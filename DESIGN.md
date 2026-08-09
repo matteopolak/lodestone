@@ -8071,6 +8071,54 @@ Also re-derived rather than trusted, because the ledger for this issue has been 
 `register(...)` calls in `BlockEntityRenderers.java`; do not count a doc's summary of them, including
 this one's.
 
+**12.162 One mesh, two renderers, and every number around it different — plus two test premises that were
+wrong where the port was right.** The enchanting table's floating book shares *every vertex* of the
+lectern's `BookModel`, which is exactly what makes it dangerous: the tempting move is to reuse
+`resolve_lectern` with a different matrix. That would hand it the lectern's **dead `1.5`** openness —
+`BookModel.State.forAnimation(0, .., 1.2)` with its `sin(0 * 0.02)` term — and produce a book that never
+opens, on a rig that draws perfectly and satisfies every mesh assertion in the crate. The two share a
+`(model, texture)` *batch*, and sharing a batch is not sharing a pose. Six numbers differ: the tilt
+(`80°` against `67.5°`), the lift, the yaw's **units**, the openness, both page flips, and the input
+(four simulated floats against one block-state boolean).
+
+**`Axis.YP.rotation` is radians where `Axis.YP.rotationDegrees` is degrees, and the same expression
+appears in both renderers.** Reading the enchanting table's as degrees turns a quarter turn into `1.57°`,
+which on a book a few texels wide is indistinguishable from no rotation at all — a silent freeze, not a
+visible error. Related: an enchanting table has **no `facing` property**, so there is nothing on its
+block state a facing could have come from; the angle is `EnchantingTableBlockEntity.rot`, simulated on
+the client.
+
+**The wrap in the angle chase is load-bearing and its absence is wrong in exactly one place.**
+`rot += wrap(tRot - rot) * 0.4` takes the short way round; without the wrap the book takes the long way
+whenever the angle crosses `±PI`, i.e. every time a player walks past one particular corner, and looks
+perfect everywhere else. Predicted from outside arithmetic before the neuter: from `rot = 3.0` toward
+`-3.0` the raw difference is `-6.0`, wrapped `+0.28319`, so `rot` lands on `3.11327` against `0.6`
+unwrapped. Neuter watched, landing on `0.5999999` exactly.
+
+Two test premises failed on their first run and **both were the test's fault, not the port's** — worth
+recording because a red test on a fresh port reads as a defect:
+
+- *Due west is `-PI`, not `+PI`.* `atan2(0, -1)` returns `+PI`, and vanilla's own
+  `while (tRot >= PI) tRot -= 2PI` then stores `-PI`. Asserting a sign on a value that sits exactly on a
+  half-open wrap boundary is asking for it; the sample was moved off the seam to `3*PI/4`, where a
+  swapped `atan2` gives `-PI/4` and the detector still works.
+- *There are four guaranteed page re-rolls, not five.* The condition is `open < 0.5` tested **after** the
+  `+= 0.1`, so the fifth tick's `open` is exactly `0.5` and falls through to the 1-in-40 dice. The
+  off-by-one is vanilla's.
+
+And one that was the test's fault in a subtler way: `the_book_yaw_is_radians_not_degrees` first probed
+local `+X` and measured `14°` for a genuine quarter turn. The `80°` tilt about `Z` stands local `X`
+almost vertical (`sin(80°) = 0.985` of it), and a Y rotation barely moves a near-vertical axis. **Probe
+an axis the earlier rotations leave alone** — here `+Z`, which `Rz` does not touch — or a correct
+implementation fails.
+
+Finally, the third animation fold in this module is the first with **no packet driving it**. `ChestLids`
+and `BellShakes` are both started by a `BLOCK_EVENT`, so a frozen one has a candidate explanation on the
+wire. An enchanting-table book is started by the player *standing within three blocks*, so a stale
+per-frame source install freezes every book in the world and there is nothing missing to blame. It also
+has three per-tick rates in one function (`open` `±0.1`, `tRot` `+0.02`, `flipA`'s `90%` smoothing), so
+the per-frame-advance trap `chest_lids` records has three victims here instead of one.
+
 **12.162 Mineshafts: a test that predicted from the wrong start, a ledger row whose gap had closed, and
 an accessor that was doing the wrong job for its callers.** Issue #514's S7 — `minecraft:mineshaft` and
 `minecraft:mineshaft_mesa`, the first structures in this engine whose pieces are generated **before**

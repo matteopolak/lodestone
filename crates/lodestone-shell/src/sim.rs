@@ -652,6 +652,15 @@ pub struct Sim {
     /// and the *gather* is what decides which tracker a given position reads
     /// from (see `block_entities::BellShakes::apply_block_event`).
     bell_shakes: crate::block_entities::BellShakes,
+    /// Per-position enchanting-table book animation state (issue #23).
+    ///
+    /// **Not fed by any packet**, which is what makes it the odd one of the three:
+    /// `chest_lids` and `bell_shakes` are both started by `NetUpdate::BlockEvent`,
+    /// and this one is started by the local player *standing near a block*. It is
+    /// advanced once per tick in [`Self::step`] from the player's own position, so
+    /// nothing on the wire would ever reveal that it had stopped — see
+    /// `crate::block_entities::EnchantingTableBooks`.
+    enchanting_table_books: crate::block_entities::EnchantingTableBooks,
 
     /// This frame's item pickups (`take_item_entity`), awaiting the fly-to-collector
     /// animation — issue #365.

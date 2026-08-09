@@ -491,6 +491,32 @@ impl Sim {
             // window, so advancing it per frame would make the swing's speed a
             // function of the frame rate.
             self.bell_shakes.tick();
+            // Enchanting-table books, on the same fixed 20 Hz. Three of vanilla's
+            // terms here are per-tick rates (`open` ±0.1, `tRot` +0.02, and the
+            // 90% smoothing on `flipA`), so a per-frame advance would make the
+            // book open three times faster at 60 fps — the `chest_lids` trap
+            // exactly, but with three victims instead of one.
+            //
+            // Unlike the two above this needs the *world* and the player, because
+            // nothing on the wire starts it: the trigger is the player standing
+            // within three blocks of a table. The position gather is deliberately
+            // radius-limited rather than `VIEW_DISTANCE`-limited, since a table
+            // nobody is near can only ever be shut — see
+            // `block_entities::enchanting_table_positions`.
+            if let Some(net) = self.net.as_ref() {
+                let handle = net.shared_handle();
+                let player = {
+                    let p = self.player();
+                    glam::DVec3::new(p.position.x, p.position.y, p.position.z)
+                };
+                // A little slack over the 3.0 trigger radius so a table becomes
+                // trackable a tick before it can wake, rather than on the same
+                // tick the distance test first passes.
+                let tables = crate::block_entities::enchanting_table_positions(
+                    &handle, player, 8.0,
+                );
+                self.enchanting_table_books.tick(&tables, player);
+            }
             // The HUD status effects and the title/action-bar overlays used to be
             // aged by three hand-written `tick(1)` calls right here. They are now
             // `lodestone_ecs::session::tick_hud_overlays` in `TickSet::Animate`,

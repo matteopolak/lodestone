@@ -672,6 +672,39 @@ impl std::fmt::Debug for BannerSource {
     }
 }
 
+/// Where this frame's enchanting-table books come from (issue #23) — the same
+/// shape as [`LecternSource`], sharing its very mesh, but it must be
+/// **re-installed every frame** for [`BellSource`]'s reason and more strongly:
+/// it captures the animation fold *and* the partial tick, and all four animated
+/// values are client-simulated, so a stale closure freezes every book with no
+/// packet whose absence could explain it.
+#[derive(Default)]
+pub struct EnchantingTableSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<
+        Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::EnchantingTableSpawn> + Send + Sync>,
+    >,
+);
+
+impl EnchantingTableSource {
+    /// This frame's enchanting-table books, or none when unset.
+    #[must_use]
+    pub(super) fn enchanting_tables(
+        &self,
+        eye: glam::Vec3,
+    ) -> Vec<lodestone_render::EnchantingTableSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for EnchantingTableSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EnchantingTableSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's campfire cooking items come from (issue #23).
 ///
 /// **The odd one out of this family**: every other block-entity source above

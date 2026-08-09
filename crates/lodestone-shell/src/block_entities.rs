@@ -335,6 +335,300 @@ impl BellShakes {
     }
 }
 
+/// `EnchantingTableBlockEntity.bookAnimationTick`'s trigger radius, in blocks:
+/// `level.getNearestPlayer(x + 0.5, y + 0.5, z + 0.5, 3.0, false)`.
+///
+/// Measured from the block **centre** to the player's position, in three
+/// dimensions — not horizontally, so a player on the floor below a table on a
+/// shelf does not open its book.
+const ENCHANTING_TABLE_PLAYER_RADIUS: f64 = 3.0;
+
+/// One enchanting table's book animation — `EnchantingTableBlockEntity`'s ten
+/// public animation fields, none of which are on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Book {
+    /// Vanilla's `time`, incremented once per tick and never reset.
+    time: i32,
+    flip: f32,
+    /// `oFlip`: the value at the start of the current tick, for the partial-tick
+    /// lerp.
+    o_flip: f32,
+    /// `flipT`: the *target* page, re-rolled at random. Unbounded, and it drifts
+    /// in both directions.
+    flip_t: f32,
+    /// `flipA`: the page-turn velocity, itself smoothed toward the target
+    /// difference at 90% per tick.
+    flip_a: f32,
+    open: f32,
+    /// `oOpen`, for the partial-tick lerp.
+    o_open: f32,
+    /// `rot`, radians, wrapped into `-PI..PI`.
+    rot: f32,
+    /// `oRot`, for the partial-tick lerp — which must be **shortest-arc**.
+    o_rot: f32,
+    /// `tRot`: the angle the book is chasing. Points at the nearest player, or
+    /// creeps by `0.02` rad/tick when there is nobody to look at.
+    t_rot: f32,
+}
+
+/// Brings an angle into `-PI..PI`, vanilla's two `while` loops.
+fn wrap_radians(mut angle: f32) -> f32 {
+    const TAU: f32 = std::f32::consts::TAU;
+    while angle >= std::f32::consts::PI {
+        angle -= TAU;
+    }
+    while angle < -std::f32::consts::PI {
+        angle += TAU;
+    }
+    angle
+}
+
+impl Book {
+    /// One tick of `bookAnimationTick` for the table at `pos`.
+    ///
+    /// `player` is the nearest player's position, or `None` when there is none
+    /// within [`ENCHANTING_TABLE_PLAYER_RADIUS`] — the caller does the radius test
+    /// so this stays a pure function of its inputs.
+    fn tick(&mut self, pos: [i32; 3], player: Option<glam::DVec3>, rng: &mut JavaRandom) {
+        self.o_open = self.open;
+        self.o_rot = self.rot;
+        if let Some(player) = player {
+            let xd = player.x - (f64::from(pos[0]) + 0.5);
+            let zd = player.z - (f64::from(pos[2]) + 0.5);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "an angle in radians; f32 is what the renderer takes"
+            )]
+            {
+                self.t_rot = zd.atan2(xd) as f32;
+            }
+            self.open += 0.1;
+            // `open < 0.5` makes the pages riffle *while opening* regardless of
+            // the dice, and then it is a 1-in-40 chance per tick. Dropping the
+            // first half leaves a book that opens dead still.
+            if self.open < 0.5 || rng.next_int(40) == 0 {
+                let old = self.flip_t;
+                // Vanilla's `do { .. } while (old == flipT)`: the difference of
+                // two `nextInt(4)` draws can be zero, and the loop **must**
+                // re-roll rather than accept it. A plain `if` leaves the page
+                // occasionally not turning at all when it was asked to.
+                loop {
+                    self.flip_t += (rng.next_int(4) - rng.next_int(4)) as f32;
+                    if old != self.flip_t {
+                        break;
+                    }
+                }
+            }
+        } else {
+            self.t_rot += 0.02;
+            self.open -= 0.1;
+        }
+
+        self.rot = wrap_radians(self.rot);
+        self.t_rot = wrap_radians(self.t_rot);
+        // The chase is 40% of the **wrapped** remaining arc. Without the wrap the
+        // book takes the long way round whenever the angle crosses `±PI`, which
+        // is a full backwards revolution in a couple of ticks and happens every
+        // time a player walks past one particular corner.
+        self.rot += wrap_radians(self.t_rot - self.rot) * 0.4;
+        self.open = self.open.clamp(0.0, 1.0);
+        self.time += 1;
+
+        self.o_flip = self.flip;
+        let diff = ((self.flip_t - self.flip) * 0.4).clamp(-0.2, 0.2);
+        self.flip_a += (diff - self.flip_a) * 0.9;
+        self.flip += self.flip_a;
+    }
+
+    /// Whether this entry is indistinguishable from having none: a fully shut
+    /// book with no page motion left.
+    ///
+    /// `open == 0` makes [`lodestone_render::enchanting_table_book_openness`] zero
+    /// and `book_part_poses` fold the lids flat, so a shut book renders exactly
+    /// like an absent one — the same property that makes `ChestLids`' garbage
+    /// collection safe. `flip` is not checked because a shut book's pages are
+    /// inside it.
+    fn is_rested(&self) -> bool {
+        self.open == 0.0 && self.o_open == 0.0
+    }
+}
+
+/// `java.util.Random`, whose algorithm is specified in its own documentation —
+/// a 48-bit truncated linear congruential generator.
+///
+/// Ported rather than pulled in as a dependency (neither `lodestone-shell` nor
+/// `lodestone-render` has an RNG crate) and ported *exactly* rather than
+/// approximated, because it is 12 lines and because `next_int`'s two branches are
+/// not interchangeable: a power-of-two bound is a multiply-and-shift and every
+/// other bound is a **rejection loop**. `nextInt(4)` takes the first path and
+/// `nextInt(40)` the second, and this animation uses both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct JavaRandom {
+    seed: u64,
+}
+
+impl JavaRandom {
+    const MULTIPLIER: u64 = 0x5DEEC_E66D;
+    const ADDEND: u64 = 0xB;
+    const MASK: u64 = (1 << 48) - 1;
+
+    /// `new Random(seed)` — the constructor scrambles the seed.
+    fn new(seed: u64) -> Self {
+        JavaRandom {
+            seed: (seed ^ Self::MULTIPLIER) & Self::MASK,
+        }
+    }
+
+    /// `next(bits)`.
+    fn next(&mut self, bits: u32) -> i32 {
+        self.seed = self.seed.wrapping_mul(Self::MULTIPLIER).wrapping_add(Self::ADDEND)
+            & Self::MASK;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the shift leaves at most 32 significant bits, which is what next(bits) returns"
+        )]
+        {
+            (self.seed >> (48 - bits)) as i32
+        }
+    }
+
+    /// `nextInt(bound)`, `bound > 0`.
+    fn next_int(&mut self, bound: i32) -> i32 {
+        debug_assert!(bound > 0);
+        if bound & (bound - 1) == 0 {
+            // Power of two: `(bound * next(31)) >> 31`, in 64-bit arithmetic.
+            return ((i64::from(bound) * i64::from(self.next(31))) >> 31) as i32;
+        }
+        loop {
+            let bits = self.next(31);
+            let value = bits % bound;
+            // Vanilla's overflow guard, kept because it is the *whole* difference
+            // between this and a plain modulo: it rejects the tail that would bias
+            // low values.
+            if bits.wrapping_sub(value).wrapping_add(bound - 1) >= 0 {
+                return value;
+            }
+        }
+    }
+}
+
+/// Per-position enchanting-table book animation state, advanced once per client
+/// tick — the third animation fold beside [`ChestLids`] and [`BellShakes`], and
+/// the first with **no packet driving it at all**.
+///
+/// Chest lids and bell shakes are both started by a `BLOCK_EVENT`; this one is
+/// started by the player *standing near a block*, so nothing on the wire would
+/// ever reveal that it had stopped working. Entries are created for tables within
+/// [`ENCHANTING_TABLE_PLAYER_RADIUS`] and dropped once fully shut, which is safe
+/// for [`Book::is_rested`]'s reason.
+#[derive(Debug, Clone)]
+pub struct EnchantingTableBooks {
+    books: HashMap<[i32; 3], Book>,
+    rng: JavaRandom,
+}
+
+impl Default for EnchantingTableBooks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EnchantingTableBooks {
+    /// An empty set.
+    ///
+    /// The RNG seed is a fixed constant rather than a clock read, for the reason
+    /// `docs/`'s evidence rules give: a test that seeds from the wall clock cannot
+    /// be reproduced, and nothing about a page-flip phase benefits from being
+    /// unpredictable across runs. Vanilla's own `RandomSource.create()` is
+    /// time-seeded, but it is a *shared static* across every enchanting table in
+    /// the world, which is the property that actually matters and which this keeps.
+    #[must_use]
+    pub fn new() -> Self {
+        EnchantingTableBooks {
+            books: HashMap::new(),
+            rng: JavaRandom::new(0x1BADB002),
+        }
+    }
+
+    /// Advances every tracked book one client tick, creating entries for the
+    /// tables in `tables` that a player is close enough to wake.
+    ///
+    /// `tables` is every enchanting-table position worth considering (the caller
+    /// gathers it — see [`enchanting_table_positions`]) and `player` is the local
+    /// player's position.
+    ///
+    /// # Only the local player
+    ///
+    /// Vanilla asks the level for the *nearest* player, which on a busy server can
+    /// be someone else. We use the local player, which is the one case that
+    /// matters for what this client's user sees and the only position this layer
+    /// has cheaply. A remote player standing at a table the local player can see
+    /// therefore leaves its book shut — a fidelity gap, recorded rather than
+    /// silently taken, and closing it means scanning tracked player entities here.
+    pub fn tick(&mut self, tables: &[[i32; 3]], player: glam::DVec3) {
+        let radius_squared = ENCHANTING_TABLE_PLAYER_RADIUS * ENCHANTING_TABLE_PLAYER_RADIUS;
+        for pos in tables {
+            let centre = glam::DVec3::new(
+                f64::from(pos[0]) + 0.5,
+                f64::from(pos[1]) + 0.5,
+                f64::from(pos[2]) + 0.5,
+            );
+            if centre.distance_squared(player) <= radius_squared {
+                self.books.entry(*pos).or_default();
+            }
+        }
+        // Borrowed separately from `self.rng` because the tick draws from it.
+        let rng = &mut self.rng;
+        self.books.retain(|pos, book| {
+            let centre = glam::DVec3::new(
+                f64::from(pos[0]) + 0.5,
+                f64::from(pos[1]) + 0.5,
+                f64::from(pos[2]) + 0.5,
+            );
+            let near = (centre.distance_squared(player) <= radius_squared).then_some(player);
+            book.tick(*pos, near, rng);
+            !book.is_rested()
+        });
+    }
+
+    /// This frame's interpolated animation state for the table at `pos`, or `None`
+    /// when there is no entry — which is a fully shut book, i.e. nothing to draw.
+    ///
+    /// Returns `(y_rot, time, open, flip)` ready for
+    /// [`lodestone_render::EnchantingTableSpawn`]. The `y_rot` lerp is
+    /// **shortest-arc**, matching `EnchantTableRenderer.extractRenderState`'s three
+    /// `while` loops rather than a plain `lerp`.
+    #[must_use]
+    pub fn state(&self, pos: [i32; 3], partial_tick: f32) -> Option<(f32, f32, f32, f32)> {
+        let book = self.books.get(&pos)?;
+        let alpha = partial_tick.clamp(0.0, 1.0);
+        let y_rot = book.o_rot + wrap_radians(book.rot - book.o_rot) * alpha;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "vanilla's own `blockEntity.time + partialTicks` is a float add"
+        )]
+        let time = book.time as f32 + alpha;
+        Some((
+            y_rot,
+            time,
+            book.o_open + (book.open - book.o_open) * alpha,
+            book.o_flip + (book.flip - book.o_flip) * alpha,
+        ))
+    }
+
+    /// Number of tracked books (for stats and tests).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.books.len()
+    }
+
+    /// Whether nothing is being tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.books.is_empty()
+    }
+}
+
 /// `Direction.from3DDataValue(b1)`, narrowed to the four horizontal directions
 /// [`BellShakeDirection`] models: `0` down, `1` up, `2` north, `3` south, `4`
 /// west, `5` east.
@@ -907,6 +1201,128 @@ pub fn lectern_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<LecternSpawn> {
         if let Some(spawn) = lectern_spawn(block, state_id, light) {
             out.push(spawn);
         }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+/// Whether a block state is an enchanting table.
+///
+/// One block, no properties that matter: an enchanting table has **no `facing`**
+/// and no other state at all in 26.2. That absence is load-bearing — the book's
+/// angle is client-simulated (`EnchantingTableBlockEntity.rot`), so there is
+/// nothing on the block state a facing could have been read from, and a port that
+/// looks for one finds nothing and draws no book.
+#[must_use]
+fn is_enchanting_table(state_id: u32) -> bool {
+    lodestone_data::block_states::block_name(state_id) == Some("minecraft:enchanting_table")
+}
+
+/// Every enchanting-table position worth ticking, within `radius` blocks of
+/// `player`.
+///
+/// A much tighter cutoff than [`VIEW_DISTANCE`] on purpose: this runs at 20 Hz,
+/// and the only thing that *starts* an animation is a player within
+/// [`ENCHANTING_TABLE_PLAYER_RADIUS`]. A table further away than that can only
+/// ever be shut, and [`EnchantingTableBooks::tick`] keeps ticking entries it
+/// already has regardless of this list, so a table the player walks away from
+/// still closes properly.
+#[must_use]
+pub fn enchanting_table_positions(
+    handle: &SharedHandle,
+    player: glam::DVec3,
+    radius: f64,
+) -> Vec<[i32; 3]> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+    let cutoff = radius * radius;
+    let world = store.read();
+    let mut out = Vec::new();
+    for pos in chunks {
+        let pos = ChunkPos { x: pos.x, z: pos.z };
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let y = i32::from(be.y);
+            let centre =
+                glam::DVec3::new(f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5);
+            if centre.distance_squared(player) > cutoff {
+                continue;
+            }
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            if is_enchanting_table(state_id) {
+                out.push([x, y, z]);
+            }
+        }
+    }
+    out
+}
+
+/// Every enchanting-table book to draw this frame.
+///
+/// Unlike every other gather here the *appearance* comes from `books` rather than
+/// from the world: the block state says only "there is a table", and all four
+/// animated values are client-simulated. A table with no entry in `books` has a
+/// fully shut book, which renders identically to no book, so it is skipped.
+///
+/// Reuses [`chest_candidates`] exactly as [`lectern_spawns`] does — the block
+/// state is still what confirms the block entity is a table.
+#[must_use]
+pub fn enchanting_table_spawns(
+    handle: &SharedHandle,
+    books: &EnchantingTableBooks,
+    eye: Vec3,
+    partial_tick: f32,
+) -> Vec<lodestone_render::EnchantingTableSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        chest_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, state_id) in candidates {
+        if !is_enchanting_table(state_id) {
+            continue;
+        }
+        let Some((y_rot, time, open, flip)) = books.state(block, partial_tick) else {
+            continue;
+        };
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        out.push(lodestone_render::EnchantingTableSpawn {
+            pos: block,
+            y_rot,
+            time,
+            open,
+            flip,
+            light,
+        });
     }
     out.sort_by_key(|s| s.pos);
     out
@@ -2298,5 +2714,187 @@ mod shulker_tests {
     fn lectern_spawns_before_login_is_empty_rather_than_a_panic() {
         let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
         assert!(lectern_spawns(&handle, Vec3::ZERO).is_empty());
+    }
+
+    /// The enchanting-table gathers are empty rather than a panic before login,
+    /// like every other family's.
+    #[test]
+    fn enchanting_table_gathers_before_login_are_empty_rather_than_a_panic() {
+        let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
+        let books = EnchantingTableBooks::new();
+        assert!(enchanting_table_positions(&handle, glam::DVec3::ZERO, 8.0).is_empty());
+        assert!(enchanting_table_spawns(&handle, &books, Vec3::ZERO, 1.0).is_empty());
+    }
+
+    /// A book takes exactly **10 ticks** to open and 10 to shut, at `±0.1` a tick.
+    ///
+    /// Asserted as a *duration* with a value predicted at every step, not just at
+    /// the endpoints — the endpoints alone are satisfied by a book that teleports
+    /// open, the same trap `the_lid_takes_ten_ticks_to_open_and_ten_to_shut`
+    /// records for chests. The rate is vanilla's `entity.open += 0.1F` per tick,
+    /// which is why this must not be advanced per frame.
+    #[test]
+    fn a_book_takes_ten_ticks_to_open_and_ten_to_shut() {
+        const POS: [i32; 3] = [4, 65, -9];
+        let near = glam::DVec3::new(4.5, 65.5, -8.5);
+        let far = glam::DVec3::new(4.5, 65.5, 60.0);
+        let mut books = EnchantingTableBooks::new();
+        for tick in 1..=12 {
+            books.tick(&[POS], near);
+            let (_, _, open, _) = books.state(POS, 1.0).expect("tracked while a player is near");
+            let expected = (0.1 * tick as f32).min(1.0);
+            assert!(
+                (open - expected).abs() < 1e-5,
+                "tick {tick}: open {open}, expected {expected}"
+            );
+        }
+        for tick in 1..=10 {
+            books.tick(&[POS], far);
+            let expected = (1.0 - 0.1 * tick as f32).max(0.0);
+            let open = books
+                .state(POS, 1.0)
+                .map_or(0.0, |(_, _, open, _)| open);
+            assert!(
+                (open - expected).abs() < 1e-5,
+                "closing tick {tick}: open {open}, expected {expected}"
+            );
+        }
+        // One more tick and the settled-shut entry is collected, the same
+        // garbage-collection `ChestLids` does — and `state` then answers `None`,
+        // which the gather reads as "no book", identical on screen to a shut one.
+        books.tick(&[POS], far);
+        assert!(
+            books.is_empty(),
+            "a fully shut book should be collected, {} left",
+            books.len()
+        );
+    }
+
+    /// The book chases the player the **short** way round the `±PI` seam.
+    ///
+    /// Both hypotheses computed from outside arithmetic. Starting at `rot = 3.0`
+    /// with a target of `-3.0`, the raw difference is `-6.0`; wrapped into
+    /// `-PI..PI` it is `+0.28319`, so 40% of it puts `rot` at
+    /// `3.0 + 0.11327 = 3.11327`. Without the wrap the book takes the long way and
+    /// lands at `3.0 - 2.4 = 0.6` — nearly a full revolution backwards, every time
+    /// a player walks past one particular corner.
+    #[test]
+    fn the_book_chases_the_player_the_short_way_round() {
+        let mut rng = JavaRandom::new(1);
+        let mut book = Book {
+            rot: 3.0,
+            // `+0.02` is applied before the chase when no player is near, so this
+            // lands the target on exactly `-3.0`.
+            t_rot: -3.02,
+            ..Book::default()
+        };
+        book.tick([0, 0, 0], None, &mut rng);
+        assert!(
+            (book.rot - 3.113_274).abs() < 1e-4,
+            "rot is {}, expected 3.113274 (the short way); 0.6 is the long way",
+            book.rot
+        );
+    }
+
+    /// `tRot = atan2(zd, xd)`, in that argument order.
+    ///
+    /// The swap is the failure this catches and it is invisible any other way: a
+    /// player due **east** of the table (`+x`) must give `0`, and one due
+    /// **south** (`+z`) must give `PI/2`. Swapped arguments produce exactly those
+    /// two values in the opposite order, so a single-position check passes.
+    ///
+    /// Due **west** is deliberately not one of the samples: `atan2` returns `+PI`
+    /// there and the wrap into `-PI..PI` is half-open, so the stored value is
+    /// `-PI` — correct, matching vanilla's own `while (tRot >= PI)`, and a
+    /// misleading thing to assert an expected sign on. The third sample sits off
+    /// the seam at `3*PI/4`, where a swapped call gives `-PI/4` instead.
+    #[test]
+    fn the_target_angle_points_at_the_player_in_atan2s_argument_order() {
+        const POS: [i32; 3] = [10, 64, 20];
+        let mut rng = JavaRandom::new(2);
+        for (offset, expected) in [
+            (glam::DVec3::new(1.0, 0.0, 0.0), 0.0),
+            (glam::DVec3::new(0.0, 0.0, 1.0), std::f32::consts::FRAC_PI_2),
+            (
+                glam::DVec3::new(-1.0, 0.0, 1.0),
+                3.0 * std::f32::consts::FRAC_PI_4,
+            ),
+        ] {
+            let centre = glam::DVec3::new(
+                f64::from(POS[0]) + 0.5,
+                f64::from(POS[1]) + 0.5,
+                f64::from(POS[2]) + 0.5,
+            );
+            let mut book = Book::default();
+            book.tick(POS, Some(centre + offset), &mut rng);
+            assert!(
+                (book.t_rot - expected).abs() < 1e-5,
+                "player at {offset:?} gave t_rot {}, expected {expected}",
+                book.t_rot
+            );
+        }
+    }
+
+    /// Vanilla's `do { flipT += nextInt(4) - nextInt(4) } while (old == flipT)`
+    /// must **always** move the target, and a plain `if` leaves it occasionally
+    /// unmoved when a page was asked to turn.
+    ///
+    /// While `open < 0.5` a re-roll happens every tick unconditionally, so the
+    /// first **four** ticks are four guaranteed re-rolls — which is what makes this
+    /// assertable without controlling the dice. The difference of two `nextInt(4)`
+    /// draws is zero one time in four, so four ticks of a plain `if` would fail
+    /// this with probability about `1 - (3/4)^4 = 68%`; across the seeds swept
+    /// below it is a certainty.
+    ///
+    /// **Four and not five, and the off-by-one is vanilla's**: the test is
+    /// `open < 0.5` *after* the `+= 0.1`, so the fifth tick's `open` is exactly
+    /// `0.5` and falls through to the 1-in-40 dice instead. This test asserted five
+    /// on its first run and failed at tick 4 for exactly that reason — a wrong test
+    /// premise, not a wrong port.
+    #[test]
+    fn a_page_reroll_always_moves_the_target() {
+        const POS: [i32; 3] = [0, 64, 0];
+        let centre = glam::DVec3::new(0.5, 64.5, 0.5);
+        for seed in 0..16 {
+            let mut rng = JavaRandom::new(seed);
+            let mut book = Book::default();
+            for tick in 0..4 {
+                let before = book.flip_t;
+                book.tick(POS, Some(centre), &mut rng);
+                assert!(
+                    (book.flip_t - before).abs() > f32::EPSILON,
+                    "seed {seed} tick {tick}: flip_t stayed at {before}"
+                );
+            }
+        }
+    }
+
+    /// `java.util.Random.nextInt(bound)`'s two branches are not interchangeable,
+    /// and this animation uses both: `nextInt(4)` is the power-of-two
+    /// multiply-and-shift and `nextInt(40)` is the rejection loop.
+    ///
+    /// Asserted as coverage of the whole range in both, not just as "in bounds":
+    /// a bound-off-by-one, or a rejection loop that never terminates its tail,
+    /// stays in bounds while losing values. `nextInt(4)` must produce all four.
+    #[test]
+    fn the_java_random_covers_both_bound_branches() {
+        let mut rng = JavaRandom::new(0xDEAD_BEEF);
+        let mut small = [false; 4];
+        let mut seen_low = false;
+        let mut seen_high = false;
+        for _ in 0..4000 {
+            let a = rng.next_int(4);
+            assert!((0..4).contains(&a), "nextInt(4) produced {a}");
+            small[a as usize] = true;
+            let b = rng.next_int(40);
+            assert!((0..40).contains(&b), "nextInt(40) produced {b}");
+            seen_low |= b == 0;
+            seen_high |= b == 39;
+        }
+        assert!(small.iter().all(|seen| *seen), "nextInt(4) missed a value");
+        assert!(
+            seen_low && seen_high,
+            "nextInt(40) never reached an endpoint, so its range is wrong"
+        );
     }
 }

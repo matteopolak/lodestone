@@ -39,7 +39,7 @@ use super::terrain::{
 };
 use super::{
     BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource, CampfireSource,
-    DEFAULT_RENDER_DISTANCE_CHUNKS, ShulkerSource,
+    DEFAULT_RENDER_DISTANCE_CHUNKS, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, LecternSource, MainHandSource, MapSource, NameTagRenderer, OutlineRenderer,
     OutlineShapeSource,
@@ -306,6 +306,8 @@ impl RenderState {
             lectern_source: LecternSource::default(),
             // Likewise `set_campfire_source`.
             campfire_source: CampfireSource::default(),
+            // Likewise `set_enchanting_table_source`.
+            enchanting_table_source: EnchantingTableSource::default(),
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -1043,6 +1045,20 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::CampfireItemSpawn> + Send + Sync + 'static,
     ) {
         self.campfire_source = CampfireSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's enchanting-table books.
+    ///
+    /// **Must be re-installed every frame**, more strictly than any other source
+    /// in this family: the closure captures both the animation fold and the partial
+    /// tick, and *nothing* about an enchanting table's book is on the wire — so a
+    /// stale closure freezes every book in the world and there is no missing packet
+    /// to blame it on.
+    pub fn set_enchanting_table_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::EnchantingTableSpawn> + Send + Sync + 'static,
+    ) {
+        self.enchanting_table_source = EnchantingTableSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's filled-map pictures (issue #184).

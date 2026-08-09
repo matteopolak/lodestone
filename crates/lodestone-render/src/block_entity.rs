@@ -1225,6 +1225,94 @@ pub fn lectern_book_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4
         * Mat4::from_translation(Vec3::new(0.0, -0.125, 0.0))
 }
 
+/// `EnchantTableRenderer.submit`'s `Axis.ZP.rotationDegrees(80.0F)` — the tilt
+/// that stands the floating book up.
+///
+/// **Not the lectern's `67.5`.** The two renderers share one mesh and one
+/// `book_part_poses`, and nothing but this number and the placement below tells
+/// them apart geometrically, so copying the lectern's transform is a change no
+/// mesh assertion can see.
+pub const ENCHANTING_TABLE_BOOK_TILT_DEG: f32 = 80.0;
+
+/// The floating book's hover, in blocks: `0.1 + sin(time * 0.1) * 0.01` on top of
+/// the base `0.75` lift.
+///
+/// A ±`0.01`-block bob — a sixth of a texel. It is easy to dismiss as noise and
+/// drop, and then the book sits dead still, which is the one thing a player
+/// actually notices about an enchanting table they are standing next to.
+#[must_use]
+pub fn enchanting_table_book_hover(time: f32) -> f32 {
+    0.1 + (time * 0.1).sin() * 0.01
+}
+
+/// The world placement transform for the floating book over an enchanting table
+/// — `EnchantTableRenderer.submit`:
+///
+/// ```text
+/// T(pos) · T(0.5, 0.75, 0.5) · T(0, hover(time), 0) · Ry(-y_rot) · Rz(80°)
+/// ```
+///
+/// # `y_rot` is **radians**, and it is not a block facing
+///
+/// `Axis.YP.rotation(-yRot)` takes radians where the lectern's
+/// `Axis.YP.rotationDegrees` takes degrees, and the value is
+/// `EnchantingTableBlockEntity.rot` — a client-simulated angle that chases the
+/// nearest player, not a `Direction`. An enchanting table has no `facing`
+/// property at all, so there is nothing on its block state this could have come
+/// from; feeding it a facing yaw would pin every book to a compass direction and
+/// look plausible until a player walks around one.
+#[must_use]
+pub fn enchanting_table_book_placement_matrix(pos: [i32; 3], y_rot: f32, time: f32) -> Mat4 {
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    Mat4::from_translation(origin + Vec3::new(0.5, 0.75, 0.5))
+        * Mat4::from_translation(Vec3::new(0.0, enchanting_table_book_hover(time), 0.0))
+        * Mat4::from_rotation_y(-y_rot)
+        * Mat4::from_rotation_z(ENCHANTING_TABLE_BOOK_TILT_DEG.to_radians())
+}
+
+/// `BookModel.State.forAnimation`'s first output — the live `openness` the
+/// lectern's [`LECTERN_BOOK_OPENNESS`] is the frozen case of:
+///
+/// ```text
+/// (sin(progress * 0.02) * 0.1 + 1.25) * open
+/// ```
+///
+/// The lectern passes `progress == 0`, which kills the `sin` and collapses the
+/// whole thing to `1.25 * 1.2 == 1.5`. Here `progress` is the block entity's real
+/// `time` counter, so the term is alive and the book breathes between `1.15 * open`
+/// and `1.35 * open`. **That is why the lectern's constant must not be reused
+/// here, and why the dead arithmetic there must not be revived** — the same
+/// expression is genuinely constant in one caller and genuinely animated in the
+/// other.
+#[must_use]
+pub fn enchanting_table_book_openness(time: f32, open: f32) -> f32 {
+    ((time * 0.02).sin() * 0.1 + 1.25) * open
+}
+
+/// `EnchantTableRenderer.submit`'s two page-flip phases, from the block entity's
+/// `flip` accumulator:
+///
+/// ```text
+/// clamp(frac(flip + 0.25) * 1.6 - 0.3, 0, 1)
+/// clamp(frac(flip + 0.75) * 1.6 - 0.3, 0, 1)
+/// ```
+///
+/// The two offsets are half a period apart, which is what makes the pages turn
+/// alternately rather than together. **Both clamps are load-bearing and neither is
+/// decorative:** `frac(..) * 1.6 - 0.3` ranges over `-0.3..1.3`, so an unclamped
+/// value drives `openness - openness * 2 * page_flip` past the covers and turns a
+/// page inside out through the spine. The `1.6`/`-0.3` pair is exactly what makes
+/// each page spend part of its cycle pinned flat against a cover, which is what
+/// vanilla's book looks like.
+#[must_use]
+pub fn enchanting_table_page_flips(flip: f32) -> (f32, f32) {
+    let frac = |x: f32| x - x.floor();
+    (
+        (frac(flip + 0.25) * 1.6 - 0.3).clamp(0.0, 1.0),
+        (frac(flip + 0.75) * 1.6 - 0.3).clamp(0.0, 1.0),
+    )
+}
+
 /// How many cooking slots a campfire has — `CampfireBlockEntity`'s
 /// `NonNullList.withSize(4, ItemStack.EMPTY)`.
 pub const CAMPFIRE_SLOTS: usize = 4;
@@ -1661,6 +1749,124 @@ impl BlockEntityModelSet {
             light: spawn.light,
             tint: [255, 255, 255],
         })
+    }
+
+    /// Resolves one enchanting table's floating book into a drawable instance, or
+    /// `None` if the model is not in the corpus.
+    ///
+    /// The same mesh, the same six overrides and the same
+    /// [`book_part_poses`] as [`Self::resolve_lectern`] — and **everything else
+    /// differs**. The placement is
+    /// [`enchanting_table_book_placement_matrix`] (an `80°` tilt, not `67.5`, and
+    /// a live hover), the openness is
+    /// [`enchanting_table_book_openness`] rather than the lectern's frozen
+    /// constant, and the page flips come from
+    /// [`enchanting_table_page_flips`] rather than a pair of literals.
+    ///
+    /// So this is emphatically **not** `resolve_lectern` with a different matrix,
+    /// and folding the two into one function parameterised by a matrix would
+    /// silently give an enchanting table the lectern's dead `1.5` openness — a
+    /// book that never opens, on a rig that draws perfectly.
+    #[must_use]
+    pub fn resolve_enchanting_table(
+        &self,
+        spawn: &EnchantingTableSpawn,
+    ) -> Option<BlockEntityInstance> {
+        let mesh = self.get(BOOK)?;
+        let placement =
+            enchanting_table_book_placement_matrix(spawn.pos, spawn.y_rot, spawn.time);
+        let openness = enchanting_table_book_openness(spawn.time, spawn.open);
+        let page_flip = enchanting_table_page_flips(spawn.flip);
+
+        let mut overrides = Vec::with_capacity(6);
+        for (name, y_rot, x) in book_part_poses(openness, page_flip) {
+            let Some(index) = mesh.index_of(name) else {
+                continue;
+            };
+            let mut pose = mesh.part_rest[index];
+            pose.y_rot = y_rot;
+            if let Some(x) = x {
+                pose.x = x;
+            }
+            overrides.push((index, pose));
+        }
+        let part_transforms = mesh.part_transforms(placement, &overrides);
+
+        // The rest AABB through the placement matrix, as `resolve_lectern` — and
+        // generous in the same wrong direction, but by more: this book's lids
+        // swing all the way open rather than sitting at a fixed `1.5`. Still
+        // dominated by the block's own AABB, and the hover is ±0.01 blocks.
+        let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
+        Some(BlockEntityInstance {
+            model: BOOK,
+            texture: BOOK_TEXTURE_STEM,
+            transform: placement,
+            part_transforms,
+            aabb_min,
+            aabb_max,
+            light: spawn.light,
+            tint: [255, 255, 255],
+        })
+    }
+}
+
+/// The version-free description of one enchanting table's floating book this
+/// frame — every field already interpolated by the caller.
+///
+/// **The only spawn in this module whose every animated field is client-simulated
+/// with nothing on the wire.** `EnchantingTableBlockEntity.bookAnimationTick` runs
+/// on the client, driven by the nearest player's position, and the server sends
+/// none of `time`/`open`/`flip`/`rot` — so a source that captured a stale copy of
+/// this state freezes the book, and there is no packet whose absence would
+/// explain it.
+///
+/// Interpolation belongs to the caller (`EnchantTableRenderer.extractRenderState`
+/// does it, not `submit`): `open` and `flip` are `lerp(partialTicks, o*, *)`,
+/// `time` is `time + partialTicks`, and `y_rot` is the **shortest-arc** lerp of
+/// `oRot`→`rot`. That last one is not an ordinary lerp — see
+/// [`Self::y_rot`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnchantingTableSpawn {
+    /// Block position.
+    pub pos: [i32; 3],
+    /// The book's facing, in **radians**, already shortest-arc interpolated:
+    /// `oRot + wrap(rot - oRot) * partialTicks`, where `wrap` brings the delta
+    /// into `-PI..PI`.
+    ///
+    /// Skipping the wrap makes the book spin the long way round — a full
+    /// backwards revolution in one tick — every time the angle crosses `±PI`,
+    /// which happens whenever a player walks past the north-west corner. A plain
+    /// `lerp` is wrong in exactly one place and looks right everywhere else.
+    pub y_rot: f32,
+    /// `EnchantingTableBlockEntity.time + partialTicks` — vanilla's raw tick
+    /// counter, feeding both the hover and the openness breath.
+    pub time: f32,
+    /// `lerp(partialTicks, oOpen, open)`, `0..1`: how far the book has opened.
+    /// `0` is fully shut and renders identically to no book at all, which is what
+    /// makes garbage-collecting a rested entry safe.
+    pub open: f32,
+    /// `lerp(partialTicks, oFlip, flip)` — the page-flip accumulator, **not** a
+    /// `0..1` phase. It is unbounded and drifts in either direction; the two
+    /// phases come out of [`enchanting_table_page_flips`].
+    pub flip: f32,
+    /// Packed sky/block light. Pass [`ENTITY_FULLBRIGHT`] only when there is
+    /// genuinely no world to sample.
+    pub light: u8,
+}
+
+impl EnchantingTableSpawn {
+    /// A fully-open, resting, full-bright book over the table at `pos` — the
+    /// minimum a hermetic gate needs.
+    #[must_use]
+    pub fn at(pos: [i32; 3]) -> Self {
+        EnchantingTableSpawn {
+            pos,
+            y_rot: 0.0,
+            time: 0.0,
+            open: 1.0,
+            flip: 0.0,
+            light: ENTITY_FULLBRIGHT,
+        }
     }
 }
 
@@ -2162,6 +2368,165 @@ mod tests {
 
     fn set() -> BlockEntityModelSet {
         BlockEntityModelSet::load()
+    }
+
+    /// The enchanting table's openness is the *live* form of the expression the
+    /// lectern's is the frozen case of, and the two must not be confused.
+    ///
+    /// Predicted from outside constants: at `open == 1.2` (the lectern's fourth
+    /// argument) and `time == 0` this must land on exactly `1.5`, the lectern's
+    /// own value — that is the arithmetic identity the two share. Away from
+    /// `time == 0` it must **leave** `1.5`, and by a predicted amount: the term is
+    /// `sin(time * 0.02) * 0.1 * open`, so at `time = PI/2 / 0.02` the `sin` is
+    /// exactly `1` and the result is `1.35 * 1.2 == 1.62`.
+    ///
+    /// A sign-only "it changes with time" assertion is satisfied by any live term
+    /// at all, including one that varies `10×` too fast, which is what dropping
+    /// the `0.02` produces.
+    #[test]
+    fn the_book_openness_breathes_around_the_lecterns_frozen_value() {
+        let at_zero = enchanting_table_book_openness(0.0, 1.2);
+        assert!(
+            (at_zero - LECTERN_BOOK_OPENNESS).abs() < 1e-5,
+            "time 0 gives {at_zero}, expected the lectern's {LECTERN_BOOK_OPENNESS}"
+        );
+        let peak_time = std::f32::consts::FRAC_PI_2 / 0.02;
+        let at_peak = enchanting_table_book_openness(peak_time, 1.2);
+        assert!(
+            (at_peak - 1.62).abs() < 1e-4,
+            "peak gives {at_peak}, expected 1.62 (1.35 * 1.2)"
+        );
+        // The trough is the mirror image, `1.15 * 1.2`.
+        let trough = enchanting_table_book_openness(-peak_time, 1.2);
+        assert!(
+            (trough - 1.38).abs() < 1e-4,
+            "trough gives {trough}, expected 1.38 (1.15 * 1.2)"
+        );
+    }
+
+    /// The two page-flip phases are **half a period apart**, so the pages turn
+    /// alternately, and both are clamped into `0..1`.
+    ///
+    /// The predicate that matters is "how far apart", not "are they different":
+    /// two phases that differ by any amount at all satisfy the weak version, and
+    /// reading both offsets as `0.25` (an easy transcription slip, since the
+    /// expressions are otherwise identical) leaves them differing by zero — but
+    /// so does *any* pair of offsets during the clamped stretches. So this asserts
+    /// the unclamped interior: at `flip == 0` the raw values are
+    /// `frac(0.25) * 1.6 - 0.3 == 0.1` and `frac(0.75) * 1.6 - 0.3 == 0.9`, i.e.
+    /// exactly the lectern's own constant pair.
+    #[test]
+    fn the_two_page_flips_are_half_a_period_apart_and_clamped() {
+        let (a, b) = enchanting_table_page_flips(0.0);
+        assert!(
+            (a - LECTERN_BOOK_PAGE_FLIP.0).abs() < 1e-5
+                && (b - LECTERN_BOOK_PAGE_FLIP.1).abs() < 1e-5,
+            "flip 0 gives ({a}, {b}), expected the lectern's {LECTERN_BOOK_PAGE_FLIP:?}"
+        );
+        // Half a period on: the two swap roles rather than both advancing.
+        let (a, b) = enchanting_table_page_flips(0.5);
+        assert!(
+            (a - LECTERN_BOOK_PAGE_FLIP.1).abs() < 1e-5
+                && (b - LECTERN_BOOK_PAGE_FLIP.0).abs() < 1e-5,
+            "flip 0.5 gives ({a}, {b}), expected the pair swapped"
+        );
+        // The clamp fires, and it fires in both directions across one period —
+        // the control for the clamp being load-bearing rather than decorative.
+        let mut saw_low = false;
+        let mut saw_high = false;
+        for step in 0..200 {
+            let flip = step as f32 / 100.0;
+            let (a, b) = enchanting_table_page_flips(flip);
+            for value in [a, b] {
+                assert!(
+                    (0.0..=1.0).contains(&value),
+                    "flip {flip} produced {value}, outside 0..1"
+                );
+                saw_low |= value == 0.0;
+                saw_high |= value == 1.0;
+            }
+        }
+        assert!(
+            saw_low && saw_high,
+            "the clamp never fired across a full period, so it is untested here"
+        );
+    }
+
+    /// An enchanting table's book is tilted `80°`, hovers, and turns about a
+    /// *simulated* angle — three things that separate it from the lectern's book,
+    /// which shares its every vertex.
+    ///
+    /// The tilt is asserted by where the book's local `+Y` ends up rather than by
+    /// restating the constant: at `80°` about `Z` the local up axis leans
+    /// `sin(80°) = 0.985` along world `-X` and keeps only `cos(80°) = 0.174` of
+    /// its height. The lectern's `67.5°` would give `0.924`/`0.383`, so the two
+    /// are separated by far more than any tolerance here.
+    #[test]
+    fn the_enchanting_table_book_is_tilted_eighty_degrees_and_hovers() {
+        const POS: [i32; 3] = [3, 64, 7];
+        let m = enchanting_table_book_placement_matrix(POS, 0.0, 0.0);
+        let up = m.transform_vector3(Vec3::Y);
+        assert!(
+            (up.y - ENCHANTING_TABLE_BOOK_TILT_DEG.to_radians().cos()).abs() < 1e-4,
+            "local up ends at {up:?}; a 67.5 degree tilt would keep 0.383 of its height"
+        );
+        // The hover: ±0.01 blocks about `0.75 + 0.1`, and its extremes are a
+        // quarter period of `time * 0.1` apart.
+        let base = Vec3::new(POS[0] as f32 + 0.5, POS[1] as f32 + 0.85, POS[2] as f32 + 0.5);
+        let rest = m.transform_point3(Vec3::ZERO);
+        assert!(
+            rest.distance(base) < 1e-5,
+            "rest origin {rest:?}, expected {base:?}"
+        );
+        let peak_time = std::f32::consts::FRAC_PI_2 / 0.1;
+        let peak = enchanting_table_book_placement_matrix(POS, 0.0, peak_time)
+            .transform_point3(Vec3::ZERO);
+        assert!(
+            (peak.y - (base.y + 0.01)).abs() < 1e-5,
+            "hover peak at {}, expected {}",
+            peak.y,
+            base.y + 0.01
+        );
+    }
+
+    /// The book turns about `y_rot` in **radians**, not degrees.
+    ///
+    /// Both hypotheses computed: a quarter turn is `PI/2` radians, and the same
+    /// number read as degrees is `1.57°` — under two degrees, which on a book a
+    /// few texels wide is visually indistinguishable from no rotation at all. So
+    /// the assertion is that a `PI/2` input really does move the book's local `+Z`
+    /// a full quarter turn, and that the degrees reading would leave it within
+    /// `0.001` of where it started.
+    ///
+    /// Local `+Z` and **not** `+X`, and that is not arbitrary: the `80°` tilt
+    /// about `Z` leaves local `Z` alone but stands local `X` almost vertical
+    /// (`sin(80°) = 0.985` of it), and a Y rotation barely moves a near-vertical
+    /// axis — measured, on the first run of this test, as `14°` for a genuine
+    /// quarter turn. Picking the wrong probe axis here fails a correct
+    /// implementation.
+    #[test]
+    fn the_book_yaw_is_radians_not_degrees() {
+        const POS: [i32; 3] = [0, 0, 0];
+        let rest = enchanting_table_book_placement_matrix(POS, 0.0, 0.0)
+            .transform_vector3(Vec3::Z)
+            .normalize();
+        let quarter = enchanting_table_book_placement_matrix(POS, std::f32::consts::FRAC_PI_2, 0.0)
+            .transform_vector3(Vec3::Z)
+            .normalize();
+        assert!(
+            rest.dot(quarter).abs() < 1e-4,
+            "PI/2 turned the book by {} degrees, not 90",
+            rest.dot(quarter).acos().to_degrees()
+        );
+        let as_degrees =
+            enchanting_table_book_placement_matrix(POS, std::f32::consts::FRAC_PI_2.to_radians(), 0.0)
+                .transform_vector3(Vec3::Z)
+                .normalize();
+        assert!(
+            rest.dot(as_degrees) > 0.999,
+            "the degrees reading must be a near-no-op, and measured {}",
+            rest.dot(as_degrees)
+        );
     }
 
     /// The four cooking slots land in four **distinct** corners of the campfire's
