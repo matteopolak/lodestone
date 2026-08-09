@@ -247,17 +247,24 @@ Editing, and reading the tree:
 
 The machine:
 
-- **The disk fills, and `target/debug/incremental` is why. `CARGO_INCREMENTAL=0` is the fix; deleting it is
-  only the mop.** Measured five times in one session: `target/` reaches 100–118 GB against a volume with about
-  30 GB usable, free space hits zero, and **every `Bash` call then fails before it runs** because the harness
-  cannot write its own output file — which reads as a dead tool, not as a full disk. The cache alone was 46 GB
-  once and back to 15 GB within two hours; the driver is `cargo check --workspace --all-targets` (~80 test
-  binaries in this workspace) run by several agents. So: **prefer plain `cargo check -p <crate>` while
-  iterating and `--all-targets` once at the end**, and **set `CARGO_INCREMENTAL=0` for the wide runs** — it
-  stops the regrowth instead of racing it. Incremental output is pure cache and invalidates no artifact, so
-  `rm -rf target/debug/incremental` is always safe when no cargo/rustc is running; it is just not a policy.
+- **The disk fills, and `target/debug/build` is why — not `incremental`.** Six times in one session `target/`
+  reached 100–118 GB against a volume with ~30 GB usable, free space hit zero, and **every `Bash` call then
+  failed before running** because the harness could not write its own output file — which reads as a dead tool,
+  not as a full disk. **An earlier version of this rule blamed `target/debug/incremental` and prescribed
+  `CARGO_INCREMENTAL=0`; that was measured wrong.** At 113 GB of `target/`, `build` was **101 GB** and
+  `incremental` **4.2 GB** — 24× apart, so deleting the cache bought back only ~4 GB each time, which is exactly
+  why it kept recurring. This toolchain puts intermediates at
+  `target/debug/build/<pkg>/<hash>/out/*.rcgu.o` and **never GCs the stale hash directories** — 2,150 of them
+  under `lodestone-shell` alone, one holding 16,900 objects. `CARGO_INCREMENTAL=0` does not touch them.
+
+  So the reclaim that works is **`rm -rf target/debug`** (72 GB in one go, measured), and it is safe when no
+  cargo/rustc is running: it is all regenerable, and **keeping `target/release` means `just run --release` still
+  starts immediately** rather than costing a full release rebuild. `build/` regrows fast — back to 9.6 GB within
+  the hour — so treat this as periodic maintenance, not a one-off. Still prefer `cargo check -p <crate>` while
+  iterating and `--all-targets` once at the end; that reduces churn even though it is not the main driver.
   **Never reach for `git clean` to reclaim space** — it deletes untracked files, which here means other
-  agents' new crates, docs and oracle dumps, in no commit and no reflog.
+  agents' new crates, docs and oracle dumps, in no commit and no reflog. And **do not purge `target/` while
+  another agent is mid-compile** — it happened twice in one session and cost an agent its workspace test run.
 - **Docker is fair game to stop and prune when no live gate needs it**; the oracles are not repo state and
   `scripts/live-oracles/{creative,survival,terrain}.sh` recreates them. Quitting Docker Desktop reclaims
   the VM reservation, the largest single win; restart it before any `#[ignore]`d live-oracle gate. Prune
