@@ -96,6 +96,13 @@ const BANNER_SHEET: (u32, u32) = (64, 64);
 /// [`BANNER_SHEET`], named separately so a jar change is one edit per family.
 const SHULKER_SHEET: (u32, u32) = (64, 64);
 
+/// The book sheet is 64×**32** (`BookModel.createBodyLayer`'s
+/// `LayerDefinition.create(mesh, 64, 32)`) — the only non-square canvas in this
+/// module, so a builder that reused [`CHEST_SHEET`] would halve every `v`
+/// coordinate and draw the page texture at the wrong scale rather than not at
+/// all.
+const BOOK_SHEET: (u32, u32) = (64, 32);
+
 /// `entity::FACE_ORDER` index of the `West` face — see the module doc on why
 /// this is not `Direction as usize`.
 const FACE_WEST: usize = 2;
@@ -173,6 +180,11 @@ pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
         name: "shulker_box",
         texture: "entity/shulker/shulker",
         build: shulker_box_model,
+    },
+    BlockEntityModelEntry {
+        name: "book",
+        texture: "entity/enchantment/enchanting_table_book",
+        build: book_model,
     },
 ];
 
@@ -527,6 +539,111 @@ pub fn shulker_box_model() -> EntityModelDef {
     EntityModelDef {
         texture_width: SHULKER_SHEET.0,
         texture_height: SHULKER_SHEET.1,
+        root,
+    }
+}
+
+/// An open book — `BookModel.createBodyLayer()`
+/// (`net/minecraft/client/model/object/book/BookModel.java`), sheet 64×32:
+///
+/// ```text
+/// left_lid    texOffs( 0,  0)  addBox(-6, -5, -0.005,  6, 10, 0.005)  pose offset(0, 0, -1)
+/// right_lid   texOffs(16,  0)  addBox( 0, -5, -0.005,  6, 10, 0.005)  pose offset(0, 0,  1)
+/// seam        texOffs(12,  0)  addBox(-1, -5,  0,      2, 10, 0.005)  pose rotation(0, PI/2, 0)
+/// left_pages  texOffs( 0, 10)  addBox( 0, -4, -0.99,   5,  8, 1)      pose ZERO
+/// right_pages texOffs(12, 10)  addBox( 0, -4, -0.01,   5,  8, 1)      pose ZERO
+/// flip_page1  texOffs(24, 10)  addBox( 0, -4,  0,      5,  8, 0.005)  pose ZERO
+/// flip_page2  texOffs(24, 10)  addBox( 0, -4,  0,      5,  8, 0.005)  pose ZERO
+/// ```
+///
+/// Three things in that table are deliberate and would each get "cleaned up"
+/// by a reader who assumed a transcription error:
+///
+/// * **The lids and the flip pages are 0.005 texels thick.** They are paper-thin
+///   *boxes*, not quads — `bake_cube` emits all six faces of each, two of which
+///   are 0.005 texels wide. A mesher that culled near-degenerate cubes would eat
+///   the covers and the turning pages and leave only the two page blocks, which
+///   still reads as a book.
+/// * **`flip_page1` and `flip_page2` share one `CubeListBuilder`** in the jar, so
+///   their UVs are identical by construction. They differ only in the per-frame
+///   `yRot` `setupAnim` gives them.
+/// * **`seam` is the only part with a rest *rotation*** (`PartPose.rotation`, no
+///   offset), and `BookModel.setupAnim` never poses it — so the spine's quarter
+///   turn must survive as a rest pose rather than being folded into a caller's
+///   override list.
+///
+/// Shared by two registrations, and the *work* is not shared: a lectern's
+/// `BookModel.State` is a compile-time constant (see
+/// `lodestone_render::block_entity`'s `LECTERN_BOOK_OPENNESS`), while
+/// `EnchantTableRenderer`'s is a client-simulated animation state machine with
+/// its own per-frame `open`/`flip`/`rot` counters. One mesh, two very different
+/// consumers.
+///
+/// Authored **block-space-up** like [`chest_single_model`] and [`bell_model`]:
+/// `LecternRenderer.submit` applies no `scale(-1, -1, 1)` (unlike
+/// `SkullBlockRenderer`), so origins and poses add with no sign flip.
+#[must_use]
+pub fn book_model() -> EntityModelDef {
+    // Vanilla builds both flip pages from one `CubeListBuilder`; one `CubeDef`
+    // value cloned into both children is the same statement in Rust.
+    let flip_page = CubeDef::new([0.0, -4.0, 0.0], [5.0, 8.0, 0.005], [24.0, 10.0]);
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "left_lid",
+            PartDef::new(PartPose::offset(0.0, 0.0, -1.0)).with_cube(CubeDef::new(
+                [-6.0, -5.0, -0.005],
+                [6.0, 10.0, 0.005],
+                [0.0, 0.0],
+            )),
+        )
+        .with_child(
+            "right_lid",
+            PartDef::new(PartPose::offset(0.0, 0.0, 1.0)).with_cube(CubeDef::new(
+                [0.0, -5.0, -0.005],
+                [6.0, 10.0, 0.005],
+                [16.0, 0.0],
+            )),
+        )
+        .with_child(
+            "seam",
+            PartDef::new(PartPose::rotation(
+                0.0,
+                std::f32::consts::FRAC_PI_2,
+                0.0,
+            ))
+            .with_cube(CubeDef::new(
+                [-1.0, -5.0, 0.0],
+                [2.0, 10.0, 0.005],
+                [12.0, 0.0],
+            )),
+        )
+        .with_child(
+            "left_pages",
+            PartDef::new(PartPose::ZERO).with_cube(CubeDef::new(
+                [0.0, -4.0, -0.99],
+                [5.0, 8.0, 1.0],
+                [0.0, 10.0],
+            )),
+        )
+        .with_child(
+            "right_pages",
+            PartDef::new(PartPose::ZERO).with_cube(CubeDef::new(
+                [0.0, -4.0, -0.01],
+                [5.0, 8.0, 1.0],
+                [12.0, 10.0],
+            )),
+        )
+        .with_child(
+            "flip_page1",
+            PartDef::new(PartPose::ZERO).with_cube(flip_page.clone()),
+        )
+        .with_child(
+            "flip_page2",
+            PartDef::new(PartPose::ZERO).with_cube(flip_page),
+        );
+    EntityModelDef {
+        texture_width: BOOK_SHEET.0,
+        texture_height: BOOK_SHEET.1,
         root,
     }
 }

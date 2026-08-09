@@ -41,7 +41,7 @@ use super::{
     BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
-    HandSwingSource, MainHandSource, MapSource, NameTagRenderer, OutlineRenderer,
+    HandSwingSource, LecternSource, MainHandSource, MapSource, NameTagRenderer, OutlineRenderer,
     OutlineShapeSource,
     RenderState, SKY_COLOR, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
     ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource, transparent_placeholder_atlas,
@@ -300,8 +300,10 @@ impl RenderState {
             shulker_source: ShulkerSource::default(),
             // Likewise `set_map_source` (issue #184).
             map_source: MapSource::default(),
-            // Likewise `set_banner_source` (issue #23).
+            // Likewise `set_banner_source`.
             banner_source: BannerSource::default(),
+            // Likewise `set_lectern_source`.
+            lectern_source: LecternSource::default(),
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -953,15 +955,9 @@ impl RenderState {
     /// Install the source for this frame's bells — the bell equivalent of
     /// [`set_skull_source`](Self::set_skull_source).
     ///
-    /// **Nothing in this workspace calls this yet.** The gather it needs
-    /// (`crate::block_entities::bell_spawns`) exists and is tested, but the
-    /// per-frame install call site — the `sim.rs`/`app.rs` equivalent of
-    /// [`Self::set_block_entity_source`]'s own installer — is outside this
-    /// change's file ownership; see `docs/block-entity-renderers.md`'s Bell
-    /// section for the exact remaining hop. Until installed, a bell draws
-    /// nothing extra beyond its block model's own attachment-frame geometry,
-    /// the same "unset means draw nothing" degradation every other source
-    /// here has.
+    /// Must be re-installed every frame: the closure captures the partial tick,
+    /// which the shake angle interpolates against, so a stale one stutters the
+    /// swing at the frame rate. `app::redraw` does this from `Sim::bell_source`.
     pub fn set_bell_source(
         &mut self,
         f: impl Fn(Vec3) -> Vec<lodestone_render::BellSpawn> + Send + Sync + 'static,
@@ -969,8 +965,8 @@ impl RenderState {
         self.bell_source = BellSource(Some(Box::new(f)));
     }
 
-    /// Install the source for this frame's shulker boxes (issue #23) — the
-    /// shulker equivalent of [`set_bell_source`](Self::set_bell_source), and the
+    /// Install the source for this frame's shulker boxes — the shulker
+    /// equivalent of [`set_bell_source`](Self::set_bell_source), and the
     /// thinnest of the family: no clock, no animation map.
     ///
     /// Leaving it unset is a **hole in the world**, not a missing decoration: a
@@ -983,7 +979,7 @@ impl RenderState {
         self.shulker_source = ShulkerSource(Some(Box::new(f)));
     }
 
-    /// Install the source for this frame's banners (issue #23).
+    /// Install the source for this frame's banners.
     ///
     /// Must be re-installed every frame: the closure captures the game tick and the
     /// partial tick, so a stale one freezes every banner's cloth mid-sway — the
@@ -993,6 +989,22 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::BannerSpawn> + Send + Sync + 'static,
     ) {
         self.banner_source = BannerSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's lectern books — the lectern
+    /// equivalent of [`set_shulker_source`](Self::set_shulker_source), and like
+    /// it, free of any clock: `LECTERN_BOOK_OPENNESS` is a compile-time constant
+    /// in the jar, so nothing about a lectern book varies with time.
+    ///
+    /// Leaving it unset is the mildest degradation of the family — an empty
+    /// lectern rather than a hole, since the shelf and base are real block
+    /// models. It is still an island if nobody calls it, which is why
+    /// `app::redraw` installs it beside the other four.
+    pub fn set_lectern_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::LecternSpawn> + Send + Sync + 'static,
+    ) {
+        self.lectern_source = LecternSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's filled-map pictures (issue #184).

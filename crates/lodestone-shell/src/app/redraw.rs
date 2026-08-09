@@ -289,20 +289,29 @@ impl WindowApp {
             render.set_bell_source(f);
         }
 
-        // Shulker boxes (issue #23). Same per-frame install as the four above, and
-        // the same reason this call site matters as much as the geometry: a 26.2
-        // shulker box has **no block model**, so without it the terrain mesher
-        // leaves a hole where every box is — the chest failure mode exactly.
+        // Shulker boxes. Same per-frame install as the four above, and the same
+        // reason this call site matters as much as the geometry: a 26.2 shulker
+        // box has **no block model**, so without it the terrain mesher leaves a
+        // hole where every box is — the chest failure mode exactly.
         if let Some(f) = self.sim.shulker_source() {
             render.set_shulker_source(f);
         }
 
-        // Banners (issue #23). The pattern compositing, the mask atlas, the flag
-        // mesh, the sway and the translucent layer pipeline were all landed with
-        // zero consumers; this call site plus `prepare_block_entities`' arm is what
+        // Banners. The pattern compositing, the mask atlas, the flag mesh, the
+        // sway and the translucent layer pipeline were all landed with zero
+        // consumers; this call site plus `prepare_block_entities`' arm is what
         // finally puts a banner on screen.
         if let Some(f) = self.sim.banner_source() {
             render.set_banner_source(f);
+        }
+
+        // Lectern books. Unlike chest/shulker/banner, an unset source here is not
+        // a hole — a lectern's shelf and base are real block models — so the
+        // failure mode is a lectern that is never holding a book, which is
+        // exactly what a missing install looks like from a screenshot. Hence the
+        // call site lands with the geometry rather than after it.
+        if let Some(f) = self.sim.lectern_source() {
+            render.set_lectern_source(f);
         }
 
         // Filled maps (issue #184). This is the hop that turns the `SessionMaps`

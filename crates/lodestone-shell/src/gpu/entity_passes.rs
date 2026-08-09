@@ -666,16 +666,20 @@ impl RenderState {
         let bells = self.bell_source.bells(eye);
         let shulkers = self.shulker_source.shulkers(eye);
         let banners = self.banner_source.banners(eye);
-        // All five, not any subset: an early return on only `chests`/`skulls`
+        let lecterns = self.lectern_source.lecterns(eye);
+        // All six, not any subset: an early return on only `chests`/`skulls`
         // would make a bell in an otherwise chestless, skull-less room draw
         // nothing, which is exactly how this pass would have grown a third
         // island — a shulker box in an empty end-city room is the fourth
-        // instance of the same shape, and a banner in a village the fifth.
+        // instance of the same shape, a banner in a village the fifth, and a
+        // lectern in an otherwise bare village library the sixth. Every source
+        // added here has to join this condition.
         if chests.is_empty()
             && skulls.is_empty()
             && bells.is_empty()
             && shulkers.is_empty()
             && banners.is_empty()
+            && lecterns.is_empty()
         {
             return (Vec::new(), Vec::new());
         }
@@ -722,6 +726,14 @@ impl RenderState {
             shulkers
                 .iter()
                 .filter_map(|spawn| self.block_entities.models.resolve_shulker(spawn)),
+        );
+        // One model and one sheet for every lectern in the world, so all of them
+        // coalesce into a single batch regardless of facing — the facing rides
+        // the per-instance placement matrix.
+        instances.extend(
+            lecterns
+                .iter()
+                .filter_map(|spawn| self.block_entities.models.resolve_lectern(spawn)),
         );
 
         // Banners (issue #23). `resolve_banner` returns three things at once: the
