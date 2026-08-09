@@ -3396,6 +3396,33 @@ impl HudRenderer {
             .attach_glint(device, queue, color_format, img, "hud-glint");
     }
 
+    /// Push vanilla's **Glint Speed**/**Glint Strength** accessibility options to
+    /// the 2-D GUI glint pass, so an enchanted hotbar item shimmers at the
+    /// player's chosen rate and opacity.
+    ///
+    /// This is the third of the three glint sites and the one that was missed:
+    /// the world and hand passes share `crate::gpu::RenderState::glint_options`,
+    /// while the GUI icon pass is a separate pipeline with its own uniform, so
+    /// pushing to the first two left an enchanted item shimmering correctly in the
+    /// world and in hand but at vanilla's default in a slot. The container screen
+    /// has the identical call on `ContainerRenderer` — **both** are needed, since
+    /// each owns its own [`IconRenderer`].
+    ///
+    /// Called once per presented frame from `app/redraw.rs` beside
+    /// `RenderState::set_glint_options`, not once at attach time: the value can
+    /// change in the settings screen while a container is open.
+    pub fn set_glint_options(&mut self, speed: f64, strength: f32) {
+        self.icons.set_glint_options(speed, strength);
+    }
+
+    /// This frame's GUI glint speed and strength as the uniform will see them —
+    /// already clamped. Exists so a gate can predict what the shader gets rather
+    /// than what was pushed; see [`item_icon::IconRenderer::glint_options`].
+    #[must_use]
+    pub fn glint_options(&self) -> (f64, f32) {
+        self.icons.glint_options()
+    }
+
     /// Attach the GPU side of the **3-D block-item** icon pass, so hotbar slots
     /// holding a block draw vanilla's isometric mini-block instead of an empty
     /// well.
