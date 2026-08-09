@@ -160,14 +160,20 @@ Editing, and reading the tree:
   test run are **two observations at two different moments**. **Before reporting a red `main`, re-run at
   the committed sha in an isolated worktree.** When *you* neuter something, keep the window short and
   restore by `cp` from a scratchpad backup **with an md5 check** — never `git checkout`.
-- **A clean log for *your* files, in a build another agent broke, is not evidence your files are clean —
-  unless you prove the compiler got that far.** rustc may stop before reaching them, so the absence of your
-  errors is indistinguishable from the absence of a chance to report them. The control that settles it, and
-  it is cheap: **introduce a deliberate type error in your own file, plus a second inside your own
-  `mod tests`, and confirm both are reported *alongside* the foreign error.** If they are, a clean log is a
-  measurement rather than a short-circuit; restore by `cp` from an md5-checked backup as above. Use this
-  instead of blocking on another agent — CLAUDE.md's rule is that only a **mid-keystroke** file is worth
-  waiting on, and this is how you keep working without waiting.
+- **A clean log for *your* files, in a build someone else broke, is not evidence your files are clean —
+  unless you prove the compiler got that far.** The control is cheap: **plant a deliberate type error in your
+  own lib file, and a second inside your own crate's test file, then check which ones come back.** Both cases
+  were measured, and **they answer differently, so one control does not cover both**:
+
+  | broken | your crate's diagnostics | verdict |
+  |---|---|---|
+  | **another crate** (`lodestone-shell` failing) | still emitted — `lodestone-server` compiled and warned normally | a foreign failure is **not** a short-circuit; keep working |
+  | **your own lib** | **test-file errors vanish entirely** — only the lib error is reported | a clean log for your *tests* means nothing until your lib compiles |
+
+  The second row is the trap: a test target depends on its lib, so a broken lib **hides every error in its own
+  crate's test files**, and removing the lib error makes the test error appear alone. So read a green test
+  target as evidence only once the lib is green. Restore by `cp` from an md5-checked backup as above. Use this
+  instead of blocking — only a **mid-keystroke** file is worth waiting on.
 - **The scratchpad directory is shared too**, per-*session*, with none of git's protections. **Use
   uniquely-named files**, write them with the file tools rather than shell heredocs, and **re-read
   anything you are about to reason from** — a `#[path]` harness compiles whatever is on disk right then.
@@ -287,6 +293,15 @@ you chose to model*, so agreement across ports sharing an author is weak evidenc
 **Assertions of an absence need a control proving the detector works.** "No corrective teleport", "no
 trailing bytes", "zero unresolved" are only as good as the evidence the mechanism *would* have fired.
 Run the control and observe it fail; do not describe what it would do.
+
+**And a control can only demonstrate as many arms as it is allowed to report.** An `assert!` *inside* a `for`
+loop aborts on the first failure, so running the neuter proves exactly **one** arm and the rest stay
+*arguments* rather than observations — you learn that some case failed, not that all four did. **Collect the
+mismatches and assert on the collection.** Restructured that way, a full-cube neuter over the item-settling
+gate failed **4 of 4** arms, each landing exactly on the wrong hypothesis's value (66.0 against true 65 /
+65.5 / 65.9375 / 66.5); with the assert inside the loop, three of those four numbers would never have been
+printed. Same reasoning as making failure output print a bounding box: the gate has to be able to *say* what
+it measured.
 
 **A control's premise can be false before the feature under test ever existed** — and it fails in the
 *safe*-looking direction, because the control fires and what it measures is unrelated. **Before believing
