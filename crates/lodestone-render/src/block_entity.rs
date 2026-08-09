@@ -1451,6 +1451,57 @@ impl BlockEntityModelSet {
         self.models.is_empty()
     }
 
+    /// Resolves a **`minecraft:special` item** into a drawable instance at an
+    /// arbitrary placement — the world surfaces of the seam
+    /// [`special_item_rig`] owns.
+    ///
+    /// `kind` is the special-renderer id from the item's own definition
+    /// (`SpecialItemForm::kind`), `item_path` the item's registry path with the
+    /// namespace stripped, and `placement` the surface's already-composed
+    /// block→world matrix: a dropped stack's bob-and-spin chain, another entity's
+    /// hand chain, or an item frame's wall pose. `None` when the `kind` has no
+    /// ported rig (six of the ten do not) or the rig is not in the corpus.
+    ///
+    /// # Why this exists rather than each surface building the instance itself
+    ///
+    /// Three callers, each with its own placement and nothing else different.
+    /// Everything after the placement — the rig lookup, the sheet, the rest-pose
+    /// part transforms, the cull AABB — is identical, and a second copy of it is
+    /// how one surface ends up drawing a chest the batcher groups under the wrong
+    /// sheet. It is the same shape [`Self::resolve_chest`] and its six siblings
+    /// have, differing only in taking the placement instead of deriving one from a
+    /// block position.
+    ///
+    /// # No pose overrides, deliberately
+    ///
+    /// `part_transforms(placement, &[])`, so a chest's lid is **shut** and a
+    /// shulker box's is **closed**: `ChestSpecialRenderer`/`ShulkerBoxSpecialRenderer`
+    /// carry a fixed `openness` and no animation at all. An item is not the block,
+    /// and passing a lid angle here would open every chest lying on every floor.
+    #[must_use]
+    pub fn resolve_special_item(
+        &self,
+        kind: &str,
+        item_path: &str,
+        placement: Mat4,
+        light: u8,
+    ) -> Option<BlockEntityInstance> {
+        let (model, texture) = special_item_rig(kind, item_path)?;
+        let mesh = self.get(model)?;
+        let part_transforms = mesh.part_transforms(placement, &[]);
+        let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
+        Some(BlockEntityInstance {
+            model,
+            texture,
+            transform: placement,
+            part_transforms,
+            aabb_min,
+            aabb_max,
+            light,
+            tint: [255, 255, 255],
+        })
+    }
+
     /// Resolves one chest into a drawable instance, or `None` if its model is
     /// not in the corpus.
     #[must_use]
@@ -4325,5 +4376,89 @@ mod special_item_tests {
             "control failed: the lid offset is too small to distinguish a real rig \
              from three copies of one cube"
         );
+    }
+
+    /// [`BlockEntityModelSet::resolve_special_item`] is what the three world
+    /// surfaces (dropped stack, another entity's hand, item frame) each turn a
+    /// placement into an instance with, so it has to carry the **whole rig** and be
+    /// keyed on the sheet the batcher groups by.
+    ///
+    /// The geometry predicate is the one from
+    /// `the_chest_rig_has_a_quad_count_no_sprite_or_cube_fallback_can_produce`,
+    /// applied through this accessor: `18` quads and `3` parts, against `6` for a
+    /// block-item cube and `0`/`1` for the sprite fallback. A presence assertion is
+    /// satisfied by both wrong answers, which is exactly why the held chest looked
+    /// fine in the GUI for so long.
+    #[test]
+    fn resolve_special_item_carries_the_whole_rig_and_the_items_own_sheet() {
+        let models = BlockEntityModelSet::load();
+        let placement = Mat4::from_translation(Vec3::new(12.0, 70.0, -4.0));
+        let chest = models
+            .resolve_special_item("minecraft:chest", "chest", placement, 0x8F)
+            .expect("a plain chest resolves");
+        assert_eq!(chest.model, CHEST_SINGLE);
+        // **Four**, not three. `chest_single_model`'s root is a real, geometry-free
+        // `PartDef` and `bake_entity_parts` emits it under an empty name, so the
+        // part list is `["", "bottom", "lid", "lock"]` — the count asserted by
+        // `single_chest_has_the_three_vanilla_parts_in_order` in `lodestone-assets`.
+        // "Three boxes, so three parts" is the plausible wrong number, and it fails
+        // here rather than showing up as a missing lid.
+        assert_eq!(
+            chest.part_transforms.len(),
+            4,
+            "an empty-named root plus bottom + lid + lock; a cube fallback has one \
+             part and a sprite none"
+        );
+        let mesh = models.get(chest.model).expect("the resolved mesh");
+        assert_eq!(mesh.quad_count(), 18, "three boxes of six faces");
+        assert_ne!(mesh.quad_count(), 6, "a plain block-item cube");
+        assert_ne!(mesh.quad_count(), 0, "the vacuous base-sprite fallback");
+        assert_eq!(chest.light, 0x8F, "the caller's light must ride through");
+
+        // The AABB is the rig's own, moved by the placement — non-degenerate and
+        // straddling the placement's translation. A zero-volume box would cull the
+        // instance on the first frustum test and read as "nothing draws".
+        let volume = (chest.aabb_max - chest.aabb_min).min_element();
+        assert!(volume > 0.0, "degenerate AABB {:?}", chest.aabb_max - chest.aabb_min);
+        let placed = placement.transform_point3(Vec3::ZERO);
+        assert!(
+            chest.aabb_min.x <= placed.x + 1.0 && chest.aabb_max.x >= placed.x,
+            "the AABB {:?}..{:?} does not follow the placement at {placed}",
+            chest.aabb_min,
+            chest.aabb_max
+        );
+
+        // The **sheet** is what the batcher keys on alongside the model, so a
+        // trapped chest must share the mesh and differ here. Collected, so one
+        // wrong arm does not hide the other.
+        let trapped = models
+            .resolve_special_item("minecraft:chest", "trapped_chest", placement, 0)
+            .expect("a trapped chest resolves");
+        let mut wrong: Vec<String> = Vec::new();
+        if trapped.model != chest.model {
+            wrong.push(format!(
+                "a trapped chest took a different mesh ({}) from a plain one ({})",
+                trapped.model, chest.model
+            ));
+        }
+        if trapped.texture == chest.texture {
+            wrong.push(format!(
+                "a trapped chest shares the plain chest's sheet ({})",
+                chest.texture
+            ));
+        }
+        // And the negative control that must fire: an unported `kind` yields
+        // nothing rather than a default oak chest.
+        for (kind, path) in [
+            ("minecraft:conduit", "conduit"),
+            ("minecraft:trident", "trident"),
+            ("minecraft:chest", "diamond_pickaxe"),
+            ("mypack:teapot", "teapot"),
+        ] {
+            if models.resolve_special_item(kind, path, placement, 0).is_some() {
+                wrong.push(format!("{kind}/{path} resolved to an instance"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 }

@@ -199,6 +199,17 @@ pub struct RenderStats {
     /// same sprite cell share one instanced draw, so this is always ≥ the number
     /// of orb draw calls.
     pub experience_orbs_drawn: usize,
+    /// `minecraft:special` items (chest, shulker box, skull) drawn as **dropped
+    /// stacks** this frame, through the block-entity rig rather than baked quads.
+    ///
+    /// Three separate counters rather than one, because the three surfaces failed
+    /// independently: each was its own island, and a single total would report
+    /// "special items are drawing" while two of the three still drew nothing.
+    pub special_item_drops_drawn: usize,
+    /// `minecraft:special` items drawn in **another entity's hand** this frame.
+    pub special_item_hands_drawn: usize,
+    /// `minecraft:special` items drawn in an **item frame** this frame.
+    pub special_item_frames_drawn: usize,
     /// Whether the first-person arm was drawn this frame. `false` means the
     /// `player_wide` mesh, its texture, or its arm part was missing — i.e. a
     /// real defect, not a quiet frame, because this pass is unconditional
