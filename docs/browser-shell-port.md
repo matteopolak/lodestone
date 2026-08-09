@@ -29,25 +29,23 @@ tidiness.
 `web/` is now a thin launcher: the spike application — its own `main`, camera, HUD,
 chunk fixture and trimmed pack, ~1,200 lines — is deleted.
 
-Every menu screen works and input works: Singleplayer → Select World → Create New
-World all render and respond to clicks.
+Every menu screen works, input works, and **Create New World reaches the Play state
+against an in-memory integrated server** — measured in the page:
 
-Not yet reached: **a world**, and the blocker is now pinned to one thing. The menu's
-Create New World goes through `saves::create_world`, which writes a `level.dat` — and
-whose browser arm correctly *refuses* (`Err(Unsupported)`, "a browser has no saves
-directory; browser worlds are in-memory only"). Pressing it returns to Select World with
-nothing created, which is the gate behaving as designed rather than a bug. **A browser
-world has to go through `IntegratedServer::open_in_memory`**, which needs no `saves/`
-directory and no `level.dat`; what is missing is a launch path from the menu to it. That
-is the next unit, and it is a *routing* change, not a porting one.
+```
+creating an in-memory browser world (nothing is written to disk; lost when the tab closes)
+starting the integrated server (singleplayer) seed=1638668955722967429 view_radius=9
+join chunks: 9 columns inline, 352 deferred to the play loop, 10 rings, window 4
+Configuration -> Play: 0ms total
+```
 
-Two smaller things the same session surfaced: the refusal is silent in the UI (the screen
-bounces back without showing the reason, though the reason exists and is logged), and
-`Select World`'s "No worlds yet" with Play/Edit/Delete/Re-Create greyed out is exactly the
-`saves.rs` browser arm working — worth knowing before someone reads it as a defect.
-
-**`just wasm-size` fails, deliberately unaddressed.** See
-[Bundle size](#bundle-size) — the ceiling has not been moved.
+Not yet **playable**: the page sits on "Joining world…". The blocker is precise and is
+the next unit — the server's play and tick loops are built on `tokio::time`
+(`Instant`/`sleep`/`interval`, 40 sites across `server.rs` and `tick.rs`). Our wasm
+`tokio` enables the `time` feature, which **compiles and then traps**: tokio has no
+`wasm32-unknown-unknown` clock. So the 352 deferred columns never arrive and the loading
+screen never dismisses. That needs a timer seam — the old `web/` spike used
+`gloo-timers` for exactly this — which is a port rather than a swap.
 
 ## Where the port started
 
@@ -317,33 +315,20 @@ absence, and it is worth exactly as much as the evidence that it would have fire
 
 ## Open work
 
-In rough dependency order. Nothing here is blocked on a design question except
-where noted.
+In rough dependency order.
 
-1. **`mesher.rs`'s worker pool.** `std::thread::spawn` **traps**, so this is
-   crash-class and the highest-priority remainder. It needs a single-threaded arm
-   that meshes in the frame, as `web/`'s spike did. **Prefer removing the need for a
-   thread over adopting `wasm-bindgen-rayon`**: COOP/COEP is already set so threads
-   are *possible*, but the rayon route is a large lift and a large bundle.
-2. **`menu/accounts.rs`'s `SignIn` state machine.** Its enum variants carry
-   `PendingLogin`/`LoopbackLogin`, which are native-only, so the machine itself
-   needs gating rather than just its worker functions. This is the largest single
-   remaining item (a 2,400-line file) and it is why the crate is not yet green in
-   one pass.
-3. **`net.rs`'s online-mode path.** `lodestone_client::Session` and
-   `ClientBuilder::{online_session, connect}` are native-only. Browser joins go
-   through the relay, so `connect` is the wrong entry point there anyway.
-4. **Options persistence.** `config.rs`'s `Options::{load,save}` currently degrade
-   to "no options file" on wasm, which **silently loses every setting** — a defect,
-   not an acceptable degradation. `localStorage` is the answer (`web-sys`'s
-   `Storage` feature is already enabled for it). Note `config.rs` is a heavily
-   contended file; do not restructure it.
-5. **The entry point.** `app::run` → `run_windowed` calls `EventLoop::run`; the wasm
-   arm is `winit::platform::web::EventLoopExtWebSys::spawn_app`, plus attaching the
-   canvas rather than creating a window. `main.rs` needs a `fn main() {}` on wasm.
-6. **`web/` consuming the shell**: add the `lodestone-shell` dependency, `fetch` the
-   asset bundle, `platform::assets::install`, then start the app.
-7. **Bundle size — measured, and over.** See [Bundle size](#bundle-size).
+1. **The server's tokio timers.** The one thing between Play and a playable world; see
+   [Status](#status). `tokio::time` compiles on wasm and traps, so `server.rs` and
+   `tick.rs` need a sleep/interval/Instant seam. Note `lodestone-client` already
+   discovered this independently — it logs *"read_timeout is unsupported on wasm32 (no
+   runtime timer); ignoring"*.
+2. **Bundle size.** Measured and attributed; see [Bundle size](#bundle-size). Its cause
+   is generated static tables, which is a whole-project question rather than a wasm one,
+   so it is deliberately not being acted on here.
+3. **The panorama** does not draw. Cosmetic next to a playable world.
+4. **Silent refusals.** `saves::create_world`'s browser refusal is now unreachable from
+   the menu (the in-memory path replaced it), but the world-list screen still swallows a
+   `set_error` without showing it on the path that produced one.
 
 ## Bundle size
 
