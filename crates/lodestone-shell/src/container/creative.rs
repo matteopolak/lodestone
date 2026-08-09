@@ -23,21 +23,23 @@
 //!
 //! Every constant here is transcribed from
 //! `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/CreativeModeInventoryScreen.java`.
-//! Three deliberate departures, each because the machinery it would need does
-//! not exist on this side yet:
+//! The click semantics are a transcription of `slotClicked` — see
+//! [`CreativeEffect`] and [`creative_item_list_click`], which is where the screen's
+//! real behaviour lives and why it is not "a chest with a copy flag". Three deliberate
+//! departures remain, each because the machinery it would need does not exist here yet:
 //!
-//! - **Clicking a grid cell gives the item into the selected hotbar slot**
-//!   rather than picking it onto the cursor. The cursor stack lives on a real
-//!   [`Menu`], and the creative grid has none; `ClientAction::SetCreativeModeSlot`
-//!   is the one wire verb available, so the screen uses it directly. See
-//!   `docs/creative-inventory-screen.md`.
+//! - **No quick-craft drag across the creative screen.** Vanilla, on a press with a
+//!   loaded cursor, starts a drag and resolves it on release; a release over a single
+//!   painted slot is then a plain `PICKUP` of that slot, so a click behaves identically
+//!   and only a drag *across several* slots differs. This screen acts on press.
 //! - **The `hotbar` tab is empty.** Vanilla fills it from saved hotbars on disk
 //!   (`HotbarManager`), which this client has no store for. It draws its
 //!   background, tab strip and the player's live hotbar row like every other
 //!   tab, and its grid is honestly blank rather than showing something invented.
 //! - **No item tooltips carry the tab-membership lines** vanilla's
-//!   `getTooltipFromContainerItem` appends; the hovered-slot tooltip itself is the
-//!   ordinary container one.
+//!   `getTooltipFromContainerItem` appends, nor the search tab's `#tag` lines; the
+//!   hovered-slot tooltip itself is the ordinary container one, which is byte-for-byte
+//!   what vanilla shows on a single-category tab.
 //!
 //! Note vanilla's `checkTabClicked` and `extractTabButton` disagree by 4 px
 //! vertically (`getTabY` gives `-32`/`+imageHeight`, the blit uses
@@ -47,6 +49,7 @@
 //! both rects for that reason.
 
 use lodestone_assets::ItemAtlas;
+use lodestone_game::click::{Click, ContainerInput, PlayerCtx};
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::Menu;
 use lodestone_model::Identifier;
@@ -670,6 +673,16 @@ pub struct CreativeView<'a> {
     /// The selected tab's display name, already resolved through the language
     /// table (`itemGroup.*`). Empty draws no title.
     pub title: &'a str,
+    /// The pointer in **physical** viewport pixels — the same space
+    /// [`creative_hit_test`] takes. Drives the hovered-slot highlight, the carried
+    /// stack (which follows the cursor), the tooltip, and the avatar's head.
+    ///
+    /// `None` for a caller with no pointer (every hermetic gate) draws none of those
+    /// four, which is what keeps every pre-existing caller byte-identical.
+    pub cursor: Option<[f32; 2]>,
+    /// `Some(advanced)` draws the hovered item's tooltip, with the advanced (F3+H)
+    /// lines when set. `None` draws none.
+    pub tooltips: Option<bool>,
 }
 
 /// Builds one frame of creative-screen geometry.
@@ -747,9 +760,71 @@ pub fn creative_geometry(
             b.bg_sprite(q);
         }
     }
-    // No hovered-slot highlight on this screen, so every background vertex is
-    // under the items.
+    // The hovered slot, resolved **once** and shared by the highlight pair, the
+    // tooltip and (through it) the item under the pointer — the same one-resolution
+    // rule `geometry.rs` follows so a highlight and a tooltip cannot disagree about
+    // which slot the pointer is on.
+    let hovered = view.cursor.and_then(|[cx, cy]| {
+        creative_hit_test(&layout, gui_scale, width, height, cx, cy)
+    });
+    let hovered_rect = hovered.and_then(|hit| match hit {
+        CreativeHit::Grid(cell) => layout.grid.get(cell).copied(),
+        CreativeHit::Hotbar(i) => layout.hotbar.get(i).copied(),
+        CreativeHit::Inventory(index) => layout
+            .inventory
+            .iter()
+            .find(|(i, _)| *i == index)
+            .map(|(_, r)| *r),
+        CreativeHit::Destroy => layout.destroy,
+        _ => None,
+    });
+
+    // `extractSlot`'s `if (itemStack.isEmpty() && slot.isActive())` empty-slot
+    // placeholders — the helmet/chestplate/leggings/boots/shield silhouettes. The
+    // creative screen reaches these through `super.extractBackground`, and its
+    // inventory tab is the one tab that shows the slots that declare them. The id
+    // comes off `Slot::no_item_icon`, so this loop and `GUI_SPRITES` (which stitches
+    // exactly those five) agree by construction rather than by two transcriptions.
+    if let (Some(bg), Some(menu)) = (background, view.menu) {
+        for (index, cell) in &layout.inventory {
+            if menu.slot_item(*index).is_some() {
+                continue;
+            }
+            let Some(id) = menu.slot(*index).and_then(|s| s.no_item_icon) else {
+                continue;
+            };
+            if let Some(q) = bg.sprite_quad(id, cell.x, cell.y, CELL, CELL) {
+                b.bg_sprite(q);
+            }
+        }
+    }
+
+    // The hover highlight's *back* half, under the item.
+    if let (Some(bg), Some(r)) = (background, hovered_rect)
+        && let Some(q) = bg.sprite_quad(
+            super::SLOT_HIGHLIGHT_BACK,
+            r.x - super::HIGHLIGHT_INSET,
+            r.y - super::HIGHLIGHT_INSET,
+            super::HIGHLIGHT,
+            super::HIGHLIGHT,
+        )
+    {
+        b.bg_sprite(q);
+    }
+    // Everything appended to the background stream past here draws **after** the
+    // slot item passes — the front half of the highlight pair, and nothing else.
     let bg_slot_floats = b.bg_verts.len();
+    if let (Some(bg), Some(r)) = (background, hovered_rect)
+        && let Some(q) = bg.sprite_quad(
+            super::SLOT_HIGHLIGHT_FRONT,
+            r.x - super::HIGHLIGHT_INSET,
+            r.y - super::HIGHLIGHT_INSET,
+            super::HIGHLIGHT,
+            super::HIGHLIGHT,
+        )
+    {
+        b.bg_sprite(q);
+    }
 
     // The search box's well: `tab_item_search.png` bakes it in, so this fill is
     // the jar-less picture only.
@@ -806,14 +881,68 @@ pub fn creative_geometry(
         }
     }
 
-    // Nothing on this screen draws a carried stack (the creative grid has no
-    // cursor — see the module doc), so the slot stratum runs to the end of every
-    // stream and the renderer's carried passes are empty by construction.
     let slot_floats = b.verts.len();
     let slot_item_floats = b.item_verts.len();
     let slot_glint_floats = b.glint_verts.len();
     let slot_model_verts = b.model_verts.len();
     let slot_special = b.special.len();
+
+    // ---- the carried stratum ----
+    //
+    // The cursor stack, above every slot and below the tooltip. It is the shared
+    // `player.inventoryMenu` cursor: vanilla's `ItemPickerMenu.getCarried` delegates
+    // there, so this screen and the survival inventory screen show one cursor, not two.
+    //
+    // `view.cursor` is physical viewport space and this builder draws in the logical
+    // canvas, so it is divided by the same effective scale `creative_hit_test` divides
+    // its own input by — without that the stack drifts toward a corner as the GUI scale
+    // grows.
+    let scale = crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
+    let cursor_logical = view.cursor.map(|[cx, cy]| [cx / scale, cy / scale]);
+    let carried = view.menu.and_then(Menu::carried);
+    if let (Some([cx, cy]), Some(stack)) = (cursor_logical, carried) {
+        b.draw_stack(&assets, stack, cx - CELL * 0.5, cy - CELL * 0.5);
+    }
+
+    // The hovered item's tooltip, last of everything — the tail of the stream is what
+    // puts it on top. Suppressed while something is carried, vanilla's
+    // `hoveredSlot.hasItem() && carried.isEmpty()`, which is also what makes the
+    // layering above sound: the two can never both want the same pixels.
+    //
+    // Vanilla's `getTooltipFromContainerItem` override additionally prepends the
+    // blue tab-membership lines on the search/hotbar/inventory tabs, and the
+    // `#tag` lines on the search tab. Neither is modelled: the first needs a
+    // resolved `itemGroup.*` display name per tab inside this module (it holds one
+    // title string, not fourteen), and the second needs the item-tag corpus. The
+    // *base* tooltip — the one Matthew reported missing entirely — is the ordinary
+    // container one, and on a single-category tab that is byte-for-byte what
+    // vanilla shows, because that branch returns `originalLines` untouched.
+    if let (Some(advanced), None) = (view.tooltips, carried) {
+        let stack = match hovered {
+            Some(CreativeHit::Grid(cell)) if kind != CreativeTabKind::Inventory => {
+                page.get(cell).copied().flatten().and_then(stack_of)
+            }
+            Some(CreativeHit::Hotbar(i)) => {
+                view.menu.and_then(|m| m.slot_item(36 + i)).cloned()
+            }
+            Some(CreativeHit::Inventory(index)) => {
+                view.menu.and_then(|m| m.slot_item(index)).cloned()
+            }
+            _ => None,
+        };
+        if let Some(stack) = stack {
+            super::tooltip::emit_tooltip_for_stack(
+                &mut b,
+                &stack,
+                view.cursor,
+                advanced,
+                gui_scale,
+                width,
+                height,
+                (w, h),
+            );
+        }
+    }
 
     ContainerGeometry {
         bg_slot_vertex_count: bg_slot_floats / BG_FLOATS_PER_VERTEX,
@@ -831,11 +960,18 @@ pub fn creative_geometry(
         special: b.special,
         bg_verts: b.bg_verts,
         widget_rect: Some(layout.panel),
-        // No avatar: vanilla's creative screen is `CreativeModeInventoryScreen`,
-        // which never calls `extractEntityInInventoryFollowsMouse` — its survival
-        // tab shows the player's *slots*, not the player. See
-        // `ContainerGeometry::player_avatar`.
-        player_avatar: None,
+        // The avatar, on the inventory tab only.
+        //
+        // This field used to be `None` with a comment asserting that vanilla's
+        // creative screen never calls `extractEntityInInventoryFollowsMouse`. It
+        // does: `CreativeModeInventoryScreen.extractBackground` ends with exactly
+        // that call, gated on `selectedTab.getType() == Type.INVENTORY`, into a
+        // 32x43 recess at `(+73, +6)` at scale 20 — a different rect *and* a
+        // different scale from `InventoryScreen`'s, which is why
+        // `PlayerAvatar::creative` exists rather than reusing `new`.
+        player_avatar: (kind == CreativeTabKind::Inventory).then(|| {
+            super::PlayerAvatar::creative(layout.panel.x, layout.panel.y, cursor_logical)
+        }),
     }
 }
 
@@ -862,11 +998,294 @@ fn push_tab(
     }
 }
 
-/// A stack of one, for an icon. `None` on a malformed id, which the transcribed
-/// table makes impossible for its own contents — the fallible form exists so a
-/// hostile id degrades to a blank cell rather than a panic.
+/// A stack of one **carrying the item's prototype components** — vanilla's
+/// `new ItemStack(item)`, whose max stack size, max damage and equippable slot come
+/// from the item's built-in component map rather than from any patch.
+///
+/// `None` on a malformed id, which the transcribed table makes impossible for its own
+/// contents; the fallible form exists so a hostile id degrades to a blank cell rather
+/// than a panic.
+///
+/// # Why the prototype is not optional here
+///
+/// A clientbound stack never carries these three on the wire — they are the item's
+/// defaults, and `lodestone_data::item_prototypes` is the census of them. Building the
+/// list entry without them has three visible consequences, all of which read as
+/// unrelated bugs:
+///
+/// * every stack caps at [`crate::hud`]'s default of 64, so a bucket, an ender pearl
+///   or a shulker box picks up 64 from the item list and the server corrects it;
+/// * `equippable` is absent, so `Slot::may_place` on an armour slot compares
+///   `None == Some(_)` and **no creative armour can be put into an armour slot at
+///   all**;
+/// * `max_damage` is absent, so two identical swords stack.
+///
+/// Routed through `lodestone_model::ItemStack` and the existing
+/// `From<&lodestone_model::ItemStack>` conversion rather than inserting the three
+/// components by hand, so the component *names* have exactly one transcription in the
+/// tree — the one the wire decoder already uses.
 fn stack_of(id: &str) -> Option<ItemStack> {
-    id.parse::<Identifier>().ok().map(|id| ItemStack::new(id, 1))
+    let item = id.parse::<Identifier>().ok()?;
+    let mut model = lodestone_model::ItemStack::new(item, 1);
+    if let Some(proto) = lodestone_data::item_prototypes::model_prototype(id) {
+        model.components.max_stack_size = Some(proto.max_stack_size);
+        model.components.max_damage = proto.max_damage;
+        model.components.equippable = proto.equip_slot;
+    }
+    Some(ItemStack::from(&model))
+}
+
+/// One consequence of a creative-screen click, in the order it must be applied.
+///
+/// The creative screen is not a chest with a copy flag: vanilla gives it its own
+/// `slotClicked` override that intercepts **before** the ordinary container path, and
+/// the item list behind it is an infinite source with no server container. So a click
+/// there cannot become a `container_click` — the server's cursor is empty and would
+/// reject an item the client minted. Every mutation is instead applied locally and
+/// reported per slot with `SET_CREATIVE_MODE_SLOT`, which is exactly what vanilla's
+/// `handleCreativeModeItemAdd` / `handleCreativeModeItemDrop` do.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CreativeEffect {
+    /// Replace the cursor stack. Client-only — there is no wire verb for the cursor,
+    /// and vanilla's `ItemPickerMenu.setCarried` delegates straight to
+    /// `player.inventoryMenu`, so the creative screen and the survival inventory
+    /// screen share one cursor rather than each having their own.
+    SetCarried(Option<ItemStack>),
+    /// Write one **window-0 menu slot** and report it with `SET_CREATIVE_MODE_SLOT`
+    /// (`handleCreativeModeItemAdd`). `menu_index` is the same numbering
+    /// `container.rs`'s slot layout uses, which is also the numbering that packet's
+    /// `slot` field is defined in.
+    SetSlot {
+        /// Window-0 menu slot index.
+        menu_index: usize,
+        /// New contents.
+        item: Option<ItemStack>,
+    },
+    /// Throw a stack into the world — `handleCreativeModeItemDrop`, i.e.
+    /// `SET_CREATIVE_MODE_SLOT` with vanilla's `-1` "drop" slot.
+    Drop(ItemStack),
+    /// Empty every player-inventory slot. Vanilla's shift-click on the inventory
+    /// tab's trash slot, which loops `inventoryMenu.getItems()` setting each to empty.
+    ClearInventory,
+}
+
+/// Vanilla's `Inventory.setItem(buttonNum, …)` target for a `SWAP` click, as a
+/// **window-0 menu index**.
+///
+/// Vanilla's `buttonNum` here is a *native inventory* index — `0..=8` is the hotbar
+/// and `40` is the off-hand, which is what `AbstractContainerScreen`'s hotbar-key and
+/// off-hand-key handlers pass. Window 0 puts the hotbar at menu `36..=44` and the
+/// off-hand at `45`, so the two spaces differ by 36 for the hotbar and are unrelated
+/// for the off-hand. Getting this mapping wrong swaps into a *main inventory* slot and
+/// looks like the key doing nothing.
+#[must_use]
+fn swap_target_menu_index(button: i32) -> Option<usize> {
+    match button {
+        0..=8 => Some(36 + button as usize),
+        40 => Some(45),
+        _ => None,
+    }
+}
+
+/// `stack` at its own maximum count — vanilla's `copyWithCount(getMaxStackSize())`.
+///
+/// **Not 64.** The limit is the item's own, which [`stack_of`] has already attached
+/// from the prototype census: a bucket is 1, an ender pearl 16, a snowball 16.
+fn full_stack(stack: &ItemStack) -> ItemStack {
+    let mut out = stack.clone();
+    out.set_count(stack.max_stack_size());
+    out
+}
+
+fn with_count(stack: &ItemStack, count: i32) -> ItemStack {
+    let mut out = stack.clone();
+    out.set_count(count);
+    out
+}
+
+/// A click on one of the 45 **item-list** cells — a transcription of
+/// `CreativeModeInventoryScreen.slotClicked`'s `slot.container == CONTAINER` branch.
+///
+/// `clicked` is the list entry under the pointer (`None` on a cell past the end of the
+/// list) and `carried` is the shared cursor. The list is an infinite source, so nothing
+/// here ever writes back to it — that is why no branch produces a `SetSlot` for the
+/// grid.
+///
+/// # The counts are the part worth reading twice
+///
+/// A plain left-click yields `clicked.getCount()`, and the list holds stacks of **one**
+/// (`CreativeModeTab`'s output builds `new ItemStack(item)`), so **one left-click gives
+/// one item** — clicking the same entry again `grow(1)`s the cursor. It is
+/// `QUICK_MOVE` (shift), `CLONE` (middle / pick-item) and `SWAP` (the hotbar number
+/// keys) that yield `getMaxStackSize()`. "Click gives you a full stack" is the
+/// plausible wrong reading; the record is explicit and the two disagree on the very
+/// first click.
+#[must_use]
+pub fn creative_item_list_click(
+    input: ContainerInput,
+    button: i32,
+    clicked: Option<&ItemStack>,
+    carried: Option<&ItemStack>,
+) -> Vec<CreativeEffect> {
+    let quick = input == ContainerInput::QuickMove;
+    match input {
+        // `inventory.setItem(buttonNum, clicked.copyWithCount(clicked.getMaxStackSize()))`
+        // then `return` — the cursor is untouched and no exchange happens, unlike a
+        // swap against a real container slot.
+        ContainerInput::Swap => match (clicked, swap_target_menu_index(button)) {
+            (Some(clicked), Some(menu_index)) => vec![CreativeEffect::SetSlot {
+                menu_index,
+                item: Some(full_stack(clicked)),
+            }],
+            _ => Vec::new(),
+        },
+        // `if (carried.isEmpty() && slot.hasItem()) setCarried(copyWithCount(max))`.
+        // A loaded cursor makes this a no-op, which is why middle-clicking with
+        // something in hand does nothing rather than swapping.
+        ContainerInput::Clone => match (carried, clicked) {
+            (None, Some(clicked)) => vec![CreativeEffect::SetCarried(Some(full_stack(clicked)))],
+            _ => Vec::new(),
+        },
+        // `copyWithCount(buttonNum == 0 ? 1 : maxStackSize)`, dropped into the world.
+        // The cursor is not involved at all.
+        ContainerInput::Throw => match clicked {
+            Some(clicked) => {
+                let count = if button == 0 { 1 } else { clicked.max_stack_size() };
+                vec![CreativeEffect::Drop(with_count(clicked, count))]
+            }
+            None => Vec::new(),
+        },
+        // `PICKUP`, `QUICK_MOVE`, and anything else that reaches the branch.
+        // `QUICK_CRAFT` never does: `ItemPickerMenu.canDragTo` refuses every
+        // `CONTAINER` slot, so a drag across the item list distributes nothing.
+        _ => match (carried, clicked) {
+            (Some(carried), Some(clicked))
+                if ItemStack::is_same_item_same_components(carried, clicked) =>
+            {
+                let mut next = carried.clone();
+                if button == 0 {
+                    if quick {
+                        next.set_count(next.max_stack_size());
+                    } else if next.count() < next.max_stack_size() {
+                        next.grow(1);
+                    }
+                } else {
+                    next.shrink(1);
+                }
+                vec![CreativeEffect::SetCarried(lodestone_game::item::normalize(next))]
+            }
+            (None, Some(clicked)) => {
+                let count = if quick {
+                    clicked.max_stack_size()
+                } else {
+                    clicked.count()
+                };
+                vec![CreativeEffect::SetCarried(Some(with_count(clicked, count)))]
+            }
+            // Everything else, including a **loaded cursor over an empty cell or a
+            // different item**: left-click destroys the whole cursor stack and
+            // right-click takes one off it. This is real vanilla behaviour and not a
+            // case to guard against — the item list doubles as the screen's bin.
+            (carried, _) => {
+                if button == 0 {
+                    vec![CreativeEffect::SetCarried(None)]
+                } else if let Some(carried) = carried {
+                    let mut next = carried.clone();
+                    next.shrink(1);
+                    vec![CreativeEffect::SetCarried(lodestone_game::item::normalize(next))]
+                } else {
+                    Vec::new()
+                }
+            }
+        },
+    }
+}
+
+/// A click on one of the **player-inventory** slots the creative screen shows — the
+/// hotbar row on every category tab, and all 41 slots on the inventory tab.
+///
+/// This is the "like a chest" half: vanilla routes these straight into
+/// `player.inventoryMenu.clicked(target.index, …)`, i.e. the ordinary click matrix,
+/// which is why left/right/shift/double/number-key all keep working there. Rather than
+/// restate that matrix, the click is applied to a **clone** of the menu through the
+/// same [`Click::apply`] the container screen uses, and the clone is then diffed
+/// against the original to produce the per-slot writes `SET_CREATIVE_MODE_SLOT` has to
+/// carry. A second copy of `doClick` in the shell would be free to drift from the one
+/// `container.rs` already tests.
+///
+/// `PlayerCtx::creative()` and not `survival()`: this screen only exists for a player
+/// with `instabuild`, and the context decides which drag types are legal and whether a
+/// clone click resolves at all.
+#[must_use]
+pub fn creative_inventory_click(menu: &Menu, click: Click) -> Vec<CreativeEffect> {
+    let before = menu.snapshot();
+    let before_carried = menu.carried().cloned();
+    let mut after = menu.clone();
+    let outcome = click.apply(&mut after, PlayerCtx::creative());
+
+    let mut out = Vec::new();
+    for (menu_index, item) in after.snapshot().into_iter().enumerate() {
+        if before.get(menu_index) != Some(&item) {
+            out.push(CreativeEffect::SetSlot { menu_index, item });
+        }
+    }
+    let carried = after.carried().cloned();
+    if carried != before_carried {
+        out.push(CreativeEffect::SetCarried(carried));
+    }
+    out.extend(outcome.dropped.into_iter().map(CreativeEffect::Drop));
+    out
+}
+
+/// Resolve a whole creative-screen click: which region was hit, then which of the two
+/// matrices above applies.
+///
+/// `page` is [`creative_page_items`]'s output for the current scroll — the authority on
+/// which of the 45 cells is populated — and `menu` is the player's own inventory menu,
+/// which owns the shared cursor.
+#[must_use]
+pub fn creative_click(
+    hit: CreativeHit,
+    input: ContainerInput,
+    button: i32,
+    tab: CreativeTabKind,
+    page: &[Option<&str>],
+    menu: &Menu,
+) -> Vec<CreativeEffect> {
+    match hit {
+        CreativeHit::Grid(cell) if tab != CreativeTabKind::Inventory => {
+            let clicked = page.get(cell).copied().flatten().and_then(stack_of);
+            creative_item_list_click(input, button, clicked.as_ref(), menu.carried())
+        }
+        // The hotbar row is window 0's `36 + i`, on every tab that draws it.
+        CreativeHit::Hotbar(i) => {
+            creative_inventory_click(
+                menu,
+                Click { slot: (36 + i) as i32, button, input },
+            )
+        }
+        // The inventory tab's slots already carry their own menu index.
+        CreativeHit::Inventory(menu_index) => {
+            creative_inventory_click(
+                menu,
+                Click { slot: menu_index as i32, button, input },
+            )
+        }
+        // `slot == this.destroyItemSlot`: shift-click empties the whole inventory,
+        // any other click just discards the cursor.
+        CreativeHit::Destroy => {
+            if input == ContainerInput::QuickMove {
+                vec![CreativeEffect::ClearInventory]
+            } else {
+                vec![CreativeEffect::SetCarried(None)]
+            }
+        }
+        CreativeHit::Grid(_)
+        | CreativeHit::Tab(_)
+        | CreativeHit::Scrollbar
+        | CreativeHit::SearchBox
+        | CreativeHit::Panel => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -948,6 +1367,233 @@ mod tests {
         assert!(!filtered.is_empty());
         assert!(filtered.iter().all(|id| id.contains("diamond")));
         assert!(filtered.len() < all.len());
+    }
+
+    /// The three stack limits every count assertion below is measured against, read off
+    /// `Items.java`'s own `Item.Properties` rather than assumed.
+    ///
+    /// **`minecraft:bucket` stacks to 16 in 26.2**, not 1 — `registerItem(ItemIds.BUCKET,
+    /// … new Item.Properties().stacksTo(16))`. It is `water_bucket`/`lava_bucket`/
+    /// `milk_bucket` that are `stacksTo(1)`. Reaching for "a bucket is unstackable"
+    /// would have been the plausible-round-number failure this repo's own rules warn
+    /// about, in the direction that reads as a code bug.
+    const STONE_MAX: i32 = 64;
+    /// `SNOWBALL = registerItem(ItemIds.SNOWBALL, SnowballItem::new, …stacksTo(16))`.
+    const SNOWBALL_MAX: i32 = 16;
+    /// `WATER_BUCKET = registerItem(… .craftRemainder(BUCKET).stacksTo(1))`.
+    const WATER_BUCKET_MAX: i32 = 1;
+
+    fn list_entry(id: &str) -> ItemStack {
+        stack_of(id).expect("a real item id")
+    }
+
+    /// Every count in the item-list matrix is the item's *own* limit. `64` is only the
+    /// answer for an item whose limit happens to be 64, and a gate that used stone alone
+    /// would pass under a hardcoded `64` — so each assertion is made at two different
+    /// limits.
+    #[test]
+    fn the_item_lists_prototype_supplies_the_real_stack_limit() {
+        assert_eq!(list_entry("minecraft:stone").max_stack_size(), STONE_MAX);
+        assert_eq!(
+            list_entry("minecraft:snowball").max_stack_size(),
+            SNOWBALL_MAX
+        );
+        assert_eq!(
+            list_entry("minecraft:water_bucket").max_stack_size(),
+            WATER_BUCKET_MAX
+        );
+        // The equippable component has to survive too, or no creative armour can enter
+        // an armour slot — `ArmorSlot.mayPlace` is `isEquippableInSlot`.
+        assert!(
+            list_entry("minecraft:diamond_helmet")
+                .components()
+                .get_str(lodestone_game::item::EQUIPPABLE_COMPONENT)
+                .is_some(),
+            "an armour item's list entry must carry minecraft:equippable"
+        );
+    }
+
+    /// The owner's report: "if i hotkey it, it should make a stack of 64 in that slot,
+    /// not 1". The record is `inventory.setItem(buttonNum, clicked.copyWithCount(
+    /// clicked.getMaxStackSize()))`, so the rule is the *limit*, not 64.
+    ///
+    /// Two things are pinned here that fail in different ways: the count, and the slot.
+    /// Vanilla's `buttonNum` is a **native** inventory index, and window 0 puts hotbar
+    /// slot `n` at menu `36 + n` — passing it through unmapped writes into the main
+    /// inventory and looks like the key doing nothing.
+    #[test]
+    fn a_hotbar_key_over_the_item_list_fills_that_slot_to_the_items_own_limit() {
+        for (id, limit) in [
+            ("minecraft:stone", STONE_MAX),
+            ("minecraft:snowball", SNOWBALL_MAX),
+            ("minecraft:water_bucket", WATER_BUCKET_MAX),
+        ] {
+            let entry = list_entry(id);
+            let effects =
+                creative_item_list_click(ContainerInput::Swap, 3, Some(&entry), None);
+            let CreativeEffect::SetSlot { menu_index, item } = &effects[0] else {
+                panic!("a swap must write a slot, got {effects:?}");
+            };
+            assert_eq!(effects.len(), 1, "a swap touches the slot and nothing else");
+            assert_eq!(*menu_index, 39, "hotbar slot 3 is window-0 menu slot 39");
+            assert_eq!(item.as_ref().map(ItemStack::count), Some(limit));
+        }
+        // The off-hand key is vanilla's button 40, and window 0 puts the off-hand at
+        // menu slot 45 — not at 40, and not at 76.
+        let entry = list_entry("minecraft:stone");
+        let effects = creative_item_list_click(ContainerInput::Swap, 40, Some(&entry), None);
+        assert!(matches!(
+            effects.as_slice(),
+            [CreativeEffect::SetSlot { menu_index: 45, .. }]
+        ));
+    }
+
+    /// A plain left-click yields `clicked.getCount()`, and the list holds stacks of one,
+    /// so **one** item lands on the cursor and a second click grows it to two. Shift
+    /// yields `getMaxStackSize()`. The two readings differ on the very first click,
+    /// which is why this asserts the count rather than "something was picked up".
+    #[test]
+    fn left_click_takes_one_and_shift_click_takes_a_full_stack() {
+        let entry = list_entry("minecraft:snowball");
+
+        let first = creative_item_list_click(ContainerInput::Pickup, 0, Some(&entry), None);
+        assert_eq!(
+            first,
+            vec![CreativeEffect::SetCarried(Some(with_count(&entry, 1)))],
+            "a plain left-click on the item list takes one item, not a stack"
+        );
+
+        // Clicking the same entry again with one already in hand: `carried.grow(1)`.
+        let one = with_count(&entry, 1);
+        let second =
+            creative_item_list_click(ContainerInput::Pickup, 0, Some(&entry), Some(&one));
+        assert_eq!(
+            second,
+            vec![CreativeEffect::SetCarried(Some(with_count(&entry, 2)))]
+        );
+
+        // Shift over an empty cursor: the item's own limit, 16 here and not 64.
+        let shifted =
+            creative_item_list_click(ContainerInput::QuickMove, 0, Some(&entry), None);
+        assert_eq!(
+            shifted,
+            vec![CreativeEffect::SetCarried(Some(with_count(
+                &entry,
+                SNOWBALL_MAX
+            )))]
+        );
+
+        // Right-click with a loaded cursor takes one *off* it, and an empty cursor
+        // normalizes to `None` rather than to a count-0 stack.
+        let two = with_count(&entry, 2);
+        assert_eq!(
+            creative_item_list_click(ContainerInput::Pickup, 1, Some(&entry), Some(&two)),
+            vec![CreativeEffect::SetCarried(Some(with_count(&entry, 1)))]
+        );
+        assert_eq!(
+            creative_item_list_click(ContainerInput::Pickup, 1, Some(&entry), Some(&one)),
+            vec![CreativeEffect::SetCarried(None)]
+        );
+    }
+
+    /// Middle-click (`CLONE`) always takes a full stack, and does nothing at all with a
+    /// loaded cursor — `if (carried.isEmpty() && slot.hasItem())`, then `return`.
+    #[test]
+    fn middle_click_clones_a_full_stack_only_into_an_empty_cursor() {
+        let entry = list_entry("minecraft:water_bucket");
+        assert_eq!(
+            creative_item_list_click(ContainerInput::Clone, 0, Some(&entry), None),
+            vec![CreativeEffect::SetCarried(Some(with_count(
+                &entry,
+                WATER_BUCKET_MAX
+            )))]
+        );
+        let held = list_entry("minecraft:stone");
+        assert_eq!(
+            creative_item_list_click(ContainerInput::Clone, 0, Some(&entry), Some(&held)),
+            Vec::new(),
+            "a loaded cursor makes a clone click a no-op"
+        );
+    }
+
+    /// Dropping a cursor stack into the item-list area **destroys** it. Real vanilla
+    /// behaviour — the `else if (buttonNum == 0) setCarried(EMPTY)` fall-through — and
+    /// not a case to guard against: the item list doubles as the screen's bin.
+    #[test]
+    fn the_item_list_is_the_bin_for_a_loaded_cursor() {
+        let held = with_count(&list_entry("minecraft:stone"), 10);
+        // Over an empty cell.
+        assert_eq!(
+            creative_item_list_click(ContainerInput::Pickup, 0, None, Some(&held)),
+            vec![CreativeEffect::SetCarried(None)]
+        );
+        // Over a *different* item, which is the same fall-through: the cursor goes,
+        // and the list entry is untouched because the list is a source and never a sink.
+        let other = list_entry("minecraft:snowball");
+        assert_eq!(
+            creative_item_list_click(ContainerInput::Pickup, 0, Some(&other), Some(&held)),
+            vec![CreativeEffect::SetCarried(None)]
+        );
+        // Right-click over an empty cell shaves one off instead.
+        assert_eq!(
+            creative_item_list_click(ContainerInput::Pickup, 1, None, Some(&held)),
+            vec![CreativeEffect::SetCarried(Some(with_count(
+                &list_entry("minecraft:stone"),
+                9
+            )))]
+        );
+    }
+
+    /// `THROW` from the item list: one item on button 0 and the item's own maximum on
+    /// button 1 (ctrl), with the cursor untouched either way.
+    #[test]
+    fn throwing_from_the_item_list_never_touches_the_cursor() {
+        let entry = list_entry("minecraft:snowball");
+        assert_eq!(
+            creative_item_list_click(ContainerInput::Throw, 0, Some(&entry), None),
+            vec![CreativeEffect::Drop(with_count(&entry, 1))]
+        );
+        assert_eq!(
+            creative_item_list_click(ContainerInput::Throw, 1, Some(&entry), None),
+            vec![CreativeEffect::Drop(with_count(&entry, SNOWBALL_MAX))]
+        );
+    }
+
+    /// The "like a chest" half: a click on a player-inventory slot runs the ordinary
+    /// matrix and comes back as per-slot writes, because `SET_CREATIVE_MODE_SLOT` is
+    /// what carries them.
+    #[test]
+    fn an_inventory_slot_click_yields_the_slots_it_actually_changed() {
+        let mut menu = Menu::player();
+        let stone = with_count(&list_entry("minecraft:stone"), 12);
+        menu.set_slot_item(36, Some(stone.clone()));
+
+        // Left-click the hotbar slot with an empty cursor: the slot empties onto the
+        // cursor. Two effects, and the counts are exact rather than "it moved".
+        let effects = creative_inventory_click(&menu, Click::left(36));
+        assert_eq!(
+            effects,
+            vec![
+                CreativeEffect::SetSlot {
+                    menu_index: 36,
+                    item: None
+                },
+                CreativeEffect::SetCarried(Some(stone.clone())),
+            ]
+        );
+
+        // Right-click splits: vanilla takes the *larger* half, so 12 leaves 6 and takes
+        // 6 — but an odd count is the discriminating input, because "half rounded down"
+        // and "half rounded up" agree on every even one.
+        let mut odd = Menu::player();
+        let thirteen = with_count(&list_entry("minecraft:stone"), 13);
+        odd.set_slot_item(36, Some(thirteen));
+        let effects = creative_inventory_click(&odd, Click::right(36));
+        let carried = effects.iter().find_map(|e| match e {
+            CreativeEffect::SetCarried(item) => item.as_ref().map(ItemStack::count),
+            _ => None,
+        });
+        assert_eq!(carried, Some(7), "vanilla's split takes the larger half");
     }
 
     #[test]

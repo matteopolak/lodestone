@@ -1180,6 +1180,78 @@ impl Sim {
         }
     }
 
+    /// Write one window-0 menu slot **locally and on the wire** — vanilla's
+    /// `MultiPlayerGameMode.handleCreativeModeItemAdd`, which is what the creative
+    /// inventory screen uses in place of a `container_click` for every mutation it
+    /// makes.
+    ///
+    /// # Why the local half is not optional
+    ///
+    /// `SET_CREATIVE_MODE_SLOT` is a **silent** write: the server applies it and sends
+    /// nothing back (ours does exactly that, and so does vanilla's
+    /// `handleSetCreativeModeSlot`). So a send with no prediction leaves the client's
+    /// own inventory unchanged *forever* — the item is really in the server's
+    /// inventory and the hotbar cell stays blank. That is the same shape as the
+    /// unpredicted `DROP_ITEM`, and it is why [`Self::send_creative_slot`] alone was
+    /// never enough to make the creative screen work.
+    ///
+    /// The local write goes in as a synthesized [`ClientEvent::ContainerSlot`] against
+    /// window 0 rather than through a new mutator, so it lands through the **same**
+    /// `Menus::apply` fold a real `container_set_slot` would take — including the
+    /// re-addressing a window-0 player-section slot needs while a container owns the
+    /// inventory. Marking it *confirmed* (which that fold does) is correct here rather
+    /// than optimistic: this packet cannot be rejected or corrected, so there is no
+    /// provisional state to keep.
+    ///
+    /// The item is carried as a canonical stack, so components (`max_stack_size`,
+    /// `equippable`) survive into the local menu even though the wire form drops them.
+    pub fn apply_creative_slot(
+        &mut self,
+        menu_index: usize,
+        item: Option<lodestone_game::item::ItemStack>,
+    ) {
+        let model = item.as_ref().map(lodestone_model::ItemStack::from);
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SetCreativeModeSlot {
+                slot: i32::try_from(menu_index).unwrap_or(-1),
+                item: model.clone(),
+            });
+        }
+        let slot = i32::try_from(menu_index).unwrap_or(0);
+        self.write_local(|w, local| {
+            if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+                // The current state id, unchanged: nothing about a creative write
+                // advances the container's synchronisation counter.
+                let state_id = menus.0.player().state_id() as i32;
+                menus.0.apply(&lodestone_model::ClientEvent::ContainerSlot {
+                    window_id: 0,
+                    state_id,
+                    slot,
+                    item: model,
+                });
+            }
+        });
+    }
+
+    /// Replace the shared cursor stack, locally only.
+    ///
+    /// There is no serverbound verb for the cursor, and there does not need to be:
+    /// vanilla's `ItemPickerMenu.setCarried` delegates to `player.inventoryMenu`, so a
+    /// creative cursor is purely client state until it is put into a slot — and *that*
+    /// is what [`Self::apply_creative_slot`] reports. Routed through
+    /// [`ClientEvent::CursorItemChanged`] for the same reason: one fold, not a second
+    /// mutator that could disagree with it.
+    pub fn set_local_carried(&mut self, item: Option<lodestone_game::item::ItemStack>) {
+        let model = item.as_ref().map(lodestone_model::ItemStack::from);
+        self.write_local(|w, local| {
+            if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+                menus
+                    .0
+                    .apply(&lodestone_model::ClientEvent::CursorItemChanged { item: model });
+            }
+        });
+    }
+
     /// The server's game rules, as `GAME_EVENT`/`CHANGE_GAME_STATE` last
     /// reported them (issue #436's `SessionGameRules` island).
     ///

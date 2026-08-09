@@ -226,6 +226,18 @@ impl WindowApp {
     /// so the key and the mouse can never disagree about which slot is under the
     /// pointer (the layout module's own warning about that class of bug).
     pub(super) fn send_container_swap(&mut self, button: i32) {
+        // The creative screen replaces the inventory screen rather than overlaying it,
+        // and its slot clicks never become a `container_click` — see
+        // `container/creative.rs`'s `CreativeEffect`. Vanilla's own
+        // `CreativeModeInventoryScreen.keyPressed` reaches `checkHotbarKeyPressed`
+        // through its overridden `slotClicked`, which is what this routes to. The
+        // carried-empty guard below is vanilla's too, so it still applies.
+        if self.creative_screen_open() {
+            if self.sim.player_menu().carried().is_none() {
+                self.handle_creative_key(button, lodestone_game::click::ContainerInput::Swap);
+            }
+            return;
+        }
         let (Some(menu), Some((w, h))) = (
             self.active_container_menu(),
             self.target.as_ref().map(RenderTarget::size),
@@ -277,6 +289,14 @@ impl WindowApp {
     /// `drop_stack` and `do_throw` (`lodestone-game`) were built and tested
     /// under #27 with zero producers before this; this is the first caller.
     pub(super) fn send_container_drop(&mut self, ctrl: bool) {
+        // Same interception as `send_container_swap`. Vanilla's raw button number for a
+        // throw is `0` for one item and `1` for the whole stack, which is what `ctrl`
+        // selects (`AbstractContainerScreen.keyPressed`'s `hasControlDown()`).
+        if self.creative_screen_open() {
+            let button = i32::from(ctrl);
+            self.handle_creative_key(button, lodestone_game::click::ContainerInput::Throw);
+            return;
+        }
         let (Some(menu), Some((w, h))) = (
             self.active_container_menu(),
             self.target.as_ref().map(RenderTarget::size),
@@ -317,6 +337,14 @@ impl WindowApp {
     /// click is *creative-only*; until that lands this resolves and then produces
     /// no clicks, which is the honest degradation rather than a fabricated one.
     pub(super) fn send_container_pick_item(&mut self) {
+        // Same interception as `send_container_swap`. This is the one click type the
+        // creative screen makes *reachable*: `AbstractContainerScreen` gates
+        // `ContainerInput::CLONE` on `player.hasInfiniteMaterials()`, so on the ordinary
+        // container path below it still resolves to nothing.
+        if self.creative_screen_open() {
+            self.handle_creative_key(0, lodestone_game::click::ContainerInput::Clone);
+            return;
+        }
         let (Some(menu), Some((w, h))) = (
             self.active_container_menu(),
             self.target.as_ref().map(RenderTarget::size),

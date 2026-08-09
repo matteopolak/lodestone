@@ -194,6 +194,30 @@ pub(super) fn emit_tooltip(
     let Some(stack) = menu.slot_item(index) else {
         return;
     };
+    emit_tooltip_for_stack(b, stack, cursor, advanced, gui_scale, width, height, canvas);
+}
+
+/// The box-and-lines half of [`emit_tooltip`], for a caller that already knows which
+/// stack is hovered.
+///
+/// Split out for the creative screen, whose item list is a client-only container with
+/// no [`Menu`] behind it — so it can name the stack but cannot name a menu slot. Every
+/// guard [`emit_tooltip`] applies that is *about a menu* (nothing carried, a slot is
+/// hovered, the slot holds a stack) stays with that function; everything below is
+/// about the box.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_tooltip_for_stack(
+    b: &mut Builder<'_>,
+    stack: &ItemStack,
+    cursor: Option<[f32; 2]>,
+    advanced: bool,
+    gui_scale: u32,
+    width: u32,
+    height: u32,
+    canvas: (f32, f32),
+) {
+    let Some([cx, cy]) = cursor else { return };
+    let Some(font) = b.font else { return };
     let lines = tooltip_lines(stack, advanced);
     if lines.is_empty() {
         return;
