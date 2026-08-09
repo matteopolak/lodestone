@@ -742,10 +742,71 @@ half-width 0.42 blocks, stack top ~3.07 blocks above the feet):
   identical for every flame drawn that frame, not a per-entity vector toward
   the camera), stacked from the entity's feet upward, shrinking (`×0.9` per
   quad) and receding in depth (`-0.03` per quad) as it rises.
-* Scaled by the entity's **base hitbox** (`lodestone_data::entity_dimensions`
-  — vanilla's `Entity.getBbWidth()`/`getBbHeight()`), not this crate's own
-  baked mesh AABB — the two differ for several mobs (e.g. a zombie's model
-  geometry includes its outstretched arms; its hitbox does not).
+* Scaled by the entity's **own hitbox** (`lodestone_data::entity_dimensions`
+  times its age scale — vanilla's `EntityRenderState.boundingBoxWidth`, i.e.
+  `getDimensions().scale(getAgeScale())`), not this crate's own baked mesh
+  AABB — the two differ for several mobs (e.g. a zombie's model geometry
+  includes its outstretched arms; its hitbox does not).
+
+#### The transform: two bugs and the reasoning that hid each
+
+Both were reported by the player as one symptom pair ("the fire is tied to one
+side of the mob" and "a baby zombie's fire should be smaller"). Both live in the
+*caller*, not in `flame_quads`, which was faithful throughout.
+`flame_instance_matrix` is now the single place either is decided.
+
+**1. The billboard rotation is `Ry(PI - yaw)`, not `Ry(yaw)`.** Vanilla's
+`Mth.rotationAroundAxis(Mth.Y_AXIS, camera.orientation, …)` is a swing/twist
+decomposition about Y, and `Camera.setRotation` builds
+`rotationYXZ(PI - yaw, -pitch, 0)`, so the projection is exactly `Ry(PI - yaw)`
+— the pitch term drops out, which is why this takes a yaw and not a camera.
+
+The wrong version was defended in a code comment: entity draws are double-sided
+(`cull_mode: None`), so *a flat billboard* reads identically face-on for either
+sign. **The flame is not a flat billboard.** It is a stack that steps forward in
+`z` (`-0.03` per quad, on top of a `0.3` pose-level push) *and* insets laterally
+(`×0.9`), and a stack with depth and lateral asymmetry is not sign-symmetric.
+With the sign wrong the flame counter-rotates as you orbit instead of following:
+correct from one azimuth, displaced from the opposite one. That is a depth-order
+symptom, which is precisely what `cull_mode: None` converts a bad transform into
+— the general rule `CLAUDE.md` already states, applied to a case where the
+comment argued the other way.
+
+The derivable invariant, and what the gate asserts: **the local `+Z` the
+billboard maps must point toward the camera**, i.e. against `Camera::forward`.
+Derived from a real `Camera` at eight azimuths, with both wrong hypotheses
+computed in the same run and required to fail. The off-axis azimuths are
+load-bearing — a **pure sign flip** (`Ry(-yaw)`) is invisible at yaw `0` and
+`180`, so a gate checking only the two obvious opposed sides passes with it.
+Measured: the shipped `Ry(yaw)` reddens at yaw `0`; `Ry(PI + yaw)` survives yaw
+`0` and reddens first at yaw `45`.
+
+**2. `pose.scale(s, s, s)` was missing entirely, and the mesh was baked per
+model type.** `s = boundingBoxWidth * 1.4` was computed inside `flame_quads` (to
+derive `h`) and never applied to anything, so every flame was `1/s` times too
+large — worst on a wide mob, where `s` is furthest from `1`. `flame_quads`' own
+doc claimed it "multiplies through by `s` at the end"; it never did, and the
+existing geometry tests all multiplied by `s` by hand to get world coordinates,
+which is what made the omission invisible.
+
+The scale is now per **instance** and the mesh stays per **type**, and the reason
+is a piece of arithmetic worth keeping:
+
+> The layer count comes from `h = height / s = height / (width × 1.4)`, which is
+> **invariant** under a uniform hitbox scale. An age scale is uniform, so a baby
+> and an adult of one type have the *same* layer count and differ only in `s`.
+
+So a baby zombie's flame is exactly half an adult's, with six quads in both —
+which is what vanilla itself draws. **A "babies get fewer layers" rule would be a
+second, wrong change**: the layer count varies with **aspect ratio**, not age (a
+spider gets 2 quads to a zombie's 6, and both keep their count as babies). The
+gate predicts both numbers from vanilla's constants — `s = 0.84` adult, `0.42`
+baby — and asserts the counts are *equal*, with the spider arm as the control
+that the count is not simply constant.
+
+`EntityDraw::scale` is the age scale (`0.5` for a `Baby`, `1.0` otherwise), so
+the per-entity box needed no new plumbing; `flame_hitbox_width` in
+`gpu/entity_passes.rs` is the one multiply.
 * Alternates between two textures (`fire_0`/`fire_1`) every quad, combined
   into one side-by-side texture by
   `lodestone_assets::entity_flame::load_combined_flame_texture` so the flame

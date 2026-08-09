@@ -41,6 +41,24 @@ use super::{
     RenderState, RenderStats, WoolPartAccum, humanoid_armour_slot,
 };
 
+/// One entity's own hitbox width in blocks — its type's base width times its age
+/// scale — or `None` for a type with no `entity_dimensions` entry.
+///
+/// This is vanilla's `EntityRenderState.boundingBoxWidth`, and it is the only
+/// input to the flame's size. `age_scale` is [`EntityDraw::scale`], which is
+/// `0.5` for a `Baby` and `1.0` otherwise — vanilla's
+/// `getDimensions().scale(getAgeScale())`, which scales **both** axes, so it
+/// changes the flame's `s` and cannot change its layer count.
+///
+/// Kept as a free function rather than a method on `EntityDraw` because it reads
+/// `lodestone_data`, which the draw type deliberately does not.
+fn flame_hitbox_width(type_path: &str, age_scale: f32) -> Option<f32> {
+    let id = lodestone_data::entity_types::entity_type_id_parts("minecraft", type_path)?;
+    let dims = lodestone_data::entity_dimensions::base_dimensions(id)?;
+    let width = dims.width * age_scale;
+    (width > 0.0).then_some(width)
+}
+
 /// Fold one layer's instances into `accum`, finding-or-creating the
 /// `(slot, texture)` group and, within it, the per-part row.
 ///
@@ -487,15 +505,25 @@ impl RenderState {
     /// purpose (see `EntityRenderer::flame_texture`'s doc, the same asymmetry
     /// `wool_texture`/`armour_textures` already document).
     ///
-    /// The billboard rotation is the camera's own yaw only (vanilla's
-    /// `Mth.rotationAroundAxis(Mth.Y_AXIS, camera.orientation, …)`,
-    /// `EntityRenderDispatcher.java:163`) — identical for every flame drawn
-    /// this frame, not a per-entity look-at vector. The exact sign is not
-    /// pixel-matched against vanilla's own convention: this engine's entity
-    /// draws are double-sided (`cull_mode: None`, see `entity_pipeline.rs`),
-    /// so a flat billboard reads identically face-on for either sign of the
-    /// rotation — only *which* horizontal axis the flame's thin edge points
-    /// down would flip, never its visibility.
+    /// # The transform, and the two things that used to be wrong about it
+    ///
+    /// Both the billboard rotation and the uniform scale come from
+    /// `lodestone_render::entity_pipeline::flame_instance_matrix`, which is the
+    /// single place either is decided. Read its doc before changing the sign.
+    ///
+    /// * **The rotation is `Ry(PI - yaw)`**, not `Ry(yaw)`. The earlier
+    ///   `Ry(yaw)` was defended on the grounds that `cull_mode: None` makes a
+    ///   flat billboard sign-symmetric; the flame is a *stack* with depth and
+    ///   lateral inset, so it is not, and the wrong sign made it counter-rotate
+    ///   as the camera orbited — right from one side, displaced from the other.
+    /// * **The scale is per instance and reads the entity's own hitbox width**,
+    ///   `base width × EntityDraw::scale`, so a baby's flame is half an adult's.
+    ///   It also restores vanilla's `pose.scale(s, s, s)`, which was missing
+    ///   outright: every flame was `1/s` too large, worst on a wide mob.
+    ///
+    /// The mesh stays keyed by entity type, and correctly so — see
+    /// `flame_instance_matrix`'s doc for why an age scale cannot change the layer
+    /// count.
     pub(super) fn prepare_flame(
         &self,
         device: &wgpu::Device,
@@ -516,7 +544,6 @@ impl RenderState {
         let frame = (tick % 32) as u32;
 
         let frustum = camera.frustum();
-        let billboard = glam::Mat4::from_rotation_y(camera.yaw.to_radians());
         let mut accum: HashMap<String, Vec<glam::Mat4>> = HashMap::new();
 
         for draw in entities {
@@ -526,8 +553,21 @@ impl RenderState {
             if !self.entities.flame_gpu_models.contains_key(&draw.type_path) {
                 continue;
             }
+            // The entity's **own** hitbox width, which is vanilla's
+            // `EntityRenderState.boundingBoxWidth` — its type's base width times
+            // its age scale. `EntityDraw::scale` is exactly that age scale
+            // (`0.5` for a `Baby`, `1.0` otherwise), and it scales the box
+            // uniformly, so it does not disturb the mesh's layer count.
+            //
+            // Declining when the type has no dimensions entry is unreachable in
+            // practice — `flame_gpu_models` is built from the same table and was
+            // just checked above — but it must not silently become a width of
+            // zero, which would collapse the flame to a point.
+            let Some(bb_width) = flame_hitbox_width(&draw.type_path, draw.scale) else {
+                continue;
+            };
             let Some(instance) = self.entities.models.resolve(
-                &draw.type_path,
+                draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
                 draw.scale,
@@ -538,7 +578,11 @@ impl RenderState {
             if !frustum.intersects_aabb(instance.aabb_min, instance.aabb_max) {
                 continue;
             }
-            let transform = glam::Mat4::from_translation(draw.feet) * billboard;
+            let transform = lodestone_render::entity_pipeline::flame_instance_matrix(
+                draw.feet,
+                camera.yaw,
+                bb_width,
+            );
             accum.entry(draw.type_path.clone()).or_default().push(transform);
             stats.flame_billboards_drawn += 1;
         }
@@ -858,5 +902,43 @@ impl RenderState {
             })
             .collect();
         (opaque, banner_layers)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The caller was the bug, so the caller gets the assertion.**
+    ///
+    /// `flame_quads` was always faithful; `EntityRenderer::new` fed it
+    /// model-*type* constants and baked one mesh per type, so a baby zombie drew
+    /// an adult's flame. The fix is per-instance, and this is the function that
+    /// makes it per instance: it must multiply the type's base width by the
+    /// entity's own age scale.
+    ///
+    /// Predicted from the generated dimensions table (index 151, zombie
+    /// `(0.6, 1.95)`) rather than asserted as "smaller", and the neutral case is
+    /// asserted alongside so a version that scaled *everything* by `0.5` cannot
+    /// pass either.
+    #[test]
+    fn a_babys_flame_reads_its_own_halved_hitbox_and_an_adults_is_untouched() {
+        let adult = flame_hitbox_width("zombie", 1.0).expect("zombie has dimensions");
+        let baby = flame_hitbox_width("zombie", 0.5).expect("zombie has dimensions");
+        assert!((adult - 0.6).abs() < 1e-6, "adult zombie width, got {adult}");
+        assert!((baby - 0.3).abs() < 1e-6, "baby zombie width, got {baby}");
+        assert!(
+            (baby - adult * 0.5).abs() < 1e-6,
+            "the age scale must reach the width"
+        );
+
+        // A different aspect ratio, so this is not pinned to one hitbox.
+        let spider = flame_hitbox_width("spider", 1.0).expect("spider has dimensions");
+        assert!((spider - 1.4).abs() < 1e-6, "spider width, got {spider}");
+
+        // Degenerate inputs: never a zero width, which would collapse the flame
+        // to a point rather than declining to draw one.
+        assert!(flame_hitbox_width("zombie", 0.0).is_none());
+        assert!(flame_hitbox_width("not_a_real_entity_type", 1.0).is_none());
     }
 }
