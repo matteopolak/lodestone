@@ -56,6 +56,79 @@ Inline bodies, from the two `DIRECT_STREAM_CODEC`s:
 The result is two bare registry **paths** (`"netherite"`, `"silence"`), the form
 `lodestone_assets::trim::{trim_material, trim_pattern}` keys its sprite tables by.
 
+## The other components modeled for the same reason
+
+`minecraft:trim` was the first, not the only one. Every arm in this table exists
+because a component with no renderer at all was truncating the packet it rode in:
+
+| component | payload | what it broke while unmodeled |
+|---|---|---|
+| `minecraft:trim` | two holders, either inline or by reference | a trimmed armour stack truncated the rest of the packet |
+| `minecraft:map_id` | one `VarInt` | a filled map in any inventory did the same |
+| `minecraft:pot_decorations` | a `VarInt` count then that many bare item ids | **the join** — see below |
+
+`minecraft:pot_decorations` is the one that mattered most, because its payload is
+not exotic and its carrier is not optional. Vanilla ships the advancement
+`adventure/craft_decorated_pot_using_only_sherds` with a `minecraft:decorated_pot`
+icon, and an advancement icon is an `ItemStackTemplate` — whose
+`read_item_stack_template` turns an incomplete patch into a **fatal** decode error
+rather than a partial stack, because everything after it in the packet is
+unreadable. So every server that had sent an advancement tree lost its whole
+`update_advancements` packet, during the initial world load.
+
+Its wire shape is `PotDecorations.STREAM_CODEC` =
+`ByteBufCodecs.registry(Registries.ITEM).apply(ByteBufCodecs.list(4))`. Two things
+to get right, both re-read from the jar rather than inferred:
+
+* **`ByteBufCodecs.registry` is `idMapper`** — `VarInt.write(id)`, with no `+1` and
+  no `0` sentinel. That is *not* `ByteBufCodecs.holder`, which `minecraft:trim` two
+  arms above does use. Adding an offset here consumes the right number of bytes and
+  reports the wrong four sherds, which no round-trip against our own encoder can
+  see.
+* **`list(4)` is a maximum, not a fixed width.** A vanilla server always writes
+  four (`PotDecorations::ordered` builds a four-element list unconditionally), but a
+  shorter list is legal and its missing tail is `Optional.empty()` —
+  `PotDecorations::getItem`'s `i >= sherds.size()` arm.
+
+`minecraft:brick` on a face decodes to `None`, mirroring `getItem`'s
+`item == Items.BRICK ? Optional.empty() : Optional.of(item)`: a brick face and a
+blank face are the same state in vanilla, by construction.
+
+Only the decode half is done. The render rig — a decorated pot's four
+independently textured sprites — is separate and untouched.
+
+## Dropping the packet is safe, and that is now pinned
+
+The driver is fail-open on `AdapterError::Decode`: it logs *"dropping undecodable
+packet and continuing session"* and keeps reading. That is only sound if the drop
+leaves the reader at the next frame boundary, and it does —
+`Connection::read_packet` hands the adapter a fully-buffered frame, so however many
+bytes the failing decode consumes, the count cannot reach the next frame.
+
+`crates/protocol/v770/tests/undecodable_packet_resync.rs` is the gate, and it
+brackets the byte count from both sides because either would desync a decoder
+reading from the *stream*:
+
+| arm | the failing decode consumes |
+|---|---|
+| an advancement icon with an unmodeled component | far fewer bytes than the frame holds — `read_component_patch` returns at the unmodeled arm |
+| the same frame with its advancement count inflated | the whole frame, then asks for more |
+
+Both then require the *next* packet's exact decoded content. The frame is over
+16 KiB so it is assembled from several transport reads, with a control asserting the
+fixture really is that big.
+
+It lives in `lodestone-v770` rather than `lodestone-client` deliberately.
+`lodestone-client`'s own `decode_error_drops_packet_and_keeps_session` asserts the
+same shape against a `FakeAdapter` that rejects the packet **without reading a byte
+of the payload**, against empty payloads — exemplary source, but the consumption
+profile is the whole variable here, so it cannot tell a resynchronised reader from
+nothing to consume. The decoder has to be the real one.
+
+**Corollary for diagnosis:** because the drop is sound, a transport-level codec
+error arriving after one is *not* caused by it. Look upstream at the byte stream,
+not at the adapter.
+
 ## How to change it, and the gotchas
 
 * **`Registries.TRIM_MATERIAL` and `TRIM_PATTERN` are dynamic registries.** Their
