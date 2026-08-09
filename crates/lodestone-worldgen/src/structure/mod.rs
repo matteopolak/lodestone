@@ -110,6 +110,7 @@
 pub mod beardifier;
 pub mod coded;
 pub mod jigsaw;
+pub mod mineshaft;
 pub mod placement;
 pub mod pool;
 pub mod processor;
@@ -121,6 +122,7 @@ use std::sync::Arc;
 use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
 use serde_json::Value;
 
+use crate::aquifer::BlockKind;
 use crate::density::Resolver;
 use jigsaw::{JigsawConfig, JigsawStub};
 use placement::{Placement, PlacementKind};
@@ -342,11 +344,42 @@ pub trait StartContext {
     /// a pyramid stays open here, the same class of deviation S2 took for template
     /// piece Y.
     ///
-    /// Defaulted to `false` ("solid everywhere") so no existing implementor had to
-    /// change; the effect of the default is that a stilt or a foundation column is
-    /// one block long, never that it runs away.
-    fn is_replaceable_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
-        false
+    /// Defaulted to agree with [`Self::block_kind_at`], so an implementor that
+    /// supplies the four-way kind gets this for free and the two can never
+    /// disagree. The effect of *both* defaults together is "solid everywhere": a
+    /// stilt or a foundation column is one block long, never runaway.
+    fn is_replaceable_at(&self, x: i32, y: i32, z: i32) -> bool {
+        self.block_kind_at(x, y, z) != BlockKind::Stone
+    }
+    /// The pre-surface **kind** of the block at `(x, y, z)` — the four-way answer
+    /// `AquiferSystem::block_at` already computes for the fill.
+    ///
+    /// A strict refinement of [`Self::is_replaceable_at`], which cannot separate air
+    /// from water from lava. Three transcriptions need the distinction and none of
+    /// them can be written without it:
+    ///
+    /// * `MineShaftPiece.isInInvalidLocation` walks the shell of a piece's box
+    ///   looking for `state.liquid()`, and a mineshaft that treated air as liquid
+    ///   would refuse every piece it generated;
+    /// * `MineShaftCorridor.fillPillarDownOrChainUp`'s downward probe treats a
+    ///   liquid column as empty but stops at lava (`!belowState.is(LAVA)`);
+    /// * `RuinedPortalPiece.canBlockBeReplacedByNetherrackOrMagma` tests for lava
+    ///   and obsidian.
+    ///
+    /// # What it deliberately cannot tell you
+    ///
+    /// This is the raw `_WG` shape, so **every solid block is one
+    /// [`BlockKind::Stone`]**. Surface rules (sand, grass, snow), ore blobs
+    /// (granite/diorite/andesite) and carvers all run *after* the eager start pass,
+    /// so a walk that terminates on "the first block that is not sand" would
+    /// terminate on its first iteration. That is not a hypothetical: it is why
+    /// `buried_treasure`'s chest is still ledgered rather than placed, and a caller
+    /// that needs a *material* rather than a shape has to say so instead of reaching
+    /// for this.
+    ///
+    /// Defaulted to [`BlockKind::Stone`] so no existing implementor had to change.
+    fn block_kind_at(&self, _x: i32, _y: i32, _z: i32) -> BlockKind {
+        BlockKind::Stone
     }
 }
 
@@ -769,6 +802,18 @@ pub enum StructureKind {
     /// a piston puzzle. Same `SinglePieceStructure` footprint refusal as
     /// [`Self::DesertPyramid`], with a 12x15 footprint instead of 21x21.
     JunglePyramid,
+    /// `minecraft:mineshaft` and `minecraft:mineshaft_mesa` — the first kind whose
+    /// pieces are generated **before** the biome filter, because its own generation
+    /// point is `moveBelowSeaLevel`'s answer and that is a function of the finished
+    /// tree. See [`mineshaft`].
+    Mineshaft {
+        /// `mineshaft_type`.
+        wood: mineshaft::Wood,
+        /// The resolved `#minecraft:mineshaft_blocking` biome set —
+        /// `isInInvalidLocation`'s first veto, and the reason a deep-dark mineshaft
+        /// is a start with no blocks rather than no start.
+        blocking: HashSet<String>,
+    },
     /// A structure `type` whose generator has not landed. Carries the type id so
     /// the ledger can name it.
     Unsupported(String),
@@ -788,13 +833,21 @@ enum Stub {
     Plain([i32; 3]),
     /// A jigsaw centre piece and its live RNG stream.
     Jigsaw(Box<JigsawStub<StructureRandom>>),
+    /// **The whole finished piece list**, plus the position it implies.
+    ///
+    /// Vanilla's `Either.right(builder)` arm: a mineshaft's stub *is* its builder,
+    /// so there is nothing left for `generate_pieces` to do but hand the list on.
+    /// The cost of the inversion is exactly vanilla's — a mineshaft candidate that
+    /// then fails its biome check has already spent its whole stream, and any other
+    /// order would be a different world.
+    Eager([i32; 3], Vec<StructurePiece>),
 }
 
 impl Stub {
     /// The point `Structure.isValidBiome` samples.
     fn position(&self) -> [i32; 3] {
         match self {
-            Self::Plain(position) => *position,
+            Self::Plain(position) | Self::Eager(position, _) => *position,
             Self::Jigsaw(stub) => stub.position,
         }
     }
@@ -818,6 +871,16 @@ impl StructureKind {
             "minecraft:swamp_hut" => Self::SwampHut,
             "minecraft:desert_pyramid" => Self::DesertPyramid,
             "minecraft:jungle_temple" => Self::JunglePyramid,
+            "minecraft:mineshaft" => Self::Mineshaft {
+                wood: match value["mineshaft_type"].as_str() {
+                    Some("mesa") => mineshaft::Wood::Mesa,
+                    _ => mineshaft::Wood::Normal,
+                },
+                blocking: resolve_biome_set(
+                    resolver,
+                    &Value::String("#minecraft:mineshaft_blocking".to_string()),
+                ),
+            },
             "minecraft:buried_treasure" => Self::BuriedTreasure,
             "minecraft:ocean_monument" => Self::OceanMonument {
                 surrounding: resolve_biome_set(
@@ -871,6 +934,7 @@ impl StructureKind {
             | Self::SwampHut
             | Self::DesertPyramid
             | Self::JunglePyramid
+            | Self::Mineshaft { .. }
             | Self::Unsupported(_) => Vec::new(),
         }
     }
@@ -905,6 +969,14 @@ impl StructureKind {
                 structure_random(seed, cx, cz),
             )
             .map(|stub| Stub::Jigsaw(Box::new(stub)));
+        }
+        if let Self::Mineshaft { wood, blocking } = self {
+            // The other kind whose generation point costs RNG, and the only one
+            // whose generation point costs *pieces*.
+            let mut random = structure_random(seed, cx, cz);
+            let (pieces, position) =
+                mineshaft::generate(cx, cz, ctx, *wood, blocking, &mut random);
+            return Some(Stub::Eager(position, pieces));
         }
         self.find_generation_point(cx, cz, ctx).map(Stub::Plain)
     }
@@ -980,7 +1052,7 @@ impl StructureKind {
                 Some([middle_x, y, middle_z])
             }
             // Handled by `find_stub` before this function is reached.
-            Self::Jigsaw(_) => None,
+            Self::Jigsaw(_) | Self::Mineshaft { .. } => None,
             Self::Unsupported(_) => {
                 // No generator, so no honest generation point — and therefore no
                 // honest biome-check Y either. Sea level is used deliberately
@@ -1038,6 +1110,12 @@ impl StructureKind {
                 return None;
             };
             return Some(jigsaw::finish(*stub, config, pools, ctx));
+        }
+        // The eager arm is checked on the *stub*, not on the kind, because the stub
+        // is what carries the answer — and matching on the kind first would leave a
+        // future eager kind silently returning `None`.
+        if let Stub::Eager(_, pieces) = stub {
+            return Some(pieces);
         }
         match self {
             Self::Shipwreck { beached } => {
@@ -1111,8 +1189,8 @@ impl StructureKind {
             // `OceanMonumentPieces` is ~1,400 lines of coded pieces, not
             // templates, so it is S5's and not S2's.
             Self::OceanMonument { .. } | Self::Unsupported(_) => None,
-            // Handled above, before the match, because it consumes `stub`.
-            Self::Jigsaw(_) => None,
+            // Handled above, before the match, because they consume `stub`.
+            Self::Jigsaw(_) | Self::Mineshaft { .. } => None,
         }
     }
 
@@ -1148,6 +1226,15 @@ impl StructureKind {
             Self::BuriedTreasure => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Invalid,
+            },
+            // A mineshaft's builder always holds at least its room, and vanilla
+            // wraps it in `Optional.of` unconditionally — there is no invalid
+            // mineshaft. An empty list here would mean the room itself failed to
+            // build, which cannot happen, so `Unknown` (ledgered) is the honest
+            // answer rather than `Invalid`.
+            Self::Mineshaft { .. } => match pieces {
+                Some(p) if !p.is_empty() => Validity::Valid,
+                _ => Validity::Unknown,
             },
         }
     }
@@ -1901,13 +1988,13 @@ impl StructureRegistry {
                  (shipwreck, igloo, ocean ruin) whose markers **do** get rolled"
                     .into(),
             );
-            unsupported.insert(
-                "template:mirrored_shape".into(),
-                "a **rail** `shape` property is not remapped under a mirror. A stair's \
-                 is, since S5's coded pieces gave SOUTH and WEST orientations a real \
-                 LEFT_RIGHT mirror; no structure placed today mirrors a rail"
-                    .into(),
-            );
+            // `template:mirrored_shape` is **gone**, and its absence is the record:
+            // it said a rail `shape` was not remapped under a mirror, which was true
+            // for as long as nothing placed a rail. A mineshaft corridor places one
+            // and its EAST/WEST orientations carry a real `CLOCKWISE_90` rotation, so
+            // `BlockState::{rotate, mirror}` grew `BaseRailBlock`'s two tables and the
+            // gap closed. Deleting a row whose gap has closed is the point of having
+            // rows; a stale one hides the real remainder.
             // S5's own gaps. Each is a *deviation* rather than an absence, which is
             // exactly the kind of thing that disappears from the record if it is not
             // written down in the same place as the absences.
@@ -1936,8 +2023,38 @@ impl StructureRegistry {
             );
             unsupported.insert(
                 "coded:worldgen_entities".into(),
-                "`swamp_hut`'s witch and cat are not spawned, and nothing in worldgen \
-                 can spawn an entity yet (#221/#222)"
+                "`swamp_hut`'s witch and cat are not spawned, a mineshaft corridor's \
+                 chest **minecart** is not spawned (its rail is placed and its loot \
+                 table plus vanilla's `nextLong()` roll seed travel on \
+                 `StructurePiece::loot`, so only the entity is missing), and a spider \
+                 corridor's `spawner` block is placed with no `SpawnData` — nothing in \
+                 worldgen can spawn an entity or build a spawner's payload yet \
+                 (#221/#222)"
+                    .into(),
+            );
+            unsupported.insert(
+                "mineshaft:post_process_scope".into(),
+                "vanilla runs a mineshaft piece's `postProcess` once **per decorating \
+                 chunk** and clips every read and write to that chunk, so \
+                 `isInInvalidLocation`'s liquid survey, `hasSturdyNeighbours` and every \
+                 `getBlock` see only part of the piece and a corridor spanning two \
+                 chunks draws its cobwebs twice from two unrelated streams. Resolved \
+                 eagerly here, once, over the whole box — a deviation with no single \
+                 vanilla answer to reproduce, the same class as \
+                 `coded:average_ground_height`"
+                    .into(),
+            );
+            unsupported.insert(
+                "mineshaft:pre_surface_world_reads".into(),
+                "six mineshaft helpers branch on what the world already holds \
+                 (`canBeReplaced`, `isSupportingBox`, `placeSupportPillar`, \
+                 `setPlanksBlock`, `placeDoubleLowerOrUpperSupport`, \
+                 `fillPillarDownOrChainUp`). They read the eager overlay plus \
+                 `StartContext::block_kind_at`, which is the raw `_WG` shape: **every \
+                 solid block is one `Stone`**, so a surface rule's sand or an ore blob's \
+                 granite is invisible and a carver's cave is not. `isFaceSturdy` is a \
+                 table over the eight states a mineshaft writes rather than a solidity \
+                 model"
                     .into(),
             );
             // S6's corrected form of the S5 row. The chest **blocks** are placed now

@@ -225,6 +225,14 @@ impl StartContext for StartSampler<'_> {
         let aquifer = self.aquifer(x >> 4, z >> 4);
         !matches!(aquifer.block_at(x, y, z), BlockKind::Stone)
     }
+
+    /// The four-way fill kind itself, for the predicates that must separate water
+    /// from lava from air. Same cached aquifer, so a mineshaft's liquid survey adds
+    /// [`AquiferSystem::block_at`] calls but no aquifer builds beyond the chunks it
+    /// already spans.
+    fn block_kind_at(&self, x: i32, y: i32, z: i32) -> BlockKind {
+        self.aquifer(x >> 4, z >> 4).block_at(x, y, z)
+    }
 }
 
 impl OverworldGenerator {
@@ -329,6 +337,25 @@ impl OverworldGenerator {
     ) -> Vec<Arc<StructureStart>> {
         let _view = self.store.open_view((cx, cz), 0);
         self.structure_starts_stage(cx, cz).to_vec()
+    }
+
+    /// Every start whose pieces this chunk's placement stage will write, in the
+    /// order it writes them — the input `structure_place_stage` itself reads.
+    ///
+    /// Exists so a gate can predict what a chunk must contain **without
+    /// re-deriving the 17×17 reach or the `is_close_to_chunk` filter**. A mineshaft
+    /// is 160 blocks wide and the oracle world has two starts three chunks apart, so
+    /// "the pieces of the start at this chunk" is not the set that lands here, and a
+    /// test that assumed it was measured 59 blocks against a true 97.
+    #[must_use]
+    pub fn structure_starts_placed_in(&self, cx: i32, cz: i32) -> Vec<Arc<StructureStart>> {
+        let _view = self.store.open_view((cx, cz), REFS_RADIUS);
+        self.structure_refs_stage(cx, cz)
+            .entries
+            .iter()
+            .filter(|(_, _, start)| start.pieces_complete)
+            .map(|(_, _, start)| Arc::clone(start))
+            .collect()
     }
 
     /// This chunk's `structures.References`, ready for the NBT writer: structure

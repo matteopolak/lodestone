@@ -102,7 +102,11 @@ impl Facing {
 
     /// True when this direction's axis is Z, i.e. `makeBoundingBox` keeps
     /// `(width, depth)` in `(x, z)` rather than swapping them.
-    fn is_z_axis(self) -> bool {
+    ///
+    /// Also `getOrientation().getAxis() == Axis.Z`, which is how a mineshaft
+    /// corridor counts its 5-block sections along the right axis.
+    #[must_use]
+    pub fn is_z_axis(self) -> bool {
         matches!(self, Self::North | Self::South)
     }
 

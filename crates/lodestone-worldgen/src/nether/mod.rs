@@ -721,6 +721,13 @@ impl StartContext for NetherStartSampler<'_> {
         let aquifer = self.aquifer(x >> 4, z >> 4);
         !matches!(aquifer.block_at(x, y, z), BlockKind::Stone)
     }
+
+    /// The four-way fill kind. Here the *default fluid is lava*, so a predicate that
+    /// treats "fluid" as water is wrong in this dimension and the distinction is not
+    /// academic — it is `ruined_portal_nether`'s whole obsidian/lava test.
+    fn block_kind_at(&self, x: i32, y: i32, z: i32) -> BlockKind {
+        self.aquifer(x >> 4, z >> 4).block_at(x, y, z)
+    }
 }
 
 /// The Nether's structure stages — the composition that closes the
