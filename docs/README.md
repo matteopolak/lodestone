@@ -1725,6 +1725,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   settings, 92 worldgen tags, and 1212 NBT structure templates. This is phase
   **S-data** of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md) (issue
   #484) and it is data only — no placement, no jigsaw, no beardifier.
+- [Mineshafts, and eager piece generation](./worldgen-structure-mineshaft.md) — The
+  port of `MineshaftStructure` and all four `MineshaftPieces` types —
+  `crates/lodestone-worldgen/src/structure/mineshaft.rs` — and with it the structure
+  engine's second piece-building mode: **eager** generation, where a structure's whole
+  piece tree is built *before* its generation point is known. Two structures ride on
+  it, `minecraft:mineshaft` and `minecraft:mineshaft_mesa`, which differ only in three
+  block states.
 - [Structure placement and starts (worldgen phase S1)](./worldgen-structure-placement.md) —
   The engine that decides **which chunk gets which structure** for a seed: the two
   `StructurePlacement` types, the four `frequency_reduction_method`s, per-set weighted
