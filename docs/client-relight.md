@@ -171,6 +171,16 @@ reported symptom.
 - **Another writer needs `World::queue_relight`.** Not every client write goes through
   `World::set_block`; a path that mutates a `ChunkColumn` directly must queue the
   position itself, or the block it changed keeps the light of whatever used to be there.
+- **`Relit::dirty_sections` is `(chunk_x, chunk_z, section_y)`, not `(x, y, z)`.** Three
+  same-typed `i32` section indices, so writing them in spatial order transposes two with
+  no type error and no failing round trip. It shipped once and the shell gate caught it:
+  the driver resolved `(0, -3, 0)` as chunk `(0, -3)`, which was not loaded, so it queued
+  a GPU *removal* instead of a mesh — light correctly fixed, zero pixels changed. Every
+  gate in the engine's own suite broke a block in chunk `(0, 0)`, where
+  `chunk_x == chunk_z`, so none of them could see it; that is why
+  `the_relight_reports_the_sections_whose_mesh_went_stale` now breaks at chunk `(1, -1)`
+  section `-3` and asserts the three components are pairwise distinct *before* asserting
+  membership.
 
 ## Configuration
 

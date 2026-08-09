@@ -8709,3 +8709,65 @@ key set): ~11 MB resident, no per-glyph allocation, nothing compiled in. Measure
 (+0.20%)**, no new dependency and no new feature. Also worth recording because it was stated wrongly in a
 brief: the wasm bundle is at **5,013,669 B gzip at HEAD, 3.13× the 1,600,000 B ceiling** — not 2.35×, and
 `scripts/wasm-size.sh`'s own recorded baseline of 882,220 B is itself now stale by ~5.7×.
+
+**12.170 A real server never sends the breaker a light update, and a whole fixture corpus shared one
+coincidence that hid the wiring bug.**
+
+Reported symptom: *"the lighting when i break a block is extremely dark, but only on non-integrated servers"*.
+Two candidate causes with the same appearance — no client relight at all, or a mask misreading in the
+`light_update` decode. **Only the first was real, and the decode was already right.**
+
+The decisive fact is one boolean in the decompile. `ChunkHolder.broadcastChanges` sends
+`ClientboundBlockUpdatePacket` to `playerProvider.getPlayers(pos, false)` — everyone tracking the chunk — and
+sends `ClientboundLightUpdatePacket` to `getPlayers(pos, true)`, whose `borderOnly` arm is
+`ChunkMap.isChunkOnTrackedBorder`: only players for whom that chunk sits on the **outer ring** of their loaded
+area. A player standing in a chunk is never on that chunk's own border, so **the breaker receives the block
+change and no light with it, ever**. Vanilla is fine because `LevelChunk.setBlockState` calls
+`getLightEngine().checkBlock(pos)` and `LevelChunk` is shared between both sides, with `ClientLevel.tick`
+draining it via `pollLightUpdates`/`runLightUpdates`. Server light packets are a correction, not the mechanism
+— and our integrated server, which does relight and push a `light_update` about a tick later, was masking the
+gap in singleplayer. The reason it looked like a *rendering* bug: the mesher lights a face from the cell it
+opens into (`ModelBlockRenderer`) and an opaque cell stores light **0**, so the instant a solid becomes air
+every newly exposed face renders at the shader's dark floor.
+
+The second candidate was checked and cleared rather than assumed: `light_layer_from_masks` implements the three
+states correctly (full-mask ⇒ replace, empty-mask ⇒ explicit `Uniform(0)`, named by neither ⇒ absent so
+`merge_light` leaves it alone), and the v770 arm reads the four bitsets in
+`ClientboundLightUpdatePacketData.write`'s order before reordering into the constructor's *different* argument
+order. Worth recording that both candidates were live: one file was right and one subsystem was missing.
+
+**A bounded box with a fixed shell is exact, and the bound is derived.** Light decays at least one level per
+cell crossed, so a change cannot alter a cell 15 away (it would receive `15 - 15 = 0`), and every path from a
+source outside the box crosses the shell — whose stored value already sums up everything beyond it. So the
+shell at radius 15 keeps its stored light as an immovable source and only the interior is recomputed, from
+zero. Sky light needs one exception because it is not radius-bounded in `y`: uncapping a shaft promotes every
+cell down to its floor to a 15 source, so the box also spans the transparent run below the change. Openness is
+read off the box's own top shell, because **sky light 15 is exactly the is-a-sky-source predicate** —
+propagation costs `max(1, dampening)`, so a cell that merely received light tops out at 14.
+
+Cost, as counters and not durations: one break is **49,972 cells recomputed, 1 changed, 1 section dirtied**;
+widening a skylight is **51,894 / 162 / 4**. Against `compute_column_light`'s 106,496 cells for a whole column
+and `compute_column_light_with_neighbours`' 958,464, that is about half a single-column recompute and a
+twentieth of the neighbour-aware one — and exact across chunk borders, which the isolated single-column form is
+not.
+
+**The finding that generalises. The shell island gate failed on its first run, and the cause was a
+transposition inside a fixture-wide coincidence.** `Relit::dirty_sections` is three same-typed `i32` section
+indices; the producer emitted them in spatial `(x, y, z)` order and the consumer reads
+`(chunk_x, chunk_z, section_y)`. No type error, no failing round trip — and **all twelve gates in the engine's
+own suite break a block in chunk `(0, 0)`, where `chunk_x == chunk_z`**, so the swap was invisible to every one
+of them. The driver resolved `(0, -3, 0)` as chunk `(0, -3)`, which is not loaded, and therefore queued a GPU
+*removal* instead of a mesh: light correctly fixed, **zero pixels changed**. This is §12.160's shared-fixture
+coincidence and CLAUDE.md's pairwise-distinct-field-values rule arriving together, and the only thing that
+caught it was a gate in the *consuming* crate — the engine's suite is a closed loop with respect to who calls
+it. The repaired gate breaks at chunk `(1, -1)` section `-3` so all three components differ, and asserts that
+premise before asserting membership.
+
+Evidence chain, since no vanilla light exists for a post-break world: the incremental relight is judged against
+`compute_column_light_with_neighbours` (an independent construction of the same physical rule — bounded box
+with a fixed shell versus a 48×48 flood from zero, sharing only the injected `LightProperties`), and that arm
+is judged against real 26.2 server light by `vanilla_light_oracle.rs`. The discriminating scene is a break
+**under a solid roof lit only from the side**, because an open-sky break reads 15 under both hypotheses; the
+fixture asserts that premise. Two negative controls, because the first was thin: skipping the relight after a
+single break disagrees in exactly **1 cell of 18,944**, so a second control skips it after the volume change
+and requires **more than 100** sky disagreements.
