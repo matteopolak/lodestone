@@ -75,6 +75,21 @@ All four *checks* are required, and each catches a class the others structurally
   on by default nothing else proves the shell compiles with **no** version family — the entire point of
   the version seam, and the only thing stopping a hardcoded `v770` dependency creeping into shell code.
   Its failure mode is architectural rather than a broken test, so nothing else will catch it.
+- **There is a fifth class, and none of the four sees it: `just wasm-check`.** It lives in CI rather than in
+  `just health` (a full workspace build is too slow to fold into the command everyone runs), so **all four
+  above can be green while `wasm32-unknown-unknown` is broken** — measured: a shutdown-signal fix gated a
+  portable type behind `cfg(not(target_arch = "wasm32"))` while four use sites stayed unconditional, so
+  `lodestone-server` compiled natively and not for wasm, and `main` shipped red for a whole agent's session.
+  Run it after any `cfg` change, any dependency edit, and any module move.
+
+  **And a green wasm compile carries almost no information about whether the browser runs.** The hazard table
+  in `scripts/wasm-check.sh`'s header is now *measured* — each call compiled to a `cdylib` and executed in a
+  wasm VM — and it corrects what this repo believed: **`std::fs::*` returns `Err(Unsupported)` and does NOT
+  trap**, while `Instant::now()`, **`SystemTime::now()`** and `thread::spawn` all trap outright. So the
+  filesystem family is *degradation*-class and the clocks are *crash*-class; treating them as one family is
+  what let `SystemTime::now()` — named in no hazard list in this repo until now — sit live in five production
+  sites, including the chat-caret blink, which runs every frame. **Reaching exit 0 for wasm32 is when you
+  start looking, not when you stop.** `docs/browser-shell-port.md` carries the census and the open work.
 
 Smaller facts, each of which has cost someone an hour:
 
