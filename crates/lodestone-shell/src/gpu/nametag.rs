@@ -788,6 +788,9 @@ mod tests {
             on_fire: false,
             // Not a player, so no skin can apply.
             player_skin: None,
+            // Not an experience orb: `None` keeps this subject out of the orb
+            // billboard pass entirely.
+            experience_orb_value: None,
         };
         // A raster is required to reach the distance check at all in
         // `prepare`, but `push_entity_quads` itself only needs one to lay
@@ -856,6 +859,9 @@ mod tests {
             on_fire: false,
             // Not a player, so no skin can apply.
             player_skin: None,
+            // Not an experience orb: `None` keeps this subject out of the orb
+            // billboard pass entirely.
+            experience_orb_value: None,
         };
         push_entity_quads(
             &raster,
@@ -946,6 +952,9 @@ mod tests {
             on_fire: false,
             // Not a player, so no skin can apply.
             player_skin: None,
+            // Not an experience orb: `None` keeps this subject out of the orb
+            // billboard pass entirely.
+            experience_orb_value: None,
         };
         push_entity_quads(
             &raster,

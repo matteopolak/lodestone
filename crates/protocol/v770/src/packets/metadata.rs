@@ -119,6 +119,29 @@ const IDX_POSE: u8 = 6;
 /// projectiles, but that one does self-identify by serializer and is handled
 /// before the index match.
 const IDX_LIVING_FLAGS: u8 = 8;
+/// `ExperienceOrb.DATA_VALUE`, `ExperienceOrb`'s only `defineId` and therefore
+/// index 8 — an `INT`, how much XP *one* absorption of this orb pays. The client
+/// needs it for nothing but the sprite: `ExperienceOrbRenderer.extractRenderState`
+/// reads `entity.getIcon()`, and `getIcon` is a **bucketed** lookup on this value
+/// (see `lodestone_render::entity::experience_orb_icon`).
+///
+/// # A third claimant on index 8, and the serializer cannot separate it either
+///
+/// Index 8 already carries two ambiguities this module resolves ([`IDX_LIVING_FLAGS`]'s
+/// `BYTE` pair, and the self-identifying `ITEM_STACK`). This is a *third*, and the
+/// jar dump (`tests/support/entity_data_index_jvm.txt`) lists five `INT` claimants
+/// at index 8: `ExperienceOrb.DATA_VALUE`, `PrimedTnt.DATA_FUSE_ID`,
+/// `FishingHook.DATA_HOOKED_ENTITY`, `VehicleEntity.DATA_ID_HURT` and
+/// `Display.DATA_TRANSFORMATION_INTERPOLATION_START_DELTA_TICKS_ID`. All five are
+/// `EntityDataSerializers.INT`, so — exactly as for the byte pair — the serializer
+/// tells you nothing and only the concrete entity type does. Hence the
+/// [`MetadataClass::ExperienceOrb`] guard: ungated, a primed TNT's fuse countdown
+/// would arrive as an orb value and pick an orb sprite for it.
+///
+/// `living` is **not** a usable guard here and neither is `mob`: an orb is neither,
+/// so both are `false` for it, and every other claimant is non-living too. The
+/// class is the only thing that separates them.
+const IDX_EXPERIENCE_ORB_VALUE: u8 = 8;
 const IDX_HEALTH: u8 = 9;
 /// `Mob.DATA_MOB_FLAGS_ID` (`Mob.java:100`), `Mob`'s **only** `defineId` and
 /// therefore index 15 — the byte carrying no-AI `0x01` / left-handed `0x02` /
@@ -230,6 +253,10 @@ pub enum MetadataClass {
     Sheep,
     Horse,
     Creeper,
+    /// Not a cosmetic variant either: `ExperienceOrb.DATA_VALUE` is an `INT` at
+    /// index 8, an index five unrelated `INT` fields also claim. See
+    /// [`IDX_EXPERIENCE_ORB_VALUE`].
+    ExperienceOrb,
 }
 
 /// Classifies a resolved entity-type identifier into the [`MetadataClass`] whose
@@ -240,6 +267,7 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         "minecraft:sheep" => Some(MetadataClass::Sheep),
         "minecraft:horse" => Some(MetadataClass::Horse),
         "minecraft:creeper" => Some(MetadataClass::Creeper),
+        "minecraft:experience_orb" => Some(MetadataClass::ExperienceOrb),
         _ => None,
     }
 }
@@ -597,6 +625,15 @@ pub fn read_entity_metadata(
             // `0x04` for "show arms". See `IDX_MOB_FLAGS`. Ungated, every armour
             // stand with arms would report itself aggressive.
             (IDX_MOB_FLAGS, Value::Byte(b)) if mob => md.mob_flags = Some(b as u8),
+            // Gated on the class for the reason [`IDX_EXPERIENCE_ORB_VALUE`] gives:
+            // four other entity types put an unrelated `INT` at this index, and a
+            // primed TNT's fuse countdown reaching an orb sprite is exactly the
+            // silent-wrong-value failure the byte pair above already documents.
+            (IDX_EXPERIENCE_ORB_VALUE, Value::Int(v))
+                if class == Some(MetadataClass::ExperienceOrb) =>
+            {
+                md.experience_orb_value = Some(v);
+            }
             (IDX_AIR_SUPPLY, Value::Int(v)) => md.air_supply = Some(v),
             (IDX_CUSTOM_NAME, Value::OptText(t)) => md.custom_name = Reported::Reported(t),
             (IDX_CUSTOM_NAME_VISIBLE, Value::Bool(b)) => md.custom_name_visible = Some(b),
@@ -774,6 +811,72 @@ mod tests {
             living: true,
             mob: true,
         }
+    }
+
+    /// An experience orb: neither living nor a mob, and carrying the class that
+    /// unlocks index 8's `INT`.
+    fn an_orb() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::ExperienceOrb),
+            living: false,
+            mob: false,
+        }
+    }
+
+    /// Index 8's `INT` is an orb's XP value **only** when the caller says the
+    /// entity is an orb; for anything else it is consumed for alignment and
+    /// deliberately not surfaced.
+    ///
+    /// The control is the second half, and its premise is checked by
+    /// `the_jar_dump_contains_the_collisions_the_guards_exist_for`: a primed TNT
+    /// puts `DATA_FUSE_ID` at this exact index with this exact serializer, so
+    /// without the class guard a lit TNT block would report itself as an orb worth
+    /// 80 XP and draw an orb sprite. `a_mob()` stands in for "any tracked entity
+    /// that is not an orb" — the guard is on the class, not on `living`, so a
+    /// living subject is the harder case, not an easier one.
+    #[test]
+    fn index_8_int_is_an_orb_value_only_for_an_orb() {
+        let payload = |value: i32| {
+            let mut bytes = Vec::new();
+            bytes.push(IDX_EXPERIENCE_ORB_VALUE);
+            bytes.extend(varint(SER_INT));
+            bytes.extend(varint(value));
+            bytes.push(EOF_MARKER);
+            bytes
+        };
+
+        // 617 rather than a small number: it is a real orb denomination and it
+        // buckets to a different sprite cell than 0, so a decode that silently
+        // produced the default would be visible downstream too.
+        let bytes = payload(617);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, an_orb())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.experience_orb_value, Some(617));
+        // And it did not also land in the two other fields index 8 can carry.
+        assert_eq!(md.living_flags, None);
+        assert!(!md.item.is_reported());
+
+        // The control. Same bytes, a subject that is not an orb: the VarInt is
+        // consumed (so the list stays aligned and the terminator is reached) and
+        // nothing is surfaced.
+        let mut reader = Reader::new(&bytes);
+        let control = read_entity_metadata(&mut reader, a_mob())
+            .expect("a non-orb must still decode, not error")
+            .metadata;
+        reader
+            .ensure_empty()
+            .expect("the INT must be consumed for alignment even when it is not surfaced");
+        assert_eq!(
+            control.experience_orb_value, None,
+            "a mob's index-8 INT was surfaced as an orb value"
+        );
+        assert!(
+            control.is_empty(),
+            "the control surfaced something: {control:?}"
+        );
     }
 
     /// Appends a network-NBT string component (`TAG_String` + modified-utf8) so
@@ -1637,6 +1740,12 @@ mod tests {
                 "Creeper.DATA_IS_IGNITED",
                 SER_BOOLEAN,
             ),
+            (
+                IDX_EXPERIENCE_ORB_VALUE,
+                "IDX_EXPERIENCE_ORB_VALUE",
+                "ExperienceOrb.DATA_VALUE",
+                SER_INT,
+            ),
         ];
         assert!(!claims.is_empty(), "the claim table is empty, so this test proves nothing");
         for &(constant, name, owner_field, serializer) in claims {
@@ -1672,6 +1781,24 @@ mod tests {
                 at_8.contains(&(owner.to_owned(), SER_BYTE)),
                 "index 8 does not claim {owner} as a BYTE in the dump; the `living` guard's \
                  premise is not what this test thinks it is"
+            );
+        }
+
+        // Index 8's *third* collision, and the premise of the `ExperienceOrb` class
+        // guard: `ExperienceOrb.DATA_VALUE` shares the index with four unrelated
+        // `INT`s, so neither the serializer nor the `living`/`mob` census can
+        // separate them. Named individually rather than counted, so a dump that
+        // dropped one of them fails here rather than weakening the guard silently.
+        for owner in [
+            "ExperienceOrb.DATA_VALUE",
+            "PrimedTnt.DATA_FUSE_ID",
+            "FishingHook.DATA_HOOKED_ENTITY",
+            "VehicleEntity.DATA_ID_HURT",
+        ] {
+            assert!(
+                at_8.contains(&(owner.to_owned(), SER_INT)),
+                "index 8 does not claim {owner} as an INT in the dump; the `ExperienceOrb` class \
+                 guard's premise is not what this test thinks it is"
             );
         }
 

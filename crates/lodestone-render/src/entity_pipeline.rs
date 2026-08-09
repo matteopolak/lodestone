@@ -1394,6 +1394,67 @@ impl EntityPipeline {
         )
     }
 
+    /// A render pipeline over this pipeline's own bind-group layouts, for the
+    /// experience-orb billboard.
+    ///
+    /// Reuses [`Self::camera_layout`]/[`Self::texture_layout`] like every sibling
+    /// here: the orb needs its own *texture* (the standalone 64×64
+    /// `entity/experience/experience_orb.png`, not a slice of any atlas), bound as a
+    /// fresh [`wgpu::BindGroup`] over this same layout — never a third bind-group
+    /// *slot*. The entity shader still spends exactly two, well under `CLAUDE.md`'s
+    /// portable 4-group floor.
+    ///
+    /// # State, and where each field comes from
+    ///
+    /// Vanilla's render type is `RenderTypes.entityTranslucentCullItemTarget`, i.e.
+    /// `RenderPipelines.ENTITY_TRANSLUCENT`:
+    /// `ColorTargetState(BlendFunction.TRANSLUCENT)`, `ALPHA_CUTOUT 0.1F`,
+    /// `PER_FACE_LIGHTING`, `withCull(false)`, and `ENTITY_SNIPPET`'s inherited
+    /// `DepthStencilState.DEFAULT`. Against the siblings:
+    ///
+    /// | | mob ([`Self::new`]) | banner layer ([`Self::banner_layer_pipeline`]) | orb (here) |
+    /// |---|---|---|---|
+    /// | `blend` | `None` (cutout) | `ALPHA_BLENDING` | `ALPHA_BLENDING` |
+    /// | `depth_write` | `true` | `false` | **`true`** |
+    /// | cutout | `0.5` (`fs_main`) | none | `0.1` (`fs_main_orb`) |
+    ///
+    /// **`depth_write: true` is the one that is easy to get wrong**, because the
+    /// nearest translucent sibling turns it off. A banner mask layer is coincident
+    /// geometry stacked over a flag that already wrote depth, so writing again would
+    /// z-fight; an orb is a free-standing entity, and with depth write off a pile of
+    /// orbs on the ground draws in submission order rather than depth order and the
+    /// far ones paint over the near ones. `ENTITY_TRANSLUCENT` overrides the blend
+    /// function and nothing about depth, so `DepthStencilState.DEFAULT`'s
+    /// `writeDepth = true` carries through — the same `LessEqual` translation of
+    /// `GREATER_THAN_OR_EQUAL` this file applies everywhere else, per `CLAUDE.md`'s
+    /// `[0,1]`-depth note.
+    ///
+    /// `vs_main` and [`EntityInstanceRaw`], not a narrower flame-style format: an orb
+    /// genuinely carries both a per-instance light (its own `+7`-boosted block
+    /// sample) and a per-instance tint (the pulsing green, which changes every tick
+    /// *and* differs between two orbs of different ages), so the wide instance row
+    /// is used rather than wasted.
+    #[must_use]
+    pub fn orb_pipeline(
+        &self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        build_entity_pipeline(
+            device,
+            color_format,
+            &self.camera_layout,
+            &self.texture_layout,
+            "lodestone-entity-orb",
+            wgpu::CompareFunction::LessEqual,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            true,
+            "vs_main",
+            "fs_main_orb",
+            EntityInstanceRaw::instance_layout(),
+        )
+    }
+
     /// A fifth render pipeline over this pipeline's own bind-group layouts,
     /// for a `decal: true` armour-trim pattern (issue #17's trims — see
     /// `docs/armour-rendering.md`'s "Trims" section for the full design).

@@ -139,6 +139,8 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        // Not an experience orb, so the orb billboard pass never claims it.
+        experience_orb_value: None,
     }
 }
 
@@ -476,6 +478,8 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        // Not an experience orb, so the orb billboard pass never claims it.
+        experience_orb_value: None,
     };
     // The same camera, turned to put the projectile squarely behind it.
     let away = Camera {

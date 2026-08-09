@@ -189,6 +189,8 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        // Not an experience orb, so the orb billboard pass never claims it.
+        experience_orb_value: None,
     };
     // The negative control: identical in every respect except equipment.
     let control = EntityDraw {

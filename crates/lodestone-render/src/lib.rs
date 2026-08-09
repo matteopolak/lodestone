@@ -160,10 +160,12 @@ pub use cull::{
 pub use device::{GpuContext, GpuError};
 pub use driver::{InstanceTable, WorldMesher};
 pub use entity::{
-    ENTITY_FULLBRIGHT, ArmourMesh, ArmourModelSet, EntityBatch, EntityCullStats, EntityFrame,
-    EntityInstance, EntityMesh, EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange,
-    SheepWoolModelSet, WoolMesh, armour_layer_tint, armour_layers, entity_model_matrix,
-    entity_texture_candidates, mob_draws_bow_when_aggressive, model_for_type, plan_entities,
+    ENTITY_FULLBRIGHT, EXPERIENCE_ORB_ICON_COUNT, EXPERIENCE_ORB_TEXTURE, ArmourMesh,
+    ArmourModelSet, EntityBatch, EntityCullStats, EntityFrame, EntityInstance, EntityMesh,
+    EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange, SheepWoolModelSet, WoolMesh,
+    armour_layer_tint, armour_layers, entity_model_matrix, entity_texture_candidates,
+    experience_orb_icon, experience_orb_light, experience_orb_matrix, experience_orb_mesh,
+    experience_orb_tint, mob_draws_bow_when_aggressive, model_for_type, plan_entities,
 };
 pub use entity_anim::{AnimFamily, AnimInput, ArmPose, Skeleton};
 pub use entity_pipeline::{

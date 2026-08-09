@@ -38,7 +38,7 @@ use crate::entities::EntityDraw;
 use super::block_entities::{BannerLayerDrawBatch, BlockEntityDrawBatch};
 use super::{
     ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, EntityDrawBatch, FlameBatch,
-    RenderState, RenderStats, WoolPartAccum, humanoid_armour_slot,
+    OrbBatch, RenderState, RenderStats, WoolPartAccum, humanoid_armour_slot,
 };
 
 /// One entity's own hitbox width in blocks — its type's base width times its age
@@ -793,6 +793,105 @@ impl RenderState {
             .collect()
     }
 
+    /// Resolve this frame's experience orbs into per-sprite-cell instance
+    /// buffers — `ExperienceOrbRenderer`, which is one camera-facing quad each.
+    ///
+    /// No pack, no sheet, nothing to draw, and no synthetic fallback — the same
+    /// asymmetry `EntityRenderer::flame_texture`/`wool_texture` document.
+    ///
+    /// # Batched by sprite cell, because the cell is geometry
+    ///
+    /// `ExperienceOrb.getIcon()` buckets an orb's value into one of eleven cells,
+    /// and the cell rides the quad's **UVs**, so two orbs in different buckets
+    /// cannot share an instanced draw. One batch per cell actually on screen; a
+    /// world full of 1-XP orbs is therefore still a single draw call.
+    ///
+    /// # Everything else is per instance
+    ///
+    /// The pulsing green (`experience_orb_tint`) is derived from each orb's **own**
+    /// age, so two orbs that spawned a tick apart are at different points of the
+    /// cycle — it cannot be hoisted to a per-frame uniform. The light is each orb's
+    /// own eye sample with vanilla's `+7` block-nibble boost
+    /// (`experience_orb_light`), which is what keeps an orb readable on a cave
+    /// floor.
+    ///
+    /// The billboard rotation *is* per frame: `camera_orientation` depends only on
+    /// the camera, so it is computed once here and shared, exactly as
+    /// `prepare_item_geometry` does for thrown projectiles.
+    pub(super) fn prepare_orbs(
+        &self,
+        device: &wgpu::Device,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Vec<OrbBatch> {
+        let (Some(_orb_texture), Some(_orb_model)) =
+            (&self.entities.orb_texture, &self.entities.orb_gpu_model)
+        else {
+            return Vec::new();
+        };
+        let orientation = lodestone_render::entity::camera_orientation(camera.view_matrix());
+        let frustum = camera.frustum();
+        // One accumulator per sprite cell, indexed by the cell itself — an orb's
+        // icon is a small dense integer, so this is a `Vec` rather than a map.
+        let mut accum: Vec<(Vec<glam::Mat4>, Vec<u32>, Vec<InstanceTint>)> =
+            (0..lodestone_render::EXPERIENCE_ORB_ICON_COUNT)
+                .map(|_| (Vec::new(), Vec::new(), Vec::new()))
+                .collect();
+
+        for draw in entities {
+            // `Some` for orbs and only orbs — see `EntityDraw::experience_orb_value`.
+            let Some(value) = draw.experience_orb_value else {
+                continue;
+            };
+            // The sprite is 0.3 blocks across and lifted 0.1, so a half-block box
+            // around the orb's feet covers it however the camera is turned. No
+            // `EntityModelSet::resolve` to take an AABB from: an orb has no rig,
+            // which is the whole reason this pass exists.
+            if !frustum.intersects_aabb(
+                draw.feet - glam::Vec3::splat(0.5),
+                draw.feet + glam::Vec3::splat(0.5),
+            ) {
+                continue;
+            }
+            let icon = lodestone_render::experience_orb_icon(value);
+            let Some((transforms, lights, tints)) = accum.get_mut(icon as usize) else {
+                continue;
+            };
+            transforms.push(lodestone_render::experience_orb_matrix(
+                draw.feet,
+                orientation,
+            ));
+            // `entity_light` is the shared eye-probe (and fire-force) every other
+            // entity layer here uses; the `+7` boost is applied on top of its
+            // result, which is exactly where vanilla's override sits — it wraps
+            // `super.getBlockLightLevel`, it does not replace the probe.
+            lights.push(u32::from(lodestone_render::experience_orb_light(
+                entity_light(&self.entity_light, draw),
+            )));
+            tints.push(InstanceTint::rgb(lodestone_render::experience_orb_tint(
+                draw.anim.age_ticks,
+            )));
+            stats.experience_orbs_drawn += 1;
+        }
+
+        accum
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (transforms, ..))| !transforms.is_empty())
+            .filter_map(|(icon, (transforms, lights, tints))| {
+                let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
+                upload_instances_tinted(device, &transforms, &lights, &tints).map(|buffer| {
+                    OrbBatch {
+                        icon: u32::try_from(icon).unwrap_or(0),
+                        buffer,
+                        count,
+                    }
+                })
+            })
+            .collect()
+    }
+
     /// Sheep wool layers (issue #53), over the same instances `prepare_entities`
     /// resolved — same resolver, same `AnimInput`, so wool can never be posed
     /// off a different pose than the body it grows out of. Mirrors
@@ -1214,6 +1313,8 @@ mod tests {
             creeper_swelling: 0.0,
             on_fire,
             player_skin: None,
+            // A flame subject, not an orb.
+            experience_orb_value: None,
         }
     }
 

@@ -190,6 +190,15 @@ pub struct RenderStats {
     /// why there is no synthetic-texture fallback here, mirroring
     /// `armour_layers_drawn`/`wool_layers_drawn`.
     pub flame_billboards_drawn: usize,
+    /// Experience-orb billboards drawn this frame — one per frustum-visible orb.
+    /// Zero with no vanilla pack (no orb sheet), and zero when no orb is on
+    /// screen; see `RenderState::prepare_orbs` for why there is no
+    /// synthetic-texture fallback, mirroring `flame_billboards_drawn`.
+    ///
+    /// Counts **orbs**, not draw calls: several orbs whose values bucket into the
+    /// same sprite cell share one instanced draw, so this is always ≥ the number
+    /// of orb draw calls.
+    pub experience_orbs_drawn: usize,
     /// Whether the first-person arm was drawn this frame. `false` means the
     /// `player_wide` mesh, its texture, or its arm part was missing — i.e. a
     /// real defect, not a quiet frame, because this pass is unconditional

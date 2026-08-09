@@ -225,6 +225,37 @@ fn fs_main_no_cutout(in: VsOut) -> @location(0) vec4<f32> {
     return shade_entity(in, tex_col);
 }
 
+// `EntityPipeline::orb_pipeline`'s fragment entry point — the experience-orb
+// billboard. Two differences from `fs_main`, both read off vanilla's own
+// `ExperienceOrbRenderer` rather than chosen:
+//
+//  * the cutout is `0.1`, not `0.5`. `RenderPipelines.ENTITY_TRANSLUCENT` (which
+//    `RenderTypes.entityTranslucentCullItemTarget` builds on) declares
+//    `ALPHA_CUTOUT 0.1F` — the same threshold `fs_main_flame` uses and for the
+//    same reason: the orb sprite's glow has a soft low-alpha fringe that a `0.5`
+//    cutout would clip into a hard-edged disc;
+//  * the output alpha is halved. Vanilla's four `vertex` calls are
+//    `setColor(rc, 255, bc, 128)` — a **vertex alpha of 128**, which multiplies
+//    the texel's. Without it the orb draws fully opaque through the alpha-blended
+//    pipeline, which is the plausible-looking wrong version: it draws, it is the
+//    right colour, and it is twice as solid as vanilla's.
+//
+// The `rgb` half is `shade_entity`'s unchanged: the pulsing green comes in as the
+// per-instance `InstanceTint`, multiplied into the gamma-encoded texel exactly
+// where a dyed-leather tint is.
+@fragment
+fn fs_main_orb(in: VsOut) -> @location(0) vec4<f32> {
+    let tex_col = textureSample(tex, smp, in.uv);
+    if (tex_col.a < 0.1) {
+        discard;
+    }
+    // `128.0 / 255.0`, vanilla's vertex alpha, written as the division so the
+    // provenance survives.
+    const ORB_VERTEX_ALPHA: f32 = 128.0 / 255.0;
+    let shaded = shade_entity(in, tex_col);
+    return vec4<f32>(shaded.rgb, shaded.a * ORB_VERTEX_ALPHA);
+}
+
 // Shared by both fragment entry points above; see `fs_main`'s own comments
 // (unchanged) for the derivation of every step here.
 fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {

@@ -217,19 +217,97 @@ its own, so it is absorbable on the tick it spawns. Draining every overlapping o
 once would bank the same total and look completely different: the client plays one pickup
 sound and one absorption animation per `TAKE_ITEM_ENTITY`.
 
-## What is not here, and what it needs
+## Drawing the orb
 
-**Client-side orb rendering.** The server spawns, ticks, merges and streams orbs with
-`ExperienceOrb.DATA_VALUE` at metadata index 8, which is everything a *vanilla* client
-needs. Our own client has no orb sprite: `lodestone_render::entity`'s own tests assert
-`model_for_type("experience_orb").is_none()` and
-`entity_texture_candidates("experience_orb").is_empty()`, so an orb entity arrives,
-interpolates and can be absorbed — the absorption being visible, since the bar moves —
-while drawing **zero pixels** on this client. That is the island shape CLAUDE.md's first
-rule names, disclosed rather than discovered later. What it needs is a billboarded quad
-pass with the `experience_orb.png` sprite sheet, frame selected by
-`ExperienceOrb.getIcon`'s bucketed lookup (**not** a linear map of value to frame) plus
-`ExperienceOrbRenderer`'s bob.
+`ExperienceOrbRenderer` is **one camera-facing quad and nothing else**, so the client
+side is a fifth billboard pass over the entity pipeline rather than a rig. Five hops,
+and the whole chain had to land at once because the first four are invisible without
+the fifth:
+
+| hop | where |
+|---|---|
+| decode index 8's `INT` | `lodestone_v770::packets::metadata`'s `IDX_EXPERIENCE_ORB_VALUE` |
+| carry it version-free | `EntityMetadataUpdate::experience_orb_value` |
+| fold it to a component | `lodestone_ecs::ingest::apply_entity_metadata` → `ExperienceOrbValue` |
+| bridge it to the draw | `lodestone_shell::entities::extract_entity_draws` → `EntityDraw::experience_orb_value` |
+| draw it | `RenderState::prepare_orbs` + `EntityPipeline::orb_pipeline` |
+
+### The orb has no rig, and that is not a gap
+
+`model_for_type("experience_orb")` and `entity_texture_candidates("experience_orb")`
+are **still** empty, and both assertions are load-bearing *after* the orb started
+drawing. The corpus holds cuboid part hierarchies; an orb is a sprite. Adding a corpus
+entry would hand the mob pass a rig for an entity that has none. The precedent is
+`ITEM_ENTITY_TYPE_PATH` — a dropped item is absent from the corpus for exactly the same
+reason — and `EXPERIENCE_ORB_TYPE_PATH` is its sibling.
+
+An earlier reading of this document treated those two assertions as a pinned absence to
+be inverted. They are not.
+
+### Index 8 has a *third* collision, and neither guard already there resolves it
+
+Index 8 already carried two ambiguities: `LivingEntity.DATA_LIVING_ENTITY_FLAGS` vs
+`AbstractArrow.ID_FLAGS` (both `BYTE`, resolved by the `living` census) and the
+self-identifying `ITEM_STACK`. `ExperienceOrb.DATA_VALUE` is a third, and the jar dump
+lists **five** `INT` claimants at index 8: the orb's value,
+`PrimedTnt.DATA_FUSE_ID`, `FishingHook.DATA_HOOKED_ENTITY`,
+`VehicleEntity.DATA_ID_HURT` and `Display.DATA_TRANSFORMATION_INTERPOLATION_START_DELTA_TICKS_ID`.
+`living`/`mob` cannot separate them — an orb is neither, and neither is a TNT block — so
+this one needs `MetadataClass::ExperienceOrb`. Ungated, a lit TNT would report itself as
+an orb worth 80 and draw an orb sprite.
+
+### The sprite cell is a bucketed ladder, and one input cannot observe that
+
+`ExperienceOrb.getIcon()` compares the value against `2477, 1237, 617, 307, 149, 73, 37,
+17, 7, 3` top-down — the **same ladder** `award` splits a payout over. So the cell is
+constant across a bucket: 7, 8 and 16 all draw cell 2 and 17 is the first value that
+draws cell 3. A gate that checks one value, or two values inside one bucket, cannot
+distinguish this from a linear `value / 250`; `orb_icon_is_bucketed_and_constant_inside_a_bucket`
+evaluates the linear hypothesis at every input and **fails if the two ever agree**,
+exempting only the ladder's two endpoints, where no monotone map can differ.
+
+The cell rides the quad's **UVs** (`(icon % 4, icon / 4)` × 16 px of a 64 px sheet), so
+it is geometry rather than an instance attribute. `EntityRenderer::orb_gpu_model` is
+therefore one mesh with eleven `PartRange`s — part index *is* icon index — and
+`prepare_orbs` batches by cell: a field full of 1-XP orbs is a single draw call.
+
+### Three numbers that are easy to get subtly wrong
+
+- **The quad is not centred on its origin.** Vanilla's corners are `y ∈ [-0.25, 0.75]`,
+  so after `scale(0.3)` and `translate(0, 0.1, 0)` the sprite spans `y ∈ [0.025, 0.325]`
+  above the orb's feet. Centring it sinks half of every orb into the floor.
+- **The `+7` light boost is on the block nibble only.**
+  `getBlockLightLevel` is `clamp(super + 7, 0, 15)`. Boosting the packed byte agrees on
+  any orb whose block level is under 9, so the discriminating input is a saturating one:
+  `0x4A` must become `0x4F`, not `0x51`.
+- **Red and blue modulate by different amounts.** `r = (sin(t)+1)*0.5*255`,
+  `g = 255` always, `b = (sin(t + 4π/3)+1)*0.1*255`, with `t = age/2`. Equal amplitudes
+  give a full hue wheel; vanilla's asymmetry is what makes it cycle green→yellow→green.
+  Multiplied in **gamma** space, as every tint in this engine is.
+
+### The pipeline is translucent *and* depth-writing
+
+`RenderTypes.entityTranslucentCullItemTarget` → `RenderPipelines.ENTITY_TRANSLUCENT`:
+`BlendFunction.TRANSLUCENT`, `ALPHA_CUTOUT 0.1F`, `withCull(false)`, and
+`ENTITY_SNIPPET`'s inherited `DepthStencilState.DEFAULT` — so depth write stays **on**.
+The nearest translucent sibling (`banner_layer_pipeline`) turns it off, and copying that
+is the trap: a banner mask is coincident geometry over a flag that already wrote depth,
+while an orb is free-standing, and with depth write off a pile of orbs draws in
+submission order rather than depth order.
+
+`fs_main_orb` also halves the output alpha, because vanilla's four `vertex` calls pass
+`setColor(rc, 255, bc, **128**)`. Without it the orb draws through the blended pipeline
+fully opaque — the plausible-looking wrong version: right colour, right cell, twice as
+solid.
+
+The draw sits after every opaque and cutout entity layer and still **before translucent
+water**, for the reason the mobs and block entities do. The dropped-item and
+moving-block draws below it are opaque, so an orb in front of an item occludes it
+correctly while blending against what was behind the *item*; that is a bounded ordering
+artifact of any blended draw that also writes depth (vanilla's own translucent entity
+phase has it), and moving the orbs later would put them over the water instead.
+
+## What is not here, and what it needs
 
 **Furnace XP still bypasses the orbs.** `experience_for_recipes` awards points directly
 on container close where vanilla's `awardUsedRecipesAndPopExperience` pops orbs at the

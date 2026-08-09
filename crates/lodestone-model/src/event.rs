@@ -423,6 +423,29 @@ pub struct EntityMetadataUpdate {
     /// [`creeper_swell_dir`](Self::creeper_swell_dir) alone being positive,
     /// which also happens from proximity (`SwellGoal`) without ever igniting.
     pub creeper_ignited: Option<bool>,
+    /// An experience orb's XP value (`ExperienceOrb.DATA_VALUE`), when present
+    /// and the entity is known to be an orb.
+    ///
+    /// This is what **one** absorption of the orb pays, not how many absorptions
+    /// the entity holds after merging — vanilla keeps those as two separate
+    /// numbers and only the first is synced. The client needs it for exactly one
+    /// thing: `ExperienceOrb.getIcon()` picks one of eleven sprite cells from it,
+    /// by a **bucketed** comparison ladder rather than a linear map, so two orbs
+    /// worth 7 and 16 draw the same cell and one worth 17 draws the next.
+    ///
+    /// # Why this can be absent on a packet that carried the value
+    ///
+    /// Same shape as [`living_flags`](Self::living_flags)/[`mob_flags`](Self::mob_flags),
+    /// one index over: the value is an `INT` at an index four *other* entity types
+    /// also put an unrelated `INT` at (a primed TNT's fuse, a fishing hook's
+    /// target, a vehicle's hurt timer, a display entity's interpolation delay), so
+    /// a version adapter that cannot establish the entity is an orb leaves this
+    /// `None` rather than surfacing a number that means something else.
+    ///
+    /// `None` therefore means "not known to be an orb value", which a consumer
+    /// reads as vanilla's own accessor default of `0` — `getIcon(0)` is cell 0 —
+    /// never as a cleared value.
+    pub experience_orb_value: Option<i32>,
 }
 
 impl EntityMetadataUpdate {
@@ -443,6 +466,7 @@ impl EntityMetadataUpdate {
             && self.creeper_swell_dir.is_none()
             && self.creeper_powered.is_none()
             && self.creeper_ignited.is_none()
+            && self.experience_orb_value.is_none()
     }
 }
 

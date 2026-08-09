@@ -351,6 +351,12 @@ impl RenderState {
         // the same reason armour/wool are: no buffer creation mid-pass.
         let flame_batches = self.prepare_flame(device, camera, entities, &mut stats);
 
+        // Experience-orb billboards, over the same `entities` slice and for the
+        // same reason as everything above: no buffer creation mid-pass. An orb has
+        // no cuboid rig, so `prepare_entities` above skips it entirely — this is
+        // the only thing that puts an orb on screen.
+        let orb_batches = self.prepare_orbs(device, camera, entities, &mut stats);
+
         // Block entities (chests, issue #23). Not derived from `entities` — a
         // chest is a *block*, gathered from the world's block-entity records by
         // the installed source — but uploaded here for the same reason as
@@ -854,6 +860,53 @@ impl RenderState {
             // text's own polygon-offset bias to win against. See
             // `gpu/sign_text.rs`'s module doc for the depth pipeline.
             self.sign_text.draw(&mut pass, sign_text_count);
+
+            // Experience-orb billboards. After every opaque and cutout entity
+            // layer above, and still **before translucent water** for the reason
+            // the mobs and block entities are: an orb writes depth, so drawing it
+            // after the water surface would paint a submerged orb over it.
+            //
+            // Its own pipeline (alpha-blended, `0.1` cutout — vanilla's
+            // `ENTITY_TRANSLUCENT`) over the base entity pass's **existing** two
+            // bind-group layouts and its camera bind group; an orb needs no camera
+            // data the mob pass does not already have. Not a fifth bind group —
+            // see `EntityPipeline::orb_pipeline`.
+            //
+            // One vertex/index binding for all eleven sprite cells and one
+            // instanced draw per cell on screen: `batch.icon` is the part index of
+            // the shared orb mesh, so the cell selection is a range within the
+            // buffer rather than a rebind.
+            //
+            // The dropped-item and moving-block draws below are opaque and
+            // depth-writing, so an orb in front of an item occludes it correctly
+            // while blending against whatever was behind the *item* rather than the
+            // item itself. That is a bounded ordering artifact of any
+            // alpha-blended draw that also writes depth (vanilla's own translucent
+            // entity phase has it too), not a reason to move this after them —
+            // moving it there would put orbs over the water instead, which is the
+            // more visible half.
+            if !orb_batches.is_empty()
+                && let (Some(texture), Some(model)) =
+                    (&self.entities.orb_texture, &self.entities.orb_gpu_model)
+            {
+                pass.set_pipeline(&self.entities.orb_pipeline);
+                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                pass.set_bind_group(1, texture, &[]);
+                pass.set_vertex_buffer(0, model.vertices.slice(..));
+                pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for batch in &orb_batches {
+                    let Some(range) = model.parts.get(batch.icon as usize) else {
+                        continue;
+                    };
+                    if range.index_count == 0 {
+                        continue;
+                    }
+                    pass.set_vertex_buffer(1, batch.buffer.slice(..));
+                    let end = range.index_start + range.index_count;
+                    pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
+                    stats.draw_calls += 1;
+                }
+            }
 
             if let Some(model) = &self.model {
                 // Dropped items, through the *model* pipeline rather than the

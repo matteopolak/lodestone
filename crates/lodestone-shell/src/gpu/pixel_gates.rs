@@ -667,6 +667,9 @@ fn entity_renders_to_pixels_through_shell_path() {
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        // Not an experience orb: `None` keeps this subject out of the orb
+        // billboard pass entirely.
+        experience_orb_value: None,
         },
         // A second pig behind the camera so frustum culling has something
         // real to remove — the anti-vacuity guard on the cull path.
@@ -697,6 +700,9 @@ fn entity_renders_to_pixels_through_shell_path() {
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        // Not an experience orb: `None` keeps this subject out of the orb
+        // billboard pass entirely.
+        experience_orb_value: None,
         },
     ];
 
@@ -880,6 +886,9 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        // Not an experience orb: `None` keeps this subject out of the orb
+        // billboard pass entirely.
+        experience_orb_value: None,
     }];
 
     // Fraction of a mob's bright pixels whose *hue direction* is far from the
