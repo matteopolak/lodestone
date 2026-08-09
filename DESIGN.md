@@ -8301,3 +8301,101 @@ committed sha with its **own** `CARGO_TARGET_DIR`, with the three changed files 
 in and md5-checked both ways, ran the full suite in under two minutes. The alternative —
 reading `cargo test`'s "could not compile" as a red tree — is the two-observations-at-two-
 moments failure §12 already names, and here the two observations were in two *crates*.
+
+**12.164 Projectiles and combat: an attribute system that already existed, three more round-number
+predictions, and a species with silent armour.** Wave 2-B, three issues (#260, #261, #227). The unit
+was described as "skeletons shoot arrows that never hurt anything", and that was exactly right — the
+projectile module's own doc said impact resolution was "the caller's job" and no caller did it. Six
+beliefs that were confidently held and turned out to be false, plus one gate class that earned its keep.
+
+**The brief asked whether to build an attribute system. One already existed and was complete.**
+`lodestone_entity::attribute` had `AttributeMap`, `Modifier`, `Operation`, the vanilla
+`AddValue → AddMultipliedBase → AddMultipliedTotal` fold and the per-attribute clamp — and vanilla's
+equipment stats *are* nothing but attribute modifiers (`ArmorMaterial.createAttributes`,
+`ToolMaterial.createSwordAttributes`). So the whole of #261's "equipment feed" is a table of jar rows
+plus a fold into a system that was already there, and building a second arithmetic would have been the
+expensive mistake. The rule that generalises: **when a brief asks "should I build X for this", grep for
+X first — a subsystem with no consumers looks identical to one that does not exist.** Using vanilla's
+*real* modifier ids (`minecraft:armor.helmet`, `minecraft:base_attack_damage`) then bought two
+behaviours for free, because `add_or_update` is keyed by id: two helmets cannot stack, and a sword
+replacing an axe overwrites rather than accumulates.
+
+**The brief also asserted "per-mob-seeded inaccuracy" already existed. It does not, and never did.**
+`ProjectileLaunch::aimed`'s own doc comment says so in as many words: vanilla's
+`random.triangle(0.0, 0.0172275 * uncertainty)` per axis is *not modelled* and every launch flies dead
+straight. The claim was plausible because the launch path is otherwise jar-exact. Same shape as §12's
+staleness rule, one layer up: **a brief's description of existing behaviour is a claim like any other.**
+
+**Three predictions were the round number, again, in three different ways.** §12.160 already records
+four of these from the previous unit and CLAUDE.md now carries the rule; it did not stop three more.
+
+* A test claimed a quarter-block sampled walk would first land inside a box spanning `1.7..=2.3` at
+  `x = 2.25`. It lands at **1.75**. The derived sampling error is `0.0167` of the segment, not the
+  `0.19` the assertion demanded — so the "sampled walk is materially worse" claim was false at that
+  input and the test failed on its own control.
+* A second attempt picked `1.85..=2.15` as a box "no sample can reach". `2.0` is a multiple of `0.25`
+  and sits inside it. The fix was to stop predicting and **derive the box from the sample grid inside
+  the test**, so the claim "no sample lands inside" is measured rather than asserted in a doc comment.
+* A thrown potion's vertical launch component was predicted as `sin(20°) × power`. It is
+  `sin(20°) / sqrt(1 + sin²(20°)) × power` — `0.16181`, not `0.17101`, because
+  `getMovementToShoot` **normalises before scaling** and the pre-normalise triple `(0, sin 20°, 1)` is
+  1.0569 long. 5% off, in the direction that looks like a rounding tolerance.
+
+The through-line in all three: the arithmetic was *one step short*, and the missing step was always the
+one that felt like it could not matter. **Re-derive in a separate expression, and prefer a value the
+test computes from outside constants over one written into the assertion.**
+
+**A zombie has two points of armour, and reading raw damage off its health delta looks like a broken
+formula.** Four assertions failed measuring `5.904` where the jar says an arrow at 3.0 blocks/tick
+deals `6`. `Zombie.createAttributes` adds `Attributes.ARMOR, 2.0`, and
+`CombatRules.getDamageAfterAbsorb`'s `max(total_armor * 0.2)` floor turns a clamp that would otherwise
+land on `-1` into `0.4`, giving `6 × 0.984`. Nothing about `5.904` reads as "armour" — it reads as a
+rounding bug in the damage arithmetic. The species with the *silent* stat is the trap: a cow has no
+armour and measures `6.0` exactly. **Before reading a raw quantity off a health delta, ask what the
+subject's own species table already contributes** — and the repair was worth more than the fix, because
+it became the gate that proves the species armour feed is live (`5.904` against a cow's `6.0`, with the
+floor as the discriminator: without it both would be `6.0`).
+
+**A `?` on a string split reported that a trident publishes no attack damage.** `weapon_attack_damage`
+opened with `let (material, kind) = path.rsplit_once('_')?;` and fell through to the flat-literal branch
+for `trident`/`mace` *after* it. Neither id contains an underscore, so both returned `None` before
+reaching the branch that knew about them. A single `?` on a happy-path line, and the failure mode is a
+weapon silently dealing bare-hand damage. **An early-return guard placed above a special case disables
+it invisibly**; the fix was to check the special case first, which reads worse and is right.
+
+**An addendum's factual claim about bundled assets was wrong in the confident direction.** It stated
+that twelve previously-missing chest loot tables "are now bundled". `ls assets/loot_table/chests/` shows
+seventeen entries, and a whole-corpus scan reported **eleven** tables named by templates and not
+bundled: `chests/ancient_city`, the four `chests/bastion_*`, `chests/pillager_outpost`, four
+`chests/trial_chambers/*` and `dispensers/trial_chambers/chamber`. The sixteen `chests/village/*` and
+`chests/ruined_portal` **are** bundled, so the blocked set is narrower than "everything that was empty".
+Recorded as a `known_blocked` list in a gate rather than in prose, because an unbundled table yields an
+*empty* container — indistinguishable from an unwired one from inside the game, so the split rots
+silently unless something asserts it.
+
+**And the structural gates earned their keep, twice in one edit.** Adding `witch` and `pillager` to
+`roster::ranged::SPECIES` failed two coverage gates immediately —
+`attribute::every_rostered_species_has_a_type_spec_arm` and
+`mobs::every_rostered_species_has_a_decided_category` — because both drive the roster's *own* exported
+species list rather than a copy of it. Neither failure was about ranged attacks; both were about a new
+species silently inheriting a registry default (a witch on 20 health instead of 26, a pillager
+categorised as a persistent `Creature`). That is the payoff shape for a gate whose subject is a list the
+production code dispatches on, and it is worth more than any assertion inside the feature being added.
+
+Two smaller ones:
+
+* **`RELEASE_USE_ITEM` (`PLAYER_ACTION` ordinal 5) was the entire reason a bow could not fire.** It
+  decoded to `ServerBound::Ignored`, so the client animated a draw locally and the packet that ends it
+  reached nothing. Lifting it broke **two** tests that asserted the ordinal *stays* ignored — the
+  "new subsystem breaks a gate written against its absence" shape, in both a unit test and an
+  integration control. Both were inverted rather than deleted, because the control's real job (proving
+  the drop-ordinal arm is a narrowing of `_ => Ignored` and not a replacement) still needs an ignored
+  neighbour, so ordinals 6 and 7 took over that role.
+* **A `LootTable` field and a `structure_block` DATA marker are two different mechanisms, and the
+  marker pass was complete, correct and blind to 132 templates.** The self-named form is village 62,
+  bastion 26, trial_chambers 19, ruined_portal 13, ancient_city 10, pillager_outpost 2 — and those
+  templates generally carry no marker at all, while `shipwreck/with_mast` is the mirror image and
+  carries a marker and no `LootTable`. Near-disjoint, so **a coverage figure from one pass says nothing
+  about the other**. This is §12's "a gate that compares two things you control cannot tell you a third
+  exists" wearing structure-generation clothes: nothing was wrong with the marker pass, and six
+  structure families generated with empty chests.
