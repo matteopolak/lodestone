@@ -826,8 +826,20 @@ impl ViewTracker {
 /// the centre, so ring 0 is the single column the player is standing in, ring 1
 /// is the 8 around it, and ring `r > 0` holds `8r` columns. Flattened, the
 /// result is the whole `[-view_radius, view_radius]²` square with **no column
-/// repeated and none missing** — the same set `ViewTracker::new` seeds itself
-/// with, in a different order.
+/// repeated and none missing**.
+///
+/// # These are offsets, not chunk coordinates
+///
+/// Every pair is a `(dx, dz)` **relative to the player's own column**, which is
+/// why ring 0 is `(0, 0)` at every view radius. The caller must add the join
+/// centre before any of it reaches `encode_chunk` or a chunk source. It did not,
+/// for a while: the square that went out was centred on chunk `(0, 0)` while
+/// `ViewTracker::new` seeded its `loaded` set around the player's actual column,
+/// so a player restored away from the origin got terrain in the wrong place,
+/// never got the ground under their feet, and had a tracker that believed
+/// otherwise. Adding the centre is what makes this "the same set
+/// `ViewTracker::new` seeds itself with, in a different order" — a property of
+/// the call site, not of this function.
 ///
 /// # Why rings, and why this is not a re-sort
 ///
@@ -2405,10 +2417,39 @@ where
                 // and `PlayerChunkSender` feeds chunks over subsequent ticks — the
                 // client holds its own loading screen until it has what it needs,
                 // but the server is not blocked.
+                // **The join centre, and it has to be derived here rather than
+                // after the stream.** [`join_view_rings`] yields Chebyshev-ring
+                // *offsets* `(dx, dz)` in `-r..=r`, not absolute chunk
+                // coordinates — the loop below used to hand them straight to
+                // `encode_chunk`, so the square that actually went out was
+                // always centred on chunk `(0, 0)` no matter where the player
+                // joined. For a restored player 400 blocks from world spawn the
+                // consequences compounded: `begin_play_at` teleported them to
+                // `join_pos` and set the chunk cache centre to their own column,
+                // `ViewTracker::new` below seeded its `loaded` set with the
+                // square around that column — and none of those columns had
+                // been sent. So the terrain the player got was a square around
+                // the origin, the ground under their feet never arrived, and the
+                // tracker believed it already had, which is why walking did not
+                // repair it either.
+                //
+                // The reason it survived every gate: both `serve_play.rs` join
+                // gates assert against `square(0, 0, view_radius)` with a spawn
+                // that floors to chunk `(0, 0)`, where offsets and absolute
+                // coordinates coincide — the *world* species of vacuous test.
+                let join_cx = (join_pos.x / 16.0).floor() as i32;
+                let join_cz = (join_pos.z / 16.0).floor() as i32;
                 let t_chunks = JoinStopwatch::now();
                 let mut batch_size = 0;
                 let window = crate::join_scheduler::generation_window();
-                let rings = join_view_rings(view_radius);
+                let rings: Vec<Vec<(i32, i32)>> = join_view_rings(view_radius)
+                    .into_iter()
+                    .map(|ring| {
+                        ring.into_iter()
+                            .map(|(dx, dz)| (join_cx + dx, join_cz + dz))
+                            .collect()
+                    })
+                    .collect();
                 let ring_count = rings.len();
                 // How much has to be on the wire before the player may act. See
                 // `JOIN_PRESTREAM_RADIUS`.
@@ -2429,6 +2470,13 @@ where
                         // join — that key *is* the ring walk, so the sequence this
                         // emits is unchanged from `join_view_rings` order.
                         //
+                        // The priority centre is the player's own column, not
+                        // `(0, 0)`: it is compared against the absolute
+                        // coordinates in `coords`, and `serve_play`'s
+                        // `reprioritise` re-keys the same queue against the
+                        // player's absolute chunk. A hardcoded origin here made
+                        // the two disagree for any player away from it.
+                        //
                         // `encoding_with`: protocol encode runs **inside** the
                         // per-column `spawn_blocking` closure, so this task only
                         // writes frames. Measured at 62 M instructions / ≈2.4 ms
@@ -2441,7 +2489,7 @@ where
                             Arc::clone(src),
                             coords,
                             window,
-                            (0, 0),
+                            (join_cx, join_cz),
                             None,
                         )
                         .encoding_with(proto.chunk_encoder());
@@ -2573,8 +2621,14 @@ where
                 // feet. Centring on world spawn instead would stream a square of
                 // terrain the player cannot see and leave them suspended over
                 // nothing — a total chunk blackout with a perfectly healthy join.
-                let spawn_cx = (join_pos.x / 16.0).floor() as i32;
-                let spawn_cz = (join_pos.z / 16.0).floor() as i32;
+                //
+                // Reused from the binding the chunk stream above already derived,
+                // rather than recomputed: the tracker's `loaded` set is a claim
+                // about the square that stream actually emitted, so a second
+                // derivation is a second chance for the two to disagree — and
+                // when they did, the columns under the player's feet were marked
+                // sent without ever being sent.
+                let (spawn_cx, spawn_cz) = (join_cx, join_cz);
                 // Issue #545: two radii, two roles — the square that was just
                 // streamed, and the ceiling a later `ClientInformationChanged`
                 // may raise this connection to. See `ViewTracker::max_radius`.
@@ -10094,6 +10148,60 @@ mod tests {
     #[test]
     fn join_view_rings_at_radius_zero_is_a_single_column() {
         assert_eq!(join_view_rings(0), vec![vec![(0, 0)]]);
+    }
+
+    /// **The cross-arm invariant the off-centre join violated**, at a centre where
+    /// the two hypotheses actually differ.
+    ///
+    /// Two independent constructions of one square: `join_view_rings` walks
+    /// Chebyshev rings and yields offsets, `ViewTracker::new` rasters a
+    /// `[-r, r]²` window around an absolute centre. The tracker's set is a *claim
+    /// about what the wire sent*, so if the two disagree the tracker suppresses
+    /// resends of columns the client never received. The expectation therefore
+    /// comes from neither implementation — it is the geometry both are supposed to
+    /// be describing.
+    ///
+    /// `(25, -13)` deliberately: at a centre of `(0, 0)` the offset and absolute
+    /// readings coincide exactly, which is why every existing join gate — all of
+    /// which spawn at a position flooring to chunk `(0, 0)` — passed throughout.
+    #[test]
+    fn ring_offsets_plus_the_join_centre_are_the_square_the_view_tracker_seeds() {
+        let radius = 9;
+        let (cx, cz) = (25, -13);
+
+        let emitted: HashSet<(i32, i32)> = join_view_rings(radius)
+            .into_iter()
+            .flatten()
+            .map(|(dx, dz)| (cx + dx, cz + dz))
+            .collect();
+        let seeded = ViewTracker::new((cx, cz), radius, radius).loaded;
+
+        assert_eq!(emitted.len(), 361, "radius 9 is 361 columns either way");
+        assert_eq!(
+            emitted, seeded,
+            "the columns the join stream emits must be exactly the ones the tracker \
+             records as sent; any difference is a column the client never gets and \
+             never gets resent"
+        );
+
+        // The control, and it must fail the same assertion: the pre-fix code used
+        // the raw offsets as absolute coordinates. Run and observed failing here
+        // rather than described, because the *reason* this bug survived is that
+        // the difference is invisible at the origin.
+        let unshifted: HashSet<(i32, i32)> =
+            join_view_rings(radius).into_iter().flatten().collect();
+        assert_ne!(
+            unshifted, seeded,
+            "control failed: raw ring offsets must NOT equal the tracker's square at a \
+             non-origin centre — if they do, this test cannot see the defect it exists for"
+        );
+        // And the reason the control has to be at a non-origin centre at all.
+        assert_eq!(
+            unshifted,
+            ViewTracker::new((0, 0), radius, radius).loaded,
+            "at the origin the two readings are identical, which is exactly why every \
+             gate that spawns at chunk (0, 0) was blind to this"
+        );
     }
 
     /// **A negative radius must yield no rings at all**, matching the raster walk
