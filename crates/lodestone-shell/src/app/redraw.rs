@@ -1264,7 +1264,16 @@ impl WindowApp {
         if self.pending_screenshot {
             self.pending_screenshot = false;
             if let Some(texture) = frame.texture() {
-                match crate::screenshot::capture(device, queue, texture, SystemTime::now()) {
+                // Fully qualified rather than imported: this module's only namespace
+                // is `use super::*`, so bringing `SystemTime` in would mean adding an
+                // import to `app.rs` — a file several agents edit concurrently — for
+                // one call site.
+                match crate::screenshot::capture(
+                    device,
+                    queue,
+                    texture,
+                    std::time::SystemTime::now(),
+                ) {
                     Ok(path) => println!("Saved screenshot as {}", path.display()),
                     Err(e) => tracing::warn!(target: "screenshot", "capture failed: {e}"),
                 }
