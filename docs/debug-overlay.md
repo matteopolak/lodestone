@@ -43,6 +43,39 @@ Three things about it are worth knowing before reading the numbers:
 no geometry, and a `NODES` that tracks `SECTIONS` instead means the fully-solid
 sections are missing and the walk has no floor to see.
 
+**`SECTIONS`/`QUADS` are per-frame *drawn* counts; `MESH VRAM` is *residency*.**
+The distinction is the whole content of this line, and getting it wrong was a
+reported bug: `MESH VRAM` used to be `vram_bytes(RenderStats::total_quads)`, and
+`total_quads` only accumulates over sections that survived the cull, so the VRAM
+figure moved every time the player turned on the spot. That reads as buffers being
+allocated and freed, and nothing of the kind happens — `RenderState::upload_section`
+and `remove_section` are the only two paths that touch GPU mesh storage, and both
+are driven by chunk arrival/unload, never by the camera. Rotating changes
+*visibility*, not residency, which is exactly why a rotation is the input that
+tells the two apart.
+
+It now reads `MESH VRAM <live>/<reserved> KB`, from
+`RenderState::resident_mesh_bytes` and `reserved_mesh_bytes`, both measured off
+the real `wgpu::Buffer` sizes and the model arena's own occupancy rather than
+estimated from a quad count:
+
+- **live** — the spans currently handed out to resident sections.
+- **reserved** — the arena blocks the driver is holding. `ModelMeshArena`
+  allocates 32 MiB vertex + 8 MiB index blocks and **never releases one**, so this
+  is a high-water mark: walking away returns spans to the free pool for the next
+  region to reuse, and reserved stays put. That retention is the design, and it is
+  why there is no eviction budget to tune here.
+
+Read them as a pair. Live sawtoothing under a flat reserved figure is healthy
+reuse; reserved climbing while live does not is fragmentation, and is the only
+shape that would justify a byte budget. The old estimate also priced every
+live-vanilla quad at the packed path's 72 B when a `ModelVertex` quad is 152 B, so
+it under-reported real mesh VRAM by a further ~2.1× on top of the cull factor.
+`mesh_vram_is_a_function_of_residency_not_of_the_camera` (`gpu/sections.rs`,
+`#[ignore]`d, needs an adapter) pins the invariant and computes the old formula
+alongside as its own control: measured 1,853,568 → 1,365,552 bytes across a pure
+180° turn, against a byte-identical 5,777,856 for the residency figure.
+
 `lines()` is the concatenation of the two, so `one_line()` and anything else
 wanting "every line" needs no knowledge of the split, and a line added to either
 column cannot go missing from the flat list.

@@ -124,6 +124,7 @@ pub(super) fn run_headless(config: Config) -> anyhow::Result<()> {
     sim.stats.section_count = stats.sections_drawn;
     sim.stats.quads = stats.total_quads;
     sim.stats.vram_bytes = stats.vram_bytes;
+    sim.stats.vram_reserved_bytes = stats.vram_reserved_bytes;
     sim.stats.frame_ms = frame_ms as f32;
 
     println!("=== lodestone headless render ===");
@@ -133,7 +134,10 @@ pub(super) fn run_headless(config: Config) -> anyhow::Result<()> {
     println!("quads (meshed)    = {meshed_quads}");
     println!("quads (drawn)     = {}", stats.total_quads);
     println!("draw calls        = {}", stats.draw_calls);
-    println!("mesh VRAM (bytes) = {}", stats.vram_bytes);
+    println!(
+        "mesh VRAM (bytes) = {} live / {} reserved",
+        stats.vram_bytes, stats.vram_reserved_bytes
+    );
     println!("terrain coverage  = {coverage:.1}%");
     println!("frame time (ms)   = {frame_ms:.3}");
     println!("saved frame       = {out}");

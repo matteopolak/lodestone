@@ -69,6 +69,22 @@ fn free_resident(arena: &mut lodestone_render::ModelMeshArena, mesh: Option<&Res
     }
 }
 
+/// Bytes a resident mesh occupies **outside** the arena's own bookkeeping.
+///
+/// An [`ResidentMesh::Arena`] span is already counted by
+/// [`ModelMeshArena::live_bytes`](lodestone_render::ModelMeshArena::live_bytes),
+/// so counting it here as well would double it; a
+/// [`ResidentMesh::Dedicated`] pair is two `wgpu::Buffer`s of its own that no
+/// arena knows about. Reading `Buffer::size()` rather than recomputing from a
+/// quad count keeps this exact: the buffers were created from the mesh's own
+/// slices and are the real footprint, padding included.
+fn dedicated_bytes(mesh: &ResidentMesh) -> u64 {
+    match mesh {
+        ResidentMesh::Arena(_) => 0,
+        ResidentMesh::Dedicated(m) => m.vertices.size() + m.indices.size(),
+    }
+}
+
 impl RenderState {
 
     /// Recreate the depth buffer to match a resized target.
@@ -307,6 +323,88 @@ impl RenderState {
         &self.depth.view
     }
 
+    /// Exact bytes of GPU **mesh** storage currently handed out to resident
+    /// sections — what the debug overlay's `MESH VRAM` reports.
+    ///
+    /// A function of *residency* alone, and that is the whole point. It consults
+    /// the two section tables and the model arena's own occupancy, and nothing
+    /// about the camera, the frustum or the cull, because the only two places
+    /// that touch GPU mesh storage are [`upload_section`](Self::upload_section)
+    /// and [`remove_section`](Self::remove_section) — neither of which a camera
+    /// movement can reach. So a pure rotation must not move this number, and
+    /// `mesh_vram_is_a_function_of_residency_not_of_the_camera` measures that it
+    /// does not.
+    ///
+    /// It replaces `lodestone_render::vertex::vram_bytes(stats.total_quads)`,
+    /// which was wrong twice over. `total_quads` accumulates only over sections
+    /// that **survived the cull that frame**, so the reported figure moved every
+    /// time the player turned on the spot — which reads as buffer churn and was
+    /// reported as such, while nothing was being allocated or freed at all. And
+    /// it priced every live-vanilla quad at the *packed* path's 72 B when a
+    /// `ModelVertex` quad is 152 B (4 × 32 B + 6 × 4 B), understating real mesh
+    /// VRAM by a further ~2.1×.
+    ///
+    /// Scope: mesh storage only. The atlases, the fixed `SectionOriginArena`
+    /// pair (32 MiB + 2 MiB, allocated once at construction) and every
+    /// entity/HUD buffer are out, because mesh storage is the part that scales
+    /// with the world and so the only part worth watching per frame. Compare
+    /// [`reserved_mesh_bytes`](Self::reserved_mesh_bytes) for what the driver is
+    /// actually holding.
+    #[must_use]
+    pub fn resident_mesh_bytes(&self) -> usize {
+        let packed: u64 = self
+            .sections
+            .values()
+            .map(|s| s.mesh.vertices.size() + s.mesh.indices.size())
+            .sum();
+        let model = self.model.as_ref().map_or(0, |m| {
+            let dedicated: u64 = m
+                .sections
+                .values()
+                .flat_map(|s| [s.mesh.as_ref(), s.water.as_ref()])
+                .flatten()
+                .map(dedicated_bytes)
+                .sum();
+            m.mesh_arena.live_bytes() + dedicated
+        });
+        (packed + model) as usize
+    }
+
+    /// Bytes of GPU mesh storage the **driver** is holding for terrain, as
+    /// opposed to the [`resident_mesh_bytes`](Self::resident_mesh_bytes) actually
+    /// occupied by live geometry.
+    ///
+    /// The difference is the model arena, which allocates in fixed 32 MiB +
+    /// 8 MiB blocks and **never releases one** (a released block would invalidate
+    /// every later block index still held by a resident section). So this is a
+    /// high-water mark: walking away from a region returns its spans to the free
+    /// pool, where the next region reuses them, and the reserved figure stays
+    /// put. That is deliberate retention — freed mesh space is kept rather than
+    /// handed back — and it is why there is no eviction budget here to tune.
+    ///
+    /// Watch the two together: `resident` sawtoothing while `reserved` is flat is
+    /// healthy reuse. `reserved` climbing while `resident` is flat is
+    /// fragmentation, and it is the only shape that would justify a budget.
+    #[must_use]
+    pub fn reserved_mesh_bytes(&self) -> usize {
+        let packed: u64 = self
+            .sections
+            .values()
+            .map(|s| s.mesh.vertices.size() + s.mesh.indices.size())
+            .sum();
+        let model = self.model.as_ref().map_or(0, |m| {
+            let dedicated: u64 = m
+                .sections
+                .values()
+                .flat_map(|s| [s.mesh.as_ref(), s.water.as_ref()])
+                .flatten()
+                .map(dedicated_bytes)
+                .sum();
+            m.mesh_arena.reserved_bytes() + dedicated
+        });
+        (packed + model) as usize
+    }
+
     /// Total merged quads currently resident on the GPU.
     #[must_use]
     pub fn total_quads(&self) -> usize {
@@ -331,5 +429,209 @@ impl RenderState {
             let slots = anim_slots_at(&model.animations, tick);
             update_model_anim_buffer(queue, &model.anim_buffer, &slots);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lodestone_render::{Camera, HeadlessTarget, RenderTarget};
+    use lodestone_render::vertex::{BYTES_PER_INDEX, BYTES_PER_VERTEX, vram_bytes};
+
+    use super::*;
+
+    /// **Rotating the camera must not move the reported mesh VRAM, and the
+    /// pre-fix formula must move.** Both hypotheses are computed in the same run,
+    /// so nothing here rests on a description of what the old code would have
+    /// done.
+    ///
+    /// A pure rotation is the discriminating input, and it is the only one: a
+    /// *step* changes which columns the server has sent, so residency legitimately
+    /// changes with it and a walking gate could not separate "the counter is
+    /// derived from the cull" from "the world really did stream". Turning on the
+    /// spot cannot allocate or free GPU mesh storage — [`RenderState::upload_section`]
+    /// and [`RenderState::remove_section`] are the only two paths that can, and a
+    /// camera reaches neither — so the correct prediction is *byte-identical*, with
+    /// no tolerance.
+    ///
+    /// Three assertions, in the order this repo's doctrine asks for:
+    ///
+    /// 1. *precondition* — `sections_drawn` and `total_quads` must genuinely
+    ///    **differ** between the two yaws, or the cull is not responding and every
+    ///    later assertion passes vacuously (the input where both hypotheses
+    ///    coincide).
+    /// 2. *the fix* — `vram_bytes` is identical across the two frames and equals
+    ///    the byte total predicted from the uploaded meshes' own vertex and index
+    ///    counts, computed here rather than read back from the accessor.
+    /// 3. *the wrong hypothesis* — `vram_bytes(total_quads)`, exactly what this
+    ///    field used to hold, differs between the two frames. That is the control,
+    ///    and it fires in the same run.
+    ///
+    /// Then a there-and-back: dropping a column's sections and re-uploading them
+    /// must return the byte total to the *same* value, not merely to a similar
+    /// one — the counter that would catch a leak or a double-count in the
+    /// remesh/eviction path.
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn mesh_vram_is_a_function_of_residency_not_of_the_camera() {
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU (or a software adapter such as \
+             LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+             would assert nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let (w, h) = (320u32, 240u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+
+        let world = crate::worldgen::generate(2);
+        let classifier = crate::blocks::DemoClassifier;
+        let mut state = RenderState::new(device, queue, format, w, h, None);
+
+        // The expected byte total, accumulated from each mesh's own element counts
+        // as it is uploaded. `PackedVertex` is 12 B and an index is 4 B, and
+        // `create_buffer_init` pads only to 4, so `12 * v + 4 * i` is the exact
+        // footprint rather than an estimate.
+        assert_eq!((BYTES_PER_VERTEX, BYTES_PER_INDEX), (12, 4));
+        let mut expected_bytes = 0usize;
+        let mut uploaded: Vec<SectionKey> = Vec::new();
+        let radius = 2;
+        for cz in -radius..=radius {
+            for cx in -radius..=radius {
+                for si in 0..crate::worldgen::SECTION_COUNT {
+                    let key = SectionKey {
+                        cx,
+                        cz,
+                        si,
+                        min_y: crate::worldgen::MIN_Y,
+                    };
+                    let Some(snap) = crate::mesher::snapshot_section(&world, key) else {
+                        continue;
+                    };
+                    let mesh = crate::mesher::mesh_snapshot(&snap, &classifier);
+                    if mesh.indices.is_empty() {
+                        continue;
+                    }
+                    expected_bytes += mesh.vertices.len() * BYTES_PER_VERTEX
+                        + mesh.indices.len() * BYTES_PER_INDEX;
+                    uploaded.push(key);
+                    state.upload_section(
+                        device,
+                        queue,
+                        key,
+                        &crate::mesher::SectionGeometry::Packed(mesh),
+                    );
+                }
+            }
+        }
+        assert!(!uploaded.is_empty(), "some sections must have meshed");
+        assert_eq!(
+            state.resident_mesh_bytes(),
+            expected_bytes,
+            "resident bytes must equal the uploaded meshes' own footprint"
+        );
+
+        // Same eye, two facings. Pitch 0 so the horizon splits the frame and a
+        // large part of the world is behind the camera at one of them.
+        let feet = crate::worldgen::spawn_feet();
+        let eye = glam::Vec3::new(feet[0] as f32, feet[1] as f32 + 4.0, feet[2] as f32);
+        let camera_at = |yaw: f32| Camera {
+            position: eye,
+            yaw,
+            pitch: 0.0,
+            fov_y_degrees: 70.0,
+            aspect: w as f32 / h as f32,
+            near: 0.05,
+            far: Camera::far_for_render_distance(8, 0),
+        };
+
+        // Collected, not asserted per iteration: a failure in the first facing
+        // would otherwise abort before the second is even measured, and the whole
+        // claim is about the pair.
+        let mut frames = Vec::new();
+        for yaw in [0.0_f32, 180.0] {
+            let frame = target.acquire().expect("headless acquire");
+            let stats = state.render(device, queue, frame.view(), &camera_at(yaw), None, &[]);
+            frames.push((yaw, stats));
+        }
+        let (a, b) = (&frames[0].1, &frames[1].1);
+
+        eprintln!("=== mesh VRAM vs the camera ===");
+        for (yaw, s) in &frames {
+            eprintln!(
+                "yaw {yaw:>5.0}: drawn {:>4} quads {:>7} vram {:>9} reserved {:>9} \
+                 (pre-fix estimate {:>9})",
+                s.sections_drawn,
+                s.total_quads,
+                s.vram_bytes,
+                s.vram_reserved_bytes,
+                vram_bytes(s.total_quads),
+            );
+        }
+
+        // 1. Precondition: the cull really is responding to the rotation. Without
+        //    this the two frames could agree for the uninteresting reason.
+        assert_ne!(
+            a.sections_drawn, b.sections_drawn,
+            "the two facings must draw different section counts, or this input \
+             cannot tell a residency figure from a cull-derived one"
+        );
+        assert_ne!(a.total_quads, b.total_quads);
+
+        // 2. The fix: identical, and equal to the independently accumulated total.
+        assert_eq!(
+            a.vram_bytes, b.vram_bytes,
+            "a pure rotation moved the reported mesh VRAM: {} at yaw 0 vs {} at \
+             yaw 180 — nothing between the two frames allocated or freed GPU mesh \
+             storage",
+            a.vram_bytes, b.vram_bytes
+        );
+        assert_eq!(a.vram_bytes, expected_bytes);
+        assert!(a.vram_reserved_bytes >= a.vram_bytes);
+
+        // 3. The control, in the same run: the formula this field used to hold
+        //    disagrees between the two frames, so the gate above is not passing
+        //    because the cull happens to be inert.
+        assert_ne!(
+            vram_bytes(a.total_quads),
+            vram_bytes(b.total_quads),
+            "the pre-fix estimate must differ across the two facings — if it does \
+             not, this test proves nothing about which quantity is being reported"
+        );
+
+        // There and back: drop one column's sections, then re-upload them. The
+        // total must land on the *same* byte count, and the intermediate must be
+        // strictly smaller so the removal is not itself a no-op.
+        let column: Vec<SectionKey> = uploaded
+            .iter()
+            .copied()
+            .filter(|k| (k.cx, k.cz) == (0, 0))
+            .collect();
+        assert!(!column.is_empty(), "column (0,0) must hold sections");
+        for key in &column {
+            state.remove_section(key);
+        }
+        let after_removal = state.resident_mesh_bytes();
+        assert!(
+            after_removal < expected_bytes,
+            "removing a column freed nothing: {after_removal} vs {expected_bytes}"
+        );
+        for key in &column {
+            let snap = crate::mesher::snapshot_section(&world, *key).expect("re-snapshot");
+            let mesh = crate::mesher::mesh_snapshot(&snap, &classifier);
+            state.upload_section(
+                device,
+                queue,
+                *key,
+                &crate::mesher::SectionGeometry::Packed(mesh),
+            );
+        }
+        assert_eq!(
+            state.resident_mesh_bytes(),
+            expected_bytes,
+            "a remove-then-upload cycle must return the byte total exactly, not \
+             approximately — a drift here is a leak or a double-count"
+        );
     }
 }

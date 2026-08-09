@@ -72,8 +72,25 @@ pub struct RenderStats {
     /// dedicated-buffer warning) or the per-block grouping in
     /// `emit_terrain_draws` stopped grouping.
     pub terrain_buffer_binds: usize,
-    /// Approximate mesh VRAM in bytes.
+    /// Exact bytes of GPU mesh storage occupied by **resident** sections, from
+    /// [`RenderState::resident_mesh_bytes`](crate::gpu::RenderState::resident_mesh_bytes).
+    ///
+    /// Residency, not visibility. This used to be
+    /// `vram_bytes(self.total_quads)` — i.e. derived from the *drawn* quad count,
+    /// which the frustum cull changes on every camera rotation — so the overlay's
+    /// VRAM figure moved whenever the player looked around and was read as
+    /// load/unload churn. Nothing is allocated or freed by a rotation; see
+    /// `resident_mesh_bytes` for the full account and for what this excludes.
     pub vram_bytes: usize,
+    /// Bytes of GPU mesh storage the driver is **holding**, from
+    /// [`RenderState::reserved_mesh_bytes`](crate::gpu::RenderState::reserved_mesh_bytes)
+    /// — the model arena's whole blocks rather than the spans handed out of them.
+    ///
+    /// Always `>= vram_bytes`. Its own counter because the two answer different
+    /// questions and only the pair can tell healthy reuse (`vram_bytes` moving
+    /// under a flat reserved figure) from fragmentation (reserved climbing while
+    /// `vram_bytes` does not).
+    pub vram_reserved_bytes: usize,
     /// Entity instances drawn this frame (post-frustum-cull).
     pub entities_drawn: usize,
     /// Entity instances frustum-culled this frame.

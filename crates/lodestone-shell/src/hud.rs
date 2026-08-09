@@ -385,12 +385,24 @@ pub struct DebugStats {
     /// `mesh_drops` counter; shown next to `LIVE COLS` so a recurrence of the
     /// silent-drop defect class is visible at a glance. Healthy sessions read `0`.
     pub mesh_drops: u64,
-    /// Uploaded (non-empty) mesh sections.
+    /// Mesh sections **drawn this frame** (`RenderStats::sections_drawn`), i.e.
+    /// post-cull — not the resident count, which is `RenderState::section_count`.
+    /// The doc said "uploaded" and the value never was; the two differ by every
+    /// section behind you, so this moves when you turn on the spot and that is
+    /// correct for a drawn counter.
     pub section_count: usize,
-    /// Quads currently resident.
+    /// Quads **drawn this frame** (`RenderStats::total_quads`), post-cull, for
+    /// the reason [`Self::section_count`] gives. Residency is
+    /// `RenderState::total_quads`.
     pub quads: usize,
-    /// Approximate mesh VRAM in bytes.
+    /// Exact bytes of GPU mesh storage occupied by resident sections
+    /// (`RenderStats::vram_bytes`). A pure function of residency: unlike the two
+    /// counters above it must **not** move when the camera merely rotates.
     pub vram_bytes: usize,
+    /// Bytes of GPU mesh storage the driver is holding, arena blocks whole
+    /// (`RenderStats::vram_reserved_bytes`). Always `>= vram_bytes`; shown beside
+    /// it because only the pair separates healthy span reuse from fragmentation.
+    pub vram_reserved_bytes: usize,
     /// Resident process memory in bytes (0 if unavailable).
     pub rss_bytes: usize,
     /// Heap bytes owned by loaded world chunks (`World::heap_bytes`). Per the
@@ -614,9 +626,15 @@ impl DebugStats {
                 if self.occlusion_active { "ACTIVE" } else { "OFF" },
                 self.occlusion_walks
             ),
+            // `MESH VRAM live/reserved`: the first is the spans handed out to
+            // resident sections, the second the arena blocks the driver is
+            // holding. Both are residency figures — a camera rotation must leave
+            // this whole line unchanged, which is what distinguishes real
+            // load/unload churn from the cull-derived estimate this used to print.
             format!(
-                "MESH VRAM {} KB WORLD {} KB RSS {} MB",
+                "MESH VRAM {}/{} KB WORLD {} KB RSS {} MB",
                 self.vram_bytes / 1024,
+                self.vram_reserved_bytes / 1024,
                 self.world_bytes / 1024,
                 self.rss_bytes / (1024 * 1024)
             ),
@@ -636,7 +654,7 @@ impl DebugStats {
     #[must_use]
     pub fn one_line(&self) -> String {
         format!(
-            "pos=({:.1},{:.1},{:.1}) facing={} f/t={:.2} target={} fps={:.0} frame={:.2}ms chunks={} live_cols={} drops={} entities={} particles={}/{}+{}unres sections={} quads={} vram={}KB world={}KB rss={}MB {}",
+            "pos=({:.1},{:.1},{:.1}) facing={} f/t={:.2} target={} fps={:.0} frame={:.2}ms chunks={} live_cols={} drops={} entities={} particles={}/{}+{}unres sections={} quads={} vram={}/{}KB world={}KB rss={}MB {}",
             self.position[0],
             self.position[1],
             self.position[2],
@@ -658,6 +676,7 @@ impl DebugStats {
             self.section_count,
             self.quads,
             self.vram_bytes / 1024,
+            self.vram_reserved_bytes / 1024,
             self.world_bytes / 1024,
             self.rss_bytes / (1024 * 1024),
             self.status,
