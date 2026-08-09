@@ -268,6 +268,32 @@ CONFINEMENT_RULES=(
   # one hazard and blind two files to it. If you add `thread::sleep` to production
   # code here, nothing will stop you: gate it yourself.
   "lodestone-shell thread-spawn-confinement|crates/lodestone-shell/src|thread::spawn|mesher.rs,accounts.rs,status.rs"
+  # --- the clock, in every other crate the browser reaches ---
+  #
+  # **These exist because `lodestone-shell`'s three rules were not enough, and the way
+  # they were not enough is the reusable lesson.** The browser build reached exit 0 with
+  # all three PASSing and still died twice: once in `lodestone-particle`
+  # (`from_entropy` -> `SystemTime::now()`, three crates below the shell) and once in
+  # `lodestone-server`/`lodestone-worldgen` on the way into a world. A confinement guard
+  # only covers the crate it names, and the browser reaches about fifteen.
+  #
+  # `lodestone-server` is the sharpest case: its `collect_nearby_items` already carried a
+  # comment stating the rule — *"this crate must not call `std::time::Instant::now()`
+  # anywhere in `lodestone-server`, because the crate links into a wasm32 bundle where
+  # that compiles and then panics at runtime"* — and four sites violated it anyway
+  # (`server.rs`'s import, `integrated.rs` x3). The rule was right and it was prose. This
+  # is the same rule, checked.
+  #
+  # Empty allowlists: these crates have no business reading a wall clock through `std`.
+  # Each now uses `web_time`, whose non-wasm arm is `pub use std::time::*` — so native is
+  # byte-identical and the rule costs nothing to keep.
+  "lodestone-server clock-ban|crates/lodestone-server/src|std::time::\(Instant\|SystemTime\)|"
+  "lodestone-worldgen clock-ban|crates/lodestone-worldgen/src|std::time::\(Instant\|SystemTime\)|"
+  "lodestone-particle clock-ban|crates/lodestone-particle/src|std::time::\(Instant\|SystemTime\)|"
+  "lodestone-net clock-ban|crates/lodestone-net/src|std::time::\(Instant\|SystemTime\)|"
+  # `async_task.rs`'s only hit is inside a `#[cfg(test)] mod`, which never reaches a
+  # browser; a grep cannot tell a test module from a production one, so it is named.
+  "lodestone-ecs clock-ban|crates/lodestone-ecs/src|std::time::\(Instant\|SystemTime\)|async_task.rs"
 )
 
 for rule in "${CONFINEMENT_RULES[@]}"; do

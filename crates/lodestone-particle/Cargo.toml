@@ -9,6 +9,13 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The portable clock. **`web-time`'s non-wasm arm is literally `pub use std::time::*`,
+# so on native this IS `std::time` — same types, not newtypes — and native behaviour is
+# unchanged.** It is here because `Instant::now()` and `SystemTime::now()` COMPILE for
+# wasm32 and then TRAP at runtime (measured, executed in a wasm VM: `RuntimeError:
+# unreachable`), and this crate runs in the browser. `web-time` is already in that
+# bundle via `winit`, so it costs nothing. See `docs/browser-shell-port.md`.
+web-time = "1"
 # Collision only. Particles resolve movement with `Entity.collideBoundingBox`,
 # which is the same swept-AABB code the player uses minus the auto-step, so this
 # reuses it rather than growing a second, silently-diverging copy.

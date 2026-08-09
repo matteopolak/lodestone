@@ -139,7 +139,46 @@ pub const SEARCH_NARRATION: &str = "Select World";
 /// upload!"). What survives is the *shape*: one centred line in row 0's content
 /// box saying the list is empty. See the module docs on why this screen shows it
 /// at all rather than opening `CreateWorldScreen` the way vanilla does.
-pub const NO_WORLDS_LABEL: &str = "No worlds yet — press Create New World";
+/// The native empty-list line. See [`NO_WORLDS_LABEL`].
+///
+/// Named separately from the `cfg`-selected alias so the length gate can measure
+/// **both** strings on one target — see [`NO_WORLDS_LABEL_BROWSER`].
+pub const NO_WORLDS_LABEL_NATIVE: &str = "No worlds yet — press Create New World";
+
+/// The browser's empty-list line.
+///
+/// **The list is empty here permanently, not yet**, and saying so is the whole
+/// difference. A browser has no `saves/` — `read_dir` returns `Err(Unsupported)` — so
+/// [`crate::saves::list_worlds`] can only ever be empty, and a player who creates a
+/// world, plays it, and comes back to an empty list would reasonably read that as a
+/// broken save. It is not broken: the world was in memory, and the tab closing ended it.
+///
+/// The **flow is deliberately unchanged**, and this label is what makes that
+/// defensible. Vanilla's `handleNewLevels` opens `CreateWorldScreen.openFresh` on an
+/// empty singleplayer list, and this module's docs record why this shell does not follow
+/// it: opening another screen from a screen's *first frame* makes the world list
+/// unreachable, and Escape would return the player somewhere they never saw. That
+/// argument is **stronger** in a browser, not weaker — the list is empty on every visit,
+/// so auto-opening creation would make this screen unreachable *forever* rather than
+/// merely on a fresh install. So the screen stays, the Create button stays live, and the
+/// line explains itself.
+///
+/// It is a **separate named constant rather than only the `cfg` alias below**, and that
+/// is the point: the 44-character ceiling on this row is pinned by
+/// `the_world_list_row_label_fits_the_row_it_is_centred_in`, which runs on the host and
+/// would therefore have measured only the native string. The first draft of this line was
+/// 53 characters — it would have overhung the row in a browser and no gate would have
+/// said so. A guard only covers what it names.
+pub const NO_WORLDS_LABEL_BROWSER: &str = "Not saved — press Create New World";
+
+/// The empty-list line for this target: [`NO_WORLDS_LABEL_NATIVE`] or
+/// [`NO_WORLDS_LABEL_BROWSER`].
+#[cfg(not(target_arch = "wasm32"))]
+pub const NO_WORLDS_LABEL: &str = NO_WORLDS_LABEL_NATIVE;
+
+/// The empty-list line for this target. See [`NO_WORLDS_LABEL_BROWSER`].
+#[cfg(target_arch = "wasm32")]
+pub const NO_WORLDS_LABEL: &str = NO_WORLDS_LABEL_BROWSER;
 
 /// A world seed and a label, kept from issue #287's one-hardcoded-row era.
 ///

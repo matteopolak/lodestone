@@ -59,7 +59,9 @@ impl JavaRandom {
     /// in the crate; every test uses [`Self::new`] instead.
     #[must_use]
     pub fn from_entropy() -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
+        // `web_time`, not `std::time`: `SystemTime::now()` traps on wasm32, and this is
+        // the crate's one clock-seeded entry point. Identical on native.
+        use web_time::{SystemTime, UNIX_EPOCH};
         // Truncating the nanosecond count into 64 bits is exactly what we want
         // from a clock seed; the LCG masks it to 48 bits immediately anyway.
         let nanos = SystemTime::now()

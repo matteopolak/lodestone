@@ -259,8 +259,8 @@ pub fn parse_ban_expiry(expires: &str) -> Option<i64> {
 
 /// `"yyyy-MM-dd HH:mm:ss +0000"` for the current time, for a ban this server issues.
 fn format_now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
@@ -676,8 +676,8 @@ impl AccessHandle {
     /// [`AccessLists::may_join`] against the current wall clock.
     #[must_use]
     pub fn may_join(&self, uuid: Uuid, ip: Option<IpAddr>, online: usize) -> Result<(), JoinRefusal> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
         self.with(|lists| lists.may_join(uuid, ip, online, now))
     }
@@ -937,8 +937,8 @@ mod tests {
     fn issued_bans_are_readable() {
         let now = format_now();
         let parsed = parse_ban_expiry(&now).expect("our own format must parse");
-        let real = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let real = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
         assert!(

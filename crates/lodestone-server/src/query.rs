@@ -167,8 +167,8 @@ impl QuerySession {
     /// A session seeded from the wall clock. The production entry point.
     #[must_use]
     pub fn new() -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let seed = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         Self::with_seed(seed)
