@@ -1087,6 +1087,11 @@ impl Plugin for IngestPlugin {
             app.add_plugins(IngestQueuePlugin);
         }
         app.init_resource::<EntityIndex>();
+        // `apply_vehicle_moved` resets it. Shared with
+        // `crate::player::LocalPlayerPlugin`, which also inits it; `init_resource`
+        // is idempotent, and installing both plugins in either order leaves a
+        // populated resource alone.
+        app.init_resource::<crate::vehicle::ControlledVehicle>();
         app.add_systems(
             NetIngest,
             (
@@ -1130,6 +1135,12 @@ impl Plugin for IngestPlugin {
                 // a `SET_PASSENGERS` in the *same* batch as the vehicle's
                 // `AddEntity` still resolve the vehicle through `EntityIndex`.
                 apply_entity_passengers,
+                // The server's *rejection* of a vehicle position we predicted.
+                // Ordered after `apply_entity_passengers` by the same `.chain()`
+                // sync point, because the subject is whichever vehicle
+                // `session::Riding` names and a correction can share a batch with
+                // the `SET_PASSENGERS` that seated us.
+                crate::vehicle::apply_vehicle_moved,
             )
                 .chain()
                 .in_set(IngestSet::Apply),
@@ -2727,6 +2738,33 @@ mod tests {
                 passenger_ids: vec![2],
             }
         ));
+        // `VehicleMoved` carries **no entity id**, which is exactly why it reads
+        // like a `session` scalar and is not one: what
+        // `crate::vehicle::apply_vehicle_moved` writes is the vehicle's own
+        // `Position`/`Rotation`, per-entity components this module owns the sole
+        // writer of, with the subject supplied by `session::Riding`. It was an
+        // island until the client became authoritative over the vehicle it rides —
+        // the correction cannot fire until there is a prediction to correct.
+        assert!(handles_event(&ClientEvent::VehicleMoved {
+            pos: lodestone_model::Vec3 {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0
+            },
+            yaw: 0.0,
+            pitch: 0.0,
+        }));
+        // …and `session` must **not** claim it, or two routers would fight over
+        // one write. This is the negative half of the fork check above.
+        assert!(!crate::session::handles_event(&ClientEvent::VehicleMoved {
+            pos: lodestone_model::Vec3 {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0
+            },
+            yaw: 0.0,
+            pitch: 0.0,
+        }));
         assert!(!handles_event(&ClientEvent::TimeChanged {
             world_age: 1,
             time_of_day: 2,

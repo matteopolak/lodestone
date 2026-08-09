@@ -149,6 +149,7 @@ mod schedules;
 pub mod scheduler;
 pub mod session;
 mod sets;
+pub mod vehicle;
 pub mod veto;
 
 /// Re-exported so plugin authors never need to match `bevy_app`'s version by

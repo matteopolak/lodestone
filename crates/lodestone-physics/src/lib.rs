@@ -51,6 +51,7 @@ pub mod player;
 pub mod pose;
 pub mod profile;
 pub mod push;
+pub mod vehicle;
 
 pub use collision::CollisionView;
 pub use effect::{DirectEffect, MovementEffect, classify, movement_speed_modifier};
@@ -77,4 +78,9 @@ pub use push::{
     CollisionRule, NearbyEntity, PushSelf, apply_entity_push, entity_collision_boxes,
     entity_push_impulse, no_collision_among_entities, no_entity_collision, pair_push_vector,
     reciprocal_push_impulse, self_is_pushable, team_allows_push,
+};
+pub use vehicle::{
+    BoatInput, BoatState, BoatStatus, MountRule, boat_paddle_state, boat_status, clamp_rider_yaw,
+    control_boat, float_boat, horse_jump_impulse, jump_riding_scale, player_jump_pending_scale,
+    ridden_input, ridden_rotation, ridden_speed, tick_boat, tick_ridden_mount,
 };
