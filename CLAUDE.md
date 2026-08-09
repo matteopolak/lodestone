@@ -349,6 +349,17 @@ has been wrong four times in four different ways. Know its scope, because outsid
 
 ## Evidence standards
 
+**A doc that transcribes vanilla *correctly* is not evidence the code does — the transcription is the plan, and
+nothing here checks the plan against the implementation.** `docs/fluid-rendering.md` carried
+`FluidRenderer.shouldRenderFace` verbatim, **including** its `isFaceOccludedBySelf` conjunct, the entire time
+that `mesh_fluids` implemented only the *first* conjunct. The doc was right, the code was half-right, and the
+gap was invisible for as long as nobody diffed one against the other. **A conjunction is the dangerous shape**:
+implementing one clause yields code that behaves correctly in most scenes, and — the reason it survives review
+— the *sibling* it does implement is genuinely correct, so the call site looks finished. So when porting from a
+transcription, **enumerate the clauses and point at the line implementing each**; treat a transcribed formula
+as a checklist, not as a citation. Two instances in one day: this, and the falling-water fix, which was the same
+mistake (a *self*-cell question answered from neighbours) in the same file.
+
 **An expected value must originate outside the code under test.** `decode(encode(x)) == x` is satisfied
 by two symmetric misunderstandings — hermetic chunk fixtures generated with our own encoder passed
 throughout, then a live gate produced 49 × "unexpected end of input". Use captured server bytes, a JVM
