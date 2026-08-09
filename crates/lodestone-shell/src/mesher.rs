@@ -28,10 +28,15 @@
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashSet};
+use std::sync::{Arc, OnceLock};
+// The worker pool's plumbing. Native-only: `MeshScheduler`'s browser arm has no
+// threads and no channels — it meshes in-frame under a time budget. See that type.
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Mutex,
     mpsc::{self, Receiver},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::{self, JoinHandle};
 
 use bevy_ecs::query::With;
@@ -1370,8 +1375,44 @@ pub struct Meshed {
     pub mesh: SectionGeometry,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 enum Job {
     Mesh(SectionSnapshot),
+}
+
+/// Mesh one snapshot. **The single meshing body, shared by both schedulers.**
+///
+/// Extracted when the browser arm landed, for the same reason `menu::accounts`'
+/// `finish_ms_token` is extracted from its two sign-in flows: the native worker
+/// thread and the browser's in-frame drain must not be able to produce *different
+/// geometry*. A forked copy is a defect that shows up as a browser world that is
+/// subtly wrong rather than as a build failure, and no `cargo check` could see it.
+fn mesh_one(snap: SectionSnapshot, classifier: &ShellClassifier) -> Meshed {
+    let _span = tracing::info_span!(
+        "mesh_section",
+        cx = snap.key.cx, cz = snap.key.cz, si = snap.key.si,
+    ).entered();
+    // The vanilla classifier carries baked models → mesh through the model path;
+    // the demo classifier has none → mesh through the packed full-cube path.
+    let mesh = match classifier.models() {
+        Some(models) => {
+            let mut opaque = mesh_snapshot_models(&snap, models);
+            let fluids = mesh_snapshot_fluids(&snap, models);
+            // Lava is opaque and full-bright: fold it into the opaque pass. Water
+            // is translucent and drawn separately.
+            opaque.merge(&fluids.lava);
+            SectionGeometry::Model {
+                opaque,
+                water: fluids.water,
+                visibility: snapshot_visibility(&snap, models),
+            }
+        }
+        None => SectionGeometry::Packed(mesh_snapshot(&snap, classifier)),
+    };
+    Meshed {
+        key: snap.key,
+        mesh,
+    }
 }
 
 /// A fixed pool of worker threads that mesh snapshots off the main thread.
@@ -1401,6 +1442,7 @@ enum Job {
 /// `drain_blocking`, which holds it for the whole blocking wait *by design*,
 /// since two concurrent drains of one result queue would interleave meshes
 /// arbitrarily.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Resource)]
 pub struct MeshScheduler {
     /// Lock-free MPMC job channel — crossbeam unbounded. `Receiver` is `Clone`
@@ -1414,6 +1456,7 @@ pub struct MeshScheduler {
     column_source: ColumnSource,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl MeshScheduler {
     /// Spawn `worker_count` (min 1) meshing threads, each meshing with a clone of
     /// `classifier`. The classifier picks the id space: a
@@ -1461,37 +1504,7 @@ impl MeshScheduler {
                         Ok(Job::Mesh(snap)) => snap,
                         Err(_) => break,
                     };
-                    let _span = tracing::info_span!(
-                        "mesh_section",
-                        cx = snap.key.cx, cz = snap.key.cz, si = snap.key.si,
-                    ).entered();
-                    // The vanilla classifier carries baked models → mesh
-                    // through the model path; the demo classifier has none
-                    // → mesh through the packed full-cube path.
-                    let mesh = match classifier.models() {
-                        Some(models) => {
-                            let mut opaque = mesh_snapshot_models(&snap, models);
-                            let fluids = mesh_snapshot_fluids(&snap, models);
-                            // Lava is opaque and full-bright: fold it into
-                            // the opaque pass. Water is translucent and
-                            // drawn separately.
-                            opaque.merge(&fluids.lava);
-                            SectionGeometry::Model {
-                                opaque,
-                                water: fluids.water,
-                                visibility: snapshot_visibility(&snap, models),
-                            }
-                        }
-                        None => SectionGeometry::Packed(mesh_snapshot(&snap, &classifier)),
-                    };
-                    drop(_span);
-                    if result_tx
-                        .send(Meshed {
-                            key: snap.key,
-                            mesh,
-                        })
-                        .is_err()
-                    {
+                    if result_tx.send(mesh_one(snap, &classifier)).is_err() {
                         break;
                     }
                 }
@@ -1562,6 +1575,7 @@ impl MeshScheduler {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for MeshScheduler {
     fn drop(&mut self) {
         // Drop the sender — closes the channel. Each worker's cloned Receiver
@@ -1572,6 +1586,177 @@ impl Drop for MeshScheduler {
         for w in self.workers.drain(..) {
             let _ = w.join();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The browser scheduler (`wasm32`)
+// ---------------------------------------------------------------------------
+
+/// How long [`MeshScheduler::drain`] may spend meshing in one call, in the browser.
+///
+/// **The whole design rests on this being a deadline rather than a job count**, and
+/// on it being well under a frame. A section's mesh cost varies by orders of
+/// magnitude — an all-air section is nearly free, a section of foliage with baked
+/// models and fluids is not — so "mesh N sections per frame" is a budget in the wrong
+/// unit: it is either far too small for air or far too large for leaves, and the
+/// backlog after a teleport is thousands of sections either way.
+///
+/// 4 ms of a 16.7 ms frame leaves room for the render pass and, more importantly, for
+/// the event loop to run at all. See [`MeshScheduler`]'s browser docs for why that
+/// second point is the load-bearing one.
+#[cfg(target_arch = "wasm32")]
+const BROWSER_MESH_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+
+/// The browser's `MeshScheduler`: **the same interface, meshing in the frame under a
+/// time budget.**
+///
+/// # Why there is no pool, and why that is the right answer rather than a stopgap
+///
+/// `std::thread::spawn` does not degrade on `wasm32-unknown-unknown` — it **traps**
+/// (measured, executed in a wasm VM: `RuntimeError: unreachable`), and with
+/// `panic = "abort"` in the browser profile that is the tab dying. So the native pool
+/// cannot be ported as-is.
+///
+/// Threads are *available* — `web/Trunk.toml` already sets COOP/COEP, so the page is
+/// cross-origin isolated and `SharedArrayBuffer` works — and this deliberately does
+/// **not** use them. `wasm-bindgen-rayon` is a large lift and a large bundle against a
+/// 1.6 MB gzip ceiling, and every other thread in the shell turned out to be
+/// removable rather than portable. This one is too: meshing is pure compute over an
+/// owned [`SectionSnapshot`], with no shared state and no ordering requirement, so
+/// spreading it over frames is behaviourally equivalent to spreading it over cores —
+/// only slower.
+///
+/// # What this DOES change, stated plainly
+///
+/// The native pool's docs make a promise this arm cannot keep: *"a slow frame delays
+/// the upload of finished geometry, never the meshing and never the simulation"*, so
+/// that presentation never gates simulation. In a browser there is one thread, so
+/// **meshing is on the frame thread and that invariant is structurally broken.** It is
+/// not papered over; it is bounded. [`BROWSER_MESH_BUDGET`] caps the work per drain,
+/// so the event loop keeps turning, keep-alives keep being sent, and the session does
+/// not look stalled to the server — which is the actual hazard the native invariant
+/// exists to prevent (a client the server considers stalled is sent no chunks at
+/// all). The cost is that a large backlog takes more frames to appear, which is
+/// visible as terrain filling in progressively rather than as a stall.
+///
+/// If that ever proves too slow to be pleasant, the next move is a Web Worker holding
+/// the classifier and meshing off-thread — a real answer, and a bigger one than a
+/// budget. It is not `rayon`.
+///
+/// # How to change it
+///
+/// Keep the two `drain` methods the only place work happens. [`submit`](Self::submit)
+/// must stay O(1): it is called from the enqueue system, which can submit a whole
+/// column's sections in one frame, and meshing there would put the cost back on the
+/// caller that the budget exists to protect.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Resource)]
+pub struct MeshScheduler {
+    /// Submitted-but-unmeshed snapshots, oldest first.
+    ///
+    /// A `VecDeque` used strictly FIFO, so submission order is meshing order. That
+    /// matters more here than on native: the pool completes jobs in whatever order
+    /// its workers finish, but with one thread the queue order *is* the order the
+    /// world appears in, and `DirtyColumns` has already sorted its submissions by
+    /// ring distance and view cone. Draining LIFO would show the player the far
+    /// edge of the backlog first.
+    queue: std::collections::VecDeque<SectionSnapshot>,
+    /// Meshed but not yet handed to the caller.
+    ///
+    /// Non-empty only when a `drain` hit the budget mid-queue... which cannot
+    /// currently happen, because `drain` returns everything it meshed. It exists so
+    /// `drain_blocking(n)` can mesh past `n` without discarding the surplus.
+    ready: Vec<Meshed>,
+    classifier: ShellClassifier,
+    column_source: ColumnSource,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl MeshScheduler {
+    /// Build the browser scheduler. `worker_count` is accepted and **ignored**.
+    ///
+    /// Ignored rather than removed from the signature: the caller
+    /// (`Sim::build`) derives it from `available_parallelism`, which on wasm32
+    /// returns `Err` and so already falls back to 1, and keeping one signature means
+    /// no `cfg` at the construction site. The count is logged so a browser session
+    /// says out loud that it is meshing in-frame.
+    #[must_use]
+    pub fn new(worker_count: usize, classifier: ShellClassifier) -> Self {
+        let column_source = if classifier.is_vanilla() {
+            ColumnSource::Streaming
+        } else {
+            ColumnSource::Complete
+        };
+        tracing::info!(
+            target: "mesh",
+            requested_workers = worker_count,
+            budget_ms = BROWSER_MESH_BUDGET.as_millis(),
+            "browser mesh scheduler: no worker threads (thread::spawn traps on wasm32);              meshing in-frame under a time budget"
+        );
+        Self {
+            queue: std::collections::VecDeque::new(),
+            ready: Vec::new(),
+            classifier,
+            column_source,
+        }
+    }
+
+    /// Whether the world this scheduler meshes has all its columns already.
+    #[must_use]
+    pub fn column_source(&self) -> ColumnSource {
+        self.column_source
+    }
+
+    /// Queue a snapshot for meshing. O(1) — no meshing happens here.
+    pub fn submit(&mut self, snapshot: SectionSnapshot) {
+        self.queue.push_back(snapshot);
+    }
+
+    /// Number of submitted jobs not yet drained.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.queue.len() + self.ready.len()
+    }
+
+    /// Mesh for at most [`BROWSER_MESH_BUDGET`] and return what got finished.
+    ///
+    /// **Meshes at least one section whenever the queue is non-empty, even if the
+    /// budget is already spent.** Without that floor a machine slow enough to blow
+    /// the budget on a single section would return an empty `Vec` forever and the
+    /// world would never appear — a livelock that looks exactly like "meshing is
+    /// broken". Checking the deadline *after* each section rather than before is what
+    /// gives the floor for free.
+    pub fn drain(&mut self) -> Vec<Meshed> {
+        let mut out = std::mem::take(&mut self.ready);
+        let deadline = crate::platform::Instant::now() + BROWSER_MESH_BUDGET;
+        while let Some(snap) = self.queue.pop_front() {
+            out.push(mesh_one(snap, &self.classifier));
+            if crate::platform::Instant::now() >= deadline {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Mesh until at least `n` results exist (or the queue empties), ignoring the
+    /// budget.
+    ///
+    /// The budget is deliberately *not* applied: this method's native counterpart
+    /// blocks the caller, its two callers are both outside the frame loop (the
+    /// headless one-shot path and `Sim::end_session`'s flush), and a caller that
+    /// asked for `n` meshes and got fewer because a clock ran out would have no way
+    /// to make progress. Honouring the request is the same contract the native arm
+    /// has.
+    pub fn drain_blocking(&mut self, n: usize) -> Vec<Meshed> {
+        while self.ready.len() < n {
+            let Some(snap) = self.queue.pop_front() else {
+                break;
+            };
+            let meshed = mesh_one(snap, &self.classifier);
+            self.ready.push(meshed);
+        }
+        std::mem::take(&mut self.ready)
     }
 }
 

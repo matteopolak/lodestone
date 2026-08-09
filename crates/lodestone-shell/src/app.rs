@@ -112,7 +112,14 @@ use recipe_panel::{
     recipe_toast_now_ms, recipe_toast_view,
 };
 #[allow(unused_imports)]
-use runners::{run_connect, run_headless, run_windowed};
+use runners::run_windowed;
+// The two CLI-diagnostic runners are `cfg(not(wasm32))` at their definitions — see
+// `run` below — so the import has to carry the identical `cfg`. A blanket `use` here
+// would name items that do not exist for the browser target, which is precisely the
+// `unresolved import` this crate spent the port learning to avoid.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(unused_imports)]
+use runners::{run_connect, run_headless};
 #[allow(unused_imports)]
 use weather::{ContinuousTimeOfDay, ShellWeatherProbe, WeatherTracker, weather_columns_for_frame};
 
@@ -122,8 +129,23 @@ use weather::{ContinuousTimeOfDay, ShellWeatherProbe, WeatherTracker, weather_co
 /// Returns an error if GPU bring-up or the event loop fails.
 pub fn run(config: Config) -> anyhow::Result<()> {
     match config.mode {
+        // `Headless` writes a PPM and `Connect` paces itself with
+        // `std::thread::sleep`; both are CLI diagnostics, and both are native-only.
+        // A browser reaches this function with `Mode::Window` — there is no command
+        // line to select anything else — so the arms are refused rather than gated
+        // into silence, which keeps "how did we get here?" answerable if a future
+        // caller does set one.
+        #[cfg(not(target_arch = "wasm32"))]
         Mode::Headless => run_headless(config),
+        #[cfg(not(target_arch = "wasm32"))]
         Mode::Connect => run_connect(config),
+        #[cfg(target_arch = "wasm32")]
+        Mode::Headless | Mode::Connect => Err(anyhow::anyhow!(
+            "{:?} is a native CLI diagnostic mode: it needs a filesystem to write a \
+             PPM to, or a raw TCP socket and a blocking sleep. A browser session is \
+             always Mode::Window.",
+            config.mode
+        )),
         Mode::Window => run_windowed(config),
     }
 }

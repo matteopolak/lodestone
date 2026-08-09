@@ -241,6 +241,33 @@ CONFINEMENT_RULES=(
   # `menu/render/tests.rs` and `sim/tests.rs` were converted for exactly that.
   "lodestone-shell instant-confinement|crates/lodestone-shell/src|std::time::Instant|platform.rs"
   "lodestone-shell systemtime-confinement|crates/lodestone-shell/src|std::time::SystemTime::now|platform.rs"
+  # `thread::spawn` TRAPS on wasm32. Measured, executed in a wasm VM, and the three
+  # thread entry points do NOT behave alike -- which is why this rule names one of
+  # them and not the family:
+  #
+  #     std::thread::spawn                TRAPS
+  #     std::thread::sleep                TRAPS
+  #     std::thread::Builder::new().spawn Err(Unsupported)  -- degrades
+  #     std::thread::available_parallelism Err              -- degrades
+  #
+  # So `remote_skins.rs` and `net.rs`, which use the `Builder` form and handle its
+  # `Err`, were never crash-class; `mesher.rs`'s pool and `menu/status.rs`'s probe
+  # thread were. The status one was REACHABLE -- it fires when the player opens the
+  # Multiplayer screen -- and no `cargo check` at any target could see it.
+  #
+  # Allowlist = the three files that genuinely confine it behind
+  # `cfg(not(target_arch = "wasm32"))`, each with a browser arm beside it. A new
+  # ungated `thread::spawn` anywhere else in the crate is what this catches.
+  #
+  # SCOPE LIMIT, stated because a guard you trust further than it reaches is worse
+  # than none: this does NOT cover `thread::sleep`, which traps just as hard. Its
+  # production site (`app/runners.rs::run_connect`) is gated, but its other sites are
+  # inside `#[cfg(test)] mod tests` in `net.rs` and `menu/status.rs` -- files whose
+  # production halves must stay covered. A grep cannot tell a test module from a
+  # production one, so allowlisting those two files to add a `sleep` rule would buy
+  # one hazard and blind two files to it. If you add `thread::sleep` to production
+  # code here, nothing will stop you: gate it yourself.
+  "lodestone-shell thread-spawn-confinement|crates/lodestone-shell/src|thread::spawn|mesher.rs,accounts.rs,status.rs"
 )
 
 for rule in "${CONFINEMENT_RULES[@]}"; do
