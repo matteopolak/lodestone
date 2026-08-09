@@ -395,12 +395,29 @@ impl WindowApp {
     /// Tab reaches here at all because `input::resolve_key` short-circuits on
     /// `gate.chat_open` before any gameplay binding — the player-list binding is
     /// on the same physical key and would otherwise eat it.
+    ///
+    /// # Order, which is the whole of the suggestion dropdown's key routing
+    ///
+    /// `ChatScreen.keyPressed` gives `CommandSuggestions.keyPressed` **first
+    /// refusal** on every key, before Enter, Escape or anything else. That is
+    /// what makes Escape close the popup rather than the box, and it is why the
+    /// popup arm below sits above the `Escape` arm rather than beside it.
+    ///
+    /// The Up/Down arrows never arrive here — `handle_chat_history_key` in
+    /// `lifecycle.rs` intercepts them one layer up, and it consults the popup
+    /// first for the same reason.
     pub(super) fn handle_chat_key(&mut self, event: &winit::event::KeyEvent) {
         // Land any `command_suggestion` reply that arrived since the last key.
         // See `pump_command_suggestions` for why this is here rather than only
         // in the frame loop.
         self.pump_command_suggestions();
         if let PhysicalKey::Code(code) = event.physical_key {
+            // `CommandSuggestions.keyPressed`'s first refusal, above every arm
+            // below. Only Escape has anything to consume here; Tab is handled in
+            // its own arm because it also has a job with no popup up.
+            if code == KeyCode::Escape && self.chat_input.suggestion_escape() {
+                return;
+            }
             match code {
                 KeyCode::Escape => {
                     let _ = self.chat_input.take();
@@ -417,17 +434,21 @@ impl WindowApp {
                 }
                 KeyCode::Backspace => {
                     self.chat_input.backspace();
+                    self.refresh_command_suggestions();
                     return;
                 }
-                // Issue #471 step 3, and the point of the whole chain: the
-                // completion is computed against the tree **the server sent**
-                // (`net::CommandTreeCell`), not against anything local. With no
-                // tree yet — a server that has sent no `minecraft:commands`, or
-                // any point before login completes — `ChatInput::tab` offers
-                // nothing rather than an empty list.
+                // The point of the whole chain: the completion is computed
+                // against the tree **the server sent** (`net::CommandTreeCell`),
+                // not against anything local. With no tree yet — a server that
+                // has sent no `minecraft:commands`, or any point before login
+                // completes — `ChatInput::tab` offers nothing rather than an
+                // empty list.
+                //
+                // `shift_held` is `event.hasShiftDown()`: Shift+Tab walks the
+                // candidate list backwards.
                 KeyCode::Tab => {
                     let tree = self.command_tree();
-                    if let Some(action) = self.chat_input.tab(tree.as_deref())
+                    if let Some(action) = self.chat_input.tab(tree.as_deref(), self.shift_held)
                         && let Some(net) = self.sim.net()
                     {
                         // A `Completion::NeedsServer` position: the answer
@@ -442,7 +463,69 @@ impl WindowApp {
         }
         if let Some(text) = &event.text {
             self.chat_input.push_str(text.as_str());
+            self.refresh_command_suggestions();
         }
+    }
+
+    /// `ChatScreen.onEdited` — the `EditBox` responder, run after every edit to
+    /// the line.
+    ///
+    /// **Every edit path must call this**, and it is the difference between a
+    /// dropdown that appears while typing and one that only ever appears on Tab.
+    /// The three callers are the printable-text and Backspace arms of
+    /// [`Self::handle_chat_key`] and the paste path; a fourth edit site added
+    /// without this call would silently go back to the old behaviour, which no
+    /// `cargo check` can see.
+    pub(super) fn refresh_command_suggestions(&mut self) {
+        let tree = self.command_tree();
+        if let Some(action) = self.chat_input.update_command_info(tree.as_deref())
+            && let Some(net) = self.sim.net()
+        {
+            net.send_action(action);
+        }
+    }
+
+    /// The suggestion row the pointer is over, or `None` when there is no popup
+    /// or the pointer is outside it.
+    ///
+    /// The rect comes from [`crate::hud::HudRenderer::suggestion_layout`], i.e.
+    /// from the same expression and the same font the draw resolves — the only
+    /// way a click can be guaranteed to land on the row the player sees. Without
+    /// a renderer or a render target there is no rect and therefore no hit, which
+    /// is the right answer for a frame that has not been drawn.
+    pub(super) fn suggestion_row_under_cursor(&self) -> Option<usize> {
+        let list = self.chat_input.suggestion_list()?;
+        let hud = self.hud.as_ref()?;
+        let (w, h) = self.target.as_ref().map(lodestone_render::RenderTarget::size)?;
+        let opts = self.nav.options();
+        let popup = crate::hud::SuggestionPopup {
+            line: self.chat_input.as_str(),
+            start: list.start(),
+            candidates: list.candidates(),
+            selected: list.current(),
+            offset: list.offset(),
+            cursor: None,
+        };
+        let gui_scale = self.nav.gui_scale();
+        let layout = hud.suggestion_layout(
+            w,
+            h,
+            gui_scale,
+            crate::hud::ChatDisplayOptions {
+                scale: opts.chat_scale,
+                width_pct: opts.chat_width,
+                height_pct_unfocused: opts.chat_height_unfocused,
+                height_pct_focused: opts.chat_height_focused,
+                line_spacing: opts.chat_line_spacing,
+                text_opacity: opts.chat_opacity,
+                background_opacity: opts.chat_background_opacity,
+                colors: opts.chat_colors,
+            },
+            &popup,
+        );
+        let (cx, cy) =
+            crate::hud::HudRenderer::canvas_cursor(w, h, gui_scale, self.cursor);
+        layout.row_at(cx, cy, list.offset(), list.candidates().len())
     }
 
     /// The command tree the connected server sent, if any.

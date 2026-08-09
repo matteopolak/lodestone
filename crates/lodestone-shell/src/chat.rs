@@ -125,19 +125,39 @@
 //!   produces a false red on input that is actually fine, which is the
 //!   safer direction for a UX feature to be wrong in.
 //!
-//! ## What presses the key (issue #471 step 3)
+//! ## What presses the key
 //!
-//! [`ChatInput::tab`] is the seam a keystroke actually reaches:
-//! `app::menus::handle_chat_key`'s `KeyCode::Tab` arm calls it with the tree
-//! from `net::CommandTreeCell`, sends the [`ClientAction`] it returns for a
-//! [`Completion::NeedsServer`] position, and
-//! `app::menus::pump_command_suggestions` polls the cell for the reply and
-//! feeds it to [`ChatInput::apply_suggestions`]. Before that arm existed,
-//! [`complete`] and [`SuggestionRequests`] had **no production caller at all**
-//! — the island this module's tests could not see, because a crate's own test
-//! suite is a closed loop. `crates/lodestone-shell/tests/
-//! command_tree_completion.rs` is the gate that drives the whole chain against
-//! a real 26.2 server's captured tree.
+//! Two seams, not one, and mixing them up is how the dropdown would go back to
+//! being Tab-only:
+//!
+//! * [`ChatInput::update_command_info`] is vanilla's `EditBox` responder
+//!   (`ChatScreen.onEdited` → `CommandSuggestions.updateCommandInfo`) and is
+//!   what makes the popup appear **while typing**.
+//!   `app::menus::handle_chat_key` calls it after every edit.
+//! * [`ChatInput::tab`] is the Tab key
+//!   (`CommandSuggestions.keyPressed`), plus [`ChatInput::suggestion_up`],
+//!   [`ChatInput::suggestion_down`] and [`ChatInput::suggestion_escape`] for the
+//!   rest of `SuggestionsList.keyPressed`. The mouse half —
+//!   [`ChatInput::suggestion_hover`], [`ChatInput::suggestion_click`],
+//!   [`ChatInput::suggestion_scroll`] — is driven from `app::lifecycle`'s
+//!   pointer arms against the rect `hud::suggestion_layout` resolved for the
+//!   frame.
+//!
+//! Either seam can return a [`ClientAction`] for a
+//! [`Completion::NeedsServer`] position; `app::menus::pump_command_suggestions`
+//! polls `net::CommandTreeCell` for the reply and feeds it to
+//! [`ChatInput::apply_suggestions`]. Before those arms existed, [`complete`] and
+//! [`SuggestionRequests`] had **no production caller at all** — the island this
+//! module's tests could not see, because a crate's own test suite is a closed
+//! loop. `crates/lodestone-shell/tests/command_tree_completion.rs` is the gate
+//! that drives the whole chain against a real 26.2 server's captured tree.
+//!
+//! The popup's own geometry — the row height, the visible window, the rect the
+//! pointer is tested against — is [`hud::suggestion_layout`]'s, because it needs
+//! font metrics this module deliberately has none of (see just below). This
+//! module owns the *state machine* and nothing that measures a glyph.
+//!
+//! [`hud::suggestion_layout`]: crate::hud::suggestion_layout
 //!
 //! `highlight`/`complete` return **byte spans into the input string**, not
 //! screen pixels — this crate has no font metrics and does not compute any.
@@ -1125,40 +1145,186 @@ fn player_name_candidates(names: &[String], partial: &str) -> Vec<Candidate> {
         .collect()
 }
 
-/// The suggestion list currently spliced into the input line, and where it
-/// came from.
+/// The most rows the popup shows at once — `ChatScreen.init`'s
+/// `suggestionLineLimit` argument to the `CommandSuggestions` constructor
+/// (`new CommandSuggestions(…, 1, 10, true, -805306368)`). Candidates past this
+/// are reachable by scrolling the window, not by growing the box.
+pub const SUGGESTION_LINE_LIMIT: usize = 10;
+
+/// `ChatScreen.init`'s `lineStartOffset` argument — the `1` in the same
+/// constructor call. It appears in exactly one expression,
+/// [`SuggestionsList::cycle`]'s forward scroll, and nowhere else; naming it
+/// separately is what keeps that from reading as an off-by-one.
+pub const SUGGESTION_LINE_START_OFFSET: usize = 1;
+
+/// The dropdown itself — vanilla's `CommandSuggestions.SuggestionsList`,
+/// transcribed field for field.
 ///
-/// `prefix` is `line[..start]` **captured when the list was computed**, which
-/// is what makes "is this list still about the line on screen?" answerable
-/// without re-walking the tree: the line is still ours exactly while it equals
-/// `prefix + candidates[index].text`. Any other edit — a typed character, a
-/// backspace, a send — makes that comparison fail, so the next Tab recomputes
-/// instead of cycling a list that no longer describes the line.
+/// # The three pieces of state, and why each is separate
+///
+/// * `current` is the highlighted row, an index into **`candidates`**, not into
+///   the visible window. It wraps at both ends ([`Self::select`]).
+/// * `offset` is the first *visible* row, so the window is
+///   `candidates[offset .. offset + rows()]`. Vanilla scrolls it only from
+///   [`Self::cycle`] and the mouse wheel — never from a bare `select`, which is
+///   why hover and click do not jump the window under the pointer.
+/// * `tab_cycles` is what makes one key do two jobs. Vanilla's
+///   `SuggestionsList.keyPressed` runs `if (tabCycles) cycle(...)` *before*
+///   `useSuggestion()`, and only `useSuggestion` sets the flag: so the **first**
+///   Tab commits the highlighted row without moving, and every Tab after that
+///   moves first. The arrows clear it (`tabCycles = false`), so browsing with
+///   Up/Down and then pressing Tab commits what you are looking at rather than
+///   the one after it.
+///
+/// `original` is vanilla's `originalContents` — the line as it was when the list
+/// was built. Every commit is computed from *that*, not from the current line,
+/// which is what lets Tab cycle: the second Tab replaces the first Tab's text
+/// rather than appending to it. Brigadier's `Suggestion.apply` splices over the
+/// suggestion's own range, and in the chat box that range always ends at the
+/// cursor, which [`ChatInput`] keeps at the end of the line — so the splice is
+/// `original[..start] + text`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ActiveCompletion {
-    /// Byte offset the candidate text replaces from, to end of line.
+pub struct SuggestionsList {
+    /// Byte offset into [`Self::original`] the candidate text replaces from.
     start: usize,
-    /// `line[..start]` at the moment this list was produced.
-    prefix: String,
+    /// The line as it was when this list was built — `originalContents`.
+    original: String,
     candidates: Vec<Candidate>,
-    /// Which candidate is currently spliced in. Tab advances it, wrapping.
-    index: usize,
+    /// First visible row; `0` until a cycle or a scroll moves the window.
+    offset: usize,
+    /// The highlighted row, an index into [`Self::candidates`].
+    current: usize,
+    /// Whether the next Tab moves the selection before committing it — see the
+    /// struct doc.
+    tab_cycles: bool,
 }
 
-impl ActiveCompletion {
-    /// The line this list currently claims to have produced.
-    fn line(&self) -> String {
-        let mut s = String::with_capacity(self.prefix.len() + 16);
-        s.push_str(&self.prefix);
-        if let Some(c) = self.candidates.get(self.index) {
+impl SuggestionsList {
+    /// How many rows are visible — `Math.min(suggestionList.size(),
+    /// suggestionLineLimit)`.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.candidates.len().min(SUGGESTION_LINE_LIMIT)
+    }
+
+    /// The largest `offset` that still fills the window —
+    /// `Math.max(size - suggestionLineLimit, 0)`, the clamp ceiling both
+    /// [`Self::cycle`] and [`Self::scroll`] use.
+    fn max_offset(&self) -> usize {
+        self.candidates.len().saturating_sub(SUGGESTION_LINE_LIMIT)
+    }
+
+    /// `SuggestionsList.select`: set the highlighted row, **wrapping** by one
+    /// list length at each end.
+    ///
+    /// Vanilla's body adds or subtracts `size()` exactly once, so it is only
+    /// correct for a step of ±1 — which is all `cycle` and the mouse ever ask
+    /// for. `index` is signed here for the same reason vanilla's can go negative.
+    fn select(&mut self, index: isize) {
+        let len = self.candidates.len() as isize;
+        if len == 0 {
+            return;
+        }
+        let mut current = index;
+        if current < 0 {
+            current += len;
+        }
+        if current >= len {
+            current -= len;
+        }
+        self.current = current.clamp(0, len - 1) as usize;
+    }
+
+    /// `SuggestionsList.cycle`: move the selection one step and scroll the
+    /// window to keep it visible.
+    ///
+    /// The two scroll branches are not symmetric in vanilla and that asymmetry
+    /// is what makes a wrap land correctly. Stepping off the top clamps the
+    /// selection itself as the new offset; stepping off the bottom uses
+    /// `current + lineStartOffset - suggestionLineLimit`, so wrapping from row 0
+    /// back to the last row scrolls all the way to [`Self::max_offset`] in one
+    /// move instead of one row at a time.
+    fn cycle(&mut self, direction: isize) {
+        self.select(self.current as isize + direction);
+        let first = self.offset;
+        let last = self.offset + SUGGESTION_LINE_LIMIT - 1;
+        if self.current < first {
+            self.offset = self.current.min(self.max_offset());
+        } else if self.current > last {
+            self.offset = (self.current + SUGGESTION_LINE_START_OFFSET)
+                .saturating_sub(SUGGESTION_LINE_LIMIT)
+                .min(self.max_offset());
+        }
+    }
+
+    /// `SuggestionsList.mouseScrolled`, minus the rect test the caller has
+    /// already done: `offset = clamp(offset - scroll, 0, max_offset)` with
+    /// `scroll` itself clamped to `-1..=1` by `CommandSuggestions.mouseScrolled`.
+    ///
+    /// **The selection does not move.** Scrolling changes only which rows are on
+    /// screen, so the highlight can scroll out of view — vanilla's behaviour, and
+    /// the reason `current` and `offset` are separate fields at all.
+    fn scroll(&mut self, notches: i32) {
+        let scroll = notches.clamp(-1, 1);
+        let moved = self.offset as i64 - i64::from(scroll);
+        self.offset = moved.clamp(0, self.max_offset() as i64) as usize;
+    }
+
+    /// The line committing the highlighted row produces —
+    /// `Suggestion.apply(originalContents)`. See the struct doc for why this is
+    /// computed from `original` rather than from the line on screen.
+    fn applied(&self) -> String {
+        let mut s = String::with_capacity(self.start + 16);
+        s.push_str(&self.original[..self.start]);
+        if let Some(c) = self.candidates.get(self.current) {
             s.push_str(&c.text);
         }
         s
     }
 
-    /// Whether `line` is still the one this list produced — see the struct doc.
-    fn owns(&self, line: &str) -> bool {
-        self.line() == line
+    /// The grey preview drawn after the caret — vanilla's
+    /// `EditBox.setSuggestion(calculateSuggestionSuffix(input.getValue(),
+    /// suggestion.apply(originalContents)))`, which is the applied line's tail
+    /// past whatever is currently typed, or nothing when the applied line is not
+    /// an extension of it (a candidate that *shortens* or rewrites the token).
+    #[must_use]
+    fn ghost(&self, line: &str) -> Option<String> {
+        let applied = self.applied();
+        applied
+            .strip_prefix(line)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+
+    /// The highlighted candidate.
+    #[must_use]
+    pub fn selected(&self) -> Option<&Candidate> {
+        self.candidates.get(self.current)
+    }
+
+    /// Every candidate, in the order the rows draw.
+    #[must_use]
+    pub fn candidates(&self) -> &[Candidate] {
+        &self.candidates
+    }
+
+    /// The highlighted row's index into [`Self::candidates`].
+    #[must_use]
+    pub fn current(&self) -> usize {
+        self.current
+    }
+
+    /// The first visible row's index into [`Self::candidates`].
+    #[must_use]
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Byte offset into the line the candidates replace from — the popup's own x
+    /// anchor, `suggestions.getRange().getStart()`.
+    #[must_use]
+    pub fn start(&self) -> usize {
+        self.start
     }
 }
 
@@ -1174,15 +1340,27 @@ impl ActiveCompletion {
 ///
 /// # What is deliberately simpler than vanilla
 ///
-/// Vanilla re-requests suggestions on **every keystroke** and draws a popup the
-/// player picks from; this splices the chosen candidate straight into the line
-/// on Tab, which is the same edit vanilla's `useSuggestion` performs when the
-/// player commits one. The popup itself is a `hud.rs` draw and is not built
-/// here — see `docs/commands.md`.
+/// Only the **usage box** is missing — vanilla's grey `commandUsage` lines
+/// (`CommandSuggestions.extractUsage`), which restate a node's argument grammar
+/// when there is no suggestion list to show. It needs Brigadier's
+/// `getSmartUsage` over the whole reachable subtree, which is a second walker
+/// rather than a draw. The list itself, its window, its navigation and its
+/// tooltips are all here.
+///
+/// Dynamic, server-provided suggestions arrive through
+/// [`SuggestionRequests`]; see this module's own doc for which positions need
+/// them.
 #[derive(Debug, Clone, Default)]
 pub struct ChatCompletion {
     requests: SuggestionRequests,
-    active: Option<ActiveCompletion>,
+    list: Option<SuggestionsList>,
+    /// Vanilla's `allowSuggestions`. `false` from the moment the line is
+    /// replaced wholesale — chat opened, or a history entry recalled — and set
+    /// `true` again by the first real edit, exactly as `ChatScreen.onEdited`
+    /// sets it and `ChatScreen.moveInHistory` clears it. Without it, opening
+    /// chat with a seeded `/` would pop the whole command list before the player
+    /// has typed anything.
+    allow_suggestions: bool,
     /// The line as it was when [`SuggestionRequests::request`] was sent. The
     /// reply's `start` is a byte offset **into that text**, so applying it to a
     /// line that has since changed would splice at an offset that no longer
@@ -1198,24 +1376,41 @@ impl ChatCompletion {
         Self::default()
     }
 
-    /// Forget any list and any in-flight request. Called when the line is
-    /// replaced wholesale (chat opened, or the line sent).
+    /// Forget any list and any in-flight request, and stop offering suggestions
+    /// until the next real edit — `setAllowSuggestions(false)` plus a cleared
+    /// pending request. Called when the line is replaced wholesale (chat opened,
+    /// a history entry recalled, or the line sent).
     pub fn reset(&mut self) {
-        self.active = None;
+        self.list = None;
+        self.allow_suggestions = false;
         self.pending_line = None;
     }
 
-    /// The candidates currently offered, newest list first. Empty when Tab has
-    /// produced nothing — a draw can show this without asking again.
-    #[must_use]
-    pub fn candidates(&self) -> &[Candidate] {
-        self.active.as_ref().map_or(&[], |a| &a.candidates)
+    /// `CommandSuggestions.hide` — drop the list but leave suggestions allowed,
+    /// so the next keystroke brings a fresh one back. This is what Escape does
+    /// while the popup is up.
+    pub fn hide(&mut self) {
+        self.list = None;
     }
 
-    /// Which of [`Self::candidates`] is spliced into the line right now.
+    /// The dropdown, when one is on screen. `None` is "no popup", which is what
+    /// a draw and a mouse hit-test both key off.
+    #[must_use]
+    pub fn list(&self) -> Option<&SuggestionsList> {
+        self.list.as_ref()
+    }
+
+    /// The candidates currently offered. Empty when there is no list — a draw
+    /// can show this without asking again.
+    #[must_use]
+    pub fn candidates(&self) -> &[Candidate] {
+        self.list.as_ref().map_or(&[], |l| &l.candidates)
+    }
+
+    /// Which of [`Self::candidates`] is highlighted right now.
     #[must_use]
     pub fn selected(&self) -> Option<usize> {
-        self.active.as_ref().map(|a| a.index)
+        self.list.as_ref().map(|l| l.current)
     }
 
     /// Whether a `command_suggestion` reply is still outstanding.
@@ -1224,63 +1419,93 @@ impl ChatCompletion {
         self.requests.is_pending()
     }
 
-    /// Start (or restart) a list, splicing its first candidate into `buf`.
-    fn begin(&mut self, start: usize, buf: &mut String, candidates: Vec<Candidate>) {
-        if candidates.is_empty() || start > buf.len() || !buf.is_char_boundary(start) {
+    /// `CommandSuggestions.showSuggestions`: build the list and highlight its
+    /// first row, **without touching the line**.
+    ///
+    /// The line is untouched on purpose and it is the whole difference between
+    /// this and the pre-dropdown behaviour: vanilla shows the candidates and
+    /// previews the highlighted one as grey ghost text, and only
+    /// `useSuggestion` — Tab, or a click — actually edits. Browsing with the
+    /// arrows therefore never rewrites what you typed.
+    fn show(&mut self, start: usize, line: &str, candidates: Vec<Candidate>) {
+        if candidates.is_empty() || start > line.len() || !line.is_char_boundary(start) {
             return;
         }
-        let active = ActiveCompletion {
+        self.list = Some(SuggestionsList {
             start,
-            prefix: buf[..start].to_string(),
+            original: line.to_owned(),
             candidates,
-            index: 0,
-        };
-        *buf = active.line();
-        self.active = Some(active);
+            offset: 0,
+            current: 0,
+            tab_cycles: false,
+        });
     }
 }
 
 impl ChatInput {
-    /// The Tab key. Completes the line in place against `tree`, and returns a
-    /// [`ClientAction`] the caller must send when the position can only be
-    /// answered by the server (`None` otherwise, including when there is no
-    /// tree yet — a server that has sent no `minecraft:commands`, or any point
-    /// before login completes, offers nothing rather than an empty list).
+    /// `ChatScreen.onEdited` → `CommandSuggestions.updateCommandInfo`: the line
+    /// changed, so recompute the candidate set and show the popup.
     ///
-    /// Pressing Tab again on an unedited completed line **cycles** to the next
-    /// candidate rather than recomputing, which is vanilla's
-    /// `SuggestionsList.cycle` behaviour reached through the same key.
-    pub fn tab(&mut self, tree: Option<&CommandTree>) -> Option<ClientAction> {
-        if let Some(active) = self.completion.active.as_mut()
-            && active.owns(&self.buf)
-        {
-            if active.candidates.len() > 1 {
-                active.index = (active.index + 1) % active.candidates.len();
-                self.buf = active.line();
-            }
+    /// **Call this after every edit** — a typed character, a backspace, a paste.
+    /// It is the seam that makes the dropdown appear while typing rather than
+    /// only on Tab, which is the whole of what the player asked for, and it is
+    /// deliberately a separate call rather than folded into
+    /// [`ChatInput::push_char`]: those take no [`CommandTree`], and threading one
+    /// into every edit method would put the tree lookup on the hot path of a
+    /// paste. Vanilla splits it exactly here too, as the `EditBox` responder.
+    ///
+    /// Returns the same [`ClientAction`] [`Self::tab`] does, for a position only
+    /// the server can answer. Vanilla re-requests on every keystroke as well
+    /// (`getCompletionSuggestions` is called from `updateCommandInfo`), and
+    /// [`SuggestionRequests`]' transaction id is what keeps a stale reply from
+    /// landing on a newer line.
+    pub fn update_command_info(&mut self, tree: Option<&CommandTree>) -> Option<ClientAction> {
+        // `allowSuggestions = true` (`ChatScreen.onEdited`). The line the player
+        // is *typing* always gets a popup; the line they opened the box with, or
+        // recalled from history, does not until they touch it.
+        self.completion.allow_suggestions = true;
+        // `updateCommandInfo`'s own `this.suggestions = null` under
+        // `!keepSuggestions`: the list about to be rebuilt describes the old
+        // line, so it goes before anything can read it. `keepSuggestions` — the
+        // flag that suppresses this during `useSuggestion` — has no analogue
+        // here because `use_selected_suggestion` does not route its edit back
+        // through this method.
+        self.completion.list = None;
+        self.recompute_suggestions(tree)
+    }
+
+    /// The shared body of [`Self::update_command_info`] and [`Self::tab`]'s
+    /// show-the-list branch: pick the candidate source from the *line*, not from
+    /// the key, and show what comes back.
+    ///
+    /// Vanilla forks here, and the fork is on the line:
+    /// `CommandSuggestions.updateCommandInfo` computes `isCommand = commandsOnly
+    /// || startsWithSlash`, and an ordinary chat line takes the `else if
+    /// (!command.isBlank())` branch, which suggests online player names with no
+    /// server round trip at all. So that path needs no command tree and works
+    /// against any server — including one that has sent us no
+    /// `minecraft:commands`.
+    fn recompute_suggestions(&mut self, tree: Option<&CommandTree>) -> Option<ClientAction> {
+        if !self.completion.allow_suggestions {
             return None;
         }
-        self.completion.active = None;
-        // Vanilla forks here, and the fork is on the *line*, not the key:
-        // `CommandSuggestions.updateCommandInfo` computes `isCommand =
-        // commandsOnly || startsWithSlash`, and an ordinary chat line takes the
-        // `else if (!command.isBlank())` branch, which suggests online player
-        // names with no server round trip at all. So this path needs no command
-        // tree and works against any server — including one that has sent us no
-        // `minecraft:commands`.
         if !self.buf.starts_with('/') {
             if self.buf.trim().is_empty() {
                 return None;
             }
             let start = last_word_index(&self.buf);
             let candidates = player_name_candidates(&self.online_players, &self.buf[start..]);
-            self.completion.begin(start, &mut self.buf, candidates);
+            let line = std::mem::take(&mut self.buf);
+            self.completion.show(start, &line, candidates);
+            self.buf = line;
             return None;
         }
         let tree = tree?;
         match complete(tree, &self.buf) {
             Completion::Local { start, candidates } => {
-                self.completion.begin(start, &mut self.buf, candidates);
+                let line = std::mem::take(&mut self.buf);
+                self.completion.show(start, &line, candidates);
+                self.buf = line;
                 None
             }
             Completion::NeedsServer { .. } => {
@@ -1289,6 +1514,150 @@ impl ChatInput {
             }
             Completion::None => None,
         }
+    }
+
+    /// The Tab key — `CommandSuggestions.keyPressed`'s `isCycleFocus` path,
+    /// which is two different behaviours depending on whether the popup is up.
+    ///
+    /// * **Popup up**: `SuggestionsList.keyPressed` commits the highlighted row
+    ///   ([`Self::use_selected_suggestion`]), cycling first if the previous Tab
+    ///   already committed one — see [`SuggestionsList`]'s doc on `tab_cycles`.
+    ///   `shift` reverses the cycle (`event.hasShiftDown()`).
+    /// * **Popup down**: `showSuggestions(true)` — build and show the list,
+    ///   editing nothing. Reachable because `ChatScreen.init` calls
+    ///   `setAllowHiding(false)`, which is what makes the outer
+    ///   `allowHiding && !isVisible` early return false for the chat box.
+    ///
+    /// So against the running client, where the popup is already up from typing,
+    /// the first Tab commits — the behaviour this key had before the dropdown
+    /// existed. It is the `autoSuggestions`-off ordering (show, *then* commit on
+    /// the next Tab) that is new, and that is vanilla's too.
+    ///
+    /// Returns a [`ClientAction`] the caller must send when the position can
+    /// only be answered by the server (`None` otherwise, including when there is
+    /// no tree yet — a server that has sent no `minecraft:commands`, or any
+    /// point before login completes, offers nothing rather than an empty list).
+    pub fn tab(&mut self, tree: Option<&CommandTree>, shift: bool) -> Option<ClientAction> {
+        if let Some(list) = self.completion.list.as_mut() {
+            if list.tab_cycles {
+                list.cycle(if shift { -1 } else { 1 });
+            }
+            self.use_selected_suggestion();
+            return None;
+        }
+        // `showSuggestions` is reached from the *key*, so it must work even
+        // where an edit would not have offered anything yet: opening the box
+        // with a seeded `/` leaves `allow_suggestions` false, and vanilla's Tab
+        // still shows the list there.
+        self.completion.allow_suggestions = true;
+        self.recompute_suggestions(tree)
+    }
+
+    /// `SuggestionsList.useSuggestion`: splice the highlighted candidate into
+    /// the line and arm the next Tab to cycle.
+    ///
+    /// The list survives the edit — vanilla's `keepSuggestions = true` around
+    /// `setValue` is what stops the responder tearing it down, and here the same
+    /// thing falls out of not calling [`Self::update_command_info`]. That is
+    /// what makes a run of Tabs walk the candidates instead of re-deriving a
+    /// one-element list from the text the previous Tab just wrote.
+    pub fn use_selected_suggestion(&mut self) {
+        let Some(list) = self.completion.list.as_mut() else {
+            return;
+        };
+        self.buf = list.applied();
+        list.tab_cycles = true;
+    }
+
+    /// Up in the popup — `SuggestionsList.keyPressed`'s `event.isUp()` arm:
+    /// `cycle(-1)` and clear `tabCycles`, so the following Tab commits *this*
+    /// row rather than the next one. Returns whether the key was consumed, which
+    /// is how the caller knows not to fall through to the chat history.
+    pub fn suggestion_up(&mut self) -> bool {
+        match self.completion.list.as_mut() {
+            Some(list) => {
+                list.cycle(-1);
+                list.tab_cycles = false;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Down in the popup — the `event.isDown()` arm. See [`Self::suggestion_up`].
+    pub fn suggestion_down(&mut self) -> bool {
+        match self.completion.list.as_mut() {
+            Some(list) => {
+                list.cycle(1);
+                list.tab_cycles = false;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Escape in the popup — the `event.isEscape()` arm: hide the list and drop
+    /// the ghost preview, consuming the key.
+    ///
+    /// Consuming it is the point. `CommandSuggestions.keyPressed` runs *before*
+    /// `ChatScreen`'s own handling, so the first Escape closes the popup and
+    /// only a second one closes the chat box.
+    pub fn suggestion_escape(&mut self) -> bool {
+        if self.completion.list.is_none() {
+            return false;
+        }
+        self.completion.hide();
+        true
+    }
+
+    /// The mouse wheel over the popup — `SuggestionsList.mouseScrolled`. The
+    /// caller has already established the pointer is inside the rect.
+    pub fn suggestion_scroll(&mut self, notches: i32) -> bool {
+        match self.completion.list.as_mut() {
+            Some(list) => {
+                list.scroll(notches);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Hovering row `index` — the `mouseMoved` half of
+    /// `SuggestionsList.extractRenderState`, which calls `select(i + offset)`
+    /// for the row under a pointer that has *moved* since the last frame.
+    ///
+    /// Deliberately not a cycle: `select` alone leaves `offset` untouched, so
+    /// hovering never scrolls the window out from under the pointer.
+    pub fn suggestion_hover(&mut self, index: usize) -> bool {
+        match self.completion.list.as_mut() {
+            Some(list) if index < list.candidates.len() => {
+                list.select(index as isize);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Clicking row `index` — `SuggestionsList.mouseClicked`: select it, then
+    /// commit it. The caller resolves the row from the rect the draw used.
+    pub fn suggestion_click(&mut self, index: usize) -> bool {
+        if !self.suggestion_hover(index) {
+            return false;
+        }
+        self.use_selected_suggestion();
+        true
+    }
+
+    /// The grey preview drawn after the caret — see [`SuggestionsList::ghost`].
+    #[must_use]
+    pub fn suggestion_ghost(&self) -> Option<String> {
+        self.completion.list.as_ref()?.ghost(&self.buf)
+    }
+
+    /// The dropdown to draw, when there is one.
+    #[must_use]
+    pub fn suggestion_list(&self) -> Option<&SuggestionsList> {
+        self.completion.list()
     }
 
     /// Apply a `command_suggestion` reply. Returns `true` when it was applied
@@ -1301,10 +1670,10 @@ impl ChatInput {
     /// because the id match consumes the pending request, so the second poll of
     /// the same response is already stale.
     ///
-    /// The splice uses the **server's own `start`**, not the local walker's:
-    /// the response's range is authoritative for where its texts belong (a
-    /// correct list at the wrong offset overwrites the wrong span on screen),
-    /// and a `start` outside the requested line is rejected rather than clamped.
+    /// The list uses the **server's own `start`**, not the local walker's: the
+    /// response's range is authoritative for where its texts belong (a correct
+    /// list at the wrong offset overwrites the wrong span on screen), and a
+    /// `start` outside the requested line is rejected rather than clamped.
     pub fn apply_suggestions(
         &mut self,
         response: &lodestone_model::command_tree::CommandSuggestionsResponse,
@@ -1331,11 +1700,13 @@ impl ChatInput {
         if candidates.is_empty() {
             return false;
         }
-        self.completion.begin(start, &mut self.buf, candidates);
+        let line = std::mem::take(&mut self.buf);
+        self.completion.show(start, &line, candidates);
+        self.buf = line;
         true
     }
 
-    /// The candidates the last Tab produced — for a draw, and for a test to
+    /// The candidates currently offered — for a draw, and for a test to
     /// assert the exact set rather than "some suggestions appeared".
     #[must_use]
     pub fn completion_candidates(&self) -> &[Candidate] {
@@ -1619,36 +1990,62 @@ mod tests {
         assert_eq!(got, ["Steve", "steven", "My_Steve"]);
     }
 
+    /// Type `text` the way the app does — one character, then the responder,
+    /// per keystroke. `app::menus::handle_chat_key` calls
+    /// [`ChatInput::update_command_info`] after every edit, so a test that only
+    /// calls `push_str` is driving a seam production does not use, and would
+    /// measure Tab against a popup that is never up.
+    fn typed(input: &mut ChatInput, tree: Option<&CommandTree>, text: &str) {
+        for ch in text.chars() {
+            input.push_char(ch);
+            let _ = input.update_command_info(tree);
+        }
+    }
+
     /// Tab in an ordinary chat line completes the **last word only**, leaving
     /// everything before it untouched, and needs no command tree.
+    ///
+    /// **Re-derived, not inverted**: this used to press Tab against a line typed
+    /// with a bare `push_str`, where no popup existed and Tab's job was to
+    /// compute *and* splice. It now types through the responder, so the popup is
+    /// already up and Tab is `useSuggestion` — vanilla's ordering. The asserted
+    /// line is unchanged because both orderings commit candidate 0 on the first
+    /// Tab; what changed is that the popup is now observable before it.
     #[test]
     fn tab_completes_a_player_name_in_a_plain_chat_line() {
         let mut input = ChatInput::new();
         input.set_online_players(vec!["Steve".to_owned(), "Alex".to_owned()]);
-        input.push_str("hey Ste");
-        // `None`: no tree, and none needed — this is the local branch.
-        assert!(input.tab(None).is_none());
-        assert_eq!(input.as_str(), "hey Ste".replace("Ste", "Steve"));
+        typed(&mut input, None, "hey Ste");
+        // The popup is up from typing alone — the point of the whole unit.
         assert_eq!(
             input.completion_candidates().iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
             ["Steve"]
         );
+        // …and previews the highlighted row as ghost text without editing.
+        assert_eq!(input.suggestion_ghost().as_deref(), Some("ve"));
+        assert_eq!(input.as_str(), "hey Ste");
+        // `None`: no tree, and none needed — this is the local branch.
+        assert!(input.tab(None, false).is_none());
+        assert_eq!(input.as_str(), "hey Steve");
     }
 
-    /// A second Tab on an unedited completed line cycles rather than recomputing —
-    /// the same `SuggestionsList.cycle` behaviour the command path already has.
+    /// A second Tab cycles rather than recomputing — `tabCycles`, armed by the
+    /// first `useSuggestion`.
     #[test]
     fn a_second_tab_cycles_through_matching_names() {
         let mut input = ChatInput::new();
         input.set_online_players(vec!["Steve".to_owned(), "steven".to_owned()]);
-        input.push_str("Ste");
-        assert!(input.tab(None).is_none());
+        typed(&mut input, None, "Ste");
+        assert!(input.tab(None, false).is_none());
         assert_eq!(input.as_str(), "Steve");
-        assert!(input.tab(None).is_none());
+        assert!(input.tab(None, false).is_none());
         assert_eq!(input.as_str(), "steven");
         // …and wraps.
-        assert!(input.tab(None).is_none());
+        assert!(input.tab(None, false).is_none());
         assert_eq!(input.as_str(), "Steve");
+        // Shift+Tab walks the other way, from row 0 back round to the last.
+        assert!(input.tab(None, true).is_none());
+        assert_eq!(input.as_str(), "steven");
     }
 
     /// An empty (or whitespace-only) line offers nothing, matching vanilla's
@@ -1659,11 +2056,13 @@ mod tests {
     fn tab_on_a_blank_line_offers_nothing() {
         let mut input = ChatInput::new();
         input.set_online_players(vec!["Steve".to_owned()]);
-        assert!(input.tab(None).is_none());
+        assert!(input.tab(None, false).is_none());
         assert_eq!(input.as_str(), "");
-        input.push_str("   ");
-        assert!(input.tab(None).is_none());
+        assert!(input.suggestion_list().is_none());
+        typed(&mut input, None, "   ");
+        assert!(input.tab(None, false).is_none());
         assert_eq!(input.as_str(), "   ");
+        assert!(input.suggestion_list().is_none());
     }
 
     /// A **command** line still takes the command path: with no tree it offers
@@ -1674,10 +2073,233 @@ mod tests {
     fn a_command_line_never_falls_back_to_player_names() {
         let mut input = ChatInput::new();
         input.set_online_players(vec!["Steve".to_owned()]);
-        input.push_str("/msg Ste");
-        assert!(input.tab(None).is_none());
+        typed(&mut input, None, "/msg Ste");
+        assert!(input.tab(None, false).is_none());
         assert_eq!(input.as_str(), "/msg Ste");
         assert!(input.completion_candidates().is_empty());
+    }
+
+    /// The popup does **not** open on a line the player has not edited —
+    /// `allowSuggestions` is `false` until `ChatScreen.onEdited` sets it.
+    ///
+    /// Opening chat with the command key seeds a `/`, and vanilla shows nothing
+    /// there. Without this the whole root command list would appear the instant
+    /// the box opened.
+    #[test]
+    fn a_seeded_line_shows_nothing_until_it_is_edited() {
+        let mut input = ChatInput::new();
+        input.set_online_players(vec!["Steve".to_owned(), "steven".to_owned()]);
+        input.set("Ste");
+        // The responder has not run, so `allow_suggestions` is still false.
+        assert!(input.suggestion_list().is_none());
+        // A recalled history entry behaves the same way
+        // (`moveInHistory`'s `setAllowSuggestions(false)`).
+        input.record_sent("Ste");
+        let _ = input.take();
+        assert!(input.history_up());
+        assert_eq!(input.as_str(), "Ste");
+        assert!(input.suggestion_list().is_none());
+        // …and the next edit brings it back.
+        typed(&mut input, None, "v");
+        assert_eq!(
+            input.completion_candidates().iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            ["Steve", "steven"]
+        );
+    }
+
+    /// Escape closes the **popup**, not the box, and only once.
+    ///
+    /// `CommandSuggestions.keyPressed` runs before `ChatScreen`'s own handling,
+    /// so the caller must be told the key was consumed — otherwise one Escape
+    /// both hides the list and cancels the message.
+    #[test]
+    fn escape_consumes_once_and_then_falls_through() {
+        let mut input = ChatInput::new();
+        input.set_online_players(vec!["Steve".to_owned()]);
+        typed(&mut input, None, "Ste");
+        assert!(input.suggestion_escape());
+        assert!(input.suggestion_list().is_none());
+        // Nothing left to hide: the second Escape is the caller's.
+        assert!(!input.suggestion_escape());
+    }
+
+    /// The arrows move the highlight, leave the line alone, and re-aim Tab.
+    ///
+    /// The exact indices are the assertion, not "it moved": `tabCycles` is
+    /// cleared by an arrow, so the Tab after Down must commit **row 1**, the row
+    /// on screen. A `SuggestionsList` that cycled unconditionally on Tab would
+    /// commit row 2 here and still look like it was working.
+    #[test]
+    fn the_arrows_browse_without_editing_and_tab_commits_what_is_highlighted() {
+        let mut input = ChatInput::new();
+        input.set_online_players(vec![
+            "Steve".to_owned(),
+            "steven".to_owned(),
+            "Stephanie".to_owned(),
+        ]);
+        typed(&mut input, None, "Ste");
+        let names: Vec<&str> = input
+            .completion_candidates()
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(names, ["Stephanie", "Steve", "steven"]);
+        assert_eq!(input.suggestion_list().map(SuggestionsList::current), Some(0));
+        assert!(input.suggestion_down());
+        assert_eq!(input.suggestion_list().map(SuggestionsList::current), Some(1));
+        // Browsing edits nothing.
+        assert_eq!(input.as_str(), "Ste");
+        assert_eq!(input.suggestion_ghost().as_deref(), Some("ve"));
+        // Up wraps past the top to the last row.
+        assert!(input.suggestion_up());
+        assert!(input.suggestion_up());
+        assert_eq!(input.suggestion_list().map(SuggestionsList::current), Some(2));
+        assert!(input.suggestion_down());
+        assert_eq!(input.suggestion_list().map(SuggestionsList::current), Some(0));
+        // Down once, then Tab: `steven` (row 2) is what a Tab that cycled
+        // unconditionally would give.
+        assert!(input.suggestion_down());
+        assert!(input.tab(None, false).is_none());
+        assert_eq!(input.as_str(), "Steve");
+    }
+
+    /// A click commits the row clicked, wherever the highlight was.
+    #[test]
+    fn a_click_selects_and_commits_that_row() {
+        let mut input = ChatInput::new();
+        input.set_online_players(vec![
+            "Steve".to_owned(),
+            "steven".to_owned(),
+            "Stephanie".to_owned(),
+        ]);
+        typed(&mut input, None, "Ste");
+        assert!(input.suggestion_click(2));
+        assert_eq!(input.as_str(), "steven");
+        // Out of range is refused rather than clamped onto a neighbour.
+        assert!(!input.suggestion_click(3));
+    }
+
+    /// The window is capped and scrolls; the visible slice is predicted exactly.
+    ///
+    /// **The input has to exceed [`SUGGESTION_LINE_LIMIT`]** or the cap, the
+    /// scroll offset and the wrap are all unobservable — with ten or fewer
+    /// candidates `offset` is pinned at `0` under every implementation, correct
+    /// or not. Twelve names, so the last two are off-screen at rest.
+    ///
+    /// The two hypotheses this separates: `cycle`'s forward branch uses
+    /// `current + lineStartOffset - suggestionLineLimit`, and the naive
+    /// `current - suggestionLineLimit + 1` happens to agree with it — they are
+    /// the same expression. What does *not* agree is a `cycle` that scrolls by
+    /// one row on a wrap: stepping Up from row 0 must jump `offset` straight to
+    /// `max_offset` (2), not to 11 clamped or to 1.
+    #[test]
+    fn the_visible_window_caps_at_ten_rows_and_scrolls_with_the_selection() {
+        let names: Vec<String> = (0..12).map(|i| format!("Player{i:02}")).collect();
+        let mut input = ChatInput::new();
+        input.set_online_players(names);
+        typed(&mut input, None, "Player");
+        let list = input.suggestion_list().expect("popup");
+        assert_eq!(list.candidates().len(), 12);
+        assert_eq!(list.rows(), SUGGESTION_LINE_LIMIT);
+        assert_eq!((list.current(), list.offset()), (0, 0));
+        // Down nine times reaches the last visible row without scrolling: rows
+        // 0..=9 are on screen, so row 9 is still inside the window.
+        for _ in 0..9 {
+            assert!(input.suggestion_down());
+        }
+        let list = input.suggestion_list().expect("popup");
+        assert_eq!((list.current(), list.offset()), (9, 0));
+        // The tenth Down is the first that must scroll — one row, to 1.
+        assert!(input.suggestion_down());
+        let list = input.suggestion_list().expect("popup");
+        assert_eq!((list.current(), list.offset()), (10, 1));
+        assert!(input.suggestion_down());
+        let list = input.suggestion_list().expect("popup");
+        assert_eq!((list.current(), list.offset()), (11, 2));
+        // Wrapping past the end lands back at row 0 with the window rewound.
+        assert!(input.suggestion_down());
+        let list = input.suggestion_list().expect("popup");
+        assert_eq!((list.current(), list.offset()), (0, 0));
+        // And wrapping the other way jumps the window all the way down at once.
+        assert!(input.suggestion_up());
+        let list = input.suggestion_list().expect("popup");
+        assert_eq!((list.current(), list.offset()), (11, 2));
+    }
+
+    /// The wheel moves the window and **not** the selection, and clamps at both
+    /// ends — `mouseScrolled` clamps `scroll` to `-1..=1` and `offset` to
+    /// `0..=max_offset`, and never touches `current`.
+    ///
+    /// A implementation that moved the selection too would pass a
+    /// "scrolling changes what is on screen" assertion; the pinned `current` is
+    /// what separates them.
+    #[test]
+    fn the_wheel_scrolls_the_window_without_moving_the_selection() {
+        let names: Vec<String> = (0..12).map(|i| format!("Player{i:02}")).collect();
+        let mut input = ChatInput::new();
+        input.set_online_players(names);
+        typed(&mut input, None, "Player");
+        // A wheel notch *down* is a negative scroll in vanilla's sign
+        // convention, which increases `offset`.
+        assert!(input.suggestion_scroll(-1));
+        let list = input.suggestion_list().expect("popup");
+        assert_eq!((list.current(), list.offset()), (0, 1));
+        // Several notches in one event are clamped to one row of movement.
+        assert!(input.suggestion_scroll(-7));
+        let list = input.suggestion_list().expect("popup");
+        assert_eq!((list.current(), list.offset()), (0, 2));
+        // …and 2 is the ceiling: 12 candidates, 10 rows.
+        assert!(input.suggestion_scroll(-1));
+        assert_eq!(input.suggestion_list().map(SuggestionsList::offset), Some(2));
+        // Back up, clamping at 0.
+        for _ in 0..4 {
+            assert!(input.suggestion_scroll(1));
+        }
+        let list = input.suggestion_list().expect("popup");
+        assert_eq!((list.current(), list.offset()), (0, 0));
+    }
+
+    /// Committing a candidate replaces the previous commit, not appends to it.
+    ///
+    /// This is the one `original` exists for. Every commit is
+    /// `original[..start] + text`, so cycling `Player00 → Player01` rewrites the
+    /// token; a list that recomputed from the line on screen would build
+    /// `Player00Player01`, and with a *single*-candidate list the two are
+    /// indistinguishable.
+    #[test]
+    fn cycling_replaces_the_previous_commit_rather_than_appending() {
+        let mut input = ChatInput::new();
+        input.set_online_players(vec![
+            "Player00".to_owned(),
+            "Player01".to_owned(),
+            "Player02".to_owned(),
+        ]);
+        typed(&mut input, None, "hi Play");
+        assert!(input.tab(None, false).is_none());
+        assert_eq!(input.as_str(), "hi Player00");
+        assert!(input.tab(None, false).is_none());
+        assert_eq!(input.as_str(), "hi Player01");
+        assert!(input.tab(None, false).is_none());
+        assert_eq!(input.as_str(), "hi Player02");
+    }
+
+    /// With the popup down, Tab **shows** it and edits nothing — vanilla's
+    /// `autoSuggestions`-off ordering, reachable here because
+    /// `ChatScreen.init` calls `setAllowHiding(false)`.
+    #[test]
+    fn tab_with_no_popup_shows_it_without_editing() {
+        let mut input = ChatInput::new();
+        input.set_online_players(vec!["Steve".to_owned(), "steven".to_owned()]);
+        typed(&mut input, None, "Ste");
+        assert!(input.suggestion_escape());
+        assert!(input.suggestion_list().is_none());
+        assert!(input.tab(None, false).is_none());
+        // Shown, not committed.
+        assert_eq!(input.as_str(), "Ste");
+        assert_eq!(input.suggestion_list().map(SuggestionsList::current), Some(0));
+        // The *next* Tab commits.
+        assert!(input.tab(None, false).is_none());
+        assert_eq!(input.as_str(), "Steve");
     }
 
     mod command_ux {

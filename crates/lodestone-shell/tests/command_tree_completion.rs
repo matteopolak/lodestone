@@ -331,6 +331,26 @@ use lodestone::menu::command_block::{CommandBlockOpen, CommandBlockState};
 use lodestone_client::ClientAction;
 use lodestone_model::command_tree::{CommandSuggestionEntry, CommandSuggestionsResponse};
 
+/// Build a `ChatInput` holding `line`, typed the way the app types it — one
+/// character, then `ChatInput::update_command_info`, per keystroke.
+///
+/// **This, and not `ChatInput::set`, is the seam production uses.**
+/// `app::menus::handle_chat_key` runs the responder after every edit, which is
+/// what raises the suggestion popup while the player types; `set` is
+/// `ChatScreen.init`'s `setValue`, which deliberately does *not* fire it (see
+/// `ChatCompletion::allow_suggestions`). Every test below that presses Tab has
+/// to arrive here through this function or it is measuring Tab against a popup
+/// that is never up — a *world*-species vacuity, where the flaw is in the input
+/// rather than in the assertion.
+fn typing(line: &str, tree: Option<&CommandTree>) -> ChatInput {
+    let mut input = ChatInput::new();
+    for ch in line.chars() {
+        input.push_char(ch);
+        let _ = input.update_command_info(tree);
+    }
+    input
+}
+
 /// Tab against a **half-typed command name** — no trailing space, the input
 /// shape that has now hidden two separate bugs in this feature (a `.trim()`ing
 /// canonicalize, and a `parse_line` that offered a fully-typed token's own
@@ -339,18 +359,11 @@ use lodestone_model::command_tree::{CommandSuggestionEntry, CommandSuggestionsRe
 #[test]
 fn tab_completes_a_half_typed_command_name_and_then_cycles() {
     let tree = real_server_tree();
-    let mut input = ChatInput::new();
-    input.set("/game");
+    let mut input = typing("/game", Some(&tree));
 
-    assert!(
-        input.tab(Some(&tree)).is_none(),
-        "a locally-answerable position needs no server round trip"
-    );
-    assert_eq!(
-        input.as_str(),
-        "/gamemode",
-        "Tab must splice the first candidate into the line — this is the pixel"
-    );
+    // The dropdown is already up from the typing alone, previewing its first
+    // row as ghost text without having touched the line — the behaviour this
+    // whole widget was added for.
     assert_eq!(
         input
             .completion_candidates()
@@ -358,22 +371,38 @@ fn tab_completes_a_half_typed_command_name_and_then_cycles() {
             .map(|c| c.text.as_str())
             .collect::<Vec<_>>(),
         vec!["gamemode", "gamerule"],
-        "and the offered set is the real server's own pair for the prefix `game`"
+        "the offered set is the real server's own pair for the prefix `game`"
     );
+    assert_eq!(input.as_str(), "/game", "and typing alone edits nothing");
+    assert_eq!(input.suggestion_ghost().as_deref(), Some("mode"));
 
-    assert!(input.tab(Some(&tree)).is_none());
-    assert_eq!(input.as_str(), "/gamerule", "a second Tab cycles");
-    assert!(input.tab(Some(&tree)).is_none());
-    assert_eq!(input.as_str(), "/gamemode", "and the cycle wraps");
-
-    // Editing the line abandons the cycle: the next Tab must recompute against
-    // what is actually typed, not advance a list about older text.
-    input.push_str("x");
-    assert!(input.tab(Some(&tree)).is_none());
+    assert!(
+        input.tab(Some(&tree), false).is_none(),
+        "a locally-answerable position needs no server round trip"
+    );
     assert_eq!(
         input.as_str(),
-        "/gamemodex",
-        "`gamemodex` matches no command, so Tab leaves the line alone rather \
+        "/gamemode",
+        "Tab must splice the highlighted candidate into the line — this is the pixel"
+    );
+
+    assert!(input.tab(Some(&tree), false).is_none());
+    assert_eq!(input.as_str(), "/gamerule", "a second Tab cycles");
+    assert!(input.tab(Some(&tree), false).is_none());
+    assert_eq!(input.as_str(), "/gamemode", "and the cycle wraps");
+    assert!(input.tab(Some(&tree), true).is_none());
+    assert_eq!(input.as_str(), "/gamerule", "Shift+Tab cycles backwards");
+
+    // Editing the line abandons the cycle: the responder rebuilds the list from
+    // what is actually typed, so the next Tab cannot advance a list about older
+    // text.
+    input.push_str("x");
+    let _ = input.update_command_info(Some(&tree));
+    assert!(input.tab(Some(&tree), false).is_none());
+    assert_eq!(
+        input.as_str(),
+        "/gamerulex",
+        "`gamerulex` matches no command, so Tab leaves the line alone rather \
          than cycling the stale `gamemode`/`gamerule` list"
     );
 }
@@ -385,16 +414,8 @@ fn tab_completes_a_half_typed_command_name_and_then_cycles() {
 #[test]
 fn tab_after_a_trailing_space_splices_the_argument_domain_at_the_servers_start() {
     let tree = real_server_tree();
-    let mut input = ChatInput::new();
-    input.set("/gamemode ");
+    let mut input = typing("/gamemode ", Some(&tree));
 
-    assert!(input.tab(Some(&tree)).is_none());
-    assert_eq!(
-        input.as_str(),
-        "/gamemode adventure",
-        "the four modes the live server itself returned (start=10), spliced at 10 — \
-         a splice at any other offset produces a different line"
-    );
     assert_eq!(
         input
             .completion_candidates()
@@ -403,13 +424,19 @@ fn tab_after_a_trailing_space_splices_the_argument_domain_at_the_servers_start()
             .collect::<Vec<_>>(),
         vec!["adventure", "creative", "spectator", "survival"],
     );
+    assert!(input.tab(Some(&tree), false).is_none());
+    assert_eq!(
+        input.as_str(),
+        "/gamemode adventure",
+        "the four modes the live server itself returned (start=10), spliced at 10 — \
+         a splice at any other offset produces a different line"
+    );
 
     // The half-typed *argument* token, again with no trailing space.
-    let mut input = ChatInput::new();
-    input.set("/gamemode s");
-    assert!(input.tab(Some(&tree)).is_none());
+    let mut input = typing("/gamemode s", Some(&tree));
+    assert!(input.tab(Some(&tree), false).is_none());
     assert_eq!(input.as_str(), "/gamemode spectator");
-    assert!(input.tab(Some(&tree)).is_none());
+    assert!(input.tab(Some(&tree), false).is_none());
     assert_eq!(input.as_str(), "/gamemode survival");
 }
 
@@ -422,13 +449,11 @@ fn tab_after_a_trailing_space_splices_the_argument_domain_at_the_servers_start()
 fn with_no_tree_the_same_tab_press_changes_nothing() {
     let tree = real_server_tree();
 
-    let mut with = ChatInput::new();
-    with.set("/game");
-    let _ = with.tab(Some(&tree));
+    let mut with = typing("/game", Some(&tree));
+    let _ = with.tab(Some(&tree), false);
 
-    let mut without = ChatInput::new();
-    without.set("/game");
-    let action = without.tab(None);
+    let mut without = typing("/game", None);
+    let action = without.tab(None, false);
 
     assert_eq!(with.as_str(), "/gamemode");
     assert_eq!(
@@ -455,10 +480,9 @@ fn with_no_tree_the_same_tab_press_changes_nothing() {
 #[test]
 fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
     let tree = real_server_tree();
-    let mut input = ChatInput::new();
-    input.set("/summon ");
+    let mut input = typing("/summon ", Some(&tree));
 
-    let Some(ClientAction::CommandSuggestion { id, command }) = input.tab(Some(&tree)) else {
+    let Some(ClientAction::CommandSuggestion { id, command }) = input.tab(Some(&tree), false) else {
         panic!("a resource argument must produce a server round trip, not a local guess");
     };
     assert_eq!(command, "/summon ", "the request carries the line as typed");
@@ -494,9 +518,8 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
     assert_eq!(input.as_str(), "/summon ");
 
     // The in-date reply. `start` is read from the response, not re-derived.
-    let mut input = ChatInput::new();
-    input.set("/summon ");
-    let Some(ClientAction::CommandSuggestion { id, .. }) = input.tab(Some(&tree)) else {
+    let mut input = typing("/summon ", Some(&tree));
+    let Some(ClientAction::CommandSuggestion { id, .. }) = input.tab(Some(&tree), false) else {
         panic!("expected a second round trip");
     };
     let good = CommandSuggestionsResponse {
@@ -506,7 +529,6 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
         suggestions: vec![entry("minecraft:creeper"), entry("minecraft:zombie")],
     };
     assert!(input.apply_suggestions(&good));
-    assert_eq!(input.as_str(), "/summon minecraft:creeper");
     assert_eq!(
         input
             .completion_candidates()
@@ -515,6 +537,18 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
             .collect::<Vec<_>>(),
         vec!["minecraft:creeper", "minecraft:zombie"],
     );
+    // **Re-derived, and this direction is the correction.** This used to assert
+    // the reply *spliced itself into the line*. Vanilla's async reply reaches
+    // `updateUsageInfo`, which ends in `showSuggestions(false)` — it raises the
+    // dropdown and edits nothing; only `useSuggestion` (Tab, or a click) writes
+    // to the `EditBox`. A reply that rewrote the line under a player still
+    // typing is exactly what the popup exists to avoid.
+    assert_eq!(
+        input.as_str(),
+        "/summon ",
+        "the reply raises the dropdown; it must not edit the line"
+    );
+    assert_eq!(input.suggestion_ghost().as_deref(), Some("minecraft:creeper"));
 
     // Polling the same response again — which is exactly what the per-frame
     // pump in `app::menus::pump_command_suggestions` does — is stale by
@@ -522,8 +556,11 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
     assert!(
         !input.apply_suggestions(&good),
         "the second poll of one response must be a no-op, or a frame loop would \
-         re-splice it forever"
+         re-raise it forever"
     );
+
+    // And the server's `start` is what the commit splices at.
+    assert!(input.tab(Some(&tree), false).is_none());
     assert_eq!(input.as_str(), "/summon minecraft:creeper");
 }
 
@@ -531,6 +568,10 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
 /// suggestion list: the same texts at two different offsets produce two
 /// different lines. An implementation that ignored the response's `start` (or
 /// re-derived its own) could not tell these apart.
+///
+/// The commit is now a separate Tab press — the reply itself only raises the
+/// dropdown (see the test above) — but the line comparison is unchanged, because
+/// `start` is carried on the list and consumed by the commit.
 #[test]
 fn the_replies_own_start_decides_where_the_text_lands() {
     let tree = real_server_tree();
@@ -539,9 +580,8 @@ fn the_replies_own_start_decides_where_the_text_lands() {
         tooltip: None,
     };
 
-    let mut at_token = ChatInput::new();
-    at_token.set("/summon ");
-    let Some(ClientAction::CommandSuggestion { id, .. }) = at_token.tab(Some(&tree)) else {
+    let mut at_token = typing("/summon ", Some(&tree));
+    let Some(ClientAction::CommandSuggestion { id, .. }) = at_token.tab(Some(&tree), false) else {
         panic!("expected a round trip");
     };
     assert!(at_token.apply_suggestions(&CommandSuggestionsResponse {
@@ -551,9 +591,8 @@ fn the_replies_own_start_decides_where_the_text_lands() {
         suggestions: vec![entry.clone()],
     }));
 
-    let mut at_zero = ChatInput::new();
-    at_zero.set("/summon ");
-    let Some(ClientAction::CommandSuggestion { id, .. }) = at_zero.tab(Some(&tree)) else {
+    let mut at_zero = typing("/summon ", Some(&tree));
+    let Some(ClientAction::CommandSuggestion { id, .. }) = at_zero.tab(Some(&tree), false) else {
         panic!("expected a round trip");
     };
     // Not a shape vanilla sends — a deliberately different offset, so the two
@@ -565,6 +604,8 @@ fn the_replies_own_start_decides_where_the_text_lands() {
         suggestions: vec![entry],
     }));
 
+    assert!(at_token.tab(Some(&tree), false).is_none());
+    assert!(at_zero.tab(Some(&tree), false).is_none());
     assert_eq!(at_token.as_str(), "/summon minecraft:zombie");
     assert_eq!(at_zero.as_str(), "minecraft:zombie");
     assert_ne!(at_token.as_str(), at_zero.as_str());

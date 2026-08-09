@@ -780,6 +780,17 @@ impl WindowApp {
         let crosshair = self.ui.is_playing();
         let world_hud = hud_follows_world(self.ui.screen());
 
+        // The command-suggestion dropdown. Declared **before** `hud_frame`
+        // because the frame borrows both, and a local declared after it would be
+        // dropped first. `chat_open` gates it as well as the list's own
+        // existence: closing the box does not clear the completion state (a
+        // cancelled line is deliberately recoverable), so an ungated popup would
+        // survive the close by one frame.
+        let suggestion_ghost = chat_open
+            .then(|| self.chat_input.suggestion_ghost())
+            .flatten();
+        let suggestion_list = chat_open.then(|| self.chat_input.suggestion_list()).flatten();
+
         let mut hud_frame = HudFrame::new(&self.sim.stats);
         hud_frame.show_debug = self.show_debug;
         hud_frame.crosshair = crosshair;
@@ -800,6 +811,25 @@ impl WindowApp {
         // frame, so a browser tab would die on the first chat open.
         hud_frame.chat_caret_visible =
             (crate::platform::epoch_duration().as_millis() / 300) % 2 == 0;
+        // Without these two lines the whole dropdown is an island: the state
+        // machine in `chat.rs` runs, its unit tests pass, and zero pixels change.
+        hud_frame.chat_suggestion_ghost = suggestion_ghost.as_deref();
+        hud_frame.chat_suggestions = suggestion_list.map(|list| crate::hud::SuggestionPopup {
+            line: self.chat_input.as_str(),
+            start: list.start(),
+            candidates: list.candidates(),
+            selected: list.current(),
+            offset: list.offset(),
+            // The tooltip's anchor, and its gate: vanilla shows a candidate's
+            // `Message` only while the pointer is over the list. `self.cursor`
+            // is physical pixels; the popup's rect is logical-canvas ones.
+            cursor: Some(crate::hud::HudRenderer::canvas_cursor(
+                w,
+                h,
+                self.nav.gui_scale(),
+                self.cursor,
+            )),
+        });
         // Without this the whole chat-option chain is an island: the fields are
         // persisted, `ChatDisplayOptions` is read by the draw, and the live
         // client would still show vanilla defaults forever.
