@@ -30,10 +30,16 @@ pub(super) fn advance(scale: f32) -> f32 {
     (GLYPH_W as f32 + 1.0) * scale
 }
 
-/// Pixel width of `s` at `scale`.
+/// Pixel width of `s` at `scale`, legacy `§`+code pairs counted as zero-width.
+///
+/// This is the jar-less twin of `VanillaFont::width`, and it has to agree with
+/// the jar-less *draw* (`hud::item_icon::ColourStream::text`), which consumes
+/// those pairs rather than drawing them. Counting them here would over-measure by
+/// two characters per code and push every centred label left of where it draws —
+/// the same defect the proportional path had.
 #[must_use]
 pub fn text_px(s: &str, scale: f32) -> f32 {
-    s.chars().count() as f32 * advance(scale)
+    crate::hud::item_icon::text_w(s, scale)
 }
 
 /// Truncates `s` so it fits in `max_px` at `scale`, appending nothing (the font

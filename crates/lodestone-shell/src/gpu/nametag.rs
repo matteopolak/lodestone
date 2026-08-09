@@ -248,10 +248,33 @@ impl InkLayoutCache {
 /// missing-glyph box `VanillaFont` draws is not reproduced here, a minor,
 /// deliberate fidelity loss for a case ordinary custom names/usernames don't
 /// hit (missing-glyph codepoints are rare in practice).
+///
+/// # Legacy `§` codes are consumed, and their colour is not applied
+///
+/// A `§`+code pair contributes no rect and no advance, matching
+/// `StringDecomposer.iterateFormatted` and `VanillaFont::legacy_run`. This is the
+/// path a plugin server's `§7`-prefixed mob name and a `§`-coded sign line both
+/// take, and before this they drew the two characters as glyphs.
+///
+/// The *effect* is dropped rather than applied, which is a real gap and a
+/// different one from the shape of this walk: both callers here paint every rect
+/// in one uniform colour supplied by the draw site (nametags white, sign lines the
+/// sign's dye), so there is nowhere for a per-run colour to go without giving
+/// [`LocalRect`] a colour and splitting the vertex buffers per run. Consuming the
+/// pair is the part that has to be right either way — a dropped colour reads as
+/// plain text, whereas an emitted pair reads as a bug.
 pub(super) fn layout_ink_runs(raster: &RasterFont, text: &str) -> (Vec<LocalRect>, f32) {
     let mut cursor = 0.0f32;
     let mut rects = Vec::new();
-    for ch in text.chars() {
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == lodestone_model::text::LEGACY_PREFIX {
+            // A dangling `§` is dropped too; vanilla `break`s on it.
+            if chars.next().is_none() {
+                break;
+            }
+            continue;
+        }
         let cp = ch as u32;
         match raster.raster(cp) {
             Some(r) => {
@@ -783,6 +806,7 @@ mod tests {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            death_time: 0.0,
             // Not on fire: these literals exist to position a nametag, not to
             // draw the entity, so no flame billboard is wanted.
             on_fire: false,
@@ -854,6 +878,7 @@ mod tests {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            death_time: 0.0,
             // Not on fire: these literals exist to position a nametag, not to
             // draw the entity, so no flame billboard is wanted.
             on_fire: false,
@@ -947,6 +972,7 @@ mod tests {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            death_time: 0.0,
             // Not on fire: these literals exist to position a nametag, not to
             // draw the entity, so no flame billboard is wanted.
             on_fire: false,

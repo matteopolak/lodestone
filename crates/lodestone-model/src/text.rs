@@ -28,6 +28,12 @@ use lodestone_core::Nbt;
 /// exhaustion on hostile network input.
 const MAX_DEPTH: usize = 64;
 
+/// The section sign that introduces a legacy formatting code —
+/// `ChatFormatting.PREFIX_CODE`, U+00A7. Named because it appears in a parser, a
+/// re-serialiser and an expansion pass, and `'\u{00a7}'` at a call site reads as
+/// an arbitrary codepoint.
+pub const LEGACY_PREFIX: char = '\u{00a7}';
+
 /// A Minecraft text colour: one of the sixteen named colours, or a modern
 /// 24-bit hex colour (`#rrggbb`, introduced in 1.16).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -454,13 +460,77 @@ impl Text {
         }
     }
 
-    /// Flattens this tree into styled runs, resolving inheritance against an
-    /// empty root style. Adjacent runs are **not** merged. `translate` nodes are
-    /// rendered as a single run carrying the node's resolved style (their
-    /// argument sub-styles collapse to plain within that run); literal and
-    /// `extra` inheritance is modelled exactly.
+    /// Flattens this tree into styled runs ready to draw: inheritance resolved
+    /// against an empty root style, **and** legacy `§` codes found inside
+    /// literal content expanded into their own runs.
+    ///
+    /// This is the one function a render surface should call. Vanilla has no
+    /// non-expanding string path either — `Font.drawInBatch` and `Font.width`
+    /// both go through `StringDecomposer.iterateFormatted`, which applies `§`
+    /// codes at *draw* time. That is exactly why a plugin server can put `§7`
+    /// inside a modern component and have it colour, and why a client that
+    /// flattens without expanding puts `§7` on screen as two glyphs.
+    ///
+    /// Both conventions exist in one field, and a server-list MOTD is where they
+    /// collide hardest: `description` arrives as a bare string full of `§c`
+    /// codes, or as a component tree with `color` keys, or — routinely — as a
+    /// component tree whose `text` values *also* contain `§` codes, because the
+    /// server built the string with a legacy formatter and wrapped it in modern
+    /// JSON. All three shapes are handled here; only the second is handled by
+    /// [`to_spans_ignoring_legacy_codes`](Self::to_spans_ignoring_legacy_codes).
+    ///
+    /// An expanded run inherits the enclosing component's style
+    /// ([`TextStyle::inherit`]), so `{"color":"gold","text":"a§cb"}` yields gold
+    /// `a` then red `b` — the legacy code overrides the colour it names and the
+    /// component's colour still governs the run before it. `§r` resets to the
+    /// *enclosing component's* style rather than to nothing, which is
+    /// `iterateFormatted`'s `resetStyle` parameter: it is seeded with the
+    /// component's own style, not `Style.EMPTY`.
+    ///
+    /// Adjacent runs are **not** merged. `translate` nodes are rendered as a
+    /// single run carrying the node's resolved style (their argument sub-styles
+    /// collapse to plain within that run); literal and `extra` inheritance is
+    /// modelled exactly.
     #[must_use]
     pub fn to_spans(&self) -> Vec<TextSpan> {
+        let mut out = Vec::new();
+        for span in self.to_spans_ignoring_legacy_codes() {
+            if !span.text.contains(LEGACY_PREFIX) {
+                out.push(span);
+                continue;
+            }
+            // `from_legacy` consumes every `§`+code pair, so the inner spans can
+            // carry no `§` of their own and this cannot recurse.
+            for inner in Self::from_legacy(&span.text).to_spans_ignoring_legacy_codes() {
+                out.push(TextSpan {
+                    text: inner.text,
+                    style: inner.style.inherit(&span.style),
+                });
+            }
+        }
+        out
+    }
+
+    /// Flattens this tree into styled runs, resolving inheritance against an
+    /// empty root style, **without** expanding legacy `§` codes inside literal
+    /// content — so a `§7` in a component's `text` survives into a span as two
+    /// literal characters.
+    ///
+    /// **Not for rendering.** A render surface that calls this draws `§7` as
+    /// glyphs, which is the defect the long name exists to advertise; use
+    /// [`to_spans`](Self::to_spans). `render_surfaces_do_not_bypass_legacy_expansion`
+    /// in this crate's `tests/legacy_expansion_guard.rs` enforces that
+    /// mechanically, because a doc comment stating an invariant is documentation
+    /// of intent and not a guard.
+    ///
+    /// The two legitimate uses are re-serialisation — [`to_legacy_string`], which
+    /// is putting the codes *back* and must not double-expand them — and
+    /// [`to_spans`]'s own inner pass.
+    ///
+    /// [`to_legacy_string`]: Self::to_legacy_string
+    /// [`to_spans`]: Self::to_spans
+    #[must_use]
+    pub fn to_spans_ignoring_legacy_codes(&self) -> Vec<TextSpan> {
         let mut spans = Vec::new();
         self.collect_spans(&TextStyle::default(), &default_translation, &mut spans, 0);
         spans
@@ -499,48 +569,29 @@ impl Text {
         }
     }
 
-    /// Flattens to styled runs like [`to_spans`](Self::to_spans), and
-    /// additionally expands legacy `§` codes found *inside* literal content.
-    ///
-    /// Both conventions exist in one field, and a server-list MOTD is where they
-    /// collide hardest: `description` arrives as a bare string full of `§c`
-    /// codes, or as a component tree with `color` keys, or — routinely — as a
-    /// component tree whose `text` values *also* contain `§` codes, because the
-    /// server built the string with a legacy formatter and wrapped it in modern
-    /// JSON. Plain [`to_spans`](Self::to_spans) is correct for the second shape
-    /// and leaves the first and third rendering their codes as literal glyphs.
-    ///
-    /// An expanded run inherits the enclosing component's style
-    /// ([`TextStyle::inherit`]), so `{"color":"gold","text":"a§cb"}` yields gold
-    /// `a` then red `b` — the legacy code overrides the colour it names and the
-    /// component's colour still governs the run before it.
+    /// The old name for [`to_spans`](Self::to_spans), kept only so an in-flight
+    /// call site keeps compiling. Expansion is now the default, so this is a
+    /// straight forward.
     #[must_use]
+    #[deprecated(note = "expansion is now the default: call `to_spans`")]
     pub fn to_spans_expanding_legacy(&self) -> Vec<TextSpan> {
-        let mut out = Vec::new();
-        for span in self.to_spans() {
-            if !span.text.contains('\u{00a7}') {
-                out.push(span);
-                continue;
-            }
-            for inner in Self::from_legacy(&span.text).to_spans() {
-                out.push(TextSpan {
-                    text: inner.text,
-                    style: inner.style.inherit(&span.style),
-                });
-            }
-        }
-        out
+        self.to_spans()
     }
 
     /// Renders this tree back to a legacy `§`-code string. Colour and each
     /// active format flag are emitted as codes ahead of each run; a `§r` reset
     /// is emitted whenever a run turns a flag *off* relative to the previous
     /// run. Hex colours (no legacy code) are dropped.
+    ///
+    /// Flattens with [`to_spans_ignoring_legacy_codes`](Self::to_spans_ignoring_legacy_codes)
+    /// on purpose: this function is putting `§` codes *back*, so a code already
+    /// literal in the tree's content is passed through unchanged rather than
+    /// expanded and re-emitted.
     #[must_use]
     pub fn to_legacy_string(&self) -> String {
         let mut out = String::new();
         let mut previous = TextStyle::default();
-        for span in self.to_spans() {
+        for span in self.to_spans_ignoring_legacy_codes() {
             let style = span.style;
             let turns_off = flag_on(previous.bold) && !flag_on(style.bold)
                 || flag_on(previous.italic) && !flag_on(style.italic)
@@ -573,8 +624,34 @@ impl Text {
     /// Parses legacy section-sign formatting codes into a styled tree.
     ///
     /// Each `§`-code starts a new sibling run. A colour code resets all
-    /// formatting (legacy semantics); `§r` resets to default. Unknown or
-    /// trailing codes are preserved literally.
+    /// formatting (legacy semantics); `§r` resets to default.
+    ///
+    /// # An unrecognised code, and a dangling `§`, are both *dropped*
+    ///
+    /// Not printed literally, and not partially printed. This is
+    /// `StringDecomposer.iterateFormatted`, whose `§` branch is:
+    ///
+    /// ```text
+    /// if (ch == 167) {
+    ///    if (i + 1 >= size) break;               // dangling §: the § is dropped
+    ///    ChatFormatting f = ChatFormatting.getByCode(string.charAt(i + 1));
+    ///    if (f != null) { … apply … }            // null: style untouched …
+    ///    i++;                                    // … but i++ runs regardless
+    /// }
+    /// ```
+    ///
+    /// `i++` is outside the `f != null` test, so an unrecognised pair consumes
+    /// **both** characters and emits neither — the sink never sees them. Three
+    /// answers were plausible here (print the pair, drop the `§` and keep the
+    /// code, drop both) and this is the one vanilla gives; the previous version
+    /// of this function chose the first.
+    ///
+    /// The consequence worth knowing: `§x§r§r§g§g§b§b`, the BungeeCord hex
+    /// dialect, is **not** honoured by vanilla 26.2 — `getByCode('x')` is null,
+    /// so `§x` vanishes and the six following pairs are read as six ordinary
+    /// colour codes, leaving the run coloured by the last one. Ours does the
+    /// same, deliberately: a client that honoured the dialect would disagree with
+    /// vanilla on every such string.
     #[must_use]
     pub fn from_legacy(input: &str) -> Self {
         let mut root = Self::default();
@@ -583,21 +660,18 @@ impl Text {
         let mut chars = input.chars().peekable();
 
         while let Some(character) = chars.next() {
-            if character != '§' {
+            if character != LEGACY_PREFIX {
                 buffer.push(character);
                 continue;
             }
-            let Some(code) = chars.next() else {
-                buffer.push(character);
-                break;
-            };
+            // Dangling `§`: vanilla `break`s without feeding it to the sink.
+            let Some(code) = chars.next() else { break };
             if let Some(next) = apply_legacy_code(current, code) {
                 flush_legacy_segment(&mut root, &mut buffer, current);
                 current = next;
-            } else {
-                buffer.push(character);
-                buffer.push(code);
             }
+            // Unrecognised code: both characters already consumed, style
+            // untouched, nothing emitted — vanilla's unconditional `i++`.
         }
         flush_legacy_segment(&mut root, &mut buffer, current);
         root
@@ -706,12 +780,39 @@ fn flush_legacy_segment(root: &mut Text, buffer: &mut String, style: TextStyle) 
     });
 }
 
+/// `Style.applyLegacyFormat`, as a `TextStyle` transform. `None` means the code
+/// is not one vanilla's `ChatFormatting.getByCode` recognises.
+///
+/// Two asymmetries, and swapping them makes `§c§lFoo` render in a way that looks
+/// almost right:
+///
+/// * **A colour code clears the five flags; a formatting code leaves the colour
+///   alone.** Vanilla's `default:` arm (every colour) assigns
+///   `bold = italic = strikethrough = underlined = obfuscated = false`
+///   *explicitly*, then sets the colour; the five named arms touch one field
+///   each and nothing else.
+/// * **`Some(false)`, not `None`.** The cleared flags are explicit-off, because
+///   `to_spans`'s expansion pass inherits an expanded run's style from the
+///   enclosing component: leaving them unspecified would let
+///   `{"bold":true,"text":"a§cb"}` inherit bold onto `b`, where vanilla turns it
+///   off. `None` here would be the `Some(false)` vs `None` collapse
+///   [`TextStyle`]'s own docs warn about, arrived at from the other direction.
+///
+/// `§r` stays all-`None` on purpose, and that is not the same claim: under
+/// `iterateFormatted` a reset restores `resetStyle`, which is seeded with the
+/// *component's own* style rather than `Style.EMPTY`, so all-unspecified plus
+/// [`TextStyle::inherit`] reproduces it exactly. At the root, where there is no
+/// enclosing style, all-unspecified *is* `Style.EMPTY`. One representation, both
+/// cases right.
 fn apply_legacy_code(mut style: TextStyle, code: char) -> Option<TextStyle> {
     if let Some(color) = TextColor::from_legacy_code(code) {
-        // A legacy colour code resets all formatting to just that colour.
         return Some(TextStyle {
             color: Some(color),
-            ..TextStyle::default()
+            bold: Some(false),
+            italic: Some(false),
+            underlined: Some(false),
+            strikethrough: Some(false),
+            obfuscated: Some(false),
         });
     }
     match code.to_ascii_lowercase() {

@@ -233,10 +233,23 @@ impl VanillaFont {
             .mul_add(scale, 0.0)
     }
 
-    /// The width of a plain string in device pixels at `scale`.
+    /// The width of a string in device pixels at `scale`, `§`+code pairs counted
+    /// as zero-width.
+    ///
+    /// Identical to [`legacy_width`](Self::legacy_width) — measurement has to
+    /// agree with [`draw`](Self::draw), and `draw` decomposes. Vanilla's
+    /// `Font.width(String)` decomposes too (`StringDecomposer.iterateFormatted`
+    /// into a width sink), so there is no version of this that counts a `§` as a
+    /// glyph and is still faithful.
+    ///
+    /// Both names are kept because a call site that says `legacy_width` is
+    /// documenting that its input is `§`-coded, which is worth reading; a call
+    /// site that says `width` is making no claim either way and now gets the right
+    /// answer regardless. Measuring the raw string over-counted by two characters
+    /// per code, which pushed every centred line left of where it drew.
     #[must_use]
     pub fn width(&self, s: &str, scale: f32) -> f32 {
-        self.raster.string_width(s) * scale
+        self.legacy_width(s, scale)
     }
 
     /// The width of a `§`-coded string in device pixels at `scale`. `§`+code
@@ -280,6 +293,20 @@ impl VanillaFont {
     /// shadow before any of its glyphs is what keeps a following glyph's ink on
     /// top of the previous glyph's shadow, which is what vanilla's two-layer
     /// batch does.
+    /// # This honours `§` codes, and that is not a convenience
+    ///
+    /// There is no non-decomposing string draw in vanilla to be faithful to.
+    /// `Font.drawInBatch(String, …)` goes through
+    /// `StringDecomposer.iterateFormatted`, which applies legacy codes at *draw*
+    /// time — that single fact is why a plugin server can put `§7` in an item
+    /// name and have it colour. A plain pass that emitted `§` and `7` as glyphs
+    /// was therefore not "the simple case"; it was the wrong case, and the
+    /// surfaces that reached it (item tooltips, the title/subtitle overlay, boss
+    /// bar titles, tab-list header and footer, container titles) were exactly the
+    /// ones showing raw codes.
+    ///
+    /// `c`'s alpha is carried through unchanged; its RGB becomes the base colour
+    /// that an unstyled run, and `§r`, draw in.
     pub(crate) fn draw(
         &self,
         cs: &mut ColourStream<'_>,
@@ -289,9 +316,7 @@ impl VanillaFont {
         scale: f32,
         c: [f32; 4],
     ) {
-        let off = font_metrics::SHADOW_OFFSET * scale;
-        self.run(cs, s, x + off, y + off, scale, shadow_of(c));
-        self.run(cs, s, x, y, scale, c);
+        self.draw_legacy(cs, s, x, y, scale, [c[0], c[1], c[2]], c[3]);
     }
 
     /// Draw a `§`-coded string with its drop shadow. Colour codes recolour the
@@ -391,6 +416,10 @@ impl VanillaFont {
     /// surface in this crate passes it implicitly by calling
     /// [`draw`](Self::draw), so the shadowless case needs its own name rather
     /// than a bool parameter on the common path.
+    ///
+    /// "Plain" is about the **shadow**, not about `§` codes — like
+    /// [`draw`](Self::draw) this decomposes, because the shadow flag is the only
+    /// axis vanilla's own overload varies.
     pub(crate) fn draw_plain(
         &self,
         cs: &mut ColourStream<'_>,
@@ -400,15 +429,7 @@ impl VanillaFont {
         scale: f32,
         c: [f32; 4],
     ) {
-        self.run(cs, s, x, y, scale, c);
-    }
-
-    /// One unshadowed pass over a plain string.
-    fn run(&self, cs: &mut ColourStream<'_>, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
-        let mut cursor = x;
-        for ch in s.chars() {
-            cursor += self.glyph(cs, ch, cursor, y, scale, c);
-        }
+        self.legacy_run(cs, s, x, y, scale, [c[0], c[1], c[2]], c[3], false);
     }
 
     /// One unshadowed pass over a `§`-coded string. `shadow` scales every run's
@@ -467,33 +488,13 @@ impl VanillaFont {
         }
     }
 
-    /// Draw one glyph with the line's top-left at `(x, y)` and return its
-    /// advance in device pixels. No style: this is [`run`](Self::run)'s glyph
-    /// primitive, and `run` draws plain `&str`s that can never carry a `§`
-    /// code — see [`glyph_styled`](Self::glyph_styled) for the `legacy_run`
-    /// counterpart.
-    fn glyph(
-        &self,
-        cs: &mut ColourStream<'_>,
-        ch: char,
-        x: f32,
-        y: f32,
-        scale: f32,
-        c: [f32; 4],
-    ) -> f32 {
-        let cp = ch as u32;
-        let Some(r) = self.raster.raster(cp) else {
-            // Covered but not drawable = whitespace (the `space` provider);
-            // uncovered = vanilla's hollow missing-glyph box.
-            if self.raster.font().contains(cp) {
-                return self.raster.advance(cp).unwrap_or(MISSING_ADVANCE) * scale;
-            }
-            missing_box(cs, x, y, scale, c);
-            return MISSING_ADVANCE * scale;
-        };
-        self.draw_ink(cs, &r, x, y, scale, c, false);
-        r.advance() * scale
-    }
+    // There is deliberately no un-styled `glyph` primitive here any more, and no
+    // `run` over a plain `&str`. Both existed to serve a "this string cannot
+    // carry a `§` code" path that vanilla does not have, and their presence was
+    // what let `§7` reach a quad: `glyph_styled` with a default `GlyphStyle` is
+    // byte-identical to the old `glyph` (zero bold offset, no obfuscation
+    // substitution, no italic shear, `has_effect()` false), so nothing was lost
+    // by routing every string through `legacy_run`.
 
     /// Draw one glyph honouring `style`, with the line's top-left at
     /// `(x, y)`. `first` is whether this is the very first glyph of the

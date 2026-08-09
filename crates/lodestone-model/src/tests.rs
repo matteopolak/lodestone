@@ -183,8 +183,13 @@ fn legacy_text_parser_tracks_color_and_format_segments() {
     assert_eq!(text.to_plain_string(), "Plain Red Bold Normal");
     assert_eq!(text.extra[1].content, TextContent::Literal("Red ".into()));
     assert_eq!(text.extra[1].style.color, Some(TextColor::Red));
-    // A colour code resets formatting: bold is unspecified (inherit), not on.
-    assert_eq!(text.extra[1].style.bold, None);
+    // A colour code clears formatting *explicitly*, not by leaving it
+    // unspecified — `Style.applyLegacyFormat`'s `default:` arm assigns
+    // `bold = false`. `None` here would let an enclosing component's bold
+    // inherit through the reset, which vanilla does not do; see
+    // `apply_legacy_code`.
+    assert_eq!(text.extra[1].style.bold, Some(false));
+    assert_eq!(text.extra[1].style.italic, Some(false));
     assert_eq!(text.extra[2].content, TextContent::Literal("Bold".into()));
     assert_eq!(text.extra[2].style.color, Some(TextColor::Red));
     assert_eq!(text.extra[2].style.bold, Some(true));
@@ -1350,4 +1355,163 @@ fn path_type_registry_resolves_ids() {
     assert_eq!(t.path_type(1), Some(PathType::Blocked));
     assert_eq!(t.path_type(2), None);
     assert_eq!(t.state_count(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Legacy `§` expansion — `StringDecomposer.iterateFormatted` parity
+// ---------------------------------------------------------------------------
+
+/// The fixture every legacy-expansion gate below shares: a colour, then a
+/// formatting code, then a **second** colour (which must clear the formatting the
+/// first one turned on), then `§r`, then an **unrecognised** code.
+///
+/// Every discriminating property this pair of tests can check is present in this
+/// one string, and each is there because the wrong hypothesis is plausible:
+/// `§a` clearing `§l` distinguishes "a colour resets formatting" from the
+/// backwards reading; `§r` distinguishes reset-to-nothing from vanilla's
+/// reset-to-the-enclosing-component's-style; and `§q` distinguishes dropping both
+/// characters from the two other plausible answers (print the pair, or drop only
+/// the `§`).
+const LEGACY_FIXTURE: &str = "§cred §lbold §agreen§r plain §qdropped";
+
+/// The visible text of [`LEGACY_FIXTURE`] once every code is consumed. `§q` and
+/// its `§` are both gone; `dropped` is not.
+const LEGACY_FIXTURE_VISIBLE: &str = "red bold green plain dropped";
+
+/// A style with all five formatting flags set **deliberately alternating**, so
+/// any swap of two adjacent flags anywhere between here and a span changes an
+/// assertion. Two equal booleans coincide half the time by chance and cannot
+/// detect a transposition at all.
+fn alternating_style() -> TextStyle {
+    TextStyle {
+        color: Some(TextColor::Gold),
+        bold: Some(true),
+        italic: Some(false),
+        underlined: Some(true),
+        strikethrough: Some(false),
+        obfuscated: Some(true),
+    }
+}
+
+/// `Text::from_legacy` + `to_spans` on a bare legacy string: the span **count**
+/// is predicted as well as the styles, because a decomposer that drops a span
+/// boundary still produces plausible-looking styles.
+#[test]
+fn legacy_codes_decompose_to_four_spans_with_vanilla_reset_semantics() {
+    let spans = Text::from_legacy(LEGACY_FIXTURE).to_spans();
+
+    // Four, not five: `§q` contributes no boundary because vanilla's
+    // unconditional `i++` swallows an unrecognised pair whole.
+    assert_eq!(spans.len(), 4, "span boundaries: {spans:?}");
+    assert_eq!(
+        spans.iter().map(|s| s.text.as_str()).collect::<String>(),
+        LEGACY_FIXTURE_VISIBLE
+    );
+
+    assert_eq!(spans[0].text, "red ");
+    assert_eq!(spans[0].style.color, Some(TextColor::Red));
+    assert_eq!(spans[0].style.bold, Some(false));
+
+    // `§l` adds bold and leaves the colour alone.
+    assert_eq!(spans[1].text, "bold ");
+    assert_eq!(spans[1].style.color, Some(TextColor::Red));
+    assert_eq!(spans[1].style.bold, Some(true));
+
+    // `§a` is a colour, so it clears the bold `§l` turned on. Getting this
+    // backwards is what makes `§c§lFoo` render almost-right.
+    assert_eq!(spans[2].text, "green");
+    assert_eq!(spans[2].style.color, Some(TextColor::Green));
+    assert_eq!(spans[2].style.bold, Some(false));
+
+    // `§r` at the root, where there is no enclosing style, is `Style.EMPTY` —
+    // and specifically *no colour*, not white.
+    assert_eq!(spans[3].text, " plain dropped");
+    assert_eq!(spans[3].style, TextStyle::default());
+    assert_eq!(spans[3].style.color, None);
+}
+
+/// The surface fix: codes living inside a **modern component's** literal content,
+/// which is how a plugin server ships them. This is the shape that used to reach
+/// the screen as `§7` glyphs.
+///
+/// The enclosing component carries [`alternating_style`], so the span `§r`
+/// produces reads its five flags back — vanilla's `resetStyle` is seeded with the
+/// component's own style, not `Style.EMPTY`, and reset-to-nothing would fail
+/// here on all five.
+#[test]
+fn legacy_codes_inside_a_component_expand_and_inherit_the_enclosing_style() {
+    let mut node = Text::literal(LEGACY_FIXTURE);
+    node.style = alternating_style();
+    let spans = node.to_spans();
+
+    assert_eq!(spans.len(), 4, "span boundaries: {spans:?}");
+    assert!(
+        spans.iter().all(|s| !s.text.contains(text::LEGACY_PREFIX)),
+        "a § survived expansion: {spans:?}"
+    );
+
+    // A colour code clears the *enclosing* component's formatting too — all
+    // three of the component's `true` flags are off inside this run.
+    assert_eq!(spans[0].text, "red ");
+    assert_eq!(spans[0].style.color, Some(TextColor::Red));
+    assert_eq!(spans[0].style.bold, Some(false));
+    assert_eq!(spans[0].style.underlined, Some(false));
+    assert_eq!(spans[0].style.obfuscated, Some(false));
+
+    assert_eq!(spans[1].style.bold, Some(true));
+    assert_eq!(spans[1].style.underlined, Some(false));
+
+    assert_eq!(spans[2].style.color, Some(TextColor::Green));
+    assert_eq!(spans[2].style.bold, Some(false));
+
+    // `§r` restores the component's style, flag for flag. Read back
+    // individually: a swap of two adjacent flags anywhere in `inherit` or in
+    // the expansion pass moves one of these five off its expected value.
+    assert_eq!(spans[3].text, " plain dropped");
+    assert_eq!(spans[3].style.color, Some(TextColor::Gold));
+    assert_eq!(spans[3].style.bold, Some(true));
+    assert_eq!(spans[3].style.italic, Some(false));
+    assert_eq!(spans[3].style.underlined, Some(true));
+    assert_eq!(spans[3].style.strikethrough, Some(false));
+    assert_eq!(spans[3].style.obfuscated, Some(true));
+}
+
+/// The two flattening functions really are different functions. Without this,
+/// `to_spans_ignoring_legacy_codes` silently becoming an alias for `to_spans`
+/// would leave every assertion above passing while the long name stopped meaning
+/// anything — and the guard test that forbids the long name at a render surface
+/// would then be forbidding nothing.
+#[test]
+fn the_non_expanding_flatten_really_leaves_the_codes_in_place() {
+    let mut node = Text::literal(LEGACY_FIXTURE);
+    node.style = alternating_style();
+
+    let raw = node.to_spans_ignoring_legacy_codes();
+    assert_eq!(raw.len(), 1, "no expansion means no extra boundaries: {raw:?}");
+    assert_eq!(raw[0].text, LEGACY_FIXTURE);
+    assert_eq!(raw[0].style, alternating_style());
+}
+
+/// `§x§r§r§g§g§b§b` — the BungeeCord hex dialect — is **not** honoured by vanilla
+/// 26.2, and must not be honoured here either. `getByCode('x')` is null, so `§x`
+/// is dropped whole and the six pairs after it are read as six ordinary colour
+/// codes; the run ends up coloured by the last of them.
+#[test]
+fn the_bungeecord_hex_dialect_resolves_to_its_last_digit_not_to_a_hex_colour() {
+    // `§x` then `ff00aa` written the dialect's way.
+    let spans = Text::from_legacy("§x§f§f§0§0§a§ahex").to_spans();
+
+    assert_eq!(spans.len(), 1, "only the final code precedes any text: {spans:?}");
+    assert_eq!(spans[0].text, "hex");
+    // `§a` — green. *Not* `Rgb(0xff00aa)`.
+    assert_eq!(spans[0].style.color, Some(TextColor::Green));
+}
+
+/// A dangling `§` is dropped, not drawn. Vanilla `break`s out of
+/// `iterateFormatted` without feeding it to the sink.
+#[test]
+fn a_dangling_section_sign_is_dropped() {
+    let spans = Text::from_legacy("tail§").to_spans();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].text, "tail");
 }
