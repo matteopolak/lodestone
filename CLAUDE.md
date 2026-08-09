@@ -398,6 +398,15 @@ rather than restating a constant. (§12.41)
 uniform-but-wrong frame from a localised blob. Ask *where*, not *what*, and **make failure output print a
 bounding box** — that diagnosed two premise-false controls in one step.
 
+**And a probe that samples *vertices* is blind to any quad larger than the probe.** `band_coverage` in the menu
+render tests counts vertices falling inside a rect, so a quad that **encloses** the rect contributes none and
+reads as zero coverage. Measured, not hypothesised: a canvas-wide tint painted straight through one gate's
+probe rect and that gate still reported **0**. The failure direction is the dangerous one — a new full-screen
+element is exactly what such a probe cannot see, so it certifies "nothing paints here" at the moment something
+started painting everywhere. When a coverage check is point- or vertex-sampled, **say so in its name or its
+doc**, and prefer testing the rasterised result (or the quad's own rect against the probe) when the thing you
+are guarding against might be *bigger* than the window you are looking through.
+
 **Validate the instrument before optimising the system — a wrong counter does not merely mislead about
 magnitude, it can invert the conclusion.** Measured: `vram_bytes` was computed from `stats.total_quads`, which
 is accumulated **inside the terrain draw loops, after the cull** — a per-frame *drawn* quantity wearing a
