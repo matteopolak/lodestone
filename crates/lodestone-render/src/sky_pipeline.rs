@@ -853,10 +853,14 @@ pub struct SkyFrame {
     /// client default of 8 chunks is 4x — the whole of #399. Prefer
     /// `with_render_distance` at every site that has the number.
     pub sky_fog_end: f32,
-    /// FAST (one alpha-tested quad) or FANCY (real extruded per-cell
-    /// geometry) — vanilla's own `CloudStatus` option, minus `OFF` (see
-    /// [`CloudStatus`]'s doc for why there is nowhere for a player to have
-    /// chosen that yet). Defaults to `Fancy`, matching vanilla's own default.
+    /// OFF (no cloud geometry), FAST (one alpha-tested quad) or FANCY (real
+    /// extruded per-cell geometry) — vanilla's own `CloudStatus` option, all three
+    /// states. Defaults to `Fancy`, matching vanilla's own default.
+    ///
+    /// Set it with [`with_cloud_status`](Self::with_cloud_status), which the
+    /// shell's sky pass calls from `crate::config::Options::cloud_status`. Only the
+    /// selected mode's geometry is built, so `Off` is a real saving rather than an
+    /// invisible draw — see [`Self::render`](SkyRenderer::render)'s selection.
     pub cloud_status: CloudStatus,
 }
 
@@ -876,7 +880,7 @@ impl SkyFrame {
         }
     }
 
-    /// Sets [`cloud_status`](Self::cloud_status) — FAST or FANCY clouds.
+    /// Sets [`cloud_status`](Self::cloud_status) — OFF, FAST or FANCY clouds.
     #[must_use]
     pub fn with_cloud_status(mut self, cloud_status: CloudStatus) -> Self {
         self.cloud_status = cloud_status;
@@ -1447,10 +1451,15 @@ impl SkyRenderer {
         // between `FLAT_CLOUDS` and `CLOUDS`.
         let cloud_tint = cloud_color;
 
-        // FAST/FANCY selection (issue #403) — vanilla's own choice, minus
-        // `OFF` (see `CloudStatus`'s doc). Only the selected mode's vertex
-        // buffer is written; the other pipeline is simply not bound below.
-        let draw_fast_clouds = frame.cloud_status == crate::sky::CloudStatus::Fast;
+        // OFF/FAST/FANCY selection (issue #403) — vanilla's own three states. Only
+        // the selected mode's vertex buffer is written; the other pipeline is
+        // simply not bound below, and `Off` binds neither.
+        //
+        // `Off` short-circuits **before** the geometry build, not just before the
+        // draw: FANCY walks a 16-cell radius and expands every visible face every
+        // frame, which is the most expensive thing in this pass. A player who turned
+        // clouds off to reclaim that cost must actually reclaim it.
+        let draw_fast_clouds = frame.cloud_status.draws_flat_quad();
         let fancy_face_count = if draw_fast_clouds {
             let (cloud_pos, cloud_uv) = cloud_plane_geometry(
                 camera.position.to_array(),
@@ -1468,7 +1477,7 @@ impl SkyRenderer {
                 .collect();
             queue.write_buffer(&self.cloud_vbuf, 0, bytemuck::cast_slice(&cloud_verts));
             0
-        } else {
+        } else if frame.cloud_status.draws_extruded_cells() {
             let verts = {
                 // Only the face *enumeration* is cached; the vertices are
                 // expanded every frame because the sub-cell scroll moves every
@@ -1504,6 +1513,11 @@ impl SkyRenderer {
                 queue.write_buffer(&self.fancy_cloud_vbuf, 0, bytemuck::cast_slice(&gpu_verts));
             }
             face_count
+        } else {
+            // `CloudStatus::Off`. Neither branch above ran, so neither vertex
+            // buffer was written and neither pipeline is bound below — a zero face
+            // count with `draw_fast_clouds` false is what "no clouds" *is* here.
+            0
         };
 
         let _ = device; // reserved for a future resize/rebuild path

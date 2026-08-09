@@ -319,6 +319,9 @@ impl RenderState {
             // pushes glint options into shimmers exactly as it did before.
             glint_speed: lodestone_render::glint::DEFAULT_SPEED,
             glint_strength: lodestone_render::glint::DEFAULT_STRENGTH,
+            // `Fancy` — vanilla's own default, and what the pass hardcoded through
+            // `SkyFrame::new` before the option had anywhere to enter.
+            cloud_status: lodestone_render::CloudStatus::default(),
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -695,6 +698,24 @@ impl RenderState {
             lodestone_render::glint::clamp_speed(self.glint_speed),
             lodestone_render::glint::clamp_strength(self.glint_strength),
         )
+    }
+
+    /// Push vanilla's **Clouds** option down from the menu layer. Read by the sky
+    /// pass in `gpu/frame.rs` when it builds this frame's
+    /// `lodestone_render::SkyFrame`.
+    ///
+    /// Per frame like every other option setter here, and cheap: the value only
+    /// reaches a `SkyFrame` builder, so switching modes costs one comparison in
+    /// `SkyRenderer::render` and no pipeline rebuild.
+    pub fn set_cloud_status(&mut self, status: lodestone_render::CloudStatus) {
+        self.cloud_status = status;
+    }
+
+    /// The cloud mode this frame's sky pass will draw. Exposed so a gate can assert
+    /// the pushed value without a GPU adapter.
+    #[must_use]
+    pub fn cloud_status(&self) -> lodestone_render::CloudStatus {
+        self.cloud_status
     }
 
     /// [`Self::write_glint_uniform`] for the **world** glint draw — enchanted

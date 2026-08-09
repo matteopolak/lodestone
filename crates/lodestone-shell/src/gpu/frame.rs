@@ -482,7 +482,12 @@ impl RenderState {
             )
             .with_fog_color(self.fog.color)
             .with_render_distance(self.render_distance_chunks)
-            .with_void_fog(lodestone_render::fog::VoidFog::OVERWORLD);
+            .with_void_fog(lodestone_render::fog::VoidFog::OVERWORLD)
+            // Vanilla's Clouds option. This builder had **zero** production
+            // callers, so the pass always drew `CloudStatus::default()` (FANCY):
+            // the FAST quad path and the OFF case both existed in
+            // `SkyRenderer::render` and no player could select either.
+            .with_cloud_status(self.cloud_status);
             let clear = frame.clear_color_wgpu(camera.position.y);
             sky.render(device, queue, &mut encoder, view, camera, &frame, clear);
             true

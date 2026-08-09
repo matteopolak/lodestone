@@ -109,7 +109,7 @@ consumer rather than inferred from the group it sits in:
 
 | kind | what is already true | what is missing | examples |
 |---|---|---|---|
-| **A — consumer live, no push** | the subsystem exists, is correct, and is called every frame with a **hardcoded constant** | links 1–4, plus swapping the constant for the field | all 11 `soundSource.*`, `fov`, `glintSpeed`, `glintStrength`, `cloudStatus` |
+| **A — consumer live, no push** | the subsystem exists, is correct, and is called every frame with a **hardcoded constant** | links 1–4, plus swapping the constant for the field | ~~all 11 `soundSource.*`, `fov`, `glintSpeed`, `glintStrength`, `cloudStatus`~~ — **link 1 and link 5 landed for all fifteen on 2026-08-09; see [Kind A: links 1 and 5 are done](#kind-a-links-1-and-5-are-done-2026-08-09)** |
 | **B — consumer is itself an island** | the code exists in `lodestone-render`, unit-tested, with **zero shell callers** | a consumer that runs, *then* the option | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale` (they scale `confusion_overlay_triangles` / `portal_overlay_alpha`, which nothing draws) |
 | **C — no subsystem** | nothing | the feature | `gamma`, `narrator`, `highContrast`, `entityShadows`, `entityDistanceScaling`, `biomeBlendRadius`, `simulationDistance`, `mipmapLevels`, `rawMouseInput`, `allowCursorChanges` |
 
@@ -138,7 +138,10 @@ most wrong. Three specific corrections, each measured:
   call sites (`gpu/glint.rs`, `hud/item_icon.rs`) pass `DEFAULT_SPEED`/
   `DEFAULT_STRENGTH`. `SkyFrame::with_cloud_status` really does switch between the
   flat quad and extruded per-cell geometry, and has **zero** production callers, so
-  the shell always draws `CloudStatus::default()` (Fancy).
+  the shell always draws `CloudStatus::default()` (Fancy). *(Both landed on
+  2026-08-09 — `with_cloud_status` has a production caller now, and there turned
+  out to be a **third** glint call site. See
+  [Kind A: links 1 and 5 are done](#kind-a-links-1-and-5-are-done-2026-08-09).)*
 
 Two traps found while measuring, both of the "grep hit is not a consumer" kind:
 
@@ -158,11 +161,11 @@ groupings are still the right map of *which* subsystem each row belongs to.
 
 | group | options | blocked on |
 |---|---|---|
-| **Audio** | all 11 `soundSource.*`, `soundDevice`, `directionalAudio`, `musicFrequency`, `musicToast` | **superseded — see kind A above.** The eleven volume sliders need only a push into `CategoryVolumes::set_user`; `soundDevice` (device enumeration) and `musicFrequency`/`musicToast` are separate and smaller |
+| **Audio** | all 11 `soundSource.*`, `soundDevice`, `directionalAudio`, `musicFrequency`, `musicToast` | **superseded — see kind A above.** The eleven volume sliders' push into `CategoryVolumes::set_user` **landed 2026-08-09**; they now need only the four `menu/**` links. `soundDevice` (device enumeration) and `musicFrequency`/`musicToast` are separate and smaller |
 | **Window / display** | `fullscreen`, `exclusiveFullscreen`, `fullscreenResolution`, `enableVsync`, `framerateLimit`, `inactivityFpsLimit`, `preferredGraphicsBackend` | runtime window and surface reconfiguration |
 | **Renderer quality** | `graphicsPreset`, `gamma`, `mipmapLevels`, `ambientOcclusion`, `biomeBlendRadius`, `particles`, `cloudStatus`, `cloudRange`, `entityShadows`, `entityDistanceScaling`, `improvedTransparency`, `textureFiltering`, `maxAnisotropyBit`, `weatherRadius`, `chunkSectionFadeInTime`, `vignette` | each needs its own renderer knob; several are whole features |
-| **Post-process / screen effects** | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale`, ~~`damageTiltStrength`~~, `glintSpeed`, `glintStrength` | `damageTiltStrength` is **live now** — its consumer had been honoured all along; the three `*EffectScale` rows are kind **B** (the effect they scale is itself an island); the two glint rows are kind **A** |
-| **Distances** | ~~`renderDistance`~~, `simulationDistance`, `fov`, ~~`sensitivity`~~ | `renderDistance` and `sensitivity` are live; `fov` is kind **A** (`camera_rig::build_camera` pins `Camera::fov_y_degrees` to the constant `FOV_Y_DEGREES`); `simulationDistance` is kind **C** |
+| **Post-process / screen effects** | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale`, ~~`damageTiltStrength`~~, `glintSpeed`, `glintStrength` | `damageTiltStrength` is **live now** — its consumer had been honoured all along; the three `*EffectScale` rows are kind **B** (the effect they scale is itself an island); the two glint rows had their consumer push landed 2026-08-09 and need only the `menu/**` links |
+| **Distances** | ~~`renderDistance`~~, `simulationDistance`, `fov`, ~~`sensitivity`~~ | `renderDistance` and `sensitivity` are live; `fov` had its consumer push landed 2026-08-09 (`camera_rig::build_camera` takes the degrees now instead of pinning `FOV_Y_DEGREES`) and needs only the `menu/**` links; `simulationDistance` is kind **C** |
 | **Chat behaviour** | `chatVisibility`, `chatLinks`, `chatLinksPrompt`, `chatDelay`, `autoSuggestions`, `hideMatchedNames`, `onlyShowSecureChat`, `saveChatDrafts`, `reducedDebugInfo` | chat *behaviour* rather than chat *appearance*; the appearance half is now wired |
 | **Narrator / high contrast** | `narrator`, `narratorHotkey`, `highContrast`, `highContrastBlockOutline` | no narrator, and high contrast is a resource pack swap |
 | **Skin & model parts** | all 7 `modelPart.*`, `mainHand` | needs the parts to reach the entity renderer *and* the serverbound client-settings packet |
@@ -210,12 +213,95 @@ Each of these is a *push*, not a feature: the consumer exists, runs every frame,
 is currently handed a hardcoded constant. Listed with the exact seam so whoever owns
 the file can do it without re-deriving anything.
 
+**All four rows below are landed.** They are kept because the *seam* each one
+names is still the right map of where the value travels, and because the "what
+was missing" column is now the record of what a kind A row costs in practice.
+
 | option(s) | file | patch |
 |---|---|---|
-| 11 × `soundSource.*` | `sim/audio.rs` (+ `config.rs` fields) | add `Sim::set_sound_volumes(&Options)` calling `audio_mut(\|a\| …)` → `AudioEngine::with_mixer(\|m\| m.volumes_mut().set_user(cat, v))` for each `SoundCategory::ALL`; call it from `app/redraw.rs` beside `set_view_bobbing`. The `Sim::audio_mut` accessor is private today, which is the only reason this cannot be done from the menu side |
-| `fov` | `camera_rig.rs` + `sim/camera.rs` | give `build_camera` an `fov_y_degrees` parameter (or a `Sim::set_fov` seam mirroring `set_view_bobbing`) instead of the module constant `FOV_Y_DEGREES`. Note vanilla's `fov` is an `IntRange(30, 110)`, so it also needs an `INT_RANGE_SLIDERS` entry — not a `UnitDouble` |
-| `glintSpeed`, `glintStrength` | `gpu/glint.rs`, `hud/item_icon.rs` | replace `DEFAULT_SPEED`/`DEFAULT_STRENGTH` at the two call sites with the option values. Both are already parameters of `glint_clock` and `GlintUniform::new` |
-| `cloudStatus` | wherever `SkyFrame` is built in `gpu/**` | call `SkyFrame::with_cloud_status`, which has zero production callers. Vanilla's option has three states and our `CloudStatus` has two (no `Off`), so the third needs a skip in the sky pass |
+| 11 × `soundSource.*` | `sim/audio.rs` (+ `config.rs` fields) | **done** — `Sim::set_sound_volumes(&Options)`, pushed from `app/redraw.rs` beside `set_view_bobbing`. `Sim::audio_mut` never needed widening: `sim::audio` is a *descendant module* of `sim`, so it already saw the private accessor, and that module's own doc says so |
+| `fov` | `camera_rig.rs` + `sim/camera.rs` | **done** — `build_camera` takes `fov_y_degrees`, `Sim::set_fov_y_degrees` mirrors `set_view_bobbing`, pushed per frame. `INT_RANGE_SLIDERS` **already had** the `("fov", 30..=110, 70)` row, so nothing was needed there |
+| `glintSpeed`, `glintStrength` | `gpu/glint.rs`, `hud/item_icon.rs` | **done for the world and hand draws** — `RenderState::set_glint_options`, pushed from `app/redraw.rs`. **There is a third glint site**, and this row said two: the 2-D GUI icon pass. `IconRenderer::set_glint_options` exists and is read per frame, but has **no caller** — see the open item below |
+| `cloudStatus` | wherever `SkyFrame` is built in `gpu/**` | **done** — `gpu/frame.rs`'s `SkyFrame` builder chain now ends in `.with_cloud_status(self.cloud_status)`, fed by `RenderState::set_cloud_status`. `CloudStatus` gained an `Off` variant rather than taking a skip in the shell; see below for why |
+
+### Kind A: links 1 and 5 are done (2026-08-09)
+
+Fifteen options — the eleven `soundSource.*` sliders, `fov`, `glintSpeed`,
+`glintStrength` and `cloudStatus` — now have **link 1** (a persisted
+`config::Options` field with hand-rolled serde both ways) and **link 5** (a live
+consumer reading it, pushed once per presented frame from `app/redraw.rs`).
+
+**Links 2–4 are still missing for all fifteen, and all three live in
+`menu/**`**: the `LiveOption` variant, the `live_value` stringifier arm, the
+`live_slider`/`live_cycle` cell, and the `MenuNav::apply_settings` arm. So every
+one of these rows still draws **greyed**, and the only way to reach the new
+behaviour today is to hand-edit `options.json`. That is exactly the shape
+`damageTiltStrength` was in before it went live — links 1 and 5 present, 2–4
+missing — and it is deliberate rather than abandoned: the agent that landed this
+half was scoped out of `menu/**`.
+
+The persisted keys, so a hand edit works and so whoever wires the menu side does
+not have to re-derive them:
+
+| option | `options.json` key | type | default |
+|---|---|---|---|
+| 11 × `soundSource.*` | `sound_volume_master` … `sound_volume_ui` | `UnitDouble` | `1.0` each |
+| `fov` | `fov` | `IntRange(30, 110)` | `70` |
+| `glintSpeed` | `glint_speed` | `UnitDouble` | `0.5` |
+| `glintStrength` | `glint_strength` | `UnitDouble` | `0.75` |
+| `cloudStatus` | `cloud_status` | `"off"` / `"fast"` / `"fancy"` | `"fancy"` |
+
+The eleven sound keys use vanilla's **singular** `SoundSource.getName()` strings
+(`record`, `block`, `player`), not the plural enum variant names, and
+`config::SOUND_CATEGORY_NAMES` is the one list all three consumers index.
+
+Six things this half measured that the table above got wrong or did not know:
+
+- **`Sim::audio_mut` being private was never the blocker.** `sim::audio` is a
+  descendant module of `sim`, so it already had access — `sim/audio.rs`'s own
+  module doc states this, and the census's claim was inherited from a reading of
+  the signature rather than from a compile.
+- **There are three glint sites, not two.** The world pass and the hand pass both
+  go through `gpu::glint::glint_uniform` and are done. The **2-D GUI icon** glint
+  is a separate pipeline with its own uniform (`hud::item_icon::GuiGlint`), and
+  its owner `IconRenderer` is held by `HudRenderer` and the container renderer —
+  so `IconRenderer::set_glint_options` needs a one-line forward in each of
+  `hud.rs` and `container/renderer.rs`, plus one call in `app/redraw.rs`. Until
+  that lands, an enchanted item shimmers at the player's speed in the world and
+  in the hand but at vanilla's default in a slot. **This is the only remaining
+  link-5 gap in kind A.**
+- **`IconRenderer` could no longer derive `Default`.** A derived one starts both
+  glint fields at `0.0` — a stationary, fully transparent shimmer — which is the
+  glint silently switched off on every screen. The impl is hand-written now, with
+  that reason on it. Any struct that gains an option field whose meaningful
+  default is not zero has this hazard.
+- **`Off` is a `CloudStatus` variant, not a skip in the shell.** The skip could
+  not live in the caller: `SkyRenderer::render` is one call that clears the target
+  and draws disc, sunrise, stars, celestial bodies **and** clouds, and it is also
+  what paints the below-horizon void — a shell "skipping clouds" would have to
+  skip the whole sky. Since the branch has to be inside `render` regardless, the
+  third state is stated in the type. It is expressed as two **non-complementary**
+  predicates, `CloudStatus::draws_flat_quad` and `draws_extruded_cells`, both
+  false for `Off`; a call site that asks "is it not fancy" would draw FAST
+  geometry for `Off`, and a gate that only checks the two differ passes with that
+  bug in place. Same shape and same reason as `CameraType`'s pair.
+- **`cloud_status` is persisted by name, and the ordinal would have been a trap.**
+  `Off` is first in the enum, so its ordinal is `0` — which is also what a missing
+  or malformed key deserialises to under an ordinal scheme, making "clouds off"
+  and "no setting at all" indistinguishable. By name, a malformed key is FANCY,
+  vanilla's default. Vanilla's legacy boolean spellings (`"true"`/`"false"`) are
+  accepted too, from `CloudStatus.byName`.
+- **`glintSpeed`/`glintStrength` cannot be gated at their defaults, and neither
+  can `fov`.** `lodestone_render::glint::DEFAULT_SPEED`/`DEFAULT_STRENGTH` *are*
+  vanilla's shipped option values (`0.5`, `0.75`), and `camera_rig::FOV_Y_DEGREES`
+  *is* vanilla's `70` — so at the default the correct and frozen-default
+  hypotheses are byte-identical and a gate there measures only that the code
+  runs. The landed gates pick `0.25` for strength (a third of `0.75`, so a stale
+  uniform is off by half the alpha range), a zero speed (the one clock-independent
+  property of a call site that reads the wall clock), and FOV `90`/`30` (exact
+  cotangents: `cot(45°) == 1`, `cot(15°) == 2 + √3`, against the frozen
+  `cot(35°) ≈ 1.42815`). Each carries a control that shows the frozen hypothesis
+  really is what it claims.
 
 ## How to change it
 
