@@ -1324,9 +1324,10 @@ pub(crate) fn build_sprite_pipeline(
 /// of the domain is how the GUI icon and the held item would come to shimmer at
 /// different rates.
 fn gui_glint_uniform(speed: f64, strength: f32) -> GuiGlintUniform {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64() * 1000.0);
+    // Same clock as `gpu::glint::glint_now_ms` — deliberately, so the GUI icon and
+    // the held item shimmer at one rate — and `crate::platform::epoch_duration` for
+    // the same reason it uses it: `SystemTime::now()` traps on wasm32.
+    let millis = crate::platform::epoch_duration().as_secs_f64() * 1000.0;
     let speed = lodestone_render::glint::clamp_speed(speed);
     let strength = lodestone_render::glint::clamp_strength(strength);
     GuiGlintUniform {

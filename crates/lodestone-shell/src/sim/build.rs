@@ -338,9 +338,10 @@ impl Sim {
         // client the identical sequence of gaps between songs. Determinism is not
         // lost where it matters: every gate constructs `ShellMusic::new` with its
         // own explicit seed rather than going through this resource.
-        let audio_seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as i64);
+        // `crate::platform::epoch_duration`, not `SystemTime::now()`: the latter
+        // compiles for wasm32 and TRAPS at runtime, and this runs during `Sim`
+        // construction — so it would kill a browser tab before the first frame.
+        let audio_seed = crate::platform::epoch_duration().as_nanos() as i64;
         ecs.insert_resource(MusicState(Some(crate::audio::music::ShellMusic::new(
             audio_seed,
         ))));

@@ -375,12 +375,20 @@ impl WindowApp {
         // shell call sites handing over `DEFAULT_SPEED`/`DEFAULT_STRENGTH` was all
         // that kept the rows inert. This covers the **world and hand** draws; the
         // 2-D GUI icon glint is the third site and is owned by the HUD and
-        // container renderers (`IconRenderer::set_glint_options`).
+        // container renderers (`IconRenderer::set_glint_options`), pushed on the
+        // two lines below.
         let (glint_speed, glint_strength) = {
             let o = self.nav.options();
             (f64::from(o.glint_speed), o.glint_strength)
         };
         render.set_glint_options(glint_speed, glint_strength);
+        // The third site, in both of its owners. All three read the same wall
+        // clock, so a site that misses this push is not merely at the wrong rate —
+        // it is out of phase with the other two, which is the visible symptom of a
+        // partial push and the reason these lines sit against the one above rather
+        // than near the HUD draw.
+        hud.set_glint_options(glint_speed, glint_strength);
+        container_renderer.set_glint_options(glint_speed, glint_strength);
         // Vanilla's Clouds option (off/fast/fancy). `SkyFrame::with_cloud_status`
         // had zero production callers, so every frame drew FANCY whatever the
         // player chose — the FAST quad path was pixel-gated and unreachable.
@@ -787,10 +795,11 @@ impl WindowApp {
         // (`.cache/mc/26.2/client-src/.../TextCursorUtils.java:9,20-22`). The
         // phase has to come from wall time rather than the tick clock, because
         // the caret keeps blinking while the game is paused.
-        hud_frame.chat_caret_visible = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| (d.as_millis() / 300) % 2 == 0)
-            .unwrap_or(true);
+        // `crate::platform::epoch_duration`, not `SystemTime::now()`: the latter
+        // compiles for wasm32 and TRAPS at runtime, and the caret blinks every
+        // frame, so a browser tab would die on the first chat open.
+        hud_frame.chat_caret_visible =
+            (crate::platform::epoch_duration().as_millis() / 300) % 2 == 0;
         // Without this the whole chat-option chain is an island: the fields are
         // persisted, `ChatDisplayOptions` is read by the draw, and the live
         // client would still show vanilla defaults forever.
@@ -1271,11 +1280,15 @@ impl WindowApp {
                 // is `use super::*`, so bringing `SystemTime` in would mean adding an
                 // import to `app.rs` — a file several agents edit concurrently — for
                 // one call site.
+                // `UNIX_EPOCH + epoch_duration()` rather than `SystemTime::now()`,
+                // which traps on wasm32. Identical value on native, and it keeps
+                // `capture`'s signature (which only ever *reads* the instant handed
+                // to it — it never calls `now()`) unchanged.
                 match crate::screenshot::capture(
                     device,
                     queue,
                     texture,
-                    std::time::SystemTime::now(),
+                    std::time::UNIX_EPOCH + crate::platform::epoch_duration(),
                 ) {
                     Ok(path) => println!("Saved screenshot as {}", path.display()),
                     Err(e) => tracing::warn!(target: "screenshot", "capture failed: {e}"),

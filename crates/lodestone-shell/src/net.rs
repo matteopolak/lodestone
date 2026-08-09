@@ -2874,9 +2874,9 @@ mod tests {
         let observed: Vec<Uuid> = (0..2)
             .map(|_| {
                 let client = NetClient::connect("127.0.0.1".into(), 1, 776, None);
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let deadline = crate::platform::Instant::now() + Duration::from_secs(5);
                 let mut uuid = None;
-                while std::time::Instant::now() < deadline && uuid.is_none() {
+                while crate::platform::Instant::now() < deadline && uuid.is_none() {
                     uuid = client.local_uuid();
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -2925,9 +2925,9 @@ mod tests {
             .map(|name| {
                 let client =
                     NetClient::connect_as("127.0.0.1".into(), 1, 776, None, name.clone());
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let deadline = crate::platform::Instant::now() + Duration::from_secs(5);
                 let mut uuid = None;
-                while std::time::Instant::now() < deadline && uuid.is_none() {
+                while crate::platform::Instant::now() < deadline && uuid.is_none() {
                     uuid = client.local_uuid();
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -2967,9 +2967,9 @@ mod tests {
     #[test]
     fn local_uuid_is_published_before_the_connection_even_resolves() {
         let client = NetClient::connect("127.0.0.1".into(), 1, 776, None);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = crate::platform::Instant::now() + Duration::from_secs(5);
         let mut uuid = None;
-        while std::time::Instant::now() < deadline && uuid.is_none() {
+        while crate::platform::Instant::now() < deadline && uuid.is_none() {
             uuid = client.local_uuid();
             std::thread::sleep(Duration::from_millis(5));
         }

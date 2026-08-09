@@ -12,13 +12,30 @@
 # WHAT IT PROVES  (read this before trusting a green run)
 #   Two separate things: (1) a COMPILE pass for the wasm crate subset, and
 #   (2) a set of grep-based CONFINEMENT guards. You need both because on wasm
-#   "compiles" and "works" are different, and a whole family of std/tokio calls
-#   COMPILE for wasm32 and only die at RUNTIME (verified: each of the first three
-#   builds green in a throwaway wasm32 crate):
-#       std::fs::*            filesystem — there is no fs in a browser
-#       std::time::Instant    ::now() panics
-#       std::thread::spawn    no threads without COOP/COEP + shared memory
-#       tokio::time::*        timeout()/sleep() panic without a wasm timer
+#   "compiles" and "works" are different, and a family of std/tokio calls COMPILE
+#   for wasm32 and only misbehave at RUNTIME.
+#
+#   BUT THEY DO NOT ALL MISBEHAVE THE SAME WAY, and an earlier version of this
+#   header grouped them as though they did. Measured by compiling each into a
+#   cdylib with `panic = "abort"` and EXECUTING it in a real wasm VM:
+#
+#       std::fs::*             returns Err(ErrorKind::Unsupported) -- DOES NOT TRAP
+#       std::time::Instant     ::now() TRAPS (RuntimeError: unreachable)
+#       std::time::SystemTime  ::now() TRAPS  <-- was named nowhere before
+#       std::thread::spawn     TRAPS
+#       tokio::time::*         timeout()/sleep() panic without a wasm timer
+#
+#   The split matters for triage. The trapping calls are EMERGENCIES: one reached
+#   call kills the tab, and with `panic = "abort"` it is not recoverable. `std::fs`
+#   is a DEGRADATION: every caller that already discards its error (`.ok()?`,
+#   `let Ok(..) else`) resolves to honest absence -- "no options file", "no saves"
+#   -- which is a correctness/UX problem to fix incrementally, not a crash. Do not
+#   spend the emergency budget on `fs`.
+#
+#   `SystemTime::now()` is the one this file used to miss entirely. lodestone-shell
+#   had 8 production sites (clock-derived seeds, the chat caret blink, glint phase,
+#   the recipe-toast clock) and every one would have aborted the tab. See
+#   docs/browser-shell-port.md.
 #
 #   The COMPILE step below is STRUCTURALLY BLIND to every one of these: a freshly
 #   added `std::fs::read(...)` compiles green and dies only when a browser runs
@@ -119,6 +136,15 @@ CRATES=(
   # a wasm regression at the crate, not only transitively via lodestone-web.
   "lodestone-server"
   "lodestone-worldgen"
+  # The playable game shell -- the menu, `Sim`, the renderer, all of it. This is
+  # the whole point of `web/` becoming the real client rather than a spike: the
+  # browser consumes this crate's LIB target. Placed last because it sits on top of
+  # everything above, so a failure here is unambiguous rather than transitive.
+  #
+  # It is ~166k lines and it is the crate most likely to regress, because almost
+  # nobody working in it is building for wasm. That is exactly why it is guarded
+  # here and why the confinement rules below name it three times.
+  "lodestone-shell"
 )
 
 fails=()
@@ -192,12 +218,47 @@ CONFINEMENT_RULES=(
   "lodestone-client fs-ban|crates/lodestone-client/src|std::fs::|"
   "lodestone-client thread-ban|crates/lodestone-client/src|std::thread|"
   "lodestone-client spawn-confinement|crates/lodestone-client/src|tokio::spawn|spawn.rs"
+  # --- lodestone-shell ---
+  # The shell confines both trapping clocks to `crate::platform`, which re-exports
+  # `web_time` (std's own types on native, `performance.now()`/`Date.now()` in a
+  # browser). These rules ban the `std::time::` PATHS rather than the bare
+  # `Instant::now(` spelling, deliberately: the shell's call sites now read
+  # `crate::platform::Instant::now()`, so a `Instant::now(` pattern would match all
+  # 30 of them and the rule could never go green. The path is what distinguishes a
+  # trapping call from a portable one.
+  #
+  # `platform.rs` is allowlisted because it is the one file that may name the real
+  # `std::time` items. Both rules found LIVE TRAPS when first added, on a tree whose
+  # `cargo check --target wasm32-unknown-unknown` was already exit 0 -- which is the
+  # entire argument for having them.
+  # The allowlist is `platform.rs` ALONE — the strongest form, matching the
+  # `lodestone-audio time-confinement` rule's empty one. `tests.rs` was in it
+  # briefly, and taking it out was the right call: a test that names the trapping
+  # clock cannot crash a browser (test code is never in a wasm `--lib` build), but
+  # `crate::platform::Instant` *is* `std::time::Instant` on native, so converting
+  # those sites cost nothing and turned "the shell never names the trapping clock"
+  # from a promise into something one grep can check. 19 test sites in `net.rs`,
+  # `menu/render/tests.rs` and `sim/tests.rs` were converted for exactly that.
+  "lodestone-shell instant-confinement|crates/lodestone-shell/src|std::time::Instant|platform.rs"
+  "lodestone-shell systemtime-confinement|crates/lodestone-shell/src|std::time::SystemTime::now|platform.rs"
 )
 
 for rule in "${CONFINEMENT_RULES[@]}"; do
   IFS='|' read -r c_label c_dir c_banned c_allow <<< "$rule"
   printf '  %-34s ' "$c_label"
   leak="$(grep -rn "$c_banned" "$ROOT/$c_dir" 2>/dev/null || true)"
+  # Drop COMMENT lines before judging. The banned symbol legitimately appears in
+  # prose — every one of these confinements is worth a sentence at its call site
+  # saying "`crate::platform::epoch_duration`, not `SystemTime::now()`, because the
+  # latter traps" — and a guard that fires on its own documentation trains people to
+  # delete the documentation. `grep -rn` output is `path:line:content`, so this
+  # strips the two leading fields and drops the line when what remains begins with
+  # `//` (a Rust line or doc comment), `*` (a `/* … */` continuation) or `#` (a
+  # comment in a manifest or script, for rules pointed at one).
+  #
+  # This does NOT weaken any rule: a hazard inside a comment cannot execute. It is
+  # the same reasoning that made a `"` legal inside a `.wgsl` comment.
+  leak="$(printf '%s\n' "$leak" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|\*|#)' || true)"
   if [[ -n "$c_allow" ]]; then
     IFS=',' read -ra c_allow_files <<< "$c_allow"
     for f in "${c_allow_files[@]}"; do

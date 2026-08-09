@@ -1974,7 +1974,7 @@ fn a_frame_takes_many_short_world_guards_and_no_long_one() {
     sim.step(0.1);
 
     sim.reset_lock_holds();
-    let started = std::time::Instant::now();
+    let started = crate::platform::Instant::now();
     sim.step(0.1);
     let wall = started.elapsed();
     let holds = sim.lock_holds();
