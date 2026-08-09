@@ -56,10 +56,21 @@
 #   confined hazard leaked out of its gated file. It still does NOT prove the
 #   browser runs. Treat it as a tripwire, not a functional test.
 #
-# WHERE THIS SHOULD EVENTUALLY LIVE
-#   This is intentionally a standalone script because `xtask` is owned by another
-#   agent right now. Once that settles it should become `cargo xtask wasm-check`
-#   (same crate list, same "compilation only" caveat printed) so it can join CI.
+# WHERE THIS LIVES NOW  (this section used to say "eventually" — it has happened)
+#   `cargo xtask wasm-check` is the LIVE implementation: `just wasm-check` calls it
+#   and the CI `wasm` job calls that recipe. This script is the reference original,
+#   kept because xtask's `wasm_crates()` and `confinement_rules()` are asserted
+#   against the tables below by name. Fix a mechanism in BOTH — the port is a
+#   parity target, not a fork.
+#
+# READING A FAILURE FROM THIS SCRIPT
+#   Every captured build is written to `target/wasm-check/<pkg>.log` in full, and
+#   what is printed to the console is a summary of that file. If the summary is
+#   not enough, read the file. This is not decoration: an earlier version piped
+#   each build through `grep -E "^error…" | head -8` and nothing else, and the one
+#   CI failure it ever caught reached the log as two lines naming neither a file
+#   nor a cause. See report_build_failure below for the three properties that
+#   fixed it.
 #
 # USAGE
 #   scripts/wasm-check.sh
@@ -149,6 +160,66 @@ CRATES=(
 
 fails=()
 
+# Where every captured build goes. The console summary below is explicitly a
+# summary OF THESE FILES, never the only copy — see report_build_failure.
+LOGDIR="$ROOT/target/wasm-check"
+mkdir -p "$LOGDIR"
+
+# Substrings marking a line worth showing from a failed build, matched
+# case-insensitively against ANSI-STRIPPED text.
+#
+# Deliberately NOT anchored. The anchored form this replaces (`grep -E "^error…"`)
+# destroyed the evidence in the only CI failure this check has ever caught:
+# `trunk` prefixes every line with an RFC-3339 timestamp and a level, so nothing
+# it writes starts with `error`, and `cargo` under CARGO_TERM_COLOR=always (which
+# CI sets for every job) starts its error lines with an escape sequence rather
+# than a letter. The whole failure reached the log as two lines that named neither
+# a file nor a cause, and had to be re-diagnosed from scratch.
+DIAG_MARKERS='error|caused by|could not compile|is not supported|unresolved import|cannot find|wasm-bindgen'
+DIAG_MAX_LINES=40
+
+# Prints a diagnosable summary of a failed build FROM ITS LOG FILE, and says
+# where that file is.
+#
+# Three properties, each of which the anchored-grep-then-`head` version lacked:
+#
+#   * matching happens on ANSI-STRIPPED text, so a coloured `error:` is found;
+#   * a matched line brings its INDENTED CONTINUATION lines with it — which is
+#     where `Caused by:` chains and rustc's `--> file:line` frames live, so a
+#     per-line filter drops precisely the payload and keeps only the headline;
+#   * when NOTHING matches, the tail is printed VERBATIM rather than nothing at
+#     all. That is the mechanism fix: a filter that can yield an empty summary
+#     turns a failing build into a silent one, and CLAUDE.md's rule is that
+#     output which prints nothing is a failure to run, never an absence of
+#     findings.
+#
+# Nothing here decides pass/fail. The verdict is the build's own exit status,
+# read directly by the `if cargo build … ; then` at each call site.
+report_build_failure() {
+  local log="$1"
+  echo "      │ full output: $log"
+  local stripped="${log%.log}.stripped.log"
+  # CSI (ESC [ … final byte in @-~) and OSC (ESC ] … BEL) forms.
+  LC_ALL=C sed -e $'s/\x1B\[[0-9;?]*[ -\/]*[@-~]//g' -e $'s/\x1B\][^\x07]*\x07//g' \
+    "$log" > "$stripped"
+  local summary="${log%.log}.summary.log"
+  # tolower() rather than gawk's IGNORECASE, which BSD awk (macOS) lacks.
+  awk -v max="$DIAG_MAX_LINES" -v markers="$DIAG_MARKERS" '
+    n >= max { exit }
+    { low = tolower($0) }
+    low ~ markers { print; n++; cont = 1; next }
+    cont == 1 && $0 ~ /^[ \t]+[^ \t]/ { print; n++; next }
+    $0 ~ /[^ \t]/ { cont = 0 }
+  ' "$stripped" > "$summary"
+  # A count with a verdict that depends on the count, not an eyeball.
+  if [[ -s "$summary" ]]; then
+    sed 's/^/      │ /' "$summary"
+  else
+    echo "      │ (no line matched the diagnostic markers — last $DIAG_MAX_LINES non-blank lines verbatim)"
+    grep -v '^[[:space:]]*$' "$stripped" | tail -"$DIAG_MAX_LINES" | sed 's/^/      │ /'
+  fi
+}
+
 echo "== Lodestone wasm32 compile guard =="
 echo "target: $TARGET"
 echo
@@ -158,8 +229,14 @@ for entry in "${CRATES[@]}"; do
   extra=""
   [[ "$entry" == *"|"* ]] && extra="${entry#*|}"
   printf '  %-34s ' "$pkg ${extra}"
+  # cargo writes its own output straight to a file and the `if` reads its REAL
+  # exit status — no filter sits between a long build and the only view of it.
+  # CARGO_TERM_COLOR keeps that file readable; report_build_failure strips ANSI
+  # anyway, for any producer that colours regardless.
+  log="$LOGDIR/$pkg.log"
   # shellcheck disable=SC2086
-  if out="$(cargo build -p "$pkg" --target "$TARGET" $extra 2>&1)"; then
+  if CARGO_TERM_COLOR=never \
+    cargo build -p "$pkg" --target "$TARGET" $extra > "$log" 2>&1; then
     echo "PASS"
   else
     echo "FAIL"
@@ -167,9 +244,7 @@ for entry in "${CRATES[@]}"; do
     # Name the offender and the fix, inline. The captured cargo error usually
     # names the actual native-only crate (e.g. `could not compile \`cpal\``),
     # which is the single most useful line for whoever just broke the build.
-    printf '%s\n' "$out" \
-      | grep -E "^error|could not compile|is not supported|cannot find (function|type|crate)|unresolved import|native" \
-      | head -6 | sed 's/^/      │ /'
+    report_build_failure "$log"
     echo "      └─ two common causes: (a) a dependency pulled '$pkg' onto native-only"
     echo "         code (threads / std::fs / OS sockets / OS audio like cpal) — fix by gating"
     echo "         that dep or call behind cfg(not(target_arch = \"wasm32\")) or an"
@@ -337,14 +412,17 @@ done
 # graph above is already warm in the shared target dir.
 if [[ -f "$ROOT/web/Cargo.toml" ]]; then
   printf '  %-34s ' "lodestone-web (trunk build)"
-  if out="$(cd "$ROOT/web" && trunk build 2>&1)"; then
+  web_log="$LOGDIR/lodestone-web-trunk.log"
+  # No NO_COLOR here, deliberately: `trunk` exposes `--no-color` through clap with
+  # `env = "NO_COLOR"` and a `bool` parser, so `NO_COLOR=1` makes trunk itself exit
+  # with `invalid value '1' for '--no-color'`. CARGO_TERM_COLOR covers the cargo it
+  # shells out to, and report_build_failure strips ANSI regardless.
+  if (cd "$ROOT/web" && CARGO_TERM_COLOR=never trunk build) > "$web_log" 2>&1; then
     echo "PASS"
   else
     echo "FAIL"
     fails+=("lodestone-web (trunk build)")
-    printf '%s\n' "$out" \
-      | grep -E "^error|could not compile|is not supported|unresolved import|wasm-bindgen|error from" \
-      | head -8 | sed 's/^/      │ /'
+    report_build_failure "$web_log"
     echo "      └─ the browser app failed to build. If the per-crate rows above are all"
     echo "         PASS, this is a wasm-bindgen/trunk-level break in web/ itself."
     echo "         Reproduce: (cd web && trunk build)"

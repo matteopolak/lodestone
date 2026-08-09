@@ -324,10 +324,21 @@ this is a shape rather than a one-off. Nothing else is reachable from the wire:
   into `strong_corpus()` in `truncation_is_clean.rs` with its packet id and state. That
   directory belongs to `v770` (off-limits for direct edits per this task's ownership rules),
   so adding fixtures there was out of scope for this pass — flagged, not done.
-- **Do not add a `cargo-fuzz` target as the primary mechanism.** If a nightly-only libFuzzer
-  target is ever worth adding on top of this (e.g. for corpus-driven coverage-guided fuzzing
-  proptest doesn't do), gate it behind an opt-in feature so `cargo test --workspace` on the
-  stable 1.95.0 toolchain is unaffected.
+- **Do not add a `cargo-fuzz` target as the primary mechanism.** If a libFuzzer target is ever
+  worth adding on top of this (e.g. for corpus-driven coverage-guided fuzzing proptest doesn't
+  do), keep it out of `cargo test --workspace`: a `fuzz/` directory that is its own Cargo
+  workspace, the way `web/` already is, is the conventional shape and the one this crate's
+  feature-gating does not obstruct — such a crate would depend on `lodestone-fuzz` with the
+  default features and get all four families exactly as the tests here do.
+
+  **The reason previously given for not adding one was "cargo-fuzz/libFuzzer need nightly and
+  the toolchain here is 1.95.0". That is void: `rust-toolchain.toml` pins
+  `channel = "nightly-2026-08-07"`,** and has for as long as worldgen has needed
+  `portable_simd`. `1.95.0` appears only as an inert `toolchain:` input in the CI workflow that
+  cargo overrides (see `docs/ci.md`). So nightly is not the blocker it was recorded as — the
+  remaining arguments are run time and keeping the stable `cargo test` path unaffected, which
+  the separate-workspace shape above answers. Do not re-derive the toolchain from this
+  paragraph either: read `rust-toolchain.toml`.
 
 ## Configuration
 
@@ -355,6 +366,33 @@ this is a shape rather than a one-off. Nothing else is reachable from the wire:
   environment-variable override.
 - `lodestone-core`, `lodestone-model`, `lodestone-world`, and all four `lodestone-v{47,340,
   735,770}` crates — the decoders under test, plus `NullSink`'s `WorldSink` impl.
+
+  **The four version crates are OPTIONAL, feature-gated dependencies, one Cargo feature per
+  family, all four on by default.** They were required edges, and `cargo xtask check-isolation`
+  failed on all four: a *required* shared → version edge makes that family undeletable, since
+  removing its folder would stop this crate building. The lint's own soft/hard split is the
+  mechanism for this case — an optional edge is a surfaced warning — so this crate uses it
+  rather than claiming the `[package.metadata.lodestone-isolation]` exemption, which is
+  reserved for `lodestone-registry` as the workspace's version aggregation point. A fuzz
+  harness is not that.
+
+  Consequences worth knowing before you build this crate with anything but the defaults:
+
+  - `Family`'s variants and `Family::ALL` are `#[cfg]`-gated per feature, and `ALL` is a
+    `&'static [Family]` rather than the `[Family; 4]` it used to be — its length is now a
+    function of the enabled features. Iterate with `for &family in Family::ALL`.
+  - three of the eight test binaries name a family directly and carry a whole-file
+    `#![cfg(feature = …)]`: `fuzz_regressions.rs` (`v340`), and `length_prefix_allocation.rs`,
+    `no_panic_v770_serverbound.rs` and `truncation_is_clean.rs` (`v770`). Under
+    `--no-default-features` they do not exist, which is why the features are on by default —
+    coverage that disappears quietly is worse than a slightly busier manifest.
+  - `families_are_compiled_in` in `no_panic_arbitrary_bytes.rs` asserts the sweep's premise and
+    names it. Measured: a family-less build does *not* report green anyway — the deterministic
+    sweep fails on its own case-count floor (`got 0`) and the proptest one fails inside proptest
+    on an empty selection range — so that test buys a **named** cause rather than two failures
+    a reader has to reverse-engineer.
+  - deleting a family is: delete its folder, then delete its `dep:` line, its `[features]` line,
+    and its name from `default`. `cargo xtask check-deletable <family>` prints those lines.
 - `lodestone-server` (direct path dependency, not a `[workspace.dependencies]` alias — same
   convention `lodestone-v770`'s own `Cargo.toml` uses for it) — `ServerProtocol`/`ServerBound`
   for the `v770` serverbound property.

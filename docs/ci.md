@@ -168,11 +168,38 @@ nightly as the dev machine, which is what you want — but it wastes a toolchain
 download per job and the file was asserting the opposite of what happened. The
 `check-default` matrix now has a `Report the toolchain actually in use` step that
 prints `rustc --version`/`cargo --version` and fails if there is none, so each leg
-states its compiler instead of a comment claiming one. **Removing the now-pointless
-`dtolnay/rust-toolchain` pin from the other jobs is a sensible follow-up and was
-deliberately not bundled here** — it changes what five currently-passing jobs do,
-and one variable at a time is the right discipline for a change that can only be
-verified by reading a run.
+states its compiler instead of a comment claiming one.
+
+**That follow-up — "just delete the pointless `toolchain:` input from the other
+jobs" — was attempted and is NOT possible. Do not try it.** The input is *inert*,
+but it is not *optional*: `dtolnay/rust-toolchain@master`'s own `action.yml`
+declares `toolchain` as `required: true` and, because GitHub does not enforce
+`required` inputs itself, opens with an explicit guard that exits 1 —
+
+```yaml
+if [[ -z $toolchain ]]; then
+  # GitHub does not enforce `required: true` inputs itself.
+  echo "'toolchain' is a required input" >&2
+  exit 1
+```
+
+— so removing the line does not remove a dead pin, it **fails every job at the
+install step**. "Inert" and "removable" are different properties, and the value
+being unused by the compiler said nothing about whether the action tolerates its
+absence. Read the action, not the effect.
+
+The three real options, none of which is a cleanup:
+
+- **give it a truthful value** (`nightly-2026-08-07`) — duplicates the pin into
+  seven places with nothing checking the copies against `rust-toolchain.toml`,
+  which is the drift this repo pays for repeatedly;
+- **drop the action entirely** and let cargo auto-install from
+  `rust-toolchain.toml` (which already declares `components` *and*
+  `targets = ["wasm32-unknown-unknown"]`, so the `wasm` job's `targets:` input is
+  redundant too) — plausibly correct and the least duplication, but it changes
+  what six passing jobs do and can only be validated by a run;
+- **leave it**, which is the current state. It costs one unused toolchain download
+  per job and nothing else, now that no document claims the value is the compiler.
 
 **Five of the six jobs call `just` recipes** (`docs/task-runner.md`) rather
 than retyping the raw `cargo` invocation, so this file, `CLAUDE.md`, and
@@ -209,8 +236,15 @@ choice.
 
 ### Toolchain and caching
 
-Every job pins the toolchain to `1.95.0` (matching `rust-toolchain.toml` and
-the dev machine) via `dtolnay/rust-toolchain`, and caches `~/.cargo` and
+Every job passes `toolchain: "1.95.0"` to `dtolnay/rust-toolchain`, and **that
+value is not the compiler any job uses** — cargo resolves `rust-toolchain.toml`'s
+`channel = "nightly-2026-08-07"` over it, so 1.95.0 is installed and then never
+invoked. The input cannot simply be deleted either; see "The `toolchain:` input is
+inert, and the job now says so" above for the action's own `required: true` guard
+and the three real options. The `check-default` matrix prints `rustc --version` so
+each leg states its actual compiler rather than inheriting a claim from this file.
+
+Every job caches `~/.cargo` and
 `target/` via `Swatinem/rust-cache` with a `shared-key` per job so the
 `--all-features` cache doesn't thrash against the default-features one (they
 build a materially different `target/`). `CARGO_INCREMENTAL=0` because a CI
@@ -515,6 +549,72 @@ new problem: it is the one leg with no compiler cache, for the reason in the
 platforms nobody has built is worse than no matrix, and the Windows row above is
 exactly that until a run replaces it.
 
+### The `wasm` job failed on gitignored assets, and its own reporter hid why
+
+Two defects, and the second is the reason the first was expensive. Worth reading in
+that order, because the shape recurs.
+
+**The reporter first.** Run `31337815809`'s `wasm` job failed at
+`lodestone-web (trunk build)` and printed, in total:
+
+```
+      │ error from build pipeline
+      │ 2026-08-09T21:50:37.386150Z ERROR error from build pipeline
+```
+
+That names no file, no cause, and no next step. `xtask`'s `wasm-check` was pushing
+the captured build through an **anchored** filter — `line.starts_with("error")`,
+plus a few `contains`, capped at 8 lines — and `trunk` prefixes every line with an
+RFC-3339 timestamp and a level, so **nothing it writes starts with `error`**. The
+`Caused by:` chain, which is where the answer was, is *indented on the lines after*
+the headline and so was invisible to a per-line filter regardless. This is
+`CLAUDE.md`'s "a shell pipeline will destroy the evidence you are about to reason
+from" living inside one of our own tools: the transform that made output readable
+invented a silence.
+
+The fix is mechanical rather than a better regex, in both `xtask`'s port and
+`scripts/wasm-check.sh`:
+
+- every build writes its **full** output to `target/wasm-check/<name>.log` and the
+  console prints a summary **of that file**, naming the path;
+- the verdict is the process's **own exit status**, never a property of its output;
+- matching happens on **ANSI-stripped** text (CI sets `CARGO_TERM_COLOR=always`
+  globally, so a coloured `error:` does not start with `e`), and the child is also
+  asked for `NO_COLOR`;
+- a matched line brings its **indented continuation lines** with it;
+- when **nothing** matches, the tail is printed **verbatim**. A filter that can
+  yield an empty summary turns a failing build into a silent one, and output that
+  prints nothing must read as a failure to run, never as an absence of findings.
+
+`xtask`'s three `diagnostic_selection_*` tests gate this against `trunk`'s real
+output, captured verbatim from a reproducing run; one of them carries the anchored
+predicate as a **control** and requires it to miss the cause, so the test cannot
+quietly stop measuring anything.
+
+**Then the actual failure.** `web/index.html` carried two
+`data-trunk rel="copy-file"` links pointing into `../.cache/mc/26.2/` —
+`client.jar` (39 MB) and `generated/reports/blocks.json` (6.8 MB). `.cache/` is
+gitignored, so **no runner has ever had it**, and a `copy-file` link is a hard
+build-time dependency: `trunk` failed in **0.33s**, before compiling anything, with
+`error getting canonical path for "…/client.jar"` / `No such file or directory`.
+Every contributor's first `trunk build` failed the same way.
+
+It reproduces exactly in a throwaway `git worktree add --detach`, which by
+construction has no gitignored files — a cheaper and more faithful runner
+stand-in than editing paths by hand, and worth reaching for whenever a failure
+smells like "present on my machine".
+
+The fix moves the two files from a mandatory `copy-file` link to a **conditional
+`post_build` hook** in `web/Trunk.toml`, which stages them only if they exist and
+otherwise prints one named line per absent file and exits 0. Nothing is lost,
+because the *runtime* already handled their absence: the page reports
+`ASSET LOAD FAILED` and draws nothing, deliberately, so a synthetic stand-in can
+never be mistaken for a working session. The failure simply moved to where it can
+be told apart from a broken build — the build cannot distinguish "this developer
+has not populated `.cache/` yet" from "the browser bundle is broken", and the page
+can. Verified both directions: assets present → both land in `dist/` at their exact
+byte sizes; assets absent → exit 0 with the named notice.
+
 ### `sccache` cannot wrap `rustc` on Windows here
 
 The Windows leg's first run failed with `sccache: error: failed to spawn Command
@@ -807,10 +907,15 @@ no custom target dir) rather than from the pass/fail count.
 - `.github/workflows/ci.yml` — the workflow itself; every tunable
   (toolchain version, cache keys, apt packages, env vars) lives inline with a
   comment explaining why.
-- `rust-toolchain.toml` — the toolchain version CI pins to; keep the two in
-  sync manually (there is no automated check that they agree — a mismatch
-  would fail CI immediately on the next push, which is the mismatch
-  announcing itself).
+- `rust-toolchain.toml` — **the toolchain every job actually compiles with**, and
+  it wins over the workflow's `toolchain:` input rather than agreeing with it. The
+  previous version of this entry said the two should be kept in sync manually and
+  that "a mismatch would fail CI immediately on the next push, which is the
+  mismatch announcing itself". **That is false, and demonstrably so: they have
+  mismatched (1.95.0 vs `nightly-2026-08-07`) across every green run in this
+  workflow's history.** An override is silent by design — it is the resolution
+  rule, not an error — so nothing announces it and there is nothing to keep in
+  sync. Change the compiler here; the workflow input is inert either way.
 - `Cargo.lock` — committed, so `Swatinem/rust-cache`'s cache key (derived
   from it) changes exactly when dependencies do.
 

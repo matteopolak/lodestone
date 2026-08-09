@@ -13,10 +13,27 @@ workspace = true
 lodestone-core = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-world = { workspace = true }
-lodestone-v47 = { workspace = true }
-lodestone-v340 = { workspace = true }
-lodestone-v735 = { workspace = true }
-lodestone-v770 = { workspace = true }
+# One OPTIONAL dependency per version family, mirroring `lodestone-registry`'s
+# shape for the same reason it has that shape: a version family must stay
+# deletable as a single folder. These were required edges, and `xtask
+# check-isolation` failed on all four — correctly. A required shared -> version
+# edge makes the version undeletable, because deleting the family's folder would
+# stop this crate building; an optional, feature-gated one makes the deletion
+# "remove the folder, then remove this crate's two lines naming it".
+#
+# Do not name a family's folder PATH in these comments: `xtask check-deletable`
+# greps this manifest for references and would report a comment as fallout.
+#
+# NOT exempted, deliberately. The isolation lint has exactly one exemption, keyed
+# on a `[package.metadata.lodestone-isolation] role` and reserved for the version
+# registry, and claiming it here would be asserting that a fuzz harness is the
+# workspace's version aggregation point. It is not. The lint's *own* soft/hard
+# split is the mechanism intended for this case, so this crate uses it and stays
+# a surfaced warning rather than a silenced violation.
+lodestone-v47 = { workspace = true, optional = true }
+lodestone-v340 = { workspace = true, optional = true }
+lodestone-v735 = { workspace = true, optional = true }
+lodestone-v770 = { workspace = true, optional = true }
 # Issue #282's own body names this crate's frame-level codec directly
 # (`MAX_PACKET_LEN`/`MAX_DECOMPRESSED_LEN`/`MAX_LENGTH_VARINT_BYTES` in
 # `codec.rs`) as already bounds-checked "per manual reading" — exactly the
@@ -31,9 +48,34 @@ uuid = { workspace = true }
 # distinct from the clientbound decoders every family below covers).
 lodestone-server = { path = "../lodestone-server" }
 
+[features]
+# ON BY DEFAULT, unlike `lodestone-registry`'s otherwise-identical feature set,
+# and the difference is load-bearing rather than a style choice. This crate's whole
+# product is a sweep over `Family::ALL`; off by default, `cargo test --workspace` —
+# what CI runs, and what anyone means by "the fuzz tests pass" — would compile an
+# EMPTY family list and sweep nothing, while three of the eight test binaries
+# vanish entirely behind their own `#![cfg(feature = ...)]`. Coverage that quiet is
+# not worth the tidier manifest.
+#
+# Measured, because the obvious version of this argument overstates it: a
+# family-less build does NOT report green. The `no_panic_arbitrary_bytes` sweeps
+# fail — one on its own case-count floor (`got 0`), one inside proptest on an empty
+# selection range — and `families_are_compiled_in` in that file fails first and
+# says why in one line. Read that test's doc comment before changing this.
+#
+# Deleting a family stays: delete its folder, then delete its `dep:` line above,
+# its line here, and its name from `default`.
+default = ["v47", "v340", "v735", "v770"]
+v47 = ["dep:lodestone-v47"]
+v340 = ["dep:lodestone-v340"]
+v735 = ["dep:lodestone-v735"]
+v770 = ["dep:lodestone-v770"]
+
 [dev-dependencies]
-# Property-based fuzzing over stable Rust (the toolchain here is 1.95.0;
-# `cargo-fuzz`/libFuzzer need nightly — see `docs/fuzz-harness.md` for why
-# this crate does not add one). Pinned to the 1.x line already implied by
-# every other `workspace.dependencies` entry using unpinned major versions.
+# Property-based fuzzing. This comment used to justify proptest over
+# `cargo-fuzz` by saying "the toolchain here is 1.95.0 and libFuzzer needs
+# nightly" — that is wrong: `rust-toolchain.toml` pins a nightly channel. The
+# real reasons are run time and keeping `cargo test --workspace` unaffected; see
+# `docs/fuzz-harness.md` for the current version. Pinned to the 1.x line already
+# implied by every other `workspace.dependencies` entry using unpinned majors.
 proptest = "1"

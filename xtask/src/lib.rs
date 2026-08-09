@@ -8644,16 +8644,14 @@ pub fn run_wasm_check(workspace_root: &Path) -> Result<()> {
         print!("  {display:<34} ");
         match compile_crate_for_wasm(workspace_root, &wasm_crate) {
             Ok(()) => println!("PASS"),
-            Err(output) => {
+            Err(failure) => {
                 println!("FAIL");
                 failures.push(format!(
                     "{} {}",
                     wasm_crate.name,
                     wasm_crate.extra_args.join(" ")
                 ));
-                for line in filter_cargo_error_lines(&output) {
-                    println!("      │ {line}");
-                }
+                report_build_failure(&failure);
                 println!(
                     "      └─ two common causes: (a) a dependency pulled '{}' onto native-only",
                     wasm_crate.name
@@ -8709,12 +8707,10 @@ pub fn run_wasm_check(workspace_root: &Path) -> Result<()> {
         print!("  {:<34} ", "lodestone-web (trunk build)");
         match build_web_with_trunk(workspace_root) {
             Ok(()) => println!("PASS"),
-            Err(output) => {
+            Err(failure) => {
                 println!("FAIL");
                 failures.push("lodestone-web (trunk build)".to_string());
-                for line in filter_trunk_error_lines(&output) {
-                    println!("      │ {line}");
-                }
+                report_build_failure(&failure);
                 println!("      └─ the browser app failed to build. If the per-crate rows above are all");
                 println!("         PASS, this is a wasm-bindgen/trunk-level break in web/ itself.");
                 println!("         Reproduce: (cd web && trunk build)");
@@ -8778,81 +8774,285 @@ fn ensure_wasm_prereqs() -> Result<()> {
     Ok(())
 }
 
+/// Where wasm-check writes the full output of each failed build, so the console
+/// summary is never the only copy.
+pub const WASM_CHECK_LOG_DIR: &str = "target/wasm-check";
+
+/// How many summary lines a failed build may print before being cut off. Chosen
+/// to fit a `Caused by:` chain or one rustc diagnostic with its `-->` frame,
+/// which the previous 6/8-line caps could not.
+const WASM_DIAGNOSTIC_MAX_LINES: usize = 40;
+
+/// Substrings (matched case-insensitively, against ANSI-stripped text) that mark
+/// a line worth showing from a failed build.
+///
+/// Deliberately **not anchored**. The anchored form (`line.starts_with("error")`)
+/// is what destroyed the evidence in the only CI failure this check has ever
+/// caught: `trunk` prefixes every line with an RFC-3339 timestamp and a level, so
+/// nothing it writes starts with `error`, and `cargo` under
+/// `CARGO_TERM_COLOR=always` (which CI sets globally) starts its error lines with
+/// an escape sequence rather than a letter. An anchor is only as good as the
+/// assumption that the producer writes bare, uncoloured, unprefixed lines, and
+/// neither producer here does.
+const WASM_DIAGNOSTIC_MARKERS: &[&str] = &[
+    "error",
+    "caused by",
+    "could not compile",
+    "is not supported",
+    "unresolved import",
+    "cannot find",
+    "wasm-bindgen",
+];
+
+/// A captured failed build: the full combined stdout+stderr, plus the path the
+/// whole thing was written to.
+///
+/// This type exists because of a measured failure of what it replaces. The
+/// previous shape returned a bare `String` that the caller pushed through an
+/// anchored `starts_with("error")` filter capped at 8 lines. The one CI failure
+/// this check has ever caught therefore reported exactly two useless lines --
+/// `error from build pipeline` and `trunk`'s own timestamped echo of it -- while
+/// the `Caused by:` chain naming the actual missing file never reached the log at
+/// all, and the failure had to be re-diagnosed from scratch. The filter that
+/// makes output readable is also the filter that can invent a silence, so the
+/// full output now always goes to a file and the console view is explicitly a
+/// summary *of that file*.
+#[derive(Debug)]
+pub struct CapturedBuild {
+    /// Combined stdout+stderr of the failed command, prefixed with the command
+    /// line and its real exit status.
+    pub output: String,
+    /// Where the full output was written. `None` only when the log could not be
+    /// written — which must never itself replace the build error.
+    pub log_path: Option<PathBuf>,
+}
+
+/// Runs `command`, returning `Ok(())` on a zero exit and a [`CapturedBuild`]
+/// otherwise.
+///
+/// The verdict comes from the process's own exit status, never from what its
+/// output looks like: a build that prints the word `error` and exits 0 is a
+/// warning, and a build that prints nothing and exits 1 is still a failure.
+fn run_captured_build(
+    command: &mut Command,
+    workspace_root: &Path,
+    log_name: &str,
+) -> Result<(), CapturedBuild> {
+    // Ask cargo not to colour output we are about to machine-match, which also
+    // covers the cargo `trunk` shells out to. Belt-and-braces with `strip_ansi`
+    // rather than a substitute for it: this keeps the *log file* readable, and the
+    // strip keeps the *matching* correct for any producer that colours anyway.
+    //
+    // `NO_COLOR` is deliberately NOT set here, and that is a measured
+    // correction rather than an omission: `trunk` exposes a `--no-color` flag
+    // through clap with `env = "NO_COLOR"` and a `bool` value parser, so
+    // `NO_COLOR=1` makes it exit with `invalid value '1' for '--no-color'` —
+    // the generic env var breaks the very build it was meant to make legible.
+    // (Caught in one line by the reporter below, which is the point of it.)
+    command.env("CARGO_TERM_COLOR", "never");
+    let description = format!("{command:?}");
+    let output = match command.output() {
+        Ok(output) => output,
+        // A spawn failure is a failure like any other and is reported through
+        // the same path, so it can never be mistaken for a green.
+        Err(err) => {
+            let text = format!("failed to spawn {description}: {err}\n");
+            let log_path = write_wasm_check_log(workspace_root, log_name, &text);
+            return Err(CapturedBuild {
+                output: text,
+                log_path,
+            });
+        }
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    let combined = format!(
+        "$ {description}\nexit status: {}\n\n{}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let log_path = write_wasm_check_log(workspace_root, log_name, &combined);
+    Err(CapturedBuild {
+        output: combined,
+        log_path,
+    })
+}
+
+/// Writes `contents` to `target/wasm-check/<log_name>.log`, returning its path.
+///
+/// A write failure is reported inline and swallowed on purpose: losing the log
+/// file must degrade the diagnosis, never replace the build error with a
+/// filesystem error.
+fn write_wasm_check_log(
+    workspace_root: &Path,
+    log_name: &str,
+    contents: &str,
+) -> Option<PathBuf> {
+    let sanitised: String = log_name
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    let dir = workspace_root.join(WASM_CHECK_LOG_DIR);
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        println!("      │ (could not create {}: {err})", dir.display());
+        return None;
+    }
+    let path = dir.join(format!("{sanitised}.log"));
+    match std::fs::write(&path, contents) {
+        Ok(()) => Some(path),
+        Err(err) => {
+            println!("      │ (could not write {}: {err})", path.display());
+            None
+        }
+    }
+}
+
+/// Strips ANSI escape sequences from captured output.
+///
+/// Load-bearing for every match in [`select_diagnostic_lines`], not cosmetic.
+/// With `CARGO_TERM_COLOR=always` set — which this repo's CI sets for every job —
+/// a line that reads `error: …` on a terminal is really
+/// `ESC[1mESC[31merror ESC[0m: …` in the captured bytes, and any anchored match
+/// against it silently fails. Handles the CSI (`ESC [` … final byte in
+/// `0x40..=0x7E`) and OSC (`ESC ]` … BEL or `ESC \`) forms; any other byte after
+/// an ESC drops the ESC alone, which cannot turn a matching line into a
+/// non-matching one.
+#[must_use]
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for next in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                let mut prev_was_esc = false;
+                for next in chars.by_ref() {
+                    if next == '\x07' || (prev_was_esc && next == '\\') {
+                        break;
+                    }
+                    prev_was_esc = next == '\x1b';
+                }
+            }
+            Some(other) => out.push(other),
+            None => {}
+        }
+    }
+    out
+}
+
+/// Selects the lines of `output` worth showing: every line containing one of
+/// `markers`, plus the indented continuation lines that follow it.
+///
+/// The continuation rule is the half the previous filter lacked, and it is where
+/// the whole diagnosis lives: `Caused by:`'s numbered causes and rustc's
+/// `--> file:line` / `|` frames all arrive *indented, on the lines after* the one
+/// that matched, so a per-line filter drops precisely the payload and keeps only
+/// the headline.
+#[must_use]
+pub fn select_diagnostic_lines(output: &str, markers: &[&str], max_lines: usize) -> Vec<String> {
+    let mut selected = Vec::new();
+    let mut in_continuation = false;
+    for line in output.lines() {
+        if selected.len() >= max_lines {
+            break;
+        }
+        let lower = line.to_ascii_lowercase();
+        if markers.iter().any(|marker| lower.contains(marker)) {
+            selected.push(line.trim_end().to_owned());
+            in_continuation = true;
+            continue;
+        }
+        let blank = line.trim().is_empty();
+        if in_continuation && !blank && (line.starts_with(' ') || line.starts_with('\t')) {
+            selected.push(line.trim_end().to_owned());
+            continue;
+        }
+        if !blank {
+            in_continuation = false;
+        }
+    }
+    selected
+}
+
+/// Prints a diagnosable summary of a failed build, and says where the full
+/// output is.
+///
+/// Three properties, each of which the anchored-grep-and-truncate version it
+/// replaces lacked: matching happens on ANSI-**stripped** text; a matched line
+/// brings its continuation lines with it; and when nothing matches, the tail is
+/// printed **verbatim** rather than nothing at all. That last one is the
+/// mechanism fix — a filter that can yield an empty summary turns a failing build
+/// into a silent one, and CLAUDE.md's rule is that output which prints nothing
+/// must be read as a failure to run, never as an absence of findings.
+fn report_build_failure(failure: &CapturedBuild) {
+    if let Some(path) = &failure.log_path {
+        println!("      │ full output: {}", path.display());
+    }
+    let stripped = strip_ansi(&failure.output);
+    let selected = select_diagnostic_lines(
+        &stripped,
+        WASM_DIAGNOSTIC_MARKERS,
+        WASM_DIAGNOSTIC_MAX_LINES,
+    );
+    if !selected.is_empty() {
+        for line in selected {
+            println!("      │ {line}");
+        }
+        return;
+    }
+    println!(
+        "      │ (no line matched the diagnostic markers — last {WASM_DIAGNOSTIC_MAX_LINES} \
+         non-blank lines verbatim)"
+    );
+    let tail: Vec<&str> = stripped
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let start = tail.len().saturating_sub(WASM_DIAGNOSTIC_MAX_LINES);
+    for line in &tail[start..] {
+        println!("      │ {line}");
+    }
+}
+
 /// Runs `cargo build -p <name> --target wasm32-unknown-unknown [extra]` from
-/// the workspace root, returning the captured cargo output on failure. The
-/// native xtask binary's own `--target-dir` is deliberately NOT forwarded: the
-/// wasm build shares the default target/ dir, exactly as the script did.
-fn compile_crate_for_wasm(workspace_root: &Path, wasm_crate: &WasmCrate) -> Result<(), String> {
-    let output = Command::new("cargo")
+/// the workspace root, capturing the build to a log file on failure. The native
+/// xtask binary's own `--target-dir` is deliberately NOT forwarded: the wasm
+/// build shares the default target/ dir, exactly as the script did.
+fn compile_crate_for_wasm(
+    workspace_root: &Path,
+    wasm_crate: &WasmCrate,
+) -> Result<(), CapturedBuild> {
+    let mut command = Command::new("cargo");
+    command
         .arg("build")
         .arg("-p")
         .arg(wasm_crate.name)
         .arg("--target")
         .arg(WASM_TARGET)
         .args(wasm_crate.extra_args)
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|err| format!("spawn cargo build for {}: {err}", wasm_crate.name))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!("{stdout}{stderr}"))
-    }
+        .current_dir(workspace_root);
+    run_captured_build(&mut command, workspace_root, wasm_crate.name)
 }
 
-/// Runs `trunk build` inside web/, returning the captured output on failure.
-fn build_web_with_trunk(workspace_root: &Path) -> Result<(), String> {
-    let output = Command::new("trunk")
+/// Runs `trunk build` inside web/, capturing the build to a log file on failure.
+fn build_web_with_trunk(workspace_root: &Path) -> Result<(), CapturedBuild> {
+    let mut command = Command::new("trunk");
+    command
         .arg("build")
-        .current_dir(workspace_root.join("web"))
-        .output()
-        .map_err(|err| format!("spawn trunk build: {err}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!("{stdout}{stderr}"))
-    }
-}
-
-/// Extracts the lines of a captured cargo build that name the actual offender
-/// (mirrors the script's error grep), capped at the same 6 lines.
-fn filter_cargo_error_lines(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter(|line| {
-            line.starts_with("error")
-                || line.contains("could not compile")
-                || line.contains("is not supported")
-                || line.starts_with("cannot find function")
-                || line.starts_with("cannot find type")
-                || line.starts_with("cannot find crate")
-                || line.contains("unresolved import")
-                || line.contains("native")
-        })
-        .take(6)
-        .map(str::to_owned)
-        .collect()
-}
-
-/// The trunk-build variant of the above, capped at 8 lines.
-fn filter_trunk_error_lines(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter(|line| {
-            line.starts_with("error")
-                || line.contains("could not compile")
-                || line.contains("is not supported")
-                || line.contains("unresolved import")
-                || line.contains("wasm-bindgen")
-                || line.contains("error from")
-        })
-        .take(8)
-        .map(str::to_owned)
-        .collect()
+        .current_dir(workspace_root.join("web"));
+    run_captured_build(&mut command, workspace_root, "lodestone-web-trunk")
 }
 
 #[cfg(test)]
@@ -8994,6 +9194,109 @@ mod tests {
             ..demo_rule()
         };
         assert!(scan_confinement(tmp.path(), &rule).is_err());
+    }
+
+    /// `trunk` 0.21.14's real failure output, captured VERBATIM from a run that
+    /// reproduced the CI failure (a detached worktree, which has no gitignored
+    /// `.cache/`, exactly the runner's condition). Only the absolute path was
+    /// shortened.
+    ///
+    /// This is the outside source the assertions below need: it is what the
+    /// producer actually writes, not what we assume it writes. Note the shape
+    /// that broke the old filter — every line carries an RFC-3339 timestamp and a
+    /// level, so NO line starts with `error`.
+    const TRUNK_FAILURE_SAMPLE: &str = concat!(
+        "2026-08-09T22:13:07.017492Z  INFO 🚀 Starting trunk 0.21.14\n",
+        "2026-08-09T22:13:07.018088Z  INFO 📦 starting build\n",
+        "2026-08-09T22:13:07.343401Z ERROR ❌ error\n",
+        "error from build pipeline\n",
+        "\n",
+        "Caused by:\n",
+        "    0: error getting canonical path for \"/repo/web/../.cache/mc/26.2/client.jar\"\n",
+        "    1: No such file or directory (os error 2)\n",
+        "2026-08-09T22:13:07.343622Z ERROR error from build pipeline\n",
+    );
+
+    /// The regression this whole mechanism exists for. The previous filter was
+    /// `line.starts_with(\"error\") || line.contains(\"error from\") || …`, capped
+    /// at 8 lines, and against the sample above it selected exactly TWO lines,
+    /// neither of which named a file or a cause — which is what CI printed.
+    ///
+    /// The control is the second half: the same anchored predicate is evaluated
+    /// here and required to MISS the `Caused by:` chain, so this test fails if
+    /// someone reintroduces an anchor and it happens to work by accident.
+    #[test]
+    fn diagnostic_selection_survives_ansi_and_keeps_the_caused_by_chain() {
+        // Uncoloured output must survive the strip untouched; the coloured case
+        // is covered by `diagnostic_selection_keeps_rustc_location_frames`.
+        let stripped = strip_ansi(TRUNK_FAILURE_SAMPLE);
+        assert_eq!(
+            stripped, TRUNK_FAILURE_SAMPLE,
+            "strip_ansi must be the identity on text with no escape sequences"
+        );
+
+        let selected = select_diagnostic_lines(&stripped, WASM_DIAGNOSTIC_MARKERS, 40);
+        let joined = selected.join("\n");
+        // The three things a reader needs, none of which reached the CI log.
+        assert!(
+            joined.contains("client.jar"),
+            "the summary must name the missing file; got:\n{joined}"
+        );
+        assert!(
+            joined.contains("No such file or directory"),
+            "the summary must name the cause; got:\n{joined}"
+        );
+        assert!(
+            joined.contains("Caused by:"),
+            "the summary must keep the Caused by: header; got:\n{joined}"
+        );
+
+        // The control: the anchored predicate this replaced, run on the same
+        // bytes. If it can see the cause, this test is not measuring anything.
+        let anchored: Vec<&str> = TRUNK_FAILURE_SAMPLE
+            .lines()
+            .filter(|line| line.starts_with("error") || line.contains("error from"))
+            .collect();
+        assert!(
+            !anchored.iter().any(|line| line.contains("client.jar")),
+            "the anchored filter was supposed to MISS the cause, so this control \
+             proves nothing; it selected: {anchored:?}"
+        );
+    }
+
+    /// A filter that can return nothing must never *print* nothing: an empty
+    /// summary reads as "no error found", which is the one thing a failing build
+    /// cannot mean. Output nobody's markers match still has to be shown.
+    #[test]
+    fn diagnostic_selection_is_empty_only_when_the_tail_fallback_takes_over() {
+        let opaque = "linker invoked\nsegmentation fault\n";
+        let selected = select_diagnostic_lines(opaque, WASM_DIAGNOSTIC_MARKERS, 40);
+        assert!(
+            selected.is_empty(),
+            "sample was meant to match no marker, so the fallback arm is what \
+             `report_build_failure` would take; it selected: {selected:?}"
+        );
+        // The fallback prints the non-blank tail, so it is non-empty exactly when
+        // the captured output is.
+        let tail: Vec<&str> = opaque.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(tail, ["linker invoked", "segmentation fault"]);
+    }
+
+    /// A coloured rustc diagnostic must keep its `-->` location line, which is
+    /// indented and therefore invisible to any per-line filter.
+    #[test]
+    fn diagnostic_selection_keeps_rustc_location_frames() {
+        let sample = concat!(
+            "\u{1b}[1m\u{1b}[31merror[E0433]\u{1b}[0m\u{1b}[1m: failed to resolve\u{1b}[0m\n",
+            "  \u{1b}[1m\u{1b}[34m-->\u{1b}[0m crates/lodestone-server/src/lib.rs:12:5\n",
+            "   \u{1b}[1m\u{1b}[34m|\u{1b}[0m\n",
+        );
+        let selected = select_diagnostic_lines(&strip_ansi(sample), WASM_DIAGNOSTIC_MARKERS, 40);
+        let joined = selected.join("\n");
+        assert!(
+            joined.contains("--> crates/lodestone-server/src/lib.rs:12:5"),
+            "the summary must keep rustc's location frame; got:\n{joined}"
+        );
     }
 
     #[test]

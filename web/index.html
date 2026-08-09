@@ -13,22 +13,25 @@
     />
     <link data-trunk rel="rust" data-wasm-opt="0" />
 
-    <!-- The renderable corpus and the block-state id table, copied out of the local
-         `.cache/mc/26.2` at build time. These are NOT committed (39 MB and 6.8 MB);
-         they are the same two files the native client discovers on disk, and
-         `src/main.rs` fetches them and hands the bytes to
+    <!-- The renderable corpus (`client.jar`) and the block-state id table
+         (`blocks.json`) are NOT referenced here, on purpose. They are copied out of
+         the local `.cache/mc/26.2` by the `post_build` hook in `Trunk.toml`, which
+         stages them only IF THEY EXIST; `src/main.rs` then `fetch`es them by
+         basename beside the page and hands the bytes to
          `lodestone::platform::assets::install`.
 
-         If trunk errors that these are missing, populate the cache the same way a
-         native run does — see web/README.md. Without them the page reports an asset
-         failure and draws nothing, on purpose: a synthetic stand-in on screen is
-         indistinguishable from a working session. -->
-    <link data-trunk rel="copy-file" href="../.cache/mc/26.2/client.jar" />
-    <link
-      data-trunk
-      rel="copy-file"
-      href="../.cache/mc/26.2/generated/reports/blocks.json"
-    />
+         They used to be two `data-trunk rel="copy-file"` links right here, and that
+         is a build-time HARD dependency on 46 MB of gitignored, uncommitted files:
+         `trunk build` failed outright wherever `.cache/` was absent — every CI
+         runner, and every contributor's first build. Moving them to an optional
+         staging step is the fix, and it costs nothing at runtime, because a missing
+         asset was ALREADY handled: the page reports "ASSET LOAD FAILED", naming the
+         fetch, and draws nothing. That is deliberate — a synthetic stand-in on
+         screen is indistinguishable from a working session — and it is a better
+         place for the failure than the build, which cannot tell "the developer has
+         not populated .cache yet" from "the browser build is broken".
+
+         Populate the cache the same way a native run does — see web/README.md. -->
 
     <style>
       html,

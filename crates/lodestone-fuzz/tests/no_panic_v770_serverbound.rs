@@ -20,6 +20,11 @@
 //! clientbound side there is no `Err` to distinguish from a clean decode —
 //! the only property this file can check is "did not panic".
 
+// `V770ServerProtocol` is the only `ServerProtocol` implementation, so this file
+// exists only in a build that compiles `v770` in. On by default; see the crate
+// manifest's `[features]`.
+#![cfg(feature = "v770")]
+
 use lodestone_fuzz::catch;
 use lodestone_model::ConnectionState;
 use lodestone_server::ServerProtocol;

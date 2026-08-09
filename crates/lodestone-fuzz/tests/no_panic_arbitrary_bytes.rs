@@ -41,7 +41,7 @@ const FIXED_PAYLOADS: &[&[u8]] = &[
 #[test]
 fn deterministic_sweep_over_every_declared_clientbound_packet_id() {
     let mut cases = 0usize;
-    for family in Family::ALL {
+    for &family in Family::ALL {
         for state in Family::STATES {
             for &(name, id) in family.clientbound_entries(state) {
                 for payload in FIXED_PAYLOADS {
@@ -66,6 +66,40 @@ fn deterministic_sweep_over_every_declared_clientbound_packet_id() {
         "expected well over 1000 (packet id x fixed payload) cases, got {cases} \
          — the packet_ids tables are probably not being reached"
     );
+}
+
+/// Asserts this file's own premise: that there is at least one family to sweep.
+///
+/// The families are optional Cargo features, so that a version folder stays
+/// deletable (`xtask check-isolation`). They are on by default, but a
+/// `--no-default-features` build compiles `Family::ALL` down to an **empty
+/// slice**, and then every `for &family in Family::ALL` loop iterates zero times.
+///
+/// **What that actually does was measured, not assumed, and the first version of
+/// this comment had it wrong.** Under `--no-default-features` the two sweeps in
+/// this file do *not* silently pass:
+///
+/// * `deterministic_sweep_over_every_declared_clientbound_packet_id` already
+///   carries its own case-count floor and fails with `got 0`;
+/// * `handle_packet_never_panics` fails incidentally, inside proptest, on an
+///   empty `0..0` selection range.
+///
+/// So this test is not the difference between green and red — it is the
+/// difference between a **named** premise failure and two failures a reader has
+/// to reverse-engineer, one of which reports as a proptest internal error that
+/// looks nothing like "you turned the families off". Keeping it is cheap and it
+/// makes the cause self-describing. The count is printed for the same reason: it
+/// tells a reader whether they are looking at a full four-family run or a subset.
+#[test]
+fn families_are_compiled_in() {
+    assert!(
+        !Family::ALL.is_empty(),
+        "no protocol family is compiled in, so every sweep in this crate would \
+         iterate zero families and pass without decoding a byte. Build with the \
+         default features (all four families) — see lodestone-fuzz's Cargo.toml."
+    );
+    let names: Vec<&str> = Family::ALL.iter().map(|f| f.name()).collect();
+    eprintln!("fuzzing {} famil(y/ies): {names:?}", names.len());
 }
 
 fn arb_family() -> impl Strategy<Value = Family> {

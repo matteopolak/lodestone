@@ -50,6 +50,9 @@
 // pure pass-throughs to `System` plus an atomic counter — no allocation
 // logic of their own to get wrong.
 #![allow(unsafe_code)]
+// This file drives `lodestone_v770` directly, so it exists only in a build that
+// compiles that family in. On by default; see the crate manifest's `[features]`.
+#![cfg(feature = "v770")]
 
 use lodestone_core::{Ctx, Decode, Reader, Writer};
 use lodestone_v770::packets::game::GameLogin;
