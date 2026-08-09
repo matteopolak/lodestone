@@ -51,6 +51,28 @@
 //!    [`AdvancementManager::revoke_criterion`] when a trigger fires. Each
 //!    call returns a [`GrantOutcome`] so the caller can react to a *first*
 //!    completion (vanilla's advancement "done" toast / root-unlocked logic).
+//!
+//!    **The trigger that actually fires today is
+//!    [`AdvancementManager::on_inventory_changed`]**, vanilla's
+//!    `minecraft:inventory_changed`, and it is deliberately the only one: every
+//!    criterion in [`AdvancementManager::builtin`] that a player can reach uses
+//!    that trigger with a single `items` predicate. `crate::server` drives it from
+//!    the two places an item enters a player's inventory — the floor-pickup sweep
+//!    and `/give`.
+//!
+//!    Putting the hook at the inventory seam rather than at each producer is not a
+//!    shortcut, it is what the records say: `story/mine_stone` fires when you
+//!    *obtain* cobblestone, from a dig or a chest or a command, so a block-break
+//!    hook would grant it for a dig whose drop went nowhere and never grant it for
+//!    the other routes. One hook reaches five of the seven builtin advancements.
+//!
+//!    **Statistics are driven from three sites**, each chosen because it is the
+//!    place the count is naturally exactly-once: `minecraft:mined` in
+//!    `crate::server`'s `destroy_block` (before the creative fork, so a creative
+//!    break still counts), `minecraft:picked_up` in the pickup sweep (credited per
+//!    item *banked*, not per entity seen), and the `minecraft:deaths` custom
+//!    counter in `publish_health`, whose own guards already make crossing zero
+//!    happen once per life.
 //! 3. Every tick (vanilla: `ServerPlayer.tick()` calls
 //!    `advancements.flushDirty(player, true)`) the server calls
 //!    [`AdvancementManager::flush_dirty`]. Only when the first packet is still
@@ -691,6 +713,85 @@ impl AdvancementManager {
             ),
         ])
         .expect("the builtin advancement tree is well-formed")
+    }
+
+    /// The item predicates every criterion in [`builtin`](Self::builtin) watches
+    /// for, as `(item id, advancement id, criterion)`.
+    ///
+    /// **Read out of the 26.2 advancement records, not invented.** Every criterion
+    /// in the builtin tree that a player can actually reach uses the
+    /// `minecraft:inventory_changed` trigger with a single `items` predicate, so the
+    /// whole trigger reduces to this table:
+    ///
+    /// | record | predicate | expanded to |
+    /// |---|---|---|
+    /// | `story/root` `crafting_table` | `minecraft:crafting_table` | one item |
+    /// | `story/mine_stone` `get_stone` | `#minecraft:stone_tool_materials` | **three** items |
+    /// | `story/upgrade_tools` `stone_pickaxe` | `minecraft:stone_pickaxe` | one item |
+    /// | `story/smelt_iron` `iron` | `minecraft:iron_ingot` | one item |
+    /// | `story/obtain_armor` × 4 | the four iron pieces | four items, one OR group |
+    ///
+    /// The `#minecraft:stone_tool_materials` tag is the row worth checking: it is
+    /// **cobblestone, blackstone and cobbled deepslate** — *not* `minecraft:stone`.
+    /// Mining a stone block drops cobblestone, which is why the advancement is
+    /// reachable at all, and a table keyed on `minecraft:stone` would never fire
+    /// for an ordinary dig.
+    ///
+    /// `nether/root`'s `returned_safely` and `recipes/root`'s
+    /// `minecraft:impossible` are absent on purpose: the first is a dimension
+    /// trigger this crate has no dimensions for, and the second is vanilla's own
+    /// never-fires criterion.
+    const INVENTORY_CHANGED_CRITERIA: &'static [(&'static str, &'static str, &'static str)] = &[
+        ("minecraft:crafting_table", "minecraft:story/root", "crafting_table"),
+        ("minecraft:cobblestone", "minecraft:story/mine_stone", "get_stone"),
+        ("minecraft:blackstone", "minecraft:story/mine_stone", "get_stone"),
+        ("minecraft:cobbled_deepslate", "minecraft:story/mine_stone", "get_stone"),
+        ("minecraft:stone_pickaxe", "minecraft:story/upgrade_tools", "stone_pickaxe"),
+        ("minecraft:iron_ingot", "minecraft:story/smelt_iron", "iron"),
+        ("minecraft:iron_helmet", "minecraft:story/obtain_armor", "iron_helmet"),
+        ("minecraft:iron_chestplate", "minecraft:story/obtain_armor", "iron_chestplate"),
+        ("minecraft:iron_leggings", "minecraft:story/obtain_armor", "iron_leggings"),
+        ("minecraft:iron_boots", "minecraft:story/obtain_armor", "iron_boots"),
+    ];
+
+    /// Vanilla's `minecraft:inventory_changed` trigger: `item` has just entered
+    /// `player`'s inventory, so grant every criterion whose predicate it satisfies.
+    ///
+    /// # Why this is the hook and a block-break hook is not
+    ///
+    /// The obvious place to grant `story/mine_stone` is block-break finalisation,
+    /// and it would be wrong. Vanilla's criterion is
+    /// `minecraft:inventory_changed` on `#stone_tool_materials`, i.e. it fires when
+    /// you **obtain** cobblestone — from a dig, from a chest, from a trade, from
+    /// `/give`. A break hook would grant it for a dig whose drop went nowhere
+    /// (a full inventory, `block_drops` off) and would never grant it for the other
+    /// three routes.
+    ///
+    /// One hook here therefore lights up **five** of the seven builtin
+    /// advancements, which is the whole reason to put it at the inventory seam
+    /// rather than at each producer.
+    ///
+    /// Returns one [`GrantOutcome`] per criterion that changed, so a caller can
+    /// tell whether anything is worth flushing. An item no criterion watches
+    /// returns empty and touches nothing — which is the overwhelmingly common case,
+    /// so the scan is a ten-entry slice comparison rather than a map.
+    pub fn on_inventory_changed(
+        &mut self,
+        player: Uuid,
+        item: &str,
+        obtained_millis: i64,
+    ) -> Vec<GrantOutcome> {
+        let mut out = Vec::new();
+        for &(watched, advancement, criterion) in Self::INVENTORY_CHANGED_CRITERIA {
+            if watched != item {
+                continue;
+            }
+            let outcome = self.grant_criterion(player, advancement, criterion, obtained_millis);
+            if outcome.changed {
+                out.push(outcome);
+            }
+        }
+        out
     }
 
     /// The advancement tree, by id.
@@ -1339,5 +1440,138 @@ mod tests {
             assert_eq!(StatType::from_resource_key(kind.resource_key()), Some(kind));
         }
         assert_eq!(StatType::from_resource_key("minecraft:nope"), None);
+    }
+    // ---------------------------------------------------------------------
+    // The `minecraft:inventory_changed` trigger — the hook that turned
+    // `grant_criterion` from a tested function with zero callers into something
+    // a player can actually reach.
+    // ---------------------------------------------------------------------
+
+    /// **The cheapest end-to-end claim, and the one the epic asked for first**:
+    /// obtaining cobblestone completes `minecraft:story/mine_stone`, and the
+    /// completion shows up in the packet a flush would send.
+    ///
+    /// The item is **cobblestone, not stone**, and that is the whole point of the
+    /// table being read out of the records: `story/mine_stone`'s criterion is
+    /// `minecraft:inventory_changed` on `#minecraft:stone_tool_materials`, which the
+    /// 26.2 tag expands to cobblestone / blackstone / cobbled deepslate. A hook
+    /// keyed on `minecraft:stone` — the obvious guess, and what a "block-break
+    /// criterion" would have used — never fires for an ordinary dig.
+    #[test]
+    fn obtaining_cobblestone_completes_mine_stone_and_reaches_the_flush() {
+        let mut manager = AdvancementManager::builtin();
+        let player = Uuid::from_u128(9);
+        // Clear the first-packet flag, so what follows is a real incremental flush
+        // rather than the join snapshot.
+        let _ = manager.initial_update(player, true);
+        let _ = manager.flush_dirty(player, true);
+
+        assert!(
+            !manager.is_done(player, "minecraft:story/mine_stone"),
+            "control: nothing is granted before the trigger fires"
+        );
+
+        let outcomes = manager.on_inventory_changed(player, "minecraft:cobblestone", 1_000);
+        assert_eq!(outcomes.len(), 1, "exactly one criterion watches cobblestone");
+        assert!(outcomes[0].is_done, "get_stone is the only requirement, so it completes");
+        assert!(manager.is_done(player, "minecraft:story/mine_stone"));
+
+        // And it reaches the wire. `flush_dirty` returning `None` here would be the
+        // island: granted server-side, invisible to the client forever.
+        let update = manager
+            .flush_dirty(player, true)
+            .expect("a granted criterion must produce an update to send");
+        let entry = update
+            .progress
+            .iter()
+            .find(|p| p.id == "minecraft:story/mine_stone")
+            .expect("the flushed update must name the completed advancement");
+        assert!(
+            entry
+                .criteria
+                .iter()
+                .any(|(name, obtained)| name == "get_stone" && *obtained == Some(1_000)),
+            "the flushed criterion must carry the timestamp it was granted with, or              the client cannot order the toast: {:?}",
+            entry.criteria
+        );
+    }
+
+    /// The control for the table itself: an item **no** criterion watches must grant
+    /// nothing and leave the player's state untouched. Without this, a trigger that
+    /// granted `story/root` for everything would pass the gate above.
+    ///
+    /// `minecraft:stone` is deliberately the negative case — it is the item a
+    /// careless implementation would have keyed `get_stone` on.
+    #[test]
+    fn an_unwatched_item_grants_nothing() {
+        let mut manager = AdvancementManager::builtin();
+        let player = Uuid::from_u128(9);
+        for item in ["minecraft:stone", "minecraft:dirt", "minecraft:diamond"] {
+            assert!(
+                manager.on_inventory_changed(player, item, 1).is_empty(),
+                "{item} is not in any builtin criterion's predicate"
+            );
+        }
+        assert!(!manager.is_done(player, "minecraft:story/root"));
+        assert!(!manager.is_done(player, "minecraft:story/mine_stone"));
+    }
+
+    /// Every item in the transcribed table really does grant its own criterion, and
+    /// the five reachable builtin advancements really are reachable — so the table
+    /// is exercised as a whole rather than only through its cobblestone row.
+    ///
+    /// The count is asserted, because a table row that silently named a
+    /// non-existent advancement or criterion would make `grant_criterion` a no-op
+    /// and nothing else here would notice.
+    #[test]
+    fn every_table_row_grants_a_real_criterion() {
+        for &(item, advancement, criterion) in AdvancementManager::INVENTORY_CHANGED_CRITERIA {
+            let mut manager = AdvancementManager::builtin();
+            let player = Uuid::from_u128(1);
+            let outcomes = manager.on_inventory_changed(player, item, 1);
+            assert_eq!(
+                outcomes.len(),
+                1,
+                "{item} must grant exactly {advancement}/{criterion}"
+            );
+            assert!(
+                manager.is_done(player, advancement),
+                "{advancement} has one requirement group containing {criterion}, so \
+                 {item} alone completes it"
+            );
+        }
+        // Five distinct advancements are reachable through the table; the other two
+        // builtin nodes (`nether/root`, `recipes/root`) are deliberately absent.
+        let reachable: std::collections::BTreeSet<&str> =
+            AdvancementManager::INVENTORY_CHANGED_CRITERIA
+                .iter()
+                .map(|&(_, advancement, _)| advancement)
+                .collect();
+        assert_eq!(
+            reachable.len(),
+            5,
+            "one hook lights up five of the seven builtin advancements: {reachable:?}"
+        );
+    }
+
+    /// `story/obtain_armor` is a single **OR** group of four pieces, so any one
+    /// piece completes it — and the second piece must report no further change.
+    ///
+    /// This is the row where the requirement *shape* matters: modelled as four
+    /// separate groups, one helmet would leave the advancement incomplete.
+    #[test]
+    fn any_single_iron_piece_completes_obtain_armor() {
+        let mut manager = AdvancementManager::builtin();
+        let player = Uuid::from_u128(4);
+        let first = manager.on_inventory_changed(player, "minecraft:iron_boots", 1);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].is_done, "one piece of the OR group is enough");
+
+        let second = manager.on_inventory_changed(player, "minecraft:iron_helmet", 2);
+        assert_eq!(second.len(), 1, "the criterion itself is newly granted");
+        assert!(
+            !second[0].completion_changed,
+            "the advancement was already done, so completion must not change again"
+        );
     }
 }
