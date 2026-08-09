@@ -56,16 +56,21 @@ wrong in both directions:
 So the honest count is: **3 of 26 registrations landed** (chest/ender chest/trapped chest all through
 `ChestRenderer`), **5 more landed and wired end to end** (skull; sign text for **both** sign
 registrations — `SIGN` and `HANGING_SIGN` — geometry excepted since a sign's board is a real block
-model; the bell body/rim; and the shulker box — see [Shulker box](#shulker-box)), plus the banner, so
-**9 of 26**. The rest are still absent. Picking the next few should read this list, not the original
-issue body.
+model; the bell body/rim; and the shulker box — see [Shulker box](#shulker-box)), plus the banner and
+the lectern, so **10 of 26**. The rest are still absent. Picking the next few should read this list,
+not the original issue body.
 
-**The registration list has two entries this document's "what is not built" section never mentioned
+**The registration list had two entries this document's "what is not built" section never mentioned
 either way: `LECTERN` (`LecternRenderer`, the open book on a lectern) and `CONDUIT` (`ConduitRenderer`,
-the shell/eye rig).** Neither is landed and neither was named as deferred — a *silent* gap, which is
-worse than a recorded one. They are the two most player-visible remaining entries after the piston
-head, and `LecternRenderer`'s `BookModel` is shared with `EnchantTableRenderer`, so porting one rig
-covers two registrations.
+the shell/eye rig)** — a *silent* gap, which is worse than a recorded one. The lectern has since
+landed (see [Lectern](#lectern)); the conduit has not.
+
+**One claim in that same paragraph was wrong and is worth keeping as a correction**: it said porting
+`BookModel` "covers two registrations", because `LecternRenderer` and `EnchantTableRenderer` bake the
+same `ModelLayers.BOOK` layer. That is true of the **mesh** and false of the **work**. A lectern's
+`BookModel.State` is a compile-time constant; the enchanting table's is a client-simulated animation
+state machine with its own `open`/`flip`/`rot`/`time` counters, none of it on the wire. One rig, two
+very different jobs — the enchanting table is a whole separate task on top.
 
 ## What it is
 
@@ -73,9 +78,12 @@ The cuboid rigs vanilla's `BlockEntityRenderer`s draw for blocks whose block mod
 describe them**. Chest and skull are the total-absence case — their block models have zero elements,
 so before this work they were a hole in the world. Bell is the partial case: its block model has real
 geometry for the attachment frame, but the swinging body/rim comes from `BellRenderer` alone, same as
-chest and skull in kind, just not in degree. Today: chests (single, double left, double right; every
-material; the lid animation), skull/head geometry (five of vanilla's seven types), and the bell
-body/rim (see [Bell](#bell)).
+chest and skull in kind, just not in degree. The lectern is the far end of that spectrum: its shelf,
+base and posts are *all* real block models, and only the open book on top comes from a renderer.
+Today: chests (single, double left, double right; every material; the lid animation), skull/head
+geometry (five of vanilla's seven types), the bell body/rim (see [Bell](#bell)), the shulker box (see
+[Shulker box](#shulker-box)), standing/wall/hanging sign text, the banner with its pattern layers, and
+the lectern's book (see [Lectern](#lectern)).
 
 This is not a nice-to-have layer over an existing box. A 26.2 chest has **no block model at all** —
 `assets/minecraft/blockstates/chest.json` points at `block/chest`, and that file is verbatim:
@@ -852,6 +860,116 @@ All six steps of the checklist below are done, including the one bell needed a s
 shulker box declares no block model of its own, so an unset source leaves a hole in the world exactly
 where every box is, the chest failure mode.
 
+## Lectern
+
+The open book lying on a lectern — `LecternRenderer` plus `BookModel`. The cheapest type in this
+module and the only one whose input is a single block-state boolean: no NBT, nothing on the wire, no
+animation state, no per-frame clock.
+
+### Geometry — seven parts, four of them paper-thin, on the module's only non-square sheet
+
+`BookModel.createBodyLayer()`, sheet **64 × 32**
+(`lodestone_assets::block_entity_models::book_model`). Three things in the transcription look like
+mistakes and are not:
+
+- **The two lids and the two flip pages are 0.005 texels thick.** They are boxes, not quads, so
+  `bake_cube` emits six faces of each and two of those faces are 0.005 texels wide. A mesher that
+  culled near-degenerate cubes would silently eat the covers and the turning pages and leave two page
+  blocks, which still reads as a book.
+- **`flip_page1` and `flip_page2` share one `CubeListBuilder`** in the jar, so identical UVs are
+  deliberate. They differ only in the per-frame `yRot` `setupAnim` gives them.
+- **`seam` is the only part with a rest *rotation*** — `PartPose.rotation(0, PI/2, 0)`, no offset —
+  and `setupAnim` never poses it. The spine's quarter turn therefore has to survive as a rest pose;
+  adding `seam` to the override list with a zero `y_rot` flattens it into the covers and still draws a
+  plausible book.
+
+`BOOK_SHEET` is named separately from `CHEST_SHEET` for the height: at 64×64 every `v` coordinate
+halves and the page texture draws at the wrong scale rather than not at all.
+
+### `openness` is a compile-time constant — do not port an animation for it
+
+`LecternRenderer.BOOK_STATE` is `BookModel.State.forAnimation(0.0, 0.1, 0.9, 1.2)`, and `forAnimation`
+computes `openness = (sin(progress * 0.02) * 0.1 + 1.25) * openness`. With `progress == 0` the `sin`
+term is **exactly zero**, so the whole expression collapses to `1.25 * 1.2 == 1.5` for every lectern in
+the world, on every frame. That is `LECTERN_BOOK_OPENNESS`.
+
+The trap is that the expression *looks* like an animation. Feeding it a live tick counter would make
+every lectern book breathe, which vanilla's does not — the page-flip animation belongs to
+`EnchantTableRenderer`, which passes `forAnimation` a real client-simulated `progress`.
+`a_lectern_books_openness_is_constant_because_its_progress_term_is_dead` recomputes the formula from
+the jar's four literals and carries a non-zero-progress control, so it proves the constant is a
+property of the lectern's own arguments rather than of an inert formula.
+
+### The six poses, and the `x` term no other type here has
+
+`book_part_poses(openness, page_flip)` returns `(part name, y_rot, x)`:
+
+```text
+left_lid.yRot    = PI + openness
+right_lid.yRot   = -openness
+left_pages.yRot  = openness
+right_pages.yRot = -openness
+flip_page1.yRot  = openness - openness * 2 * page_flip1
+flip_page2.yRot  = openness - openness * 2 * page_flip2
+left_pages.x = right_pages.x = flip_page1.x = flip_page2.x = sin(openness)
+```
+
+Six overrides — the widest list in this module, which is why
+`BlockEntityMesh::part_transforms` takes a slice. Two things to hold on to:
+
+- **`x` is absolute, not a delta.** `setupAnim` assigns `this.leftPages.x = Mth.sin(openness)`,
+  overwriting the rest pose's `0`. Four of the six parts move their pivot as well as rotating; no
+  other type in this module does.
+- **The `* 2` in the flip-page terms is load-bearing.** With it, the two pages land at `+1.2` and
+  `-1.2` — opposite sides of the spine, which is what makes a book look mid-turn. Drop it and they
+  are `1.35` and `0.15`: both positive, same side, and a sign-only assertion still passes. The gate
+  requires opposite signs.
+
+Every posed part is a flat child of the root, so unlike the bell there is no parent/child composition
+to get right.
+
+### Placement — a `67.5°` tilt about Z, and a facing turned clockwise then negated
+
+`LecternRenderer.submit`, in `lectern_book_placement_matrix`:
+
+```text
+translate(0.5, 1.0625, 0.5) · rotateY(-yRot) · rotateZ(67.5°) · translate(0, -0.125, 0)
+```
+
+**Not `block_entity_placement_matrix` with a yaw.** The lift happens *before* the rotation, so the
+book pivots about itself rather than the block's floor corner; the `67.5°` tilt about **Z** is the
+entire reason the book faces a reader instead of lying flat; and the final `-0.125` happens in the
+tilted frame, so it does not commute with the first translation.
+
+`yRot` is `FACING.getClockWise().toYRot()` — `horizontal_facing_clockwise_yaw`, **not**
+`horizontal_facing_yaw` — and `submit` then rotates by its *negation*. Both steps are a quarter turn
+each and easy to unwind wrongly; the plain facing yaw lays the book across the shelf at right angles
+to the reader. A clockwise turn is `+90°` in `toYRot()` terms (north `180` → east `270`), so this is
+one addition rather than a second four-arm match to keep in sync.
+
+The tilt gate takes its expectation from the transform algebra rather than the implementation: `Ry`
+preserves a vector's `y` component, so the angle between the book's own up axis and world up is
+exactly `67.5°` at **every** facing. It computes the wrong hypothesis
+(`block_entity_placement_matrix`, which gives `0°`) in the same run, and a second assertion requires
+opposite facings to lean in opposite horizontal directions — which a placement missing the `Ry` term
+entirely would fail while still passing the tilt check.
+
+### `has_book` is the whole gather, and an unset source is not a hole
+
+`crate::block_entities::lectern_spawn` declines twice, for different reasons: the state is not a
+lectern (a stale record, same rule as every gather here), or it *is* a lectern with `has_book=false`
+and there is genuinely nothing to draw. Only the book comes from this pass.
+
+That makes the lectern the **mildest** degradation in the family. An unset `set_lectern_source` leaves
+a complete but empty lectern rather than a hole in the world, so this one cannot be caught by looking
+for a missing block — the symptom is a lectern that never holds a book. `app/redraw.rs` installs
+`Sim::lectern_source` beside the other four.
+
+### Status: fully wired, including the live install
+
+All six steps of the checklist below are done. One model, one sheet, so every lectern in the world
+coalesces into one batch regardless of facing — the facing rides the per-instance placement matrix.
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -1118,15 +1236,15 @@ Against the real 26-entry registration list (see above), not the issue's origina
   `max_text_line_width`, and rich per-run text formatting — all named and reasoned about in that
   section rather than silently missing. **The "hanging signs need a different model set" item that
   used to head this list was a 1.20 memory, not a 26.2 measurement** — it was four numbers.
-- **Lectern and conduit are the two registrations nothing here has ever named**, in either
-  direction — see the correction under [the registration list](#the-real-vanilla-scope-from-the-registration-list--not-the-issues-guess-list).
-- **Bell — the body/rim geometry, placement and shake formula are landed** (see [Bell](#bell)
-  above), wired through a real GPU pixel gate. **Still open within bell scope: the `BLOCK_EVENT`
-  trigger** (`b0 == 1`, a **different** `b0` meaning than chest's own `b0 == 1` — direction packed
-  into `b1` rather than a viewer count) is not decoded into a tick clock anywhere, and no
-  `sim.rs`/`app.rs` call site installs the render source from the live per-frame path — both named
-  explicitly in that section rather than silently missing. A bell in a live game today still shows
-  only its (real) attachment-frame block model, unchanged from before this session.
+- **Lectern — landed**, including the live per-frame install (see [Lectern](#lectern) above).
+  **Conduit remains the one registration nothing here has ever named in either direction** — see the
+  correction under [the registration list](#the-real-vanilla-scope-from-the-registration-list--not-the-issues-guess-list).
+  Nothing is open within lectern scope: `openness` is a compile-time constant in the jar, so there is
+  no animation left to wire.
+- **Bell — landed**, including the `BLOCK_EVENT` shake trigger and the live per-frame install (see
+  [Bell](#bell) above). The trigger needed `b0 == 1` decoded as a **different** thing from chest's own
+  `b0 == 1` (direction packed into `b1` via `Direction.from3DDataValue`, not a viewer count) plus a
+  50-tick clock in `BellShakes`. Nothing is open within bell scope.
 - **Shulker box — landed** (see [Shulker box](#shulker-box) above), including the live per-frame
   install. Still open within shulker scope: the lid open/close animation, which needs the
   `BLOCK_EVENT` fold `ChestLids` already has a shape for.
@@ -1140,7 +1258,9 @@ Against the real 26-entry registration list (see above), not the issue's origina
   a shield is an item model in the hand, not a block entity, so it is a different pass).
 - The enchanting-table book (a full animation state machine —
   `open`/`flip`/`rot`/`time`, all client-simulated, none of it on the wire, closer in scope to the
-  chest lid than to a static model), mob spawner (draws a miniature spinning entity inside the cage —
+  chest lid than to a static model; **the mesh it needs is already built and baked** — `book_model`,
+  shared with the lectern — so what is left is purely the state machine and a `resolve_*` that feeds
+  a live `openness`/`page_flip` into `book_part_poses`), mob spawner (draws a miniature spinning entity inside the cage —
   reuses full entity rendering, not a simple cuboid rig), piston head, campfire, brushable block,
   decorated pot (`decorated_pot` atlas; its sides need **up to four independently textured sprites
   per instance** from NBT `sherds`, which the current `(model, texture)` single-texture-per-instance

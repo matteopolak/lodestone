@@ -1035,6 +1035,137 @@ pub fn shulker_lid_pose(progress: f32) -> (f32, f32) {
     )
 }
 
+/// Model name of the open-book rig, keying both the mesh set and the shell's
+/// texture map.
+///
+/// Named for the *mesh* rather than for the lectern, because
+/// `LecternRenderer` and `EnchantTableRenderer` bake the same
+/// `ModelLayers.BOOK` layer. Only the lectern consumes it today; the enchanting
+/// table needs its own animation state on top (see [`LECTERN_BOOK_OPENNESS`]).
+pub const BOOK: &str = "book";
+
+/// The jar sheet a book draws with — `EnchantTableRenderer.BOOK_TEXTURE`
+/// (`Sheets.BLOCK_ENTITIES_MAPPER.defaultNamespaceApply("enchantment/enchanting_table_book")`).
+///
+/// **`LecternRenderer` has no texture of its own** — it passes
+/// `EnchantTableRenderer.BOOK_TEXTURE` straight through, which is why this stem
+/// says `enchantment` and not `lectern`. Grepping the jar for a lectern book
+/// texture finds nothing.
+pub const BOOK_TEXTURE_STEM: &str = "entity/enchantment/enchanting_table_book";
+
+/// The one book sheet stem, for [`block_entity_texture_stems`] — same shape as
+/// [`bell_texture_stems`].
+#[must_use]
+pub fn book_texture_stems() -> Vec<&'static str> {
+    vec![BOOK_TEXTURE_STEM]
+}
+
+/// A lectern book's `openness`, which is a **compile-time constant**.
+///
+/// `LecternRenderer.BOOK_STATE` is
+/// `BookModel.State.forAnimation(0.0, 0.1, 0.9, 1.2)`, and `forAnimation`
+/// computes `openness = (sin(progress * 0.02) * 0.1 + 1.25) * openness`. With
+/// `progress == 0` the `sin` term is exactly zero, so the whole expression
+/// collapses to `1.25 * 1.2 == 1.5` for every lectern in the world, every frame.
+///
+/// That dead arithmetic is the trap: it *looks* like an animation, and porting a
+/// live `progress` here would make every lectern book breathe, which vanilla's
+/// does not. The page-flip animation belongs to `EnchantTableRenderer`, which
+/// feeds `forAnimation` a real, client-simulated `progress`.
+pub const LECTERN_BOOK_OPENNESS: f32 = 1.5;
+
+/// A lectern book's `pageFlip1`/`pageFlip2` — `BOOK_STATE`'s second and third
+/// arguments, also constant. Kept as named constants rather than inlined
+/// because [`book_part_poses`] is the shared entry point for the enchanting
+/// table too, where both of these *do* vary.
+pub const LECTERN_BOOK_PAGE_FLIP: (f32, f32) = (0.1, 0.9);
+
+/// `BookModel.setupAnim`'s six per-part poses, as `(part name, y_rot, x)`.
+///
+/// ```text
+/// left_lid.yRot    = PI + openness
+/// right_lid.yRot   = -openness
+/// left_pages.yRot  = openness
+/// right_pages.yRot = -openness
+/// flip_page1.yRot  = openness - openness * 2 * page_flip1
+/// flip_page2.yRot  = openness - openness * 2 * page_flip2
+/// left_pages.x = right_pages.x = flip_page1.x = flip_page2.x = sin(openness)
+/// ```
+///
+/// `x` is an **absolute** pivot in texels, not a delta: `setupAnim` assigns
+/// `this.leftPages.x = Mth.sin(openness)`, overwriting the rest pose's `0`. The
+/// two lids keep their rest `z` of ∓1 and are not moved in `x` at all, so they
+/// carry `None`.
+///
+/// `seam` is deliberately absent — the jar never poses it, and its rest
+/// `rotation(0, PI/2, 0)` is the spine's quarter turn. Adding it here with a
+/// zero pose would flatten the spine into the covers.
+#[must_use]
+pub fn book_part_poses(
+    openness: f32,
+    page_flip: (f32, f32),
+) -> [(&'static str, f32, Option<f32>); 6] {
+    let slide = Some(openness.sin());
+    [
+        ("left_lid", std::f32::consts::PI + openness, None),
+        ("right_lid", -openness, None),
+        ("left_pages", openness, slide),
+        ("right_pages", -openness, slide),
+        (
+            "flip_page1",
+            openness - openness * 2.0 * page_flip.0,
+            slide,
+        ),
+        (
+            "flip_page2",
+            openness - openness * 2.0 * page_flip.1,
+            slide,
+        ),
+    ]
+}
+
+/// `Direction.getClockWise().toYRot()` for vanilla's four horizontal facing
+/// names, or `None` for anything else.
+///
+/// `LecternRenderer.extractRenderState` stores
+/// `getValue(FACING).getClockWise().toYRot()`, **not** `FACING.toYRot()`, and
+/// then `submit` rotates by the *negation* of it. Both steps are easy to unwind
+/// wrongly and each is a quarter turn: a book fed [`horizontal_facing_yaw`]
+/// directly lies across the lectern's shelf at 90° to the reader.
+///
+/// A clockwise turn is `+90°` in `toYRot()` terms (north `180` → east `270`,
+/// east `270` → south `0`), which is why this is one addition and not a second
+/// four-arm match to keep in sync.
+#[must_use]
+pub fn horizontal_facing_clockwise_yaw(name: &str) -> Option<f32> {
+    horizontal_facing_yaw(name).map(|yaw| (yaw + 90.0) % 360.0)
+}
+
+/// The world placement transform for a lectern's book — `LecternRenderer.submit`:
+///
+/// ```text
+/// translate(0.5, 1.0625, 0.5) · rotateY(-yRot) · rotateZ(67.5°) · translate(0, -0.125, 0)
+/// ```
+///
+/// `yRot` is [`horizontal_facing_clockwise_yaw`]'s value, in degrees.
+///
+/// **Not [`block_entity_placement_matrix`] with a yaw.** Three differences, all
+/// visible: the translation is `1.0625` blocks up (the shelf's own height) and is
+/// applied *before* the rotation, so the rotation pivots about the book rather
+/// than about the block's floor corner; there is a `67.5°` tilt about **Z**,
+/// which is the whole reason a lectern book faces a reader instead of lying
+/// flat; and the final `-0.125` lift happens in the tilted frame, so it does
+/// **not** commute with the translation at the front.
+#[must_use]
+pub fn lectern_book_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4 {
+    const TILT_DEG: f32 = 67.5;
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    Mat4::from_translation(origin + Vec3::new(0.5, 1.0625, 0.5))
+        * Mat4::from_rotation_y(-facing_yaw_deg.to_radians())
+        * Mat4::from_rotation_z(TILT_DEG.to_radians())
+        * Mat4::from_translation(Vec3::new(0.0, -0.125, 0.0))
+}
+
 /// Every sheet stem across every block-entity family — what the shell's
 /// texture loader preloads. Union of [`chest_texture_stems`],
 /// [`skull_texture_stems`], [`bell_texture_stems`],
@@ -1055,6 +1186,7 @@ pub fn block_entity_texture_stems() -> Vec<&'static str> {
     stems.extend(bell_texture_stems());
     stems.extend(banner_texture_stems());
     stems.extend(shulker_texture_stems());
+    stems.extend(book_texture_stems());
     stems
 }
 
@@ -1335,6 +1467,93 @@ impl BlockEntityModelSet {
             .collect();
 
         Some(BannerInstances { body, flag, layers })
+    }
+
+    /// Resolves one lectern's open book into a drawable instance, or `None` if
+    /// the model is not in the corpus.
+    ///
+    /// Six overrides, one per posed part, from [`book_part_poses`] — the widest
+    /// override list in this module, and the reason
+    /// [`BlockEntityMesh::part_transforms`]' `(index, pose)` mechanism was
+    /// written to take a slice rather than one part.
+    ///
+    /// Every one of the six is a **flat child of the root**, so there is no
+    /// parent/child composition to get right the way [`Self::resolve_bell`] has.
+    /// What there *is* instead is `x`: four of the six move their pivot as well
+    /// as rotating, which no other type here does.
+    ///
+    /// Nothing about the result varies per frame — [`LECTERN_BOOK_OPENNESS`] is
+    /// constant — so a caller may cache it against `(pos, facing)` if it ever
+    /// matters.
+    #[must_use]
+    pub fn resolve_lectern(&self, spawn: &LecternSpawn) -> Option<BlockEntityInstance> {
+        let mesh = self.get(BOOK)?;
+        let placement = lectern_book_placement_matrix(spawn.pos, spawn.facing_yaw_deg);
+
+        let mut overrides = Vec::with_capacity(6);
+        for (name, y_rot, x) in book_part_poses(LECTERN_BOOK_OPENNESS, LECTERN_BOOK_PAGE_FLIP) {
+            let Some(index) = mesh.index_of(name) else {
+                continue;
+            };
+            let mut pose = mesh.part_rest[index];
+            pose.y_rot = y_rot;
+            if let Some(x) = x {
+                pose.x = x;
+            }
+            overrides.push((index, pose));
+        }
+        let part_transforms = mesh.part_transforms(placement, &overrides);
+
+        // The rest AABB through the placement matrix, like every other type
+        // here. The posed book opens *wider* than its rest bounds (the lids
+        // swing out past `openness` radians), so this is deliberately
+        // generous-in-the-wrong-direction rather than exact — but a book is a
+        // few texels across and the placement is a block off the floor, so the
+        // block's own AABB dominates either way.
+        let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
+        Some(BlockEntityInstance {
+            model: BOOK,
+            texture: BOOK_TEXTURE_STEM,
+            transform: placement,
+            part_transforms,
+            aabb_min,
+            aabb_max,
+            light: spawn.light,
+            tint: [255, 255, 255],
+        })
+    }
+}
+
+/// The version-free description of one lectern's book to draw this frame.
+///
+/// Two fields and no animation state at all, which makes this the cheapest type
+/// in the module: `LecternBlock.HAS_BOOK` decides whether there is a spawn to
+/// make in the first place (a bookless lectern draws nothing here — its shelf is
+/// a real block model), and `FACING` gives the yaw. There is no NBT read and
+/// nothing on the wire.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LecternSpawn {
+    /// Block position.
+    pub pos: [i32; 3],
+    /// `Direction.getClockWise().toYRot()` of `LecternBlock.FACING`, in degrees
+    /// — see [`horizontal_facing_clockwise_yaw`], which is the only correct way
+    /// to produce this. Passing `FACING.toYRot()` puts the book sideways.
+    pub facing_yaw_deg: f32,
+    /// Packed sky/block light. Pass [`ENTITY_FULLBRIGHT`] only when there is
+    /// genuinely no world to sample.
+    pub light: u8,
+}
+
+impl LecternSpawn {
+    /// A north-facing, full-bright lectern book at `pos` — the minimum a
+    /// hermetic gate needs.
+    #[must_use]
+    pub fn at(pos: [i32; 3]) -> Self {
+        LecternSpawn {
+            pos,
+            facing_yaw_deg: horizontal_facing_clockwise_yaw("north").unwrap_or(270.0),
+            light: ENTITY_FULLBRIGHT,
+        }
     }
 }
 
@@ -1771,9 +1990,9 @@ mod tests {
         let set = set();
         assert_eq!(
             set.len(),
-            9,
+            10,
             "3 chest layers + 2 skull canvases + bell + 2 banner parts (body, flag) \
-             + shulker box"
+             + shulker box + book"
         );
         for (name, mesh) in set.iter() {
             assert!(mesh.quad_count() > 0, "{name} baked no quads");
@@ -2784,5 +3003,214 @@ mod tests {
             "chest, banner body and banner flag must all batch independently \
              (different model *and* different model between body/flag)"
         );
+    }
+
+    /// `Direction.getClockWise().toYRot()`, hand-expanded from the jar's own two
+    /// tables (`Direction.getClockWise`: north→east→south→west→north, and
+    /// `toYRot`: south 0, west 90, north 180, east 270).
+    ///
+    /// The wrong hypothesis is not an error but a quarter turn, and it is
+    /// spelled with the function *next to* the right one, so this asserts both
+    /// arms in the same run: every facing's clockwise yaw must differ from its
+    /// plain yaw by exactly 90°, and the four expected values are written out
+    /// rather than derived from `horizontal_facing_yaw` (which would make the
+    /// test agree with whatever the implementation does).
+    #[test]
+    fn a_lecterns_yaw_is_the_facing_turned_clockwise_not_the_facing() {
+        for (facing, clockwise, plain) in [
+            ("north", 270.0_f32, 180.0_f32),
+            ("east", 0.0, 270.0),
+            ("south", 90.0, 0.0),
+            ("west", 180.0, 90.0),
+        ] {
+            assert_eq!(
+                horizontal_facing_clockwise_yaw(facing),
+                Some(clockwise),
+                "{facing}"
+            );
+            assert_eq!(horizontal_facing_yaw(facing), Some(plain), "{facing}");
+            assert_ne!(
+                clockwise, plain,
+                "{facing}: the two must differ, or this test proves nothing"
+            );
+        }
+        assert_eq!(horizontal_facing_clockwise_yaw("up"), None);
+    }
+
+    /// `BookModel.State.forAnimation(0.0, 0.1, 0.9, 1.2)` collapses to a
+    /// constant, computed here from the jar's four literals rather than by
+    /// reading [`LECTERN_BOOK_OPENNESS`] back.
+    ///
+    /// The point is the `sin(progress * 0.02)` term: it is dead at
+    /// `progress == 0`, which is why a lectern book must not be given a live
+    /// clock. The second assertion is the control — with a *non*-zero progress
+    /// the same formula does move, so the constant is a property of the
+    /// lectern's arguments and not of the formula being inert.
+    #[test]
+    fn a_lectern_books_openness_is_constant_because_its_progress_term_is_dead() {
+        fn for_animation(progress: f32, openness: f32) -> f32 {
+            ((progress * 0.02).sin() * 0.1 + 1.25) * openness
+        }
+        assert!((for_animation(0.0, 1.2) - LECTERN_BOOK_OPENNESS).abs() < 1e-6);
+        assert!((for_animation(0.0, 1.2) - 1.5).abs() < 1e-6);
+        assert!(
+            (for_animation(100.0, 1.2) - 1.5).abs() > 1e-3,
+            "a live progress *would* move openness, so the constant above is \
+             about the lectern's own arguments"
+        );
+    }
+
+    /// The six posed parts, against `BookModel.setupAnim` transcribed by hand.
+    ///
+    /// `seam` must be absent from the list: the jar never poses it, and its rest
+    /// `rotation(0, PI/2, 0)` is the spine's quarter turn — an override with a
+    /// zero `y_rot` would flatten it into the covers, which still draws a
+    /// plausible book.
+    #[test]
+    fn the_books_six_poses_match_setup_anim_and_leave_the_seam_alone() {
+        let openness = 1.5_f32;
+        let poses = book_part_poses(openness, (0.1, 0.9));
+        let by_name = |name: &str| {
+            poses
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .copied()
+                .unwrap_or_else(|| panic!("{name} is not posed"))
+        };
+
+        let slide = openness.sin();
+        for (name, expected_y_rot, expected_x) in [
+            ("left_lid", std::f32::consts::PI + 1.5, None),
+            ("right_lid", -1.5, None),
+            ("left_pages", 1.5, Some(slide)),
+            ("right_pages", -1.5, Some(slide)),
+            // openness - openness*2*flip: 1.5 - 0.3 and 1.5 - 2.7.
+            ("flip_page1", 1.2, Some(slide)),
+            ("flip_page2", -1.2, Some(slide)),
+        ] {
+            let (_, y_rot, x) = by_name(name);
+            assert!(
+                (y_rot - expected_y_rot).abs() < 1e-5,
+                "{name}: y_rot {y_rot} != {expected_y_rot}"
+            );
+            match (x, expected_x) {
+                (Some(a), Some(b)) => assert!((a - b).abs() < 1e-6, "{name}: x"),
+                (None, None) => {}
+                _ => panic!("{name}: x presence"),
+            }
+        }
+        assert!(
+            !poses.iter().any(|(n, _, _)| *n == "seam"),
+            "the seam is never posed by the jar"
+        );
+
+        // The two flip pages must land on opposite sides of the spine — that is
+        // what makes a book look mid-turn rather than shut. A transcription that
+        // dropped the `* 2` gives 1.35 and 0.15: both positive, same side, and a
+        // sign-only assertion would pass.
+        let (_, flip1, _) = by_name("flip_page1");
+        let (_, flip2, _) = by_name("flip_page2");
+        assert!(flip1 > 0.0 && flip2 < 0.0, "{flip1} / {flip2}");
+    }
+
+    /// The `67.5°` tilt about **Z** is what makes a lectern book face a reader,
+    /// and it is the whole difference from [`block_entity_placement_matrix`].
+    ///
+    /// Expectation from the transform algebra, not from the implementation: `Ry`
+    /// preserves a vector's `y` component, so the angle between the book's own
+    /// up axis and world up is exactly the tilt for **every** facing. Reusing
+    /// the chest placement matrix gives `0°` — the wrong hypothesis is computed
+    /// here and required to be far away, in the same run.
+    #[test]
+    fn the_books_placement_tilts_it_by_the_jars_angle_at_every_facing() {
+        let up = Vec3::Y;
+        for facing in ["north", "east", "south", "west"] {
+            let yaw = horizontal_facing_clockwise_yaw(facing).unwrap();
+            let m = lectern_book_placement_matrix([3, 4, 5], yaw);
+            let book_up = m.transform_vector3(up).normalize();
+            let angle = book_up.dot(up).clamp(-1.0, 1.0).acos().to_degrees();
+            assert!(
+                (angle - 67.5).abs() < 1e-3,
+                "{facing}: tilt {angle} != 67.5"
+            );
+
+            // The wrong hypothesis, in the same run.
+            let flat = block_entity_placement_matrix([3, 4, 5], yaw);
+            let flat_angle = flat
+                .transform_vector3(up)
+                .normalize()
+                .dot(up)
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees();
+            assert!(flat_angle < 1e-3, "the chest matrix does not tilt at all");
+        }
+
+        // The facing really does turn the book: opposite facings must put the
+        // book's horizontal lean in opposite directions. A placement that
+        // dropped the `Ry` term entirely would satisfy the tilt assertion above
+        // at all four facings and fail here.
+        let north = lectern_book_placement_matrix(
+            [0, 0, 0],
+            horizontal_facing_clockwise_yaw("north").unwrap(),
+        )
+        .transform_vector3(Vec3::Y);
+        let south = lectern_book_placement_matrix(
+            [0, 0, 0],
+            horizontal_facing_clockwise_yaw("south").unwrap(),
+        )
+        .transform_vector3(Vec3::Y);
+        let horizontal = |v: Vec3| Vec3::new(v.x, 0.0, v.z);
+        assert!(
+            horizontal(north).dot(horizontal(south)) < 0.0,
+            "north {north} vs south {south}"
+        );
+    }
+
+    /// The lectern reaches the batcher, batches on its own key, and the six
+    /// overrides really are in the instance's `part_transforms`.
+    ///
+    /// The last part is the one a "does it draw" check misses: a book whose
+    /// overrides were dropped is a *shut* book, which still batches, still
+    /// culls, still draws, and still looks like a book from any distance.
+    #[test]
+    fn a_lectern_batches_on_its_own_key_with_its_overrides_applied() {
+        let set = set();
+        let mesh = set.get(BOOK).unwrap();
+        let lectern = set.resolve_lectern(&LecternSpawn::at([0, 0, 0])).unwrap();
+        assert_eq!(lectern.model, BOOK);
+        assert_eq!(lectern.texture, BOOK_TEXTURE_STEM);
+        assert_eq!(lectern.part_transforms.len(), mesh.parts.len());
+
+        // Rest transforms through the *same* placement, so the only difference
+        // between the two is the override list.
+        let placement = lectern_book_placement_matrix([0, 0, 0], LecternSpawn::at([0; 3]).facing_yaw_deg);
+        let rest = mesh.part_transforms(placement, &[]);
+        for name in [
+            "left_lid",
+            "right_lid",
+            "left_pages",
+            "right_pages",
+            "flip_page1",
+            "flip_page2",
+        ] {
+            let i = mesh.index_of(name).unwrap();
+            assert_ne!(
+                rest[i], lectern.part_transforms[i],
+                "{name} was not posed"
+            );
+        }
+        // …and the seam is, correctly, untouched.
+        let seam = mesh.index_of("seam").unwrap();
+        assert_eq!(rest[seam], lectern.part_transforms[seam]);
+
+        let chest = set.resolve_chest(&ChestSpawn::at([2, 0, 0])).unwrap();
+        let cam = looking_at_origin();
+        let frame = plan_block_entities(
+            &[chest, lectern],
+            &Frustum::from_view_projection(cam.view_projection()),
+        );
+        assert_eq!(frame.stats.drawn, 2);
+        assert_eq!(frame.batches.len(), 2, "a book is its own model and sheet");
     }
 }

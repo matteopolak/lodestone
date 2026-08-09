@@ -231,9 +231,25 @@ impl Sim {
         Some(move |eye: glam::Vec3| crate::block_entities::shulker_spawns(&handle, eye))
     }
 
+    /// This frame's lectern books, for
+    /// [`RenderState::set_lectern_source`](crate::gpu::RenderState::set_lectern_source).
+    ///
+    /// As thin as [`Self::shulker_source`], and for a stronger reason: a lectern
+    /// book's pose is a compile-time constant in the jar, so there is nothing a
+    /// clock could even feed it. Installed per frame anyway, for
+    /// [`Self::skull_source`]'s reason — a source that outlived a disconnect
+    /// would hand out spawns from a dead world's handle.
+    #[must_use]
+    pub fn lectern_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::LecternSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| crate::block_entities::lectern_spawns(&handle, eye))
+    }
+
     /// This frame's banners, for
-    /// [`RenderState::set_banner_source`](crate::gpu::RenderState::set_banner_source)
-    /// (issue #23).
+    /// [`RenderState::set_banner_source`](crate::gpu::RenderState::set_banner_source).
     ///
     /// Captures the game tick *and* the partial tick, like `bell_source` and unlike
     /// `shulker_source`, because `banner_phase` mixes both into the sway — so this

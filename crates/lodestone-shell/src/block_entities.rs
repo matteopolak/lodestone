@@ -108,9 +108,10 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 use lodestone_render::{
-    BannerSpawn, BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial, ChestSpawn,
+    BannerSpawn, BellShakeDirection, BellSpawn, ChestHalf, ChestMaterial, ChestSpawn, LecternSpawn,
     SHULKER_COLOURS, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation, SignSpawn,
-    SkullOrientation, SkullSpawn, SkullType, horizontal_facing_yaw,
+    SkullOrientation, SkullSpawn, SkullType, horizontal_facing_clockwise_yaw,
+    horizontal_facing_yaw,
 };
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
 use lodestone_world::{ChunkPos, SignText, World};
@@ -818,6 +819,91 @@ pub fn shulker_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<ShulkerSpawn> {
         let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
         if let Some(spawn) = shulker_spawn(block, state_id, light) {
+            out.push(spawn);
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+/// One candidate resolved into a [`LecternSpawn`], or `None` if the state at
+/// that position is not a lectern **with a book in it**.
+///
+/// Two `None` cases that are both correct and mean different things:
+///
+/// * The block is not a lectern. Same shape as every other gather here — the
+///   block *state* is the truth, so a stale record draws nothing.
+/// * The block is a lectern with `has_book=false`. There is genuinely nothing to
+///   draw: a lectern's shelf, base and posts are all real block models
+///   (`block/lectern.json` has geometry, unlike `chest.json`), so an empty
+///   lectern is complete without this pass. Only the open book is missing, and
+///   only when a book is in it. That also means an unwired lectern source
+///   degrades to "no books on lecterns", not to a hole in the world.
+///
+/// `facing_yaw_deg` goes through [`horizontal_facing_clockwise_yaw`] and not
+/// [`horizontal_facing_yaw`]: `LecternRenderer.extractRenderState` stores
+/// `FACING.getClockWise().toYRot()`, and the plain facing lays the book across
+/// the shelf at right angles to the reader.
+#[must_use]
+pub fn lectern_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<LecternSpawn> {
+    let name = lodestone_data::block_states::block_name(state_id)?;
+    if name != "minecraft:lectern" {
+        return None;
+    }
+    let props = lodestone_data::block_states::properties(state_id)?;
+    let mut yaw = None;
+    let mut has_book = false;
+    for (name, value) in props {
+        match *name {
+            "facing" => yaw = horizontal_facing_clockwise_yaw(value),
+            "has_book" => has_book = *value == "true",
+            _ => {}
+        }
+    }
+    if !has_book {
+        return None;
+    }
+    Some(LecternSpawn {
+        pos: block,
+        facing_yaw_deg: yaw?,
+        light,
+    })
+}
+
+/// Every lectern book to draw this frame. Reuses [`chest_candidates`] exactly as
+/// [`skull_spawns`], [`bell_spawns`] and [`shulker_spawns`] do.
+#[must_use]
+pub fn lectern_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<LecternSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+    let chunks = client.loaded_chunks();
+
+    // The guard is taken and dropped inside this block, before the light
+    // sampling below — the no-nested-read-lock rule every gather here follows.
+    let candidates = {
+        let world = store.read();
+        chest_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, state_id) in candidates {
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        if let Some(spawn) = lectern_spawn(block, state_id, light) {
             out.push(spawn);
         }
     }
@@ -1873,5 +1959,76 @@ mod shulker_tests {
     fn shulker_spawns_before_login_is_empty_rather_than_a_panic() {
         let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
         assert!(shulker_spawns(&handle, Vec3::ZERO).is_empty());
+    }
+
+    /// `has_book` decides whether there is anything to draw, and `facing` goes
+    /// through the *clockwise* yaw.
+    ///
+    /// Driven over every real `minecraft:lectern` state id in the data crate
+    /// rather than a hand-built one, so the four facings and both `has_book`
+    /// values all come from the jar. Two things the walk pins that a single
+    /// hand-picked state cannot: a bookless lectern yields **no** spawn at all
+    /// (there is genuinely nothing to draw — the shelf is a real block model),
+    /// and every book-bearing one yields a yaw that is *not* its plain facing
+    /// yaw, which is the quarter-turn trap.
+    #[test]
+    fn a_lectern_only_spawns_with_a_book_and_takes_the_clockwise_yaw() {
+        let mut with_book = 0_usize;
+        let mut without_book = 0_usize;
+        let mut yaws = std::collections::HashSet::new();
+        for id in 0..lodestone_data::block_states::STATE_COUNT {
+            if lodestone_data::block_states::block_name(id) != Some("minecraft:lectern") {
+                continue;
+            }
+            let props = lodestone_data::block_states::properties(id).expect("lectern has properties");
+            let facing = props
+                .iter()
+                .find(|(n, _)| *n == "facing")
+                .map(|(_, v)| *v)
+                .expect("lectern has facing");
+            let has_book = props
+                .iter()
+                .any(|(n, v)| *n == "has_book" && *v == "true");
+
+            match lectern_spawn([1, 2, 3], id, lodestone_render::ENTITY_FULLBRIGHT) {
+                None => {
+                    assert!(!has_book, "a lectern with a book must spawn");
+                    without_book += 1;
+                }
+                Some(spawn) => {
+                    assert!(has_book, "a bookless lectern must not spawn");
+                    assert_eq!(spawn.pos, [1, 2, 3]);
+                    let plain = horizontal_facing_yaw(facing).expect("horizontal");
+                    assert_ne!(
+                        spawn.facing_yaw_deg, plain,
+                        "{facing}: the plain facing yaw lays the book sideways"
+                    );
+                    assert_eq!(
+                        Some(spawn.facing_yaw_deg),
+                        horizontal_facing_clockwise_yaw(facing)
+                    );
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "the four yaws are exact multiples of 90"
+                    )]
+                    yaws.insert(spawn.facing_yaw_deg as i32);
+                    with_book += 1;
+                }
+            }
+        }
+        assert_eq!(yaws.len(), 4, "all four facings, saw {yaws:?}");
+        assert!(with_book > 0 && without_book > 0, "{with_book}/{without_book}");
+        assert!(
+            lectern_spawn([0, 0, 0], state_named("minecraft:bell"), 0).is_none(),
+            "a bell is not a lectern"
+        );
+    }
+
+    /// The gather is empty rather than a panic before login, like every other
+    /// family's.
+    #[test]
+    fn lectern_spawns_before_login_is_empty_rather_than_a_panic() {
+        let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
+        assert!(lectern_spawns(&handle, Vec3::ZERO).is_empty());
     }
 }

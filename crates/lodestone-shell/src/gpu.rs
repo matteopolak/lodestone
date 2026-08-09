@@ -65,10 +65,9 @@ pub use occlusion::TerrainOcclusion;
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    BannerSource, BellSource, BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource,
-    MapSource,
-    ShulkerSource, OutlineShapeSource, SignSource, SkullSource, SkyDarkenSource,
-    ThirdPersonBodySource, ThirdPersonBodyState,
+    BannerSource, BellSource, BlockEntitySource, EntityLightSource, HandSwingSource, LecternSource,
+    MainHandSource, MapSource, OutlineShapeSource, ShulkerSource, SignSource, SkullSource,
+    SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
 };
 pub use stats::RenderStats;
 
@@ -342,6 +341,12 @@ pub struct RenderState {
     /// pass, but the block itself has no terrain model, so an unset source leaves a
     /// hole exactly as chest and shulker do.
     banner_source: BannerSource,
+    /// Where this frame's lectern books come from. Same "unset means draw
+    /// nothing" convention as [`Self::skull_source`], and here the degradation is
+    /// the mildest in the family: a lectern's shelf, base and posts are all real
+    /// block models, so an unset source leaves a complete but empty lectern
+    /// rather than a hole.
+    lectern_source: LecternSource,
     /// Where this frame's filled-map pictures come from (issue #184). Same "unset
     /// means draw nothing" convention as [`Self::skull_source`], and here the
     /// degradation is that a held `filled_map` falls back to its ordinary flat item
