@@ -44,7 +44,9 @@
 //! | `random_chance_with_enchanted_bonus` | uses `unenchanted_chance` (no attacker → level 0) | `…Condition.java:41-45` |
 //! | `killed_by_player` | `false` (no `LAST_DAMAGE_PLAYER` param) | `…Condition.java:26-28` |
 //! | `survives_explosion` | `true` (no `EXPLOSION_RADIUS` param) | `ExplosionCondition.test` |
-//! | `match_tool` / `entity_properties` / `block_state_property` | `false` (no tool/entity/state) | `MatchTool`, `…EntityProperty…`, `…BlockStateProperty…` |
+//! | `match_tool` | `false` (no tool). **With a tool it is fully evaluated** against `ItemPredicate` | `MatchTool` |
+//! | `block_state_property` | `false` (no state). **With a state it is fully evaluated** against `StatePropertiesPredicate` | `LootItemBlockStatePropertyCondition` |
+//! | `entity_properties` / `damage_source_properties` / `location_check` | `false` (no entity/source/level) | `…EntityProperty…`, `…DamageSourceProperties…`, `LocationCheck` |
 //! | `table_bonus` | `chances[0]` (fortune level 0) | `BonusLevelTableCondition.java:37-42` |
 //! | `set_count` | uniform/constant/binomial rolled | `SetItemCountFunction` |
 //! | `enchanted_count_increase` | no-op (no attacker → level 0) | `…Function.java:74-89` |
@@ -61,6 +63,27 @@
 //! reason `crate::explosion_blocks` deliberately dropped nothing until this
 //! existed. Set it and both become real: one draw per stack for the condition,
 //! one draw **per item** for the decay function.
+//!
+//! ## The block-state context
+//!
+//! [`LootContext::block_state`] is the parameter whose absence was *silently*
+//! wrong rather than merely incomplete, and it is worth stating why the mistake
+//! survived so long. `block_state_property` **parsed** — it was a recognised
+//! condition with its own enum variant — and then evaluated as a constant
+//! `false`, so [`LootTable::unsupported_features`] reported nothing and the
+//! curated bundle's own "zero unsupported features" guarantee held while 154 of
+//! its 1,241 tables took the wrong branch of an `alternatives` on every roll.
+//! Fully-grown wheat dropped one seed and no wheat; a slab dropped one instead of
+//! two; a candle dropped one regardless of how many were stacked.
+//!
+//! The lesson generalises past this condition: **the bundle's guarantee is about
+//! parsing, and a variant that discards its own JSON data is invisible to it.**
+//! After this landing the remaining constant-`false` conditions are
+//! `entity_properties`, `damage_source_properties`, `location_check` and
+//! `killed_by_player`; the first three each discard a `predicate` object they
+//! parsed, so they are exactly the same shape of hole.
+//! [`LootTable::context_blind_features`] reports them, which is the instrument
+//! `unsupported_features` structurally cannot be.
 //!
 //! A feature this module does not recognise is **parsed but marked
 //! unsupported** (see [`LootTable::unsupported_features`]) rather than aborting
@@ -158,6 +181,89 @@ pub struct LootContext {
     /// `3.0` keeps one block in three and a larger blast keeps proportionally
     /// fewer.
     pub explosion_radius: Option<f32>,
+    /// `LootContextParams.BLOCK_STATE` — the state of the block being broken.
+    /// `None` is vanilla's absent parameter, which is what a mob table and a
+    /// chest fill are.
+    ///
+    /// **Its absence made every state-conditioned block table take the wrong
+    /// branch**, silently: `block_state_property` was a hardcoded `false`, so
+    /// fully-grown wheat dropped one seed and no wheat (the `alternatives` fell
+    /// through to the seed child, and the bonus-seed pool's pool-level condition
+    /// skipped the pool entirely). 154 of the 1,241 bundled tables carry the
+    /// condition — crops, candles, slabs, doors, beds, tall flowers, snow layers,
+    /// cave vines and sea pickles — so this is not one block's quirk.
+    pub block_state: Option<LootBlockState>,
+}
+
+/// The block state a roll happens against — `LootContextParams.BLOCK_STATE`,
+/// reduced to what `LootItemBlockStatePropertyCondition.test` reads off it: the
+/// block's identity and its property values.
+///
+/// # Why the properties are a full, canonical list and not "whatever the state
+/// string spelled"
+///
+/// Vanilla's `StatePropertiesPredicate.PropertyMatcher.match` looks the property
+/// up in the block's `StateDefinition` and then reads the *state's* value for
+/// it — so a property the caller did not mention still has a value, its default.
+/// A matcher against a property the block does not have at all is `false`
+/// (`property != null &&`), never a match.
+///
+/// So a consumer must hand over the **resolved** property set, not the substring
+/// between the brackets: `"minecraft:wheat"` and `"minecraft:wheat[age=0]"` are
+/// the same state and must both fail an `age=7` matcher for the same reason,
+/// rather than one failing because the property is absent.
+/// [`crate::block_drops::loot_block_state`] does that resolution through
+/// `lodestone_data::block_states`, which is the 26.2 server's own state table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LootBlockState {
+    /// The block's registry key, e.g. `minecraft:wheat`. Compared against the
+    /// condition's own **required** `block` field, so a table applied to the
+    /// wrong block cannot silently pass.
+    pub block: ResourceKey,
+    /// Every property of this state as `(name, serialized value)`, e.g.
+    /// `[("age", "7")]`. A name absent from this list is a property the block
+    /// does not have, which no matcher matches.
+    pub properties: Vec<(String, String)>,
+}
+
+impl LootBlockState {
+    /// A state with no properties — enough for a block whose table gates only on
+    /// `block`.
+    #[must_use]
+    pub fn new(block: ResourceKey) -> Self {
+        Self {
+            block,
+            properties: Vec::new(),
+        }
+    }
+
+    /// A state carrying `properties`, as `(name, value)` pairs.
+    #[must_use]
+    pub fn with_properties<I, K, V>(block: ResourceKey, properties: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        Self {
+            block,
+            properties: properties
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        }
+    }
+
+    /// This state's value for `name`, or `None` if the block has no such
+    /// property — vanilla's `StateDefinition.getProperty(name)` returning null,
+    /// which makes the matcher fail rather than pass.
+    #[must_use]
+    pub fn property(&self, name: &str) -> Option<&str> {
+        self.properties
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 /// The tool a roll happens with — `LootContextParams.TOOL`, reduced to the three
@@ -253,7 +359,14 @@ pub struct LootTable {
     pools: Vec<LootPool>,
     functions: Vec<LootFunction>,
     unsupported: Vec<String>,
+    context_blind: Vec<String>,
 }
+
+/// Marks an audit entry as **recognised but not evaluated** rather than
+/// unrecognised. [`LootTable::from_value`] partitions the parse audit on this
+/// prefix, so the two live in one `Vec<String>` through every parse helper and
+/// separate once at the top.
+const CONTEXT_BLIND_PREFIX: &str = "context-blind ";
 
 impl LootTable {
     /// Parses one table document. `id` is the table's registry id (e.g.
@@ -285,7 +398,15 @@ impl LootTable {
             None => Vec::new(),
         };
         let functions = parse_functions(value.get("functions"), audit)?;
-        Ok(Self { id, pools, functions, unsupported: audit.clone() })
+        let (context_blind, unsupported): (Vec<String>, Vec<String>) = audit
+            .iter()
+            .cloned()
+            .partition(|entry| entry.starts_with(CONTEXT_BLIND_PREFIX));
+        let context_blind = context_blind
+            .into_iter()
+            .map(|entry| entry[CONTEXT_BLIND_PREFIX.len()..].to_string())
+            .collect();
+        Ok(Self { id, pools, functions, unsupported, context_blind })
     }
 
     /// Rolls the table in `context` with `rng`, resolving nested
@@ -341,6 +462,33 @@ impl LootTable {
     #[must_use]
     pub fn unsupported_features(&self) -> &[String] {
         &self.unsupported
+    }
+
+    /// Feature ids this table uses that **parse into a recognised variant and
+    /// then ignore their own JSON data** — e.g.
+    /// `"condition minecraft:entity_properties"`, which parses an `entity` and a
+    /// `predicate` and evaluates as a constant `false`.
+    ///
+    /// # Why this is a separate list from [`unsupported_features`](Self::unsupported_features)
+    ///
+    /// Because the bundle's curation invariant is stated in terms of *that* list,
+    /// and it is silent about this one — which is how 154 state-conditioned tables
+    /// shipped taking the wrong branch on every roll while every gate stayed
+    /// green. A predicate that parses and returns a constant is "supported" by any
+    /// test that only asks whether the parser recognised it.
+    ///
+    /// Reported rather than fatal, deliberately: making these `Unsupported` would
+    /// eject 200-odd tables from the bundle and change nothing a player sees (a
+    /// constant-`false` condition and an absent table both drop nothing), while
+    /// destroying the byte-identical-to-Mojang property the corpus gate rests on.
+    /// The value is in *counting* them, so the next condition that becomes
+    /// evaluable is a number that moves rather than a discovery.
+    ///
+    /// **Ordinary and expected to be non-empty.** Every entry names a context
+    /// parameter this crate does not yet carry, not a defect in the table.
+    #[must_use]
+    pub fn context_blind_features(&self) -> &[String] {
+        &self.context_blind
     }
 }
 
@@ -1291,7 +1439,25 @@ enum LootCondition {
         predicate: Option<ItemPredicate>,
     },
     EntityProperties,
-    BlockStateProperty,
+    /// `LootItemBlockStatePropertyCondition(Holder<Block> block,
+    /// Optional<StatePropertiesPredicate> properties)`, whose `test` is
+    ///
+    /// ```text
+    /// state != null && state.is(this.block)
+    ///     && (this.properties.isEmpty() || this.properties.get().matches(state))
+    /// ```
+    ///
+    /// Three things the record settles that a paraphrase gets wrong. `block` is
+    /// **not** optional in the codec, and it is ANDed — a table whose condition
+    /// names a different block than the state being broken fails, so a
+    /// misapplied table cannot silently pass. `properties` **is** optional, and
+    /// absent means "any state of this block", i.e. `true`, not `false`. And a
+    /// matcher naming a property the block does not have is `false`, because
+    /// `PropertyMatcher.match` starts `property != null &&`.
+    BlockStateProperty {
+        block: ResourceKey,
+        properties: Vec<StatePropertyMatcher>,
+    },
     DamageSourceProperties,
     LocationCheck,
     /// `BonusLevelTableCondition` — `nextFloat() < chances[min(level, len-1)]`.
@@ -1350,10 +1516,38 @@ impl LootCondition {
                     }),
                 },
             },
-            "minecraft:entity_properties" => Ok(Self::EntityProperties),
-            "minecraft:block_state_property" => Ok(Self::BlockStateProperty),
-            "minecraft:damage_source_properties" => Ok(Self::DamageSourceProperties),
-            "minecraft:location_check" => Ok(Self::LocationCheck),
+            // These three parse a `predicate`/`entity`/offsets object and then
+            // discard it: each references a context parameter this crate does not
+            // carry, so each is a constant `false`. Recorded as *context-blind*
+            // rather than unsupported — see `LootTable::context_blind_features`
+            // for why the distinction is the point.
+            "minecraft:entity_properties" => {
+                audit.push(format!("{CONTEXT_BLIND_PREFIX}condition {id}"));
+                Ok(Self::EntityProperties)
+            }
+            "minecraft:block_state_property" => {
+                let block = parse_id(value.get("block"), "block")?;
+                let properties = match value.get("properties") {
+                    None => Vec::new(),
+                    Some(raw) => {
+                        let map = raw.as_object().ok_or_else(|| {
+                            LootError::UnexpectedType("block_state_property properties", "an object")
+                        })?;
+                        map.iter()
+                            .map(|(name, matcher)| StatePropertyMatcher::from_value(name, matcher))
+                            .collect::<Result<Vec<_>, _>>()?
+                    }
+                };
+                Ok(Self::BlockStateProperty { block, properties })
+            }
+            "minecraft:damage_source_properties" => {
+                audit.push(format!("{CONTEXT_BLIND_PREFIX}condition {id}"));
+                Ok(Self::DamageSourceProperties)
+            }
+            "minecraft:location_check" => {
+                audit.push(format!("{CONTEXT_BLIND_PREFIX}condition {id}"));
+                Ok(Self::LocationCheck)
+            }
             "minecraft:table_bonus" => {
                 let chances = value
                     .get("chances")
@@ -1398,9 +1592,17 @@ impl LootCondition {
             // reads absent: each is `false`.
             Self::KilledByPlayer
             | Self::EntityProperties
-            | Self::BlockStateProperty
             | Self::DamageSourceProperties
             | Self::LocationCheck => false,
+            // `LootItemBlockStatePropertyCondition.test`, transcribed. Consumes
+            // no RNG either way, so filling the block state in cannot shift the
+            // stream through this condition — only through which entry wins.
+            Self::BlockStateProperty { block, properties } => match context.block_state.as_ref() {
+                None => false,
+                Some(state) => {
+                    state.block == *block && properties.iter().all(|m| m.matches(state))
+                }
+            },
             // `ExplosionCondition.test`, transcribed:
             //
             // ```java
@@ -1448,6 +1650,134 @@ impl LootCondition {
             Self::Unsupported => false,
         }
     }
+}
+
+/// One entry of a `StatePropertiesPredicate` — `PropertyMatcher(String name,
+/// ValueMatcher valueMatcher)`, i.e. one `"age": "7"` pair out of the condition's
+/// `properties` object.
+///
+/// `match` is `definition.getProperty(name) != null && valueMatcher.match(…)`, so
+/// an unknown property name fails the whole predicate rather than being ignored.
+#[derive(Debug, Clone, PartialEq)]
+struct StatePropertyMatcher {
+    name: String,
+    matcher: StateValueMatcher,
+}
+
+impl StatePropertyMatcher {
+    fn from_value(name: &str, value: &Value) -> Result<Self, LootError> {
+        Ok(Self {
+            name: name.to_string(),
+            matcher: StateValueMatcher::from_value(value)?,
+        })
+    }
+
+    fn matches(&self, state: &LootBlockState) -> bool {
+        match state.property(&self.name) {
+            None => false,
+            Some(value) => self.matcher.matches(value),
+        }
+    }
+}
+
+/// `StatePropertiesPredicate.ValueMatcher` — `Codec.either(ExactMatcher,
+/// RangedMatcher)`, so a property's JSON value is either a bare string or a
+/// `{"min": …, "max": …}` object.
+///
+/// # Both bounds are strings in the record, and the comparison is *typed*
+///
+/// `RangedMatcher(Optional<String> minValue, Optional<String> maxValue)` compares
+/// with `property.getValue(bound)` then `value.compareTo(bound)` — the
+/// **property's own** ordering, which for an `IntegerProperty` is numeric and for
+/// a `BooleanProperty` is `false < true`. Comparing the serialized strings
+/// lexicographically instead would put `"9" > "10"`, so [`Self::matches`] parses
+/// numerically when both sides are integers and compares booleans as booleans.
+///
+/// An `EnumProperty`'s ordering is its **declaration order**, which is not
+/// recoverable from a serialized name, so a ranged matcher over an enum property
+/// fails closed here. That path is unreachable from the bundle: all 258
+/// `block_state_property` conditions across the 1,241 bundled tables use the
+/// exact-string form and **none** uses a range, measured by walking the JSON.
+#[derive(Debug, Clone, PartialEq)]
+enum StateValueMatcher {
+    /// `ExactMatcher(String value)` — `property.getValue(value)` is present and
+    /// `compareTo == 0`. Every typed value has exactly one serialized form and
+    /// `getValue` is its inverse, so string equality is the same predicate: a
+    /// bound outside the property's domain (`age: "99"`) matches no real state
+    /// under either reading.
+    Exact(String),
+    /// `RangedMatcher(Optional<String>, Optional<String>)`. An absent bound is
+    /// vacuously satisfied; a bound outside the property's domain fails
+    /// (`typedMinValue.isEmpty() → return false`), which the numeric parse
+    /// reproduces by failing to parse.
+    Ranged {
+        min: Option<String>,
+        max: Option<String>,
+    },
+}
+
+impl StateValueMatcher {
+    fn from_value(value: &Value) -> Result<Self, LootError> {
+        match value {
+            Value::String(exact) => Ok(Self::Exact(exact.clone())),
+            Value::Object(bounds) => {
+                let bound = |key: &str| -> Result<Option<String>, LootError> {
+                    match bounds.get(key) {
+                        None => Ok(None),
+                        Some(Value::String(raw)) => Ok(Some(raw.clone())),
+                        Some(_) => Err(LootError::UnexpectedType(
+                            "block state property bound",
+                            "a string",
+                        )),
+                    }
+                };
+                Ok(Self::Ranged {
+                    min: bound("min")?,
+                    max: bound("max")?,
+                })
+            }
+            _ => Err(LootError::UnexpectedType(
+                "block state property value",
+                "a string or a min/max object",
+            )),
+        }
+    }
+
+    fn matches(&self, value: &str) -> bool {
+        match self {
+            Self::Exact(expected) => value == expected,
+            Self::Ranged { min, max } => {
+                if let Some(min) = min {
+                    if compare_state_values(value, min).is_none_or(|o| o.is_lt()) {
+                        return false;
+                    }
+                }
+                if let Some(max) = max {
+                    if compare_state_values(value, max).is_none_or(|o| o.is_gt()) {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+    }
+}
+
+/// `value.compareTo(bound)` in the property's own ordering, for the two property
+/// kinds whose ordering a serialized name determines: integers compare
+/// numerically, booleans as `false < true`.
+///
+/// `None` means "not comparable" — an enum property, or a bound outside the
+/// property's domain — and every caller treats that as a failed match, matching
+/// `RangedMatcher.match`'s `typedMinValue.isEmpty() → false`.
+fn compare_state_values(value: &str, bound: &str) -> Option<std::cmp::Ordering> {
+    if let (Ok(value), Ok(bound)) = (value.parse::<i64>(), bound.parse::<i64>()) {
+        return Some(value.cmp(&bound));
+    }
+    if let (Ok(value), Ok(bound)) = (value.parse::<bool>(), bound.parse::<bool>()) {
+        return Some(value.cmp(&bound));
+    }
+    None
 }
 
 /// `advancements/predicates/ItemPredicate` — `(items, count, components)`, of
@@ -2246,6 +2576,7 @@ mod tests {
                     .with_enchantment(enchantment.parse().unwrap(), level),
             ),
             explosion_radius: None,
+            block_state: None,
         }
     }
 
@@ -2254,6 +2585,7 @@ mod tests {
             luck: 0.0,
             tool: Some(LootTool::new("minecraft:diamond_pickaxe".parse().unwrap())),
             explosion_radius: None,
+            block_state: None,
         }
     }
 
@@ -2410,6 +2742,7 @@ mod tests {
                 luck: 0.0,
                 tool: Some(LootTool::new(item.parse().unwrap())),
                 explosion_radius: None,
+                block_state: None,
             };
             let mut rng = SpawnRng::new(3);
             t.roll(&ctx, &mut rng)[0].item.to_string()
@@ -2621,6 +2954,7 @@ mod tests {
                 luck: 0.0,
                 tool: None,
                 explosion_radius: radius,
+                block_state: None,
             };
             (0..ROLLS).filter(|_| !t.roll(&ctx, &mut rng).is_empty()).count()
         };
@@ -2689,6 +3023,7 @@ mod tests {
             luck: 0.0,
             tool: None,
             explosion_radius: Some(3.0),
+            block_state: None,
         };
         let mut total = 0u64;
         let mut intermediate = 0usize;
@@ -2724,5 +3059,545 @@ mod tests {
                 "with no EXPLOSION_RADIUS explosion_decay must not touch the stack"
             );
         }
+    }
+
+    /// A bare-handed break of `state`, i.e. the context `block_drops` builds.
+    fn broken(state: &str) -> LootContext {
+        LootContext {
+            luck: 0.0,
+            tool: None,
+            explosion_radius: None,
+            block_state: crate::block_drops::loot_block_state(state),
+        }
+    }
+
+    /// `LootItemBlockStatePropertyCondition.test`'s three clauses, each isolated
+    /// against a state that satisfies the other two.
+    ///
+    /// Every expectation comes from the record rather than from a roll:
+    /// `state != null && state.is(block) && (properties.isEmpty() ||
+    /// properties.matches(state))`, with `PropertyMatcher.match` opening
+    /// `property != null &&`. So a wrong *block* fails even with matching
+    /// properties, an absent `properties` object passes for any state of the right
+    /// block, and a property the block does not carry fails rather than being
+    /// skipped — the last being the clause a "just compare the pairs that are
+    /// present" implementation gets backwards.
+    #[test]
+    fn block_state_property_tests_block_identity_then_each_named_property() {
+        let condition = |properties: &str| {
+            table(
+                "minecraft:test/state",
+                &format!(
+                    r#"{{
+                      "pools": [{{
+                        "entries": [{{ "type": "minecraft:item", "name": "minecraft:wheat" }}],
+                        "conditions": [{{
+                          "condition": "minecraft:block_state_property",
+                          "block": "minecraft:wheat"{properties}
+                        }}],
+                        "rolls": 1.0
+                      }}]
+                    }}"#
+                ),
+            )
+        };
+        let drops = |t: &LootTable, context: &LootContext| {
+            let mut rng = SpawnRng::new(7);
+            !t.roll(context, &mut rng).is_empty()
+        };
+
+        // `properties` absent: any state of the right block passes, no state of
+        // the wrong block does, and an absent BLOCK_STATE parameter fails.
+        let any_state = condition("");
+        assert!(any_state.unsupported_features().is_empty());
+        assert!(drops(&any_state, &broken("minecraft:wheat[age=0]")));
+        assert!(drops(&any_state, &broken("minecraft:wheat[age=7]")));
+        assert!(
+            !drops(&any_state, &broken("minecraft:beetroots[age=3]")),
+            "the record's `state.is(this.block)` clause is ANDed, so a table \
+             applied to the wrong block must not pass"
+        );
+        assert!(
+            !drops(&any_state, &LootContext::default()),
+            "no BLOCK_STATE parameter is the `state != null` clause"
+        );
+
+        // Exact matcher.
+        let age_seven = condition(r#", "properties": { "age": "7" }"#);
+        assert!(drops(&age_seven, &broken("minecraft:wheat[age=7]")));
+        assert!(!drops(&age_seven, &broken("minecraft:wheat[age=6]")));
+        assert!(
+            !drops(&age_seven, &broken("minecraft:wheat")),
+            "a bare name is the default state (age=0), so it must fail because \
+             zero is not seven — not because the string omitted the property"
+        );
+
+        // A property `minecraft:wheat` does not have. Vanilla's
+        // `definition.getProperty(\"lit\")` is null, so the matcher is false.
+        let no_such = condition(r#", "properties": { "lit": "true" }"#);
+        assert!(
+            !drops(&no_such, &broken("minecraft:wheat[age=7]")),
+            "a matcher naming a property the block has not got must fail, not be \
+             ignored"
+        );
+
+        // Every named property is ANDed (`matches` returns on the first miss).
+        let two = condition(r#", "properties": { "age": "7", "lit": "true" }"#);
+        assert!(!drops(&two, &broken("minecraft:wheat[age=7]")));
+    }
+
+    /// `RangedMatcher.match` compares in the **property's** ordering, not the
+    /// serialized string's — `value.compareTo(typedMinValue)` after
+    /// `property.getValue(min)`.
+    ///
+    /// The discriminating input is a bound that crosses a decimal-digit boundary:
+    /// for `minecraft:candle`'s `candles` (1..=4) no such input exists, so this
+    /// uses `minecraft:composter`'s `level` (0..=8) against a bound of `"10"`,
+    /// where the numeric answer (`8 < 10`, no match) and the lexicographic answer
+    /// (`"8" > "10"`, match) differ. A `min` of `"2"` is *not* a test: both
+    /// readings agree there.
+    #[test]
+    fn a_ranged_state_matcher_compares_numerically_not_lexicographically() {
+        let ranged = |bounds: &str| {
+            table(
+                "minecraft:test/ranged",
+                &format!(
+                    r#"{{
+                      "pools": [{{
+                        "entries": [{{ "type": "minecraft:item", "name": "minecraft:wheat" }}],
+                        "conditions": [{{
+                          "condition": "minecraft:block_state_property",
+                          "block": "minecraft:composter",
+                          "properties": {{ "level": {bounds} }}
+                        }}],
+                        "rolls": 1.0
+                      }}]
+                    }}"#
+                ),
+            )
+        };
+        let drops = |t: &LootTable, state: &str| {
+            let mut rng = SpawnRng::new(7);
+            !t.roll(&broken(state), &mut rng).is_empty()
+        };
+
+        let at_least_ten = ranged(r#"{ "min": "10" }"#);
+        assert!(
+            !drops(&at_least_ten, "minecraft:composter[level=8]"),
+            "8 is not >= 10; a lexicographic compare would say \"8\" >= \"10\" and \
+             pass, which is the whole point of this input"
+        );
+        let at_most_ten = ranged(r#"{ "max": "10" }"#);
+        assert!(
+            drops(&at_most_ten, "minecraft:composter[level=8]"),
+            "8 is <= 10; a lexicographic compare would say \"8\" > \"10\" and fail"
+        );
+        // Inclusivity, and a bound below the value.
+        assert!(drops(&ranged(r#"{ "min": "8" }"#), "minecraft:composter[level=8]"));
+        assert!(drops(&ranged(r#"{ "max": "8" }"#), "minecraft:composter[level=8]"));
+        assert!(!drops(&ranged(r#"{ "min": "9" }"#), "minecraft:composter[level=8]"));
+        assert!(!drops(&ranged(r#"{ "max": "7" }"#), "minecraft:composter[level=8]"));
+        // Both bounds, and an absent one being vacuous.
+        assert!(drops(&ranged(r#"{ "min": "2", "max": "10" }"#), "minecraft:composter[level=8]"));
+        assert!(!drops(&ranged(r#"{ "min": "2", "max": "7" }"#), "minecraft:composter[level=8]"));
+        assert!(drops(&ranged("{}"), "minecraft:composter[level=8]"));
+    }
+
+    /// **The reported bug, and its control.** Breaking fully-grown wheat dropped
+    /// one seed and no wheat, at every age.
+    ///
+    /// The expectations are read out of the bundle's own `blocks/wheat.json`
+    /// (Mojang's generated data, copied verbatim — the corpus gate asserts it is
+    /// byte-identical), not out of a roll:
+    ///
+    /// * pool 1 is an `alternatives` whose first child is `minecraft:wheat` gated
+    ///   on `age: "7"` and whose second is an unconditional `wheat_seeds`, so the
+    ///   pool yields **wheat at age 7 and a seed at every other age**;
+    /// * pool 2 is a `wheat_seeds` entry gated at *pool* level on the same
+    ///   condition, so it contributes **one more stack at age 7 and nothing
+    ///   otherwise**. Its `apply_bonus` needs a tool (`ApplyBonusCount.run`
+    ///   guards on `tool != null`), so bare-handed the second stack is exactly 1.
+    ///
+    /// `age=7` alone cannot distinguish a working condition from a hardcoded
+    /// `true`, and `age=3` alone cannot distinguish one from the hardcoded `false`
+    /// that shipped — so the pair is the test and neither half is dropped.
+    #[test]
+    fn fully_grown_wheat_drops_wheat_and_an_unripe_stalk_drops_one_seed() {
+        let set = LootTableSet::load_bundled();
+        let wheat: ResourceKey = "minecraft:blocks/wheat".parse().unwrap();
+        let roll = |state: &str| {
+            let mut rng = SpawnRng::new(42);
+            describe(&set.roll(&wheat, &broken(state), &mut rng))
+        };
+
+        assert_eq!(
+            roll("minecraft:wheat[age=7]"),
+            vec![
+                "minecraft:wheatx1".to_string(),
+                "minecraft:wheat_seedsx1".to_string(),
+            ],
+            "at max age the alternatives takes its first child and pool 2 runs"
+        );
+        for age in 0..7 {
+            assert_eq!(
+                roll(&format!("minecraft:wheat[age={age}]")),
+                vec!["minecraft:wheat_seedsx1".to_string()],
+                "age {age} is not 7, so the alternatives falls through and pool 2 \
+                 is skipped"
+            );
+        }
+
+        // The control, and it is the shipped bug rather than a description of it:
+        // an absent BLOCK_STATE makes `block_state_property` false for every
+        // state, which is byte-for-byte what the hardcoded `false` did. If this
+        // arm ever agreed with the one above, the gate would be proving nothing.
+        let mut rng = SpawnRng::new(42);
+        let blind = describe(&set.roll(&wheat, &LootContext::default(), &mut rng));
+        assert_eq!(
+            blind,
+            vec!["minecraft:wheat_seedsx1".to_string()],
+            "with no block state the roll must reproduce the reported bug exactly"
+        );
+        assert_ne!(
+            blind,
+            roll("minecraft:wheat[age=7]"),
+            "the fixed arm and the blind arm must differ, or the state is not \
+             reaching the condition"
+        );
+    }
+
+    /// Fortune's bonus seeds: `apply_bonus` with
+    /// `binomial_with_bonus_count(extra = 3, probability = 0.5714286)` on wheat's
+    /// second pool.
+    ///
+    /// `BinomialWithBonusCount.calculateNewCount` is `count + Σ(nextFloat() <
+    /// probability)` over `level + extra` rounds, so the **support** is computed
+    /// from the JSON's own parameters rather than guessed: `1..=1 + (level + 3)`.
+    /// At level 0 that is `1..=4` and at level 3 it is `1..=7`, and the presence
+    /// of the top value is asserted as well as the ceiling — a port writing
+    /// `rounds = extra` would cap at 4 for both levels and pass a range-only
+    /// check at level 0.
+    ///
+    /// The wrong hypothesis is checked at the same input: bare-handed the function
+    /// does not run at all (`tool != null`), so the count is *always* 1. That is
+    /// what makes the tool arm a measurement rather than an observation.
+    #[test]
+    fn wheat_bonus_seeds_are_binomial_over_the_tables_own_extra() {
+        let set = LootTableSet::load_bundled();
+        let wheat: ResourceKey = "minecraft:blocks/wheat".parse().unwrap();
+        let ripe = "minecraft:wheat[age=7]";
+
+        let seed_counts = |context: &LootContext, seeds: std::ops::Range<u64>| {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut out_of_range = Vec::new();
+            for s in seeds {
+                let mut rng = SpawnRng::new(s);
+                let rolled = set.roll(&wheat, context, &mut rng);
+                let count = rolled
+                    .iter()
+                    .find(|stack| stack.item.to_string() == "minecraft:wheat_seeds")
+                    .map_or(0, |stack| stack.count);
+                seen.insert(count);
+                if count == 0 {
+                    out_of_range.push((s, count));
+                }
+            }
+            (seen, out_of_range)
+        };
+
+        // Bare hand: the function is skipped, so exactly 1 every time.
+        let (bare, missing) = seed_counts(&broken(ripe), 0..512);
+        assert!(missing.is_empty(), "every roll must produce seeds: {missing:?}");
+        assert_eq!(
+            bare.into_iter().collect::<Vec<_>>(),
+            vec![1],
+            "with no tool ApplyBonusCount.run returns early, so no bonus at all"
+        );
+
+        // Unenchanted tool, level 0: rounds = 0 + 3, support 1..=4.
+        let with_tool = |level: u32| LootContext {
+            luck: 0.0,
+            tool: Some(if level == 0 {
+                LootTool::new("minecraft:iron_hoe".parse().unwrap())
+            } else {
+                LootTool::new("minecraft:iron_hoe".parse().unwrap())
+                    .with_enchantment("minecraft:fortune".parse().unwrap(), level)
+            }),
+            explosion_radius: None,
+            block_state: crate::block_drops::loot_block_state(ripe),
+        };
+        let (level_zero, _) = seed_counts(&with_tool(0), 0..4096);
+        assert_eq!(
+            level_zero.into_iter().collect::<Vec<_>>(),
+            vec![1, 2, 3, 4],
+            "extra = 3 with a tool in hand gives exactly 1..=4, all reachable"
+        );
+        // Fortune 3: rounds = 3 + 3, support 1..=7. The ceiling moves with the
+        // level, which is what separates `rounds = level + extra` from
+        // `rounds = extra`.
+        let (level_three, _) = seed_counts(&with_tool(3), 0..8192);
+        assert_eq!(
+            level_three.into_iter().collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6, 7],
+            "fortune 3 must reach 7; a port ignoring the level would stop at 4"
+        );
+    }
+
+    /// The families beyond wheat, each with the exact bare-handed drop its own
+    /// bundled JSON implies — and each a *different* shape of the same bug, which
+    /// is why one crop is not a sufficient fixture.
+    ///
+    /// | family | what the condition gates | what a constant `false` produced |
+    /// |---|---|---|
+    /// | crop, `alternatives` (`wheat`, `beetroots`) | which child of pool 1 wins | the seed, never the crop |
+    /// | crop, extra pool (`carrots`) | a *second* stack from pool 2 | one carrot instead of two |
+    /// | `set_count` (`stone_slab`, `candle`) | the count of the one stack | always 1 |
+    /// | whole pool (`white_bed`, `oak_door`, `cave_vines`) | whether anything drops | **nothing at all** |
+    ///
+    /// That last row is worth the table on its own: a `part=head` / `half=lower`
+    /// gate means every bed and every door in the game dropped no item, which no
+    /// amount of reasoning about "off by one branch" would have predicted.
+    ///
+    /// Mismatches are collected rather than asserted in the loop, so neutering the
+    /// condition shows every family failing rather than only the alphabetically
+    /// first.
+    #[test]
+    fn every_state_conditioned_family_drops_what_its_own_json_implies() {
+        let set = LootTableSet::load_bundled();
+        // `(state, expected)`. Every expectation is derived from that block's
+        // `assets/loot_table/blocks/*.json`, read as a record.
+        let cases: &[(&str, &[&str])] = &[
+            // `alternatives`: crop at the final age, seed otherwise.
+            ("minecraft:beetroots[age=3]", &["minecraft:beetrootx1", "minecraft:beetroot_seedsx1"]),
+            ("minecraft:beetroots[age=2]", &["minecraft:beetroot_seedsx1"]),
+            // Pool 1 is unconditional here, so the ripe case is *two* stacks of
+            // one carrot and the unripe case is one — not crop-versus-seed.
+            ("minecraft:carrots[age=7]", &["minecraft:carrotx1", "minecraft:carrotx1"]),
+            ("minecraft:carrots[age=6]", &["minecraft:carrotx1"]),
+            // `set_count` gated on the state: a double slab is two.
+            ("minecraft:stone_slab[type=double]", &["minecraft:stone_slabx2"]),
+            ("minecraft:stone_slab[type=bottom]", &["minecraft:stone_slabx1"]),
+            ("minecraft:stone_slab[type=top]", &["minecraft:stone_slabx1"]),
+            // Three chained `set_count`s, one per candle count above one.
+            ("minecraft:candle[candles=4]", &["minecraft:candlex4"]),
+            ("minecraft:candle[candles=3]", &["minecraft:candlex3"]),
+            ("minecraft:candle[candles=2]", &["minecraft:candlex2"]),
+            ("minecraft:candle[candles=1]", &["minecraft:candlex1"]),
+            // Whole-drop gates. The `false` branch dropped nothing at all.
+            ("minecraft:white_bed[part=head]", &["minecraft:white_bedx1"]),
+            ("minecraft:white_bed[part=foot]", &[]),
+            ("minecraft:oak_door[half=lower]", &["minecraft:oak_doorx1"]),
+            ("minecraft:oak_door[half=upper]", &[]),
+            ("minecraft:cave_vines[berries=true]", &["minecraft:glow_berriesx1"]),
+            ("minecraft:cave_vines[berries=false]", &[]),
+        ];
+
+        let mut mismatches = Vec::new();
+        for (state, expected) in cases {
+            let id = crate::block_drops::block_loot_table_id(state).expect("state names a block");
+            let mut rng = SpawnRng::new(42);
+            let got = describe(&set.roll(&id, &broken(state), &mut rng));
+            let want: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();
+            if got != want {
+                mismatches.push(format!("{state}: expected {want:?}, got {got:?}"));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} of {} state-conditioned drops are wrong:\n  {}",
+            mismatches.len(),
+            cases.len(),
+            mismatches.join("\n  "),
+        );
+    }
+
+    /// Sweet berries: two pools, `age=3` yielding `uniform 2..3` berries and
+    /// `age=2` yielding `uniform 1..2`, both gated on the state — so an unripe
+    /// bush drops nothing and the two ripe stages differ in *count*.
+    ///
+    /// The count is a range rather than a value, so the assertion is the range's
+    /// endpoints computed from the JSON's own `min`/`max` **plus** the requirement
+    /// that both endpoints occur: a provider that ignored `min` would still land
+    /// inside `2..=3` about half the time.
+    #[test]
+    fn sweet_berries_count_comes_from_the_pool_its_age_selects() {
+        let set = LootTableSet::load_bundled();
+        let id: ResourceKey = "minecraft:blocks/sweet_berry_bush".parse().unwrap();
+        let support = |state: &str| {
+            let mut seen = std::collections::BTreeSet::new();
+            for seed in 0..1024u64 {
+                let mut rng = SpawnRng::new(seed);
+                let rolled = set.roll(&id, &broken(state), &mut rng);
+                seen.insert(rolled.iter().map(|s| s.count).sum::<u32>());
+            }
+            seen.into_iter().collect::<Vec<_>>()
+        };
+        assert_eq!(support("minecraft:sweet_berry_bush[age=3]"), vec![2, 3]);
+        assert_eq!(support("minecraft:sweet_berry_bush[age=2]"), vec![1, 2]);
+        assert_eq!(
+            support("minecraft:sweet_berry_bush[age=1]"),
+            vec![0],
+            "neither pool's condition holds below age 2, so nothing drops"
+        );
+        assert_eq!(support("minecraft:sweet_berry_bush[age=0]"), vec![0]);
+    }
+
+    /// The instrument the curation gate could not be: how many bundled tables
+    /// still carry a condition that parses and then ignores its own JSON.
+    ///
+    /// `unsupported_features` answers "did the parser recognise this", which is
+    /// why a constant-`false` `block_state_property` was reported as fully
+    /// supported across 154 tables. `context_blind_features` answers "is this
+    /// *evaluated*", and the count is asserted exactly so that making one of them
+    /// evaluable is a number that has to move rather than something a future
+    /// reader discovers.
+    ///
+    /// **Non-zero is correct**, not a defect: each remaining entry names a loot
+    /// context parameter this crate does not carry (the killing entity, the damage
+    /// source, the level around the block).
+    #[test]
+    fn the_bundle_reports_which_conditions_are_recognised_but_not_evaluated() {
+        let set = LootTableSet::load_bundled();
+        let mut by_feature: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        let mut tables_with_any = 0usize;
+        for table in set.iter() {
+            let blind: std::collections::BTreeSet<&String> =
+                table.context_blind_features().iter().collect();
+            if !blind.is_empty() {
+                tables_with_any += 1;
+            }
+            for feature in blind {
+                *by_feature.entry(feature.clone()).or_default() += 1;
+            }
+        }
+        assert_eq!(
+            by_feature
+                .iter()
+                .map(|(f, n)| format!("{f} in {n} tables"))
+                .collect::<Vec<_>>(),
+            vec![
+                "condition minecraft:damage_source_properties in 4 tables".to_string(),
+                "condition minecraft:entity_properties in 25 tables".to_string(),
+                "condition minecraft:location_check in 3 tables".to_string(),
+            ],
+            "if this moved, a condition became evaluable (or a new blind one \
+             landed) — say which in the commit message"
+        );
+        assert_eq!(
+            tables_with_any, 30,
+            "30 of the 1,241 bundled tables carry at least one; the four counts \
+             above come from walking assets/loot_table/**/*.json for the condition \
+             ids, not from this accessor"
+        );
+
+        // And the thing that made this list necessary: `block_state_property` is
+        // no longer on it, while still being in the bundle 154 times.
+        assert!(
+            !by_feature.contains_key("condition minecraft:block_state_property"),
+            "block_state_property is evaluated now and must not be reported blind"
+        );
+        // And the connectedness half: for how many bundled block tables does
+        // *some* state of that block roll differently from the blind context?
+        //
+        // The sweep is over every state of the block, not its default state,
+        // because most of these gates are false in the default state — wheat's
+        // default is `age=0`, a slab's is `type=bottom`, a bed's is `part=foot`.
+        // A default-state-only sweep answers 31, which measures the defaults
+        // rather than the wiring, and a threshold picked to look impressive next
+        // to it would have been a guess.
+        let mut states_by_block: std::collections::BTreeMap<&str, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for id in 0..lodestone_data::block_states::STATE_COUNT {
+            let Some(name) = lodestone_data::block_states::block_name(id) else {
+                continue;
+            };
+            let properties = lodestone_data::block_states::properties(id).unwrap_or(&[]);
+            let state = if properties.is_empty() {
+                name.to_string()
+            } else {
+                let pairs: Vec<String> = properties
+                    .iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect();
+                format!("{name}[{}]", pairs.join(","))
+            };
+            states_by_block.entry(name).or_default().push(state);
+        }
+
+        // Which tables carry the condition is read off the embedded JSON *text* —
+        // Mojang's own bytes, the same thing a grep over `assets/loot_table` sees —
+        // rather than off the parsed table, so the population under test is not
+        // defined by the parser being tested.
+        let carries: std::collections::BTreeSet<String> = EMBEDDED_LOOT
+            .iter()
+            .filter(|(_, raw)| raw.contains("minecraft:block_state_property"))
+            .map(|(id, _)| format!("minecraft:{id}"))
+            .collect();
+
+        let mut reached = 0usize;
+        let mut inert = Vec::new();
+        for table in set.iter() {
+            let id = table.id.to_string();
+            if !carries.contains(&id) {
+                continue;
+            }
+            let block = match id.strip_prefix("minecraft:blocks/") {
+                Some(path) => format!("minecraft:{path}"),
+                None => {
+                    inert.push(id);
+                    continue;
+                }
+            };
+            let states = states_by_block
+                .get(block.as_str())
+                .unwrap_or_else(|| panic!("{block} is not in the block-state census"));
+            let mut rng = SpawnRng::new(1);
+            let blind = describe(&table.roll(&LootContext::default(), &mut rng));
+            if states.iter().any(|state| {
+                let mut rng = SpawnRng::new(1);
+                describe(&table.roll(&broken(state), &mut rng)) != blind
+            }) {
+                reached += 1;
+            } else {
+                inert.push(id);
+            }
+        }
+        assert_eq!(
+            reached + inert.len(),
+            154,
+            "154 bundled tables carry a block_state_property condition, measured by \
+             grepping assets/loot_table for the condition id"
+        );
+        // The six a bare-handed sweep cannot move, named rather than absorbed into
+        // a threshold — three different reasons, and only two of them are
+        // outstanding work:
+        //
+        // * `glow_lichen`, `sculk_vein` — the *entry* is gated on `match_tool`
+        //   (shears, silk touch), so with no tool nothing is produced for the
+        //   state-conditioned `set_count`s to add to. These are reached with the
+        //   right tool in hand; the sweep is bare-handed, not the code blind.
+        // * `snow` (`entity_properties`), `large_fern` and `tall_grass`
+        //   (`location_check`) — the enclosing *pool* is gated on a condition that
+        //   is still constant `false`, so no block state can rescue them. Real
+        //   remaining wrongness, and `context_blind_features` above is what counts
+        //   it.
+        // * `harvest/sweet_berry_bush` — not keyed under `blocks/`, so
+        //   `block_drops::block_loot_table_id` never resolves a broken block to it
+        //   at all. It is the *bone-meal harvest* table, reached by a different
+        //   action this crate does not model yet.
+        assert_eq!(
+            inert,
+            vec![
+                "minecraft:blocks/glow_lichen".to_string(),
+                "minecraft:blocks/large_fern".to_string(),
+                "minecraft:blocks/sculk_vein".to_string(),
+                "minecraft:blocks/snow".to_string(),
+                "minecraft:blocks/tall_grass".to_string(),
+                "minecraft:harvest/sweet_berry_bush".to_string(),
+            ],
+            "a table entering or leaving this list is a real change in coverage"
+        );
+        assert_eq!(reached, 148);
     }
 }

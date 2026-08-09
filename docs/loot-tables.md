@@ -48,14 +48,88 @@ value, so a table with zero unsupported features rolls correctly:
 | `random_chance_with_enchanted_bonus` | uses `unenchanted_chance` (level 0) | `…Condition.java` |
 | `killed_by_player` | `false` (no killer param) | `…Condition.java` |
 | `survives_explosion` | `true` (no explosion radius) | `ExplosionCondition.java` |
-| `entity_properties` / `block_state_property` | `false` (no entity/state) | the respective conditions |
-| `match_tool` | `false` (no tool) | `MatchTool.java` |
+| `entity_properties` / `damage_source_properties` / `location_check` | `false` (no entity/source/level) | the respective conditions |
+| `block_state_property` | `false` (no state); **fully evaluated once a state is present** | `LootItemBlockStatePropertyCondition` |
+| `match_tool` | `false` (no tool); **fully evaluated once a tool is present** | `MatchTool` |
 | `table_bonus` | `chances[0]` (fortune level 0) | `BonusLevelTableCondition.java` |
 | `set_count` | rolled | `SetItemCountFunction` |
 | `enchanted_count_increase` | no-op (level 0) | `…Function.java` |
 | `apply_bonus` | no-op (no tool) | `ApplyBonusCount.java` |
 | `explosion_decay` | no-op (no explosion) | `ApplyExplosionDecay.java` |
 | `furnace_smelt` | smelted via `crate::furnace::recipe_for` | `SmeltItemFunction.java` |
+
+### The block state, and why 154 tables were silently wrong
+
+`LootContext::block_state: Option<LootBlockState>` is
+`LootContextParams.BLOCK_STATE`. Until it existed, `block_state_property` **parsed
+into a recognised variant and evaluated as a hardcoded `false`**, so every
+state-conditioned table took the wrong branch on every roll. The reported symptom
+was wheat: breaking a fully-grown stalk dropped **one seed and no wheat**, at every
+age. Reading `blocks/wheat.json` explains it exactly — pool 1 is an `alternatives`
+whose `minecraft:wheat` child is gated on `age: "7"` and whose fallback is
+`wheat_seeds`, and pool 2's bonus seeds carry the same condition at *pool* level.
+Both took the false branch.
+
+**154 of the 1,241 bundled tables carry the condition, 258 times between them.**
+Four shapes, and only the first was guessed correctly before the tables were read:
+
+| shape | tables | what the false branch produced |
+|---|---|---|
+| `alternatives` child (`wheat`, `beetroots`) | crops | the seed, never the crop |
+| extra pool (`carrots`, `potatoes`) | crops | one carrot, never the second |
+| `set_count` condition (all 68 slabs, all 17 candles, `snow`, `sea_pickle`, `glow_lichen`) | counts | always 1 — **a double slab dropped one** |
+| whole-pool or whole-entry gate (`*_door`, `*_bed`, `cave_vines`, `sweet_berry_bush`) | drops | **nothing at all** |
+
+That last row is the one worth remembering: a `part=head` gate on every bed and a
+`half=lower` gate on every door meant **beds and doors dropped no item whatsoever**.
+
+#### What resolving the state actually requires
+
+`StatePropertiesPredicate.PropertyMatcher.match` looks the property up in the
+block's `StateDefinition` and reads the *state's* value, so **every property the
+block has contributes a value whether or not the caller named it**, and a matcher
+over a property the block has not got is `false` rather than skipped. So the loot
+context cannot take the substring between the brackets:
+`block_drops::loot_block_state` resolves through
+`lodestone_data::block_states::state_id` (Mojang's own 32,366-state table, with its
+default-plus-overrides tiers) and reads the canonical `(name, value)` list back out
+of `properties`. `"minecraft:wheat"` therefore arrives as `age=0` — a value, not an
+absence — which is why it fails an `age=7` matcher for the right reason.
+
+`StatePropertiesPredicate` also has a **ranged** matcher (`{"min": …, "max": …}`,
+both strings) whose comparison is the *property's* ordering, so integers compare
+numerically: a lexicographic compare puts `"9" > "10"` and would invert the answer.
+No bundled table uses the ranged form — all 258 conditions are exact strings — so
+that path is implemented from the record and gated synthetically against
+`minecraft:composter`'s `level` with a bound of `"10"`, the input where the two
+readings disagree.
+
+#### The curation gate could not have caught this, and now something can
+
+`bundled_tables_are_all_fully_supported_and_roll` asserts
+`LootTable::unsupported_features()` is empty. That list answers **"did the parser
+recognise this"**, and a variant that parses its JSON and then ignores it is
+invisible to it — which is exactly how a bundle whose stated invariant is "zero
+unsupported features" shipped 154 tables that were always wrong.
+
+`LootTable::context_blind_features()` is the missing instrument: it reports
+conditions that are **recognised but not evaluated**, meaning they parse data they
+then discard. It is deliberately *separate* from `unsupported_features` rather than
+folded into it — promoting these to unsupported would eject 30 tables from the
+bundle and change nothing a player sees, while breaking the byte-identical-to-Mojang
+property the corpus gate rests on. The value is in the count, which is asserted
+exactly:
+
+| condition | bundled tables |
+|---|---|
+| `minecraft:entity_properties` | 25 |
+| `minecraft:damage_source_properties` | 4 |
+| `minecraft:location_check` | 3 |
+
+30 tables in total. Non-zero is correct — each names a context parameter this crate
+does not carry — and making one of them evaluable is now a number that has to move.
+`snow` (`entity_properties`), `tall_grass` and `large_fern` (`location_check`) are
+the tables still wrong for this reason after the block-state landing.
 
 ### The tool (issue #539)
 
