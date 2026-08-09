@@ -314,6 +314,11 @@ impl RenderState {
             // Vanilla's own default — see the field's doc for why `0.0` would be
             // the wrong "nothing installed yet" value.
             damage_tilt_strength: 1.0,
+            // Vanilla's own shipped option values, which are also the constants
+            // `glint_uniform` used to hand over itself — so a renderer nobody
+            // pushes glint options into shimmers exactly as it did before.
+            glint_speed: lodestone_render::glint::DEFAULT_SPEED,
+            glint_strength: lodestone_render::glint::DEFAULT_STRENGTH,
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -658,9 +663,38 @@ impl RenderState {
             queue.write_buffer(
                 &glint.uniform_buffer,
                 0,
-                bytemuck::bytes_of(&super::glint::glint_uniform(view_proj)),
+                bytemuck::bytes_of(&super::glint::glint_uniform(
+                    view_proj,
+                    self.glint_speed,
+                    self.glint_strength,
+                )),
             );
         }
+    }
+
+    /// Push vanilla's **Glint Speed**/**Glint Strength** accessibility options
+    /// down from the menu layer, exactly as
+    /// [`Self::set_damage_tilt_strength`] does for Damage Tilt — per frame,
+    /// because the sliders live on a settings page and must move the shimmer
+    /// while that page is still up.
+    ///
+    /// Both are `UnitDouble`s in `[0, 1]`; clamping lives in
+    /// `gpu::glint::glint_uniform`, the one place both the world and hand draws
+    /// pass through, so this setter cannot become a second copy of the domain.
+    pub fn set_glint_options(&mut self, speed: f64, strength: f32) {
+        self.glint_speed = speed;
+        self.glint_strength = strength;
+    }
+
+    /// This frame's glint speed and strength, as they will reach the uniform —
+    /// already clamped, so a gate can predict the value the GPU sees rather than
+    /// the value that was pushed.
+    #[must_use]
+    pub fn glint_options(&self) -> (f64, f32) {
+        (
+            lodestone_render::glint::clamp_speed(self.glint_speed),
+            lodestone_render::glint::clamp_strength(self.glint_strength),
+        )
     }
 
     /// [`Self::write_glint_uniform`] for the **world** glint draw — enchanted
@@ -676,7 +710,11 @@ impl RenderState {
             queue.write_buffer(
                 &glint.world_uniform_buffer,
                 0,
-                bytemuck::bytes_of(&super::glint::glint_uniform(view_proj)),
+                bytemuck::bytes_of(&super::glint::glint_uniform(
+                    view_proj,
+                    self.glint_speed,
+                    self.glint_strength,
+                )),
             );
         }
     }

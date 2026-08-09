@@ -95,6 +95,38 @@ pub const DEFAULT_SPEED: f64 = 0.5;
 /// overlay here at 70% red where vanilla renders 30%.
 pub const DEFAULT_STRENGTH: f32 = 0.75;
 
+/// Vanilla's `glintSpeed` `UnitDouble` domain as a clamp, with a non-finite input
+/// degrading to [`DEFAULT_SPEED`].
+///
+/// Lives here rather than at each call site because there are **three** glint
+/// sites in the shell — the world pass, the hand pass and the 2-D GUI icon pass —
+/// and they must agree, or the same item shimmers at two rates depending on
+/// whether it is in a slot or in your hand. The non-finite case is not
+/// hypothetical bookkeeping: the option is player-editable through a JSON file,
+/// and a NaN reaches [`glint_texture_matrix`], whose NaN output makes the shader
+/// discard every glint fragment. That reads as "the slider turned the shimmer
+/// off" rather than as a corrupt config, which is the worst kind of failure to
+/// debug.
+#[must_use]
+pub fn clamp_speed(speed: f64) -> f64 {
+    if speed.is_finite() {
+        speed.clamp(0.0, 1.0)
+    } else {
+        DEFAULT_SPEED
+    }
+}
+
+/// As [`clamp_speed`], for `glintStrength` / `GlintAlpha`. A negative strength
+/// would make vanilla's additive `dst += src * src` blend *darken* the item.
+#[must_use]
+pub fn clamp_strength(strength: f32) -> f32 {
+    if strength.is_finite() {
+        strength.clamp(0.0, 1.0)
+    } else {
+        DEFAULT_STRENGTH
+    }
+}
+
 /// The `U`-axis wrap period, in scaled milliseconds (`TextureTransform.java:33`).
 pub const U_PERIOD: i64 = 110_000;
 
@@ -570,6 +602,45 @@ mod tests {
         assert_eq!(glint_clock(1000.0, DEFAULT_SPEED), 4000);
         // And 8.0 at full speed.
         assert_eq!(glint_clock(1000.0, 1.0), 8000);
+    }
+
+    /// The two option clamps: vanilla's `UnitDouble` domain, and the non-finite
+    /// degradation that keeps a corrupt `options.json` from looking like the
+    /// slider works.
+    ///
+    /// The interior values are the load-bearing rows — a clamp that returned its
+    /// bound unconditionally would pass every endpoint assertion here — and `0.0`
+    /// is checked to pass *through*, because a frozen glint and a full-alpha glint
+    /// are both legitimate choices a player can make.
+    #[test]
+    fn the_glint_option_clamps_cover_vanillas_domain_and_reject_nothing_inside_it() {
+        for inside in [0.0, 0.25, DEFAULT_SPEED, 0.9, 1.0] {
+            assert_eq!(clamp_speed(inside), inside, "{inside} is a legal glintSpeed");
+        }
+        assert_eq!(clamp_speed(-0.5), 0.0);
+        assert_eq!(clamp_speed(4.0), 1.0);
+        assert_eq!(
+            clamp_speed(f64::NAN),
+            DEFAULT_SPEED,
+            "a NaN speed must not reach glint_texture_matrix — its output would \
+             discard every glint fragment, which looks like the option working"
+        );
+        assert_eq!(clamp_speed(f64::INFINITY), DEFAULT_SPEED);
+
+        for inside in [0.0, 0.25, DEFAULT_STRENGTH, 1.0] {
+            assert_eq!(
+                clamp_strength(inside),
+                inside,
+                "{inside} is a legal glintStrength"
+            );
+        }
+        assert_eq!(
+            clamp_strength(-1.0),
+            0.0,
+            "a negative GlintAlpha would make dst += src * src darken the item"
+        );
+        assert_eq!(clamp_strength(2.0), 1.0);
+        assert_eq!(clamp_strength(f32::NAN), DEFAULT_STRENGTH);
     }
 
     /// The two offsets use **different** periods, and both stay in `[0, 1)`.
