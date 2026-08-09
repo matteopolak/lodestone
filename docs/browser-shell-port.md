@@ -29,7 +29,22 @@ tidiness.
 `web/` is now a thin launcher: the spike application — its own `main`, camera, HUD,
 chunk fixture and trimmed pack, ~1,200 lines — is deleted.
 
-Not yet reached: **a world**. That is the next milestone and it is what proves the rest.
+Every menu screen works and input works: Singleplayer → Select World → Create New
+World all render and respond to clicks.
+
+Not yet reached: **a world**, and the blocker is now pinned to one thing. The menu's
+Create New World goes through `saves::create_world`, which writes a `level.dat` — and
+whose browser arm correctly *refuses* (`Err(Unsupported)`, "a browser has no saves
+directory; browser worlds are in-memory only"). Pressing it returns to Select World with
+nothing created, which is the gate behaving as designed rather than a bug. **A browser
+world has to go through `IntegratedServer::open_in_memory`**, which needs no `saves/`
+directory and no `level.dat`; what is missing is a launch path from the menu to it. That
+is the next unit, and it is a *routing* change, not a porting one.
+
+Two smaller things the same session surfaced: the refusal is silent in the UI (the screen
+bounces back without showing the reason, though the reason exists and is logged), and
+`Select World`'s "No worlds yet" with Play/Edit/Delete/Re-Create greyed out is exactly the
+`saves.rs` browser arm working — worth knowing before someone reads it as a defect.
 
 **`just wasm-size` fails, deliberately unaddressed.** See
 [Bundle size](#bundle-size) — the ceiling has not been moved.
