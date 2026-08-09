@@ -1594,6 +1594,45 @@ pub struct ListSpec {
     /// Where the rows sit horizontally — used only to derive [`Self::row_left`]
     /// and [`Self::row_right`]. See [`RowBand`].
     pub band: RowBand,
+    /// Where the band's own chrome — the tinted background and the two
+    /// separators — spans. See [`ListChrome`].
+    pub chrome: ListChrome,
+}
+
+/// Where a list's **chrome** spans horizontally: the tinted band background and
+/// the two 2 px separators that fence it off from the header and the footer.
+///
+/// ## What it is, and why it is not [`RowBand`]
+///
+/// These are two different rectangles and conflating them is the trap this type
+/// exists to prevent. [`RowBand`] is `getRowLeft()`/`getRowRight()` — the column
+/// an *entry* is laid into, 310 px on a settings page. The chrome is the list
+/// **widget's own** `getX()`/`getWidth()`, and `AbstractSelectionList`'s
+/// constructor is `super(0, y, width, height, …)`, so for every list whose screen
+/// hands it `this.width` the chrome is the whole canvas while the rows are a
+/// narrow centred column. Drawing the tint at `row_w` would leave the canvas
+/// margins untinted, which is not what vanilla looks like.
+///
+/// ## How to change it
+///
+/// [`Self::Canvas`] is the answer for every list whose vanilla constructor takes
+/// the screen width, which is all of them here bar one. Reach for
+/// [`Self::None`] only when a screen's real vanilla geometry is *several*
+/// narrower lists that this crate models as one band — see its own doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListChrome {
+    /// `super(0, y, screen.width, …)`: the chrome spans the canvas.
+    Canvas,
+    /// No chrome at all.
+    ///
+    /// The Resource Packs screen: vanilla runs **two** 200 px-wide
+    /// `TransferableSelectionList`s side by side, each with its own background
+    /// and its own pair of separators, and this crate models the pair as one
+    /// band so that a single clip rect and a single scrollbar can serve both.
+    /// One canvas-wide tint would therefore paint the gutter *between* the two
+    /// columns that vanilla leaves clear. Deliberately unported rather than
+    /// approximated; the fix is a per-column chrome rect, not a wider one.
+    None,
 }
 
 /// Where a list's rows sit horizontally on the canvas.
@@ -1700,6 +1739,30 @@ impl ListSpec {
             heights: None,
             scroll: 0.0,
             band: RowBand::Centred { row_w },
+            chrome: ListChrome::Canvas,
+        }
+    }
+
+    /// This spec with no band chrome — see [`ListChrome::None`], which is the one
+    /// screen that needs it and says why.
+    #[must_use]
+    pub fn without_chrome(mut self) -> Self {
+        self.chrome = ListChrome::None;
+        self
+    }
+
+    /// The chrome's rect: `(x, y, w, h)` in logical pixels at this canvas, or
+    /// `None` when this list declares none.
+    ///
+    /// `y`/`h` are the band the rows are clipped to, so the tint, the separators
+    /// and the clip are three readers of one expression rather than three
+    /// expressions that agree today. Takes the *model* rather than recomputing the
+    /// band, for the same reason.
+    #[must_use]
+    pub fn chrome_rect(&self, list: &ScrollList, canvas_width: f32) -> Option<Rect> {
+        match self.chrome {
+            ListChrome::Canvas => Some((0.0, list.top(), canvas_width, list.height())),
+            ListChrome::None => None,
         }
     }
 

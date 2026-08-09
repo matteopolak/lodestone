@@ -218,6 +218,11 @@ pub fn first_entry_y() -> f32 {
 /// `top` is [`first_entry_y`] minus the primitive's own
 /// [`super::widget::LIST_CONTENT_PADDING`] so the padding is counted exactly
 /// once — the trap `super::language`'s own gate recorded.
+///
+/// **The one spec here with no band chrome.** Vanilla's two 200 px lists carry a
+/// tinted background and a separator pair *each*; one canvas-wide set would paint
+/// the gutter this screen deliberately leaves clear between the columns. See
+/// [`super::widget::ListChrome::None`].
 #[must_use]
 pub fn list_spec(len: usize, scroll: f32) -> super::widget::ListSpec {
     super::widget::ListSpec::uniform(
@@ -227,6 +232,7 @@ pub fn list_spec(len: usize, scroll: f32) -> super::widget::ListSpec {
         len,
         BAND_W,
     )
+    .without_chrome()
     .at(scroll)
 }
 

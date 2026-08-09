@@ -799,6 +799,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `LayoutSettings` cell model and Mojang's `Divisor`. Its consumers are the title
   screen's button column and the pause screen's grid, which since this change are
   **built and arranged** rather than stored as tables of hand-derived offsets.
+- [Menu list band chrome](./menu-list-chrome.md) — The **band chrome**: the tinted
+  background a scrolling menu list draws behind its rows, plus the two 2 px horizontal
+  bars that fence that band off from the header above it and the footer below it. It
+  is what makes a settings screen read as three sections — title, content, buttons
+  — rather than one field of widgets, and it is vanilla's
+  `AbstractSelectionList.extractListBackground` and `extractListSeparators` ported as
+  three flat quad rows.
 - [The menu background and the title-screen panorama](./menu-panorama.md) —
   Vanilla's out-of-world menu screens are drawn over a **spinning cubemap panorama**,
   with a flat wash of `textures/gui/menu_background.png` composited on top — except
