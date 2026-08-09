@@ -133,7 +133,15 @@ const BURST_PRE_ORE_CLOSURE: usize = 21 * 21;
 // duplication is deliberate and the size assertion below is what makes a
 // mis-transcription fail loudly instead of reading a neighbouring field.
 
+// Darwin-only from here to `rusage_now`. `proc_pid_rusage` lives in `libSystem`
+// and has no equivalent symbol on Linux or Windows, so an ungated `extern "C"`
+// declaration of it links fine on macOS and fails the *link* — not the compile —
+// everywhere else. `cargo check` never links, which is why this was invisible to
+// every `check` job and only surfaced as
+// `rust-lld: error: undefined symbol: proc_pid_rusage` in `cargo test`.
+
 /// `RUSAGE_INFO_V4` from `<sys/resource.h>`.
+#[cfg(target_os = "macos")]
 const RUSAGE_INFO_V4: i32 = 4;
 
 /// `struct rusage_info_v4` from macOS `<sys/resource.h>`, field-by-field in
@@ -183,8 +191,10 @@ struct RusageInfoV4 {
 
 /// What the transcription must weigh if every field is present and correctly
 /// typed: a 16-byte UUID and 36 `u64`s. Derived from the field list, not measured.
+#[cfg(target_os = "macos")]
 const RUSAGE_INFO_V4_SIZE: usize = 16 + 36 * 8;
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut core::ffi::c_void) -> i32;
 }
@@ -212,6 +222,22 @@ struct Rusage {
     footprint: u64,
 }
 
+/// Non-Darwin arm. Panics rather than returning zeroed counters: all three
+/// readings feed ratios, and a silent zero would make every ratio degenerate
+/// while still reporting a number — the vacuous green this repo's evidence rules
+/// exist to forbid. Every test that reaches this is `#[ignore]`d, so nothing on
+/// Linux or Windows calls it; running one explicitly with `--ignored` is what
+/// should say so, loudly.
+#[cfg(not(target_os = "macos"))]
+fn rusage_now() -> Rusage {
+    unimplemented!(
+        "instructions, cycles and physical footprint are read through \
+         proc_pid_rusage(RUSAGE_INFO_V4), which exists only on Darwin; this efficiency \
+         harness is a macOS-only measurement and has no counters to report on this target"
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn rusage_now() -> Rusage {
     assert_eq!(
         size_of::<RusageInfoV4>(),

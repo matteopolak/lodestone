@@ -211,7 +211,15 @@ static GLOBAL_ALLOC: CountingAllocator = CountingAllocator;
 // needs the pair, and reporting the ratio (instructions per µs) is how a change
 // that moved only locality announces itself.
 
+// Darwin-only from here to `instructions_retired`. `proc_pid_rusage` lives in
+// `libSystem` and has no equivalent symbol on Linux or Windows, so an ungated
+// `extern "C"` declaration of it links fine on macOS and fails the *link* — not
+// the compile — everywhere else. A bench target is built by `--all-targets` and
+// linked by `cargo test`, so this is a real cross-platform break and not only a
+// concern for `cargo bench`.
+
 /// `RUSAGE_INFO_V4` from `<sys/resource.h>`.
+#[cfg(target_os = "macos")]
 const RUSAGE_INFO_V4: i32 = 4;
 
 /// `struct rusage_info_v4` from macOS `<sys/resource.h>`, transcribed
@@ -265,12 +273,28 @@ struct RusageInfoV4 {
 /// The size the transcription above must have if every field is present and
 /// correctly typed: a 16-byte UUID followed by 36 `u64`s. Derived from the field
 /// list, not measured.
+#[cfg(target_os = "macos")]
 const RUSAGE_INFO_V4_SIZE: usize = 16 + 36 * 8;
 
+#[cfg(target_os = "macos")]
 unsafe extern "C" {
     /// `libproc`'s task-level resource accounting, in `libSystem` — no link flag
     /// and no privileges needed for the calling process.
     fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut core::ffi::c_void) -> i32;
+}
+
+/// Non-Darwin arm. Panics rather than returning a plausible zero: every figure
+/// this bench reports is a before/after difference, and a counter stuck at 0
+/// would print an instructions-per-µs ratio of zero as though it were a result.
+/// `cargo bench` on a non-Darwin host should fail here and say why, not publish a
+/// fabricated number.
+#[cfg(not(target_os = "macos"))]
+fn instructions_retired() -> u64 {
+    unimplemented!(
+        "instructions retired is read through proc_pid_rusage(RUSAGE_INFO_V4), which exists \
+         only on Darwin; this bench's instruction-count arm cannot run on this target (its \
+         wall-clock arm is unaffected)"
+    )
 }
 
 /// Instructions retired by this **process** so far.
@@ -278,6 +302,7 @@ unsafe extern "C" {
 /// Process-wide, not per-thread: everything measured through it below is
 /// single-threaded and criterion's own sampling is not running concurrently with
 /// it, which is the same constraint `client_chunk_cycles.rs` documents.
+#[cfg(target_os = "macos")]
 fn instructions_retired() -> u64 {
     let mut info = RusageInfoV4::default();
     let rc = unsafe {
