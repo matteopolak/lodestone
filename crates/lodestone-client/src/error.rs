@@ -31,21 +31,54 @@ pub enum ClientError {
     DriverPanicked,
 
     /// The server's login sequence asked for online-mode encryption
-    /// (`Directive::BeginEncryption { should_authenticate: true, .. }`), but
-    /// this session was built without an authenticated
-    /// [`lodestone_auth::Session`] (see [`crate::ClientBuilder::online_session`]).
+    /// (`Directive::BeginEncryption { should_authenticate: true, .. }`), and
+    /// **no Microsoft account is signed in at all**.
     ///
     /// Deliberately checked *before* the RSA/AES handshake even starts:
     /// without this check, an offline profile connecting to an online-mode
     /// server would still complete the crypto exchange and only then fail
     /// the session-server `join`, which the server also can't tell apart from
     /// a genuine Mojang-side rejection. Fail fast, fail clearly.
+    ///
+    /// # Why the text names a player action rather than a builder method
+    ///
+    /// It used to end *"no Microsoft session was configured for this connection
+    /// (see ClientBuilder::online_session)"*, which is accurate about the
+    /// library and useless on a disconnect screen — it reads as a build fault,
+    /// and it was what a player saw while an account was signed in and working
+    /// in the switcher (nothing produced the session; see
+    /// `lodestone_shell::net`'s `RemoteAuth`). It is now the sentence for
+    /// exactly one situation — nobody is signed in — and
+    /// [`ClientError::OnlineModeSessionUnavailable`] covers the case where
+    /// somebody is.
     #[cfg(not(target_arch = "wasm32"))]
     #[error(
-        "this server requires online-mode authentication, but no Microsoft \
-         session was configured for this connection (see ClientBuilder::online_session)"
+        "this server requires a Minecraft account, and no Microsoft account is \
+         signed in — add one in Options ▸ Accounts and select it, then rejoin"
     )]
     OnlineModeSessionRequired,
+
+    /// The server's login sequence asked for online-mode encryption, an account
+    /// **is** selected, and it could not be turned into a usable session — an
+    /// expired/revoked refresh token, an unreachable Microsoft, a locked
+    /// keychain, or no configured Azure client id.
+    ///
+    /// Distinct from [`ClientError::OnlineModeSessionRequired`] because the
+    /// remedy is distinct: the player already signed in once, so the honest
+    /// instruction is "sign in to *this account* again", not "add an account".
+    /// Distinct from [`ClientError::Auth`] because nothing was sent to Mojang —
+    /// the failure happened locally, before the handshake.
+    ///
+    /// `detail` is produced by `lodestone_auth::SelectedAccount::Unavailable`
+    /// and is already user-facing; it never contains a token.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("this server requires a Minecraft account, but signing in as {account} failed: {detail}")]
+    OnlineModeSessionUnavailable {
+        /// The account's username, or its UUID when no metadata row exists.
+        account: String,
+        /// One sentence about why that account could not be used.
+        detail: String,
+    },
 
     /// The session-server `join` call (or a step of the auth chain reached
     /// while getting there) failed. Carries the crate's own typed error, so a

@@ -82,6 +82,16 @@ pub(crate) struct Driver<T: Transport> {
     /// crypto handshake and only then failing the session-server join.
     #[cfg(not(target_arch = "wasm32"))]
     auth_session: Option<lodestone_auth::Session>,
+    /// `(account, detail)` when the caller had an account selected and could not
+    /// resolve a session for it — see
+    /// [`crate::ClientBuilder::online_session_unavailable`]. Read only on the
+    /// `auth_session.is_none()` path, to choose
+    /// [`ClientError::OnlineModeSessionUnavailable`] over
+    /// [`ClientError::OnlineModeSessionRequired`]. Never consulted otherwise: a
+    /// resolved session makes it irrelevant, and an offline-mode server never
+    /// reaches the check at all.
+    #[cfg(not(target_arch = "wasm32"))]
+    auth_unavailable: Option<(String, String)>,
     /// The HTTP client the session-server `join` call goes through. Built once
     /// per driver rather than per join attempt (there is at most one per
     /// session anyway, but a fresh `reqwest::Client` per call would rebuild
@@ -133,6 +143,7 @@ impl<T: Transport> Driver<T> {
         profile: LoginProfile,
         server: ServerAddress,
         #[cfg(not(target_arch = "wasm32"))] auth_session: Option<lodestone_auth::Session>,
+        #[cfg(not(target_arch = "wasm32"))] auth_unavailable: Option<(String, String)>,
     ) -> Self {
         // reqwest is built with `rustls-no-provider` (issue #446), which leaves
         // the rustls crypto provider for the application to choose. The
@@ -160,6 +171,8 @@ impl<T: Transport> Driver<T> {
             awaiting_player_load: false,
             #[cfg(not(target_arch = "wasm32"))]
             auth_session,
+            #[cfg(not(target_arch = "wasm32"))]
+            auth_unavailable,
             #[cfg(not(target_arch = "wasm32"))]
             http: reqwest::Client::new(),
             bundling: false,
@@ -503,10 +516,20 @@ impl<T: Transport> Driver<T> {
         // client-side error for the server's generic "unverified username"
         // disconnect (see `lodestone-net`'s `online_handshake` test for what
         // that looks like from the other side of exactly this gap).
+        //
+        // Two distinct errors, not one: the check fires for a player who has
+        // never signed in *and* for a player whose saved session went stale, and
+        // reporting both as "no session was configured" is what made a working
+        // account switcher look like a broken build. `auth_unavailable` is set
+        // only on the second, by the caller that tried and failed to resolve it.
         if should_authenticate && self.auth_session.is_none() {
-            return Step::Stop(Box::new(SessionOutcome::Failed(
-                ClientError::OnlineModeSessionRequired,
-            )));
+            let error = match self.auth_unavailable.take() {
+                Some((account, detail)) => {
+                    ClientError::OnlineModeSessionUnavailable { account, detail }
+                }
+                None => ClientError::OnlineModeSessionRequired,
+            };
+            return Step::Stop(Box::new(SessionOutcome::Failed(error)));
         }
 
         let secret = generate_shared_secret();

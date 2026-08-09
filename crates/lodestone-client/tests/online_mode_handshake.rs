@@ -267,3 +267,119 @@ async fn begin_encryption_requiring_auth_without_a_session_fails_fast() {
         other => panic!("expected OnlineModeSessionRequired, got {other:?}"),
     }
 }
+
+/// The same fail-fast path, but for a caller that *had* an account and could not
+/// resolve a session for it — `ClientBuilder::online_session_unavailable`.
+///
+/// # Why this is a separate variant and not a better sentence
+///
+/// The two situations have different remedies. "Nobody is signed in" means add
+/// an account; "your saved session expired" means re-authorise a specific,
+/// nameable account. Collapsing them is what let a player with a working premium
+/// account — visible and correct in the account switcher — read *"no Microsoft
+/// session was configured for this connection"*, which sounds like a broken
+/// build and points at nothing they can act on.
+///
+/// So this asserts the discriminant **and** that the payload carries the account
+/// name through to the message: a variant that dropped `account` would be the old
+/// vague text wearing a new type.
+#[tokio::test]
+async fn begin_encryption_with_an_unusable_account_names_it_instead_of_blaming_configuration() {
+    let (_priv_key, pub_der) = generate_server_keypair();
+
+    let adapter = FakeOnlineAdapter {
+        server_id: "srv".to_owned(),
+        public_key_der: pub_der,
+        verify_token: vec![1, 2, 3],
+        should_authenticate: true,
+    };
+
+    let (client_io, server_io) = memory_pair();
+    let (handle, _events) = ClientBuilder::new(server(), profile(), Box::new(adapter))
+        .online_session_unavailable(
+            "Steve".to_owned(),
+            "the saved Microsoft session has expired".to_owned(),
+        )
+        .connect_with(client_io);
+    let mut peer: Connection<DuplexStream> = Connection::new(server_io);
+
+    peer.write_packet(TRIGGER, &[]).await.unwrap();
+
+    let outcome = handle.join().await;
+    let SessionOutcome::Failed(error) = outcome else {
+        panic!("expected a failed session, got {outcome:?}");
+    };
+    let ClientError::OnlineModeSessionUnavailable { account, detail } = &error else {
+        panic!("expected OnlineModeSessionUnavailable, got {error:?}");
+    };
+    assert_eq!(account, "Steve");
+    assert_eq!(detail, "the saved Microsoft session has expired");
+
+    // The text a disconnect screen shows. Both halves must survive into it —
+    // the account (so the player knows *which* sign-in to repeat) and the
+    // reason. Asserted on the rendered string, not just the fields, because the
+    // `#[error(...)]` format is what the screen actually reads and a variant can
+    // carry a field it never prints.
+    let shown = error.cause_chain();
+    assert!(
+        shown.contains("Steve") && shown.contains("expired"),
+        "the message must name the account and the reason, got {shown:?}"
+    );
+    // And it must NOT be the sentence for "nobody is signed in", which is the
+    // whole distinction. This is the arm that fails if someone later merges the
+    // two variants back together for tidiness.
+    assert!(
+        !shown.contains("no Microsoft account is signed in"),
+        "an expired session must not be reported as nobody being signed in, got {shown:?}"
+    );
+}
+
+/// The three online-mode failure kinds are three distinct values, checked
+/// against each other in one place so a future merge of any two is a red test.
+///
+/// A server *kicking* us for an unauthenticated join is deliberately not in this
+/// list: that arrives as `ClientEvent::Disconnect` carrying the server's own
+/// `Text`, travels a different path entirely (`NetUpdate::Disconnected`, titled
+/// `disconnect.lost`), and must keep the server's wording rather than any of
+/// ours. The owner's report of a *"failed premium challenge"* kick was exactly
+/// that — a server's message, not this crate's; the string "premium" appears
+/// nowhere in this repo.
+#[test]
+fn the_online_mode_failures_are_three_distinguishable_messages() {
+    let required = ClientError::OnlineModeSessionRequired.cause_chain();
+    let unavailable = ClientError::OnlineModeSessionUnavailable {
+        account: "Steve".to_owned(),
+        detail: "the saved Microsoft session has expired".to_owned(),
+    }
+    .cause_chain();
+    // The Mojang-side failure. `NoMinecraftProfile` is the cheapest real
+    // `AuthError` to build (no reqwest error needed) and is itself a genuine
+    // outcome of this path: an account that authenticated but owns no copy of
+    // the game.
+    let mojang =
+        ClientError::Auth(lodestone_auth::AuthError::NoMinecraftProfile).cause_chain();
+
+    let all = [&required, &unavailable, &mojang];
+    for (i, a) in all.iter().enumerate() {
+        assert!(!a.is_empty(), "message {i} is empty");
+        for (j, b) in all.iter().enumerate() {
+            if i != j {
+                assert_ne!(a, b, "messages {i} and {j} are the same sentence");
+            }
+        }
+    }
+
+    // Distinct strings is the floor, not the bar: each must also be *about* its
+    // own cause, or three different ways of saying "authentication failed" would
+    // pass the loop above.
+    assert!(
+        required.contains("no Microsoft account is signed in"),
+        "got {required:?}"
+    );
+    assert!(required.contains("Accounts"), "must say where to fix it: {required:?}");
+    assert!(unavailable.contains("Steve"), "got {unavailable:?}");
+    assert!(
+        mojang.contains("does not own a minecraft profile"),
+        "the Mojang-side failure must surface Mojang's own reason: {mojang:?}"
+    );
+}

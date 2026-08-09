@@ -15,21 +15,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   off the screen**.
 - [Microsoft account storage and online-mode join](./accounts.md) —
   `crates/lodestone-auth` stores **multiple** Microsoft accounts instead of one, and
-  no longer keeps the long-lived refresh token in a plaintext file (issue #64) — see
-  "Storage" below. **It is now also wired into the actual join flow (issue #65)**:
-  `lodestone-client`'s driver turns a server's online-mode
-  `Directive::BeginEncryption` into a real RSA/AES handshake plus an authenticated
-  `POST /session/minecraft/join`, using a `lodestone_auth::Session` obtained from a
-  cached refresh token or a completed interactive device-code sign-in. Offline mode is
-  unaffected and remains the default — see "Join-flow wiring" below for what changed
-  and exactly what is and isn't verified. **And it now has a screen** (issue #66):
-  `crates/lodestone-shell/src/menu/accounts.rs` draws the account list — every saved
-  account plus an always-present offline entry — and drives its own device-code
-  sign-in flow. See "The account list screen" below for how it fits alongside
-  `login`'s composition layer above (it now calls straight into
-  `login::finish_interactive` rather than hand-rolling a second copy — issue #73,
-  see that section) and for the offline-selection convention it establishes that
-  `login::try_cached_session` already happens to handle correctly.
+  no longer keeps the long-lived refresh token in a plaintext file — see "Storage"
+  below — and **the multiplayer join now actually uses the account the switcher has
+  selected**. A join resolves that selection on the net thread, presents the profile's
+  real username and UUID, and completes the online-mode RSA/AES handshake plus an
+  authenticated `POST /session/minecraft/join`; with nothing selected it joins offline
+  exactly as before, and makes no network call looking for an account. Offline mode
+  remains the default and singleplayer is never authenticated. There is also a screen
+  — `crates/lodestone-shell/src/menu/accounts.rs` draws the account list, every
+  saved account plus an always-present offline entry, and drives its own device-code
+  sign-in.
 - [Advancements screen](./advancements-screen.md) — Vanilla's `AdvancementsScreen`
   (issue #167), reached from the pause menu's Advancements button: five tabs, the real
   26.2 advancement tree, connector lines, frames, icons, a tiled per-tab background,

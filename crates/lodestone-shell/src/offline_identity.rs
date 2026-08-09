@@ -4,11 +4,12 @@
 //!
 //! ## What it is
 //!
-//! Every join this shell makes today is an *offline* join — `net.rs`'s
-//! `connect_online` (the online-mode seam, issue #65) still has zero callers
-//! outside `crates/protocol/`, so the `Some(session)` arm of `run`'s profile
-//! match is unreachable from production. Before this module existed the offline
-//! arm read
+//! This is the identity a join presents when no Microsoft account is signed in
+//! and selected. It is no longer the *only* one: `net.rs`'s `RemoteAuth` now
+//! resolves the account switcher's selection on the net thread, so a signed-in
+//! player joins under their real profile and this module covers the
+//! nobody-signed-in case, `connect_as` (live gates), and singleplayer. Before
+//! this module existed the offline arm read
 //!
 //! ```text
 //! username: unique_username(),      // from `lodestone-testsupport`

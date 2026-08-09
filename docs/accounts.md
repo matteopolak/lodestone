@@ -3,22 +3,52 @@
 ## What it is
 
 `crates/lodestone-auth` stores **multiple** Microsoft accounts instead of one,
-and no longer keeps the long-lived refresh token in a plaintext file
-(issue #64) — see "Storage" below. **It is now also wired into the actual join
-flow (issue #65)**: `lodestone-client`'s driver turns a server's online-mode
-`Directive::BeginEncryption` into a real RSA/AES handshake plus an
-authenticated `POST /session/minecraft/join`, using a `lodestone_auth::Session`
-obtained from a cached refresh token or a completed interactive device-code
-sign-in. Offline mode is unaffected and remains the default — see "Join-flow
-wiring" below for what changed and exactly what is and isn't verified.
-**And it now has a screen** (issue #66): `crates/lodestone-shell/src/menu/accounts.rs`
-draws the account list — every saved account plus an always-present offline
-entry — and drives its own device-code sign-in flow. See "The account list
-screen" below for how it fits alongside `login`'s composition layer above
-(it now calls straight into `login::finish_interactive` rather than
-hand-rolling a second copy — issue #73, see that section) and for the
-offline-selection convention it establishes that `login::try_cached_session`
-already happens to handle correctly.
+and no longer keeps the long-lived refresh token in a plaintext file — see
+"Storage" below — and **the multiplayer join now actually uses the account the
+switcher has selected**. A join resolves that selection on the net thread,
+presents the profile's real username and UUID, and completes the online-mode
+RSA/AES handshake plus an authenticated `POST /session/minecraft/join`; with
+nothing selected it joins offline exactly as before, and makes no network call
+looking for an account. Offline mode remains the default and singleplayer is
+never authenticated. There is also a screen —
+`crates/lodestone-shell/src/menu/accounts.rs` draws the account list, every
+saved account plus an always-present offline entry, and drives its own
+device-code sign-in.
+
+See "Join-flow wiring" below for the whole path and, importantly, for **what is
+and is not verified**: no hermetic test can reach a real
+`sessionserver.mojang.com` join, so the last link is the owner's own
+interactive check.
+
+### The island this doc used to describe
+
+Worth keeping, because it is the most expensive shape in this repo and this was
+a textbook instance. Every piece of online-mode support was built and
+individually tested — the `Session` type, `login::try_cached_session`,
+`ClientBuilder::online_session`, the driver's `begin_encryption`, the RSA/AES
+primitives against NIST vectors — and **the first link was missing**:
+`NetClient::connect` hardcoded `auth: None`, and `NetClient::connect_online`,
+the only constructor that could pass a session, had **zero callers**. So a
+player could sign in, see their real premium username in the switcher, join an
+online-mode server, and be told *"no Microsoft session was configured for this
+connection (see ClientBuilder::online_session)"* — a message about a builder
+method, describing a configuration fault that did not exist.
+
+Two things generalise from it:
+
+- **A constructor with no callers may have a signature that makes calling it
+  impossible.** `connect_online` demanded an already-resolved `Session`;
+  resolving one needs an `await`; every join call site is synchronous UI code on
+  the render thread. Nobody could have called it without restructuring, so
+  "wire up a caller" was never a small task and never got done. The fix was to
+  pass an *intent* (`net.rs`'s `RemoteAuth`) and resolve it where a runtime
+  already exists. When something has no producers, ask whether its shape is the
+  reason before looking for a lazy author.
+- **The doc comment on `connect_online` stated the whole bug, accurately, for as
+  long as it existed** — *"every join this shell makes is an offline one … the
+  account switcher can hold a signed-in Microsoft account that no join ever
+  uses."* Prose that names a defect is not a defect report. Nothing reads it and
+  nothing fails because of it.
 
 The crate splits an account's data into two places with very different
 sensitivity:
@@ -238,7 +268,8 @@ built so nothing in it blocks:
   than just saying so. Only [`AuthError::RefreshTokenInvalid`] (OAuth's
   `invalid_grant` — the token itself is dead, not the network) becomes "no
   cached token, go interactive."
-- If that returns `NoCachedToken`, the caller starts an interactive
+- If that returns either non-`Ready` outcome — `NoAccountSelected` or
+  `SessionExpired` — the caller starts an interactive
   device-code login the existing way (`flow::PendingLogin::begin`, already
   poll-based and non-blocking) and, once it completes, calls
   [`login::finish_interactive`], which derives the session, saves the
@@ -305,10 +336,10 @@ describes. `crates/lodestone-client/src/driver.rs`'s `begin_encryption` is the
 new consumer:
 
 1. If the server wants a session-server join (`should_authenticate: true`)
-   but the client wasn't built with `ClientBuilder::online_session(session)`,
-   fail immediately with `ClientError::OnlineModeSessionRequired` — before
-   spending a round trip on crypto the server was always going to reject
-   anyway (an offline profile has nothing to prove ownership with).
+   but the client has no session, fail immediately — before spending a round
+   trip on crypto the server was always going to reject anyway (an offline
+   profile has nothing to prove ownership with). **Which** error depends on why
+   there is no session; see "Three distinguishable failures" below.
 2. Generate the shared secret and RSA-wrap it and the verify token against
    the public key *the directive carried* (`lodestone_net::generate_shared_secret`
    / `rsa_encrypt` — already existed, already verified against NIST vectors
@@ -329,14 +360,71 @@ new consumer:
 servers; omit it and everything behaves exactly as before (the offline-mode
 default, unchanged).
 
-`lodestone-shell/src/net.rs`'s `NetClient::connect_online` is the shell-level
-equivalent of `NetClient::connect`, for a caller that already has a
-`lodestone_auth::Session` — it feeds the profile's *real* username/UUID into
-the login-start packet instead of `unique_username()`/a random UUID.
-**`NetClient::connect` is completely unchanged** and remains what every
-existing caller (`app.rs`, `sim.rs`, every test oracle) uses; offline mode's
-`unique_username()`-per-run scheme (and the dead-player-blackout hazard it
-exists to dodge — see `CLAUDE.md`) is untouched.
+### The shell: `net.rs`'s `RemoteAuth`
+
+`Origin::Remote` carries a `RemoteAuth` — an *intent*, not a resolved session —
+and `run_async` resolves it inside the net thread's `block_on`, which is the
+only place in this path that can `await`. Three variants:
+
+| variant | who asks for it | what happens |
+|---|---|---|
+| `SelectedAccount` | `NetClient::connect` — the production multiplayer join | `lodestone_auth::resolve_selected_account`: read `profiles.json`, load the refresh token from the keychain, exchange it with Microsoft |
+| `Offline` | `connect_as` (live gates), singleplayer, Open to LAN, every browser join | present the caller's `OfflineIdentity` verbatim; no keychain, no network |
+| `Session(_)` | `connect_online` | use the session the caller already resolved |
+
+`connect_as` staying offline is load-bearing rather than tidy: a gate asks for
+an exact username, so resolving the developer's selected account there would
+join under a *different* name — on a developer's machine only — and every gate
+would then share one premium player file, which is exactly the shared-name
+eviction and dead-player-blackout hazard `connect_as` exists to avoid.
+Singleplayer matches vanilla: `handleHello` skips the encryption request for
+`isMemoryConnection()`, so there is nothing to authenticate.
+
+**A failed resolution does not abort the join.** An offline-mode server never
+sends an encryption request at all, so a dead refresh token has no bearing on
+joining one; refusing to dial would break joins that work today. The reason is
+carried to `ClientBuilder::online_session_unavailable` and only spent if the
+server turns out to demand online mode.
+
+**`production_origin` forks on `#[cfg(test)]`.** Resolving an account opens the
+OS keychain, POSTs to Microsoft, and — because the refresh token rotates on
+every use — writes a new one back. A `cargo test` that did that would reach the
+network from a unit test and could invalidate the token the owner's real client
+is holding, while the suite reported green. `net.rs` already had a unit test
+calling `NetClient::connect` (`two_offline_sessions_publish_the_same_identity`),
+so this was not hypothetical. The fork is on `#[cfg(test)]` rather than an
+early return on `cfg!(test)` so it is *assertable*:
+`unit_tests_never_resolve_a_real_microsoft_account` pins the interception and
+`a_production_join_requests_the_selected_microsoft_account` pins the production
+decision the fork bypasses, so the two cannot both be satisfied by never
+resolving anything.
+
+### Three distinguishable failures
+
+They used to be one sentence that blamed configuration in all three cases,
+which is why a working account looked like a broken build. They are now three
+distinct typed values, and a fourth path that is not ours at all:
+
+| situation | value | says |
+|---|---|---|
+| nobody signed in | `ClientError::OnlineModeSessionRequired` | add an account in Options ▸ Accounts and select it |
+| an account is selected but unusable — expired/revoked token, Microsoft unreachable, locked keychain, no `LODESTONE_MS_CLIENT_ID` | `ClientError::OnlineModeSessionUnavailable { account, detail }` | names the account and the reason |
+| the sessionserver `join` failed | `ClientError::Auth(AuthError)` | Mojang's own typed reason |
+| the **server** kicked us | `ClientEvent::Disconnect` → `NetUpdate::Disconnected` | the server's own `Text`, untouched |
+
+The last row is a different path on purpose, and it matters for reading bug
+reports. A server rejecting an unauthenticated join sends its own kick — the
+owner saw something like *"failed premium challenge"* — and that is the
+**server's** wording, not ours; the string "premium" appears nowhere in this
+repo. It surfaces as `disconnect.lost` rather than `connect.failed`, so it is
+already visibly distinct from our own errors and must stay that way.
+
+`lodestone_auth::SelectedAccount` is the source of the middle two rows'
+distinction, and it splits what `CachedSessionOutcome` used to merge:
+`NoCachedToken` became `NoAccountSelected` and `SessionExpired { profile_id,
+username }`. Same remedy, different sentence — "sign in" versus "sign in to
+*this* account again" — and a caller cannot produce the second message without
+the account name, so the name is in the type.
 
 ### What's verified and what isn't
 
@@ -350,19 +438,36 @@ Hermetic (`crates/lodestone-client/tests/online_mode_handshake.rs`):
   right secret, in both directions);
 - `should_authenticate: false` skips the session-server call entirely;
 - `should_authenticate: true` with no configured session fails fast with the
-  typed `OnlineModeSessionRequired`, before any crypto happens.
+  typed `OnlineModeSessionRequired`, before any crypto happens;
+- `should_authenticate: true` with an *unusable* account fails with
+  `OnlineModeSessionUnavailable`, and the rendered message names the account and
+  the reason and is **not** the nobody-signed-in sentence — the arm that goes red
+  if the two variants are ever merged back together for tidiness;
+- the three failure messages are pairwise distinct *and* each is about its own
+  cause, since three different ways of saying "authentication failed" would pass
+  a distinctness check alone.
 
 Also hermetic: every XSTS/refresh-token classification branch in
-`lodestone-auth::flow`'s tests, and `login::try_cached_session`'s two
-no-network fast paths.
+`lodestone-auth::flow`'s tests, `login::try_cached_session`'s no-network fast
+paths, `resolve_selected_account`'s no-selection and cannot-resolve arms
+(including that a selection with no `profiles.json` row names its UUID rather
+than an empty string), and `net.rs`'s pair of origin gates above.
 
-**Not verified, and not claimed:** an actual successful `join_server` call
-against the real `sessionserver.mojang.com` with a real Microsoft account.
-Same limitation `flow.rs` already had — there is no way to construct a
-hermetic fake for Microsoft's OAuth/Xbox/XSTS/session-server chain — and the
-same reason `lodestone-net/tests/online_handshake.rs` is `#[ignore]`d rather
-than run by default. A caller with a real Azure client id and a real Xbox
-account is the only way to close this gap.
+**Not verified, and not claimable from this repo: the successful premium join.**
+Producing it needs a real Azure client id plus a real Microsoft account that
+owns Minecraft, and there is no way to build a hermetic fake for Microsoft's
+OAuth/Xbox/XSTS/session-server chain — the same limitation `flow.rs` always had,
+and the same reason `lodestone-net/tests/online_handshake.rs` is `#[ignore]`d.
+Concretely, none of the following is covered by any test here:
+
+- a refresh token actually being exchanged, and the rotated one written back;
+- `SelectedAccount::Online` being produced at all;
+- `join_server` succeeding against `sessionserver.mojang.com`;
+- an online-mode server accepting the resulting username.
+
+That last link is the owner's own interactive check, against a real online-mode
+server with the account signed in. No test in this repo may reach
+`sessionserver.mojang.com`, and none does.
 
 ## The account list screen (issue #66)
 
@@ -421,11 +526,12 @@ state without a schema change in this crate, which this screen does not make.
 Instead it treats **"no account selected" as offline mode's own selected
 state**: the offline row shows the selection marker exactly when
 `selected.is_none()`, and choosing it sets `selected = None` and saves. This
-happens to be exactly what `login::try_cached_session` already does with a
-`None` selection (`Ok(CachedSessionOutcome::NoCachedToken)`, no network call)
-— so a future connect path built on `login` does not need to know offline
+is exactly what `login::try_cached_session` does with a
+`None` selection (`Ok(CachedSessionOutcome::NoAccountSelected)`, no network
+call), and what `resolve_selected_account` turns into
+`SelectedAccount::Offline` — so the connect path does not need to know offline
 mode exists as a concept; it is already the correct behaviour for "nothing
-selected." The one thing this does *not* give a future caller is telling
+selected." The one thing this does *not* give a caller is telling
 "user explicitly chose offline" apart from "fresh install, never asked" —
 both look identical on disk. That distinction would need a real schema change
 (a third variant, or a separate `offline: bool` field) if it ever matters.

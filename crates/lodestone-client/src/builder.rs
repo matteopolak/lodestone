@@ -43,6 +43,11 @@ pub struct ClientBuilder {
     /// [`Self::online_session`].
     #[cfg(not(target_arch = "wasm32"))]
     online_session: Option<lodestone_auth::Session>,
+    /// Why [`Self::online_session`] was not called, when the caller *tried* to
+    /// resolve an account and failed — see [`Self::online_session_unavailable`].
+    /// `None` means nobody is signed in, which is a different message.
+    #[cfg(not(target_arch = "wasm32"))]
+    online_session_unavailable: Option<(String, String)>,
 }
 
 impl ClientBuilder {
@@ -66,6 +71,8 @@ impl ClientBuilder {
             ecs: None,
             #[cfg(not(target_arch = "wasm32"))]
             online_session: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            online_session_unavailable: None,
         }
     }
 
@@ -87,6 +94,30 @@ impl ClientBuilder {
     #[must_use]
     pub fn online_session(mut self, session: lodestone_auth::Session) -> Self {
         self.online_session = Some(session);
+        self
+    }
+
+    /// Records that the caller *had* an account to use and could not resolve a
+    /// session for it, so an online-mode server produces
+    /// [`crate::ClientError::OnlineModeSessionUnavailable`] naming `account`
+    /// instead of [`crate::ClientError::OnlineModeSessionRequired`]'s
+    /// "nobody is signed in".
+    ///
+    /// **This must not stop the connection.** An offline-mode server never
+    /// sends an encryption request at all (vanilla gates it on
+    /// `usesAuthentication() && !isMemoryConnection()` in
+    /// `ServerLoginPacketListenerImpl.handleHello`), so a dead refresh token
+    /// has no bearing on joining one — refusing to dial would break joins that
+    /// work today. The reason is therefore *carried* and only spent if the
+    /// server turns out to demand online mode.
+    ///
+    /// Calling this after [`Self::online_session`] does not revoke the session:
+    /// a real session always wins, since it is the thing that can actually
+    /// complete the join.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn online_session_unavailable(mut self, account: String, detail: String) -> Self {
+        self.online_session_unavailable = Some((account, detail));
         self
     }
 
@@ -238,6 +269,8 @@ impl ClientBuilder {
             self.server,
             #[cfg(not(target_arch = "wasm32"))]
             self.online_session,
+            #[cfg(not(target_arch = "wasm32"))]
+            self.online_session_unavailable,
         );
 
         let task = crate::spawn::spawn_driver(driver.run(actions_rx, shutdown_rx));
