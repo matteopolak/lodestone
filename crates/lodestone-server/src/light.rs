@@ -77,22 +77,33 @@
 //! full generation cold. Making that cheap is the same change gap 2 below needs —
 //! light computed in the chunk source and carried on the column.
 //!
-//! # The named gaps, and the patch that closes them
+//! # The named gaps
 //!
-//! **Both survived the encoder, and that is worth stating plainly**: the encoder
-//! was the blocker named for each of them, and neither fell out of building it,
+//! Both survived the encoder, and that is worth stating plainly: the encoder was
+//! the blocker named for each of them, and neither fell out of building it,
 //! because neither is a *transport* problem. `light_update` is a cheaper carrier
-//! for the same values, not a better computation.
+//! for the same values, not a better computation. **Gap 1 is now closed; gap 2
+//! is not.**
 //!
-//! **1. Sky light does not follow an edit.** [`should_relight`] compares
-//! *emission* only, not dampening, so breaking a roof does not re-send the
-//! column's sky light. Widening it to `dampening` as well fires on nearly every
-//! placement — and even at `light_update`'s size that is a full
-//! `compute_column_light` (a `build_world_column` state-id resolution plus the
-//! flood) per block placed, on the connection task. So the encoder made this
-//! *cheaper* without making it affordable. What it needs is **incremental**
-//! re-propagation from the changed cell, which vanilla has and this crate does
-//! not.
+//! **1. Sky light did not follow an edit — closed.** [`should_relight`] compared
+//! *emission* only, so breaking a roof, a tree trunk or a floor changed the
+//! block and could not change the light: dirt emits `0` and so does the air that
+//! replaces it. The reported symptom was a freshly opened column staying pitch
+//! black, and the diagnosis worth keeping is that **nothing was wrong with the
+//! propagation**. `compute_column_light` floods from zero and seeds every cell
+//! open to the sky at `15`, so it gets a newly opened shaft right on the first
+//! try; the missing piece was entirely the trigger, one predicate away from the
+//! flood that already worked.
+//!
+//! It now compares [`dampening`] as well, so it fires on essentially every
+//! placement and break. The version of this paragraph that talked itself out of
+//! that widening reasoned from cost — a full `compute_column_light` per block
+//! placed, on the connection task — and the cost is real but it was never large:
+//! ≈1.0 ms in release (`crates/protocol/v770/tests/server_light.rs`) against a
+//! player edit rate of a handful per second. Incremental re-propagation from the
+//! changed cell, which vanilla has and this crate does not, is the optimisation;
+//! it was never the correctness fix, and treating it as one is what kept the bug
+//! alive.
 //!
 //! **2. Light does not cross a chunk border**, so a torch at local `x = 15` does
 //! not light its eastern neighbour at all. This is *not* a gap in this module: it
@@ -138,17 +149,62 @@ pub fn emission(state: &str) -> u8 {
     lodestone_data::light_props::emission(crate::chunk::resolve_palette_state_id(state))
 }
 
-/// `true` iff replacing `old` with `new` changes how much light the cell emits —
-/// the gate on the column resend described in this module's own doc comment.
+/// The block-light **dampening** of one canonical block-state string, `0..=15` —
+/// vanilla's `BlockState.getLightDampening()`, raw, before the engine's
+/// `max(1, ·)`.
 ///
-/// Compared on the **value**, not on the state string: `minecraft:torch` and
-/// `minecraft:wall_torch[facing=north]` both emit 14, so re-orienting a torch is
-/// not a relight, while lighting a furnace (`lit=false` → `lit=true`, `0` → `13`)
-/// is. That is also why this cannot be `emission(new) > 0`: **removing** a light
-/// source has to relight too, and a break writes `minecraft:air`.
+/// The other half of what a light computation reads off a state, resolved the
+/// same way [`emission`] is. Air and glass are `0`; water, ice and leaves are
+/// `1`; a full solid is `15`. A state the census does not carry answers `0`,
+/// which is the transparent direction — see [`emission`] for why every gap in
+/// this census darkens or occludes rather than brightening.
+#[must_use]
+pub fn dampening(state: &str) -> u8 {
+    lodestone_data::light_props::dampening(crate::chunk::resolve_palette_state_id(state))
+}
+
+/// `true` iff replacing `old` with `new` changes the light the cell **emits or
+/// occludes** — the gate on the relight described in this module's own doc
+/// comment.
+///
+/// Compared on the **values**, not on the state strings: `minecraft:torch` and
+/// `minecraft:wall_torch[facing=north]` both emit 14 and dampen 0, so
+/// re-orienting a torch is not a relight, while lighting a furnace
+/// (`lit=false` → `lit=true`, `0` → `13`) is. That is also why this cannot be
+/// `emission(new) > 0`: **removing** a light source has to relight too, and a
+/// break writes `minecraft:air`.
+///
+/// # Why dampening is in here, and what it fixed
+///
+/// It was emission only, and that made the *reported* symptom — break the trunk
+/// of a tree and one dirt block under it, and the hole is pitch black — a
+/// guaranteed outcome rather than a bug with a cause. Nothing about the
+/// propagation was wrong: the engine floods from zero over the whole column, so
+/// sky light really does fall down a freshly opened shaft at full strength. What
+/// was missing was the **trigger**. Dirt and logs emit `0` before the break and
+/// air emits `0` after it, so an emission-only comparison saw no change, no
+/// light packet left the server, and the client — which deliberately never
+/// recomputes light on the live path — kept serving the pre-break value, which
+/// under a tree is `0`.
+///
+/// So the predicate has to compare the quantity the edit actually moved.
+/// Breaking dirt is `15 → 0` in dampening, and placing it is `0 → 15`; both must
+/// relight, in both directions, for the same reason removing a torch must.
+///
+/// This does mean it now fires on essentially every ordinary placement and
+/// break, where before it fired only for the small emissive set. That is the
+/// intended trade and it is affordable: the work behind it is one
+/// `compute_column_light` over the edited column, measured at ≈1.0 ms in release
+/// (`crates/protocol/v770/tests/server_light.rs`), plus a few KiB `light_update`
+/// — against a player edit rate of a handful per second. What is *not*
+/// affordable, and is still not attempted here, is recomputing the eight
+/// neighbours as well; see this module's doc for that gap and its shape.
+///
+/// A state whose *only* change is decorative — `axis`, `facing`, `waterlogged`
+/// on a full solid — still costs nothing, because both quantities compare equal.
 #[must_use]
 pub fn should_relight(old: &str, new: &str) -> bool {
-    emission(old) != emission(new)
+    emission(old) != emission(new) || dampening(old) != dampening(new)
 }
 
 #[cfg(test)]
@@ -167,14 +223,36 @@ mod tests {
         assert_eq!(emission("minecraft:stone"), 0);
     }
 
-    /// Both directions of an emissive edit fire, and an ordinary one does not.
+    /// The occlusion half of the census, predicted the same way — from
+    /// `lodestone-data/src/light_props.rs`'s own stated scale (air and glass `0`,
+    /// water/ice/leaves `1`, a full solid `15`) rather than from this module.
     ///
-    /// The last case is the load-bearing one: if `should_relight` fired on
-    /// stone-for-air it would resend a column on every block a player places,
-    /// which is the reason this is an emission comparison rather than a
-    /// "did anything change" test.
+    /// The two `1`s are the discriminating rows and the reason this test is not
+    /// just "solids are 15": a predicate keyed on `dampening != 0` instead of on
+    /// a *change* in dampening would treat leaves-for-water as an edit and
+    /// water-for-leaves as none, and both answers would be wrong.
     #[test]
-    fn relight_fires_on_placing_and_removing_a_light_source_only() {
+    fn the_occluding_blocks_this_gate_exists_for_really_dampen() {
+        assert_eq!(dampening("minecraft:air"), 0, "air occludes nothing");
+        assert_eq!(dampening("minecraft:glass"), 0, "glass casts no shadow");
+        assert_eq!(dampening("minecraft:dirt"), 15, "a full solid occludes fully");
+        assert_eq!(dampening("minecraft:oak_log"), 15);
+        assert_eq!(dampening("minecraft:water"), 1);
+        assert_eq!(dampening("minecraft:oak_leaves"), 1);
+    }
+
+    /// Both directions of an emissive edit fire, and so do both directions of an
+    /// **occluding** one.
+    ///
+    /// The dirt and log cases are the whole reported bug in one predicate. They
+    /// were `!should_relight(…)` here, asserted deliberately, on the argument
+    /// that firing on an ordinary placement was too expensive — so the gate that
+    /// should have caught "break a tree trunk and the hole is pitch black" was
+    /// instead pinning it in place. That is worth leaving on the record: the test
+    /// was not weak, it was *pointed the wrong way*, and no amount of reading it
+    /// would have said so. Only the screen did.
+    #[test]
+    fn relight_fires_on_any_edit_that_moves_emission_or_occlusion() {
         assert!(
             should_relight("minecraft:air", "minecraft:torch"),
             "placing a torch must relight"
@@ -184,13 +262,38 @@ mod tests {
             "breaking a torch must relight — a `emission(new) > 0` gate would miss this"
         );
         assert!(
-            !should_relight("minecraft:air", "minecraft:stone"),
-            "an ordinary placement must NOT resend a column"
+            should_relight("minecraft:oak_log[axis=y]", "minecraft:air"),
+            "breaking a tree trunk must relight: sky now reaches the cell"
         );
         assert!(
-            !should_relight("minecraft:stone", "minecraft:air"),
-            "an ordinary break must NOT resend a column"
+            should_relight("minecraft:dirt", "minecraft:air"),
+            "breaking the dirt under it must relight for the same reason"
         );
+        assert!(
+            should_relight("minecraft:air", "minecraft:stone"),
+            "and placing a solid must darken what is under it"
+        );
+    }
+
+    /// The other side of the trade, and the reason the predicate compares two
+    /// *values* rather than asking "did the state string change": an edit that
+    /// moves neither quantity must still cost nothing, or every rotation and
+    /// every cosmetic swap pays for a flood and a packet.
+    ///
+    /// Each pair here is chosen so the naive `old != new` string comparison would
+    /// fire and this one must not.
+    #[test]
+    fn a_decorative_edit_is_not_a_relight() {
+        for (old, new) in [
+            ("minecraft:oak_log[axis=y]", "minecraft:oak_log[axis=x]"),
+            ("minecraft:stone", "minecraft:dirt"),
+            ("minecraft:torch", "minecraft:wall_torch[facing=north]"),
+        ] {
+            assert!(
+                !should_relight(old, new),
+                "{old} -> {new} moves neither emission nor dampening, so it must not relight"
+            );
+        }
     }
 
     /// A redstone torch's `lit` property really moves the emission, so a state

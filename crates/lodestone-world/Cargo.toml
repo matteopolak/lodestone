@@ -36,6 +36,16 @@ lodestone-testsupport = { workspace = true }
 # ever compiles for this crate's own test/bench targets, never for the
 # `lodestone-world` library itself or for anything that depends on it.
 lodestone-worldgen = { path = "../lodestone-worldgen" }
+# Path dev-dependencies, test-only, both for `tests/vanilla_light_oracle.rs`:
+# the light engine's only *outside* judge is the light a real Mojang 26.2 server
+# computed and wrote into `.cache/mc/survival/world`, so that gate needs a
+# region-file reader (`lodestone-anvil`) and the 26.2 dampening/emission census
+# keyed by block-state name (`lodestone-data`). Neither depends on
+# `lodestone-world` — checked, the same way the `lodestone-worldgen` edge above
+# was — so these close no cycle and only ever compile for this crate's own test
+# targets.
+lodestone-anvil = { path = "../lodestone-anvil" }
+lodestone-data = { workspace = true }
 # Direct dependency (not a workspace alias), per the harness decision in
 # `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU benches use criterion
 # for its statistically-robust sampling and free local `--baseline` diffing.
