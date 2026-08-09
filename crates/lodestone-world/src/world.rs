@@ -393,7 +393,23 @@ fn light_layer_from_masks(
 #[derive(Debug, Clone, Default)]
 pub struct World {
     chunks: HashMap<ChunkPos, LoadedChunk>,
+    /// Absolute block positions written since the last relight drain, for
+    /// [`run_pending_relight`](World::run_pending_relight) — the client's own
+    /// `LightEngine.checkBlock` queue.
+    ///
+    /// Recorded rather than acted on, because a `/fill` is 4096 writes under one
+    /// lock and vanilla batches the same work onto its client tick. A host that
+    /// never drains this pays a bounded [`PENDING_RELIGHT_CAP`] entries and gets
+    /// exactly the previous behaviour.
+    pub(crate) pending_relight: Vec<[i32; 3]>,
 }
+
+/// Ceiling on [`World`]'s pending-relight queue. A host that writes blocks and
+/// never calls [`World::run_pending_relight`] — the integrated server's own world,
+/// a bot, a fuzz target — must not grow a list for the whole session, and a batch
+/// this large is a bulk world edit whose light the next chunk resend carries
+/// anyway.
+pub const PENDING_RELIGHT_CAP: usize = 8192;
 
 impl World {
     /// Creates an empty world.
@@ -468,6 +484,26 @@ impl World {
         let sx = (x & 15) as usize;
         let sz = (z & 15) as usize;
         chunk.column.set_block(sx, y, sz, state);
+        self.queue_relight(x, y, z);
+    }
+
+    /// Records `(x, y, z)` for the next
+    /// [`run_pending_relight`](World::run_pending_relight), which is vanilla's
+    /// `LevelChunk.setBlockState` calling `getLightEngine().checkBlock(pos)`.
+    ///
+    /// Public because not every client write goes through
+    /// [`set_block`](World::set_block) — a host that mutates a column directly must
+    /// say so, or a block it changed keeps the light of whatever used to be there.
+    /// See [`crate::relight`] for why the light cannot simply be recomputed here.
+    ///
+    /// Queueing is unconditional rather than gated on the state actually changing
+    /// light properties (vanilla's `LightEngine.hasDifferentLightProperties`): that
+    /// test needs a props lookup and the *old* state, and a redundant relight is a
+    /// no-op diff, not a wrong picture.
+    pub fn queue_relight(&mut self, x: i32, y: i32, z: i32) {
+        if self.pending_relight.len() < PENDING_RELIGHT_CAP {
+            self.pending_relight.push([x, y, z]);
+        }
     }
 
     /// Applies many block writes that all fall within a **single** section,
@@ -501,6 +537,18 @@ impl World {
             return;
         };
         chunk.column.set_blocks_in_section(index, blocks);
+        // Every changed cell is queued, not just one: the relight coalesces a whole
+        // section's worth into a single box, and its bounds are the *bounding box*
+        // of the changes — a single representative position would leave the far end
+        // of a `/fill` lit by whatever used to be there.
+        let (base_x, base_y, base_z) = (section_x << 4, section_y << 4, section_z << 4);
+        for &(lx, ly, lz, _) in blocks {
+            self.queue_relight(
+                base_x | i32::from(lx),
+                base_y | i32::from(ly),
+                base_z | i32::from(lz),
+            );
+        }
     }
 
     /// Inserts or replaces a single block entity's type and NBT payload at
@@ -647,6 +695,15 @@ impl World {
     /// and pushes `light_update`; the client applies it here. See the crate-level
     /// note on why no lighting engine lives in this version-free storage crate.
     pub fn merge_light(&mut self, pos: ChunkPos, patch: LightPatch) {
+        // The server wins, in both orders. A patch that lands *after* our own
+        // relight overwrites it below; one that lands *before* would otherwise be
+        // overwritten by a queued recomputation of ours — which is the divergence
+        // bug in a subtler form than the darkness it fixes, so drop the queue for
+        // this column instead. See [`crate::relight`].
+        if !self.pending_relight.is_empty() {
+            self.pending_relight
+                .retain(|p| ChunkPos::from_block(p[0], p[2]) != pos);
+        }
         let Some(chunk) = self.chunks.get_mut(&pos) else {
             return;
         };
