@@ -1067,6 +1067,17 @@ impl WindowApp {
                     font.as_deref(),
                     w,
                     h,
+                    // The hover tooltip vanilla draws over a recipe button
+                    // (`RecipeBookPage.extractTooltip`). The same cursor and the
+                    // same persisted `advancedItemTooltips` flag the container's
+                    // own slot tooltip above uses, so the two can never disagree
+                    // about which lines an identical stack shows — and
+                    // `hover_blocked` above already stops the container drawing a
+                    // second tooltip for whatever slot sits under the book.
+                    crate::container::RecipeTooltipContext {
+                        cursor: Some([self.cursor.0, self.cursor.1]),
+                        advanced: self.nav.advanced_item_tooltips(),
+                    },
                 ) {
                     hud.render_recipe_book_panel(
                         device,

@@ -894,7 +894,47 @@ pub fn recipe_book_panel_geometry(
         height,
         &IconAssets { items: None, models: None },
         None,
+        // No font on this path, so no tooltip could be drawn even if a cursor
+        // were supplied — see `RecipeTooltipContext`.
+        RecipeTooltipContext::default(),
     )
+}
+
+/// What the panel needs in order to draw a **hover tooltip** over the recipe
+/// button under the pointer.
+///
+/// Vanilla really does show one: `RecipeBookComponent.extractTooltip` forwards to
+/// `RecipeBookPage.extractTooltip`, which — while a screen is up and the
+/// ghost-recipe overlay is not visible — sets a component tooltip built by
+/// `RecipeButton.getTooltipText` for the hovered button. That method is
+/// `Screen.getTooltipFromItem(displayStack)`, i.e. exactly the lines an inventory
+/// slot holding the same stack would show, which is why this reuses
+/// [`super::tooltip::emit_tooltip_for_stack`] rather than growing a second
+/// tooltip builder.
+///
+/// `cursor` is **physical viewport pixels** — the same space
+/// [`recipe_book_panel_hit_test_with_scale`] and the container's own hit test
+/// take, and the space `emit_tooltip_for_stack` divides down internally. `None`
+/// is "no pointer this frame", which draws no tooltip.
+///
+/// # What vanilla adds and this deliberately does not
+///
+/// `getTooltipText` appends `gui.recipebook.moreRecipes` ("Right Click for More")
+/// **only when `hasMultipleRecipes()`**, which is `selectedEntries.size() > 1` on
+/// the button's `RecipeCollection`. This client has no collection grouping:
+/// [`lodestone_game::recipe::RecipeBook::browse`] hands back one recipe id per
+/// button, so every button we draw carries exactly one recipe and vanilla's
+/// predicate is false for all of them. Emitting the line anyway would be
+/// fabricating a right-click affordance that does not exist here. Whoever lands
+/// grouping-by-result-display is the right person to add it, and this is the
+/// place.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RecipeTooltipContext {
+    /// Pointer position in physical viewport pixels, or `None` for no pointer.
+    pub cursor: Option<[f32; 2]>,
+    /// Vanilla's persisted `advancedItemTooltips` (F3+H), passed straight
+    /// through to the shared line builder.
+    pub advanced: bool,
 }
 
 /// As [`recipe_book_panel_geometry`], drawing **real item icons** from the
@@ -903,7 +943,8 @@ pub fn recipe_book_panel_geometry(
 ///
 /// `font` is the only thing that can draw the search box's *text*; with `None`
 /// the box is chrome and nothing else, which is the jar-less picture (there is no
-/// vanilla font to draw with there either).
+/// vanilla font to draw with there either). It also gates the hover tooltip, for
+/// the same reason — see [`RecipeTooltipContext`].
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn recipe_book_panel_geometry_with_icons(
@@ -917,6 +958,7 @@ pub fn recipe_book_panel_geometry_with_icons(
     items: &ItemAtlas,
     models: Option<&BlockModels>,
     font: Option<&crate::hud::VanillaFont>,
+    tooltip: RecipeTooltipContext,
 ) -> RecipeBookPanelGeometry {
     recipe_book_panel_geometry_inner(
         layout,
@@ -928,11 +970,18 @@ pub fn recipe_book_panel_geometry_with_icons(
         height,
         &IconAssets { items: Some(items), models },
         font,
+        tooltip,
     )
 }
 
+/// The one body both public entry points share.
+///
+/// `pub(super)` so `super::tests` can drive it with **no atlas but a real font** —
+/// the only combination that exercises the hover tooltip (which needs a font to
+/// measure against) without needing a stitched [`ItemAtlas`]. That is the same
+/// arrangement `ContainerGeometry::build_inner`'s own tooltip gate uses.
 #[allow(clippy::too_many_arguments)]
-fn recipe_book_panel_geometry_inner(
+pub(super) fn recipe_book_panel_geometry_inner(
     layout: &RecipeBookPanelLayout,
     open: bool,
     selected_tab: Option<usize>,
@@ -942,6 +991,7 @@ fn recipe_book_panel_geometry_inner(
     height: u32,
     assets: &IconAssets<'_>,
     font: Option<&crate::hud::VanillaFont>,
+    tooltip: RecipeTooltipContext,
 ) -> RecipeBookPanelGeometry {
     // The same logical-canvas expression `recipe_book_panel_layout_with_scale`
     // (via `panel_origin_with_scale`) and `ContainerGeometry::build_inner`
@@ -1182,6 +1232,36 @@ fn recipe_book_panel_geometry_inner(
                 b.rect_px(cx, ty - 1.0, 1.0, SEARCH_GLYPH_H + 2.0, SEARCH_TEXT_COLOUR);
             }
         }
+    }
+
+    // The hovered recipe button's tooltip — `RecipeBookPage.extractTooltip`.
+    //
+    // **Last of all, deliberately.** This appends to the tail of the colour
+    // stream, which the caller draws after both item passes, so the tooltip sits
+    // over the icons rather than under them. It is the same argument
+    // `chrome_vertex_count` exists for, and the same one `super::tooltip`'s own
+    // module doc makes about the container.
+    //
+    // The hovered button is resolved through `recipe_book_panel_hit_test_with_scale`
+    // rather than a second walk of `layout.recipes`: the *click* path already
+    // goes through that function, so a tooltip that appeared over a cell the
+    // click would not resolve to is impossible by construction.
+    if let Some(cursor) = tooltip.cursor
+        && let Some(RecipeBookPanelHit::Recipe(i)) = recipe_book_panel_hit_test_with_scale(
+            layout, open, gui_scale, width, height, cursor[0], cursor[1],
+        )
+        && let Some(stack) = page_results.get(i)
+    {
+        super::tooltip::emit_tooltip_for_stack(
+            &mut b,
+            stack,
+            Some(cursor),
+            tooltip.advanced,
+            gui_scale,
+            width,
+            height,
+            (w, h),
+        );
     }
 
     RecipeBookPanelGeometry {

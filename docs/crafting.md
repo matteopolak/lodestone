@@ -301,6 +301,34 @@ index to build one from, so `browse` substring-matches the **result item's
 id** (namespace and bare path) instead. A query like `"planks"` still finds
 every planks recipe, just not by its translated display name.
 
+### Hover tooltips on recipe buttons
+
+Vanilla shows one. The chain is `RecipeBookComponent.extractTooltip` →
+`RecipeBookPage.extractTooltip`, which — while a screen is up and the
+ghost-recipe overlay is not visible — builds the tooltip for the hovered
+`RecipeButton` from `RecipeButton.getTooltipText`, itself
+`Screen.getTooltipFromItem(displayStack)`.
+
+So the lines are *exactly* the ones an inventory slot holding the same stack
+would show, and `RecipeTooltipContext` threads a cursor plus the persisted
+`advancedItemTooltips` flag down to the same `container::tooltip::
+emit_tooltip_for_stack` the container already uses. It emits into the **tail** of
+the panel's colour stream, after `chrome_vertex_count`, so it draws over the item
+icons — submission order is the only z this GUI path has.
+
+**The "Right Click for More" line is deliberately absent.** `getTooltipText`
+appends `gui.recipebook.moreRecipes` only when `hasMultipleRecipes()`, i.e.
+`selectedEntries.size() > 1` on the button's `RecipeCollection`. This client has
+no collection grouping — `RecipeBook::browse` returns one recipe id per button —
+so vanilla's predicate is false for every button we draw, and emitting the line
+would advertise a right-click affordance that does not exist. To add it, group
+`browse`'s output by result display first; `RecipeTooltipContext`'s own doc
+carries the same note.
+
+The container's slot tooltip cannot double up: `recipe_panel_pointer_hit` already
+feeds `ContainerFrame::with_hover_blocked`, so a slot sitting geometrically under
+the book resolves to no hover at all.
+
 ### Panel geometry — `container.rs`
 
 `RecipeBookPanelLayout`/`recipe_book_panel_layout[_with_scale]` and
