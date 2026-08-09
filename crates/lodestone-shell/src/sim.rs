@@ -462,6 +462,16 @@ pub struct Sim {
     /// its view radius (`Sim::set_view_radius`). The progress bar's denominator;
     /// `None` means "no denominator, so no bar" rather than a guessed one.
     expected_view_columns: Option<usize>,
+    /// When the terrain-streaming phase began, for
+    /// [`crate::menu::loading::CLIENT_WAIT_TIMEOUT`].
+    ///
+    /// `crate::platform::Instant`, not `std::time::Instant`: the shell has a wasm
+    /// target and `std`'s panics there. Set once, by `Sim::set_connect_phase` on
+    /// the transition *into* `LoadingTerrain`, so it measures the phase rather than
+    /// the session — and only from that real boundary, which is what keeps the
+    /// screen's phase label off a timer even though its dismissal now has one.
+    /// `None` outside that phase, which reads as "not waiting".
+    terrain_wait_started: Option<crate::platform::Instant>,
     /// The stitched vanilla atlas for the live world, or `None` when running on
     /// the demo palette. Its presence is the single discriminant for "render the
     /// live server world with the vanilla atlas" vs "mesh the demo world": the

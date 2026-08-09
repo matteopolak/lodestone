@@ -341,11 +341,26 @@ impl Sim {
     /// session: the demo/dev world has no net client and is never "loading
     /// terrain".
     ///
-    /// Vanilla's `DownloadingTerrainScreen` predicate: the chunk column under
-    /// the player's feet is not yet in the client-owned world. The same column
-    /// math as `live_collision` (`sim/collide.rs`), the other reader of this
-    /// exact question, so the two cannot disagree about which chunk the player
-    /// is standing on.
+    /// The condition is vanilla's `LevelLoadTracker.WaitingForPlayerChunk`
+    /// readiness rule — see [`crate::menu::loading::is_level_ready`], which holds
+    /// the decision and the record it was ported from. This function's whole job is
+    /// gathering the four observations it reads.
+    ///
+    /// The column math is the same as `live_collision` (`sim/collide.rs`), the
+    /// other reader of this exact question, so the two cannot disagree about which
+    /// chunk the player is standing on.
+    ///
+    /// # The bound, and why it is not belt-and-braces
+    ///
+    /// This used to be the bare column test with no timeout, which makes the
+    /// screen's dismissal a liveness assumption about the server. The owner's
+    /// report was that assumption failing: the server centred the join view on
+    /// chunk `(0, 0)` instead of on the joining player, so for a player restored
+    /// away from the origin the column this waits for was never sent — and, because
+    /// the server's own view tracker had recorded it as sent, never would be. The
+    /// screen had no way out. That server defect is fixed
+    /// (`lodestone_server::server`'s join centre), and the timeout is what makes a
+    /// *future* one present as a 30 s delay rather than as a game that never starts.
     #[must_use]
     pub fn terrain_loading(&self) -> bool {
         let Some(net) = self.net() else {
@@ -354,7 +369,27 @@ impl Sim {
         let position = self.player().position;
         let pcx = (position.x.floor() as i32).div_euclid(16);
         let pcz = (position.z.floor() as i32).div_euclid(16);
-        !net.is_chunk_loaded(lodestone_client::ChunkPos { x: pcx, z: pcz })
+
+        // `None` — no dimensions yet — is `false`, i.e. "not inside a build
+        // height", which routes to `is_level_ready`'s bail-out. That is the honest
+        // reading rather than a defensive one: with no world dimensions there is no
+        // column under the player to be waiting for.
+        let within_build_height = net.world_dimensions().is_some_and(|dims| {
+            let top = dims.min_y + dims.section_count() as i32 * 16;
+            let y = position.y.floor() as i32;
+            y >= dims.min_y && y < top
+        });
+
+        !crate::menu::loading::is_level_ready(crate::menu::loading::TerrainWait {
+            own_column_loaded: net.is_chunk_loaded(lodestone_client::ChunkPos { x: pcx, z: pcz }),
+            // `Duration::ZERO` when the phase boundary was never seen, which can
+            // only under-report the wait — it never dismisses early.
+            elapsed: self
+                .terrain_wait_started
+                .map_or(core::time::Duration::ZERO, |started| started.elapsed()),
+            player_alive: !self.is_dead(),
+            within_build_height,
+        })
     }
 
     /// The loading screen's current step (issue #449).
@@ -370,7 +405,19 @@ impl Sim {
 
     /// Record the loading screen's step. Only [`crate::net::NetUpdate`] handling
     /// calls this — see [`crate::menu::loading::ConnectPhase`].
+    ///
+    /// Also starts the terrain wait's clock, on the transition *into*
+    /// `LoadingTerrain` and not on a re-set of the same phase, so the timeout in
+    /// [`Self::terrain_loading`] measures the phase and cannot be pushed forward by
+    /// a repeated `NetUpdate::ConnectPhase`. This is still the only place a real
+    /// boundary is recorded; the clock reads off that boundary rather than
+    /// replacing it.
     pub(crate) fn set_connect_phase(&mut self, phase: crate::menu::loading::ConnectPhase) {
+        if phase == crate::menu::loading::ConnectPhase::LoadingTerrain
+            && self.connect_phase != crate::menu::loading::ConnectPhase::LoadingTerrain
+        {
+            self.terrain_wait_started = Some(crate::platform::Instant::now());
+        }
         self.connect_phase = phase;
     }
 
