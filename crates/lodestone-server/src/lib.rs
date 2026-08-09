@@ -278,6 +278,11 @@ mod scheduled_tick;
 mod server;
 mod sleep;
 mod spawn;
+/// Spawn eggs: which entity a `*_spawn_egg` names, and where a right-click puts
+/// it. Public because the right-click dispatcher and a future dispenser
+/// behaviour are both callers, and because the item→entity derivation is worth
+/// asserting from an integration test rather than only from inside the crate.
+pub mod spawn_egg;
 /// Structure chests (issue #337): the data-marker pass that fills a shipwreck's,
 /// igloo's or ocean ruin's chest with a rolled loot table at generation time.
 mod structure_loot;
@@ -348,7 +353,7 @@ pub use inventory::{HOTBAR_SIZE, OFFHAND_NATIVE, PLAYER_NATIVE_SIZE, PlayerInven
 pub use loot::{LootContext, LootTable, LootTableBuilder, LootTableResolver, LootTableSet, roll_loot};
 pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
-    SpawnState, check_despawn, resolve_mob_shape,
+    SpawnState, allowed_in_peaceful, check_despawn, resolve_mob_shape,
 };
 pub use natural_spawn::NaturalSpawner;
 pub use mobs::{

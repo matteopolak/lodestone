@@ -14,7 +14,7 @@
 //! | issue | what existed | what was wrong |
 //! |---|---|---|
 //! | #327 game rules | a typed `GameRules` registry with `/gamerule` and typed accessors | **zero production constructors** — `GameRulesHandle::new()` was called only under `#[cfg(test)]`, while the live `SET_GAME_RULE` path wrote a separate, unvalidated, **per-connection** `HashMap<String, String>` |
-//! | #328 difficulty | decode → store → confirm, gated by a real test | stored on the same per-connection struct, and read by nothing |
+//! | #328 difficulty | decode → store → confirm, gated by a real test | stored on the same per-connection struct, and read by nothing. **Now four readers** — see [`monsters_may_spawn`](WorldStateHandle::monsters_may_spawn) and `docs/world-state.md`'s difficulty table |
 //! | #323 world time | `SET_TIME` decoded, and a connected client's sky really moved | the **value** was `ticks_since(play_start)` — wall-clock elapsed since *this connection* joined. `tick.rs`'s real counter never reached the encoder |
 //!
 //! #323 is the shape `cargo xtask connectedness` structurally cannot see: every
@@ -267,13 +267,19 @@ impl WorldStateHandle {
         self.with(|state| state.rules.mob_drops())
     }
 
-    /// Whether natural mob spawning of *monsters* is allowed at this difficulty —
-    /// `Peaceful` forbids it (`NaturalSpawner`'s `MobCategory.MONSTER` pass is
-    /// skipped, and `ServerLevel.setDayTime`'s sibling `Mob.checkDespawn` removes
-    /// the ones already alive).
+    /// Whether mobs vanilla marks `notInPeaceful` may exist — false on `Peaceful`.
     ///
     /// Difficulty's **first** real consumer: before this, nothing read the stored
     /// value at all, which is why #328 was "stored and broadcast, not enforced".
+    /// There are now four (peaceful eviction, peaceful spawn refusal, the
+    /// starvation floor, fire spread odds); `docs/world-state.md` carries the
+    /// table and the two parts deliberately left.
+    ///
+    /// **This is only half of a peaceful check.** It answers the *difficulty*
+    /// question; the *species* question is
+    /// [`crate::mob_spawn::allowed_in_peaceful`], and both are needed —
+    /// `MobCategory.MONSTER` is not the same set, and vanilla keeps seven monsters
+    /// on Peaceful. `run_tick_loop` and `crate::spawn_egg` each pair the two.
     #[must_use]
     pub fn monsters_may_spawn(&self) -> bool {
         self.with(|state| state.difficulty != Difficulty::Peaceful)

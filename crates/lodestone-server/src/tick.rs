@@ -1254,6 +1254,15 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 // 24 000-tick phase boundary. This is also the mirror's first
                 // *reader* — until now it was written and never read.
                 natural_spawner.set_day_time(day_time);
+                // `SpawnPlacements.checkSpawnRules`' peaceful guard. The
+                // `remove_monsters` sweep a few lines up is the *other* half and
+                // is not a substitute: without this, a monster proposed on
+                // Peaceful is published in this tick's snapshot set and evicted in
+                // the next, so the client receives an `ADD_ENTITY` followed by a
+                // `REMOVE_ENTITIES` and the player sees it blink. Read from the
+                // store rather than reusing `peaceful` above so the two cannot
+                // drift; both are one bool copy per tick.
+                natural_spawner.set_difficulty(world_state.difficulty().0);
                 natural_spawner.begin_cycle(world, game_tick, players.clone());
                 mobs.with(|sim| {
                     let mut state = sim.census(spawnable_chunks);

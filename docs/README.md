@@ -286,6 +286,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   The harness is `crates/lodestone-shell/tests/client_chunk_cycles.rs`; this doc is
   how to read it, what it found, and how to extend it without reintroducing a defect
   it already caught.
+- [Client-side relight](./client-relight.md) — The client's own light engine: a
+  block change queues a relight, and once a frame the client recomputes sky and block
+  light in a bounded box around each change and re-meshes what moved. It is vanilla's
+  `LightEngine.checkBlock` plus `ClientLevel`'s `runLightUpdates`, and without it a
+  block broken on a real vanilla server leaves a **permanently pitch-black hole**.
 - [v770 clientbound `play` packet coverage, and the 32-packet remainder](./clientbound-packet-coverage.md) —
   The measured decode/consumer coverage of protocol 776's `play` clientbound packets
   in `crates/protocol/v770`, and a sourced triage of every packet that is still
@@ -1420,6 +1425,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   hotbar, oldest at the bottom, each fading from white to grey over three seconds,
   with a `<` or `>` arrow when the sound came from behind you. Gated by the
   `showSubtitles` option (issue #198).
+- [Spawn eggs](./spawn-eggs.md) — The rule layer for `*_spawn_egg` items —
+  `crates/lodestone-server/src/spawn_egg.rs`: which entity a given egg names, where a
+  right-click puts it, and when the click is refused. It is the cheapest way for a
+  player to make any mob appear, and it was completely inert before: no handler
+  existed anywhere in the tree, so an egg fell through to the block-placement branch,
+  found the clicked cell non-replaceable and did nothing.
 - [Statistics screen](./statistics-screen.md) — `Screen::Statistics` (issue #188):
   vanilla's `StatsScreen`, reached from the pause menu's Statistics button
   (`crates/lodestone-shell/src/menu/nav.rs`'s `PauseButton::Statistics`, now live).
@@ -1469,8 +1480,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   per frame at the shipped render distance 8 (issue #543).
 - [Text colour](./text-colour.md) — Server-authored text colour and formatting —
   the sixteen legacy `§` colours, modern `TextColor` hex values, and the five format
-  flags — carried from the wire through to the emitted vertex on every surface that
-  draws a chat component: chat, the scoreboard sidebar, and the server-list MOTD.
+  flags — carried from the wire through to the emitted vertex on **every** surface
+  that draws server text: chat, item names and tooltips, the scoreboard sidebar, the
+  tab list, the title/subtitle overlay, boss bars, container titles, nametags, sign
+  text, the kick screen and the server-list MOTD.
 - [The third-person player body](./third-person-player-body.md) — The render-side
   path that turns the local player's own state into a drawable third-person avatar —
   full rig, both skin layers, walking/head-look animation — reusing the same code

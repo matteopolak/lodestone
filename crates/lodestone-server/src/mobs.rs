@@ -3619,14 +3619,26 @@ impl<'w> MobSim<'w> {
         self.mob_drops = allowed;
     }
 
-    /// Discards every hostile mob — vanilla's `Mob.checkDespawn` on Peaceful
-    /// difficulty (issue #328). Returns how many were removed.
+    /// Discards every mob Peaceful forbids — vanilla's `Mob.checkDespawn` guard,
+    /// `difficulty == PEACEFUL && !getType().isAllowedInPeaceful()`. Returns how
+    /// many were removed.
     ///
     /// Rolls **no** loot: vanilla's peaceful sweep is `discard()`, not a death, so a
     /// player switching to Peaceful does not get a floor covered in rotten flesh.
+    ///
+    /// **The predicate is the per-type `notInPeaceful` flag
+    /// ([`crate::mob_spawn::allowed_in_peaceful`]), not
+    /// [`is_hostile_species`].** The two disagree in both directions and the
+    /// disagreement is visible: `is_hostile_species` is a 22-name list serving the
+    /// *category* question, so it kept a slime, magma cube, silverfish, phantom,
+    /// vex, ravager, hoglin or warden alive on Peaceful — and slimes really do
+    /// spawn here, because `crate::natural_spawn` models slime chunks. In the other
+    /// direction the flag keeps a shulker and a piglin, which vanilla also keeps
+    /// and which a `MobCategory.MONSTER` test would delete.
     pub fn remove_monsters(&mut self) -> usize {
         let before = self.mobs.len();
-        self.mobs.retain(|m| !is_hostile_species(&m.entity_type));
+        self.mobs
+            .retain(|m| crate::mob_spawn::allowed_in_peaceful(m.entity_type.path()));
         before - self.mobs.len()
     }
 

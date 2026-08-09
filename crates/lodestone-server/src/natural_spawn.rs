@@ -84,7 +84,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use lodestone_model::{ResourceKey, Vec3};
+use lodestone_model::{Difficulty, ResourceKey, Vec3};
 use lodestone_world::{BlockVolume, LightProperties, compute_column_light};
 
 use crate::chunk::ChunkColumn;
@@ -666,6 +666,9 @@ pub struct NaturalSpawner {
     /// `SURFACE_SLIME_SPAWN_CHANCE` is keyframed against. See
     /// [`set_day_time`](Self::set_day_time).
     day_time: i64,
+    /// The world difficulty, for `SpawnPlacements.checkSpawnRules`' peaceful
+    /// guard. See [`set_difficulty`](Self::set_difficulty).
+    difficulty: Difficulty,
 }
 
 impl std::fmt::Debug for NaturalSpawner {
@@ -699,6 +702,10 @@ impl NaturalSpawner {
             world: None,
             world_seed: 0,
             day_time: 0,
+            // `LevelSettings.DEFAULT`'s difficulty, matching
+            // `crate::world_state::WorldState`'s own default, so a spawner nobody
+            // sets it on behaves exactly as it did before the guard existed.
+            difficulty: Difficulty::Normal,
         }
     }
 
@@ -731,6 +738,27 @@ impl NaturalSpawner {
     /// moon, which is the *most* permissive phase for surface slimes.
     pub fn set_day_time(&mut self, day_time: i64) {
         self.day_time = day_time;
+    }
+
+    /// Sets the world difficulty, which decides whether a candidate species may be
+    /// proposed at all — vanilla's `SpawnPlacements.checkSpawnRules`, whose *first*
+    /// statement is `!type.isAllowedInPeaceful() && level.getDifficulty() ==
+    /// PEACEFUL → false`.
+    ///
+    /// # Why refusing at spawn time is not redundant with the peaceful despawn
+    ///
+    /// [`crate::MobSim::remove_monsters`] already evicts a forbidden mob, and the
+    /// tick loop runs it before this cycle — so on Peaceful a monster proposed here
+    /// lived exactly one tick. One tick is enough to be *seen*: the loop publishes
+    /// its snapshot set after the spawn cycle, so the connection's next streaming
+    /// pass sends `ADD_ENTITY` and the pass after it sends `REMOVE_ENTITIES`. The
+    /// player on Peaceful watched zombies blink in and out. Vanilla refuses in both
+    /// places, and this is the half that stops the flicker.
+    ///
+    /// Defaults to `Normal`; a caller that never sets it spawns monsters, which is
+    /// the behaviour every existing gate was written against.
+    pub fn set_difficulty(&mut self, difficulty: Difficulty) {
+        self.difficulty = difficulty;
     }
 
     /// Starts a cycle at `tick` with `players` as the loaded players, resetting
@@ -1095,6 +1123,19 @@ impl SpawnCandidateSource for NaturalSpawner {
                             continue;
                         }
                     }
+                }
+
+                // `SpawnPlacements.checkSpawnRules`' first statement, ahead of the
+                // rule's own predicate for the same reason it is first there: the
+                // predicate draws from the RNG (light brightness, the per-species
+                // chance), and vanilla's peaceful refusal happens before any of that.
+                // Keyed on the per-type `notInPeaceful` flag, never on the category —
+                // see `crate::mob_spawn::allowed_in_peaceful` for the seven
+                // `MobCategory.MONSTER` species vanilla keeps on Peaceful.
+                if self.difficulty == Difficulty::Peaceful
+                    && !crate::mob_spawn::allowed_in_peaceful(key.path())
+                {
+                    continue;
                 }
 
                 if !self.permits(&rule, x, sy, z) {

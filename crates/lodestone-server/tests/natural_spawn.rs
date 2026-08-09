@@ -23,7 +23,7 @@
 
 use std::str::FromStr;
 
-use lodestone_model::{ResourceKey, Vec3};
+use lodestone_model::{Difficulty, ResourceKey, Vec3};
 use lodestone_server::natural_spawn::NaturalSpawner;
 use lodestone_server::{
     ChunkColumn, ChunkWorld, MobCategory, MobSim, PlayerPerception, SpawnCandidateSource,
@@ -86,6 +86,16 @@ fn player() -> PlayerPerception {
 /// Runs `cycles` spawn cycles against `world`, returning the species census of
 /// what ended up alive.
 fn populate(world: ChunkWorld, cycles: usize) -> Vec<(String, MobCategory)> {
+    populate_at(world, cycles, Difficulty::Normal)
+}
+
+/// [`populate`] at a chosen world difficulty — the input `SpawnPlacements`'
+/// peaceful guard turns on.
+fn populate_at(
+    world: ChunkWorld,
+    cycles: usize,
+    difficulty: Difficulty,
+) -> Vec<(String, MobCategory)> {
     // Leaked for the same reason `MobHandle::new` leaks: `MobSim` borrows its
     // world for `'static`.
     let world: &'static ChunkWorld = Box::leak(Box::new(world));
@@ -95,6 +105,7 @@ fn populate(world: ChunkWorld, cycles: usize) -> Vec<(String, MobCategory)> {
         lodestone_server::bundled_biome_spawners().clone(),
         0xB0_0B_1E5,
     );
+    spawner.set_difficulty(difficulty);
     let all = chunks();
     for cycle in 0..cycles {
         spawner.begin_cycle(world, cycle as u64, vec![player().position]);
@@ -186,6 +197,60 @@ fn darkness_spawns_monsters_and_light_suppresses_them() {
         0,
         "a glowstone floor must suppress every monster spawn; got {lit:?}"
     );
+}
+
+/// **Peaceful proposes no forbidden species at all**, and the discriminating pair
+/// is the same sealed dark room on Normal — which the test above already proves
+/// fills with monsters. A gate on Peaceful alone cannot tell "the guard works" from
+/// "this room never spawned anything".
+///
+/// The claim is about *proposal*, not eviction: `MobSim::remove_monsters` is not
+/// called here at all, so a monster reaching this census is one
+/// `SpawnPlacements.checkSpawnRules` let through. That distinction is the whole
+/// point — with only the eviction half, a monster still existed for one tick, long
+/// enough for the tick loop to publish it and a client to be sent `ADD_ENTITY`
+/// followed by `REMOVE_ENTITIES`, so monsters blinked on Peaceful.
+///
+/// Passive spawns are deliberately **not** asserted to be zero: Peaceful forbids
+/// only `notInPeaceful` species, and a sealed room's floor is still plains, so a
+/// sheep here is correct. Asserting an empty census would be asserting the wrong
+/// rule.
+#[test]
+fn peaceful_proposes_no_forbidden_species_and_normal_does() {
+    let normal = populate_at(plains_world(Some("minecraft:stone")), 400, Difficulty::Normal);
+    let normal_monsters: Vec<&String> = normal
+        .iter()
+        .filter(|(species, _)| !lodestone_server::allowed_in_peaceful(strip_namespace(species)))
+        .map(|(species, _)| species)
+        .collect();
+    assert!(
+        !normal_monsters.is_empty(),
+        "the control failed: this sealed dark room must spawn forbidden species on \
+         Normal, or the Peaceful assertion below is about nothing; got {normal:?}"
+    );
+
+    let peaceful = populate_at(
+        plains_world(Some("minecraft:stone")),
+        400,
+        Difficulty::Peaceful,
+    );
+    let leaked: Vec<&String> = peaceful
+        .iter()
+        .filter(|(species, _)| !lodestone_server::allowed_in_peaceful(strip_namespace(species)))
+        .map(|(species, _)| species)
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "Peaceful must propose no notInPeaceful species; {} leaked through \
+         (Normal proposed {normal_monsters:?} in the same room): {leaked:?}",
+        leaked.len()
+    );
+}
+
+/// `minecraft:zombie` → `zombie`, the key
+/// [`lodestone_server::allowed_in_peaceful`] takes.
+fn strip_namespace(key: &str) -> &str {
+    key.split_once(':').map_or(key, |(_, path)| path)
 }
 
 /// A species with no `SpawnPlacements` registration is never proposed, so a
