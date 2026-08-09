@@ -51,6 +51,67 @@ lodestone-assets   ResourceManager::from_priority_order — the one reversal
   `MenuRow::pack`, tested inside the `slot` arm (the rect *is* the slot, unlike the
   three other list screens, whose `getRowLeft()` needs its own `row_rect` arm).
 
+### Hover is not focus, and the wheel is aimed separately
+
+`PacksNav::hover_row` used to set the cursor. On a screen whose rows are
+*buttons* that is this shell's convention; on a **selection list** it is a defect,
+because the cursor is what `draw_pack_entry` reads as `selected` and a selected row
+fills its interior opaque black under its content. So moving the mouse across the
+columns stole keyboard focus and dragged the outline and the fill with it — the same
+report the multiplayer list already had and fixed in `MenuNav::hover_list`. Vanilla
+reaches `AbstractSelectionList.setSelected` only from `setFocused` and the click
+paths, never from hover.
+
+A pack row now records **only its column**; the move buttons and the footer still
+take the cursor, because they are buttons. The row's hover *visuals* need no state
+at all: `draw_pack_entry` bounds-tests the logical cursor against the row rect it is
+drawing, exactly as vanilla's `mouseOverIcon` does — which is just as well, because
+nothing calls `hover_row` when the pointer is over no row, so a stored row index
+would burn in.
+
+The column matters because `PacksNav::focused_list` aims the wheel and the
+scrollbar. It now answers "the column under the pointer, or the cursor's when the
+pointer is on the footer", which is *closer* to vanilla (`mouseScrolled` is
+dispatched to the widget under the mouse) and preserves the behaviour hover-moves-
+cursor used to produce by accident. `cursor_list` is the keyboard's separate answer,
+used by `scroll_to_cursor` — the two can now differ and must not be conflated again.
+
+Gates: `hovering_a_pack_row_does_not_move_the_cursor` (with a click as the control,
+because "hover does nothing" is also satisfied by a dead screen) and
+`hover_still_aims_the_wheel_at_the_column_under_the_pointer`.
+
+### The empty state is a deliberate divergence
+
+**Vanilla has no empty state here.** `PackSelectionScreen`'s two lists render
+nothing when they have no children and there is no `pack.*` key for one:
+`pack.dropInfo` is a header `StringWidget` vanilla draws unconditionally, and
+`pack.folderInfo` is the Open Pack Folder button's tooltip. Vanilla gets away with
+it because the built-in pack always occupies Selected, so the screen is never wholly
+blank. The owner asked for one anyway — the same shape as `world-select.md`'s
+recorded `CreateWorldScreen` deviation, so it is written down rather than presented
+as a port.
+
+The condition is *the **Available** column is empty*, which happens two ways, and
+being imprecise about which would tell a truth-shaped lie:
+
+| Available | Selected | line |
+|---|---|---|
+| empty | built-in only | `No resource packs found` |
+| empty | built-in + packs | `Every pack you have is selected` |
+
+The Selected column never gets a line — the built-in row is always in it. The text
+rides on `MenuFrame::list_labels` at `PacksPlacement::EmptyNotice`, so it is clipped
+to the same band the rows are and centred in the first row slot from
+`first_entry_y()`/`ROW_H`/`ROW_W` — the same expressions `row_y` and `list_spec`
+use, rather than a chosen offset. Colour is `widget::INACTIVE_LABEL`, vanilla's own
+`-6250336` grey, so it reads as absence rather than as a row you could click. Note
+this screen's `list_spec` is `.without_chrome()`, so there is no tinted band or
+separator pair here to fight.
+
+`the_available_column_says_it_is_empty_only_when_it_is` asserts the **pair**:
+present with no packs, absent with one, and the second wording for one pack that is
+selected. A label that always draws passes the first alone.
+
 ## The trap: the UI list and the manager stack are reversed
 
 `ResourceManager` stores sources **lowest priority first**. This screen shows

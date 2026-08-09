@@ -265,7 +265,14 @@ impl Origin {
                 | SocialPlacement::Report { .. },
             )
             | Origin::Language(LanguagePlacement::Row { .. })
-            | Origin::Packs(PacksPlacement::Row { .. } | PacksPlacement::MoveButton { .. }) => true,
+            | Origin::Packs(
+                PacksPlacement::Row { .. }
+                | PacksPlacement::MoveButton { .. }
+                // The empty-state line sits in the first row slot and must be cut
+                // by the same band the rows are, or a canvas too short to hold one
+                // row would show it over the footer.
+                | PacksPlacement::EmptyNotice(_),
+            ) => true,
             // -- outside the band by construction -------------------------
             //
             // Titles, search fields, warnings, column headers, footer bands and

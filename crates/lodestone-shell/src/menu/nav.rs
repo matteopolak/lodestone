@@ -1758,11 +1758,11 @@ impl MenuNav {
                     lang.scroll(),
                 ))
             }
-            // Resource Packs (issue #415). Its two columns share **one**
-            // vertical band, so one spec is the right clip rect for both; the
-            // length and offset are the column the cursor is in
-            // (`PacksNav::focused_list`), which is also the column the wheel
-            // acts on. See `packs`'s module doc on why the thumb reflects one
+            // Resource Packs. Its two columns share **one** vertical band, so one
+            // spec is the right clip rect for both; the length and offset are
+            // `PacksNav::focused_list`'s column, which is the one under the
+            // pointer (falling back to the cursor's) and is also the column the
+            // wheel acts on. See `packs`'s module doc on why the thumb reflects one
             // column rather than both.
             super::Screen::Settings
                 if self.settings.page() == crate::menu::options::SettingsPage::ResourcePacks =>

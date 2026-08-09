@@ -104,10 +104,25 @@ pub(super) const SERVER_MOVE_UP_SPRITES: (&str, &str) =
 /// `MOVE_DOWN_SPRITE` / `MOVE_DOWN_HIGHLIGHTED_SPRITE` (`:56-57`).
 pub(super) const SERVER_MOVE_DOWN_SPRITES: (&str, &str) =
     ("server_list/move_down", "server_list/move_down_highlighted");
-/// `FaviconTexture`'s fallback, blitted for a row whose server sent no usable
-/// icon. A **loose** texture, so it reaches the atlas through
+/// `FaviconTexture.MISSING_LOCATION`, blitted for a row whose server sent no
+/// usable icon. A **loose** texture, so it reaches the atlas through
 /// [`crate::resources::UNKNOWN_SERVER_TEXTURE`] rather than the sprite glob.
+///
+/// **Not only this screen's.** `FaviconTexture` is also what `WorldListEntry`
+/// holds its thumbnail in, so the same file is the world list's missing-icon
+/// fallback — see [`WORLD_UNKNOWN_ICON`], which aliases this rather than
+/// restating the path.
 pub(super) const SERVER_UNKNOWN_ICON: &str = "misc/unknown_server";
+
+/// The world list's missing-thumbnail fallback, which vanilla shares with the
+/// server list because both rows hold a `FaviconTexture` and its
+/// `MISSING_LOCATION` is one file.
+///
+/// An alias rather than a second constant so the shared-ness is stated in the
+/// source; it is re-exported under its own name because a reader of
+/// `draw_world_entry` should not have to know that the world thumbnail is a
+/// *server* texture to follow the code.
+pub(super) const WORLD_UNKNOWN_ICON: &str = SERVER_UNKNOWN_ICON;
 
 /// Vanilla's `JoinMultiplayerScreen.init` (`JoinMultiplayerScreen.java:48-130`)
 /// as a real [`layout::HeaderAndFooterLayout`], arranged for a `width`×`height`

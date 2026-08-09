@@ -6081,3 +6081,476 @@ fn a_move_button_draws_a_triangle_pointing_its_own_way() {
         "a down arrow is the mirror image: top {down_top} should be over bottom {down_bottom}"
     );
 }
+
+// -- composition order: a selection fill must not bury a fallback icon --------
+//
+// The reported symptom: selecting a server whose icon is the default one turned
+// the 32 px thumbnail solid black, and so did focusing a resource pack, while a
+// server with a real favicon and a pack with a real `pack.png` were both fine.
+// One cause, in `MenuGeometry`: the renderer drew *every* sprite between the
+// backdrop and the rest of the colour stream, so a row's opaque black selection
+// fill landed on top of the two fallback icons — which are sprites — no matter
+// when it was emitted, while a real icon is a `FaviconMosaic` of flat quads on the
+// colour stream and stayed in emission order.
+
+/// One quad from either stream, reduced to what a paint-order question needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Paint {
+    /// A flat colour quad's RGBA.
+    Colour([f32; 4]),
+    /// A sprite quad's mean UV, which is what says *which* atlas region it
+    /// sampled and therefore which sprite it is.
+    Sprite([f32; 2]),
+}
+
+/// Whether a quad's destination bounding box contains `at`, in logical pixels.
+///
+/// **Containment of a point, not vertices-inside-a-rect.** `band_coverage` in this
+/// file counts *vertices* inside a rect, so a quad that **encloses** the rect
+/// contributes none and reads as zero coverage — a canvas-wide fill measured
+/// straight through that probe and it still reported 0. A row's selection fill
+/// encloses the 32 px icon exactly, so it is precisely the species that probe
+/// cannot see, and sampling one point inside the icon is a detector that can.
+fn quad_covers(quad: &[f32], stride: usize, w: f32, h: f32, at: (f32, f32)) -> bool {
+    let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+    let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+    for v in quad.chunks_exact(stride) {
+        let px = (v[0] + 1.0) * 0.5 * w;
+        let py = (1.0 - v[1]) * 0.5 * h;
+        x0 = x0.min(px);
+        y0 = y0.min(py);
+        x1 = x1.max(px);
+        y1 = y1.max(py);
+    }
+    at.0 >= x0 - 0.01 && at.0 <= x1 + 0.01 && at.1 >= y0 - 0.01 && at.1 <= y1 + 0.01
+}
+
+/// Colour quads covering `at` within `from..to` **floats** of the colour stream.
+///
+/// Both streams are always a whole number of six-vertex quads long, and a
+/// `SpriteCut`'s `colour_floats` is a snapshot of that length, so the slice is
+/// quad-aligned; the assertion says so rather than trusting it.
+fn colour_paints(
+    geo: &MenuGeometry,
+    w: f32,
+    h: f32,
+    at: (f32, f32),
+    from: usize,
+    to: usize,
+) -> Vec<Paint> {
+    let to = to.min(geo.colour.len());
+    if to <= from {
+        return Vec::new();
+    }
+    assert_eq!(from % (STRIDE * 6), 0, "colour cut {from} is mid-quad");
+    geo.colour[from..to]
+        .chunks_exact(STRIDE * 6)
+        .filter(|q| quad_covers(q, STRIDE, w, h, at))
+        .map(|q| Paint::Colour([q[2], q[3], q[4], q[5]]))
+        .collect()
+}
+
+/// [`colour_paints`] for the sprite stream, keyed on the quad's mean UV.
+fn sprite_paints(
+    geo: &MenuGeometry,
+    w: f32,
+    h: f32,
+    at: (f32, f32),
+    from: usize,
+    to: usize,
+) -> Vec<Paint> {
+    let to = to.min(geo.sprite.len());
+    if to <= from {
+        return Vec::new();
+    }
+    assert_eq!(
+        from % (SPRITE_FLOATS_PER_VERTEX * 6),
+        0,
+        "sprite cut {from} is mid-quad"
+    );
+    geo.sprite[from..to]
+        .chunks_exact(SPRITE_FLOATS_PER_VERTEX * 6)
+        .filter(|q| quad_covers(q, SPRITE_FLOATS_PER_VERTEX, w, h, at))
+        .map(|q| {
+            let (mut u, mut v) = (0.0f32, 0.0f32);
+            for vert in q.chunks_exact(SPRITE_FLOATS_PER_VERTEX) {
+                u += vert[2];
+                v += vert[3];
+            }
+            Paint::Sprite([u / 6.0, v / 6.0])
+        })
+        .collect()
+}
+
+/// Everything painted at `at`, in the order `MenuRenderer::draw` replays it —
+/// colour up to each [`SpriteCut`], that cut's sprites, then the colour tail.
+///
+/// Order, not a composited byte: `CLAUDE.md` records that an exact blended byte
+/// through `ALPHA_BLENDING` on this backend is not predictable, so the question
+/// asked here is which quad went down after which.
+fn paint_at(geo: &MenuGeometry, w: f32, h: f32, at: (f32, f32)) -> Vec<Paint> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    for cut in &geo.sprite_cuts {
+        out.extend(colour_paints(geo, w, h, at, cursor, cut.colour_floats));
+        cursor = cut.colour_floats.max(cursor);
+        out.extend(sprite_paints(
+            geo,
+            w,
+            h,
+            at,
+            cut.sprite_start,
+            cut.sprite_end,
+        ));
+    }
+    out.extend(colour_paints(geo, w, h, at, cursor, geo.colour.len()));
+    out
+}
+
+/// [`paint_at`] under the ordering the renderer used **before** the interleave:
+/// the backdrop, then every sprite, then the whole colour tail.
+///
+/// This is the negative control, and it is a control rather than a description
+/// because the gate below runs it and requires it to *fail* the same assertion —
+/// `CLAUDE.md`: an assertion of an absence needs a detector observed firing.
+fn paint_at_legacy(geo: &MenuGeometry, w: f32, h: f32, at: (f32, f32)) -> Vec<Paint> {
+    let mut out = colour_paints(geo, w, h, at, 0, geo.backdrop_floats);
+    out.extend(sprite_paints(geo, w, h, at, 0, geo.sprite.len()));
+    out.extend(colour_paints(
+        geo,
+        w,
+        h,
+        at,
+        geo.backdrop_floats,
+        geo.colour.len(),
+    ));
+    out
+}
+
+/// Whether a [`Paint`] is a sprite quad sampling inside an atlas region.
+fn is_sprite(paint: Paint, min: [f32; 2], max: [f32; 2]) -> bool {
+    match paint {
+        Paint::Sprite(uv) => {
+            uv[0] >= min[0] && uv[0] <= max[0] && uv[1] >= min[1] && uv[1] <= max[1]
+        }
+        Paint::Colour(_) => false,
+    }
+}
+
+/// [`sprite_uv_bounds`] for a **loose** texture. The two fallback icons live at
+/// `textures/misc/`, outside the `gui/sprites/**` glob, so `build_with_extras`
+/// stitches them under a synthetic `lodestone:gui/loose/<id>` location — a
+/// different key space, which is why this cannot share the sprite helper.
+fn loose_uv_bounds(atlas: &GuiAtlas, id: &str) -> ([f32; 2], [f32; 2]) {
+    let loc: lodestone_assets::ResourceLocation = format!("lodestone:gui/loose/{id}")
+        .parse()
+        .expect("location");
+    let s = atlas.atlas().sprite(&loc).expect("loose texture placed");
+    let (aw, ah) = (atlas.atlas().width as f32, atlas.atlas().height as f32);
+    (
+        [s.x as f32 / aw, s.y as f32 / ah],
+        [(s.x + s.width) as f32 / aw, (s.y + s.height) as f32 / ah],
+    )
+}
+
+/// A synthetic atlas for the Resource Packs screen: the four
+/// `transferable_list/*` overlays plus the **loose** `misc/unknown_pack`
+/// fallback, which only arrives because it is named as an extra.
+fn pack_screen_atlas() -> GuiAtlas {
+    use lodestone_assets::{MemorySource, ResourceSource};
+    let mut src = MemorySource::default();
+    for id in [
+        super::draw::PACK_SELECT_SPRITES.0,
+        super::draw::PACK_SELECT_SPRITES.1,
+        super::draw::PACK_UNSELECT_SPRITES.0,
+        super::draw::PACK_UNSELECT_SPRITES.1,
+    ] {
+        src.insert(
+            format!("assets/minecraft/textures/gui/sprites/{id}.png"),
+            solid_rgba_png(32, 32, [10, 200, 10, 255]),
+        );
+    }
+    src.insert(
+        crate::resources::UNKNOWN_PACK_TEXTURE.1,
+        solid_rgba_png(32, 32, [70, 70, 70, 255]),
+    );
+    let manager =
+        lodestone_assets::ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>]);
+    GuiAtlas::build_with_extras(&manager, &[crate::resources::UNKNOWN_PACK_TEXTURE])
+        .expect("synthetic pack atlas builds")
+}
+
+/// Where in a paint order the row fill and the fallback icon landed, at one
+/// point.
+fn fill_then_icon(
+    order: &[Paint],
+    fill: [f32; 4],
+    icon: ([f32; 2], [f32; 2]),
+) -> (Option<usize>, Option<usize>) {
+    (
+        order.iter().position(|p| *p == Paint::Colour(fill)),
+        order.iter().position(|p| is_sprite(*p, icon.0, icon.1)),
+    )
+}
+
+/// A selected row's **fallback** icon is painted after the row's opaque black
+/// selection fill, on both screens that have one.
+///
+/// ## The discriminating cell is (default icon × selected), and nothing had it
+///
+/// A real favicon passes under both hypotheses — it is a mosaic on the colour
+/// stream, so emission order always protected it — and an *unselected* default
+/// icon passes too, because no fill is drawn for it. Only the pair sees the bug.
+/// No gate in this file had that pair: every default-icon assertion here runs
+/// through `geometry`, which builds with **no atlas** and therefore emits no
+/// sprite at all, and every icon-with-an-atlas gate asks which region was
+/// sampled rather than in what order. The corpus was structurally blind to it.
+///
+/// Three cells and two controls per screen, collected rather than asserted in the
+/// loop so a neuter cannot pass by aborting on the first one.
+#[test]
+fn a_selected_rows_fallback_icon_paints_over_its_selection_fill() {
+    use super::draw::{PACK_ICON, PACK_ROW_PAD, PACK_SELECTION_FILL};
+    use super::server_list::{SERVER_LIST_SELECTION_FILL, SERVER_UNKNOWN_ICON};
+    use super::world_list::WORLD_LIST_SELECTION_FILL;
+    use crate::menu::packs::{self, PackList, PacksNav, PacksPlacement};
+
+    let mut bad: Vec<String> = Vec::new();
+
+    // -- the multiplayer list ------------------------------------------------
+    let atlas = server_list_atlas();
+    let (nav, ui) = list_nav("paint-order", &[("A", "a.example"), ("B", "b.example")]);
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut fav = FaviconCache::new();
+    let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+    let row_of = |f: &MenuFrame<'_>, index: usize| {
+        f.rows
+            .iter()
+            .position(|r| r.entry.as_ref().is_some_and(|e| e.index == index))
+            .expect("the frame carries the server row")
+    };
+    // **Which row is selected is read, not assumed.** `list_nav` adds each server
+    // through the real Add Server path, which leaves the row it just created
+    // selected — so a two-entry list arrives on row 1, and a gate that assumed
+    // row 0 fails its own premise instead of measuring anything.
+    let sel = nav.server_index();
+    assert!(sel < 2, "premise: the selection is one of the two rows, not {sel}");
+    let unsel = 1 - sel;
+    let (rs, ru) = (row_of(&f, sel), row_of(&f, unsel));
+    assert!(
+        f.rows[rs].entry.as_ref().unwrap().selected,
+        "premise: server row {sel} is the selection"
+    );
+    assert!(
+        !f.rows[ru].entry.as_ref().unwrap().selected,
+        "premise: server row {unsel} is not"
+    );
+    assert!(
+        f.rows[rs].favicon.is_none() && f.rows[ru].favicon.is_none(),
+        "premise: an unreachable server sends no favicon, so both rows draw the fallback sprite"
+    );
+    assert!(f.cursor.is_none(), "premise: no hover — this is about selection");
+
+    let centre_of = |rect: (f32, f32, f32, f32)| (rect.0 + rect.2 * 0.5, rect.1 + rect.3 * 0.5);
+    let icon_rect = |index: usize| server_entry_icon_rect(index, V_W, 0.0);
+    let geo = build(&f, Some(&atlas), None, V_W, V_H);
+    let fallback = loose_uv_bounds(&atlas, SERVER_UNKNOWN_ICON);
+
+    // The cell that matters.
+    let at = centre_of(icon_rect(sel));
+    let order = paint_at(&geo, V_W, V_H, at);
+    match fill_then_icon(&order, SERVER_LIST_SELECTION_FILL, fallback) {
+        (Some(fi), Some(si)) if si > fi => {}
+        (fi, si) => bad.push(format!(
+            "server row {sel} (default icon, selected): fill at {fi:?}, fallback icon at {si:?} — \
+             the icon must be painted after the fill. icon rect {:?}, order {order:?}",
+            icon_rect(sel)
+        )),
+    }
+
+    // Control 1 — the same icon in an **unselected** row: no fill at all, which
+    // is what makes the cell above about the fill rather than about the sprite.
+    let at1 = centre_of(icon_rect(unsel));
+    let order1 = paint_at(&geo, V_W, V_H, at1);
+    let (fill1, icon1) = fill_then_icon(&order1, SERVER_LIST_SELECTION_FILL, fallback);
+    if fill1.is_some() || icon1.is_none() {
+        bad.push(format!(
+            "server row {unsel} (default icon, unselected): expected no fill and an icon, got fill \
+             {fill1:?} icon {icon1:?}. icon rect {:?}, order {order1:?}",
+            icon_rect(unsel)
+        ));
+    }
+
+    // Control 2 — the ordering this fix replaced must **bury** the icon at the
+    // same cell. Run and observed failing, not described.
+    let legacy = paint_at_legacy(&geo, V_W, V_H, at);
+    match fill_then_icon(&legacy, SERVER_LIST_SELECTION_FILL, fallback) {
+        (Some(fi), Some(si)) if si < fi => {}
+        (fi, si) => bad.push(format!(
+            "the control did not fire: under the pre-fix ordering the fallback icon ({si:?}) must \
+             land *before* the fill ({fi:?}) and be buried. icon rect {:?}, order {legacy:?}",
+            icon_rect(sel)
+        )),
+    }
+
+    // Control 3 — a **real** icon survives even the pre-fix ordering, which is
+    // the asymmetry the report described: a mosaic is flat quads on the colour
+    // stream, emitted after the fill, so nothing ever buried it.
+    let mut mosaic = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+    const PROBE: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
+    mosaic.rows[rs].favicon = Some(FaviconMosaic {
+        size: 1,
+        cells: vec![PROBE],
+    });
+    let mgeo = build(&mosaic, Some(&atlas), None, V_W, V_H);
+    for (what, order) in [
+        ("now", paint_at(&mgeo, V_W, V_H, at)),
+        ("pre-fix", paint_at_legacy(&mgeo, V_W, V_H, at)),
+    ] {
+        let fill = order
+            .iter()
+            .position(|p| *p == Paint::Colour(SERVER_LIST_SELECTION_FILL));
+        let cell = order.iter().position(|p| *p == Paint::Colour(PROBE));
+        if !matches!((fill, cell), (Some(fi), Some(ci)) if ci > fi) {
+            bad.push(format!(
+                "a real favicon must outlive the fill under the {what} ordering too: fill \
+                 {fill:?}, mosaic cell {cell:?}. icon rect {:?}, order {order:?}",
+                icon_rect(sel)
+            ));
+        }
+    }
+
+    // -- the Resource Packs screen -------------------------------------------
+    let patlas = pack_screen_atlas();
+    let pnav = PacksNav::rebuild(vec![pack_fixture("bravo.zip", "a zip pack", false)], &[]);
+    let pf = packs::frame(&pnav);
+    assert_eq!(
+        pf.selected, 0,
+        "premise: the cursor is on Available row 0, so that row is the selection"
+    );
+    assert!(
+        pf.rows[0].pack.is_some() && pf.rows[0].favicon.is_none(),
+        "premise: a pack with no pack.png draws the fallback sprite"
+    );
+    let (px, py) = packs::placement_anchor(
+        PacksPlacement::Row {
+            list: PackList::Available,
+            row: 0,
+            scroll: 0.0,
+        },
+        V_W,
+        V_H,
+    );
+    let pack_icon_rect = (px + PACK_ROW_PAD, py + PACK_ROW_PAD, PACK_ICON, PACK_ICON);
+    let pat = centre_of(pack_icon_rect);
+    let pgeo = build(&pf, Some(&patlas), None, V_W, V_H);
+    let pack_fallback = loose_uv_bounds(&patlas, super::draw::PACK_UNKNOWN_ICON);
+
+    let porder = paint_at(&pgeo, V_W, V_H, pat);
+    match fill_then_icon(&porder, PACK_SELECTION_FILL, pack_fallback) {
+        (Some(fi), Some(si)) if si > fi => {}
+        (fi, si) => bad.push(format!(
+            "pack row 0 (default icon, focused): fill at {fi:?}, fallback icon at {si:?} — the \
+             icon must be painted after the fill. icon rect {pack_icon_rect:?}, order {porder:?}"
+        )),
+    }
+    let plegacy = paint_at_legacy(&pgeo, V_W, V_H, pat);
+    match fill_then_icon(&plegacy, PACK_SELECTION_FILL, pack_fallback) {
+        (Some(fi), Some(si)) if si < fi => {}
+        (fi, si) => bad.push(format!(
+            "the pack control did not fire: under the pre-fix ordering the fallback icon ({si:?}) \
+             must land before the fill ({fi:?}). icon rect {pack_icon_rect:?}, order {plegacy:?}"
+        )),
+    }
+
+    // -- the singleplayer world list -----------------------------------------
+    //
+    // This screen drew *nothing* in its 32 px icon column until the fallback
+    // landed, so the cell is "the thumbnail exists at all" as well as "it survives
+    // selection". Both halves matter and neither implies the other.
+    let (wnav, wui) = world_select_nav_with_worlds("paint-order-worlds", &["alpha", "bravo"]);
+    let wf = world_select_frame(&wnav, &wui);
+    let wrow = |index: usize| {
+        wf.rows
+            .iter()
+            .position(|r| r.world.as_ref().is_some_and(|v| v.index == index))
+            .expect("the frame carries the world row")
+    };
+    assert!(
+        wf.rows[wrow(0)].world.as_ref().unwrap().selected
+            && !wf.rows[wrow(1)].world.as_ref().unwrap().selected,
+        "premise: world row 0 is the selection (most recently played) and row 1 is not"
+    );
+    assert!(
+        wf.rows[wrow(0)].favicon.is_none(),
+        "premise: nothing writes a per-world image, so the row draws the fallback"
+    );
+    let wgeo = build(&wf, Some(&atlas), None, V_W, V_H);
+    for (index, selected) in [(0usize, true), (1usize, false)] {
+        let rect = world_list_icon_rect(index, V_W, 0.0);
+        let order = paint_at(&wgeo, V_W, V_H, centre_of(rect));
+        let (fill, icon) = fill_then_icon(&order, WORLD_LIST_SELECTION_FILL, fallback);
+        let ok = match (selected, fill, icon) {
+            (true, Some(fi), Some(si)) => si > fi,
+            (false, None, Some(_)) => true,
+            _ => false,
+        };
+        if !ok {
+            bad.push(format!(
+                "world row {index} (selected {selected}): fill {fill:?}, thumbnail {icon:?} — a \
+                 selected row needs the icon after the fill, an unselected one needs no fill and \
+                 still a thumbnail. icon rect {rect:?}, order {order:?}"
+            ));
+        }
+    }
+
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// The hover scrim goes **under** the icon's overlay sprites, which is the same
+/// cause one step further on: `SERVER_ICON_DARKEN` is a translucent grey rect and
+/// vanilla fills it before blitting the join / move arrows over it
+/// (`ServerSelectionList.OnlineServerEntry.extractContent`), so the pre-fix
+/// ordering washed all three arrows out.
+#[test]
+fn the_hover_scrim_is_painted_under_the_icon_overlay_sprites() {
+    let atlas = server_list_atlas();
+    let (nav, ui) = list_nav("scrim-order", &[("A", "a.example"), ("B", "b.example")]);
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut fav = FaviconCache::new();
+    let mut f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+
+    // The icon's right half, so `over_right_half` picks the highlighted join
+    // sprite — the discriminator is position, which the quadrant gate above owns;
+    // here it only has to be *a* known region.
+    let (ix, iy, iw, ih) = server_entry_icon_rect(0, V_W, 0.0);
+    f.cursor = Some((ix + iw * 0.75, iy + ih * 0.5));
+    let at = (ix + iw * 0.75, iy + ih * 0.5);
+    let geo = build(&f, Some(&atlas), None, V_W, V_H);
+    let join = sprite_uv_bounds(&atlas, SERVER_JOIN_SPRITES.1);
+
+    let order = paint_at(&geo, V_W, V_H, at);
+    let scrim = order
+        .iter()
+        .position(|p| *p == Paint::Colour(SERVER_ICON_DARKEN));
+    let arrow = order.iter().position(|p| is_sprite(*p, join.0, join.1));
+    assert!(
+        matches!((scrim, arrow), (Some(s), Some(a)) if a > s),
+        "the join arrow ({arrow:?}) must be painted after the scrim ({scrim:?}). icon rect \
+         {:?}, order {order:?}",
+        (ix, iy, iw, ih)
+    );
+
+    // The control: the pre-fix ordering put the scrim on top of all three.
+    let legacy = paint_at_legacy(&geo, V_W, V_H, at);
+    let l_scrim = legacy
+        .iter()
+        .position(|p| *p == Paint::Colour(SERVER_ICON_DARKEN));
+    let l_arrow = legacy.iter().position(|p| is_sprite(*p, join.0, join.1));
+    assert!(
+        matches!((l_scrim, l_arrow), (Some(s), Some(a)) if a < s),
+        "the control did not fire: under the pre-fix ordering the arrow ({l_arrow:?}) must land \
+         before the scrim ({l_scrim:?}). icon rect {:?}, order {legacy:?}",
+        (ix, iy, iw, ih)
+    );
+}

@@ -98,7 +98,7 @@ pub use account_screen::{
     accounts_row_rect, accounts_row_top, accounts_row_visible,
 };
 pub use dispatch::frame_for;
-pub use draw::{MenuGeometry, build, geometry};
+pub use draw::{MenuGeometry, SpriteCut, build, geometry};
 pub use favicon::{FaviconMosaic, default_head_icon, favicon_mosaic, head_mosaic};
 pub use frame::{
     AccountEntryView, Align, Arrow, FaviconCache, MenuFrame, MenuLabel, MenuNotice, MenuProgress,
@@ -122,7 +122,8 @@ pub use server_list::{
 };
 pub use title_pause::{death_slot, pause_grid_size, pause_slot, title_slot};
 pub use world_list::{
-    WORLD_LIST_ITEM_H, WORLD_LIST_LINE_DY, WORLD_LIST_TEXT_DX, world_list_row_content_rect,
+    WORLD_LIST_ITEM_H, WORLD_LIST_LINE_DY, WORLD_LIST_TEXT_DX, world_list_icon_rect,
+    world_list_row_content_rect,
     world_list_row_label, world_list_row_left, world_list_row_rect, world_list_row_top,
     world_list_row_visible, world_list_scroll_for, world_list_spec, world_list_text_width,
     world_list_visible_rows,
@@ -265,8 +266,12 @@ const PAUSE_BUTTON_HALF_W: f32 = 98.0;
 /// `LinearLayout.horizontal().spacing(4)` (`:101`).
 const PAUSE_ICON_SPACING: i32 = 4;
 /// Vanilla's font line height, used to centre a label in its widget
-/// (`ActiveTextCollector.java:73`).
-const LINE_H: f32 = 9.0;
+/// (`ActiveTextCollector`).
+///
+/// `pub(super)` so a screen module outside `render` can centre its own text on a
+/// row without restating the 9 — `packs::placement_anchor`'s empty-state line is
+/// the first such caller.
+pub(super) const LINE_H: f32 = 9.0;
 /// Vertical offset of the pause screen's title `StringWidget`
 /// (`PauseScreen.java:88`).
 const PAUSE_TITLE_Y: f32 = 40.0;

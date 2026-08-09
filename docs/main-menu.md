@@ -239,6 +239,50 @@ borrowed is the HUD's **public** bitmap font, `hud::glyph_rows`.
 Unlike the HUD overlays this pass **clears** the target, because nothing renders
 behind a menu — otherwise the last world frame shows through.
 
+#### Two vertex streams, replayed in emission order
+
+One menu frame produces **two** vertex streams, because buttons and icons are
+textured nine-slice sprites off the GUI atlas while backdrops, row fills and text
+are flat coloured quads — different pipelines, so they cannot share a buffer.
+`MenuGeometry` carries both, plus `sprite_cuts`: a list of "draw the colour stream
+up to here, then these sprite quads". `MenuRenderer::draw` walks it, so the two
+streams composite in the order `Quads` emitted them.
+
+It did not always. The pass used to be three draws with one global ordering —
+backdrop, then **every** sprite, then the rest of the colour stream — chosen so a
+button's label (colour) landed on its background (sprite). That ordering is wrong
+for anything meant to sit *under* a sprite, and it produced a reported bug with a
+diagnostic asymmetry:
+
+| row icon | what it is | pre-fix result when the row was selected |
+|---|---|---|
+| a server's favicon, a pack's `pack.png` | `FaviconMosaic`, flat quads on the **colour** stream | correct — stayed in emission order |
+| the default icon (`misc/unknown_server`, `misc/unknown_pack`) | a **sprite** | solid black |
+
+A selected list row fills its interior opaque black under its content
+(`AbstractSelectionList.extractItem`), so the fill landed on top of the fallback
+sprite and the thumbnail went black — on the multiplayer list when a server sent no
+favicon, and on the Resource Packs screen for any pack with no `pack.png`, which
+includes the built-in row. The same cause washed out the hover overlay: the
+translucent grey scrim vanilla fills *before* blitting the join / move arrows was
+painted over them instead.
+
+`sprite_cuts` is appended to from `Quads::sprite` alone — the only place sprite
+quads are pushed — by snapshotting `verts.len()`, so nothing that emits a colour
+quad needs to know it exists. Consecutive sprite calls with no colour quad between
+them coalesce into one cut, so a frame yields a handful of draw calls, not one per
+sprite. `backdrop_floats` survives alongside it because its job is different: the
+backdrop quad is *skipped* when the panorama is up, not reordered.
+
+The gate is `a_selected_rows_fallback_icon_paints_over_its_selection_fill` in
+`menu::render::tests`. Its discriminating cell is the **pair** (default icon ×
+selected) — a real favicon passes under both hypotheses and an unselected default
+icon has no fill at all — and it runs the pre-fix ordering as a negative control,
+requiring it to bury the icon. Note what the corpus could not see before: every
+default-icon assertion in that file went through `geometry`, which builds with no
+atlas and therefore emits no sprite, and every icon-with-an-atlas gate asked which
+atlas region was sampled rather than in what order.
+
 `render::frame_for` is the single place menu *state* becomes menu *content*, and
 `render::owns_frame` is the predicate for "this renderer owns the frame and the
 keyboard". They are tested against each other on every `Screen` variant, because

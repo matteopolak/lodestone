@@ -433,15 +433,20 @@ impl MenuRenderer {
             queue.write_buffer(&sprites.buffer, 0, bytemuck::cast_slice(&geo.sprite));
         }
 
-        // Three colour/sprite draws, one pass (four with the panorama in front of
-        // them). The split is `MenuGeometry::backdrop_floats`:
-        // backdrop, then every GUI sprite, then the rest of the colour stream —
-        // so a button's label lands *on* its nine-slice background rather than
-        // under it. A render pass can rebind its pipeline, so this needs no
-        // extra pass (and must not have one: the load op is only correct once).
+        // The two streams are replayed in **emission order**, from
+        // `MenuGeometry::sprite_cuts`: colour up to a cut, that cut's sprites,
+        // colour up to the next, and the tail of the colour stream last. A render
+        // pass can rebind its pipeline, so this needs no extra pass (and must not
+        // have one: the load op is only correct once).
+        //
+        // It used to be exactly three draws with one global ordering — backdrop,
+        // *all* sprites, then all remaining colour — and that was a bug rather
+        // than a simplification: see `MenuGeometry`'s doc for the black
+        // server/pack thumbnail it produced. `backdrop_floats` survives because
+        // its job is different: the backdrop quad is *skipped* when the panorama
+        // is up, not reordered.
         let backdrop_verts = (geo.backdrop_floats / FLOATS_PER_VERTEX) as u32;
         let colour_verts = (geo.colour.len() / FLOATS_PER_VERTEX) as u32;
-        let sprite_verts = (geo.sprite.len() / SPRITE_FLOATS_PER_VERTEX) as u32;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("menu"),
         });
@@ -476,21 +481,32 @@ impl MenuRenderer {
             }
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.buffer.slice(..));
-            if backdrop_verts > 0 && !panorama_drawn {
-                pass.draw(0..backdrop_verts, 0..1);
+            // The panorama already covers every pixel, so the backdrop quad is
+            // dropped rather than drawn under it — the colour cursor starts past
+            // it instead of at zero.
+            let mut cursor = if panorama_drawn { backdrop_verts } else { 0 };
+            for cut in &geo.sprite_cuts {
+                let Some(sprites) = self.sprites.as_ref() else {
+                    break;
+                };
+                let colour_end = ((cut.colour_floats / FLOATS_PER_VERTEX) as u32).max(cursor);
+                if colour_end > cursor {
+                    pass.draw(cursor..colour_end, 0..1);
+                    cursor = colour_end;
+                }
+                let from = (cut.sprite_start / SPRITE_FLOATS_PER_VERTEX) as u32;
+                let to = (cut.sprite_end / SPRITE_FLOATS_PER_VERTEX) as u32;
+                if to > from {
+                    pass.set_pipeline(&sprites.pipeline);
+                    pass.set_bind_group(0, &sprites.bind_group, &[]);
+                    pass.set_vertex_buffer(0, sprites.buffer.slice(..));
+                    pass.draw(from..to, 0..1);
+                    pass.set_pipeline(&self.pipeline);
+                    pass.set_vertex_buffer(0, self.buffer.slice(..));
+                }
             }
-            if let Some(sprites) = self.sprites.as_ref()
-                && sprite_verts > 0
-            {
-                pass.set_pipeline(&sprites.pipeline);
-                pass.set_bind_group(0, &sprites.bind_group, &[]);
-                pass.set_vertex_buffer(0, sprites.buffer.slice(..));
-                pass.draw(0..sprite_verts, 0..1);
-                pass.set_pipeline(&self.pipeline);
-                pass.set_vertex_buffer(0, self.buffer.slice(..));
-            }
-            if colour_verts > backdrop_verts {
-                pass.draw(backdrop_verts..colour_verts, 0..1);
+            if colour_verts > cursor {
+                pass.draw(cursor..colour_verts, 0..1);
             }
         }
         queue.submit(std::iter::once(encoder.finish()));

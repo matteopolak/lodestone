@@ -177,12 +177,36 @@ last played **descending**, ties broken by folder name ascending. Each carries
 | 2 | `+9+3` | `folder (YYYY-MM-DD HH:MM UTC)` | `-8355712` grey |
 | 3 | `+9+9+3` | `Survival, Cheats, Version: 26.2` | `-8355712` grey |
 
-all inset by `getTextX() = getContentX() + 32 + 3`. **The 32 px icon column is
-reserved and drawn empty**: vanilla blits `FaviconTexture.forWorld` from the
-`icon.png` the client writes on quit, and this client writes none, so there is
-nothing to blit — and the column still has to exist, because all three lines' x is
-measured from its far edge. Drawing a placeholder square would be inventing a
-texture vanilla has no equivalent of.
+all inset by `getTextX() = getContentX() + WORLD_LIST_ICON + 3`.
+
+**The 32 px icon column now draws vanilla's missing-thumbnail texture.** This
+section used to say the column was reserved and drawn empty, on the reasoning that
+"drawing a placeholder square would be inventing a texture vanilla has no
+equivalent of". That reasoning was wrong, and the record says so plainly:
+`WorldListEntry` holds its thumbnail in a **`FaviconTexture`** — the same class the
+multiplayer list uses — and blits `this.icon.textureLocation()`, which returns
+`FaviconTexture.MISSING_LOCATION` when nothing has been uploaded. That location is
+`textures/misc/unknown_server.png`, the *same file* the server list already falls
+back to. So the fallback is a port, not an invention, and `WORLD_UNKNOWN_ICON` in
+`render::server_list` is an alias of `SERVER_UNKNOWN_ICON` rather than a second
+path, to keep the shared-ness visible.
+
+`draw_world_entry` takes `MenuRow::favicon` when it is set and the fallback sprite
+otherwise — the identical two-branch shape a server row and a pack row use. Nothing
+sets `favicon` today, because nothing writes a per-world image. **Whenever something
+does** — a screenshot captured at save time is the obvious candidate, and the owner
+has asked for it as a separate piece of work — reducing that image through
+`render::head_mosaic` and setting the field is the entire change: the rect
+(`world_list_icon_rect`), the text column and this draw all stay put. Do **not**
+fabricate a preview in the meantime; the fallback is the honest state.
+
+One thing that had to land first: the fallback is a *sprite*, and until
+`MenuGeometry::sprite_cuts` existed a selected row's opaque black interior fill was
+composited on top of every sprite in the frame, so adding this would have drawn a
+black square on the selected row. See *Two vertex streams* in `docs/main-menu.md`.
+The gate `a_selected_rows_fallback_icon_paints_over_its_selection_fill` covers the
+world row as a third arm, asserting both that the thumbnail draws at all and that it
+survives the fill.
 
 The date format is a **deliberate deviation**: vanilla uses
 `Util.localizedDateFormatter(FormatStyle.SHORT)`, i.e. the user's locale and the
