@@ -167,8 +167,15 @@ site was converted from the free `text_w` to `b.text_width`.
   `&str` path `draw`/`draw_plain` use for titles, the XP number, etc.) is
   deliberately untouched — a Rust `&str` can never carry a `§` code, so giving it
   the styled glyph path would cost every unstyled draw a pool lookup for nothing.
-- **Only bitmap providers rasterise.** `unihex` (CJK) and `ttf` parse but contribute
-  no glyphs, so those codepoints draw the hollow missing-glyph box.
+- **`unihex` rasterises; `ttf` still does not.** See
+  [Unihex glyphs](./unihex-font-glyphs.md) — the short version is that CJK, Thai,
+  Arabic, Hangul and most of the BMP now draw real glyphs, and the shell's
+  `draw_ink` needed **no change** because a unihex glyph resolves to the same
+  `GlyphRaster` a sheet cell does (at `texel_size` 0.5 instead of 1.0). What still
+  boxes: astral-plane emoji and anything only a `ttf` provider would supply. Two
+  traps live there and not here: it needs the **asset-object store** above the jar
+  (the jar's `font/include/unifont.json` is an empty stub), and bold/shadow offsets
+  are **per glyph** — 0.5 for a unihex glyph, 1.0 for a sheet one.
 - **`§` pairs are zero-width in both fonts.** `hud::strip_legacy` exists so the
   fallback measure does not over-count by two characters per code and push centred
   lines left.

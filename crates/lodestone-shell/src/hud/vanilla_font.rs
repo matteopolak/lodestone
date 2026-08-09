@@ -56,8 +56,17 @@
 //!   no `§` codes, so it can never be styled, and giving it the styled glyph path
 //!   anyway would cost every title/subtitle/XP-number draw a pool lookup for
 //!   nothing.
-//! * **Only bitmap providers rasterise.** `unihex` (CJK) and `ttf` parse but
-//!   contribute no glyphs, so those codepoints render as the missing-glyph box.
+//! * **`unihex` now rasterises; `ttf` still does not.** `unifont.zip`'s 114,432
+//!   glyphs come through [`lodestone_assets::font::GlyphRaster`] like a sheet
+//!   cell, at `texel_size` 0.5 instead of 1.0, so [`draw_ink`](VanillaFont::draw_ink)
+//!   needed no change at all — there is still no atlas and no fifth bind group.
+//!   The codepoints that remain missing-glyph boxes are the ones neither the
+//!   three sheets nor `unifont.zip` cover: astral-plane emoji, and anything a
+//!   `ttf` provider would have supplied. See [`jar_manager`] for why this needs
+//!   the asset-object store and not just the jar.
+//! * **Right-to-left text is still drawn left-to-right.** Arabic and Hebrew
+//!   codepoints now have glyphs, so they draw instead of boxing, but nothing
+//!   here reorders a bidi run or shapes a cursive join.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -172,6 +181,10 @@ impl VanillaFont {
                     target: "assets",
                     codepoints = raster.font().codepoint_count(),
                     sheets = raster.sheet_count(),
+                    // The number that says whether CJK/Thai/Arabic draw at all;
+                    // 0 means the asset-object store did not resolve and the
+                    // jar's empty `unifont.json` stub won. See `jar_manager`.
+                    unihex = raster.unihex_count(),
                     "loaded the vanilla default font for the HUD"
                 );
                 let obfuscation_pool = build_obfuscation_pool(&raster);
@@ -521,11 +534,14 @@ impl VanillaFont {
                 MISSING_ADVANCE
             }
         };
-        // `GlyphInfo::getAdvance(bold)` (`GlyphInfo.java:6-8`): `advance +
-        // boldOffset` when bold, unchanged otherwise. Vanilla applies this to
-        // *every* glyph, drawable or not — a bold space is 1px wider too.
+        // `GlyphInfo.getAdvance(boolean)`: `advance + boldOffset` when bold,
+        // unchanged otherwise. Vanilla applies this to *every* glyph, drawable
+        // or not — a bold space is wider too. The offset is **per glyph**, not a
+        // font constant: `UnihexProvider.Glyph.info` overrides `getBoldOffset`
+        // to 0.5F because a unihex glyph is drawn at oversample 2, so bold CJK
+        // shifts one source texel rather than two.
         let bold_extra = if style.bold {
-            font_metrics::BOLD_OFFSET
+            self.raster.font().bold_offset(cp)
         } else {
             0.0
         };
@@ -711,8 +727,55 @@ fn build_obfuscation_pool(raster: &RasterFont) -> HashMap<u32, Vec<char>> {
 /// produced a title screen with a **readable-looking layout and no glyphs** — every
 /// caller here falls back to a fixed-width stand-in when this returns `None`, which is
 /// exactly the shape of failure that reports success while the screen is wrong.
+///
+/// # Why the asset-object store is pushed on top
+///
+/// The jar alone is **not enough for the font**, and this is the one place in the
+/// shell where that matters. `client.jar` ships a 29-byte
+/// `assets/minecraft/font/include/unifont.json` **stub whose `providers` array is
+/// empty**; the real 3,993-byte file — the one that declares the `unihex`
+/// provider and its `size_overrides` — lives only in the launcher's asset-object
+/// store, and so does `font/unifont.zip`. Loading `minecraft:default` from the
+/// jar alone therefore resolves the stub, contributes zero unihex glyphs, logs a
+/// perfectly healthy "loaded the vanilla default font", and draws the
+/// missing-glyph box for all 112,018 codepoints the three bitmap sheets do not
+/// cover. That is the entire "squares instead of CJK" symptom, and no amount of
+/// rasteriser work fixes it without this push.
+///
+/// [`ResourceManager::push`] adds at the **highest** priority, which is the
+/// direction `asset_objects`' own rule demands: *for any name present in both,
+/// prefer the object store.* Only 8 of the 5,057 index objects share a name with
+/// a jar entry, and the store's copy is the real asset in all 8.
+///
+/// A store that will not open is not an error here — it is the pre-unihex state,
+/// which still renders every Latin/European codepoint from the jar. Watch
+/// [`Font::unihex_count`](lodestone_assets::font::Font::unihex_count) in the load
+/// log to tell the two apart; the codepoint total alone cannot, because it moves
+/// whenever any provider does.
 fn jar_manager() -> Option<ResourceManager> {
-    crate::resources::vanilla_manager()
+    let mut manager = crate::resources::vanilla_manager()?;
+    // The browser has no object store: `platform::assets::Bundle` carries the jar
+    // and the blocks report only, so a wasm session keeps bitmap-only coverage
+    // rather than paying a 1.5 MB fetch for `unifont.zip` on a bundle that is
+    // already over its size ceiling.
+    #[cfg(not(target_arch = "wasm32"))]
+    match crate::asset_objects::discover_store_root()
+        .and_then(|root| crate::asset_objects::AssetObjectStore::open(&root))
+    {
+        Ok(store) => {
+            tracing::debug!(
+                target: "assets",
+                objects = store.len(),
+                "asset-object store pushed above client.jar for the font (unifont)"
+            );
+            manager.push(Box::new(store));
+        }
+        Err(e) => tracing::info!(
+            target: "assets",
+            "no asset-object store for the font, so unihex/CJK coverage is off: {e}"
+        ),
+    }
+    Some(manager)
 }
 
 

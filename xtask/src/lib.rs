@@ -6523,12 +6523,25 @@ const RESOURCES_BASE_URL: &str = "https://resources.download.minecraft.net";
 /// is *not* jar-shadowed — the jar has no copy — so the size-disagreement rule
 /// below would never select it.
 ///
-/// The 4871 `.ogg` samples it references are deliberately **not** here. They are
-/// 375 MB, and unlike a stub they fail *honestly*: a missing sample is one silent
-/// sound, resolved lazily per event, not a wrong asset masquerading as the right
-/// one. Someone wanting real audio should fetch them with [`ensure_object`] rather
-/// than by growing this list.
-const REQUIRED_OBJECT_NAMES: &[&str] = &["minecraft/sounds.json"];
+/// `minecraft/font/unifont.zip` is the second, and it is the *data* half of a
+/// jar-shadowed pair rather than a shadowed file itself. `font/include/unifont.json`
+/// **is** shadowed (29 B stub in the jar, 3993 B real file in the store), so the
+/// size-disagreement rule below already selects it — but that file's only content
+/// is a `unihex` provider pointing at `font/unifont.zip`, which the jar does not
+/// contain at all and so the rule cannot see. Fetching the declaration without the
+/// data gives a font that resolves a unihex provider, finds no `hex_file`, and
+/// draws the missing-glyph box for all 112,018 codepoints outside the three bitmap
+/// sheets — the same symptom as not fetching either. 1.5 MB of GNU Unifont HEX
+/// text; the `unifont_jp` and `unifont_pua` variants are behind the `jp` font
+/// option and a private-use pack respectively, and are not needed to render.
+///
+/// The 4871 `.ogg` samples `sounds.json` references are deliberately **not** here.
+/// They are 375 MB, and unlike a stub they fail *honestly*: a missing sample is one
+/// silent sound, resolved lazily per event, not a wrong asset masquerading as the
+/// right one. Someone wanting real audio should fetch them with [`ensure_object`]
+/// rather than by growing this list.
+const REQUIRED_OBJECT_NAMES: &[&str] =
+    &["minecraft/sounds.json", "minecraft/font/unifont.zip"];
 
 /// Ensure one asset-store object is on disk, verifying its SHA-1 against the
 /// index.

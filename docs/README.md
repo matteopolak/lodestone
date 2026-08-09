@@ -1506,6 +1506,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `Screen`-level input layer, and the three target screens — the multiplayer server
   list, world select with creation disabled, and the full settings tree with every
   real button present and the unsupported ones greyed out.
+- [Unihex font glyphs](./unihex-font-glyphs.md) — Rasterisation of vanilla's
+  `unihex` glyph provider — the GNU Unifont HEX bitmaps in `font/unifont.zip` — so
+  that CJK, Hangul, Thai, Arabic, Cyrillic extensions, box drawing and most of the
+  rest of the Basic Multilingual Plane draw real glyphs instead of the hollow
+  missing-glyph box. It takes the `minecraft:default` font from **2,414 codepoints to
+  114,432**.
 - [Vanilla HUD text](./vanilla-hud-text.md) — Every string the HUD draws — chat,
   the F3 overlay, titles, the action bar, the scoreboard, the tab list, stack counts
   — rendered as **vanilla's proportional `default` font** with its 1 px drop shadow,

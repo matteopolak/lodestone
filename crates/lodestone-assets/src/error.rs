@@ -435,6 +435,25 @@ pub enum FontError {
     /// A resource location inside the font definition was malformed.
     #[error("invalid resource location in font: {0}")]
     Location(#[from] ResourceLocationError),
+    /// A `unihex` provider's `.hex` payload was not in GNU Unifont HEX form.
+    ///
+    /// Mirrors the three `IllegalArgumentException`s in
+    /// `UnihexProvider.readFromStream` / `decodeHex`: a codepoint field that is
+    /// not 4, 5 or 6 hex digits followed by a colon, a bitmap field that is not
+    /// 32, 64, 96 or 128 hex digits, or a non-hex digit anywhere.
+    #[error("invalid unihex font data: {reason}")]
+    Hex {
+        /// Why the entry was rejected, naming the 0-based entry index.
+        reason: String,
+    },
+    /// A `unihex` provider's `hex_file` zip could not be opened.
+    #[error("unihex font archive {file} could not be read: {reason}")]
+    HexArchive {
+        /// The archive's resource location.
+        file: String,
+        /// Why it could not be read.
+        reason: String,
+    },
 }
 
 /// Errors produced while parsing GUI sprite scaling metadata (`gui.scaling`).

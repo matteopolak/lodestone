@@ -8658,3 +8658,54 @@ unbuilt for want of a moving-block-model path. That path is now
 `(state id, transform, light)` and resolving geometry through the crack pass's existing per-state quad
 snapshot, so there is no per-block table to rot. The piston head's remaining work is a polled source telling
 the renderer which pistons are moving and how far; the geometry half is done.
+
+**12.169 Unihex glyphs: the rasteriser was the easy half, and the file it needs is not in the jar.**
+
+The reported symptom was "squares where vanilla renders proper unicode". Measured cause: `minecraft:default`
+resolved **2,414 codepoints** — the three bitmap sheets plus the `space` provider — because the `unihex`
+provider was parsed into a struct nothing read. Vanilla's own `unifont.zip` holds **114,432** entries, a
+strict superset of those 2,414, so the correct total is the file's own count and the provider wins
+**112,018** of them. Both numbers are now gates.
+
+**The rasteriser is ~200 lines; the thing that would have shipped broken is the resource stack.**
+`client.jar` ships a **29-byte `assets/minecraft/font/include/unifont.json` whose `providers` array is
+empty**, and the real 3,993-byte file plus the 1,559,654-byte `font/unifont.zip` are asset-object-store
+objects. `resources::vanilla_manager` builds a `ResourceManager` from the jar alone, so a complete, correct
+unihex implementation loaded **zero** providers and logged a healthy "loaded the vanilla default font". The
+fix is `hud::vanilla_font::jar_manager` pushing `AssetObjectStore` above the jar; `Font::unihex_count` exists
+solely because the codepoint total cannot distinguish the two states. `xtask`'s `REQUIRED_OBJECT_NAMES` had
+to grow the zip too: the *declaration* is jar-shadowed and so the size-disagreement rule already fetched it,
+but the *data* is index-only and that rule structurally cannot see it — fetching one without the other
+reproduces the original symptom exactly.
+
+**Two numbers in the record that a plausible reading gets wrong.** `LineData.calculateWidth`'s empty case is
+`left = 0, right = bitWidth`, one **past** the last column, so a blank 8-wide glyph is 9 columns and advances
+5.5 rather than 5.0. And `getBoldOffset`/`getShadowOffset` are **0.5** on `UnihexProvider.Glyph`, not the
+`GlyphInfo` default of 1.0, because the glyph draws at oversample 2 — per glyph, never per font, so bold CJK
+measured through a font constant is 0.5 px per glyph too wide.
+
+**The discriminating-input rule did all the work here.** A codepoint in *both* the sheets and unifont proves
+nothing: the sheet wins by priority and the assertion passes with unihex absent. The pairs that discriminate:
+`U+2713` ✓ (unihex-only, advance 4.5) against `U+2714` ✔ (in `nonlatin_european.png`, advance **7.0**, whose
+unihex derivation would be 8.5); `U+4E2D` 中 whose ink derives **6.5** and whose `3200..9FFF` override forces
+**9.0**; `U+FF5E` (last member of `FF01..FF5E`, override 9.0 against a derived 7.5) against `U+FF5F` one past
+it (derived **5.5**, and 9.0 there is a range applied one codepoint too wide). Half-width `U+2713` at 7
+source columns against full-width 中 at 16 is what separates a correct stride from a fixed one; vanilla's own
+file uses only the 32- and 64-digit forms (12,582 and 101,850), so the 24- and 32-wide arms are fixture-only.
+
+**Two of my own errors, both caught by the discipline rather than by review.** The fixture asserted a
+codepoint was "inside no override range" when `U+6000` is plainly inside `4E00..9FFF`, and a hand-counted
+entry total was 12 against a real 11 — the *magnitude* habit of predicting the value caught both on the first
+run. Then the whole 16-gate suite was run against a neutered loader (`load_unihex` returning `Ok(0)`): **13
+fired, 3 did not**, and one of the three was supposed to. `unwrap_or(f32::NAN)` in an advance comparison makes
+the test vacuous, because every comparison against NaN is false and an *absent* glyph passes. Compare the
+`Option`.
+
+**No glyph atlas, and that is a decision.** Vanilla stitches on demand; the HUD here emits glyph coverage as
+run-length-merged quads on a colour stream, so `GlyphRaster` became an internal enum with an unchanged public
+surface and `draw_ink` needed **no change at all** — no upload path, no fifth bind group against wgpu's
+4-group floor. The CPU store is eager because vanilla parses eagerly too (`getSupportedGlyphs` needs the full
+key set): ~11 MB resident, no per-glyph allocation, nothing compiled in. Measured wasm delta **+9,889 B gzip
+(+0.20%)**, no new dependency and no new feature. Also worth recording because it was stated wrongly in a
+brief: the wasm bundle is at **5,013,669 B gzip at HEAD, 3.13× the 1,600,000 B ceiling** — not 2.35×, and
+`scripts/wasm-size.sh`'s own recorded baseline of 882,220 B is itself now stale by ~5.7×.

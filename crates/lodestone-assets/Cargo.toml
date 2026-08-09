@@ -19,3 +19,6 @@ lodestone-model.workspace = true
 tempfile.workspace = true
 png.workspace = true
 serde_json.workspace = true
+# The unihex gates build a `hex_file` archive in memory, the same way the PNG
+# sheet gates encode their sheets with `png`.
+zip.workspace = true
