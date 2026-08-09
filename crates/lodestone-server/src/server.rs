@@ -3681,6 +3681,9 @@ async fn apply_own_effect<T, P>(
     // For the world-clock timestamp the grant is stamped with, which must be
     // tick-derived rather than `Instant::now()` (this crate links into wasm32).
     world: &crate::world_state::WorldStateHandle,
+    // Issue #259. This player's live status effects — the store `/effect give` and
+    // `/effect clear` write through.
+    effects: &mut crate::mob_effects::ActiveEffects,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -3744,6 +3747,25 @@ where
                     )
                     .await?;
                 }
+            }
+        }
+        crate::commands::Effect::ApplyEffect {
+            effect,
+            duration,
+            amplifier,
+        } => {
+            // The producer #259 needed. `ActiveEffects::apply` runs vanilla's whole
+            // stacking rule (including the hidden-effect chain), so a second
+            // application of the same effect behaves correctly rather than
+            // overwriting.
+            effects.apply(&effect, duration, amplifier);
+        }
+        crate::commands::Effect::ClearEffects { effect } => {
+            match effect {
+                Some(id) => {
+                    effects.remove(&id);
+                }
+                None => effects.clear(),
             }
         }
         crate::commands::Effect::Message(line) => {
@@ -5892,6 +5914,9 @@ async fn dispatch_play_packet<T, P, S>(
     // `&mut` because closing a furnace pays out its banked smelting XP (the
     // `ContainerClosed` arm), which is currently the only production producer.
     experience: &mut crate::experience::PlayerExperience,
+    // Issue #259. This connection's live status effects — written by `/effect` and
+    // ticked from `serve_play`'s vitals timer.
+    effects: &mut crate::mob_effects::ActiveEffects,
     // Issue #337. This connection's block-drop roll source — seeded once in
     // `serve_play`, advanced by every break that rolls a table (see
     // `apply_block_action`'s parameter comment). A second stream rather than
@@ -6504,6 +6529,7 @@ where
                                 directed.effect,
                                 advancements,
                                 world,
+                                effects,
                             )
                             .await?;
                         } else if let Some(registry) = players {
@@ -6779,6 +6805,7 @@ where
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
     let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
     let mut experience = crate::experience::PlayerExperience::default();
+    let mut effects = crate::mob_effects::ActiveEffects::new();
     // Issue #337. This connection's block-drop roll stream — see
     // `block_drops::BLOCK_DROPS_BEHAVIOR_SEED` and `dispatch_play_packet`'s
     // parameter comment for why it is separate from the composter's.
@@ -6950,6 +6977,7 @@ where
                     &mut composter_rng,
                     &mut bone_meal_rng,
                     &mut experience,
+                    &mut effects,
                     &mut drops_rng,
                     client_channels,
                     plugin_channels,
@@ -7286,6 +7314,56 @@ where
                     }
                 }
 
+                // Status effects, ahead of hunger — vanilla ticks `activeEffects` in
+                // `LivingEntity.aiStep` before `ServerPlayer.tick` reaches
+                // `foodData.tick`, and the order matters for one arm: `hunger`
+                // charges exhaustion, so it must land before the exhaustion is spent
+                // rather than a tick late.
+                //
+                // `game_tick` is the entity tick count `ActiveEffects::tick` needs
+                // **only** for an infinite effect (vanilla's `target.tickCount`); a
+                // finite one counts against its own remaining duration.
+                if !effects.is_empty() {
+                    let out = effects.tick(
+                        i32::try_from(world.time().game_time.max(0)).unwrap_or(i32::MAX),
+                        vitals.health(),
+                        crate::vitals::MAX_HEALTH,
+                    );
+                    if out.exhaustion > 0.0 {
+                        vitals.add_exhaustion(out.exhaustion);
+                    }
+                    // Poison's `health > 1.0` guard is already applied inside the
+                    // registry, so this is an unconditional subtraction of an amount
+                    // that was only produced when the guard allowed it.
+                    let mut moved = false;
+                    if out.heal > 0.0 {
+                        vitals.heal(out.heal);
+                        moved = true;
+                    }
+                    if out.poison_damage > 0.0 {
+                        vitals.apply_effect_damage(out.poison_damage);
+                        moved = true;
+                    }
+                    if out.wither_damage > 0.0 {
+                        vitals.apply_effect_damage(out.wither_damage);
+                        moved = true;
+                    }
+                    if moved {
+                        publish_health(
+                            conn,
+                            &mut state,
+                            proto,
+                            &vitals,
+                            player_entity_id,
+                            &username,
+                            crate::vitals::DeathCause::Wither,
+                            &mut advancements,
+                            player_uuid,
+                        )
+                        .await?;
+                    }
+                }
+
                 // Hunger, after the air block — vanilla's own order
                 // (`LivingEntity.baseTick`'s water-breath block, then
                 // `ServerPlayer.tick`'s `foodData.tick`). Runs whether or not a
@@ -7463,6 +7541,7 @@ where
                             effect,
                             &mut advancements,
                             world,
+                            &mut effects,
                         )
                         .await?;
                     }
@@ -7653,6 +7732,7 @@ where
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
     let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
     let mut experience = crate::experience::PlayerExperience::default();
+    let mut effects = crate::mob_effects::ActiveEffects::new();
     // Issue #337 — see the native `serve_play`'s identical binding: the
     // block-drop roll stream has no timer and no wasm32 dependency either.
     let mut drops_rng = SpawnRng::new(crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED);
@@ -7719,6 +7799,7 @@ where
             &mut composter_rng,
             &mut bone_meal_rng,
             &mut experience,
+            &mut effects,
             &mut drops_rng,
             client_channels,
             plugin_channels,

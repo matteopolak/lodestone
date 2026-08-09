@@ -1343,6 +1343,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   Only the **General** tab (vanilla's 77 fixed stats — time, distance, damage,
   counters) is a real scrollable list; **Items** and **Mobs** are
   present-and-inactive.
+- [Status effects](./status-effects.md) — The general server-side status-effect
+  registry: duration countdown, amplifier stacking with vanilla's hidden-effect chain,
+  and the periodic poison / wither / regeneration / hunger ticks.
+  `crates/lodestone-server/src/mob_effects.rs` holds the rules; `/effect give` and
+  `/effect clear` write to it; `server.rs`'s vitals timer ticks it and applies the
+  result through `PlayerVitals`.
 - [Structure chests](./structure-chests.md) — The server-side pass that fills a
   generated structure's chests with rolled loot (issue #337): shipwrecks, ocean ruins
   and igloos place real blocks since the worldgen `structure` S2 unit, and every one

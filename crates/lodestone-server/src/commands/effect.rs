@@ -53,6 +53,25 @@ pub enum Effect {
     /// Send the player a system-chat line — the `gameMode.changed` notification
     /// a target receives when *someone else* changes their mode.
     Message(String),
+    /// Apply a status effect (`/effect give`) — issue #259's producer.
+    ///
+    /// `duration` is in **ticks**, already multiplied out from the command's seconds
+    /// argument, and [`crate::mob_effects::INFINITE_DURATION`] is vanilla's default
+    /// for the two-argument form. `amplifier` is zero-based: `0` is level I.
+    ApplyEffect {
+        /// A namespaced effect id, e.g. `minecraft:poison`.
+        effect: String,
+        duration: i32,
+        amplifier: u32,
+    },
+    /// Remove one status effect, or every one (`/effect clear`).
+    ///
+    /// `None` is the clear-everything form. A `Some` naming an effect the target does
+    /// not have is a no-op rather than an error, matching vanilla's own return of `0`
+    /// affected entities.
+    ClearEffects {
+        effect: Option<String>,
+    },
 }
 
 /// An [`Effect`] plus who it is for.
