@@ -169,8 +169,15 @@ Editing, and reading the tree:
 
 - **Never rewrite a shared file wholesale — edit the lines you mean.** No git command is involved, so no
   ban above catches it: a full new copy silently discards every concurrent edit. **Re-read a shared file
-  immediately before writing to it**, not at the start of your task. `sim.rs`, `app.rs`, `gpu.rs` and
-  `docs/README.md` are the usual victims.
+  immediately before writing to it**, not at the start of your task. `sim.rs`, `app.rs`, `gpu.rs`,
+  `server.rs` and `docs/README.md` are the usual victims. **It happens: an agent rewrote `server.rs`
+  wholesale and silently dropped another's `ticks_after_place` call**, with nothing red and no conflict.
+- **So protect your own edits with a marker check, not with vigilance.** The victim above caught it only
+  because it had a mechanical check that **grepped for a distinctive symbol from its own change and required
+  a non-zero count** — a count with a verdict depending on the count, exactly as for `git diff --cached`.
+  After landing work in a contended file, re-grep for one symbol per edit; zero matches where you expect one
+  is the *only* signal you will get, because a wholesale rewrite leaves a clean tree, a green build, and no
+  diff to read.
 - **A red test here may be someone else's *deliberate* neuter, and no diff can tell you** — a diff and a
   test run are **two observations at two different moments**. **Before reporting a red `main`, re-run at
   the committed sha in an isolated worktree.** When *you* neuter something, keep the window short and
@@ -393,6 +400,15 @@ Three corollaries, all paid for (§12.160):
   discriminating levels are 16 and 31. Before writing the assertion, evaluate the wrong hypothesis at your
   chosen input and **pick an input where the two answers differ** — otherwise you have measured that the
   code runs.
+
+  **And a whole fixture corpus can share one coincidence.** `join_view_rings` yields ring *offsets*
+  `(dx, dz)`, and the join loop passed them to the encoder as *absolute* coordinates — so every streamed
+  square was centred on chunk `(0, 0)`. It survived because **every existing join gate spawns the player at
+  chunk `(0, 0)`**, the single input where "offset" and "absolute" are the same number. No individual test was
+  badly written; the corpus had one blind spot and all of them inherited it. So ask the coincidence question of
+  **the fixture set**, not only of the input in front of you: if every gate in a subsystem shares a spawn
+  point, an origin, a seed or an identity value, that shared value is exactly where a whole class of bug lives
+  unobserved. (The same shape as the docs-index gate scanning three directories and not the fourth.)
 - **Do not predict the plausible round number.** Four gates in one unit failed on first run for this alone —
   "200 blocks" was really 241, "regeneration fills the bar" was 15.5, "regeneration repeats" happens once.
   Re-derive the arithmetic in a separate script rather than reaching for the figure that sounds right; a
