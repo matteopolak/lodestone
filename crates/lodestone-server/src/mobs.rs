@@ -68,6 +68,11 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use lodestone_data::{block_states, collision_shapes, entity_dimensions, entity_types, path_types};
+// `collide` and `CollisionView` are the item pass's swept resolve against the real
+// per-state shape census (see `ItemCollision`); `Vec3d` is the physics crate's own
+// vector, which `Vec3` (this crate's) is converted to at that seam rather than
+// through the whole module.
+use lodestone_physics::{CollisionView, EntityDimensions, Vec3d, collision::collide};
 use lodestone_entity::ai::roster::{self, SpeciesContext};
 use lodestone_entity::ai::navigating_mob::{
     BABY_START_AGE, DEFAULT_FOLLOW_RANGE, PARENT_AGE_AFTER_BREEDING,
@@ -394,8 +399,14 @@ impl ChunkWorld {
     /// The canonical block-state string at world coordinates, or
     /// `"minecraft:air"` for a missing column or an out-of-range Y — matching
     /// [`ChunkColumn::block_state`]'s own out-of-range behaviour.
+    ///
+    /// **`pub`, alongside [`is_solid`](Self::is_solid), because it is what
+    /// [`MobSim::tick_with_terrain`] now takes.** That oracle used to be a
+    /// solid/air bit and is a state name now, so an external caller supplying a
+    /// snapshot-backed one needs this. It is strictly more information than
+    /// `is_solid` already exposed, not a new disclosure.
     #[must_use]
-    pub(crate) fn block_state(&self, x: i32, y: i32, z: i32) -> &str {
+    pub fn block_state(&self, x: i32, y: i32, z: i32) -> &str {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
         self.columns
@@ -1723,6 +1734,9 @@ pub struct MobSim<'w> {
     item_state: HashMap<i32, ItemState>,
     next_id: i32,
     tick_count: u64,
+    /// Cells the last tick's item-settling pass asked [`ItemCollision`] for —
+    /// see [`items_settled_probe_count`](Self::items_settled_probe_count).
+    item_probe_count: u64,
     /// Every detonation [`tick`](Self::tick) has triggered since the last
     /// [`take_detonations`](Self::take_detonations) call (issue #425).
     /// `tick` itself has no wire access — it only knows `self.world` — so
@@ -1807,12 +1821,27 @@ impl<'w> MobSim<'w> {
             item_state: HashMap::new(),
             next_id: 1,
             tick_count: 0,
+            item_probe_count: 0,
             pending_detonations: Vec::new(),
             pending_grazes: Vec::new(),
             pending_vocalisations: Vec::new(),
             players: Vec::new(),
             mob_drops: true,
         }
+    }
+
+    /// How many cells the **last** tick's item-settling pass asked the collision
+    /// oracle about.
+    ///
+    /// This is the cost of routing items through swept collision, in the one unit
+    /// that survives being read on a machine with four other builds running. It
+    /// scales with item count and with how fast each item is moving (a faster item
+    /// sweeps a longer box), so it is also the number that says whether a floor
+    /// covered in drops can eat a tick — the question a per-item measurement
+    /// structurally cannot answer.
+    #[must_use]
+    pub fn items_settled_probe_count(&self) -> u64 {
+        self.item_probe_count
     }
 
     /// Replaces the set of players mob perception can see, for
@@ -2071,17 +2100,23 @@ impl<'w> MobSim<'w> {
     /// whose fixture world *is* the whole world they care about.
     pub fn tick(&mut self) {
         let world = self.world;
-        self.tick_with_terrain(&|x, y, z| world.is_solid(x, y, z));
+        self.tick_with_terrain(&|x, y, z| world.block_state(x, y, z).to_owned());
     }
 
     /// One tick, settling dropped items against a caller-supplied solidity
     /// oracle — the live world, when the caller has one.
     ///
-    /// Only the item-settling pass consults `is_solid`; everything else still
+    /// Only the item-settling pass consults `block_state`; everything else still
     /// reads the snapshot, because mob pathfinding genuinely wants a view that
     /// does not change underneath a search in progress. Items are the opposite
     /// case: an item has to land on the block that is there *this* tick.
-    pub fn tick_with_terrain(&mut self, is_solid: &dyn Fn(i32, i32, i32) -> bool) {
+    ///
+    /// **The oracle is a block-state *name*, not a solid/air boolean.** It used to be
+    /// the latter, and one bit per cell cannot express the shape an item actually
+    /// rests on: a bottom slab, soul sand and a patch of grass all answered "solid"
+    /// and all settled the item at the top of the cell. See [`ItemCollision`] for the
+    /// measured table and [`settle_item`] for the sweep that consumes it.
+    pub fn tick_with_terrain(&mut self, block_state: &dyn Fn(i32, i32, i32) -> String) {
         // Issue #441 (plan unit A2): feed every mob's perception inputs before
         // its goals run. Without this pass `NavigatingMob` reports the trait
         // defaults for `nearest_player`/`temptation`/`avoid_threat`/
@@ -2354,13 +2389,26 @@ impl<'w> MobSim<'w> {
         // which is why #533's two halves are one fix.
         let world = self.world;
         let mut fell_out_of_the_world: Vec<i32> = Vec::new();
+        let view = ItemCollision {
+            block_state,
+            probe_count: std::cell::Cell::new(0),
+        };
         for (&id, state) in &mut self.item_state {
+            let before = state.motion.position;
             state.motion.tick();
-            settle_item(is_solid, &mut state.motion);
+            settle_item(&view, &mut state.motion, before);
             if state.motion.position.y < f64::from(world.min_y) - VOID_DESPAWN_DEPTH {
                 fell_out_of_the_world.push(id);
             }
         }
+        // **The cost of the sweep, as a counter rather than a duration.** Swept
+        // collision against real shapes is strictly more work per item than one
+        // boolean lookup was, and the number of items in one tick is unbounded — so
+        // the thing worth measuring is not per-item cost but how much of one tick a
+        // floor covered in drops can consume. A counter is what a gate can assert
+        // and what survives being read on a loaded machine; see
+        // `items_settled_probe_count`.
+        self.item_probe_count = view.probe_count.get();
         // `Entity.checkBelowWorld`'s discard, and not merely tidiness: an item
         // that escapes the world (a column the snapshot does not cover, so
         // `is_solid` is false everywhere) would otherwise keep being ticked and
@@ -3765,16 +3813,88 @@ impl<'w> MobSim<'w> {
 /// `this.getY() < (double)(this.level().getMinY() - 64)`).
 const VOID_DESPAWN_DEPTH: f64 = 64.0;
 
-/// The vertical epsilon used to ask "is the cell directly beneath this item's
-/// bottom face solid".
+/// The dropped item's hitbox — vanilla `ItemEntity`'s `EntityType.ITEM`
+/// dimensions, `0.25 × 0.25`, with **no** auto-step.
 ///
-/// A resting item's bottom face sits *exactly* on a block boundary, so
-/// `position.y.floor()` is the cell **above** the supporting block and testing it
-/// would always answer air. Subtracting a small epsilon first is what makes the
-/// support test look at the block the item is standing on. It has to be smaller
-/// than any real movement and larger than f64 noise; vanilla's own equivalent is
-/// the `1.0E-7` deflation in `ItemEntity.tick`'s `noCollision` check.
-const ITEM_SUPPORT_EPSILON: f64 = 1.0e-7;
+/// `step_height` is `0.0` rather than the `0.6` an ordinary mob resolves from its
+/// `STEP_HEIGHT` attribute: `ItemEntity` never overrides `maxUpStep()`, and
+/// `Entity`'s base returns `0.0`. Getting this wrong would let a dropped item climb
+/// a slab it slid into, which is the sort of thing that looks like a physics
+/// improvement in a screenshot.
+const ITEM_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.25, 0.25, 0.0);
+
+/// A [`CollisionView`] over a caller-supplied block-state oracle, serving the real
+/// per-block-state collision shapes.
+///
+/// # Why this exists rather than a `Fn(i32, i32, i32) -> bool`
+///
+/// The item pass used to take exactly that: one boolean per cell, `!is_air_or_fluid`,
+/// with an item resolved as a **point** and its rest height hardcoded to `by + 1`.
+/// Read out of `lodestone_data`'s generated shape table rather than predicted, that
+/// is wrong for most of the blocks a player actually drops things onto:
+///
+/// | block state | true collision top | the boolean's answer |
+/// |---|---|---|
+/// | `short_grass`, `tall_grass`, `snow[layers=1]` | **0.0** — no collision at all | solid, so the item rests a full block *above* the ground |
+/// | `oak_slab[type=bottom]` | 0.5 | 1.0 |
+/// | `enchanting_table` | 0.75 | 1.0 |
+/// | `soul_sand`, `mud`, `chest` | 0.875 | 1.0 |
+/// | `dirt_path` | 0.9375 | 1.0 |
+/// | `oak_fence` | **1.5** — uncapped | 1.0, i.e. *too low* |
+///
+/// The grass row is the one with the visible symptom, and it is the common case:
+/// almost any grassy surface has a plant on it, so almost every dropped item floated.
+/// The fence row is worth keeping because it fails in the opposite direction, so a
+/// gate that only ever checked "not too high" would miss it.
+///
+/// # Cost, stated because it is strictly more work per item
+///
+/// The boolean was one map lookup per cell. This is a `String` from the oracle, a
+/// name→id lookup, and an O(1) rodata index — then `collide` sweeps the cells the
+/// item's expanded box spans rather than probing one column. `probe_count` is
+/// incremented per cell so the cost is a **counter** a gate can assert on rather
+/// than a duration, and `items_settled_probe_count` exposes it.
+struct ItemCollision<'a> {
+    block_state: &'a dyn Fn(i32, i32, i32) -> String,
+    probe_count: std::cell::Cell<u64>,
+}
+
+impl CollisionView for ItemCollision<'_> {
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<lodestone_physics::Aabb>) {
+        self.probe_count.set(self.probe_count.get() + 1);
+        let name = (self.block_state)(x, y, z);
+        // **`block_state_id` then `block_states::state_id`, and emphatically NOT
+        // `block_state_id_or_default`.** That helper resolves a bare name to the
+        // block's *lowest* state id, and its own doc comment says in as many words
+        // that it "is not a substitute for `block_state_id` where the properties
+        // matter (collision shapes, path types)". It was used here for one iteration
+        // and a bare `minecraft:oak_slab` resolved to a full cube — the lowest id is
+        // not `type=bottom` — so the item rested at the top of the cell and the fix
+        // reproduced the very bug it removes. `block_states::state_id` consults
+        // `span.default`, which is vanilla's real `defaultBlockState()`.
+        //
+        // The exact-string map is tried first because it is O(1) and because a
+        // `ChunkSource` normally hands back a full canonical state; `state_id` scans
+        // the block's own span, which is short but not free.
+        let Some(id) = block_state_id(&name).or_else(|| block_states::state_id(&name)) else {
+            return;
+        };
+        let Some(shape) = collision_shapes::collision_boxes(id) else {
+            return;
+        };
+        let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
+        for b in shape {
+            out.push(lodestone_physics::Aabb::new(
+                bx + f64::from(b.min[0]),
+                by + f64::from(b.min[1]),
+                bz + f64::from(b.min[2]),
+                bx + f64::from(b.max[0]),
+                by + f64::from(b.max[1]),
+                bz + f64::from(b.max[2]),
+            ));
+        }
+    }
+}
 
 /// Resolves one item's collision with the terrain after [`ItemMotion::tick`] has
 /// already moved it, and records whether it is resting (issue #533).
@@ -3821,25 +3941,55 @@ const ITEM_SUPPORT_EPSILON: f64 = 1.0e-7;
 /// loop is the one place that holds the live `ChunkSource`, so it supplies the
 /// answer and the sim asks — see [`MobSim::tick_with_terrain`]. `tick` keeps the
 /// snapshot as its oracle so hermetic callers are unchanged.
-fn settle_item(is_solid: &dyn Fn(i32, i32, i32) -> bool, motion: &mut ItemMotion) {
-    let bx = motion.position.x.floor() as i32;
-    let bz = motion.position.z.floor() as i32;
+fn settle_item(view: &dyn CollisionView, motion: &mut ItemMotion, before: Vec3) {
+    // The movement `ItemMotion::tick` just applied by translating outright. It is
+    // recovered rather than recomputed so this cannot drift from that function's own
+    // arithmetic (gravity, then translate, then drag, then the landing bounce) —
+    // which lives in `lodestone-entity` and is unchanged by this.
+    let attempted = Vec3d::new(
+        motion.position.x - before.x,
+        motion.position.y - before.y,
+        motion.position.z - before.z,
+    );
 
-    // Sunk into a solid cell this tick: lift the bottom face onto its top.
-    let by = motion.position.y.floor() as i32;
-    if is_solid(bx, by, bz) {
-        motion.position.y = f64::from(by + 1);
-        if motion.velocity.y < 0.0 {
-            // `Entity.move`'s collision resolution zeroes the delta component it
-            // could not apply. Note this is also why the `-0.5` bounce in
-            // `ItemMotion::tick` does not fire for a landed item in vanilla
-            // either: by the time that branch runs, `y` is already `0.0`.
-            motion.velocity.y = 0.0;
-        }
+    // **The ordering is deliberately identical to what it replaced**: gravity and
+    // drag still happen inside `ItemMotion::tick`, before the collision, and this
+    // still runs after. Vanilla's `ItemEntity.tick` collides *between* them, so its
+    // friction reads the post-move `onGround`. Matching that is a separate change to
+    // a crate outside this one; keeping the order fixed here means the only thing
+    // this commit alters is the **geometry**, which is what makes the existing
+    // settling gates still meaningful rather than merely still green.
+    let bb = ITEM_DIMENSIONS.bounding_box(Vec3d::new(before.x, before.y, before.z));
+    let resolved = collide(view, attempted, bb, motion.on_ground, ITEM_DIMENSIONS.step_height);
+
+    motion.position = Vec3::new(
+        before.x + resolved.x,
+        before.y + resolved.y,
+        before.z + resolved.z,
+    );
+
+    // `Entity.move`'s `restituteMovementAfterCollisions`: zero each component the
+    // sweep could not fully apply. Horizontal is included now — the old point test
+    // could not see a wall at all, and its doc comment argued that was safe because
+    // an item's horizontal velocity decays before it can cross one. That argument
+    // holds for *slow* items and not for a thrown one, and it is free to get right
+    // here because `collide` resolves all three axes in one call.
+    if (resolved.x - attempted.x).abs() > f64::EPSILON {
+        motion.velocity.x = 0.0;
+    }
+    if (resolved.z - attempted.z).abs() > f64::EPSILON {
+        motion.velocity.z = 0.0;
+    }
+    if (resolved.y - attempted.y).abs() > f64::EPSILON {
+        motion.velocity.y = 0.0;
     }
 
-    let supporting_y = (motion.position.y - ITEM_SUPPORT_EPSILON).floor() as i32;
-    motion.on_ground = is_solid(bx, supporting_y, bz);
+    // Vanilla's own rule (`Entity.setOnGroundWithMovement`): grounded when the sweep
+    // ate downward movement. This replaces a point probe one epsilon below the
+    // bottom face, which is why `ITEM_SUPPORT_EPSILON` is gone: there is no longer a
+    // boundary-straddling floor() to defend against, and an item resting on a slab
+    // has no block boundary under its feet to probe in the first place.
+    motion.on_ground = attempted.y < 0.0 && (resolved.y - attempted.y).abs() > f64::EPSILON;
 }
 
 /// Horizontal reach of `mergeWithNeighbours`' search: the item's own half-width

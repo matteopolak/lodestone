@@ -61,7 +61,9 @@ The item's *identity* belongs in metadata (`ItemEntity.DATA_ITEM`), not in this 
    `setDefaultPickUpDelay()`.
 
 From there the existing machinery takes over with no new task: `tick::run_tick_loop` already ticks `MobSim`
-every 50 ms (advancing lifecycle and `ItemMotion` fall dynamics), and `MobSim::snapshots` already feeds the
+every 50 ms (advancing lifecycle and `ItemMotion` fall dynamics — where the drop actually comes to rest is
+[`item-physics.md`](item-physics.md), and it is a swept collision against real per-state shapes rather than
+the solid/air boolean it began as), and `MobSim::snapshots` already feeds the
 per-connection `EntityStreamer` diff, which is the "broadcast path" — a *pull*, so a new item is picked up by
 every connection's next streaming pass with nothing pushed. (#438's claim that there is no broadcast path and
 no player registry is **stale**: `players.rs` landed both.)

@@ -1060,9 +1060,24 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         next_tick_at = adjusted_next;
         last_overload_warning_at = adjusted_warning;
         if let Some(event) = overload {
+            // The item-settling pass's own cost rides along, because it is the one
+            // thing in this loop whose work scales with something a *player* controls
+            // and it is otherwise invisible here: `MobSim` settles every dropped item
+            // through swept collision against real per-block-state shapes, so a floor
+            // covered in drops does strictly more work per tick than the one boolean
+            // lookup this used to be. Measured at 36 cell probes per item per tick, so
+            // a four-figure number here means items are a real share of the overrun
+            // and a five-figure one means they are most of it.
+            //
+            // Read from the *previous* tick (this runs before the body), which is
+            // exactly the tick that ran long. `serve_play`'s own `LoopStallWatch` does
+            // not cover this — that watches the connection task's `select!` arms, and
+            // this is a different task entirely.
+            let item_probes = mobs.with(|sim| sim.items_settled_probe_count());
             tracing::warn!(
                 ticks_behind = event.ticks_behind,
                 behind_ms = event.behind_ms,
+                item_settle_probes = item_probes,
                 "Can't keep up! Is the server overloaded? Running {}ms or {} ticks behind",
                 event.behind_ms,
                 event.ticks_behind,
@@ -1104,9 +1119,14 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         {
             let world = Arc::clone(&world);
             mobs.with(|sim| {
-                sim.tick_with_terrain(&|x, y, z| {
-                    !crate::chunk::is_air_or_fluid(&world.block_state(x, y, z))
-                });
+                // The **block-state name**, not a solid/air bit. One bit per cell
+                // cannot express the shape an item comes to rest on: a bottom slab,
+                // soul sand and a patch of short grass all answered "solid" and all
+                // settled the item at the top of the cell, so an item on any grassy
+                // surface floated a full block above the ground. `MobSim` resolves
+                // the name against the real 26.2 shape census — see
+                // `mobs::ItemCollision`.
+                sim.tick_with_terrain(&|x, y, z| world.block_state(x, y, z));
             });
         }
         // Issue #328's first real enforcement: **Peaceful removes monsters.**
