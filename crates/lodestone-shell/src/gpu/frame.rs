@@ -33,7 +33,7 @@
 //! See [`super::first_person`] and `docs/screen-overlays.md`.
 use lodestone_render::{
     Camera, CameraUniform, CullVerdict, TerrainCull, crack_pipeline::GpuCrackMesh,
-    spinning_effect_angle_degrees, update_model_shared_camera_buffer, vertex::vram_bytes,
+    spinning_effect_angle_degrees, update_model_shared_camera_buffer,
 };
 
 use crate::entities::EntityDraw;
@@ -1149,7 +1149,14 @@ impl RenderState {
 
         queue.submit(std::iter::once(encoder.finish()));
 
-        stats.vram_bytes = vram_bytes(stats.total_quads);
+        // Residency, measured — **not** `vram_bytes(stats.total_quads)`, which is
+        // what this was. `total_quads` only accumulates over sections that
+        // survived the cull, so that form reported a VRAM figure that moved every
+        // time the camera turned on the spot, and it priced live-vanilla quads at
+        // the packed path's 72 B instead of a `ModelVertex` quad's 152 B. See
+        // `RenderState::resident_mesh_bytes`.
+        stats.vram_bytes = self.resident_mesh_bytes();
+        stats.vram_reserved_bytes = self.reserved_mesh_bytes();
         stats
     }
 }
