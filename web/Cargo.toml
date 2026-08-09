@@ -54,6 +54,17 @@ web-sys = { version = "0.3", features = [
 console_error_panic_hook = "0.1"
 log = "0.4"
 console_log = "1"
+# **`tracing` with its `log` feature, and this edge is load-bearing for diagnosis.**
+# The shell logs through `tracing`, but `console_log` only bridges the `log` crate — so
+# without this, every `tracing::info!`/`warn!`/`error!` in the entire game goes nowhere
+# in a browser. Measured: the first successful title screen produced a console with four
+# `[boot]` lines and *nothing else*, while the shell was internally reporting audio
+# disabled, the mesher's budget and any asset that failed to resolve. Enabling `log`
+# makes `tracing` emit a `log` record for every event, which `console_log` prints.
+#
+# Only affects the browser build: `web/` is its own workspace, so this feature does not
+# unify into the native graph.
+tracing = { version = "0.1", features = ["log"] }
 
 # **Not used by any code here — this edge exists only to turn a feature on.**
 # `getrandom` 0.2 has a hard `compile_error!` on `wasm*-unknown-unknown` unless

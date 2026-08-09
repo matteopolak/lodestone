@@ -69,6 +69,21 @@ fn status(text: &str) {
     log::info!("[boot] {text}");
 }
 
+/// Removes the boot overlay, if it is still in the page.
+///
+/// Called just before the shell starts rather than after, because `app::run` returns
+/// immediately in a browser (winit's `spawn_app` hands the loop to the page), so
+/// "after" and "before" are the same instant — and the shell's first frame is what
+/// should be visible next.
+fn remove_boot_overlay() {
+    if let Some(el) = window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("boot"))
+    {
+        el.remove();
+    }
+}
+
 /// Fetches a URL into bytes.
 ///
 /// The only asynchronous step in the whole asset path — everything downstream is the
@@ -144,6 +159,10 @@ async fn boot() {
     config.resolve_persisted(&lodestone::config::Options::load());
 
     status("starting the shell …");
+    // Drop the boot overlay before the shell draws. It is a plain DOM element sitting
+    // *over* the canvas, so leaving it up would print "starting the shell…" across the
+    // title screen's first button — which is what the first successful run did.
+    remove_boot_overlay();
     // Returns immediately: winit's `spawn_app` has handed the loop to the browser.
     // Nothing may go after this that assumes the session has ended.
     if let Err(e) = lodestone::app::run(config) {

@@ -231,7 +231,19 @@ impl Particles {
             None => (Vec::new(), Vec::new()),
         };
         Self {
-            engine: ParticleEngine::new(),
+            // `seeded` from `crate::platform::epoch_duration`, NOT `ParticleEngine::new()`.
+            //
+            // `new()` seeds itself with `JavaRandom::from_entropy()`, which calls
+            // `SystemTime::now()` — and that **traps** on wasm32. This was the first
+            // thing to kill the browser tab once the shell actually booted: the console
+            // read "assets ready … starting the shell …" and then `time not implemented
+            // on this platform`, from three crates down. `cargo check --target
+            // wasm32-unknown-unknown` was exit 0 the whole time.
+            //
+            // Seeding from the caller keeps `lodestone-particle` clock-free and
+            // dependency-free rather than giving a leaf crate a portable-time
+            // dependency — the same shape `sim::build` already uses for the audio seed.
+            engine: ParticleEngine::seeded(crate::platform::epoch_duration().as_nanos() as i64),
             state_uv: Arc::new(state_uv),
             state_tint: Arc::new(state_tint),
             sheet_uv: Arc::new(HashMap::new()),
@@ -285,7 +297,19 @@ impl Particles {
             state_uv.push(uv);
         }
         Self {
-            engine: ParticleEngine::new(),
+            // `seeded` from `crate::platform::epoch_duration`, NOT `ParticleEngine::new()`.
+            //
+            // `new()` seeds itself with `JavaRandom::from_entropy()`, which calls
+            // `SystemTime::now()` — and that **traps** on wasm32. This was the first
+            // thing to kill the browser tab once the shell actually booted: the console
+            // read "assets ready … starting the shell …" and then `time not implemented
+            // on this platform`, from three crates down. `cargo check --target
+            // wasm32-unknown-unknown` was exit 0 the whole time.
+            //
+            // Seeding from the caller keeps `lodestone-particle` clock-free and
+            // dependency-free rather than giving a leaf crate a portable-time
+            // dependency — the same shape `sim::build` already uses for the audio seed.
+            engine: ParticleEngine::seeded(crate::platform::epoch_duration().as_nanos() as i64),
             state_uv: Arc::new(state_uv),
             // The demo palette has no colormaps and no tinted blocks, so every
             // demo id is genuinely untinted — an empty table, which
