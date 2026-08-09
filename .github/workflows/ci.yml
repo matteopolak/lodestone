@@ -2,6 +2,13 @@
 # intentionally NOT run here (the 219 `#[ignore]`d live/GPU/jar-dependent
 # tests), and how to reproduce any of these jobs locally.
 #
+# Six jobs, eight legs: `check-default` is a 3-OS matrix (Linux / macOS /
+# Windows) and every other job is Linux-only on purpose — see that job's comment
+# for which axis each one varies and why re-running it per OS would measure the
+# same thing three times. GitHub bills macOS runner minutes at 10x and Windows at
+# 2x the Linux rate, so "which platform catches what" is a real design question
+# here and not a formality; docs/ci.md carries the arithmetic.
+#
 # Five of the six jobs below call the `just` recipes that are exactly
 # CLAUDE.md's "Build and test" health checks, one per job so a failure names
 # itself instead of hiding behind three green jobs and one red one:
@@ -84,25 +91,80 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The one job that runs on all three desktop platforms. `just check` is the
+  # per-platform check because what actually differs between macOS, Linux and
+  # Windows is `#[cfg]`-selected code, path handling and platform crates — not
+  # business logic, which the Linux-only jobs below already cover once.
+  #
+  # Everything else here is deliberately Linux-only, and each for a reason rather
+  # than to save money: `check-all` varies *features*, `check-seam` varies the
+  # *version seam*, `xtask-structural-checks` reads the *dependency graph*, and
+  # `wasm` targets wasm32 from any host. None of those axes is the OS, so running
+  # them three times measures the same thing three times. See docs/ci.md for the
+  # runner-cost multipliers that make that distinction worth drawing.
+  #
+  # KNOWN GAP, stated rather than discovered later: `cargo check` NEVER LINKS, so
+  # this job cannot see an unresolved symbol. That is not hypothetical — the
+  # Darwin-only `proc_pid_rusage` FFI in five test/bench targets passed every
+  # `check` job on Linux for this workflow's whole life and failed the `test` job
+  # at `rust-lld: error: undefined symbol: proc_pid_rusage`. On Linux the `test`
+  # job links and so closes that gap; on macOS and Windows nothing here links.
+  # docs/ci.md's "What the matrix does not cover" says what would close it and
+  # what it would cost.
   check-default:
-    name: "check: just check"
-    runs-on: ubuntu-latest
+    name: "check: just check (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Load-bearing. With the default `fail-fast: true`, the first leg to go red
+      # CANCELS the other two, so a Windows-only break would hide whether macOS
+      # was fine and you would learn one thing per run instead of three. A
+      # cancelled leg also reports as neither pass nor fail, which is the
+      # "green job that ran nothing" shape this file tries to avoid.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      # Linux only. macOS reaches CoreAudio and Windows reaches WASAPI through
+      # frameworks that ship with the SDK, so `cpal`/`alsa-sys` needs no dev
+      # package there; `alsa-sys` is Linux-gated in cpal's own manifest and is
+      # not in the dependency graph on the other two legs at all.
       - name: Install system audio dev headers (alsa-sys build dependency)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: check-default
+          # Per-OS key: the three legs build materially different `target/`s and
+          # would otherwise thrash one cache entry between them.
+          shared-key: check-default-${{ matrix.os }}
       - uses: mozilla-actions/sccache-action@v0.0.11
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
         with:
           just-version: "1.58.0"
-      - run: just check
+      # Print the compiler that will actually be used, and fail if there is none.
+      # This is not decoration: the `toolchain:` input above is INERT — cargo
+      # resolves `rust-toolchain.toml` (a pinned nightly) over any rustup default,
+      # and rustup says so itself in the log ("the toolchain
+      # 'nightly-2026-08-07-…' is currently in use (overridden by
+      # …/rust-toolchain.toml)"). A job that names one compiler and silently runs
+      # another should at least print which one won. See docs/ci.md.
+      - name: Report the toolchain actually in use
+        shell: bash
+        run: |
+          set -eu
+          rustc --version
+          cargo --version
+      # `shell: bash` on all three legs so the command is literally identical
+      # everywhere. Only Windows is affected (bash is already the default on the
+      # other two), where the default would be pwsh; `just` itself shells out to
+      # `sh`, which Git for Windows provides on the runner's PATH.
+      - name: just check
+        shell: bash
+        run: just check
 
   check-all-features:
     name: "check: just check-all (allocbench excluded)"
