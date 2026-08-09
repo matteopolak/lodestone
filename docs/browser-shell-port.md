@@ -14,6 +14,26 @@ best writeup in the repo on why "compiles for wasm" and "works on wasm" are
 different questions. This document corrects two claims in it (see
 [What the record got wrong](#what-the-record-got-wrong)).
 
+## Status
+
+**The browser reaches the real title screen.** `web/` fetches `client.jar` (37.4 MiB)
+and `blocks.json` (6.5 MiB), installs them through `platform::assets`, starts
+`lodestone-shell`, and draws the actual menu — Singleplayer / Multiplayer / Minecraft
+Realms / Options / Quit Game, the Accounts button, and
+`Minecraft 26.2 (Lodestone 0.1.0)` — in the real vanilla font out of the fetched jar.
+Verified by loading the page: a screenshot, plus a console with no errors after startup.
+Real glyphs rather than the fixed-width stand-in is itself the evidence that collapsing
+the four duplicate jar lookups into `resources::vanilla_manager` was necessary and not
+tidiness.
+
+`web/` is now a thin launcher: the spike application — its own `main`, camera, HUD,
+chunk fixture and trimmed pack, ~1,200 lines — is deleted.
+
+Not yet reached: **a world**. That is the next milestone and it is what proves the rest.
+
+**`just wasm-size` fails, deliberately unaddressed.** See
+[Bundle size](#bundle-size) — the ceiling has not been moved.
+
 ## Where the port started
 
 `web/` was, by its own README, "an isolated feasibility spike": its own Cargo
@@ -308,11 +328,48 @@ where noted.
    canvas rather than creating a window. `main.rs` needs a `fn main() {}` on wasm.
 6. **`web/` consuming the shell**: add the `lodestone-shell` dependency, `fetch` the
    asset bundle, `platform::assets::install`, then start the app.
-7. **Bundle size.** Not yet measured with the shell linked in. The baseline is
-   **882,220 B** gzip against a 1,600,000 B ceiling, and the wgpu stack alone is
-   ~1.19 MiB raw. Adding the shell will move this substantially. **Do not silently
-   raise the ceiling** — measure, report the number, and attribute it with
-   `twiggy top` built once with `strip = false`.
+7. **Bundle size — measured, and over.** See [Bundle size](#bundle-size).
+
+## Bundle size
+
+Measured with the whole shell linked in, and **the ceiling has not been moved**:
+
+| | bytes | |
+|---|---|---|
+| raw | 10,476,414 | |
+| **gzip** | **3,766,970** | **enforced; ceiling 1,600,000 → FAIL at 2.35×** |
+| brotli | 3,222,830 | real wire cost |
+| *baseline before the shell* | *882,220 gzip* | *so the shell added +2,884,750 B gzip* |
+
+Attribution, from `twiggy top` on a build made once with
+`CARGO_PROFILE_RELEASE_STRIP=false`:
+
+**`.rodata` is 8,004,211 B — 61.4% of the unstripped binary and ~76% of the 10.47 MB
+shipped one.** It is not code, and it is *not* `include_str!` — lib-only `include_`
+sites total 1.2 MB raw, and the multi-megabyte ones that show up in a naive grep are
+all `tests/support/**` JVM oracle fixtures that never link into `lodestone-web`. It is
+**generated static tables**:
+
+| source | size |
+|---|---|
+| `lodestone-data/src/generated/` (whole directory) | ~4.9 MB of Rust |
+| — `block_states.rs` | 1,426,724 B |
+| — `path_types.rs` | 713,210 B |
+| — `outline_shapes.rs` | 428,382 B |
+| — `block_entity_types.rs` | 305,194 B |
+| — `item_prototypes.rs` | 256,749 B |
+| `lodestone-physics/src/sin_table.rs` | 819,881 B |
+| `lodestone-canonical/src/generated/flattening.rs` | 369,419 B |
+
+So the browser bundle is roughly **three quarters jar-derived game data compiled into
+the binary**. The next unit is to move those corpora behind the fetch seam
+`client.jar` already uses — `platform::assets` exists precisely for "this data is not
+code, acquire it at runtime" — not to raise a number. Note what that implies for
+*native* too: the same tables are in the desktop binary, where nobody has had a reason
+to notice.
+
+Do not reach for `opt-level` or `lto` first. They act on code, and code is the quarter
+that is not the problem.
 
 ## Gotchas
 
@@ -334,6 +391,14 @@ where noted.
   the portable wrapper will fail on the host while all three `check` recipes stay
   green. Prefer referring to `crate::platform` in examples — if callers should not
   name the backend, neither should the docs.
+* **A confinement guard only covers the crate it names, and the browser reaches
+  about fifteen.** This cost the last hour of the port. `cargo check --target
+  wasm32-unknown-unknown` was exit 0, all three `lodestone-shell` rules PASSed, and the
+  tab still died on `time not implemented on this platform` — from three crates down:
+  `Sim::build` → `Particles::new` → `ParticleEngine::new()` →
+  `JavaRandom::from_entropy()` → `SystemTime::now()`. `lodestone-particle` is not even in
+  `wasm-check.sh`'s crate list. **Every crate in that list wants the clock rules, and the
+  ones not in the list want to be.** Until then: run the page.
 * **A green `wasm-check` does not prove the browser runs.** It is a compile pass
   plus greps. The only evidence that counts is the page reaching the title screen
   and then a world.
