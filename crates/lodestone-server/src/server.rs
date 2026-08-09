@@ -3654,6 +3654,32 @@ where
 /// per entity seen: a pickup that only partly fitted credits what fitted, and one
 /// that fitted nothing credits nothing — the same `written`/`leftover` split the
 /// slot updates already key off.
+/// One item entity a player just took, for [`ServerProtocol::encode_take_item_entity`].
+#[derive(Debug, Clone, Copy)]
+struct TakenItem {
+    item_entity_id: i32,
+    /// The entity's stack count **before** the inventory took any of it — vanilla's
+    /// `orgCount`. Not the amount banked; see the encoder's own doc.
+    amount: i32,
+}
+
+/// What one pickup pass produced: the inventory slots to resend, and the takes to
+/// announce.
+///
+/// **The takes are returned rather than sent here because the ordering matters more
+/// than the plumbing.** The client keeps the item entity alive to interpolate it and
+/// removes it once the animation finishes, so `TAKE_ITEM_ENTITY` has to reach the wire
+/// *before* the `REMOVE_ENTITIES` that `stream_pass` derives from this same removal.
+/// Returning them puts that ordering in the caller, where `stream_pass` is visible;
+/// sending from inside `mobs.with` would also mean awaiting under the sim lock.
+#[derive(Debug, Default)]
+struct Pickups {
+    /// Native inventory slot indices whose contents changed.
+    changed: Vec<usize>,
+    /// Items taken this pass, in pickup order.
+    takes: Vec<TakenItem>,
+}
+
 fn collect_nearby_items(
     mobs: &MobHandle,
     inventory: &mut PlayerInventory,
@@ -3668,8 +3694,9 @@ fn collect_nearby_items(
     // wasm-safe, and means "ms of world time", which is a more useful stamp for a
     // save file than wall clock anyway.
     obtained_millis: i64,
-) -> Vec<usize> {
+) -> Pickups {
     let mut changed: Vec<usize> = Vec::new();
+    let mut takes: Vec<TakenItem> = Vec::new();
     mobs.with(|sim| {
         for (id, item, count) in sim.items_within_pickup_range(player_feet) {
             let stack = ItemStack::new(item, u32::from(count));
@@ -3718,6 +3745,22 @@ fn collect_nearby_items(
                 // *having* the item, not by how many.
                 advancements.on_inventory_changed(player_uuid, &item_id, obtained_millis);
             }
+            // The pickup *animation* cue. Gated on `banked > 0` because that is
+            // vanilla's own guard: `playerTouch` only calls `player.take` when
+            // `getInventory().add(itemStack)` returned true, i.e. when something
+            // actually went in. A pickup into a full inventory shows nothing, which
+            // is right — nothing was taken.
+            //
+            // `offered`, not `banked`: vanilla passes `orgCount`, captured *before*
+            // `add` shrinks the stack in place. The two differ exactly when the
+            // pickup is partial, and `orgCount` is what drives the client's sound
+            // pitch. See `ServerProtocol::encode_take_item_entity`.
+            if banked > 0 {
+                takes.push(TakenItem {
+                    item_entity_id: id,
+                    amount: i32::try_from(offered).unwrap_or(i32::MAX),
+                });
+            }
             for slot in written {
                 if !changed.contains(&slot) {
                     changed.push(slot);
@@ -3725,7 +3768,7 @@ fn collect_nearby_items(
             }
         }
     });
-    changed
+    Pickups { changed, takes }
 }
 
 /// Vanilla's `Direction.fromYRot` (`Direction.java:291-293`) restricted to the
@@ -7740,14 +7783,36 @@ where
                 // pass — so the item vanishes from the world and appears in the
                 // hotbar together rather than a packet apart.
                 if let Some((x, y, z)) = player_pos {
-                    for native in collect_nearby_items(
+                    let pickups = collect_nearby_items(
                         mobs,
                         &mut inventory,
                         Vec3::new(x, y, z),
                         &mut advancements,
                         player_uuid,
                         world.time().game_time.saturating_mul(50),
-                    ) {
+                    );
+                    // **The pickup animation, and it must go out before the
+                    // `stream_pass` below.** That pass derives `REMOVE_ENTITIES`
+                    // from the removal `collect_nearby_items` just performed, and
+                    // the client keeps the item entity alive precisely so it can
+                    // interpolate it toward the collector — it removes the entity
+                    // itself when the animation completes. Announce the take after
+                    // the removal has been broadcast and the client has nothing
+                    // left to animate, so the packet is present, correct, and
+                    // invisible.
+                    for take in &pickups.takes {
+                        apply(
+                            conn,
+                            &mut state,
+                            proto.encode_take_item_entity(
+                                take.item_entity_id,
+                                player_entity_id,
+                                take.amount,
+                            ),
+                        )
+                        .await?;
+                    }
+                    for native in pickups.changed {
                         // Window `0`, menu slot for this native index. `state_id`
                         // `0` matches every other server-initiated slot write in
                         // this file (`apply_container_clicked` applies a click's
@@ -8681,14 +8746,30 @@ where
         // packet-driven with no timer, so unlike `vitals`/`sync_open_container`
         // this target loses nothing. See the native loop's comment.
         if let Some((x, y, z)) = player_pos {
-            for native in collect_nearby_items(
+            let pickups = collect_nearby_items(
                 mobs,
                 &mut inventory,
                 Vec3::new(x, y, z),
                 &mut advancements,
                 player_uuid,
                 world.time().game_time.saturating_mul(50),
-            ) {
+            );
+            // Before the slot writes and before `stream_pass`, for the reason the
+            // native loop's own comment gives: the client needs the item entity to
+            // still exist in order to animate it.
+            for take in &pickups.takes {
+                apply(
+                    conn,
+                    &mut state,
+                    proto.encode_take_item_entity(
+                        take.item_entity_id,
+                        player_entity_id,
+                        take.amount,
+                    ),
+                )
+                .await?;
+            }
+            for native in pickups.changed {
                 if let Some(menu_slot) = window_zero_menu_slot(native) {
                     apply(
                         conn,

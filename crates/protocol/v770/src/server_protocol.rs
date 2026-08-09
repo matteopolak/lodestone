@@ -3641,6 +3641,26 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
+    /// Three VarInts: the item entity, the collector, and the count taken — the
+    /// exact shape `V770Adapter`'s own `TAKE_ITEM_ENTITY` arm decodes back into
+    /// `ClientEvent::ItemPickup`, which is the round-trip this crate's
+    /// `entity_events.rs` gate already pins from the client side.
+    fn encode_take_item_entity(
+        &self,
+        item_entity_id: i32,
+        collector_entity_id: i32,
+        amount: i32,
+    ) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(item_entity_id);
+        w.var_i32(collector_entity_id);
+        w.var_i32(amount);
+        ServerDirective::Send {
+            packet_id: play::clientbound::TAKE_ITEM_ENTITY,
+            payload: w.into_vec(),
+        }
+    }
+
     fn encode_keep_alive(&self, id: i64) -> ServerDirective {
         // `KeepAlive` (`packets::common`) is identical on the wire in both
         // directions, so the same bidirectional struct this module's
