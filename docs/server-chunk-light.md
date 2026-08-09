@@ -111,9 +111,38 @@ gate green while destroying its argument.
 unchanged: *MP consumes server light; SP computes it.* This change makes the server hold up its end; it does
 not move the client.
 
-**A per-block-change relight does not exist anywhere in this tree** (issue #94), and #517 did not create a
-caller for one: light is computed per column at serve time, so a block edit is reflected the next time that
-column is sent.
+**A per-block-change relight does exist now, and this paragraph used to say the opposite.** It said light was
+computed per column at serve time only, so a block edit was reflected the next time that column was sent. That
+is no longer true in either half: `lodestone_server::light::should_relight` decides, and
+`resend_column_for_light` recomputes the edited column from zero and sends a `light_update`.
+
+**Its predicate compares emission *and* dampening, and the dampening half is the whole of a reported bug.** It
+compared emission only, which meant an edit that changed what a cell *occludes* rather than what it emits
+moved nothing the predicate looked at. Dirt and logs emit `0`, and so does the air that replaces them, so
+breaking a tree trunk and the dirt under it sent no light packet at all — and the client, which deliberately
+never recomputes light on the live path, kept serving the pre-break value, which under a tree is `0`. The hole
+was pitch black.
+
+Nothing was wrong with the propagation, and that is the part worth remembering: `compute_column_light` floods
+from zero and seeds every cell open to the sky at `15`, so it gets a freshly opened shaft right on the first
+try. The gap was one predicate away from a flood that already worked, and the reason it stayed open is that
+the cost of firing on every placement was treated as a correctness argument. It is ~1.0 ms per edit against a
+player edit rate of a handful per second. Incremental re-propagation from the changed cell — which vanilla has
+and this crate does not — is the optimisation, not the fix.
+
+Two consequences to keep in mind when changing it:
+
+- **Both directions must fire.** Placing a solid has to darken what is under it, exactly as removing a torch
+  has to darken what was around it. A predicate keyed on `dampening(new) != 0` rather than on a *change*
+  answers water-for-leaves and leaves-for-water inconsistently, and both answers are wrong.
+- **A decorative edit must still cost nothing.** `axis`, `facing`, a stone-for-dirt swap: comparing two
+  resolved *values* rather than the state strings is what keeps a rotation from paying for a flood and a
+  packet.
+
+**The relight is the isolated compute, so the seam above still applies to it.** An edit within 15 blocks of a
+column border under-reports by the neighbour's contribution, and the neighbours' own light changes too and is
+not re-sent. Answering one edit exactly means nine 3×3 floods and nine packets, which is why it is not done on
+the connection task; the shape that makes it affordable is the chunk-source plan above.
 
 **`LIGHT_UPDATE` (packet 48) now has an encoder**, which it did not when the paragraph above was written:
 `ServerProtocol::encode_light_update` plus `ServerProtocol::compute_column_light`, with the v770 overrides
@@ -139,6 +168,51 @@ above the water and a purely *vertical* decay through it, with zero horizontal s
 block-lit cells. A gate on it exercises neither horizontal propagation nor emission. `server_light.rs` uses
 seed 42, chunk (−9, 4) and places its own emitter for exactly this reason. If you add a light gate, count the
 axis you care about — "cells with an intermediate level" is satisfied by vertical decay alone.
+
+**That warning has now been paid for twice, and the second time gives you the number to rank by.**
+`crates/lodestone-world/tests/vanilla_light_oracle.rs` first selected its survey chunks by counting cells whose
+vanilla sky value is *partial* (`1..=14`). The six top-scoring chunks in `r.0.0.mca` all scored exactly
+**3584**, which is `14 × 256` — fourteen complete, individually uniform 16×16 layers. Open ocean again, and the
+score was honest: sky light really does attenuate one level per block through water. Every one of those cells
+is lit from directly above, so a purely vertical propagator would have got the whole chunk right.
+
+Rank by **lateral** variation instead — cells whose value differs from their `+x` or `+z` neighbour — which is
+a direct census of light that can only have arrived by spreading sideways. An ocean column scores `0` on it.
+The chunks it picks score 2969–5375 and are real cave systems, and the survey over them is what licenses the
+numbers below.
+
+### The engine judged against a real 26.2 server's own stored light
+
+`.cache/mc/survival/world` is a world a vanilla server generated **and lit**, and its `minecraft:full` chunks
+carry vanilla's own `SkyLight`/`BlockLight` arrays — computed by vanilla, stored independently of the
+`block_states` containers we read the terrain from. So the blocks are the input and the light is the expected
+answer, neither came from us, and it needs **no container and no JVM**.
+
+Measured over the six most laterally-varying chunks of `r.0.0.mca`, centre-of-a-loaded-3×3:
+
+| statistic | value |
+|---|---|
+| sky-light disagreements | **0** of 200,704 cells compared |
+| block-light disagreements | 4,513 |
+| cells where **ours is brighter** | **0** |
+| attributable to | 38 `minecraft:glow_lichen` source cells plus their falloff |
+| isolated vs 3×3, same vanilla answer | 5,565 vs 4,513 disagreements |
+
+The block-light residual is **not** an engine defect: it is the upstream `blocks.json` `emitLight=0` gap for
+`glow_lichen` (and `cave_vines[berries=true]`) that `crates/lodestone-data/tests/light_props.rs` already
+records as a known residual. The survey's own per-state tally is what turns "4,513 unexplained cells" into
+"one missing census row", which is why that tally exists.
+
+Two scope facts, because the result is easy to over-read:
+
+- **Vanilla materialises a `DataLayer` only where light is non-trivial** — measured over `r.0.0.mca`, 2 to 7
+  `SkyLight` sections and 0 to 10 `BlockLight` sections per full chunk, out of 26 possible. The survey
+  therefore covers vanilla's own transition band, not the whole column, and its cell-count floor is derived
+  from that rather than from the column height. A section vanilla omitted is skipped and counted, because an
+  absent layer is not an assertion of zero.
+- **Both controls are executed.** An all-transparent props arm floods every sealed cell and produces 24,379
+  ours-brighter cells; and the survey refuses to run at all if the census cannot name a palette entry, since a
+  naming gap darkens our side and would be measured as agreement.
 
 ## Configuration
 
