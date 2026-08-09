@@ -1058,7 +1058,15 @@ impl WindowApp {
             // The `_scaled` variant is required: the plain one lays out against
             // `AUTO_GUI_SCALE` and would disagree with `hit_test_with_scale` about
             // where the slots are.
-            container_renderer.render_with_icons_scaled(
+            //
+            // `_between_strata`, and **not** a plain call followed by the panel
+            // draw: the recipe book belongs to the stratum between the slots and
+            // the carried stack, so the panel goes *into* this call rather than
+            // after it. That method's own doc carries the vanilla order and the
+            // reported symptom; the short version is that the container renderer
+            // draws the carried stack and the hovered-slot tooltip itself, so
+            // anything submitted after the whole call covers both.
+            container_renderer.render_with_icons_scaled_between_strata(
                 device,
                 queue,
                 frame.view(),
@@ -1068,58 +1076,77 @@ impl WindowApp {
                 self.nav.gui_scale(),
                 w,
                 h,
-            );
-
-            // The recipe-book panel (issue #163), as its own pass **over** the
-            // container panel it belongs to — the toggle button sits on the
-            // container's own chrome and the book body overlaps its left edge at
-            // narrow canvases (`container.rs`'s documented clamp), so drawing it
-            // before the container would bury both.
-            //
-            // This call is what stops the whole
-            // `recipe_book_panel_layout`/`_hit_test`/`_geometry` family being an
-            // island: it was built and unit-tested with 75 tests and reached
-            // zero pixels because nothing composited the vertices.
-            if let Some(menu) = container_menu {
-                let items = hud.item_atlas();
-                // The search box's *text* needs the same vanilla font the
-                // container's own labels use — without it the box drew as an
-                // empty well, which is why it read as missing entirely.
-                let font = hud.font();
-                if let Some(geo) = recipe_panel_geometry(
-                    self.recipe_book.as_ref(),
-                    &self.recipe_panel,
-                    menu,
-                    self.nav.gui_scale(),
-                    items.as_deref(),
-                    item_models,
-                    font.as_deref(),
-                    w,
-                    h,
-                    // The hover tooltip vanilla draws over a recipe button
-                    // (`RecipeBookPage.extractTooltip`). The same cursor and the
-                    // same persisted `advancedItemTooltips` flag the container's
-                    // own slot tooltip above uses, so the two can never disagree
-                    // about which lines an identical stack shows — and
-                    // `hover_blocked` above already stops the container drawing a
-                    // second tooltip for whatever slot sits under the book.
-                    crate::container::RecipeTooltipContext {
-                        cursor: Some([self.cursor.0, self.cursor.1]),
-                        advanced: self.nav.advanced_item_tooltips(),
-                    },
-                ) {
-                    hud.render_recipe_book_panel(
-                        device,
-                        queue,
-                        frame.view(),
-                        Some(render.depth_view()),
-                        &geo,
+                || {
+                    // The recipe-book panel (issue #163), **over** the container
+                    // panel it belongs to and **under** the cursor stack — the
+                    // toggle button sits on the container's own chrome and the
+                    // book body overlaps its left edge at narrow canvases
+                    // (`container.rs`'s documented clamp), so drawing it before
+                    // the slots would bury both.
+                    //
+                    // This call is what stops the whole
+                    // `recipe_book_panel_layout`/`_hit_test`/`_geometry` family
+                    // being an island: it was built and unit-tested with 75 tests
+                    // and reached zero pixels because nothing composited the
+                    // vertices.
+                    let Some(menu) = container_menu else {
+                        return;
+                    };
+                    let items = hud.item_atlas();
+                    // The search box's *text* needs the same vanilla font the
+                    // container's own labels use — without it the box drew as an
+                    // empty well, which is why it read as missing entirely.
+                    let font = hud.font();
+                    if let Some(geo) = recipe_panel_geometry(
+                        self.recipe_book.as_ref(),
+                        &self.recipe_panel,
+                        menu,
                         self.nav.gui_scale(),
+                        items.as_deref(),
+                        item_models,
+                        font.as_deref(),
                         w,
                         h,
-                    );
-                }
-            }
+                        // The hover tooltip vanilla draws over a recipe button
+                        // (`RecipeBookPage.extractTooltip`). The same cursor and
+                        // the same persisted `advancedItemTooltips` flag the
+                        // container's own slot tooltip above uses, so the two can
+                        // never disagree about which lines an identical stack
+                        // shows — and `hover_blocked` above already stops the
+                        // container drawing a second tooltip for whatever slot
+                        // sits under the book.
+                        //
+                        // **One residual divergence, recorded rather than
+                        // fixed.** Vanilla's tooltips are deferred
+                        // (`setTooltipForNextFrame`) and composited after
+                        // everything, so `recipeBookComponent.extractTooltip`
+                        // lands above the carried stack too. Ours rides the tail
+                        // of this one geometry blob, which has no tooltip split
+                        // marker, so a player *carrying* a stack while hovering a
+                        // recipe button sees the stack over the tooltip. The two
+                        // *slot* tooltips cannot conflict — `hover_blocked` makes
+                        // them mutually exclusive — so this is the only case, and
+                        // closing it means giving
+                        // `RecipeBookPanelGeometry` a tooltip range the way
+                        // `chrome_vertex_count` already splits its chrome.
+                        crate::container::RecipeTooltipContext {
+                            cursor: Some([self.cursor.0, self.cursor.1]),
+                            advanced: self.nav.advanced_item_tooltips(),
+                        },
+                    ) {
+                        hud.render_recipe_book_panel(
+                            device,
+                            queue,
+                            frame.view(),
+                            Some(render.depth_view()),
+                            &geo,
+                            self.nav.gui_scale(),
+                            w,
+                            h,
+                        );
+                    }
+                },
+            );
         }
 
         // The pause overlay draws *over* the world/HUD/container passes above
