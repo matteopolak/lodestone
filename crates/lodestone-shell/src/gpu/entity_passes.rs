@@ -186,10 +186,15 @@ impl RenderState {
             ),
         );
 
-        // Split by `hurt` here, at the one point that still knows which
-        // `EntityDraw` each instance came from.
-        let mut plain: Vec<_> = Vec::new();
-        let mut hurt: Vec<_> = Vec::new();
+        // Split by `(hurt, skin url)` here, at the one point that still knows
+        // which `EntityDraw` each instance came from — `plan_entities` groups by
+        // model and drops the input order, so neither can be zipped back on.
+        //
+        // The skin half is a `Vec` of groups rather than a `HashMap` because it is
+        // *ordered by first appearance* and tiny: one group for everything with no
+        // skin (every mob in the world) plus one per distinct skin actually in
+        // view, which is bounded by the number of players on screen.
+        let mut groups: Vec<(bool, Option<String>, Vec<_>)> = Vec::new();
         for e in entities {
             // `resolve_posed`, not `resolve`, and this is the *only* call site that
             // needs it (issue #380): the pitch selects the **placement**, and a
@@ -198,25 +203,46 @@ impl RenderState {
             // pitch is head tracking and arrives through `e.anim`, not through the
             // placement — so the other five `resolve` call sites are deliberately
             // left alone rather than widened for symmetry.
+            // `model_type_path`, not `type_path`: a player whose skin declares the
+            // slim rig resolves `player_slim` here and nowhere else. The rig and
+            // the sheet have to change together, and this is the rig half — the
+            // sheet half is the group key below.
             let Some(instance) = self
                 .entities
                 .models
-                .resolve_posed(&e.type_path, e.feet, e.yaw, e.pitch, e.scale, &e.anim)
+                .resolve_posed(
+                    e.model_type_path(),
+                    e.feet,
+                    e.yaw,
+                    e.pitch,
+                    e.scale,
+                    &e.anim,
+                )
                 .map(|i| i.with_light(self.entity_light.sample(e.feet)))
             else {
                 continue;
             };
-            if e.hurt { &mut hurt } else { &mut plain }.push(instance);
+            let skin = e.player_skin.as_ref().map(|s| s.url.clone());
+            match groups
+                .iter_mut()
+                .position(|(hurt, url, _)| *hurt == e.hurt && *url == skin)
+            {
+                Some(i) => groups[i].2.push(instance),
+                None => groups.push((e.hurt, skin, vec![instance])),
+            }
         }
 
         let frustum = camera.frustum();
-        // The flag and the plan it describes travel as one value from here on.
-        let plans = [
-            (false, plan_entities(&plain, &frustum)),
-            (true, plan_entities(&hurt, &frustum)),
-        ];
-        stats.entities_drawn = plans.iter().map(|(_, f)| f.stats.drawn).sum();
-        stats.entities_culled = plans.iter().map(|(_, f)| f.stats.culled_frustum).sum();
+        // The flag, the sheet and the plan they describe travel as one value from
+        // here on. A `Vec<bool>`/`Vec<Option<String>>` parallel to the batches
+        // would be an invariant nothing enforces, which is precisely how this
+        // class of bug comes back.
+        let plans: Vec<_> = groups
+            .into_iter()
+            .map(|(hurt, skin, instances)| (hurt, skin, plan_entities(&instances, &frustum)))
+            .collect();
+        stats.entities_drawn = plans.iter().map(|(_, _, f)| f.stats.drawn).sum();
+        stats.entities_culled = plans.iter().map(|(_, _, f)| f.stats.culled_frustum).sum();
 
         // One instance buffer per *part*, not per entity: the mesh's vertices are
         // part-local, so a limb only moves if its own matrices are uploaded
@@ -224,8 +250,13 @@ impl RenderState {
         // roughly 1% of the data a per-entity vertex re-bake would.
         plans
             .iter()
-            .flat_map(|(hurt, frame)| frame.batches.iter().map(move |batch| (*hurt, batch)))
-            .map(|(hurt, batch)| {
+            .flat_map(|(hurt, skin, frame)| {
+                frame
+                    .batches
+                    .iter()
+                    .map(move |batch| (*hurt, skin.as_ref(), batch))
+            })
+            .map(|(hurt, skin, batch)| {
                 let count = u32::try_from(batch.transforms.len()).unwrap_or(u32::MAX);
                 // Every instance in this batch shares one overlay state, by
                 // construction of the split above — so one repeated value rather
@@ -243,6 +274,7 @@ impl RenderState {
                     model: batch.model,
                     count,
                     parts,
+                    skin: skin.cloned(),
                 }
             })
             .collect()
@@ -317,11 +349,13 @@ impl RenderState {
             {
                 continue;
             }
-            // Same resolver, same `AnimInput` as `prepare_entities`, so a piece
-            // of armour can never be posed off a different pose than the body it
-            // is drawn over.
+            // Same resolver, same `AnimInput` **and same rig selection** as
+            // `prepare_entities`, so a piece of armour can never be posed off a
+            // different pose — or a different model — than the body it is drawn
+            // over. `model_type_path` is the rig half: a slim player's chestplate
+            // has to be posed off the *slim* body's part matrices.
             let Some(instance) = self.entities.models.resolve(
-                &draw.type_path,
+                draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
                 draw.scale,

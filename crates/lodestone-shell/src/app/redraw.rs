@@ -423,6 +423,23 @@ impl WindowApp {
         self.sim.tick_ambience(now, weather_state.as_ref());
         let outline = self.sim.target().map(|hit| hit.block);
         let entity_draws = self.sim.entity_draws();
+        // Remote players' skins, in two hops that must both be here. The first
+        // starts a fetch for every skin URL in view; it is idempotent per URL, so
+        // handing it the same list every frame costs one hash lookup per player.
+        // The second turns whatever has landed into a bind group — a `&mut`
+        // borrow, so it cannot happen inside the render pass.
+        //
+        // Without this pair the whole chain is an island: the properties decode,
+        // the rig selection and the batch key are all in place and every remote
+        // player still draws the pack's default sheet, which is also exactly what
+        // an offline-mode server legitimately looks like. See
+        // `crate::remote_skins`.
+        crate::remote_skins::request_all(
+            entity_draws
+                .iter()
+                .filter_map(|draw| draw.player_skin.as_ref().map(|skin| skin.url.as_str())),
+        );
+        render.install_pending_player_skins(device, queue);
         // Extraction lives in `Sim` because resolving each particle's light
         // needs the world; doing it here would hand out two borrows of `Sim`.
         let particle_frame = self.sim.extract_particles(&camera);

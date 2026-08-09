@@ -625,7 +625,17 @@ impl RenderState {
                     let Some(model) = self.entities.gpu_models.get(batch.model) else {
                         continue;
                     };
-                    let Some(texture) = self.entities.textures.get(batch.model) else {
+                    // A fetched player skin wins over the model's own sheet, and a
+                    // miss falls through to it. That fallback covers three cases
+                    // at once and none of them is an error: no skin declared
+                    // (every offline-mode server), a fetch still in flight, and a
+                    // fetch that failed. See `EntityRenderer::player_skins`.
+                    let texture = batch
+                        .skin
+                        .as_ref()
+                        .and_then(|url| self.entities.player_skins.get(url))
+                        .or_else(|| self.entities.textures.get(batch.model));
+                    let Some(texture) = texture else {
                         continue;
                     };
                     pass.set_bind_group(1, texture, &[]);

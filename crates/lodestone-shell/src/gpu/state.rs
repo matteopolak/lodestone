@@ -991,6 +991,23 @@ impl RenderState {
         self.banner_source = BannerSource(Some(Box::new(f)));
     }
 
+    /// Upload every remote player's skin that has finished fetching since the
+    /// last frame, as a texture bind group keyed by its URL.
+    ///
+    /// Not a `set_*_source`: this is a **one-way upload**, not a per-frame
+    /// closure. It has to be a `&mut self` call from outside the frame because
+    /// creating a bind group needs the device and the render pass borrows
+    /// everything immutably. Cheap on all but the handful of frames after a fetch
+    /// lands, since [`crate::remote_skins::drain_ready`] is empty otherwise.
+    ///
+    /// **Not optional, and its absence is invisible in a screenshot**: without
+    /// this call every remote player draws the pack's default sheet forever, which
+    /// is exactly what an offline-mode server legitimately looks like. See
+    /// `crate::remote_skins`.
+    pub fn install_pending_player_skins(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.entities.install_pending_player_skins(device, queue);
+    }
+
     /// Install the source for this frame's lectern books — the lectern
     /// equivalent of [`set_shulker_source`](Self::set_shulker_source), and like
     /// it, free of any clock: `LECTERN_BOOK_OPENNESS` is a compile-time constant

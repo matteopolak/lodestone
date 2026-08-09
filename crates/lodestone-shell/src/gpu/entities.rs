@@ -109,6 +109,22 @@ pub(super) struct EntityRenderer {
     pub(super) flame_pipeline: wgpu::RenderPipeline,
     pub(super) flame_gpu_models: HashMap<String, GpuEntityModel>,
     pub(super) flame_texture: Option<wgpu::BindGroup>,
+    /// Remote players' fetched skins: one texture bind group per **texture
+    /// URL**, filled in at runtime by
+    /// [`RenderState::install_pending_player_skins`](super::RenderState::install_pending_player_skins).
+    ///
+    /// The only map here that grows *after* startup, and the reason it is keyed by
+    /// `String` while [`Self::textures`] is keyed by `&'static str`: a fetched
+    /// skin's identity arrives on the wire, so it cannot be a static name without
+    /// leaking one string per distinct skin per session. A URL rather than a
+    /// player UUID so two accounts wearing the same skin share one bind group,
+    /// and so the key survives a reconnect.
+    ///
+    /// A miss is **not** a failure: the draw falls back to the model's own sheet
+    /// from [`Self::textures`], so a remote player is Steve while their skin is in
+    /// flight and themselves afterwards. Empty against every offline-mode server,
+    /// which sends no `textures` property at all — see `crate::remote_skins`.
+    pub(super) player_skins: HashMap<String, wgpu::BindGroup>,
 }
 
 impl EntityRenderer {
@@ -288,6 +304,37 @@ impl EntityRenderer {
             flame_pipeline,
             flame_gpu_models,
             flame_texture,
+            // Nothing until a skin is fetched; see `player_skins`' doc for why a
+            // miss falls back rather than failing.
+            player_skins: HashMap::new(),
+        }
+    }
+
+    /// Turn every sheet `crate::remote_skins` has finished fetching into a
+    /// texture bind group, keyed by its URL.
+    ///
+    /// Called once per frame from `app::redraw`. Drains rather than polls, so a
+    /// sheet is uploaded exactly once and the per-frame cost is zero on all but
+    /// the handful of frames after a fetch lands.
+    pub(super) fn install_pending_player_skins(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) {
+        let ready = crate::remote_skins::drain_ready();
+        if ready.is_empty() {
+            return;
+        }
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("lodestone-player-skin-sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        for (url, image) in ready {
+            let view = entity_texture_from_image(device, queue, &image);
+            let bg = self.pipeline.texture_bind_group(device, &view, &sampler);
+            self.player_skins.insert(url, bg);
         }
     }
 

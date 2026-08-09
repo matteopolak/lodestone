@@ -442,8 +442,10 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         item_use: None,
         // Not a creeper: only a creeper ever swells.
         creeper_swelling: 0.0,
-        // No flame overlay from this construction site (issue #434).
+        // No flame overlay from this construction site.
         on_fire: false,
+        // Not a player, so no skin can apply.
+        player_skin: None,
     };
 
     let instance = models

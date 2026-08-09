@@ -186,6 +186,8 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         item_use: None,
         creeper_swelling: 0.0,
         on_fire: false,
+        // Not a player, so no skin can apply.
+        player_skin: None,
     };
     // The negative control: identical in every respect except equipment.
     let control = EntityDraw {

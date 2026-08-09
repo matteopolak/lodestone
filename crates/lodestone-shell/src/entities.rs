@@ -503,6 +503,19 @@ struct EntityFacts {
     /// [`update_track`] only overwrites the direction when a fold actually
     /// carries one — silence must not reset a mid-fuse creeper back to idle.
     creeper_swell_dir: Option<i32>,
+    /// The skin this player declares, from the tab-list profile's `textures`
+    /// property — `None` for every non-player and for every player whose
+    /// profile declares none.
+    ///
+    /// **`None` is the normal case against every one of our own oracles**: an
+    /// offline-mode server derives the account UUID from the username and sends
+    /// no `textures` property at all. It resolves to the default sheet on the
+    /// wide rig, which is what a remote player looked like before this existed.
+    ///
+    /// Carried as a whole [`crate::remote_skins::RemoteSkin`] rather than a bare
+    /// URL because the rig and the sheet have to change **together** — see that
+    /// type's doc.
+    player_skin: Option<crate::remote_skins::RemoteSkin>,
 }
 
 /// A sheep's decoded wool state, narrowed from [`EntityFacts::variant`] for
@@ -740,6 +753,41 @@ pub struct EntityDraw {
     /// different, local-player-only purpose, and this field must never feed
     /// it. See `docs/entity-rendering.md`'s "Mob fire" section.
     pub on_fire: bool,
+    /// This player's declared skin, carried through from
+    /// [`EntityFacts::player_skin`] — `None` for every non-player.
+    ///
+    /// Two consumers, and they must agree: [`Self::model_type_path`] picks the
+    /// **rig** from `model`, and `RenderState::prepare_entities` groups by `url`
+    /// so the batch carries the **sheet**. A slim-authored sheet on the wide rig
+    /// puts the arm UVs a texel out; the wide sheet on the slim rig leaves a gap
+    /// at the shoulder. Neither reads as a model bug.
+    pub player_skin: Option<crate::remote_skins::RemoteSkin>,
+}
+
+impl EntityDraw {
+    /// The corpus name to resolve this entity's mesh from — [`Self::type_path`]
+    /// for everything except a player whose skin declares the **slim** rig.
+    ///
+    /// A separate accessor rather than rewriting `type_path` at the fold, and
+    /// that distinction is load-bearing: `type_path` is also what
+    /// `gpu/nametag.rs` feeds to `entity_dimensions::base_dimensions` to place
+    /// the tag above the head, and `"player_slim"` is **not** an entity-type
+    /// registry path — it would miss, fall back to `FALLBACK_HEIGHT`, and put
+    /// every slim player's nametag at the wrong height. `world_items.rs`,
+    /// `debug_lines.rs` and the flame pass read it the same way.
+    ///
+    /// `lodestone_render::entity::player_model_name` is the one place the two
+    /// rig names live; both are first-class corpus entries, so
+    /// `canonical_model_name` resolves the literal with no extra plumbing.
+    #[must_use]
+    pub fn model_type_path(&self) -> &str {
+        match &self.player_skin {
+            Some(skin) if skin.model == lodestone_assets::PlayerModelType::Slim => {
+                lodestone_render::entity::player_model_name(true)
+            }
+            _ => &self.type_path,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -938,6 +986,17 @@ pub struct RenderWool(pub Option<SheepWool>);
 /// for free.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct RenderNameTag(pub Option<NameTag>);
+
+/// This player's declared skin, narrowed from [`EntityFacts::player_skin`].
+///
+/// A component for [`RenderNameTag`]'s reason, and the "replaced wholesale every
+/// poll" part matters more here than anywhere else in this list: **the profile
+/// routinely arrives after the entity does.** A player's `ADD_PLAYER` and their
+/// `ADD_ENTITY` are separate packets, so the first few folds of a remote player
+/// legitimately see no tab-list entry at all and this is `None` — it has to be
+/// allowed to become `Some` later, which a spawn-time-only insert would forbid.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenderPlayerSkin(pub Option<crate::remote_skins::RemoteSkin>);
 
 // ---------------------------------------------------------------------------
 // Resources
@@ -1252,10 +1311,12 @@ pub fn extract_pickup_draws(
             item_use: None,
             // An item entity is never a creeper.
             creeper_swelling: 0.0,
-            // A pickup-flight animation is synthetic (issue #98's own item, not
+            // A pickup-flight animation is synthetic (this pass's own item, not
             // a tracked entity with `EntityFlags`) and vanishes in 3 ticks — not
             // worth threading a real flag lookup through for.
             on_fire: false,
+            // An item entity is never a player either.
+            player_skin: None,
         });
     }
 }
@@ -1646,6 +1707,7 @@ pub fn extract_entity_draws(
         &RenderEquipmentTrim,
         &RenderWool,
         &RenderNameTag,
+        &RenderPlayerSkin,
         // `Option`, not `&CreeperFuse` bare: present only on creepers, same
         // "absence is the switch" shape `ItemPhysics` uses elsewhere in this
         // module. Every non-creeper entity matches `None` here at zero cost.
@@ -1672,6 +1734,7 @@ pub fn extract_entity_draws(
         equipment_trim,
         wool,
         name_tag,
+        player_skin,
         fuse,
     ) in &tracks
     {
@@ -1771,6 +1834,7 @@ pub fn extract_entity_draws(
             item_use,
             creeper_swelling,
             on_fire,
+            player_skin: player_skin.0.clone(),
         });
     }
 }
@@ -2026,6 +2090,16 @@ fn resolve_entity_facts(
         foil,
         name_tag,
         creeper_swell_dir: entity.get::<CreeperSwellDir>().map(|dir| dir.0),
+        // The same `tab_list` the nametag above came out of — a player's skin
+        // and their display name are two fields of one profile, so there is no
+        // second lookup and no second source of truth. Gated on `is_player`
+        // rather than on the property being absent, so a server that attached a
+        // `textures` property to a non-player profile cannot put a skin on a
+        // mob's rig.
+        player_skin: is_player
+            .then(|| uuid.and_then(|id| tab_list.get(&id)))
+            .flatten()
+            .and_then(|entry| crate::remote_skins::skin_for_profile(&entry.profile)),
     })
 }
 
@@ -2163,6 +2237,7 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
         RenderEquipmentTrim(snap.equipment_trim.clone()),
         RenderWool(sheep_wool(&snap.type_path, snap.variant.as_ref())),
         RenderNameTag(snap.name_tag.clone()),
+        RenderPlayerSkin(snap.player_skin.clone()),
     ));
     if is_item {
         entity.insert(new_item_physics(snap));
@@ -2223,6 +2298,14 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     // `CUSTOM_NAME_VISIBLE` can toggle, neither of which moves the entity.
     if let Some(mut name_tag) = entity.get_mut::<RenderNameTag>() {
         name_tag.0.clone_from(&snap.name_tag);
+    }
+    // Outside the motion gate for a stronger reason than the rest of this list:
+    // `ADD_PLAYER` and `ADD_ENTITY` are separate packets, so a remote player's
+    // first folds legitimately carry no profile and the skin has to be allowed
+    // to arrive later — a player standing perfectly still while their tab-list
+    // entry lands must still get their skin. See `RenderPlayerSkin`.
+    if let Some(mut skin) = entity.get_mut::<RenderPlayerSkin>() {
+        skin.0.clone_from(&snap.player_skin);
     }
     // Same "outside the motion gate" reasoning once more: a creeper's fuse
     // direction can flip while it stands still (backing away from a player it
@@ -3133,6 +3216,149 @@ mod tests {
                 EntityUuid(uuid),
             ));
             entity
+        }
+
+        /// The `textures` profile property reaches [`EntityFacts::player_skin`]
+        /// and the slim rig reaches [`EntityDraw::model_type_path`] — the two
+        /// halves that have to agree, checked through the same `tab_list`
+        /// boundary the nametag above uses.
+        ///
+        /// Three things this pins, each of which fails differently:
+        ///
+        /// * a **mob** with the same property attached never gets a skin, so a
+        ///   server cannot put a player sheet on a pig's rig;
+        /// * a player whose profile declares **no** property is `None`, which is
+        ///   every offline-mode server and must stay the ordinary path;
+        /// * `model_type_path` returns `player_slim` for a slim declaration and
+        ///   the untouched `type_path` otherwise — and the wide case is asserted
+        ///   as `"player"`, **not** `"player_wide"`, because `type_path` is also
+        ///   what `gpu/nametag.rs` feeds to `entity_dimensions`, where
+        ///   `"player_wide"` is not a registry path and would fall back to a
+        ///   default height.
+        #[test]
+        fn a_players_texture_property_reaches_the_draw_and_selects_its_rig() {
+            fn textures_property(model: &str) -> lodestone_game::tablist::ProfileProperty {
+                // Base64 of a minimal real payload. Built here rather than
+                // borrowed from `remote_skins`' own fixture so this test does not
+                // depend on that module's test-only helpers.
+                let json = format!(
+                    concat!(
+                        r#"{{"textures":{{"SKIN":{{"url":"#,
+                        r#""https://textures.minecraft.net/texture/deadbeef","#,
+                        r#""metadata":{{"model":"{}"}}}}}}}}"#
+                    ),
+                    model
+                );
+                lodestone_game::tablist::ProfileProperty {
+                    name: "textures".to_owned(),
+                    value: base64(json.as_bytes()),
+                    signature: None,
+                }
+            }
+            fn base64(bytes: &[u8]) -> String {
+                const T: &[u8; 64] =
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                let mut out = String::new();
+                for chunk in bytes.chunks(3) {
+                    let b = [
+                        chunk[0],
+                        chunk.get(1).copied().unwrap_or(0),
+                        chunk.get(2).copied().unwrap_or(0),
+                    ];
+                    let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+                    for i in 0..4 {
+                        if i <= chunk.len() {
+                            out.push(char::from(T[((n >> (18 - 6 * i)) & 0x3f) as usize]));
+                        } else {
+                            out.push('=');
+                        }
+                    }
+                }
+                out
+            }
+
+            for (declared, expect_slim) in [("slim", true), ("default", false)] {
+                let id = Uuid::from_u128(if expect_slim { 40 } else { 41 });
+                let mut tabs = lodestone_game::tablist::TabList::new();
+                let mut profile = lodestone_game::tablist::GameProfile::new(id, "Skinned");
+                profile.properties.push(textures_property(declared));
+                tabs.insert(lodestone_game::tablist::PlayerListEntry::new(profile));
+
+                let mut world = World::new();
+                let entity = bare_player_entity(&mut world, id);
+                let facts = facts_for(&world, entity, &tabs);
+                let skin = facts
+                    .player_skin
+                    .clone()
+                    .expect("a declared texture property must reach the facts");
+                assert_eq!(skin.url, "https://textures.minecraft.net/texture/deadbeef");
+
+                let draw = draw_with_skin(facts.player_skin.clone());
+                if expect_slim {
+                    assert_eq!(draw.model_type_path(), "player_slim");
+                } else {
+                    assert_eq!(
+                        draw.model_type_path(),
+                        "player",
+                        "the wide rig must leave type_path alone -- `player_wide` is \
+                         not an entity-type registry path"
+                    );
+                }
+            }
+
+            // A mob carrying the same property gets no skin: the gather is gated
+            // on the entity actually being a player.
+            let id = Uuid::from_u128(42);
+            let mut tabs = lodestone_game::tablist::TabList::new();
+            let mut profile = lodestone_game::tablist::GameProfile::new(id, "NotAPlayer");
+            profile.properties.push(textures_property("slim"));
+            tabs.insert(lodestone_game::tablist::PlayerListEntry::new(profile));
+            let mut world = World::new();
+            let mob = bare_entity(&mut world);
+            world.entity_mut(mob).insert(EntityUuid(id));
+            assert!(facts_for(&world, mob, &tabs).player_skin.is_none());
+
+            // And a player whose profile declares nothing -- every offline-mode
+            // server -- is `None`, resolving to the default sheet on the wide rig.
+            let plain = Uuid::from_u128(43);
+            let mut tabs = lodestone_game::tablist::TabList::new();
+            tabs.insert(lodestone_game::tablist::PlayerListEntry::new(
+                lodestone_game::tablist::GameProfile::new(plain, "Offline"),
+            ));
+            let mut world = World::new();
+            let entity = bare_player_entity(&mut world, plain);
+            let facts = facts_for(&world, entity, &tabs);
+            assert!(facts.player_skin.is_none());
+            assert_eq!(draw_with_skin(None).model_type_path(), "player");
+        }
+
+        /// A minimal player [`EntityDraw`] carrying `skin` and nothing else —
+        /// enough to exercise [`EntityDraw::model_type_path`], which is the only
+        /// thing the caller asserts on.
+        fn draw_with_skin(skin: Option<crate::remote_skins::RemoteSkin>) -> EntityDraw {
+            EntityDraw {
+                id: 1,
+                type_path: "player".to_owned(),
+                item: None,
+                equipment: Vec::new(),
+                equipment_dye: Vec::new(),
+                equipment_trim: Vec::new(),
+                wool: None,
+                count: 1,
+                foil: false,
+                feet: Vec3::ZERO,
+                yaw: 0.0,
+                head_yaw: 0.0,
+                pitch: 0.0,
+                scale: 1.0,
+                anim: AnimInput::default(),
+                name_tag: None,
+                hurt: false,
+                item_use: None,
+                creeper_swelling: 0.0,
+                on_fire: false,
+                player_skin: skin,
+            }
         }
 
         /// A player's tag is always its tab-list display name —

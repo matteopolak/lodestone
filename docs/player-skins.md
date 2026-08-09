@@ -3,10 +3,11 @@
 ## What it is
 
 The `textures` profile property — base64 → JSON → a URL plus a **wide/slim rig
-declaration** — and the render half that draws the declared rig, for issue
-[#62](https://github.com/matteopolak/lodestone/issues/62). The decode and the
-render are landed; **the fetch is not**, and the three patches it needs all sit
-outside the rendering cluster, so they are named below rather than half-built.
+declaration** — the host-restricted fetch that turns it into a sheet, and the
+render halves that draw the declared rig on the inventory avatar and on other
+players' bodies in the world. All three are landed for both our own account and
+for remote players; what is left is capes, the first-person arm and the local
+third-person body, named under [What is missing](#what-is-missing).
 
 ## How it works
 
@@ -17,7 +18,7 @@ Two halves, in two crates, plus a hole between them:
 | **decode** | `lodestone-assets/src/skin.rs` | landed — `decode_textures_property` |
 | **render** | `lodestone-shell/src/container/player_preview.rs` | landed — a runtime `PlayerModelType`, both rigs reachable |
 | **fetch (our own)** | `lodestone-auth/src/texture.rs` + `lodestone-shell/src/skin_fetch.rs` | landed — see [Fetching our own skin](#fetching-our-own-skin) |
-| **fetch (remote players)** | `protocol/v770`/`lodestone-model`/`lodestone-game` | the properties now survive `ADD_PLAYER`; nothing draws them yet |
+| **fetch (remote players)** | `lodestone-shell/src/remote_skins.rs` | landed — see [Remote players](#remote-players) |
 
 ### The decode, and where its record definition comes from
 
@@ -212,26 +213,116 @@ because only the newest skin matters.
 Every failure inside the fetch is a `warn!` and a `false`, including the refused
 host: a dead texture CDN must not fail an otherwise-successful login.
 
+## Remote players
+
+`lodestone-shell/src/remote_skins.rs`. The properties already survived the wire
+(`read_add_player` keeps them, `PlayerListEntry::properties` carries them, and
+`None` there means "this update had no `ADD_PLAYER`, keep the existing skin",
+distinct from `Some(vec![])`); this is the consumer.
+
+```text
+player_info ADD_PLAYER -> GameProfile::properties
+  entities::resolve_entity_facts
+    -> remote_skins::skin_for_profile        -- memoised base64+JSON decode
+    -> EntityFacts::player_skin -> RenderPlayerSkin -> EntityDraw::player_skin
+  app::redraw
+    -> remote_skins::request_all             -- one fetch per URL, ever
+    -> RenderState::install_pending_player_skins
+  RenderState::prepare_entities
+    -> group by (hurt, skin url); EntityDrawBatch::skin
+  the draw (gpu/frame.rs)
+    -> player_skins[url], falling back to the model's default sheet
+```
+
+### The blocker that was named, and what it actually took
+
+#62's investigation named the render-side blocker correctly: `EntityBatch` keys a
+texture by the `&'static str` model name, so texture identity *was* model
+identity and every player in the world collapsed into one `player_wide` batch
+sharing one bind group.
+
+The fix it proposed — a `(model, texture)` composite key plus interning, so a
+runtime name could still be `&'static str` — is not what landed, and the reason is
+worth recording. The batch is the wrong place to make the name static: an
+`EntityDrawBatch` lives for one frame, so `EntityDrawBatch::skin` is an owned
+`Option<String>` and there is nothing to intern and nothing to leak. What has to
+outlive the frame is the **bind group**, and `EntityRenderer::player_skins` is a
+`HashMap<String, wgpu::BindGroup>` keyed by URL for exactly that. This is the
+shape `ArmourTextureKey` already gives armour: the sheet is chosen at the draw,
+and the batch key is what guarantees one texture per batch.
+
+**Keyed by URL, not by player UUID**, so two accounts wearing the same skin share
+one decode, one GET and one bind group, and the key survives a reconnect where an
+entity id does not.
+
+### Two halves that must agree: the rig and the sheet
+
+`EntityDraw::player_skin` carries a whole `RemoteSkin`, not a bare URL, because
+the rig and the sheet change **together**:
+
+* the **rig** is `EntityDraw::model_type_path`, which returns `player_slim` for a
+  slim declaration and the untouched `type_path` otherwise;
+* the **sheet** is the group key in `prepare_entities`, which becomes
+  `EntityDrawBatch::skin`.
+
+A slim-authored sheet on the wide rig puts the arm UVs a texel out; the wide
+sheet on the slim rig leaves a gap at the shoulder. Neither reads as a model bug.
+
+**`model_type_path` is an accessor and not a rewrite of `type_path`, and that is
+load-bearing.** `type_path` is also what `gpu/nametag.rs` hands to
+`entity_dimensions::base_dimensions` to place a tag above the head, and
+`"player_slim"` is **not** an entity-type registry path — it would miss, fall back
+to `FALLBACK_HEIGHT`, and put every slim player's nametag at the wrong height.
+`world_items.rs`, `debug_lines.rs` and the flame pass read it the same way.
+`prepare_armour` *does* use `model_type_path`, so a slim player's chestplate is
+posed off the slim body's own part matrices.
+
+### The fallback is the normal path, not an error path
+
+A batch with `skin: Some(url)` and no bind group installed resolves to the
+model's default sheet, and so does `skin: None`. That covers three cases at once
+and none of them is a failure: no skin declared, a fetch in flight, and a fetch
+that failed. **Offline-mode servers send no `textures` property at all** (the
+account UUID is derived from the username), so this is what every one of our own
+oracles looks like — a gate here must never assert that a skin *arrives*.
+
+Failures are remembered rather than retried: `FetchState::Failed` is why a dead
+CDN or a refused host does not produce one GET per player per frame forever.
+
+### The profile arrives after the entity
+
+`ADD_PLAYER` and `ADD_ENTITY` are separate packets, so a remote player's first
+folds legitimately see no tab-list entry and `RenderPlayerSkin` is `None`. It is
+updated **outside** `update_track`'s motion gate for that reason: a player
+standing perfectly still while their tab-list entry lands must still get their
+skin.
+
+### The fetch forks on `#[cfg(test)]`
+
+`remote_skins::spawn_fetch` has two definitions. The real one spawns a
+short-lived thread with its own current-thread runtime (the shape
+`menu::status`'s one-shot ping uses) — one thread per *distinct skin*, not per
+player and not per frame. The test one records the URL in `requested_urls`.
+
+A `cfg!(test)` early return would have been a silent skip; a `#[cfg(test)]` fork
+makes the routing assertable, and without it a unit test reaching `request` would
+perform a real HTTP GET as a side effect of `cargo test` — a defect class no
+health check in this repo can see. See `DESIGN.md` on the unit test that was
+opening a browser on every `cargo test -p lodestone-shell`.
+
 ## What is missing
 
-**Remote players' skins.** The properties now survive the wire —
-`read_add_player` keeps them and `PlayerListEntry::properties` carries them
-(`None` means "this update had no `ADD_PLAYER`, keep the existing skin", which is
-distinct from `Some(vec![])`) — but nothing turns one into a bound texture yet.
-The render-side piece is the one named in #62's investigation: `EntityBatch`
-keys a texture by the `&'static str` model name, so every player collapses into
-one `player_wide` batch sharing one bind group, and per-player sheets need a
-`(model, texture)` composite key plus interning for runtime names.
-
-Also not built, each deliberately:
+Not built, each deliberately:
 
 * **Capes and the elytra texture.** Decoded (`ProfileTextures::cape`/`elytra`)
   and unconsumed — there is no cape rig in the entity corpus.
-* **The first-person arm and the third-person body** still draw `player_wide`
-  from the shared entity texture cache; only the inventory avatar honours the
-  override. The arm is the most-seen surface of a skin, so it is the obvious next
-  step, and it is a different seam (`gpu/entities.rs`' texture cache, keyed by
-  model name, not a per-instance sheet).
+* **Our own first-person arm and third-person body.** Remote players now honour
+  their sheets and our own inventory avatar honours ours, but the local player's
+  own body and arm still resolve `player_wide` through `gpu/entities.rs`' cache.
+  The seam is now much shorter than it was: `ThirdPersonBodyState` already picks
+  the right *rig* (`type_path` is `player_model_name(self.slim)`), so what it needs
+  is the URL, and `EntityDrawBatch::skin` will carry it the rest of the way with
+  no new plumbing. The arm is a separate pass with its own instance path.
 * **`DefaultPlayerSkin`'s UUID hash.** Vanilla picks one of eight built-in
   sheets from the profile UUID for a skinless account; this reports "no skin
   declared" and draws the pack's `steve`. `ProfileTextures::skin` is an `Option`
@@ -269,8 +360,10 @@ of the container renderer takes.
   allow list and the GET) and `flow::{Profile, ProfileSkin, SkinVariant}`. Uses
   `reqwest::Url` for the structural parse, which needs no manifest change since
   `reqwest` is already a direct dependency.
+* `lodestone-game` — `tablist::GameProfile::skin_texture`, the accessor the
+  remote path starts from.
 * `crate::gpu::entities::entity_texture_from_image` — shared with the world
-  entity pass, not copied.
+  entity pass, not copied; `remote_skins`' bind groups go through it too.
 
 ## Related
 

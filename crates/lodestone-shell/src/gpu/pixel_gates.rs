@@ -662,8 +662,10 @@ fn entity_renders_to_pixels_through_shell_path() {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
-        // No flame overlay from this construction site (issue #434).
+        // No flame overlay from this construction site.
         on_fire: false,
+        // Not a player, so no skin can apply.
+        player_skin: None,
         },
         // A second pig behind the camera so frustum culling has something
         // real to remove — the anti-vacuity guard on the cull path.
@@ -689,8 +691,10 @@ fn entity_renders_to_pixels_through_shell_path() {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
-        // No flame overlay from this construction site (issue #434).
+        // No flame overlay from this construction site.
         on_fire: false,
+        // Not a player, so no skin can apply.
+        player_skin: None,
         },
     ];
 
@@ -869,8 +873,10 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         item_use: None,
         // Not a creeper: only a creeper ever swells.
         creeper_swelling: 0.0,
-        // No flame overlay from this construction site (issue #434).
+        // No flame overlay from this construction site.
         on_fire: false,
+        // Not a player, so no skin can apply.
+        player_skin: None,
     }];
 
     // Fraction of a mob's bright pixels whose *hue direction* is far from the
