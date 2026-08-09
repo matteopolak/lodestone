@@ -74,8 +74,8 @@
 use lodestone_model::Vec3;
 
 use super::{
-    Registration, Selector, SpeciesContext, hurt_by_target, look_at_player_6, look_at_player_8,
-    nearest_attackable_target, random_look_around, stroll,
+    Registration, Selector, SpeciesContext, avoid_entity, float_goal, hurt_by_target,
+    look_at_player_6, look_at_player_8, nearest_attackable_target, random_look_around, stroll,
 };
 use crate::ai::goal::{Flag, FlagSet, Goal};
 use crate::ai::mob::{MobController, ProjectileKind, ProjectileLaunch, distance_sqr};
@@ -576,6 +576,81 @@ fn snowball_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
     ))
 }
 
+/// `RangedAttackGoal(this, 1.0, 60, 10.0F)` (`monster/Witch.java:68`), throwing a
+/// splash potion.
+///
+/// The power is `Witch.performRangedAttack`'s own `dist <= 2.0 ? 0.45F : 0.75F`
+/// (`:249`). `0.75` is used: the goal only fires while the witch is inside its
+/// 10-block attack radius and closing, so the far branch is the one a player meets,
+/// and this crate's `RangedAttackGoal` carries one power rather than a per-shot
+/// function of distance.
+///
+/// **Two disclosed divergences, both about the potion rather than the throw.**
+///
+/// First, *which* potion is not modelled. Vanilla picks between harming, healing,
+/// regeneration, slowness, poison and weakness from the target's own health,
+/// distance and existing effects (`:229-244`) — a five-way branch over state a
+/// `ProjectileKind` cannot carry, and one of whose arms even clears the target.
+/// Every throw here is a plain `SplashPotion`.
+///
+/// Second, and the reason the first one costs less than it looks: **a splash potion
+/// applies no effect on impact yet.** `impact_effect` gives it zero damage, and
+/// there is no per-mob status-effect store for an area effect to land in — the
+/// effect model that exists is the *player's* (`/effect`'s consumer). So a witch
+/// currently throws a real projectile that really flies and really impacts, and the
+/// impact does nothing. That is the honest state, and it is the seam a potion-cloud
+/// pass plugs into rather than a hole in this table.
+fn witch_potion(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(RangedAttackGoal::new(
+        ProjectileKind::SplashPotion,
+        WITCH_POTION_POWER,
+        ctx.speed * 1.0,
+        60,
+        60,
+        10.0,
+    ))
+}
+
+/// `Witch.performRangedAttack`'s far-distance throw power (`:249`,
+/// `dist <= 2.0 ? 0.45F : 0.75F`).
+const WITCH_POTION_POWER: f64 = 0.75;
+
+/// `RangedCrossbowAttackGoal<>(this, 1.0, 8.0F)`
+/// (`monster/illager/Pillager.java:74`), firing at `1.6F`
+/// (`Pillager.performRangedAttack` → `performCrossbowAttack(this, 1.6F)`, `:198`).
+///
+/// Modelled with [`RangedAttackGoal`] rather than a new crossbow goal, and the
+/// difference is worth stating: vanilla's `RangedCrossbowAttackGoal` has a
+/// four-state machine (uncharged → charging → charged → ready) driven by the
+/// crossbow item's own `CHARGED_PROJECTILES` component, which this repo has no item
+/// component model for. `RangedAttackGoal`'s fixed interval stands in for the
+/// charge cycle. The **projectile and its speed are exact**; the *cadence* is an
+/// approximation, and the interval below is the crossbow's own charge duration
+/// rather than a guess — see [`CROSSBOW_CHARGE_TICKS`].
+fn crossbow_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(RangedAttackGoal::new(
+        ProjectileKind::Arrow,
+        ARROW_POWER,
+        ctx.speed * 1.0,
+        CROSSBOW_CHARGE_TICKS,
+        CROSSBOW_CHARGE_TICKS,
+        8.0,
+    ))
+}
+
+/// `CrossbowItem.getChargeDuration`'s unenchanted value, used as the stand-in
+/// cadence for [`crossbow_attack`]: `Mth.floor(MAX_CHARGE_DURATION * 20.0F)` with
+/// `MAX_CHARGE_DURATION = 1.25F`, so **25** ticks.
+///
+/// A real number from the jar rather than a plausible round one. Reusing the bow's
+/// `40` would make a pillager fire noticeably slower than vanilla, and `20` — one
+/// second, the obvious guess — is 20% fast. Note the crossbow *item's* own
+/// `ARROW_POWER` is `3.15F`, which is **not** the figure a mob uses:
+/// `Pillager.performRangedAttack` calls `performCrossbowAttack(this, 1.6F)`, so the
+/// launch speed is [`ARROW_POWER`]'s `1.6`. Picking `3.15` here would have made
+/// pillager bolts hit twice as hard as vanilla's.
+const CROSSBOW_CHARGE_TICKS: i32 = 25;
+
 // -- tables ------------------------------------------------------------------
 
 /// `monster/Blaze.java:44-52`. No `super.registerGoals()` call, so this is the
@@ -614,6 +689,89 @@ pub const SNOW_GOLEM: &[Registration] = &[
     Registration::goal(2, "WaterAvoidingRandomStrollGoal", stroll),
     Registration::goal(3, "LookAtPlayerGoal", look_at_player_6),
     Registration::goal(4, "RandomLookAroundGoal", random_look_around),
+];
+
+/// `monster/Witch.java:61-75`, **including** the `super.registerGoals()` chain the
+/// first line calls: `Raider.registerGoals` (`raid/Raider.java:62-68`), which itself
+/// calls `PatrollingMonster.registerGoals` (`:38-41`), which calls `Monster`'s.
+///
+/// Those inherited rows are the reason this table is mostly `Missing`, and the
+/// reason the witch was left out of this family until now: every one of them is
+/// raid or patrol machinery — a raid to path to, a village to move through, a leader
+/// banner to obtain, a celebration to perform — and there is no raid system in this
+/// repo to approximate. They are transcribed as `Missing` rather than omitted so a
+/// gate comparing this table against the jar sees the whole `addGoal` set.
+///
+/// The ranged row itself is real, and it is what #227 asked for.
+pub const WITCH: &[Registration] = &[
+    // -- inherited from PatrollingMonster / Raider --
+    Registration::missing(Selector::Goal, 4, "PatrollingMonster.LongDistancePatrolGoal"),
+    Registration::missing(Selector::Goal, 1, "Raider.ObtainRaidLeaderBannerGoal"),
+    Registration::missing(Selector::Goal, 3, "PathfindToRaidGoal"),
+    Registration::missing(Selector::Goal, 4, "Raider.RaiderMoveThroughVillageGoal"),
+    Registration::missing(Selector::Goal, 5, "Raider.RaiderCelebration"),
+    // -- the witch's own --
+    Registration::goal(1, "FloatGoal", float_goal),
+    Registration::goal(2, "RangedAttackGoal", witch_potion),
+    Registration::goal(2, "WaterAvoidingRandomStrollGoal", stroll),
+    Registration::goal(3, "LookAtPlayerGoal", look_at_player_8),
+    Registration::goal(3, "RandomLookAroundGoal", random_look_around),
+    Registration::target(1, "HurtByTargetGoal", hurt_by_target),
+    // `NearestHealableRaiderTargetGoal` — a witch heals *other raiders*, which
+    // needs both a raid and mob-vs-mob targeting. Neither exists.
+    Registration::missing(Selector::Target, 2, "NearestHealableRaiderTargetGoal"),
+    // `NearestAttackableWitchTargetGoal` is a `NearestAttackableTargetGoal`
+    // subclass whose only override suppresses targeting *while a raid is active
+    // and the witch has not finished its wave* (`Witch.java`'s inner class). With
+    // no raid, the override is inert and the base behaviour is exactly ours — so
+    // this is `Modelled`, not `Missing`, and that is a claim about the subclass
+    // rather than a convenient substitution.
+    Registration::target(3, "NearestAttackableWitchTargetGoal", nearest_attackable_target),
+];
+
+/// `monster/illager/Pillager.java:69-82`, plus the same inherited
+/// `Raider`/`PatrollingMonster` chain [`WITCH`] documents.
+///
+/// The crossbow row is [`crossbow_attack`]; read its doc comment for what is exact
+/// (the projectile and its launch speed) and what is a stand-in (the charge-state
+/// machine, replaced by a fixed interval).
+pub const PILLAGER: &[Registration] = &[
+    // -- inherited from PatrollingMonster / Raider --
+    Registration::missing(Selector::Goal, 4, "PatrollingMonster.LongDistancePatrolGoal"),
+    Registration::missing(Selector::Goal, 1, "Raider.ObtainRaidLeaderBannerGoal"),
+    Registration::missing(Selector::Goal, 3, "PathfindToRaidGoal"),
+    Registration::missing(Selector::Goal, 4, "Raider.RaiderMoveThroughVillageGoal"),
+    Registration::missing(Selector::Goal, 5, "Raider.RaiderCelebration"),
+    // -- the pillager's own --
+    Registration::goal(0, "FloatGoal", float_goal),
+    // `AvoidEntityGoal<Creaking>` (`:72`). Ours resolves the avoided species
+    // through the host's own feed, the same route the creeper's cat/ocelot
+    // avoidance takes.
+    Registration::goal(1, "AvoidEntityGoal", avoid_entity),
+    // `Raider.HoldGroundAttackGoal` — the raid-wave "stand and fight at the
+    // village bell" behaviour. Raid machinery again.
+    Registration::missing(Selector::Goal, 2, "Raider.HoldGroundAttackGoal"),
+    Registration::goal(3, "RangedCrossbowAttackGoal", crossbow_attack),
+    // `RandomStrollGoal(this, 0.6)` (`:75`) — note this is the plain stroll, not
+    // the water-avoiding one the witch gets, and vanilla's speed factor is 0.6.
+    // Ours is one goal for both, so the row is `Modelled` with the factor visible
+    // at `stroll`'s own definition rather than here.
+    Registration::goal(8, "RandomStrollGoal", stroll),
+    Registration::goal(9, "LookAtPlayerGoal", look_at_player_8),
+    // The second `LookAtPlayerGoal` at priority 10 targets `Mob`, not `Player`
+    // (`:77`) — a different class, so per this family's own rule it is a row
+    // covered by the one above rather than a second instance fighting it for LOOK.
+    Registration::covered(Selector::Goal, 10, "LookAtPlayerGoal", "LookAtPlayerGoal"),
+    Registration::target(1, "HurtByTargetGoal", hurt_by_target),
+    Registration::target(2, "NearestAttackableTargetGoal", nearest_attackable_target),
+    // The two priority-3 target rows name `AbstractVillager` and `IronGolem`
+    // (`:80-81`). Both are mob-vs-mob targeting, which `find_nearest_target`
+    // answers with the nearest *player* — substituting ours would make a pillager
+    // shoot the player under a villager's priority, which is not a simplification
+    // but a duplicate of the row above. `Missing`, for the same reason the snow
+    // golem's target row is.
+    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal"),
+    Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal"),
 ];
 
 /// The registry path a [`ProjectileKind`] spawns as.
@@ -673,12 +831,19 @@ pub const fn integrates_as_arrow(kind: ProjectileKind) -> bool {
 /// registered from that file.
 ///
 /// **Not the ghast** — its fireball feeds `explosion.rs` and it belongs to the
-/// specialist family (#232). **Not the witch or the pillager**: both extend
-/// `Raider`, whose `registerGoals` chain (`raid/Raider.java:62-68` and
-/// `PatrollingMonster` above it) adds raid machinery this repo has none of, so
-/// their tables are mostly `Missing` rows about a raid system rather than about
-/// ranged attacks. They are #227's remainder, not B3a's.
-pub const SPECIES: &[&str] = &["blaze", "snow_golem"];
+/// specialist family (#232).
+///
+/// **The witch and the pillager are here now.** This list used to exclude them with
+/// the reasoning that both extend `Raider`, whose `registerGoals` chain adds raid
+/// machinery this repo has none of, "so their tables are mostly `Missing` rows about
+/// a raid system rather than about ranged attacks". Both halves of that were true
+/// and neither was a reason to omit the species: the inherited raid rows are
+/// transcribed as `Missing` (which is what that coverage variant is *for*), and the
+/// ranged rows underneath them — [`witch_potion`] and [`crossbow_attack`] — are real
+/// and are exactly what a player meets outside a raid. Leaving them out meant a
+/// witch and a pillager fell through to the fallback table and had no ranged attack
+/// at all.
+pub const SPECIES: &[&str] = &["blaze", "snow_golem", "witch", "pillager"];
 
 /// Resolves a species path to its table, or `None` if this family does not claim
 /// it.
@@ -687,6 +852,8 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
     match species {
         "blaze" => Some(BLAZE),
         "snow_golem" => Some(SNOW_GOLEM),
+        "witch" => Some(WITCH),
+        "pillager" => Some(PILLAGER),
         _ => None,
     }
 }
@@ -972,12 +1139,63 @@ mod tests {
             (Selector::Target, 1, "NearestAttackableTargetGoal"),
         ];
 
+        // The witch's own five goal rows and three target rows, plus the five
+        // inherited `Raider`/`PatrollingMonster` rows its `super.registerGoals()`
+        // pulls in. The inherited rows are the point: a table that transcribed only
+        // the witch's own `addGoal` calls would look complete and would be missing
+        // five, and no behavioural test could see the difference because all five
+        // are `Missing` anyway.
+        let witch_expected = vec![
+            (Selector::Goal, 4, "PatrollingMonster.LongDistancePatrolGoal"),
+            (Selector::Goal, 1, "Raider.ObtainRaidLeaderBannerGoal"),
+            (Selector::Goal, 3, "PathfindToRaidGoal"),
+            (Selector::Goal, 4, "Raider.RaiderMoveThroughVillageGoal"),
+            (Selector::Goal, 5, "Raider.RaiderCelebration"),
+            (Selector::Goal, 1, "FloatGoal"),
+            (Selector::Goal, 2, "RangedAttackGoal"),
+            (Selector::Goal, 2, "WaterAvoidingRandomStrollGoal"),
+            (Selector::Goal, 3, "LookAtPlayerGoal"),
+            (Selector::Goal, 3, "RandomLookAroundGoal"),
+            (Selector::Target, 1, "HurtByTargetGoal"),
+            (Selector::Target, 2, "NearestHealableRaiderTargetGoal"),
+            (Selector::Target, 3, "NearestAttackableWitchTargetGoal"),
+        ];
+        let pillager_expected = vec![
+            (Selector::Goal, 4, "PatrollingMonster.LongDistancePatrolGoal"),
+            (Selector::Goal, 1, "Raider.ObtainRaidLeaderBannerGoal"),
+            (Selector::Goal, 3, "PathfindToRaidGoal"),
+            (Selector::Goal, 4, "Raider.RaiderMoveThroughVillageGoal"),
+            (Selector::Goal, 5, "Raider.RaiderCelebration"),
+            (Selector::Goal, 0, "FloatGoal"),
+            (Selector::Goal, 1, "AvoidEntityGoal"),
+            (Selector::Goal, 2, "Raider.HoldGroundAttackGoal"),
+            (Selector::Goal, 3, "RangedCrossbowAttackGoal"),
+            (Selector::Goal, 8, "RandomStrollGoal"),
+            (Selector::Goal, 9, "LookAtPlayerGoal"),
+            (Selector::Goal, 10, "LookAtPlayerGoal"),
+            (Selector::Target, 1, "HurtByTargetGoal"),
+            (Selector::Target, 2, "NearestAttackableTargetGoal"),
+            (Selector::Target, 3, "NearestAttackableTargetGoal"),
+            (Selector::Target, 3, "NearestAttackableTargetGoal"),
+        ];
+
         for (species, cite, expected) in [
             ("blaze", "monster/Blaze.java:44-52", blaze_expected),
             (
                 "snow_golem",
                 "animal/golem/SnowGolem.java:54-61",
                 snow_golem_expected,
+            ),
+            (
+                "witch",
+                "monster/Witch.java:61-75 plus raid/Raider.java:62-68 and \
+                 monster/PatrollingMonster.java:38-41",
+                witch_expected,
+            ),
+            (
+                "pillager",
+                "monster/illager/Pillager.java:69-82 plus the same inherited chain",
+                pillager_expected,
             ),
         ] {
             let table = lookup(species).unwrap_or_else(|| panic!("{species} has no table"));
@@ -1001,7 +1219,14 @@ mod tests {
     /// `MobSim::spawn_species` calls.
     #[test]
     fn both_species_install_goals_through_the_production_entry_point() {
-        for (species, expected_built) in [("blaze", 6), ("snow_golem", 4)] {
+        // The witch builds 7 of its 13 rows and the pillager 7 of its 16 — every
+        // `Modelled` row and no `Missing` or `CoveredBy` one, which is what makes the
+        // raid rows honest bookkeeping rather than silently-registered no-ops. The
+        // pillager's second `LookAtPlayerGoal` is `CoveredBy`, so 16 rows minus 8
+        // uncovered gives 7 and not 8.
+        for (species, expected_built) in
+            [("blaze", 6), ("snow_golem", 4), ("witch", 7), ("pillager", 7)]
+        {
             let ctx = SpeciesContext::new(0.23);
             let built = goals_for(species, &ctx);
             assert_eq!(
