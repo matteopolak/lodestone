@@ -2574,9 +2574,9 @@ fn the_wheel_router_declines_a_screen_with_no_list() {
 /// Measured **by location and by colour**, never as a frame fraction:
 ///
 /// - the thumb's rect carries `LABEL`, the colour `draw_scrollbar` gives the scroller
-/// - the 8 px gutter between the rows' right edge and the bar carries nothing, which
-///   is what pins the bar *outside* the row column (`scrollBarX() = getRowRight() +
-///   scrollbarWidth() + 2`) rather than inset into it
+/// - the 8 px gutter between the rows' right edge and the bar carries nothing **but
+///   the band's own tint**, which is what pins the bar *outside* the row column
+///   (`scrollBarX() = getRowRight() + scrollbarWidth() + 2`) rather than inset into it
 /// - a list short enough not to scroll draws **no bar at all** — vanilla's
 ///   `if (this.scrollable())` gate, and the control that stops the two assertions
 ///   above passing on a bar that is unconditionally painted
@@ -2614,12 +2614,28 @@ fn the_accounts_screen_draws_the_same_scrollbar_the_server_list_does() {
 
     // The gutter: `scrollbar_x` is `row_right + 6 + 2`, so the 8 px immediately right
     // of the rows belongs to neither. Derived from the same expression, not restated.
+    //
+    // **Re-derived when the band chrome landed**, and the old form is worth recording
+    // because it was correct and is now the wrong question. This asserted
+    // `coverage(...) == 0` — nothing at all in the gutter — which held only because the
+    // band had no background: `extractListBackground` blits `menu_list_background.png`
+    // across the list widget's own `getX()..getRight()`, and that is the whole canvas,
+    // so the gutter is *inside* the tint by vanilla's own construction. Asserting
+    // emptiness again would mean asserting the tint away.
+    //
+    // The claim the gate exists to make is unchanged and is now spelled colour-wise:
+    // the **topmost** thing in the gutter is the tint at every sample, so no row ink
+    // and no scrollbar ink reached it. Strictly stronger than the old count — a bar
+    // inset into the row column would paint `LABEL` here and fail — and it cannot be
+    // satisfied by a frame that simply drew nothing, because a bare backdrop reports
+    // `None` rather than the tint.
     let gutter = (row_right, list.top(), widget::SCROLLBAR_WIDTH + 2.0, list.height());
-    let in_gutter = coverage(&v, w, h, gutter);
+    let tinted = coverage_of(&v, w, h, gutter, LIST_BAND_TINT);
     assert_eq!(
-        in_gutter, 0.0,
-        "something painted {in_gutter} of the gutter {gutter:?} between the rows and \
-         the bar, so the bar is inset into the row column rather than outside it"
+        tinted, 1.0,
+        "the gutter {gutter:?} between the rows and the bar is not uniformly the band \
+         tint ({tinted} of it is) — something else painted there, so the bar is inset \
+         into the row column rather than outside it"
     );
 
     // The control, run rather than described: two accounts is three rows, which fit
@@ -2724,12 +2740,25 @@ fn an_account_row_straddling_the_band_is_clipped_not_drawn_over_the_footer() {
     // precisely the button row's own 20 px out of the 60 px band. The button y comes
     // off `accounts_button_slot` — the same arranged slot the draw places the buttons
     // from — rather than being restated as a constant.
+    //
+    // **The strip now starts `SEPARATOR_H` below the band, and that is a re-derivation
+    // rather than a loosening.** `extractListSeparators` blits `footer_separator.png`
+    // — 32×2 — at exactly `getBottom()`, so the first two rows of this strip belong to
+    // the separator by vanilla's own construction, and the old bound of `band_bottom`
+    // asserted them away. It read 0.083 covered when the chrome landed, which is 2 of
+    // the 24 sample rows: the bar, not a row. The clip under test is unchanged.
     let (_, button_y, _, _) = accounts_button_slot(0).resolve(w, h);
     assert!(
-        button_y > band_bottom,
-        "premise: the button row at {button_y} must sit below the band at {band_bottom}"
+        button_y > band_bottom + SEPARATOR_H,
+        "premise: the button row at {button_y} must sit below the band at {band_bottom} \
+         plus its separator"
     );
-    let below = (col_x, band_bottom, col_w, button_y - band_bottom);
+    let below = (
+        col_x,
+        band_bottom + SEPARATOR_H,
+        col_w,
+        button_y - band_bottom - SEPARATOR_H,
+    );
     let spill = coverage(&v, w, h, below);
     assert_eq!(
         spill, 0.0,
@@ -4869,7 +4898,313 @@ fn a_settings_row_is_cut_at_the_bands_bottom_rather_than_painted_over_the_footer
     );
 }
 
-/// **The scroll gate** (issue #541), in three parts, each with its control:
+/// Which visible row on the current settings page is the nav button for `page`.
+fn settings_nav_row(nav: &MenuNav, page: crate::menu::options::SettingsPage) -> Option<usize> {
+    use crate::menu::options;
+    nav.settings()
+        .visible()
+        .iter()
+        .position(|c| matches!(c.cell, options::Cell::Nav { page: Some(p), .. } if p == page))
+}
+
+/// Open the settings tree on `page` the way a player does — by **clicking** nav
+/// buttons found in the row list `app` hit-tests, never by writing a page into a
+/// field.
+///
+/// An anti-island premise: if the button that reaches a page stops opening it, the
+/// setup fails instead of the assertion. Two levels deep, because two pages are not
+/// on the root grid — Mouse hangs off Controls and Online off the root's own header
+/// button — and hardcoding a parent table would be the thing this is avoiding. The
+/// walk restarts from a fresh screen per candidate parent rather than backing out,
+/// so a page reached down the wrong branch cannot leave a nav stack behind.
+fn settings_nav_on(page: crate::menu::options::SettingsPage) -> (MenuNav, crate::menu::UiState) {
+    use crate::menu::options;
+    let fresh = || {
+        let nav = test_nav("settings-band-chrome");
+        let mut ui = crate::menu::UiState::new();
+        ui.open_settings();
+        (nav, ui)
+    };
+    let (mut nav, mut ui) = fresh();
+    if let Some(row) = settings_nav_row(&nav, page) {
+        nav.click(&mut ui, row);
+        assert_eq!(nav.settings().page(), page, "premise: {page:?} is up");
+        return (nav, ui);
+    }
+    let parents: Vec<options::SettingsPage> = nav
+        .settings()
+        .visible()
+        .iter()
+        .filter_map(|c| match c.cell {
+            options::Cell::Nav { page: Some(p), .. } => Some(p),
+            _ => None,
+        })
+        .collect();
+    for parent in parents {
+        let (mut n, mut u) = fresh();
+        let Some(row) = settings_nav_row(&n, parent) else {
+            continue;
+        };
+        n.click(&mut u, row);
+        if let Some(row) = settings_nav_row(&n, page) {
+            n.click(&mut u, row);
+            if n.settings().page() == page {
+                return (n, u);
+            }
+        }
+    }
+    panic!("premise: no nav button within two clicks of the root opens {page:?}");
+}
+
+/// **The reported bug** (2026-08-09): *"some settings menus (like the Music &
+/// Sounds) still overlaps buttons at the bottom … in vanilla the button(s) anchored
+/// at the bottom have their own section, with a horizontal bar separating it … the
+/// middle section has a bit of a black filter in the background that tints the
+/// panorama"*.
+///
+/// The band's chrome, measured **by location and by exact colour**: the two
+/// separators sit on the band's own edges and the tint fills the band and stops
+/// there. That is what makes header / content / footer read as three sections, and
+/// it is the piece that was missing — the clip already reserved the footer band
+/// (see `every_settings_page_keeps_its_footer_band_clear_at_every_scroll_offset`),
+/// so a row cut flush against an untinted, unfenced edge was the whole of what the
+/// owner saw.
+///
+/// Every expected value originates **outside this crate**: the four colours are the
+/// pixel values of `textures/gui/{header,footer}_separator.png` and
+/// `menu_list_background.png` decoded out of the 26.2 `client.jar`, and the two
+/// y offsets are `extractListSeparators`' own `getY() - 2` and `getBottom()`. The
+/// rects come from `ListSpec::chrome_rect`, the same call the draw makes.
+///
+/// **What else paints here** was asked first, and it decides every sample point:
+/// the separator rows are outside the band, where only the title (centred, 9 px
+/// tall, in the 33 px header) and the footer's Done (a 200 px button 7 px lower)
+/// paint — so a sample at the canvas's left edge is clear of both. The tint sample
+/// is likewise in the left margin, clear of the 310 px row column.
+#[test]
+fn the_settings_band_carries_vanillas_separators_and_its_tint() {
+    use crate::menu::options::SettingsPage;
+
+    // A canvas short enough that Sound overflows its band, so this is the same
+    // frame the report was made against rather than a roomy one.
+    const W: f32 = 320.0;
+    const H: f32 = 240.0;
+    let (nav, ui) = settings_nav_on(SettingsPage::Sound);
+    let statuses = crate::menu::status::StatusCache::with_probe(
+        crate::menu::status::unavailable_probe(),
+    );
+    let mut fav = FaviconCache::new();
+    let frame = frame_for(&ui, &nav, &statuses, &mut fav).expect("settings owns its frame");
+    let spec = frame.list.as_ref().expect("premise: Sound declares a ListSpec");
+    let list = spec.model(H).expect("premise: Sound has a band at 240");
+    let (cx, cy, cw, ch) = spec
+        .chrome_rect(&list, W)
+        .expect("premise: a settings list declares canvas-wide chrome");
+    assert_eq!(
+        (cx, cy, cw, ch),
+        (0.0, 33.0, W, H - 33.0 - 33.0),
+        "the chrome rect is not the 33 px-header / 33 px-footer band vanilla's \
+         OptionsList is sized to"
+    );
+    let v = geometry(&frame, W, H);
+
+    // A column in the left margin: outside the 310 px row column, so nothing but
+    // the chrome can paint here.
+    let probe_x = 4.0;
+    let at = |y: f32| {
+        colour_at(&v, 2.0 * probe_x / W - 1.0, 1.0 - 2.0 * y / H)
+    };
+    let expect = |y: f32, want: [f32; 4], what: &str| {
+        let got = at(y);
+        assert!(
+            got.is_some_and(|c| c.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.002)),
+            "{what} at y={y} is {got:?}, not the decoded {want:?}"
+        );
+    };
+    // `header_separator.png` is light over dark; `footer_separator.png` is the
+    // mirror. Sampled at row centres, since a quad spans `y..y+1`.
+    expect(cy - SEPARATOR_H + 0.5, SEPARATOR_LIGHT, "the header bar's light row");
+    expect(cy - 1.0 + 0.5, SEPARATOR_DARK, "the header bar's dark row");
+    expect(cy + ch + 0.5, SEPARATOR_DARK, "the footer bar's dark row");
+    expect(cy + ch + 1.5, SEPARATOR_LIGHT, "the footer bar's light row");
+    // And the tint, over the band's whole height in that column.
+    let margin = (0.0, cy, options::row_left(W, 0), ch);
+    let tinted = coverage_of(&v, W, H, margin, LIST_BAND_TINT);
+    assert_eq!(
+        tinted, 1.0,
+        "the band's left margin {margin:?} is only {tinted} tinted — the black filter \
+         over the panorama does not cover the band"
+    );
+
+    // The tint **stops** at the band. Two rows that must not carry it: one above the
+    // header bar, one inside the footer band beside the Done button. This is the
+    // "own section" half of the report; a tint that ran the whole canvas would
+    // satisfy the assertion above and still be wrong.
+    for (y, what) in [
+        (cy - SEPARATOR_H - 1.5, "above the header bar"),
+        (cy + ch + SEPARATOR_H + 1.5, "below the footer bar"),
+    ] {
+        let got = at(y);
+        assert!(
+            !got.is_some_and(|c| c.iter().zip(LIST_BAND_TINT).all(|(a, b)| (a - b).abs() < 0.002)),
+            "the band tint leaked {what} (y={y}), so the content band is not fenced off"
+        );
+    }
+
+    // -- control, executed ---------------------------------------------------
+    // The same frame with its `ListSpec` removed draws no chrome at all, so every
+    // assertion above is measuring the chrome rather than something else that
+    // happens to paint at those rows. Observed failing: `expect` on the header bar's
+    // light row reports `None` here.
+    let mut bare = frame.clone();
+    bare.list = None;
+    let bv = geometry(&bare, W, H);
+    let bare_at = colour_at(&bv, 2.0 * probe_x / W - 1.0, 1.0 - 2.0 * (cy - SEPARATOR_H + 0.5) / H);
+    assert!(
+        bare_at.is_none(),
+        "a frame with no ListSpec still painted {bare_at:?} where the header bar goes, \
+         so the chrome is not what the assertions above measured"
+    );
+    let bare_tint = coverage_of(&bv, W, H, margin, LIST_BAND_TINT);
+    assert_eq!(
+        bare_tint, 0.0,
+        "a frame with no ListSpec still tinted {bare_tint} of the band"
+    );
+}
+
+/// **The layout half of the same report, and it is a sweep rather than one probe.**
+///
+/// A page whose rows already fit cannot tell "laid out clear of the footer" from
+/// "happens not to overflow", which is exactly how an overlap ships. So this runs
+/// every `OptionsList` page at a canvas where the longest of them overflows by
+/// hundreds of pixels, at **every** scroll offset one pixel apart, and requires the
+/// strip between the band's footer separator and the footer's own top button to be
+/// empty in all of them.
+///
+/// Three things make it a real measurement rather than a restatement:
+///
+/// - the offset is driven through `MenuNav::scroll_active_list` — the production
+///   wheel path — a twelfth of a notch at a time, so the swept offsets are ones a
+///   player can actually reach, not values written into a field;
+/// - mismatches are **collected**, not asserted inside the loop, so a regression
+///   reports every page and offset it touches instead of aborting on the first;
+/// - the premise that a page overflows is asserted per page, and the control is the
+///   same frame with its `ListSpec` removed, which must fail.
+///
+/// The strip's bounds are derived: the band from the `ListSpec::model` the clip is
+/// built from, plus `SEPARATOR_H` for the footer bar that legitimately owns the
+/// first two rows, up to `options::footer_rects`' own y.
+#[test]
+fn every_settings_page_keeps_its_footer_band_clear_at_every_scroll_offset() {
+    use crate::menu::options::{self, SettingsPage};
+
+    // The shortest canvas any `gui_scale` can produce, so every page that can
+    // overflow does.
+    const W: f32 = 320.0;
+    const H: f32 = 240.0;
+    // One pixel of offset: `scroll_rate` is `floor(DEFAULT_ITEM_HEIGHT / 2)` = 12,
+    // and the wheel takes notches.
+    let px_per_notch = (options::DEFAULT_ITEM_HEIGHT / 2.0).floor();
+
+    let statuses = crate::menu::status::StatusCache::with_probe(
+        crate::menu::status::unavailable_probe(),
+    );
+    let mut overflowed = Vec::new();
+    let mut mismatches: Vec<String> = Vec::new();
+    for page in [
+        SettingsPage::Video,
+        SettingsPage::Controls,
+        SettingsPage::Mouse,
+        SettingsPage::Sound,
+        SettingsPage::Chat,
+        SettingsPage::Accessibility,
+        SettingsPage::Skin,
+        SettingsPage::Online,
+    ] {
+        let (mut nav, ui) = settings_nav_on(page);
+        let mut fav = FaviconCache::new();
+        let footer_top = options::footer_rects(W, H, page.footer().len() as u8)
+            .first()
+            .expect("every page has a footer button")
+            .1;
+        let max = options::list_spec(page, 0.0)
+            .model(H)
+            .map_or(0.0, |m| m.max_scroll());
+        if max > 0.0 {
+            overflowed.push(page);
+        }
+        let mut offset = 0.0f32;
+        loop {
+            let frame = frame_for(&ui, &nav, &statuses, &mut fav).expect("settings owns a frame");
+            let list = frame
+                .list
+                .as_ref()
+                .and_then(|s| s.model(H))
+                .expect("premise: every OptionsList page has a band at 240");
+            let band_bottom = list.top() + list.height();
+            let strip = (
+                0.0,
+                band_bottom + SEPARATOR_H,
+                W,
+                footer_top - band_bottom - SEPARATOR_H,
+            );
+            assert!(strip.3 > 0.0, "premise: {page:?} has a strip to measure");
+            let ink = coverage(&geometry(&frame, W, H), W, H, strip);
+            if ink != 0.0 {
+                mismatches.push(format!(
+                    "{page:?} at scroll {offset}: {ink} of {strip:?} painted"
+                ));
+            }
+            if offset >= max {
+                break;
+            }
+            offset += 1.0;
+            nav.scroll_active_list(&ui, -1.0 / px_per_notch, H);
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "settings rows painted into the reserved footer band:\n{}",
+        mismatches.join("\n")
+    );
+    // The premise, stated as a count so it cannot pass vacuously: this sweep is
+    // worthless unless some page genuinely has more rows than its band holds.
+    assert!(
+        overflowed.len() >= 4,
+        "only {} of the OptionsList pages overflow a 240 px canvas ({overflowed:?}), so \
+         this sweep mostly measured pages that could not overlap anyway",
+        overflowed.len()
+    );
+
+    // -- control, executed ---------------------------------------------------
+    // Sound with no `ListSpec` takes `draw`'s unclipped branch, and its rows run
+    // 50 px past the band at 240, so the same strip must be inked.
+    let (nav, ui) = settings_nav_on(SettingsPage::Sound);
+    let mut fav = FaviconCache::new();
+    let mut bare = frame_for(&ui, &nav, &statuses, &mut fav).expect("settings owns a frame");
+    let band_bottom = bare
+        .list
+        .as_ref()
+        .and_then(|s| s.model(H))
+        .map(|l| l.top() + l.height())
+        .expect("premise: Sound has a band");
+    let footer_top = options::footer_rects(W, H, 1)[0].1;
+    let strip = (
+        0.0,
+        band_bottom + SEPARATOR_H,
+        W,
+        footer_top - band_bottom - SEPARATOR_H,
+    );
+    bare.list = None;
+    let spilled = coverage(&geometry(&bare, W, H), W, H, strip);
+    assert!(
+        spilled > 0.0,
+        "the unclipped Sound frame painted nothing in {strip:?} either, so the sweep \
+         above is not measuring the clip"
+    );
+}
+
+/// **The save-list scroll gate**, in three parts, each with its control:
 ///
 /// 1. a row straddling the band's bottom edge is **cut** rather than painted into
 ///    the gap above the footer — the control is the *same frame with no

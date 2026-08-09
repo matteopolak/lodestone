@@ -238,9 +238,9 @@ pub fn build(
 
     // The multiplayer list's scrollbar (the owner's first report: "server list
     // needs a scrollbar"). Drawn *before* the rows so a row can never be painted
-    // over by the bar — vanilla's order is the reverse (`extractScrollbar` runs
-    // last, `AbstractSelectionList.java:216`) because it scissors the rows to the
-    // band first; the bar sits outside the rows here either way
+    // over by the bar — vanilla's order is the reverse (`extractScrollbar` runs last
+    // in `AbstractSelectionList.extractWidgetRenderState`) because it scissors the
+    // rows to the band first; the bar sits outside the rows here either way
     // (`scrollBarX() = getRowRight() + 8`), so the order is not observable.
     //
     // Every input is derived from the same expressions the rows are placed by —
@@ -258,6 +258,22 @@ pub fn build(
         spec.model(height)
             .map(|list| (list, spec.row_right(width)))
     });
+    // The band's own tinted background — `AbstractSelectionList.extractListBackground`,
+    // which runs *before* the scissored rows, so this has to go here and not with the
+    // separators after them. See `LIST_BAND_TINT` for the decoded texture.
+    //
+    // The rect comes from `ListSpec::chrome_rect`, which is handed the same
+    // `ScrollList` the row clip is built from, so the tint cannot end somewhere the
+    // clip does not. It is what makes the header, content and footer read as three
+    // sections rather than one field of buttons.
+    let chrome = frame
+        .list
+        .as_ref()
+        .zip(active_list.as_ref())
+        .and_then(|(spec, (list, _))| spec.chrome_rect(list, width));
+    if let Some((cx, cy, cw, ch)) = chrome {
+        b.rect(cx, cy, cw, ch, LIST_BAND_TINT);
+    }
     if let Some((list, row_right)) = active_list.as_ref() {
         draw_scrollbar(&mut b, list, *row_right);
     }
@@ -570,6 +586,26 @@ pub fn build(
                 FG_DIM,
             );
         }
+    }
+
+    // The two separators that fence the band off from the header and the footer —
+    // `AbstractSelectionList.extractListSeparators`, which runs **after** the
+    // scissored rows and before the scrollbar, hence their position here rather than
+    // beside the tint. Drawn after the rows so a row cut flush at the band edge is
+    // capped by the bar rather than butting into the buttons below it, which is what
+    // the owner's report described.
+    //
+    // Both are two 1 px rows of flat colour rather than a blit: these are loose
+    // `textures/gui/` PNGs outside the sprite atlas (the same gap `resources.rs`
+    // records), and each row of each texture is one flat value, so a quad per row is
+    // exact and not an approximation. The header bar is light-over-dark and the
+    // footer bar dark-over-light — mirror images in the jar, and the mirroring is the
+    // point: each bevel faces the content.
+    if let Some((cx, cy, cw, ch)) = chrome {
+        b.rect(cx, cy - SEPARATOR_H, cw, 1.0, SEPARATOR_LIGHT);
+        b.rect(cx, cy - 1.0, cw, 1.0, SEPARATOR_DARK);
+        b.rect(cx, cy + ch, cw, 1.0, SEPARATOR_DARK);
+        b.rect(cx, cy + ch + 1.0, cw, 1.0, SEPARATOR_LIGHT);
     }
 
     // Message and footer, bottom-up. Not on a vanilla screen: vanilla has no

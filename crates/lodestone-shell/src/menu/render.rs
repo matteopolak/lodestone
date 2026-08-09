@@ -304,11 +304,45 @@ const BG: [f32; 4] = [0.10, 0.10, 0.12, 1.0];
 /// a flat 25 %-black fill *is* the vanilla backdrop.
 ///
 /// What is missing is the **blur** vanilla applies behind it when the pause
-/// screen is topmost (`Screen.java:389-394`, gated on the
+/// screen is topmost (`Screen.extractBlurredBackground`, gated on the
 /// `menuBackgroundBlurriness` option, which vanilla lets the player set to 0).
 /// At blurriness 0 this is exactly vanilla; above it, vanilla's menu reads
 /// calmer over a busy world than ours does.
 const OVERLAY_BG: [f32; 4] = [0.0, 0.0, 0.0, 64.0 / 255.0];
+
+/// The tint a scrolling list's band carries on top of the screen backdrop —
+/// `textures/gui/menu_list_background.png`, decoded out of the 26.2 `client.jar`:
+/// a 16×16 greyscale+alpha PNG in which **every pixel is grey 0, alpha 112**. So
+/// a flat quad at 112/255 black *is* the vanilla band background, exactly as
+/// [`OVERLAY_BG`] is the whole-screen one, and there is no tiling to reproduce.
+///
+/// `AbstractSelectionList.extractListBackground` blits it across `getX()`/`getY()`
+/// to `getRight()`/`getBottom()` before the rows, which is why this is drawn
+/// under them and why its rect comes from
+/// [`widget::ListSpec::chrome_rect`] rather than from anything restated.
+///
+/// **This is the "black filter over the panorama" the owner reported missing.**
+/// Out of a world the stack is panorama → whole-screen `menu_background` (this
+/// pass applies it as `panorama::dim_for_screen`) → this band tint; in a world it
+/// is [`OVERLAY_BG`] → this band tint. `inworld_menu_list_background.png` is a
+/// **separate file with byte-identical pixels** (also grey 0 / alpha 112), so the
+/// in-world fork vanilla writes is a no-op in 26.2 and one constant is faithful to
+/// both arms. Measured, not assumed — see `docs/menu-list-chrome.md`.
+const LIST_BAND_TINT: [f32; 4] = [0.0, 0.0, 0.0, 112.0 / 255.0];
+/// Height of one separator — `header_separator.png` and `footer_separator.png` are
+/// both 32×**2**, and `extractListSeparators` blits them at that height.
+const SEPARATOR_H: f32 = 2.0;
+/// The **light** row of a separator: white at alpha 51.
+///
+/// Both separator textures are 32×2 greyscale+alpha with one flat colour per row.
+/// `header_separator.png` is light-over-dark and `footer_separator.png` is
+/// dark-over-light — mirror images, which is what makes the pair read as a bevel
+/// facing the content in both directions. All four values decoded from the jar;
+/// the two `inworld_*` variants are byte-identical to these, so there is nothing
+/// to fork on.
+const SEPARATOR_LIGHT: [f32; 4] = [1.0, 1.0, 1.0, 51.0 / 255.0];
+/// The **dark** row of a separator: black at alpha 191.
+const SEPARATOR_DARK: [f32; 4] = [0.0, 0.0, 0.0, 191.0 / 255.0];
 /// Fill of an unselected row.
 const ROW_BG: [f32; 4] = [0.22, 0.22, 0.26, 1.0];
 /// Fill of the highlighted row.
