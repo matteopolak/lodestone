@@ -168,7 +168,7 @@ nodes left — notably the output of `lodestone_game::text::resolve` — and in 
 and tests. It is wrong on anything a server authored.
 
 `container::menu_title(&Text, &translate)` is the read-boundary resolution, the
-same shape `scoreboard::sidebar_from`, `tablist::player_rows` and
+same shape `scoreboard::sidebar_from`, `tablist::tab_list_view` and
 `overlay::boss_bars_from` use, and `app.rs` passes `Sim::translator()`:
 
 ```rust

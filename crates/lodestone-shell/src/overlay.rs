@@ -127,7 +127,7 @@ pub struct BossBarView {
 /// bar's title is the boss entity's display name, i.e.
 /// `translate("entity.minecraft.ender_dragon")` — flattening it without a table
 /// puts the raw key on screen. Same shape as [`crate::scoreboard::sidebar_from`]
-/// and [`crate::tablist::player_rows`], deliberately.
+/// and [`crate::tablist::tab_list_view`], deliberately.
 #[must_use]
 pub fn boss_bars_from(
     bars: &BossBarSet,

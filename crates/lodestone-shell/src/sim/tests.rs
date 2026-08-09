@@ -2630,7 +2630,7 @@ fn held_item_overlay_reaches_pixels_and_keys_on_identity_not_slot() {
 ///
 /// `ingest_session_event` runs the same `lodestone_ecs::session` systems the
 /// real net thread runs (see `NetClient::session`); what this pins is the
-/// chain `component → NetClient::tab_list → Sim::player_rows`, which is
+/// chain `component → NetClient::tab_list → Sim::tab_list_view`, which is
 /// exactly what the deleted `NetUpdate::TabListEvent` fold used to short.
 #[test]
 fn tab_overlay_rows_read_the_clients_one_folded_tab_list() {

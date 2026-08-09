@@ -66,7 +66,7 @@ insert_session_components(&mut ecs, local);         // scoreboard, tab list, bos
 `a_separately_spawned_session_entity_makes_two_local_players` is its control — it spawns the session
 entity separately (exactly what `SharedState::default` does) and observes 2.
 
-The direct consequence: `Sim::{sidebar, player_rows, boss_bars, player_menu, open_menu}` read
+The direct consequence: `Sim::{sidebar, tab_list_view, boss_bars, player_menu, open_menu}` read
 components off `Sim.local` instead of round-tripping through `NetClient` → `ClientHandle` →
 the client's `World`. Still one fold (`lodestone_ecs::session`'s `NetIngest` systems), still one
 copy; only the reader changed.
@@ -521,7 +521,7 @@ flips that to reproduce "stranded on the death screen forever". Merging them del
 `Sim::end_session`'s doc said the tab list, scoreboard, boss bars and menus "need no clearing at all
 … they are components in the *client's* `World`, so dropping `net` drops the only route to them".
 **True when written, false since (c).** There is one `World`, the readers are
-`Sim::sidebar`/`player_rows`/`boss_bars` off `Sim.local`, and dropping `net` drops no route to
+`Sim::sidebar`/`tab_list_view`/`boss_bars` off `Sim.local`, and dropping `net` drops no route to
 anything — the previous server's sidebar and tab list survived a quit-to-title. `end_session` now
 calls `insert_session_components` beside `insert_hud_components`, and
 `end_session_tears_down_and_a_fresh_connect_afterward_starts_clean` asserts the sidebar clears.
