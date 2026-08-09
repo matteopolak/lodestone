@@ -392,6 +392,25 @@ impl ContainerRenderer {
             .attach_glint(device, queue, color_format, img, "container-glint");
     }
 
+    /// Push vanilla's **Glint Speed**/**Glint Strength** accessibility options to
+    /// this screen's 2-D GUI glint pass. Mirrors
+    /// [`HudRenderer::set_glint_options`](crate::hud::HudRenderer::set_glint_options),
+    /// and both are needed because each owns its own [`IconRenderer`] — an
+    /// enchanted stack in a slot and the same stack in the hotbar would otherwise
+    /// shimmer at different rates and out of phase.
+    pub fn set_glint_options(&mut self, speed: f64, strength: f32) {
+        self.icons.set_glint_options(speed, strength);
+    }
+
+    /// This frame's GUI glint speed and strength as the uniform will see them —
+    /// already clamped, for the same reason
+    /// [`HudRenderer::glint_options`](crate::hud::HudRenderer::glint_options)
+    /// exists.
+    #[must_use]
+    pub fn glint_options(&self) -> (f64, f32) {
+        self.icons.glint_options()
+    }
+
     /// Attach the **3-D block-item** pass, so container slots holding a block
     /// draw vanilla's isometric mini-block. Every resource is borrowed from the
     /// world renderer — the same block atlas, tint palette and animation slots
