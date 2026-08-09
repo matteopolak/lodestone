@@ -925,11 +925,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `ServerProtocol` encoders that put both on the wire. Before it, two players on one
   server — including over LAN — were completely invisible to one another.
 - [Player skins](./player-skins.md) — The `textures` profile property — base64 →
-  JSON → a URL plus a **wide/slim rig declaration** — and the render half that
-  draws the declared rig, for issue
-  [#62](https://github.com/matteopolak/lodestone/issues/62). The decode and the render
-  are landed; **the fetch is not**, and the three patches it needs all sit outside the
-  rendering cluster, so they are named below rather than half-built.
+  JSON → a URL plus a **wide/slim rig declaration** — the host-restricted fetch
+  that turns it into a sheet, and the render halves that draw the declared rig on the
+  inventory avatar and on other players' bodies in the world. All three are landed for
+  both our own account and for remote players; what is left is capes, the first-person
+  arm and the local third-person body, named under [What is
+  missing](#what-is-missing).
 - [The plugin API](./plugin-api.md) — The surface a third-party bevy plugin uses to
   do everything native Lodestone code can do — read world/entity/player state, write
   intent, order systems against internal ones, and observe events — specified
