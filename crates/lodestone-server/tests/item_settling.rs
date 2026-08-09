@@ -25,6 +25,34 @@
 //! block is at `y` must come to rest at exactly `y + 1.0`. That is an integer, and
 //! the gates assert it exactly.
 //!
+//! **`y + 1.0` is only right for a full cube, and that was the second half of the
+//! defect.** The settling pass took a `Fn(i32, i32, i32) -> bool` oracle and
+//! hardcoded the rest height to the top of the cell, so every non-cube surface was
+//! wrong. The heights below were read out of `lodestone-data`'s generated
+//! collision-shape table — a dump from the real 26.2 server, so an outside source —
+//! in a separate step, and then written here as literals rather than recomputed from
+//! the same table the implementation reads:
+//!
+//! | surface block (bare name, as the fixture places it) | true collision top | the boolean's `+1.0` |
+//! |---|---|---|
+//! | `minecraft:short_grass` | **0.0** (no collision boxes at all) | 1.0 |
+//! | `minecraft:oak_slab` | 0.5 | 1.0 |
+//! | `minecraft:dirt_path` | 0.9375 | 1.0 |
+//! | `minecraft:oak_fence` | **1.5** (uncapped) | 1.0 |
+//!
+//! Every one of those differs from `1.0`, which is the point: a candidate where the
+//! two hypotheses coincide measures only that the code runs. `oak_leaves` was
+//! evaluated and **rejected** for exactly that reason — its collision top is
+//! `1.0`, so a "surely leaves are not solid" intuition would have produced a gate
+//! that passes either way. `oak_fence` is kept because it fails in the *opposite*
+//! direction: the old behaviour rested the item too **low**, so a gate that only
+//! ever checked for floating would miss it.
+//!
+//! The fixture's own resolution is asserted separately in
+//! [`the_surface_fixtures_resolve_to_the_shapes_the_gates_assume`], because these
+//! are *bare* names and the state they resolve to is a property of the census, not
+//! of this file.
+//!
 //! # Controls
 //!
 //! * [`an_item_over_a_void_column_never_settles_and_is_discarded`] — the same
@@ -457,7 +485,7 @@ fn an_item_outside_the_snapshot_settles_on_the_live_world() {
     );
 
     for _ in 0..200 {
-        sim.tick_with_terrain(&|x, y, z| live.is_solid(x, y, z));
+        sim.tick_with_terrain(&|x, y, z| live.block_state(x, y, z).to_owned());
     }
 
     let resting = f64::from(FLOOR_TOP_Y + 1);
@@ -474,12 +502,331 @@ fn an_item_outside_the_snapshot_settles_on_the_live_world() {
 
     // Still there 200 ticks later: settled, not passing through.
     for _ in 0..200 {
-        sim.tick_with_terrain(&|x, y, z| live.is_solid(x, y, z));
+        sim.tick_with_terrain(&|x, y, z| live.block_state(x, y, z).to_owned());
     }
     assert!(
         sim.item_position(id)
             .is_some_and(|p| (p.y - resting).abs() < 1.0e-9),
         "and it must still be resting there, not sinking at {ITEM_GRAVITY} per tick"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Non-cube surfaces: the half the boolean oracle could not express.
+// ---------------------------------------------------------------------------
+
+/// Each surface block, the local `x` the fixture places it at, and the rest height
+/// an item settling on it must reach.
+///
+/// The heights are **literals transcribed from `lodestone-data`'s shape table**, not
+/// recomputed here — see this file's header for the table and for why each one is
+/// discriminating. `FLOOR_TOP_Y + 1` is the top of the stone floor, i.e. where the
+/// surface block itself sits, so a surface with collision top `t` rests an item at
+/// `FLOOR_TOP_Y + 1 + t`.
+const SURFACES: &[(&str, i32, f64)] = &[
+    // No collision boxes at all: the item falls straight through and lands on the
+    // stone. This is the case with the visible symptom — almost any grassy surface
+    // has a plant on it, so almost every dropped item floated a block up.
+    ("minecraft:short_grass", 1, 0.0),
+    ("minecraft:oak_slab", 3, 0.5),
+    ("minecraft:dirt_path", 5, 0.9375),
+    // The one that fails the *other* way: 1.5 is above the cell, so the old
+    // behaviour rested the item too low, inside the fence post.
+    ("minecraft:oak_fence", 7, 1.5),
+];
+
+/// A stone floor filling `MIN_Y..=FLOOR_TOP_Y` across the whole column, with each
+/// [`SURFACES`] block sitting on top of it at its own local `x`.
+///
+/// One fixture for all four arms, so a difference between them cannot be a
+/// difference between worlds — the same discipline
+/// [`world_with_floor_and_void`] already uses for its floor/void pair.
+fn world_with_surfaces() -> ChunkWorld {
+    let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+    for x in 0..16 {
+        for z in 0..16 {
+            for y in MIN_Y..=FLOOR_TOP_Y {
+                column.set_block(x, y, z, "minecraft:stone");
+            }
+        }
+    }
+    for &(name, x, _) in SURFACES {
+        column.set_block(x, FLOOR_TOP_Y + 1, 8, name);
+    }
+    ChunkWorld::from_columns([((0, 0), column)])
+}
+
+/// The fixture places what it thinks it places, and each surface resolves to a
+/// state whose collision top is the literal the gate below asserts against.
+///
+/// **A precondition, not a duplicate of the gate.** These are *bare* block names
+/// (`minecraft:oak_slab`, not `minecraft:oak_slab[type=bottom,waterlogged=false]`),
+/// and which state a bare name resolves to is a property of the census rather than of
+/// this file — a default that moved would silently retarget every arm below at a
+/// different shape, and the rest-height assertions would then be measuring something
+/// nobody chose. It reads the table because the fixture's *identity* is the claim
+/// here; the rest heights stay literals.
+#[test]
+fn the_surface_fixtures_resolve_to_the_shapes_the_gates_assume() {
+    let world = world_with_surfaces();
+    for &(name, x, expected_top) in SURFACES {
+        assert_eq!(
+            world.block_state(x, FLOOR_TOP_Y + 1, 8),
+            name,
+            "the fixture must actually hold {name} at x={x}"
+        );
+        let id = lodestone_data::block_states::state_id(name)
+            .unwrap_or_else(|| panic!("{name} must be in the 26.2 block-state census"));
+        let boxes = lodestone_data::collision_shapes::collision_boxes(id).unwrap_or(&[]);
+        let top = boxes
+            .iter()
+            .map(|b| f64::from(b.max[1]))
+            .fold(0.0_f64, f64::max);
+        assert!(
+            (top - expected_top).abs() < 1.0e-9,
+            "{name} resolves to state {id} with collision top {top}, but the gate \
+             asserts a rest height derived from {expected_top}. Either the census \
+             moved or the bare name now resolves to a different default state — \
+             re-read the table before touching the expected height."
+        );
+        assert!(
+            (top - 1.0).abs() > 1.0e-9,
+            "{name} has collision top {top}, which equals the full-cube hypothesis: \
+             this arm cannot distinguish the two implementations and must be replaced \
+             with a block whose shape differs from a full cube"
+        );
+    }
+    assert!(
+        world.is_solid(1, FLOOR_TOP_Y, 8),
+        "and the stone floor must be under all of them"
+    );
+}
+
+/// **The headline for this half.** An item dropped onto each non-cube surface comes
+/// to rest at the top of that surface's *real* collision shape.
+///
+/// Two hypotheses per arm, both computed from outside constants:
+///
+/// * **full cube** (the old boolean oracle): `FLOOR_TOP_Y + 2.0` for every arm, since
+///   the surface block occupies the cell at `FLOOR_TOP_Y + 1` and the item was pinned
+///   to the top of whatever cell it was in.
+/// * **real shape**: `FLOOR_TOP_Y + 1 + top`, with `top` from the table.
+///
+/// The assertion lands on the second and the failure message names the first, so a
+/// regression reads as "this is the full-cube bug" rather than as an unexplained
+/// number. `short_grass` and `oak_fence` are a full block and a half block away from
+/// the wrong answer respectively; `dirt_path` is only `0.0625` away, which is why the
+/// tolerance is `1.0e-9` and not something forgiving.
+///
+/// **Every arm is reported, not just the first.** A `for` loop with an `assert!`
+/// inside stops at arm one, so a control run could only ever demonstrate one arm and
+/// the other three would be arguments rather than observations. Collecting the
+/// mismatches and asserting the collection is empty is the same "make failure name
+/// where" discipline a bounding box serves in the pixel gates.
+#[test]
+fn an_item_rests_on_the_real_collision_shape_of_each_surface() {
+    let full_cube_hypothesis = f64::from(FLOOR_TOP_Y + 2);
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for &(name, x, top) in SURFACES {
+        let world = world_with_surfaces();
+        let mut sim = MobSim::new(&world);
+        let expected = f64::from(FLOOR_TOP_Y + 1) + top;
+        let id = sim.spawn_item(
+            diamond(),
+            Vec3::new(f64::from(x) + 0.5, f64::from(FLOOR_TOP_Y) + 20.0, 8.5),
+            Vec3::new(0.0, 0.0, 0.0),
+            mergable_stack(1),
+        );
+
+        for _ in 0..300 {
+            sim.tick();
+        }
+
+        let Some(position) = sim.item_position(id) else {
+            mismatches.push(format!(
+                "{name}: the item left the world, so the sweep found no collision at all"
+            ));
+            continue;
+        };
+        if (position.y - expected).abs() >= 1.0e-9 {
+            mismatches.push(format!(
+                "{name}: rests at {} but must rest at {expected} (stone top {} plus the \
+                 shape's own {top}); the full-cube hypothesis predicts \
+                 {full_cube_hypothesis}",
+                position.y,
+                FLOOR_TOP_Y + 1,
+            ));
+            continue;
+        }
+
+        // Settled, not passing through: 300 more ticks must not move it.
+        for _ in 0..300 {
+            sim.tick();
+        }
+        match sim.item_position(id) {
+            Some(later) if (later.y - expected).abs() < 1.0e-9 => {}
+            Some(later) => mismatches.push(format!(
+                "{name}: landed at {expected} but crept to {} over 300 further ticks",
+                later.y
+            )),
+            None => mismatches.push(format!(
+                "{name}: landed at {expected} and then left the world"
+            )),
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "{} of {} surfaces settled at the wrong height:\n  {}",
+        mismatches.len(),
+        SURFACES.len(),
+        mismatches.join("\n  "),
+    );
+}
+
+/// **Horizontal collision, which the point test could not see at all.**
+///
+/// The old pass tested one column at the item's own centre and resolved vertically
+/// only. Its doc comment argued that was safe because an item's horizontal velocity
+/// decays before it can cross a wall — true for a slow item, and false for a thrown
+/// one, which is what this drops.
+///
+/// The wall is stone, so this is *not* a shape claim: it is the claim that the
+/// horizontal axes are resolved at all. An item launched hard at a wall one block
+/// away must end up on the near side of it, and the near face is at `x = 3.0`, so with
+/// a half-width of `0.125` the furthest its centre can reach is `2.875`. Under the old
+/// behaviour it passed straight through and kept going, so the two hypotheses are
+/// "bounded by 2.875" and "unbounded" — no tolerance can confuse them.
+#[test]
+fn a_thrown_item_stops_against_a_wall_instead_of_passing_through_it() {
+    let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+    for x in 0..16 {
+        for z in 0..16 {
+            for y in MIN_Y..=FLOOR_TOP_Y {
+                column.set_block(x, y, z, "minecraft:stone");
+            }
+        }
+    }
+    // A wall two cells thick at local x = 3..4, so even a fast item cannot be on the
+    // far side of it by rounding.
+    for y in FLOOR_TOP_Y + 1..=FLOOR_TOP_Y + 3 {
+        for z in 0..16 {
+            column.set_block(3, y, z, "minecraft:stone");
+            column.set_block(4, y, z, "minecraft:stone");
+        }
+    }
+    let world = ChunkWorld::from_columns([((0, 0), column)]);
+    let mut sim = MobSim::new(&world);
+    let id = sim.spawn_item(
+        diamond(),
+        Vec3::new(1.5, f64::from(FLOOR_TOP_Y) + 1.0, 8.5),
+        // Hard enough that a single tick would clear the wall outright without a
+        // sweep — which is also what makes this a test of the sweep and not of drag.
+        Vec3::new(1.2, 0.0, 0.0),
+        mergable_stack(1),
+    );
+
+    for _ in 0..200 {
+        sim.tick();
+    }
+
+    let position = sim
+        .item_position(id)
+        .expect("the item must still exist — it hit a wall, it did not leave the world");
+    assert!(
+        position.x <= 2.875 + 1.0e-9,
+        "the item must stop on the near side of the wall whose face is at x = 3.0: \
+         with a 0.25-wide hitbox its centre cannot pass 2.875. It is at {}, which \
+         beyond the wall means horizontal movement is not being resolved at all",
+        position.x
+    );
+    assert!(
+        position.x > 1.5,
+        "and it must actually have travelled — an item that never moved would satisfy \
+         the bound above without testing anything"
+    );
+}
+
+/// **The cost of the sweep, bounded as a counter and asserted for linearity.**
+///
+/// Swept collision against real per-state shapes is strictly more work per item than
+/// one boolean lookup was, and nothing bounds how many items sit on a floor. The
+/// per-item number is not the interesting one — this repo has already shipped a
+/// latency defect whose per-unit cost was fine and whose single unserviced window was
+/// not — so what this asserts is that the *tick* cost grows **linearly** with item
+/// count and not faster.
+///
+/// Two arms, and the expectation is derived rather than observed: items are settled
+/// independently in one pass, so probes-per-item must be the same at 1 item and at 64.
+/// A quadratic pass (each item consulting the others) would show 64× the per-item
+/// count at 64 items. The bound is 3×, which is nowhere near 64 and leaves room for
+/// the differing sweep lengths of items at slightly different speeds.
+///
+/// **Measured: 36 probes per item at 1 item and 2,304 at 64 — exactly 36 both times.**
+/// So a floor holding 200 dropped items costs ~7,200 cell probes in the settling pass
+/// of one tick, each a `String` from the oracle plus a name→id lookup plus an O(1)
+/// rodata index. That is the number to re-read if the item tick ever shows up in the
+/// tick loop's own overrun accounting; the second bound below is what catches a
+/// per-item regression, since linearity alone would be satisfied by a pass that got
+/// ten times more expensive uniformly.
+#[test]
+fn the_settling_sweep_costs_a_constant_number_of_probes_per_item() {
+    let world = world_with_surfaces();
+
+    let probes_for = |count: i32| -> u64 {
+        let mut sim = MobSim::new(&world);
+        for i in 0..count {
+            sim.spawn_item(
+                diamond(),
+                // Spread over the floor so they do not merge into one entity, which
+                // would make the 64-item arm secretly a 1-item arm.
+                Vec3::new(
+                    f64::from(i % 8) + 0.5,
+                    f64::from(FLOOR_TOP_Y) + 4.0 + f64::from(i),
+                    f64::from(i / 8) + 0.5,
+                ),
+                Vec3::new(0.0, 0.0, 0.0),
+                mergable_stack(1),
+            );
+        }
+        // One tick, measured: the counter is per-tick, so this is the cost of a tick
+        // holding `count` items.
+        sim.tick();
+        assert_eq!(
+            sim.item_count(),
+            count as usize,
+            "precondition: all {count} items must still be live, or this arm is \
+             measuring fewer items than it thinks"
+        );
+        sim.items_settled_probe_count()
+    };
+
+    let one = probes_for(1);
+    let many = probes_for(64);
+    assert!(
+        one > 0,
+        "precondition: settling one item must probe at least one cell, or the counter \
+         is not wired and this gate measures nothing"
+    );
+    let per_item_one = one as f64;
+    let per_item_many = many as f64 / 64.0;
+    assert!(
+        per_item_many <= per_item_one * 3.0,
+        "probes per item must not grow with item count: {per_item_one} at 1 item \
+         against {per_item_many} at 64 ({many} total). A quadratic settling pass would \
+         show about {} per item here",
+        per_item_one * 64.0
+    );
+    // The absolute bound, because linearity alone is satisfied by a pass that became
+    // uniformly ten times more expensive. 36 was measured; 150 is generous enough not
+    // to be a tripwire on an unrelated sweep-length change and tight enough to catch
+    // an order of magnitude.
+    assert!(
+        per_item_one <= 150.0,
+        "one item's settling sweep probed {per_item_one} cells; it measured 36 when \
+         this was written, so an order-of-magnitude rise means the sweep is spanning \
+         far more cells than the item's own box plus its movement"
     );
 }
 

@@ -659,6 +659,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (grass/foliage) tint and multiplies tint and shade in gamma space; this issue is
   specifically the *data-driven, per-item-stack* tint sources that are not the biome
   lookup.
+- [Dropped-item physics: swept collision against real block shapes](./item-physics.md) —
+  How a dropped item entity comes to rest on the server. It used to be a solid/air
+  boolean per cell with the rest height hardcoded to the top of the block, which meant
+  an item settled a full block too high on any grassy surface and half a block too
+  high on a slab. It is now `lodestone_physics::collision::collide` — vanilla's own
+  `Entity.collide` sweep — against the real per-block-state collision shapes from
+  `lodestone-data`.
 - [Item pickup animation](./item-pickup-animation.md) — The short flight a collected
   item makes toward whoever collected it, before it vanishes — vanilla's
   `ItemPickupParticle`. Issue #365, reported from live play as "picked-up items

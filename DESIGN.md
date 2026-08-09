@@ -8487,3 +8487,59 @@ coordinate so it goes out twice. Vanilla's `PlayerChunkSender` drops pending sen
 reason. The join stream has always been able to outlive a forget; nothing noticed because no gate walks
 back. `ColumnPipeline::cancel` withdraws pending columns, and `total` must come down with them — the
 `select!` branch is gated on `remaining()`, so a stale count spins the loop rather than answering wrong.
+
+**12.166 Dropped-item collision: a helper whose own doc comment forbade the misuse, and a candidate
+block that would have made the gate vacuous.**
+
+The item settling pass took a `Fn(i32, i32, i32) -> bool` oracle and hardcoded the rest height to
+`by + 1`. One bit per cell cannot express a shape, so the height was wrong for most of what a player
+drops things onto. Read out of `lodestone-data`'s generated shape table — a dump from the real 26.2
+server — rather than predicted: `short_grass`, `tall_grass` and `snow[layers=1]` have **no collision
+boxes at all** while `!is_air_or_fluid` calls them solid, so an item floated a full block above almost
+any grassy surface; `oak_slab` is 0.5, `enchanting_table` 0.75, `soul_sand`/`mud`/`chest` 0.875,
+`dirt_path` 0.9375, and `oak_fence` **1.5**, which is the one where the old behaviour rested the item
+too *low*.
+
+**The most valuable finding is that a doc comment already said not to do the thing that was done.**
+`mobs::block_state_id_or_default` resolves a bare name to the block's *lowest* state id, and its own doc
+reads: *"It is not a substitute for `block_state_id` where the properties matter (collision shapes, path
+types); those must resolve the exact state."* It was used anyway, for exactly collision shapes, and a bare
+`minecraft:oak_slab` resolved to a full cube — so the first version of the fix **reproduced the bug it
+removes**, at 66.0 instead of 65.5. Nothing about the call site looked wrong; the helper's name says
+"or_default" and a default state is what was wanted. `lodestone_data::block_states::state_id` consults
+`span.default`, vanilla's real `defaultBlockState()`, and is the correct resolver. **When a helper's doc
+names a class of caller it is wrong for, grep whether you are that caller — the warning is worth more than
+the signature.**
+
+**A candidate input chosen by intuition would have made an arm vacuous, and the intuition points the wrong
+way.** `oak_leaves` has collision top **1.0** — identical to the full-cube hypothesis — so "leaves are
+see-through, surely not a full cube" selects an input where both hypotheses coincide and the arm measures
+only that the code runs. Every surface in the gate is now asserted to differ from `1.0`, as a precondition
+rather than as a comment, and the *bare* name is asserted to still resolve to the state the height was read
+from: which state a bare name resolves to is a property of the census, not of the test file.
+
+**A `for` loop with an `assert!` inside cannot be its own control past the first arm.** The full-cube
+neuter initially demonstrated one surface and left the other three as arguments. Collecting mismatches and
+asserting the collection is empty made one control run report **4 of 4** — 66.0 against true answers of 65,
+65.5, 65.9375 and 66.5 — which is the same "make failure name *where*" discipline a bounding box serves in
+the pixel gates.
+
+**The reporting control has two different answers depending on which crate is broken, and only one of them
+is the reassuring one.** Planting a deliberate type error in `mobs.rs` *and* in `tests/item_settling.rs` and
+running `cargo check --workspace --all-targets` reported **only the lib error**: the test target depends on
+the lib, so a broken lib hides every error in its own crate's test files. With the lib error removed the test
+error appeared alone. Separately measured earlier the same day: a *foreign* crate failing (`lodestone-shell`)
+did **not** hide this crate's diagnostics — `lodestone-server` compiled and emitted its own warnings in the
+same run. So: a clean log for your test files is evidence only once your lib compiles, and a foreign failure
+elsewhere in the workspace is not a short-circuit. Those are different questions with different answers and
+one control does not cover both.
+
+**Cost, as a counter, because a per-item number cannot answer the question that matters.** Swept collision
+is strictly more work per item than a boolean lookup and nothing bounds how many items sit on a floor.
+Measured at **36 cell probes per item per tick, identical at 1 item and at 64 (2,304 total)** — exactly
+linear, so ~7,200 probes for 200 items in one tick's settling pass. Linearity alone is not the whole gate:
+it is satisfied by a pass that became uniformly ten times more expensive, so there is an absolute bound as
+well. The figure is carried into `run_tick_loop`'s existing *"Can't keep up!"* warning as
+`item_settle_probes`, because `serve_play`'s `LoopStallWatch` watches the **connection** task's `select!`
+arms and the item tick is a different task entirely — assuming one instrument covers the other would have
+been the easy mistake.
