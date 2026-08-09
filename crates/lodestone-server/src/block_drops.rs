@@ -100,7 +100,7 @@
 
 use lodestone_model::{BlockPos, ItemStack, ResourceKey, Vec3};
 
-use crate::loot::{LootContext, LootTableSet, LootTool};
+use crate::loot::{LootBlockState, LootContext, LootTableSet, LootTool};
 use crate::mob_spawn::SpawnRng;
 
 /// Half the height of `EntityTypes.ITEM`, which is `.sized(0.25F, 0.25F)`
@@ -223,6 +223,74 @@ pub fn block_loot_table_id(block_state: &str) -> Option<ResourceKey> {
         return None;
     }
     format!("minecraft:blocks/{path}").parse().ok()
+}
+
+/// The loot context's `LootContextParams.BLOCK_STATE` for a block-state string —
+/// the block's identity plus its **fully resolved** property set.
+///
+/// # Why this resolves through the census instead of reading the brackets
+///
+/// Vanilla's `StatePropertiesPredicate.PropertyMatcher.match` asks the block's
+/// `StateDefinition` for the property and then reads the *state's* value, so
+/// every property the block has contributes a value whether or not the caller
+/// spelled it. Splitting `"minecraft:wheat[age=3]"` on commas would agree by luck
+/// for anything `crate::growth_tick` wrote and disagree for a bare
+/// `"minecraft:wheat"`, which is the same state as `age=0` and must fail an
+/// `age=7` matcher *because zero is not seven* rather than because the string
+/// happened to omit the property.
+///
+/// `lodestone_data::block_states::state_id` is the resolution — Mojang's own
+/// 32,366-state table, with its default-plus-overrides fallback — and
+/// `properties` reads the canonical `(name, value)` list straight back out.
+///
+/// Falls back to the properties written in the string for a state the census
+/// cannot resolve at all. That path is the *conservative* direction rather than a
+/// silent guess: a synthetic state this server invents (`minecraft:comparator`'s
+/// `output=N`) keeps whatever it spelled, and a matcher over a property the census
+/// would have supplied simply fails, dropping less rather than more.
+#[must_use]
+pub fn loot_block_state(block_state: &str) -> Option<LootBlockState> {
+    let name = block_state
+        .split_once('[')
+        .map_or(block_state, |(name, _)| name)
+        .trim();
+    if name.is_empty() {
+        return None;
+    }
+    let block: ResourceKey = if name.contains(':') {
+        name.parse().ok()?
+    } else {
+        format!("minecraft:{name}").parse().ok()?
+    };
+    // The census is keyed by fully-qualified name, so a namespace-less input has
+    // to be re-qualified before the lookup — and the bracket part carried across
+    // verbatim, since `state_id`'s tiers are what turn a partial property list
+    // into a real state.
+    let query = match block_state.split_once('[') {
+        Some((_, rest)) => format!("{block}[{rest}"),
+        None => block.to_string(),
+    };
+    if let Some(properties) = lodestone_data::block_states::state_id(&query)
+        .and_then(lodestone_data::block_states::properties)
+    {
+        return Some(LootBlockState::with_properties(block, properties.iter().copied()));
+    }
+    Some(LootBlockState::with_properties(block, parsed_properties(block_state)))
+}
+
+/// The `(name, value)` pairs literally written between the brackets of a
+/// block-state string. Only the fallback path of [`loot_block_state`] uses this;
+/// prefer the census, which supplies the properties a string omitted.
+fn parsed_properties(block_state: &str) -> Vec<(&str, &str)> {
+    let Some((_, raw)) = block_state.split_once('[') else {
+        return Vec::new();
+    };
+    raw.strip_suffix(']')
+        .unwrap_or(raw)
+        .split(',')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(k, v)| (k.trim(), v.trim()))
+        .collect()
 }
 
 /// `Block.popResource`'s position and the `ItemEntity` constructor's velocity,
@@ -521,6 +589,10 @@ fn drop_block_loot_in(
         luck: 0.0,
         tool: held.map(LootTool::from_held_item),
         explosion_radius,
+        // Free: the state being broken is already this function's argument. It was
+        // simply thrown away here, which is the whole of why every
+        // `block_state_property` condition took the wrong branch.
+        block_state: loot_block_state(block_state),
     };
     table
         .roll(&context, rng)
@@ -753,6 +825,13 @@ mod tests {
     /// `drop_block_loot` with an explicit [`LootTool`] rather than a bare
     /// `ItemStack`, so a test can name an enchantment level. Mirrors the
     /// production call exactly apart from the context construction.
+    ///
+    /// **Every field must keep mirroring [`drop_block_loot_in`].** This helper
+    /// filled `block_state` with `None` for as long as the production path did,
+    /// which was harmless only because everything it is pointed at (`stone`,
+    /// `gravel`, the ores) has no `block_state_property` in its table — a test
+    /// double complete enough to pass. Pointing it at a crop with the field still
+    /// `None` would have reproduced the bug inside the gate.
     fn drop_with_tool(
         tables: &LootTableSet,
         block: &str,
@@ -766,6 +845,7 @@ mod tests {
             luck: 0.0,
             tool: Some(tool),
             explosion_radius: None,
+            block_state: loot_block_state(block),
         };
         table
             .roll(&context, rng)
@@ -1273,5 +1353,98 @@ mod tests {
              carries ~0.3; got pop {pop:?} and throw {south:?}. If these are close, the \
              throw is using the pop formula"
         );
+    }
+
+    /// [`loot_block_state`] hands the loot context the **whole** property set,
+    /// filling in what the state string left out — the property that makes a
+    /// `block_state_property` matcher behave like vanilla's, where
+    /// `StateDefinition.getProperty` finds every property the block has whether or
+    /// not the caller named it.
+    ///
+    /// The discriminating input is a *bare* name. A comma-splitting implementation
+    /// answers "no properties" for `"minecraft:wheat"`, so an `age=7` matcher would
+    /// fail for the right reason by accident and an
+    /// `inverted { age=7 }` matcher would pass for the wrong one. Both readings
+    /// agree on `"minecraft:wheat[age=7]"`, which is why that alone is not a test.
+    #[test]
+    fn loot_block_state_fills_in_the_properties_the_string_left_out() {
+        let of = |state: &str| {
+            let resolved = loot_block_state(state).expect("state names a block");
+            let mut pairs: Vec<String> = resolved
+                .properties
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            pairs.sort();
+            (resolved.block.to_string(), pairs.join(","))
+        };
+
+        // A bare name is the block's default state, and wheat's default `age` is 0
+        // — a value, not an absence.
+        assert_eq!(of("minecraft:wheat"), ("minecraft:wheat".to_string(), "age=0".to_string()));
+        assert_eq!(of("minecraft:wheat[age=7]"), ("minecraft:wheat".to_string(), "age=7".to_string()));
+        // Namespace-less input, which the rest of this crate accepts.
+        assert_eq!(of("wheat[age=5]"), ("minecraft:wheat".to_string(), "age=5".to_string()));
+        // A partially-specified multi-property state keeps its named value and
+        // takes the vanilla default for the rest — `state_id`'s tier 2.
+        let (block, properties) = of("minecraft:oak_door[half=upper]");
+        assert_eq!(block, "minecraft:oak_door");
+        assert!(
+            properties.contains("half=upper") && properties.contains("hinge="),
+            "the unnamed properties must be present with their defaults, got {properties}"
+        );
+        // A block the census does not know keeps whatever the string said, rather
+        // than losing the properties entirely.
+        assert_eq!(
+            of("modded:widget[colour=red]"),
+            ("modded:widget".to_string(), "colour=red".to_string())
+        );
+        assert_eq!(loot_block_state(""), None);
+    }
+
+    /// **The reported bug, end to end through the production entry point.**
+    /// Breaking fully-grown wheat with a bare hand pops one wheat and one seed;
+    /// breaking it before it ripens pops one seed and nothing else.
+    ///
+    /// `drop_block_loot` is the function `server.rs`'s `StopDestroy` arm calls, so
+    /// this is the whole path rather than the roller in isolation — the same
+    /// `block_state` argument that picks the loot table now also fills
+    /// `LootContextParams.BLOCK_STATE`, which is why the fix needed no new argument
+    /// at any call site.
+    #[test]
+    fn breaking_ripe_wheat_pops_wheat_and_a_seed_and_unripe_wheat_pops_one_seed() {
+        let tables = LootTableSet::load_bundled();
+        let pos = BlockPos::new(4, 65, -7);
+        let popped = |state: &str| {
+            let mut rng = SpawnRng::new(BLOCK_DROPS_BEHAVIOR_SEED);
+            drop_block_loot(&tables, state, pos, None, &mut rng)
+                .into_iter()
+                .map(|item| format!("{}x{}", item.stack.item, item.stack.count))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            popped("minecraft:wheat[age=7]"),
+            vec![
+                "minecraft:wheatx1".to_string(),
+                "minecraft:wheat_seedsx1".to_string(),
+            ],
+        );
+        // Every earlier age, collected rather than asserted in the loop so a
+        // regression shows all seven rather than only `age=0`.
+        let mut wrong = Vec::new();
+        for age in 0..7 {
+            let state = format!("minecraft:wheat[age={age}]");
+            let got = popped(&state);
+            if got != vec!["minecraft:wheat_seedsx1".to_string()] {
+                wrong.push(format!("{state}: {got:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "unripe wheat must pop exactly one seed: {wrong:?}");
+
+        // Wheat requires no tool, so `drops_are_allowed` is not what is being
+        // measured here — but assert it, because a `false` would make the whole
+        // thing moot at the call site rather than in this function.
+        assert!(drops_are_allowed("minecraft:wheat[age=7]", None));
     }
 }
