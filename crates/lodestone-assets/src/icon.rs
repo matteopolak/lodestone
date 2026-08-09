@@ -107,9 +107,36 @@ pub enum IconPart {
         /// The GUI lighting mode (side-lit for blocks, front-lit for flat items).
         gui_light: GuiLight,
     },
-    /// A code-driven special renderer (chest, shulker box, banner, shield, …).
-    /// The renderer's block-entity path draws it; `base` is a real item model it
-    /// can fall back to as a flat sprite.
+    /// A code-driven special renderer (chest, shulker box, banner, shield, …) —
+    /// ten `kind`s over 91 item definitions, and the whole family has **no item
+    /// model and no block model** in vanilla: every triangle comes from a
+    /// block-entity renderer.
+    ///
+    /// # Two corrections to what this doc used to say
+    ///
+    /// It read: *"The renderer's block-entity path draws it; `base` is a real item
+    /// model it can fall back to as a flat sprite."* Both halves were misleading.
+    ///
+    /// * **"the block-entity path draws it" was a plan, not a fact.** For a long
+    ///   while nothing consumed this variant on any 3-D surface —
+    ///   `lodestone-render`'s item baker discarded it at four sites, so a chest in
+    ///   the hand, on the ground or in an item frame drew literally nothing while
+    ///   the inventory slot drew a real chest. `lodestone_render::special_item_rig`
+    ///   plus `ItemVariants::resolve_special` is what makes the claim true; a
+    ///   consumer must call **both** that and the baked path, in that order.
+    /// * **The "flat sprite fallback" does not exist.** Every one of the ten
+    ///   special `base` models in 26.2 has no `elements` and no `layer0` — only a
+    ///   `particle` texture, which is a *block* texture and is not in the item
+    ///   atlas. So [`ItemIconBuilder::part_for_model`] classifies every one of them
+    ///   as undrawable and the "fallback" draws the same zero pixels as no fallback
+    ///   at all. Measured against the real jar by
+    ///   `lodestone-shell/tests/hotbar_special_item_pixels.rs`.
+    ///
+    /// What `base` is genuinely for, and the only reason it is resolved, is its
+    /// `display` map: a chest's `gui` pose is `[30, 45, 0]` at scale `0.625` and its
+    /// `firstperson_righthand` pose likewise, both authored on
+    /// `item/template_chest`. See [`ItemIconBuilder::part_for`], which returns that
+    /// map for a `Special`.
     Special {
         /// The base sprite model.
         base: ResourceLocation,

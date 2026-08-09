@@ -2224,6 +2224,94 @@ pub struct MovingPistonSpawn {
     pub base_light: u8,
 }
 
+/// Which block-entity rig and sheet draw one `minecraft:special` **item** form —
+/// vanilla's `SpecialModelRenderer` family, the ex-`builtin/entity` items.
+///
+/// `kind` is the special-renderer id an item definition names
+/// (`lodestone_assets::IconPart::Special::kind`); `item_path` is the item's own
+/// registry path with the namespace stripped. Returns `(model name, texture stem)`
+/// — the same two keys a placed block entity is batched on, because it is the same
+/// rig and the same sheet.
+///
+/// # One resolver, every surface
+///
+/// This exists so a chest's rig is chosen in exactly **one** place for all five
+/// surfaces vanilla draws these items on: the inventory slot, the first-person
+/// hand, another entity's hand, a dropped stack, and an item frame. Two copies of
+/// the mapping is how a chest ends up correct in the GUI and oak-coloured in the
+/// hand — the copies differ in whichever `kind` was added later.
+///
+/// # Keyed by `kind` first and item path second, never by item path alone
+///
+/// The family is ten `kind`s over 91 item definitions. A `match` on the item id
+/// alone would need 91 arms and would leave any datapack item invisible; the
+/// `kind` says *what rig*, and the path only picks *which sheet* within it —
+/// exactly vanilla's split, where `ChestSpecialRenderer.Unbaked` carries the
+/// `texture` field the item definition names.
+///
+/// `ChestHalf::Single` is not a simplification: `ChestSpecialRenderer.Unbaked`'s
+/// `chest_type` defaults to `ChestType.SINGLE` and no 26.2 item definition
+/// overrides it, so an item chest is never one of the two double halves.
+///
+/// # Which kinds resolve today
+///
+/// `chest` (13 item definitions), `shulker_box` (17), `head` (6) and
+/// `player_head` (1) — every `kind` whose rig `BLOCK_ENTITY_MODELS` already holds.
+/// The other six return `None` and draw nothing, which is the behaviour before this
+/// existed:
+///
+/// | kind | items | why not yet |
+/// |---|---|---|
+/// | `banner` | 16 | needs the ordered translucent pattern-mask pass, not one rig |
+/// | `conduit` | 1 | rig unported (`ConduitRenderer` calls `bakeLayer` four times) |
+/// | `copper_golem_statue` | 32 | rig unported |
+/// | `decorated_pot` | 1 | needs up to four independently textured sprites per instance |
+/// | `shield` | 2 | rig unported, and it is an item model in the hand, not a block entity |
+/// | `trident` | 2 | rig unported |
+///
+/// `None` is also the right answer for an item path a `kind` does not recognise (a
+/// datapack item declaring `minecraft:chest` over something that is not a chest):
+/// drawing nothing beats drawing a plain oak chest for it. And `dragon_head`/
+/// `piglin_head` fall out here too, because [`SkullType::from_block_path`] declines
+/// them — they use multi-part rigs unrelated to the two skull layers.
+#[must_use]
+pub fn special_item_rig(kind: &str, item_path: &str) -> Option<(&'static str, &'static str)> {
+    match kind {
+        "minecraft:chest" => {
+            let material = ChestMaterial::from_block_path(item_path)?;
+            Some((
+                CHEST_SINGLE,
+                chest_texture_stem(material, ChestHalf::Single),
+            ))
+        }
+        "minecraft:shulker_box" => {
+            // `shulker_box` (the undyed one) has no colour prefix and takes the
+            // default sheet; every other path is `<colour>_shulker_box`. Passing
+            // the whole path through would silently take the default arm for all
+            // seventeen, which is the plausible wrong version: it draws, and it
+            // draws purple.
+            let colour = item_path.strip_suffix("_shulker_box").filter(|c| {
+                // Only a real dye colour — a datapack `foo_shulker_box` should
+                // not quietly become the default sheet.
+                SHULKER_COLOURS.contains(c)
+            });
+            if colour.is_none() && item_path != "shulker_box" {
+                return None;
+            }
+            Some((SHULKER_BOX, shulker_texture_stem(colour)))
+        }
+        // Two `kind`s, one rig family: vanilla splits `player_head` out because its
+        // renderer resolves a profile texture, which we do not fetch here — a
+        // player head therefore draws the default Steve sheet, exactly as a placed
+        // one does.
+        "minecraft:head" | "minecraft:player_head" => {
+            let ty = SkullType::from_block_path(item_path)?;
+            Some((ty.model(), skull_texture_stem(ty)))
+        }
+        _ => None,
+    }
+}
+
 /// One resolved block entity, ready to batch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockEntityInstance {
@@ -4003,5 +4091,239 @@ mod tests {
         );
         assert_eq!(frame.stats.drawn, 2);
         assert_eq!(frame.batches.len(), 2, "a book is its own model and sheet");
+    }
+}
+
+/// Held/dropped `minecraft:special` item forms — [`special_item_rig`] and the rig
+/// geometry it names.
+///
+/// Its own module because these gates are about the **item** surfaces (hand, drop,
+/// item frame, inventory slot), not about a placed block entity, and the two
+/// families fail for different reasons.
+#[cfg(test)]
+mod special_item_tests {
+    use super::*;
+
+    /// Every `(model, sheet)` pair [`special_item_rig`] can return must really
+    /// exist: the model in [`BlockEntityModelSet`] and the sheet in the preload
+    /// list the shell builds bind groups from.
+    ///
+    /// **This is the island check, and it is the one that matters most here.** A
+    /// typo in a model name or a stem is not a compile error — both are
+    /// `&'static str` — and the only symptom is a held chest that silently draws
+    /// nothing, which is byte-for-byte the bug this whole path exists to fix. So the
+    /// assertion is not "the mapping returns something", it is "what it returns can
+    /// be looked up".
+    ///
+    /// The subjects are the real 26.2 item paths, one per resolving `kind`, plus the
+    /// two ends of the shulker colour range and both skull rigs (the mob 32×32 canvas
+    /// and the humanoid 64×64 one) — a single subject per kind would leave whichever
+    /// arm picked the wrong canvas passing.
+    #[test]
+    fn every_rig_and_sheet_the_resolver_names_can_actually_be_looked_up() {
+        let models = BlockEntityModelSet::load();
+        let stems = block_entity_texture_stems();
+        let mut wrong: Vec<String> = Vec::new();
+        for (kind, path) in [
+            ("minecraft:chest", "chest"),
+            ("minecraft:chest", "trapped_chest"),
+            ("minecraft:chest", "ender_chest"),
+            ("minecraft:chest", "oxidized_copper_chest"),
+            ("minecraft:shulker_box", "shulker_box"),
+            ("minecraft:shulker_box", "white_shulker_box"),
+            ("minecraft:shulker_box", "black_shulker_box"),
+            // `skeleton_skull` and `creeper_head` are the 32x32 mob rig;
+            // `zombie_head` and `player_head` are the 64x64 humanoid one.
+            ("minecraft:head", "skeleton_skull"),
+            ("minecraft:head", "wither_skeleton_skull"),
+            ("minecraft:head", "creeper_head"),
+            ("minecraft:head", "zombie_head"),
+            ("minecraft:player_head", "player_head"),
+        ] {
+            let Some((model, stem)) = special_item_rig(kind, path) else {
+                wrong.push(format!("{kind}/{path}: resolved to nothing"));
+                continue;
+            };
+            if models.get(model).is_none() {
+                wrong.push(format!(
+                    "{kind}/{path}: model {model:?} is not in BLOCK_ENTITY_MODELS"
+                ));
+            }
+            if !stems.contains(&stem) {
+                wrong.push(format!(
+                    "{kind}/{path}: sheet {stem:?} is not in the preload list, so the \
+                     shell builds no bind group for it and this draws nothing"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// Both halves of the two-level key are load-bearing: the `kind` picks the rig
+    /// and the item path picks the sheet *within* it.
+    ///
+    /// The wrong hypothesis this excludes is "the item path alone is enough" — and
+    /// the discriminating pair is a plain chest against a trapped one, which share a
+    /// `kind` and a **mesh** and differ only in sheet. A resolver keyed on `kind`
+    /// alone passes any "does it resolve" check and draws every trapped chest with
+    /// the plain sheet.
+    #[test]
+    fn the_kind_picks_the_rig_and_the_item_path_picks_the_sheet() {
+        let (plain_model, plain_stem) =
+            special_item_rig("minecraft:chest", "chest").expect("a plain chest");
+        let (trapped_model, trapped_stem) =
+            special_item_rig("minecraft:chest", "trapped_chest").expect("a trapped chest");
+        assert_eq!(
+            plain_model, trapped_model,
+            "the two share one mesh; only the sheet differs"
+        );
+        assert_ne!(
+            plain_stem, trapped_stem,
+            "keying the sheet on `kind` alone draws every trapped chest plain"
+        );
+        assert_eq!(plain_model, CHEST_SINGLE);
+
+        // And the reciprocal: one item path under two different `kind`s must not
+        // collapse. `player_head` is its own `kind` in vanilla precisely because its
+        // renderer resolves a profile texture.
+        assert_eq!(
+            special_item_rig("minecraft:player_head", "player_head"),
+            special_item_rig("minecraft:head", "player_head"),
+            "the two head kinds share one rig family here — we fetch no profile skin, \
+             so a player head draws the default sheet exactly as a placed one does"
+        );
+    }
+
+    /// A held chest is always the **single** chest layer, never a double half.
+    ///
+    /// `ChestSpecialRenderer.Unbaked`'s `chest_type` defaults to `ChestType.SINGLE`
+    /// and no 26.2 item definition overrides it. The two double halves are 15 texels
+    /// wide against the single's 14 and each omits the face meeting its partner, so
+    /// picking one of those for an item leaves a chest with a hole in its side — and
+    /// it still passes any "does a chest draw" gate.
+    #[test]
+    fn an_item_chest_is_the_single_layer_not_a_double_half() {
+        let (model, _) = special_item_rig("minecraft:chest", "chest").expect("a chest");
+        assert_eq!(model, CHEST_SINGLE);
+        assert_ne!(model, CHEST_LEFT);
+        assert_ne!(model, CHEST_RIGHT);
+    }
+
+    /// The six unported `kind`s, and the item paths a `kind` must decline, resolve to
+    /// nothing rather than to a plausible wrong rig.
+    ///
+    /// The `dragon_head`/`piglin_head` arm is the sharp one: both are real
+    /// `minecraft:head` items in 26.2, so the `kind` matches and only
+    /// `SkullType::from_block_path` declines them. A resolver that fell back to any
+    /// skull rig would draw a dragon head as a skeleton skull — which looks like a
+    /// texture bug rather than an unported rig.
+    #[test]
+    fn unported_kinds_and_undeclared_paths_resolve_to_nothing() {
+        let mut wrong: Vec<String> = Vec::new();
+        for (kind, path) in [
+            ("minecraft:banner", "white_banner"),
+            ("minecraft:conduit", "conduit"),
+            ("minecraft:copper_golem_statue", "copper_golem_statue"),
+            ("minecraft:decorated_pot", "decorated_pot"),
+            ("minecraft:shield", "shield"),
+            ("minecraft:trident", "trident"),
+            // Real `minecraft:head` items whose rigs are unrelated multi-part ones.
+            ("minecraft:head", "dragon_head"),
+            ("minecraft:head", "piglin_head"),
+            // A datapack item declaring a `kind` over something that is not one.
+            ("minecraft:chest", "diamond_pickaxe"),
+            ("minecraft:shulker_box", "not_a_shulker_box"),
+            ("minecraft:head", "stone"),
+            // An unknown kind entirely.
+            ("mypack:teapot", "teapot"),
+        ] {
+            if let Some(rig) = special_item_rig(kind, path) {
+                wrong.push(format!("{kind}/{path}: resolved to {rig:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// **The geometry gate**: a chest rig is `18` quads — three boxes of six faces —
+    /// which is what tells a real rig from the two things that look like a fix and
+    /// are not.
+    ///
+    /// | hypothesis | quads |
+    /// |---|---|
+    /// | the flat `base` sprite fallback | `0` (the base model has no `elements` and no `layer0`) |
+    /// | a plain block-item cube | `6` |
+    /// | **the chest rig** | **`18`** |
+    ///
+    /// A presence-only assertion ("something drew") is satisfied by the first two,
+    /// and the first is exactly what the GUI's own doc measured as *vacuous*. Both
+    /// wrong values are named here rather than described, so the predicate is a
+    /// prediction and not a sign test.
+    ///
+    /// The shulker box is checked too, and for a reason specific to it: a closed
+    /// shulker box is **near-cubic**, so if it were the only subject a cube-shaped
+    /// fallback would be hard to tell from the rig by silhouette. Its quad count
+    /// still separates them.
+    #[test]
+    fn the_chest_rig_has_a_quad_count_no_sprite_or_cube_fallback_can_produce() {
+        let models = BlockEntityModelSet::load();
+        let chest = models.get(CHEST_SINGLE).expect("the single chest layer");
+        assert_eq!(
+            chest.quad_count(),
+            18,
+            "the single chest is bottom + lid + lock, three boxes of six faces"
+        );
+        assert_ne!(chest.quad_count(), 6, "a plain block-item cube");
+        assert_ne!(chest.quad_count(), 0, "the vacuous base-sprite fallback");
+
+        let shulker = models.get(SHULKER_BOX).expect("the shulker box layer");
+        assert_ne!(shulker.quad_count(), 6, "a plain block-item cube");
+        assert_ne!(shulker.quad_count(), 0, "the vacuous base-sprite fallback");
+    }
+
+    /// A chest's parts are **posed relative to each other**, which is the property a
+    /// single-cube fallback structurally cannot have — and the reason a chest rather
+    /// than a shulker box is the right subject for this gate.
+    ///
+    /// Predicted exactly, from `chest_single_model`'s own `PartPose::offset` values:
+    /// `bottom` is `PartPose::ZERO`, so its matrix is the placement unchanged, while
+    /// `lid` and `lock` are both `offset(0, 9, 1)` in texels — `9/16` up and `1/16`
+    /// forward in block-local space. Not "the matrices differ", which a jitter would
+    /// satisfy: the exact translation, derived from the model definition rather than
+    /// restated as a number.
+    #[test]
+    fn the_chest_parts_are_posed_relative_to_the_placement_not_stacked_on_it() {
+        let models = BlockEntityModelSet::load();
+        let chest = models.get(CHEST_SINGLE).expect("the single chest layer");
+        let placement = Mat4::from_translation(Vec3::new(3.0, 5.0, 7.0));
+        let transforms = chest.part_transforms(placement, &[]);
+
+        let bottom = chest.index_of("bottom").expect("a `bottom` part");
+        let lid = chest.index_of("lid").expect("a `lid` part");
+        let lock = chest.index_of("lock").expect("a `lock` part");
+
+        let origin = |i: usize| transforms[i].transform_point3(Vec3::ZERO);
+        let placed = placement.transform_point3(Vec3::ZERO);
+        assert!(
+            (origin(bottom) - placed).length() < 1e-5,
+            "`bottom` is PartPose::ZERO, so it must be the placement unchanged; got {}",
+            origin(bottom)
+        );
+        // `PartPose::offset(0.0, 9.0, 1.0)` in texels, and the mesh is block-local.
+        let expected = placed + Vec3::new(0.0, 9.0 / 16.0, 1.0 / 16.0);
+        let mut wrong: Vec<String> = Vec::new();
+        for (name, index) in [("lid", lid), ("lock", lock)] {
+            let got = origin(index);
+            if (got - expected).length() > 1e-5 {
+                wrong.push(format!("{name}: expected {expected}, got {got}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+        // And the control: the offset is big enough that "all parts share the
+        // placement" — the single-cube hypothesis — fails the assertion above.
+        assert!(
+            (expected - placed).length() > 0.1,
+            "control failed: the lid offset is too small to distinguish a real rig \
+             from three copies of one cube"
+        );
     }
 }

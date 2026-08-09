@@ -237,35 +237,17 @@ pub(crate) struct SpecialIconDraw {
 /// `SINGLE`, which is why an item chest is always the single-chest layer and
 /// never one of the two double halves.
 ///
-/// # Which kinds draw today
+/// # This is now a one-line delegation, and that is the point
 ///
-/// Only `minecraft:chest`, because it is the only block-entity model **#23 has
-/// ported** — `BLOCK_ENTITY_MODELS` holds the three chest layers and nothing
-/// else. The remaining nine return `None` and keep drawing nothing, which is the
-/// pre-existing behaviour and *not* a regression; they become one match arm each
-/// the day their geometry lands, with no change to any of the wiring below. See
-/// `docs/gui-item-icons.md` for the table.
-///
-/// `None` is also the right answer for an id a `kind` does not recognise (a
-/// datapack item declaring `minecraft:chest` over some other block): drawing
-/// nothing beats drawing a plain oak chest for something that is not one.
+/// The mapping used to live here, in the GUI pass, with a chest arm and nothing
+/// else. It now lives in [`lodestone_render::special_item_rig`], because the *3-D*
+/// surfaces — the first-person hand, another entity's hand, a dropped stack, an
+/// item frame — need exactly the same answer, and a second copy is how a chest ends
+/// up correct in the inventory and oak-coloured in the hand. Read that function for
+/// which `kind`s resolve today and why the others do not; this wrapper exists only
+/// to strip the namespace off the item id.
 fn special_icon_geometry(kind: &str, item: &ResourceLocation) -> Option<(&'static str, &'static str)> {
-    match kind {
-        "minecraft:chest" => {
-            let material = ChestMaterial::from_block_path(item.path())?;
-            // `ChestHalf::Single` is not a simplification: `ChestSpecialRenderer
-            // .Unbaked`'s `chest_type` defaults to `ChestType.SINGLE`, and the
-            // 26.2 item definitions never override it. The two double halves are
-            // 15 texels wide against the single's 14 and each omits the face
-            // meeting its partner, so they are separate meshes reachable only
-            // from a placed block.
-            Some((
-                CHEST_SINGLE,
-                chest_texture_stem(material, ChestHalf::Single),
-            ))
-        }
-        _ => None,
-    }
+    lodestone_render::special_item_rig(kind, item.path())
 }
 
 /// Draw one slot's icon into the `size`×`size` rect at `(x, y)`: the icon

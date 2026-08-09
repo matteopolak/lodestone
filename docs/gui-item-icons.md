@@ -428,20 +428,28 @@ the procedural fallback uses a 16 px icon at a 22 px pitch.
 
   | `kind` | defs | geometry | draws today |
   |---|---|---|---|
-  | `minecraft:chest` | 13 | #23, all 7 materials | **yes** |
-  | `minecraft:shulker_box` | 17 | not ported | no |
-  | `minecraft:banner` | 16 | not ported | no |
+  | `minecraft:chest` | 13 | all 7 materials | **yes** |
+  | `minecraft:shulker_box` | 17 | 17 sheets, one rig | **yes** |
+  | `minecraft:head` / `player_head` | 7 | 5 of 7 types | **yes**, except dragon/piglin |
+  | `minecraft:banner` | 16 | rig exists; needs the ordered mask pass | no |
   | `minecraft:copper_golem_statue` | 32 | not ported | no |
-  | `minecraft:head` / `player_head` | 7 | not ported | no |
   | `minecraft:shield` | 2 | not ported | no |
   | `minecraft:trident` | 2 | not ported | no |
   | `minecraft:conduit` | 1 | not ported | no |
   | `minecraft:decorated_pot` | 1 | not ported | no |
 
-  Each remaining row is **one match arm** in `special_icon_geometry` the day its
-  model lands in `BLOCK_ENTITY_MODELS`; none of the wiring changes. Note the item id
-  is consulted only *within* a kind, to choose the sheet — that is what makes one
-  chest arm cover trapped, ender and the four copper weathering stages.
+  Each remaining row is **one match arm** the day its model lands in
+  `BLOCK_ENTITY_MODELS`; none of the wiring changes. Note the item id is consulted
+  only *within* a kind, to choose the sheet — that is what makes one chest arm cover
+  trapped, ender and the four copper weathering stages.
+
+  **That match now lives in `lodestone_render::special_item_rig`, not here.**
+  `special_icon_geometry` is a one-line delegation to it. The move was not tidying:
+  the *3-D* surfaces — the first-person hand above all — need exactly the same
+  `kind` + item path → (rig, sheet) answer, and a second copy is how a chest ends
+  up correct in the inventory slot and oak-coloured in the hand. Add a kind there
+  and every surface gets it at once. See
+  [`held-block-entity-items.md`](./held-block-entity-items.md).
 
   **Do not "simplify" this to the `base` sprite fallback.** The issue proposed it as
   the cheap route and it is not a route at all: **every one of the ten `base` models

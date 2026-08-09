@@ -399,7 +399,15 @@ impl RenderState {
             self.prepare_first_person_hand(device, queue, camera)
         };
         stats.first_person_arm_drawn = matches!(first_person_hand, Some(FirstPersonHand::Arm(_)));
-        stats.first_person_item_drawn = matches!(first_person_hand, Some(FirstPersonHand::Item(..)));
+        // `Special` counts as an item drawn, not as a third state: the question this
+        // flag answers is "is the hand holding something visible", and a held chest is
+        // as much an item in the hand as a pickaxe. It only *draws* through a
+        // different pipeline. Leaving it out would report `false` for exactly the case
+        // this branch exists to fix, which is the shape of an island counter.
+        stats.first_person_item_drawn = matches!(
+            first_person_hand,
+            Some(FirstPersonHand::Item(..) | FirstPersonHand::Special(_))
+        );
 
         // Build every mining-crack overlay mesh before the pass (buffers can't be
         // created mid-pass) — one per entry in `cracks`, not just the local

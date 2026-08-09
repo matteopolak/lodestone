@@ -602,6 +602,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   pixels. It serves **both** screens that have slots — the hotbar (`hud.rs`) and the
   container / inventory / crafting screen (`container.rs`) — from one shared module,
   `hud/item_icon.rs`. Two kinds of icon reach two different pipelines:
+- [Held block-entity items](./held-block-entity-items.md) — The path that draws a
+  **chest, shulker box or skull the player is holding**. These items have no item
+  model and no block model in vanilla — every triangle comes from a block-entity
+  renderer — so they need a rig, not baked quads, and the 3-D surfaces had no way to
+  ask for one. A held chest drew *nothing at all*: the hand showed a bare arm as if
+  the slot were empty, while the inventory slot right below it drew a real chest.
 - [Held-item equip animation](./held-item-equip-animation.md) — The dip-and-raise
   the first-person hand makes when the held item changes — vanilla's
   `ItemInHandRenderer` swap animation. Issue #366, reported from live play as

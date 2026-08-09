@@ -373,8 +373,51 @@ pub(super) enum FirstPersonHand<'a> {
     /// map's own 128×128 texture. The bind group travels with the mesh because the
     /// two are meaningless apart — see `super::maps`.
     Map(GpuModelMesh, wgpu::BindGroup),
+    /// A held **block-entity rig** — a chest, a shulker box, a skull/head: an item
+    /// whose definition resolves to a `minecraft:special` node and whose geometry is
+    /// therefore a block-entity renderer rather than any baked model.
+    ///
+    /// # Why this cannot be [`Self::Item`]
+    ///
+    /// Not because of the geometry — a `BlockEntityMesh`'s part transforms take an
+    /// arbitrary placement matrix, so
+    /// [`first_person_item_matrix`](lodestone_render::entity::first_person_item_matrix)
+    /// slots in exactly where the GUI's `gui_item_pose` and the world's
+    /// `block_entity_placement_matrix` go. It is the **texture**: a chest's UVs are
+    /// `[0,1]` against a standalone 64×64 `entity/chest/*.png`, while the model
+    /// pipeline [`Self::Item`] draws through binds the stitched *block* atlas, which
+    /// contains nothing under `textures/entity/`. Routing a chest through it samples
+    /// arbitrary block texels.
+    ///
+    /// And the model pipeline cannot simply bind a second texture: it spends all
+    /// four bind groups (camera / atlas / palette / anim), which is wgpu's portable
+    /// `max_bind_groups` floor. So this draws through the **block-entity pass's**
+    /// `EntityPipeline`, which spends two — the same reasoning
+    /// `hud/item_icon.rs`'s `SpecialIcons` records for the inventory slot, reaching
+    /// the same conclusion from the other end of the frame.
+    ///
+    /// No foil flag: the glint pipeline rasterises a `GpuModelMesh` through the
+    /// model shader's vertex layout, and this is instanced entity geometry. An
+    /// enchanted held chest therefore draws unglinted — the same shortfall the
+    /// inventory slot has for the same reason.
+    Special(SpecialHandDraw<'a>),
     /// The bare arm, drawn through the *entity* pipeline.
     Arm(FirstPersonArm<'a>),
+}
+
+/// A held block-entity rig's draw for one frame: the uploaded mesh and sheet
+/// (borrowed — both are uploaded once at startup) and one single-instance buffer
+/// per part.
+///
+/// One buffer per part rather than one for the whole rig, because a
+/// `BlockEntityMesh` is *part*-instanced: every part carries its own world matrix
+/// so an animation can move one of them. Nothing animates here (a held chest's lid
+/// is shut — `ChestSpecialRenderer` has no `openness`), but the mesh's draw shape is
+/// the same either way and diverging from it would mean a second draw loop.
+pub(super) struct SpecialHandDraw<'a> {
+    model: &'a GpuEntityModel,
+    texture: &'a wgpu::BindGroup,
+    parts: Vec<(lodestone_render::entity::PartRange, wgpu::Buffer)>,
 }
 
 /// The first-person arm's draw for one frame: the uploaded `player_wide` mesh and
@@ -556,6 +599,27 @@ impl RenderState {
             }
         }
 
+        // A held **block-entity rig** — a chest, a shulker box, a skull. This has to
+        // be tried after the baked-geometry branch and before the bare arm, and both
+        // orderings are load-bearing:
+        //
+        // * **After `Item`**: an item whose tree reaches both a model and a special
+        //   node in the same context does not exist in 26.2, but if a pack made one,
+        //   vanilla's `ItemStackRenderState` submits the layers in tree order and
+        //   the model comes first. Trying this first would shadow it.
+        // * **Before `Arm`**: the bare arm is the *empty hand*. Falling through to it
+        //   with a chest in hand is exactly the bug this branch fixes — the hand drew
+        //   an empty arm because `ItemVariants::resolve` returns `None` for a special
+        //   form and `gui()`, its fallback, is `None` too. See
+        //   `ItemVariants::resolve_special`.
+        if let Some((item, _foil)) = self.equip.visible()
+            && let Some(model) = self.model.as_ref()
+            && let Some(form) = model.items.get(item).and_then(|v| v.resolve_special(&hand_ctx))
+            && let Some(draw) = self.prepare_special_hand(device, item, form, inverse_arm_height, camera)
+        {
+            return Some(FirstPersonHand::Special(draw));
+        }
+
         let entry = model_for_type("player")?;
         let mesh = self.entities.models.get(entry.name)?;
         let gpu = self.entities.gpu_models.get(entry.name)?;
@@ -593,6 +657,88 @@ impl RenderState {
             texture,
             parts,
         }))
+    }
+
+    /// Build the held block-entity rig's draw, or `None` when this item's `kind` has
+    /// no ported rig (six of the ten do not) or the pack shipped no sheet for it.
+    ///
+    /// # It is the same rig the world chest uses, resolved by the same function
+    ///
+    /// `special_item_rig` is the single owner of `kind` + item path → (model, sheet),
+    /// shared with the inventory pass — so a held chest, a placed chest and a chest
+    /// in a hotbar slot cannot disagree about which mesh or which sheet they are.
+    /// Anything keyed on the item id alone would need 91 arms; `kind` says *what
+    /// rig*, the path says *which sheet within it*.
+    ///
+    /// # The pose is the ordinary held-item pose, not a special one
+    ///
+    /// `first_person_item_matrix(ARM, swing, dip, transform)` — byte-for-byte the
+    /// matrix the `Item` branch feeds `first_person_item_mesh`, and the `transform`
+    /// comes from the `base` model's own `display` map. That is what makes the two
+    /// branches agree about where the hand is: a chest and a pickaxe swing on the
+    /// same arc, dip on the same ramp, and sit at whatever offset
+    /// `item/template_chest`'s `firstperson_righthand` asks for.
+    ///
+    /// **`ARM.display_slot(true)`'s slot is resolved by the caller and passed in via
+    /// `form`**, so the variant that was chosen and the transform that poses it
+    /// cannot come from two different slots — the bug `item/spyglass_in_hand`
+    /// recorded for the baked path.
+    fn prepare_special_hand<'a>(
+        &'a self,
+        device: &wgpu::Device,
+        item: &ResourceLocation,
+        form: &lodestone_render::SpecialItemForm,
+        inverse_arm_height: f32,
+        camera: &Camera,
+    ) -> Option<SpecialHandDraw<'a>> {
+        let (model_name, texture_stem) = lodestone_render::special_item_rig(&form.kind, item.path())?;
+        let mesh = self.block_entities.models.get(model_name)?;
+        let gpu = self.block_entities.gpu_models.get(model_name)?;
+        // A missing sheet draws **nothing** rather than an untextured box — the same
+        // fail-open the world block-entity pass uses, and for the same reason: a
+        // flat-magenta chest-shaped box in the hand reads as a renderer bug.
+        let texture = self.block_entities.textures.get(texture_stem)?;
+
+        // The same `Arm::Right` `prepare_first_person_hand` uses. A local rather
+        // than a shared constant so this function is readable on its own; the two
+        // cannot drift into disagreement, because the *caller* has already resolved
+        // the variant with `ARM.display_slot(true)` and there is only one hand.
+        const ARM: Arm = Arm::Right;
+        let transform = hand_transform(&form.display, ARM, true);
+        let placement = lodestone_render::entity::first_person_item_matrix(
+            ARM,
+            self.hand_swing.value(),
+            inverse_arm_height,
+            &transform,
+        );
+        // `upload_instances` takes the packed byte widened to `u32`, the same shape
+        // the arm branch passes `hand_light` through.
+        let light = self.hand_light(camera);
+        // `&[]` — no pose overrides. A held chest's lid is shut:
+        // `ChestSpecialRenderer` carries no `openness` at all, so the rest pose *is*
+        // the pose. Passing a lid angle here would open every chest in every hand.
+        let transforms = mesh.part_transforms(placement, &[]);
+
+        let parts: Vec<(lodestone_render::entity::PartRange, wgpu::Buffer)> = transforms
+            .iter()
+            .enumerate()
+            .filter_map(|(index, matrix)| {
+                let range = *gpu.parts.get(index)?;
+                if range.index_count == 0 {
+                    return None;
+                }
+                let buffer = upload_instances(device, &[*matrix], &[light])?;
+                Some((range, buffer))
+            })
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        Some(SpecialHandDraw {
+            model: gpu,
+            texture,
+            parts,
+        })
     }
 
     /// The packed light byte the first-person hand is lit with, for both branches.
@@ -727,6 +873,19 @@ impl RenderState {
                 fog: hand_fog,
             }),
         );
+        // And the block-entity pass's own copy, for a held chest/shulker box/skull
+        // ([`FirstPersonHand::Special`]). Written unconditionally rather than only
+        // when that branch wins: it is 128 bytes, and a conditional write is how a
+        // rarely-taken branch ends up reading last frame's matrix — visible as a
+        // held chest that lags the camera by one frame while the arm does not.
+        queue.write_buffer(
+            &self.block_entities.hand_cam_buffer,
+            0,
+            bytemuck::bytes_of(&EntityCameraUniform {
+                camera: camera_uniform,
+                fog: hand_fog,
+            }),
+        );
         if let Some(model) = self.model.as_ref() {
             // The origin binding is untouched here: it always points at the
             // shared arena's reserved zero slot (see the draw site), so only
@@ -851,6 +1010,23 @@ impl RenderState {
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                     stats.draw_calls += 1;
                     stats.filled_maps_drawn += 1;
+                }
+            }
+            // A held block-entity rig: the **block-entity pass's** pipeline and its
+            // own hand camera, so the sheet is `entity/chest/normal` and not the
+            // stitched block atlas. Two bind groups, not four — see
+            // `FirstPersonHand::Special`.
+            FirstPersonHand::Special(draw) => {
+                pass.set_pipeline(&self.block_entities.pipeline.pipeline);
+                pass.set_bind_group(0, &self.block_entities.hand_cam_bind_group, &[]);
+                pass.set_bind_group(1, draw.texture, &[]);
+                pass.set_vertex_buffer(0, draw.model.vertices.slice(..));
+                pass.set_index_buffer(draw.model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for (range, buffer) in &draw.parts {
+                    pass.set_vertex_buffer(1, buffer.slice(..));
+                    let end = range.index_start + range.index_count;
+                    pass.draw_indexed(range.index_start..end, 0, 0..1);
+                    stats.draw_calls += 1;
                 }
             }
             FirstPersonHand::Arm(arm) => {
