@@ -534,6 +534,67 @@ impl ContainerRenderer {
         width: u32,
         height: u32,
     ) {
+        self.render_with_icons_scaled_between_strata(
+            device,
+            queue,
+            view,
+            depth,
+            frame,
+            models,
+            gui_scale,
+            width,
+            height,
+            || {},
+        );
+    }
+
+    /// As [`render_with_icons_scaled`](Self::render_with_icons_scaled), but with
+    /// a draw hook at vanilla's **`nextStratum()` boundary** — the one place an
+    /// overlay belonging to a container screen may be submitted.
+    ///
+    /// # Why this hook exists instead of "draw it afterwards"
+    ///
+    /// `AbstractRecipeBookScreen.extractRenderState` is the record, and it is
+    /// explicit about the order:
+    ///
+    /// ```text
+    /// extractContents          panel art, labels, slots, both slot highlights
+    /// nextStratum()
+    /// recipeBookComponent      <- the overlay: THIS hook
+    /// nextStratum()
+    /// extractCarriedItem       the stack on the cursor
+    /// extractTooltip           the hovered slot's tooltip
+    /// recipeBookComponent.extractTooltip
+    /// ```
+    ///
+    /// So the recipe-book panel sits **above** every slot and **below** the
+    /// carried stack and the item tooltip. This renderer draws the carried
+    /// stratum and the tooltip itself (see [`ContainerGeometry`]'s
+    /// `slot_vertex_count` family), so an overlay submitted *after* the whole
+    /// container call lands on top of both — which is exactly the reported
+    /// defect: the recipe book painted over the stack being dragged and over the
+    /// tooltip of whatever slot the pointer was on.
+    ///
+    /// Passing the overlay *in* rather than sequencing it at the call site is the
+    /// point: there is one entry point, the hook is a parameter of it, and the
+    /// carried stratum is unreachable to a caller, so a future overlay cannot be
+    /// appended after the cursor stack by accident. Anything drawn from here must
+    /// submit its own encoder — this call has already flushed the slot stratum's,
+    /// and creates a fresh one for the carried stratum afterwards.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_icons_scaled_between_strata(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        depth: Option<&wgpu::TextureView>,
+        frame: &ContainerFrame<'_>,
+        models: Option<&BlockModels>,
+        gui_scale: u32,
+        width: u32,
+        height: u32,
+        between_strata: impl FnOnce(),
+    ) {
         // Only ask for model geometry when there is somewhere to draw it.
         let want_models = self.icons.models_attached() && depth.is_some();
         let item_atlas = self.icons.item_atlas();
@@ -549,7 +610,17 @@ impl ContainerRenderer {
             self.font.as_deref(),
             self.background.as_ref().map(|bg| bg.data.as_ref()),
         );
-        self.render_geometry_scaled(device, queue, view, depth, &geo, gui_scale, width, height);
+        self.render_geometry_scaled_between_strata(
+            device,
+            queue,
+            view,
+            depth,
+            &geo,
+            gui_scale,
+            width,
+            height,
+            between_strata,
+        );
     }
 
     /// Draw an already-built [`ContainerGeometry`] through this renderer's
@@ -576,6 +647,29 @@ impl ContainerRenderer {
         gui_scale: u32,
         width: u32,
         height: u32,
+    ) {
+        self.render_geometry_scaled_between_strata(
+            device, queue, view, depth, geo, gui_scale, width, height, || {},
+        );
+    }
+
+    /// As [`render_geometry_scaled`](Self::render_geometry_scaled), with the
+    /// `nextStratum()` draw hook —
+    /// [`render_with_icons_scaled_between_strata`](Self::render_with_icons_scaled_between_strata)
+    /// carries the whole argument for why an overlay goes *there* rather than
+    /// after this call.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_geometry_scaled_between_strata(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        depth: Option<&wgpu::TextureView>,
+        geo: &ContainerGeometry,
+        gui_scale: u32,
+        width: u32,
+        height: u32,
+        between_strata: impl FnOnce(),
     ) {
         // A skin fetched after startup (issue #62) lands here, not at
         // construction: `PlayerPreview` is built once during `app::lifecycle`'s
@@ -605,6 +699,12 @@ impl ContainerRenderer {
             // emptiness check above.
             && geo.player_avatar.is_none()
         {
+            // The hook still fires. An overlay is not conditional on the
+            // container having drawn anything — a frame whose geometry is empty
+            // (no menu, nothing attached) would otherwise silently swallow it,
+            // and "the recipe book vanishes on some frames" is a worse bug than
+            // the one this hook exists to fix.
+            between_strata();
             return;
         }
         if geo.verts.len() > self.capacity_floats {
@@ -803,12 +903,30 @@ impl ContainerRenderer {
             pass.draw(bg_slot_count..bg_count, 0..1);
         }
 
-        // Vanilla's `nextStratum()` (issue #377): the carried stack replays all
-        // three streams *after* every slot, and its model pass **clears depth
-        // again** — that clear is what stops a slot block item's near faces
-        // winning over a block on the cursor. See the layering table in
-        // `build_inner` for the four cases and which two append order alone
-        // could not fix.
+        // ---- vanilla's first `nextStratum()` -------------------------------
+        //
+        // Everything above is the **slot stratum**. Flush it, then let the
+        // caller's overlay — today the recipe-book panel — submit its own work
+        // *between* the two strata, exactly where
+        // `AbstractRecipeBookScreen.extractRenderState` draws
+        // `recipeBookComponent`. wgpu executes submissions in order, so two
+        // encoders either side of the hook is what buys the layering; a single
+        // encoder finished at the end of this function could not, because the
+        // overlay's own submit would already have landed.
+        queue.submit(std::iter::once(encoder.finish()));
+        between_strata();
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("container-carried"),
+        });
+
+        // ---- vanilla's second `nextStratum()` ------------------------------
+        //
+        // The carried stack replays all three streams *after* every slot, and its
+        // model pass **clears depth again** — that clear is what stops a slot
+        // block item's near faces winning over a block on the cursor. See the
+        // layering table in `build_inner` for the four cases and which two append
+        // order alone could not fix. The hovered slot's tooltip rides the tail of
+        // the same colour range, which is why it too ends up above the overlay.
         self.icons.draw_models_range(
             &mut encoder,
             view,

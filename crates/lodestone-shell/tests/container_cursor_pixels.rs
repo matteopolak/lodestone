@@ -66,9 +66,30 @@
 //! ```text
 //! cargo test -p lodestone-shell --test container_cursor_pixels -- --ignored --nocapture
 //! ```
+//!
+//! # The second gate here: the **recipe book** is also under the cursor stack
+//!
+//! Same subject — "the thing following the mouse is on top" — one more thing that
+//! was covering it. Reported from play: *"the recipe book seems to be drawn on top
+//! of everything - including items in my cursor when i move them and item
+//! tooltips."*
+//!
+//! `AbstractRecipeBookScreen.extractRenderState` is the record and it is explicit:
+//! container contents, `nextStratum()`, the recipe-book component, `nextStratum()`,
+//! *then* the carried stack and the hovered-slot tooltip. Ours drew the panel as a
+//! trailing pass after the whole container call, so it landed over both.
+//!
+//! [`the_recipe_book_draws_under_the_carried_stack`] needs **no `client.jar`** —
+//! jar-less, both the carried stack and the panel body fall back to flat fills, and
+//! flat fills are all a layering question needs. That is deliberate: the arm that
+//! can run anywhere is the arm that will be run.
 
 use lodestone::config::{AUTO_GUI_SCALE, calculate_gui_scale};
-use lodestone::container::{ContainerFrame, ContainerGeometry, ContainerRenderer, slot_layout};
+use lodestone::container::{
+    ContainerFrame, ContainerGeometry, ContainerRenderer, recipe_book_panel_geometry,
+    recipe_book_panel_layout_with_scale, slot_layout,
+};
+use lodestone::hud::HudRenderer;
 use lodestone::gpu::RenderState;
 use lodestone::resources::{BlockResources, load_item_atlas};
 use lodestone_assets::ResourceLocation;
@@ -238,6 +259,263 @@ fn ink_mask(cursor_only: &[u8], chrome: &[u8], rect: [u32; 4]) -> (Vec<bool>, Re
         }
     }
     (mask, region)
+}
+
+/// Mean per-pixel channel-sum difference inside `rect` — a **magnitude**, where
+/// [`differs`] is a boolean.
+///
+/// The recipe-book arm below reports a magnitude because the carried stack's own
+/// jar-less swatch is `a = 0.95`, so it composites differently over the panel than
+/// over the container's fill even when the ordering is *right* — measured
+/// `d_hook = 117.25` against `d_stack = 165.03`, i.e. 71%, not 100%. Per
+/// `CLAUDE.md` an exact composited byte through `ALPHA_BLENDING` on this backend is
+/// not predictable, so the gate brackets: a **ratio** against the stack's own
+/// contrast, measured in the same rect with no panel in the frame at all.
+///
+/// The wrong ordering measured **`d_trailing = 0.00`, 0 px** — the panel's slot
+/// wells are opaque, so a trailing pass erases the carried stack outright rather
+/// than merely dimming it. The two hypotheses are therefore 0.71 and 0.00 of
+/// `d_stack`, and the thresholds below (0.5 and 0.25) sit between them with room.
+fn mean_delta(a: &[u8], b: &[u8], rect: [u32; 4]) -> f64 {
+    let [rx, ry, rw, rh] = rect;
+    let mut total = 0u64;
+    for dy in 0..rh {
+        for dx in 0..rw {
+            let i = (((ry + dy) * W + rx + dx) * 4) as usize;
+            for c in 0..3 {
+                total += (i32::from(a[i + c]) - i32::from(b[i + c])).unsigned_abs() as u64;
+            }
+        }
+    }
+    total as f64 / f64::from(rw * rh)
+}
+
+/// Which ordering to composite the recipe-book panel with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BookOrder {
+    /// No panel in the frame — the baselines.
+    Absent,
+    /// Production: submitted through
+    /// `ContainerRenderer::render_with_icons_scaled_between_strata`, at vanilla's
+    /// first `nextStratum()`, so the carried stratum still follows it.
+    BetweenStrata,
+    /// The **wrong hypothesis**, kept in the gate rather than described: a
+    /// trailing pass after the whole container call. This is what shipped, and it
+    /// is what the report was about.
+    Trailing,
+}
+
+/// Pixel gate: **the recipe-book panel draws under the carried stack**, not over
+/// it.
+///
+/// See this file's module doc for the vanilla record. Needs a GPU and nothing
+/// else — jar-less, the panel body and the carried stack are both flat fills,
+/// which is all a layering question needs.
+///
+/// # The two hypotheses, both measured
+///
+/// Four renders at the same cursor position, which is the **centre of the open
+/// panel** — the discriminating input. A cursor outside the panel's rect passes
+/// under either ordering, so it would be a test that the code runs.
+///
+/// ```text
+/// plain     no carried stack, no panel        the background baseline
+/// book      no carried stack, panel drawn     the "panel is here" baseline
+/// hook      carried stack, panel between strata
+/// trailing  carried stack, panel drawn after
+/// ```
+///
+/// `d_stack = |cursor over plain|` is the stack's own contrast with no panel in
+/// the frame — an independent measurement, not a constant. Measured on first run:
+/// `d_stack 165.03`, `d_hook 117.25` (71%), `d_trailing 0.00` (0 px of 100). Both
+/// arms are asserted, so a frame where the panel failed to draw fails the
+/// `trailing` arm instead of passing silently — the premise-false trap
+/// `CLAUDE.md` names.
+///
+/// ```text
+/// cargo test -p lodestone-shell --test container_cursor_pixels -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn the_recipe_book_draws_under_the_carried_stack() {
+    assert_eq!(
+        calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+        1,
+        "the cell math below assumes W x H divides to itself under the GUI scale"
+    );
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let mut renderer = ContainerRenderer::new(device, format);
+    let mut hud = HudRenderer::new(device, format);
+
+    // The panel rect with the book **open**, from the same layout call the
+    // production draw and the click hit-test both go through — nothing here
+    // restates a constant.
+    let probe = Menu::player();
+    let layout = recipe_book_panel_layout_with_scale(
+        &probe,
+        AUTO_GUI_SCALE,
+        W,
+        H,
+        0,
+        false,
+        false,
+        true,
+    );
+    let panel = layout.panel;
+    // `page_results` empty: the panel body, its wells and its buttons are what
+    // covers the cursor, and a jar-less run has no icons to put in them anyway.
+    let book_geo = recipe_book_panel_geometry(&layout, true, None, &[], AUTO_GUI_SCALE, W, H);
+    assert!(
+        !book_geo.verts.is_empty(),
+        "the open panel must produce colour geometry, or there is nothing to be \
+         layered against"
+    );
+
+    // Cursor at the panel's centre. Scale is 1 (asserted above), so physical and
+    // logical coincide; the cell is `build_inner`'s own
+    // `(cx / scale - CELL * 0.5)` expression solved for the top-left.
+    let cursor = [panel.x + panel.w * 0.5, panel.y + panel.h * 0.5];
+    let cell = [
+        (cursor[0] - 8.0) as u32,
+        (cursor[1] - 8.0) as u32,
+        16u32,
+        16u32,
+    ];
+    assert!(
+        cursor[0] > panel.x + 8.0
+            && cursor[0] < panel.x + panel.w - 8.0
+            && cursor[1] > panel.y + 8.0
+            && cursor[1] < panel.y + panel.h - 8.0,
+        "the carried stack's whole cell must sit inside the panel rect, or this \
+         gate is measuring an overlap that does not exist: cell {cell:?} vs panel \
+         {panel:?}"
+    );
+
+    let mut shoot = |carried: bool, order: BookOrder| -> Vec<u8> {
+        let mut menu = Menu::player();
+        if carried {
+            menu.set_carried(Some(ItemStack::new(id(SPRITE_ITEM), 1)));
+        }
+        let frame = ContainerFrame::new(Some(&menu), "Inventory")
+            .with_cursor(Some(cursor))
+            .with_book_open(true);
+        let acquired = target.acquire().expect("headless acquire");
+        clear_view(device, queue, acquired.view());
+        renderer.render_with_icons_scaled_between_strata(
+            device,
+            queue,
+            acquired.view(),
+            None,
+            &frame,
+            None,
+            AUTO_GUI_SCALE,
+            W,
+            H,
+            || {
+                if order == BookOrder::BetweenStrata {
+                    hud.render_recipe_book_panel(
+                        device,
+                        queue,
+                        acquired.view(),
+                        None,
+                        &book_geo,
+                        AUTO_GUI_SCALE,
+                        W,
+                        H,
+                    );
+                }
+            },
+        );
+        if order == BookOrder::Trailing {
+            hud.render_recipe_book_panel(
+                device,
+                queue,
+                acquired.view(),
+                None,
+                &book_geo,
+                AUTO_GUI_SCALE,
+                W,
+                H,
+            );
+        }
+        target.read_texels(device, queue)
+    };
+
+    let plain = shoot(false, BookOrder::Absent);
+    let stack_no_book = shoot(true, BookOrder::Absent);
+    let book = shoot(false, BookOrder::BetweenStrata);
+    let hook = shoot(true, BookOrder::BetweenStrata);
+    let trailing = shoot(true, BookOrder::Trailing);
+
+    let d_stack = mean_delta(&stack_no_book, &plain, cell);
+    let d_book = mean_delta(&book, &plain, cell);
+    let d_hook = mean_delta(&hook, &book, cell);
+    let d_trailing = mean_delta(&trailing, &book, cell);
+    let (_, stack_ink) = ink_mask(&stack_no_book, &plain, cell);
+    let (_, hook_ink) = ink_mask(&hook, &book, cell);
+    let (_, trailing_ink) = ink_mask(&trailing, &book, cell);
+
+    eprintln!("=== recipe-book vs carried-stack layering gate ===");
+    eprintln!("panel = {panel:?}   cursor = {cursor:?}   cell = {cell:?}");
+    eprintln!("  d_stack   (stack over no panel)     = {d_stack:.2}   ink {}", stack_ink.describe());
+    eprintln!("  d_book    (panel over no stack)     = {d_book:.2}");
+    eprintln!("  d_hook    (between strata, subject) = {d_hook:.2}   ink {}", hook_ink.describe());
+    eprintln!("  d_trailing(after the container)     = {d_trailing:.2}   ink {}", trailing_ink.describe());
+    // Measured on first run: 165.03 / 117.25 / 0.00. The wrong ordering erases the
+    // stack outright (opaque slot wells), so the two hypotheses are ~0.71 and 0.00.
+    eprintln!(
+        "  correct hypothesis ~= 0.71 * {d_stack:.2} = {:.2}; wrong one ~= 0.00",
+        d_stack * 0.71
+    );
+
+    let mut failures: Vec<String> = Vec::new();
+    if d_stack < 5.0 {
+        failures.push(format!(
+            "the carried stack barely drew over the plain background (d_stack \
+             {d_stack:.2}, {}) — every ratio below is against nothing",
+            stack_ink.describe()
+        ));
+    }
+    if d_book < 5.0 {
+        failures.push(format!(
+            "the panel does not paint inside the carried stack's own cell (d_book \
+             {d_book:.2}), so there is no overlap here and both arms below would \
+             pass whatever the ordering is — this gate's premise is false"
+        ));
+    }
+    if d_hook < 0.5 * d_stack {
+        failures.push(format!(
+            "the recipe book is painting over the carried stack: with the panel \
+             submitted at the nextStratum() hook the stack retains only \
+             d_hook {d_hook:.2} of its own d_stack {d_stack:.2} ({}). Vanilla's \
+             AbstractRecipeBookScreen.extractRenderState draws the component \
+             between two nextStratum() calls, with extractCarriedItem after both.",
+            hook_ink.describe()
+        ));
+    }
+    if d_trailing > 0.25 * d_stack {
+        failures.push(format!(
+            "the control is dark: drawing the panel as a TRAILING pass — the \
+             ordering that shipped and was reported — left d_trailing \
+             {d_trailing:.2} against d_stack {d_stack:.2}, so this gate cannot \
+             tell the two orderings apart and its positive arm proves nothing"
+        ));
+    }
+
+    assert!(
+        failures.is_empty(),
+        "recipe-book layering gate failed:\n  {}",
+        failures.join("\n  ")
+    );
 }
 
 #[test]
