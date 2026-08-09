@@ -383,6 +383,7 @@ impl Sim {
             status,
             connect_phase: crate::menu::loading::ConnectPhase::default(),
             expected_view_columns: None,
+            terrain_wait_started: None,
             vanilla_atlas: resources.vanilla_atlas,
             particle_atlas,
             language: resources.language,

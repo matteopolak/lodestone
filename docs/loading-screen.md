@@ -21,9 +21,45 @@ it. The label is `ui.connect_phase().label()`.
 `loading_frame_with_progress` over the still-rendering world while
 `Sim::terrain_loading()` is true. It must stay an overlay: chunks have to keep
 meshing and uploading behind the text, which a full-frame screen would stop.
-The predicate is vanilla's own `DownloadingTerrainScreen` rule — the column
-under the player's feet is not in the client world yet — so the screen clears
-when the ground the player is standing on arrives, never because a bar filled.
+The predicate is `menu::loading::is_level_ready`, vanilla's
+`LevelLoadTracker.WaitingForPlayerChunk.isReady` — so the screen clears when the
+ground the player is standing on arrives, never because a bar filled.
+
+### The dismissal condition, in full
+
+Four observations, gathered by `Sim::terrain_loading` and decided by
+`is_level_ready`. Note `ReceivingLevelScreen` is **gone** in 26.2; the screen
+carrying `multiplayer.downloadingTerrain` is `LevelLoadingScreen`, and
+`Minecraft.doWorldLoad` builds one unconditionally for singleplayer next to
+`ConnectScreen`/`ClientPacketListener` for multiplayer — so it really does appear
+on every join, not only on world creation.
+
+| observation | effect | vanilla |
+|---|---|---|
+| player's own column loaded | dismisses | `playerSectionReady` (we use the column, a strictly earlier condition) |
+| 30 s elapsed | dismisses **anyway** | `CLIENT_WAIT_TIMEOUT_MS` |
+| player dead | dismisses | `player.isAlive()` |
+| player outside build height, or no dimensions yet | dismisses | `level.isOutsideBuildHeight` |
+
+**The last three are bail-outs, not requirements** — vanilla's ternary reads
+"only wait if waiting could work", and transcribing them as `&&`ed preconditions
+for dismissal inverts it into a screen that hangs in exactly the cases they were
+written for. The dead case has teeth here: a server holding a dead player on the
+death screen sends no chunks at all, so a column-only wait would never finish.
+
+**It is not the view square.** `TerrainProgress`'s `(2r+1)^2` is the *bar's*
+denominator and nothing else; waiting on it would hold the screen for the whole
+initial stream.
+
+**Why the timeout is load-bearing rather than defensive.** Without it the
+dismissal is a liveness assumption about the server, and that assumption has
+already failed once: `lodestone_server::server`'s join loop used
+`join_view_rings`' ring *offsets* as absolute chunk coordinates, so the streamed
+square was centred on chunk `(0, 0)` rather than on the joining player. For a
+player restored away from the origin the awaited column was never sent — and the
+server's `ViewTracker` had recorded it as sent, so it never would be. The screen
+had no way out. That defect is fixed; the timeout is what makes the next one
+present as a 30 s delay instead of a game that never starts.
 
 ### The phases, and why there are only three
 

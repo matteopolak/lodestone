@@ -34,9 +34,25 @@
 //! * [`TerrainProgress`] carries the raw numerator and denominator rather than a
 //!   pre-computed percentage, so a caller cannot round a partial load up to
 //!   "done", and [`TerrainProgress::fraction`] is clamped **below** 1.0 for
-//!   exactly that reason — the screen closes when the real predicate
-//!   (`Sim::terrain_loading`) says the player's own column has landed, never
-//!   because a bar filled.
+//!   exactly that reason — the screen closes when [`is_level_ready`] says so,
+//!   never because a bar filled.
+//!
+//! # The dismissal condition
+//!
+//! [`is_level_ready`] is vanilla's `LevelLoadTracker.WaitingForPlayerChunk`
+//! readiness rule, and it is worth naming what it is *not*: it is **not** "the
+//! whole view square has landed". `TerrainProgress`'s `(2r+1)²` denominator is the
+//! progress *bar*'s, and nothing else; waiting on it would hold the screen for the
+//! entire initial stream. Vanilla waits on the player's own chunk and bounds even
+//! that with a 30 s timeout — see [`CLIENT_WAIT_TIMEOUT`] for the incident that
+//! made the bound load-bearing rather than defensive.
+//!
+//! Note that 26.2 has no `ReceivingLevelScreen` any more; the screen carrying
+//! `multiplayer.downloadingTerrain` is `LevelLoadingScreen`, and
+//! `Minecraft.doWorldLoad` constructs one unconditionally for singleplayer
+//! alongside `ConnectScreen`/`ClientPacketListener` for multiplayer. So it really
+//! does appear on **every** join, not only on world creation — the only
+//! singleplayer-specific part is a 500 ms close delay for a brand-new world.
 //!
 //! # How to change it
 //!
@@ -130,8 +146,8 @@ impl TerrainProgress {
     /// The bar fill, in `0.0..=MAX_FRACTION`.
     ///
     /// **Clamped below 1.0 deliberately.** The loading screen is dismissed by
-    /// `Sim::terrain_loading` — a real test on whether the player's own column
-    /// has arrived — never by this number reaching the end. A bar that could
+    /// [`is_level_ready`] — the player's own column, or one of the bail-outs
+    /// there — never by this number reaching the end. A bar that could
     /// read as full while the screen is still up would be the false
     /// reassurance this whole feature exists to prevent; leaving the last
     /// sliver unfilled means "not done" stays visible even when the count
@@ -156,9 +172,201 @@ impl TerrainProgress {
 /// The most the progress bar will ever report. See [`TerrainProgress::fraction`].
 pub const MAX_FRACTION: f32 = 0.99;
 
+/// How long the terrain screen may hold before it gives up and lets the player
+/// in anyway — vanilla's `LevelLoadTracker.CLIENT_WAIT_TIMEOUT_MS`, 30 s.
+///
+/// This is not a safety margin someone chose here; it is vanilla's own escape
+/// hatch, and its log line says what it is for: *"Timed out while waiting for the
+/// client to load chunks, letting the player into the world anyway"*. Without it
+/// the screen's condition is a liveness assumption about the server, and the
+/// owner-reported symptom was exactly what happens when that assumption fails —
+/// the join view was centred on chunk `(0, 0)` rather than on the player, so the
+/// column the predicate waits for was never coming, and there was nothing to
+/// dismiss the screen. A bug in the server presenting as a permanently stuck
+/// client is the failure mode this constant exists to bound.
+pub const CLIENT_WAIT_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(30);
+
+/// Everything [`is_level_ready`] reads, gathered so the decision itself is a pure
+/// function of observations rather than of a `Sim`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerrainWait {
+    /// Whether the chunk column under the player's feet has arrived.
+    pub own_column_loaded: bool,
+    /// How long the terrain phase has been up. Compared against
+    /// [`CLIENT_WAIT_TIMEOUT`].
+    pub elapsed: core::time::Duration,
+    /// Whether the local player is alive. A dead player is held on the death
+    /// screen, and **a server holding a dead player sends no chunks at all** —
+    /// so waiting for a column while dead waits forever.
+    pub player_alive: bool,
+    /// Whether the player's Y is inside the world's build height. `false` when
+    /// the client has no world dimensions yet, which is also the honest answer:
+    /// there is no build height to be inside of.
+    pub within_build_height: bool,
+}
+
+/// Vanilla's `LevelLoadTracker.WaitingForPlayerChunk.isReady`, ported.
+///
+/// The record, so the port is auditable:
+///
+/// ```text
+/// private boolean isReady() {
+///    if (Util.getMillis() > this.timeoutAfter) {
+///       LOGGER.warn("Timed out while waiting for the client to load chunks, letting the player into the world anyway");
+///       return true;
+///    } else {
+///       BlockPos playerPos = this.player.blockPosition();
+///       BlockPos cameraPos = Minecraft.getInstance().gameRenderer.mainCamera().blockPosition();
+///       return !this.level.isOutsideBuildHeight(playerPos.getY())
+///             && !this.level.isOutsideBuildHeight(cameraPos.getY())
+///             && !this.player.isSpectator()
+///             && this.player.isAlive()
+///          ? this.playerSectionReady.get()
+///          : true;
+///    }
+/// }
+/// ```
+///
+/// Read carefully, the ternary is **"only wait if waiting could work"**: every one
+/// of those four conditions failing makes the answer `true`, i.e. *ready*. They
+/// are not extra requirements for readiness — they are the states in which the
+/// wait is pointless, and vanilla short-circuits out of the screen rather than
+/// holding a player it can never satisfy. Transcribing them as `&&`ed
+/// preconditions for dismissal inverts the record and produces a screen that
+/// hangs in precisely the cases vanilla wrote them for.
+///
+/// # Two named deviations
+///
+/// * **Column loaded, not section compiled.** Vanilla waits on
+///   `playerSectionReady`, set from a mesh-compilation callback. This client has
+///   no such callback, and the column being present in the client-owned world is
+///   the observation it does have. It is a strictly *earlier* condition than a
+///   compiled mesh, so this dismisses no later than vanilla — never longer, which
+///   is the direction that matters for a screen the player is stuck behind.
+/// * **No spectator check, and no separate camera check.** `Sim` carries no game
+///   mode, so `isSpectator` has nothing to read; the camera Y is the player Y here
+///   because the shell has no detached camera in the loading phase. Both are
+///   short-circuits *out* of the wait, so their absence can only make this hold
+///   longer than vanilla in a spectator join — bounded by
+///   [`CLIENT_WAIT_TIMEOUT`], never unbounded.
+#[must_use]
+pub fn is_level_ready(wait: TerrainWait) -> bool {
+    if wait.elapsed >= CLIENT_WAIT_TIMEOUT {
+        return true;
+    }
+    if !wait.player_alive || !wait.within_build_height {
+        return true;
+    }
+    wait.own_column_loaded
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ConnectPhase, MAX_FRACTION, TerrainProgress};
+    use core::time::Duration;
+
+    use super::{
+        CLIENT_WAIT_TIMEOUT, ConnectPhase, MAX_FRACTION, TerrainProgress, TerrainWait,
+        is_level_ready,
+    };
+
+    /// The state a healthy join is in the instant the terrain phase starts: alive,
+    /// in the world, no column yet, no time elapsed. Every case below is this with
+    /// one field moved, so what each test measures is unambiguous.
+    const STILL_WAITING: TerrainWait = TerrainWait {
+        own_column_loaded: false,
+        elapsed: Duration::ZERO,
+        player_alive: true,
+        within_build_height: true,
+    };
+
+    /// The timeout is vanilla's 30 s, and the boundary is asserted at the two
+    /// inputs where the two readings of it differ.
+    ///
+    /// A "does it eventually give up" test would pass against any finite bound —
+    /// the *magnitude* species. So the prediction is the exact figure from
+    /// `LevelLoadTracker.CLIENT_WAIT_TIMEOUT_MS`, and it is checked one
+    /// millisecond either side: at 29.999 s the screen must still be up, at 30.000 s
+    /// it must be gone. A bound of, say, 5 s or 60 s fails one of those two.
+    #[test]
+    fn the_wait_is_bounded_at_vanillas_thirty_seconds_exactly() {
+        assert_eq!(CLIENT_WAIT_TIMEOUT, Duration::from_secs(30));
+
+        let just_short = TerrainWait {
+            elapsed: Duration::from_millis(29_999),
+            ..STILL_WAITING
+        };
+        assert!(
+            !is_level_ready(just_short),
+            "at 29.999 s with no column the screen must still be held — a shorter bound \
+             would dismiss here"
+        );
+
+        let at_the_bound = TerrainWait {
+            elapsed: Duration::from_millis(30_000),
+            ..STILL_WAITING
+        };
+        assert!(
+            is_level_ready(at_the_bound),
+            "at exactly 30.000 s the player is let in anyway, per vanilla's own log line"
+        );
+    }
+
+    /// The player's own column — not the view square — is what a healthy join
+    /// waits for, and it is sufficient on its own well inside the timeout.
+    ///
+    /// This is the case the whole feature is about, so it is checked at a
+    /// mid-stream elapsed rather than at zero: the dismissal must come from the
+    /// column, not from the clock.
+    #[test]
+    fn the_players_own_column_dismisses_the_screen_without_the_rest_of_the_view() {
+        let mid_stream = Duration::from_secs(3);
+        assert!(!is_level_ready(TerrainWait {
+            elapsed: mid_stream,
+            ..STILL_WAITING
+        }));
+        assert!(
+            is_level_ready(TerrainWait {
+                own_column_loaded: true,
+                elapsed: mid_stream,
+                ..STILL_WAITING
+            }),
+            "one column is the condition; at view_radius 9 the square is 361 and a \
+             square-based condition would still be holding here"
+        );
+    }
+
+    /// **The direction of vanilla's ternary, which is the easy thing to get
+    /// backwards.** A dead player and a player outside build height are *ready*,
+    /// not *held*: those are the states in which waiting cannot succeed.
+    ///
+    /// The dead case is the one with teeth in this repo — a server holding a dead
+    /// player on the death screen sends no chunks at all, so a screen that treated
+    /// `player_alive` as a requirement for dismissal would stack the terrain
+    /// overlay on top of the death screen until the 30 s timeout, every death.
+    #[test]
+    fn the_states_where_waiting_cannot_succeed_dismiss_rather_than_hold() {
+        assert!(
+            is_level_ready(TerrainWait {
+                player_alive: false,
+                ..STILL_WAITING
+            }),
+            "a dead player must be let through: the server sends no chunks while it \
+             holds them, so the column being waited for is never coming"
+        );
+        assert!(
+            is_level_ready(TerrainWait {
+                within_build_height: false,
+                ..STILL_WAITING
+            }),
+            "outside build height (or with no world dimensions yet) there is no column \
+             under the player to wait for"
+        );
+        // And the control for both: with those two back to their healthy values and
+        // nothing else changed, the screen is held — so the assertions above are
+        // about the fields they name and not about `STILL_WAITING` being ready
+        // already.
+        assert!(!is_level_ready(STILL_WAITING));
+    }
 
     /// Every phase must have both a key and a non-empty label, and no two
     /// phases may share either — a duplicated label is a phase the screen
