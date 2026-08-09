@@ -84,7 +84,7 @@ use bevy_ecs::component::Component;
 use bevy_ecs::prelude::{Query, Res, With};
 use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 use bevy_ecs::world::World;
-use lodestone_model::{ClientEvent, Difficulty, DimensionId, DimensionTypeInfo, GameMode};
+use lodestone_model::{ClientEvent, Difficulty, DimensionId, DimensionTypeInfo, GameMode, Text};
 
 use crate::ingest::{IngestBatch, IngestQueuePlugin};
 use crate::player::{LocalPlayer, SelectedSlot};
@@ -1231,9 +1231,100 @@ pub enum SessionPhase {
     Connecting,
     /// Logged in to the server.
     Connected,
-    /// The session ended; carries the human-readable reason (disconnect, net
-    /// error, or death). Terminal until a new connection is attached.
-    Ended(String),
+    /// The session ended; carries why, and the styled text to show for it.
+    /// Terminal until a new connection is attached.
+    ///
+    /// Boxed because [`SessionEnd`] owns a whole [`Text`] tree and every other
+    /// variant is a unit — inlining it would make the common `Connected` phase
+    /// pay for the terminal one.
+    Ended(Box<SessionEnd>),
+}
+
+/// Why a session ended, and the text to show for it.
+///
+/// # The reason is a [`Text`], not a formatted string
+///
+/// It used to be `format!("disconnected: {reason}")`, and that `format!` was
+/// where every kick message lost its colour: the styled component was flattened
+/// to a `String` before any screen saw it, so nothing downstream *could* render
+/// a span. The reason is now carried as the tree it arrived as, resolved (so
+/// `multiplayer.disconnect.kicked` is already English) but not flattened.
+///
+/// # Nothing prefixes the reason
+///
+/// The `"disconnected: "` prefix was ours, and vanilla does not do it: a
+/// `DisconnectedScreen` puts its `title` in its own `StringWidget` *above* the
+/// reason's `MultiLineTextWidget`, never glued onto it. [`SessionEndKind`] is
+/// what a screen derives that title from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEnd {
+    /// Which of the two very different things happened.
+    pub kind: SessionEndKind,
+    /// The reason, resolved but still styled. For [`SessionEndKind::Disconnected`]
+    /// this is the *server's* own component and belongs on screen verbatim; for
+    /// [`SessionEndKind::Failed`] it is ours.
+    pub reason: Text,
+}
+
+impl SessionEnd {
+    /// A server-sent disconnect carrying the server's own component.
+    #[must_use]
+    pub fn disconnected(reason: Text) -> Self {
+        Self {
+            kind: SessionEndKind::Disconnected,
+            reason,
+        }
+    }
+
+    /// A client-side failure carrying our own error text.
+    #[must_use]
+    pub fn failed(reason: Text) -> Self {
+        Self {
+            kind: SessionEndKind::Failed,
+            reason,
+        }
+    }
+
+    /// The local player died.
+    #[must_use]
+    pub fn died(reason: Text) -> Self {
+        Self {
+            kind: SessionEndKind::Died,
+            reason,
+        }
+    }
+
+    /// The reason with all styling dropped — for logs and for assertions that
+    /// only care about the wording.
+    #[must_use]
+    pub fn plain(&self) -> String {
+        self.reason.to_plain_string()
+    }
+}
+
+/// The two — three, with death — genuinely different ways a session ends.
+///
+/// Conflating them is what made a client-side failure wear a server disconnect's
+/// clothes: the adapter's real message was logged, the session then died of a
+/// generic codec error, and the screen said `stream closed`. "The server kicked
+/// you, here is its message" and "we failed to talk to the server, here is why"
+/// need different titles and different logging, which is the whole reason this
+/// is a separate field rather than something a screen guesses from the wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEndKind {
+    /// The server sent a disconnect packet. [`SessionEnd::reason`] is its
+    /// component and is shown verbatim; vanilla's title for this is
+    /// `disconnect.lost` ("Connection Lost").
+    Disconnected,
+    /// We could not talk to the server: a connect failure, a transport error, a
+    /// codec error, a missing adapter. [`SessionEnd::reason`] is ours, and it
+    /// should carry the error's cause chain because nothing else will.
+    /// Vanilla's title for this is `connect.failed` ("Failed to connect to the
+    /// server").
+    Failed,
+    /// The local player died. Not a connection failure at all, and the one case
+    /// where the session is still perfectly healthy.
+    Died,
 }
 
 /// The session phase, as a component on the local player.

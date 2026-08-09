@@ -393,6 +393,8 @@ pub fn accounts_row_visible(index: usize, height: f32, scroll: f32) -> bool {
 /// [`MenuNotice`] is.
 fn accounts_notice(text: String, colour: [f32; 4]) -> MenuNotice {
     MenuNotice {
+        // Our own text, so no styled runs to preserve.
+        spans: Vec::new(),
         text,
         origin: Origin::ScreenTop,
         // The row column's own left edge at an even canvas width. `dx` is
@@ -416,6 +418,8 @@ fn accounts_notice(text: String, colour: [f32; 4]) -> MenuNotice {
 /// player whose account choice silently fails to persist deserves the reason.
 fn accounts_save_error_notice(text: String) -> MenuNotice {
     MenuNotice {
+        // Our own text, so no styled runs to preserve.
+        spans: Vec::new(),
         text,
         origin: Origin::ScreenBottom,
         dx: -(ACCOUNTS_ROW_W * 0.5).floor(),

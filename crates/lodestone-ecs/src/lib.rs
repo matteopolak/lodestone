@@ -213,7 +213,8 @@ pub use schedules::{Extract, GameTick, NetIngest, Update};
 pub use session::{
     Abilities, ActionBarOverlay, HudEffects, Phase, RespawnCount, Riding, ServerAlive,
     ServerDifficulty, ServerDimension, ServerEntityId, ServerGameMode, SessionBlockDestruction,
-    SessionBossBars, SessionChat, SessionDebugFeeds, SessionHudPlugin, SessionMenus, SessionPhase,
+    SessionBossBars, SessionChat, SessionDebugFeeds, SessionEnd, SessionEndKind, SessionHudPlugin,
+    SessionMenus, SessionPhase,
     SessionPlugin, SessionRecipeBook, SessionRegistryOrder, SessionScoreboard, SessionServerInfo,
     SessionSet, SessionStatistics, SessionTrades,
     SessionTabList, SessionWaypoints, TitleOverlay, Vitals, Xp, insert_hud_components,

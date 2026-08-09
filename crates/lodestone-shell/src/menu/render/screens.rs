@@ -4,6 +4,7 @@
 //!
 //! Split out of `menu/render.rs` verbatim: a pure move by line range.
 
+use crate::sim::{SessionEnd, SessionEndKind};
 use super::*;
 
 /// Vanilla's `title.credits` string (`en_us.json`), drawn bottom-right on the
@@ -573,13 +574,20 @@ const ERROR_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
 /// `!allowsMultiplayer()` branch, reproduced honestly, rather than a label
 /// that promises a screen this client does not return to.
 ///
-/// **The title is `disconnect.lost`** ("Connection Lost"), vanilla's own
-/// title for `ClientPacketListener.onDisconnect`'s ordinary mid-session
-/// disconnect — the case [`super::UiState::session_failed`] models most often.
-/// A failed *initial* connection attempt is titled `connect.failed` in
-/// vanilla instead; this client has one generic error screen for both causes,
-/// so one title has to be picked, and the mid-session one is both the more
-/// common path and the truthful one when there was a session to lose.
+/// **The title is per-case, from [`SessionEndKind`]**, which is how vanilla does
+/// it: `DisconnectedScreen` takes its `title` as a constructor argument and puts
+/// it in its own `StringWidget` *above* the reason's `MultiLineTextWidget` —
+/// never glued onto the reason as a prefix.
+///
+/// | end kind | vanilla title | vanilla call site |
+/// |---|---|---|
+/// | [`SessionEndKind::Disconnected`] | `disconnect.lost` — "Connection Lost" | `ClientCommonPacketListenerImpl.onDisconnect`'s `GENERIC_DISCONNECT_MESSAGE` |
+/// | [`SessionEndKind::Failed`] | `connect.failed` — "Failed to connect to the server" | `ClientHandshakePacketListenerImpl.onDisconnect` and `ConnectScreen`'s `connectFailedTitle` |
+/// | [`SessionEndKind::Died`] | "Connection Lost" | not a vanilla path at all — this arm only exists as the death gate's negative control |
+///
+/// This used to pick "Connection Lost" for every case and say so, because the
+/// two causes were indistinguishable by the time they reached here: both arrived
+/// as one `format!("disconnected: {…}")` string. They are separate now.
 ///
 /// `shouldCloseOnEsc()` is `false` in vanilla (`:82-85`) — Escape does
 /// **not** dismiss this screen there, so a misclick cannot swallow a network
@@ -588,7 +596,11 @@ const ERROR_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
 /// tested behaviour this pass does not change — this function is layout, not
 /// input semantics.
 #[must_use]
-pub(super) fn error_frame(reason: Option<&str>) -> MenuFrame<'static> {
+pub(super) fn error_frame(end: Option<&SessionEnd>) -> MenuFrame<'static> {
+    let title = match end.map(|e| e.kind) {
+        Some(SessionEndKind::Failed) => "Failed to connect to the server",
+        _ => "Connection Lost",
+    };
     MenuFrame {
         rows: vec![MenuRow {
             label: "Back to Title Screen".to_string(),
@@ -605,7 +617,7 @@ pub(super) fn error_frame(reason: Option<&str>) -> MenuFrame<'static> {
         selected: 0,
         vanilla: true,
         labels: vec![MenuLabel {
-            text: "Connection Lost".to_string(),
+            text: title.to_string(),
             origin: Origin::ScreenTop,
             dx: 0.0,
             dy: ERROR_TITLE_Y,
@@ -613,12 +625,22 @@ pub(super) fn error_frame(reason: Option<&str>) -> MenuFrame<'static> {
             colour: LABEL,
             scale: 1.0,
         }],
-        // `reason.is_empty()` never happens in production (`session_failed`
-        // always carries a real message), but an empty notice would still
-        // draw zero lines correctly — no special-casing needed, unlike
-        // `death_frame`'s optional message.
-        notice: reason.map(|text| MenuNotice {
-            text: text.to_string(),
+        // An empty reason never happens in production (`session_failed` always
+        // carries a real message), but an empty notice would still draw zero
+        // lines correctly — no special-casing needed, unlike `death_frame`'s
+        // optional message.
+        //
+        // `spans` is what makes a kicked player see the server's own colours:
+        // the reason arrives as a `Text` tree and `to_spans` resolves style
+        // inheritance through its `extra` children, so a root with no text and
+        // all the content in `extra` — the ordinary shape of a server's kick
+        // message — renders per-run rather than in one flat colour. `text` is
+        // still the plain string because wrapping has to be measured in the
+        // font, and `FG_BAD` is the fallback for a reason that specifies no
+        // colour of its own.
+        notice: end.map(|end| MenuNotice {
+            text: end.reason.to_plain_string(),
+            spans: end.reason.to_spans(),
             origin: Origin::ScreenTop,
             dx: -(ERROR_NOTICE_W * 0.5),
             dy: ERROR_TITLE_Y + LINE_H * 3.0,
@@ -709,6 +731,8 @@ pub(super) fn credits_frame() -> MenuFrame<'static> {
         }],
         notice: Some(MenuNotice {
             text: CREDITS_BODY.to_string(),
+            // Our own text, so no styled runs to preserve.
+            spans: Vec::new(),
             origin: Origin::ScreenTop,
             dx: -(CREDITS_NOTICE_W * 0.5),
             dy: CREDITS_TITLE_Y + LINE_H * 3.0,

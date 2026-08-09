@@ -74,6 +74,45 @@ MOTD wrap has several non-obvious rules (per-paragraph line state, a blank line 
 over-wide word starts a line rather than overflowing) and each exists because it was a bug
 once. It works because a wrapped line's characters are a subsequence of the source in order.
 
+**Disconnect / kick screen** — the fold, not the draw. `Sim::poll_net`'s
+`NetUpdate::Disconnected` arm did
+`self.resolve_text(&reason).to_legacy_string()` and then
+`format!("disconnected: {reason}")`, so the styled tree became a `String` two layers
+above any renderer. Nothing downstream *could* draw a span — every screen on that
+path was innocent. Three changes:
+
+* `SessionPhase::Ended` carries a `SessionEnd { kind, reason: Text }`
+  (`lodestone-ecs/src/session.rs`) instead of a formatted string, so the reason
+  stays a tree from the wire to `error_frame`.
+* `MenuNotice` gained `spans: Vec<TextSpan>` beside its plain `text`, and
+  `draw`'s notice block uses `restyle_wrapped` + `Builder::text_spans` when they are
+  present — the same two functions the MOTD already used. A notice with no spans
+  (every one the shell authors itself) takes the flat `colour` path unchanged.
+* The `"disconnected: "` prefix is gone, because it was ours.
+  `DisconnectedScreen` puts its `title` in a separate `StringWidget` *above* the
+  reason's `MultiLineTextWidget`; it never glues it on. `SessionEndKind` is what
+  picks that title, per vanilla: `disconnect.lost` ("Connection Lost") for a
+  server-sent disconnect (`ClientCommonPacketListenerImpl.onDisconnect`) and
+  `connect.failed` ("Failed to connect to the server") for a client-side failure
+  (`ClientHandshakePacketListenerImpl.onDisconnect`, `ConnectScreen`).
+
+`SessionEndKind` is also why a client-side failure is no longer logged as though it
+were a kick: `NetUpdate::Error`'s arm `tracing::error!`s the cause where the
+disconnect arm does not need to, because a disconnect carries text the player sees
+and a failure carries a Rust error nobody was printing.
+
+**The corpus had a blind spot here and it is worth remembering the shape.** A
+`Text` with a nested `extra` and an **empty root `text`** — the ordinary shape of a
+server's kick message — was covered on the MOTD path
+(`motd_keeps_colour_from_json_and_from_legacy_codes`) and on the v770 server-encode
+path (`nested_components_survive_the_nbt_encoding`), and *every* disconnect fixture
+in `sim/tests.rs` was a flat single component. So the parser was demonstrably fine
+and the consumer was demonstrably untested, which is exactly the combination that
+reads as covered. `a_kick_reason_keeps_the_server_s_colours_through_frame_and_draw`
+now drives that shape with a root colour, a child overriding it, and a second child
+inheriting it — three readings of inheritance give three different span lists, so
+one colour could not have discriminated.
+
 ### Colour space — the one thing not to get wrong
 
 **Vanilla is not colour-managed.** A text colour is written to the framebuffer as the sRGB

@@ -112,11 +112,17 @@ impl WindowApp {
             // LocalOnly never drives the menu — the dev world is already Playing.
             SessionPhase::LocalOnly | SessionPhase::Connecting => {}
             SessionPhase::Connected => self.ui.session_ready(),
-            SessionPhase::Ended(reason) => {
+            SessionPhase::Ended(end) => {
                 // Only transition in once; re-setting every frame would keep
                 // re-latching the same reason (harmless but wasteful).
+                //
+                // The whole `SessionEnd` crosses, not a formatted string: its
+                // `kind` is what picks the screen's title (a server disconnect
+                // and a failure to reach the server are different screens in
+                // vanilla) and its `reason` is still a styled `Text`, so the
+                // server's own colours survive to the draw.
                 if self.ui.screen() != crate::menu::Screen::Error {
-                    self.ui.session_failed(reason.clone());
+                    self.ui.session_failed(*end);
                 }
             }
         }
@@ -455,12 +461,16 @@ impl WindowApp {
         let Some(server_protocol) =
             lodestone_registry::server_protocol_for_protocol(self.config.protocol)
         else {
-            self.ui.session_failed(
-                super::LaunchError::NoVersionFamily {
-                    protocol: self.config.protocol,
-                }
-                .to_string(),
-            );
+            // A client-side failure, not a server disconnect: there is no
+            // server text, so the screen gets `connect.failed`'s title and our
+            // own reason.
+            self.ui
+                .session_failed(crate::sim::SessionEnd::failed(lodestone_model::Text::literal(
+                    super::LaunchError::NoVersionFamily {
+                        protocol: self.config.protocol,
+                    }
+                    .to_string(),
+                )));
             return;
         };
         self.sim.attach_net(crate::net::NetClient::open_to_lan(
@@ -663,7 +673,9 @@ impl WindowApp {
             // Reported, never routed around: the only cause is a build with no
             // hostable version family, and telling the player that is strictly
             // better than a world that silently never loads.
-            Err(e) => self.ui.session_failed(e.to_string()),
+            Err(e) => self
+                .ui
+                .session_failed(crate::sim::SessionEnd::failed(lodestone_model::Text::literal(e.to_string()))),
         }
         // Remembered for Open to LAN (issue #535), which republishes this exact
         // launch on a TCP port. Recorded even on the error arm above: a failed

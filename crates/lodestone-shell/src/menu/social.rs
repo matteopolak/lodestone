@@ -590,6 +590,8 @@ pub fn frame(nav: &SocialNav, kind: Option<super::SessionKind>) -> MenuFrame<'st
             vanilla: true,
             labels,
             notice: Some(MenuNotice {
+        // Our own text, so no styled runs to preserve.
+        spans: Vec::new(),
                 text: NOT_AVAILABLE.to_string(),
                 origin: Origin::ScreenTop,
                 dx: -140.0,

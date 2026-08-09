@@ -378,7 +378,20 @@ pub struct AccountEntryView {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MenuNotice {
     /// The unwrapped text. May contain `\n`, and may be arbitrarily long.
+    ///
+    /// Always the plain string, even when [`Self::spans`] is populated: wrapping
+    /// is measured in the font at draw time and the wrapper works on characters,
+    /// so the styled runs are re-applied to the wrapped lines afterwards (see
+    /// `draw`'s `restyle_wrapped`) rather than wrapped themselves.
     pub text: String,
+    /// The same content as styled runs, or empty for a notice with no styling.
+    ///
+    /// A notice whose content is **not ours** — a server's kick message, a
+    /// server's response body — carries the sender's own colours, and flattening
+    /// them here is how a coloured kick message came out uniformly red. When this
+    /// is empty the draw falls back to [`Self::colour`] for the whole block,
+    /// which is what every notice this shell authors itself wants.
+    pub spans: Vec<TextSpan>,
     /// Anchor the block is measured from.
     pub origin: Origin,
     /// Horizontal offset from the anchor — the block's **left** edge.

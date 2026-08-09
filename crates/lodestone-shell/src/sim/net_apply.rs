@@ -23,6 +23,9 @@
 //! boundary `sim/actions.rs` hit for its three `pub(crate)` methods.
 
 use super::*;
+// Not reachable through `super::*`: the disconnect and failure arms build a
+// `SessionEnd` whose reason is a styled `Text` rather than a formatted string.
+use lodestone_model::Text;
 
 impl Sim {
     /// Fold this frame's entity state into the render-side component set, so
@@ -334,7 +337,9 @@ impl Sim {
                         // the pre-fix behaviour that declared the session over and
                         // stranded the client on the death screen forever.
                         self.status = "server: died".into();
-                        self.set_phase(SessionPhase::Ended("player died".into()));
+                        self.set_phase(SessionPhase::Ended(Box::new(SessionEnd::died(
+                            Text::literal("player died"),
+                        ))));
                     }
                 }
                 NetUpdate::Respawned => {
@@ -499,19 +504,38 @@ impl Sim {
                     });
                 }
                 NetUpdate::Disconnected(reason) => {
-                    // `reason` is an unresolved `Text` (issue #68): a kicked
-                    // player's disconnect reason is a `translate` component
-                    // like `multiplayer.disconnect.kicked`, so it has to go
-                    // through the same read-boundary translator that
-                    // `title_overlay`/`action_bar_overlay` already use,
-                    // rather than being formatted straight into `status`.
-                    let reason = self.resolve_text(&reason).to_legacy_string();
-                    self.status = format!("disconnected: {reason}");
-                    self.set_phase(SessionPhase::Ended(format!("disconnected: {reason}")));
+                    // `reason` is an unresolved `Text`: a kicked player's
+                    // disconnect reason is a `translate` component like
+                    // `multiplayer.disconnect.kicked`, so it goes through the
+                    // same read-boundary translator that
+                    // `title_overlay`/`action_bar_overlay` already use.
+                    //
+                    // **Resolved, not flattened.** This used to continue
+                    // `.to_legacy_string()` into `format!("disconnected: {…}")`,
+                    // and those two calls were where every kick message lost its
+                    // colour: the styled tree became a `String` here, so no
+                    // downstream renderer *could* draw a span — and the
+                    // `"disconnected: "` prefix was ours, not vanilla's, which
+                    // puts its screen title in a separate widget above the
+                    // reason rather than gluing it on.
+                    let reason = self.resolve_text(&reason);
+                    self.status = format!("disconnected: {}", reason.to_plain_string());
+                    self.set_phase(SessionPhase::Ended(Box::new(SessionEnd::disconnected(
+                        reason,
+                    ))));
                 }
                 NetUpdate::Error(e) => {
+                    // A client-side failure, and a *different thing* from the arm
+                    // above: there is no server text, only our own error. It gets
+                    // logged here as well as shown, because until now the real
+                    // cause was logged inside `lodestone-client` and the shell
+                    // then reported the generic end-of-stream reason instead —
+                    // the failure mode where a join error reached no log at all.
+                    tracing::error!(error = %e, "session failed");
                     self.status = format!("net error: {e}");
-                    self.set_phase(SessionPhase::Ended(format!("net error: {e}")));
+                    self.set_phase(SessionPhase::Ended(Box::new(SessionEnd::failed(
+                        Text::literal(e),
+                    ))));
                 }
             }
         }
