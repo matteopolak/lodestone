@@ -8543,3 +8543,43 @@ well. The figure is carried into `run_tick_loop`'s existing *"Can't keep up!"* w
 `item_settle_probes`, because `serve_play`'s `LoopStallWatch` watches the **connection** task's `select!`
 arms and the item tick is a different task entirely — assuming one instrument covers the other would have
 been the easy mistake.
+
+**12.167 The pickup animation: two claims that need opposite inputs, and the version that looks fixed.**
+
+*"The pickup animation for items is missing on the integrated server."* An outbound island, the mirror of
+`ClientAction::SetFlying`: the v770 adapter already decoded `TAKE_ITEM_ENTITY` into
+`ClientEvent::ItemPickup`, the shell already carried the lerp, and `TAKE_ITEM_ENTITY` had **zero producers**
+in `server_protocol.rs` and zero in `lodestone-server`. Overlap-based pickup itself was already complete —
+worth checking before assuming, because had it been missing the packet would have been the *second* half of
+the gap rather than the whole of it.
+
+**The ordering is the feature, and a gate that only asserts "the packet was sent" passes the broken
+version.** `ItemEntity.playerTouch` calls `player.take(this, orgCount)` and only *then* `this.discard()`,
+because the client deliberately keeps the entity alive to interpolate it and removes it when the animation
+completes. So a server that removes first — or lets `stream_pass` batch `REMOVE_ENTITIES` ahead of the take
+— produces **no animation at all** with the packet present, correct, and byte-checked. Neutering the order
+(emitting a removal just before the take) made the gate report *"REMOVE_ENTITIES (packet 0) reached the
+client at or before the take (packet 1)"*, so the ordering assertion is the one doing the work.
+
+**Two claims wanted opposite inputs, and the first draft used one input for both.** `amount` is vanilla's
+`orgCount`, captured before `getInventory().add(itemStack)` shrinks the stack in place — *not* the amount
+banked — and the two coincide on a full pickup, so only a **partial** pickup discriminates. But a partial
+pickup leaves the entity alive by construction, so there is **no `REMOVE_ENTITIES` to order against**: the
+first version of the gate used a partial pickup for both claims and failed with *"the item entity was never
+removed, so the ordering claim is moot"*. The claims constrain the input in opposite directions and needed
+splitting into two arms — full for ordering, partial for `amount`. Neutering `amount` to `banked` then
+failed the partial arm with `[2]` against `[5]` **while the ordering arm still passed**, which is the
+positive demonstration that one arm could not have covered both.
+
+Three smaller things, all read off the decompile rather than inferred from the packet name:
+
+* the take is gated on something having actually been banked, matching `playerTouch`'s
+  `player.getInventory().add(itemStack)` guard — a drop that fits nowhere announces nothing.
+* the three payload VarInts are item entity, collector, amount, and the first two are adjacent same-typed
+  fields, so a transposition round-trips perfectly through our own symmetric code while making the client
+  lerp the *player* toward the item. The byte gate uses `11, 1, 4` — pairwise distinct — because equal
+  arguments pass under every permutation.
+* **a divergence found while reading, and deliberately not changed:** vanilla awards
+  `Stats.ITEM_PICKED_UP` with `orgCount`, while `collect_nearby_items` credits only what was banked. Ours is
+  arguably better accounting and is a documented choice at that call site, but it is a real difference and
+  the sort of thing that is invisible until someone reads the same twenty lines again.

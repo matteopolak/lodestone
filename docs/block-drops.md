@@ -71,6 +71,33 @@ no player registry is **stale**: `players.rs` landed both.)
 Pickup runs in `serve_play`, right after the player's position is republished and *before* the streaming
 pass, so the item's `REMOVE_ENTITIES` and the inventory's `container_set_slot` go out together.
 
+### The pickup animation, and why its ordering is the whole feature
+
+`collect_nearby_items` returns a `Pickups` — the slots to resend *and* the takes to announce — and the
+caller emits `ServerProtocol::encode_take_item_entity` for each **before** the `stream_pass` that derives
+`REMOVE_ENTITIES` from the same removal. That ordering is not tidiness:
+
+- vanilla's `ItemEntity.playerTouch` calls `player.take(this, orgCount)` and only then `this.discard()`;
+- the client **keeps the item entity alive to interpolate it** toward the collector and removes it when the
+  animation completes (`ClientPacketListener.handleTakeItemEntity`; `lodestone-shell`'s `entities.rs`
+  carries the matching lerp).
+
+So a server that removes first — or batches the removal ahead of the take — produces **no animation at
+all**, with the packet present and correct on the wire. That is the failure mode
+`a_pickup_announces_the_take_before_removing_the_item_entity` exists to catch, and it was confirmed by
+neutering the order and watching the gate fail.
+
+`amount` is vanilla's `orgCount`: the entity's stack count captured **before**
+`player.getInventory().add(itemStack)` shrinks it in place. It is *not* the amount that fitted, and the two
+coincide on a full pickup — so only a partial pickup can tell them apart. The take is also gated on
+something having actually been banked, matching vanilla's `add(...)` returning true: a drop that fits
+nowhere announces nothing.
+
+**One divergence worth knowing, not introduced here:** vanilla awards `Stats.ITEM_PICKED_UP` and
+`onItemPickup` with `orgCount`, while `collect_nearby_items` credits only what was banked. Ours is
+arguably the more sensible accounting, and it is a deliberate documented choice at that call site, but it
+is a real difference from the decompile.
+
 ### `popResource`'s draw order is the specification
 
 From `Block.java:412-419` plus the `ItemEntity` constructor at `ItemEntity.java:61-66`, **five draws in the

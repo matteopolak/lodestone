@@ -1266,6 +1266,40 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes vanilla's `TAKE_ITEM_ENTITY` — the **pickup animation**: the item
+    /// entity arcs toward the collector and shrinks. The default emits nothing.
+    ///
+    /// # This is an animation cue, not the pickup itself
+    ///
+    /// The inventory write and the entity's removal are separate and already
+    /// happen. This packet exists only so the client can *show* the take, and the
+    /// client deliberately keeps the item entity alive to interpolate it, removing
+    /// it when the animation finishes (`ClientPacketListener.handleTakeItemEntity`;
+    /// our own `lodestone-shell`'s `entities.rs` carries the matching lerp).
+    ///
+    /// **So the ordering is load-bearing and it is easy to get wrong in a way that
+    /// looks fixed.** Vanilla's `ItemEntity.playerTouch` calls `player.take(this,
+    /// orgCount)` and only *then* `this.discard()`. A server that removes the entity
+    /// first — or emits `REMOVE_ENTITIES` in the same pass, before this — leaves the
+    /// client with nothing to interpolate and produces no animation at all, with the
+    /// packet present and correct on the wire.
+    ///
+    /// `amount` is the item entity's stack count **before** the inventory took any
+    /// of it — vanilla passes `orgCount`, captured ahead of
+    /// `player.getInventory().add(itemStack)`, which shrinks the stack in place. It
+    /// is *not* the amount that actually fitted, and the two differ exactly when a
+    /// pickup is partial. It drives the client's pickup sound pitch, so a hardcoded
+    /// `1` is audible rather than merely wrong.
+    fn encode_take_item_entity(
+        &self,
+        item_entity_id: i32,
+        collector_entity_id: i32,
+        amount: i32,
+    ) -> ServerDirective {
+        let _ = (item_entity_id, collector_entity_id, amount);
+        ServerDirective::None
+    }
+
     /// Encodes a `SET_ENTITY_DATA` metadata update for an arbitrary entity id
     /// (issue #425), given every [`MetadataField`] that entity currently wants
     /// synced — not a hardcoded single field for a hardcoded entity id, the
@@ -2049,6 +2083,15 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_remove_entity(&self, ids: &[i32]) -> ServerDirective {
         (**self).encode_remove_entity(ids)
+    }
+
+    fn encode_take_item_entity(
+        &self,
+        item_entity_id: i32,
+        collector_entity_id: i32,
+        amount: i32,
+    ) -> ServerDirective {
+        (**self).encode_take_item_entity(item_entity_id, collector_entity_id, amount)
     }
 
     fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
