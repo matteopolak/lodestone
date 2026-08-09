@@ -478,6 +478,46 @@ impl ExplosionFeed {
     }
 }
 
+/// Applies one [`FallingBlockEffect`](crate::gravity_tick::FallingBlockEffect) to
+/// the world and the outbound feed.
+///
+/// One function for all four variants, and both callers walk their effect list in
+/// order — that is the point. The two orderings a player can actually see (clear
+/// before spawn, place before discard) are properties of the sequence
+/// `crate::mobs::MobSim` returns, and routing every variant through one applier is
+/// what stops a caller from reordering them by accident. See
+/// `crate::gravity_tick`'s module doc for what each reversal looks like on screen.
+///
+/// `column` is `Some` only where the caller already holds one (the scheduled-tick
+/// drain); passing it keeps the drain's own subsequent reads consistent with the
+/// write. The `ChunkSource` write and the client publish happen either way, so a
+/// `None` caller loses nothing but that consistency.
+///
+/// [`Spawned`](crate::gravity_tick::FallingBlockEffect::Spawned) and
+/// [`Discarded`](crate::gravity_tick::FallingBlockEffect::Discarded) are
+/// deliberately no-ops here: `MobSim` has already inserted or removed the entity,
+/// and the wire half is the entity streamer's diff of `snapshots()`. They are
+/// still *in* the sequence because their position relative to the block writes is
+/// the fact being asserted.
+fn apply_falling_block_effect<W: ChunkSource>(
+    world: &W,
+    out: &BlockTickFeed,
+    column: Option<(&mut crate::chunk::ChunkColumn, i32, i32)>,
+    effect: &crate::gravity_tick::FallingBlockEffect,
+) {
+    use crate::gravity_tick::FallingBlockEffect;
+    let (pos, state) = match effect {
+        FallingBlockEffect::ClearedOrigin { pos, .. } => (*pos, crate::chunk::AIR.to_string()),
+        FallingBlockEffect::Placed { pos, state, .. } => (*pos, state.clone()),
+        FallingBlockEffect::Spawned { .. } | FallingBlockEffect::Discarded { .. } => return,
+    };
+    if let Some((column, min_x, min_z)) = column {
+        column.set_block(pos.x - min_x, pos.y, pos.z - min_z, &state);
+    }
+    world.set_block(pos.x, pos.y, pos.z, &state);
+    out.publish(pos.x, pos.y, pos.z, state);
+}
+
 /// Publishes the open/close sound for a state transition, if it was one (issue
 /// #530). A no-op for every other block, so call sites need no guard of their own.
 ///
@@ -1523,11 +1563,52 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             // gravity check at all, which is precisely the owner's report: sand
             // placed in mid-air did not fall until another block was placed beside
             // it.
+            //
+            // **This is now the only place in the tree a block leaves the world to
+            // fall**, and it creates a real `FallingBlockEntity` rather than
+            // teleporting: `settle_gravity_at` answers "unsupported, landing at
+            // `y`" and `MobSim::spawn_falling_block` returns the two effects in
+            // `FallingBlockEntity.fall`'s own order (clear the cell, *then*
+            // broadcast the entity). The effects are applied in the order given —
+            // see `gravity_tick::FallingBlockEffect` for why that order is a
+            // returned value rather than two statements here.
             if due.kind == crate::gravity_tick::TICK_GRAVITY {
-                for event in crate::random_tick::settle_gravity_at(&mut column, min_x, min_z, x, y, z) {
-                    let (ex, ey, ez) = event.pos;
-                    world.set_block(ex, ey, ez, &event.to);
-                    block_tick_out.publish(ex, ey, ez, event.to);
+                if let Some(settle) =
+                    crate::random_tick::settle_gravity_at(&column, min_x, min_z, x, y, z)
+                {
+                    let origin = BlockPos::new(x, y, z);
+                    let (_id, effects) = mobs.with(|sim| {
+                        sim.spawn_falling_block(settle.state.clone(), origin, settle.landing_y)
+                    });
+                    for effect in effects {
+                        apply_falling_block_effect(
+                            &*world,
+                            &block_tick_out,
+                            Some((&mut column, min_x, min_z)),
+                            &effect,
+                        );
+                    }
+                    // `setBlock(pos, air, 3)`'s flag-1 half: the cell the block
+                    // left has to notify its neighbours, or a *stack* of sand
+                    // collapses exactly one block deep — the block above the one
+                    // that just left never learns its support is gone. The gravity
+                    // arm in `react_to_notification` schedules rather than settles,
+                    // so this cascades with vanilla's delay per layer instead of
+                    // resolving the whole column in one tick.
+                    for event in crate::random_tick::propagate_and_react(
+                        &mut column,
+                        min_x,
+                        min_z,
+                        x,
+                        y,
+                        z,
+                        &mut block_ticks,
+                        game_tick,
+                    ) {
+                        let (ex, ey, ez) = event.pos;
+                        world.set_block(ex, ey, ez, &event.to);
+                        block_tick_out.publish(ex, ey, ez, event.to);
+                    }
                 }
                 continue;
             }
@@ -1657,6 +1738,55 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                         world.set_block(x, y, z, &event.to);
                         block_tick_out.publish(x, y, z, event.to);
                     }
+                }
+            }
+        }
+
+        // Every live `FallingBlockEntity`, one tick — the driver half of the
+        // falling-block animation. Without it a spawned entity would sit still at
+        // its spawn cell forever, which is a *worse* symptom than the teleport it
+        // replaced: the block would appear to simply vanish.
+        //
+        // **Position is vanilla's**: `ServerLevel.tick` runs `tickChunks` — which
+        // is the scheduled-block, scheduled-fluid and random-tick passes above —
+        // and only then walks `entityTickList`. So an entity created by a block
+        // tick this tick does take its first `0.04` step in the same tick, exactly
+        // as it does in the jar, and the `ADD_ENTITY` a connection's next streaming
+        // pass sends already carries the post-step position (vanilla's tracker also
+        // reads it at end of tick).
+        //
+        // Inside the queue scope rather than in the mob block above because a
+        // landing has to `propagate_and_react`, which needs `block_ticks`.
+        // `MobSim::tick_falling_blocks` returns only the ticks that *finished*; an
+        // airborne entity's new position rides the ordinary `snapshots()` diff, so
+        // there is no per-tick position event to forward.
+        for effect in mobs.with(MobSim::tick_falling_blocks) {
+            // No column: `Placed` carries world coordinates and `ChunkSource`
+            // already takes them. The propagation below needs one, so it is built
+            // on demand — a landing is rare, unlike the per-tick step.
+            apply_falling_block_effect(&*world, &block_tick_out, None, &effect);
+            if let crate::gravity_tick::FallingBlockEffect::Placed { pos, .. } = &effect {
+                // `setBlock(pos, blockState, 3)`'s flag-1 half, at the landing
+                // cell: the placed block notifies its neighbours, which is what
+                // lets a pile settle rather than one block land on top of something
+                // that should also have fallen. Column fetched *after* the
+                // placement so the propagation sees it.
+                let cx = pos.x.div_euclid(16);
+                let cz = pos.z.div_euclid(16);
+                let mut column = world.column(cx, cz);
+                for event in crate::random_tick::propagate_and_react(
+                    &mut column,
+                    cx * 16,
+                    cz * 16,
+                    pos.x,
+                    pos.y,
+                    pos.z,
+                    &mut block_ticks,
+                    game_tick,
+                ) {
+                    let (ex, ey, ez) = event.pos;
+                    world.set_block(ex, ey, ez, &event.to);
+                    block_tick_out.publish(ex, ey, ez, event.to);
                 }
             }
         }

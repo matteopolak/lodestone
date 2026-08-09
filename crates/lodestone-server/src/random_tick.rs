@@ -1143,12 +1143,41 @@ fn fire_state_in_column(
     )
 }
 
-/// Settles the gravity block at world `(x, y, z)` if it is one and its
-/// support was just removed — see `crate::gravity_tick`'s module doc for the
-/// jar citation and the "instant settle, no `FallingBlockEntity`" deviation.
-/// A no-op (empty `Vec`) for anything that is not an unsupported gravity
-/// block. Draws no RNG (`FallingBlock.tick` itself draws none — see that
-/// module's doc comment), so this needs no `&mut self`.
+/// What `FallingBlock.tick` decided at one position: the block is unsupported and
+/// is about to become a `FallingBlockEntity`.
+///
+/// Returned rather than applied because the two halves live in different places —
+/// the world mutation is the caller's (`crate::tick`'s drain owns the column and
+/// the outbound feed) and the entity is `crate::mobs::MobSim`'s. Keeping the
+/// decision pure is also what stops this function reintroducing the teleport it
+/// used to be: it can no longer write a block anywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GravitySettle {
+    /// The state that leaves the world and rides the entity.
+    pub state: String,
+    /// Where the entity will come to rest —
+    /// [`gravity_tick::find_landing_y`]'s answer against the world as it is now.
+    pub landing_y: i32,
+}
+
+/// `FallingBlock.tick`: whether the gravity block at world `(x, y, z)` is
+/// unsupported and should become a falling entity, and where it will land.
+///
+/// `None` for anything that is not a gravity block, for one that is still
+/// supported, and for the (unreachable) case where the landing scan does not
+/// move. Draws no RNG — `FallingBlock.tick` itself draws none — so this needs no
+/// `&mut self`, and it no longer needs `&mut column` either: **it mutates
+/// nothing.**
+///
+/// # What changed, and why it is not a regression
+///
+/// This used to move the block: `set_block(y, AIR)` plus
+/// `set_block(landing_y, state)` in one step, returning both as
+/// [`RandomTickEvent`]s. That was the whole of the reported *"it just teleports to
+/// its final place at the bottom instead of falling down and landing"* — a real,
+/// documented simplification standing in for the `FallingBlockEntity` that did not
+/// exist. It does now, so the teleport is gone and this function answers the
+/// question rather than acting on it.
 ///
 /// `pub(crate)` for `crate::tick`'s scheduled-tick drain, which dispatches
 /// `gravity_tick::TICK_GRAVITY` **straight here** rather than through
@@ -1157,51 +1186,34 @@ fn fire_state_in_column(
 /// fires on the placed block itself, so the propagate route would settle the
 /// wrong cells. See `crate::gravity_tick`'s module doc.
 pub(crate) fn settle_gravity_at(
-    column: &mut crate::chunk::ChunkColumn,
+    column: &crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
     x: i32,
     y: i32,
     z: i32,
-) -> Vec<RandomTickEvent> {
+) -> Option<GravitySettle> {
     let lx = x - min_x;
     let lz = z - min_z;
     let state = column.block_state(lx, y, lz).to_string();
     if !gravity_tick::is_gravity_block(base_name(&state)) {
-        return Vec::new();
+        return None;
     }
     let below = column.block_state(lx, y - 1, lz).to_string();
     if !gravity_tick::is_free(&below) {
-        return Vec::new();
+        return None;
     }
-    let min_y = column.min_y;
-    let landing_y = {
-        let column_ref: &crate::chunk::ChunkColumn = column;
-        gravity_tick::find_landing_y(
-            |probe_y| gravity_tick::is_free(column_ref.block_state(lx, probe_y, lz)),
-            y,
-            min_y,
-        )
-    };
+    let landing_y = gravity_tick::find_landing_y(
+        |probe_y| gravity_tick::is_free(column.block_state(lx, probe_y, lz)),
+        y,
+        column.min_y,
+    );
     if landing_y == y {
         // Shouldn't happen (we already confirmed `below` is free, so the
         // scan must move at least one step) — defensive, not reachable.
-        return Vec::new();
+        return None;
     }
-    column.set_block(lx, y, lz, crate::chunk::AIR);
-    column.set_block(lx, landing_y, lz, &state);
-    vec![
-        RandomTickEvent {
-            pos: (x, y, z),
-            from: state.clone(),
-            to: crate::chunk::AIR.to_string(),
-        },
-        RandomTickEvent {
-            pos: (x, landing_y, z),
-            from: crate::chunk::AIR.to_string(),
-            to: state,
-        },
-    ]
+    Some(GravitySettle { state, landing_y })
 }
 
 /// `DefaultRedstoneWireEvaluator.updatePowerStrength`'s update set, in full
@@ -1452,14 +1464,35 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 1. Gravity (#311) — first, matching the existing precedent.
-        let settled = settle_gravity_at(column, min_x, min_z, n.pos.x, n.pos.y, n.pos.z);
-        if !settled.is_empty() {
-            events.extend(settled);
-            return vec![Notification { pos: BlockPos::new(n.pos.x, n.pos.y + 1, n.pos.z), from: Direction::Down }];
-        }
-
         let state = column.block_state(tlx, n.pos.y, tlz).to_string();
+
+        // 1. Gravity — first, matching the existing precedent.
+        //
+        // **`FallingBlock.updateShape`, which is `scheduleTick(pos, this,
+        // getDelayAfterPlace())` and nothing else.** No `isFree(below)` test here
+        // and no fall: the eligibility check belongs to `FallingBlock.tick`, which
+        // the scheduled tick dispatches to (`crate::tick`'s drain →
+        // `settle_gravity_at`).
+        //
+        // This arm used to *settle inline*, which was a second fall path that
+        // skipped both the 2-tick delay and — once the entity existed — the entity
+        // itself. Sand whose support was removed by a neighbour mutation
+        // teleported while sand placed in mid-air fell properly, from the same
+        // module, for no reason a reader could see. There is now exactly one place
+        // a block ever leaves the world for a fall.
+        //
+        // No further fan-out (empty return): `updateShape` returns
+        // `super.updateShape(...)` unchanged, so nothing about the world moved and
+        // there is nothing to notify.
+        if gravity_tick::is_gravity_block(base_name(&state)) {
+            block_ticks.schedule(
+                (n.pos.x, n.pos.y, n.pos.z),
+                gravity_tick::TICK_GRAVITY.to_string(),
+                current_tick + gravity_tick::DELAY_AFTER_PLACE,
+                TickPriority::Normal,
+            );
+            return Vec::new();
+        }
 
         // 1b. `snowy` upkeep (#546). `SnowyBlock.updateShape`
         // (`SnowyBlock.java:41-45`) recomputes `snowy` from the block above
@@ -2487,87 +2520,172 @@ mod tests {
         assert_eq!(column.block_state(6, 5, 6), "minecraft:oak_leaves[distance=3,persistent=false]");
     }
 
-    // # Issue #311 end-to-end: gravity blocks settling through
-    // `NeighborPropagator`'s first real production call. Every test below
-    // triggers the fall via an ADJACENT random-tick mutation (grass dying to
-    // dirt) — this crate's only current producer, since block-place/break
-    // (the far more common vanilla trigger) lives in `server.rs`, off-limits
-    // to this task. See `crate::gravity_tick`'s module doc for that scope
-    // note stated in full.
+    // # Gravity blocks reached through `NeighborPropagator`'s first real
+    // production call. Every test below triggers the reaction via an ADJACENT
+    // random-tick mutation (grass dying to dirt) — this crate's only producer
+    // reachable from *this* module, since block-place/break lives in `server.rs`.
+    //
+    // ## These assertions were inverted, deliberately, and reading them cannot
+    // ## tell you that — so it is written down here
+    //
+    // Two of the three gates below used to assert the **teleport**: that an
+    // adjacent mutation moved the sand from `y = 5` to `y = 0` inside
+    // `tick_chunk`, in one step, with no entity. That was correct and evidenced
+    // when written — the `FallingBlockEntity` did not exist and
+    // `settle_gravity_at` really did write the block at its landing position. It
+    // is now the *bug the owner reported* ("it just teleports to its final place
+    // at the bottom instead of falling down and landing"), so the gates assert
+    // the opposite: the sand does not move here at all, and what the notification
+    // produces is a scheduled `TICK_GRAVITY` — `FallingBlock.updateShape`'s
+    // `scheduleTick(pos, this, getDelayAfterPlace())` and nothing else.
+    //
+    // The fall itself is `crate::tick`'s drain plus `crate::mobs`, one layer up,
+    // and `crate::gravity_tick`'s own tests own the motion. Nothing in *this*
+    // module moves a gravity block any more, which is the point.
 
-    /// A sand block adjacent to a grass-dies-to-dirt conversion, with
-    /// nothing solid beneath it, settles all the way to the floor —
-    /// `ChunkColumn::new`'s default all-air column, so the predicted landing
-    /// is exactly `min_y` (0 here), a magnitude check, not just "it moved".
+    /// A sand block adjacent to a grass-dies-to-dirt conversion, with nothing
+    /// solid beneath it, **schedules its own gravity tick and does not move**.
+    ///
+    /// Both halves are load-bearing and the second is the inverted one. The
+    /// position assertion is what separates a correct schedule from
+    /// `propagate`'s natural mistake: it notifies an origin's six neighbours and
+    /// not the origin, so a tick scheduled at the grass block's cell instead
+    /// would look entirely right in a queue dump and settle nothing.
+    ///
+    /// The delay is the predicted value and the candidate readings are evaluated
+    /// rather than assumed: `getDelayAfterPlace` is `2`, so a notification
+    /// resolved on tick `T` fires at `T + 2` — never `T` (which is the immediate
+    /// settle this replaced) and never `T + 1`.
     #[test]
-    fn a_gravity_block_settles_when_an_adjacent_random_tick_mutation_removes_its_support() {
+    fn an_unsupported_gravity_block_schedules_a_gravity_tick_and_does_not_move() {
         let mut column = ChunkColumn::new(0, 16);
         column.set_block(5, 5, 5, GRASS_BLOCK);
         column.set_block(5, 6, 5, "minecraft:stone"); // covers the grass: dies to dirt
         column.set_block(6, 5, 5, "minecraft:sand"); // east neighbour, unsupported (air below by default)
         let mut scheduler = RandomTickScheduler::new(1, 1);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        let mut settled = false;
+        let mut scheduled = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
-            if events.iter().any(|e| e.pos == (6, 0, 5) && e.to == "minecraft:sand") {
-                settled = true;
+            scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
+            if block_ticks.has_scheduled((6, 5, 5), &gravity_tick::TICK_GRAVITY.to_string()) {
+                scheduled = true;
                 break;
             }
         }
-        assert!(settled, "an unsupported sand block adjacent to a grass conversion must settle");
-        assert_eq!(column.block_state(6, 0, 5), "minecraft:sand", "must land exactly at min_y");
-        assert_eq!(column.block_state(6, 5, 5), "minecraft:air", "the old position must be vacated");
+        assert!(
+            scheduled,
+            "an unsupported sand block adjacent to a grass conversion must schedule \
+             its own `FallingBlock` tick"
+        );
+        assert!(
+            !block_ticks.has_scheduled((5, 5, 5), &gravity_tick::TICK_GRAVITY.to_string()),
+            "the tick belongs to the sand, not to the cell that was mutated"
+        );
+        // The inverted half: no teleport.
+        assert_eq!(
+            column.block_state(6, 5, 5),
+            "minecraft:sand",
+            "the sand must still be where it was — the fall is the drain's job now, \
+             and moving it here is the teleport this landing removed"
+        );
+        assert_eq!(
+            column.block_state(6, 0, 5),
+            "minecraft:air",
+            "nothing may appear at the landing position from this layer"
+        );
+
+        let due = block_ticks.drain_due(u64::MAX, usize::MAX);
+        let gravity: Vec<_> = due
+            .iter()
+            .filter(|t| t.kind == gravity_tick::TICK_GRAVITY)
+            .collect();
+        assert_eq!(gravity.len(), 1, "one tick, not one per notification");
+        assert_eq!(
+            gravity[0].trigger_tick,
+            gravity_tick::DELAY_AFTER_PLACE,
+            "getDelayAfterPlace is 2: not 0 (the immediate settle) and not 1"
+        );
     }
 
-    /// Negative control: a sand block WITH solid support directly below it
-    /// must never move, however many adjacent grass conversions happen —
-    /// proving the settle check actually discriminates on support, not
-    /// firing unconditionally on every neighbour notification.
+    /// Negative control, **repointed**: the support test now belongs to
+    /// `settle_gravity_at` rather than to the notification.
+    ///
+    /// `FallingBlock.updateShape` schedules unconditionally for *any*
+    /// `FallingBlock` — there is no `isFree(below)` test in it — so a supported
+    /// sand block does get a scheduled tick, and the discrimination happens in
+    /// `FallingBlock.tick`. Asserting "no tick was scheduled" here would
+    /// therefore be asserting a bug. This gate instead requires
+    /// `settle_gravity_at` to answer `None` for the supported block and `Some`
+    /// for the unsupported one, in the same column, so the detector is proven to
+    /// discriminate rather than to always refuse.
     #[test]
-    fn a_supported_gravity_block_never_moves_even_after_adjacent_mutations() {
+    fn support_is_what_settle_gravity_at_discriminates_on_not_the_notification() {
         let mut column = ChunkColumn::new(0, 16);
-        column.set_block(5, 5, 5, GRASS_BLOCK);
-        column.set_block(5, 6, 5, "minecraft:stone");
         column.set_block(6, 5, 5, "minecraft:sand");
         column.set_block(6, 4, 5, "minecraft:stone"); // real support
-        let mut scheduler = RandomTickScheduler::new(1, 1);
-        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        for _ in 0..3000 {
-            scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
-        }
-        assert_eq!(column.block_state(6, 5, 5), "minecraft:sand", "a supported sand block must never fall");
+        column.set_block(9, 5, 5, "minecraft:sand"); // unsupported: air below
+        assert_eq!(
+            settle_gravity_at(&column, 0, 0, 6, 5, 5),
+            None,
+            "a supported sand block must never become a falling entity"
+        );
+        assert_eq!(
+            settle_gravity_at(&column, 0, 0, 9, 5, 5),
+            Some(GravitySettle {
+                state: "minecraft:sand".to_string(),
+                landing_y: 0,
+            }),
+            "control failed: the unsupported arm must be `Some`, or the `None` above \
+             is measuring nothing"
+        );
+        assert_eq!(
+            column.block_state(9, 5, 5),
+            "minecraft:sand",
+            "`settle_gravity_at` must not move anything — it answers, it does not act"
+        );
     }
 
-    /// A stacked column of two gravity blocks collapses one at a time in a
-    /// single `NeighborPropagator::propagate` call — proof that the
-    /// depth-first re-notification (`Direction::Down` from the vacated
-    /// position) actually cascades, not just handles the one directly
-    /// notified neighbour. Predicted landing: the bottom block reaches
-    /// `min_y` (0), the top block then finds the bottom one already there
-    /// and lands at exactly one above it (`1`) — both in the SAME
-    /// triggering mutation, proven by checking both final positions after
-    /// only enough retries to land the position LCG on the grass block once.
+    /// A stacked column: only the block the propagation actually **reaches**
+    /// schedules a tick.
+    ///
+    /// This gate used to assert that both blocks teleported in one `tick_chunk`
+    /// call, cascading through a `Direction::Down` re-notification from the
+    /// vacated cell. That cascade is now one layer up and one tick later: the
+    /// bottom sand becomes an entity in `crate::tick`'s drain, whose
+    /// `propagate_and_react` on the vacated cell is what notifies the gravel — so
+    /// the pile still collapses layer by layer, with vanilla's delay per layer
+    /// instead of resolving the whole column inside one tick.
+    ///
+    /// What is assertable *here* is the boundary: the gravel is a neighbour of a
+    /// neighbour, so it must **not** be scheduled by this pass. That is the
+    /// discriminating claim — a propagation that fanned out one layer too far
+    /// would schedule it, and the old teleporting version effectively did.
     #[test]
-    fn a_stacked_gravity_column_collapses_one_block_at_a_time_in_one_cascade() {
+    fn only_the_notified_block_of_a_stack_schedules_and_neither_moves() {
         let mut column = ChunkColumn::new(0, 16);
         column.set_block(5, 5, 5, GRASS_BLOCK);
         column.set_block(5, 6, 5, "minecraft:stone");
         column.set_block(6, 5, 5, "minecraft:sand"); // bottom of the stack, unsupported
-        column.set_block(6, 6, 5, "minecraft:gravel"); // resting on top of the sand above
+        column.set_block(6, 6, 5, "minecraft:gravel"); // resting on top of the sand
         let mut scheduler = RandomTickScheduler::new(1, 1);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        let mut both_settled = false;
+        let kind = gravity_tick::TICK_GRAVITY.to_string();
+        let mut scheduled = false;
         for _ in 0..3000 {
             scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
-            if column.block_state(6, 0, 5) == "minecraft:sand" && column.block_state(6, 1, 5) == "minecraft:gravel" {
-                both_settled = true;
+            if block_ticks.has_scheduled((6, 5, 5), &kind) {
+                scheduled = true;
                 break;
             }
         }
-        assert!(both_settled, "both stacked gravity blocks must settle, the gravel directly atop the sand");
-        assert_eq!(column.block_state(6, 5, 5), "minecraft:air");
-        assert_eq!(column.block_state(6, 6, 5), "minecraft:air");
+        assert!(scheduled, "the sand the propagation reaches must schedule its own tick");
+        assert!(
+            !block_ticks.has_scheduled((6, 6, 5), &kind),
+            "the gravel is a neighbour of a neighbour: this pass must not reach it. \
+             The cascade is the scheduled-tick drain's, one tick later."
+        );
+        assert_eq!(column.block_state(6, 5, 5), "minecraft:sand", "no teleport");
+        assert_eq!(column.block_state(6, 6, 5), "minecraft:gravel", "no teleport");
     }
 
     // # Issue #472: local vs absolute `z` in grass propagation

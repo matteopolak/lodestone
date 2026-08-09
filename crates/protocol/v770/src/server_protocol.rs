@@ -1942,8 +1942,13 @@ fn encode_container_data_body(window_id: i32, property: i32, value: i32) -> Vec<
 /// Wire layout: VarInt id, UUID, VarInt entity-type id, position `f64`×3,
 /// low-precision velocity ([`write_lp_vec3`]), then three signed-byte angles
 /// in **pitch, yaw, head_yaw** order (note: this order is reversed from
-/// `move_entity`'s yaw-then-pitch), then a trailing VarInt `data` field
-/// (vanilla sends `0` for ordinary mobs).
+/// `move_entity`'s yaw-then-pitch), then a trailing VarInt **Object Data** field
+/// from [`EntitySnapshot::object_data`] (`0` for ordinary mobs, and the block
+/// state id for a `minecraft:falling_block` — see that field's own doc).
+///
+/// This field used to be a hardcoded `0`, which is correct for every entity kind
+/// that does not override `getAddEntityPacket` and silently wrong for the one that
+/// does: a falling block's imitated state travels here and nowhere else.
 ///
 /// An `entity_type` with no match in this version's registry (a typo, or a
 /// key from a version this table doesn't cover) falls back to network id `0`
@@ -1967,7 +1972,7 @@ fn encode_add_entity_body(entity: &EntitySnapshot) -> Vec<u8> {
     w.i8(pack_degrees(entity.rotation.pitch));
     w.i8(pack_degrees(entity.rotation.yaw));
     w.i8(pack_degrees(entity.head_yaw));
-    w.var_i32(0);
+    w.var_i32(entity.object_data);
     w.into_vec()
 }
 
