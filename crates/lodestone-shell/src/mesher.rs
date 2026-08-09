@@ -1266,6 +1266,51 @@ impl FluidSectionView for SnapshotFluidView<'_> {
         lodestone_assets::fluid::full_footprint_y_range(boxes)
     }
 
+    /// The live half of `shouldRenderFace`'s *self* test — the block sharing the
+    /// fluid's own cell, which for a waterlogged stair is the stair. Same
+    /// trait-default-plus-override shape as `overlay_at` and
+    /// `partial_occluder_y_range_at` above, and the same failure mode if it is
+    /// missing: the rule sits in `lodestone-render` and never reaches terrain.
+    ///
+    /// # The `RenderLayer::Solid` gate is vanilla's `canOcclude`
+    ///
+    /// Vanilla builds the shape this test reads as
+    /// `canOcclude ? getOcclusionShape(state) : Shapes.empty()`, and `canOcclude`
+    /// is a `Properties` flag with no getter, absent from `blocks.json` and from
+    /// every table in `lodestone-data`. `BlockModels::layer` stands in for it: a
+    /// state whose sprites are fully opaque renders `Solid`, and a
+    /// `noOcclusion()` block is (in 26.2, across every waterloggable block) one
+    /// whose textures are not. Without the gate, **waterlogged leaves** — a
+    /// full-cube outline shape, `noOcclusion()` in vanilla — would report all five
+    /// faces occluded and cull their water away entirely.
+    ///
+    /// The gate is not a scoping compromise on the *geometry* side:
+    /// `face_fully_covered` is exact for any axis-aligned union, so a stair's
+    /// two-box solid side is answered correctly where
+    /// `partial_occluder_y_range_at`'s single-box reduction would have declined.
+    ///
+    /// Cheap for ordinary water: `minecraft:water`'s own outline shape is empty
+    /// (`LiquidBlock.getShape` is `Shapes.empty()`) *and* its layer is
+    /// `Translucent`, so an open ocean's cells leave on the first branch.
+    fn self_occlusion_at(&self, x: i32, y: i32, z: i32) -> lodestone_assets::fluid::SelfOcclusion {
+        use lodestone_assets::fluid::SelfOcclusion;
+
+        let (dx, lx) = split16(x);
+        let (dy, ly) = split16(y);
+        let (dz, lz) = split16(z);
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+            return SelfOcclusion::default();
+        }
+        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        if self.models.layer(id) != lodestone_render::RenderLayer::Solid {
+            return SelfOcclusion::default();
+        }
+        let Some(boxes) = lodestone_data::outline_shapes::outline_boxes(id) else {
+            return SelfOcclusion::default();
+        };
+        lodestone_assets::fluid::self_occlusion(boxes)
+    }
+
     fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
         // A fluid surface has no single facing (its top slopes and its sides are
         // baked together), so it takes the brightest cell of the immediate
