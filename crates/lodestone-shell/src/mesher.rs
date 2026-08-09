@@ -2181,6 +2181,19 @@ pub struct TerrainMesh {
     /// Bounded, not a second leak: an entry is dropped as soon as it has no
     /// loaded neighbour left, at which point it cannot affect any decision.
     pub departed: HashSet<(i32, i32)>,
+    /// Sections whose **light** the client's own relight just changed, coalesced
+    /// and drained on a budget by [`relight_changed_blocks`].
+    ///
+    /// Separate from [`Self::dirty_columns`] because the granularity is the point.
+    /// A relight around one broken block touches a handful of sections; expressing
+    /// that as a column dirty would re-mesh 24 sections each snapshotting a
+    /// 27-section neighbourhood, per break, which is the cost the whole bounded-box
+    /// design exists to avoid.
+    ///
+    /// Absolute `(chunk_x, chunk_z, section_y)`, exactly what
+    /// [`lodestone_world::Relit::dirty_sections`] reports — converted to a
+    /// [`SectionKey`] at drain time, when the store's extent is known.
+    pub light_dirty_sections: BTreeSet<(i32, i32, i32)>,
     /// Sections whose geometry vanished (all-air after an edit, or a column that
     /// unloaded) and must be dropped from the GPU. Drained by the app each frame.
     pub pending_removals: Vec<SectionKey>,
@@ -2236,6 +2249,7 @@ impl TerrainMesh {
             dirty_columns: DirtyColumns::default(),
             forced_columns: BTreeSet::new(),
             departed: HashSet::new(),
+            light_dirty_sections: BTreeSet::new(),
             pending_removals: Vec::new(),
             uploaded_sections: HashSet::new(),
             drops: 0,
@@ -2630,6 +2644,7 @@ impl TerrainMesh {
         self.dirty_columns.clear();
         self.forced_columns.clear();
         self.departed.clear();
+        self.light_dirty_sections.clear();
         self.drops = 0;
         self.deferred = 0;
         self.pending_removals.extend(self.uploaded_sections.drain());
@@ -2715,7 +2730,145 @@ pub fn heal_dirty_columns(
     }
 }
 
-/// Registers Stage 4's terrain state and its one `Update` system.
+/// Budget for [`relight_changed_blocks`]: max sections to re-mesh per frame after a
+/// relight.
+///
+/// Larger than [`DIRTY_COLUMN_BUDGET`] because the unit is smaller — a *section*, not
+/// a whole column — and because the latency matters more: a black hole where a block
+/// used to be is the symptom the relight exists to remove, so the sections around the
+/// break should land in the frame after the break rather than queue behind a streaming
+/// backlog. One break typically reports fewer sections than this, so the budget only
+/// engages on a bulk edit.
+pub const LIGHT_DIRTY_SECTION_BUDGET: usize = 24;
+
+/// The 26.2 [`lodestone_world::LightProperties`] for a live session: the per-state
+/// dampening and emission census, read straight out of rodata.
+///
+/// A zero-sized adapter rather than a table, so the relight has no per-call setup.
+/// See [`lodestone_data::light_props`] for the provenance argument, and in particular
+/// that every gap in it darkens rather than brightens — which is why a state we cannot
+/// resolve can never fake a bright cell.
+#[derive(Debug)]
+struct VanillaLightProps;
+
+impl lodestone_world::LightProperties for VanillaLightProps {
+    fn opacity(&self, state: u32) -> u8 {
+        lodestone_data::light_props::dampening(state)
+    }
+
+    fn emission(&self, state: u32) -> u8 {
+        lodestone_data::light_props::emission(state)
+    }
+}
+
+/// `Update` / [`FrameSet::Terrain`]: run the client's own light engine over the block
+/// changes applied since last frame, then re-mesh what that changed.
+///
+/// **This is vanilla's `ClientLevel.tick` calling `pollLightUpdates` and
+/// `getLightEngine().runLightUpdates()`**, and without it a block broken on a real
+/// vanilla server leaves a pitch-black hole — permanently, because
+/// `ChunkHolder.broadcastChanges` sends `ClientboundLightUpdatePacket` only to
+/// `getPlayers(pos, true)`, the players for whom that chunk is on the *outer ring* of
+/// their loaded area. The breaker is never on their own chunk's border, so no light
+/// packet is coming. See [`lodestone_world::relight`] for the full argument.
+///
+/// # Why the re-mesh half is not optional
+///
+/// A relight that changes light and dirties no mesh changes nothing on screen — the
+/// dominant defect class in this repo. The block-update path already dirties the 3×3×3
+/// around the changed cell, but a relight reaches further (up to
+/// [`lodestone_world::relight::AFFECTED_RADIUS`]) and, more importantly, runs a frame
+/// *after* that dirty signal was serviced. So the sections the relight itself reports
+/// are re-meshed here, budgeted, which is vanilla's
+/// `LevelRenderer.setSectionDirtyWithNeighbors` on the light path.
+///
+/// # Why `Option<Res<ChunkWorldWrite>>`
+///
+/// [`TerrainPlugin`] inserts only the read handle, because the write side belongs to
+/// the session owner. A harness that installs the plugin and nothing else has no world
+/// to write, and that is a legitimate configuration meaning exactly "nothing is
+/// applying block changes" — not a panic.
+pub fn relight_changed_blocks(
+    write: Option<Res<ChunkWorldWrite>>,
+    store: Res<ChunkWorld>,
+    mut terrain: ResMut<TerrainMesh>,
+) {
+    let Some(write) = write else {
+        return;
+    };
+    // The relight's block-state ids must be the store's. `ColumnSource::Streaming` is
+    // the live-vanilla session — the same fact `MeshScheduler::new` derives from
+    // `classifier.is_vanilla()` — so it is also the discriminator for which props
+    // table applies. Running the 26.2 census against the demo palette would not fail,
+    // it would light the demo world from an unrelated table.
+    let vanilla_ids = terrain.column_source == ColumnSource::Streaming;
+    // The dimension's own `has_skylight`, arrived at the same way the mesher resolves
+    // an absent sky sample. The two must agree: the relight reads stored light through
+    // this rule and the mesher renders it through the same one.
+    let has_skylight = matches!(terrain.policy.sky_default, SkyDefault::Full);
+
+    let relit = {
+        // The write guard is held for the relight and dropped before anything
+        // reaches for the read handle — `mesh_section` takes a read lock, and the
+        // store is one `RwLock`.
+        let mut world = write.write();
+        if vanilla_ids {
+            world.run_pending_relight(&VanillaLightProps, has_skylight)
+        } else {
+            world.run_pending_relight(&crate::blocks::DemoLightProps, has_skylight)
+        }
+    };
+
+    if relit.dropped > 0 {
+        tracing::warn!(
+            target: "light",
+            dropped = relit.dropped,
+            "client relight dropped a job above its cell ceiling; a shaft that deep \
+             stays lit by whatever the server last sent"
+        );
+    }
+    if relit.jobs > 0 {
+        tracing::debug!(
+            target: "light",
+            jobs = relit.jobs,
+            cells_visited = relit.cells_visited,
+            cells_changed = relit.cells_changed,
+            sections = relit.dirty_sections.len(),
+            deferred = relit.deferred,
+            "client relight"
+        );
+    }
+    terrain.light_dirty_sections.extend(relit.dirty_sections);
+
+    if terrain.light_dirty_sections.is_empty() {
+        return;
+    }
+    let Some(extent) = store.extent() else {
+        // No extent means no loaded column to mesh; keeping the queue would spend
+        // the budget every frame on sections that cannot resolve.
+        terrain.light_dirty_sections.clear();
+        return;
+    };
+    let base_si = extent.min_y.div_euclid(16);
+    for _ in 0..LIGHT_DIRTY_SECTION_BUDGET {
+        let Some((cx, cz, sy)) = terrain.light_dirty_sections.pop_first() else {
+            break;
+        };
+        let si = sy - base_si;
+        if si < 0 || si as usize >= extent.section_count {
+            continue;
+        }
+        let key = SectionKey {
+            cx,
+            cz,
+            si: si as usize,
+            min_y: extent.min_y,
+        };
+        terrain.mesh_section(&store, key, extent.section_count);
+    }
+}
+
+/// Registers Stage 4's terrain state and its `Update` systems.
 ///
 /// Deliberately does **not** insert [`TerrainMesh`] itself: the worker pool has
 /// to be built with the classifier for whichever id space this session meshes,
@@ -2730,6 +2883,11 @@ pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChunkWorld>();
+        // The client's own light engine, and the re-mesh that makes its result
+        // visible. Registered here rather than in the session builder for the same
+        // reason `heal_dirty_columns` is: it reads and writes only the terrain
+        // resources this plugin owns.
+        app.add_systems(Update, relight_changed_blocks.in_set(FrameSet::Terrain));
         app.add_systems(Update, heal_dirty_columns.in_set(FrameSet::Terrain));
     }
 }

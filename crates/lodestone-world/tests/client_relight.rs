@@ -627,20 +627,45 @@ fn one_break_costs_one_bounded_box() {
 
 /// The relight has to say which section meshes it invalidated, or the light it fixed
 /// reaches no pixels. The broken block's own section must be in the set.
+///
+/// **The break is deliberately off-centre.** `Relit::dirty_sections` is a triple of
+/// same-typed section indices, so writing it in spatial `(x, y, z)` order instead of
+/// the mesher's `(chunk_x, chunk_z, section_y)` transposes two components with no type
+/// error and no failing round trip — and it shipped, because every other gate in this
+/// file breaks a block in chunk `(0, 0)`, where `chunk_x == chunk_z` and the swap is
+/// invisible. Chunk `(1, -1)` at section `-3` makes all three components distinct, so a
+/// transposition cannot survive.
 #[test]
 fn the_relight_reports_the_sections_whose_mesh_went_stale() {
     let mut world = scene_world();
-    break_the_block(&mut world);
+    // Local (4, ·, 4) of chunk (1, -1): world x 20, z -12 — chunk_x 1, chunk_z -1,
+    // section_y -3, pairwise distinct.
+    let at = [EDGE + BREAK[0], BREAK[1], -EDGE + BREAK[2]];
+    for (cx, cz) in NEIGHBOURHOOD {
+        let chunk = world.get_mut(ChunkPos::new(cx, cz)).expect("loaded");
+        chunk
+            .column
+            .set_block(BREAK[0] as usize, at[1], BREAK[2] as usize, AIR);
+    }
+    world.queue_relight(at[0], at[1], at[2]);
     let relit = world.run_pending_relight(&FixtureProps, true);
 
     let own = (
-        BREAK[0].div_euclid(EDGE),
-        BREAK[1].div_euclid(EDGE),
-        BREAK[2].div_euclid(EDGE),
+        at[0].div_euclid(EDGE),
+        at[2].div_euclid(EDGE),
+        at[1].div_euclid(EDGE),
+    );
+    assert_eq!(
+        own,
+        (1, -1, -3),
+        "premise: the three components must be pairwise distinct or a transposition \
+         cannot be detected"
     );
     assert!(
         relit.dirty_sections.contains(&own),
-        "the broken block's own section {own:?} is not in the dirty set {:?}",
+        "the broken block's own section {own:?} (chunk_x, chunk_z, section_y) is not in \
+         the dirty set {:?} — if the set holds the same three numbers in another order, \
+         the tuple is transposed",
         relit.dirty_sections
     );
     // And the set is not the whole world: a relight that dirties everything is a

@@ -367,6 +367,13 @@ fn light_section_of(y: i32, min_y: i32) -> i32 {
 /// is visible in the section across that boundary. This is vanilla's
 /// `LevelRenderer.setSectionDirtyWithNeighbors`, narrowed by the same per-axis
 /// filter the block-update path uses rather than dirtying all 27 unconditionally.
+///
+/// **The emitted tuple is `(chunk_x, chunk_z, section_y)` — not `(x, y, z)`.** All
+/// three components are `i32` section indices, so writing them in spatial order
+/// transposes two of them with no type error and no failing round trip; it cost a run
+/// here, because a fixture centred on chunk `(0, 0)` has `chunk_x == chunk_z` and the
+/// swap is invisible. The consumer is a mesher keyed on column-plus-height, which is
+/// why the horizontal pair comes first.
 fn mark_dirty_sections(x: i32, y: i32, z: i32, out: &mut BTreeSet<(i32, i32, i32)>) {
     if out.len() >= DIRTY_SECTION_CAP {
         return;
@@ -385,7 +392,7 @@ fn mark_dirty_sections(x: i32, y: i32, z: i32, out: &mut BTreeSet<(i32, i32, i32
                 if (dz == -1 && bz != 0) || (dz == 1 && bz != EDGE - 1) {
                     continue;
                 }
-                out.insert((sx + dx, sy + dy, sz + dz));
+                out.insert((sx + dx, sz + dz, sy + dy));
             }
         }
     }
