@@ -312,6 +312,13 @@ throughout, then a live gate produced 49 × "unexpected end of input". Use captu
 oracle, or a hand-decoded spec example. Note that a self-authored JVM oracle validates *the behaviour
 you chose to model*, so agreement across ports sharing an author is weak evidence.
 
+The cheapest instance of that symmetry, and it recurs in every packet: **two adjacent same-typed fields
+transpose without a trace.** `TAKE_ITEM_ENTITY` is three VarInts, the first two being the item entity and its
+collector — swap them and the round-trip through our own encode/decode is *byte-perfect*, while the client
+lerps the **player toward the item**. So for any packet, assert against a byte string the *other* side already
+decodes, and choose **pairwise-distinct** field values (`11, 1, 4`, never `1, 1, 4`) so a transposition cannot
+survive. A field's value being distinct from its neighbours' is part of the fixture's job.
+
 **Assertions of an absence need a control proving the detector works.** "No corrective teleport", "no
 trailing bytes", "zero unresolved" are only as good as the evidence the mechanism *would* have fired.
 Run the control and observe it fail; do not describe what it would do.
@@ -409,6 +416,16 @@ Three corollaries, all paid for (§12.160):
   **the fixture set**, not only of the input in front of you: if every gate in a subsystem shares a spawn
   point, an origin, a seed or an identity value, that shared value is exactly where a whole class of bug lives
   unobserved. (The same shape as the docs-index gate scanning three directories and not the fourth.)
+
+  **Two discriminating requirements can be mutually exclusive, and folding them into one test silently voids
+  one of them.** Wiring the item-pickup packet needed *both* an ordering claim (the take must reach the wire
+  before the entity's removal) and a **partial** pickup (so the `amount` field is not merely the stack size) —
+  but a partial pickup leaves the entity alive by construction, so **there is no removal left to order
+  against**. One test for both reported *"the item entity was never removed, so the ordering claim is moot"*.
+  Split it: a **full** pickup for ordering, a **partial** one for `amount`. The neuter then proved the split
+  was necessary rather than merely tidy — forcing `amount` to the banked count failed the partial arm while
+  the ordering arm **stayed green**. So when a gate needs two properties, check whether the input each one
+  demands is the same input; if not, that is two gates.
 - **Do not predict the plausible round number.** Four gates in one unit failed on first run for this alone —
   "200 blocks" was really 241, "regeneration fills the bar" was 15.5, "regeneration repeats" happens once.
   Re-derive the arithmetic in a separate script rather than reaching for the figure that sounds right; a
