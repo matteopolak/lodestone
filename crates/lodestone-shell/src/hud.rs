@@ -306,11 +306,6 @@ impl TabPanel {
     pub fn centred_x(&self, text_w: f32) -> f32 {
         (self.screen_w * 0.5).floor() - (text_w * 0.5).floor()
     }
-
-    /// Horizontal centre of the overlay, for a gate asking *where* a line sits.
-    pub fn centre_x(&self) -> f32 {
-        (self.screen_w * 0.5).floor()
-    }
 }
 
 /// Everything the debug overlay shows for one frame.
