@@ -581,6 +581,20 @@ on every `cargo test -p lodestone-shell`. **Fork on `#[cfg(test)]` rather than e
 not the feature** (`Command::new("open")` / `xdg-open` / `cmd /C start`) — which found a second latent
 instance. Fixtures should use RFC 2606 `.invalid` hostnames as a second layer. (§12.44)
 
+**And the effect class is wider than launching a UI: a test can *destroy* state that lives outside the
+repo, and that one has no visible symptom at all.** Caught mid-change rather than after: wiring
+account resolution into the shell's join meant an **existing** `net.rs` unit test that called the
+connect entry point would have opened the keychain, POSTed to Microsoft and **rotated the owner's
+refresh token** — invalidating the credential his real client holds, while the suite reported green
+and the damage sat in a keychain no `git status` covers. The browser case at least *announced* itself.
+
+Two things generalise. **When you thread a resolver into a function tests already call, enumerate what
+it touches outside the process before you wire it** — the new call site is not where the hazard is
+introduced, the *pre-existing* caller is, and it will not appear in your diff. And a credential store,
+a token endpoint that rotates on use, a shared cache and the real filesystem are all this class, so
+the grep is for the **effect** — keychain access, a token refresh, a `.cache` write — not for the
+feature that happens to use it.
+
 ---
 
 ## Rendering constraints
