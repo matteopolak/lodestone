@@ -3524,8 +3524,11 @@ where
 /// `compute_column_light` is the **isolated** compute, so light still does not
 /// cross a column border and the measured Δ5 sky-light dark bias at borders is
 /// unchanged — this is a cheaper carrier for the same values, not a better
-/// computation. And `should_relight` still compares emission only, so breaking a
-/// roof does not re-send sky light. Both need light computed where the 3×3
+/// computation. (The claim that used to sit here, that `should_relight` compares
+/// emission only so breaking a roof does not re-send sky light, is no longer true:
+/// it compares dampening too. Left recorded rather than deleted because it was the
+/// stated reason this predicate was safe to keep narrow.) The border gap needs
+/// light computed where the 3×3
 /// neighbourhood is resident (the chunk source) and carried on the column; see
 /// `crate::light` and `docs/server-chunk-light.md`, including the invalidation
 /// trap that makes stale light look like a working fix.
@@ -3550,7 +3553,51 @@ where
     if !crate::light::should_relight(old_state, new_state) {
         return Ok(());
     }
-    let (cx, cz) = (pos.x.div_euclid(16), pos.z.div_euclid(16));
+    send_column_light(conn, proto, source, state, pos.x.div_euclid(16), pos.z.div_euclid(16)).await
+}
+
+/// [`resend_column_for_light`] with the predicate removed — recompute and send one
+/// column's light unconditionally.
+///
+/// # Why this exists separately
+///
+/// [`crate::light::should_relight`] needs the state the cell held *before* the
+/// edit, and there is one real production path that cannot supply it: the world
+/// tick loop's changes arrive over [`BlockTickFeed`] as `(x, y, z, new_state)`
+/// only, with the old state already overwritten in the shared source by the time
+/// this connection drains them.
+///
+/// **That path used to send no light at all**, which is the whole reason this
+/// function was split out. `container_sync_tick`'s drain forwarded
+/// `encode_block_update` and stopped, so every block change *originating in the
+/// tick loop* moved on the client and left the light behind — stale until the
+/// player rejoined and the column was re-encoded from scratch. The reported
+/// symptom was a torch placed underwater: the placement relights correctly through
+/// the predicate above, and then the fluid tick destroys the torch a tick later,
+/// on this path, so the block vanished and its light stayed. Fire spreading and
+/// dying, grass and crops, a redstone torch flipping `lit`, and a falling block
+/// landing all travel the same wire and had the same defect.
+///
+/// The absent old state is why this is unconditional rather than predicated. That
+/// is the conservative direction and it is affordable: `should_relight` already
+/// fires on essentially every placement and break (see [`crate::light`]), so the
+/// predicate was not buying much, and the caller **deduplicates by column** —
+/// which is what actually bounds the cost, because a fluid cascade can rewrite
+/// dozens of cells in one column in a single tick and each flood is a whole-column
+/// recompute.
+async fn send_column_light<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    cx: i32,
+    cz: i32,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource,
+{
     let column = source.column(cx, cz);
     // Both halves have to be present for the cheap path: a family that can
     // compute light but not encode the packet (or the reverse) would otherwise
@@ -8145,8 +8192,37 @@ where
                 // is single-consumer (see that type's doc comment); this is
                 // the one connection that owns it for
                 // `open_in_memory_with_mobs`.
+                // **And the light for them, which this drain used to omit
+                // entirely.** `encode_block_update` carries no light, so before
+                // this every block change originating in the tick loop moved on the
+                // client and left its light behind — stale until the player
+                // rejoined and the column was re-encoded from scratch. The reported
+                // case was a torch placed underwater: `apply_use_item_on`'s own
+                // resend lights the column correctly for the placement, then the
+                // fluid tick destroys the torch a tick later and arrives *here*, so
+                // the torch vanished and its light did not. Fire, grass, crops, a
+                // redstone torch flipping `lit` and a landing falling block all ride
+                // this same drain.
+                //
+                // Deduplicated by column, and that is what makes it affordable: a
+                // fluid cascade rewrites many cells in one column in a single tick,
+                // and each relight is a whole-column flood. `send_column_light`
+                // rather than `resend_column_for_light` because the feed carries only
+                // the *new* state — see that function's own doc comment for why the
+                // missing old state means this cannot be predicated.
+                let mut relight: Vec<(i32, i32)> = Vec::new();
                 for (x, y, z, block_state) in block_ticks.drain_all() {
                     apply(conn, &mut state, proto.encode_block_update(x, y, z, &block_state)).await?;
+                    let column = (x.div_euclid(16), z.div_euclid(16));
+                    if !relight.contains(&column) {
+                        relight.push(column);
+                    }
+                }
+                // `source.get()`, like every other non-batch read on this task: one
+                // column at a time has nothing to offload, and it is the same
+                // accessor `resend_column_for_light`'s callers already use.
+                for (cx, cz) in relight {
+                    send_column_light(conn, proto, source.get(), &mut state, cx, cz).await?;
                 }
                 // Issue #530: the same feed's effect lane — every sound,
                 // particle and level event the world tick produced. This is what
