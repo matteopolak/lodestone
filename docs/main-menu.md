@@ -312,10 +312,53 @@ and `SessionPhase::Ended`. `net::forward`'s `ClientEvent::Disconnect` arm
 therefore just moves `reason` into the `Box` unchanged; it no longer calls
 `to_plain_string()` at all.
 
-Two sender sites in `net.rs` construct a `Disconnected` from a **synthetic**,
-Lodestone-authored message rather than a server-sent key: the stream-closed-
-without-a-packet case in `run`'s event loop (`"stream closed"`) and a test
-fixture in `sim.rs` (`"Server closed"`). Both use `Text::literal(..)` rather
+### A mid-session failure now says why, and it is a *different screen*
+
+`"stream closed"` used to be what a client-side failure looked like on screen, and
+that was structural rather than an oversight. The driver returns every failure as
+`SessionOutcome::Failed(ClientError)`, and the only way to read that value is
+`ClientHandle::join`, which takes the handle **by value** — the shell holds an
+`Arc<ClientHandle>`, so it cannot. What the shell observed was the event channel
+simply closing, byte-for-byte identical to a clean `ServerClosed`, and the
+`Ok(None)` arm below synthesised `"stream closed"` for both. The real cause reached
+the driver's log and nothing else, which is the half of *"join errors dont get
+printed anywhere"* that the `NetUpdate::Error` logging did not cover.
+
+`ClientEvent::SessionFailed { reason: String }` closes it: `Driver::run` wraps the
+whole session loop and emits the failure on the event stream before the stream
+closes, so the terminal reason travels the same channel every other session event
+does. Three things about it worth keeping:
+
+* **The emit is one chokepoint, not one per failure site.** `run_session` returns
+  `SessionOutcome::Failed` from a dozen places and from every `Step::Stop`
+  `execute` can produce; wrapping it means a failure path added later cannot
+  forget to emit. The single failure this cannot cover is
+  `ClientError::DriverPanicked`, synthesised by `crate::spawn` after the driver
+  has already unwound.
+* **It routes to the shell, and that was established from the consumer.** The only
+  writer of `SessionPhase::Ended` anywhere is `Sim::set_phase`, called from
+  `poll_net`'s `NetUpdate` arms; nothing in `lodestone_ecs::session` folds a
+  `Phase` from a `ClientEvent`. So a `session` route would have compiled,
+  unit-tested green and reached no screen — the fork `event-routing.md` exists to
+  force.
+* **`forward` maps it to `NetUpdate::Error`, not `Disconnected`, and the
+  difference is visible.** `Error` carries `SessionEndKind::Failed`, so the title
+  becomes vanilla's `connect.failed` ("Failed to connect to the server") instead of
+  `disconnect.lost` ("Connection Lost"), and `poll_net`'s arm logs the cause. The
+  reason carries `ClientError::cause_chain()` — the error plus its `source()`
+  chain, deduplicated because `thiserror`'s `{0}` already interpolates each
+  source's own `Display` and a naive concatenation prints every layer twice.
+
+`a_mid_session_failure_reaches_the_event_stream_and_a_clean_close_does_not` gates
+both arms in one test on purpose: a gate covering only the failure case passes just
+as well if *every* ending emits `SessionFailed`, which would put the failure title
+on a clean server close.
+
+One sender site in `net.rs` still constructs a `Disconnected` from a **synthetic**,
+Lodestone-authored message rather than a server-sent key — the stream-closed-
+without-a-packet case in `run`'s event loop (`"stream closed"`), which now means
+only a genuinely clean end — as does a test fixture in `sim.rs`
+(`"Server closed"`). Both use `Text::literal(..)` rather
 than inventing a fake vanilla translation key — there is no real
 `multiplayer.disconnect.*` key that means "the event stream ended with no
 packet", and a made-up one would be more confusing than a literal, not less.

@@ -159,7 +159,7 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-**29 of 131** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
+**29 of 132** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
 consumer, which is a normal state for a from-scratch client.
 
 > **The numerator did not move when issue #26 added twenty-four variants**, and

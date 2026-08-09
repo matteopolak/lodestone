@@ -1223,3 +1223,93 @@ async fn local_shutdown_is_local_close() {
     assert_eq!(events.recv().await, None);
     assert!(matches!(handle.join().await, SessionOutcome::LocalClose));
 }
+
+/// A mid-session failure reaches the **event stream**, and a clean close does
+/// not — the two endings must be distinguishable to a consumer that only ever
+/// sees the stream.
+///
+/// # What this is a regression test for
+///
+/// `SessionOutcome::Failed(ClientError)` is only readable through
+/// `ClientHandle::join`, which takes the handle **by value**. A shell holding an
+/// `Arc<ClientHandle>` cannot call it, so every mid-session failure used to
+/// present to it as the stream simply ending — identical to a clean close — and
+/// the shell synthesised the string `"stream closed"` for both. The real cause
+/// went only to the driver's log.
+///
+/// # Why both arms are in one test
+///
+/// A gate that only covers the failure case passes just as well if *every*
+/// ending emits `SessionFailed`, which would label a clean server close a
+/// client-side failure and put the wrong title on the screen. The discriminating
+/// property is the **difference** between the two arms, so both are measured
+/// here and the mismatches are collected rather than asserted inside the flow —
+/// so a run reports everything that is wrong, not just the first thing.
+#[tokio::test]
+async fn a_mid_session_failure_reaches_the_event_stream_and_a_clean_close_does_not() {
+    let mut mismatches: Vec<String> = Vec::new();
+
+    // ---- arm A: mid-frame EOF, i.e. a genuine transport failure -------------
+    let (client_io, mut server_io) = memory_pair();
+    let (handle, mut events) =
+        ClientBuilder::new(server(), profile(), Box::new(FakeAdapter::new()))
+            .connect_with(client_io);
+
+    // Announce a 5-byte frame and send 2 of its bytes, then close: the same
+    // input `mid_frame_eof_is_transport_error` uses.
+    server_io.write_all(&[0x05, 0x00, 0x01]).await.unwrap();
+    drop(server_io);
+
+    // Predicted exactly, from the two `#[error(…)]` record definitions plus
+    // `Codec::buffered_len` (which is `rx.len()`, so all three fed bytes are
+    // still buffered when EOF lands): `ClientError::Transport`'s
+    // `"transport error: {0}"` wrapping `NetError::UnexpectedClose`'s
+    // `"connection closed mid-frame ({0} bytes buffered)"`. Not a round number
+    // and not a direction — the wrong hypothesis this replaces is the literal
+    // string `"stream closed"`, which shares no substring with it.
+    let expected = "transport error: connection closed mid-frame (3 bytes buffered)";
+    match events.recv().await {
+        Some(ClientEvent::SessionFailed { reason }) => {
+            if reason != expected {
+                mismatches.push(format!(
+                    "failure arm: reason was {reason:?}, expected {expected:?}"
+                ));
+            }
+        }
+        other => mismatches.push(format!(
+            "failure arm: expected a SessionFailed event, got {other:?} — a consumer \
+             holding an Arc<ClientHandle> can read nothing else, so this is the whole \
+             difference between a real cause and a synthesised \"stream closed\""
+        )),
+    }
+    // And the event agrees with the outcome rather than being a second, freely
+    // drifting rendering of it.
+    match handle.join().await {
+        SessionOutcome::Failed(error) => {
+            if error.cause_chain() != expected {
+                mismatches.push(format!(
+                    "failure arm: outcome chain was {:?}, expected {expected:?}",
+                    error.cause_chain()
+                ));
+            }
+        }
+        other => mismatches.push(format!("failure arm: outcome was {other:?}")),
+    }
+
+    // ---- arm B: clean EOF at a frame boundary ------------------------------
+    let (handle, mut events, peer) = start(FakeAdapter::new(), KeepAlivePolicy::Automatic);
+    drop(peer);
+    match events.recv().await {
+        None => {}
+        other => mismatches.push(format!(
+            "clean arm: a clean close must emit no SessionFailed, got {other:?} — \
+             otherwise every ending is labelled a client-side failure and this gate \
+             would pass without discriminating anything"
+        )),
+    }
+    if !matches!(handle.join().await, SessionOutcome::ServerClosed) {
+        mismatches.push("clean arm: outcome was not ServerClosed".to_owned());
+    }
+
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
