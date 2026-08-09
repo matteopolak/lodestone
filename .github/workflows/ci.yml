@@ -2,7 +2,7 @@
 # intentionally NOT run here (the 219 `#[ignore]`d live/GPU/jar-dependent
 # tests), and how to reproduce any of these jobs locally.
 #
-# Four of the five jobs below call the `just` recipes that are exactly
+# Five of the six jobs below call the `just` recipes that are exactly
 # CLAUDE.md's "Build and test" health checks, one per job so a failure names
 # itself instead of hiding behind three green jobs and one red one:
 #
@@ -10,6 +10,12 @@
 #   just check-all    # cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
 #   just check-seam   # cargo check -p lodestone-shell --no-default-features
 #   just test         # cargo test --workspace --no-fail-fast
+#
+# plus one that is not a "Build and test" health check but is the only
+# automatic runner of the wasm32 tripwire — see the `wasm` job's own comment for
+# why it is here and not in `just health`:
+#
+#   just wasm-check   # cargo xtask wasm-check
 #
 # `just` is the canonical *command* layer (docs/task-runner.md) — calling the
 # recipe instead of retyping the raw invocation makes command drift between
@@ -20,7 +26,7 @@
 # the identical bare command it always ran — no shared target dir, no
 # hardcoded `-j`.
 #
-# The fifth (xtask-structural-checks) runs cargo xtask's own dependency-graph
+# The sixth (xtask-structural-checks) runs cargo xtask's own dependency-graph
 # checks (check-isolation, check-deletable) — cheap, and CLAUDE.md-adjacent
 # but not one of the four literal commands above. It is left calling `cargo
 # run -p xtask` directly: the Justfile's `xtask *args` passthrough always adds
@@ -161,6 +167,78 @@ jobs:
             cargo run -p xtask -- check-deletable "$family"
             echo "::endgroup::"
           done
+
+  # The wasm32 tripwire. This job is the whole point of `cargo xtask wasm-check`
+  # existing: it was written to be a tripwire and NOTHING RAN IT — not `just
+  # health`, not CI — so the first person to try `just run-wasm` found three
+  # E0433s waiting in lodestone-server, each a `cfg(not(target_arch =
+  # "wasm32"))` module named from ungated code. A tripwire nothing runs
+  # automatically is not a tripwire.
+  #
+  # Deliberately NOT folded into `just health` instead, and this is the trade-off
+  # rather than an omission. `health` is already four full workspace builds and is
+  # the command every agent runs many times a session on one shared machine;
+  # `scripts/wasm-check.sh`'s own header and `just wasm-size`'s comment both argue
+  # against putting slow work in the command everyone runs, and adding a
+  # ~15-crate wasm build plus a trunk build to it would tax every health run to
+  # catch a regression that only lands on the browser surface. More decisively:
+  # `just health` is a command someone *chooses* to run, so it cannot answer
+  # "nothing runs this automatically". CI can, and does, on every push and PR.
+  #
+  # `web/` is its own Cargo workspace with its own Cargo.lock, deliberately
+  # outside the root `members` glob, so `just check`/`check-all` have never
+  # covered it and never will. That is the other half of why this rotted, and it
+  # is why the trunk build inside wasm-check is load-bearing here rather than
+  # redundant with the per-crate rows.
+  #
+  # Both prerequisites are installed explicitly below, and their absence is a
+  # hard failure rather than a skip: `ensure_wasm_prereqs` bails with the install
+  # command. That matters more here than anywhere else in this file — "wasm32
+  # target not installed => skip" is the precondition species of vacuous test
+  # (CLAUDE.md), a green that measures nothing, and it is exactly the shape a
+  # wasm job in CI invites.
+  wasm:
+    name: "wasm: just wasm-check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No apt step: the wasm crate subset excludes lodestone-shell, and
+      # lodestone-audio's cpal dependency is target-gated away for wasm32 (the
+      # `cpal::` confinement guard in wasm-check is what keeps it that way).
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          # The prerequisite wasm-check verifies. Installed here rather than left
+          # to a `rustup target add` step so a toolchain bump cannot silently
+          # drop it.
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-check
+          # web/ is a separate workspace with its own lockfile; without this the
+          # cache key ignores it and a dependency bump there is invisible to the
+          # cache.
+          workspaces: |
+            .
+            web
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+      # Pinned to the version CLAUDE.md and web/README.md both name (0.21.x), and
+      # taken as a prebuilt tarball rather than `cargo install trunk`, which is a
+      # multi-minute from-source build of a tool this job only shells out to.
+      # trunk fetches its own wasm-bindgen-cli into its cache, so nothing else is
+      # needed for the `(cd web && trunk build)` step inside wasm-check.
+      - name: Install trunk
+        run: |
+          set -eu
+          curl -sSfL \
+            https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
+            | tar xz -C "$HOME/.cargo/bin" trunk
+          trunk --version
+      - run: just wasm-check
 
   test:
     name: "test: just test"

@@ -44,6 +44,30 @@ serde_json = { workspace = true }
 # on a version-free crate (only the reverse direction is forbidden).
 lodestone-server = { path = "../../lodestone-server" }
 
+# **Not used by any code in this crate — this edge exists only to turn a feature
+# on**, and it is the same trick `web/Cargo.toml` already documents, moved one
+# level down to where it actually belongs.
+#
+# `getrandom` 0.2 has a hard `compile_error!` on `wasm*-unknown-unknown` unless
+# its `js` feature is on, and it reaches this crate three levels down:
+# `lodestone-v770` -> `rand` 0.8 -> `rand_core` 0.6 -> `getrandom` 0.2. Neither
+# `rand` nor `rand_core` can enable it, so `web/` did — which fixed the *browser
+# bundle* and left `cargo build -p lodestone-v770 --target
+# wasm32-unknown-unknown` red, because that build never sees `web/`'s manifest.
+# `web/` is its own workspace, outside the root `members` glob. So the v770 row of
+# `cargo xtask wasm-check` failed permanently, in `getrandom/src/lib.rs` with no
+# mention of Lodestone at all, and a check that can never pass gets ignored
+# rather than fixed. Declaring it here makes the row winnable and makes the
+# browser bundle's own feature no longer depend on `web/` remembering.
+#
+# Target-gated, not unconditional, and that is the whole reason it is safe here:
+# a native build of this crate — which is every build anyone runs today — does
+# not get the edge at all, so it cannot silently pick up the browser RNG backend.
+# `web/`'s own copy is now redundant but harmless (feature unification unions
+# them); it is left alone because that file is not this crate's to edit.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
 [dev-dependencies]
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true }
