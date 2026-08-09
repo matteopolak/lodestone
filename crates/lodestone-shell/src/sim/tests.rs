@@ -2672,9 +2672,30 @@ fn tab_overlay_rows_read_the_clients_one_folded_tab_list() {
         },
     );
 
+    // The whole row, not just the name: the projection now carries the game mode
+    // and the latency *band*, and asserting only the names would not notice
+    // either being dropped on the way through — which is exactly what the
+    // pre-`TabListView` flattening did.
+    let rows = |sim: &Sim| -> Vec<(String, &'static str, bool)> {
+        sim.tab_list_view()
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    crate::overlay::spans_text(&row.name),
+                    row.ping_sprite,
+                    row.spectator,
+                )
+            })
+            .collect()
+    };
     assert_eq!(
-        sim.player_rows(),
-        vec!["Alice the Brave  12ms".to_string(), "Bob  30ms".to_string(),],
+        rows(&sim),
+        vec![
+            ("Alice the Brave".to_string(), "icon/ping_5", false),
+            // Spectators sort last and draw dimmed; both facts are in the row.
+            ("Bob".to_string(), "icon/ping_5", true),
+        ],
         "tab overlay rows must come from the client's folded TabList state"
     );
 
@@ -2684,7 +2705,7 @@ fn tab_overlay_rows_read_the_clients_one_folded_tab_list() {
             profile_ids: vec![alice],
         },
     );
-    assert_eq!(sim.player_rows(), vec!["Bob  30ms".to_string()]);
+    assert_eq!(rows(&sim), vec![("Bob".to_string(), "icon/ping_5", true)]);
 }
 
 /// Issue #410's missing hop: `crate::gpu::gather_crack_targets` and
@@ -2750,7 +2771,7 @@ fn crack_targets_reaches_every_other_players_overlay_not_just_the_local_dig() {
 #[test]
 fn without_a_connection_the_shell_has_no_session_state_of_its_own() {
     let sim = Sim::new(test_config());
-    assert!(sim.player_rows().is_empty());
+    assert!(sim.tab_list_view().is_empty());
     assert!(sim.sidebar().is_none());
     assert!(sim.boss_bars().is_empty());
 }

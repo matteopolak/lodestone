@@ -84,7 +84,7 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
     let net = NetClient::connect_as(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2, None, unique_username());
 
     let deadline = Instant::now() + Duration::from_secs(25);
-    let mut rows = Vec::new();
+    let mut view = tablist::TabListView::default();
     let mut sidebar = None;
     let mut scores = lodestone_game::scoreboard::Scoreboard::new();
     while Instant::now() < deadline {
@@ -93,9 +93,9 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
         // the client's own `NetIngest` fold below.
         let _ = net.poll();
         scores = net.scoreboard();
-        rows = tablist::player_rows(&net.tab_list(), &|_: &str| None);
+        view = tablist::tab_list_view(&net.tab_list(), &|_: &str| None);
         sidebar = scoreboard::sidebar_from(&scores, &|_: &str| None);
-        if !rows.is_empty()
+        if !view.is_empty()
             && sidebar
                 .as_ref()
                 .is_some_and(|side| {
@@ -112,28 +112,29 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
         cleanup_objective(&objective);
         panic!(
             "live scoreboard/sidebar did not reach the shell fold before timeout: \
-             rows={rows:?}, displayed={:?}",
+             rows={:?}, displayed={:?}",
+            view.rows,
             scores.displayed(lodestone_game::scoreboard::DisplaySlot::Sidebar)
         )
     });
     assert!(
-        !rows.is_empty(),
+        !view.is_empty(),
         "live player-list updates did not produce any tab rows"
     );
 
-    let empty_rows: Vec<String> = Vec::new();
+    let empty_view = tablist::TabListView::default();
     let tab_empty = render_tab_bright_pixels(
         &mut target,
         &mut hud,
         device,
         queue,
         &stats,
-        &empty_rows,
+        &empty_view,
         w,
         h,
     );
     let tab_live =
-        render_tab_bright_pixels(&mut target, &mut hud, device, queue, &stats, &rows, w, h);
+        render_tab_bright_pixels(&mut target, &mut hud, device, queue, &stats, &view, w, h);
     let score_empty =
         render_sidebar_changed_pixels(&mut target, &mut hud, device, queue, &stats, None, w, h);
     let score_live = render_sidebar_changed_pixels(
@@ -151,7 +152,7 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
     drop(net);
 
     eprintln!("=== shell live UI pixel gate ===");
-    eprintln!("tab rows          = {rows:?}");
+    eprintln!("tab rows          = {:?}", view.rows);
     eprintln!("sidebar title     = {:?}", sidebar.title);
     eprintln!("sidebar lines     = {:?}", sidebar.lines);
     eprintln!("tab empty bright  = {tab_empty}");
@@ -195,7 +196,7 @@ fn render_tab_bright_pixels(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     stats: &DebugStats,
-    rows: &[String],
+    view: &tablist::TabListView,
     w: u32,
     h: u32,
 ) -> usize {
@@ -204,7 +205,7 @@ fn render_tab_bright_pixels(
     let hud_frame = HudFrame {
         show_debug: false,
         crosshair: false,
-        players: Some(rows),
+        players: Some(view),
         ..HudFrame::new(stats)
     };
     hud.render(device, queue, frame.view(), &hud_frame, w, h);
