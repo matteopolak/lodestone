@@ -5504,6 +5504,56 @@ fn join_inventory_snapshot<P: ServerProtocol>(
     )
 }
 
+/// The experience bar a joining player is owed — vanilla's first
+/// `ClientboundSetExperiencePacket`.
+///
+/// # Why this exists
+///
+/// **The XP bar never appeared, in survival as well as creative**, and the creative
+/// gate was a red herring (vanilla hides the bar client-side via
+/// `Player.hasExperience`, and still sends the packet). Same island shape as
+/// [`join_inventory_snapshot`], one step further along: the encoder existed in both
+/// the [`ServerProtocol`] trait and `V770ServerProtocol`, the client decodes
+/// `SET_EXPERIENCE` into `ClientEvent::ExperienceChanged`, and the HUD draws the bar
+/// from it — but the *only* producer in this crate was the furnace-close arm of
+/// [`dispatch_play_packet`], which pays out banked smelting XP. So a player who had
+/// never closed a furnace was never sent the packet at all, and the bar had no
+/// values to draw from.
+///
+/// # Where vanilla sends it, and why "on join" is the faithful answer
+///
+/// Not from `placeNewPlayer` — from `ServerPlayer.doTick`, which sends whenever
+/// `this.totalExperience != this.lastSentExp`. `lastSentExp` is initialised to
+/// `-99999999`, so the comparison is true on the **first tick after any join** even
+/// for a player with zero experience, and the packet goes out unconditionally.
+/// Every mutator (`setExperiencePoints`, `setExperienceLevels`,
+/// `giveExperienceLevels`, `onEnchantmentPerformed`) additionally forces
+/// `lastSentExp = -1` so that a change to *progress or level alone* — which leaves
+/// `totalExperience` untouched — still resends. The equivalent here is: send once at
+/// join, and send after every [`crate::experience::PlayerExperience`] mutation. The
+/// furnace arm already does the latter.
+///
+/// # Argument order
+///
+/// `(progress, level, total)`, matching the trait and **the wire**, which is not
+/// vanilla's constructor order. `ClientboundSetExperiencePacket`'s field
+/// declaration and its constructor both read `(progress, total, level)`, while its
+/// `write` method emits `writeFloat(progress)`, `writeVarInt(level)`,
+/// `writeVarInt(total)`. Reading the constructor call in `doTick` instead of the
+/// record's own codec is how the two integers get transposed — and they are adjacent
+/// VarInts, so a swap costs nothing at the wire level and silently shows the wrong
+/// number on the bar.
+fn join_experience<P: ServerProtocol>(
+    proto: &P,
+    experience: &crate::experience::PlayerExperience,
+) -> ServerDirective {
+    proto.encode_set_experience(
+        experience.progress(),
+        experience.level(),
+        experience.total(),
+    )
+}
+
 /// Applies a `CONTAINER_CLICK` by **deriving** its result server-side
 /// (`ServerBound::ContainerClicked`).
 ///
@@ -7723,6 +7773,10 @@ where
     // this is the packet that makes a rejoining player's items visible without
     // touching a slot first — see `join_inventory_snapshot` for the whole story.
     apply(conn, &mut state, join_inventory_snapshot(proto, &inventory)).await?;
+    // The first `SET_EXPERIENCE`, which `ServerPlayer.doTick` sends on the tick after
+    // every join because `lastSentExp` starts at `-99999999`. Without it the bar has
+    // no values at all — see `join_experience`.
+    apply(conn, &mut state, join_experience(proto, &experience)).await?;
 
     loop {
         tokio::select! {
@@ -8787,6 +8841,12 @@ where
     // reconcile every later click against, and a target-specific omission here is
     // exactly how the two loops drift apart.
     apply(conn, &mut state, join_inventory_snapshot(proto, &inventory)).await?;
+    // The first `SET_EXPERIENCE` — see the native `serve_play`'s identical send and
+    // `join_experience`'s own doc comment. `experience` is `default()` on both
+    // targets today (nothing restores it from disk), so this carries zeroes; it is
+    // sent anyway because the bar is drawn from the *last* values received and a
+    // client that is never sent any has nothing to draw.
+    apply(conn, &mut state, join_experience(proto, &experience)).await?;
 
     // The deferred join view, inline — see this function's `join_stream`
     // parameter for why this target does not race it against anything.
