@@ -231,6 +231,24 @@ impl ShellAudio {
             .set_listener(camera.position, camera.forward(), Vec3::Y);
     }
 
+    /// Pushes the eleven `soundSource.*` slider values onto their mixer buses.
+    ///
+    /// A thin forward to
+    /// [`AudioEngine::set_category_volumes`](lodestone_sound::AudioEngine::set_category_volumes),
+    /// which exists because `ShellAudio::engine` is private and every other
+    /// module reaches the engine through methods here. The whole set travels
+    /// together under one mixer lock; see that method for why.
+    pub fn set_category_volumes(&self, volumes: &[(SoundCategory, f32)]) {
+        self.engine.set_category_volumes(volumes);
+    }
+
+    /// The slider value currently on `category`'s bus — the read-back half of
+    /// [`Self::set_category_volumes`].
+    #[must_use]
+    pub fn category_volume(&self, category: SoundCategory) -> f32 {
+        self.engine.category_volume(category)
+    }
+
     /// Plays a positioned sound (the `SOUND` packet path). Resolution/decode
     /// failures are logged and swallowed — one bad sound must not stall the game.
     pub fn play_sound(

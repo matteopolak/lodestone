@@ -96,7 +96,15 @@ use glam::Vec3;
 use lodestone_physics::{Aabb, CollisionView, PlayerState};
 use lodestone_render::Camera;
 
-/// Vertical field of view in degrees (vanilla default, "Normal" FOV).
+/// Vertical field of view in degrees — vanilla's **default**, "Normal" FOV
+/// (`Options.java:806,808`: `IntRange(30, 110)`, default `70`).
+///
+/// **This is a default and no longer a pin.** [`build_camera`] used to write it
+/// into every camera unconditionally, which made vanilla's FOV option
+/// unreachable while the whole projection path was already correct — the option
+/// is now a [`build_camera`] parameter and this constant is what a caller passes
+/// when it has no player preference to honour (tests, and the seed for
+/// `Sim`'s own field before the menu layer pushes one).
 pub const FOV_Y_DEGREES: f32 = 70.0;
 /// Near plane distance in blocks.
 pub const NEAR: f32 = 0.05;
@@ -969,16 +977,32 @@ pub fn yaw_pitch_from_forward_or(forward: Vec3, fallback_yaw: f32) -> (f32, f32)
 }
 
 /// Construct the render camera for the given player state, **eye height above
-/// the feet**, viewport aspect, and render distance (in chunks).
+/// the feet**, viewport aspect, render distance (in chunks) and vertical field
+/// of view in degrees.
 ///
 /// `state.position` is the feet — always, in every pose. `eye_height` is what
 /// varies; see the module docs.
+///
+/// # `fov_y_degrees` is a parameter for the eye height's reason
+///
+/// It was [`FOV_Y_DEGREES`], written in unconditionally, and that single line was
+/// the whole of why vanilla's FOV option did nothing here: the projection matrix
+/// has read [`Camera::fov_y_degrees`] since the camera existed, so every link
+/// past this one was already correct. Pass [`FOV_Y_DEGREES`] for vanilla's
+/// default; pass the player's `Options::fov` to honour the option.
+///
+/// Clamped to vanilla's own `IntRange(30, 110)` here rather than trusted, because
+/// a `0` or a negative would make `perspective_rh`'s `1 / tan(fov / 2)` infinite
+/// and blank the frame instead of looking wrong — and this function is reachable
+/// from a hand-edited `options.json`. A non-finite value falls back to the
+/// default for the same reason.
 #[must_use]
 pub fn build_camera(
     state: &PlayerState,
     eye_height: f32,
     aspect: f32,
     render_distance: u32,
+    fov_y_degrees: f32,
 ) -> Camera {
     let feet = glam::Vec3::new(
         state.position.x as f32,
@@ -989,7 +1013,7 @@ pub fn build_camera(
         position: feet + glam::Vec3::new(0.0, eye_height, 0.0),
         yaw: state.yaw,
         pitch: state.pitch,
-        fov_y_degrees: FOV_Y_DEGREES,
+        fov_y_degrees: clamp_fov(fov_y_degrees),
         aspect: if aspect.is_finite() && aspect > 0.0 {
             aspect
         } else {
@@ -997,6 +1021,25 @@ pub fn build_camera(
         },
         near: NEAR,
         far: Camera::far_for_render_distance(render_distance, 0),
+    }
+}
+
+/// Vanilla's `fov` `IntRange(30, 110)` as a clamp on the degrees
+/// [`build_camera`] will actually write, with a non-finite input falling back to
+/// [`FOV_Y_DEGREES`].
+///
+/// The bounds are named here rather than imported from
+/// `crate::config::{MIN_FOV, MAX_FOV}` deliberately: this module is the render
+/// rig and has no dependency on the persisted-settings layer in either
+/// direction, and the pair is a *vanilla record* (`Options.java:806`) that both
+/// places cite independently. `crate::config`'s own doc names this function as
+/// the second clamp.
+#[must_use]
+fn clamp_fov(degrees: f32) -> f32 {
+    if degrees.is_finite() {
+        degrees.clamp(30.0, 110.0)
+    } else {
+        FOV_Y_DEGREES
     }
 }
 
@@ -1846,7 +1889,7 @@ mod tests {
     #[test]
     fn eye_is_above_feet() {
         let state = PlayerState::at(Vec3d::new(1.0, 64.0, 2.0), 0.0);
-        let cam = build_camera(&state, PLAYER_EYE_HEIGHT, 16.0 / 9.0, 8);
+        let cam = build_camera(&state, PLAYER_EYE_HEIGHT, 16.0 / 9.0, 8, FOV_Y_DEGREES);
         assert!((cam.position.y - (64.0 + PLAYER_EYE_HEIGHT)).abs() < 1e-6);
         assert!((cam.position.x - 1.0).abs() < 1e-6);
     }
@@ -1854,8 +1897,8 @@ mod tests {
     #[test]
     fn far_scales_with_render_distance() {
         let state = PlayerState::at(Vec3d::ZERO, 0.0);
-        let near = build_camera(&state, PLAYER_EYE_HEIGHT, 1.0, 4);
-        let far = build_camera(&state, PLAYER_EYE_HEIGHT, 1.0, 16);
+        let near = build_camera(&state, PLAYER_EYE_HEIGHT, 1.0, 4, FOV_Y_DEGREES);
+        let far = build_camera(&state, PLAYER_EYE_HEIGHT, 1.0, 16, FOV_Y_DEGREES);
         assert!(
             far.far > near.far,
             "more render distance ⇒ farther far plane"
@@ -1865,8 +1908,104 @@ mod tests {
     #[test]
     fn degenerate_aspect_is_sanitised() {
         let state = PlayerState::at(Vec3d::ZERO, 0.0);
-        let cam = build_camera(&state, PLAYER_EYE_HEIGHT, 0.0, 8);
+        let cam = build_camera(&state, PLAYER_EYE_HEIGHT, 0.0, 8, FOV_Y_DEGREES);
         assert_eq!(cam.aspect, 1.0);
+    }
+
+    // --- vanilla's `fov` option reaches the projection. ---
+
+    /// `cot(35°)` — what `m[1][1]` is at [`FOV_Y_DEGREES`], and therefore the
+    /// **frozen-default hypothesis** every assertion below has to land away from.
+    ///
+    /// Spelled out as a constant rather than recomputed from `FOV_Y_DEGREES`
+    /// inside the test, because a regression that reverted `build_camera` to
+    /// writing that constant would then move both the measurement *and* the
+    /// expectation and the gate would keep passing.
+    const FROZEN_PROJECTION_SCALE: f32 = 1.428_148;
+
+    /// The `fov_y_degrees` argument reaches [`Camera::projection_matrix`], at two
+    /// values where the frozen default lands somewhere else entirely.
+    ///
+    /// # Where the expected numbers come from
+    ///
+    /// Not from a run of this code. Vanilla hands `options.fov` to JOML's
+    /// `Matrix4f.perspective`, and every perspective matrix in that family —
+    /// glam's DirectX RH form included — puts `1 / tan(fovy / 2)` in `m[1][1]`.
+    /// So both anchors are exact cotangents of a half-angle: `cot(45°) == 1` and
+    /// `cot(15°) == 2 + √3`. Two anchors rather than one because a single
+    /// measurement is satisfied by a matrix that ignores the argument and happens
+    /// to be built for that angle.
+    ///
+    /// `90` and `30` are chosen because their cotangents are closed-form *and* far
+    /// from [`FROZEN_PROJECTION_SCALE`]; a gate at `70` would measure only that the
+    /// function runs, since correct and frozen agree there by construction.
+    #[test]
+    fn the_fov_argument_reaches_the_projection_and_not_the_frozen_default() {
+        let state = PlayerState::at(Vec3d::ZERO, 0.0);
+
+        // 90° → cot(45°) == 1, exactly.
+        let wide = build_camera(&state, PLAYER_EYE_HEIGHT, 1.0, 8, 90.0);
+        let h = wide.projection_matrix().y_axis.y;
+        assert!(
+            (h - 1.0).abs() < 1e-5,
+            "FOV 90 must give m[1][1] == cot(45°) == 1, got {h}"
+        );
+        assert!(
+            (h - FROZEN_PROJECTION_SCALE).abs() > 0.4,
+            "FOV 90 landed on the frozen default's scale ({FROZEN_PROJECTION_SCALE}) \
+             — the argument is being ignored"
+        );
+
+        // 30° (vanilla's range minimum) → cot(15°) == 2 + √3.
+        let narrow = build_camera(&state, PLAYER_EYE_HEIGHT, 1.0, 8, 30.0);
+        let h = narrow.projection_matrix().y_axis.y;
+        assert!(
+            (h - 3.732_050_8).abs() < 1e-5,
+            "FOV 30 must give m[1][1] == cot(15°) == 2 + sqrt(3), got {h}"
+        );
+        assert!(
+            (h - FROZEN_PROJECTION_SCALE).abs() > 2.0,
+            "FOV 30 landed on the frozen default's scale — the argument is \
+             being ignored"
+        );
+
+        // The control: [`FROZEN_PROJECTION_SCALE`] really is what the old
+        // hardcoded constant produced, so the two hypotheses above are the pair
+        // this gate claims to distinguish rather than two arbitrary numbers.
+        let default = build_camera(&state, PLAYER_EYE_HEIGHT, 1.0, 8, FOV_Y_DEGREES);
+        let h = default.projection_matrix().y_axis.y;
+        assert!(
+            (h - FROZEN_PROJECTION_SCALE).abs() < 1e-5,
+            "the frozen-default hypothesis is mis-stated: FOV_Y_DEGREES gives \
+             {h}, not {FROZEN_PROJECTION_SCALE}"
+        );
+    }
+
+    /// A hand-edited `options.json` must not be able to blank the frame.
+    ///
+    /// `0` degrees makes `1 / tan(0)` infinite and `perspective` degenerate, which
+    /// is a black screen rather than a wrong-looking one — so the clamp is to
+    /// vanilla's own `IntRange(30, 110)` and a rejected value lands on an
+    /// **endpoint**, not on the default, because a clamp is what vanilla's slider
+    /// does too.
+    #[test]
+    fn an_out_of_range_fov_is_clamped_onto_vanillas_own_range() {
+        let state = PlayerState::at(Vec3d::ZERO, 0.0);
+        let at = |fov: f32| build_camera(&state, PLAYER_EYE_HEIGHT, 1.0, 8, fov).fov_y_degrees;
+        assert_eq!(at(0.0), 30.0, "0 clamps up to the minimum");
+        assert_eq!(at(-90.0), 30.0);
+        assert_eq!(at(400.0), 110.0, "and down to the maximum");
+        assert_eq!(
+            at(f32::NAN),
+            FOV_Y_DEGREES,
+            "a non-finite value has no nearer endpoint, so it degrades to \
+             vanilla's default"
+        );
+        // The detector works: both endpoints and an interior value really do come
+        // through unchanged.
+        assert_eq!(at(30.0), 30.0);
+        assert_eq!(at(110.0), 110.0);
+        assert_eq!(at(90.0), 90.0);
     }
 
     // --- apply_spyglass_fov: issue #154's FOV-zoom half. ---
@@ -1874,7 +2013,7 @@ mod tests {
     #[test]
     fn apply_spyglass_fov_is_a_tenth_while_scoping() {
         let state = PlayerState::at(Vec3d::ZERO, 0.0);
-        let cam = build_camera(&state, PLAYER_EYE_HEIGHT, 16.0 / 9.0, 8);
+        let cam = build_camera(&state, PLAYER_EYE_HEIGHT, 16.0 / 9.0, 8, FOV_Y_DEGREES);
         let zoomed = apply_spyglass_fov(cam, true);
         assert!(
             (zoomed.fov_y_degrees - cam.fov_y_degrees * 0.1).abs() < 1e-6,
@@ -1888,7 +2027,7 @@ mod tests {
     #[test]
     fn apply_spyglass_fov_is_unchanged_while_not_scoping() {
         let state = PlayerState::at(Vec3d::ZERO, 0.0);
-        let cam = build_camera(&state, PLAYER_EYE_HEIGHT, 16.0 / 9.0, 8);
+        let cam = build_camera(&state, PLAYER_EYE_HEIGHT, 16.0 / 9.0, 8, FOV_Y_DEGREES);
         let unzoomed = apply_spyglass_fov(cam, false);
         assert_eq!(unzoomed.fov_y_degrees, cam.fov_y_degrees);
     }
@@ -1901,7 +2040,7 @@ mod tests {
         // absolute spyglass constant — this is the "composed with, not
         // overwriting" property `docs/screen-overlays.md` calls out.
         let state = PlayerState::at(Vec3d::ZERO, 0.0);
-        let mut cam = build_camera(&state, PLAYER_EYE_HEIGHT, 16.0 / 9.0, 8);
+        let mut cam = build_camera(&state, PLAYER_EYE_HEIGHT, 16.0 / 9.0, 8, FOV_Y_DEGREES);
         cam.fov_y_degrees = 90.0;
         let zoomed = apply_spyglass_fov(cam, true);
         assert!((zoomed.fov_y_degrees - 9.0).abs() < 1e-6);

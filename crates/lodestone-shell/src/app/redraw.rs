@@ -73,6 +73,19 @@ impl WindowApp {
         // is on. Pushed every frame for `set_view_bobbing`'s reason.
         self.sim
             .set_damage_tilt_strength(self.nav.damage_tilt_strength());
+        // Vanilla's eleven `soundSource.*` sliders, pushed beside View Bobbing and
+        // **before** `draw_menu`'s early return on purpose: the sliders live on the
+        // Sound settings page, so a player dragging Master must hear the menu music
+        // change while that page is still the whole frame. One mixer lock per
+        // frame carries all eleven — see `Sim::set_sound_volumes`.
+        self.sim.set_sound_volumes(self.nav.options());
+        // Vanilla's FOV option, in degrees. Pushed here rather than folded into
+        // `Config` at launch the way `renderDistance` is, because vanilla's `fov`
+        // takes the default `applyValueImmediately` and its does not — the slider
+        // has to move the view while the settings page is open. `Sim::camera`
+        // reads it; `camera_rig::build_camera` clamps it.
+        self.sim
+            .set_fov_y_degrees(self.nav.options().fov as f32);
 
         // A menu screen owns the whole frame — its pass clears, so there is no
         // world render behind it and none of the HUD state below is built.

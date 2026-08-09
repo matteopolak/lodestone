@@ -589,6 +589,19 @@ pub struct Sim {
     /// user choice that disables the effect, so a zero default would be
     /// indistinguishable from the accessibility option being on.
     damage_tilt_strength: f32,
+    /// Vanilla's **FOV** option ([`crate::config::Options::fov`]) in degrees,
+    /// pushed down the same way as [`Self::view_bobbing`] by
+    /// [`Self::set_fov_y_degrees`] and read by [`Self::camera`].
+    ///
+    /// Seeded to [`crate::camera_rig::FOV_Y_DEGREES`] — vanilla's own `70` — so a
+    /// caller that never calls the setter (a headless bot, a test) sees exactly
+    /// the projection it saw when `build_camera` wrote that constant itself.
+    ///
+    /// A whole `f32` rather than the option's `u32` degrees because that is what
+    /// [`Camera::fov_y_degrees`](lodestone_render::Camera) is, and the spyglass
+    /// zoom multiplies it by `0.1`: rounding back to an integer between the option
+    /// and the camera would quantise a 3° scoped view to 3.
+    fov_y_degrees: f32,
     /// Vanilla's `invertMouseX`/`invertMouseY` options
     /// ([`crate::config::Options::invert_mouse_x`]/`invert_mouse_y`, issue
     /// #203), pushed down the same way as [`Self::view_bobbing`] — see
