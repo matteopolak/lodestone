@@ -264,17 +264,35 @@ recurring defect classes, not because they are generically useful — see
    was worse than this bullet says, with **six** riding items stranded, three of them
    serverbound with zero producers.
 
-   **What remains is one thing, not four: the vehicle does not move.** Every vehicle
-   is client-authoritative while a player rides it — `Entity.isClientAuthoritative`
-   delegates to the controlling passenger and `Player`'s is `true`, so the server
-   takes `travelRidden`'s `setDeltaMovement(Vec3.ZERO)` branch and waits for
-   `ServerboundMoveVehiclePacket`. **This includes horses**, so the intuitive
-   "a horse steers for free off the `PlayerInput` bitfield we already send" is wrong;
-   do not plan around it. Boat steering, paddle state, the horse jump impulse and the
-   jump bar are all downstream of porting vehicle physics + producing
-   `ClientAction::MoveVehicle`. The jump bar additionally needs a `HudFrame` line in
-   `app.rs`. Camera-on-a-*moving*-vehicle needs the minecart lerp fix-up
-   (`Camera.java:247-256`), which needs per-vehicle interpolation state.
+   **The one thing that remained — the vehicle not moving — is also closed.** Every
+   vehicle is client-authoritative while a player rides it (`Entity.isClientAuthoritative`
+   delegates to the controlling passenger and `Player`'s is `true`, so the server takes
+   `travelRidden`'s `setDeltaMovement(Vec3.ZERO)` branch and waits for
+   `ServerboundMoveVehiclePacket`), **including horses** — the intuitive "a horse steers
+   for free off the `PlayerInput` bitfield we already send" was and is wrong. So the
+   physics is now ported in `lodestone_physics::vehicle` and driven by
+   `lodestone_ecs::vehicle`: boat float/steer/paddles, land-mount ridden travel, the
+   horse jump charge and impulse, rider yaw clamping, `ClientAction::{MoveVehicle,
+   PaddleBoat}` once per tick, `PlayerCommand::StartRidingJump` on the release edge, and
+   `ClientEvent::VehicleMoved` folded as the server's rejection snap.
+
+   **Two things the earlier version of this entry got wrong, both worth carrying.**
+   `AbstractHorse`'s ridden rule is **not** universal: `Pig` and `Strider` override
+   `getRiddenInput` to a constant `(0, 0, 1)` — unsteerable by keys — and scale speed by
+   `0.225` / `0.55`, so "the ridden-travel path" is three rules, not one. And
+   `PlayerCommand::StopRidingJump` is not a missing producer waiting on input: the vanilla
+   client has no sender for it at all, so zero is the correct count forever.
+
+   What is still open is smaller and each item is blocked on its own thing, not on
+   authority: the jump **bar** (needs a `HudFrame` line in `app.rs` plus sprites that
+   exist nowhere in the tree), the horse inventory screen
+   (`ClientEvent::MountScreenOpened` + `PlayerCommand::OpenInventory`), the minecart
+   camera lerp fix-up (`Camera.alignWithEntity`'s new-behaviour-minecart branch, which
+   needs per-vehicle interpolation state), the jar-generated attachment table, and a
+   handful of unmodelled vanilla clauses (`refuseToMove`, `isSuffocating`, `boostFactor`,
+   `isStanding`, the saddle gate) — all enumerated in `riding.md`. **Minecarts are
+   deliberately left to the server**: rail-following motion arrives as
+   `ClientboundMoveMinecartPacket`, so `VehicleFamily::for_type_path` declines them.
 9. **The remaining ~32 clientbound packets.** **Use `cargo xtask connectedness`, never a
    hand count** — the hand-derived figure has been wrong four times in four different
    ways, and do not trust the numbers written here either: run it.
