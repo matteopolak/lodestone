@@ -3995,6 +3995,11 @@ const COMPOSTER_BEHAVIOR_SEED: u64 = 0x5EED_C011;
 /// stream nothing else advances.
 const BONE_MEAL_BEHAVIOR_SEED: u64 = 0x5EED_B04E;
 
+/// The seed for the per-connection [`SpawnRng`] that draws
+/// `BaseFireBlock.fireIgnite`'s `nextInt(1, 3)` player ramp. Its own stream for the
+/// reason the two constants above give.
+const BURN_BEHAVIOR_SEED: u64 = 0x5EED_F14E;
+
 /// What a right-click on a composter did, so [`apply_use_item_on`] can decide
 /// whether the ordinary placement logic may still run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6806,6 +6811,11 @@ where
     let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
     let mut experience = crate::experience::PlayerExperience::default();
     let mut effects = crate::mob_effects::ActiveEffects::new();
+    let mut burn = crate::burning::BurnState::new();
+    // The `nextInt(1, 3)` ramp draw `BaseFireBlock.fireIgnite` makes on a player's
+    // contact tick. Its own stream, so standing in fire cannot shift which roll a
+    // later block drop or composter insert sees.
+    let mut burn_rng = SpawnRng::new(BURN_BEHAVIOR_SEED);
     // Issue #337. This connection's block-drop roll stream — see
     // `block_drops::BLOCK_DROPS_BEHAVIOR_SEED` and `dispatch_play_packet`'s
     // parameter comment for why it is separate from the composter's.
@@ -7314,6 +7324,72 @@ where
                     }
                 }
 
+                // Burning. The ignition producer and the burn consumer in one place,
+                // because both need the same feet-cell read — vanilla splits them
+                // (`BaseFireBlock.entityInside` ignites, `Entity.baseTick` consumes)
+                // only because the block and the entity are different objects.
+                //
+                // The **feet** cell, not the eye: `entityInside` fires for any cell the
+                // bounding box overlaps, and the feet cell is the one this crate
+                // tracks. Reading the eye instead would let a player stand in fire
+                // unharmed up to their chin.
+                //
+                // `!invulnerable`: vanilla's guards are `fireImmune()` on the entity
+                // type and `abilities.invulnerable` inside the damage path; a creative
+                // player is the second. Passed as `fire_immune` because the observable
+                // is the same — the fire goes out and nothing hurts — and this crate
+                // has no per-entity-type immunity table to consult.
+                if let Some((x, y, z)) = player_pos {
+                    let feet = source.get().block_state(
+                        x.floor() as i32,
+                        y.floor() as i32,
+                        z.floor() as i32,
+                    );
+                    let standing_in = crate::burning::BurnSource::for_block(&feet);
+                    let creative = Abilities::for_mode(game_mode).invulnerable;
+                    // Fire Resistance refuses the damage and leaves the counter
+                    // running — see `crate::burning`'s doc for why that is not the
+                    // same as putting the fire out.
+                    let resistant = effects
+                        .amplifier_of("minecraft:fire_resistance")
+                        .is_some();
+                    if let Some(source_kind) = standing_in
+                        && !creative
+                    {
+                        match source_kind {
+                            // `BaseFireBlock.fireIgnite` — the player ramp, which is
+                            // why running across one fire block can leave you unburnt.
+                            // One draw per contact tick, from this connection's own
+                            // stream.
+                            crate::burning::BurnSource::Fire
+                            | crate::burning::BurnSource::SoulFire => {
+                                let ramp = 1 + i32::from(burn_rng.next_f32() < 0.5);
+                                burn.fire_ignite(true, ramp);
+                            }
+                            // `Entity.lavaIgnite` — a flat 15 seconds, no ramp.
+                            crate::burning::BurnSource::Lava => {
+                                burn.ignite_for_ticks(crate::burning::LAVA_IGNITE_TICKS);
+                            }
+                        }
+                    }
+                    let out = burn.tick(standing_in, creative, resistant);
+                    if out.damage > 0.0 {
+                        vitals.apply_effect_damage(out.damage);
+                        publish_health(
+                            conn,
+                            &mut state,
+                            proto,
+                            &vitals,
+                            player_entity_id,
+                            &username,
+                            crate::vitals::DeathCause::OnFire,
+                            &mut advancements,
+                            player_uuid,
+                        )
+                        .await?;
+                    }
+                }
+
                 // Status effects, ahead of hunger — vanilla ticks `activeEffects` in
                 // `LivingEntity.aiStep` before `ServerPlayer.tick` reaches
                 // `foodData.tick`, and the order matters for one arm: `hunger`
@@ -7733,6 +7809,11 @@ where
     let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
     let mut experience = crate::experience::PlayerExperience::default();
     let mut effects = crate::mob_effects::ActiveEffects::new();
+    let mut burn = crate::burning::BurnState::new();
+    // The `nextInt(1, 3)` ramp draw `BaseFireBlock.fireIgnite` makes on a player's
+    // contact tick. Its own stream, so standing in fire cannot shift which roll a
+    // later block drop or composter insert sees.
+    let mut burn_rng = SpawnRng::new(BURN_BEHAVIOR_SEED);
     // Issue #337 — see the native `serve_play`'s identical binding: the
     // block-drop roll stream has no timer and no wasm32 dependency either.
     let mut drops_rng = SpawnRng::new(crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED);
