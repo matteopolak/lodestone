@@ -399,10 +399,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   same way [`Screen::Paused`](./pause-menu.md) does, and gates a respawn the client
   used to send automatically with no screen at all.
 - [F3 debug overlay](./debug-overlay.md) — The F3 instrument: two columns of stats
-  over the world, plus the F3+B hitbox and F3+G chunk-border world overlays. Issue
-  #197 turned the existing single dense column into vanilla's two-column layout, gave
-  every line vanilla's translucent plate, and added the two chords and the light
-  readout.
+  over the world in vanilla's own plate, pitch and font, plus the F3+B hitbox and F3+G
+  chunk-border world overlays. The presentation is a port of `DebugScreenOverlay`; the
+  *content* is curated — vanilla lines that describe the JVM are dropped rather than
+  faked, and this engine's own counters take the slots they leave.
 - [Dimension visuals: sky, fog and the Nether/End](./dimension-visuals.md) — How the
   client's render path is supposed to look different in the Nether and the End, versus
   what it actually does today: which parts already work (sky light defaulting, and now
