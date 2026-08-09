@@ -94,6 +94,14 @@ const PLAYER_BB_HEIGHT: f32 = 1.8;
 /// `docs/player-skins.md`.
 const DEFAULT_MODEL: PlayerModelType = PlayerModelType::Wide;
 
+/// `leftPos + 73`, `topPos + 6` — the creative inventory tab's avatar recess origin.
+/// See [`PlayerAvatar::creative`].
+const CREATIVE_RECT_OFFSET: [f32; 2] = [73.0, 6.0];
+/// `105 - 73` by `49 - 6`.
+const CREATIVE_RECT_SIZE: [f32; 2] = [32.0, 43.0];
+/// The creative call's `scale` argument, against `InventoryScreen`'s 30.
+const CREATIVE_SIZE: f32 = 20.0;
+
 /// The interim local skin: `<data_dir>/skin.png`, with an optional sibling
 /// `<data_dir>/skin.model` naming the rig.
 ///
@@ -163,6 +171,16 @@ pub struct PlayerAvatar {
     /// inventory screen is ever open in. Reaching it needs a small accessor in
     /// `sim/`; see `docs/inventory-player-preview.md`.
     pub pose: AnimInput,
+    /// The `scale` argument `extractEntityInInventoryFollowsMouse` is called with —
+    /// GUI pixels per block, which sets how large the avatar is drawn inside
+    /// [`rect`](Self::rect).
+    ///
+    /// Carried rather than taken from [`INVENTORY_SIZE`] at draw time because the two
+    /// screens that show an avatar do **not** agree on it: `InventoryScreen` passes
+    /// `30`, and `CreativeModeInventoryScreen`'s inventory tab passes `20` into a
+    /// smaller recess. Reading the constant would draw the creative avatar at the
+    /// survival size and it would overflow its well.
+    pub size: f32,
 }
 
 impl PlayerAvatar {
@@ -180,11 +198,40 @@ impl PlayerAvatar {
             w: INVENTORY_RECT_SIZE[0],
             h: INVENTORY_RECT_SIZE[1],
         };
+        Self::in_rect(rect, cursor_logical, INVENTORY_SIZE)
+    }
+
+    /// The avatar rect the **creative** screen's inventory tab uses.
+    ///
+    /// `CreativeModeInventoryScreen.extractBackground`'s own call, on the
+    /// `Type.INVENTORY` branch only:
+    /// `extractEntityInInventoryFollowsMouse(g, leftPos + 73, topPos + 6, leftPos + 105,
+    /// topPos + 49, 20, 0.0625F, mouseX, mouseY, player)`. So a 32×43 recess at
+    /// `(+73, +6)` at scale 20 — a different rect *and* a different scale from
+    /// [`new`](Self::new)'s 49×70 at `(+26, +8)`, scale 30. Neither number is shared,
+    /// which is why this is its own constructor rather than an offset applied to that
+    /// one.
+    ///
+    /// The module doc in `container/creative.rs` used to state that vanilla's creative
+    /// screen never draws the avatar. It does; this is the call.
+    #[must_use]
+    pub fn creative(panel_x: f32, panel_y: f32, cursor_logical: Option<[f32; 2]>) -> Self {
+        let rect = Rect {
+            x: panel_x + CREATIVE_RECT_OFFSET[0],
+            y: panel_y + CREATIVE_RECT_OFFSET[1],
+            w: CREATIVE_RECT_SIZE[0],
+            h: CREATIVE_RECT_SIZE[1],
+        };
+        Self::in_rect(rect, cursor_logical, CREATIVE_SIZE)
+    }
+
+    fn in_rect(rect: Rect, cursor_logical: Option<[f32; 2]>, size: f32) -> Self {
         let mouse = cursor_logical.unwrap_or([rect.x + rect.w * 0.5, rect.y + rect.h * 0.5]);
         Self {
             rect,
             mouse,
             pose: AnimInput::REST,
+            size,
         }
     }
 
@@ -209,7 +256,7 @@ impl PlayerAvatar {
     pub fn view(&self) -> Mat4 {
         gui_entity_view(
             self.rect_px(),
-            INVENTORY_SIZE,
+            self.size,
             INVENTORY_OFFSET_Y,
             PLAYER_BB_HEIGHT,
             &self.look(),

@@ -56,8 +56,9 @@ mod tooltip;
 pub use background::ContainerBackground;
 pub use creative::{
     CREATIVE_COLS, CREATIVE_DEFAULT_TAB, CREATIVE_PAGE, CREATIVE_PANEL_H, CREATIVE_PANEL_W,
-    CREATIVE_ROWS, CREATIVE_SEARCH_MAX_LEN, CreativeBackground, CreativeHit, CreativeLayout,
-    CreativeState, CreativeTabKind, CreativeView, can_scroll, creative_geometry, creative_hit_test,
+    CREATIVE_ROWS, CREATIVE_SEARCH_MAX_LEN, CreativeBackground, CreativeEffect, CreativeHit,
+    CreativeLayout, CreativeState, CreativeTabKind, CreativeView, can_scroll, creative_click,
+    creative_geometry, creative_hit_test, creative_inventory_click, creative_item_list_click,
     creative_items_for, creative_layout, creative_page_items, creative_tab_count,
     creative_tab_kind, creative_tab_title_key, row_count, row_for_scroll,
 };

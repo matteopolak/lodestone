@@ -874,6 +874,12 @@ impl WindowApp {
                 &self.creative,
                 creative_menu.as_ref(),
                 &creative_title,
+                // The same cursor and the same tooltip option the ordinary container
+                // frame is given below. Without these the creative screen draws no
+                // hover highlight, no cursor stack and no tooltip — the three things
+                // that made taking an item out of it feel broken.
+                Some([self.cursor.0, self.cursor.1]),
+                Some(self.nav.advanced_item_tooltips()),
                 container_renderer,
                 item_models,
                 self.nav.gui_scale(),

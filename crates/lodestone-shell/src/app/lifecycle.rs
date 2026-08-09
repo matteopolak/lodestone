@@ -527,17 +527,34 @@ impl ApplicationHandler for WindowApp {
             WindowEvent::MouseInput { state, button, .. }
                 if self.ui.is_container_open() && self.creative_screen_open() =>
             {
-                if let (Some(MenuButton::Left), Some((w, h))) = (
+                if let (Some(menu_button), Some((w, h))) = (
                     menu_button_for(button),
                     self.target.as_ref().map(RenderTarget::size),
                 ) {
                     match state {
                         ElementState::Pressed => {
-                            self.handle_creative_click(w, h);
+                            // `AbstractContainerScreen.mouseClicked`'s own three-way:
+                            // the pick-item button clones (and it is *only* a clone for
+                            // a player with `instabuild`, which this screen already
+                            // guarantees), shift quick-moves, everything else picks up.
+                            // Vanilla's raw button number is 0 for left and 1 for
+                            // right, and the clone arm passes whichever button was used.
+                            let (raw, input) = match menu_button {
+                                MenuButton::Pick => (0, lodestone_game::click::ContainerInput::Clone),
+                                MenuButton::Left if self.shift_held => {
+                                    (0, lodestone_game::click::ContainerInput::QuickMove)
+                                }
+                                MenuButton::Right if self.shift_held => {
+                                    (1, lodestone_game::click::ContainerInput::QuickMove)
+                                }
+                                MenuButton::Left => (0, lodestone_game::click::ContainerInput::Pickup),
+                                MenuButton::Right => (1, lodestone_game::click::ContainerInput::Pickup),
+                            };
+                            self.handle_creative_click(raw, input, w, h);
                         }
                         // The thumb drag ends on release, wherever the pointer
                         // is — vanilla's `mouseReleased` sets `scrolling = false`
-                        // unconditionally (`:513`).
+                        // unconditionally.
                         ElementState::Released => self.creative.scrolling = false,
                     }
                 }
