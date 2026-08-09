@@ -5405,6 +5405,105 @@ fn read_menu(
         .collect()
 }
 
+/// The `stateId` the join snapshot carries, and it is **`1`, not `0`**.
+///
+/// Vanilla's `AbstractContainerMenu::setSynchronizer` calls `sendAllDataToRemote`,
+/// which hands the list to `ContainerSynchronizer::sendInitialData` — and
+/// `ServerPlayer`'s implementation of that sends
+/// `new ClientboundContainerSetContentPacket(container.containerId,
+/// container.incrementStateId(), …)`. `stateId` starts at `0` and
+/// `incrementStateId` is `(stateId + 1) & 32767`, so the *first* content packet a
+/// real client ever receives for its own inventory menu carries `1`.
+///
+/// # Why the other window-`0` sends in this file can keep their constant `0`
+///
+/// Measured against the 26.2 decompile rather than assumed, because the obvious
+/// worry — "a wrong state id makes the client reject the next update" — is
+/// **backwards**. No client validates this field:
+/// `ClientPacketListener.handleContainerContent` calls
+/// `menu.initializeContents(packet.stateId(), …)` unconditionally, and
+/// `initializeContents` simply assigns `this.stateId = stateId`. Ditto
+/// `AbstractContainerMenu::setItem` for a single-slot update, and this workspace's
+/// own client does the same (`lodestone_game::reconcile::MenuPair::sync_state_id`
+/// adopts whatever arrived).
+///
+/// The only consumer anywhere is a **server** checking a click's *echoed* id:
+/// `ServerGamePacketListenerImpl.handleContainerClick`'s
+/// `packet.stateId() != this.player.containerMenu.getStateId()` picks the
+/// `broadcastFullState()` branch. That is the other direction of travel, and this
+/// crate does not perform that check at all (the `ServerBound::ContainerClicked`
+/// arm binds `state_id: _`). So a window-`0` id that moves backwards costs nothing
+/// observable on either known client — which is why the join snapshot is faithful
+/// to the record here without threading a real counter through
+/// [`dispatch_play_packet`] for a field nothing reads.
+const JOIN_CONTENT_STATE_ID: i32 = 1;
+
+/// The window-`0` inventory snapshot a joining player is owed — vanilla's
+/// `ServerPlayer::initInventoryMenu`.
+///
+/// # Why this exists
+///
+/// **Nothing sent it.** The encoder
+/// ([`ServerProtocol::encode_container_content`]) and its `V770ServerProtocol`
+/// implementation were both complete, and the client decodes the packet and folds
+/// it through `lodestone_game::menus::Menus`, but every producer in this file was
+/// reactive: [`open_container_screen`] (a menu was opened),
+/// [`apply_container_clicked`] (a click disagreed) and [`apply_recipe_placed`].
+/// A rejoining player was therefore never told what they were holding, and their
+/// screen drew the fresh-`Menu` default — an empty grid — until the first click
+/// produced a disagreement and the corrective resync flushed all 46 slots at once.
+/// That is the reported symptom exactly: *"my inventory is empty, but if I
+/// shift-click something then all the items pop in"*. The items were never lost;
+/// `PlayerData::to_inventory` had restored them before this function's first line.
+///
+/// # Placement, and it is deliberate
+///
+/// `PlayerList.placeNewPlayer` calls `initInventoryMenu()` **last** — after the
+/// abilities/held-slot/recipe packets, after `sendPlayerPermissionLevel`, after the
+/// placement `teleport`, after the player-info adds and after `sendLevelInfo`. So
+/// the top of [`serve_play`] is the faithful position: `serve_connection_inner` has
+/// already done all of those, and the deferred chunk stream that this loop drains
+/// corresponds to vanilla's `PlayerChunkSender` feeding columns over *subsequent*
+/// ticks. Sending it later — say, lazily on the first movement packet — would
+/// reintroduce the same class of bug for a player who joins and stands still.
+///
+/// # The packet is `container_set_content`, not `set_player_inventory`
+///
+/// Both exist in 26.2 and this workspace's client decodes both, so it is worth
+/// recording why only one is correct here.
+/// `ClientboundSetPlayerInventoryPacket` is a **single-slot** record — `(int slot,
+/// ItemStack contents)` — and vanilla's only producer is
+/// `Inventory.createInventoryUpdatePacket`, called from `Inventory.add` to
+/// acknowledge one item pickup. It carries no slot list and no cursor, so it cannot
+/// express a snapshot. `ClientboundContainerSetContentPacket` is what
+/// `sendInitialData` sends, and `handleContainerContent`'s `containerId == 0` arm
+/// routes it to `player.inventoryMenu` — which is why window `0` is right.
+///
+/// The carried (cursor) stack is part of the snapshot rather than an afterthought:
+/// `sendAllDataToRemote` reads `getCarried()` and forces `remoteCarried` to it in
+/// the same pass. A player who quit mid-drag holds nothing on the server (the
+/// `ServerBound::ContainerClosed` arm returns the cursor to the inventory or the
+/// floor), so this is `None` in practice today — but reading it from
+/// [`ClickState`](crate::container_click::ClickState) rather than hardcoding `None`
+/// means it stays right when a disconnect path that preserves a cursor appears.
+fn join_inventory_snapshot<P: ServerProtocol>(
+    proto: &P,
+    inventory: &PlayerInventory,
+) -> ServerDirective {
+    let items = read_menu(
+        &MenuLayout::player(),
+        inventory,
+        Some(inventory.crafting()),
+        &[],
+    );
+    proto.encode_container_content(
+        0,
+        JOIN_CONTENT_STATE_ID,
+        &items,
+        inventory.click_state().carried.as_ref(),
+    )
+}
+
 /// Applies a `CONTAINER_CLICK` by **deriving** its result server-side
 /// (`ServerBound::ContainerClicked`).
 ///
@@ -7619,6 +7718,12 @@ where
     // Issue #302, counted down on `vitals_tick` — see that arm.
     let mut player_save_countdown = PLAYER_SAVE_EVERY_VITALS_TICKS;
 
+    // Vanilla's `ServerPlayer::initInventoryMenu`, the last call in
+    // `PlayerList.placeNewPlayer`. `inventory` above is already the restored one, so
+    // this is the packet that makes a rejoining player's items visible without
+    // touching a slot first — see `join_inventory_snapshot` for the whole story.
+    apply(conn, &mut state, join_inventory_snapshot(proto, &inventory)).await?;
+
     loop {
         tokio::select! {
             // The deferred join view (`JOIN_PRESTREAM_RADIUS`), streamed while this
@@ -8670,6 +8775,18 @@ where
     let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
     // Issue #469 — see the native loop's identical binding.
     let mut outgoing_chat: Vec<String> = Vec::new();
+
+    // `ServerPlayer::initInventoryMenu` — see the native `serve_play`'s identical
+    // send and `join_inventory_snapshot`'s own doc comment. Placed *before* the
+    // inline join-stream drain below rather than after it, so the packet's position
+    // relative to the deferred chunks matches native: there the send happens before
+    // the `select!` loop that drains the stream. This target's `inventory` is always
+    // a fresh `PlayerInventory::default()` (there is no player store in the
+    // browser), so the snapshot is 46 empty slots today — sent anyway, because the
+    // client's `Menus` fold is what establishes the window-`0` menu it will
+    // reconcile every later click against, and a target-specific omission here is
+    // exactly how the two loops drift apart.
+    apply(conn, &mut state, join_inventory_snapshot(proto, &inventory)).await?;
 
     // The deferred join view, inline — see this function's `join_stream`
     // parameter for why this target does not race it against anything.
