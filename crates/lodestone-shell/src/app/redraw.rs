@@ -819,6 +819,14 @@ impl WindowApp {
         hud_frame.boss_bars = &boss_bars;
         hud_frame.can_hurt_player = can_hurt_player;
         hud_frame.health = health;
+        // The armour row. `Sim::armour_value` is `floor(minecraft:armor)` off the
+        // local player's folded attribute snapshot — vanilla's
+        // `LivingEntity.getArmorValue()` — so equipment reaches the bar the way it
+        // reaches any other attribute, as a server `update_attributes` push, and
+        // there is no per-item table anywhere in the chain. Without this line the
+        // whole row is an island: `HudFrame::armour` defaults to `None`, both draw
+        // paths and both gates are correct, and zero pixels change.
+        hud_frame.armour = self.sim.armour_value();
         hud_frame.food = food;
         // Without this the hunger wobble (issue #30) is computed correctly and
         // never fires: vanilla shakes the row only while saturation is
