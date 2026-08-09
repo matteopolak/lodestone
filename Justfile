@@ -30,6 +30,12 @@ tdir := env("LODESTONE_TARGET_DIR", "target")
 jobs := env("LODESTONE_JOBS", "")
 jflag := if jobs != "" { "-j " + jobs } else { "" }
 
+# Default relay endpoints for `run-relay`, matching web/README.md. Held in a
+# variable rather than inline in the signature purely so `just --list` can still
+# fit the recipe's doc comment on the same line as its name — an inline default
+# this long pushes the description onto a line of its own.
+relay_defaults := "--listen 127.0.0.1:25580 --target 127.0.0.1:25565"
+
 # --- Health checks (CLAUDE.md "Build and test") ---------------------------
 
 # cargo check --workspace --all-targets
@@ -71,6 +77,52 @@ health: check check-all check-seam test
 # cargo run --release -p lodestone-shell --bin lodestone — launch the game
 run *args:
     cargo run --release -p lodestone-shell --bin lodestone {{jflag}} --target-dir {{tdir}} -- {{args}}
+
+# cd web && trunk serve --release — launch the BROWSER build and serve it on
+# http://127.0.0.1:8080/ (address, port and the COOP/COEP headers all come from
+# web/Trunk.toml, so they are deliberately not repeated here).
+#
+# Named `run-wasm` rather than `run:wasm` or `run --surface wasm` for two
+# reasons. `:` is just's module-path separator, so it is not available in a
+# recipe name at all. And a `--surface` flag on `run` would mean parsing an
+# argument and branching on it inside this file — the one thing the header
+# forbids; two recipes is the shape that keeps "one name per raw invocation"
+# true. It sits beside `run` so `just --list` shows both ways to launch the game
+# together, while the `wasm-*` recipes below stay grouped as what they are:
+# guards, not launchers.
+#
+# --release is NOT a preference here, the same way it is not for `run`, but for a
+# different reason: a debug build makes single-threaded worldgen ~10x slower,
+# which blows the singleplayer probe's own 30 s deadline and therefore *presents
+# as a failure* rather than as slowness. See web/README.md → "Run it".
+#
+# No {{jflag}} and no --target-dir {{tdir}}, and their absence is deliberate
+# rather than an oversight: trunk drives cargo itself and exposes neither flag
+# (its output knob is --dist), and `web/` is its own workspace root with its own
+# Cargo.lock and its own web/target/, so it never contends for the shared
+# target/ lock that {{tdir}} exists to avoid.
+#
+# Prerequisites are trunk 0.21.x and the wasm32-unknown-unknown target. This
+# recipe lets trunk report a missing one; `just wasm-check` is the recipe that
+# verifies both up front and fails with the install command.
+#
+# The [doc] attribute is here because `just --list` otherwise shows the LAST
+# comment line before a recipe, which for any recipe carrying real rationale is a
+# mid-sentence fragment. Prefer it over reordering the prose so the summary lands
+# last — the rationale should read top-to-bottom for someone in the file.
+[doc("cd web && trunk serve --release — launch the browser (wasm) build on :8080")]
+run-wasm *args:
+    cd web && trunk serve --release {{args}}
+
+# cargo run -p lodestone-relay — the WebSocket→TCP bridge the browser build needs
+# to join a real server, because a browser cannot open a raw TCP socket. Render
+# and in-memory singleplayer work with this down (the page shows `relay
+# UNREACHABLE` on its net HUD line); joining anything does not. Defaults match
+# web/README.md; override by passing your own flags, e.g.
+# `just run-relay --listen 127.0.0.1:25580 --target 127.0.0.1:25570`.
+[doc("cargo run -p lodestone-relay — the WebSocket→TCP bridge run-wasm needs to join a server")]
+run-relay *args=relay_defaults:
+    cargo run --release -p lodestone-relay {{jflag}} --target-dir {{tdir}} -- {{args}}
 
 # --- xtask ------------------------------------------------------------------
 
@@ -191,12 +243,14 @@ oracle-top-layer:
 # prove the browser runs — see xtask's wasm-check section (issue #431; the
 # tested port of scripts/wasm-check.sh, which remains as the reference
 # original).
+[doc("wasm32 compile + confinement-guard tripwire — does NOT prove the browser runs")]
 wasm-check:
     cargo run -q -p xtask {{jflag}} --target-dir {{tdir}} -- wasm-check
 
 # Release wasm bundle-size ceiling (gzip-enforced; brotli reported when
 # available). Separate from wasm-check because a --release + lto=fat build
 # is slow enough that folding it in would slow the command everyone runs.
+[doc("release wasm bundle-size ceiling, gzip-enforced (slow: --release + lto=fat)")]
 wasm-size:
     ./scripts/wasm-size.sh
 
