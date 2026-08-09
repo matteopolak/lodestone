@@ -511,12 +511,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   client's event routers claim each `ClientEvent` variant. It exists so that adding a
   variant and forgetting to wire it is a **compile error** (`E0004`) rather than a
   silent nothing.
-- [Experience](./experience.md) — The XP level curve, the orb denomination ladder
-  and a player's experience state. `crates/lodestone-server/src/experience.rs` holds
-  all three as pure arithmetic; `ServerProtocol::encode_set_experience` puts the
-  result on the wire, and `crates/lodestone-server/src/player_data.rs` saves and
-  restores it. The one production *source* today is furnace smelting, paid out when
-  the player closes the menu.
+- [Experience](./experience.md) — The XP level curve, the orb denomination ladder, a
+  player's experience state, and the `experience_orb` entity that carries points from
+  a kill or a broken ore to the bar. `crates/lodestone-server/src/experience.rs` holds
+  the arithmetic, `MobSim` owns the live orbs, `ServerProtocol::encode_set_experience`
+  puts the result on the wire, and `crates/lodestone-server/src/player_data.rs` saves
+  and restores it across a rejoin. The wired sources are mob death, ore mining and
+  furnace smelting.
 - [Explosion block destruction](./explosion-blocks.md) — The half of an explosion
   that removes blocks: a port of 26.2's `ServerExplosion::calculateExplodedPositions`
   into `crates/lodestone-server/src/explosion_blocks.rs`, on real per-block blast
