@@ -2333,6 +2333,83 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_select_advancements_tab(tab)
     }
 
+    fn encode_custom_payload(&self, channel: &ResourceKey, data: &[u8]) -> ServerDirective {
+        (**self).encode_custom_payload(channel, data)
+    }
+
+    fn encode_player_info_add(&self, players: &[PlayerListing]) -> Vec<ServerDirective> {
+        (**self).encode_player_info_add(players)
+    }
+
+    fn encode_player_info_remove(&self, uuids: &[Uuid]) -> Vec<ServerDirective> {
+        (**self).encode_player_info_remove(uuids)
+    }
+
+    fn encode_player_info_game_mode(&self, entries: &[(Uuid, GameMode)]) -> Vec<ServerDirective> {
+        (**self).encode_player_info_game_mode(entries)
+    }
+
+    // The three world-effect encoders and their dispatcher. Every one of them had
+    // an emit-nothing default and no forward, so a boxed protocol — i.e. every
+    // singleplayer session — produced **no sounds, no level events and no
+    // particles at all**, silently, while a directly-owned protocol emitted them
+    // normally. Same shape as `begin_play_at` above, and the same reason it went
+    // unnoticed: the drain site calls `encode_world_effect` and gets a
+    // `ServerDirective::None` that is indistinguishable from "nothing happened".
+    fn encode_sound(
+        &self,
+        sound: &str,
+        category: SoundCategory,
+        pos: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) -> ServerDirective {
+        (**self).encode_sound(sound, category, pos, volume, pitch, seed)
+    }
+
+    fn encode_level_event(&self, event: i32, pos: BlockPos, data: i32, global: bool) -> ServerDirective {
+        (**self).encode_level_event(event, pos, data, global)
+    }
+
+    fn encode_level_particles(
+        &self,
+        particle: &str,
+        pos: Vec3,
+        offset: Vec3f,
+        max_speed: f32,
+        count: i32,
+        long_distance: bool,
+    ) -> ServerDirective {
+        (**self).encode_level_particles(particle, pos, offset, max_speed, count, long_distance)
+    }
+
+    // Forwarded even though the trait's own body is pure dispatch and would
+    // already reach the inner protocol through the four forwards above: an
+    // implementor that *does* override the dispatcher would otherwise have its
+    // override skipped by the box, and the parity guard below requires a forward
+    // for every trait method rather than reasoning about which ones are
+    // redundant.
+    fn encode_world_effect(&self, effect: &crate::effects::WorldEffect) -> ServerDirective {
+        (**self).encode_world_effect(effect)
+    }
+
+    fn encode_player_combat_kill(&self, player_entity_id: i32, message: &Text) -> ServerDirective {
+        (**self).encode_player_combat_kill(player_entity_id, message)
+    }
+
+    fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
+        (**self).encode_respawn(spawn)
+    }
+
+    fn encode_recipe_book_add(
+        &self,
+        entries: &[crate::crafting::RecipeBookEntry],
+        replace: bool,
+    ) -> ServerDirective {
+        (**self).encode_recipe_book_add(entries, replace)
+    }
+
     fn worldgen_scope(&self) -> WorldgenScope {
         (**self).worldgen_scope()
     }
@@ -2829,6 +2906,97 @@ mod tests {
             WorldgenScope::None,
             "worldgen_scope answered with the trait default through the box, so the \
              forward is missing and a boxed v770 would silently report 'no worldgen'"
+        );
+    }
+
+    /// The names of every item-level `fn` inside the top-level item whose
+    /// declaration line starts with `anchor`.
+    ///
+    /// Deliberately crude, and deliberately not a Rust lexer — this repo has
+    /// already paid for one of those being wrong about lifetimes. Two facts make
+    /// line-shape matching sufficient here, and both are properties of this file
+    /// rather than of Rust: a top-level item's closing brace is the only `}` that
+    /// ever appears alone at column 0, and a direct member of that item is the
+    /// only `fn` that ever appears at exactly four spaces of indent. A `}` inside
+    /// a doc comment (this file has fenced Java in one) is prefixed by `///`, and
+    /// a nested `fn` inside a default body is indented further.
+    fn item_level_fn_names(source: &str, anchor: &str) -> Vec<String> {
+        let mut lines = source.lines().skip_while(|l| !l.starts_with(anchor));
+        assert!(
+            lines.next().is_some(),
+            "anchor {anchor:?} matched no line — the parser found nothing, which is a \
+             failure to run and not a pass"
+        );
+        lines
+            .take_while(|l| *l != "}")
+            .filter_map(|l| {
+                let rest = l.strip_prefix("    ")?;
+                if rest.starts_with(' ') {
+                    return None;
+                }
+                let rest = rest.strip_prefix("pub ").unwrap_or(rest);
+                let name = rest.strip_prefix("fn ")?;
+                let end = name.find(|c: char| !c.is_ascii_alphanumeric() && c != '_')?;
+                Some(name[..end].to_owned())
+            })
+            .collect()
+    }
+
+    /// **Every [`ServerProtocol`] method has a forward in the `Box<P>` impl.**
+    ///
+    /// The impl's own doc comment has asked for this in prose since it was
+    /// written, and prose is not a rule: at the time this guard was added the box
+    /// was missing **eleven** forwards, including all three world-effect encoders
+    /// — so every singleplayer session emitted no sounds, no level events and no
+    /// particles, silently, because an unforwarded defaulted method answers
+    /// `ServerDirective::None` and that is indistinguishable from "nothing
+    /// happened".
+    ///
+    /// `a_boxed_protocol_answers_exactly_as_the_concrete_one_does` above cannot
+    /// see this class of gap: it compares two things by a hand-written list, so a
+    /// *third* thing — a method nobody added to the list — is invisible to it.
+    /// This one enumerates instead of listing.
+    #[test]
+    fn every_server_protocol_method_is_forwarded_by_the_box_impl() {
+        let source = include_str!("protocol.rs");
+        let trait_fns = item_level_fn_names(source, "pub trait ServerProtocol");
+        let box_fns =
+            item_level_fn_names(source, "impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P>");
+
+        // The floor is a measurement, not a guess: the trait had 64 methods when
+        // this guard landed. Without it, an anchor that stopped matching would
+        // compare two empty sets and report green — the vacuous-precondition
+        // species, and the one this whole test exists to rule out.
+        assert!(
+            trait_fns.len() >= 60,
+            "parsed only {} trait methods (64 when this guard landed) — the anchor or \
+             the region scan has drifted, so this gate is measuring nothing",
+            trait_fns.len()
+        );
+        assert!(
+            box_fns.len() >= 60,
+            "parsed only {} forwards in the Box impl — see above",
+            box_fns.len()
+        );
+
+        // Collected rather than asserted in the loop: an `assert!` inside the
+        // iteration reports one missing forward and leaves the rest as arguments,
+        // so a neuter would demonstrate a single arm instead of all eleven.
+        let missing: Vec<&String> = trait_fns.iter().filter(|f| !box_fns.contains(f)).collect();
+        assert!(
+            missing.is_empty(),
+            "{} ServerProtocol method(s) have no forward in `impl ServerProtocol for Box<P>`: \
+             {missing:?}. Each one silently answers the trait's default (usually \
+             ServerDirective::None) for every boxed protocol, i.e. for every singleplayer \
+             session, while a directly-owned protocol keeps working.",
+            missing.len()
+        );
+
+        let stray: Vec<&String> = box_fns.iter().filter(|f| !trait_fns.contains(f)).collect();
+        assert!(
+            stray.is_empty(),
+            "the Box impl forwards {stray:?}, which the trait does not declare — either a \
+             rename left a stale arm behind or the region scan is reading the wrong item"
         );
     }
 }
