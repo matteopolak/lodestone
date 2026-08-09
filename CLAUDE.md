@@ -406,6 +406,14 @@ look authoritative.
 trailing bytes", "zero unresolved" are only as good as the evidence the mechanism *would* have fired.
 Run the control and observe it fail; do not describe what it would do.
 
+**A sentinel that makes the assertion's *negative* form true is unfalsifiable, and `unwrap_or(f32::NAN)` is the
+one to watch for.** Every comparison against `NAN` is false, so `!=` against it is always **true** — an
+inequality assertion fed a NaN sentinel therefore passes for an **absent** value, which is precisely the case
+it existed to catch. Measured: a font-advance gate asserting a glyph's advance was *not* the wrong number
+passed with the glyph missing entirely; 13 of 16 gates fired under the neuter and this was one of the three
+that did not. **Compare the `Option`, do not unwrap to a sentinel** — and when a neuter leaves a gate green,
+that gate is the finding, not a rounding error in the run.
+
 **And a control can only demonstrate as many arms as it is allowed to report.** An `assert!` *inside* a `for`
 loop aborts on the first failure, so running the neuter proves exactly **one** arm and the rest stay
 *arguments* rather than observations — you learn that some case failed, not that all four did. **Collect the
