@@ -8070,3 +8070,62 @@ Also re-derived rather than trusted, because the ledger for this issue has been 
 **is** registered, between `SHULKER_BOX` and `BELL`, so it is in scope and simply unbuilt. Count the
 `register(...)` calls in `BlockEntityRenderers.java`; do not count a doc's summary of them, including
 this one's.
+
+**12.162 Mineshafts: a test that predicted from the wrong start, a ledger row whose gap had closed, and
+an accessor that was doing the wrong job for its callers.** Issue #514's S7 — `minecraft:mineshaft` and
+`minecraft:mineshaft_mesa`, the first structures in this engine whose pieces are generated **before**
+the biome filter.
+
+- **A structure whose generation point depends on its own pieces inverts the phase order the rest of the
+  engine is built on.** Every other coded structure is a `SinglePieceStructure` whose
+  `findGenerationPoint` draws nothing, which is what lets the piece list be built lazily after the biome
+  check. `MineshaftStructure` returns `Either.right(builder)`: it grows the whole depth-8 tree, then
+  `moveBelowSeaLevel` derives the start's Y from the tree's own height. So the stub *is* the builder,
+  and the cost is vanilla's own — a candidate that then fails its biome check has already spent its
+  entire stream. Modelling this as "generate lazily and reconstruct the position" would be a different
+  world at every seed.
+- **The prediction was right about the mechanism and wrong about the set, and the error was a factor of
+  1.6 in the safe-looking direction.** The block gate predicted the chunk's contents from "the pieces of
+  the start at this chunk" and measured **59** against a true **97**. A mineshaft is ~160 blocks wide
+  and the vanilla oracle world has two starts **three chunks apart**, so a second mineshaft's corridors
+  reach in. `placed > expected` is not a leak; it is the gate not knowing what production writes. The
+  fix was to add a public accessor returning the placement stage's own reached-start list rather than to
+  re-derive the 17×17 reach in the test — the same rule that stopped a hand-rolled grid walk becoming a
+  hang, applied to a hand-rolled *reach*.
+- **A ledger row whose gap has closed is worse than no row, and the closure was a side effect.**
+  `template:mirrored_shape` said a rail `shape` was not remapped under a mirror. True, and inert, for as
+  long as nothing placed a rail. A mineshaft corridor places one and its EAST/WEST orientations carry a
+  real `CLOCKWISE_90`, so an east/west corridor's rails were coming out `north_south` — a defect nothing
+  could observe until the moment it could. `BaseRailBlock`'s two tables were transcribed rather than
+  derived from "rotate the two connected directions and re-canonicalise", because the derivation needs a
+  canonical-name pass that a table lifted from the source cannot disagree with. The row is **deleted**,
+  and the gate now asserts its absence.
+- **`is_replaceable_at` was a one-bit answer to a four-way question, and three transcriptions needed the
+  other bits.** `isInInvalidLocation` walks a box's shell for `state.liquid()`; a mineshaft that read
+  air as liquid would refuse every piece it generated. `fillPillarDownOrChainUp` treats a liquid column
+  as empty but stops at lava. `RuinedPortalPiece.canBlockBeReplacedByNetherrackOrMagma` tests lava and
+  obsidian. `StartContext::block_kind_at` is that refinement, and `is_replaceable_at` now **defaults to
+  it** so the two cannot disagree. What it still cannot answer is a *material* question: pre-surface
+  every solid block is one `Stone`, which is why `buried_treasure` stays ledgered.
+- **A vacuous-looking seed is sometimes the real behaviour, and a magnitude guess found it the hard
+  way.** The first unit test asserted "more than 5 pieces" at a seed that legitimately produces **one**:
+  the room's four wall walks each step by `nextInt(xSpan)` and break as soon as `pos + 3 > span`, so a
+  small room reaching no children is a normal outcome. A generator that could not produce a lone room
+  would look healthier and be wrong. Both cases are now their own test with an exact count (101 pieces /
+  14,344 blocks, and 1 piece / 435 blocks), because with RNG draw order as the specification the count
+  *is* the assertion.
+- **The two deviations are the `swamp_hut` shape again, and both were worth a row rather than a
+  comment.** Vanilla runs a piece's `postProcess` once per decorating chunk, with that chunk's own
+  feature random, clipping every read and write to `chunkBB`. A corridor spanning two chunks therefore
+  draws its cobwebs twice from two unrelated streams, and `isInInvalidLocation` can call the same piece
+  invalid in one chunk and valid in another. There is no single vanilla answer to reproduce, so the
+  eager pass resolves it once over the whole box — `mineshaft:post_process_scope` and
+  `mineshaft:pre_surface_world_reads`.
+
+The evidence that made this cheap was already on disk: the `mineshafts` structure set is **closed**
+(`findGenerationPoint` returns `Optional.of` unconditionally, so biome-valid implies start-valid), so it
+joins `CLOSED_SET_STRUCTURES` and the oracle world's own **46** mineshaft start chunks become an outside
+expected value in *both* directions — 77 closed-set starts reproduced exactly, zero extras over 4,080
+window chunks. A structure whose start is decidable is worth checking for that property before writing
+any gate of your own: it turns a "does it place something" test into a chunk-for-chunk parity test
+against a different implementation, for the price of adding two strings to a list.
