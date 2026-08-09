@@ -16,14 +16,31 @@
 //!   sky and ground (an ocean column) aborting the candidate.
 //! * The **per-player** half — a player's bed respawn point
 //!   ([`RespawnPoint`]) with the set-time legality check vanilla applies
-//!   before accepting one ([`is_legal_bed_respawn`]) — mirrors
-//!   `ServerPlayer.startSleepInBed`'s validation
-//!   (`ServerPlayer.java:1186-1240`). The point is *stored*, never yet
-//!   *used*: resolving a death against it (bed wins over the world spawn,
-//!   then the placement teleport, the `respawn_radius` scatter and the async
-//!   chunk-ticket search of `PlayerSpawnFinder.findSpawn`) is the deferred
-//!   half — it needs shape-B player state and #297's ticket system (see
+//!   before accepting one ([`is_legal_bed_respawn`]), and the *read* that
+//!   resolves a death against it ([`resolve_bed_respawn`], vanilla's
+//!   `ServerPlayer.findRespawnAndUseSpawnBlock`). The set-time check mirrors
+//!   `ServerPlayer.startSleepInBed`'s validation.
+//!
+//!   **Both halves are needed and the read is the one that was missing.** The
+//!   point used to be stored and consulted by nothing, so `PERFORM_RESPAWN`
+//!   healed the player and left them where they died. The read re-examines the
+//!   block at the stored position rather than trusting it: a broken or walled-in
+//!   bed answers `None` and the caller falls back to the world spawn, which is
+//!   vanilla's own `Optional.empty()` arm.
+//!
+//!   Still deferred: the `respawn_radius` scatter around the world spawn and the
+//!   async chunk-ticket search of `PlayerSpawnFinder.findSpawn`, which need
+//!   shape-B player state and the ticket system (see
 //!   `docs/plans/world-state.md` unit P2).
+//!
+//! # Where the world spawn is stored
+//!
+//! In [`crate::world_state::WorldStateHandle`], persisted to `level.dat`'s nested
+//! `spawn` compound — **not** re-derived per connection. [`find_initial_spawn`] is
+//! vanilla's `setInitialSpawn`, which runs once at world creation; running it per
+//! join re-paid a 121-column search every time and meant the persisted value was
+//! written and read by nothing. `None` there means "not searched yet", which is
+//! what a fresh world is.
 
 use lodestone_model::{BlockPos, Vec3};
 
@@ -442,6 +459,137 @@ pub(crate) fn is_legal_bed_respawn<S: ChunkSource>(
         }
     }
     true
+}
+
+/// Vanilla's `bedSurroundStandUpOffsets` followed by `bedAboveStandUpOffsets`
+/// (`BedBlock.bedStandUpOffsets`), as `(forward_steps, side_steps)` multipliers
+/// rather than resolved `(dx, dz)` — the direction vectors are substituted by
+/// [`resolve_bed_respawn`], which knows the bed's `facing`.
+///
+/// The **order is the specification**, not an implementation detail: vanilla
+/// returns the first offset that yields a safe dismount location, so a different
+/// order puts the player somewhere else for the same bed. Transcribed in vanilla's
+/// own sequence, `side` first and the two on-bed cells last.
+const BED_STAND_UP_OFFSETS: [(i32, i32); 12] = [
+    // bedSurroundStandUpOffsets(forward, side)
+    (0, 1),
+    (-1, 1),
+    (-2, 1),
+    (-2, 0),
+    (-2, -1),
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+    // bedAboveStandUpOffsets(forward) — the bed's own cell, and its foot.
+    (0, 0),
+    (-1, 0),
+];
+
+/// The `(dx, dz)` step vector for a bed's `facing` property, or `None` for a
+/// state carrying no recognisable facing.
+fn bed_facing_steps(state: &str) -> Option<(i32, i32)> {
+    let props = state.split_once('[')?.1.strip_suffix(']')?;
+    let facing = props.split(',').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k.trim() == "facing").then(|| v.trim())
+    })?;
+    match facing {
+        "north" => Some((0, -1)),
+        "south" => Some((0, 1)),
+        "west" => Some((-1, 0)),
+        "east" => Some((1, 0)),
+        _ => None,
+    }
+}
+
+/// Whether a player can stand at `pos` — the reduction of
+/// `DismountHelper.findSafeDismountLocation` this crate can actually answer.
+///
+/// Vanilla walks the player's collision shape against the level and additionally
+/// rejects "dangerous" blocks (fire, lava, magma, a cactus) on its first pass.
+/// This crate has no player AABB sweep, so the test is the two facts the census
+/// does carry: **two** clear cells of body room (a player is 1.8 blocks tall, so
+/// the cell above matters), standing on something whose up-face is full.
+///
+/// Fail-closed on both halves, which is the safe direction here: an unrecognised
+/// block is not somewhere the search will place a player, so it moves on to the
+/// next offset rather than dropping them into it.
+fn is_standable<S: ChunkSource>(source: &S, pos: BlockPos) -> bool {
+    let feet = source.block_state(pos.x, pos.y, pos.z);
+    let head = source.block_state(pos.x, pos.y + 1, pos.z);
+    let below = source.block_state(pos.x, pos.y - 1, pos.z);
+    is_air_or_fluid(&feet) && is_air_or_fluid(&head) && spawn_face_full_up(&below)
+}
+
+/// Resolves a stored per-player [`RespawnPoint`] into the position a death should
+/// return the player to, or `None` if the point is no longer usable.
+///
+/// This is `ServerPlayer.findRespawnAndUseSpawnBlock`'s bed branch, and the
+/// `None` arm is the load-bearing half rather than an error case:
+///
+/// ```java
+/// BlockState blockState = level.getBlockState(pos);
+/// if (block instanceof BedBlock && …canSetSpawn(level)) {
+///    return BedBlock.findStandUpPosition(EntityTypes.PLAYER, level, pos, blockState.getValue(FACING), yaw)
+///       .map(p -> RespawnPosAngle.of(p, pos, 0.0F));
+/// }
+/// if (!forced) { return Optional.empty(); }
+/// ```
+///
+/// So the block at the stored position is **re-read at death time**, not trusted
+/// from when it was set: a bed that has since been broken yields `Optional.empty()`,
+/// vanilla sends `NO_RESPAWN_BLOCK_AVAILABLE`, and the player lands at the world
+/// spawn. Storing the point at set time and never re-validating it would respawn a
+/// player inside whatever replaced their bed. That is the whole reason this
+/// function takes the source rather than just the point.
+///
+/// The candidate walk is vanilla's [`BED_STAND_UP_OFFSETS`] in vanilla's own
+/// order, with [`is_standable`] standing in for `DismountHelper` — see its doc for
+/// what that costs. Vanilla's second, `checkDangerous = false` pass over the same
+/// offsets is not reproduced: the only difference between the two passes is the
+/// danger check, which `is_standable` does not model, so a second pass would test
+/// exactly the same predicate and find exactly the same answer.
+///
+/// The returned position is the cell's centre in x/z, its floor in y — vanilla's
+/// `DismountHelper` returns a `Vec3` at the block's centre-bottom.
+pub(crate) fn resolve_bed_respawn<S: ChunkSource>(
+    source: &S,
+    point: RespawnPoint,
+) -> Option<Vec3> {
+    let bed = point.pos;
+    let state = source.block_state(bed.x, bed.y, bed.z);
+    if !is_bed_block(&state) {
+        // The bed is gone. Vanilla's `Optional.empty()`.
+        return None;
+    }
+    // A bed with no readable `facing` cannot have its offsets resolved; treat the
+    // head/foot axis as north-south, which is the default state's own facing, so
+    // the walk still happens rather than the point being silently discarded.
+    let (fx, fz) = bed_facing_steps(&state).unwrap_or((0, -1));
+    // `side` is `forward.getClockWise()` — vanilla picks between it and its
+    // opposite using the sleeper's yaw, which this crate does not record at bed
+    // entry (see [`RespawnPoint`]'s own doc). The clockwise choice is taken, which
+    // only decides *which* side of the bed a player wakes on.
+    let (sx, sz) = (-fz, fx);
+    for (forward_steps, side_steps) in BED_STAND_UP_OFFSETS {
+        let candidate = BlockPos::new(
+            bed.x + fx * forward_steps + sx * side_steps,
+            bed.y,
+            bed.z + fz * forward_steps + sz * side_steps,
+        );
+        if is_standable(source, candidate) {
+            return Some(Vec3::new(
+                f64::from(candidate.x) + 0.5,
+                f64::from(candidate.y),
+                f64::from(candidate.z) + 0.5,
+            ));
+        }
+    }
+    // Every offset obstructed. Vanilla's `Optional.empty()` again — the bed is
+    // walled in, and the player goes to the world spawn.
+    None
 }
 
 // A small `ChunkSource` for the spiral gates: a fixed map of columns, with any
@@ -1023,5 +1171,120 @@ mod tests {
         assert!(!is_bed_block("minecraft:air"));
         assert!(!is_bed_block("minecraft:bedrock"), "bedrock ends in -rock, not -bed");
         assert!(!is_bed_block("minecraft:respawn_anchor"));
+    }
+    // ---------------------------------------------------------------------
+    // `resolve_bed_respawn` — the *read* half. The point was already written
+    // and validated at set time; nothing consulted it on death, so a player
+    // always woke where they died.
+    // ---------------------------------------------------------------------
+
+    /// A bed on open stone resolves to a standable cell beside it — and to the
+    /// **first** offset in vanilla's own order, not just to any of the twelve.
+    ///
+    /// `side` is `forward.getClockWise()`, so for a north-facing bed
+    /// (`forward = (0, -1)`) `side` is `(1, 0)` and the first offset
+    /// `{side.getStepX(), side.getStepZ()}` is one cell east. That is a value
+    /// predicted from the transcribed offset table, not from running this code:
+    /// an implementation that iterated the offsets in any other order would land
+    /// somewhere else and fail here.
+    #[test]
+    fn a_bed_on_open_ground_resolves_to_the_first_vanilla_offset() {
+        let mut column = land_column(20);
+        column.set_block(8, 21, 8, "minecraft:red_bed[facing=north,part=foot]");
+        let mut columns = std::collections::HashMap::new();
+        columns.insert((0, 0), column);
+        let source = MapSource { columns };
+
+        let resolved = resolve_bed_respawn(&source, RespawnPoint {
+            pos: BlockPos::new(8, 21, 8),
+        });
+        assert_eq!(
+            resolved,
+            Some(Vec3::new(9.5, 21.0, 8.5)),
+            "forward=(0,-1) makes side=(1,0), so the first offset is one cell east \
+             of the bed at the bed's own y, centred in x/z"
+        );
+    }
+
+    /// **The load-bearing case, and the one the missing read produced.** A bed
+    /// that has been broken since the point was set must resolve to `None`, so the
+    /// caller falls back to the world spawn — vanilla's `Optional.empty()`, which
+    /// it answers with `NO_RESPAWN_BLOCK_AVAILABLE`.
+    ///
+    /// Trusting the stored point instead would teleport the player into whatever
+    /// replaced their bed. Note the position here is *identical* to the passing
+    /// case above: only the block changed, which is what makes this a test of the
+    /// re-read rather than of the coordinates.
+    #[test]
+    fn a_broken_bed_resolves_to_nothing() {
+        let mut column = land_column(20);
+        // Where the bed used to be. Someone has since built a wall there.
+        column.set_block(8, 21, 8, "minecraft:stone");
+        let mut columns = std::collections::HashMap::new();
+        columns.insert((0, 0), column);
+        let source = MapSource { columns };
+
+        assert_eq!(
+            resolve_bed_respawn(&source, RespawnPoint {
+                pos: BlockPos::new(8, 21, 8)
+            }),
+            None,
+            "a stored point whose bed is gone must be refused, not used"
+        );
+    }
+
+    /// A bed walled in on every side resolves to `None` too — the other
+    /// `Optional.empty()` arm, and the control that proves the offset walk is
+    /// actually testing each candidate rather than returning the first one
+    /// unconditionally.
+    ///
+    /// Filled with stone from the bed's own y upward across the whole column, so
+    /// every one of the twelve offsets (including the two on the bed itself) has a
+    /// solid cell where the player's feet would go.
+    #[test]
+    fn a_walled_in_bed_resolves_to_nothing() {
+        let mut column = land_column(20);
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 21..=23 {
+                    column.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        column.set_block(8, 21, 8, "minecraft:red_bed[facing=north,part=foot]");
+        let mut columns = std::collections::HashMap::new();
+        columns.insert((0, 0), column);
+        let source = MapSource { columns };
+
+        assert_eq!(
+            resolve_bed_respawn(&source, RespawnPoint {
+                pos: BlockPos::new(8, 21, 8)
+            }),
+            None,
+            "every offset is obstructed, so there is nowhere to stand"
+        );
+    }
+
+    /// The bed's `facing` really is read: a south-facing bed's `side` is the
+    /// opposite of a north-facing one's, so the same bed at the same position
+    /// resolves to a *different* cell. Without this, a hardcoded offset would pass
+    /// the first gate above.
+    #[test]
+    fn the_beds_facing_decides_which_side_the_player_wakes_on() {
+        let resolve = |facing: &str| {
+            let mut column = land_column(20);
+            column.set_block(8, 21, 8, &format!("minecraft:red_bed[facing={facing},part=foot]"));
+            let mut columns = std::collections::HashMap::new();
+            columns.insert((0, 0), column);
+            resolve_bed_respawn(&MapSource { columns }, RespawnPoint {
+                pos: BlockPos::new(8, 21, 8),
+            })
+        };
+        // north: forward=(0,-1), side=clockwise=(1,0)  -> east
+        assert_eq!(resolve("north"), Some(Vec3::new(9.5, 21.0, 8.5)));
+        // south: forward=(0,1),  side=clockwise=(-1,0) -> west
+        assert_eq!(resolve("south"), Some(Vec3::new(7.5, 21.0, 8.5)));
+        // east:  forward=(1,0),  side=clockwise=(0,1)  -> south
+        assert_eq!(resolve("east"), Some(Vec3::new(8.5, 21.0, 9.5)));
     }
 }

@@ -1124,6 +1124,16 @@ impl IntegratedServer {
         if let Some(data) = level_dat.data() {
             autosave_world_state.load_level_data(&data);
         }
+        // The one thing that must *not* survive the load on a brand-new world:
+        // `LevelDat::for_new_world` had to write *some* `spawn` compound and had no
+        // terrain to consult, so it wrote a placeholder at the mob centre. Loading
+        // that back would look like a resolved world spawn and suppress the spiral
+        // search forever — the player would spawn at the placeholder even if it is
+        // ocean. Clearing it makes the first join do the search, and its answer is
+        // what the next autosave persists.
+        if level_dat.created() {
+            autosave_world_state.clear_world_spawn();
+        }
         // Cloned before the `Self` literal for the same reason `tick_clock` is
         // in the constructor above: an `Arc::clone` inside the `async move`
         // would move the binding into the coroutine.
