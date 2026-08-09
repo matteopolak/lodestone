@@ -4703,8 +4703,15 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
 #[test]
 fn the_world_list_row_label_fits_the_row_it_is_centred_in() {
     let (.., content_w, _) = world_list_row_content_rect(0, V_W, 0.0);
+    // **Both** empty-list strings, not just this target's. The label is
+    // `cfg`-selected (a browser says the list is never saved, not "not yet"), and this
+    // test runs on the host — so measuring `NO_WORLDS_LABEL` alone would leave the
+    // browser string unmeasured on every machine that runs the suite. The first draft
+    // of it was 53 characters against a 44-character row and nothing would have
+    // caught it. A guard only covers what it names.
     for label in [
-        crate::menu::world_select::NO_WORLDS_LABEL,
+        crate::menu::world_select::NO_WORLDS_LABEL_NATIVE,
+        crate::menu::world_select::NO_WORLDS_LABEL_BROWSER,
         crate::menu::world_select::BUNDLED_WORLD.label,
     ] {
         let measured = text_px(label, 1.0);

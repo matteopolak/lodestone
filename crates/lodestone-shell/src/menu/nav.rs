@@ -100,6 +100,16 @@ pub enum SingleplayerLaunch {
     /// rather than forcing a seed onto an existing world.
     Created {
         /// The directory the menu created.
+        ///
+        /// **Native-only.** A browser world is created by
+        /// `IntegratedServer::open_in_memory` and has no directory, no `level.dat`
+        /// and no `world_gen_settings.dat` — so there is nothing for this field to
+        /// hold, and gating it is what lets the browser reach this variant at all.
+        /// `app::session::begin_singleplayer` already computed `world_dir` under the
+        /// same `cfg` before this existed, and `app::launch::launch_singleplayer`
+        /// already took it as a `cfg`-gated parameter; this was the one link in that
+        /// chain still demanding a path.
+        #[cfg(not(target_arch = "wasm32"))]
         world_dir: std::path::PathBuf,
         /// What the player typed on the creation screen.
         config: crate::menu::create_world::WorldCreationConfig,
@@ -3164,6 +3174,35 @@ impl MenuNav {
                     crate::menu::create_world::WorldGameMode::Survival
                     | crate::menu::create_world::WorldGameMode::Hardcore => 0,
                 };
+                // Browser: no directory, no `level.dat`, straight to the launch.
+                //
+                // `saves::create_world_in` deliberately *refuses* on wasm32 — a page
+                // has no `saves/` to write into — so routing through it made Create
+                // New World a button that did nothing: it returned to the world list
+                // with "Could not create the world", which was correct and useless.
+                // A browser world is real, it is simply **in memory**:
+                // `IntegratedServer::open_in_memory` needs no directory and no
+                // `level.dat`, and everything downstream of here already handled its
+                // absence under the same `cfg`.
+                //
+                // The typed **name** is the one thing lost with the directory — it
+                // normally lands in `level.dat` — and nothing in a browser session
+                // reads it back, because the world it would label cannot be re-opened.
+                // The seed still travels, in `config`, and is still honoured: a fresh
+                // in-memory world has no stored settings to override it, which is the
+                // same reason the native `Created` arm honours it.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = game_type;
+                    tracing::info!(
+                        target: "saves",
+                        name = %config.name,
+                        "creating an in-memory browser world (nothing is written to disk; \
+                         it is lost when the tab closes)"
+                    );
+                    return MenuAction::Singleplayer(SingleplayerLaunch::Created { config });
+                }
+                #[cfg(not(target_arch = "wasm32"))]
                 match crate::saves::create_world_in(&self.saves_root, &config.name, game_type) {
                     Ok(world_dir) => {
                         MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, config })

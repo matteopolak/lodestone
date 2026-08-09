@@ -67,11 +67,11 @@ impl Runner {
             );
         };
         let tick_duration = std::time::Duration::from_secs_f64(1.0 / tick_hz.max(1.0));
-        let mut last = std::time::Instant::now();
+        let mut last = web_time::Instant::now();
         let mut accumulator = std::time::Duration::ZERO;
 
         while !should_stop() {
-            let now = std::time::Instant::now();
+            let now = web_time::Instant::now();
             accumulator += now.duration_since(last);
             last = now;
 

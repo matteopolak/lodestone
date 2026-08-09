@@ -1822,7 +1822,7 @@ mod tests {
         // Let the ticker reach its first await point before the clock starts,
         // so arm 1 and arm 2 begin from the same state.
         tokio::task::yield_now().await;
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         let offloaded = generate_columns_offloaded(
             Arc::new(SleepyChunkSource { per_column }),
             coords.clone(),
@@ -1846,7 +1846,7 @@ mod tests {
             })
         };
         tokio::task::yield_now().await;
-        let control_started = std::time::Instant::now();
+        let control_started = web_time::Instant::now();
         let blocking = generate_columns_parallel(
             &SleepyChunkSource { per_column },
             &coords,

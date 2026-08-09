@@ -270,7 +270,7 @@ impl<T> StageSlot<T> {
             outcome(false);
             return Arc::clone(value);
         }
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         let computed = std::cell::Cell::new(false);
         let value = self.cell.get_or_init(|| {
             computed.set(true);

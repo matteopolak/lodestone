@@ -893,6 +893,16 @@ pub struct NetClient {
     /// hand to the client. Kept off the render thread; the net loop drains it.
     action_tx: Sender<ClientAction>,
     stop: Arc<AtomicBool>,
+    /// The driver's OS thread, joined on `Drop`.
+    ///
+    /// **Native-only.** A browser drives the same future with `spawn_local`, which
+    /// yields no join handle at all, so there is nothing to store and nothing to join.
+    /// Teardown there is the `stop` flag above and nothing else — which is sufficient
+    /// for the same reason it is sufficient natively: the driver's loop checks it every
+    /// iteration. What is *lost* is the `Drop`-time guarantee that the driver has
+    /// actually finished before `NetClient` goes away; in a browser it observes `stop`
+    /// on its next poll and unwinds a moment later.
+    #[cfg(not(target_arch = "wasm32"))]
     thread: Option<JoinHandle<()>>,
     /// Published by the net thread once login completes; lets the render/mesh
     /// thread read the client-owned world lock-free of tokio.
@@ -1359,6 +1369,9 @@ impl NetClient {
         let local_uuid: SharedLocalUuid = Arc::new(OnceLock::new());
         let local_uuid_thread = Arc::clone(&local_uuid);
 
+        // Native: the driver gets its own OS thread, so a slow tick never touches the
+        // frame loop.
+        #[cfg(not(target_arch = "wasm32"))]
         let thread = std::thread::Builder::new()
             .name("lodestone-net".into())
             .spawn(move || {
@@ -1380,10 +1393,42 @@ impl NetClient {
             })
             .expect("spawn net thread");
 
+        // Browser: `spawn_local`, onto the page's own event loop.
+        //
+        // **The `.expect` above is what killed the tab**, and it is worth recording
+        // exactly why, because the failure was one step removed from the usual one.
+        // `std::thread::Builder::spawn` does *not* trap on wasm32 — measured, executed
+        // in a wasm VM, it returns `Err(ErrorKind::Unsupported)`, which is why this
+        // site did not appear in the trapping-call census at all. The `.expect()` then
+        // turned that graceful error into a panic, and with `panic = "abort"` that is
+        // the tab. A degrading call reached through an `.expect()` is as fatal as a
+        // trapping one; the census has to look at the *handling*, not only the call.
+        //
+        // No `JoinHandle` exists here, so `Drop` cannot join — the `stop` flag is the
+        // whole teardown, and the driver's own loop already checks it. See the `thread`
+        // field.
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(run_async(
+            origin,
+            protocol,
+            tx,
+            action_rx,
+            stop_thread,
+            handle_thread,
+            weather_thread,
+            biome_climates_thread,
+            biome_names_thread,
+            command_tree_thread,
+            local_uuid_thread,
+            session,
+            offline,
+        ));
+
         Self {
             rx,
             action_tx,
             stop,
+            #[cfg(not(target_arch = "wasm32"))]
             thread: Some(thread),
             handle,
             weather,
@@ -1757,6 +1802,9 @@ impl NetClient {
 impl Drop for NetClient {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        // Browser: there is no handle to join — see the `thread` field. Setting `stop`
+        // above is the whole teardown.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -1840,7 +1888,34 @@ pub fn entity_light_at(
     Some((sky << 4) | block)
 }
 
-fn run(
+/// The session driver's body: connect, log in, and pump events until `stop`.
+///
+/// **`async fn`, and the *whole* driver — `run` below is a native wrapper.** The two
+/// targets differ only in how this future is driven:
+///
+/// * **Native.** `run` builds a `current_thread` runtime on its own OS thread and
+///   `block_on`s this. Unchanged from before the split, including the property the
+///   comments inside rely on: a runtime *is* entered, so the integrated server's
+///   serving task has somewhere to go.
+/// * **Browser.** `NetClient::spawn` hands this straight to
+///   `wasm_bindgen_futures::spawn_local`. There is no thread and no `block_on`, and
+///   neither is available: `std::thread::Builder::spawn` returns
+///   `Err(Unsupported)` on wasm32, and the old call site `.expect()`ed it — so the
+///   graceful error became a panic, and *that* was the last thing between the
+///   browser's title screen and a world. `block_on` could not have rescued it
+///   either; on a browser main thread there is no second thread to make the future
+///   progress.
+///
+/// Extracted verbatim rather than reimplemented, for the reason `mesh_one` and
+/// `finish_bring_up` were: this is ~500 lines of login, world-sync and teardown, and
+/// two copies would diverge into a browser session that is subtly wrong rather than
+/// one that fails to build.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the driver's shared cells, one per subsystem the render thread reads; \
+              bundling them into a struct would only move the same list"
+)]
+async fn run_async(
     origin: Origin,
     protocol: i32,
     tx: Sender<NetUpdate>,
@@ -1855,18 +1930,6 @@ fn run(
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     offline: OfflineIdentity,
 ) {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            let _ = tx.send(NetUpdate::Error(format!("runtime: {e}")));
-            return;
-        }
-    };
-
-    runtime.block_on(async move {
         let Some(adapter) = lodestone_registry::adapter_for_protocol(protocol) else {
             let _ = tx.send(NetUpdate::Error(format!(
                 "no version family compiled in for protocol {protocol}; build with the `live` feature"
@@ -2364,7 +2427,55 @@ fn run(
             server.shutdown().await;
             tracing::info!(target: "net", "integrated server stopped");
         }
-    });
+}
+
+/// Native entry point: a `current_thread` runtime, blocking on [`run_async`].
+#[cfg(not(target_arch = "wasm32"))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a pass-through to `run_async`; see that function"
+)]
+fn run(
+    origin: Origin,
+    protocol: i32,
+    tx: Sender<NetUpdate>,
+    action_rx: Receiver<ClientAction>,
+    stop: Arc<AtomicBool>,
+    shared_handle: SharedHandle,
+    weather: SharedWeather,
+    biome_climates: SharedBiomeClimates,
+    biome_names: SharedBiomeNames,
+    command_tree: SharedCommandTree,
+    local_uuid: SharedLocalUuid,
+    session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+    offline: OfflineIdentity,
+) {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let _ = tx.send(NetUpdate::Error(format!("runtime: {e}")));
+            return;
+        }
+    };
+
+    runtime.block_on(run_async(
+        origin,
+        protocol,
+        tx,
+        action_rx,
+        stop,
+        shared_handle,
+        weather,
+        biome_climates,
+        biome_names,
+        command_tree,
+        local_uuid,
+        session,
+        offline,
+    ));
 }
 
 /// The world name a LAN ping advertises — the world directory's own final
