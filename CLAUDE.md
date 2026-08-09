@@ -165,6 +165,17 @@ step**, use **a literal nonce** rather than `$$` or `$RANDOM`, **sanity-check th
 file-count floor before moving the ref**, and run `update-ref` **first** — a refresh before it stages a
 reversal of the commit you just made. (§12.27–§12.28 carry the exact sequence.)
 
+**And clean up after it, because the route leaves the SHARED index staging the exact inverse of what you just
+committed — which means the next agent's plain `git commit` deletes your work.** Reported independently by two
+agents in one session; one measured `git diff --cached --stat` at **68 insertions, 1,250 deletions**, precisely
+the reverse of its own commit. This is why the ban table says `git reset` "exists only to clean up after the
+private-index route": after `commit-tree`, `git reset -- <your paths>` (or `git read-tree HEAD` for a
+content-only refresh) **is** the sanctioned step, and skipping it is the hazard. Two things about doing it:
+**verify the reversal set is exactly your own files first** — the identical symptom appears when you are about
+to discard someone else's staged work — and **confirm the count goes to zero afterwards**, a count with a
+verdict depending on the count. The trap is that a clean `git status` for *your* files is exactly what an
+inverse-staged index looks like.
+
 Editing, and reading the tree:
 
 - **Never rewrite a shared file wholesale — edit the lines you mean.** No git command is involved, so no
