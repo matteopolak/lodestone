@@ -3027,6 +3027,14 @@ pub fn route(event: &ClientEvent) -> Route {
         // shell instead would compile, test green, and never run — `apply` consults
         // both switches and only forwards what each lists.
         | ClientEvent::FallingBlockState { .. }
+        // Per-entity despite carrying no entity id, and the distinction is worth
+        // stating because "no id" reads as a local-player scalar. The server sends
+        // `ClientboundMoveVehiclePacket` only to *reject* a position the
+        // client-authoritative rider reported, and what it changes is the
+        // vehicle's own `Position`/`Rotation` — components `ingest` already owns
+        // the sole writer of. The subject comes from `session::Riding`, exactly as
+        // the seat pin already resolves its vehicle from that same scalar.
+        | ClientEvent::VehicleMoved { .. }
         | ClientEvent::EntityAnimation { .. } => INGEST,
         // Both halves, and neither supersedes the other: `ingest` turns this into
         // the per-entity `HurtTime` countdown and destructures with `..`,
@@ -3305,7 +3313,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::SimulationDistanceChanged { .. }
         | ClientEvent::EntityStatus { .. }
         | ClientEvent::EntityLeashed { .. }
-        | ClientEvent::VehicleMoved { .. }
         | ClientEvent::ItemCooldown { .. }
         | ClientEvent::PlayerRotationSet { .. }
         | ClientEvent::CameraSet { .. }

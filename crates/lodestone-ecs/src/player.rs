@@ -1758,6 +1758,10 @@ pub fn spawn_local_player(world: &mut World, state: PlayerState) -> Entity {
                 // because no glide is in progress to have announced.
                 WasJumpingGlide(false),
                 FallFlyingSent(false),
+                // The horse jump-charge ramp. Cleared for the same reason
+                // `WasJumping` is: a jump key already held at spawn must read as a
+                // rising edge, not as a charge already in progress.
+                crate::vehicle::RidingJumpCharge::default(),
             ),
         ))
         .id()
@@ -1804,6 +1808,9 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
             // jump edge behind.
             WasJumpingGlide(false),
             FallFlyingSent(false),
+            // A quit-to-title must not leave a half-charged horse jump behind
+            // either — the next session's server has never heard of it.
+            crate::vehicle::RidingJumpCharge::default(),
         ),
     ));
     entity.remove::<Dead>();
@@ -1869,6 +1876,12 @@ impl Plugin for LocalPlayerPlugin {
         app.init_resource::<crate::entity::EntityIndex>();
         app.init_resource::<ActionQueue>();
         app.init_resource::<Egress>();
+        // `ControlledVehicle`, shared with `crate::ingest::IngestPlugin`'s
+        // `apply_vehicle_moved`; either plugin can be installed without the other,
+        // so both init it. `init_resource` and **not** a nested plugin: adding a
+        // plugin from inside another plugin's `build` is a Bevy hazard this crate
+        // has no reason to take on for one resource.
+        app.init_resource::<crate::vehicle::ControlledVehicle>();
         // `TickSet::Intent` before `TickSet::Physics`: the master chain in
         // `CorePlugin` (`Input, Physics, Predict, Animate, Send`) predates
         // this variant and is out of scope for this crate's edit list, so
@@ -1924,6 +1937,17 @@ impl Plugin for LocalPlayerPlugin {
                 tick_item_use,
                 player_physics,
                 cancel_flight_on_landing,
+                // The client-authoritative vehicle tick, and it sits **before**
+                // the seat pin on purpose: the pin reads the vehicle's
+                // `Position`, so moving the vehicle afterwards would carry the
+                // camera one tick behind the boat it is sitting in.
+                //
+                // `charge_riding_jump` is first of the three because it is
+                // `LocalPlayer.aiStep`'s own jump block, which vanilla runs before
+                // `travel` — the charge released this tick has to reach this
+                // tick's impulse.
+                crate::vehicle::charge_riding_jump,
+                crate::vehicle::tick_controlled_vehicle,
                 pin_passenger_to_vehicle,
                 // Issue #206's outbound half, and **`TickSet::Physics` is where
                 // vanilla puts it**: `LocalPlayer.aiStep` sends
@@ -1942,6 +1966,14 @@ impl Plugin for LocalPlayerPlugin {
                 // `exactly_one_system_writes_movement_intent`'s ambiguity build
                 // — which is how this was caught.
                 send_fall_flying_command,
+                // `ClientAction::MoveVehicle` / `PaddleBoat`, in this chain and
+                // not in `TickSet::Send` for exactly the reason
+                // `send_fall_flying_command` above gives: it writes
+                // `ResMut<ActionQueue>`, which `lodestone_controller`'s two `Send`
+                // systems also write, and this crate cannot name them to order
+                // against. An unordered second writer there fails the schedule's
+                // own ambiguity check.
+                crate::vehicle::send_vehicle_actions,
             )
                 .chain()
                 .in_set(TickSet::Physics),

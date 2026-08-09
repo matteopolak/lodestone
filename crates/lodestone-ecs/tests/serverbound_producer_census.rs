@@ -14,6 +14,7 @@
 //! | `ClientAction::ChangeGameMode` | zero producers until a game-mode switcher was added |
 //! | `ClientAction::PlaceRecipe` | zero producers; the shell synthesises three container clicks instead |
 //! | `PlayerCommand::StartFallFlying` | four adapter encoders, zero producers, until riptide (#208) added the first |
+//! | `ClientAction::MoveVehicle`, `ClientAction::PaddleBoat`, `PlayerCommand::StartRidingJump` | encoded byte-exactly by the v770 adapter with its own round-trip tests; nothing moved a ridden vehicle at all until `lodestone_ecs::vehicle` simulated one |
 //!
 //! So the set is **snapshotted**, and landing the first producer for something on
 //! the list fails this gate — the fix being to delete the line, which is the
@@ -125,13 +126,15 @@ const KNOWN_UNPRODUCED: &[(&str, &str)] = &[
         "PlayerCommand::StopSleeping",
         "leave-bed input (shell); the sleeping pose arrives as entity metadata",
     ),
-    (
-        "PlayerCommand::StartRidingJump",
-        "horse jump-charge input (shell)",
-    ),
+    // `StartRidingJump` left this list when `lodestone_ecs::vehicle::charge_riding_jump`
+    // became its producer. `StopRidingJump` is a different case and will never
+    // leave: it exists in `ServerboundPlayerCommandPacket.Action` and **the vanilla
+    // client never sends it** — `LocalPlayer` has only `sendRidingJump`, and
+    // `AbstractHorse.handleStopJump` is an empty method. So this is not a missing
+    // producer waiting on a screen; the correct number of producers is zero.
     (
         "PlayerCommand::StopRidingJump",
-        "horse jump-release input (shell)",
+        "nothing: the vanilla client never sends this action, so a producer would be a divergence",
     ),
     (
         "PlayerCommand::OpenInventory",
