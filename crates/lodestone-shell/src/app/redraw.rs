@@ -722,6 +722,18 @@ impl WindowApp {
         };
         let health = self.sim.health();
         let food = self.sim.food();
+        // Vanilla's `canHurtPlayer()` — the single gate `extractPlayerHealth` sits
+        // behind, so it hides the hearts, the hunger row and the air bubbles together,
+        // and (through `hasExperience()`, whose body is identical) the XP bar too.
+        // Read off the same `shared_handle` the `spectator` flag above uses; the
+        // predicate itself lives in `crate::hud::can_hurt_player` so the
+        // `isSurvival()`-not-`Creative` distinction is testable without a window.
+        let can_hurt_player = crate::hud::can_hurt_player(
+            self.sim
+                .net()
+                .and_then(|n| n.shared_handle().get().cloned())
+                .and_then(|h| h.game_mode()),
+        );
         // `HudState::MAX_AIR` — the same constant `PlayerSnapshot::air` fills
         // an unreported value with — rather than a second hardcoded `300`.
         let air = self
@@ -776,6 +788,7 @@ impl WindowApp {
         hud_frame.tab_footer = tab_footer.as_slice();
         hud_frame.sidebar = sidebar.as_ref();
         hud_frame.boss_bars = &boss_bars;
+        hud_frame.can_hurt_player = can_hurt_player;
         hud_frame.health = health;
         hud_frame.food = food;
         // Without this the hunger wobble (issue #30) is computed correctly and
