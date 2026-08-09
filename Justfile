@@ -102,17 +102,33 @@ run *args:
 # Cargo.lock and its own web/target/, so it never contends for the shared
 # target/ lock that {{tdir}} exists to avoid.
 #
-# Prerequisites are trunk 0.21.x and the wasm32-unknown-unknown target. This
-# recipe lets trunk report a missing one; `just wasm-check` is the recipe that
-# verifies both up front and fails with the install command.
+# It starts `run-relay` too, and that is the default rather than an extra,
+# because a browser cannot open a raw TCP socket: without the relay the page
+# renders and in-memory singleplayer works, but joining anything reports `relay
+# UNREACHABLE`. A "run" command that silently produces a client which cannot
+# connect looks broken rather than incomplete. `LODESTONE_NO_RELAY=1 just
+# run-wasm` serves the page alone.
+#
+# Two long-lived servers in one command is why the body is a script and not
+# inline here: it needs a trap, so the relay cannot outlive the run and keep its
+# port bound for the *next* one. Per this file's header that body belongs in
+# scripts/, exactly as `wasm-size` delegates. LODESTONE_RELAY_ARGS is how
+# {{relay_defaults}} reaches it, so the endpoints keep one definition shared with
+# `run-relay` below rather than drifting in two places. (It is a LODESTONE_*
+# name, not a CARGO_* one, for the sccache reason at the top of this file, and it
+# is set inline on the command rather than via `set export`.)
+#
+# Prerequisites are trunk 0.21.x and the wasm32-unknown-unknown target; the
+# script verifies both up front and fails with the install command, rather than
+# letting a missing one surface as a confusing build error.
 #
 # The [doc] attribute is here because `just --list` otherwise shows the LAST
 # comment line before a recipe, which for any recipe carrying real rationale is a
 # mid-sentence fragment. Prefer it over reordering the prose so the summary lands
 # last — the rationale should read top-to-bottom for someone in the file.
-[doc("cd web && trunk serve --release — launch the browser (wasm) build on :8080")]
+[doc("relay + browser (wasm) build on :8080; LODESTONE_NO_RELAY=1 for the page alone")]
 run-wasm *args:
-    cd web && trunk serve --release {{args}}
+    LODESTONE_RELAY_ARGS="{{relay_defaults}}" ./scripts/run-wasm.sh {{args}}
 
 # cargo run -p lodestone-relay — the WebSocket→TCP bridge the browser build needs
 # to join a real server, because a browser cannot open a raw TCP socket. Render
@@ -240,9 +256,19 @@ oracle-top-layer:
 # --- Delegating wrappers (scripts/* keep their bodies and paths) ------------
 
 # wasm32 compile + confinement-guard tripwire (debug build, fast). Does NOT
-# prove the browser runs — see xtask's wasm-check section (issue #431; the
-# tested port of scripts/wasm-check.sh, which remains as the reference
-# original).
+# prove the browser runs — see xtask's wasm-check section (the tested port of
+# scripts/wasm-check.sh, which remains as the reference original).
+#
+# CI runs this on every push and PR (the `wasm` job in
+# .github/workflows/ci.yml), which is the *only* thing that makes it a tripwire.
+# For a long time nothing ran it — not this file's `health`, not CI — and the
+# first `just run-wasm` duly found three E0433s in lodestone-server, each a
+# `cfg(not(target_arch = "wasm32"))` module named from ungated code. Deliberately
+# still NOT in `health`: that is four full workspace builds already, and the
+# trade-off is written out at the CI job. Nothing here checks `web/` either way —
+# it is its own workspace with its own Cargo.lock, outside the root `members`
+# glob, so `check`/`check-all` structurally cannot reach it and the trunk build
+# inside wasm-check is the only thing that does.
 [doc("wasm32 compile + confinement-guard tripwire — does NOT prove the browser runs")]
 wasm-check:
     cargo run -q -p xtask {{jflag}} --target-dir {{tdir}} -- wasm-check
