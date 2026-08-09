@@ -8177,3 +8177,58 @@ expected value in *both* directions — 77 closed-set starts reproduced exactly,
 window chunks. A structure whose start is decidable is worth checking for that property before writing
 any gate of your own: it turns a "does it place something" test into a chunk-for-chunk parity test
 against a different implementation, for the price of adding two strings to a list.
+
+**12.163 The cheapest structure in the corpus, and the three ways "cheap" was the wrong
+axis.** Issue #514's S7 also landed `nether_fossil` — 178 Java lines against a template
+engine that already had everything it needed.
+
+- **Small and reachable are different axes, and a previous phase had already recorded
+  this one.** `nether_fossil` was named "the cheapest structure left in the corpus by a
+  wide margin" *and* deferred, because writing it would have produced zero blocks: the
+  Nether composed no structure stage. That stage landed in between, so the cheap thing
+  became the cheap *and reachable* thing. The lesson is not "defer cheap work" — it is
+  that a cost estimate and a reachability claim are two different measurements and a
+  brief that carries one will be read as carrying both.
+- **A test that asks to be updated deliberately is worth more than a test that will
+  quietly go vacuous.** `the_beardifier_is_empty_because_no_nether_structure_bears_adaptation_yet`
+  asserted an empty beard for four Nether chunks, with a message saying that if a
+  `nether_fossil` generator ever landed, this test was the record and should be updated
+  deliberately. It landed, and the test still **passed** — those four chunks happen to
+  have no fossil in reach, so it had become a vacuous pass rather than a failure. Only
+  the comment caught it. It is now inverted: a non-empty beard at the fossil's own
+  chunk plus an empty one at a chunk *the engine itself reports* as out of reach, and
+  the negative arm is the load-bearing half because `nether_fossils` is `spacing 2` and
+  a hardcoded "far away" chunk is as likely as not to have a fossil near it.
+- **An ordering can stand in for a world read the engine cannot make.** Vanilla's
+  `placeDriedGhast` tests `level.getBlockState(pos).isAir()` *after* the template
+  placed, which is unavailable at start time. It does not have to be:
+  `structure_place_stage` writes a piece's `blocks` **before** its `placement`, so the
+  ghast is laid down and then overwritten wherever the template has a bone block —
+  exactly the position set vanilla's `isAir()` would have rejected. What is left to test
+  eagerly is the *terrain* being air. When a post-hoc read is missing, ask whether the
+  write order already encodes it.
+- **The consequence of that, and it made a gate wrong before it made it right: "on the
+  piece" is not "in the world".** The nearest ghast-*bearing* fossil is at (−4, 2) and
+  its ghast never survives — its own template covers the position. A gate that asserted
+  the piece carried a ghast would have passed while the world had none. The constant now
+  names (−6, 6), found by a search that counts in the **world**, and (2, 2) is kept as
+  the contrasting case with no ghast at all, so the pair is two-sided rather than
+  satisfied by a constant `true`.
+- **One transcription where the four-way `BlockKind` loses nothing, and it is worth
+  knowing which.** `NetherFossilStructure`'s walk breaks on *air over
+  soul-sand-**or**-face-sturdy*. The soul-sand disjunct exists because soul sand is not
+  face-sturdy — but soul sand is a **surface-rule** product, so pre-surface it does not
+  exist and every solid block is one `Stone`, which *is* face-sturdy. The disjunction is
+  therefore exactly satisfied by the shape. The same reasoning, applied to
+  `buried_treasure`, says the opposite: its walk terminates on a *material*, so a
+  `block_kind_at` there stops on the first iteration. One accessor, two transcriptions,
+  opposite verdicts — the question to ask is never "is the read available" but "does the
+  branch turn on shape or on material".
+
+Also worth recording because it cost nothing and saved the unit: `lodestone-worldgen`
+dev-depends on `lodestone-server`, which was mid-edit and non-compiling in the shared
+tree for the whole of this work. A throwaway `git worktree add --detach` at the last
+committed sha with its **own** `CARGO_TARGET_DIR`, with the three changed files copied
+in and md5-checked both ways, ran the full suite in under two minutes. The alternative —
+reading `cargo test`'s "could not compile" as a red tree — is the two-observations-at-two-
+moments failure §12 already names, and here the two observations were in two *crates*.

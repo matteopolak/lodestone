@@ -112,7 +112,7 @@ matters, so here is the current table.
 | `trail_ruins` | `bury` | no — jigsaw, but its `capped` processor is ledgered |
 | `trial_chambers` | `encapsulate` | no — jigsaw, but `pool_aliases` is ledgered |
 | `stronghold` | `bury` | no — coded pieces (S5) |
-| `nether_fossil` | `beard_thin` | no — coded pieces (S5), and Nether-only |
+| `nether_fossil` | `beard_thin` | **yes** (S7) — a *template* piece, not coded as this row used to claim, and Nether-only. The first non-jigsaw structure whose beard is observable; `tests/nether_structures.rs`'s `the_nether_beard_is_live_at_a_fossil_and_empty_away_from_one` is that measurement |
 
 So `StructureRefs::adaptation_bearing` is **no longer empty**: a chunk within 12
 blocks of any village piece yields a real rigid list plus junctions, and

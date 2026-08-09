@@ -159,7 +159,8 @@ does (its air comes from the aquifer as plain `minecraft:air`).
 was gated, it was absent from the unsupported ledger's per-structure rows, and it
 placed **zero blocks anywhere in the game** — because its biome tag is Nether-only,
 so the Overworld's stage (the only one that existed) could never accept it.
-`fortress`, `nether_fossil` and `ruined_portal_nether` sat in the same position.
+`fortress` and `ruined_portal_nether` sat in the same position, and so did
+`nether_fossil` until S7 landed its generator (below).
 
 The machinery is shared, not new: `overworld/structures.rs`'s `StructureRefs`
 product, `REFS_RADIUS`/`BEARD_REACH`, `structure::beardifier` and
@@ -193,12 +194,42 @@ and live in `nether/mod.rs`:
   would not be there: it holds only starts, each a pure function of `(seed, cx, cz)`,
   so a miss returns the identical value.
 
-**The beardifier is empty for every Nether chunk today, and that is the negative
-control for the whole change.** `nether_fossil` (`beard_thin`) is the dimension's
-only adaptation-bearing structure and has no piece generator, so `fill_stage` takes
-its no-beard branch — which is *why* the biome and bedrock parity below is unchanged
-by construction rather than by measurement. `the_beardifier_is_empty_because_no_nether_structure_bears_adaptation_yet`
-pins that, so a future `nether_fossil` generator has to update it deliberately.
+**The beardifier was empty for every Nether chunk, and that was the negative control
+for the whole change. S7 made it live.** `nether_fossil` (`beard_thin`) is the
+dimension's only adaptation-bearing structure; while it had no piece generator
+`fill_stage` took its no-beard branch, which is *why* the biome and bedrock parity
+below was unchanged by construction rather than by measurement. That test asked to be
+updated deliberately if a generator ever landed, and one has:
+`the_nether_beard_is_live_at_a_fossil_and_empty_away_from_one` now requires a
+non-empty beard at the fossil's own chunk **and** an empty one at a chunk the engine
+itself reports as out of reach. The negative arm is the load-bearing half —
+`nether_fossils` is `spacing 2`, so a chunk with no fossil within 12 blocks is
+genuinely hard to find, and the control chunk is *searched for* rather than assumed.
+
+### `nether_fossil`: the cheapest structure in the corpus, and why cheap was not the question
+
+178 Java lines against a template engine that already had everything it needed, and
+it still reached zero blocks until the stage above existed — small and reachable are
+different axes. Three details:
+
+* `findGenerationPoint` draws two `nextInt(16)`s and the `height` sample, walks down
+  **draw-free**, and then `addPieces` continues the *same* stream. So it needs a stub
+  that carries a half-used random — `Stub::Continued`, the general form of what jigsaw
+  had bespoke.
+* the walk's condition is *air over soul-sand-**or**-face-sturdy*. Pre-surface those
+  are one test: soul sand is a surface-rule product, so every solid block is
+  `BlockKind::Stone` and every `Stone` is face-sturdy. The one place in this engine
+  where the four-way kind loses nothing to a material question — and the same
+  reasoning is what makes `buried_treasure` impossible.
+* the **dried ghast** is a coin flip on a positional fork of the world seed at the box
+  centre, and vanilla tests `isAir()` *after* the template placed. That read does not
+  exist at start time and does not need to: `structure_place_stage` writes `blocks`
+  before `placement`, so the ghast is laid down and overwritten wherever the template
+  has a bone block of its own — exactly the positions vanilla would have rejected.
+  What is left is the terrain-air test, which `block_kind_at` answers. **Measure the
+  ghast in the world, not on the piece**: the nearest ghast-bearing fossil at (−4, 2)
+  has its ghast overwritten by its own template, so a piece-level gate would have
+  measured the wrong thing and passed.
 
 **Where the fortress goes.** `nether_complexes` carries `fortress` at weight 2 and
 `bastion_remnant` at weight 3. `fortress` has no piece generator, so it yields an
