@@ -593,6 +593,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (vanilla's "overlay message") — and why all three currently draw at exactly **2×
   vanilla**. It also records the answer to a recurring design question: vanilla
   exposes **no** size option for any of them, and we should not invent one.
+- [Hunger](./hunger.md) — Server-authoritative food: exhaustion accumulation from
+  actions, the hidden saturation buffer, the visible food level, natural health
+  regeneration and starvation damage. `crates/lodestone-server/src/food.rs` holds the
+  rules as a pure value type; `crate::vitals::PlayerVitals` owns one and applies its
+  health consequences; `crate::server` charges exhaustion at the sites that know an
+  action happened.
 - [Sprint food gate, toggle sneak/sprint, and mouse feel](./input-options.md) —
   Three small, related fixes to `lodestone-controller`'s input model and the settings
   screen's mouse/controls pages:

@@ -1512,8 +1512,8 @@ pub trait ServerProtocol: Send + Sync {
     /// its own constant food/saturation (see
     /// `V770ServerProtocol::encode_set_health` for the value it picks and
     /// why). The default emits nothing.
-    fn encode_set_health(&self, health: f32) -> ServerDirective {
-        let _ = health;
+    fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
+        let _ = (health, food, saturation);
         ServerDirective::None
     }
 
@@ -2034,8 +2034,8 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_air_supply_update(air)
     }
 
-    fn encode_set_health(&self, health: f32) -> ServerDirective {
-        (**self).encode_set_health(health)
+    fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
+        (**self).encode_set_health(health, food, saturation)
     }
 
     fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
@@ -2244,8 +2244,9 @@ mod tests {
         fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
             send(air)
         }
-        fn encode_set_health(&self, health: f32) -> ServerDirective {
-            send(health as i32)
+        fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
+            let _ = saturation;
+            send(health as i32 * 100 + food)
         }
         fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
             send(difficulty as i32 * 10 + i32::from(locked))
@@ -2438,7 +2439,10 @@ mod tests {
             boxed.encode_air_supply_update(19),
             direct.encode_air_supply_update(19)
         );
-        assert_eq!(boxed.encode_set_health(4.0), direct.encode_set_health(4.0));
+        assert_eq!(
+            boxed.encode_set_health(4.0, 20, 5.0),
+            direct.encode_set_health(4.0, 20, 5.0)
+        );
         assert_eq!(
             boxed.encode_change_difficulty(Difficulty::Hard, true),
             direct.encode_change_difficulty(Difficulty::Hard, true)

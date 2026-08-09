@@ -4057,13 +4057,17 @@ impl ServerProtocol for V770ServerProtocol {
     /// equally here — there is simply nothing that changes them), so
     /// restating the constant is honest about there being no hunger
     /// simulation, not a claim that hunger is unaffected by anything.
-    fn encode_set_health(&self, health: f32) -> ServerDirective {
+    fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
         send(
             play::clientbound::SET_HEALTH,
             &SetHealth {
                 health: health.clamp(0.0, 20.0),
-                food: 20,
-                saturation: 5.0,
+                // Clamped here rather than trusted: the wire field is the HUD's
+                // haunch count, and a value outside `0..=20` draws an overflowing
+                // bar. `food` used to be a hardcoded `20` and `saturation` a
+                // hardcoded `5.0`, which is why hunger was invisible.
+                food: food.clamp(0, 20),
+                saturation: saturation.clamp(0.0, 20.0),
             },
         )
     }
