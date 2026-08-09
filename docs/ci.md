@@ -17,23 +17,156 @@ every push; the rest is still a local, explicit, opt-in run.
 
 ## How it works
 
-Five jobs, all on `ubuntu-latest`, running in parallel so a failure names
-itself instead of hiding behind three green jobs and one red one:
+Six jobs — eight legs, because `check-default` is a three-OS matrix — running in
+parallel so a failure names itself instead of hiding behind three green jobs and
+one red one:
+
+| job | runner | command | why it's separate |
+|---|---|---|---|
+| `check-default` | **`ubuntu` + `macos` + `windows`** | `just check` (`cargo check --workspace --all-targets`) | the baseline health check, and the only per-platform job |
+| `wasm` | `ubuntu` | `just wasm-check` (`cargo xtask wasm-check`) | the wasm32 tripwire: 19 per-crate wasm builds, ~20 grep-based confinement rules, and a real `trunk build` of `web/` |
+
+and, on `ubuntu-latest` only:
 
 | job | command | why it's separate |
 |---|---|---|
-| `check-default` | `just check` (`cargo check --workspace --all-targets`) | the baseline health check |
 | `check-all-features` | `just check-all` (`cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench`) | proves every feature combination compiles; the `--exclude` is structural, not a workaround (below) |
 | `check-shell-no-default` | `just check-seam` (`cargo check -p lodestone-shell --no-default-features`) | the version-seam check — no protocol family is enabled by default, and this is the only thing that proves the shell still compiles with **none** |
 | `xtask-structural-checks` | `cargo run -p xtask -- check-isolation`, then `check-deletable` for each of `v47`/`v340`/`v735`/`v770` | dependency-direction and folder-deletability checks; cheap (xtask has almost no dependencies) and catches a class of break nothing else does |
 | `test` | `just test` (`cargo test --workspace --no-fail-fast`) | the only thing that compiles doctests and runs all 22 `.wgsl` shaders through naga; see "What cannot run" below for what it deliberately does not exercise |
 
-**Four of the five jobs call `just` recipes** (`docs/task-runner.md`) rather
+### Which platform catches what, and what each one costs
+
+The matrix is deliberately **one job wide, not six**. What differs between macOS,
+Linux and Windows is `#[cfg]`-selected code, path handling and platform crates —
+so `cargo check --workspace --all-targets` is the whole per-platform payload.
+Every other job varies an axis that is *not* the OS, and running it three times
+would measure the same thing three times:
+
+| job | axis it varies | so it runs on |
+|---|---|---|
+| `check-default` | **the OS** | all three |
+| `check-all-features` | features | Linux |
+| `check-shell-no-default` | the version seam | Linux |
+| `xtask-structural-checks` | the dependency graph | Linux |
+| `test` | runtime behaviour | Linux |
+| `wasm` | the *target* (wasm32, from any host) | Linux |
+
+**Cost, because it is a real constraint on a repo with this much churn.** GitHub
+bills private-repo runner minutes with a per-OS multiplier: **Linux 1x, Windows
+2x, macOS 10x**. So the matrix's marginal cost is not "3x one job" — with a
+`check` leg at roughly 2–4 minutes, it is about `1x + 2x2 + 10x4 ≈ 45`
+Linux-equivalent minutes per run against the single Linux leg's ~2. macOS is the
+expensive leg by an order of magnitude and also the **least** informative one,
+because the dev machine is an Apple Silicon Mac and every local `just health` run
+already proves that platform. It is in the matrix because the request was
+explicitly "mac, linux, windows, and wasm", not because it carries its weight —
+if runner spend ever needs cutting, **drop the macOS leg first**, not the Windows
+one.
+
+No extra trigger gating was needed for this, and the obvious idea to add some
+would have been a no-op: the `on:` block is already `push: branches: [main]` plus
+`pull_request`, so a push to any non-default branch **never** starts this workflow
+in the first place. There is no "every branch push" case to exclude.
+
+### What the matrix does not cover
+
+**`cargo check` never links.** It stops after type-checking and emits no
+executable, so no `check` leg — on any OS — can see an unresolved symbol. This is
+not a theoretical gap; it is how the one real cross-platform break in this
+repository hid:
+
+Five test and bench targets declare `proc_pid_rusage` in an `unsafe extern "C"`
+block to read `ri_instructions` (`CLAUDE.md` prefers instructions-retired over
+wall clock, at 0.16–0.21% reproducibility against ~10.8%). That symbol lives in
+Darwin's `libSystem` and exists on neither Linux nor Windows. An `extern`
+declaration of a missing symbol **compiles fine everywhere and fails at link**,
+so all three `check` jobs were green while the Linux `test` job died on
+`rust-lld: error: undefined symbol: proc_pid_rusage` — which it had been doing on
+every run, in `lodestone-shell`'s `client_chunk_cycles` test binary. The five
+sites are now `#[cfg(target_os = "macos")]`-gated with explicit non-Darwin arms
+(below).
+
+The residual gap, stated plainly: on Linux the `test` job links, so that class is
+covered there. **On macOS and Windows nothing in this workflow links.** The check
+that would close it is `cargo test --workspace --no-run` per platform, and it was
+deliberately **not** added: it builds every test binary in a ~290-crate
+workspace, which is the 10–35-minute shape the `test` job already has, and at
+Windows' 2x and macOS' 10x that is a large recurring cost to catch a class whose
+only known instance was Darwin-only FFI — something the Linux `test` job catches
+by construction. If a *Windows*-only `extern` ever lands, nothing here will see
+it; a Windows `cargo test --no-run` on push-to-`main` only is the cheapest way to
+buy that, and it is an explicit deferral rather than an oversight.
+
+### The `#[cfg]` gates this required
+
+Five files, all test or bench targets — no library code needed changing. Each got
+the same narrow treatment: `#[cfg(target_os = "macos")]` on the two constants,
+the `extern "C"` block and the real reader, plus a `#[cfg(not(target_os =
+"macos"))]` reader that **panics with `unimplemented!`**:
+
+- `crates/lodestone-shell/tests/client_chunk_cycles.rs` — `Counters::read` and
+  `assert_counters_are_real`
+- `crates/lodestone-server/tests/explosion_cost_profile.rs` — `instructions_now`
+- `crates/lodestone-server/tests/join_parallel_efficiency.rs` — `rusage_now`
+- `crates/protocol/v770/tests/chunk_encode_cycles.rs` — `instructions_retired`
+- `crates/lodestone-worldgen/benches/generation.rs` — `instructions_retired`
+  (a **bench** target, which `--all-targets` checks and `cargo test` links, so it
+  is a real cross-platform break and not only a `cargo bench` concern)
+
+Two decisions worth keeping, because the cheaper alternatives are both wrong:
+
+- **The non-Darwin arm panics; it does not return zero.** Every one of these
+  readers feeds a before/after difference or a ratio, so a counter that silently
+  reads `0` would report a cost of zero instructions — a number that looks like a
+  result and is not one. That is the *precondition* species of vacuous test in
+  `CLAUDE.md`, and `client_chunk_cycles.rs`'s own doc comment already warns about
+  exactly this failure mode for the Intel/Rosetta case. Every test that reaches
+  one of these is `#[ignore]`d, so nothing on Linux or Windows calls it; running
+  one explicitly with `--ignored` on those hosts is what should fail loudly.
+- **Gated per item, not per file.** A file-level `#![cfg(target_os = "macos")]`
+  is fewer lines and would have been wrong twice over.
+  `chunk_encode_cycles.rs`'s `encode_chunk_still_returns_a_send` is **not**
+  `#[ignore]`d and is not a measurement, so a file-level gate would have silently
+  dropped a real test from the Linux and Windows suites. And the surrounding
+  harness code in the two `lodestone-server` tests exercises a lot of server API;
+  keeping it compiling on all three platforms is most of the value of having
+  those platforms in CI at all.
+
+### The `toolchain:` input is inert, and the job now says so
+
+`docs/ci.md` claimed for a while that "every job pins the toolchain to `1.95.0`
+(matching `rust-toolchain.toml` and the dev machine)". **Both halves were wrong.**
+`rust-toolchain.toml` pins `channel = "nightly-2026-08-07"` (worldgen needs
+`portable_simd`), and cargo resolves that file over any rustup default — so the
+`toolchain: "1.95.0"` input installs a toolchain that is then never used. rustup
+says so in the run's own log:
+
+```
+info: note that the toolchain 'nightly-2026-08-07-x86_64-unknown-linux-gnu'
+      is currently in use (overridden by …/lodestone/rust-toolchain.toml)
+```
+
+This is benign in effect — every job has always compiled with the same pinned
+nightly as the dev machine, which is what you want — but it wastes a toolchain
+download per job and the file was asserting the opposite of what happened. The
+`check-default` matrix now has a `Report the toolchain actually in use` step that
+prints `rustc --version`/`cargo --version` and fails if there is none, so each leg
+states its compiler instead of a comment claiming one. **Removing the now-pointless
+`dtolnay/rust-toolchain` pin from the other jobs is a sensible follow-up and was
+deliberately not bundled here** — it changes what five currently-passing jobs do,
+and one variable at a time is the right discipline for a change that can only be
+verified by reading a run.
+
+**Five of the six jobs call `just` recipes** (`docs/task-runner.md`) rather
 than retyping the raw `cargo` invocation, so this file, `CLAUDE.md`, and
 `ci.yml` cannot silently drift apart the way three independently-maintained
-copies of the same command eventually do. Each of those four jobs installs a
+copies of the same command eventually do. Each of those five jobs installs a
 pinned `just` (`extractions/setup-just`, pinned to a commit SHA, not a
-floating major tag) right before its recipe-calling step. `xtask-structural-
+floating major tag) right before its recipe-calling step. All three legs of the
+`check-default` matrix run the same `just check`, so adding platforms added no
+new command to keep in sync — which is most of why the recipe layer was worth
+having. `xtask-structural-
 checks` is the one exception, left calling `cargo run -p xtask` directly: the
 Justfile's generic `xtask *args` passthrough always adds `-q`, which is not
 byte-identical to this job's pre-existing invocation, so wrapping it would
@@ -84,6 +217,13 @@ opposite too: installing them fixes it. Every job that touches the workspace
 `anyhow`, `serde_json`, `sha1`, `zip`, `tempfile` — never reaches
 `lodestone-sound`) installs `libasound2-dev pkg-config` via `apt-get` as its
 first step, before the toolchain is even set up.
+
+In the `check-default` matrix that step carries `if: runner.os == 'Linux'`, which
+is a correctness requirement and not just a saving: `apt-get` does not exist on
+the macOS or Windows runners, so an ungated step would fail those legs outright.
+Neither needs it — `cpal` gates `alsa-sys` to Linux in its own manifest, and
+reaches CoreAudio and WASAPI through SDK frameworks that need no dev package — so
+`alsa-sys` is not in the dependency graph on those two legs at all.
 
 Everything else in the dependency tree that looked risky turned out fine on
 inspection: `xkbcommon-dl`, `x11-dl` and `x11rb` (winit's Linux backends) are
@@ -222,13 +362,20 @@ future agent doesn't have to re-derive them:
 
 ## How to reproduce a CI failure locally
 
-Run the exact failing job's command from `.github/workflows/ci.yml`. Four of
-the five jobs literally run a `just` recipe (see
+Run the exact failing job's command from `.github/workflows/ci.yml`. Five of
+the six jobs literally run a `just` recipe (see
 [`docs/task-runner.md`](./task-runner.md)) as their `run:` step — there is no
-translation to do, the job's own command **is** the recipe below. The fifth
+translation to do, the job's own command **is** the recipe below. The sixth
 (`xtask-structural-checks`) still runs raw `cargo`/`xtask` invocations. None
-of the five need anything beyond the toolchain pin and (for anything
-workspace-wide) `libasound2-dev`/`pkg-config`:
+of the six need anything beyond the toolchain pin and (for anything
+workspace-wide) `libasound2-dev`/`pkg-config`.
+
+**If the red leg was `check-default (macos-latest)`, `just check` on the dev
+machine already reproduces it** — same OS, same architecture, same pinned
+nightly. A red `windows-latest` leg is the one with no local reproduction: there
+is no Windows host here, so read the run's log and reason from it, or push a
+branch and open a PR to iterate (a PR run cancels its own superseded runs, so
+iterating there is cheap; pushes to `main` deliberately do not).
 
 ```bash
 # whichever job went red
@@ -320,6 +467,19 @@ world — re-measure after the infrastructure lands rather than trusting these
 numbers as a baseline going forward.
 
 ## Verification status
+
+### The three-OS matrix
+
+| leg | status |
+|---|---|
+| `check-default (ubuntu-latest)` | proven — this job has passed on every run since it landed |
+| `check-default (macos-latest)` | **inferred, not yet proven by a runner.** `just check` was run on the dev machine (Apple Silicon, the pinned nightly) after the `#[cfg]` gates landed: real exit code **0**, read from a file rather than from a pipeline. Same OS and architecture as the runner, but not the same machine — a runner-image difference (missing SDK, different Xcode) would not have shown up |
+| `check-default (windows-latest)` | **unproven.** There is no Windows host here, and nothing about this leg has ever executed. The specific risks: `just` shells out to `sh`, which should come from Git for Windows on the runner's PATH but has not been observed doing so; `sccache` with MSVC; and `MAX_PATH` on a deep `target/` |
+| the non-Darwin `#[cfg]` arm | **proven only once the Linux legs run.** `cargo check` on Linux type-checks it and the Linux `test` job links it — that is the discriminating check for the arm this host cannot compile. It could not be verified locally: cross-checking to `x86_64-unknown-linux-gnu` from macOS fails in `aws-lc-sys`'s build script for want of a cross C toolchain, which would have produced a red for a reason unrelated to the gate |
+
+**Read the first run rather than assuming this table.** A matrix that certifies
+platforms nobody has built is worse than no matrix, and the macOS and Windows
+rows above are exactly that until a run replaces them.
 
 The workflow YAML is statically validated (`actionlint`, zero findings,
 including its embedded `shellcheck` pass over every `run:` block, re-checked
@@ -516,6 +676,16 @@ no custom target dir) rather than from the pass/fail count.
   `just` recipe yet, add one to the `Justfile` first (`docs/task-runner.md`)
   rather than calling raw `cargo` here — a job that bypasses `just` is exactly
   the drift this conversion exists to close off.
+- **Add a platform**: add the runner label to `check-default`'s `matrix.os`.
+  Keep `fail-fast: false` — with the default `true`, the first leg to go red
+  cancels the others, so you learn one thing per run instead of three and the
+  cancelled legs report as neither pass nor fail. Any step that is not portable
+  needs an `if: runner.os == '…'` guard (the `apt-get` audio step is the existing
+  example, and an ungated `apt-get` fails a macOS or Windows leg outright), and
+  give the leg its own `shared-key` suffix so `Swatinem/rust-cache` does not
+  thrash one entry between OSes. Do **not** duplicate the other five jobs onto
+  the new platform without saying which axis that job varies — see "Which
+  platform catches what" above.
 - **Add a new protocol family to `xtask-structural-checks`**: add its folder
   name to the `for family in ...` loop. `check-deletable` accepts a package
   name, folder name, or path — folder name (`v47`, not `lodestone-v47`) is
