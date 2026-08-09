@@ -159,8 +159,16 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-**29 of 132** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
+**28 of 132** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
 consumer, which is a normal state for a from-scratch client.
+
+> **`VehicleMoved` left the list when the client became authoritative over the
+> vehicle it rides.** It is worth reading as a template for the "no entity id, so
+> it must be a session scalar" mistake: the packet carries only a position and a
+> rotation, but what it *writes* is the vehicle's own `Position`/`Rotation`
+> components, so it is `ingest` — the subject comes from `session::Riding`, the way
+> the seat pin already resolves one. Ask what a fold writes, not what the packet
+> names.
 
 > **The numerator did not move when issue #26 added twenty-four variants**, and
 > that is the useful reading of this line rather than a coincidence: the
@@ -338,10 +346,10 @@ Both were tracked as separate follow-up issues (#410, #411), closed as follows:
   split into `gather_crack_targets`) and `app.rs`'s one-line call site are the
   brokered choke-point patch that lands alongside this doc update.
 
-The remaining **29**, listed for the record and not as a defect claim:
+The remaining **28**, listed for the record and not as a defect claim:
 
 `Ping`, `BlockChangedAck`, `ChunkCacheCenterChanged`, `ChunkCacheRadiusChanged`,
-`SimulationDistanceChanged`, `EntityStatus`, `EntityLeashed`, `VehicleMoved`,
+`SimulationDistanceChanged`, `EntityStatus`, `EntityLeashed`,
 `ItemCooldown`, `PlayerRotationSet`, `CameraSet`, `BookOpened`, `SoundStopped`,
 `PlayerCombatEntered`, `PlayerCombatEnded`, `SignEditorOpened`,
 `AdvancementsTabSelected`, `ProjectilePowerChanged`, `MountScreenOpened`,

@@ -83,6 +83,16 @@ Seventeen entries, each verified by hand. The full list with blockers lives in
   fourth instance of the `SetFlying` shape; **the whole family was worth checking
   precisely because one member of it had already been wrong**.
 
+  Two of the four have since resolved, in *opposite* directions, and the pair is the
+  useful reading. `StartRidingJump` gained a producer
+  (`lodestone_ecs::vehicle::charge_riding_jump`) once the client became authoritative
+  over the vehicle it rides. `StopRidingJump` never will: it exists in
+  `ServerboundPlayerCommandPacket.Action` and **the vanilla client has no sender for
+  it** — only `LocalPlayer.sendRidingJump` exists, and `AbstractHorse.handleStopJump`
+  is an empty method. So "encoded with no producer" is not always a gap waiting on a
+  screen; sometimes zero is the correct count, and the entry's blocker should say so
+  rather than naming an input that will never be written.
+
 ### Two paired halves, which is the useful pattern
 
 `SubscribeDebug` and the four `debug_*` clientbound packets are one loop: the
@@ -94,8 +104,13 @@ looks unmotivated, check whether it is the request half of something clientbound
 ### The eighteen that are *not* verified
 
 A whole-enum sweep of `ClientAction` reported eighteen further variants with no
-producer found by name: `ContainerButtonClick`, `EditBook`, `EndClientTick`,
-`MoveVehicle`, `PaddleBoat`, `PingRequest`, `RecipeBookSeenRecipe`, `RenameItem`,
+producer found by name. **Two of the eighteen — `MoveVehicle` and `PaddleBoat` — have
+since gained producers** in `lodestone_ecs::vehicle::send_vehicle_actions`, which is a
+data point about the list rather than only about riding: they were sitting here
+*unverified* while being genuine islands of exactly the `SetFlying` shape, so an
+unverified entry is a real lead and not noise. The sixteen that remain:
+`ContainerButtonClick`, `EditBook`, `EndClientTick`,
+`PingRequest`, `RecipeBookSeenRecipe`, `RenameItem`,
 `ResourcePackResponse`, `SeenAdvancements`, `SelectBundleItem`, `SelectTrade`,
 `SetBeaconEffects`, `SetContainerSlotState`, `SignUpdate`, `SpectatorAction`,
 `Stab`, `TeleportToEntity`.
