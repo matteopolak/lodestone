@@ -167,6 +167,11 @@ pub mod fluid;
 /// (`docs/hunger.md`). Public because the exhaustion *producers* live in
 /// `crate::server` and a caller needs the constants to charge the right amount.
 pub mod food;
+/// Experience: the three-regime level curve, the orb denomination ladder and a
+/// player's XP state (`docs/experience.md`). Public because every XP *source*
+/// (smelting, breeding, fishing, enchanting) lives outside this module and must not
+/// grow a second curve.
+pub mod experience;
 mod furnace;
 /// The world's typed game-rule registry (issue #327). **Was an orphan file too**
 /// — none of its 780 lines, including `game_rule_defaults_match_the_jar`, was in

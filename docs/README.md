@@ -489,6 +489,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   client's event routers claim each `ClientEvent` variant. It exists so that adding a
   variant and forgetting to wire it is a **compile error** (`E0004`) rather than a
   silent nothing.
+- [Experience](./experience.md) — The XP level curve, the orb denomination ladder
+  and a player's experience state. `crates/lodestone-server/src/experience.rs` holds
+  all three as pure arithmetic; `ServerProtocol::encode_set_experience` puts the
+  result on the wire. The one production producer today is furnace smelting, paid out
+  when the player closes the menu.
 - [Explosion block destruction](./explosion-blocks.md) — The half of an explosion
   that removes blocks: a port of 26.2's `ServerExplosion::calculateExplodedPositions`
   into `crates/lodestone-server/src/explosion_blocks.rs`, on real per-block blast

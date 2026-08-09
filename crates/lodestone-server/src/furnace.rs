@@ -969,6 +969,39 @@ impl Furnace {
 /// same "caller supplies the randomness" shape [`crate::composter::Composter::insert`]
 /// uses.
 #[must_use]
+/// Turns one drained [`Furnace::take_recipes_used`] map into a total XP award —
+/// vanilla's `AbstractFurnaceBlockEntity.awardUsedRecipesAndPopExperience`, which
+/// walks the banked recipes and calls `createExperience` for each.
+///
+/// `roll` is one `[0.0, 1.0)` draw **per recipe entry**, supplied by the caller in
+/// the order the map is walked, because `createExperience`'s fractional remainder is
+/// probabilistic (see [`experience_for`]). The map is a `HashMap`, so its iteration
+/// order is not reproducible — which matters only for *which* entry gets which roll,
+/// not for the total's distribution, and is recorded rather than papered over.
+///
+/// A recipe key the table no longer knows contributes nothing rather than panicking:
+/// a furnace loaded from a save written by a different build can carry one.
+#[must_use]
+pub fn experience_for_recipes(
+    used: &std::collections::HashMap<String, u32>,
+    mut rolls: impl FnMut() -> f32,
+) -> u32 {
+    let mut total = 0u32;
+    for (key, count) in used {
+        // The key is `"<table>:<ingredient>"` — `Furnace::tick`'s own format. Split
+        // on the *first* colon only: the ingredient is itself a namespaced id and
+        // carries a second one.
+        let Some((table, ingredient)) = key.split_once(':') else {
+            continue;
+        };
+        let Some(recipe) = cooking_recipe(table, ingredient) else {
+            continue;
+        };
+        total = total.saturating_add(experience_for(*count, recipe.experience, rolls()));
+    }
+    total
+}
+
 pub fn experience_for(amount: u32, experience_per_item: f32, roll: f32) -> u32 {
     let raw = amount as f32 * experience_per_item;
     let mut xp = raw.floor();
@@ -1255,5 +1288,63 @@ mod tests {
         // An exact integer amount has zero fractional remainder — the roll
         // must never matter.
         assert_eq!(experience_for(2, 1.0, 0.999), 2);
+    }
+    /// `experience_for_recipes` turns a banked map into a total — the join that made
+    /// `take_recipes_used` and `experience_for` reachable at all.
+    ///
+    /// The key format is `"<table>:<ingredient>"` and the ingredient is itself a
+    /// namespaced id, so **the split must be on the first colon only**. Splitting on
+    /// the last (or on every) colon yields a table name no recipe lookup knows, and
+    /// the function would silently return zero for every entry — a plausible "no XP
+    /// yet" rather than a failure.
+    ///
+    /// Iron ore smelts for `0.7` XP each in 26.2. Ten cooks is `7.0` exactly, so the
+    /// fractional remainder is zero and the roll cannot matter: the total is exactly
+    /// **7**, whatever the RNG does. That is the prediction, and it is roll-free by
+    /// construction rather than by tolerance.
+    #[test]
+    fn experience_for_recipes_splits_the_key_on_the_first_colon_only() {
+        let recipe = recipe_for(FurnaceKind::Furnace, "minecraft:raw_iron")
+            .expect("raw iron is smeltable in 26.2");
+        // The expected value comes from the recipe table, not from a literal here.
+        let per_item = recipe.experience;
+        let cooks = 10u32;
+        let exact = (cooks as f32 * per_item).fract() == 0.0;
+
+        let mut used = std::collections::HashMap::new();
+        used.insert(
+            format!("{}:minecraft:raw_iron", FurnaceKind::Furnace.recipe_table_key()),
+            cooks,
+        );
+
+        let low = experience_for_recipes(&used, || 0.0);
+        let high = experience_for_recipes(&used, || 0.999);
+        assert_eq!(
+            low,
+            (cooks as f32 * per_item) as u32,
+            "the total must be the table's own per-item value times the cook count"
+        );
+        if exact {
+            assert_eq!(
+                low, high,
+                "with a whole-number total the roll cannot matter, so both extremes \
+                 must agree"
+            );
+        }
+        assert!(low > 0, "a banked smelt must be worth something");
+
+        // **The control**: a key the table does not know contributes nothing, rather
+        // than panicking or being counted at some default. This is also what a
+        // wrong split would make *every* key look like, so the two assertions
+        // together separate "unknown recipe" from "broken parser".
+        let mut bogus = std::collections::HashMap::new();
+        bogus.insert("minecraft:smelting:minecraft:not_a_thing".to_string(), 99);
+        assert_eq!(experience_for_recipes(&bogus, || 0.0), 0);
+
+        // And an empty map is zero, not a panic.
+        assert_eq!(
+            experience_for_recipes(&std::collections::HashMap::new(), || 0.0),
+            0
+        );
     }
 }
