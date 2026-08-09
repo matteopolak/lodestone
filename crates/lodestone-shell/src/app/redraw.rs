@@ -370,6 +370,17 @@ impl WindowApp {
         // `renderItemInHand` does the same — and it takes the strength rather than
         // the matrix because it composes both bob halves itself.
         render.set_damage_tilt_strength(self.sim.damage_tilt_strength());
+        // Vanilla's Glint Speed and Glint Strength accessibility options. Both
+        // were already parameters of `glint_clock` and `GlintUniform::new`; the two
+        // shell call sites handing over `DEFAULT_SPEED`/`DEFAULT_STRENGTH` was all
+        // that kept the rows inert. This covers the **world and hand** draws; the
+        // 2-D GUI icon glint is the third site and is owned by the HUD and
+        // container renderers (`IconRenderer::set_glint_options`).
+        let (glint_speed, glint_strength) = {
+            let o = self.nav.options();
+            (f64::from(o.glint_speed), o.glint_strength)
+        };
+        render.set_glint_options(glint_speed, glint_strength);
 
         // Filled maps (issue #184). This is the hop that turns the `SessionMaps`
         // fold from an F3 readout into the picture itself — the palette, the

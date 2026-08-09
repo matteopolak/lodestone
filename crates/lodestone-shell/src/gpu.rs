@@ -185,6 +185,22 @@ pub struct RenderState {
     /// installs a bob source, and a `0.0` default would be indistinguishable from
     /// the accessibility option being switched on.
     damage_tilt_strength: f32,
+    /// Vanilla's **Glint Speed**/**Glint Strength** accessibility options
+    /// ([`crate::config::Options::glint_speed`]/`glint_strength`), pushed down per
+    /// frame by `app/redraw.rs` the same way [`Self::damage_tilt_strength`] is and
+    /// read by `gpu::glint::glint_uniform` for the world and hand glint draws.
+    ///
+    /// Seeded to `lodestone_render::glint::DEFAULT_SPEED`/`DEFAULT_STRENGTH`,
+    /// which *are* vanilla's shipped option values — so an install that never
+    /// calls the setter, and every existing gate written against the defaults,
+    /// sees byte-identical output.
+    ///
+    /// The speed is `f64` because `glint_clock` is: the scroll is a wall-clock
+    /// millisecond count multiplied by the speed, and narrowing it to `f32` would
+    /// lose resolution in the clock, not in the option.
+    glint_speed: f64,
+    /// See [`Self::glint_speed`].
+    glint_strength: f32,
     pipeline: BlockPipeline,
     #[allow(dead_code)]
     atlas: GpuAtlas,

@@ -1307,25 +1307,38 @@ pub(crate) fn build_sprite_pipeline(
     }
 }
 
-/// This frame's [`GuiGlintUniform`], at the shipped option defaults.
+/// This frame's [`GuiGlintUniform`], at the player's **Glint Speed** and **Glint
+/// Strength** (`Options.java:858-874`, two `UnitDouble`s defaulting to `0.5` and
+/// `0.75`).
 ///
 /// The clock is wall-clock milliseconds, vanilla's `Util.getMillis()` — the same
 /// origin `gpu/glint.rs` keys the world and hand glint off, so all three shimmer
-/// in phase.
-fn gui_glint_uniform() -> GuiGlintUniform {
+/// in phase. **Both options must be pushed to all three or they fall out of
+/// phase**, which is why the world/hand pair reads
+/// `crate::gpu::RenderState::glint_options` and this reads
+/// [`IconRenderer::glint_speed`]/`glint_strength`: two owners, one pair of
+/// values, pushed from the same place each frame.
+///
+/// Clamped through `lodestone_render::glint::clamp_speed`/`clamp_strength` — the
+/// *same* pair `gpu::glint::glint_uniform` uses, deliberately, because two copies
+/// of the domain is how the GUI icon and the held item would come to shimmer at
+/// different rates.
+fn gui_glint_uniform(speed: f64, strength: f32) -> GuiGlintUniform {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |d| d.as_secs_f64() * 1000.0);
+    let speed = lodestone_render::glint::clamp_speed(speed);
+    let strength = lodestone_render::glint::clamp_strength(strength);
     GuiGlintUniform {
         tex_matrix: lodestone_render::glint::glint_texture_matrix(
             millis,
-            lodestone_render::glint::DEFAULT_SPEED,
+            speed,
             // `Scale::Item` — the `glint` render type, which is every item form
             // including a GUI slot icon.
             lodestone_render::glint::Scale::Item,
         )
         .to_cols_array_2d(),
-        fade: [lodestone_render::glint::DEFAULT_STRENGTH, 0.0, 0.0, 0.0],
+        fade: [strength, 0.0, 0.0, 0.0],
     }
 }
 
@@ -1529,7 +1542,10 @@ impl GuiGlint {
 /// draw; `attach_item_models` gives block icons somewhere to draw. Neither is
 /// required, and a renderer with neither draws no icons at all — the jar-less
 /// runtime behaviour and the executed negative control in both pixel gates.
-#[derive(Debug, Default)]
+/// **`Default` is hand-written below, not derived** — the two glint fields must
+/// boot at vanilla's `0.5`/`0.75` and a derived `0.0` would silently switch the
+/// shimmer off.
+#[derive(Debug)]
 pub(crate) struct IconRenderer {
     sprites: Option<SpriteIcons>,
     models: Option<ModelIcons>,
@@ -1551,6 +1567,20 @@ pub(crate) struct IconRenderer {
     /// draw without their shimmer — the same "is a thing attached" degradation
     /// every other stream here has.
     glint: Option<GuiGlint>,
+    /// Vanilla's **Glint Speed**/**Glint Strength** accessibility options, read by
+    /// [`gui_glint_uniform`] once per frame in [`Self::upload_glint`].
+    ///
+    /// Held here rather than passed to `upload_glint` because that method's
+    /// callers are the HUD and container renderers, and the uniform is per *frame*
+    /// while their call is per *screen* — the same split
+    /// [`Self::upload_glint`]'s own doc already records for the scroll offsets.
+    ///
+    /// Seeded to `lodestone_render::glint::DEFAULT_SPEED`/`DEFAULT_STRENGTH`,
+    /// which are vanilla's shipped values, so an `IconRenderer` nobody pushes
+    /// options into is byte-identical to what it was before these existed.
+    glint_speed: f64,
+    /// See [`Self::glint_speed`].
+    glint_strength: f32,
 }
 
 /// The GPU resources for the **2-D GUI glint**: the shimmer over a flat item
@@ -1592,10 +1622,54 @@ struct GuiGlintUniform {
     fade: [f32; 4],
 }
 
+/// Not derived, and that is the whole reason this impl is hand-written: the two
+/// glint fields must start at vanilla's shipped `0.5`/`0.75`, and
+/// `#[derive(Default)]` would start them at `0.0` — a stationary, fully
+/// transparent shimmer, i.e. the glint silently switched off on every screen for
+/// any caller that never pushes the options. Every other field's `Default` is the
+/// detached state the struct's own doc describes and is unchanged.
+impl Default for IconRenderer {
+    fn default() -> Self {
+        Self {
+            sprites: None,
+            models: None,
+            special: None,
+            special_tried: false,
+            color_format: None,
+            glint: None,
+            glint_speed: lodestone_render::glint::DEFAULT_SPEED,
+            glint_strength: lodestone_render::glint::DEFAULT_STRENGTH,
+        }
+    }
+}
+
 impl IconRenderer {
     /// A detached renderer: no atlas, no model pass, no icons.
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Push vanilla's **Glint Speed**/**Glint Strength** accessibility options
+    /// down for the 2-D GUI glint, the third of the three glint sites (the world
+    /// and hand pair live on `crate::gpu::RenderState`). Read once per frame by
+    /// [`Self::upload_glint`].
+    ///
+    /// Clamping lives in [`gui_glint_uniform`], so this stores the raw pushed
+    /// value and the domain is stated once.
+    pub(crate) fn set_glint_options(&mut self, speed: f64, strength: f32) {
+        self.glint_speed = speed;
+        self.glint_strength = strength;
+    }
+
+    /// This frame's GUI glint speed and strength as they will reach the uniform —
+    /// already clamped, so a gate can predict the value the shader sees rather than
+    /// the one that was pushed.
+    #[must_use]
+    pub(crate) fn glint_options(&self) -> (f64, f32) {
+        (
+            lodestone_render::glint::clamp_speed(self.glint_speed),
+            lodestone_render::glint::clamp_strength(self.glint_strength),
+        )
     }
 
     /// The attached flat item atlas, if any. Cloned (an `Arc`) so the caller can
@@ -1699,6 +1773,9 @@ impl IconRenderer {
         if verts.is_empty() {
             return 0;
         }
+        // Copied out before the `&mut self.glint` borrow below, not read through
+        // it: `self.glint_speed` and the mutable pass borrow cannot coexist.
+        let (g_speed, g_strength) = (self.glint_speed, self.glint_strength);
         let Some(g) = self.glint.as_mut() else {
             return 0;
         };
@@ -1712,7 +1789,11 @@ impl IconRenderer {
             });
         }
         queue.write_buffer(&g.buffer, 0, bytemuck::cast_slice(verts));
-        queue.write_buffer(&g.uniform, 0, bytemuck::bytes_of(&gui_glint_uniform()));
+        queue.write_buffer(
+            &g.uniform,
+            0,
+            bytemuck::bytes_of(&gui_glint_uniform(g_speed, g_strength)),
+        );
         (verts.len() / SPRITE_FLOATS_PER_VERTEX) as u32
     }
 

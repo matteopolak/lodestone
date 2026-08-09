@@ -465,6 +465,27 @@ pub struct Options {
     /// degenerate projection matrix, which blanks the frame rather than looking
     /// wrong.
     pub fov: u32,
+    /// Vanilla's **Glint Speed** accessibility option (`Options.java:858-865`), a
+    /// `UnitDouble` defaulting to `0.5` — how fast the enchantment shimmer scrolls
+    /// across an item.
+    ///
+    /// The default is not incidental: it is the same number as
+    /// `lodestone_render::glint::DEFAULT_SPEED`, because that constant *is*
+    /// vanilla's shipped option value. So a stored `0.5` and the frozen constant
+    /// are byte-identical, which is exactly why a gate for this option has to pick
+    /// something else.
+    ///
+    /// `0.0` is a legitimate value and a **stationary** shimmer, not an absent
+    /// one — the whole point of the accessibility option — so unlike
+    /// [`Self::damage_tilt_strength`] zero is not an off state.
+    pub glint_speed: f32,
+    /// Vanilla's **Glint Strength** accessibility option (`Options.java:867-874`),
+    /// a `UnitDouble` defaulting to `0.75` — the shimmer's alpha
+    /// (`GlintAlpha`), matching `lodestone_render::glint::DEFAULT_STRENGTH`.
+    ///
+    /// `0.0` removes the shimmer entirely, which is what a player sensitive to it
+    /// wants; there is no separate on/off toggle in vanilla either.
+    pub glint_strength: f32,
 }
 
 impl Default for Options {
@@ -499,6 +520,8 @@ impl Default for Options {
             advanced_item_tooltips: false,
             sound_volumes: [1.0; 11],
             fov: DEFAULT_FOV,
+            glint_speed: lodestone_render::glint::DEFAULT_SPEED as f32,
+            glint_strength: lodestone_render::glint::DEFAULT_STRENGTH,
         }
     }
 }
@@ -685,6 +708,18 @@ impl Options {
             .and_then(|v| u32::try_from(v).ok())
             .filter(|v| (MIN_FOV..=MAX_FOV).contains(v))
             .unwrap_or(DEFAULT_FOV);
+        // Both `UnitDouble`s, so the chat sliders' `unit` rule applies. The
+        // defaults come from `lodestone_render::glint`'s own constants rather than
+        // from literals here, because those constants *are* vanilla's shipped
+        // option values — a second copy would be a fact declared twice.
+        let glint_speed = unit(
+            "glint_speed",
+            lodestone_render::glint::DEFAULT_SPEED as f32,
+        );
+        let glint_strength = unit(
+            "glint_strength",
+            lodestone_render::glint::DEFAULT_STRENGTH,
+        );
         Self {
             gui_scale,
             keybinds,
@@ -715,6 +750,8 @@ impl Options {
             advanced_item_tooltips,
             sound_volumes,
             fov,
+            glint_speed,
+            glint_strength,
         }
     }
 
@@ -839,6 +876,12 @@ impl Options {
             "chat_background_opacity",
             self.chat_background_opacity,
             default.chat_background_opacity,
+        );
+        put_unit("glint_speed", self.glint_speed, default.glint_speed);
+        put_unit(
+            "glint_strength",
+            self.glint_strength,
+            default.glint_strength,
         );
         // Before the `chat_colors` insert below, because `put_unit` holds a
         // mutable borrow of `obj` and its last use has to precede any direct
@@ -1806,6 +1849,56 @@ mod tests {
         for good in [MIN_FOV, 70, MAX_FOV] {
             let json = format!("{{\"fov\": {good}}}");
             assert_eq!(Options::from_json(&json).fov, good);
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -- `glintSpeed` / `glintStrength` --------------------------------------
+
+    /// Both glint options round-trip, and both boot at the same numbers
+    /// `lodestone_render::glint` holds as its constants.
+    ///
+    /// That last assertion is the load-bearing one and it looks trivial: those two
+    /// constants *are* vanilla's shipped option values, so if the defaults here
+    /// ever drifted from them an untouched install would silently start shimmering
+    /// differently from vanilla with no row on any screen changed.
+    #[test]
+    fn glint_options_round_trip_and_default_to_the_render_crates_own_constants() {
+        let path = temp_options_path("glint");
+        let d = Options::default();
+        assert_eq!(
+            f64::from(d.glint_speed),
+            lodestone_render::glint::DEFAULT_SPEED
+        );
+        assert_eq!(d.glint_strength, lodestone_render::glint::DEFAULT_STRENGTH);
+
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("glint"), "the defaults write no key: {text}");
+
+        let custom = Options {
+            glint_speed: 0.0,
+            glint_strength: 0.25,
+            ..Options::default()
+        };
+        custom.save_to(&path).unwrap();
+        let back = Options::load_from(&path);
+        assert_eq!(back.glint_speed, 0.0, "a frozen glint is a legal choice");
+        assert_eq!(back.glint_strength, 0.25);
+
+        for bad in ["-0.5", "1.5", "\"fast\"", "null"] {
+            let json = format!("{{\"glint_speed\": {bad}, \"glint_strength\": {bad}}}");
+            let loaded = Options::from_json(&json);
+            assert_eq!(
+                f64::from(loaded.glint_speed),
+                lodestone_render::glint::DEFAULT_SPEED,
+                "glint_speed: {bad} must degrade to the default"
+            );
+            assert_eq!(
+                loaded.glint_strength,
+                lodestone_render::glint::DEFAULT_STRENGTH,
+                "glint_strength: {bad} must degrade to the default"
+            );
         }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

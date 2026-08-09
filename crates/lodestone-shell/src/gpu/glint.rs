@@ -32,7 +32,7 @@
 
 use lodestone_assets::Image;
 use lodestone_render::glint::{
-    DEFAULT_SPEED, DEFAULT_STRENGTH, GlintPipeline, GlintUniform, Scale, glint_sampler,
+    GlintPipeline, GlintUniform, Scale, clamp_speed, clamp_strength, glint_sampler,
 };
 
 /// The uploaded glint sheet, its pass, and the shared group-0 uniform buffer.
@@ -166,17 +166,114 @@ pub(super) fn glint_now_ms() -> f64 {
 }
 
 /// The shared `GlintUniform` value for a glint draw under `view_proj`, at the
-/// shipped option defaults. `section_origin` is zero on every current site —
-/// item geometry carries its own position — mirroring the model pass's reserved
-/// zero origin slot.
+/// player's **Glint Speed** and **Glint Strength**. `section_origin` is zero on
+/// every current site — item geometry carries its own position — mirroring the
+/// model pass's reserved zero origin slot.
+///
+/// # Both were `DEFAULT_SPEED`/`DEFAULT_STRENGTH` until now
+///
+/// `glint_clock` and `GlintUniform::new` have taken them as parameters since the
+/// glint landed, so nothing downstream needed changing — this call site handing
+/// over the constants was the whole of why the two accessibility rows did
+/// nothing. Note the two constants *are* vanilla's shipped option values (`0.5`
+/// and `0.75`), so an untouched install is byte-identical to the old behaviour
+/// and no gate written against the defaults can tell the difference.
+///
+/// Clamped to `[0, 1]` because both options are `UnitDouble`s and this reaches a
+/// GPU uniform: a hand-edited negative strength would make `dst += src * src`
+/// darken the item instead of shimmering it.
 #[must_use]
-pub(super) fn glint_uniform(view_proj: [[f32; 4]; 4]) -> GlintUniform {
+pub(super) fn glint_uniform(
+    view_proj: [[f32; 4]; 4],
+    speed: f64,
+    strength: f32,
+) -> GlintUniform {
     GlintUniform::new(
         view_proj,
         [0.0, 0.0, 0.0],
         glint_now_ms(),
-        DEFAULT_SPEED,
-        DEFAULT_STRENGTH,
+        clamp_speed(speed),
+        clamp_strength(strength),
         Scale::Item,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use lodestone_render::glint::{DEFAULT_SPEED, DEFAULT_STRENGTH, glint_texture_matrix};
+
+    const IDENTITY: [[f32; 4]; 4] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
+    /// The pushed **strength** reaches `GlintAlpha`, at a value where the frozen
+    /// `DEFAULT_STRENGTH` hypothesis fails.
+    ///
+    /// `0.25` is not arbitrary: it is a third of the shipped `0.75`, so a uniform
+    /// still carrying the constant is off by `0.5` — half the whole alpha range —
+    /// and no rounding or blend subtlety can hide that. `0.0` is the second anchor
+    /// because it is the value the accessibility option exists for, and it is the
+    /// one a "did anything arrive?" check would confuse with an unwritten buffer.
+    #[test]
+    fn the_pushed_glint_strength_reaches_glint_alpha() {
+        let quarter = super::glint_uniform(IDENTITY, DEFAULT_SPEED, 0.25);
+        assert_eq!(quarter.origin_and_alpha[3], 0.25);
+        assert!(
+            (quarter.origin_and_alpha[3] - DEFAULT_STRENGTH).abs() > 0.4,
+            "the uniform is still carrying DEFAULT_STRENGTH"
+        );
+
+        let off = super::glint_uniform(IDENTITY, DEFAULT_SPEED, 0.0);
+        assert_eq!(
+            off.origin_and_alpha[3], 0.0,
+            "a strength of zero must arrive as zero, not fall back to the default"
+        );
+
+        // The control: the default really is `DEFAULT_STRENGTH`, so the hypothesis
+        // the first assertion distances itself from is the right one.
+        let default = super::glint_uniform(IDENTITY, DEFAULT_SPEED, DEFAULT_STRENGTH);
+        assert_eq!(default.origin_and_alpha[3], DEFAULT_STRENGTH);
+    }
+
+    /// The pushed **speed** reaches the texture matrix.
+    ///
+    /// The expectation comes from `glint_texture_matrix` evaluated at a fixed
+    /// clock outside this function — the same clock `glint_uniform` cannot be given
+    /// (it reads the wall clock), which is why the comparison is at `millis == 0`:
+    /// there, the scroll offsets are zero at *every* speed and the matrices agree
+    /// trivially, so the assertion is instead that a **frozen** glint's matrix
+    /// differs from a full-speed one at a non-zero clock. That is what separates
+    /// "the argument is threaded" from "the argument is ignored" without needing a
+    /// clock injection this call site does not have.
+    #[test]
+    fn the_speed_argument_changes_the_texture_matrix() {
+        const MILLIS: f64 = 5_000.0;
+        let frozen = glint_texture_matrix(MILLIS, 0.0, super::Scale::Item);
+        let shipped = glint_texture_matrix(MILLIS, DEFAULT_SPEED, super::Scale::Item);
+        let full = glint_texture_matrix(MILLIS, 1.0, super::Scale::Item);
+        assert_ne!(
+            frozen.to_cols_array(),
+            shipped.to_cols_array(),
+            "a zero-speed glint must not scroll like the shipped default"
+        );
+        assert_ne!(
+            shipped.to_cols_array(),
+            full.to_cols_array(),
+            "full speed must not scroll like the shipped default"
+        );
+        // And `glint_uniform` really does put that matrix in the uniform, rather
+        // than building its own: at a zero speed the translation column is exactly
+        // the un-scrolled one whatever the wall clock reads, which is the one
+        // property of the live call that is clock-independent.
+        let uniform = super::glint_uniform(IDENTITY, 0.0, DEFAULT_STRENGTH);
+        assert_eq!(
+            uniform.tex_matrix,
+            glint_texture_matrix(0.0, 0.0, super::Scale::Item).to_cols_array_2d(),
+            "glint_uniform is not passing its speed argument to \
+             glint_texture_matrix"
+        );
+    }
 }
