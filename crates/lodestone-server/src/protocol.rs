@@ -1528,8 +1528,28 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes one block entity's update tag (vanilla
+    /// `ClientboundBlockEntityDataPacket`, wire id `block_entity_data`).
+    ///
+    /// `block_entity_type` is a `minecraft:block_entity_type` registry **key**, not
+    /// a numeric id — resolving it is version-specific, so the implementor does it.
+    /// A key this version does not have must emit nothing rather than guess.
+    ///
+    /// This is the mid-play counterpart to the block-entity array a chunk packet
+    /// carries at load time: without it, a record that changes while the chunk is
+    /// already resident never reaches the client at all. The default emits nothing.
+    fn encode_block_entity_data(
+        &self,
+        pos: BlockPos,
+        block_entity_type: &str,
+        nbt: &lodestone_core::Nbt,
+    ) -> ServerDirective {
+        let _ = (pos, block_entity_type, nbt);
+        ServerDirective::None
+    }
+
     /// Encodes one [`crate::effects::WorldEffect`] by dispatching to whichever
-    /// of the three encoders above it names.
+    /// of the encoders above it names.
     ///
     /// Provided rather than required: it is pure dispatch, so no implementor
     /// should override it, and it is the only method a *publisher* has to know
@@ -1560,6 +1580,11 @@ pub trait ServerProtocol: Send + Sync {
                 count,
                 long_distance,
             } => self.encode_level_particles(particle, *pos, *offset, *max_speed, *count, *long_distance),
+            crate::effects::WorldEffect::BlockEntityData {
+                pos,
+                block_entity_type,
+                nbt,
+            } => self.encode_block_entity_data(*pos, block_entity_type, nbt),
         }
     }
 
@@ -2197,6 +2222,15 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
         (**self).encode_block_update(x, y, z, state)
+    }
+
+    fn encode_block_entity_data(
+        &self,
+        pos: BlockPos,
+        block_entity_type: &str,
+        nbt: &lodestone_core::Nbt,
+    ) -> ServerDirective {
+        (**self).encode_block_entity_data(pos, block_entity_type, nbt)
     }
 
     fn encode_air_supply_update(&self, air: i32) -> ServerDirective {

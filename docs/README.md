@@ -1105,8 +1105,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Pistons](./redstone-pistons.md) — `crates/lodestone-server/src/piston.rs` —
   vanilla's `PistonBaseBlock` and `PistonStructureResolver`, ported as pure decisions
   over a `Fn(BlockPos) -> String` world lookup, plus the wiring in `random_tick.rs`'s
-  neighbour-reaction pass that makes a powered piston actually move blocks. Issue
-  #316, **partially**: read "What is not here" before assuming a contraption works.
+  neighbour-reaction pass that makes a powered piston actually move blocks, and the
+  two-phase `moving_piston` transition that makes a push *animate* on a client rather
+  than snap. Issue #316, **partially**: read "What is not here" before assuming a
+  contraption works.
 - [Redstone: dust, torches, repeaters, comparators, observers](./redstone.md) — Five
   new modules in `crates/lodestone-server/src/`, all pure query/decision functions
   with no `ChunkColumn` in scope except through a `lookup: Fn(BlockPos) -> String`

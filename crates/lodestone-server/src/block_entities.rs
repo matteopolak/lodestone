@@ -556,6 +556,66 @@ pub(crate) async fn run_block_entity_tick_loop(handle: BlockEntityHandle) {
     }
 }
 
+/// Renders a canonical block-state string as the `{Name, Properties}` compound
+/// `BlockState.CODEC` reads — the shape any NBT field holding a block state takes.
+///
+/// `Properties` is omitted entirely for a state with none, matching vanilla's own
+/// codec (an empty map would still decode, but writing one where vanilla writes
+/// nothing is a gratuitous divergence in a payload we may one day compare byte for
+/// byte against a capture). Every property value is a `String`, including numeric
+/// and boolean ones — `Properties` is a map of the property's *serialized name*,
+/// never its typed value.
+#[must_use]
+pub fn block_state_nbt(state: &str) -> Nbt {
+    let (name, properties) = match state.split_once('[') {
+        Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
+        None => (state, ""),
+    };
+    let mut fields = vec![("Name".to_string(), Nbt::String(name.to_string()))];
+    let pairs: Vec<(String, Nbt)> = properties
+        .split(',')
+        .filter(|pair| !pair.is_empty())
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(key, value)| (key.to_string(), Nbt::String(value.to_string())))
+        .collect();
+    if !pairs.is_empty() {
+        fields.push(("Properties".to_string(), Nbt::Compound(pairs)));
+    }
+    Nbt::Compound(fields)
+}
+
+/// One in-flight moving piston's network NBT — `PistonMovingBlockEntity`'s
+/// `getUpdateTag`, which is `saveCustomOnly`, i.e. exactly `saveAdditional`'s five
+/// fields with no `id`/`x`/`y`/`z`.
+///
+/// Ported from `saveAdditional`, not from the field declarations, and the two
+/// differ in a way that matters:
+///
+/// * **`facing` is a `Byte`**, because `Direction.LEGACY_ID_CODEC` is
+///   `Codec.BYTE` over `get3DDataValue`. Written as an `Int` it decodes as absent
+///   and every piston silently defaults to `DOWN`.
+/// * **`progress` is `progressO`**, the value at the *start* of the tick, so a
+///   freshly created entity reports [`crate::piston::PISTON_INITIAL_PROGRESS`] and
+///   not the `0.5` the server's own first tick would already have reached. A client
+///   ramps from this seed itself; sending the advanced value halves the animation.
+/// * `extending` and `source` are `putBoolean`, which is a `Byte` in NBT.
+#[must_use]
+pub fn moving_piston_nbt(entity: &crate::piston::MovingBlockEntity) -> Nbt {
+    Nbt::Compound(vec![
+        (
+            "blockState".to_string(),
+            block_state_nbt(&entity.moved_state),
+        ),
+        ("facing".to_string(), Nbt::Byte(entity.facing_3d_value())),
+        (
+            "progress".to_string(),
+            Nbt::Float(crate::piston::PISTON_INITIAL_PROGRESS),
+        ),
+        ("extending".to_string(), Nbt::Byte(i8::from(entity.extending))),
+        ("source".to_string(), Nbt::Byte(i8::from(entity.source))),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,6 +852,79 @@ mod tests {
     /// `tests/serve_play.rs` already established for this crate — real
     /// `tokio::time::interval`s, virtual clock, resolves in a fraction of a
     /// second of actual wall time.
+    /// [`moving_piston_nbt`] against `PistonMovingBlockEntity.saveAdditional` read
+    /// as a record definition: five fields, and the **tag types** are the half a
+    /// name-only comparison cannot see.
+    ///
+    /// `facing` written as an `Nbt::Int` is the specific failure this pins. A
+    /// client reads it with `getBooleanOr`-style tolerance for the flags but a
+    /// strict `Nbt::Byte` match for the direction, so an `Int` decodes as *absent*
+    /// and every piston in the world silently animates toward `DOWN` — a clean
+    /// parse, no error, wrong geometry. Same shape as the `Age` short/int collision
+    /// this repo already paid for.
+    #[test]
+    fn moving_piston_nbt_matches_the_vanilla_update_tag() {
+        let entity = crate::piston::MovingBlockEntity {
+            moved_state: "minecraft:piston_head[facing=east,short=false,type=sticky]".to_string(),
+            direction: crate::neighbor_update::Direction::East,
+            // Distinct on purpose: equal flags would let a transposition of the two
+            // adjacent booleans through unnoticed.
+            extending: true,
+            source: false,
+        };
+        let Nbt::Compound(fields) = moving_piston_nbt(&entity) else {
+            panic!("the update tag must be a compound");
+        };
+        let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["blockState", "facing", "progress", "extending", "source"],
+            "exactly `saveAdditional`'s five fields, and no id/x/y/z — \
+             `getUpdateTag` is `saveCustomOnly`"
+        );
+        let field = |key: &str| {
+            fields
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+                .expect("field present")
+        };
+        // `Direction.LEGACY_ID_CODEC` is `Codec.BYTE` over `get3DDataValue`, and
+        // EAST is 5.
+        assert_eq!(field("facing"), Nbt::Byte(5));
+        assert_eq!(field("progress"), Nbt::Float(0.0), "`progressO`, not `progress`");
+        assert_eq!(field("extending"), Nbt::Byte(1));
+        assert_eq!(field("source"), Nbt::Byte(0));
+        // `BlockState.CODEC`: a `Name` string plus a `Properties` map whose values
+        // are all strings, including the boolean `short`.
+        assert_eq!(
+            field("blockState"),
+            Nbt::Compound(vec![
+                (
+                    "Name".to_string(),
+                    Nbt::String("minecraft:piston_head".to_string())
+                ),
+                (
+                    "Properties".to_string(),
+                    Nbt::Compound(vec![
+                        ("facing".to_string(), Nbt::String("east".to_string())),
+                        ("short".to_string(), Nbt::String("false".to_string())),
+                        ("type".to_string(), Nbt::String("sticky".to_string())),
+                    ])
+                ),
+            ])
+        );
+        // A state with no properties omits `Properties` entirely, as vanilla's
+        // codec does.
+        assert_eq!(
+            block_state_nbt("minecraft:stone"),
+            Nbt::Compound(vec![(
+                "Name".to_string(),
+                Nbt::String("minecraft:stone".to_string())
+            )])
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn run_block_entity_tick_loop_actually_advances_a_registered_furnace_over_time() {
         let handle = BlockEntityHandle::new();

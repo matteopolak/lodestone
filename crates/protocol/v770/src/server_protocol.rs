@@ -4002,6 +4002,39 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
+    /// `ClientboundBlockEntityDataPacket`: a packed `BlockPos` i64, the
+    /// `BLOCK_ENTITY_TYPE` registry id as a VarInt, then the nameless network-NBT
+    /// update tag — the identical shape this crate's own `BLOCK_ENTITY_DATA`
+    /// decode arm reads back (`adapter.rs`).
+    ///
+    /// Emits nothing when the type key does not resolve in this version's registry
+    /// or when the payload does not serialize, for the same reason
+    /// [`encode_block_entities`] filters an entry out of the chunk array rather
+    /// than writing a wrong VarInt: a bad type id mis-draws one entity, while a
+    /// malformed body desynchronises the stream and takes the connection down.
+    fn encode_block_entity_data(
+        &self,
+        pos: lodestone_model::BlockPos,
+        block_entity_type: &str,
+        nbt: &lodestone_core::Nbt,
+    ) -> ServerDirective {
+        let Some(type_id) = resolve_block_entity_type_id(block_entity_type) else {
+            return ServerDirective::None;
+        };
+        let mut body = Writer::default();
+        if write_network_nbt(&mut body, nbt).is_err() {
+            return ServerDirective::None;
+        }
+        let mut w = Writer::default();
+        w.i64(pack_block_pos(pos.x, pos.y, pos.z));
+        w.var_i32(type_id as i32);
+        w.bytes(&body.into_vec());
+        ServerDirective::Send {
+            packet_id: play::clientbound::BLOCK_ENTITY_DATA,
+            payload: w.into_vec(),
+        }
+    }
+
     /// Encodes air-supply as a one-field `SET_ENTITY_DATA` metadata update for
     /// [`LOCAL_PLAYER_ENTITY_ID`] — the same wire packet a mob's cosmetic
     /// metadata would use, restricted to the single `DATA_AIR_SUPPLY_ID`
@@ -5376,6 +5409,122 @@ mod block_edit_tests {
             }
             other => panic!("expected Send, got {other:?}"),
         }
+    }
+
+    /// A moving piston reaches the wire as **two** packets, and the whole point of
+    /// this gate is the pair: a `block_update` establishing the `moving_piston`
+    /// state and a `block_entity_data` carrying the record that says which block is
+    /// travelling. Either alone draws nothing.
+    ///
+    /// Decoded with the exact sequence `V770Adapter`'s own `BLOCK_ENTITY_DATA` arm
+    /// uses — packed i64, VarInt type id, network NBT, `ensure_empty` — so the
+    /// expectation for the *layout* comes from the reader that has to consume real
+    /// server bytes, not from this encoder. The record's field names and tag types
+    /// come from `PistonMovingBlockEntity.saveAdditional` and are gated in
+    /// `lodestone_server::block_entities`.
+    ///
+    /// The two packets are asserted in the order the server's own drain emits them
+    /// (block-change lane first, effect lane second): reversed, a client applies a
+    /// record to a cell whose state is still the *old* block, and
+    /// `sync_block_entity` may discard it as a type mismatch.
+    #[test]
+    fn a_moving_piston_reaches_the_wire_as_a_state_then_a_record() {
+        use lodestone_server::piston::{Direction, MovingBlockEntity, moving_piston_state};
+
+        let proto = V770ServerProtocol;
+        let entity = MovingBlockEntity {
+            moved_state: "minecraft:piston_head[facing=east,short=false,type=sticky]".to_string(),
+            direction: Direction::East,
+            extending: true,
+            source: true,
+        };
+        let pos = lodestone_model::BlockPos::new(11, 64, -4);
+
+        // 1. The state. A `moving_piston` must resolve to a real 26.2 state id —
+        // a fallback to the default would silently animate the wrong facing.
+        let moving = moving_piston_state(Direction::East, true);
+        let state_directive = proto.encode_block_update(pos.x, pos.y, pos.z, &moving);
+        let ServerDirective::Send {
+            packet_id: state_id_packet,
+            payload: state_payload,
+        } = state_directive
+        else {
+            panic!("the moving_piston state must reach the wire");
+        };
+        assert_eq!(state_id_packet, play::clientbound::BLOCK_UPDATE);
+        let mut r = Reader::new(&state_payload);
+        assert_eq!(r.i64().expect("packed pos"), pack_block_pos(pos.x, pos.y, pos.z));
+        let wire_state = r.var_i32().expect("state id") as u32;
+        r.ensure_empty().expect("no trailing bytes");
+        assert_eq!(
+            lodestone_data::block_states::state_id(&moving),
+            Some(wire_state),
+            "the moving_piston state must resolve exactly, not fall back to a default"
+        );
+
+        // 2. The record, through the same dispatch a world tick uses — so this also
+        // proves `encode_world_effect` routes the new variant instead of dropping it.
+        let effect = lodestone_server::effects::WorldEffect::BlockEntityData {
+            pos,
+            block_entity_type: lodestone_server::piston::PISTON_BLOCK_ENTITY.to_string(),
+            nbt: entity.update_tag(),
+        };
+        let ServerDirective::Send {
+            packet_id: record_packet,
+            payload: record_payload,
+        } = proto.encode_world_effect(&effect)
+        else {
+            panic!("the moving piston record must reach the wire");
+        };
+        assert_eq!(record_packet, play::clientbound::BLOCK_ENTITY_DATA);
+
+        let mut r = Reader::new(&record_payload);
+        let packed = r.i64().expect("packed pos");
+        assert_eq!(unpack_block_pos(packed), pos);
+        let type_id = r.var_i32().expect("type id") as u32;
+        assert_eq!(
+            lodestone_data::block_entity_types::block_entity_type_name(type_id),
+            Some("minecraft:piston"),
+            "the block's key is `moving_piston` and its entity's key is `piston`; \
+             sending the block's would resolve to some other entity"
+        );
+        let nbt = lodestone_core::read_network_nbt(&mut r).expect("network nbt");
+        r.ensure_empty().expect("no trailing bytes");
+
+        let lodestone_core::Nbt::Compound(fields) = &nbt else {
+            panic!("the record must be a compound");
+        };
+        let field = |key: &str| {
+            fields
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+                .unwrap_or(lodestone_core::Nbt::End)
+        };
+        assert_eq!(
+            field("facing"),
+            lodestone_core::Nbt::Byte(5),
+            "`facing` must survive the NBT round trip as a Byte — as an Int a client \
+             reads it as absent and animates toward DOWN"
+        );
+        assert_eq!(field("progress"), lodestone_core::Nbt::Float(0.0));
+        assert_eq!(field("extending"), lodestone_core::Nbt::Byte(1));
+        assert_eq!(field("source"), lodestone_core::Nbt::Byte(1));
+
+        // 3. And the two together resolve to the head a client draws: the record's
+        // own `blockState` must be a real state id, or `PistonHeadRenderer`'s first
+        // arm never fires and nothing is drawn at all.
+        assert!(
+            lodestone_data::block_states::state_id(&entity.moved_state).is_some(),
+            "the travelling head state must resolve in the 26.2 table"
+        );
+
+        // Control: a type key this version does not have must emit nothing rather
+        // than a packet carrying a made-up registry id.
+        assert!(matches!(
+            proto.encode_block_entity_data(pos, "minecraft:not_a_block_entity", &nbt),
+            ServerDirective::None
+        ));
     }
 
     /// Pins `encode_game_event`'s wire layout end to end: one unsigned byte

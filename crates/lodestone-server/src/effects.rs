@@ -105,6 +105,26 @@ pub enum WorldEffect {
         /// Bypass the client's particle-distance limiter.
         long_distance: bool,
     },
+    /// Vanilla `ClientboundBlockEntityDataPacket` — one block entity's update tag,
+    /// republished for a cell whose *record* changed without the chunk being
+    /// resent.
+    ///
+    /// The odd one out in this enum: it is not a sound or a particle, and it is
+    /// here because this is the lane that is drained **after** the block-change
+    /// lane. That order is load-bearing for anything whose record must land on a
+    /// state the same batch established — a moving piston, whose block state alone
+    /// says nothing about which block is travelling. Giving it a lane of its own
+    /// would mean choosing that order again somewhere else.
+    BlockEntityData {
+        /// The cell the record belongs to.
+        pos: BlockPos,
+        /// The `minecraft:block_entity_type` registry key — **the entity's key,
+        /// not the block's**. A `moving_piston` block carries a
+        /// `minecraft:piston` block entity.
+        block_entity_type: String,
+        /// The `getUpdateTag` payload, as a nameless compound.
+        nbt: lodestone_core::Nbt,
+    },
 }
 
 /// `LevelEvent.PARTICLES_DESTROY_BLOCK`
