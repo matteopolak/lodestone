@@ -193,6 +193,55 @@ pub struct MenuRow {
     pub arrow: Option<Arrow>,
 }
 
+impl MenuRow {
+    /// Whether this row belongs to the screen's scrolling list, and must therefore
+    /// be **clipped to that list's band** — by the draw, and equally by the
+    /// hit-test.
+    ///
+    /// ## Why this is on the row rather than on the slot
+    ///
+    /// Because a row can belong to a list in four different ways, and asking only
+    /// about the slot sees one of them. [`Origin::is_scrolling_list_row`] was the
+    /// whole test for a while, and it left the three `MenuRow::entry`/`account`/
+    /// `world` lists unclipped in the hit-test: those rows carry **no** slot at all
+    /// (their columns are `getRowLeft()`'s two separate integer divisions, which a
+    /// [`Slot`] cannot express), so the slot test simply did not fire and the row
+    /// stayed hit-testable everywhere. The reported symptom was on the multiplayer
+    /// screen (2026-08-07): with a server row scrolled under the footer, pressing
+    /// *Join Server* neither highlighted the button nor pressed it — the row won,
+    /// because rows and the footer share one flat index space and the first rect
+    /// containing the cursor wins.
+    ///
+    /// The draw and the hit-test must agree about this, and the only way to
+    /// guarantee that is for both to call **this** function. The band already had
+    /// that property — it comes from `frame.list` through
+    /// [`widget::ListSpec::model`] in both places — and row membership did not,
+    /// which is precisely why the two disagreed.
+    ///
+    /// ## Why it is not "every row on a screen that has a list"
+    ///
+    /// A footer button, a title, a search field and `OptionsScreen`'s own arranged
+    /// grid live *outside* the band by construction. Clipping them to it would
+    /// erase them, and rejecting them outside it would make them unclickable — the
+    /// exact bug, mirrored. See [`Origin::is_scrolling_list_row`] for which
+    /// placements are which, and why that match has no `_ =>` arm.
+    #[must_use]
+    pub fn is_scrolling_list_row(&self) -> bool {
+        // The three `AbstractSelectionList` screens, whose rows are placed by
+        // `row_rect`'s own arms rather than by a `Slot` — the multiplayer list, the
+        // account list and the world/save list.
+        self.entry.is_some()
+            || self.account.is_some()
+            || self.world.is_some()
+            // Everything else: a settings-tree list row is a slotted widget, and a
+            // resource-pack row is one too (`MenuRow::pack` is a draw selector, not
+            // a placement).
+            || self
+                .slot
+                .is_some_and(|slot| slot.origin.is_scrolling_list_row())
+    }
+}
+
 /// Which way a [`MenuRow::arrow`] triangle points.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arrow {

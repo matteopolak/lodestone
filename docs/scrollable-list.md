@@ -113,6 +113,62 @@ The sprite crop generalises the horizontal-only UV crop the XP bar already uses
 (`hud.rs:1302-1312`). Cropping one axis only would **squash** a favicon instead of
 cutting it, which is worth naming because it still looks like a picture.
 
+### The clip has a second half: the hit-test
+
+Clipping the *draw* is only one side. `app/menus.rs`'s `menu_row_at_in` scans
+`frame.rows` in order and the **first rect containing the cursor wins**, with the
+footer buttons last in the same flat index space — so a list row whose rect
+overhangs the band steals the footer button's clicks along exactly the strip it
+overhangs, and steals its **hover** too, because that one function answers both.
+Vanilla has no such failure: `AbstractSelectionList.getEntryAtPosition` tests the
+cursor against the list's own box before it ever walks the entries.
+
+The hit-test therefore rejects a list row when the cursor is outside the band, and
+both halves of that question are **derived from the same source the draw reads**:
+
+| question | one expression, two readers |
+|---|---|
+| where does the band end? | `frame.list` → `ListSpec::model` — `render::draw` for its clip, `menu_row_at_in` for its bound |
+| is this row *in* the list? | `MenuRow::is_scrolling_list_row` — `render::draw` to decide whether to clip, `menu_row_at_in` to decide whether to bound |
+
+The second row of that table is the one that was missing, and it cost two separate
+player reports of the same defect:
+
+- 2026-08-07, the settings screen — *"Done is only partly clickable"*. Fixed by
+  testing `MenuRow::slot`'s `Origin::is_scrolling_list_row`.
+- 2026-08-07, the multiplayer screen — *"if i try to press 'Join Server' when im not
+  scrolled to the bottom … it doesnt highlight the button and instead presses the
+  server entry"*. The settings fix did **not** reach it, because the three
+  `AbstractSelectionList` screens (`MenuRow::entry`/`account`/`world`) carry **no
+  slot at all** — their column is `getRowLeft()`'s two separate integer divisions,
+  which a `Slot` cannot express — so the guard silently did not apply to any of
+  them. Same mechanism, three screens, one missing question.
+
+Two rules follow, and they are what stops a fourth instance:
+
+- **Ask `MenuRow::is_scrolling_list_row`, never `slot.origin` directly.** A row can
+  belong to a list in four ways; the slot is one of them.
+- **`Origin::is_scrolling_list_row` has no `_ =>` arm at any depth**, nested
+  placement enums included. It had one, and it made a new scrolling list *born
+  broken*: an unclassified origin fell through to `false`, which is "hit-testable
+  and paintable everywhere" — the defect, not a neutral default. Adding an `Origin`
+  variant, or a placement variant on any screen, is now a compile error there until
+  someone says which side of the clip it is on. This is the same shape as
+  `CLAUDE.md`'s rule about a terminal `_ =>` arm in an event router being an island
+  factory, except it manufactures a hit-test bug instead of an island.
+
+The gate is `app::tests::the_join_server_button_wins_the_cursor_at_every_scroll_offset`,
+and the sweep is load-bearing rather than thorough: the bug exists **only** at
+offsets where a row has scrolled under the footer, so a probe at scroll 0 or at
+`max_scroll` passes against the broken code. Measured against the pre-fix
+predicate, the first failing offset is **12 px**, where row 11 wins a cursor
+inside Join Server's rect (`Some(11)` where `Some(16)` is required) — a gate that
+sampled the ends would have been green. Its control,
+`a_cursor_inside_the_band_still_resolves_to_the_list_row_under_it`, was observed to
+fail with `None` when the bound is dropped so that list rows are rejected
+everywhere: without it, "the footer wins below the band" is equally satisfied by a
+list nothing can click at all.
+
 ## How to change it, and the gotchas
 
 - **Keep every formula a citation.** A convenience with no vanilla counterpart

@@ -233,32 +233,42 @@ impl WindowApp {
         self.nav.set_menu_cursor(lx, ly, w, h);
         // The active list's band, if this screen has one. **A scrolling-list row
         // outside it is not hit-testable**, which is the other half of the clip
-        // `Origin::is_scrolling_list_row` gave the *draw*.
+        // `MenuRow::is_scrolling_list_row` gives the *draw*.
         //
-        // Vanilla's `AbstractSelectionList.getEntryAtPosition`
-        // (`AbstractSelectionList.java:296-306`) tests the cursor against the
-        // list's own box before it ever walks the entries, so an entry scrolled
-        // past the bottom cannot be clicked even where it would have painted.
-        // Here the rows and the footer share **one flat index space** and the
-        // first rect containing the cursor wins, with the footer last — so a row
-        // that overhangs the band was stealing the Done button's clicks along
-        // exactly the strip it overhung. That is the "Done is only partly
-        // clickable" report: the draw stopped painting over it at #445 and the
-        // hit-test kept routing to it.
+        // Vanilla's `AbstractSelectionList.getEntryAtPosition` tests the cursor
+        // against the list's own box before it ever walks the entries, so an entry
+        // scrolled past the bottom cannot be clicked even where it would have
+        // painted. Here the rows and the footer share **one flat index space** and
+        // the first rect containing the cursor wins, with the footer last — so a row
+        // that overhangs the band steals the footer button's clicks along exactly
+        // the strip it overhangs, and steals its *hover* too, because this one
+        // function answers both.
         //
-        // The band comes from `frame.list` through `ListSpec::model`, the same
-        // two calls `render::draw` makes for its clip, so the two cannot
-        // disagree about where the list ends.
+        // Two reports, one mechanism. The first was "Done is only partly clickable"
+        // on the settings screen; the second was the multiplayer screen's *Join
+        // Server* neither highlighting nor firing whenever a server row had scrolled
+        // under it. The settings fix tested `rows[i].slot`'s origin, and a
+        // multiplayer row carries **no slot at all** — its column is
+        // `getRowLeft()`'s two separate integer divisions, which a `Slot` cannot
+        // express — so the guard silently did not apply to the three
+        // `AbstractSelectionList` screens at all.
+        //
+        // Both halves of the question are now derived rather than restated: the band
+        // comes from `frame.list` through `ListSpec::model`, the same two calls
+        // `render::draw` makes for its clip, and membership comes from
+        // `MenuRow::is_scrolling_list_row`, the same call `render::draw` makes to
+        // decide *whether* to clip. Neither pair can disagree.
         let band = frame
             .list
             .as_ref()
             .and_then(|spec| spec.model(h))
             .map(|list| (list.top(), list.bottom()));
         (0..frame.rows.len()).find(|&i| {
-            if let (Some((top, bottom)), Some(slot)) = (band, frame.rows[i].slot) {
-                if slot.origin.is_scrolling_list_row() && (ly < top || ly > bottom) {
-                    return false;
-                }
+            if let Some((top, bottom)) = band
+                && frame.rows[i].is_scrolling_list_row()
+                && (ly < top || ly > bottom)
+            {
+                return false;
             }
             crate::menu::render::row_rect(&frame.rows, i, w, h)
                 .is_some_and(|(rx, ry, rw, rh)| {
