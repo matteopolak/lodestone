@@ -1122,3 +1122,162 @@ fn fancy_clouds_paint_real_pixels_near_the_camera() {
         control_frac * 100.0
     );
 }
+
+// ---------------------------------------------------------------------------
+// `SkyMode::None` — the Nether draws no sky geometry, only the clear.
+// ---------------------------------------------------------------------------
+
+/// Renders one frame through `SkyRenderer::render` at `mode` and returns the
+/// RGBA8 readback.
+///
+/// One helper so the two arms below cannot differ in anything except the mode:
+/// same camera, same clock, same clear, same textures. A per-arm setup is how a
+/// paired gate ends up comparing two scenes rather than two modes.
+fn render_sky_at_mode(
+    ctx: &GpuContext,
+    sky: &SkyRenderer,
+    mode: lodestone_render::SkyMode,
+    clear: wgpu::Color,
+) -> Vec<u8> {
+    let mut target =
+        HeadlessTarget::new(ctx.device(), WIDTH, HEIGHT, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let frame = target.acquire().expect("acquire");
+    let camera = Camera {
+        position: glam::Vec3::new(0.0, 70.0, 0.0),
+        yaw: 0.0,
+        // Steeply up, for the reason `sky_pass_paints_the_whole_frame` records:
+        // the disc is a finite overhead plane, so a level camera paints only the
+        // upper half and the lower half is where terrain would go.
+        pitch: -60.0,
+        fov_y_degrees: 90.0,
+        aspect: WIDTH as f32 / HEIGHT as f32,
+        near: 0.05,
+        far: 1024.0,
+    };
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("sky-mode-gate-encoder"),
+        });
+    sky.render(
+        ctx.device(),
+        ctx.queue(),
+        &mut encoder,
+        frame.view(),
+        &camera,
+        // Midnight, so the star and moon draws are live too — a gate run at noon
+        // would leave `star_brightness == 0` and could not tell a suppressed star
+        // pass from an inactive one.
+        &lodestone_render::SkyFrame::new(18_000, [0.24, 0.46, 0.83])
+            .with_cloud_status(lodestone_render::CloudStatus::Fast)
+            .with_sky_mode(mode),
+        clear,
+    );
+    ctx.queue().submit(std::iter::once(encoder.finish()));
+    target.read_texels(ctx.device(), ctx.queue())
+}
+
+/// The count of pixels differing from the frame's own top-left pixel, and their
+/// bounding box as `(min_x, min_y, max_x, max_y)`.
+///
+/// A **bounding box, not a fraction**: a fraction cannot tell a uniform-but-wrong
+/// frame from a localised blob, and the failure message has to be able to say
+/// *where* the geometry that should not be there landed.
+fn differing_from_corner(pixels: &[u8]) -> (usize, Option<(u32, u32, u32, u32)>) {
+    let reference = &pixels[0..4];
+    let mut count = 0usize;
+    let mut bbox: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let i = ((y * WIDTH + x) * 4) as usize;
+            let px = &pixels[i..i + 4];
+            // A tolerance of 2/255 per channel: the readback goes through an
+            // `Rgba8UnormSrgb` target, so a byte of rounding is expected and is
+            // not geometry.
+            let differs = (0..4).any(|c| px[c].abs_diff(reference[c]) > 2);
+            if differs {
+                count += 1;
+                bbox = Some(match bbox {
+                    None => (x, y, x, y),
+                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                });
+            }
+        }
+    }
+    (count, bbox)
+}
+
+/// **The Nether gate.** With `SkyMode::None`, the frame must be exactly the
+/// clear colour everywhere — no disc, no band, no sun, no moon, no stars, no
+/// clouds — while the *same* frame at `SkyMode::Overworld` must not be, and the
+/// clear must still have happened.
+///
+/// # Three assertions, because uniformity alone is the trap
+///
+/// A full-screen quad painting over everything is *also* uniform, and that is
+/// precisely the shape a coverage probe cannot see (a new full-screen element is
+/// what a point- or vertex-sampled check certifies as "nothing paints here").
+/// So the uniform value is checked to be the **red clear** and not the sky's
+/// blue or the synthetic sun's white:
+///
+/// 1. the `None` frame differs from its own corner pixel in **zero** locations;
+/// 2. that uniform value is red-dominant and not black — the clear ran, so this
+///    is "clear and draw nothing", not "do nothing" (which would leave the
+///    target black and would silently make the block pass `Load` garbage);
+/// 3. the `Overworld` frame *does* differ, with a printed bounding box — the
+///    control, without which arm 1's zero would be measuring an empty scene
+///    rather than a suppressed one.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn the_nether_paints_only_the_clear_while_the_overworld_paints_geometry() {
+    let Some(ctx) = ctx() else { return };
+    let sky = SkyRenderer::new(
+        ctx.device(),
+        ctx.queue(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &manager(),
+    )
+    .expect("build sky renderer over the synthetic pack");
+
+    // The Nether's own fog hue, and deliberately not black or grey: a
+    // red-dominant clear is what lets arm 2 tell the clear apart from the disc
+    // (blue), the synthetic sun/cloud (white) and an untouched target (black).
+    let clear = wgpu::Color {
+        r: 0.20,
+        g: 0.02,
+        b: 0.02,
+        a: 1.0,
+    };
+
+    let nether = render_sky_at_mode(&ctx, &sky, lodestone_render::SkyMode::None, clear);
+    let overworld = render_sky_at_mode(&ctx, &sky, lodestone_render::SkyMode::Overworld, clear);
+
+    let (nether_diff, nether_bbox) = differing_from_corner(&nether);
+    let (overworld_diff, overworld_bbox) = differing_from_corner(&overworld);
+    let corner = [nether[0], nether[1], nether[2], nether[3]];
+
+    eprintln!("=== SkyMode::None gate ===");
+    eprintln!("nether: {nether_diff} px differ from the corner, bbox {nether_bbox:?}");
+    eprintln!("nether corner rgba: {corner:?}");
+    eprintln!("overworld (control): {overworld_diff} px differ, bbox {overworld_bbox:?}");
+
+    assert_eq!(
+        nether_diff, 0,
+        "SkyMode::None painted geometry: {nether_diff} px differ from the clear, \
+         bounding box {nether_bbox:?} in a {WIDTH}x{HEIGHT} frame"
+    );
+    assert!(
+        corner[0] > corner[1] && corner[0] > corner[2] && corner[0] > 20,
+        "the uniform frame is not the red clear ({corner:?}) — either the clear \
+         never ran (an untouched target reads black, and the block pass would then \
+         Load garbage) or a full-screen quad painted over it, which is exactly the \
+         case a uniformity check alone cannot see"
+    );
+    assert!(
+        overworld_diff > 0,
+        "control failed to fail: SkyMode::Overworld painted nothing over the same \
+         clear from the same camera at the same clock, so this scene cannot tell a \
+         suppressed sky from an empty one — the camera/time setup needs changing, \
+         not the assertion"
+    );
+}
