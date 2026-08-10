@@ -161,12 +161,50 @@ lands, a creeper's fuse direction reaches `EntitySnapshot` → `CreeperFuse` →
 `tick_creeper_fuse` → `EntityDraw::creeper_swelling`, the chain that was
 already fully wired and tested waiting on exactly this value.
 
-One known gap that predates this change and is still open:
-`EntityMesh::local_min`/`local_max` come from `rest_pose()`, so a swelling
-creeper is drawn up to 41% wider than its own culling box and will clip at the
-frame edge. `MAX_SWELL_SCALE` is exported for whoever widens the creeper's
-local bounds; this pass deliberately left it alone rather than guess at the
-right conjugated-scale math under time pressure with no dedicated pixel test.
+**The chain was not "already fully wired", and the last hop was in this crate.**
+The paragraph above was written in good faith and was wrong about its own
+subject, which is worth keeping because the reason is general.
+`EntityDraw::creeper_swelling` really did receive a correct, interpolated,
+non-zero swell — and then **nothing read it**. The shell's
+`RenderState::prepare_entities` resolved every entity through
+`EntityModelSet::resolve_posed`, whose swell is a hard `0.0`, so
+`Skeleton::pose_swelling`, `creeper_swell_scale`,
+`creeper_white_overlay_progress` and `creeper_overlay_alpha_from_progress` had
+**zero production callers between them** — every one of them was reached only
+from its own tests. This field's own doc comment asserted "two consumers
+downstream, both in `gpu.rs`", and a grep for either function in the whole
+`gpu` module returned nothing.
+
+Two lessons, both mechanical:
+
+* **`swell = 0.0` is a documented exact identity**, which is what made the gap
+  invisible: no frame looked wrong, no counter moved, and every unit test of
+  every formula passed. An identity default is the perfect camouflage for a
+  missing call, so a formula whose zero case is the identity needs a gate on
+  its **caller**, not on itself.
+* **`cargo xtask connectedness` structurally cannot see this.** It answers "is
+  this clientbound packet reaching anything", and the packet was reaching
+  `EntityDraw` fine. The detector that *would* have found it is different: a
+  field on a render/instance struct whose every assignment site in the tree is
+  the same literal constant. Every `creeper_swelling:` in the repo was `0.0`.
+
+Fixed by `EntityModelSet::resolve_animated` (and
+`EntityInstance::new_animated`), which take the swell and the death time and
+which `prepare_entities` now calls; `resolve_posed` remains as the zero-extras
+delegate for the five call sites that have neither. The white-flash byte joins
+`(hurt, skin)` in that function's batch-grouping key, because the tint is one
+repeated value per batch.
+
+The culling-box gap is closed in the same pass. `EntityMesh::local_min`/
+`local_max` came from `rest_pose()`, so a swelling creeper was drawn up to 41%
+wider than its own box and would cull at the frame edge; `from_named_model` now
+pads the creeper's local bounds by `MAX_SWELL_SCALE`, conjugated about
+`MODEL_FEET_OFFSET` on the y axis exactly as `swell_root_affine` is (a plain
+scale about the model origin would let the padded box sink below the feet
+plane). It is padded once at bake time rather than recomputed per frame: one
+constant box that always contains the drawn model costs a slightly conservative
+cull and cannot drift from the pose, where a per-frame exact box would be a
+second derivation of the same geometry.
 
 **A separate, server-side gap (issue #425), now also closed.** Everything
 above is the decode/render side — it works against *any* server that sends
