@@ -221,7 +221,8 @@ Editing, and reading the tree:
 
   | broken | your crate's diagnostics | verdict |
   |---|---|---|
-  | **another crate** (`lodestone-shell` failing) | still emitted — `lodestone-server` compiled and warned normally | a foreign failure is **not** a short-circuit; keep working |
+  | **a sibling crate** (`lodestone-shell` failing, you are in `lodestone-server`) | still emitted — compiled and warned normally | a *sibling*'s failure is **not** a short-circuit; keep working |
+  | **a crate you depend on** (`lodestone-server` failing, you are in `lodestone-shell`) | **nothing at all** — a planted error in the agent's own lib file was never reported, zero diagnostics for its crate | wait it out; "my files look clean" carries **no** information |
   | **your own lib** | **test-file errors vanish entirely** — only the lib error is reported | a clean log for your *tests* means nothing until your lib compiles |
 
   The second row is the trap: a test target depends on its lib, so a broken lib **hides every error in its own
@@ -253,7 +254,11 @@ The machine:
   not as a full disk. **An earlier version of this rule blamed `target/debug/incremental` and prescribed
   `CARGO_INCREMENTAL=0`; that was measured wrong.** At 113 GB of `target/`, `build` was **101 GB** and
   `incremental` **4.2 GB** — 24× apart, so deleting the cache bought back only ~4 GB each time, which is exactly
-  why it kept recurring. This toolchain puts intermediates at
+  why it kept recurring. **That ratio is not a constant, and treating it as one is the next version of the same
+  mistake**: re-measured later the same day at 80 GB of `target/debug`, the split was `build` **46 GB** and
+  `incremental` **34 GB** — 1.35× apart. So `build` is reliably the *largest* consumer but `incremental` is not
+  reliably negligible; **measure the split before choosing what to delete**, rather than reasoning from either
+  figure. This toolchain puts intermediates at
   `target/debug/build/<pkg>/<hash>/out/*.rcgu.o` and **never GCs the stale hash directories** — 2,150 of them
   under `lodestone-shell` alone, one holding 16,900 objects. `CARGO_INCREMENTAL=0` does not touch them.
 
