@@ -51,6 +51,36 @@ if (player.getFoodData().getSaturationLevel() <= 0.0F && this.tickCount % (food 
 
 Range `-1..=+1`, and only on ticks where `tickCount % (food * 3 + 1) == 0`, so the wobble gets faster as food drops. There is no change-triggered food offset anywhere in `Hud.java`. Our `anim::hunger_wobble` already models exactly this, so hunger has no gap.
 
+### The fill frontier is an integer one, and the `ceil` is the whole of it
+
+Separate from the two offsets above, and the subject of a second player report: *"sometimes i get to 0 hearts but im still alive - im assuming vanilla maybe rounds up while we just round either way"*. He was right.
+
+Vanilla never compares the raw float health. `extractPlayerHealth` computes `currentHealth = Mth.ceil(player.getHealth())` **once**, hands that `int` to `extractHearts`, and the fill is two integer comparisons against it:
+
+```text
+int halves = containerIndex * 2;
+if (halves < currentHealth) {
+   boolean halfHeart = halves + 1 == currentHealth;
+   extractHeart(type, …, halfHeart);
+}
+```
+
+Ours compared `health - 2i` against `2.0`/`1.0` as floats. The two readings agree on every **even** hit point and diverge at every odd half, in both directions:
+
+| health | vanilla | the float reading |
+|---|---|---|
+| 0.5 | `ceil` 1 → one **half** heart | nothing at all — an empty bar while alive |
+| 1.5 | `ceil` 2 → one **full** heart | a half heart |
+| 19.5 | `ceil` 20 → **ten full** hearts | nine full and a half |
+| 2.0, 20.0 | full hearts | identical |
+
+The first row is the report: under the ceiling an empty bar is reachable only at *exactly* 0, which is death. Now `hud::heart_fill`, gated by `heart_fill_follows_extract_hearts_at_half_healths`.
+
+Two things worth carrying from the fix:
+
+* **The bug was a seam between two correct halves of one loop.** The ghost/blink overlay in the *same* `for` body already used the integer `halves`/`halves + 1 ==` shape against `anim.display_health` — correctly — while the fill row beside it compared floats. Neither row read as wrong on inspection; the divergence had no name and therefore nothing to point a test at, which is why the fix extracts `heart_fill` as a named symbol rather than editing the comparison in place.
+* **The sibling rows do not share the bug, and that had to be checked rather than assumed.** `armour_icon` already transcribes `extractArmor`'s three `if`s on the odd threshold `2i + 1`. The hunger row's `units >= 2.0`/`>= 1.0` form *is* equivalent to `extractFood`'s `i*2+1 < food`/`== food`, but only because `HudFrame::food` is an `i32` — the same expression over an `f32` is the health bug. Vehicle health and absorption both round with `Mth.ceil` in vanilla too; neither is modelled in `HudFrame`, so there is nothing to get wrong yet and both are places to apply `heart_fill`'s rule rather than re-derive it.
+
 ### Status against the four-item report
 
 | behaviour | vanilla | ours | status |

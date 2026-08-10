@@ -663,6 +663,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            death_time: 0.0,
         // No flame overlay from this construction site.
         on_fire: false,
         // Not a player, so no skin can apply.
@@ -696,6 +697,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            death_time: 0.0,
         // No flame overlay from this construction site.
         on_fire: false,
         // Not a player, so no skin can apply.
@@ -882,6 +884,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         item_use: None,
         // Not a creeper: only a creeper ever swells.
         creeper_swelling: 0.0,
+        death_time: 0.0,
         // No flame overlay from this construction site.
         on_fire: false,
         // Not a player, so no skin can apply.
@@ -1451,6 +1454,7 @@ fn orb_draw(value: i32) -> EntityDraw {
         hurt: false,
         item_use: None,
         creeper_swelling: 0.0,
+        death_time: 0.0,
         on_fire: false,
         player_skin: None,
         experience_orb_value: Some(value),

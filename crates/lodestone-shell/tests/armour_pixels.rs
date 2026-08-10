@@ -186,6 +186,7 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         name_tag: None,
         item_use: None,
         creeper_swelling: 0.0,
+        death_time: 0.0,
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,

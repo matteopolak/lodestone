@@ -134,6 +134,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         // An item entity is not a living one; nothing can be using it.
         item_use: None,
         creeper_swelling: 0.0,
+        death_time: 0.0,
         // A dropped item entity carries no `EntityFlags` lookup in this
         // hand-built fixture (issue #434).
         on_fire: false,
@@ -475,6 +476,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         name_tag: None,
         item_use: None,
         creeper_swelling: 0.0,
+        death_time: 0.0,
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,

@@ -48,8 +48,8 @@ use lodestone_model::{AnimationAction, ClientEvent, EntityMovement, Reported};
 use lodestone_physics::Vec3d;
 
 use crate::entity::{
-    Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem,
-    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
+    Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName, CustomNameVisible, DeathTime,
+    DisplayItem, EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
     FallingBlockState, HeadYaw, Health, HurtTime, MinecraftEntityId, MobState, OnGround, Passengers,
     Pose, Position, Rotation, Variant, Vehicle, Velocity,
 };
@@ -485,6 +485,80 @@ pub fn apply_falling_block_state(
 pub fn tick_hurt_time(mut entities: Query<&mut HurtTime>) {
     for mut hurt in &mut entities {
         hurt.0 = hurt.0.saturating_sub(1);
+    }
+}
+
+/// Vanilla's `EntityEvent.DEATH` (`EntityEvent.java`), the per-entity status byte a
+/// server broadcasts from `LivingEntity.die()`.
+const ENTITY_STATUS_DEATH: u8 = 3;
+
+/// `IngestSet::Apply`: `ClientEvent::EntityStatus` → [`DeathTime`].
+///
+/// `EntityStatus` carries Mojang's raw per-entity-type event byte and was routed
+/// **nowhere** before this system existed — decoded, tested, and consumed by
+/// nothing. This claims exactly one of its ~40 codes; the rest are still
+/// unhandled, and deliberately fall through rather than being logged, because most
+/// are particle and sound effects with no subsystem here to receive them.
+///
+/// # Only byte 3, and only as an insert
+///
+/// `LivingEntity.handleEntityEvent`'s `case 3` plays the death sound and, for a
+/// non-player, does `setHealth(0); die();`. `die()` is what makes
+/// `isDeadOrDying()` true, which is what lets `tickDeath()` start incrementing —
+/// so on this side the whole of that chain is "the entity now has a
+/// [`DeathTime`]", and [`tick_death_time`] is the `tickDeath` half.
+///
+/// **One documented divergence.** Vanilla's `case 3` guards the kill with
+/// `!(this instanceof Player)`, so a *remote player* falls over off their synced
+/// health reaching zero rather than off this byte, one tick later than a mob
+/// would. This does not reproduce that split: the server broadcasts byte 3 for
+/// every `LivingEntity.die()` including players, so reacting to it uniformly
+/// costs a sub-tick head start on a remote player's fall-over and saves a second
+/// trigger path keyed on health that would have to agree with this one about when
+/// death began.
+///
+/// Re-inserting on a repeat byte 3 would restart the animation, so the insert is
+/// guarded on absence — a server that re-sends the byte (or a death that arrives
+/// in two batches) must not snap a half-fallen mob back upright.
+pub fn apply_entity_status(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    dying: Query<&DeathTime>,
+    mut commands: Commands,
+) {
+    for event in batch.events() {
+        let ClientEvent::EntityStatus { entity_id, status } = event else {
+            continue;
+        };
+        if *status != ENTITY_STATUS_DEATH {
+            continue;
+        }
+        // A `None` from `index.get` is silently skipped for
+        // `apply_falling_block_state`'s reason: a status for an entity we never
+        // spawned is a packet for something out of view, not an error.
+        if let Some(entity) = index.get(*entity_id)
+            && dying.get(entity).is_err()
+        {
+            commands.entity(entity).insert(DeathTime(0));
+        }
+    }
+}
+
+/// `TickSet::Animate`: age every dying entity's [`DeathTime`] **up**, one tick at a
+/// time — `LivingEntity.tickDeath`'s `deathTime++`.
+///
+/// The opposite direction from [`tick_hurt_time`], and paired with it in the same
+/// set for that reason: a mob's killing blow starts both counters, one running out
+/// as the other runs up, and vanilla's red overlay is the *disjunction*
+/// (`hurtTime > 0 || deathTime > 0`) precisely so the tint does not lapse in the
+/// ten-tick gap between them.
+///
+/// Only entities that carry the component are touched, so this is a no-op for
+/// everything alive — the component's absence is the "not dying" state, not a
+/// zero.
+pub fn tick_death_time(mut entities: Query<&mut DeathTime>) {
+    for mut death in &mut entities {
+        death.0 = death.0.saturating_add(1);
     }
 }
 
@@ -1124,6 +1198,13 @@ impl Plugin for IngestPlugin {
                 apply_entity_equipment,
                 apply_entity_damaged,
                 apply_entity_hurt_animation,
+                // The other half of the hurt/death pair above: `EntityDamaged` and
+                // `EntityHurtAnimation` start the countdown that runs *out*, this
+                // starts the one that runs *up*. Id-addressed like them, so it
+                // relies on the same `.chain()` sync point after
+                // `apply_entity_spawn` — a mob can be spawned and killed in one
+                // batch.
+                apply_entity_status,
                 apply_entity_animation,
                 // The falling block's imitated state. Id-addressed, so it depends on
                 // the same `.chain()` sync point after `apply_entity_spawn` that
@@ -1154,7 +1235,16 @@ impl Plugin for IngestPlugin {
         // all.
         app.add_systems(
             GameTick,
-            (tick_hurt_time, tick_entity_swing, tick_entity_item_use).in_set(TickSet::Animate),
+            (
+                tick_hurt_time,
+                // Paired with `tick_hurt_time` rather than merely adjacent to it —
+                // see its own doc for why the two counters run in opposite
+                // directions and why their consumer is a disjunction.
+                tick_death_time,
+                tick_entity_swing,
+                tick_entity_item_use,
+            )
+                .in_set(TickSet::Animate),
         );
     }
 }
@@ -2037,6 +2127,102 @@ mod tests {
             entity_for(&world, 2).get::<HurtTime>().map(|h| h.0),
             Some(10),
             "EntityHurtAnimation resets the same countdown EntityDamaged does"
+        );
+    }
+
+    /// The whole death-counter chain: `EntityStatus` byte 3 →
+    /// [`apply_entity_status`] → [`DeathTime`] → [`tick_death_time`], plus both
+    /// halves of the routing claim.
+    ///
+    /// Live player report: *"stuff dying doesnt have the death animation (the one
+    /// where they turn red and tilt on their side)"*. `EntityStatus` was decoded,
+    /// round-tripped by the `v770` tests, and routed **nowhere** — sitting in
+    /// `event.rs`'s "claimed by nothing" list — so no byte it carried reached any
+    /// system. This is the island the routing assertions below exist to catch.
+    ///
+    /// Both halves of the routing decision are asserted, not just the one that had
+    /// to change: `ingest` must claim it (or nothing runs however correct the fold
+    /// is) **and** `session` must not (a fold in the wrong router compiles, tests
+    /// green through `feed()`, and never runs in production). The fold writes
+    /// `DeathTime` on the entity the status names, which is per-entity state with a
+    /// single writer in this module and no session system holding a mutable query on
+    /// it.
+    #[test]
+    fn entity_status_death_starts_a_death_counter_that_ticks_up() {
+        // The router, first — a green fold behind a router that is never asked is
+        // exactly the shape this repo pays for most.
+        let death = ClientEvent::EntityStatus {
+            entity_id: 1,
+            status: 3,
+        };
+        assert!(
+            handles_event(&death),
+            "EntityStatus is not routed to ingest, so apply_entity_status can never \
+             run in production however green this test's feed() calls are"
+        );
+        assert!(
+            !lodestone_model::event::route(&death).session,
+            "EntityStatus must not also be claimed by session: the fold writes a \
+             per-entity component, and a second router asked for it is a second \
+             writer nothing coordinates"
+        );
+
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:pig"));
+        assert!(
+            entity_for(&world, 1).get::<DeathTime>().is_none(),
+            "a living entity must carry no DeathTime at all — absence is the \
+             'not dying' state, not a zero"
+        );
+
+        // A status byte that is *not* death must not start the counter. `2` is
+        // `onKineticHit`, a real neighbouring code, rather than an invented one.
+        feed(
+            &mut world,
+            ClientEvent::EntityStatus {
+                entity_id: 1,
+                status: 2,
+            },
+        );
+        assert!(
+            entity_for(&world, 1).get::<DeathTime>().is_none(),
+            "only EntityEvent.DEATH (3) starts the death counter"
+        );
+
+        feed(&mut world, death);
+        let entity = entity_for(&world, 1).id();
+        assert_eq!(
+            world.get::<DeathTime>(entity).map(|d| d.0),
+            Some(0),
+            "inserted at zero, not one: vanilla's deathTime is still 0 when die() \
+             runs, and both its consumers test deathTime > 0, so the first tick of \
+             death draws upright"
+        );
+
+        // Counts **up**, the opposite direction from `tick_hurt_time`.
+        for expected in 1..=25 {
+            world.run_schedule(GameTick);
+            assert_eq!(
+                world.get::<DeathTime>(entity).map(|d| d.0),
+                Some(expected),
+                "tick_death_time must increment once per GameTick"
+            );
+        }
+
+        // A repeat byte 3 must not restart the animation — a server that re-sends
+        // it, or a death arriving in two batches, would snap a half-fallen mob
+        // upright.
+        feed(
+            &mut world,
+            ClientEvent::EntityStatus {
+                entity_id: 1,
+                status: 3,
+            },
+        );
+        assert_eq!(
+            world.get::<DeathTime>(entity).map(|d| d.0),
+            Some(25),
+            "a second death byte must leave the running counter alone"
         );
     }
 

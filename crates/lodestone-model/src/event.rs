@@ -3056,6 +3056,18 @@ pub fn route(event: &ClientEvent) -> Route {
             session: true,
             ..Route::NOWHERE
         },
+        // Per-entity state, so `ingest` and **not** `session`: the fold
+        // (`ingest::apply_entity_status`) writes a `DeathTime` on the entity the
+        // status names, alongside the `HurtTime` its sibling folds write, and no
+        // session system holds a mutable query on either. Only vanilla's
+        // `EntityEvent.DEATH` (byte 3) is claimed today — the other ~40 codes are
+        // particle and sound effects with nothing here to receive them, and are
+        // dropped by that system rather than by this table, which is the right place
+        // for the distinction: this answers "is anything *asked*".
+        ClientEvent::EntityStatus { .. } => Route {
+            ingest: true,
+            ..Route::NOWHERE
+        },
         // `ingest` spawns the entity; the shell arm is guarded on
         // `lightning_bolt` and only counts flashes, so every other spawn
         // legitimately reaches `forward`'s catch-all.
@@ -3311,7 +3323,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::ChunkCacheCenterChanged { .. }
         | ClientEvent::ChunkCacheRadiusChanged { .. }
         | ClientEvent::SimulationDistanceChanged { .. }
-        | ClientEvent::EntityStatus { .. }
         | ClientEvent::EntityLeashed { .. }
         | ClientEvent::ItemCooldown { .. }
         | ClientEvent::PlayerRotationSet { .. }
