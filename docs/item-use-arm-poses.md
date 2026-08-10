@@ -204,6 +204,75 @@ perfectly correct.
 - **`arm_pose_left_hand` mirrors rather than breaks.** A wrong value still looks
   like a bow draw, so it is a named field rather than an assumption.
 
+## A merely-held item, and the renderer that decides
+
+`ArmPose::Item` is now selected for an item that is simply **held**, not only one in
+use — `entities::held_item_arm_pose`, reached by `arm_pose_for` after
+`in_use_arm_pose` declines. Vanilla's tail is:
+
+```java
+// AvatarRenderer.getArmPose
+return itemInHand.is(ItemTags.SPEARS) ? HumanoidModel.ArmPose.SPEAR : HumanoidModel.ArmPose.ITEM;
+```
+
+### This document previously drew the wrong conclusion from that line
+
+It said the fallthrough *"runs for any non-empty hand, so every armed mob has a
+slightly raised arm in vanilla and hangs its arms here"*, and that widening it was
+**one line plus a re-baseline of both pixel gates**. The first clause is true of that
+method. The conclusion is wrong, because **a humanoid mob never calls it**:
+
+```java
+// HumanoidMobRenderer.getArmPose — the base every mob override delegates to
+return itemHeldByArm.is(ItemTags.SPEARS) ? HumanoidModel.ArmPose.SPEAR : HumanoidModel.ArmPose.EMPTY;
+```
+
+Same shape, same position in the method, **different tail**. So a player holding a
+sword raises the arm; a zombie holding the same sword does not, and hanging arms on an
+armed mob was already correct. Every humanoid-mob override ends at that `EMPTY`:
+`AbstractSkeletonRenderer` (aggressive + bow, else `super`),
+`AbstractZombieRenderer` (stab, else `super`), `DrownedRenderer` (aggressive +
+trident, else `super`), and `PiglinRenderer`, whose pose is the piglin's own
+server-side enum.
+
+`EntityRenderDispatcher.getRenderer` routes exactly two classes to `AvatarRenderer`:
+`AbstractClientPlayer` and `ClientMannequin` — the two `Avatar` subclasses. That set
+is `lodestone_render::renderer_is_avatar`, the sibling of
+`mob_draws_bow_when_aggressive` and keyed the same way, on the entity type path.
+
+Three things follow that are worth carrying:
+
+- **Neither pixel gate needed re-baselining.** Both use a skeleton subject and a
+  zombie control, and neither is an avatar, so the correctly-scoped change moves zero
+  pixels in either. The predicted re-baseline was a consequence of the wrong scope, not
+  of the feature — *the cost of a change can be entirely an artifact of misreading it*.
+- **The discriminating input is the renderer, not the item.** Both readings give `Item`
+  for a player, so a player-only gate measures that the code runs.
+  `a_merely_held_item_raises_an_avatars_arm_and_no_mobs` therefore carries zombie,
+  skeleton, husk, drowned, piglin and **armour stand** rows, and collects its
+  mismatches so a regression reports every arm. Under the universal-fallthrough
+  hypothesis it fails **6 of 6** mob rows; with the fallthrough removed entirely it
+  fails **5 of 5** avatar rows; forcing the pose onto the main arm fails exactly the
+  one off-hand row. All three controls were run.
+- **The armour-stand row is why the scope matters.** A stand is a `LivingEntity` with
+  equipment and a humanoid rig, and `ArmorStandRenderer` sets no arm pose at all, so a
+  universal fallthrough would have lifted the arm of every decorative stand holding a
+  sword.
+
+### Shape of the reduction
+
+Vanilla poses each arm from its own hand and can raise **both** at once
+(`getMainArm() == arm ? mainHandPose : offHandPose`). `ArmPoseChoice` carries one pose
+and one hand, so the main hand wins when both are full and the off hand is reached only
+when the main hand is empty — the case that would otherwise pose the wrong arm.
+Emptiness is `ItemStack.isEmpty()`'s two halves: `RenderEquipment` already drops an
+explicitly-cleared slot, and `minecraft:air` in a slot is rejected as well.
+
+Unlike the `bow` rule, the **namespace is not load-bearing here**: a modded item is
+still not empty, so `mypack:widget` reaches `ITEM` exactly as vanilla's `isEmpty()`
+test would send it there. The bow rule matches `minecraft:bow` by identity because that
+pose is per-item; this one asks only "is the hand full".
+
 ## Not done
 
 - **The local player in first person.** It has no `EntityKind`/`Position`/
@@ -218,6 +287,15 @@ perfectly correct.
   rendered in third person **does** get the pose; so does the local player's own
   body in third person once `Sim::third_person_body_state` is fed (it currently
   passes `ArmPose::Empty` with that gap noted at the site).
+
+  **The held-item fallthrough makes that gap visible rather than merely latent.**
+  Before it, an idle remote player and your own third-person body both hung their
+  arms, so the hard-coded `ArmPose::Empty` at that call site was indistinguishable
+  from a correct answer. Now every *other* avatar holding anything raises an arm and
+  yours does not, which is a difference you can see in F5 while standing still. The
+  fix is the same one this bullet already describes — feed the real pose through
+  `third_person_body_state` — and the change is now worth doing for the resting case
+  and not only for bow draws.
 - **`ArmPose::CrossbowHold` is implemented and tested but unreachable.** It is not
   an in-use pose: vanilla selects it from `CrossbowItem.isCharged`, i.e. the stack's
   `minecraft:charged_projectiles` component, which `ItemComponents` does not model
@@ -230,15 +308,6 @@ perfectly correct.
   (`CROSSBOW_CHARGE_TICKS`) — exact for an unenchanted crossbow, visually slow for an
   enchanted one. `CrossbowItem.getChargeDuration` is `25 - 5 * level`; reading the
   level needs full stacks where `RenderEquipment` has narrowed to bare item ids.
-- **`ITEM` has landed** — see [eating and drinking](./eating-and-drinking.md), which
-  needed it, because vanilla has no `EAT`/`DRINK` pose and a consuming entity falls
-  through to `ITEM`. It is also this module's **first one-handed pose**
-  (`ArmPose.ITEM(false, false)`), so `pose_arms_for_item` now writes one arm for it
-  and two for everything else. What is still left of it is the *selection*: it is
-  chosen only for an item in **use**, while vanilla's fallthrough gives it to any
-  non-empty hand — so every armed mob has a slightly raised arm in vanilla and hangs
-  its arms here. Widening it is one line in `entities::arm_pose_for` plus a
-  re-baseline of both pixel gates below, whose *resting* silhouettes it changes.
 - `BLOCK`, `SPYGLASS`, `TOOT_HORN`, `BRUSH`, `THROW_TRIDENT`, `SPEAR` now resolve to
   `Item` rather than `Empty` when in use, which is a closer wrong answer (the arm
   goes up, which is the half those poses share) and still not the right one — vanilla

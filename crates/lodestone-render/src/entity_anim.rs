@@ -1581,7 +1581,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// [`death_fall_over_degrees`] against `LivingEntityRenderer.setupRotations`, at
     /// ticks where the **linear** reading — "90 degrees over 20 ticks", the answer
     /// anybody writes from the description — gives a different angle.

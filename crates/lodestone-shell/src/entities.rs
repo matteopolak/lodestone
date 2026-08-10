@@ -157,7 +157,7 @@ use lodestone_physics::{
     CollisionView, EntityDimensions, EntityMotion, MoveContext, PhysicsProfile, Vec3d, mth,
     move_entity,
 };
-use lodestone_render::{AnimInput, ArmPose, mob_draws_bow_when_aggressive};
+use lodestone_render::{AnimInput, ArmPose, mob_draws_bow_when_aggressive, renderer_is_avatar};
 
 /// Converts a render-space [`glam::Vec3`] into the `f64` [`lodestone_model::Vec3`]
 /// [`ItemMotion`] is expressed in.
@@ -1550,6 +1550,9 @@ const VANILLA: &str = "minecraft";
 const BOW_PATH: &str = "bow";
 /// The `minecraft:crossbow` item path.
 const CROSSBOW_PATH: &str = "crossbow";
+/// The `minecraft:air` item path — `ItemStack.isEmpty()`'s other half. A slot
+/// holding air is an *empty* hand, so it must not raise an arm.
+const AIR_PATH: &str = "air";
 
 /// Vanilla's `CrossbowItem.getChargeDuration` with **no Quick Charge**:
 /// `25 - 5 * level`, at level 0.
@@ -1619,16 +1622,21 @@ struct ArmPoseChoice {
 ///   the world hold the shooting pose permanently, which is more wrong, more
 ///   often, than the resting pose it gets today.
 ///
-/// # `ArmPose::Item` is selected for an in-use item only, and vanilla is wider
+/// # `ArmPose::Item` for a merely-held item, and why only an avatar gets it
 ///
 /// Vanilla's final `return itemInHand.is(ItemTags.SPEARS) ? SPEAR : ITEM;` runs for
-/// **any non-empty hand**, in use or not, so every mob holding a sword has a raised
-/// arm in vanilla and hanging arms here. Only the in-use half is wired, because that
-/// is the half eating needs and because the other half changes the silhouette of
-/// every armed humanoid in the game — including the resting arm of every fixture the
-/// bow-pose pixel gates difference against. Widening it is a one-line change to this
-/// function plus a re-baseline of those gates, and it is a legitimate follow-up
-/// rather than an oversight.
+/// **any non-empty hand**, in use or not — but that line is in
+/// `AvatarRenderer.getArmPose`, and **a humanoid mob never reaches it**.
+/// `HumanoidMobRenderer.getArmPose`, the base every mob override delegates to, ends
+/// `? SPEAR : EMPTY` instead. So a player holding a sword raises the arm and a zombie
+/// holding the same sword does not, and [`renderer_is_avatar`] is what separates
+/// them. An earlier reading of this file had it that *every* armed mob raises an arm
+/// in vanilla; that was a transcription of the right method for the wrong renderer,
+/// and acting on it would have posed every armed zombie, skeleton and armour stand.
+///
+/// Because the fallthrough is now avatar-only, it changes **no** mob silhouette, and
+/// neither bow-pose pixel gate (both of which use a skeleton subject and a zombie
+/// control) needed re-baselining.
 fn arm_pose_for(
     type_path: &str,
     equipment: &[(EquipmentSlot, ResourceLocation)],
@@ -1648,35 +1656,51 @@ fn arm_pose_for(
             left_hand: false,
         };
     }
-    let Some(item_use) = item_use else {
-        return ArmPoseChoice::default();
-    };
+    if let Some(choice) = in_use_arm_pose(equipment, item_use) {
+        return choice;
+    }
+    held_item_arm_pose(type_path, equipment)
+}
+
+/// `AvatarRenderer.getArmPose`'s using-item `if` chain — the poses that need the
+/// item to be *in use*, ahead of the merely-held fallthrough.
+///
+/// `None` means "no in-use pose applies", which is a different answer from
+/// `Some(Empty)`: it lets [`held_item_arm_pose`] have its turn. Extracted so the
+/// composition of the two halves has a name, because that seam is where the
+/// interesting mistakes live — the in-use half alone was shipped once, and reading
+/// it in isolation is what made "vanilla is wider" look like a one-line widening of
+/// *this* function rather than a per-renderer question.
+fn in_use_arm_pose(
+    equipment: &[(EquipmentSlot, ResourceLocation)],
+    item_use: Option<ItemUse>,
+) -> Option<ArmPoseChoice> {
+    let item_use = item_use?;
     if !item_use.using {
-        return ArmPoseChoice::default();
+        return None;
     }
     let slot = if item_use.off_hand {
         EquipmentSlot::OffHand
     } else {
         EquipmentSlot::MainHand
     };
-    let Some((_, held)) = equipment.iter().find(|(s, _)| *s == slot) else {
-        // Using something we were never told about. `Empty` rather than a guess:
-        // equipment and metadata are separate packets and either can arrive first.
-        return ArmPoseChoice::default();
-    };
+    // Using something we were never told about. Falling through rather than
+    // guessing: equipment and metadata are separate packets and either can arrive
+    // first.
+    let (_, held) = equipment.iter().find(|(s, _)| *s == slot)?;
     if held.namespace() != VANILLA {
-        return ArmPoseChoice::default();
+        return None;
     }
     let pose = match held.path() {
         BOW_PATH => ArmPose::BowAndArrow,
         CROSSBOW_PATH => ArmPose::CrossbowCharge {
             progress: item_use.ticks as f32 / CROSSBOW_CHARGE_TICKS,
         },
-        // `AvatarRenderer.getArmPose`'s fallthrough, `ArmPose.ITEM`. **For eating
-        // and drinking this is not an approximation — it is what vanilla does.**
+        // Vanilla's `ItemUseAnimation` chain, reduced. **For eating and drinking
+        // this is not an approximation — it is what vanilla does.**
         // `ItemUseAnimation.EAT` and `DRINK` are deliberately absent from that
-        // method's `if` chain, so a consuming entity takes the plain held-item
-        // raise and the whole distinctive eating motion lives in
+        // chain, so a consuming entity takes the plain held-item raise and the
+        // whole distinctive eating motion lives in
         // `ItemInHandRenderer.applyEatTransform`, first person only.
         //
         // For the poses `ArmPose` still does not model — `BLOCK` (a raised shield),
@@ -1687,10 +1711,55 @@ fn arm_pose_for(
         // looks like the feature is off.
         _ => ArmPose::Item,
     };
-    ArmPoseChoice {
+    Some(ArmPoseChoice {
         pose,
         left_hand: item_use.off_hand,
+    })
+}
+
+/// `AvatarRenderer.getArmPose`'s tail: any non-empty hand gets `ArmPose.ITEM`,
+/// whether the item is in use or not.
+///
+/// **Avatar renderers only** — see [`renderer_is_avatar`] for the measurement. A
+/// humanoid *mob* ends at `HumanoidMobRenderer.getArmPose`'s `EMPTY`, so its arms
+/// hang, which is what this build already did and what vanilla does.
+///
+/// Vanilla poses each arm from its own hand and can raise **both** at once
+/// (`getMainArm() == arm ? mainHandPose : offHandPose`). [`ArmPoseChoice`] carries
+/// one pose and one hand, so the main hand wins when both are full; the off hand is
+/// reached only when the main hand is empty, which is the case that would otherwise
+/// pose the wrong arm.
+fn held_item_arm_pose(
+    type_path: &str,
+    equipment: &[(EquipmentSlot, ResourceLocation)],
+) -> ArmPoseChoice {
+    if !renderer_is_avatar(type_path) {
+        return ArmPoseChoice::default();
     }
+    for (slot, left_hand) in [
+        (EquipmentSlot::MainHand, false),
+        (EquipmentSlot::OffHand, true),
+    ] {
+        if hand_is_occupied(equipment, slot) {
+            return ArmPoseChoice {
+                pose: ArmPose::Item,
+                left_hand,
+            };
+        }
+    }
+    ArmPoseChoice::default()
+}
+
+/// `!itemInHand.isEmpty()` for one hand.
+///
+/// [`RenderEquipment`] only carries occupied slots — the narrowing drops an explicit
+/// clear rather than keeping it as a present-but-empty entry — so presence is most of
+/// the answer. `minecraft:air` is rejected as well: `ItemStack.isEmpty()` is
+/// air-or-zero-count, and a server that sends air explicitly must not raise an arm.
+fn hand_is_occupied(equipment: &[(EquipmentSlot, ResourceLocation)], slot: EquipmentSlot) -> bool {
+    equipment
+        .iter()
+        .any(|(s, item)| *s == slot && !(item.namespace() == VANILLA && item.path() == AIR_PATH))
 }
 
 /// `mob.getMainHandItem().is(Items.BOW)` — the *item identity* half of the
@@ -3759,12 +3828,24 @@ mod tests {
             ArmPose::Empty
         );
         // Aggressive, bow, wrong renderer family. `AbstractZombieRenderer` and
-        // `IllagerRenderer` have no such override.
-        for kind in ["zombie", "husk", "drowned", "pillager", "player"] {
+        // `IllagerRenderer` have no such override, so a humanoid mob's arms hang.
+        for kind in ["zombie", "husk", "drowned", "pillager"] {
             assert_eq!(
                 arm_pose_for(kind, &bow_in_main_hand(), None, true).pose,
                 ArmPose::Empty,
                 "{kind} is not drawn by AbstractSkeletonRenderer and must not get the draw"
+            );
+        }
+        // An avatar is the other kind of "wrong renderer family", and its expected
+        // pose is NOT `Empty`: `AvatarRenderer` has no aggressive-bow override
+        // either, so a bow-holding player falls through to the ordinary held-item
+        // raise. Asserting `Empty` here would be asserting the mob answer for the
+        // one renderer that does not give it.
+        for kind in ["player", "mannequin"] {
+            assert_eq!(
+                arm_pose_for(kind, &bow_in_main_hand(), None, true).pose,
+                ArmPose::Item,
+                "{kind} is drawn by AvatarRenderer: no draw pose, but a raised arm"
             );
         }
         // Aggressive skeleton, bow in the *off* hand: vanilla reads
@@ -3813,6 +3894,237 @@ mod tests {
         assert_eq!(
             arm_pose_for("skeleton", &bow_in_main_hand(), Some(drawing), false).pose,
             ArmPose::BowAndArrow
+        );
+    }
+
+    /// `minecraft:diamond_sword`, an item with no pose of its own — so the only
+    /// thing that can raise the arm is the held-item fallthrough.
+    fn sword_in(slot: EquipmentSlot) -> Vec<(EquipmentSlot, ResourceLocation)> {
+        vec![(
+            slot,
+            "minecraft:diamond_sword".parse().expect("valid item key"),
+        )]
+    }
+
+    /// `AvatarRenderer.getArmPose`'s tail — `? SPEAR : ITEM` for **any** non-empty
+    /// hand, in use or not — against `HumanoidMobRenderer`'s `? SPEAR : EMPTY`.
+    ///
+    /// # The discriminating input is the *renderer*, not the item
+    ///
+    /// Both hypotheses ("the fallthrough is universal" and "the fallthrough is
+    /// avatar-only") give `Item` for a player, so a player-only gate measures that
+    /// the code runs. The zombie and skeleton rows are where the two answers differ,
+    /// and they are the reason this is not a one-line widening: a universal
+    /// fallthrough poses every armed zombie, skeleton, husk and armour stand in a
+    /// pose vanilla never shows.
+    ///
+    /// Mismatches are collected and asserted on the collection, so a regression
+    /// reports every arm rather than aborting on the first.
+    #[test]
+    fn a_merely_held_item_raises_an_avatars_arm_and_no_mobs() {
+        // (type_path, equipment, expected pose, expected left_hand)
+        let cases: Vec<(&str, Vec<(EquipmentSlot, ResourceLocation)>, ArmPose, bool)> = vec![
+            // Avatars: `AvatarRenderer.getArmPose` reaches `ITEM`.
+            (
+                "player",
+                sword_in(EquipmentSlot::MainHand),
+                ArmPose::Item,
+                false,
+            ),
+            (
+                "mannequin",
+                sword_in(EquipmentSlot::MainHand),
+                ArmPose::Item,
+                false,
+            ),
+            // Off hand only: vanilla poses the arm belonging to that hand, so the
+            // pose must move to the left arm rather than staying on the main one.
+            // A version that always reported the main hand passes every other row.
+            (
+                "player",
+                sword_in(EquipmentSlot::OffHand),
+                ArmPose::Item,
+                true,
+            ),
+            // Both hands full. Vanilla raises both arms; one pose is all
+            // `ArmPoseChoice` can carry, and the main hand is the one that wins.
+            (
+                "player",
+                vec![
+                    (
+                        EquipmentSlot::MainHand,
+                        "minecraft:diamond_sword".parse().expect("key"),
+                    ),
+                    (
+                        EquipmentSlot::OffHand,
+                        "minecraft:torch".parse().expect("key"),
+                    ),
+                ],
+                ArmPose::Item,
+                false,
+            ),
+            // A modded item is still not empty, so vanilla's `isEmpty()` test passes
+            // it through to `ITEM`. This is the opposite of the `bow` rule, where the
+            // namespace is load-bearing because the pose is per-item.
+            (
+                "player",
+                vec![(
+                    EquipmentSlot::MainHand,
+                    "mypack:widget".parse().expect("key"),
+                )],
+                ArmPose::Item,
+                false,
+            ),
+            // Empty hands: nothing to hold, nothing to raise.
+            ("player", Vec::new(), ArmPose::Empty, false),
+            // `minecraft:air` in the slot is `ItemStack.isEmpty()`'s other half.
+            (
+                "player",
+                vec![(
+                    EquipmentSlot::MainHand,
+                    "minecraft:air".parse().expect("key"),
+                )],
+                ArmPose::Empty,
+                false,
+            ),
+            // Humanoid MOBS, the rows the two hypotheses disagree on. Every one of
+            // these overrides `getArmPose` and delegates to `HumanoidMobRenderer`'s
+            // `EMPTY` tail.
+            (
+                "zombie",
+                sword_in(EquipmentSlot::MainHand),
+                ArmPose::Empty,
+                false,
+            ),
+            (
+                "skeleton",
+                sword_in(EquipmentSlot::MainHand),
+                ArmPose::Empty,
+                false,
+            ),
+            (
+                "husk",
+                sword_in(EquipmentSlot::MainHand),
+                ArmPose::Empty,
+                false,
+            ),
+            (
+                "drowned",
+                sword_in(EquipmentSlot::MainHand),
+                ArmPose::Empty,
+                false,
+            ),
+            (
+                "piglin",
+                sword_in(EquipmentSlot::MainHand),
+                ArmPose::Empty,
+                false,
+            ),
+            // An armour stand is a `LivingEntity` with equipment and a humanoid rig,
+            // and `ArmorStandRenderer` sets no arm pose at all. It is the row that
+            // makes the universal reading visibly wrong: every decorative stand
+            // holding a sword would have lifted its arm.
+            (
+                "armor_stand",
+                sword_in(EquipmentSlot::MainHand),
+                ArmPose::Empty,
+                false,
+            ),
+        ];
+
+        let mut mismatches = Vec::new();
+        for (kind, equipment, want_pose, want_left) in cases {
+            let got = arm_pose_for(kind, &equipment, None, false);
+            if got.pose != want_pose || got.left_hand != want_left {
+                mismatches.push(format!(
+                    "{kind} holding {equipment:?}: want {want_pose:?} left_hand={want_left}, \
+                     got {:?} left_hand={}",
+                    got.pose, got.left_hand
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} of the held-item arms are wrong:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+
+    /// The in-use poses must still win over the held-item fallthrough, in both
+    /// directions: a bow being drawn is `BowAndArrow` and not `Item`, and a crossbow
+    /// being wound keeps its progress rather than collapsing to the flat raise.
+    ///
+    /// The seam is where the mistake would live — `in_use_arm_pose` returning
+    /// `Some(Empty)` instead of `None` for its "we were never told" cases would have
+    /// disabled the fallthrough silently, and returning `None` for a real in-use pose
+    /// would have flattened every bow draw to a held-item raise.
+    #[test]
+    fn an_in_use_pose_outranks_the_held_item_fallthrough() {
+        let drawing = ItemUse {
+            using: true,
+            off_hand: false,
+            ticks: 5,
+        };
+        assert_eq!(
+            arm_pose_for("player", &bow_in_main_hand(), Some(drawing), false).pose,
+            ArmPose::BowAndArrow,
+            "a drawn bow must not collapse into the flat held-item raise"
+        );
+        let winding = ItemUse {
+            using: true,
+            off_hand: false,
+            ticks: 12,
+        };
+        let crossbow = vec![(
+            EquipmentSlot::MainHand,
+            "minecraft:crossbow"
+                .parse::<ResourceLocation>()
+                .expect("key"),
+        )];
+        assert_eq!(
+            arm_pose_for("player", &crossbow, Some(winding), false).pose,
+            ArmPose::CrossbowCharge {
+                progress: 12.0 / CROSSBOW_CHARGE_TICKS
+            }
+        );
+        // Using something we were never told about: the in-use half declines, and the
+        // fallthrough then finds the hand genuinely empty. `Empty`, not a guess.
+        assert_eq!(
+            arm_pose_for("player", &[], Some(drawing), false).pose,
+            ArmPose::Empty
+        );
+        // ...but a hand that IS occupied while a *different* hand claims to be in use
+        // still gets the raise, because the item is held either way.
+        assert_eq!(
+            arm_pose_for(
+                "player",
+                &sword_in(EquipmentSlot::MainHand),
+                Some(ItemUse {
+                    using: true,
+                    off_hand: true,
+                    ticks: 3,
+                }),
+                false,
+            )
+            .pose,
+            ArmPose::Item
+        );
+        // `using: false` is the resting case, and for an avatar resting-with-an-item
+        // is now a raised arm rather than a hanging one.
+        assert_eq!(
+            arm_pose_for(
+                "player",
+                &sword_in(EquipmentSlot::MainHand),
+                Some(ItemUse {
+                    using: false,
+                    off_hand: false,
+                    ticks: 0,
+                }),
+                false,
+            )
+            .pose,
+            ArmPose::Item
         );
     }
 
