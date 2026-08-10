@@ -928,6 +928,188 @@ fn tempt_food(species: &str) -> &'static [&'static str] {
     }
 }
 
+/// What feeding this species does — vanilla's `Animal.isFood` tag, read out of
+/// `.cache/mc/26.2/src/data/minecraft/tags/item/*_food.json`.
+///
+/// # This is not [`tempt_food`], and the two must not be merged
+///
+/// They coincide for the five species [`tempt_food`] covers, because those
+/// species' `TemptGoal` is constructed with the very same tag. They diverge
+/// wherever vanilla constructs the tempt goal with a *different* predicate, and
+/// the wolf is the case that matters: `Wolf.isFood` is `#wolf_food` (meat and
+/// fish), while a **bone** is what tames it — and a bone is in neither tag.
+/// Merging the tables would make a bone a breeding item and meat a taming item,
+/// both wrong.
+///
+/// # `hay_block` is deliberately absent from the horse's row
+///
+/// The horse family has no `isFood`-driven love at all — see
+/// [`horse_breeding_items`] — so its row here is empty rather than
+/// `#horse_food`. Filling it in from the tag would make wheat a breeding item
+/// for a horse, which it is not.
+fn breeding_food(species: &str) -> &'static [&'static str] {
+    match species {
+        // `AbstractCow` covers both, and they share `#cow_food`.
+        "cow" | "mooshroom" => &["wheat"],
+        "sheep" => &["wheat"],
+        "pig" => &["carrot", "potato", "beetroot"],
+        "chicken" => &[
+            "wheat_seeds",
+            "melon_seeds",
+            "pumpkin_seeds",
+            "beetroot_seeds",
+            "torchflower_seeds",
+            "pitcher_pod",
+        ],
+        "rabbit" => &["carrot", "golden_carrot", "dandelion"],
+        // `#wolf_food` = `#meat` + the five fish + rabbit stew.
+        "wolf" => &[
+            "beef",
+            "chicken",
+            "cooked_beef",
+            "cooked_chicken",
+            "cooked_mutton",
+            "cooked_porkchop",
+            "cooked_rabbit",
+            "mutton",
+            "porkchop",
+            "rabbit",
+            "rotten_flesh",
+            "cod",
+            "cooked_cod",
+            "salmon",
+            "cooked_salmon",
+            "tropical_fish",
+            "pufferfish",
+            "rabbit_stew",
+        ],
+        // `#cat_food`. Note it is *raw* fish only, unlike `#wolf_food`.
+        "cat" => &["cod", "salmon"],
+        // `Parrot.isFood` returns a literal `false`, and `Parrot.canMate`
+        // returns `false` with `getBreedOffspring` returning `null`. A parrot
+        // cannot be bred at all — an empty row, not an unfinished one.
+        "parrot" => &[],
+        _ => &[],
+    }
+}
+
+/// How this species is tamed, or `None` if it is not tameable.
+///
+/// # Four species, four mechanisms — not one with different constants
+///
+/// | species | trigger | roll |
+/// |---|---|---|
+/// | wolf | a **bone** (`Items.BONE`), and only while not angry | `random.nextInt(3) == 0` |
+/// | cat | `#cat_food` (raw cod or salmon) | `random.nextInt(3) == 0` |
+/// | parrot | `#parrot_food` (six seeds) | `random.nextInt(10) == 0` |
+/// | horse family | **being ridden**, not fed | `random.nextInt(getMaxTemper()) < getTemper()` |
+///
+/// The wolf's trigger item is in none of its own food tags, the parrot's odds
+/// differ by a factor of three, and the horse's roll is not a constant chance at
+/// all — it is a function of a persisted `Temper` counter that *feeding* raises
+/// (see [`horse_temper_gain`]). A single "tame chance per species" table would be
+/// wrong about three of the four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TameMechanism {
+    /// `tryToTame`: consume the item, then tame on `random.nextInt(one_in) == 0`.
+    /// Both the wolf's and the cat's shape, differing only in the item set.
+    FoodRoll {
+        /// Item paths that trigger an attempt. Anything else is `Pass`.
+        items: &'static [&'static str],
+        /// The bound of vanilla's `nextInt`; success is a draw of exactly `0`.
+        one_in: i32,
+        /// Whether a successful tame also orders the animal to sit — vanilla's
+        /// `setOrderedToSit(true)` inside `tryToTame`. **The parrot's does
+        /// not**, and it is the only one of the three that omits it.
+        sit_on_success: bool,
+    },
+    /// The horse family: feeding raises `Temper` and never rolls; the roll
+    /// happens in `RunAroundLikeCrazyGoal` while a player is riding.
+    Temper {
+        /// `AbstractHorse.getMaxTemper()`.
+        max_temper: i32,
+    },
+}
+
+/// The taming mechanism for a species path, or `None` for a species that cannot
+/// be tamed.
+///
+/// The `donkey`/`mule`/`skeleton_horse`/`zombie_horse` rows are `AbstractHorse`
+/// subclasses and inherit its temper mechanism unchanged; `getMaxTemper` is
+/// overridden by none of them.
+fn tame_mechanism(species: &str) -> Option<TameMechanism> {
+    match species {
+        "wolf" => Some(TameMechanism::FoodRoll {
+            // `Wolf.mobInteract`: `itemStack.is(Items.BONE)`, a single item and
+            // not a tag.
+            items: &["bone"],
+            one_in: 3,
+            sit_on_success: true,
+        }),
+        "cat" => Some(TameMechanism::FoodRoll {
+            items: &["cod", "salmon"],
+            one_in: 3,
+            sit_on_success: true,
+        }),
+        "parrot" => Some(TameMechanism::FoodRoll {
+            items: &[
+                "wheat_seeds",
+                "melon_seeds",
+                "pumpkin_seeds",
+                "beetroot_seeds",
+                "torchflower_seeds",
+                "pitcher_pod",
+            ],
+            one_in: 10,
+            sit_on_success: false,
+        }),
+        "horse" | "donkey" | "mule" | "skeleton_horse" | "zombie_horse" => {
+            Some(TameMechanism::Temper { max_temper: 100 })
+        }
+        _ => None,
+    }
+}
+
+/// `AbstractHorse.handleEating`'s temper gain for one item, or `0` for anything
+/// that is not horse food.
+///
+/// # Read the table, not the tag
+///
+/// `#horse_food` and this function disagree twice, in both directions, and both
+/// disagreements are vanilla's:
+///
+/// * **`hay_block` is horse food and grants no temper at all** (`heal = 20.0F`,
+///   `ageUp = 180`, and `temper` left at its `0` initialiser). Deriving temper
+///   from the tag would let a stack of hay bales tame a horse.
+/// * **`red_mushroom` grants 3 temper and is *not* in `#horse_food`**, so
+///   `AbstractHorse.isFood` is false for it while `handleEating` still accepts
+///   it. Deriving the accepted set from `isFood` would drop it.
+fn horse_temper_gain(item: &str) -> i32 {
+    match item {
+        "wheat" | "sugar" | "apple" | "carrot" | "red_mushroom" => 3,
+        "golden_carrot" => 5,
+        "golden_apple" | "enchanted_golden_apple" => 10,
+        // Including `hay_block`, which heals 20 and tempers nothing.
+        _ => 0,
+    }
+}
+
+/// The items that put a **tamed** horse in love — the horse family's breeding
+/// trigger, which is not its food tag.
+///
+/// `AbstractHorse.handleEating` calls `setInLove` in exactly two of its arms,
+/// `Items.GOLDEN_CARROT` and `Items.GOLDEN_APPLE`/`ENCHANTED_GOLDEN_APPLE`, and
+/// each is additionally gated on `isTamed() && getAge() == 0 && !isInLove()`.
+/// Wheat, sugar, apples, carrots and hay all feed a horse and none of them breeds
+/// it, so the ordinary [`breeding_food`] route cannot express this species and its
+/// row there is empty.
+fn horse_breeding_items(item: &str) -> bool {
+    matches!(
+        item,
+        "golden_carrot" | "golden_apple" | "enchanted_golden_apple"
+    )
+}
+
 /// What [`MobSim`] needs to know about one connected player in order to feed
 /// mob perception. See [`MobSim::set_players`].
 ///
@@ -946,6 +1128,192 @@ pub struct PlayerPerception {
     /// some species or computed once per (player, species) pair by the caller,
     /// which is the feed's job, not the producer's.
     pub held_item: Option<ResourceKey>,
+}
+
+/// **Who** a connected player is, as the mob simulation needs to know it.
+///
+/// # Why both, and what each one is for
+///
+/// Ownership is keyed on the **uuid** and nothing else. Vanilla stores a tamed
+/// animal's owner in `TamableAnimal.DATA_OWNERUUID_ID`, whose serializer is
+/// `EntityDataSerializers.OPTIONAL_LIVING_ENTITY_REFERENCE`; that resolves to
+/// `EntityReference.streamCodec()`, which is `UUIDUtil.STREAM_CODEC` — sixteen
+/// raw bytes. The NBT form (`EntityReference`'s `store`/`read` with
+/// `UUIDUtil.CODEC`) is the same uuid. So the uuid is what both the wire and the
+/// save file demand, and it is also the only identity that *survives*: a runtime
+/// entity id is reassigned on every reconnect, and this server derives an
+/// offline-mode uuid from the username, so a pet's owner is still the same
+/// person tomorrow.
+///
+/// The **entity id** is carried alongside because the rest of this sim's
+/// identity vocabulary is `i32` entity ids — [`SimMob::attack_target_id`],
+/// [`SimMob::owner_id`], [`EntitySnapshot`]'s ids — and a mob that wants to
+/// exclude its owner from a target, or a snapshot that wants to name the owning
+/// entity, cannot say so in uuids. Vanilla makes exactly this split:
+/// `EntityReference` stores the uuid and *caches* the resolved live entity.
+///
+/// So: **the uuid is the identity; the entity id is the handle.** Storing only
+/// the entity id would make ownership evaporate on reconnect; storing only the
+/// uuid would make it unnameable to anything else in this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlayerIdentity {
+    /// The player's account uuid — what ownership is keyed on. In offline mode
+    /// this is derived from the username, so it is stable across sessions.
+    pub uuid: Uuid,
+    /// The player's runtime entity id, valid for this session only.
+    pub entity_id: i32,
+}
+
+/// One connected player as the mob simulation sees them: who they are, plus what
+/// a mob can sense about them.
+///
+/// # Why this is a second type rather than two more fields on [`PlayerPerception`]
+///
+/// Because the two answer different questions and only one of them is
+/// *perception*. A mob senses a position and a held item; it does not sense a
+/// uuid. Ownership is a relation between a mob and a **person**, resolved by the
+/// host, and putting the person inside the sense data would say that a mob can
+/// see who you are.
+///
+/// The practical consequence is the useful one: `From<PlayerPerception>` yields a
+/// view with **no** identity, which is exactly the honest state for a producer
+/// that has not been taught to supply one. An unidentified player can still be
+/// looked at and tempted; they simply cannot own anything, and no mob will ever
+/// resolve them as an owner. That is a correct neutral default rather than a
+/// wrong one — contrast keying ownership on a nil uuid, which would make every
+/// unidentified player the owner of every pet tamed by any other.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerceivedPlayer {
+    /// Who this player is, or `None` for a producer that supplies no identity.
+    pub identity: Option<PlayerIdentity>,
+    /// What a mob can sense about them.
+    pub perception: PlayerPerception,
+}
+
+impl From<PlayerPerception> for PerceivedPlayer {
+    fn from(perception: PlayerPerception) -> Self {
+        Self {
+            identity: None,
+            perception,
+        }
+    }
+}
+
+/// What [`MobSim::interact`] did — vanilla's `InteractionResult`, narrowed to
+/// the outcomes this crate can actually produce.
+///
+/// Richer than a `bool` because the caller has to do different things with each:
+/// a tame attempt consumes the item whether it succeeded or not, a sit toggle
+/// consumes nothing (`InteractionResult.SUCCESS.withoutItem()`), and a `Pass`
+/// must fall through to whatever else a right-click does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractOutcome {
+    /// Nothing on this mob responded. Vanilla's `InteractionResult.PASS`.
+    Pass,
+    /// A tame roll succeeded; the mob is now owned by the actor.
+    Tamed,
+    /// A tame roll failed. The item is still consumed — that is what makes taming
+    /// cost bones rather than patience.
+    TameFailed,
+    /// A tame pet's owner toggled its sitting order. Consumes no item.
+    SitToggled {
+        /// The order's new value.
+        sitting: bool,
+    },
+    /// The mob entered love mode; a partner in love within range will now breed
+    /// with it.
+    InLove,
+    /// A hurt tame pet was healed. The arm that runs *instead* of breeding.
+    Fed,
+    /// A horse family member's `Temper` rose. Carries the new value, because the
+    /// tame probability is a function of it and a caller that cannot read it
+    /// cannot tell "fed" from "nearly tame".
+    TemperRaised {
+        /// `AbstractHorse.getTemper()` after the gain.
+        temper: i32,
+    },
+}
+
+impl InteractOutcome {
+    /// Whether the interaction consumed one of the held item.
+    ///
+    /// `SitToggled` is the exception, and it is vanilla's:
+    /// `InteractionResult.SUCCESS.withoutItem()`. A pet you sit down does not eat
+    /// whatever you happened to be holding.
+    #[must_use]
+    pub fn consumes_item(self) -> bool {
+        !matches!(self, Self::Pass | Self::SitToggled { .. })
+    }
+
+    /// The particle type vanilla's matching `broadcastEntityEvent` would make the
+    /// client spawn, or `None` for an outcome with no visual.
+    ///
+    /// `6` → `SMOKE`, `7` → `HEART` (`TamableAnimal.spawnTamingParticles`), `18`
+    /// → `HEART` (`Animal.setInLove`, seven hearts, same burst).
+    #[must_use]
+    fn particle(self) -> Option<&'static str> {
+        match self {
+            Self::Tamed | Self::InLove => Some("minecraft:heart"),
+            Self::TameFailed => Some("minecraft:smoke"),
+            Self::Pass | Self::SitToggled { .. } | Self::Fed | Self::TemperRaised { .. } => None,
+        }
+    }
+}
+
+/// One `spawnTamingParticles`-shaped burst, as a `LEVEL_PARTICLES` packet.
+///
+/// Vanilla spawns seven particles client-side at `getRandomX(1.0)`,
+/// `getRandomY() + 0.5`, `getRandomZ(1.0)` with a `nextGaussian() * 0.02`
+/// per-axis velocity. `ClientboundLevelParticlesPacket` carries the count and a
+/// per-axis spread, so the same burst is expressed as one packet: seven
+/// particles, spread half a block horizontally (vanilla's `getRandomX(1.0)` is
+/// ±width/2 about the centre, and 1.0 is a rough stand-in for the mob's width),
+/// centred half a block above the mob's feet.
+fn taming_particles(particle: &str, pos: Vec3) -> crate::effects::WorldEffect {
+    crate::effects::WorldEffect::Particles {
+        particle: particle.to_owned(),
+        pos: Vec3::new(pos.x, pos.y + 0.5, pos.z),
+        offset: lodestone_model::Vec3f::new(0.5, 0.5, 0.5),
+        // Vanilla's per-particle velocity is `nextGaussian() * 0.02`, so the
+        // burst barely drifts. `max_speed` is the packet's own scale for that.
+        max_speed: 0.02,
+        count: 7,
+        long_distance: false,
+    }
+}
+
+/// `Wolf.feed`/`Cat.feed`'s heal amount for a tame pet fed its food item.
+///
+/// `Wolf.mobInteract` passes `2.0F, 2.0F` and `Cat.mobInteract` passes
+/// `1.0F, 1.0F` — the first argument is the heal. Not one constant: a wolf
+/// recovers twice as fast per fish as a cat does.
+fn tame_feed_heal(species: &str) -> f32 {
+    match species {
+        "wolf" => 2.0,
+        "cat" => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// Who owns a tamed mob.
+///
+/// Two variants because the two are genuinely different relations rather than one
+/// with a wider key. A player owner is a **uuid** — vanilla's
+/// `TamableAnimal.DATA_OWNERUUID_ID`, which is a uuid on the wire and in NBT
+/// alike, and the only identity that survives a reconnect. A mob owner is a
+/// runtime **entity id**, because nothing persists it and there is no uuid to
+/// resolve; that flavour predates taming and exists for the ownership questions
+/// the neutral roster asks (`HurtByTargetGoal.alertOthers`' same-owner filter).
+///
+/// Collapsing them into one `i32` is what made ownership unable to name a player,
+/// and collapsing them into one `Uuid` would require inventing uuids for mobs
+/// that the wire would then never carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobOwner {
+    /// Another live [`SimMob`], by runtime entity id.
+    Mob(i32),
+    /// A player, by account uuid.
+    Player(Uuid),
 }
 
 /// Vanilla `Creeper.DEFAULT_EXPLOSION_RADIUS`
@@ -1108,6 +1476,15 @@ pub struct SimMob<'w> {
     /// the sim at the end of the tick that landed it (vanilla's immediate
     /// death removal).
     health: f32,
+    /// The `minecraft:max_health` attribute value resolved at spawn — the ceiling
+    /// [`heal`](SimMob::heal) clamps to.
+    ///
+    /// Recorded rather than re-resolved because it is what decides the *order* of
+    /// a tame pet's interaction arms: `Wolf.mobInteract` feeds a hurt pet
+    /// (`isFood(stack) && getHealth() < getMaxHealth()`) and only falls through to
+    /// the breeding and sit arms when it cannot. Without the ceiling that
+    /// condition is unanswerable and the arms silently reorder.
+    max_health: f32,
     /// Armour/resistance/absorption state `damage::apply_reductions` reads for
     /// every incoming hit; absorption is written back after each hit.
     defenses: Defenses,
@@ -1154,19 +1531,45 @@ pub struct SimMob<'w> {
     /// `Vec3` (which only drives movement — the goal/navigation seam has no
     /// entity identity, just positions).
     attack_target_id: Option<i32>,
-    /// The id of the entity that owns this mob, if any — issue #458's
-    /// primitive 5, the ownership relation. Vanilla stores a tamed animal's
-    /// owner as a **player** `UUID` (`TamableAnimal.DATA_OWNERUUID_ID`,
-    /// `animal/TamableAnimal.java:41`), but player identity does not exist at
-    /// this seam — [`PlayerPerception`] carries only position and held item —
-    /// so today this can only name another [`SimMob`]. The seam carries the
-    /// resolved *position* ([`MobController::owner_position`]); the identity
-    /// lives here, because only a census of entities can hold it.
+    /// Who owns this mob, if anyone — the ownership relation. Vanilla stores a
+    /// tamed animal's owner as a **player** uuid
+    /// (`TamableAnimal.DATA_OWNERUUID_ID`), and that is now expressible:
+    /// [`PerceivedPlayer`] carries a [`PlayerIdentity`] at the perception seam. The
+    /// mob-to-mob flavour is kept because the enderman/wolf-pack work needs it
+    /// and nothing about a uuid replaces it.
     ///
-    /// `None` for a wild mob — which is every mob in production today (taming
-    /// is not implemented; nothing calls [`set_owner_id`](SimMob::set_owner_id)
-    /// yet).
-    owner_id: Option<i32>,
+    /// The seam carries the resolved *position*
+    /// ([`MobController::owner_position`]); the identity lives here, because
+    /// only a census can hold it.
+    ///
+    /// `None` for a wild mob.
+    owner: Option<MobOwner>,
+    /// Whether this mob is *tame at all*, independent of whether its owner is
+    /// currently resolvable — vanilla `TamableAnimal.isTame()`, the `0x04` bit
+    /// of `DATA_FLAGS_ID`.
+    ///
+    /// Not derived from [`owner`](Self::owner) being `Some`, and this is the
+    /// distinction that matters: a tamed pet whose owner has logged out keeps
+    /// its `owner` (the uuid is durable) but has **no resolvable position**, and
+    /// a mob-owned pet has an owner that is not a player at all. Both are tame.
+    /// Deriving tameness from a *resolved* owner would un-tame every pet the
+    /// moment its owner left the player list, and goals read this.
+    tame: bool,
+    /// Vanilla `TamableAnimal.orderedToSit` — the sitting **intent** an owner's
+    /// right-click toggles, which is what `SitWhenOrderedToGoal` reads. NBT
+    /// round-trips it as `Sitting`.
+    ///
+    /// Kept here rather than only on the [`NavigatingMob`] because it is
+    /// persisted state that outlives any goal, and because the interaction that
+    /// toggles it is a host event, not a goal.
+    ordered_to_sit: bool,
+    /// `AbstractHorse.Temper` — how close a horse family member is to accepting
+    /// a rider, `0..=getMaxTemper()`. Raised by feeding
+    /// ([`horse_temper_gain`]); read by the tame roll
+    /// ([`MobSim::attempt_horse_tame`]).
+    ///
+    /// `0` for every species outside the horse family, where nothing reads it.
+    temper: i32,
     /// `minecraft:knockback_resistance` attribute value (`0.0..=1.0`),
     /// `lodestone_physics::knockback::knockback_impulse`'s own
     /// `knockback_resistance` parameter for a hit landing on *this* mob. See
@@ -1302,18 +1705,110 @@ impl<'w> SimMob<'w> {
         self.mob.love_partner_position()
     }
 
-    /// The id of this mob's owner, if any (issue #458, primitive 5). `None`
-    /// for a wild (untamed) mob.
+    /// Who owns this mob, if anyone. `None` for a wild (untamed) mob.
     #[must_use]
-    pub fn owner_id(&self) -> Option<i32> {
-        self.owner_id
+    pub fn owner(&self) -> Option<MobOwner> {
+        self.owner
     }
 
-    /// Sets this mob's owner id (vanilla `TamableAnimal.tame` /
-    /// `setOwnerUUID`). A future tame interaction is the producer; nothing
-    /// calls it in production yet.
+    /// The **mob** id of this mob's owner, if it is owned by a mob. `None` both
+    /// for a wild mob and for one owned by a *player* — read
+    /// [`owner`](Self::owner) when the difference matters.
+    #[must_use]
+    pub fn owner_id(&self) -> Option<i32> {
+        match self.owner {
+            Some(MobOwner::Mob(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The uuid of this mob's owner, if it is owned by a player.
+    #[must_use]
+    pub fn owner_uuid(&self) -> Option<Uuid> {
+        match self.owner {
+            Some(MobOwner::Player(uuid)) => Some(uuid),
+            _ => None,
+        }
+    }
+
+    /// Sets this mob's owner id (the mob-to-mob flavour of
+    /// [`set_owner`](Self::set_owner)).
     pub fn set_owner_id(&mut self, owner_id: Option<i32>) -> &mut Self {
-        self.owner_id = owner_id;
+        self.set_owner(owner_id.map(MobOwner::Mob))
+    }
+
+    /// Sets this mob's owner — vanilla `TamableAnimal.setOwner`.
+    ///
+    /// **Does not set the tame flag**, and the asymmetry is vanilla's:
+    /// `setOwnerReference` sets `DATA_OWNERUUID_ID` and *then* calls
+    /// `setTame(true, false)`, two separate pieces of state
+    /// (`TamableAnimal.setOwnerReference`). [`tame`](Self::tame) is the call that
+    /// does both, and is what a taming interaction should use.
+    pub fn set_owner(&mut self, owner: Option<MobOwner>) -> &mut Self {
+        self.owner = owner;
+        self
+    }
+
+    /// Whether this mob is tame — vanilla `TamableAnimal.isTame()`.
+    ///
+    /// Distinct from [`owner_position`](Self::owner_position) being `Some`: a
+    /// tamed pet whose owner is offline is still tame.
+    #[must_use]
+    pub fn is_tame(&self) -> bool {
+        self.tame
+    }
+
+    /// Tames this mob to `owner` — vanilla `TamableAnimal.tame(player)`, which is
+    /// `setTame(true, true)` plus `setOwner(player)`.
+    pub fn tame(&mut self, owner: MobOwner) -> &mut Self {
+        self.owner = Some(owner);
+        self.tame = true;
+        self.mob.set_tame(true);
+        self
+    }
+
+    /// Whether the owner has told this mob to sit — vanilla
+    /// `TamableAnimal.isOrderedToSit()`, the persisted intent.
+    #[must_use]
+    pub fn is_ordered_to_sit(&self) -> bool {
+        self.ordered_to_sit
+    }
+
+    /// Sets the sitting order — vanilla `TamableAnimal.setOrderedToSit`.
+    ///
+    /// Pushes straight through to the [`NavigatingMob`] as well as recording it
+    /// here, so `SitWhenOrderedToGoal` sees the order on the *same* tick rather
+    /// than one tick late. Every other perception input is refreshed by
+    /// [`MobSim::feed_perception`], but an order given by an interaction arrives
+    /// between ticks and a one-tick lag is visible as a pet that ignores the
+    /// first click.
+    pub fn set_ordered_to_sit(&mut self, ordered_to_sit: bool) -> &mut Self {
+        self.ordered_to_sit = ordered_to_sit;
+        self.mob.set_ordered_to_sit(ordered_to_sit);
+        self
+    }
+
+    /// Whether this mob is currently in the sitting **pose** —
+    /// `SitWhenOrderedToGoal`'s observable output, which is what the `0x01`
+    /// `DATA_FLAGS_ID` bit carries. Read this to answer "did the goal run",
+    /// and [`is_ordered_to_sit`](Self::is_ordered_to_sit) to answer "was it
+    /// told to".
+    #[must_use]
+    pub fn is_in_sitting_pose(&self) -> bool {
+        self.mob.is_in_sitting_pose()
+    }
+
+    /// `AbstractHorse.getTemper()` — how close this horse is to accepting a
+    /// rider. Always `0` outside the horse family.
+    #[must_use]
+    pub fn temper(&self) -> i32 {
+        self.temper
+    }
+
+    /// `AbstractHorse.setTemper`, clamped to `0..=max` by the caller. Exists so a
+    /// gate can stage a horse at a chosen temper instead of feeding it 34 times.
+    pub fn set_temper(&mut self, temper: i32) -> &mut Self {
+        self.temper = temper;
         self
     }
 
@@ -1450,6 +1945,19 @@ impl<'w> SimMob<'w> {
     /// Clamped to `>= 0.0`.
     pub fn set_health(&mut self, health: f32) -> &mut Self {
         self.health = health.max(0.0);
+        self
+    }
+
+    /// The `minecraft:max_health` attribute resolved at spawn.
+    #[must_use]
+    pub fn max_health(&self) -> f32 {
+        self.max_health
+    }
+
+    /// `LivingEntity.heal(amount)`: raises health toward
+    /// [`max_health`](Self::max_health), never past it.
+    pub fn heal(&mut self, amount: f32) -> &mut Self {
+        self.health = (self.health + amount).min(self.max_health);
         self
     }
 
@@ -1960,7 +2468,21 @@ pub struct MobSim<'w> {
     /// This crate had **no player-position feed at all** before issue #441 —
     /// see [`set_players`](Self::set_players) for why that made two of the
     /// eight perception methods unreachable, and which one line closes it.
-    players: Vec<PlayerPerception>,
+    players: Vec<PerceivedPlayer>,
+    /// The `nextInt(3)` / `nextInt(10)` / `nextInt(maxTemper)` draws the taming
+    /// mechanisms make, on their own stream so a tame attempt cannot shift which
+    /// roll a mob spawn, a despawn pass or an XP award sees — the same isolation
+    /// [`orb_rng`](Self::orb_rng) exists for.
+    ///
+    /// Injectable through [`set_tame_rng`](Self::set_tame_rng), which is how a
+    /// gate drives a tame roll to both sides of its threshold instead of
+    /// asserting that taming "sometimes" happens.
+    tame_rng: SpawnRng,
+    /// The `random.nextInt(7) + 1` draw
+    /// `Animal.finalizeSpawnChildFromBreeding` makes for the experience orb a
+    /// successful mating pops, on its own stream for [`tame_rng`](Self::tame_rng)'s
+    /// reason: a breeding event must not shift which roll a tame attempt sees.
+    breed_rng: SpawnRng,
     /// The `mob_drops` game rule, mirrored in by
     /// [`set_mob_drops`](Self::set_mob_drops). `true` by default, which is vanilla's
     /// own default and the behaviour before the rule was readable.
@@ -2015,8 +2537,23 @@ impl<'w> MobSim<'w> {
             pending_grazes: Vec::new(),
             pending_vocalisations: Vec::new(),
             players: Vec::new(),
+            tame_rng: SpawnRng::new(TAME_ROLL_SEED),
+            breed_rng: SpawnRng::new(BREED_XP_SEED),
             mob_drops: true,
         }
+    }
+
+    /// Replaces the RNG the taming mechanisms draw from — the injection point a
+    /// tame-chance gate needs.
+    ///
+    /// A tame *chance* cannot be gated by observing that taming sometimes
+    /// happens; that measures only that the code runs. Seed this with a stream
+    /// whose first draw is known and the outcome becomes a prediction. The draw
+    /// order and count are part of the specification, so a gate that reseeds
+    /// between attempts is also asserting how many draws each mechanism makes.
+    pub fn set_tame_rng(&mut self, rng: SpawnRng) -> &mut Self {
+        self.tame_rng = rng;
+        self
     }
 
     /// How many cells the **last** tick's item-settling pass asked the collision
@@ -2055,15 +2592,46 @@ impl<'w> MobSim<'w> {
     /// the eight is fed from state this crate already owns. That asymmetry is
     /// recorded in `docs/mob-perception.md` rather than left for the next
     /// author to rediscover.
-    pub fn set_players(&mut self, players: Vec<PlayerPerception>) -> &mut Self {
-        self.players = players;
+    ///
+    /// # Why the parameter is generic
+    ///
+    /// It accepts anything that converts into a [`PerceivedPlayer`], which in
+    /// practice means a `Vec<PerceivedPlayer>` **or** a bare
+    /// `Vec<PlayerPerception>`. Both shapes are wanted at once and neither is
+    /// transitional sugar for the other: taming needs the identity, so the real
+    /// producer supplies views, while every gate that only cares where a mob
+    /// looks is clearer without a uuid it does not use. A `PlayerPerception`
+    /// converts to a view with **no identity**, which is the honest state for a
+    /// producer that has none — see [`PerceivedPlayer`].
+    pub fn set_players<I, P>(&mut self, players: I) -> &mut Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PerceivedPlayer>,
+    {
+        self.players = players.into_iter().map(Into::into).collect();
         self
     }
 
-    /// The players mob perception currently sees.
+    /// The players mob perception currently sees, with their identities.
     #[must_use]
-    pub fn players(&self) -> &[PlayerPerception] {
+    pub fn players(&self) -> &[PerceivedPlayer] {
         &self.players
+    }
+
+    /// The position of the player with this identity's uuid, if they are in the
+    /// current player list — the resolution vanilla's
+    /// `EntityReference.get(…, ServerLevel, …)` performs for
+    /// `TamableAnimal.getOwner()`.
+    ///
+    /// Keyed on the **uuid**, never on the entity id, for the reason
+    /// [`PlayerIdentity`] gives: the entity id is reassigned per session, so a
+    /// pet whose owner reconnects would resolve to whoever inherited that id.
+    #[must_use]
+    fn player_position(&self, uuid: Uuid) -> Option<Vec3> {
+        self.players
+            .iter()
+            .find(|v| v.identity.is_some_and(|id| id.uuid == uuid))
+            .map(|v| v.perception.position)
     }
 
     /// Overrides the id the next [`spawn`](Self::spawn) call assigns (and
@@ -2144,13 +2712,17 @@ impl<'w> MobSim<'w> {
             uuid: Uuid::new_v4(),
             entity_type,
             health: max_health,
+            max_health,
             defenses,
             anger: None,
             hurt_by_player_until: None,
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
             attack_target_id: None,
-            owner_id: None,
+            owner: None,
+            tame: false,
+            ordered_to_sit: false,
+            temper: 0,
             knockback_resistance,
         });
         self.mobs.last_mut().expect("just pushed")
@@ -2384,7 +2956,7 @@ impl<'w> MobSim<'w> {
             let nearest = self
                 .players
                 .iter()
-                .map(|p| dist_sqr(p.position, pos))
+                .map(|p| dist_sqr(p.perception.position, pos))
                 .min_by(f64::total_cmp);
             // Player proximity is the **only** reset condition here, and
             // deliberately *not* vanilla's other one.
@@ -2672,7 +3244,8 @@ impl<'w> MobSim<'w> {
             // `LookAtPlayerGoal::can_use` applies exactly that cut itself
             // (`goals.rs`). Cutting here as well would silently take the
             // minimum of two ranges and make the goal's own parameter a lie.
-            nearest_player[i] = nearest_by(&self.players, pos, |p| p.position, |_| true, None);
+            nearest_player[i] =
+                nearest_by(&self.players, pos, |p| p.perception.position, |_| true, None);
 
             // --- temptation -----------------------------------------------
             // The range *is* on the mob here (`Attributes.TEMPT_RANGE`), so it
@@ -2686,9 +3259,10 @@ impl<'w> MobSim<'w> {
                 temptation[i] = nearest_by(
                     &self.players,
                     pos,
-                    |p| p.position,
+                    |p| p.perception.position,
                     |p| {
-                        p.held_item
+                        p.perception
+                            .held_item
                             .as_ref()
                             .is_some_and(|item| foods.contains(&item.path()))
                     },
@@ -2751,28 +3325,45 @@ impl<'w> MobSim<'w> {
             }
 
             // --- owner ----------------------------------------------------
-            // Issue #458, primitive 5. The owner *identity* is a census fact
-            // (`SimMob::owner_id`); only the resolved position can cross the
-            // seam (`MobController::owner_position`), so this is resolved here
-            // exactly like partner/parent. Vanilla's owner is a player
-            // (`TamableAnimal.DATA_OWNERUUID_ID`), and player identity does not
-            // exist at this seam — `PlayerPerception` carries only position and
-            // held item — so today this can only resolve mob-to-mob ownership.
-            // Player ownership stays blocked until `PlayerPerception` grows an
-            // identity; until then a tamed-by-player mob reads `None`, which is
-            // the correct neutral default rather than a wrong feed.
-            if let Some(oid) = me.owner_id {
-                owner[i] = nearest_by(
-                    &self.mobs,
-                    pos,
-                    SimMob::position,
-                    |other| other.id == oid,
-                    None,
-                );
+            // The owner *identity* is a census fact (`SimMob::owner`); only the
+            // resolved position can cross the seam
+            // (`MobController::owner_position`), so this is resolved here
+            // exactly like partner/parent.
+            //
+            // Both flavours resolve, and the player one is what taming produces:
+            // vanilla's owner is a uuid (`TamableAnimal.DATA_OWNERUUID_ID`) and
+            // `getOwner()` resolves it against the level every time it is asked,
+            // which is what `player_position` does here. A tamed pet whose owner
+            // is not in the list resolves to `None` — offline, or in another
+            // dimension, which are the same two cases vanilla's
+            // `owner.level() != this.level()` covers — and `None` is the correct
+            // answer rather than a stale last-known position: a pet must not
+            // path toward where you were an hour ago.
+            //
+            // `is_tame` is fed *unconditionally* below rather than derived from
+            // this, because a mob is tame whether or not its owner is resolvable.
+            match me.owner {
+                Some(MobOwner::Mob(oid)) => {
+                    owner[i] = nearest_by(
+                        &self.mobs,
+                        pos,
+                        SimMob::position,
+                        |other| other.id == oid,
+                        None,
+                    );
+                }
+                Some(MobOwner::Player(uuid)) => {
+                    owner[i] = self.player_position(uuid);
+                }
+                None => {}
             }
         }
 
         for (i, m) in self.mobs.iter_mut().enumerate() {
+            // Not folded into the chain below: `set_tame`/`set_ordered_to_sit`
+            // read `m`'s own record while the chain holds `m.mob` mutably.
+            let (tame, ordered_to_sit) = (m.tame, m.ordered_to_sit);
+            m.mob.set_tame(tame).set_ordered_to_sit(ordered_to_sit);
             m.mob
                 .set_nearest_player(nearest_player[i])
                 .set_temptation(temptation[i])
@@ -2785,6 +3376,294 @@ impl<'w> MobSim<'w> {
                 .set_love_partner_candidate(partner[i])
                 .set_parent_candidate(parent[i])
                 .set_owner(owner[i]);
+        }
+    }
+
+    /// A player right-clicked a mob with (or without) an item — vanilla
+    /// `Mob.interact` → `mobInteract`, the single producer for taming, sitting,
+    /// feeding and breeding.
+    ///
+    /// # The dispatch order is the specification
+    ///
+    /// Vanilla's `mobInteract` overrides are nested `if` chains that end in
+    /// `super.mobInteract`, so *which arm wins* is as much a part of the port as
+    /// the constants are. Two orderings that both "tame a wolf" differ
+    /// observably: feeding a hurt tame wolf meat must heal it, **not** put it in
+    /// love, and only once it is at full health does the same item breed it
+    /// (`Wolf.mobInteract`'s first arm, then `super` reaching
+    /// `Animal.mobInteract`). This method's arms are in that order and each one
+    /// names the vanilla method it comes from.
+    ///
+    /// # What is deliberately not here
+    ///
+    /// Collar dyeing, wolf body armour and its repair, the parrot's poisonous
+    /// cookie, and mounting a tame horse. Each needs an item model this crate
+    /// does not have (dye components, equipment slots, damage values) or a
+    /// passenger model that does not exist.
+    ///
+    /// Returns [`InteractOutcome::Pass`] when nothing responded, which is the
+    /// caller's signal to fall through to whatever it does with an unconsumed
+    /// right-click.
+    pub fn interact(
+        &mut self,
+        mob_id: i32,
+        actor: PlayerIdentity,
+        held_item: Option<&ResourceKey>,
+    ) -> InteractOutcome {
+        let Some(mob) = self.mobs.iter().find(|m| m.id == mob_id) else {
+            return InteractOutcome::Pass;
+        };
+        let species = mob.entity_type().path().to_owned();
+        let pos = mob.position();
+        let item = held_item.map(|k| k.path().to_owned());
+        let item = item.as_deref();
+
+        let outcome = match tame_mechanism(&species) {
+            Some(TameMechanism::Temper { max_temper }) => {
+                self.interact_horse(mob_id, actor, item, max_temper)
+            }
+            Some(mechanism) => self.interact_tamable(mob_id, actor, item, &species, mechanism),
+            // Every other species goes straight to `Animal.mobInteract`.
+            None => self.interact_animal(mob_id, item, &species),
+        };
+
+        // Vanilla's particles are `broadcastEntityEvent(this, (byte)6|7|18)`,
+        // which the *client* expands into a burst
+        // (`TamableAnimal.spawnTamingParticles`, `Animal.handleEntityEvent`).
+        // This server has no `ENTITY_EVENT` encoder, so the burst is published
+        // directly as a `LEVEL_PARTICLES` packet with the same particle type,
+        // count and Gaussian spread the client would have produced. A disclosed
+        // substitution, not an approximation of the visual: seven HEART or SMOKE
+        // particles at `getRandomY() + 0.5` either way.
+        if let Some(particle) = outcome.particle() {
+            self.pending_vocalisations
+                .push(taming_particles(particle, pos));
+        }
+        outcome
+    }
+
+    /// `Wolf`/`Cat`/`Parrot.mobInteract` — the `TamableAnimal` chain.
+    fn interact_tamable(
+        &mut self,
+        mob_id: i32,
+        actor: PlayerIdentity,
+        item: Option<&str>,
+        species: &str,
+        mechanism: TameMechanism,
+    ) -> InteractOutcome {
+        let TameMechanism::FoodRoll {
+            items,
+            one_in,
+            sit_on_success,
+        } = mechanism
+        else {
+            return InteractOutcome::Pass;
+        };
+        let Some(mob) = self.mobs.iter().find(|m| m.id == mob_id) else {
+            return InteractOutcome::Pass;
+        };
+
+        if mob.is_tame() {
+            // `isOwnedBy(player)` — a tame animal ignores everyone but its owner.
+            // Vanilla's cat wraps its whole body in this check and the wolf
+            // repeats it per arm; the effect is the same.
+            if mob.owner_uuid() != Some(actor.uuid) {
+                return InteractOutcome::Pass;
+            }
+            // `Wolf.mobInteract`'s first arm: `isFood(stack) && getHealth() <
+            // getMaxHealth()` → `feed`. **Before** the breeding arm, which is
+            // reached only through `super.mobInteract`.
+            let is_food = item.is_some_and(|i| breeding_food(species).contains(&i));
+            if is_food && mob.health() < mob.max_health() {
+                let heal = tame_feed_heal(species);
+                let mob = self.get_mut(mob_id).expect("checked above");
+                mob.heal(heal);
+                return InteractOutcome::Fed;
+            }
+            // `super.mobInteract` → `Animal.mobInteract`'s love arm.
+            if is_food && self.try_set_in_love(mob_id) {
+                return InteractOutcome::InLove;
+            }
+            // `if (!interactionResult.consumesAction() && isOwnedBy(player))` →
+            // `setOrderedToSit(!isOrderedToSit())`. The *last* arm, so anything
+            // above it suppresses the toggle — which is why an owner feeding a
+            // hurt pet does not also sit it down.
+            let mob = self.get_mut(mob_id).expect("checked above");
+            let sitting = !mob.is_ordered_to_sit();
+            mob.set_ordered_to_sit(sitting);
+            return InteractOutcome::SitToggled { sitting };
+        }
+
+        // Untamed. The taming item is checked first and it is **not** the food
+        // tag for the wolf: `Items.BONE`.
+        if item.is_some_and(|i| items.contains(&i)) {
+            // `Wolf.mobInteract`'s `!this.isAngry()` guard. The cat and the
+            // parrot have no such gate, and `anger` is `None` for them anyway,
+            // so this is one condition rather than a per-species branch.
+            if self.get(mob_id).is_some_and(|m| m.anger.is_some()) {
+                return InteractOutcome::Pass;
+            }
+            // `tryToTame`: one `nextInt(one_in)` draw, success on exactly `0`.
+            let success = self.tame_rng.next_int(one_in) == 0;
+            let mob = self.get_mut(mob_id).expect("checked above");
+            if success {
+                mob.tame(MobOwner::Player(actor.uuid));
+                // `navigation.stop(); setTarget(null);` then, for the wolf and
+                // the cat only, `setOrderedToSit(true)`.
+                mob.set_attack_target(None);
+                mob.set_attack_target_id(None);
+                if sit_on_success {
+                    mob.set_ordered_to_sit(true);
+                }
+                return InteractOutcome::Tamed;
+            }
+            return InteractOutcome::TameFailed;
+        }
+
+        // Still `super.mobInteract` → `Animal.mobInteract`: an **untamed** wolf
+        // fed meat really does fall in love in vanilla, because the bone check
+        // above did not match and the chain continues.
+        if item.is_some_and(|i| breeding_food(species).contains(&i))
+            && self.try_set_in_love(mob_id)
+        {
+            return InteractOutcome::InLove;
+        }
+        InteractOutcome::Pass
+    }
+
+    /// `AbstractHorse.mobInteract` → `handleEating`.
+    ///
+    /// The horse family's whole mechanism is a persisted counter, so this arm
+    /// makes **no** tame roll: feeding raises `Temper` and nothing else. The roll
+    /// lives in [`attempt_horse_tame`](Self::attempt_horse_tame), which
+    /// `RunAroundLikeCrazyGoal` drives while a player is riding.
+    fn interact_horse(
+        &mut self,
+        mob_id: i32,
+        actor: PlayerIdentity,
+        item: Option<&str>,
+        max_temper: i32,
+    ) -> InteractOutcome {
+        let Some(item) = item else {
+            // An empty-handed right-click on an untamed horse is
+            // `doPlayerRide` — vanilla's only route to the tame roll. See
+            // `attempt_horse_tame`'s doc for the one disclosed deviation.
+            return if self.get(mob_id).is_some_and(|m| !m.is_tame()) {
+                self.attempt_horse_tame(mob_id, actor, max_temper)
+            } else {
+                InteractOutcome::Pass
+            };
+        };
+
+        // `handleEating`'s arms in order: heal, ageUp, love, temper. Love is
+        // gated on `isTamed() && getAge() == 0 && !isInLove()` and only the two
+        // gold items reach it.
+        let mut used = false;
+        if horse_breeding_items(item)
+            && self.get(mob_id).is_some_and(SimMob::is_tame)
+            && self.try_set_in_love(mob_id)
+        {
+            return InteractOutcome::InLove;
+        }
+
+        let gain = horse_temper_gain(item);
+        let mob = match self.get_mut(mob_id) {
+            Some(mob) => mob,
+            None => return InteractOutcome::Pass,
+        };
+        // `if (temper > 0 && (itemUsed || !isTamed()) && getTemper() <
+        // getMaxTemper())`. `hay_block` has `temper == 0` and so raises nothing,
+        // however much of it you feed — the trap `horse_temper_gain` documents.
+        if gain > 0 && mob.temper() < max_temper {
+            let raised = (mob.temper() + gain).clamp(0, max_temper);
+            mob.set_temper(raised);
+            used = true;
+        }
+        if used {
+            let temper = mob.temper();
+            InteractOutcome::TemperRaised { temper }
+        } else {
+            InteractOutcome::Pass
+        }
+    }
+
+    /// `Animal.mobInteract` for a species with no taming at all — the cow, sheep,
+    /// pig, chicken and rabbit route, and the only thing feeding them does.
+    fn interact_animal(
+        &mut self,
+        mob_id: i32,
+        item: Option<&str>,
+        species: &str,
+    ) -> InteractOutcome {
+        if item.is_some_and(|i| breeding_food(species).contains(&i))
+            && self.try_set_in_love(mob_id)
+        {
+            return InteractOutcome::InLove;
+        }
+        InteractOutcome::Pass
+    }
+
+    /// `Animal.mobInteract`'s love arm as a single testable condition:
+    /// `getAge() == 0 && canFallInLove()`, then `setInLove`.
+    ///
+    /// **`age == 0` exactly**, not `!is_baby()`. The two differ on a parent
+    /// inside its post-breeding cooldown, whose age is a positive countdown: it
+    /// is not a baby and it still cannot fall in love. Reading `!is_baby()` here
+    /// would let a pair breed every 60 ticks forever.
+    fn try_set_in_love(&mut self, mob_id: i32) -> bool {
+        let Some(mob) = self.get_mut(mob_id) else {
+            return false;
+        };
+        if mob.age() != 0 || mob.is_in_love() {
+            return false;
+        }
+        mob.set_in_love();
+        true
+    }
+
+    /// `RunAroundLikeCrazyGoal.tick`'s tame roll for the horse family:
+    /// `random.nextInt(getMaxTemper()) < getTemper()`, and on failure
+    /// `modifyTemper(5)` plus `makeMad()`.
+    ///
+    /// # The one disclosed deviation, and why it is not silent
+    ///
+    /// Vanilla reaches this roll from a **goal** that runs while a player is a
+    /// passenger, gated on its own `random.nextInt(adjustedTickDelay(50)) == 0`
+    /// — so a rider gets roughly one attempt every 25 ticks until the horse
+    /// yields. This server has no passenger model at all, so there is nothing to
+    /// stay mounted on and no goal to tick. The attempt is therefore made **once
+    /// per mount attempt** (one empty-handed right-click), and the 1-in-50 outer
+    /// gate is not drawn.
+    ///
+    /// What is *not* changed is the part that makes the horse a different
+    /// mechanism from the wolf: the roll is still `nextInt(maxTemper) < temper`,
+    /// still fails at temper `0` with certainty, and still adds 5 temper per
+    /// failure — so a horse still has to be fed or ridden repeatedly, and the
+    /// number of attempts it takes is vanilla's. Only the *pacing* differs.
+    pub fn attempt_horse_tame(
+        &mut self,
+        mob_id: i32,
+        actor: PlayerIdentity,
+        max_temper: i32,
+    ) -> InteractOutcome {
+        let Some(mob) = self.get(mob_id) else {
+            return InteractOutcome::Pass;
+        };
+        if mob.is_tame() || max_temper <= 0 {
+            return InteractOutcome::Pass;
+        }
+        let temper = mob.temper();
+        let success = self.tame_rng.next_int(max_temper) < temper;
+        let mob = self.get_mut(mob_id).expect("checked above");
+        if success {
+            // `tameWithName`: `setOwner` + `setTamed(true)`. Note it does **not**
+            // order the horse to sit — horses have no sitting pose at all.
+            mob.tame(MobOwner::Player(actor.uuid));
+            InteractOutcome::Tamed
+        } else {
+            let raised = (temper + 5).clamp(0, max_temper);
+            mob.set_temper(raised);
+            InteractOutcome::TameFailed
         }
     }
 
@@ -2849,6 +3728,25 @@ impl<'w> MobSim<'w> {
             // island of exactly the kind this issue exists to close.
             let child = self.spawn_species(species, breeder_pos);
             child.set_age(BABY_START_AGE);
+
+            // `finalizeSpawnChildFromBreeding`'s last statement:
+            // `if (gameRules.get(MOB_DROPS)) addFreshEntity(new ExperienceOrb(…,
+            // random.nextInt(7) + 1))`.
+            //
+            // **Constructed, not awarded**, and the distinction is visible:
+            // `ExperienceOrb.award` splits an amount into denominations and tries
+            // `tryMergeToExisting` first, whereas breeding builds one orb with
+            // one value directly. Routing this through `award_experience` would
+            // let a second mating in the same spot silently fold into the first
+            // orb, so `spawn_orb` is the right call even though the values are
+            // small enough that denomination splitting would be a no-op.
+            //
+            // The gate is the `mob_drops` rule, exactly as for a mob's death
+            // reward — breeding on a `doMobLoot false` server pops nothing.
+            if self.mob_drops {
+                let value = self.breed_rng.next_int(7) + 1;
+                self.spawn_orb(value, breeder_pos, Vec3::new(0.0, 0.0, 0.0));
+            }
         }
     }
 
@@ -4141,7 +5039,7 @@ impl<'w> MobSim<'w> {
         let range_sqr = ORB_MAX_FOLLOW_DIST * ORB_MAX_FOLLOW_DIST;
         let mut best: Option<(f64, Vec3)> = None;
         for player in &self.players {
-            let d = dist_sqr(player.position, orb);
+            let d = dist_sqr(player.perception.position, orb);
             if d > range_sqr {
                 continue;
             }
@@ -4149,9 +5047,9 @@ impl<'w> MobSim<'w> {
                 best = Some((
                     d,
                     Vec3::new(
-                        player.position.x,
-                        player.position.y + PLAYER_EYE_HEIGHT / 2.0,
-                        player.position.z,
+                        player.perception.position.x,
+                        player.perception.position.y + PLAYER_EYE_HEIGHT / 2.0,
+                        player.perception.position.z,
                     ),
                 ));
             }
@@ -4927,6 +5825,16 @@ const ORB_SPAWN_MERGE_REACH: f64 = 0.5 + 0.25;
 /// [`crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED`] and its siblings: an arbitrary
 /// fixed constant, so a replay of the same awards produces the same merges.
 const ORB_BEHAVIOR_SEED: u64 = 0x584f_5242_5f53_4545;
+
+/// Default seed for [`MobSim`]'s tame-roll stream. Arbitrary and fixed, exactly
+/// like [`ORB_BEHAVIOR_SEED`] — what matters is that it is a *separate* stream,
+/// so a tame attempt cannot shift which roll a spawn or a despawn pass sees.
+/// Replace it per test with [`MobSim::set_tame_rng`].
+const TAME_ROLL_SEED: u64 = 0x5441_4d45_5f52_4f4c;
+
+/// Default seed for the breeding experience-orb stream. See
+/// [`TAME_ROLL_SEED`] for why it is separate.
+const BREED_XP_SEED: u64 = 0x4252_4545_445f_5850;
 
 /// The entity-type key every experience orb streams as.
 ///

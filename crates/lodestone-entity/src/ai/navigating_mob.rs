@@ -363,9 +363,33 @@ pub struct NavigatingMob<'w> {
     ///
     /// Host-injected exactly like [`parent_candidate`](Self::parent_candidate):
     /// the host owns the owner *identity* (`lodestone_server`'s
-    /// `SimMob::owner_id`) and resolves it to a position each tick. `None` for
-    /// every mob in production today (taming is not implemented).
+    /// `SimMob::owner`) and resolves it to a position each tick. `None` for a
+    /// wild mob, **and also for a tamed mob whose owner is offline or out of the
+    /// player list** — see [`tame`](Self::tame) for why those are two different
+    /// states.
     owner: Option<Vec3>,
+    /// Host injection point: vanilla `TamableAnimal.isTame()` (the `0x04` bit of
+    /// `TamableAnimal.DATA_FLAGS_ID`). Drives [`MobController::is_tame`].
+    ///
+    /// Separate from [`owner`](Self::owner) rather than derived from it: a tamed
+    /// pet whose owner has logged out still *is* tame, so deriving tameness from
+    /// a resolved owner position would un-tame every pet whenever its owner left
+    /// the player list. `SitWhenOrderedToGoal`'s `!isTame()` arm and
+    /// `Wolf.WolfAvoidEntityGoal`'s `!wolf.isTame()` guard both read this.
+    tame: bool,
+    /// Host injection point: vanilla `TamableAnimal.orderedToSit`, the persisted
+    /// *intent* an owner's right-click toggles. Drives
+    /// [`MobController::is_ordered_to_sit`].
+    ordered_to_sit: bool,
+    /// The sitting **pose** — vanilla's `0x01` `DATA_FLAGS_ID` bit, written by
+    /// [`SitWhenOrderedToGoal`](super::goals::SitWhenOrderedToGoal)'s `start`
+    /// and `stop` through [`MobController::set_in_sitting_pose`], and read back
+    /// by the host to publish that flag.
+    ///
+    /// Distinct from [`ordered_to_sit`](Self::ordered_to_sit) for the reason
+    /// [`MobController::is_ordered_to_sit`] gives: the order survives the goal
+    /// being preempted, the pose does not.
+    in_sitting_pose: bool,
     /// Self-damage requests this mob recorded via
     /// [`MobController::damage_self`], awaiting a host drain via
     /// [`take_self_damage`](Self::take_self_damage) — the
@@ -467,6 +491,9 @@ impl<'w> NavigatingMob<'w> {
             eaten: Vec::new(),
             stared_at: false,
             owner: None,
+            tame: false,
+            ordered_to_sit: false,
+            in_sitting_pose: false,
             self_damage: Vec::new(),
         }
     }
@@ -809,6 +836,31 @@ impl<'w> NavigatingMob<'w> {
     pub fn set_owner(&mut self, owner: Option<Vec3>) -> &mut Self {
         self.owner = owner;
         self
+    }
+
+    /// Host injection point: vanilla `TamableAnimal.setTame`'s `0x04` bit. See
+    /// the `tame` field's own doc comment for why this is not
+    /// `set_owner(Some(..)).is_some()`.
+    pub fn set_tame(&mut self, tame: bool) -> &mut Self {
+        self.tame = tame;
+        self
+    }
+
+    /// Host injection point: vanilla `TamableAnimal.setOrderedToSit`, the
+    /// persisted sitting *intent*.
+    pub fn set_ordered_to_sit(&mut self, ordered_to_sit: bool) -> &mut Self {
+        self.ordered_to_sit = ordered_to_sit;
+        self
+    }
+
+    /// Whether this mob is currently in the sitting **pose** —
+    /// [`SitWhenOrderedToGoal`](super::goals::SitWhenOrderedToGoal)'s observable
+    /// output, and the `0x01` `DATA_FLAGS_ID` bit the host publishes. Read this
+    /// (not [`is_ordered_to_sit`](MobController::is_ordered_to_sit)) to answer
+    /// "did the goal actually run".
+    #[must_use]
+    pub fn is_in_sitting_pose(&self) -> bool {
+        self.in_sitting_pose
     }
 
     /// The self-damage requests a goal or host logic recorded (for tests).
@@ -1175,6 +1227,18 @@ impl MobController for NavigatingMob<'_> {
 
     fn owner_position(&self) -> Option<Vec3> {
         self.owner
+    }
+
+    fn is_tame(&self) -> bool {
+        self.tame
+    }
+
+    fn is_ordered_to_sit(&self) -> bool {
+        self.ordered_to_sit
+    }
+
+    fn set_in_sitting_pose(&mut self, sitting: bool) {
+        self.in_sitting_pose = sitting;
     }
 
     fn is_being_stared_at(&self) -> bool {
