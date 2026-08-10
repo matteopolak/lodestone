@@ -276,25 +276,31 @@ impl Sim {
     /// this module's doc for the survives/does-not table, and note that nothing
     /// player-scoped appears below.
     ///
-    /// # The chunk **store** is not cleared here, on purpose
+    /// # The chunk **store** is still not cleared here, and now it is cleared
+    /// elsewhere
     ///
-    /// The renderer's sections are dropped; the client's decoded chunk store is
-    /// not. That is a real, deliberate gap and the reason is ordering, not
-    /// oversight: the store is written by the **net thread** as packets decode,
-    /// while this runs on the render thread when the shell next drains
-    /// `NetClient::poll`. Columns for the *new* dimension can already be in the
-    /// store by then, and a bulk clear here would delete terrain no server will
-    /// resend — trading leftover geometry for a permanent hole.
+    /// The renderer's sections are dropped below; the client's decoded chunk store
+    /// is not, and that remains deliberate. The reason is ordering, not oversight:
+    /// the store is written by the **net thread** as packets decode, while this runs
+    /// on the render thread when the shell next drains `NetClient::poll`. Columns
+    /// for the *new* dimension can already be in the store by then, and a bulk clear
+    /// here would delete terrain no server will resend — trading leftover geometry
+    /// for a permanent hole.
     ///
     /// Dropping the meshed columns is safe in exactly the way clearing the store
     /// is not: a column still in the store is re-meshed the moment anything
     /// dirties it, so an over-eager mesh drop costs a re-mesh, and an over-eager
-    /// store clear costs the chunk. `lodestone-server` sweeps `forget_chunk`
-    /// over every loaded column before it sends the respawn, which empties the
-    /// store from the net thread in the correct order; the honest client-side fix
-    /// lives at that same point — `lodestone-client`'s `Driver::emit`, where the
-    /// `Respawned` event is seen with the world-write guard reachable and before
-    /// the next packet decodes. See `docs/nether-portals.md`.
+    /// store clear costs the chunk.
+    ///
+    /// The store clear therefore lives at the one point where the ordering is
+    /// safe — `lodestone_client::Driver::forget_previous_dimension`, called from
+    /// `Driver::emit`'s `Respawned` arm, on the net thread, after that packet's
+    /// world-write guard has been dropped and before the next packet decodes. It
+    /// compares the destination against the dimension it last recorded, so a
+    /// death-respawn touches nothing. Against our own integrated server the store
+    /// was already emptied in the right order by its `forget_chunk` sweep; that
+    /// clear is what makes a **vanilla** server correct too. See
+    /// `docs/nether-portals.md`.
     fn reset_for_dimension_change(&mut self) {
         // The other entities. Vanilla builds a whole new `ClientLevel` on
         // `handleRespawn`, which drops every entity in the old one; this is the
