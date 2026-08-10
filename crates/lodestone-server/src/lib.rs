@@ -117,6 +117,10 @@ mod block_support;
 /// of the growth families [`growth_tick`] already models. Public because the
 /// producer is a right-click handler outside the tick loop.
 pub mod bone_meal;
+/// Placing a boat — `BoatItem.use`'s raytrace and the vehicle it creates. Public
+/// because the producer is a `USE_ITEM` handler outside the tick loop, exactly as
+/// [`bone_meal`] and [`spawn_egg`] are.
+pub mod boat;
 mod border;
 mod brewing;
 mod chunk;

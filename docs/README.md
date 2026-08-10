@@ -170,6 +170,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   than missing models: a block whose support is destroyed now pops off and drops,
   placing a block now costs you the block, and a right-click in mid-air now eats food
   and equips armour instead of doing nothing at all.
+- [Boats: placing, boarding and steering](./boat-placement.md) — The server-side
+  half of "put a boat down, get in it, row it". It covers `BoatItem.use`'s raytrace
+  (`lodestone_server::boat`), a rideable-vehicle registry that is deliberately **not**
+  the mob simulation (`lodestone_server::mobs`' `vehicles` field), the
+  `SET_PASSENGERS` producer that makes a client believe it is aboard, and the
+  acceptance of the client's authoritative `MoveVehicle`.
 - [Bone meal](./bone-meal.md) — The instant-growth right-click: a port of 26.2's
   `BoneMealItem::useOn` and the per-block `isValidBonemealTarget` /
   `isBonemealSuccess` / `performBonemeal` triples it dispatches to, in

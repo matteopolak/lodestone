@@ -3139,9 +3139,24 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<ClientTickEnd>(payload);
                 ServerBound::Ignored
             }
+            // `ServerboundMoveVehiclePacket` now lifts into a real variant: the
+            // server grew a vehicle model (`lodestone_server::mobs`' vehicle
+            // registry), so the client's authoritative report of where its boat
+            // has got to finally has a consumer. Before this it decoded and was
+            // dropped, which meant a mounted boat could be steered on the client
+            // and never moved anywhere anyone else could see.
+            //
+            // No entity id on the wire — vanilla resolves `player.getRootVehicle()`
+            // — so the variant carries only the transform.
             State::Play if packet_id == play::serverbound::MOVE_VEHICLE => {
-                let _ = decode_full::<MoveVehicle>(payload);
-                ServerBound::Ignored
+                match decode_full::<MoveVehicle>(payload) {
+                    Some(m) => ServerBound::VehicleMoved {
+                        position: Vec3::new(m.x, m.y, m.z),
+                        yaw: m.yaw,
+                        pitch: m.pitch,
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::PADDLE_BOAT => {
                 let _ = decode_full::<PaddleBoat>(payload);
@@ -4141,6 +4156,30 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::COMMANDS,
             payload: encode_commands_body(tree),
+        }
+    }
+
+    /// `ClientboundSetPassengersPacket.write`: `writeVarInt(vehicle)` then
+    /// `writeVarIntArray(passengers)`.
+    ///
+    /// `writeVarIntArray` is a VarInt length followed by that many bare VarInts —
+    /// **not** `ByteBufCodecs.VAR_INT.apply(list())`, which would be the same bytes
+    /// by coincidence today and is a different codec. This crate's own
+    /// `SET_PASSENGERS` *decode* arm in `crate::adapter` reads exactly this shape by
+    /// hand and says so, so the two halves agree by construction.
+    ///
+    /// An empty `passenger_ids` is the dismount, and is a legal, meaningful frame:
+    /// `Entity.stopRiding` re-sends the vehicle's now-empty list.
+    fn encode_set_passengers(&self, vehicle_id: i32, passenger_ids: &[i32]) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(vehicle_id);
+        w.var_i32(i32::try_from(passenger_ids.len()).unwrap_or(i32::MAX));
+        for &id in passenger_ids {
+            w.var_i32(id);
+        }
+        ServerDirective::Send {
+            packet_id: play::clientbound::SET_PASSENGERS,
+            payload: w.into_vec(),
         }
     }
 
@@ -6726,6 +6765,114 @@ mod border_wire_tests {
         let mut r = Reader::new(&payload);
         assert_eq!(r.var_i32().expect("warning_blocks"), 5);
         r.ensure_empty().expect("no trailing bytes");
+    }
+}
+
+#[cfg(test)]
+mod vehicle_wire_tests {
+    use super::*;
+    use lodestone_core::State;
+
+    /// `ClientboundSetPassengersPacket.write` — a VarInt vehicle id then
+    /// `writeVarIntArray`.
+    ///
+    /// The ids are **pairwise distinct and none is a small ordinal** (`517`, `41`,
+    /// `9`), which is what makes a transposition of the vehicle and its first
+    /// passenger fail: the two are adjacent VarInts of the same type, so
+    /// `decode(encode(x))` through this crate's own pair is byte-perfect either way
+    /// and the visible symptom would be a boat riding a player.
+    ///
+    /// The length prefix is asserted separately from the elements for the same
+    /// reason: `writeVarIntArray` is not `ByteBufCodecs.VAR_INT.apply(list())`, and
+    /// the two are only accidentally the same bytes.
+    #[test]
+    fn set_passengers_writes_the_vehicle_then_a_varint_array() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { packet_id, payload } =
+            proto.encode_set_passengers(517, &[41, 9])
+        else {
+            panic!("a passenger list must be sent");
+        };
+        assert_eq!(packet_id, play::clientbound::SET_PASSENGERS);
+        let mut r = Reader::new(&payload);
+        let mut wrong = Vec::new();
+        if r.var_i32().expect("vehicle id") != 517 {
+            wrong.push("the vehicle id must come first");
+        }
+        if r.var_i32().expect("count") != 2 {
+            wrong.push("then the array length");
+        }
+        if r.var_i32().expect("first passenger") != 41 {
+            wrong.push("then the passengers, in order");
+        }
+        if r.var_i32().expect("second passenger") != 9 {
+            wrong.push("both of them");
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        r.ensure_empty().expect("no trailing bytes");
+
+        // **The dismount frame.** Vanilla announces a dismount as the same packet
+        // with an empty list, and this client folds exactly that into "we got out"
+        // (`lodestone_ecs::session`'s `Riding` fold). A zero-length array is
+        // therefore a meaningful frame, not a degenerate one, and an encoder that
+        // declined to send it would leave a dismounted player stuck in a seat.
+        let ServerDirective::Send { payload: empty, .. } = proto.encode_set_passengers(517, &[])
+        else {
+            panic!("an empty list is still a real packet");
+        };
+        let mut r = Reader::new(&empty);
+        assert_eq!(r.var_i32().expect("vehicle id"), 517);
+        assert_eq!(r.var_i32().expect("count"), 0);
+        r.ensure_empty().expect("no trailing bytes");
+    }
+
+    /// `ServerboundMoveVehiclePacket` decodes into a real variant now that the
+    /// server has a vehicle to apply it to.
+    ///
+    /// Every field value is distinct and none is a round number, because the packet
+    /// is three `f64`s followed by two `f32`s: any transposition inside either run
+    /// is wire-legal and survives a round trip through our own codec. `-40.25` for
+    /// pitch versus `137.5` for yaw also separates them by *sign*, so swapping the
+    /// pair is visible rather than merely numerically different.
+    ///
+    /// The fixture is built with the packet struct's own encoder rather than by
+    /// hand, so this gate is about the **lift** (that `MOVE_VEHICLE` reaches
+    /// `ServerBound::VehicleMoved` rather than `Ignored`); the byte layout itself is
+    /// pinned by `crate::packets::game`'s own round-trip gates.
+    #[test]
+    fn move_vehicle_lifts_into_a_variant_rather_than_being_ignored() {
+        let body = MoveVehicle {
+            x: 118.5,
+            y: 63.25,
+            z: -204.75,
+            yaw: 137.5,
+            pitch: -40.25,
+            on_ground: true,
+        };
+        let payload = encode_body(&body);
+        let decoded = V770ServerProtocol.decode(
+            State::Play,
+            play::serverbound::MOVE_VEHICLE,
+            &payload,
+        );
+        assert_eq!(
+            decoded,
+            ServerBound::VehicleMoved {
+                position: Vec3::new(118.5, 63.25, -204.75),
+                yaw: 137.5,
+                pitch: -40.25,
+            }
+        );
+        // A truncated frame must be `Ignored`, not a partially-read transform: a
+        // half-decoded position would teleport the boat.
+        assert_eq!(
+            V770ServerProtocol.decode(
+                State::Play,
+                play::serverbound::MOVE_VEHICLE,
+                &payload[..payload.len() - 3],
+            ),
+            ServerBound::Ignored
+        );
     }
 }
 

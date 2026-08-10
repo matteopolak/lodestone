@@ -3097,6 +3097,7 @@ where
             | ServerBound::InteractEntity { .. }
             | ServerBound::UseItem { .. }
             | ServerBound::ReleaseUseItem
+            | ServerBound::VehicleMoved { .. }
             | ServerBound::PlayerInput { .. }
             | ServerBound::CreativeModeSlotSet { .. }
             | ServerBound::ClientCommand { .. }
@@ -8027,7 +8028,7 @@ where
         ServerBound::InteractEntity {
             entity_id,
             hand,
-            using_secondary_action: _,
+            using_secondary_action,
         } => {
             // Off-hand interactions are dropped rather than duplicated: a vanilla
             // client sends the main hand first, and running both would roll a tame
@@ -8035,6 +8036,40 @@ where
             // drives `interact` directly and only shows up as "taming is suspiciously
             // easy" in the running game.
             if hand == 0 {
+                // **Boarding a boat, and it has to be ahead of `MobSim::interact`.**
+                // A boat is not a mob: `interact`'s whole chain is
+                // `TamableAnimal`/`AbstractHorse`/`Animal.mobInteract` and has no arm
+                // for one, so a right-click on a boat reached the taming code, fell
+                // through to `Pass`, and did nothing at all — `SET_PASSENGERS` had no
+                // producer anywhere in the tree.
+                //
+                // `using_secondary_action` is `player.isSecondaryUseActive()`, which
+                // `AbstractBoat.interact` really does consult: sneak-clicking a boat
+                // must *not* board it. This is the first reader of that field, whose
+                // own doc comment said "nothing reads it yet".
+                if mobs.with(|sim| sim.vehicle_type(entity_id).is_some()) {
+                    let boarded = mobs.with(|sim| {
+                        sim.mount_vehicle(entity_id, player_entity_id, using_secondary_action)
+                    });
+                    if boarded {
+                        // The vehicle's **whole** passenger list, which is how
+                        // vanilla always sends it — `Entity.startRiding` re-broadcasts
+                        // the list rather than a delta. Without this packet the client
+                        // has no way to know it is aboard and
+                        // `lodestone_ecs::vehicle::tick_controlled_vehicle` never
+                        // engages, so the boat is placeable and unusable.
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_set_passengers(entity_id, &[player_entity_id]),
+                        )
+                        .await?;
+                    }
+                    // Boarding consumes no item, and a refused board must not fall
+                    // through to the taming chain — a boat is not tameable and the
+                    // fall-through would only cost a wasted roll.
+                    return Ok(());
+                }
                 let held = inventory.selected_item().map(|stack| stack.item.clone());
                 let outcome = mobs.with(|sim| {
                     sim.interact(
@@ -8082,6 +8117,81 @@ where
         // existed in the protocol crates with no server model behind it, so a
         // player could draw a bow and nothing was ever created.
         ServerBound::UseItem { hand, yaw, pitch } => {
+            // **`BoatItem.use` first, because it is an override rather than an
+            // arm.** `BoatItem` replaces `Item.use` wholesale, exactly as
+            // `BowItem`/`SnowballItem` do, so it belongs on the disjoint-set side of
+            // the dispatch alongside `launch_intent` and ahead of the eat/equip
+            // chain. A boat is neither food nor equippable, so the order is
+            // unobservable today — it is written this way so it stays right if one
+            // ever becomes both.
+            //
+            // Handled here rather than inside `apply_use_item` because the raytrace
+            // needs the **world**, which that function is deliberately without: it
+            // takes an inventory, a position and a game mode and nothing else. The
+            // eye height comes from the tracked feet position — `getEyePosition()`,
+            // whose absence is the same "no data yet, don't guess" refusal the
+            // launch arm makes.
+            let boat_native = if hand == 1 {
+                crate::inventory::OFFHAND_NATIVE
+            } else {
+                usize::from(inventory.selected_hotbar_slot())
+            };
+            let boat_item = inventory
+                .native(boat_native)
+                .map(|stack| stack.item.to_string());
+            if let (Some(item), Some((px, py, pz))) = (boat_item.as_deref(), *player_pos) {
+                let applied = crate::boat::apply_boat_item(
+                    item,
+                    Vec3::new(px, py + EYE_HEIGHT, pz),
+                    yaw,
+                    pitch,
+                    crate::boat::block_interaction_range(*game_mode == GameMode::Creative),
+                    &|x, y, z| source.get().block_state(x, y, z),
+                    mobs,
+                );
+                match applied {
+                    crate::boat::BoatApplied::NotABoat => {}
+                    // Vanilla `PASS`/`FAIL` — the raytrace missed, or the hull would
+                    // not fit. Nothing is consumed and, crucially, nothing falls
+                    // through: a boat reaching the eat/equip arms would find no food
+                    // component and no equippable one anyway, but returning here says
+                    // so rather than relying on it.
+                    crate::boat::BoatApplied::Refused => return Ok(()),
+                    crate::boat::BoatApplied::Placed { .. } => {
+                        // `itemStack.consume(1, player)`, *after* `addFreshEntity`.
+                        // Through `consume_one` so `!hasInfiniteMaterials()` applies
+                        // and a creative player's boats are not used up — the trap a
+                        // previous arm here hit by shrinking unconditionally.
+                        if consume_one(inventory, boat_native, *game_mode)
+                            && *game_mode != GameMode::Creative
+                        {
+                            // The remainder on window 0, the same channel every other
+                            // consuming arm reports on. Without it the client's count
+                            // desyncs and the next click sends a stale one, which
+                            // looks like the item coming back.
+                            if let Some(menu_slot) = window_zero_menu_slot(boat_native) {
+                                let remainder = inventory.native(boat_native).cloned();
+                                apply(
+                                    conn,
+                                    state,
+                                    proto.encode_container_slot(
+                                        0,
+                                        0,
+                                        menu_slot,
+                                        remainder.as_ref(),
+                                    ),
+                                )
+                                .await?;
+                            }
+                        }
+                        // A placement ends any draw or bite in progress, as any other
+                        // `USE_ITEM` does.
+                        *bow_draw = None;
+                        *item_in_use = None;
+                        return Ok(());
+                    }
+                }
+            }
             let outcome = apply_use_item(
                 mobs,
                 inventory,
@@ -8158,6 +8268,28 @@ where
                 // oversight next to the `Attack` arm two branches down.
                 let _ = fired;
             }
+        }
+        // The steering half. The client owns the boat it rides
+        // (`Player.isClientAuthoritative()`), so this is not a request to be
+        // validated — it is the authoritative report, and the server's job is to
+        // write it down so the boat's snapshot moves and every other viewer's
+        // `move_entity` diff follows.
+        //
+        // The rider check lives in `apply_vehicle_move`, which resolves the vehicle
+        // from *this* player rather than from an id on the wire (the packet carries
+        // none) — vanilla's own `getRootVehicle()` rule, and what stops a connection
+        // dragging a boat it is not sitting in.
+        ServerBound::VehicleMoved {
+            position,
+            yaw,
+            pitch,
+        } => {
+            // Pitch is decoded and dropped: `AbstractBoat` never writes `xRot`, and
+            // a land mount (which takes half its rider's) is not modelled as a
+            // vehicle here. Named rather than `_` so the field's existence is
+            // visible at the one place that could use it.
+            let _ = pitch;
+            mobs.with(|sim| sim.apply_vehicle_move(player_entity_id, position, yaw));
         }
         ServerBound::PlayerInput { sprint } => {
             *sprinting = sprint;
