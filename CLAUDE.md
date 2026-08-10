@@ -504,7 +504,29 @@ returned green by measuring nothing. So:
   test run whose real status was **101**, and only reading cargo's own status out of the log caught it. The
   harness around a build is one more transform that can invent a green.
 - **Write the paths out, or `set -- a b c` and use `"$@"`.**
-- **Treat an audit that prints nothing as a failure to run, never as a pass.**
+- **Treat an audit that prints nothing as a failure to run, never as a pass.** Sharpened by measurement:
+  **a guard whose detector *errored* has measured nothing, and "no findings" must never share a value with
+  "could not look".** Five of `wasm-check.sh`'s clock-ban rules printed a grep error and then reported
+  **PASS** for weeks. The mechanism is worth memorising because it is generic: the rule table is
+  `|`-separated and those five patterns spelled a BRE alternation `\(Instant\|SystemTime\)`, so **the field
+  separator appeared inside the pattern** and `read` truncated it mid-escape; grep then exited **2**, and the
+  `|| true` that exists to swallow grep's *no-match* exit **1** swallowed the error identically. So: read
+  grep's status and treat `>= 2` as a hard failure printing its stderr, validate each table row's field
+  count, and prefer literal substrings over regex metacharacters in any table whose separator is itself a
+  metacharacter. The other twelve rules were correct **by accident**, not by construction — nothing required
+  a pattern to be separator-free.
+
+  **And a parity test that pins a list or a count instead of comparing the two sources goes stale in
+  silence.** The `cargo xtask wasm-check` that CI actually runs carried **9 of 17** rules — every
+  `lodestone-shell` rule and all five clock rules absent, and `lodestone-shell` missing from its wasm compile
+  list — because its parity test hard-coded nine labels and stayed green as the script grew. **Parity gates
+  must parse both sources and diff them**, never assert against a transcribed snapshot.
+
+  The reusable control: **plant a violating line in each named crate and require the rule to fail and name
+  the file**, then restore by `cp` from an md5-checked backup. Done for all 22 rules (the five alternations
+  split one-per-hazard), 22/22 fired in both implementations, and the run now prints
+  `rules that actually ran: N/22` with a verdict on the count. No real violation was hiding — the guards were
+  decorative, not concealing.
 - **Do not build a control out of a shell pipeline here. Count with a program that reads the file.** A
   `diff | grep -c '^<'` control reported **0** where the truth was about **15,000**.
 
