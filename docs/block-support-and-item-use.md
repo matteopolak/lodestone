@@ -26,7 +26,8 @@ flowers, rails, doors, beds and sugar cane were all unbreakable-by-support.
 | `requirement(pos, state)` | which cell `canSurvive` reads | `Supported(cell)` or `Partner { cell, block, property, value }` |
 | `survives(pos, state, block_at)` | `canSurvive` itself | `true` for every block with no modelled rule |
 
-`SUPPORT_KINDS` (291 rows) is **generated**, not hand-written: a script walks
+`SUPPORT_KINDS` (291 rows) is **generated**, not hand-written, by
+[`scripts/derive-block-support.py`](../scripts/derive-block-support.py): it walks
 `Blocks.java`'s registrations for block name → implementing class, then every
 `class X extends Y` under the decompiled block tree for the ancestor chain, and
 maps each block to the nearest ancestor whose `canSurvive`/`updateShape` pair is a
@@ -94,10 +95,13 @@ get wrong, and the one a single-helmet test cannot see:
 
 ## How to change it
 
-* **A new support family**: add its vanilla base class to the generator's base
-  table and regenerate. Do not hand-add a block name — the class chain is what
-  makes the table trustworthy, and `block_support`'s own tests check every name
-  against the block-state census.
+* **A new support family**: add its vanilla base class to
+  `scripts/derive-block-support.py`'s `BASE_KIND` and re-run it with `--rust`, then
+  paste the rows in. Do not hand-add a block name and do not hand-transcribe the
+  output — a hand-typed pass at this table lost 18 rows and invented 8, and only
+  the invented half would have been caught by `block_support`'s census check. A
+  class that inherits a `BASE_KIND` ancestor but has no `canSurvive` of its own
+  belongs in `FORCE_NONE`, and every entry there was grepped first.
 * **A new food**: one row in `item_use::FOODS`. The arithmetic is
   `crate::food::FoodData::eat`'s.
 * **Gotcha — the sturdiness approximation.** `canSurvive`'s support test is
