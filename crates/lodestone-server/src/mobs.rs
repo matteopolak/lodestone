@@ -2461,6 +2461,19 @@ pub struct MobSim<'w> {
     /// result at all** — the `ServerProtocol` trait had no sound encoder, so a
     /// player could beat a cow to death in silence.
     pending_vocalisations: Vec<crate::effects::WorldEffect>,
+    /// Per-entity animation cues awaiting the driver — the *visible* half of the
+    /// same hits [`pending_vocalisations`](Self::pending_vocalisations) makes
+    /// audible, and recorded at the same funnels for the same reason (this sim
+    /// owns no connection). Drained by
+    /// [`take_entity_animations`](Self::take_entity_animations).
+    ///
+    /// Two packets, not one, because vanilla uses two: the hurt flash is
+    /// `ClientboundHurtAnimationPacket` and the fall-over is
+    /// `ClientboundEntityEventPacket` byte 3
+    /// (`LivingEntity.die`'s `broadcastEntityEvent`). Before this a mob could be
+    /// beaten to death and simply *vanish* — no flash, no tip-over — because
+    /// `ServerProtocol` had no encoder for either.
+    pending_animations: Vec<MobAnimation>,
     /// Every connected player's perception-relevant state, refreshed by a
     /// driver through [`set_players`](Self::set_players) and consumed by
     /// [`tick`](Self::tick) to feed each mob's `nearest_player`/`temptation`.
@@ -2487,6 +2500,34 @@ pub struct MobSim<'w> {
     /// [`set_mob_drops`](Self::set_mob_drops). `true` by default, which is vanilla's
     /// own default and the behaviour before the rule was readable.
     mob_drops: bool,
+}
+
+/// One per-entity animation cue a hit produced, for
+/// [`take_entity_animations`](MobSim::take_entity_animations) to hand a driver.
+///
+/// Two variants because vanilla sends two different packets, and the split is
+/// not cosmetic: the hurt flash is `ClientboundHurtAnimationPacket` (a VarInt id
+/// and a `float`) while the death tip-over is `ClientboundEntityEventPacket` (a
+/// fixed-width `int` id and a status byte). A driver cannot collapse them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MobAnimation {
+    /// The mob flashed red — `ClientboundHurtAnimationPacket`.
+    ///
+    /// No yaw is carried because vanilla's is a constant for anything that is not
+    /// a player: `LivingEntity.getHurtDir` returns `0.0F` and only
+    /// `ServerPlayer` overrides it, so a mob's hurt animation is always the pure
+    /// roll. Adding a field here would invite a producer to invent one.
+    Hurt {
+        /// The mob's entity id.
+        entity_id: i32,
+    },
+    /// The mob died — `ClientboundEntityEventPacket` with
+    /// [`crate::protocol::entity_event::DEATH`], which is what starts the
+    /// client's `deathTime` counter and tips the body onto its side.
+    Died {
+        /// The mob's entity id.
+        entity_id: i32,
+    },
 }
 
 /// One detonation [`MobSim::tick`] triggered this tick, for
@@ -2536,6 +2577,7 @@ impl<'w> MobSim<'w> {
             pending_detonations: Vec::new(),
             pending_grazes: Vec::new(),
             pending_vocalisations: Vec::new(),
+            pending_animations: Vec::new(),
             players: Vec::new(),
             tame_rng: SpawnRng::new(TAME_ROLL_SEED),
             breed_rng: SpawnRng::new(BREED_XP_SEED),
@@ -3777,18 +3819,36 @@ impl<'w> MobSim<'w> {
         std::mem::take(&mut self.pending_vocalisations)
     }
 
-    /// Records the hurt or death sound for a hit that landed on mob `id`
-    /// (issue #530) — vanilla's `LivingEntity.hurt`/`die` playing
-    /// `getHurtSound()`/`getDeathSound()`.
+    /// Drains every per-entity animation cue recorded since the last call — the
+    /// visible sibling of [`take_vocalisations`](Self::take_vocalisations), and
+    /// drained rather than read for the same reason: a slow consumer must not
+    /// flash the same hit twice.
+    pub fn take_entity_animations(&mut self) -> Vec<MobAnimation> {
+        std::mem::take(&mut self.pending_animations)
+    }
+
+    /// Records the hurt or death sound **and animation** for a hit that landed on
+    /// mob `id` — vanilla's `LivingEntity.hurt`/`die` playing
+    /// `getHurtSound()`/`getDeathSound()`, plus the `broadcastDamageEvent` /
+    /// `broadcastEntityEvent(this, (byte)3)` those two methods send alongside.
     ///
     /// Called from every funnel that applies damage rather than from
     /// [`SimMob::apply_damage`] itself, because the queue lives on the sim and
     /// `apply_damage` holds only the one mob. `applied <= 0.0` (a hit fully
-    /// swallowed by i-frames or absorption) is silent, matching vanilla's own
-    /// `hurtServer` returning before the sound.
+    /// swallowed by i-frames or absorption) is silent *and* invisible, matching
+    /// vanilla's own `hurtServer` returning before either broadcast — the guard is
+    /// `tookFullDamage` there and the same `applied > 0.0` here.
     ///
     /// **Must be called before the end-of-tick `retain`**, or a killing blow
     /// finds no mob to read the species and position from and dies silently.
+    ///
+    /// # Why the sound and the animation share one entry point
+    ///
+    /// They share a *cause*. Vanilla emits both from inside `hurtServer`/`die`
+    /// under the same guard, so splitting them into two recorders here would give
+    /// two chances for one damage funnel to be taught about one of them and not
+    /// the other — which is exactly how the animation came to be missing while
+    /// every funnel already had the sound.
     fn note_vocalisation(&mut self, id: i32, applied: f32) {
         if applied <= 0.0 {
             return;
@@ -3796,6 +3856,16 @@ impl<'w> MobSim<'w> {
         let Some(mob) = self.mobs.iter().find(|m| m.id == id) else {
             return;
         };
+        // Hurt *and* death on a killing blow, in that order, because vanilla sends
+        // both: `hurtServer` broadcasts the damage event and only then calls `die`,
+        // which broadcasts byte 3. The client needs the flash to have started for
+        // the tip-over to look like a death rather than a teleport.
+        self.pending_animations
+            .push(MobAnimation::Hurt { entity_id: id });
+        if mob.health <= 0.0 {
+            self.pending_animations
+                .push(MobAnimation::Died { entity_id: id });
+        }
         // Vanilla draws pitch from the level RNG; this sim's only clock is
         // `tick_count`, and consuming from a shared generator here would shift
         // every other draw. Mixed with the id so two mobs hit in one tick differ.

@@ -18,6 +18,36 @@ use uuid::Uuid;
 
 use crate::chunk::ChunkColumn;
 
+/// The `EntityEvent` constants this crate sends through
+/// [`ServerProtocol::encode_entity_event`], transcribed from
+/// `net.minecraft.world.entity.EntityEvent`'s own `public static final byte`
+/// declarations.
+///
+/// A module rather than a Rust `enum`, because the wire field is an arbitrary
+/// byte whose meaning is **per entity type**: vanilla reuses values across
+/// classes (`ClientboundEntityEventPacket` carries no type tag), so an
+/// exhaustive enum would claim a closed set that does not exist. Naming only
+/// the values with a producer here keeps the set honest, and the constant name
+/// keeps the number out of the call site.
+pub mod entity_event {
+    /// `EntityEvent.DEATH` — `LivingEntity.die`'s broadcast. The client's
+    /// `LivingEntity.handleEntityEvent` `case 3` starts `deathTime`, which is
+    /// what tips a mob onto its side and holds the death screen's red overlay.
+    pub const DEATH: u8 = 3;
+
+    /// `EntityEvent.TAMING_FAILED` — the smoke puff of a failed tame roll
+    /// (`TamableAnimal.spawnTamingParticles(false)`).
+    pub const TAMING_FAILED: u8 = 6;
+
+    /// `EntityEvent.TAMING_SUCCEEDED` — the hearts of a successful tame
+    /// (`TamableAnimal.spawnTamingParticles(true)`).
+    pub const TAMING_SUCCEEDED: u8 = 7;
+
+    /// `EntityEvent.IN_LOVE_HEARTS` — the breeding hearts an `Animal` in love
+    /// emits. **Not** `LOVE_HEARTS` (12), which is the villager's.
+    pub const IN_LOVE_HEARTS: u8 = 18;
+}
+
 /// The local player's movement abilities — vanilla's `Player.Abilities`, as
 /// carried by `ClientboundPlayerAbilitiesPacket`.
 ///
@@ -1368,6 +1398,73 @@ pub trait ServerProtocol: Send + Sync {
     /// existed. The failure mode of the alternative (a required method) would be
     /// a legacy family forced to grow an encoder for a packet whose id it may
     /// number differently.
+    /// Encodes vanilla's `ClientboundHurtAnimationPacket` — **the camera damage
+    /// tilt**, and the red hurt flash on a remote entity.
+    ///
+    /// # Where vanilla sends it
+    ///
+    /// `LivingEntity.dealDefaultKnockback` calls `indicateDamage(xd, zd)` with the
+    /// horizontal offset from the damage source to the victim, and only
+    /// `ServerPlayer` overrides it — `LivingEntity.indicateDamage` is empty, and
+    /// `LivingEntity.getHurtDir` is a constant `0.0F`. So in vanilla this packet
+    /// goes to **one** connection, the hurt player's own, and never for a mob.
+    ///
+    /// `yaw` is `ServerPlayer.indicateDamage`'s own expression,
+    /// `atan2(zd, xd) * 180 / PI - yRot` — degrees, in the victim's frame, so a hit
+    /// from straight ahead is `0`. See [`crate::vitals::hurt_dir_degrees`], which
+    /// is that formula and the one place it should be computed.
+    ///
+    /// # The one deliberate widening, and why the screen needs it
+    ///
+    /// `dealDefaultKnockback` runs only for a source **outside**
+    /// `#minecraft:damage_type/no_knockback`, and that tag holds `fall`, `drown`,
+    /// `starve`, `lava`, `in_fire`, `cactus`, `freeze`, `magic` — i.e. very nearly
+    /// every way a singleplayer world currently hurts anyone. Vanilla still tilts
+    /// the camera for those, because `ClientboundDamageEventPacket` also sets
+    /// `hurtTime`, and this crate encodes no `damage_event`. This crate therefore
+    /// sends `hurt_animation` for a directionless hit too, with `yaw` **exactly
+    /// `0.0`** — the pure-roll case, which is what a vanilla client shows for a
+    /// player who has not been knocked back since spawning. It is a substitution
+    /// on the *route*, not on the pixels; encoding `damage_event` (which needs a
+    /// `minecraft:damage_type` registry id per source) is the follow-up that makes
+    /// the route vanilla's as well.
+    ///
+    /// The default emits nothing, so a protocol family without hurt-animation
+    /// support need not override it and the tilt simply never fires there.
+    fn encode_hurt_animation(&self, entity_id: i32, yaw: f32) -> ServerDirective {
+        let _ = (entity_id, yaw);
+        ServerDirective::None
+    }
+
+    /// Encodes vanilla's `ClientboundEntityEventPacket` — one raw per-entity-type
+    /// status byte, `ServerLevel.broadcastEntityEvent`'s whole payload.
+    ///
+    /// `event` is a `net.minecraft.world.entity.EntityEvent` constant, and the
+    /// values are **not** a registry: they are reused across entity types, so the
+    /// same byte means different things on different species. The ones this crate
+    /// sends today, read off `EntityEvent`:
+    ///
+    /// | byte | constant | meaning |
+    /// |---|---|---|
+    /// | 3 | `DEATH` | `LivingEntity.die`'s broadcast — the fall-over animation |
+    /// | 6 | `TAMING_FAILED` | smoke puff |
+    /// | 7 | `TAMING_SUCCEEDED` | hearts |
+    /// | 18 | `IN_LOVE_HEARTS` | breeding hearts |
+    ///
+    /// **Note the wire shape**: the entity id is a plain big-endian `int`, *not* a
+    /// VarInt — `ClientboundEntityEventPacket.write` is `writeInt` then
+    /// `writeByte`, one of the few remaining fixed-width ids in play. Porting from
+    /// the field list rather than from `write` would give the same two fields in
+    /// the same order at the wrong widths, which desynchronises the stream instead
+    /// of merely mis-animating.
+    ///
+    /// The default emits nothing, so a protocol family without entity-event
+    /// support need not override it and a dying mob simply pops out of existence.
+    fn encode_entity_event(&self, entity_id: i32, event: u8) -> ServerDirective {
+        let _ = (entity_id, event);
+        ServerDirective::None
+    }
+
     fn encode_commands(&self, tree: &CommandTree) -> ServerDirective {
         let _ = tree;
         ServerDirective::None
@@ -2229,6 +2326,14 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         amount: i32,
     ) -> ServerDirective {
         (**self).encode_take_item_entity(item_entity_id, collector_entity_id, amount)
+    }
+
+    fn encode_hurt_animation(&self, entity_id: i32, yaw: f32) -> ServerDirective {
+        (**self).encode_hurt_animation(entity_id, yaw)
+    }
+
+    fn encode_entity_event(&self, entity_id: i32, event: u8) -> ServerDirective {
+        (**self).encode_entity_event(entity_id, event)
     }
 
     fn encode_commands(&self, tree: &CommandTree) -> ServerDirective {

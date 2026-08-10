@@ -275,6 +275,79 @@ fn drown_damage_type() -> lodestone_data::damage_types::DamageType {
 /// `SetHealth { health: 20.0, .. }` fresh-spawn default.
 pub const MAX_HEALTH: f32 = 20.0;
 
+/// The `yaw` field of vanilla's `ClientboundHurtAnimationPacket` — the direction
+/// the **camera damage tilt** leans away from, in degrees, in the victim's own
+/// frame.
+///
+/// # The record
+///
+/// `ServerPlayer.indicateDamage` is the whole of it, and it is one line:
+///
+/// ```java
+/// this.hurtDir = (float)(Mth.atan2(zd, xd) * 180.0F / (float)Math.PI - this.getYRot());
+/// this.connection.send(new ClientboundHurtAnimationPacket(this));
+/// ```
+///
+/// `xd`/`zd` come from its caller `LivingEntity.dealDefaultKnockback`, as
+/// `source.getSourcePosition() - this.position()` on the horizontal axes — so
+/// they point **from the victim toward whatever hurt them**, and the argument
+/// order into `atan2` is `(z, x)`, not `(x, z)`. Getting either of those backwards
+/// still produces a plausible-looking tilt, so they are the two things to check
+/// against the record rather than against intuition.
+///
+/// `LivingEntity.getHurtDir` is a constant `0.0F` and `LivingEntity.indicateDamage`
+/// is empty, so in vanilla **only a `ServerPlayer` ever carries a non-zero value
+/// here** — a mob's hurt animation is always the pure roll.
+///
+/// [`PURE_ROLL`](Self::PURE_ROLL) is that zero, named, because it is the value
+/// every production call site in this crate currently uses and a bare `0.0`
+/// argument reads as a placeholder rather than as the answer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HurtDirection(f32);
+
+impl HurtDirection {
+    /// A hit with no horizontal direction — the tilt is a pure roll, with no yaw
+    /// component at all.
+    ///
+    /// This is the correct value for **every damage source this crate currently
+    /// has**, and that is a fact about vanilla's tags rather than a shortcut:
+    /// `dealDefaultKnockback` (the only thing that ever calls `indicateDamage`)
+    /// runs solely for a source *outside*
+    /// `#minecraft:damage_type/no_knockback`, and that tag contains `fall`,
+    /// `drown`, `starve`, `on_fire`, `in_fire`, `lava`, `outside_border`, `wither`,
+    /// `magic` and `generic` — which is the complete set of
+    /// [`DeathCause`] variants. It is also what a mob's own hurt animation carries
+    /// (`LivingEntity.getHurtDir`).
+    pub const PURE_ROLL: Self = Self(0.0);
+
+    /// The tilt direction for a hit whose source has a position — vanilla's
+    /// formula above, given the victim's position and yaw in degrees.
+    ///
+    /// **No production caller yet, and the reason is above**: nothing in this
+    /// crate damages a player from a knockback-generating source, because nothing
+    /// lets a mob's melee reach the player's [`PlayerVitals`] at all
+    /// ([`PlayerVitals::apply_damage`], the melee entry point, has test callers
+    /// only). This exists so that the site which lands that wiring has the formula
+    /// already read off the record and gated, rather than re-deriving an `atan2`
+    /// argument order from a constructor.
+    #[must_use]
+    pub fn from_source(
+        source: lodestone_model::Vec3,
+        victim: lodestone_model::Vec3,
+        victim_yaw_degrees: f32,
+    ) -> Self {
+        let xd = source.x - victim.x;
+        let zd = source.z - victim.z;
+        Self((zd.atan2(xd) as f32).to_degrees() - victim_yaw_degrees)
+    }
+
+    /// The degrees to put on the wire.
+    #[must_use]
+    pub fn yaw_degrees(self) -> f32 {
+        self.0
+    }
+}
+
 /// What changed on one [`PlayerVitals::tick`] call, so the caller knows which
 /// client-bound packets (if any) are worth sending. Both fields can be set on
 /// the same tick — the tick that crosses the drowning threshold changes air
@@ -1406,5 +1479,94 @@ mod tests {
         assert_eq!(v.food().saturation(), crate::food::START_SATURATION);
         assert_eq!(v.food().exhaustion(), 0.0, "exhaustion must not survive a death");
         assert_eq!(v.food().tick_timer(), 0);
+    }
+
+    /// `HurtDirection::from_source` is `ServerPlayer.indicateDamage`'s expression,
+    /// on an **off-axis** hit.
+    ///
+    /// # Why the input is off-axis, and why these particular numbers
+    ///
+    /// A hit from straight ahead yields `0.0`, which is also what
+    /// [`HurtDirection::PURE_ROLL`] is and what a hardcoded placeholder would
+    /// produce — so a frontal fixture cannot distinguish a wired formula from an
+    /// ignored one. The source is at `(3, ·, 4)` relative to the victim, who faces
+    /// `30°`. Every wrong hypothesis lands somewhere else, and each is computed
+    /// here from the outside constants rather than restated:
+    ///
+    /// | hypothesis | degrees |
+    /// |---|---|
+    /// | correct: `atan2(zd, xd) - yaw` | 23.130 |
+    /// | `atan2` arguments transposed | 6.870 |
+    /// | offset taken victim→source reversed | −156.870 |
+    /// | yaw not subtracted | 53.130 |
+    /// | hardcoded zero | 0 |
+    #[test]
+    fn hurt_direction_is_atan2_of_the_offset_minus_the_victim_yaw() {
+        use lodestone_model::Vec3;
+
+        let victim = Vec3::new(0.0, 64.0, 0.0);
+        let source = Vec3::new(3.0, 64.0, 4.0);
+        let victim_yaw = 30.0_f32;
+        let got = HurtDirection::from_source(source, victim, victim_yaw).yaw_degrees();
+
+        // The four hypotheses, each derived rather than typed as a literal.
+        let (xd, zd) = (3.0_f64, 4.0_f64);
+        let correct = (zd.atan2(xd) as f32).to_degrees() - victim_yaw;
+        let transposed = (xd.atan2(zd) as f32).to_degrees() - victim_yaw;
+        let reversed = ((-zd).atan2(-xd) as f32).to_degrees() - victim_yaw;
+        let no_yaw = (zd.atan2(xd) as f32).to_degrees();
+
+        // The premise: these four really are distinct at this input. Without it
+        // the assertions below could all hold for the wrong reason.
+        for (name, wrong) in [
+            ("transposed atan2 arguments", transposed),
+            ("reversed offset", reversed),
+            ("yaw not subtracted", no_yaw),
+            ("hardcoded zero", 0.0),
+        ] {
+            assert!(
+                (wrong - correct).abs() > 1.0,
+                "the fixture must separate the hypotheses: {name} gives {wrong}, \
+                 correct gives {correct} — pick a different offset/yaw"
+            );
+            assert!(
+                (got - wrong).abs() > 1.0,
+                "from_source matched the {name} hypothesis ({wrong}), got {got}"
+            );
+        }
+
+        assert!(
+            (got - correct).abs() < 1e-3,
+            "expected {correct} degrees, got {got}"
+        );
+        // And the number itself, so the arithmetic above is not the only witness.
+        assert!(
+            (got - 23.130_102).abs() < 1e-3,
+            "atan2(4, 3) is 53.13010 degrees; minus a 30 degree yaw that is \
+             23.13010, got {got}"
+        );
+    }
+
+    /// The pure-roll constant really is zero, and it is the value every damage
+    /// source this crate has must use.
+    ///
+    /// A one-line assertion, but not a vacuous one: it is the only thing standing
+    /// between the constant and someone "fixing" it to a nominal lean, which would
+    /// tilt the camera sideways on every fall.
+    #[test]
+    fn pure_roll_is_exactly_zero_degrees() {
+        assert_eq!(HurtDirection::PURE_ROLL.yaw_degrees(), 0.0);
+        // A victim hit from their own position has no direction either — the
+        // `atan2(0, 0)` case vanilla's `indicateDamage` reaches for a source with
+        // no `getSourcePosition`, whose only non-zero term is `-yRot`. Stated so
+        // the difference from `PURE_ROLL` is on the record: they are **not** the
+        // same value at a non-zero yaw, which is exactly why the directionless
+        // sites pass the constant rather than calling `from_source` with a zero
+        // offset.
+        let same = lodestone_model::Vec3::new(1.0, 64.0, 2.0);
+        assert_eq!(
+            HurtDirection::from_source(same, same, 30.0).yaw_degrees(),
+            -30.0
+        );
     }
 }

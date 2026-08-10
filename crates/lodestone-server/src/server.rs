@@ -7222,6 +7222,26 @@ fn fall_sample<S: ChunkSource + ?Sized>(source: &S, x: f64, y: f64, z: f64, on_g
 /// packet therefore fires once, without state to keep. [`PlayerVitals::respawn`]
 /// re-arms it by construction. That is a property of the guards rather than of
 /// this function, so `death_is_announced_exactly_once_per_life` pins it.
+///
+/// # The two animation cues, and why they are here rather than at each site
+///
+/// A hit also has to be *seen*, and neither `set_health` nor `player_combat_kill`
+/// carries any animation: vanilla plays the camera damage tilt off
+/// `hurt_animation` and tips the body over off `entity_event` byte 3, and this
+/// crate encoded neither, so singleplayer damage was silent and a death was a
+/// screen with a motionless avatar behind it.
+///
+/// Both cues belong at this choke point for the same reason the death *count*
+/// does — the guards above already make "a hit landed" and "the hit that killed
+/// them" exactly-once properties, and re-deriving either at seven call sites is
+/// how one of them ends up sending twice on a tick that both burned and starved.
+///
+/// `hurt` is what distinguishes a **hit** from a mere publish: two of the call
+/// sites (the status-effect arm and the food arm) reach here for a *heal* or a
+/// bare food-bar change, and flashing the screen red on a regeneration tick is a
+/// worse bug than not flashing it at all. `None` there; `Some` only where damage
+/// actually landed.
+#[allow(clippy::too_many_arguments)]
 async fn publish_health<T, P>(
     conn: &mut Connection<T>,
     state: &mut State,
@@ -7237,11 +7257,29 @@ async fn publish_health<T, P>(
     // `apply_*` call site would double-count a tick that both drowned and fell.
     advancements: &mut AdvancementManager,
     player_uuid: uuid::Uuid,
+    // `Some(direction)` when this publish follows a hit that landed — see the doc
+    // comment's third section. Every production site passes
+    // `HurtDirection::PURE_ROLL`, and that is vanilla's own answer rather than a
+    // stub: every damage type this crate has is `no_knockback`-tagged, so
+    // `indicateDamage` would never see a non-zero offset for any of them.
+    hurt: Option<crate::vitals::HurtDirection>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
     P: ServerProtocol,
 {
+    // Ahead of the health packet, matching vanilla's order: `indicateDamage`
+    // fires inside `hurtServer`, while the health value rides the next
+    // `ServerPlayer.doTick`. The client folds this into the view bob's countdown,
+    // so it wants to arrive with (or before) the health drop it explains.
+    if let Some(direction) = hurt {
+        apply(
+            conn,
+            state,
+            proto.encode_hurt_animation(player_entity_id, direction.yaw_degrees()),
+        )
+        .await?;
+    }
     apply(
         conn,
         state,
@@ -7266,6 +7304,18 @@ where
             conn,
             state,
             proto.encode_player_combat_kill(player_entity_id, &message),
+        )
+        .await?;
+        // `LivingEntity.die`'s own broadcast, which `ServerLevel.broadcastEntityEvent`
+        // sends to the dying player too (`ChunkMap.broadcastAndSend`). It is what
+        // starts the client's `deathTime` counter — the fall-over tilt the red
+        // overlay persists through. The death *screen* comes from the packet above;
+        // this is the body behind it, and without it the avatar stands upright
+        // through its own death.
+        apply(
+            conn,
+            state,
+            proto.encode_entity_event(player_entity_id, crate::protocol::entity_event::DEATH),
         )
         .await?;
     }
@@ -7335,6 +7385,9 @@ where
             crate::vitals::DeathCause::Fall,
             advancements,
             player_uuid,
+            // `minecraft:fall` is `no_knockback`-tagged, so vanilla's own
+            // `indicateDamage` offset for it is `(0, 0)`.
+            Some(crate::vitals::HurtDirection::PURE_ROLL),
         )
         .await?;
     }
@@ -7632,6 +7685,7 @@ where
                     crate::vitals::DeathCause::Fall,
                     advancements,
                     player_uuid,
+                    Some(crate::vitals::HurtDirection::PURE_ROLL),
                 )
                 .await?;
             }
@@ -9283,6 +9337,7 @@ where
                                 crate::vitals::DeathCause::OutsideBorder,
                                 &mut advancements,
                                 player_uuid,
+                                Some(crate::vitals::HurtDirection::PURE_ROLL),
                             )
                             .await?;
                         }
@@ -9313,6 +9368,7 @@ where
                             crate::vitals::DeathCause::Drown,
                             &mut advancements,
                             player_uuid,
+                            Some(crate::vitals::HurtDirection::PURE_ROLL),
                         )
                         .await?;
                     }
@@ -9379,6 +9435,7 @@ where
                             crate::vitals::DeathCause::OnFire,
                             &mut advancements,
                             player_uuid,
+                            Some(crate::vitals::HurtDirection::PURE_ROLL),
                         )
                         .await?;
                     }
@@ -9406,6 +9463,11 @@ where
                     // registry, so this is an unconditional subtraction of an amount
                     // that was only produced when the guard allowed it.
                     let mut moved = false;
+                    // Tracked separately from `moved`, because regeneration reaches
+                    // this publish too and a heal must not flash the screen red or
+                    // tilt the camera. This is the one arm where "health changed"
+                    // and "a hit landed" genuinely differ.
+                    let mut hurt_landed = false;
                     if out.heal > 0.0 {
                         vitals.heal(out.heal);
                         moved = true;
@@ -9413,10 +9475,12 @@ where
                     if out.poison_damage > 0.0 {
                         vitals.apply_effect_damage(out.poison_damage);
                         moved = true;
+                        hurt_landed = true;
                     }
                     if out.wither_damage > 0.0 {
                         vitals.apply_effect_damage(out.wither_damage);
                         moved = true;
+                        hurt_landed = true;
                     }
                     if moved {
                         publish_health(
@@ -9429,6 +9493,7 @@ where
                             crate::vitals::DeathCause::Wither,
                             &mut advancements,
                             player_uuid,
+                            hurt_landed.then_some(crate::vitals::HurtDirection::PURE_ROLL),
                         )
                         .await?;
                     }
@@ -9463,6 +9528,13 @@ where
                             crate::vitals::DeathCause::Starve,
                             &mut advancements,
                             player_uuid,
+                            // `food_out.starve`, not `!food_out.is_empty()`: this
+                            // publish also carries a pure food/saturation change and
+                            // the natural-regeneration heal, neither of which is a
+                            // hit.
+                            food_out
+                                .starve
+                                .map(|_| crate::vitals::HurtDirection::PURE_ROLL),
                         )
                         .await?;
                     }
@@ -9628,6 +9700,43 @@ where
                         proto.encode_explode(detonation.centre, detonation.radius),
                     )
                     .await?;
+                }
+                // The per-entity animation cues for hits the mob sim resolved:
+                // vanilla's `broadcastDamageEvent` (which we send as
+                // `hurt_animation` — see `ServerProtocol::encode_hurt_animation`
+                // for why the route differs and the pixels do not) and
+                // `LivingEntity.die`'s `broadcastEntityEvent(this, (byte)3)`.
+                //
+                // Without this a mob beaten to death never flashed and never tipped
+                // over: it simply disappeared when the next entity diff dropped it,
+                // which reads as a despawn rather than a kill.
+                //
+                // **Drained straight off the `MobHandle` rather than through a
+                // feed**, unlike the three drains above. The feeds exist to carry
+                // world-global events from the *tick task* to a connection; these
+                // are already per-entity and the sim is already shared with this
+                // task (`apply_attack` mutates it from here), so a feed would add a
+                // hop and nothing else. It inherits the same single-consumer
+                // caveat: with two connections sharing one sim the first to reach
+                // this line takes the queue. That is not reachable today —
+                // `IntegratedServer::bind`'s LAN worlds get a `MobHandle::default`
+                // with no population — and a second player needs per-connection
+                // tracking here, not a feed.
+                for animation in mobs.with(crate::mobs::MobSim::take_entity_animations) {
+                    let directive = match animation {
+                        crate::mobs::MobAnimation::Hurt { entity_id } => {
+                            // `0.0` is vanilla's own value for a non-player, not a
+                            // placeholder: `LivingEntity.getHurtDir` is a constant
+                            // and only `ServerPlayer` overrides it.
+                            proto.encode_hurt_animation(entity_id, 0.0)
+                        }
+                        crate::mobs::MobAnimation::Died { entity_id } => proto
+                            .encode_entity_event(
+                                entity_id,
+                                crate::protocol::entity_event::DEATH,
+                            ),
+                    };
+                    apply(conn, &mut state, directive).await?;
                 }
                 // Issue #324: same shape again — the world tick loop's weather
                 // cycle (`crate::weather::WeatherState`, ticked inside

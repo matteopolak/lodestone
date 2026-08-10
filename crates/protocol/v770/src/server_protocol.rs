@@ -4059,6 +4059,42 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
+    /// `ClientboundHurtAnimationPacket.write`: a **VarInt** id then an IEEE-754
+    /// `float` yaw — the exact shape this crate's own `HURT_ANIMATION` decode arm
+    /// reads back into `ClientEvent::EntityHurtAnimation`.
+    ///
+    /// The two fields differ in type, so a transposition cannot survive the wire
+    /// here; the trap this packet *does* have is its sibling
+    /// [`Self::encode_entity_event`], whose id is a fixed-width `int`.
+    fn encode_hurt_animation(&self, entity_id: i32, yaw: f32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(entity_id);
+        w.f32(yaw);
+        ServerDirective::Send {
+            packet_id: play::clientbound::HURT_ANIMATION,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// `ClientboundEntityEventPacket.write`: `writeInt` then `writeByte` — a
+    /// **plain big-endian `i32`**, not a VarInt, matching this crate's own
+    /// `ENTITY_EVENT` decode arm (whose comment already flags the same thing from
+    /// the reading side).
+    ///
+    /// The status byte is written as-is: `EntityEvent`'s constants are `byte`s and
+    /// every value this server sends (3, 6, 7, 18) is inside `i8`'s positive
+    /// range, but the cast is `as i8` rather than a bounds check because vanilla
+    /// itself has negative-valued events and a future one must round-trip.
+    fn encode_entity_event(&self, entity_id: i32, event: u8) -> ServerDirective {
+        let mut w = Writer::default();
+        w.i32(entity_id);
+        w.i8(event as i8);
+        ServerDirective::Send {
+            packet_id: play::clientbound::ENTITY_EVENT,
+            payload: w.into_vec(),
+        }
+    }
+
     fn encode_commands(&self, tree: &WireCommandTree) -> ServerDirective {
         ServerDirective::Send {
             packet_id: play::clientbound::COMMANDS,

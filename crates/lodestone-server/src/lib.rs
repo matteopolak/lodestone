@@ -398,6 +398,15 @@ pub use protocol::{
     Abilities, ChunkEncoder, EntitySnapshot, MetadataField, PlayerListing, ResourcePackPush,
     ServerBound, ServerDirective, ServerProtocol, WorldgenScope,
 };
+/// The `EntityEvent` status bytes [`ServerProtocol::encode_entity_event`] carries.
+///
+/// Re-exported as a module rather than flattened into the list above because the
+/// names (`DEATH`, `TAMING_SUCCEEDED`, …) are only unambiguous behind the
+/// `entity_event::` prefix — a bare `DEATH` at a call site says nothing about
+/// which of vanilla's several death-adjacent packets it belongs to.
+pub mod entity_event {
+    pub use crate::protocol::entity_event::*;
+}
 pub use random_tick::{
     DEFAULT_RANDOM_TICK_SPEED, GrassOutcome, RandomTickEvent, RandomTickScheduler,
     can_propagate_onto, grass_random_tick, is_air_variant, is_randomly_ticking,
