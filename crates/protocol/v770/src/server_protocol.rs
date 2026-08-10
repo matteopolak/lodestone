@@ -2644,6 +2644,107 @@ fn encode_registry_data_packet(registry: &str, entries: &[(&str, &[u8])]) -> Ser
     }
 }
 
+/// The `minecraft:dimension_type` registry this server publishes, **in wire
+/// order**.
+///
+/// A holder id is an index into this list, so the order is the mapping — which is
+/// why it is a named table read by both [`ServerProtocol::encode_registry_data`]
+/// and [`dimension_type_holder_id`] rather than an inline literal at the one call
+/// site. Two copies of an *order* is the shape that silently renumbers a dimension:
+/// the registry would still be well-formed, the ids would still resolve, and every
+/// Nether trip would frame its chunks against `the_end`.
+const DIMENSION_TYPE_REGISTRY: [(&str, &[u8]); 4] = [
+    ("minecraft:overworld", DIMENSION_TYPE_OVERWORLD_NBT),
+    (
+        "minecraft:overworld_caves",
+        DIMENSION_TYPE_OVERWORLD_CAVES_NBT,
+    ),
+    ("minecraft:the_end", DIMENSION_TYPE_END_NBT),
+    ("minecraft:the_nether", DIMENSION_TYPE_NETHER_NBT),
+];
+
+/// The `dimension_type` holder id for a level key, or `None` for a key this
+/// server's registry does not publish.
+///
+/// Derived from [`DIMENSION_TYPE_REGISTRY`]'s order rather than written down, for
+/// the reason that constant's doc gives.
+fn dimension_type_holder_id(dimension: &str) -> Option<i32> {
+    DIMENSION_TYPE_REGISTRY
+        .iter()
+        .position(|(id, _)| *id == dimension)
+        .and_then(|index| i32::try_from(index).ok())
+}
+
+/// The Nether's `sea_level` — `noise_settings/nether.json`'s own value, and the
+/// height its lava seas fill to. **Not** derivable from the overworld's 63.
+const NETHER_SEA_LEVEL: i32 = 32;
+
+/// The `sea_level` a `respawn` packet carries for a destination level.
+///
+/// The End has no sea and vanilla's `the_end` noise settings put `sea_level` at 0;
+/// an unknown key gets the overworld's, which is the value this server sent for
+/// every packet before dimensions existed.
+fn sea_level_for_dimension(dimension: &str) -> i32 {
+    match dimension {
+        "minecraft:the_nether" => NETHER_SEA_LEVEL,
+        "minecraft:the_end" => 0,
+        _ => OVERWORLD_SEA_LEVEL,
+    }
+}
+
+/// The [`ChunkShape`] a served column is framed against, taken from **the column
+/// itself** rather than from a hardcoded overworld constant.
+///
+/// # Why the column and not the connection
+///
+/// A chunk packet's section count is a property of the *dimension*, and the client
+/// derives its own from the `dimension_type` holder id `login`/`respawn` carried
+/// (`V770Adapter::enter_dimension`). Once the server can host more than one
+/// dimension, a constant here is wrong for one of them: a Nether column is
+/// `min_y 0, height 256` (16 sections) against the overworld's `-64, 384` (24), and
+/// serving one through the other's shape mis-slices every section — a decode error
+/// on the client, not a cosmetic one.
+///
+/// `ServerChunkColumn` already carries `min_y` and `height`, and `lodestone-server`
+/// builds every column with the dimension's own window (see that crate's
+/// `NetherChunkSource::WINDOW_HEIGHT`, which is the dimension type's 256 and
+/// deliberately not the generator's 128). So reading them off the column keeps the
+/// wire framing and the terrain that fills it derived from **one** number, rather
+/// than from two that must be kept in agreement by hand.
+///
+/// Only the vertical window comes from the column: the palette framing and the
+/// air/biome ids are properties of the protocol family, exactly as
+/// `V770Adapter::enter_dimension` documents for the receiving side.
+///
+/// # This recognises the two real windows and defaults to the overworld's
+///
+/// It is deliberately **not** `section_count = height / 16` for an arbitrary column.
+/// A chunk's section count is a property of the *dimension the client resolved*, and
+/// nothing else: a client framed against the overworld reads exactly 24 sections
+/// whatever the server's column happens to contain.
+///
+/// That distinction was measured. Several of this crate's own loopback fixtures serve
+/// deliberately tiny columns — `combat_live`'s `AirSource` is `ChunkColumn::new(0,
+/// 16)`, one section — because the test is about combat and no block is ever read.
+/// Framing that column against its own height emitted a one-section packet to a
+/// 24-section client, and six live tests failed with *"initial column never
+/// arrived"*: the client joined, spawned, and silently could not decode a single
+/// chunk. The short column was always fine against the overworld window (the missing
+/// rows are simply empty sections), and it still is.
+///
+/// So the mapping is from a *known dimension window* to that dimension's shape, and
+/// anything unrecognised keeps the overworld's — the exact behaviour every caller had
+/// before the Nether existed.
+fn shape_for_column(column: &ServerChunkColumn) -> ChunkShape {
+    let nether_or_end = ChunkShape::nether_or_end_1_21();
+    if column.min_y == nether_or_end.min_y
+        && column.height == nether_or_end.world_height as i32
+    {
+        return nether_or_end;
+    }
+    ChunkShape::overworld_1_21()
+}
+
 /// The single column-encode body in this crate.
 ///
 /// It lives on the [`ChunkEncoder`] impl rather than on
@@ -2655,7 +2756,7 @@ fn encode_registry_data_packet(registry: &str, entries: &[(&str, &[u8])]) -> Ser
 /// drift.
 impl ChunkEncoder for V770ServerProtocol {
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ServerChunkColumn) -> ServerDirective {
-        let shape = ChunkShape::overworld_1_21();
+        let shape = shape_for_column(column);
         let world_column = build_world_column(&shape, column);
         let light = compute_served_light(&world_column);
         let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
@@ -3588,15 +3689,9 @@ impl ServerProtocol for V770ServerProtocol {
         // creative oracle (`tests/fixtures/registry_data_*.hex`, captured by
         // the `live-registry` gate), so the client reads its own wire format.
         vec![
-            encode_registry_data_packet(
-                "minecraft:dimension_type",
-                &[
-                    ("minecraft:overworld", DIMENSION_TYPE_OVERWORLD_NBT),
-                    ("minecraft:overworld_caves", DIMENSION_TYPE_OVERWORLD_CAVES_NBT),
-                    ("minecraft:the_end", DIMENSION_TYPE_END_NBT),
-                    ("minecraft:the_nether", DIMENSION_TYPE_NETHER_NBT),
-                ],
-            ),
+            // From `DIMENSION_TYPE_REGISTRY`, not an inline literal: the order *is*
+            // the holder-id mapping `encode_dimension_change` resolves against.
+            encode_registry_data_packet("minecraft:dimension_type", &DIMENSION_TYPE_REGISTRY),
             encode_registry_data_packet(
                 "minecraft:world_clock",
                 &[
@@ -3814,7 +3909,12 @@ impl ServerProtocol for V770ServerProtocol {
     /// [`compute_served_light`]'s doc for why this is the isolated compute and
     /// what the residual is.
     fn compute_column_light(&self, column: &ServerChunkColumn) -> Option<ColumnLight> {
-        let shape = ChunkShape::overworld_1_21();
+        // Through `shape_for_column` for the same reason `encode_chunk` is: a
+        // `light_update` that framed a Nether column against the overworld's 24
+        // sections would carry a different section count than the chunk packet that
+        // preceded it, which is the one thing this method's own doc promises cannot
+        // happen.
+        let shape = shape_for_column(column);
         Some(compute_served_light(&build_world_column(&shape, column)))
     }
 
@@ -4555,6 +4655,62 @@ impl ServerProtocol for V770ServerProtocol {
             // on. `crate::server::apply_client_command` sends the authoritative
             // value from `PlayerVitals` immediately after this list, so this is
             // deliberately *not* duplicated here.
+        ]
+    }
+
+    /// The dimension-change respawn pair — see
+    /// [`ServerProtocol::encode_dimension_change`]'s trait doc for why this is a
+    /// separate encoder from [`encode_respawn`](Self::encode_respawn) rather than
+    /// the same one with a flag.
+    ///
+    /// # The holder id comes from this crate's own registry, by name
+    ///
+    /// [`encode_registry_data`](Self::encode_registry_data) publishes
+    /// `minecraft:dimension_type` with four entries **in a fixed order**, and a
+    /// holder id is that list's index — overworld 0, `overworld_caves` 1,
+    /// `the_end` 2, `the_nether` 3. `dimension_type_holder_id` reads the mapping out
+    /// of the same order, so adding a fifth registry entry cannot silently renumber
+    /// the Nether. An unrecognised key returns `None` and this emits **nothing**,
+    /// which the server treats as "cannot change dimension" and declines to move the
+    /// player — the trait doc explains why guessing is worse.
+    ///
+    /// # `data_to_keep` is `KEEP_ALL_DATA`, and `sea_level` follows the dimension
+    ///
+    /// `PlayerList.respawn` passes `KEEP_ATTRIBUTE_MODIFIERS | KEEP_ENTITY_DATA` for
+    /// a dimension change, which is what keeps the arriving player's inventory, XP
+    /// and health rather than rebuilding them. `sea_level` is the destination's, not
+    /// the overworld's: the Nether's is 32 (`noise_settings/nether.json`'s
+    /// `sea_level`), and it is what the client's own fluid-fog and ambient checks
+    /// frame against.
+    fn encode_dimension_change(
+        &self,
+        dimension: &str,
+        spawn: Vec3,
+        mode: GameMode,
+    ) -> Vec<ServerDirective> {
+        let Some(holder_id) = dimension_type_holder_id(dimension) else {
+            return Vec::new();
+        };
+        let respawn = Respawn {
+            dimension_type: holder_id,
+            dimension: dimension.to_string(),
+            seed: 0,
+            game_type: crate::adapter::game_mode_to_ordinal(mode) as u8,
+            previous_game_type: -1,
+            is_debug: false,
+            is_flat: false,
+            last_death_location: None,
+            portal_cooldown: 0,
+            sea_level: sea_level_for_dimension(dimension),
+            // `ClientboundRespawnPacket.KEEP_ALL_DATA`.
+            data_to_keep: 0x03,
+        };
+        vec![
+            send(play::clientbound::RESPAWN, &respawn),
+            ServerDirective::Send {
+                packet_id: play::clientbound::PLAYER_POSITION,
+                payload: encode_player_position_teleport(0, spawn.x, spawn.y, spawn.z, 0.0, 0.0),
+            },
         ]
     }
 
@@ -6429,5 +6585,107 @@ mod border_wire_tests {
         let mut r = Reader::new(&payload);
         assert_eq!(r.var_i32().expect("warning_blocks"), 5);
         r.ensure_empty().expect("no trailing bytes");
+    }
+}
+
+#[cfg(test)]
+mod dimension_wire_tests {
+    use super::*;
+
+    /// The holder-id mapping is `DIMENSION_TYPE_REGISTRY`'s order, and the Nether is
+    /// **3**, not 1 — `overworld_caves` and `the_end` sit between them.
+    ///
+    /// The expectation comes from the registry table this crate publishes, and the
+    /// negative arm is what makes it a test rather than a restatement: an
+    /// unrecognised key must be `None`, because guessing a holder id reframes every
+    /// subsequent chunk against the wrong build height.
+    #[test]
+    fn dimension_type_holder_ids_follow_the_published_registry_order() {
+        assert_eq!(dimension_type_holder_id("minecraft:overworld"), Some(0));
+        assert_eq!(dimension_type_holder_id("minecraft:overworld_caves"), Some(1));
+        assert_eq!(dimension_type_holder_id("minecraft:the_end"), Some(2));
+        assert_eq!(dimension_type_holder_id("minecraft:the_nether"), Some(3));
+        assert_eq!(dimension_type_holder_id("mypack:mine"), None);
+    }
+
+    /// `encode_dimension_change` carries `KEEP_ALL_DATA` and the destination's own
+    /// `sea_level`, and emits **nothing** for a dimension this server's registry does
+    /// not publish.
+    ///
+    /// The `data_to_keep` byte is the one field that separates this from
+    /// `encode_respawn`: `0` there makes the client rebuild its player state, which
+    /// for a portal trip would empty the inventory. Asserting the *byte* rather than
+    /// "a respawn was sent" is what makes that checkable.
+    #[test]
+    fn a_dimension_change_keeps_player_data_and_declines_an_unknown_level() {
+        let proto = V770ServerProtocol;
+        let directives = proto.encode_dimension_change(
+            "minecraft:the_nether",
+            Vec3::new(215.5, 96.0, -65.5),
+            GameMode::Survival,
+        );
+        assert_eq!(directives.len(), 2, "the respawn record, then the teleport");
+        let ServerDirective::Send { packet_id, payload } = &directives[0] else {
+            panic!("expected a Send, got {:?}", directives[0]);
+        };
+        assert_eq!(*packet_id, play::clientbound::RESPAWN);
+        let mut r = Reader::new(payload);
+        assert_eq!(r.var_i32().expect("dimension_type"), 3);
+        assert_eq!(r.string(32767).expect("dimension"), "minecraft:the_nether");
+        assert_eq!(r.i64().expect("seed"), 0);
+        assert_eq!(r.u8().expect("game_type"), 0);
+        assert_eq!(r.i8().expect("previous_game_type"), -1);
+        assert!(!r.bool().expect("is_debug"));
+        assert!(!r.bool().expect("is_flat"));
+        assert!(!r.bool().expect("has last_death_location"));
+        assert_eq!(r.var_i32().expect("portal_cooldown"), 0);
+        assert_eq!(
+            r.var_i32().expect("sea_level"),
+            NETHER_SEA_LEVEL,
+            "the destination's sea level, not the overworld's 63"
+        );
+        assert_eq!(
+            r.u8().expect("data_to_keep"),
+            0x03,
+            "KEEP_ATTRIBUTE_MODIFIERS | KEEP_ENTITY_DATA — a portal trip keeps the \
+             player's inventory, XP and health"
+        );
+        r.ensure_empty().expect("no trailing bytes");
+
+        assert!(
+            proto
+                .encode_dimension_change("mypack:mine", Vec3::new(0.0, 0.0, 0.0), GameMode::Survival)
+                .is_empty(),
+            "an unpublished level must emit nothing rather than guess a holder id"
+        );
+    }
+
+    /// A served column is framed against a **dimension window**, never against its
+    /// own height.
+    ///
+    /// The first arm is the regression that six live loopback tests caught: fixtures
+    /// serve deliberately tiny columns (`ChunkColumn::new(0, 16)`), and framing one
+    /// against its own height emits a one-section packet to a 24-section client,
+    /// which joins, spawns and then decodes nothing at all.
+    #[test]
+    fn a_columns_shape_comes_from_its_dimension_not_its_height() {
+        let short = ServerChunkColumn::new(0, 16);
+        assert_eq!(
+            shape_for_column(&short).section_count,
+            24,
+            "an unrecognised window keeps the overworld's 24 sections"
+        );
+        assert_eq!(shape_for_column(&short).min_y, -64);
+
+        let overworld = ServerChunkColumn::new(-64, 384);
+        assert_eq!(shape_for_column(&overworld).section_count, 24);
+
+        let nether = ServerChunkColumn::new(0, 256);
+        assert_eq!(
+            shape_for_column(&nether).section_count,
+            16,
+            "the Nether's own window is 16 sections"
+        );
+        assert_eq!(shape_for_column(&nether).min_y, 0);
     }
 }

@@ -47,6 +47,7 @@ use crate::chunk::ChunkSource;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::chunk::generate_columns_offloaded;
 use crate::chunk_store::ChunkStore;
+use crate::dimension::{Dimension, DimensionalSource};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mobs::ChunkWorld;
 use crate::mobs::{LiveMobSource, MobHandle};
@@ -175,6 +176,62 @@ pub fn demo_mob_count(requested: usize) -> usize {
     } else {
         0
     }
+}
+
+/// Labels `overworld` as the overworld and makes the Nether reachable from it, so a
+/// portal in this world leads somewhere.
+///
+/// # What this does and does not cost
+///
+/// Wrapping is free: [`DimensionalSource`] forwards every [`ChunkSource`] method, so
+/// the world behaves identically until something travels. The Nether's generator and
+/// `ChunkStore` are built by the closure below **on the first portal trip**, never at
+/// world open — see [`DimensionalSource::with_siblings`] for why that matters to a
+/// test suite where every test opens a world.
+///
+/// # The seed
+///
+/// Taken from [`crate::worldgen_data::active_world_seed`], the same static
+/// `crate::natural_spawn` reads for slime chunks. That is the right answer for every
+/// world whose overworld came from `overworld_chunk_source` (which sets it), and it
+/// is the only answer available here: `overworld` is caller-supplied and generic, so
+/// this function cannot ask it. A world built on a hand-rolled test source therefore
+/// gets a Nether on whatever seed was last used — harmless, because such a world has
+/// no obsidian to light either, and it is why the Nether is lazy rather than eager.
+///
+/// # `retention` is the same policy the overworld got
+///
+/// Not a smaller one. The player streams the same square in either dimension, and a
+/// capacity that does not cover the streamed view puts the columns under their feet
+/// permanently in eviction range at ~909 ms a column to regenerate — see
+/// `crate::chunk_store`'s module docs.
+fn with_nether<S>(overworld: S, view_radius: i32, uncapped: bool) -> DimensionalSource<S>
+where
+    S: ChunkSource + 'static,
+{
+    let portals = crate::portal::PortalIndex::new();
+    let shared = portals.clone();
+    let factory: crate::dimension::SiblingFactory = Arc::new(move |dimension| match dimension {
+        Dimension::Nether => {
+            let seed = crate::worldgen_data::active_world_seed();
+            let terrain = crate::worldgen_data::nether_chunk_source(seed);
+            let store = if uncapped {
+                ChunkStore::for_integrated_view_radius(terrain, view_radius)
+            } else {
+                ChunkStore::for_view_radius(terrain, view_radius)
+            };
+            // `alone`, not `with_siblings`: the way *home* is the source the
+            // connection joined with, which `crate::server` still holds. See
+            // `DimensionalSource`'s "the links are one-directional" note.
+            Some(Arc::new(DimensionalSource::alone(
+                store,
+                Dimension::Nether,
+                shared.clone(),
+            )) as Arc<dyn ChunkSource>)
+        }
+        Dimension::Overworld => None,
+    });
+    DimensionalSource::with_siblings(overworld, Dimension::Overworld, factory, portals)
 }
 
 /// Spawns `fut` racing against `shutdown`'s notification — whichever finishes
@@ -568,7 +625,11 @@ impl IntegratedServer {
         // memory. `IntegratedServer::bind` below keeps the hosted ceiling. See
         // `chunk_store::integrated_capacity_for_view_radius` for the numbers and
         // for why a short capacity drops the *innermost* rings.
-        let source = Arc::new(ChunkStore::for_integrated_view_radius(source, view_radius));
+        let source = Arc::new(with_nether(
+            ChunkStore::for_integrated_view_radius(source, view_radius),
+            view_radius,
+            true,
+        ));
         // A fresh, empty registry for this one connection's lifetime. Nothing
         // ticks it here — only `open_in_memory_with_mobs` spawns the tick
         // loop (see that constructor's doc comment) — so a block entity
@@ -831,7 +892,11 @@ impl IntegratedServer {
         // `for_integrated_view_radius`, i.e. **uncapped**: this is the real
         // singleplayer world, the one whose render-distance slider the player owns.
         // See `chunk_store::integrated_capacity_for_view_radius`.
-        let source = Arc::new(ChunkStore::for_integrated_view_radius(source, view_radius));
+        let source = Arc::new(with_nether(
+            ChunkStore::for_integrated_view_radius(source, view_radius),
+            view_radius,
+            true,
+        ));
 
         // Issue #454: **mob seeding is off the critical path.**
         //
@@ -1489,7 +1554,11 @@ impl IntegratedServer {
         // behalf of every accepted connection, none of whom chose the setting.
         // `chunk_store::integrated_capacity_for_view_radius` carries the argument
         // and the price list for the other side of the fork.
-        let source = Arc::new(ChunkStore::for_view_radius(source, view_radius));
+        let source = Arc::new(with_nether(
+            ChunkStore::for_view_radius(source, view_radius),
+            view_radius,
+            false,
+        ));
         let shutdown = ShutdownSignal::new();
         let signal = shutdown.clone();
         // Shared across every accepted connection (like `protocol`/`source`

@@ -831,6 +831,27 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         self.source.world_registries()
     }
 
+    /// Forwarded for the same reason [`world_registries`](ChunkSource::world_registries)
+    /// is: a cache is transparent, and a wrapper that answered the default here
+    /// would hide the world's other dimensions from every connection — the store
+    /// sits *between* `crate::dimension::DimensionalSource` and the generator on
+    /// one of the two paths and *above* it on the other, so neither position may
+    /// swallow these.
+    fn dimension(&self) -> Option<crate::dimension::Dimension> {
+        self.source.dimension()
+    }
+
+    fn sibling(
+        &self,
+        dimension: crate::dimension::Dimension,
+    ) -> Option<std::sync::Arc<dyn ChunkSource>> {
+        self.source.sibling(dimension)
+    }
+
+    fn portal_index(&self) -> Option<&crate::portal::PortalIndex> {
+        self.source.portal_index()
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         // `Some` means retention is off (the negative-control configuration) —
         // the column was just generated and there is nothing to read it from.

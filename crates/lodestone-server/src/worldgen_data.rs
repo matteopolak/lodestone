@@ -466,6 +466,83 @@ fn canonical_state(id: u32) -> String {
     format!("{name}[{}]", body.join(","))
 }
 
+/// The Nether's [`Resolver`]: [`EmbeddedResolver`] with **one** method changed.
+///
+/// `biome_parameters` is the whole difference. `NetherGenerator::new` parses that
+/// document as the dimension's own 5-row multi-noise table and *asserts* it is
+/// non-empty — deliberately, because temperature and vegetation are the entire
+/// Nether biome layout and a fallback would produce a uniform `nether_wastes`
+/// that looks plausible in a screenshot. Handing it the overworld table would be
+/// worse still: it parses, so nothing fails, and every Nether column gets an
+/// overworld biome name whose surface rules and carver list do not exist here.
+///
+/// Everything else — density functions, noises, biome documents, carvers, block
+/// tags, structure sets and templates — is dimension-agnostic lookup by id, so it
+/// delegates. `biome_temperatures` delegates too: it feeds
+/// `cold_enough_to_snow`, which only [`OverworldGenerator`] consults, and the
+/// Nether has no `biome_parameters/nether_temperature` asset to point at.
+///
+/// A newtype rather than a discriminant field on [`EmbeddedResolver`] so that no
+/// existing `&EmbeddedResolver` call site changes shape.
+#[derive(Debug, Default)]
+struct NetherResolver(EmbeddedResolver);
+
+impl Resolver for NetherResolver {
+    /// The one override — see the struct doc.
+    fn biome_parameters(&self) -> Value {
+        self.0.json("biome_parameters/nether")
+    }
+
+    fn density_function(&self, id: &str) -> Value {
+        self.0.density_function(id)
+    }
+    fn noise(&self, id: &str) -> NoiseParams {
+        self.0.noise(id)
+    }
+    fn biome_temperatures(&self) -> Value {
+        self.0.biome_temperatures()
+    }
+    fn biome_document(&self, id: &str) -> Value {
+        self.0.biome_document(id)
+    }
+    fn configured_carver(&self, id: &str) -> Value {
+        self.0.configured_carver(id)
+    }
+    fn configured_feature(&self, id: &str) -> Value {
+        self.0.configured_feature(id)
+    }
+    fn placed_feature(&self, id: &str) -> Value {
+        self.0.placed_feature(id)
+    }
+    fn block_tag(&self, id: &str) -> Value {
+        self.0.block_tag(id)
+    }
+    fn structure_set_ids(&self) -> Vec<String> {
+        self.0.structure_set_ids()
+    }
+    fn structure_set(&self, id: &str) -> Value {
+        self.0.structure_set(id)
+    }
+    fn structure(&self, id: &str) -> Value {
+        self.0.structure(id)
+    }
+    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+        self.0.structure_template(id)
+    }
+    fn template_pool(&self, id: &str) -> Value {
+        self.0.template_pool(id)
+    }
+    fn processor_list(&self, id: &str) -> Value {
+        self.0.processor_list(id)
+    }
+    fn biome_tag(&self, id: &str) -> Value {
+        self.0.biome_tag(id)
+    }
+    fn block_freeze_facts(&self) -> Value {
+        self.0.block_freeze_facts()
+    }
+}
+
 /// The parsed overworld noise settings (parsed once, reused across seeds).
 fn overworld_settings() -> &'static Value {
     static SETTINGS: OnceLock<Value> = OnceLock::new();
@@ -568,6 +645,35 @@ pub fn bundled_biome_spawners()
 #[must_use]
 pub fn overworld_chunk_source(seed: i64) -> crate::chunk::OverworldChunkSource {
     crate::chunk::OverworldChunkSource::new(overworld_generator(seed))
+}
+
+/// The parsed Nether noise settings (parsed once, reused across seeds).
+fn nether_settings() -> &'static Value {
+    static SETTINGS: OnceLock<Value> = OnceLock::new();
+    SETTINGS.get_or_init(|| {
+        let raw = EmbeddedResolver.raw("noise_settings/nether");
+        serde_json::from_str(raw).expect("parsing embedded nether noise settings")
+    })
+}
+
+/// Builds the bundled Nether generator for `seed`.
+///
+/// **Does not touch [`active_world_seed`]**, unlike [`overworld_generator`]. That
+/// static answers "which world's slime chunks", a question only the overworld
+/// asks, and storing the Nether's seed there would point `crate::natural_spawn`
+/// at the wrong world for the rest of the process — the two generators share one
+/// world seed today, so the store would be a no-op *by coincidence*, which is the
+/// worst kind of correct.
+#[must_use]
+pub fn nether_generator(seed: i64) -> lodestone_worldgen::nether::NetherGenerator {
+    lodestone_worldgen::nether::NetherGenerator::new(seed, nether_settings(), &NetherResolver::default())
+}
+
+/// Builds the bundled Nether [`ChunkSource`](crate::ChunkSource) for `seed` — the
+/// terrain a player who walks through a portal is served.
+#[must_use]
+pub fn nether_chunk_source(seed: i64) -> crate::chunk::NetherChunkSource {
+    crate::chunk::NetherChunkSource::new(nether_generator(seed))
 }
 
 #[cfg(test)]

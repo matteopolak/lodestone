@@ -938,6 +938,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   **no production caller at all**, so a world held exactly the mobs `seed_demo_mobs`
   put in it, forever, and nothing anywhere implemented `lodestone_entity::spawn`'s
   `SpawnRule`/`SpawnEnvironment` seam.
+- [Nether portals and multi-dimension world state](./nether-portals.md) — The
+  integrated server hosts two dimensions and moves players between them through nether
+  portals. Three modules and one protocol method:
 - [The "Play offline" identity](./offline-identity.md) — The one persisted,
   user-editable name the client joins under when no Microsoft account is signed in,
   plus the stable UUID derived from it. It lives in

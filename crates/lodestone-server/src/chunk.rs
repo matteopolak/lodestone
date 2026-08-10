@@ -375,6 +375,114 @@ impl ChunkColumn {
         column
     }
 
+    /// Adopts a [`lodestone_worldgen::nether::NetherColumn`], padded up to
+    /// `window_height` rows of air.
+    ///
+    /// # Why there is a separate constructor, and why it pads
+    ///
+    /// [`from_generated`](Self::from_generated) takes the *overworld* generator's
+    /// `GeneratedColumn`, which carries four products the Nether generator
+    /// deliberately does not produce (a 4×4×4 biome grid, decoration block
+    /// entities, a `MOTION_BLOCKING` heightmap, stage timings) — its own doc says
+    /// a caller that wants to serve a Nether column "converts explicitly". This
+    /// is that conversion.
+    ///
+    /// **The padding is the load-bearing part.** `NetherGenerator` produces 128
+    /// rows (`noise_settings/nether.json`'s `noise.height`), while the Nether
+    /// *dimension type* is `min_y 0, height 256, logical_height 128`
+    /// (`DimensionTypes`' `BuiltinDimensionTypes.NETHER` registration). The wire
+    /// frames a chunk against the **dimension**, not against whatever the
+    /// generator felt like producing: a client that resolved `the_nether`'s
+    /// registry entry reads exactly 16 sections, so serving an 8-section column
+    /// is a decode failure, not a short world. The rows above 128 are genuinely
+    /// air in vanilla — 127 is the bedrock roof and `logical_height` is what stops
+    /// anything being built above it — so the padding is the truth rather than a
+    /// stand-in.
+    ///
+    /// Biomes come across at the generator's own resolution: this dimension's
+    /// climate is y-invariant (see `lodestone_worldgen::nether`'s module doc), so
+    /// broadcasting the 16 horizontal quarts vertically is exact here, and is
+    /// **not** the mistake issue #512 was filed for.
+    #[must_use]
+    pub fn from_nether(
+        column: lodestone_worldgen::nether::NetherColumn,
+        window_height: i32,
+    ) -> Self {
+        let (min_y, generated_height, palette, blocks, biome_quarts) = column.into_raw();
+        Self::from_raw_window(
+            min_y,
+            generated_height,
+            window_height,
+            palette,
+            &blocks,
+            biome_quarts,
+        )
+    }
+
+    /// The shared body behind [`from_nether`](Self::from_nether): a flat
+    /// `blocks[(ly * 16 + z) * 16 + x]` grid `generated_height` rows tall, adopted
+    /// into a `window_height`-tall column whose remaining rows are air.
+    ///
+    /// The palette is **re-based so air is index 0**, which every other
+    /// constructor here gets for free from the overworld generator's own
+    /// convention. A generator whose palette happens not to start with air (or
+    /// which produced no air at all, in a fully solid column) would otherwise
+    /// make index 0 mean netherrack — and since the padding rows are written as
+    /// index 0, the sky above the Nether roof would come out solid.
+    fn from_raw_window(
+        min_y: i32,
+        generated_height: i32,
+        window_height: i32,
+        palette: Vec<String>,
+        blocks: &[u16],
+        biome_quarts: [String; 16],
+    ) -> Self {
+        assert!(window_height >= generated_height, "window cannot truncate the generated column");
+        let mut column = Self::new(min_y, window_height);
+        // `Self::new` seeded the palette with air at index 0; intern the rest in
+        // the generator's own order so a remap is a single lookup table.
+        let remap: Vec<u16> = palette
+            .iter()
+            .map(|state| column.intern(state))
+            .collect();
+        let rows = generated_height.max(0) as usize;
+        for ly in 0..rows {
+            for lz in 0..16usize {
+                for lx in 0..16usize {
+                    let index = (ly * 16 + lz) * 16 + lx;
+                    let Some(&raw) = blocks.get(index) else { continue };
+                    let id = remap.get(raw as usize).copied().unwrap_or(0);
+                    if id == 0 {
+                        continue;
+                    }
+                    column.blocks.set(lx as i32, ly as i32, lz as i32, id);
+                }
+            }
+        }
+        column.biome_quarts = biome_quarts;
+        // Broadcast the horizontal quarts through the whole window — exact for
+        // this dimension, see `from_nether`'s doc.
+        column.biome_palette = Vec::new();
+        column.biome_cells = Vec::with_capacity(column.biome_y_quarts() * 16);
+        let quart_ids: Vec<u16> = (0..16)
+            .map(|q| {
+                let name = column.biome_quarts[q].clone();
+                match column.biome_palette.iter().position(|entry| *entry == name) {
+                    Some(index) => index as u16,
+                    None => {
+                        column.biome_palette.push(name);
+                        (column.biome_palette.len() - 1) as u16
+                    }
+                }
+            })
+            .collect();
+        for _ in 0..column.biome_y_quarts() {
+            column.biome_cells.extend_from_slice(&quart_ids);
+        }
+        column.recalc_ticking_counts();
+        column
+    }
+
     /// Biome id at local `(x, z)` in `0..16` — quart resolution, the column's
     /// **surface** answer, the same value for every `y` (issue #405).
     ///
@@ -973,6 +1081,49 @@ pub trait ChunkSource: Send + Sync {
     fn world_registries(&self) -> Option<WorldRegistries> {
         None
     }
+
+    /// Which dimension this source's terrain belongs to, when it knows.
+    ///
+    /// `None` — the default — means "unlabelled", which every source that is not
+    /// wrapped in a [`DimensionalSource`](crate::dimension::DimensionalSource) is.
+    /// Callers treat `None` as `Overworld`, since that is the only dimension a
+    /// single-dimension world can be; the distinction is kept so a *labelled*
+    /// source is never silently overridden.
+    fn dimension(&self) -> Option<crate::dimension::Dimension> {
+        None
+    }
+
+    /// Another dimension's terrain, for a source that is part of a multi-dimension
+    /// world.
+    ///
+    /// **This is how a connection reaches the Nether.** It rides an accessor the
+    /// join path already threads a source to, for exactly the reason
+    /// [`WorldRegistries::player_data`] does: `serve_play` has forty parameters
+    /// across eleven wrapper call sites in two target-gated definitions, and a new
+    /// one for the dimension bundle would be eleven signature changes in this
+    /// crate's most contended file to carry information the connection can ask the
+    /// source it is already holding.
+    ///
+    /// `None` — the default, and the answer for the dimension the caller is
+    /// already in — means "no such dimension here", which is the correct
+    /// degradation: `crate::server`'s travel path simply does not travel, and a
+    /// single-dimension world behaves exactly as it did before portals existed.
+    fn sibling(
+        &self,
+        dimension: crate::dimension::Dimension,
+    ) -> Option<std::sync::Arc<dyn ChunkSource>> {
+        let _ = dimension;
+        None
+    }
+
+    /// This world's shared index of lit nether portals, when it has one.
+    ///
+    /// Shared across *all* dimensions of one world, because a trip's destination
+    /// search runs in the dimension the player is not yet in. See
+    /// [`crate::portal::PortalIndex`] for why an index rather than a block scan.
+    fn portal_index(&self) -> Option<&crate::portal::PortalIndex> {
+        None
+    }
 }
 
 /// The live registries a persistent [`ChunkSource`] owns, handed to a
@@ -1042,7 +1193,7 @@ pub struct WorldRegistries {
 /// `Vec` aligned index-for-index with `coords` rather than an unordered
 /// collection.
 #[must_use]
-pub(crate) fn generate_columns_parallel<S: ChunkSource>(
+pub(crate) fn generate_columns_parallel<S: ChunkSource + ?Sized>(
     source: &S,
     coords: &[(i32, i32)],
 ) -> Vec<ChunkColumn> {
@@ -1080,7 +1231,7 @@ pub(crate) fn generate_columns_parallel<S: ChunkSource>(
 #[must_use]
 fn map_columns_parallel<S, T, F>(source: &S, coords: &[(i32, i32)], f: F) -> Vec<T>
 where
-    S: ChunkSource,
+    S: ChunkSource + ?Sized,
     T: Send,
     F: Fn((i32, i32), ChunkColumn) -> T + Sync,
 {
@@ -1171,7 +1322,7 @@ where
 /// through — unchanged behaviour on a target that never had a second thread
 /// to protect.
 #[tracing::instrument(skip_all, fields(count = coords.len()))]
-pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static>(
+pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static + ?Sized>(
     source: Arc<S>,
     coords: Vec<(i32, i32)>,
 ) -> Vec<ChunkColumn> {
@@ -1213,7 +1364,7 @@ pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static>(
 /// rather than taking a non-optional encoder keeps the fallback a property of
 /// this function instead of a branch every call site repeats.
 #[cfg_attr(not(target_arch = "wasm32"), tracing::instrument(skip_all, fields(count = coords.len())))]
-pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'static>(
+pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'static + ?Sized>(
     source: Arc<S>,
     coords: Vec<(i32, i32)>,
     encoder: Option<Arc<dyn crate::protocol::ChunkEncoder>>,
@@ -1450,6 +1601,100 @@ impl ChunkSource for OverworldChunkSource {
             self.attach_structures(&mut column, cx, cz);
             column
         });
+        column.set_block(lx, y, lz, name);
+    }
+}
+
+/// The Nether's terrain source — [`OverworldChunkSource`]'s counterpart for the
+/// second dimension this server hosts.
+///
+/// Same retention rule as its sibling and for the same reason: `edits` is
+/// populated **only** by [`set_block`](Self::set_block), so an untouched column is
+/// regenerated on demand and only a column a player (or a portal) has actually
+/// changed costs memory. That matters more here than in the overworld, because
+/// *every* Nether portal trip writes blocks — the destination portal the travel
+/// path builds when it finds none is a `set_block` fan-out, and it has to still be
+/// there when the player walks back into it.
+///
+/// # The window height is 256, not the generator's 128
+///
+/// [`WINDOW_HEIGHT`](Self::WINDOW_HEIGHT) is the *dimension type*'s height, and
+/// [`ChunkColumn::from_nether`] pads to it. See that constructor's doc for why
+/// serving the generator's own 128 rows is a client-side decode failure rather
+/// than a short world.
+pub struct NetherChunkSource {
+    generator: lodestone_worldgen::nether::NetherGenerator,
+    edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+}
+
+impl NetherChunkSource {
+    /// The Nether dimension type's `min_y` (`DimensionTypes`'
+    /// `BuiltinDimensionTypes.NETHER`).
+    pub const MIN_Y: i32 = 0;
+    /// The Nether dimension type's `height` — **not** its `logical_height` of
+    /// 128, and not the generator's 128 either. See the struct doc.
+    pub const WINDOW_HEIGHT: i32 = 256;
+
+    /// Wraps a pre-built Nether generator.
+    #[must_use]
+    pub fn new(generator: lodestone_worldgen::nether::NetherGenerator) -> Self {
+        Self {
+            generator,
+            edits: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The lowest world `y` this source's columns contain.
+    #[must_use]
+    pub fn min_y(&self) -> i32 {
+        Self::MIN_Y
+    }
+
+    /// How many `y` levels this source's columns contain — the dimension's, not
+    /// the generator's. See the struct doc.
+    #[must_use]
+    pub fn height(&self) -> i32 {
+        Self::WINDOW_HEIGHT
+    }
+
+    fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
+        ChunkColumn::from_nether(self.generator.column(cx, cz), Self::WINDOW_HEIGHT)
+    }
+}
+
+impl std::fmt::Debug for NetherChunkSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetherChunkSource").finish_non_exhaustive()
+    }
+}
+
+impl ChunkSource for NetherChunkSource {
+    fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        if let Some(edited) = edits.get(&(cx, cz)) {
+            return edited.clone();
+        }
+        drop(edits);
+        self.generate(cx, cz)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        let mut edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        let column = edits
+            .entry((cx, cz))
+            .or_insert_with(|| self.generate(cx, cz));
         column.set_block(lx, y, lz, name);
     }
 }
