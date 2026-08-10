@@ -876,6 +876,185 @@ impl Goal for BreedGoal {
     }
 }
 
+/// A tamed pet sits where it was told to and stops navigating.
+///
+/// Vanilla `SitWhenOrderedToGoal` (flags MOVE + JUMP, registered at goal
+/// priority 2 by the wolf, the cat and the parrot alike).
+///
+/// # The clauses of vanilla's `canUse`, and which of them this implements
+///
+/// `canUse` is a five-clause conjunction and a conjunction is the shape that
+/// hides a half-port, so each clause is named with what answers it here:
+///
+/// | vanilla clause | here |
+/// |---|---|
+/// | `isOrderedToSit() \|\| isTame()` | [`MobController::is_ordered_to_sit`] / [`MobController::is_tame`] |
+/// | `!isInWater()` | [`MobController::in_water`] |
+/// | `onGround()` | **not implemented** — no ground state exists on this seam |
+/// | `owner == null \|\| owner.level() != level()` → `true` | [`MobController::owner_position`] being `None`, which the host feeds for an offline or out-of-world owner alike |
+/// | `dist² < 144 && owner.getLastHurtByMob() != null` → `false` | **not implemented** — no owner-hurt state on this seam |
+///
+/// The last row is why the `Some(owner)` arm below is a bare
+/// `is_ordered_to_sit()` rather than a ternary: with the owner-hurt conjunct
+/// unavailable, vanilla's `? false :` branch is unreachable and transcribing the
+/// ternary would be writing a dead arm. Its behavioural cost is that a pet does
+/// **not** stand up to defend an owner who was just attacked nearby — it keeps
+/// sitting. `onGround()`'s cost is that a pet ordered to sit mid-fall sits
+/// immediately.
+///
+/// # Why the `None` arm returns `true` and not `is_ordered_to_sit()`
+///
+/// Because vanilla's does, and it is deliberate rather than a decompiler
+/// artefact: having already passed `orderedToSit || isTame()`, a **tame** pet
+/// with no resolvable owner sits down even though nobody told it to. That is the
+/// "pets settle when you log out" behaviour. Reading the summary ("a pet sits
+/// when ordered") instead of the record would have produced
+/// `is_ordered_to_sit()` in both arms and silently dropped it.
+#[derive(Debug, Default)]
+pub struct SitWhenOrderedToGoal;
+
+impl Goal for SitWhenOrderedToGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move, Flag::Jump])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        let ordered = mob.is_ordered_to_sit();
+        if !ordered && !mob.is_tame() {
+            return false;
+        }
+        if mob.in_water() {
+            return false;
+        }
+        match mob.owner_position() {
+            None => true,
+            Some(_) => ordered,
+        }
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        mob.is_ordered_to_sit()
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        mob.stop_navigation();
+        mob.set_in_sitting_pose(true);
+    }
+
+    fn stop(&mut self, mob: &mut dyn MobController) {
+        mob.set_in_sitting_pose(false);
+    }
+}
+
+/// A tamed pet walks after its owner.
+///
+/// Vanilla `FollowOwnerGoal(speedModifier, startDistance, stopDistance)` (flags
+/// MOVE + LOOK). The per-species arguments are **not** uniform and the
+/// difference is behavioural, not cosmetic: `Wolf` is `(1.0, 10, 2)`, `Cat` is
+/// `(1.0, 10, 5)` — a cat stops five blocks out rather than at your heel — and
+/// `Parrot` is `(1.0, 5, 1)`, which both starts and stops far tighter. Passing
+/// one set of constants for all three would be wrong for two of them, so the
+/// distances are constructor arguments.
+///
+/// # What is not implemented
+///
+/// * **The teleport.** `FollowOwnerGoal::tick` prefers
+///   `tryToTeleportToOwner()` over pathing once `distanceToSqr(owner) >= 144`,
+///   and that lands on `TamableAnimal.canTeleportTo`, which needs a
+///   `PathType.WALKABLE` probe plus a `noCollision` box test at an arbitrary
+///   candidate cell. This seam answers block questions only about the mob's own
+///   feet cell, so the goal paths the whole way instead. Behavioural cost: a pet
+///   left far behind never catches up across terrain a path cannot cross, where
+///   vanilla's would blink to you.
+/// * **`getPathfindingMalus(PathType.WATER)`** — vanilla's `start`/`stop` zero
+///   and restore the water malus so a following pet will wade. No per-path-type
+///   malus is settable through this seam.
+///
+/// `unableToMoveToOwner()`'s `isOrderedToSit()` conjunct **is** implemented, and
+/// it is the load-bearing one: without it a pet ordered to sit would still be
+/// dragged along behind its owner, with the two goals fighting over MOVE every
+/// tick.
+#[derive(Debug)]
+pub struct FollowOwnerGoal {
+    speed: f64,
+    /// Squared `startDistance` — the goal begins beyond this.
+    start_sqr: f64,
+    /// Squared `stopDistance` — the goal ends within this.
+    stop_sqr: f64,
+    time_to_recalc: i32,
+}
+
+impl FollowOwnerGoal {
+    /// Vanilla's `adjustedTickDelay(10)`. `FollowOwnerGoal` does not override
+    /// `requiresUpdateEveryTick`, so `Goal.adjustedTickDelay` halves it — the
+    /// re-path interval is **5** ticks, not the literal 10.
+    const RECALC_TICKS: i32 = 5;
+
+    /// Creates the goal with a species' own `(speed, startDistance,
+    /// stopDistance)`. The distances are in blocks and squared here once.
+    #[must_use]
+    pub fn new(speed: f64, start_distance: f64, stop_distance: f64) -> Self {
+        Self {
+            speed,
+            start_sqr: start_distance * start_distance,
+            stop_sqr: stop_distance * stop_distance,
+            time_to_recalc: 0,
+        }
+    }
+}
+
+impl Goal for FollowOwnerGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move, Flag::Look])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        let Some(owner) = mob.owner_position() else {
+            return false;
+        };
+        if mob.is_ordered_to_sit() {
+            return false;
+        }
+        distance_sqr(owner, mob.position()) >= self.start_sqr
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        // Vanilla's own first clause, and it is checked *before* the distance:
+        // once the path has run out there is nothing left to continue, whatever
+        // the distance says (`FollowOwnerGoal.canContinueToUse`).
+        if mob.navigation_done() {
+            return false;
+        }
+        let Some(owner) = mob.owner_position() else {
+            return false;
+        };
+        if mob.is_ordered_to_sit() {
+            return false;
+        }
+        distance_sqr(owner, mob.position()) > self.stop_sqr
+    }
+
+    fn start(&mut self, _mob: &mut dyn MobController) {
+        self.time_to_recalc = 0;
+    }
+
+    fn stop(&mut self, mob: &mut dyn MobController) {
+        mob.stop_navigation();
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        let Some(owner) = mob.owner_position() else {
+            return;
+        };
+        mob.look_at(owner);
+        self.time_to_recalc -= 1;
+        if self.time_to_recalc <= 0 {
+            self.time_to_recalc = Self::RECALC_TICKS;
+            mob.move_to(owner, self.speed);
+        }
+    }
+}
+
 /// Grazes: stands still, plays out an eat animation, and consumes the grass at
 /// or under the mob's feet.
 ///

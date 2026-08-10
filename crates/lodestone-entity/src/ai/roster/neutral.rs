@@ -32,7 +32,7 @@
 //! | "is that player looking at me" (a gaze test) | enderman freeze + stare | `MobController::is_being_stared_at` + free `is_in_view_cone` geometry; the **feed is blocked** — `PlayerPerception` carries no view vector |
 //! | relocating a mob instantly (a teleport) | enderman teleport | `MobController::teleport_to`, host-commanded via `SimMob::teleport_to` |
 //! | a mob damaging **itself** | bee sting-then-die | `MobController::damage_self`, drained by `MobSim::tick` through the damage pipeline |
-//! | an owner relationship | wolf tame half | `MobController::owner_position` + host-side `SimMob::owner_id`; the **player** half is blocked — `PlayerPerception` carries no player identity to own *by* |
+//! | an owner relationship | wolf tame half | `MobController::owner_position`/`is_tame`/`is_ordered_to_sit` + host-side `SimMob::owner`. **No longer blocked**: `lodestone_server::mobs::PerceivedPlayer` puts a `PlayerIdentity` (account uuid + runtime entity id) at the perception seam, so a mob can be owned *by a player*, and the wolf's `SitWhenOrderedToGoal` and `FollowOwnerGoal` rows below are `Modelled` |
 //!
 //! Group propagation needs a sixth thing that is not a trait method at all: a
 //! same-species census, which the seam deliberately does not expose (a goal sees
@@ -142,7 +142,9 @@
 //! [#233]: https://github.com/matteopolak/lodestone/issues/233
 
 use crate::ai::goal::Goal;
-use crate::ai::goals::{FollowParentGoal, PanicGoal, TemptGoal};
+use crate::ai::goals::{
+    FollowOwnerGoal, FollowParentGoal, PanicGoal, SitWhenOrderedToGoal, TemptGoal,
+};
 
 use super::{
     Registration, Selector, SpeciesContext, breed_1_0, float_goal, hurt_by_target,
@@ -373,7 +375,7 @@ pub const WOLF: &[Registration] = &[
     // of vanilla's causes. A disclosed over-eagerness, not a missing goal — and
     // the priority is what matters here, see the gates below.
     Registration::goal(1, "TamableAnimal.TamableAnimalPanicGoal", panic_1_5),
-    Registration::missing(Selector::Goal, 2, "SitWhenOrderedToGoal"),
+    Registration::goal(2, "SitWhenOrderedToGoal", sit_when_ordered),
     // `Wolf.WolfAvoidEntityGoal<>(this, Llama.class, 24.0F, 1.5, 1.5)`
     // (`:666-696`). Not merely an `AvoidEntityGoal` with a 24-block radius: its
     // `canUse` requires `!wolf.isTame()` (`:678`) and rolls against the llama's
@@ -383,7 +385,10 @@ pub const WOLF: &[Registration] = &[
     Registration::missing(Selector::Goal, 4, "LeapAtTargetGoal"),
     // `MeleeAttackGoal(this, 1.0, true)`.
     Registration::goal(5, "MeleeAttackGoal", melee_attack),
-    Registration::missing(Selector::Goal, 6, "FollowOwnerGoal"),
+    // `FollowOwnerGoal(this, 1.0, 10.0F, 2.0F)` (`animal/wolf/Wolf.java`). The
+    // two distances are the wolf's own — a cat's are `(10, 5)` and a parrot's
+    // `(5, 1)`, so they are constructor arguments rather than constants.
+    Registration::goal(6, "FollowOwnerGoal", follow_owner_10_2),
     Registration::goal(7, "BreedGoal", breed_1_0),
     Registration::goal(8, "WaterAvoidingRandomStrollGoal", stroll),
     Registration::missing(Selector::Goal, 9, "BegGoal"),
@@ -423,6 +428,17 @@ fn panic_1_5(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// `TemptGoal(this, 1.25, BEE_FOOD, false)` (`animal/bee/Bee.java:178`).
 fn tempt_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(TemptGoal::new(ctx.speed * 1.25))
+}
+
+/// `SitWhenOrderedToGoal(this)` (`animal/wolf/Wolf.java`, goal priority 2).
+/// Takes no speed — it stops navigation rather than driving it.
+fn sit_when_ordered(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(SitWhenOrderedToGoal)
+}
+
+/// `FollowOwnerGoal(this, 1.0, 10.0F, 2.0F)` — the wolf's follow distances.
+fn follow_owner_10_2(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(FollowOwnerGoal::new(ctx.speed, 10.0, 2.0))
 }
 
 /// `FollowParentGoal(this, 1.25)` (`animal/bee/Bee.java:183`).

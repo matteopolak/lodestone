@@ -191,10 +191,47 @@ pub trait MobController {
     /// crate cannot answer; `lodestone_server`'s `SimMob::owner_id` is where
     /// it lives.
     ///
-    /// Defaults to `None` — a wild, ownerless mob, which is every mob in the
-    /// roster today (taming is not implemented).
+    /// Defaults to `None` — a wild, ownerless mob.
     fn owner_position(&self) -> Option<Vec3> {
         None
+    }
+
+    /// Whether this mob is *tame at all* — vanilla
+    /// `TamableAnimal.isTame()`, the `0x04` bit of `TamableAnimal.DATA_FLAGS_ID`.
+    ///
+    /// Distinct from [`owner_position`](MobController::owner_position) being
+    /// `Some`, and the distinction is load-bearing rather than pedantic: a tamed
+    /// wolf whose owner has logged out has no owner *position* and is still
+    /// tame. A goal that reads `owner_position().is_some()` as "am I tame" would
+    /// therefore un-tame every pet the moment its owner walked out of the
+    /// player list, which is what `SitWhenOrderedToGoal`'s `!isTame()` arm and
+    /// `Wolf.WolfAvoidEntityGoal`'s `!wolf.isTame()` guard both hinge on.
+    fn is_tame(&self) -> bool {
+        false
+    }
+
+    /// Whether the owner has told this mob to sit — vanilla
+    /// `TamableAnimal.isOrderedToSit()`, which is the *persisted intent* rather
+    /// than the pose.
+    ///
+    /// Vanilla keeps two pieces of state here and only one of them is this:
+    /// `orderedToSit` is the field an owner's right-click toggles and NBT
+    /// round-trips (`TamableAnimal.addAdditionalSaveData`'s `Sitting`), while
+    /// `setInSittingPose` is the *synced* `0x01` flag bit that
+    /// `SitWhenOrderedToGoal::start`/`stop` writes as the goal actually runs.
+    /// The intent is what a goal must read to decide whether to run; the pose is
+    /// what the goal produces. Collapsing them means a sitting order silently
+    /// evaporates whenever the goal is preempted by a higher-priority flag
+    /// holder.
+    fn is_ordered_to_sit(&self) -> bool {
+        false
+    }
+
+    /// Reports that this mob has entered or left the sitting **pose** — vanilla
+    /// `TamableAnimal.setInSittingPose`, called by `SitWhenOrderedToGoal`'s
+    /// `start` and `stop`. The host turns this into the synced `0x01` flag bit.
+    fn set_in_sitting_pose(&mut self, sitting: bool) {
+        let _ = sitting;
     }
 
     /// Performs a melee attack against `target`.

@@ -1242,7 +1242,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // difficulty.
         if world_state.spawn_mobs() {
             let players: Vec<lodestone_model::Vec3> =
-                mobs.with(|sim| sim.players().iter().map(|p| p.position).collect());
+                mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());
             if !players.is_empty() {
                 let world = mobs.with(|sim| sim.world());
                 // The moon phase, which in 26.2 is the whole of
@@ -1272,7 +1272,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             // Nearest-player despawn runs whether or not anything spawned: it is
             // the other half of the same accounting, and vanilla runs it every
             // tick from `Mob.checkDespawn`.
-            let nearest = mobs.with(|sim| sim.players().first().map(|p| p.position));
+            let nearest = mobs.with(|sim| sim.players().first().map(|p| p.perception.position));
             mobs.with(|sim| sim.despawn_pass(nearest, &mut despawn_rng));
         }
         mob_out.publish(mobs.with(|sim| sim.snapshots()));
