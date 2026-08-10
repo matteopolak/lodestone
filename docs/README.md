@@ -1474,12 +1474,6 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   different constants), the ownership state that survives a reconnect, sitting and
   following, and the right-click that puts two adults in love. It lives in
   `lodestone_server::mobs` plus two new goals in `lodestone_entity::ai::goals`.
-- [Taming and breeding](./taming-and-breeding.md) — The server-side model for making
-  a wild animal *yours* and for making two of them produce a third: per-species taming
-  (a wolf, a cat, a parrot and a horse are four different mechanisms, not one with
-  different constants), the ownership state that survives a reconnect, sitting and
-  following, and the right-click that puts two adults in love. It lives in
-  `lodestone_server::mobs` plus two new goals in `lodestone_entity::ai::goals`.
 - [The task runner (`just`)](./task-runner.md) — A [`Justfile`](../Justfile) at the
   repo root, run with `casey/just` (installed at `/opt/homebrew/bin/just`, 1.58.0+).
   It gives every health check, `xtask` invocation, and `LODESTONE_REGEN` regeneration
