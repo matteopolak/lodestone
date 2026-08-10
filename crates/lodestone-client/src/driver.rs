@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use lodestone_game::chat_ack::{LastSeenTracker, MessageSignature};
 use lodestone_model::{
-    AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, LoginProfile,
+    AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, DimensionId, LoginProfile,
     PackedMessageSignature, ResourceKey, ResourcePackResponseKind, ServerAddress, VersionAdapter,
 };
 use lodestone_net::{Connection, NetError, Transport};
@@ -116,6 +116,23 @@ pub(crate) struct Driver<T: Transport> {
     /// with no persistence and no UI, answered immediately with whatever is
     /// on hand (or nothing).
     cookies: HashMap<ResourceKey, Vec<u8>>,
+    /// The dimension whose decoded columns are currently in the chunk store —
+    /// **an edge detector, not a second source of truth.**
+    ///
+    /// "Which dimension we are in" is owned by
+    /// `lodestone_ecs::session::ServerDimension`, folded from `Login` and
+    /// `Respawned` and readable through the handle. This field exists only so
+    /// [`Driver::emit`]'s `Respawned` arm can answer a different question — "did
+    /// the dimension *change*?" — because a death-respawn and a portal trip arrive
+    /// on the same packet and only one of them may empty the store. An edge
+    /// detector that disagrees with the source of truth is at worst a missed or
+    /// repeated clear; a second copy of the identity would be a render path
+    /// reading the wrong dimension forever. Same shape, and the same reasoning, as
+    /// the shell's `Sim::applied_dimension`.
+    ///
+    /// `None` before login, which is why the first `Respawned` of a session cannot
+    /// be mistaken for a change: there is nothing loaded to throw away.
+    dimension: Option<DimensionId>,
 }
 
 /// The client brand announced on entering Configuration, matching vanilla's
@@ -178,6 +195,7 @@ impl<T: Transport> Driver<T> {
             bundling: false,
             bundle_buffer: Vec::new(),
             cookies: HashMap::new(),
+            dimension: None,
         }
     }
 
@@ -372,6 +390,78 @@ impl<T: Transport> Driver<T> {
     /// Bundling is `false` outside a bundle, so the common case (no
     /// delimiter in the batch) is a single `push` per directive with no
     /// buffering at all.
+    /// Empty the decoded chunk store when a `Respawned` names a **different**
+    /// dimension, and do nothing at all when it does not. Returns whether the
+    /// store was cleared, so a gate can assert the edge rather than infer it.
+    ///
+    /// # Why this lives here and not at the shell
+    ///
+    /// The store is written on **this** thread, by the adapter's `WorldSink`, as
+    /// each chunk packet decodes. The shell's own dimension reset
+    /// (`Sim::reset_for_dimension_change`) runs on the render thread when it next
+    /// drains `NetClient::poll`, and by then columns for the *new* dimension can
+    /// already be in the store — so a bulk clear there would delete terrain no
+    /// server resends, trading leftover geometry for a permanent hole. Dropping
+    /// *meshes* is safe at the shell precisely because a column still in the store
+    /// re-meshes; the store itself has no such second chance, so its clear has to
+    /// happen on the thread that fills it, before the next packet decodes. This
+    /// call site is that point: `emit` runs from `execute`, after the per-packet
+    /// world-write guard has been dropped and before the next `read_packet_timed`.
+    ///
+    /// # A dimension change is not a respawn
+    ///
+    /// The two share one packet. Everything player-scoped — inventory, XP, health,
+    /// hunger, air — survives both, and nothing here touches any of it: this
+    /// function's entire reach is `World`'s chunk map. What it must not do is fire
+    /// on a *death*-respawn, which reports the same [`DimensionId`] and would
+    /// otherwise turn every death in the game into a full terrain reload. That is
+    /// what the comparison buys, and it is the whole safety argument.
+    ///
+    /// `self.dimension == None` (pre-login, or an adapter family whose `Login` we
+    /// never saw) is treated as "no change": a clear we cannot justify is worse
+    /// than one we skip, because the skipped case is the pre-existing behaviour and
+    /// the unjustified one deletes terrain.
+    ///
+    /// # This does not make the integrated server's `forget_chunk` sweep redundant
+    ///
+    /// `lodestone-server` sweeps `encode_forget_chunk` over every loaded column
+    /// before it sends the respawn, and that sweep is *protocol*, not client
+    /// bookkeeping: it is what a real vanilla client needs to unload the old
+    /// dimension, and it is the only thing that tells any other client anything at
+    /// all. Deleting it because our own client now also clears locally would break
+    /// every non-Lodestone client against our server. The two are belt and braces
+    /// against different failures, and it is the *vanilla* server — which sends no
+    /// such sweep — that this function exists for.
+    fn forget_previous_dimension(&mut self, dimension: &DimensionId) -> bool {
+        let changed = self
+            .dimension
+            .as_ref()
+            .is_some_and(|before| before != dimension);
+        self.dimension = Some(dimension.clone());
+        if !changed {
+            return false;
+        }
+        // Enumerated then unloaded, rather than through a `World::clear`, so this
+        // stays inside `lodestone-world`'s existing public surface. Once per
+        // dimension change, so the extra `Vec` is not worth a new API.
+        {
+            let mut world = self.read_model.world_write();
+            let loaded: Vec<_> = world.iter().map(|(pos, _)| *pos).collect();
+            for pos in loaded {
+                world.unload(pos);
+            }
+        }
+        // The world lost every chunk, so anything blocked on a world query must be
+        // woken — the same reason the per-packet path wakes unconditionally rather
+        // than relying on the adapter to emit a notification directive.
+        self.read_model.wake();
+        tracing::debug!(
+            dimension = %dimension,
+            "dimension changed: cleared the decoded chunk store"
+        );
+        true
+    }
+
     fn absorb_bundle(&mut self, directives: Vec<Directive>) -> Vec<Directive> {
         let mut ready = Vec::with_capacity(directives.len());
         for directive in directives {
@@ -688,11 +778,16 @@ impl<T: Transport> Driver<T> {
                     response: ResourcePackResponseKind::FailedDownload,
                 });
             }
-            ClientEvent::Login { .. } => {
+            ClientEvent::Login { dimension, .. } => {
                 // Entering the world arms the client-loaded signal; the first
                 // placement teleport that follows zeroes the server's
                 // load-timeout timer so our movement stops being ignored.
                 self.awaiting_player_load = true;
+                // The baseline for the `Respawned` arm's comparison, recorded
+                // without clearing anything: a fresh session has nothing of a
+                // previous dimension in the store. Without it the first portal trip
+                // of a session would compare against `None` and skip its clear.
+                self.dimension = Some(dimension.clone());
             }
             ClientEvent::TeleportPlayer { .. } if self.awaiting_player_load => {
                 // The first teleport after entering the world (or after a
@@ -715,13 +810,14 @@ impl<T: Transport> Driver<T> {
                     auto_actions.push(ClientAction::Respawn);
                 }
             }
-            ClientEvent::Respawned { .. } => {
+            ClientEvent::Respawned { dimension, .. } => {
                 // Any respawn — death, portal travel, dimension change, `/respawn`
                 // — re-seeds the server's load-timeout timer, so re-arm for the
                 // post-respawn placement teleport. `Death` also re-arms above, but
                 // that only covers death-respawn; this covers every non-death
                 // transition, which emits `Respawned` with no preceding `Death`.
                 self.awaiting_player_load = true;
+                self.forget_previous_dimension(dimension);
             }
             ClientEvent::Chat {
                 ack: Some(info), ..

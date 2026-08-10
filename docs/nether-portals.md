@@ -102,32 +102,53 @@ would compare the new dimension against itself and never see a change at all.
 The portal overlay and warp are driven by `Sim::portal_effect_intensity`; the curve
 and the two-consumer split are in [`screen-overlays.md`](./screen-overlays.md).
 
-### Is the `forget_chunk` sweep redundant now?
+### Where the decoded chunk store is cleared, and why not at the shell
 
-**No, and the reason is ordering rather than effort.** The client now clears
-everything it can clear safely, but the decoded chunk **store** is deliberately not
-among them:
+The store is cleared by `lodestone_client::Driver::forget_previous_dimension`, called
+from `Driver::emit`'s `ClientEvent::Respawned` arm. That site was chosen, not
+defaulted to:
 
-- the store is written by the **net thread** as packets decode;
+- the store is written by the **net thread** as packets decode, through the adapter's
+  `WorldSink`;
 - the shell's reset runs on the **render thread**, when it next drains
   `NetClient::poll`;
 - columns for the *new* dimension can already be in the store by then, and a bulk
   clear there would delete terrain no server will resend — trading leftover geometry
   for a permanent hole.
 
-Dropping the *meshed* columns is safe in exactly the way clearing the store is not: a
-column still in the store is re-meshed the moment anything dirties it, so an
-over-eager mesh drop costs a re-mesh and an over-eager store clear costs the chunk.
+`Driver::emit` is on the net thread, runs after that packet's world-write guard has
+been dropped and before the next `read_packet_timed`, so there is no window in which a
+new-dimension column can exist yet.
 
-So the sweep is still load-bearing, and it is also what makes step 1 of
-`travel_through_portal`'s ordering argument true: `forget_chunk` empties the store
-*from the net thread*, in packet order, before the respawn. The honest client-side fix
-lives at that same point — `lodestone-client`'s `Driver::emit`, in the
-`ClientEvent::Respawned` arm, which runs on the net thread with `read_model`'s
-world-write guard reachable and before the next packet decodes. That would matter for
-a **vanilla** server, which sends no such sweep; it changes nothing against this one.
-It is left undone rather than done badly: it is `lodestone-client` work, and doing it
-in the shell would be the racy version described above wearing a fix's clothes.
+Dropping the *meshed* columns, which the shell still does, is safe in exactly the way
+clearing the store is not: a column still in the store is re-meshed the moment
+anything dirties it, so an over-eager mesh drop costs a re-mesh and an over-eager
+store clear costs the chunk. That asymmetry is why the two halves of the reset live on
+two different threads.
+
+The driver compares the destination against the dimension it last recorded (`Login`,
+then each `Respawned`) and clears **only** on a change. A death-respawn reports the
+same `DimensionId`; without the comparison every death in the game would empty the
+store and force a full terrain reload, which is a worse bug than the one this fixes.
+`a_dimension_change_empties_the_chunk_store_and_a_death_respawn_does_not` in
+`crates/lodestone-client/tests/driver.rs` gates all four arms — first load,
+death-respawn, portal trip, and a second death in the destination — and both neuters
+(dropping the comparison; never clearing) were run and observed to fail, in opposite
+directions.
+
+### Is the `forget_chunk` sweep redundant now?
+
+**No.** The sweep is *protocol*, not client bookkeeping: it is what a real vanilla
+client needs in order to unload the old dimension, and it is the only thing that tells
+any non-Lodestone client anything at all. Deleting it because our own client now also
+clears locally would break every other client against our server, and it would also
+falsify step 1 of `travel_through_portal`'s ordering argument.
+
+The two are belt and braces against different failures, and the client-side clear
+exists for the case the sweep cannot cover: a **vanilla** server, which sends no such
+sweep. Note that `travel_through_portal`'s own doc still says the client's `Respawned`
+handler does not clear the store; that sentence is now stale and belongs to whoever
+next edits `lodestone-server`.
 
 ## How to change it
 
@@ -202,12 +223,11 @@ Honest list, so nothing here reads as finished:
   the search and the index. It does not drive a live connection walking into a portal
   for 81 ticks, so the `forget_chunk` sweep, the respawn framing and the re-stream are
   verified by construction only.
-* **Client-side teardown on arrival is done except for the chunk store.** The sky pass,
-  the leftover entities, the meshed columns and the portal overlay are all wired now —
-  see "Arrival, on the client" above. What is still worked around here is the decoded
-  **chunk store**: the `forget_chunk` sweep remains load-bearing because the only
-  race-free place for a client-side clear is `lodestone-client`'s `Driver::emit`, on the
-  net thread. That gap only shows against a *vanilla* server, which sends no sweep.
+* **Client-side teardown on arrival is complete.** The sky pass, the leftover entities,
+  the meshed columns, the portal overlay and — since
+  `Driver::forget_previous_dimension` — the decoded chunk store are all wired; see
+  "Where the decoded chunk store is cleared" above. The `forget_chunk` sweep stays,
+  because it is what a vanilla client needs, not a workaround for a client-side gap.
 * **Flint and steel lights portals and nothing else**, and takes no durability damage.
   A plain fire needs `fire::ticks_after_edit` and a live block-tick queue, and an
   inert fire block looks like a working one. This item did nothing at all before.

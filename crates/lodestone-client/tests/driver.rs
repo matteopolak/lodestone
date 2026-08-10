@@ -35,6 +35,14 @@ struct FakeAdapter {
     brand_resp_id: Option<i32>,
     pong_resp_id: Option<i32>,
     calls: Arc<Mutex<Vec<(ConnectionState, i32)>>>,
+    /// Chunk columns to write into the [`lodestone_model::WorldSink`] when a
+    /// scripted `(state, packet_id)` arrives, as `(chunk_x, chunk_z)`.
+    ///
+    /// Real adapters put chunk data through the sink and **not** through the event
+    /// stream, so any test about the client's decoded chunk store has to reach the
+    /// store the same way — asserting on a `ChunkLoaded` event instead would prove
+    /// only that a notification travelled.
+    chunks: HashMap<(ConnectionState, i32), Vec<(i32, i32)>>,
 }
 
 const KEEPALIVE_RESP_ID: i32 = 0x30;
@@ -106,6 +114,23 @@ impl FakeAdapter {
         self
     }
 
+    /// Loads one all-air column per position into the world sink when
+    /// `(state, packet_id)` arrives, and emits a `ChunkLoaded` for each so a test
+    /// has something to await before reading the store.
+    fn chunks_on(mut self, state: ConnectionState, packet_id: i32, at: &[(i32, i32)]) -> Self {
+        self.chunks.insert((state, packet_id), at.to_vec());
+        let emits = at
+            .iter()
+            .map(|(x, z)| {
+                Directive::Emit(ClientEvent::ChunkLoaded {
+                    pos: lodestone_model::ChunkPos { x: *x, z: *z },
+                })
+            })
+            .collect();
+        self.script.insert((state, packet_id), emits);
+        self
+    }
+
     fn calls(&self) -> Arc<Mutex<Vec<(ConnectionState, i32)>>> {
         Arc::clone(&self.calls)
     }
@@ -134,7 +159,7 @@ impl VersionAdapter for FakeAdapter {
 
     fn handle_packet(
         &self,
-        _world: &mut dyn lodestone_model::WorldSink,
+        world: &mut dyn lodestone_model::WorldSink,
         state: ConnectionState,
         packet_id: i32,
         _payload: &[u8],
@@ -142,6 +167,14 @@ impl VersionAdapter for FakeAdapter {
         self.calls.lock().unwrap().push((state, packet_id));
         if self.fail.contains(&(state, packet_id)) {
             return Err(AdapterError::Decode(format!("boom at {packet_id}")));
+        }
+        if let Some(positions) = self.chunks.get(&(state, packet_id)) {
+            for (x, z) in positions {
+                world.load(
+                    lodestone_world::ChunkPos { x: *x, z: *z },
+                    air_column(),
+                );
+            }
         }
         Ok(self
             .script
@@ -272,12 +305,39 @@ fn teleport_event() -> ClientEvent {
 /// A respawn that is not a death — portal travel, a dimension change, or
 /// `/respawn`. The server re-seeds its client-load timer on any of these.
 fn respawned_event() -> ClientEvent {
+    respawned_in("the_nether")
+}
+
+/// A `Respawned` naming `minecraft:<path>` as the destination. Both the
+/// same-dimension (death) and different-dimension (portal) cases arrive on this
+/// one event, which is exactly why the driver has to compare rather than react.
+fn respawned_in(path: &str) -> ClientEvent {
     ClientEvent::Respawned {
-        dimension: Identifier::new("minecraft", "the_nether").unwrap(),
+        dimension: Identifier::new("minecraft", path).unwrap(),
         game_mode: GameMode::Survival,
         previous_game_mode: None,
         last_death_location: None,
     }
+}
+
+/// An empty single-section column, the cheapest thing that occupies a slot in the
+/// chunk store. Nothing here reads block data — the subject is whether the store
+/// is emptied at the right moment.
+fn air_column() -> lodestone_world::LoadedChunk {
+    let column = lodestone_world::ChunkColumn::new(
+        0,
+        16,
+        lodestone_world::PaletteKind::block_states(),
+        lodestone_world::PaletteKind::biomes(),
+        0,
+        0,
+    );
+    lodestone_world::LoadedChunk::new(
+        column,
+        lodestone_world::ColumnLight::new(16),
+        lodestone_world::Heightmaps::new(),
+        Vec::new(),
+    )
 }
 
 fn start(
@@ -737,6 +797,124 @@ async fn player_loaded_rearms_on_respawn_without_death() {
         PLAYER_LOADED_ID,
         "a non-death respawn must re-arm player_loaded"
     );
+
+    drop(handle);
+}
+
+/// **The dimension-change gate.** A `Respawned` naming a *different* dimension
+/// must empty the decoded chunk store; one naming the same dimension must not
+/// touch it.
+///
+/// # Why this belongs on the net thread and not at the shell
+///
+/// The store is filled by the adapter's `WorldSink` while a packet decodes, i.e.
+/// on the driver's own task. The shell's dimension reset runs on the render thread
+/// when it next drains, and by then the new dimension's columns can already be in
+/// the store — so a clear there deletes terrain no server resends. This test drives
+/// the packets in the order the wire delivers them and reads the store through the
+/// handle, so it is measuring the real ordering rather than a call to a function.
+///
+/// # The same-dimension arm is the important one
+///
+/// A death-respawn reports the *same* dimension id. If the comparison were dropped,
+/// every death in the game would empty the chunk store and force a full terrain
+/// reload — a far worse bug than the leftover geometry this fixes, and one a test
+/// asserting only the portal arm would certify as working. The two ids are both
+/// `minecraft:` and differ only in path, so a comparison that accidentally compared
+/// namespaces would pass the same-dimension arm and fail the portal one rather than
+/// the other way round.
+///
+/// Four counts are collected and asserted together, so one wrong arm does not hide
+/// the other three, and each expected value is stated as a number rather than as a
+/// direction.
+#[tokio::test]
+async fn a_dimension_change_empties_the_chunk_store_and_a_death_respawn_does_not() {
+    const LOGIN_PKT: i32 = 0x2B;
+    const OVERWORLD_CHUNKS_PKT: i32 = 0x27;
+    const NETHER_CHUNKS_PKT: i32 = 0x28;
+    const SAME_DIM_RESPAWN_PKT: i32 = 0x4A;
+    const NEW_DIM_RESPAWN_PKT: i32 = 0x4B;
+
+    // Three then two, so no arm's expected count is a repeat of another's and a
+    // stale read cannot pass by coincidence.
+    const OVERWORLD: [(i32, i32); 3] = [(0, 0), (1, 0), (0, 1)];
+    const NETHER: [(i32, i32); 2] = [(-4, 7), (-4, 8)];
+
+    let adapter = FakeAdapter::new()
+        .on(
+            ConnectionState::Handshaking,
+            LOGIN_PKT,
+            vec![Directive::Emit(login_event())],
+        )
+        .chunks_on(ConnectionState::Handshaking, OVERWORLD_CHUNKS_PKT, &OVERWORLD)
+        .chunks_on(ConnectionState::Handshaking, NETHER_CHUNKS_PKT, &NETHER)
+        // `login_event()` is `minecraft:overworld`, so this one is a death.
+        .on(
+            ConnectionState::Handshaking,
+            SAME_DIM_RESPAWN_PKT,
+            vec![Directive::Emit(respawned_in("overworld"))],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            NEW_DIM_RESPAWN_PKT,
+            vec![Directive::Emit(respawned_in("the_nether"))],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+
+    peer.write_packet(LOGIN_PKT, &[]).await.unwrap();
+    let _ = events.recv().await; // Login — records the baseline dimension.
+
+    // Fill the store with the overworld.
+    peer.write_packet(OVERWORLD_CHUNKS_PKT, &[]).await.unwrap();
+    for _ in 0..OVERWORLD.len() {
+        let _ = events.recv().await; // ChunkLoaded
+    }
+    let after_load = handle.loaded_chunk_count();
+
+    // A death in the overworld. Awaiting the `Respawned` event is what makes the
+    // read below happen *after* the driver's arm has run — the clear is on the
+    // driver's task, and `emit` forwards the event only once it has returned.
+    peer.write_packet(SAME_DIM_RESPAWN_PKT, &[]).await.unwrap();
+    let _ = events.recv().await; // Respawned (same dimension)
+    let after_death = handle.loaded_chunk_count();
+
+    // A portal trip.
+    peer.write_packet(NEW_DIM_RESPAWN_PKT, &[]).await.unwrap();
+    let _ = events.recv().await; // Respawned (new dimension)
+    let after_portal = handle.loaded_chunk_count();
+
+    // The Nether's own columns arrive, then a death *in the Nether*: the edge must
+    // be consumed, or the second respawn would throw away terrain that has already
+    // been streamed and will not be sent again.
+    peer.write_packet(NETHER_CHUNKS_PKT, &[]).await.unwrap();
+    for _ in 0..NETHER.len() {
+        let _ = events.recv().await; // ChunkLoaded
+    }
+    peer.write_packet(NEW_DIM_RESPAWN_PKT, &[]).await.unwrap();
+    let _ = events.recv().await; // Respawned (the Nether again)
+    let after_nether_death = handle.loaded_chunk_count();
+
+    let mut wrong = Vec::new();
+    for (what, got, want) in [
+        ("after the overworld's columns loaded", after_load, OVERWORLD.len()),
+        (
+            "after a death-respawn in the same dimension (must be untouched)",
+            after_death,
+            OVERWORLD.len(),
+        ),
+        ("after a portal trip to the Nether (must be empty)", after_portal, 0),
+        (
+            "after a death in the Nether (the edge must be consumed)",
+            after_nether_death,
+            NETHER.len(),
+        ),
+    ] {
+        if got != want {
+            wrong.push(format!("{what}: want {want} columns, got {got}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 
     drop(handle);
 }
