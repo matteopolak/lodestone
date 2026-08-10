@@ -6813,6 +6813,16 @@ pub(crate) struct ItemInUse {
     item: String,
     /// The `MobSim` tick the use completes on — `started + Consumable.consumeTicks()`.
     finish_tick: u64,
+    /// The `remaining` value the last periodic consume sound was published for.
+    ///
+    /// `Consumable.shouldEmitParticlesAndSounds` is a predicate on
+    /// `remaining % 4 == 0`, which is correct **only if it is evaluated exactly once
+    /// per tick**. The loop that drives it reads `MobSim`'s counter from a 50 ms
+    /// timer arm, and the two clocks are not the same object: if the timer fires
+    /// twice inside one mob tick, the same `remaining` passes the predicate again and
+    /// the eating sound doubles. Latching the value it last fired for makes the
+    /// emission idempotent per tick without assuming the clocks agree.
+    last_effect_remaining: Option<u32>,
 }
 
 /// What a `USE_ITEM` started. Vanilla's `Item.use` returns an
@@ -6918,6 +6928,7 @@ fn apply_use_item(
             native,
             item: held,
             finish_tick: now + u64::try_from(food.use_ticks.max(0)).unwrap_or(0),
+            last_effect_remaining: None,
         });
     }
 
@@ -9491,11 +9502,78 @@ where
                 // with this loop's `ticks_since(play_start)` would compare two
                 // unrelated counters.
                 if let Some(started) = item_in_use.clone() {
-                    if mobs.with(|sim| sim.tick_count()) >= started.finish_tick {
+                    let now = mobs.with(|sim| sim.tick_count());
+                    // The periodic eating/drinking sound —
+                    // `ItemStack.onUseTick` → `Consumable.emitParticlesAndSounds`.
+                    // **Sound only**: the crumbs are the client's own prediction,
+                    // because `ServerLevel.addParticle` is a no-op in vanilla, and
+                    // the sound is *only* the server's, because
+                    // `ClientLevel.playSeededSound` drops a `playSound(null, …)`.
+                    // Splitting a single vanilla call across the two sides looks like
+                    // an omission on each of them; it is the whole mechanism.
+                    if now < started.finish_tick
+                        && let Some(pos) = player_pos
+                        && let Some(consumable) =
+                            lodestone_game::consumable::consumable_for_item(&started.item)
+                    {
+                        let remaining =
+                            u32::try_from(started.finish_tick - now).unwrap_or(u32::MAX);
+                        let already = started.last_effect_remaining == Some(remaining);
+                        if !already
+                            && lodestone_game::consumable::should_emit_consume_effects(
+                                consumable.consume_ticks,
+                                remaining,
+                            )
+                        {
+                            let seed = i64::from(drops_rng.next_int(i32::MAX));
+                            let roll = drops_rng.next_f32();
+                            if let Some(effect) = crate::effects::item_consumed_tick(
+                                &started.item,
+                                Vec3::new(pos.0, pos.1, pos.2),
+                                roll,
+                                seed,
+                            ) {
+                                // No exclusion: vanilla's `Entity.playSound` passes
+                                // `null`, so the eater hears it too — and *only*
+                                // through this broadcast.
+                                block_ticks.publish_effect(effect);
+                            }
+                        }
+                        // Latched whether or not this tick emitted, so the guard
+                        // tracks "already looked at this tick" rather than "already
+                        // played", which is the property that makes it idempotent.
+                        if let Some(live) = item_in_use.as_mut() {
+                            live.last_effect_remaining = Some(remaining);
+                        }
+                    }
+                    if now >= started.finish_tick {
                         item_in_use = None;
                         if let Some((native, remainder)) =
                             finish_consuming(&mut inventory, &mut vitals, &started, game_mode)
                         {
+                            // `FoodProperties.onConsume`: the consumable sound again,
+                            // louder and on `NEUTRAL`, plus the burp. Both are on the
+                            // **food** component, so they are published here — inside
+                            // the `finish_consuming` success arm, which already
+                            // required a food — rather than beside the periodic sound
+                            // above, which is `Consumable`'s and fires for potions too.
+                            if let Some(pos) = player_pos {
+                                let at = Vec3::new(pos.0, pos.1, pos.2);
+                                let seed = i64::from(drops_rng.next_int(i32::MAX));
+                                if let Some(effect) = crate::effects::item_consume_finished(
+                                    &started.item,
+                                    at,
+                                    drops_rng.next_f32(),
+                                    seed,
+                                ) {
+                                    block_ticks.publish_effect(effect);
+                                }
+                                block_ticks.publish_effect(crate::effects::player_burped(
+                                    at,
+                                    drops_rng.next_f32(),
+                                    i64::from(drops_rng.next_int(i32::MAX)),
+                                ));
+                            }
                             if let Some(menu_slot) = window_zero_menu_slot(native) {
                                 apply(
                                     conn,

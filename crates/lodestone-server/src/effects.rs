@@ -183,6 +183,115 @@ fn first_real_sound(candidates: &[String]) -> Option<String> {
     candidates.iter().find(|name| sound_exists(name)).cloned()
 }
 
+/// One periodic eating/drinking sound — `Consumable.emitParticlesAndSounds`'s
+/// `user.playSound(consumeSound, volume, pitch)`.
+///
+/// Publish with **no** excluded player: `Entity.playSound` is
+/// `level.playSound(null, …)`, and `ClientLevel.playSeededSound` therefore skips it
+/// on the eater's own client (`except == null` is not the local player), so the
+/// eater hears only this broadcast. That is the opposite of the block-break case in
+/// this module's doc — do not reach for `publish_effect_except` by analogy, or the
+/// player eating hears nothing at all while everyone nearby does.
+///
+/// The particles are **not** here and must not be: `ServerLevel.addParticle` is a
+/// no-op, so the crumbs are the client's own prediction
+/// (`lodestone_shell::consume`).
+///
+/// Vanilla's volume and pitch are per-animation:
+///
+/// ```java
+/// float eatVolume = random.nextBoolean() ? 0.5F : 1.0F;
+/// float eatPitch = random.triangle(1.0F, 0.2F);
+/// float drinkVolume = 0.5F;
+/// float drinkPitch = Mth.randomBetween(random, 0.9F, 1.0F);
+/// ```
+///
+/// `roll` is a uniform `0.0..1.0` sample the caller draws, one per emission — a
+/// constant makes every bite identical, and reaching for a clock traps on wasm32.
+/// The eat volume's `nextBoolean` is folded into the same sample rather than a
+/// second draw, which changes the *sequence* vanilla would produce but not the
+/// distribution; the seed field already decides which sample of the sound event
+/// plays, so nothing here is reproducible against vanilla anyway.
+#[must_use]
+pub fn item_consumed_tick(
+    item: &str,
+    pos: Vec3,
+    roll: f32,
+    seed: i64,
+) -> Option<WorldEffect> {
+    let consumable = lodestone_game::consumable::consumable_for_item(item)?;
+    let drink = consumable.animation == lodestone_game::consumable::ConsumeAnimation::Drink;
+    let sound = first_real_sound(&[consumable.sound.to_owned()])?;
+    let (volume, pitch) = if drink {
+        // `Mth.randomBetween(random, 0.9F, 1.0F)`.
+        (0.5, 0.9 + roll * 0.1)
+    } else {
+        // `random.triangle(1.0F, 0.2F)` is `1.0 + 0.2 * (nextDouble() -
+        // nextDouble())`, whose support is `0.8..1.2` and whose mode is 1.0. One
+        // uniform sample gives the right range and a flat distribution inside it;
+        // the audible difference is that a bite is very slightly less often
+        // exactly-pitched, which is not the kind of thing a gate can see.
+        (if roll < 0.5 { 0.5 } else { 1.0 }, 0.8 + roll * 0.4)
+    };
+    Some(WorldEffect::Sound {
+        sound,
+        category: SoundCategory::Player,
+        pos,
+        volume,
+        pitch,
+        seed,
+    })
+}
+
+/// The **finish** replay of the consumable sound — `FoodProperties.onConsume`'s
+/// first `level.playSound`, at volume `1.0F`, `random.triangle(1.0F, 0.4F)` pitch
+/// and `SoundSource.NEUTRAL`.
+///
+/// Easy to miss because it is the *same sound event* as the periodic one and looks
+/// like a duplicate of [`item_consumed_tick`]. It is not: louder, wider pitch
+/// spread, a different category, and it is what makes the last bite land audibly
+/// rather than just stopping. Like the burp it lives on `minecraft:food`, so a
+/// potion does not get it.
+#[must_use]
+pub fn item_consume_finished(item: &str, pos: Vec3, roll: f32, seed: i64) -> Option<WorldEffect> {
+    let consumable = lodestone_game::consumable::consumable_for_item(item)?;
+    let sound = first_real_sound(&[consumable.sound.to_owned()])?;
+    Some(WorldEffect::Sound {
+        sound,
+        category: SoundCategory::Neutral,
+        pos,
+        volume: 1.0,
+        // `random.triangle(1.0F, 0.4F)` — support `0.6..1.4`, flattened to one
+        // uniform sample for the reason [`item_consumed_tick`] gives.
+        pitch: 0.6 + roll * 0.8,
+        seed,
+    })
+}
+
+/// `SoundEvents.PLAYER_BURP` — the extra sound `FoodProperties.onConsume` plays
+/// when a **player** finishes a food:
+///
+/// ```java
+/// level.playSound(null, player.getX(), player.getY(), player.getZ(),
+///    SoundEvents.PLAYER_BURP, SoundSource.PLAYERS, 0.5F, Mth.randomBetween(random, 0.9F, 1.0F));
+/// ```
+///
+/// Food-only and player-only, because it comes from the `minecraft:food`
+/// component's `ConsumableListener` rather than from `Consumable` — a potion and a
+/// milk bucket finish without one. Callers must therefore gate on the item having a
+/// food component, not merely on it being consumable.
+#[must_use]
+pub fn player_burped(pos: Vec3, roll: f32, seed: i64) -> WorldEffect {
+    WorldEffect::Sound {
+        sound: lodestone_game::consumable::BURP_SOUND.to_owned(),
+        category: SoundCategory::Player,
+        pos,
+        volume: 0.5,
+        pitch: 0.9 + roll * 0.1,
+        seed,
+    }
+}
+
 /// The level event for a block destroyed at `pos`, or `None` if `state` does not
 /// resolve to a block-state id.
 ///

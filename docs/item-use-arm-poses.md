@@ -230,9 +230,19 @@ perfectly correct.
   (`CROSSBOW_CHARGE_TICKS`) — exact for an unenchanted crossbow, visually slow for an
   enchanted one. `CrossbowItem.getChargeDuration` is `25 - 5 * level`; reading the
   level needs full stacks where `RenderEquipment` has narrowed to bare item ids.
-- `ITEM`, `BLOCK`, `SPYGLASS`, `TOOT_HORN`, `BRUSH`, `THROW_TRIDENT`, `SPEAR` are all
-  `Empty`. `ITEM` needs only "is something held", which equipment already says, so
-  it is a cheap separate follow-up.
+- **`ITEM` has landed** — see [eating and drinking](./eating-and-drinking.md), which
+  needed it, because vanilla has no `EAT`/`DRINK` pose and a consuming entity falls
+  through to `ITEM`. It is also this module's **first one-handed pose**
+  (`ArmPose.ITEM(false, false)`), so `pose_arms_for_item` now writes one arm for it
+  and two for everything else. What is still left of it is the *selection*: it is
+  chosen only for an item in **use**, while vanilla's fallthrough gives it to any
+  non-empty hand — so every armed mob has a slightly raised arm in vanilla and hangs
+  its arms here. Widening it is one line in `entities::arm_pose_for` plus a
+  re-baseline of both pixel gates below, whose *resting* silhouettes it changes.
+- `BLOCK`, `SPYGLASS`, `TOOT_HORN`, `BRUSH`, `THROW_TRIDENT`, `SPEAR` now resolve to
+  `Item` rather than `Empty` when in use, which is a closer wrong answer (the arm
+  goes up, which is the half those poses share) and still not the right one — vanilla
+  reaches each of them before the fallthrough.
 
 ### Aggressive-driven poses deliberately left (#379)
 

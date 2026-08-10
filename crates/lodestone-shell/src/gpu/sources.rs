@@ -386,6 +386,52 @@ impl std::fmt::Debug for HandSwingSource {
     }
 }
 
+/// This frame's in-progress eat or drink, for
+/// `ItemInHandRenderer.applyEatTransform` — `(currUsageTime, useDuration)`, already
+/// interpolated with the frame's partial tick.
+///
+/// # Why the *interpolated* usage time and not `(ticks, partial)`
+///
+/// Vanilla's `applyEatTransform` computes `currUsageTime` once
+/// (`getUseItemRemainingTicks() - frameInterp + 1.0F`) and then uses it for both the
+/// bob's phase and the jiggle's fraction. Handing the renderer the combined value
+/// keeps that single derivation
+/// ([`eat_usage_time`](lodestone_render::entity::eat_usage_time)) in one place; two
+/// fields would let the phase and the fraction be assembled differently and be one
+/// tick apart, which shows up as a bob that never quite reaches its peak.
+///
+/// Like every other source here it must be re-installed **every frame**, because it
+/// carries a partial-tick interpolation. Unset — the default, the demo, every
+/// headless test — is `None`, which is the plain held-item pose: exactly the
+/// behaviour before eating animated.
+#[derive(Default)]
+pub struct ItemUseSource(pub(super) Option<Box<dyn Fn() -> Option<(f32, u32)> + Send + Sync>>);
+
+impl ItemUseSource {
+    /// This frame's `(currUsageTime, useDuration)`, or `None` when nothing is being
+    /// consumed.
+    ///
+    /// A non-finite usage time is mapped to `None` rather than clamped: unlike a
+    /// swing, there is no sensible "moment of an eat" to fall back to, and a NaN
+    /// reaching `Math.pow` produces a NaN matrix and an item that vanishes. A zero
+    /// duration is refused for the same reason — it is the divisor.
+    #[must_use]
+    pub(super) fn sample(&self) -> Option<(f32, u32)> {
+        match self.0.as_ref().and_then(|f| f()) {
+            Some((usage, duration)) if usage.is_finite() && duration > 0 => Some((usage, duration)),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for ItemUseSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ItemUseSource")
+            .field(&if self.0.is_some() { "set" } else { "unset" })
+            .finish()
+    }
+}
+
 /// Where the **local player's main-hand item** comes from, polled once per frame
 /// like [`HandSwingSource`].
 ///

@@ -210,6 +210,143 @@ pub fn breaking_block_effect(
     engine.add(p);
 }
 
+/// `new BreakingItemParticle(...)` — one crumb of an item.
+///
+/// The same shape as [`terrain_particle`] and deliberately so: vanilla's
+/// `BreakingItemParticle` and `TerrainParticle` have **byte-identical**
+/// `getU0`/`getU1`/`getV0`/`getV1` overrides (a quarter sub-sprite at
+/// `(uo + 1) / 4 .. uo / 4`, `uo`/`vo` each `random.nextFloat() * 3.0F`), the same
+/// `gravity = 1.0F` and the same `quadSize /= 2.0F`, so [`Behaviour::Terrain`]
+/// describes both. Only the sprite source and the absence of a `0.6` grey differ:
+/// an item crumb is drawn at full brightness.
+///
+/// # The velocity is *not* `setPower`
+///
+/// `BreakingItemParticle`'s public constructor chains to the zero-velocity one and
+/// then does `xd *= 0.1F; … xd += xa;`, a **plain multiply of all three
+/// components** followed by an add.
+/// [`Particle::set_power`](crate::Particle::set_power) is the wrong tool: it
+/// deliberately preserves [`Particle::with_velocity`](crate::Particle::with_velocity)'s
+/// `0.1` upward bias across the scale, and vanilla here scales that bias too (to
+/// `0.01`). Using `set_power` leaves the crumbs drifting upward roughly ten times
+/// too fast, which reads as "the particles are wrong" rather than as an arithmetic
+/// slip.
+#[must_use]
+pub fn item_particle(
+    x: f64,
+    y: f64,
+    z: f64,
+    xa: f64,
+    ya: f64,
+    za: f64,
+    item: u32,
+    rng: &mut JavaRandom,
+) -> Particle {
+    // The 4-argument constructor: zero given velocity, so the whole of `xd/yd/zd`
+    // is `Particle`'s own randomised jitter.
+    let mut p = Particle::with_velocity(x, y, z, 0.0, 0.0, 0.0, SpriteSource::Item(item), rng);
+    p.gravity = 1.0;
+    p.quad_size /= 2.0;
+    // Two more draws, *after* the quad size — order matters for replay, exactly as
+    // in `terrain_particle`.
+    let uo = rng.next_float() * 3.0;
+    let vo = rng.next_float() * 3.0;
+    p.behaviour = Behaviour::Terrain { uo, vo };
+    // `xd *= 0.1F; yd *= 0.1F; zd *= 0.1F; xd += xa; …` — see the note above on why
+    // this is not `set_power`.
+    p.xd = p.xd * 0.1 + xa;
+    p.yd = p.yd * 0.1 + ya;
+    p.zd = p.zd * 0.1 + za;
+    p
+}
+
+/// `LivingEntity.spawnItemParticles(itemStack, count)` — the crumbs that fly from
+/// an entity's mouth while it eats, and the same burst `breakItem` throws when a
+/// tool snaps.
+///
+/// `count` is **5** per periodic emission while consuming and **16** on the final
+/// bite (`ItemStack.onUseTick` and `Consumable.onConsume` respectively); it is a
+/// parameter because those are the two call sites and neither number belongs here.
+///
+/// # Everything is in the entity's own facing frame
+///
+/// Both the spawn offset and the velocity are built in a body-local frame
+/// (`+z` forward, `0.6` blocks ahead of the eye) and then rotated by `-xRot` and
+/// `-yRot`, so crumbs leave the mouth rather than a fixed world direction. Getting
+/// either sign wrong puts them behind the head, where they are invisible from first
+/// person and therefore read as "no particles" — the failure this ordering exists to
+/// avoid. `y_rot_deg` is vanilla's yaw (`0` = south / `+z`) and `x_rot_deg` its pitch
+/// (positive = looking down).
+///
+/// The vertical spawn offset is `-nextFloat() * 0.6 - 0.3`, i.e. **below** the eye,
+/// which is where a mouth is.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors `spawnItemParticles` plus the eye position and facing it reads off the entity"
+)]
+pub fn spawn_item_particles(
+    engine: &mut ParticleEngine,
+    eye_x: f64,
+    eye_y: f64,
+    eye_z: f64,
+    x_rot_deg: f32,
+    y_rot_deg: f32,
+    item: u32,
+    count: u32,
+) {
+    let x_rad = -x_rot_deg.to_radians();
+    let y_rad = -y_rot_deg.to_radians();
+    for _ in 0..count {
+        let (dx, dy, dz) = {
+            let rng = engine.rng();
+            // `new Vec3((nextFloat() - 0.5) * 0.1, nextFloat() * 0.1 + 0.1, 0.0)`
+            let d = (
+                (f64::from(rng.next_float()) - 0.5) * 0.1,
+                f64::from(rng.next_float()).mul_add(0.1, 0.1),
+                0.0,
+            );
+            let d = x_rot(d, x_rad);
+            y_rot(d, y_rad)
+        };
+        let (px, py, pz) = {
+            let rng = engine.rng();
+            // `double y1 = -nextFloat() * 0.6 - 0.3;`
+            // `new Vec3((nextFloat() - 0.5) * 0.3, y1, 0.6)` — note vanilla draws
+            // `y1` *before* the horizontal jitter, so the two `nextFloat()` calls
+            // are in that order and swapping them desynchronises the sequence.
+            let y1 = (-f64::from(rng.next_float())).mul_add(0.6, -0.3);
+            let p = ((f64::from(rng.next_float()) - 0.5) * 0.3, y1, 0.6);
+            let p = x_rot(p, x_rad);
+            y_rot(p, y_rad)
+        };
+        let p = item_particle(
+            eye_x + px,
+            eye_y + py,
+            eye_z + pz,
+            dx,
+            // `addParticle(..., d.y + 0.05, ...)` — the bias is applied at the
+            // call site, not inside the rotation.
+            dy + 0.05,
+            dz,
+            item,
+            engine.rng(),
+        );
+        engine.add(p);
+    }
+}
+
+/// `Vec3.xRot(radians)`.
+fn x_rot((x, y, z): (f64, f64, f64), radians: f32) -> (f64, f64, f64) {
+    let (cos, sin) = (f64::from(radians.cos()), f64::from(radians.sin()));
+    (x, y * cos + z * sin, z * cos - y * sin)
+}
+
+/// `Vec3.yRot(radians)`.
+fn y_rot((x, y, z): (f64, f64, f64), radians: f32) -> (f64, f64, f64) {
+    let (cos, sin) = (f64::from(radians.cos()), f64::from(radians.sin()));
+    (x * cos + z * sin, y, z * cos - x * sin)
+}
+
 /// `CritParticle` — the sparkle on a critical hit.
 pub fn crit(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
     let rng = engine.rng();

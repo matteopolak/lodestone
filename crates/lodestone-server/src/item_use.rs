@@ -79,8 +79,15 @@ pub(crate) struct Food {
 }
 
 /// `Consumables.defaultFood()`/`defaultDrink()`'s shared `consumeSeconds(1.6F)`,
-/// in ticks. Only three items in 26.2 differ, and each is spelled out in
-/// [`FOODS`].
+/// in ticks. Only **two** items in 26.2 differ — `DRIED_KELP` (`0.8F`) and
+/// `HONEY_BOTTLE` (`2.0F`) — and each is spelled out in [`FOODS`], which says the
+/// same thing correctly. This line said "three" and disagreed with its own table.
+///
+/// The same number is also `lodestone_game::consumable::DEFAULT_CONSUME_TICKS`,
+/// which is the client-visible half of the component (the animation, the particle
+/// cadence, the sound). The two tables are deliberately separate — this one is
+/// `minecraft:food` and that one is `minecraft:consumable`, and the sets differ:
+/// `milk_bucket`, `potion` and `ominous_bottle` are drinkable and are not food.
 pub(crate) const DEFAULT_CONSUME_TICKS: i32 = 32;
 
 /// The `minecraft:food` component of `item` (a full registry name), or `None`

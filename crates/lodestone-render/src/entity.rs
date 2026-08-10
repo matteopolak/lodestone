@@ -3558,6 +3558,185 @@ pub fn first_person_item_matrix(
         * display_matrix_for_hand(transform, arm.is_left())
 }
 
+/// `ItemInHandRenderer.applyEatTransform`'s `Math.pow(scaledUsageTime, 27.0)`.
+///
+/// The exponent is the whole character of the animation and the one number a
+/// "reasonable" simplification destroys. `1 - t` (a linear approach) and `1 - t^27`
+/// agree only at the two endpoints: at `remaining = 30` of a 32-tick food the real
+/// jiggle is `0.5755` and the linear reading is `0.03125`, an 18× difference, and by
+/// `remaining = 24` the real one is already `0.9985` against `0.21875`. Linear reads
+/// as the item *drifting* toward the mouth over the whole use; vanilla snaps it
+/// there within about two ticks and then bobs.
+pub const EAT_JIGGLE_EXPONENT: f64 = 27.0;
+
+/// `applyEatTransform`'s `scaledUsageTime < 0.8F` gate on the vertical bob.
+///
+/// **This is a bound on *remaining* time, so it opens *late*, not early.**
+/// `scaledUsageTime` is `currUsageTime / useDuration` where `currUsageTime` counts
+/// **down**, so the bob is suppressed for the first 20% of a use and runs for the
+/// last 80% of it. Reading the comparison as "only near the start" — the natural
+/// reading of `< 0.8` — inverts the animation and is invisible in a still frame.
+pub const EAT_BOB_SCALED_LIMIT: f32 = 0.8;
+
+/// `applyEatTransform`'s `currUsageTime`:
+/// `player.getUseItemRemainingTicks() - frameInterp + 1.0F`.
+///
+/// Named rather than inlined because the `+ 1.0` and the sign of `frameInterp` are
+/// both easy to lose and neither is checkable from a screenshot: the result is a
+/// bob one tick out of phase. Note it can exceed `useDuration` on the first tick of
+/// a use (`remaining == duration` gives `duration + 1`), which makes
+/// `scaledUsageTime > 1` and the jiggle **negative** for that instant. That is
+/// vanilla, not a clamp we forgot — the item flicks away from the mouth before
+/// coming to it.
+#[must_use]
+pub fn eat_usage_time(remaining_ticks: u32, partial_tick: f32) -> f32 {
+    remaining_ticks as f32 - partial_tick + 1.0
+}
+
+/// `ItemInHandRenderer.applyEatTransform`, verbatim:
+///
+/// ```java
+/// float currUsageTime = player.getUseItemRemainingTicks() - frameInterp + 1.0F;
+/// float scaledUsageTime = currUsageTime / itemStack.getUseDuration(player);
+/// if (scaledUsageTime < 0.8F) {
+///    float extraHeightOffset = Mth.abs(Mth.cos(currUsageTime / 4.0F * (float)Math.PI) * 0.1F);
+///    poseStack.translate(0.0F, extraHeightOffset, 0.0F);
+/// }
+/// float eatJiggle = 1.0F - (float)Math.pow(scaledUsageTime, 27.0);
+/// int invert = arm == HumanoidArm.RIGHT ? 1 : -1;
+/// poseStack.translate(eatJiggle * 0.6F * invert, eatJiggle * -0.5F, eatJiggle * 0.0F);
+/// poseStack.mulPose(Axis.YP.rotationDegrees(invert * eatJiggle * 90.0F));
+/// poseStack.mulPose(Axis.XP.rotationDegrees(eatJiggle * 10.0F));
+/// poseStack.mulPose(Axis.ZP.rotationDegrees(invert * eatJiggle * 30.0F));
+/// ```
+///
+/// # Vanilla has no third-person counterpart
+///
+/// This is the *entire* eating animation. `HumanoidModel.ArmPose` has no `EAT` or
+/// `DRINK` variant and `AvatarRenderer.getArmPose` omits both from its chain, so
+/// another player eating is drawn with the ordinary [`ArmPose::Item`](crate::ArmPose::Item)
+/// raise plus crumbs. The dip, the twist and the bob exist only here.
+///
+/// # `EAT` and `DRINK` are the same transform
+///
+/// They are one `switch` case in `submitArmWithItem`, so a potion and a carrot move
+/// identically in the hand. The two animations differ only in duration (via the
+/// item's `consumeSeconds`), sound, and whether particles are emitted at all.
+///
+/// # The `z` term is `eatJiggle * 0.0F`
+///
+/// Kept as a literal zero rather than dropped, because it is the one axis vanilla
+/// deliberately does not move and a reader comparing against the Java otherwise has
+/// to prove the omission was intentional.
+#[must_use]
+pub fn first_person_eat_transform(arm: Arm, curr_usage_time: f32, use_duration: u32) -> Mat4 {
+    let i = arm.invert();
+    let scaled = curr_usage_time / use_duration.max(1) as f32;
+    let bob = if scaled < EAT_BOB_SCALED_LIMIT {
+        // `Mth.abs(Mth.cos(currUsageTime / 4.0F * PI) * 0.1F)` — a 8-tick period,
+        // and the absolute value is what makes it a *bounce* rather than a
+        // sinusoid: it never goes below the resting height.
+        let height = ((curr_usage_time / 4.0 * std::f32::consts::PI).cos() * 0.1).abs();
+        Mat4::from_translation(Vec3::new(0.0, height, 0.0))
+    } else {
+        Mat4::IDENTITY
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "vanilla's own `(float)Math.pow(..., 27.0)`: the pow is evaluated in double and narrowed"
+    )]
+    let jiggle = 1.0 - f64::from(scaled).powf(EAT_JIGGLE_EXPONENT) as f32;
+    bob * Mat4::from_translation(Vec3::new(jiggle * 0.6 * i, jiggle * -0.5, jiggle * 0.0))
+        * Mat4::from_rotation_y((i * jiggle * 90.0).to_radians())
+        * Mat4::from_rotation_x((jiggle * 10.0).to_radians())
+        * Mat4::from_rotation_z((i * jiggle * 30.0).to_radians())
+}
+
+/// The camera-space chain for an item being **eaten or drunk**, replacing
+/// [`first_person_item_chain`] for as long as the use lasts.
+///
+/// ```text
+/// applyEatTransform(arm, currUsageTime, useDuration)
+///   · T(i·0.56, -0.52 + h·-0.6, -0.72)      -- applyItemArmTransform
+/// ```
+///
+/// # Two differences from [`first_person_item_chain`], both from the same `switch`
+///
+/// * **`applyItemArmTransform` comes *last*, not first.** `ItemUseAnimation.EAT` and
+///   `DRINK` have `hasCustomArmTransform() == true`, so `submitArmWithItem` skips the
+///   pre-switch `applyItemArmTransform` and the case applies it *after*
+///   `applyEatTransform`. Putting the offset first instead — the order every other
+///   pose here uses — rotates the item about the camera rather than about the hand,
+///   which swings it across the whole screen.
+/// * **There is no swing.** The `player.isUsingItem()` branch never reaches
+///   `swingArm`, so [`ItemSwingTerms`] and [`first_person_item_attack_chain`] do not
+///   apply. Left-clicking while eating must not move the item.
+#[must_use]
+pub fn first_person_eat_chain(
+    arm: Arm,
+    curr_usage_time: f32,
+    use_duration: u32,
+    inverse_arm_height: f32,
+) -> Mat4 {
+    let i = arm.invert();
+    let [ox, oy, oz] = FIRST_PERSON_ITEM_OFFSET;
+    first_person_eat_transform(arm, curr_usage_time, use_duration)
+        * Mat4::from_translation(Vec3::new(
+            i * ox,
+            oy + inverse_arm_height * FIRST_PERSON_ITEM_EQUIP_DIP,
+            oz,
+        ))
+}
+
+/// [`first_person_eat_chain`] followed by the item's own `firstperson_?hand`
+/// display transform — the eating counterpart of [`first_person_item_matrix`].
+#[must_use]
+pub fn first_person_eat_matrix(
+    arm: Arm,
+    curr_usage_time: f32,
+    use_duration: u32,
+    inverse_arm_height: f32,
+    transform: &DisplayTransform,
+) -> Mat4 {
+    first_person_eat_chain(arm, curr_usage_time, use_duration, inverse_arm_height)
+        * display_matrix_for_hand(transform, arm.is_left())
+}
+
+/// Mesh the item in the first-person hand into a camera-space [`ModelMesh`], to be
+/// drawn through the ordinary [`ModelPipeline`](crate::ModelPipeline) with
+/// [`hand_projection`] alone as the camera uniform (the same uniform the bare arm
+/// uses, and for the same reason: the pose is already camera-space).
+///
+/// `eating` selects the pose: `Some((curr_usage_time, use_duration))` runs
+/// [`first_person_eat_matrix`] and `None` runs [`first_person_item_matrix`]. It is a
+/// parameter rather than a separate function so the two cannot diverge in the
+/// lighting or quad-meshing they apply, and so a caller that forgets to plumb the
+/// use state gets the old behaviour rather than a compile-time choice it can make
+/// wrongly in two places.
+#[must_use]
+pub fn first_person_item_mesh_with_use(
+    quads: &[BakedQuad],
+    gui_light: GuiLight,
+    arm: Arm,
+    attack_anim: f32,
+    inverse_arm_height: f32,
+    transform: &DisplayTransform,
+    light: u8,
+    eating: Option<(f32, u32)>,
+) -> ModelMesh {
+    let pose = match eating {
+        Some((curr_usage_time, use_duration)) => first_person_eat_matrix(
+            arm,
+            curr_usage_time,
+            use_duration,
+            inverse_arm_height,
+            transform,
+        ),
+        None => first_person_item_matrix(arm, attack_anim, inverse_arm_height, transform),
+    };
+    mesh_item_quads_with_light(quads, pose, gui_light, light)
+}
+
 /// Mesh the item in the first-person hand into a camera-space [`ModelMesh`], to be
 /// drawn through the ordinary [`ModelPipeline`](crate::ModelPipeline) with
 /// [`hand_projection`] alone as the camera uniform (the same uniform the bare arm

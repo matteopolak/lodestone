@@ -24,6 +24,8 @@
 //!   (player-native vs. menu) slot indexing.
 //! * [`click`] — the full container click state machine, including the
 //!   multi-stage drag-distribute protocol.
+//! * [`consumable`] — the `minecraft:consumable` component: consume duration, the
+//!   eat/drink animation, and the particle/sound cadence both sides read.
 //! * [`reconcile`] — the optimistic predict-then-reconcile seam.
 //! * [`mining`] — block breaking, the dig state machine and item pickup.
 //! * [`placement`] — block placement / item use: the interaction-vs-placement
@@ -47,6 +49,7 @@ pub mod bossbar;
 pub mod chat;
 pub mod chat_ack;
 pub mod click;
+pub mod consumable;
 pub mod container;
 pub mod custom_item;
 pub mod debug_feeds;

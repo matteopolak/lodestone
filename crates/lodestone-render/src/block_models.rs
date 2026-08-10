@@ -2092,6 +2092,45 @@ impl BlockModels {
         self.state(state_id).particle_uv
     }
 
+    /// Normalised atlas UVs `[u0, v0, u1, v1]` of the sprite a
+    /// `BreakingItemParticle` of `item` should sample — the crumbs vanilla throws
+    /// while an entity eats, and when a tool breaks.
+    ///
+    /// # Why the bounding rect and not one quad's UVs
+    ///
+    /// Vanilla resolves this through `ItemStackRenderState.pickParticleMaterial`,
+    /// which picks a **random** one of the render state's layers' particle
+    /// materials. Every consumable in 26.2 is a single-layer `item/generated`
+    /// sprite, so there is exactly one material to pick and the choice is not
+    /// observable — but a sprite bakes into a *slab* here (front and back faces plus
+    /// per-pixel edge extrusions), and the edge quads sample sub-rects of the same
+    /// sprite. Taking any single quad therefore risks a one-texel sliver, while the
+    /// union over all of them is exactly the sprite's own rect. That also degrades
+    /// sensibly for a multi-layer or 3-D item rather than picking arbitrarily.
+    ///
+    /// `None` for an unknown item, and for an item whose GUI form bakes no quads
+    /// (a `special` renderer such as a shield or a chest) — the caller counts that
+    /// as unresolved rather than drawing an arbitrary texel.
+    ///
+    /// Uses the **GUI** form deliberately: the in-hand variant of the 26 items with
+    /// a `display_context` fork can name a different model entirely
+    /// (`item/spyglass_in_hand`), and the crumbs should look like the item, not like
+    /// how it is being held.
+    #[must_use]
+    pub fn item_particle_uv(&self, item: &ResourceLocation) -> Option<[f32; 4]> {
+        let quads = &self.item(item)?.quads;
+        let mut rect: Option<[f32; 4]> = None;
+        for quad in quads {
+            for [u, v] in quad.uvs {
+                rect = Some(match rect {
+                    None => [u, v, u, v],
+                    Some([u0, v0, u1, v1]) => [u0.min(u), v0.min(v), u1.max(u), v1.max(v)],
+                });
+            }
+        }
+        rect
+    }
+
     /// The `[r, g, b]` multiplier a break/hit particle of `state_id` applies on
     /// top of its `#particle` sprite, or `None` for an untinted state — see
     /// [`StateModel::particle_tint`] for why this is a separate lookup from the
