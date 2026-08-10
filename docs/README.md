@@ -165,6 +165,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   every one of the 32,366 block states, plus the type's volume and pitch. It is the
   data half of every surface sound a block makes, and its absence is the whole reason
   block breaking was silent (see [sound playback](./sound-playback.md)).
+- [Block support, placement consumption, and `Item.use`](./block-support-and-item-use.md) —
+  Three joins the integrated server was missing, all of them producer-side gaps rather
+  than missing models: a block whose support is destroyed now pops off and drops,
+  placing a block now costs you the block, and a right-click in mid-air now eats food
+  and equips armour instead of doing nothing at all.
 - [Bone meal](./bone-meal.md) — The instant-growth right-click: a port of 26.2's
   `BoneMealItem::useOn` and the per-block `isValidBonemealTarget` /
   `isBonemealSuccess` / `performBonemeal` triples it dispatches to, in
@@ -1463,6 +1468,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   plate, one striped row per player carrying that player's display name and a
   five-band ping icon, split into columns past twenty players, with the server's
   header above and footer below when it sent them.
+- [Taming and breeding](./taming-and-breeding.md) — The server-side model for making
+  a wild animal *yours* and for making two of them produce a third: per-species taming
+  (a wolf, a cat, a parrot and a horse are four different mechanisms, not one with
+  different constants), the ownership state that survives a reconnect, sitting and
+  following, and the right-click that puts two adults in love. It lives in
+  `lodestone_server::mobs` plus two new goals in `lodestone_entity::ai::goals`.
 - [The task runner (`just`)](./task-runner.md) — A [`Justfile`](../Justfile) at the
   repo root, run with `casey/just` (installed at `/opt/homebrew/bin/just`, 1.58.0+).
   It gives every health check, `xtask` invocation, and `LODESTONE_REGEN` regeneration

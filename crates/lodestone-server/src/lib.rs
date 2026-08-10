@@ -112,6 +112,7 @@ mod block_entities;
 /// [`MobSim::spawn_item`] and `server`'s block-break arm.
 pub mod block_drops;
 mod block_placement;
+mod block_support;
 /// Bone meal's instant-growth right-click — the rule layer for one item, on top
 /// of the growth families [`growth_tick`] already models. Public because the
 /// producer is a right-click handler outside the tick loop.
@@ -204,6 +205,11 @@ mod hand_use;
 mod hopper;
 mod integrated;
 mod inventory;
+/// `Item.use`'s ordered arms — eating and drinking, and equipping armour by
+/// right-click. The join between `crate::food`'s arithmetic, the armour slots
+/// `crate::inventory` already models, and the `UseItem` packet that reached
+/// neither.
+mod item_use;
 /// The join burst's generation scheduler (`docs/plans/worldgen-rewrite.md`
 /// Unit 10): a primed sliding window over the wire order, replacing the per-ring
 /// barrier `4307b59` reinstated. `pub` because its gates measure in-flight
@@ -296,6 +302,10 @@ pub mod spawn_egg;
 /// Structure chests (issue #337): the data-marker pass that fills a shipwreck's,
 /// igloo's or ocean ruin's chest with a rolled loot table at generation time.
 mod structure_loot;
+/// Gates for the support-collapse pass — `server::collapse_unsupported` driven
+/// against a rig world, one arm per block family shape. `#![cfg(test)]` inside,
+/// like the redstone gate modules beside it.
+mod support_collapse_gate;
 mod tick;
 mod vitals;
 mod weather;
