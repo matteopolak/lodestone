@@ -315,10 +315,21 @@ pub const CONCURRENT_TICK_RADIUS: i32 = 3;
 ///
 /// # Why this is added to the view rather than assumed inside it
 ///
-/// `mob_area` is centred on world spawn and never moves, so once the player has
-/// walked away it is 49 columns *outside* the streamed view that are still
-/// touched at 20 Hz. The working set is the **union** of the concurrent scans,
-/// not the largest of them.
+/// **This section's original reason is now historical, and the replacement reason
+/// is weaker but still real.** It used to read: *"`mob_area` is centred on world
+/// spawn and never moves, so once the player has walked away it is 49 columns
+/// outside the streamed view that are still touched at 20 Hz"* — which was true,
+/// and was the bug `crate::tick_area` fixes. The tick area now follows the players,
+/// so in the steady state those 49 columns are a **subset** of the streamed view
+/// rather than a disjoint square, and the union has collapsed.
+///
+/// The headroom is kept because the collapse is not instantaneous. The area moves
+/// the tick a player's movement packet lands, which is before that strip has
+/// finished streaming; and `crate::tick::run_tick_loop`'s
+/// [`crate::tick::INITIAL_RANDOM_TICK_DEFERRAL_TICKS`] deferral, a teleport, and the
+/// playerless fallback square all put the tick area transiently outside the view.
+/// The working set is still the **union** of the concurrent scans, not the largest
+/// of them; the union is simply much smaller than it was.
 ///
 /// And the union is what matters rather than the frequency, which is the
 /// counter-intuitive half. Issue #504's investigation measured a column polled
@@ -1209,6 +1220,7 @@ mod tests {
             // Issue #468: this gate measures column generation, not persistence,
             // so a fresh handle -- behaviourally the locals this replaced.
             crate::region_source::ScheduledTickHandle::default(),
+            crate::tick_area::TickFollow::default(),
         ));
         tokio::task::yield_now().await;
         for _ in 0..ticks {

@@ -304,6 +304,7 @@ fn spawn_loop(world: Arc<RigWorld>, feed: &BlockTickFeed) {
         (0..=0, 0..=0),
         ExplosionFeed::default(),
         crate::region_source::ScheduledTickHandle::default(),
+        crate::tick_area::TickFollow::default(),
     ));
 }
 
@@ -1283,6 +1284,7 @@ async fn drive_hoppers(
         (0..=0, 0..=0),
         ExplosionFeed::default(),
         crate::region_source::ScheduledTickHandle::default(),
+        crate::tick_area::TickFollow::default(),
     ));
     tokio::task::yield_now().await;
     let mut published = Vec::new();
@@ -1543,6 +1545,7 @@ async fn drive_with_handle(
         (0..=0, 0..=0),
         ExplosionFeed::default(),
         scheduled.clone(),
+        crate::tick_area::TickFollow::default(),
     ));
     tokio::task::yield_now().await;
     let mut published = Vec::new();

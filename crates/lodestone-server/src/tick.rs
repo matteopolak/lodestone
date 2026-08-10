@@ -894,6 +894,11 @@ pub(crate) async fn run_tick_loop<W>(
     tick_area: (RangeInclusive<i32>, RangeInclusive<i32>),
     explosion_out: ExplosionFeed,
     scheduled: crate::region_source::ScheduledTickHandle,
+    // Which dimension this loop serves and where its players are, so `tick_area`
+    // above becomes a *fallback* rather than the whole story. `TickFollow::default()`
+    // carries an empty anchor set and therefore reproduces the fixed-area behaviour
+    // exactly — see `crate::tick_area`.
+    follow: crate::tick_area::TickFollow,
 ) where
     W: ChunkSource,
 {
@@ -938,6 +943,7 @@ pub(crate) async fn run_tick_loop<W>(
         // every tick), they are just at their defaults with nothing able to
         // change them, which is exactly the behaviour before #327.
         crate::world_state::WorldStateHandle::default(),
+        follow,
     )
     .await
 }
@@ -1013,6 +1019,10 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // *because* there was no registry here; three of them now read this instead,
     // and the clock is no longer two locals.
     world_state: crate::world_state::WorldStateHandle,
+    // See [`run_tick_loop`]'s own parameter comment: the dimension this loop serves
+    // plus the shared player-anchor set, which together turn `tick_area` from the
+    // whole simulated world into a fallback for when no player is in it.
+    follow: crate::tick_area::TickFollow,
 ) where
     W: ChunkSource,
 {
@@ -1095,6 +1105,31 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         crate::explosion_blocks::EXPLOSION_BEHAVIOR_SEED ^ 0x100D_5EED,
     );
     let (tick_cx_range, tick_cz_range) = tick_area;
+    // **The columns this loop simulates, and they now follow the players.**
+    //
+    // This used to be two `RangeInclusive`s destructured above and iterated
+    // directly, which is what made the whole world tick a 49-column square nailed
+    // to chunk (0, 0) — `crate::chunk_store`'s module doc recorded the symptom
+    // ("`mob_area` is centred on world spawn and never moves") and natural
+    // spawning, random ticks and the fluid queue all inherited it. See
+    // `crate::tick_area` for the design, the per-dimension filter and why an empty
+    // anchor set deliberately falls back to exactly the square the caller passed.
+    //
+    // The two ranges above are still read: they *are* that fallback, and every
+    // playerless caller of this loop (`crate::chunk_store`'s memory gates,
+    // `crate::redstone_placement_gate`, this module's own tests) depends on it.
+    let mut area = crate::tick_area::FollowArea::new(
+        follow,
+        tick_cx_range.clone(),
+        tick_cz_range.clone(),
+    );
+    // The terrain view the natural spawner reads, rebuilt only when `area` moves
+    // (or on the staleness cadence below) rather than per tick — see
+    // `FollowArea::snapshot_terrain` for why that gate is the whole cost story.
+    // `None` until the first cycle needs one, so a loop with `spawn_mobs` off
+    // never pays for a snapshot at all.
+    let mut spawn_terrain: Option<std::sync::Arc<crate::mobs::ChunkWorld>> = None;
+    let mut spawn_terrain_built_at: u64 = 0;
     // Issues #221/#222: the natural-spawn driver. Long-lived rather than built
     // per tick because it owns the per-column light cache — see
     // `crate::natural_spawn`'s module doc for the per-cycle budget and the TTL
@@ -1111,19 +1146,6 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         NATURAL_SPAWN_SEED,
     )
     .with_world_seed(crate::worldgen_data::active_world_seed());
-    // The chunks the spawn cycle and the census run over — the same fixed tick
-    // area everything else here uses, for the reason this module's own doc gives
-    // (there is still no loaded-chunk registry to derive a player-relative one
-    // from). Built once: it does not move.
-    let spawn_chunks: Vec<(i32, i32)> = tick_cz_range
-        .clone()
-        .flat_map(|cz| tick_cx_range.clone().map(move |cx| (cx, cz)))
-        .collect();
-    // Vanilla's `spawnableChunkCount` for the cap formula. `MAGIC_NUMBER` (289)
-    // worth of chunks yields caps equal to the per-chunk maxima, so a smaller
-    // tick area scales the caps down with it — which is the honest answer for an
-    // area this loop really does simulate.
-    let spawnable_chunks = i32::try_from(spawn_chunks.len()).unwrap_or(i32::MAX);
     let mut despawn_rng = crate::mob_spawn::SpawnRng::new(NATURAL_SPAWN_SEED ^ 0x5DEE_C0DE);
     // Issue #326 / `docs/plans/world-state.md` B1: the world border, ticked
     // first each loop (per `ServerLevel.tick`'s order) and owned by this
@@ -1172,6 +1194,12 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         tokio::time::sleep_until(next_tick_at).await;
 
         let tick_start = tokio::time::Instant::now();
+        // **Where the world is ticking this tick.** Integer arithmetic over at most
+        // a few dozen coordinate pairs, so it is affordable every tick; the
+        // expensive half (the terrain snapshot below) is gated on the `true` this
+        // returns, which is what keeps a chunk-boundary crossing from putting a
+        // whole area's worth of column fetches inside one unserviced window.
+        let area_moved = area.recompute();
         // Issue #326 B1: border ticks first, per `ServerLevel.tick`'s order
         // (`WorldBorder.tick` then the rest of the level's tick). Inert today —
         // a static full-size default — but this is where a resize's lerp
@@ -1244,7 +1272,37 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             let players: Vec<lodestone_model::Vec3> =
                 mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());
             if !players.is_empty() {
-                let world = mobs.with(|sim| sim.world());
+                // **The terrain the spawn cycle runs against, and it now follows the
+                // player.** This used to be `mobs.with(|sim| sim.world())` — the
+                // sim's own leaked `ChunkWorld`, a 49-column snapshot of `mob_area`
+                // taken once at world open and never moved. Outside those columns
+                // `column()` returns `None`, so `random_pos_within` found no surface
+                // and `cluster` returned an empty vec: **natural spawning stopped
+                // working entirely once the player walked out of the origin box**,
+                // which is what an earlier agent measured reaching the wire and
+                // could not fix from where it was.
+                //
+                // Rebuilt only when the area moved, or once per `LIGHT_TTL_TICKS` so
+                // player edits eventually appear — the same cadence the spawner
+                // already drops its light cache on, which is deliberate: a fresh
+                // snapshot with a stale light cache would light cells from terrain
+                // that is no longer there. Everything else in this loop reads the
+                // live `ChunkSource` per column already; only this one wants a view
+                // that is stable for the duration of a cycle.
+                let stale = game_tick.saturating_sub(spawn_terrain_built_at)
+                    >= crate::natural_spawn::LIGHT_TTL_TICKS;
+                if area_moved || stale || spawn_terrain.is_none() {
+                    spawn_terrain = Some(area.snapshot_terrain(&*world));
+                    spawn_terrain_built_at = game_tick;
+                }
+                // `expect` over a second `if let`: the branch above assigns `Some`
+                // whenever it is `None`, so this cannot fail, and unwrapping here
+                // keeps the failure loud rather than silently skipping a cycle.
+                let spawn_world = std::sync::Arc::clone(
+                    spawn_terrain
+                        .as_ref()
+                        .expect("the branch above assigns a terrain view when none exists"),
+                );
                 // The moon phase, which in 26.2 is the whole of
                 // `SURFACE_SLIME_SPAWN_CHANCE` (0.0 at new moon, 0.5 at full) —
                 // see `NaturalSpawner::surface_slime_spawn_chance`. This loop's own
@@ -1263,10 +1321,14 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 // store rather than reusing `peaceful` above so the two cannot
                 // drift; both are one bool copy per tick.
                 natural_spawner.set_difficulty(world_state.difficulty().0);
-                natural_spawner.begin_cycle(world, game_tick, players.clone());
+                natural_spawner.begin_cycle(spawn_world, game_tick, players.clone());
                 mobs.with(|sim| {
-                    let mut state = sim.census(spawnable_chunks);
-                    sim.run_spawn_cycle(&mut state, &mut natural_spawner, &spawn_chunks);
+                    // Vanilla's `spawnableChunkCount` for the cap formula, read off
+                    // the area actually simulated rather than a constant: `MAGIC_NUMBER`
+                    // (289) worth of chunks yields caps equal to the per-chunk maxima,
+                    // so a smaller follow area scales every category cap down with it.
+                    let mut state = sim.census(area.spawnable_chunks());
+                    sim.run_spawn_cycle(&mut state, &mut natural_spawner, area.chunks());
                 });
             }
             // Nearest-player despawn runs whether or not anything spawned: it is
@@ -1794,8 +1856,11 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // [`INITIAL_RANDOM_TICK_DEFERRAL_TICKS`] for the arithmetic.
         let tick_speed = world_state.random_tick_speed();
         if game_tick > INITIAL_RANDOM_TICK_DEFERRAL_TICKS && tick_speed > 0 {
-            for cz in tick_cz_range.clone() {
-                for cx in tick_cx_range.clone() {
+            // The follow area rather than the two fixed ranges: crops, grass, fire,
+            // leaf decay and every other randomly-ticking block now grow where the
+            // player is standing instead of only around chunk (0, 0).
+            for &(cx, cz) in area.chunks() {
+                {
                     let mut column = world.column(cx, cz);
                     // Issue #508: the *rule*, not `DEFAULT_RANDOM_TICK_SPEED`.
                     // The getter has existed and been tested since #327; this line
@@ -1950,6 +2015,7 @@ mod tests {
             tick_area,
             ExplosionFeed::default(),
             crate::region_source::ScheduledTickHandle::default(),
+            crate::tick_area::TickFollow::default(),
         ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the
@@ -1990,6 +2056,7 @@ mod tests {
             tick_area,
             ExplosionFeed::default(),
             crate::region_source::ScheduledTickHandle::default(),
+            crate::tick_area::TickFollow::default(),
         ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the
@@ -2238,6 +2305,7 @@ mod tests {
             tick_area,
             ExplosionFeed::default(),
             crate::region_source::ScheduledTickHandle::default(),
+            crate::tick_area::TickFollow::default(),
         ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the
@@ -2422,6 +2490,7 @@ mod tests {
             (64..=64, 64..=64),
             ExplosionFeed::default(),
             crate::region_source::ScheduledTickHandle::default(),
+            crate::tick_area::TickFollow::default(),
         ));
         // See `ten_periods_advance_exactly_ten_ticks_with_no_overrun`: the
         // spawned task must reach its first `Instant::now()` before any
@@ -2439,6 +2508,132 @@ mod tests {
         }
         let edits = recorded.lock().expect("poisoned").clone();
         (edits, published)
+    }
+
+    /// A source that records which chunk columns the loop asked for, so a gate can
+    /// see **where** the world tick is actually running.
+    ///
+    /// Terrain is an empty column, deliberately: nothing here reads a block back,
+    /// and an empty column makes the random-tick pass produce no events, so the
+    /// recorded set is exactly "which columns the loop visited" with no other
+    /// writer confusing it.
+    #[derive(Default)]
+    struct ColumnProbe(Arc<Mutex<Vec<(i32, i32)>>>);
+
+    impl ChunkSource for ColumnProbe {
+        fn column(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
+            self.0.lock().expect("probe lock poisoned").push((cx, cz));
+            crate::chunk::ChunkColumn::new(0, 16)
+        }
+
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            // Deliberately *not* `self.column(..)`: a block-state probe must not
+            // land in the recorded set, or the block-entity scan and the fluid pass
+            // would be indistinguishable from the random-tick area this measures.
+            "minecraft:air".to_owned()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
+    /// **The world tick follows the player, and it stops ticking the origin.**
+    ///
+    /// This is the production-level gate for `crate::tick_area`: it drives the real
+    /// [`run_tick_loop`] and observes which columns the random-tick pass fetches.
+    ///
+    /// # Why the player is at chunk (100, -37)
+    ///
+    /// Every other gate in this area puts the player at chunk `(0, 0)`, which is the
+    /// single position where "a box fixed at the origin" and "a box centred on the
+    /// player" are the **same set** — so none of them can fail under the old
+    /// behaviour. `(100, -37)` is far outside the fallback square, uses a negative
+    /// axis, and has `100 != -37` so the axes cannot be transposed unnoticed.
+    ///
+    /// # The assertion, stated as the old behaviour's failure
+    ///
+    /// The fallback square (`(64..=64, 64..=64)` here) must be visited **zero**
+    /// times and the player's own column must be visited, which is exactly inverted
+    /// from what the fixed area did. Asserting only "the player's column is visited"
+    /// would pass for an area that ticks *both*, i.e. for a widened constant rather
+    /// than a moved one.
+    #[tokio::test(start_paused = true)]
+    async fn the_random_tick_pass_follows_the_player_and_abandons_the_fixed_area() {
+        let (mobs, out, block_entities) = handles();
+        let visited = Arc::new(Mutex::new(Vec::new()));
+        let source = Arc::new(ColumnProbe(Arc::clone(&visited)));
+
+        // The anchor set on its own rather than through a `WorldStateHandle`: this
+        // gate is about the geometry, and `run_tick_loop` (the wrapper) supplies its
+        // own default world state, whose `random_tick_speed` is already vanilla's
+        // non-zero default.
+        let anchors = crate::tick_area::TickAnchors::default();
+        anchors.publish(vec![crate::tick_area::TickAnchor {
+            dimension: crate::dimension::Dimension::Overworld,
+            cx: 100,
+            cz: -37,
+        }]);
+        let follow = crate::tick_area::TickFollow {
+            dimension: crate::dimension::Dimension::Overworld,
+            radius: 1,
+            anchors,
+        };
+
+        tokio::spawn(run_tick_loop(
+            mobs,
+            out,
+            block_entities,
+            Arc::new(TickClock::new()),
+            source,
+            BlockTickFeed::default(),
+            // The fallback: a single column at (64, 64), nowhere near the player.
+            // Under the old fixed-area behaviour this is the *only* column that
+            // would ever be visited.
+            (64..=64, 64..=64),
+            ExplosionFeed::default(),
+            crate::region_source::ScheduledTickHandle::default(),
+            follow,
+        ));
+        // See `a_healthy_run_never_records_an_overrun`: the spawned task must reach
+        // its first `Instant::now()` before any `advance`.
+        tokio::task::yield_now().await;
+
+        // Past `INITIAL_RANDOM_TICK_DEFERRAL_TICKS`, derived rather than restated —
+        // raising the deferral must move this expectation with it rather than
+        // silently voiding the gate.
+        for _ in 0..(INITIAL_RANDOM_TICK_DEFERRAL_TICKS + 5) {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+        }
+
+        let seen = visited.lock().expect("poisoned").clone();
+        assert!(
+            !seen.is_empty(),
+            "the random-tick pass must have run at all — if this is empty the \
+             deferral or the tick-speed rule kept it from ever firing, and every \
+             assertion below would be vacuous"
+        );
+        assert!(
+            seen.contains(&(100, -37)),
+            "the player's own column must be ticked; visited {seen:?}"
+        );
+        // At radius 1 the area is the 3x3 around the player, so its corners are
+        // predicted exactly rather than bounded.
+        for corner in [(99, -38), (101, -36), (99, -36), (101, -38)] {
+            assert!(
+                seen.contains(&corner),
+                "the 3x3 around the player must be ticked, missing {corner:?}"
+            );
+        }
+        // The claim the old behaviour cannot pass.
+        assert!(
+            !seen.contains(&(64, 64)),
+            "the fallback column was still ticked, so the area did not move — this \
+             is the assertion a player at chunk (0, 0) could never make"
+        );
+        assert!(
+            !seen.contains(&(-37, 100)),
+            "the axes must not be transposed"
+        );
     }
 
     /// The half-width of [`grass_world`]'s patch. An edit inside it is under
@@ -2575,6 +2770,7 @@ mod tests {
                 &feed,
                 crate::region_source::ScheduledTickHandle::default(),
                 crate::world_state::WorldStateHandle::default(),
+                crate::tick_area::TickFollow::default(),
             )
             .await;
         });
@@ -2650,6 +2846,7 @@ mod tests {
                 &feed,
                 crate::region_source::ScheduledTickHandle::default(),
                 crate::world_state::WorldStateHandle::default(),
+                crate::tick_area::TickFollow::default(),
             )
             .await;
         });
@@ -2741,6 +2938,7 @@ mod tests {
                 &loop_feed,
                 crate::region_source::ScheduledTickHandle::default(),
                 crate::world_state::WorldStateHandle::default(),
+                crate::tick_area::TickFollow::default(),
             )
             .await;
         });
@@ -2860,6 +3058,7 @@ mod tests {
             (0..=0, 0..=0),
             ExplosionFeed::default(),
             scheduled,
+            crate::tick_area::TickFollow::default(),
         ));
         tokio::task::yield_now().await;
 

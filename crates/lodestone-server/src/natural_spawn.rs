@@ -657,7 +657,16 @@ pub struct NaturalSpawner {
     /// [`begin_cycle`](Self::begin_cycle) rather than stored at construction:
     /// [`crate::MobHandle::reseed`] replaces the sim's world, and a spawner
     /// holding the old one would light chunks nothing paths over.
-    world: Option<&'static ChunkWorld>,
+    ///
+    /// **`Arc`, not the `&'static` this used to be.** The old lifetime came from
+    /// `MobHandle`'s deliberate `Box::leak`, which is sound only because that
+    /// snapshot is built **once** and never moves. The spawn area now *follows the
+    /// player* (`crate::tick_area::FollowArea`), so this view is replaced every
+    /// time the area moves — and leaking one 49-column snapshot per chunk boundary
+    /// crossed would leak roughly 31 KiB per column for the life of the process.
+    /// Refcounting it costs one atomic increment per accessor call and bounds the
+    /// memory at one live view.
+    world: Option<std::sync::Arc<ChunkWorld>>,
     /// The **world generation seed**, which is a different number from the
     /// spawn-RNG seed `new` takes and is used for exactly one thing:
     /// `WorldgenRandom.seedSlimeChunk`. See [`with_world_seed`](Self::with_world_seed).
@@ -763,7 +772,12 @@ impl NaturalSpawner {
 
     /// Starts a cycle at `tick` with `players` as the loaded players, resetting
     /// the per-cycle light budget and dropping the cache once its TTL is up.
-    pub fn begin_cycle(&mut self, world: &'static ChunkWorld, tick: u64, players: Vec<Vec3>) {
+    pub fn begin_cycle(
+        &mut self,
+        world: std::sync::Arc<ChunkWorld>,
+        tick: u64,
+        players: Vec<Vec3>,
+    ) {
         self.world = Some(world);
         self.players = players;
         self.lit_this_cycle = 0;
@@ -818,7 +832,7 @@ impl NaturalSpawner {
     /// per-cycle budget allows. `None` means "not known this cycle" — the caller
     /// treats that as "do not spawn", never as darkness.
     fn light_at(&mut self, x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
-        let world = self.world?;
+        let world = self.world.clone()?;
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         let (lx, lz) = (x.rem_euclid(16) as usize, z.rem_euclid(16) as usize);
         if !self.lights.contains_key(&(cx, cz)) {
@@ -848,7 +862,7 @@ impl NaturalSpawner {
         if y < rule.y_range.0 || y > rule.y_range.1 {
             return false;
         }
-        let Some(world) = self.world else {
+        let Some(world) = self.world.clone() else {
             return false;
         };
 
@@ -1005,6 +1019,7 @@ impl NaturalSpawner {
         let surface_biome = surface_band
             && self
                 .world
+                .as_ref()
                 .and_then(|w| w.biome_at(x, y, z))
                 .is_some_and(|b| SURFACE_SLIME_BIOMES.contains(&b.as_str()));
         if surface_biome {
@@ -1027,7 +1042,7 @@ impl NaturalSpawner {
         y: i32,
         z: i32,
     ) -> Option<(&'static SpawnRule, ResourceKey, i32, i32)> {
-        let biome = self.world?.biome_at(x, y, z)?;
+        let biome = self.world.clone()?.biome_at(x, y, z)?;
         let entries = self.biomes.get(&biome)?.for_category(worldgen_category(category));
         let total: i32 = entries.iter().map(|e| e.weight.max(0)).sum();
         if total <= 0 {
@@ -1056,7 +1071,7 @@ impl SpawnCandidateSource for NaturalSpawner {
     /// group) and its count, then the rule's own light and chance draws.
     fn cluster(&mut self, category: MobCategory, cx: i32, cz: i32) -> Vec<SpawnCandidate> {
         let mut out = Vec::new();
-        let Some(world) = self.world else {
+        let Some(world) = self.world.clone() else {
             return out;
         };
         let Some(start) = self.random_pos_within(cx, cz) else {
@@ -1162,7 +1177,7 @@ impl NaturalSpawner {
     /// Vanilla `getRandomPosWithin`: a random column in the chunk, then a Y
     /// uniform in `[min_y, surface + 1]`.
     fn random_pos_within(&mut self, cx: i32, cz: i32) -> Option<(i32, i32, i32)> {
-        let world = self.world?;
+        let world = self.world.clone()?;
         let x = cx * 16 + self.rng.next_int(16);
         let z = cz * 16 + self.rng.next_int(16);
         let min_y = world.floor_y();
