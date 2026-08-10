@@ -140,6 +140,8 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
         // Not a player, so no skin can apply.
         player_skin: None,
         // Not an experience orb, so the orb billboard pass never claims it.
+        // No variant texture axis on these subjects; the model sheet applies.
+        variant_sheet: None,
         experience_orb_value: None,
     };
     // The negative control: identical in every respect except shear state —

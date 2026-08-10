@@ -148,6 +148,23 @@ pub(super) struct EntityRenderer {
     /// flight and themselves afterwards. Empty against every offline-mode server,
     /// which sends no `textures` property at all — see `crate::remote_skins`.
     pub(super) player_skins: HashMap<String, wgpu::BindGroup>,
+    /// Variant mob sheets — one bind group per corpus **reference**
+    /// (`entity/wolf/wolf_ashen`), from
+    /// [`crate::resources::load_entity_variant_textures`].
+    ///
+    /// This is what gives `EntityTexture::resolve` a production reader. Before it,
+    /// the corpus modelled nine wolf breeds and three climate skins and the whole
+    /// render path asked only for `default_path()`, so every wolf drew pale and
+    /// every pig drew temperate.
+    ///
+    /// Keyed by `String` rather than `&'static str` for the same reason
+    /// [`Self::player_skins`] is: the key is derived from a jar listing at load
+    /// time, so making it static would mean leaking one string per sheet.
+    ///
+    /// A miss is **not** a failure — the draw falls back to
+    /// [`Self::textures`]' per-model sheet, which is exactly the previous
+    /// behaviour. Empty with no vanilla pack.
+    pub(super) variant_textures: HashMap<String, wgpu::BindGroup>,
 }
 
 impl EntityRenderer {
@@ -183,6 +200,21 @@ impl EntityRenderer {
             let bg = pipeline.texture_bind_group(device, &view, &sampler);
             textures.insert(name, bg);
         }
+
+        // The variant sheets, keyed by corpus reference. Loaded from the same pack
+        // stack as `real` above; empty without one, and every mob then draws its
+        // model's default sheet exactly as it did before this map existed.
+        let variant_textures: HashMap<String, wgpu::BindGroup> =
+            crate::resources::load_entity_variant_textures()
+                .iter()
+                .map(|(reference, img)| {
+                    let view = entity_texture_from_image(device, queue, img);
+                    (
+                        reference.clone(),
+                        pipeline.texture_bind_group(device, &view, &sampler),
+                    )
+                })
+                .collect();
 
         // The armour layers. Four meshes, uploaded once and shared by every
         // material — the geometry depends only on the slot's inflation, so
@@ -364,6 +396,7 @@ impl EntityRenderer {
             // Nothing until a skin is fetched; see `player_skins`' doc for why a
             // miss falls back rather than failing.
             player_skins: HashMap::new(),
+            variant_textures,
         }
     }
 

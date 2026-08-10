@@ -810,6 +810,30 @@ pub struct EntityDraw {
     /// puts the arm UVs a texel out; the wide sheet on the slim rig leaves a gap
     /// at the shoulder. Neither reads as a model bug.
     pub player_skin: Option<crate::remote_skins::RemoteSkin>,
+    /// The **variant** texture sheet this entity resolves to — a corpus reference
+    /// like `entity/wolf/wolf_ashen` — or `None` for an entity whose model has no
+    /// variant axis, or whose reported variant carries nothing that axis can use.
+    ///
+    /// Resolved once per poll in [`extract_entity_draws`] by
+    /// [`lodestone_render::entity_variant_sheet`], which is
+    /// `EntityTexture::resolve`'s **first production caller**: the corpus has
+    /// modelled nine wolf breeds and three climate skins the whole time, and every
+    /// consumer asked only for `default_path()`, so every wolf drew pale and every
+    /// pig drew temperate. A function with zero production *readers* is the dual of
+    /// this repo's usual island, and a connectedness scan cannot see it — the packet
+    /// decodes, the fold lands on a component, and nothing downstream asks.
+    ///
+    /// Consumed exactly like [`Self::player_skin`]: it joins the draw-grouping key
+    /// so one batch is one sheet, and a *miss* in the shell's variant texture map
+    /// falls back to the model's own sheet rather than failing. Two mobs of the same
+    /// species and different breeds are therefore two batches, which is what vanilla
+    /// pays too — its `getTextureLocation` is per entity.
+    ///
+    /// **A wolf's tame state is not part of this yet, and that is a real gap.**
+    /// `lodestone_render::entity_variant_sheet` pins `WolfState::Wild` because
+    /// vanilla's tame bit (`TamableAnimal.DATA_FLAGS_ID & 4`) reaches no field of
+    /// `EntityMetadataUpdate`, so the client cannot know. See that function's doc.
+    pub variant_sheet: Option<&'static str>,
     /// An experience orb's XP value (`ExperienceOrb.DATA_VALUE`), bridged off the
     /// ingest entity's [`ExperienceOrbValue`] component — `None` for every entity
     /// that is not an orb, which is the switch the orb pass keys on.
@@ -1390,6 +1414,7 @@ pub fn extract_pickup_draws(
             on_fire: false,
             // An item entity is never a player either.
             player_skin: None,
+            variant_sheet: None,
         });
     }
 }
@@ -1791,6 +1816,10 @@ pub fn extract_entity_draws(
     // nothing to `spawn_track`/`update_track` and nothing to the tuple above,
     // which is already at fourteen.
     orb_values: Query<&ExperienceOrbValue>,
+    // The wire variant, on the ingest entity, bridged like `orb_values` above —
+    // resolved to a texture sheet by `lodestone_render::entity_variant_sheet`. See
+    // `EntityDraw::variant_sheet`.
+    variants: Query<&lodestone_ecs::entity::Variant>,
     tracks: Query<(
         &MinecraftEntityId,
         &RenderKind,
@@ -1954,9 +1983,24 @@ pub fn extract_entity_draws(
         } else {
             None
         };
+        // The variant sheet, bridged off the ingest entity's `Variant` exactly as
+        // `block_state` and `experience_orb_value` above are, and for their reason:
+        // `lodestone_ecs::ingest::apply_entity_metadata` inserts `Variant` *there*,
+        // not on the render track this query is drawn from. Bridged rather than
+        // narrowed into a fifteenth render component — the same choice
+        // `experience_orb_value` documents one block up.
+        //
+        // `kind.0` and not `model_type_path()`: the variant axis belongs to the
+        // *species* corpus entry, and the only case where the two differ is a
+        // player's slim rig, which has no variant axis at all.
+        let variant_sheet = index
+            .get(id.0)
+            .and_then(|entity| variants.get(entity).ok())
+            .and_then(|variant| lodestone_render::entity_variant_sheet(&kind.0, &variant.0));
         out.0.push(EntityDraw {
             id: id.0,
             type_path: kind.0.clone(),
+            variant_sheet,
             item: stack.map(|s| s.id.clone()),
             count: stack.map_or(1, |s| s.count),
             foil: stack.is_some_and(|s| s.foil),
@@ -3497,6 +3541,7 @@ mod tests {
             EntityDraw {
                 id: 1,
                 type_path: "player".to_owned(),
+                variant_sheet: None,
                 item: None,
                 equipment: Vec::new(),
                 equipment_dye: Vec::new(),
@@ -4680,6 +4725,83 @@ mod tests {
             Some(true),
             "wool state must not be gated on movement, same as equipment"
         );
+    }
+
+    /// **The variant-sheet connectedness gate.** A wolf's decoded breed must reach
+    /// [`EntityDraw::variant_sheet`] through the real `Extract` schedule.
+    ///
+    /// # Why this test exists at all
+    ///
+    /// `EntityTexture::resolve` was built, unit-tested and had **zero production
+    /// readers** — the dual of this repo's usual island, and the species a
+    /// connectedness scan structurally cannot see: `SET_ENTITY_DATA` decodes, the
+    /// fold lands `Variant` on a component, and every consumer downstream asked for
+    /// `default_path()`. So the question this asserts is not "does the packet
+    /// arrive" but "does anything *read* it", and the only honest subject is the
+    /// draw list the GPU pass consumes.
+    ///
+    /// # The discriminating input
+    ///
+    /// `minecraft:ashen`, not `minecraft:pale`. Pale is the default sheet, so a
+    /// resolver that ignored the coat entirely would pass a pale arm — the
+    /// coincident input. The pig arm is the negative half: the *same* mechanism must
+    /// select a climate sheet, so the wiring is not wolf-shaped by accident; and the
+    /// zombie arm proves a model with no variant axis stays `None` rather than
+    /// picking up a neighbour's sheet.
+    #[test]
+    fn a_decoded_breed_reaches_the_draws_variant_sheet() {
+        let keyed = |path: &str| {
+            EntityVariant::Keyed(format!("minecraft:{path}").parse().expect("valid id"))
+        };
+
+        let mut wolf = snap(1, Vec3::ZERO, 0.0);
+        wolf.type_path = "wolf".into();
+        wolf.variant = Some(keyed("ashen"));
+        // A second wolf of a *different* breed, so the two cannot both be satisfied
+        // by one shared sheet — the same reason the breeds are required to be
+        // distinct in `lodestone_render`'s own gate.
+        let mut snowy = snap(2, Vec3::new(1.0, 0.0, 0.0), 0.0);
+        snowy.type_path = "wolf".into();
+        snowy.variant = Some(keyed("snowy"));
+        // The climate axis, on the same wire shape.
+        let mut pig = snap(3, Vec3::new(2.0, 0.0, 0.0), 0.0);
+        pig.variant = Some(keyed("cold"));
+        // No variant axis at all, carrying a variant anyway.
+        let mut zombie = snap(4, Vec3::new(3.0, 0.0, 0.0), 0.0);
+        zombie.type_path = "zombie".into();
+        zombie.variant = Some(keyed("ashen"));
+        // A wolf that has reported no variant: nothing to resolve, so the model's
+        // own sheet applies and this must stay `None` rather than defaulting to pale
+        // *through* the variant path (which would make the map lookup the authority
+        // on a mob the server said nothing about).
+        let mut unreported = snap(5, Vec3::new(4.0, 0.0, 0.0), 0.0);
+        unreported.type_path = "wolf".into();
+
+        let mut interp = EntityInterpolator::new();
+        for s in [&wolf, &snowy, &pig, &zombie, &unreported] {
+            s.apply(interp.world_mut());
+        }
+        interp.update(0.016);
+        let draws = interp.draws();
+
+        let mut wrong = Vec::new();
+        for (id, want) in [
+            (1, Some("entity/wolf/wolf_ashen")),
+            (2, Some("entity/wolf/wolf_snowy")),
+            (3, Some("entity/pig/pig_cold")),
+            (4, None),
+            (5, None),
+        ] {
+            match draws.iter().find(|d| d.id == id) {
+                Some(draw) if draw.variant_sheet == want => {}
+                Some(draw) => wrong.push(format!(
+                    "id {id}: want {want:?}, got {:?}",
+                    draw.variant_sheet
+                )),
+                None => wrong.push(format!("id {id}: not tracked at all")),
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     // ---- dropped items ---------------------------------------------------

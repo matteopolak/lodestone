@@ -534,6 +534,77 @@ pub fn load_entity_textures() -> std::collections::HashMap<&'static str, lodesto
     out
 }
 
+/// Decode every **variant** mob sheet, keyed by the corpus *reference*
+/// (`entity/wolf/wolf_ashen`) that [`lodestone_render::entity_variant_sheet`]
+/// resolves to.
+///
+/// Version-free and fail-open, exactly like [`load_entity_textures`]: an empty map
+/// means no pack was found, and every mob then draws its model's default sheet — the
+/// pre-existing behaviour, so a missing pack costs the refinement and never the mob.
+///
+/// # Keyed by reference, and loaded by *listing* rather than by enumeration
+///
+/// [`load_entity_textures`] keys by model name because one model has one default
+/// sheet. A variant does not: nine wolf breeds and three climates share one mesh, so
+/// the key has to be the sheet, the same choice [`load_block_entity_textures`]
+/// makes.
+///
+/// The set is found by walking the pack for everything under
+/// [`lodestone_render::entity_variant_sheet_dirs`]' prefixes, **not** by enumerating
+/// the variant enums. That is deliberate: an enumeration would be a second table
+/// beside the corpus's own `select` functions, free to drift the moment 26.3 adds a
+/// breed, and it would have to be maintained in a crate that has no reason to know
+/// how many wolves there are. Listing costs a few dozen extra PNG decodes at
+/// startup and needs no change for a new variant at all.
+///
+/// This also loads sheets no variant currently resolves to (a wolf's `_tame` and
+/// `_angry` files, for instance, which nothing asks for while the tame flag does not
+/// reach the client). That is the *cheap* direction of the trade: an unused decoded
+/// image costs memory, whereas a missing one costs a visibly wrong skin.
+#[must_use]
+pub fn load_entity_variant_textures()
+-> std::collections::HashMap<String, lodestone_assets::Image> {
+    use lodestone_assets::Image;
+
+    let mut out = std::collections::HashMap::new();
+    let Some(root) = asset_root() else {
+        return out;
+    };
+    let Some(manager) = open_pack_stack(&root) else {
+        return out;
+    };
+
+    for dir in lodestone_render::entity_variant_sheet_dirs() {
+        for path in manager.list(dir) {
+            let Some(reference) = lodestone_render::sheet_reference_of(&path) else {
+                // A `.mcmeta` sidecar or anything else that is not a sheet.
+                continue;
+            };
+            let reference = reference.to_owned();
+            if out.contains_key(&reference) {
+                continue;
+            }
+            let Some(png) = manager.read(&path) else {
+                continue;
+            };
+            match Image::decode_png(&png) {
+                Ok(img) => {
+                    out.insert(reference, img);
+                }
+                Err(e) => {
+                    tracing::warn!(target: "assets", "decode {path}: {e}");
+                }
+            }
+        }
+    }
+    tracing::info!(
+        target: "assets",
+        loaded = out.len(),
+        "loaded vanilla entity variant textures"
+    );
+    out
+}
+
 /// Decode every **block-entity** sheet the renderer can ask for, keyed by the
 /// same texture *stem* the renderer resolves (`entity/chest/normal_left`).
 ///

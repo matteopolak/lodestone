@@ -49,6 +49,65 @@ candidate the jar contains; a model with no hit falls back to
 single flat colour means its sheet was not found; a mob rendering as the wrong
 mob means resolution picked the wrong entry.** They are different bugs.
 
+### Variant → texture (a wolf's breed, a pig's climate)
+
+`entity_texture_candidates` answers "which sheet does this *model* have", which is
+one sheet per model. Several mobs have more: nine wolf breeds and three climate
+skins share one mesh apiece, and `lodestone-assets` has modelled all of them —
+`EntityTexture::ByVariant`, and `EntityTexture::resolve(variant)` to select one —
+since the corpus was written.
+
+**`resolve` had no production caller.** Every consumer asked for `default_path()`,
+so every wolf drew pale and every pig drew temperate. That is the *dual* of this
+repo's usual island: not "nothing calls this subsystem" but "nothing **reads** this
+function", and `cargo xtask connectedness` structurally cannot see it — the packet
+decodes, the fold lands `Variant` on a component, and the gap is that nothing
+downstream asks. The query that finds this class is *"what reads this?"*, not "is
+every assignment the same constant".
+
+The chain, end to end:
+
+| step | where |
+|---|---|
+| wire → `EntityVariant::Keyed("minecraft:ashen")` | `protocol/v770`'s metadata decode |
+| → `lodestone_ecs::entity::Variant` on the ingest entity | `lodestone_ecs::ingest::apply_entity_metadata` |
+| → `EntityDraw::variant_sheet` (a corpus reference) | `entities.rs::extract_entity_draws`, via `lodestone_render::entity_variant_sheet` |
+| → the draw-grouping key, so one batch is one sheet | `gpu/entity_passes.rs` |
+| → a bind group | `gpu/frame.rs`, against `EntityRenderer::variant_textures` |
+
+Three things about it worth knowing before changing it:
+
+* **Only the axes that actually arrive are lifted.** `entity_variant_sheet` handles
+  the wolf's breed and the pig/cow/chicken climate, both of which come over as
+  `Keyed` holder ids. Horse colour, llama, cat, parrot and mooshroom have corpus
+  entries and their own axes and are deliberately *absent* rather than half-lifted:
+  each needs its own answer to "does this key or ordinal reach us", and guessing one
+  wrong ships a confidently wrong skin rather than a missing one.
+* **The variant joins the batch key.** Texture identity is not the model, so without
+  it nine breeds collapse into one bind group and all nine draw whichever sheet won.
+  Same shape, and the same reason, as `EntityDrawBatch::skin` for player skins.
+* **The shell loads variant sheets by *listing*, not by enumerating the variant
+  enums** (`resources.rs::load_entity_variant_textures`, walking
+  `entity_variant_sheet_dirs`). An enumeration would be a second table beside the
+  corpus's own `select` functions, free to drift the moment a breed is added; listing
+  costs a few dozen extra decodes at startup and needs no change for a new variant.
+  A reference the pack does not ship falls back to the model sheet.
+
+**A tamed wolf still draws its wild sheet, and that is an input gap, not a
+rendering one.** Vanilla's tame bit is `TamableAnimal.DATA_FLAGS_ID & 4`; **no field
+of `lodestone_model::EntityMetadataUpdate` carries it**, so the client cannot know a
+wolf is tamed, and `entity_variant_sheet` pins `WolfState::Wild`. Closing it needs a
+field on `EntityMetadataUpdate`, a `v770` decode gated on the entity being a
+`TamableAnimal`, an ECS component and ingest arm, and then one extra argument to
+`entity_variant_sheet` plus one more grouping key. It is deliberately not inferred
+from anything else — a plausible guess would make the eventual real signal
+indistinguishable from a bug.
+`a_tamed_wolf_still_resolves_to_its_wild_sheet_because_the_flag_never_arrives`
+asserts that state, so **the day the flag lands that test fails** and whoever lands
+it has to thread it rather than discovering later that the collar never appeared.
+26.2 also ships a `_baby` axis (`WolfVariants.register` builds six identifiers, not
+three) which `WolfState` does not model at all.
+
 ### Pose
 
 `AnimFamily::classify` picks a `setupAnim` from a model's **part names**, not its

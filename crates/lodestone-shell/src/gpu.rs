@@ -540,6 +540,19 @@ struct EntityDrawBatch {
     /// `Some(url)` with no bind group installed yet resolves to the default sheet
     /// too, so the fallback covers "in flight" and "no skin declared" alike.
     skin: Option<String>,
+    /// The variant sheet **reference** every instance in this batch shares
+    /// (`entity/wolf/wolf_ashen`), or `None` for the model's own default sheet.
+    ///
+    /// [`Self::skin`]'s shape and reasoning, one axis over: texture identity is not
+    /// `model`, so a wolf's breed has to join the batch key or nine breeds collapse
+    /// into one bind group and all of them draw pale. `Some(reference)` with no bind
+    /// group installed (no vanilla pack, or a sheet the pack omits) falls back to the
+    /// model sheet, which is exactly the pre-variant behaviour.
+    ///
+    /// Ranked *below* `skin` at the draw: a player has no variant axis and a wolf has
+    /// no skin URL, so the two can never both be `Some` for one entity today — the
+    /// order is stated so it does not have to be rediscovered if one ever does.
+    variant_sheet: Option<&'static str>,
 }
 
 /// One `(armour slot, texture)` group's uploaded instance buffers for a frame.
