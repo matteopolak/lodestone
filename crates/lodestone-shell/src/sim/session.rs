@@ -1139,6 +1139,47 @@ impl Sim {
         })
     }
 
+    /// The local player's in-progress eat or drink, or `None`.
+    ///
+    /// The same [`ConsumeState::resolve`](crate::consume::ConsumeState::resolve) join
+    /// the particle system runs, read out of the world here so the render side and
+    /// the tick side cannot disagree about whether a consume is happening — see that
+    /// module's docs for why the composition is a named symbol.
+    #[must_use]
+    pub fn consume_state(&self) -> Option<crate::consume::ConsumeState> {
+        let (using, ticks, held) = self.read(|w| {
+            let using = w.resource::<crate::interact::UsingItem>().0;
+            let ticks = w.resource::<lodestone_ecs::player::ItemUseTicks>().0;
+            let slot = w.get::<SelectedSlot>(self.local).map_or(0, |s| s.0);
+            let held = w
+                .get::<lodestone_ecs::SessionMenus>(self.local)
+                .and_then(|menus| menus.0.player().player_native(slot).cloned())
+                .map(|stack| stack.item().to_string());
+            (using, ticks, held)
+        });
+        crate::consume::ConsumeState::resolve(using, ticks, held.as_deref())
+    }
+
+    /// `(currUsageTime, useDuration)` for `ItemInHandRenderer.applyEatTransform`
+    /// **this frame** — what `RenderState::set_item_use_source`'s closure returns.
+    ///
+    /// Reads the frame's own `interp_alpha` rather than taking one, exactly as
+    /// [`Sim::hand_swing_progress`] does and for the same reason: two accessors that
+    /// each ask the caller for a partial tick can be handed different ones, and a
+    /// bob a frame out of step with the swing is not visible as a bug. The clock
+    /// itself is a **tick** counter — `Instant::now` traps on wasm32.
+    #[must_use]
+    pub fn consume_usage_time(&self) -> Option<(f32, u32)> {
+        let consume = self.consume_state()?;
+        Some((
+            lodestone_render::entity::eat_usage_time(
+                consume.remaining_ticks(),
+                self.clock().interp_alpha,
+            ),
+            consume.consumable.consume_ticks,
+        ))
+    }
+
     /// Select hotbar slot `slot` (`0..9`); out-of-range values are ignored. When
     /// the selection actually changes, echoes it to the server via
     /// [`ClientAction::SetCarriedItem`] so the held item stays in sync. No-op

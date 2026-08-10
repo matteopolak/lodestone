@@ -73,7 +73,9 @@
 
 use lodestone_assets::{ResourceManager, ZipSource};
 use lodestone_render::entity::{
-    Arm, camera_orientation, first_person_item_chain, first_person_item_matrix,
+    Arm, EAT_BOB_SCALED_LIMIT, EAT_JIGGLE_EXPONENT, camera_orientation, eat_usage_time,
+    first_person_eat_chain, first_person_eat_transform, first_person_item_chain,
+    first_person_item_matrix,
     first_person_item_mesh, ground_transform, hand_projection, hand_transform, thrown_item_for,
     thrown_item_mesh,
 };
@@ -623,6 +625,155 @@ fn the_first_person_item_chain_is_a_plain_translation_at_rest() {
     assert!((left.w_axis.x + 0.56).abs() < 1e-5, "left hand mirrors x");
     assert!((left.w_axis.y + 0.52).abs() < 1e-5, "left hand keeps y");
     assert!((left.w_axis.z + 0.72).abs() < 1e-5, "left hand keeps z");
+}
+
+// ---------------------------------------------------------------------------
+// The eating bob (`ItemInHandRenderer.applyEatTransform`)
+// ---------------------------------------------------------------------------
+
+/// A default food's `Consumable.consumeTicks()`, restated here rather than imported
+/// so this crate stays free of `lodestone-game`: `(int)(1.6F * 20.0F)`.
+const FOOD_TICKS: u32 = 32;
+
+/// The eating jiggle at two tick values chosen so the **correct** `1 - t^27` and a
+/// plausible **linear** `1 - t` disagree, with both hypotheses computed here from
+/// [`EAT_JIGGLE_EXPONENT`] rather than transcribed. Hermetic.
+///
+/// This is the magnitude species of vacuous test, avoided: "the item moves toward
+/// the mouth as the use advances" is satisfied by every monotone curve, including
+/// the linear one, which is visibly a slow drift rather than vanilla's snap. The
+/// discriminator is the *value*, and the two readings are 18× apart at
+/// `remaining = 30`.
+///
+/// The jiggle is read out of the matrix by its `x` translation, which is
+/// `eatJiggle * 0.6F * invert` — the one term no rotation contributes to.
+#[test]
+fn the_eating_jiggle_follows_the_27th_power_and_not_a_linear_approach() {
+    /// `eatJiggle * 0.6F`, the coefficient the reading inverts.
+    const JIGGLE_X: f32 = 0.6;
+    let mut mismatches: Vec<String> = Vec::new();
+    for remaining in [30_u32, 24] {
+        let curr = eat_usage_time(remaining, 0.0);
+        let scaled = curr / FOOD_TICKS as f32;
+        let correct = 1.0 - f64::from(scaled).powf(EAT_JIGGLE_EXPONENT) as f32;
+        let linear = 1.0 - scaled;
+        // Read from the eat transform alone, **not** from the full chain: the chain
+        // post-multiplies `applyItemArmTransform`'s translation, so the eat
+        // rotations carry that offset around and `w_axis.x` there is no longer
+        // `eatJiggle * 0.6`. (Measured: the first form of this test subtracted 0.56
+        // from the chain's `x` and read the jiggle as `-0.629` where the truth was
+        // `+0.576` — a rotated translation, not a wrong jiggle.)
+        let measured = first_person_eat_transform(Arm::Right, curr, FOOD_TICKS).w_axis.x;
+        let jiggle = measured / JIGGLE_X;
+        if (jiggle - correct).abs() > 1e-3 {
+            mismatches.push(format!(
+                "remaining {remaining}: jiggle {jiggle} is not the 27th-power {correct} \
+                 (linear hypothesis would be {linear})"
+            ));
+        }
+        if (jiggle - linear).abs() < 0.1 {
+            mismatches.push(format!(
+                "remaining {remaining}: jiggle {jiggle} is indistinguishable from the linear \
+                 hypothesis {linear}; this tick value does not discriminate"
+            ));
+        }
+    }
+    // Collected rather than asserted inside the loop: an `assert!` in there proves
+    // one arm and leaves the rest as arguments.
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// The bob window and the chain's composition order — the two structural properties
+/// a value check cannot see. Hermetic.
+///
+/// * `scaledUsageTime < 0.8F` bounds *remaining* time, so the bob is off at the
+///   **start** of a use and on later. Reading `< 0.8` as "near the start" inverts
+///   it, and a still frame cannot tell.
+/// * `applyItemArmTransform` runs **after** `applyEatTransform` for EAT/DRINK
+///   (`hasCustomArmTransform()`), so the offset is the right-hand factor. The
+///   opposite order is built here and required to differ.
+#[test]
+fn the_eat_chain_gates_its_bob_late_and_applies_the_arm_offset_last() {
+    let mut failures: Vec<String> = Vec::new();
+
+    // At `remaining == duration - 1` the usage time is exactly the duration, so
+    // `scaled == 1.0`: the jiggle vanishes and the bob is gated off. The chain must
+    // then be exactly `applyItemArmTransform`'s translation — the same anchor
+    // `the_first_person_item_chain_is_a_plain_translation_at_rest` uses for the
+    // non-eating pose, which is what proves the two chains share an origin.
+    let anchor = first_person_eat_chain(Arm::Right, FOOD_TICKS as f32, FOOD_TICKS, 0.0);
+    let expected = glam::Mat4::from_translation(glam::Vec3::new(0.56, -0.52, -0.72));
+    let diff = (anchor - expected)
+        .to_cols_array()
+        .iter()
+        .fold(0.0_f32, |m, v| m.max(v.abs()));
+    if diff >= 1e-5 {
+        failures.push(format!(
+            "at scaled == 1.0 the eat chain must reduce to the plain arm offset; error {diff}"
+        ));
+    }
+
+    // The bob gate. `scaled` at the first tick of a use is `(32 + 1) / 32 = 1.031`,
+    // above the limit; at remaining 20 it is `21 / 32 = 0.656`, below it. Derived
+    // from `EAT_BOB_SCALED_LIMIT` rather than restated, so a changed constant moves
+    // the assertion with it.
+    let scaled_at = |remaining: u32| eat_usage_time(remaining, 0.0) / FOOD_TICKS as f32;
+    if scaled_at(FOOD_TICKS) < EAT_BOB_SCALED_LIMIT {
+        failures.push("the first tick of a use must be above the bob limit".to_owned());
+    }
+    if scaled_at(20) >= EAT_BOB_SCALED_LIMIT {
+        failures.push("remaining 20 must be below the bob limit".to_owned());
+    }
+    // `cos(currUsageTime / 4 * PI)` is +-1 at every multiple of 4, so remaining 19
+    // (`curr = 20`) is a bob peak of 0.1 and remaining 21 (`curr = 22`) is a trough
+    // of 0. Two ticks whose bob differs by the full amplitude.
+    let peak = first_person_eat_chain(Arm::Right, eat_usage_time(19, 0.0), FOOD_TICKS, 0.0);
+    let trough = first_person_eat_chain(Arm::Right, eat_usage_time(21, 0.0), FOOD_TICKS, 0.0);
+    let bob_delta = peak.w_axis.y - trough.w_axis.y;
+    if (bob_delta - 0.1).abs() > 5e-3 {
+        failures.push(format!(
+            "the bob's full amplitude must be 0.1 blocks; measured {bob_delta}"
+        ));
+    }
+
+    // The composition order, against the *independently built* eat transform.
+    // `eat · offset` is vanilla's order for EAT/DRINK; `offset · eat` is the order
+    // every other pose in this module uses, and building both here is what makes
+    // the claim falsifiable rather than a comment.
+    let curr = eat_usage_time(24, 0.0);
+    let right = first_person_eat_chain(Arm::Right, curr, FOOD_TICKS, 0.0);
+    let eat = first_person_eat_transform(Arm::Right, curr, FOOD_TICKS);
+    let order_diff = (eat * expected - right)
+        .to_cols_array()
+        .iter()
+        .fold(0.0_f32, |m, v| m.max(v.abs()));
+    if order_diff >= 1e-5 {
+        failures.push(format!(
+            "the chain must be applyEatTransform then applyItemArmTransform; error {order_diff}"
+        ));
+    }
+    let reversed_diff = (expected * eat - right)
+        .to_cols_array()
+        .iter()
+        .fold(0.0_f32, |m, v| m.max(v.abs()));
+    if reversed_diff <= 1e-3 {
+        failures.push(format!(
+            "the arm offset must not commute with the eat transform, or the ordering claim is \
+             untestable; difference {reversed_diff}"
+        ));
+    }
+
+    // The off hand mirrors `x` and `z` rotation sign; a wrong `invert` swings the
+    // item to the wrong side of the screen, which reads as the item missing.
+    let left = first_person_eat_chain(Arm::Left, curr, FOOD_TICKS, 0.0);
+    if (left.w_axis.x + right.w_axis.x).abs() > 1e-5 {
+        failures.push(format!(
+            "the off hand must mirror x: right {} left {}",
+            right.w_axis.x, left.w_axis.x
+        ));
+    }
+
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 /// The winding rule, derived from a real camera rather than asserted.

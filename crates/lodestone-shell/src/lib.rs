@@ -33,6 +33,7 @@ pub mod chat;
 pub mod collision;
 pub mod command_block_source;
 pub mod config;
+pub mod consume;
 pub mod container;
 pub mod effects;
 pub mod entities;

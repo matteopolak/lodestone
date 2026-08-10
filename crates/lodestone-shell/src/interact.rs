@@ -1149,6 +1149,13 @@ impl Plugin for InteractPlugin {
                 drive_select_slot,
                 drive_mining,
                 drive_placement,
+                // The eating/drinking crumbs. **Inside the `.chain()` for the same
+                // reason `drive_placement` is**: it shares `ResMut<ParticleSim>`
+                // with `drive_mining` and this app runs with
+                // `ambiguity_detection: LogLevel::Error`. Its position relative to
+                // the others is otherwise arbitrary — it reads the use clock, which
+                // no system in this chain writes.
+                crate::consume::emit_consume_particles,
             )
                 .chain()
                 .after(lodestone_controller::ecs::send_player_input)

@@ -69,7 +69,7 @@ pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
     BannerSource, BellSource, BlockEntitySource, CampfireSource, EnchantingTableSource,
-    EntityLightSource, HandSwingSource, LecternSource, MainHandSource, MapSource,
+    EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource,
     MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource, SkullSource,
     SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
 };
@@ -342,6 +342,11 @@ pub struct RenderState {
     /// pass. Empty (bare arm) until the shell wires it in via
     /// [`RenderState::set_main_hand_source`].
     main_hand: MainHandSource,
+    /// This frame's in-progress eat or drink, which replaces the held item's
+    /// ordinary pose with `ItemInHandRenderer.applyEatTransform`'s. `None` — the
+    /// default — is the plain held-item pose, so the eating bob is invisible until
+    /// the shell wires it in via [`RenderState::set_item_use_source`].
+    item_use: ItemUseSource,
     /// Vanilla's `ItemInHandRenderer` swap state (issue #366): which held item is
     /// *drawn* — which lags [`Self::main_hand`] across a hotbar change — and how far
     /// the hand is lowered.

@@ -7,8 +7,8 @@ use lodestone_assets::ResourceLocation;
 use lodestone_render::{
     Camera, CameraUniform, EntityCameraUniform, GpuEntityModel, GpuModelMesh, ItemStateContext,
     entity::{
-        Arm, first_person_arm_parts, first_person_arm_pose_with_equip, first_person_item_mesh,
-        hand_projection, hand_transform, model_for_type,
+        Arm, first_person_arm_parts, first_person_arm_pose_with_equip,
+        first_person_item_mesh_with_use, hand_projection, hand_transform, model_for_type,
     },
     fog::FogUniform,
     update_model_shared_camera_buffer, upload_instances,
@@ -577,7 +577,11 @@ impl RenderState {
             // `firstperson_righthand` at all, i.e. vanilla poses it with the
             // identity, not with `item/generated`'s `[0, -90, 25]` / 0.68.
             let transform = hand_transform(&geometry.display, ARM, true);
-            let mesh = first_person_item_mesh(
+            // An in-progress eat or drink replaces the whole pose — vanilla's
+            // `player.isUsingItem()` branch never reaches `swingArm`, so the swing
+            // value below is genuinely unused while consuming rather than being
+            // added on top. `None` is the ordinary held-item pose.
+            let mesh = first_person_item_mesh_with_use(
                 &geometry.quads,
                 geometry.gui_light,
                 ARM,
@@ -585,6 +589,7 @@ impl RenderState {
                 inverse_arm_height,
                 &transform,
                 u8::try_from(self.hand_light(camera)).unwrap_or(u8::MAX),
+                self.item_use.sample(),
             );
             if let Some(gpu) = GpuModelMesh::upload(device, &mesh) {
                 // An enchanted held item gets the glint second pass. The uniform

@@ -437,6 +437,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   ever arrived at full — `airSupply` decoded correctly end to end, but nothing on
   the server ever sent anything other than the join-time default. This closes the loop
   from the *server* side, which is the side that has to be authoritative.
+- [Eating and drinking](./eating-and-drinking.md) — Everything visible and audible
+  about a consume, on both sides of the seam: the first-person dip and jitter of the
+  food toward the mouth, the crumbs that carry the food's own texture, the
+  third-person raised arm, and the eating/drinking/burp sounds. The *gameplay* half
+  — nutrition, saturation, the use clock, cancel-on-release — landed earlier and
+  lives in [`lodestone_server::item_use`](./hunger.md); this is the half that makes it
+  look and sound like eating.
 - [`maybeBackOffFromEdge` — the sneak-at-a-ledge back-off](./edge-back-off.md) —
   `Player.maybeBackOffFromEdge` is the vanilla rule that stops you walking off a drop
   while shift is held. It lives in `lodestone-physics` as

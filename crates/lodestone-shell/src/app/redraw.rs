@@ -208,6 +208,19 @@ impl WindowApp {
         let hand_swing = self.sim.hand_swing_progress();
         render.set_hand_swing_source(move || hand_swing);
 
+        // The eating/drinking bob — `ItemInHandRenderer.applyEatTransform`. Installed
+        // here, next to the swing, because it has the identical partial-tick
+        // requirement: the value is `getUseItemRemainingTicks() - frameInterp + 1`,
+        // so a one-shot install would freeze the item mid-bite forever. `None` off a
+        // consume, which is the plain held-item pose.
+        //
+        // **Without this line the whole first-person half of eating is invisible** and
+        // nothing looks broken: the pass still runs and the food still draws in the
+        // hand, just without moving. That is the island shape, which is why this is
+        // wired in the same change as the transform rather than left for a follow-up.
+        let eating = self.sim.consume_usage_time();
+        render.set_item_use_source(move || eating);
+
         // The hand needs its own copy of the view bob: vanilla applies `bobView`
         // a *second* time to a fresh pose stack seeded with the unbobbed
         // model-view (`GameRenderer.java:333-362`), rather than letting the hand

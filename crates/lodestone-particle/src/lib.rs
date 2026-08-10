@@ -347,6 +347,17 @@ pub enum SpriteSource {
     /// bark-coloured fragments rather than generic grey ones. The shell resolves
     /// the state to a sprite through the block model set.
     BlockState(u32),
+    /// The particle texture of an **item**, by network registry id —
+    /// `BreakingItemParticle`, which vanilla textures from
+    /// `ItemStackRenderState.pickParticleMaterial`, i.e. the item model's own
+    /// sprite.
+    ///
+    /// Carrying the *item* rather than a resolved sprite is what makes eating a
+    /// carrot throw orange crumbs and eating a beetroot throw red ones. A generic
+    /// crumb satisfies any "some particles spawned" check and is visibly wrong for
+    /// every coloured food, so the identity travels with the particle and the
+    /// shell resolves it the same way it resolves [`Self::BlockState`].
+    Item(u32),
 }
 
 /// Which pass a particle draws in.

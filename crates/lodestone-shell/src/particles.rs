@@ -194,6 +194,16 @@ pub struct Particles {
     /// `redstone_dust_*`), so dropping the tint does not merely desaturate their
     /// debris — it renders it near-**white**. See `docs/break-particles.md`.
     state_tint: Arc<Vec<[f32; 3]>>,
+    /// Per-**item** atlas UV rect, indexed by network item registry id —
+    /// `SpriteSource::Item`, i.e. `BreakingItemParticle`'s sprite.
+    ///
+    /// Indexed by id rather than keyed by name for the same reason `state_uv` is:
+    /// the engine ticks in the simulation while the models live in the renderer, so
+    /// resolution is precomputed once instead of holding a `BlockModels` borrow
+    /// across the frame. Items live in the **same** stitched atlas as block states
+    /// (`BlockModels::build` bakes both against one), which is why these rects also
+    /// carry [`SpriteAtlas::Block`] and not a third selector.
+    item_uv: Arc<Vec<Option<[f32; 4]>>>,
     /// Per-`(Sheet, frame)` atlas UV rect. Empty when no [`ParticleAtlas`] has
     /// been attached via [`Self::with_particle_atlas`], in which case every
     /// [`SpriteSource::Sheet`] particle counts into
@@ -246,6 +256,7 @@ impl Particles {
             engine: ParticleEngine::seeded(crate::platform::epoch_duration().as_nanos() as i64),
             state_uv: Arc::new(state_uv),
             state_tint: Arc::new(state_tint),
+            item_uv: Arc::new(models.map(item_uv_table).unwrap_or_default()),
             sheet_uv: Arc::new(HashMap::new()),
             quads: Vec::new(),
             instances: Vec::new(),
@@ -315,6 +326,9 @@ impl Particles {
             // demo id is genuinely untinted — an empty table, which
             // `state_tint_of` reads as `[1.0; 3]`.
             state_tint: Arc::new(Vec::new()),
+            // The demo palette has no item models at all, so an item crumb is
+            // counted as unresolved rather than drawing a block texel.
+            item_uv: Arc::new(Vec::new()),
             sheet_uv: Arc::new(HashMap::new()),
             quads: Vec::new(),
             instances: Vec::new(),
@@ -742,6 +756,14 @@ impl Particles {
                 .copied()
                 .flatten()
                 .map(|rect| (rect, SpriteAtlas::Block)),
+            // `SpriteAtlas::Block`, not a third selector: `BlockModels` bakes item
+            // geometry against the *same* stitch as block states.
+            SpriteSource::Item(id) => self
+                .item_uv
+                .get(id as usize)
+                .copied()
+                .flatten()
+                .map(|rect| (rect, SpriteAtlas::Block)),
             SpriteSource::Sheet { sheet, frame } => self
                 .sheet_uv
                 .get(&(sheet, frame))
@@ -749,6 +771,31 @@ impl Particles {
                 .map(|rect| (rect, SpriteAtlas::Sheet)),
         }
     }
+}
+
+/// Builds the network-item-id → UV rect table [`Particles::new`] installs, by
+/// walking `lodestone_data::items`' registry order and asking `models` for each
+/// item's `BreakingItemParticle` sprite.
+///
+/// Keyed by the **network registry id**, which is what
+/// [`SpriteSource::Item`](lodestone_particle::SpriteSource::Item) carries, so the
+/// emitter never has to hold a name. An item with no baked GUI geometry (a `special`
+/// renderer, or one missing from a stripped pack) has no entry and its crumbs count
+/// as unresolved — the same visible-gap discipline `state_uv` gets.
+fn item_uv_table(models: &BlockModels) -> Vec<Option<[f32; 4]>> {
+    let mut table =
+        Vec::with_capacity(lodestone_data::item_prototypes::ITEM_COUNT as usize);
+    for id in 0i32.. {
+        let Some(name) = lodestone_data::items::item_name(id) else {
+            break;
+        };
+        table.push(
+            ResourceLocation::parse(name)
+                .ok()
+                .and_then(|loc| models.item_particle_uv(&loc)),
+        );
+    }
+    table
 }
 
 /// Builds the `(Sheet, frame) -> UV rect` table [`Particles::with_particle_atlas`]

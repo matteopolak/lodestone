@@ -1618,6 +1618,17 @@ struct ArmPoseChoice {
 ///   guessing "charged" from anything else available would make every crossbow in
 ///   the world hold the shooting pose permanently, which is more wrong, more
 ///   often, than the resting pose it gets today.
+///
+/// # `ArmPose::Item` is selected for an in-use item only, and vanilla is wider
+///
+/// Vanilla's final `return itemInHand.is(ItemTags.SPEARS) ? SPEAR : ITEM;` runs for
+/// **any non-empty hand**, in use or not, so every mob holding a sword has a raised
+/// arm in vanilla and hanging arms here. Only the in-use half is wired, because that
+/// is the half eating needs and because the other half changes the silhouette of
+/// every armed humanoid in the game — including the resting arm of every fixture the
+/// bow-pose pixel gates difference against. Widening it is a one-line change to this
+/// function plus a re-baseline of those gates, and it is a legitimate follow-up
+/// rather than an oversight.
 fn arm_pose_for(
     type_path: &str,
     equipment: &[(EquipmentSlot, ResourceLocation)],
@@ -1661,9 +1672,20 @@ fn arm_pose_for(
         CROSSBOW_PATH => ArmPose::CrossbowCharge {
             progress: item_use.ticks as f32 / CROSSBOW_CHARGE_TICKS,
         },
-        // Every other item's use animation (eat, drink, block, spyglass, …) is a
-        // pose `ArmPose` does not model yet; see its docs.
-        _ => return ArmPoseChoice::default(),
+        // `AvatarRenderer.getArmPose`'s fallthrough, `ArmPose.ITEM`. **For eating
+        // and drinking this is not an approximation — it is what vanilla does.**
+        // `ItemUseAnimation.EAT` and `DRINK` are deliberately absent from that
+        // method's `if` chain, so a consuming entity takes the plain held-item
+        // raise and the whole distinctive eating motion lives in
+        // `ItemInHandRenderer.applyEatTransform`, first person only.
+        //
+        // For the poses `ArmPose` still does not model — `BLOCK` (a raised shield),
+        // `SPYGLASS`, `TOOT_HORN`, `BRUSH`, `THROW_TRIDENT`, `SPEAR` — this is a
+        // *closer* wrong answer than `Empty`, not a right one: vanilla reaches each
+        // of those before the fallthrough. `Item` at least puts the arm up, which is
+        // the half those poses share; arms hanging at the sides is the reading that
+        // looks like the feature is off.
+        _ => ArmPose::Item,
     };
     ArmPoseChoice {
         pose,

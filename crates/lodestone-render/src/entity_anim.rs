@@ -540,6 +540,29 @@ pub enum ArmPose {
     /// No item pose: the arms keep the walk/attack/idle result.
     #[default]
     Empty,
+    /// Holding an item (`ArmPose::ITEM`) — the arm lifts by `PI/10` and its own
+    /// swing is halved.
+    ///
+    /// **This is vanilla's pose for eating and drinking.** `HumanoidModel.ArmPose`
+    /// has no `EAT` or `DRINK` variant and `AvatarRenderer.getArmPose` deliberately
+    /// omits `ItemUseAnimation.EAT`/`DRINK` from its `if` chain, so a consuming
+    /// entity falls through to `ITEM`. All of vanilla's distinctive eating motion —
+    /// the dip and the jitter toward the mouth — is *first-person only*, in
+    /// `ItemInHandRenderer.applyEatTransform`; in third person another player
+    /// eating is an entity with a raised arm and crumbs coming off it. Looking for
+    /// a third-person eating animation and not finding one is the expected outcome,
+    /// not a gap.
+    ///
+    /// # The first one-handed pose here
+    ///
+    /// `ArmPose.ITEM(false, false)` — neither two-handed nor
+    /// `affectsOffhandPose()` — so vanilla poses each arm from *its own* pose and
+    /// this one touches only the arm actually holding the item.
+    /// [`Skeleton::pose_arms_for_item`] therefore writes one arm for this variant
+    /// and two for every other, which is why `arm_pose_left_hand` is load-bearing
+    /// here in a way it is not for the ranged poses (where a wrong value merely
+    /// mirrors a symmetric result).
+    Item,
     /// Drawing a bow (`ArmPose::BOW_AND_ARROW`). Both arms come up in front,
     /// tracking the head.
     BowAndArrow,
@@ -578,7 +601,8 @@ impl ArmPose {
     #[must_use]
     pub const fn is_two_handed(self) -> bool {
         match self {
-            ArmPose::Empty => false,
+            // `ITEM(false, false)` — one-handed, and the first such pose here.
+            ArmPose::Empty | ArmPose::Item => false,
             ArmPose::BowAndArrow | ArmPose::CrossbowCharge { .. } | ArmPose::CrossbowHold => true,
         }
     }
@@ -1182,6 +1206,34 @@ impl Skeleton {
 
         match input.arm_pose {
             ArmPose::Empty => {}
+
+            // `case ITEM` in `poseRightArm`/`poseLeftArm`:
+            //
+            // ```java
+            // this.rightArm.xRot = this.rightArm.xRot * 0.5F - (float)(Math.PI / 10);
+            // this.rightArm.yRot = 0.0F;
+            // ```
+            //
+            // **This is the third-person pose for eating and drinking** — see
+            // [`ArmPose::Item`] for why vanilla has no separate one.
+            //
+            // Two things separate it from every pose below it:
+            //
+            // * It **reads its own previous value**, so unlike the ranged poses it
+            //   is not a pure assignment: the arm keeps half of whatever the walk
+            //   swing put there. Replacing `x_rot * 0.5` with a constant freezes a
+            //   walking player's arm, which reads as the pose being applied at the
+            //   wrong time rather than as a dropped term.
+            // * It writes **one** arm. `ArmPose.ITEM` is neither two-handed nor
+            //   `affectsOffhandPose()`, so vanilla poses each arm from its own
+            //   pose and the off hand — `EMPTY` for an empty hand — keeps its
+            //   swing. Touching both arms here would raise the empty hand too,
+            //   which is what makes it look like a shrug rather than a bite.
+            ArmPose::Item => {
+                let holder = if holding_in_right { right } else { left };
+                poses[holder].x_rot = poses[holder].x_rot * 0.5 - std::f32::consts::PI / 10.0;
+                poses[holder].y_rot = 0.0;
+            }
 
             // `case BOW_AND_ARROW` (`HumanoidModel.java:353-357` for the right
             // arm, `:398-402` for the left). Both arms take the *same* xRot; the
@@ -2396,6 +2448,7 @@ mod tests {
         };
         let empty = arm_rots("skeleton", &base);
         for pose in [
+            ArmPose::Item,
             ArmPose::BowAndArrow,
             ArmPose::CrossbowCharge { progress: 0.0 },
             ArmPose::CrossbowCharge { progress: 1.0 },
@@ -2414,6 +2467,75 @@ mod tests {
             base.arm_pose == ArmPose::Empty && !ArmPose::Empty.is_two_handed(),
             "Empty is the no-op pose and is not two-handed"
         );
+    }
+
+    /// `ArmPose::Item` is the first **one-handed** pose here, so it must leave the
+    /// other arm on its walk swing — and it must halve the holding arm's own swing
+    /// rather than assign a constant.
+    ///
+    /// Both properties are invisible in a still frame and both fail in the
+    /// plausible-looking direction: posing both arms reads as a shrug, and assigning
+    /// a constant freezes the arm of a *walking* player, which looks like the pose
+    /// being applied at the wrong moment rather than like a dropped term. Mismatches
+    /// are collected so a neuter reports every arm.
+    #[test]
+    fn the_item_pose_moves_one_arm_and_keeps_half_of_its_swing() {
+        let base = AnimInput {
+            limb_swing: 4.0,
+            limb_swing_amount: 1.0,
+            ..AnimInput::REST
+        };
+        let unposed = arm_rots("skeleton", &base);
+        let mut failures: Vec<String> = Vec::new();
+        for left_hand in [false, true] {
+            let posed = arm_rots(
+                "skeleton",
+                &AnimInput {
+                    arm_pose: ArmPose::Item,
+                    arm_pose_left_hand: left_hand,
+                    ..base
+                },
+            );
+            let (holder, other) = if left_hand {
+                ((posed.1, unposed.1), (posed.0, unposed.0))
+            } else {
+                ((posed.0, unposed.0), (posed.1, unposed.1))
+            };
+            if other.0 != other.1 {
+                failures.push(format!(
+                    "left_hand={left_hand}: the non-holding arm moved ({:?} vs {:?}), so ITEM \
+                     is being treated as two-handed",
+                    other.0, other.1
+                ));
+            }
+            if holder.0 == holder.1 {
+                failures.push(format!(
+                    "left_hand={left_hand}: the holding arm did not move at all"
+                ));
+            }
+            // `xRot = xRot * 0.5 - PI/10`, so the swing survives at half amplitude.
+            // Predicted from the unposed value and the two constants, and compared
+            // against the wrong hypothesis (`xRot = -PI/10`, the swing discarded) —
+            // the walk swing is non-zero at `limb_swing = 4.0`, so the two differ.
+            let expected = holder.1.0 * 0.5 - std::f32::consts::PI / 10.0;
+            let discarded = -std::f32::consts::PI / 10.0;
+            if (holder.0.0 - expected).abs() > 1e-5 {
+                failures.push(format!(
+                    "left_hand={left_hand}: holding arm xRot {} is not `xRot * 0.5 - PI/10` \
+                     ({expected}); the swing-discarding hypothesis would give {discarded}",
+                    holder.0.0
+                ));
+            }
+            if (expected - discarded).abs() < 1e-3 {
+                failures.push(
+                    "the walk swing is ~zero at this input, so the halving cannot be \
+                     distinguished from discarding it"
+                        .to_owned(),
+                );
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+        assert!(!ArmPose::Item.is_two_handed(), "ArmPose.ITEM(false, false)");
     }
 
     /// A zombie rig **loses** the pose, because `animate_zombie_arms` assigns over

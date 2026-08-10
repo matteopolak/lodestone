@@ -41,7 +41,7 @@ use super::{
     BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource, CampfireSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
-    HandSwingSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
+    HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
     NameTagRenderer, OutlineRenderer, OutlineShapeSource,
     RenderState, SKY_COLOR, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
     ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource, transparent_placeholder_atlas,
@@ -269,6 +269,7 @@ impl RenderState {
             // A rested arm until the shell installs its tick-driven swing clock;
             // see `set_hand_swing_source`.
             hand_swing: HandSwingSource::default(),
+            item_use: ItemUseSource::default(),
             // An empty hand until the shell installs a source; see
             // `set_main_hand_source`.
             main_hand: MainHandSource::default(),
@@ -949,6 +950,37 @@ impl RenderState {
     /// ```
     pub fn set_hand_swing_source(&mut self, f: impl Fn() -> f32 + Send + Sync + 'static) {
         self.hand_swing = HandSwingSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for an in-progress eat or drink (see [`ItemUseSource`]),
+    /// which is what makes the held item dip and jitter toward the mouth.
+    ///
+    /// Until installed, a held food is posed exactly like any other item and eating
+    /// has no first-person animation at all — the pass still runs and the item still
+    /// draws, so a missing install looks like working code with a missing feature
+    /// rather than like a failure. That is the island shape, so this is the second
+    /// half of the work and not an optional extra.
+    ///
+    /// `f` returns `(currUsageTime, useDuration)`: vanilla's
+    /// `getUseItemRemainingTicks() - frameInterp + 1.0F` — build it with
+    /// [`lodestone_render::entity::eat_usage_time`] rather than by hand — and the
+    /// item's `Consumable.consumeTicks()`. `None` means nothing is being consumed.
+    ///
+    /// **Re-install it every frame**, for the same reason
+    /// [`set_hand_swing_source`](Self::set_hand_swing_source) says to: the value
+    /// carries this frame's partial tick, so a one-shot install freezes the bob.
+    ///
+    /// ```no_run
+    /// # fn wire(render: &mut lodestone::gpu::RenderState, sim: &lodestone::sim::Sim) {
+    /// let eating = sim.consume_usage_time();
+    /// render.set_item_use_source(move || eating);
+    /// # }
+    /// ```
+    pub fn set_item_use_source(
+        &mut self,
+        f: impl Fn() -> Option<(f32, u32)> + Send + Sync + 'static,
+    ) {
+        self.item_use = ItemUseSource(Some(Box::new(f)));
     }
 
     /// Install the source for the local player's **main-hand item** (see
