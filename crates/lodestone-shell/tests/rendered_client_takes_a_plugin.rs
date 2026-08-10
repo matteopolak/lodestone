@@ -44,11 +44,35 @@ use lodestone::sim::Sim;
 use lodestone_ecs::TickSet;
 use lodestone_ecs::player::{LocalPlayer, MovementIntent};
 
-/// A consumer's plugin, in the shape a real one has: it claims
-/// `TickSet::Intent` and writes `MovementIntent` on the local player every tick.
-/// `lodestone-autopilot`'s executor does exactly this, one set after
-/// `ControllerPlugin`'s human-input write in `TickSet::Input`, which is what
-/// makes a plugin's intent survive to `TickSet::Physics`.
+/// A consumer's plugin, in the shape a real one has: it writes `MovementIntent`
+/// on the local player every tick, ordered **`.after(TickSet::Intent)`** so its
+/// write is the last one that tick.
+///
+/// # That ordering is the whole fixture, and this file had it wrong
+///
+/// The first version used a bare `.in_set(TickSet::Intent)` and claimed
+/// "`lodestone-autopilot`'s executor does exactly this". **It does not**, and the
+/// difference is the defect: `lodestone_autopilot::drive_plan` is
+/// `.after(TickSet::Intent).before(TickSet::Physics)`, and its crate docs spell
+/// out why — *"after the whole of `TickSet::Intent`, not inside it"*.
+///
+/// `TickSet::Intent`'s own doc comment names exactly two sanctioned idioms:
+/// `.after(TickSet::Intent)` to **override** human input this tick, or
+/// `.in_set(TickSet::Intent).after(…)` to compose with it. A bare `.in_set` with
+/// no `.after` is neither. It makes the plugin a **second unordered writer of
+/// `MovementIntent`** alongside `lodestone_controller::ecs::compute_movement_intent`,
+/// which is precisely the shape `lodestone-controller`'s own
+/// `a_second_unordered_intent_writer_fails_the_ambiguity_check` exists to catch.
+///
+/// Measured, not inferred: with the bare `.in_set`, this plugin's system ran all
+/// eight ticks and wrote `jump = true` all eight times, and `MovementIntent.jump`
+/// read `false` at `TickSet::Predict` on every one of them — `compute_movement_intent`
+/// won the race and overwrote it from an idle `RawInput`. The player therefore never
+/// moved at all, which surfaced as *"apex 0.0000, horizontal 0.0000"* and reads like
+/// a broken seam rather than a fixture that never specified its own order. The race
+/// resolved favourably for a while and then stopped; nothing about the source
+/// changed when it did, which is why the ordering is now stated rather than lucky.
+/// [`the_plugins_intent_is_not_a_second_unordered_writer`] is the mechanical guard.
 ///
 /// **Jump in place, no walk.** Both were tried; see
 /// [`a_consumers_plugin_drives_the_rendered_client`] for what each measured and
@@ -57,8 +81,41 @@ struct JumpPlugin;
 
 impl lodestone_ecs::app::Plugin for JumpPlugin {
     fn build(&self, app: &mut lodestone_ecs::app::App) {
-        app.add_systems(lodestone_ecs::GameTick, jump.in_set(TickSet::Intent));
+        app.init_resource::<IntentSurvived>();
+        app.add_systems(
+            lodestone_ecs::GameTick,
+            jump.after(TickSet::Intent).before(TickSet::Physics),
+        );
+        // Reads `MovementIntent` in a set that runs after both writers, so the
+        // ordering claim above is observed rather than assumed. `TickSet::Predict`
+        // is the first set after `Physics`, which is also after everything in
+        // `Intent`.
+        app.add_systems(
+            lodestone_ecs::GameTick,
+            record_surviving_intent.in_set(TickSet::Predict),
+        );
     }
+}
+
+/// Per-tick record of whether the plugin's `jump = true` was still set once every
+/// writer had run — the direct observation of the ordering claim in
+/// [`JumpPlugin`]'s docs.
+///
+/// This exists because the failure it guards is **not** legible from the apex.
+/// "Apex 0.0000" is equally consistent with a frozen world, an absent collision
+/// view, a plugin that never registered, and this — an intent write that lost a
+/// race — and two separate agents spent a session distinguishing them. A gate
+/// should say what it measured.
+#[derive(bevy_ecs::resource::Resource, Default)]
+struct IntentSurvived(Vec<bool>);
+
+fn record_surviving_intent(
+    mut survived: ResMut<IntentSurvived>,
+    q: Query<&MovementIntent, With<LocalPlayer>>,
+) {
+    survived
+        .0
+        .push(q.iter().next().is_some_and(|intent| intent.0.jump));
 }
 
 fn jump(mut q: Query<&mut MovementIntent, With<LocalPlayer>>) {
@@ -125,6 +182,32 @@ fn a_consumers_plugin_drives_the_rendered_client() {
 
     let (apex, horizontal) = walk_and_measure(&mut sim, 60);
 
+    // Asserted **before** the apex, because it is the assertion that can say why.
+    // An apex of 0.0 is consistent with four different faults; this one separates
+    // "the plugin's write lost a race" from all of them, and it is the fault this
+    // fixture actually had.
+    {
+        let ecs = sim.ecs().read();
+        let survived = &ecs.resource::<IntentSurvived>().0;
+        let lost = survived.iter().filter(|s| !**s).count();
+        assert_eq!(
+            survived.len(),
+            60,
+            "the plugin's observer must have run once per tick; it ran {} times, so \
+             the plugin is not registered in the composed App at all",
+            survived.len()
+        );
+        assert_eq!(
+            lost, 0,
+            "the plugin's `jump = true` was overwritten on {lost} of {} ticks before \
+             physics read it. That is a second unordered writer of `MovementIntent` \
+             racing `lodestone_controller::ecs::compute_movement_intent` -- see \
+             `JumpPlugin`'s docs. The apex assertion below cannot tell this apart \
+             from a frozen world, which is why this one comes first.",
+            survived.len()
+        );
+    }
+
     assert!(
         (0.9..1.6).contains(&apex),
         "a plugin registered through `Sim::client_app()` + `Sim::from_app` must actually \
@@ -155,6 +238,92 @@ fn without_the_plugin_the_player_stays_put() {
         horizontal < 0.05,
         "control: with no plugin registered nothing may move the player horizontally, yet \
          displacement was {horizontal:.4} blocks"
+    );
+}
+
+/// **The mechanical guard for [`JumpPlugin`]'s ordering**, so the fixture cannot
+/// silently return to being a race.
+///
+/// `lodestone-controller`'s `exactly_one_system_writes_movement_intent` proves this
+/// is detectable: build the schedule with `ambiguity_detection: LogLevel::Error`
+/// and an unordered second writer of `MovementIntent` makes
+/// `Schedule::initialize` fail.
+///
+/// # Why this counts pairs instead of asserting "unambiguous"
+///
+/// **The shell's composed `GameTick` is already ambiguous without any plugin** —
+/// measured at **three** conflicting pairs, none of them riding-related and none of
+/// them this test's business. A gate that demanded a clean schedule would fail on
+/// those and tell nobody anything about the fixture. So the claim is a *delta*:
+/// registering `JumpPlugin` must add **zero** new conflicting pairs, while the bare
+/// `.in_set(TickSet::Intent)` this fixture used to have adds exactly **one**. That
+/// is the negative control, and it is what proves the detector is switched on rather
+/// than the first arm passing vacuously.
+///
+/// The baseline is measured here rather than hardcoded at three, so cleaning up (or
+/// adding to) the shell's unrelated ambiguities changes nothing about this gate.
+#[test]
+fn the_plugins_intent_is_not_a_second_unordered_writer() {
+    use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings};
+
+    /// A writer with no stated order against `compute_movement_intent` — the shape
+    /// `TickSet::Intent`'s doc comment does *not* sanction, and the one this
+    /// fixture shipped with.
+    fn rogue_unordered(mut q: Query<&mut MovementIntent, With<LocalPlayer>>) {
+        for mut intent in &mut q {
+            intent.0.jump = true;
+        }
+    }
+
+    /// Conflicting-access pairs in the composed `GameTick`, under strict detection.
+    ///
+    /// `initialize` is called on a schedule that has **not** been run: an
+    /// already-built schedule is not rebuilt, so the new settings would never be
+    /// consulted and this would go vacuous. Same trap
+    /// `lodestone_controller::ecs`'s own helper documents.
+    fn conflicting_pairs(app: &mut lodestone_ecs::app::App) -> usize {
+        app.world_mut()
+            .schedule_scope(lodestone_ecs::GameTick, |world, schedule| {
+                schedule.set_build_settings(ScheduleBuildSettings {
+                    ambiguity_detection: LogLevel::Error,
+                    ..ScheduleBuildSettings::default()
+                });
+                match schedule.initialize(world) {
+                    Ok(_) => 0,
+                    // The error renders one tuple per pair; counting the tuples is
+                    // the only stable handle bevy gives, and a count is what this
+                    // gate's verdict depends on.
+                    Err(e) => format!("{e}").matches("SystemKey(").count() / 2,
+                }
+            })
+    }
+
+    let baseline = conflicting_pairs(&mut Sim::client_app());
+
+    let mut with_fixture = Sim::client_app();
+    with_fixture.add_plugins(JumpPlugin);
+    let fixed = conflicting_pairs(&mut with_fixture);
+
+    let mut with_rogue = Sim::client_app();
+    with_rogue.add_systems(
+        lodestone_ecs::GameTick,
+        rogue_unordered.in_set(TickSet::Intent),
+    );
+    let rogue = conflicting_pairs(&mut with_rogue);
+
+    assert_eq!(
+        fixed, baseline,
+        "`JumpPlugin` must add no conflicting pair: baseline {baseline}, with the \
+         plugin {fixed}. Its system is ordered `.after(TickSet::Intent)` precisely so \
+         it does not race `compute_movement_intent`."
+    );
+    assert_eq!(
+        rogue,
+        baseline + 1,
+        "the negative control must be *detected*: a bare `.in_set(TickSet::Intent)` \
+         writer of MovementIntent has to add exactly one conflicting pair (baseline \
+         {baseline}, with the rogue {rogue}). If it does not, ambiguity detection is \
+         not actually switched on and the arm above proves nothing."
     );
 }
 

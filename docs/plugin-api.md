@@ -281,6 +281,27 @@ Ordering is the one rule a producer must get right, and `lodestone-autopilot`'s 
 before `TickSet::Send`, where both consumers live. Naming the *set* rather than the consuming system is
 deliberate — a producer that named `drive_mining` would version-lock itself to the shell.
 
+**And this rule was stated correctly here while a shipped test fixture violated it, which is the
+"a rule written in prose is not a rule" shape.** `lodestone-shell/tests/rendered_client_takes_a_plugin.rs`'s
+`JumpPlugin` used a bare `.in_set(TickSet::Intent)` with no `.after(…)` — neither sanctioned form — and
+its own doc comment claimed the autopilot "does exactly this", which was false. That made it a second
+*unordered* writer of `MovementIntent` racing `compute_movement_intent`, and the race resolved
+favourably for a while and then stopped. Measured when it did: the plugin's system ran on all 60 ticks
+and wrote `jump = true` on all 60, and `MovementIntent.jump` read `false` at `TickSet::Predict` on every
+one — so the player never moved and the symptom was *"apex 0.0000, horizontal 0.0000"*, which is equally
+consistent with a frozen world, an absent collision view and an unregistered plugin. Two agents
+misattributed it to an unrelated commit before the mechanism was measured.
+
+Three things worth carrying from it. **`.in_set(TickSet::Intent)` without an `.after` is the trap**, and
+it is easy to write because it reads like "I am an intent writer". **A gate whose failure message cannot
+name the mechanism costs a session** — that fixture now asserts the surviving intent *before* the apex,
+so a regression says "overwritten on 60 of 60 ticks" instead of a bare zero. And **the shell's composed
+`GameTick` is already ambiguous without any plugin** — three conflicting pairs, unrelated to intent — so
+a plugin-ordering gate there has to assert a *delta* (this plugin adds zero pairs; a bare-`.in_set` rogue
+adds exactly one) rather than demanding a clean schedule, which is what `the_plugins_intent_is_not_a_second_unordered_writer`
+does. Those three pairs are why `docs/bevy-migration.md`'s `ambiguity_detection: LogLevel::Error` cannot
+simply be switched on for the shell today.
+
 **Where it is genuinely blocked is the ABI, and the dependency wall — not the shape.**
 
 - *WASM guests.* `docs/wasm-plugin-host.md` records that the intent half is absent from the v0.1 ABI,
