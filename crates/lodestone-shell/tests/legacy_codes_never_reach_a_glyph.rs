@@ -35,8 +35,26 @@
 //! in this font, `coded == plain` would hold under **both** readings and the test
 //! would be measuring nothing.
 
+//! # What changed when these two surfaces started carrying spans
+//!
+//! The title/subtitle overlay and the boss bar title used to be `String` fields
+//! and reached `Builder::text`, so "is the `§` consumed?" was a question about the
+//! *font* layer. Both now carry `Vec<TextSpan>`, because
+//! `Text::to_legacy_string`/`to_plain_string` cannot express a hex colour and a
+//! server's hex title was arriving white — see `HudFrame::title`.
+//!
+//! The rule these tests exist for is unchanged and the input is the same coded
+//! string; what moved is *where* the code is consumed. A producer now calls
+//! `Text::to_spans`, which expands the pair into a coloured run, so the assertion
+//! gets **stronger**: the pair must contribute no glyph and no advance (positions
+//! byte-identical to the plain arm) *and* the colour it named must actually reach
+//! the vertex. The old buffer-equality assertion cannot be kept as written — a
+//! correctly *applied* `§c` changes every vertex's colour, which is the point.
+
 use lodestone::hud::{DebugStats, HudFrame, HudGeometry};
-use lodestone::overlay::BossBarView;
+use lodestone::overlay::{BossBarView, plain_spans};
+use lodestone_model::Text;
+use lodestone_model::text::TextSpan;
 
 /// Canvas size; anything is fine, both arms share it.
 const W: u32 = 640;
@@ -51,13 +69,41 @@ const LITERAL: &str = "chi";
 /// The visible text `CODED` must reduce to.
 const PLAIN: &str = "hi";
 
-/// The title/subtitle overlay. Its string arrives from
-/// `Sim::title_overlay`'s `to_legacy_string()`, so it is `§`-coded by
-/// construction — and it was drawn through `Builder::text`, the plain path.
+/// Vanilla's `red`, `TextColor.java`'s `named("red", 16733525)` — the colour `§c`
+/// names, hand-transcribed rather than read back from our own table.
+const RED: (u8, u8, u8) = (0xff, 0x55, 0x55);
+
+/// The spans a producer really hands over for a `§`-coded server component: the
+/// component parsed from the legacy string, then `to_spans`, which is the expanding
+/// pass. Building `TextSpan`s by hand here would bypass the expansion under test.
+fn coded_spans(s: &str) -> Vec<TextSpan> {
+    Text::from_legacy(s).to_spans()
+}
+
+/// Every vertex's `(x, y)`, quantised to the byte grid the canvas uses. Positions
+/// alone, so a *correctly applied* colour code does not make the geometry
+/// comparison fail for the wrong reason.
+fn positions(geo: &HudGeometry) -> Vec<(i32, i32)> {
+    geo.verts
+        .chunks_exact(6)
+        .map(|v| (v[0].to_bits() as i32, v[1].to_bits() as i32))
+        .collect()
+}
+
+/// Whether any fully-opaque vertex carries `rgb`.
+fn has_colour(geo: &HudGeometry, rgb: (u8, u8, u8)) -> bool {
+    let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    geo.verts
+        .chunks_exact(6)
+        .any(|v| (byte(v[2]), byte(v[3]), byte(v[4])) == rgb)
+}
+
+/// The title/subtitle overlay. Its spans arrive from `Sim::title_overlay`'s
+/// `to_spans()`, so a `§`-coded server component reaches here already expanded.
 #[test]
 fn a_coded_title_draws_exactly_the_visible_text() {
     let stats = DebugStats::default();
-    let build = |title: &str, subtitle: &str| {
+    let build = |title: Vec<TextSpan>, subtitle: Vec<TextSpan>| {
         HudGeometry::build(
             &HudFrame {
                 crosshair: false,
@@ -66,7 +112,7 @@ fn a_coded_title_draws_exactly_the_visible_text() {
                 // scales through two separate call sites, and one being fixed
                 // while the other is not is exactly the per-call-site outcome
                 // this change exists to avoid.
-                title: Some((title.to_owned(), Some(subtitle.to_owned()), 1.0)),
+                title: Some((title, Some(subtitle), 1.0)),
                 ..HudFrame::new(&stats)
             },
             W,
@@ -74,9 +120,9 @@ fn a_coded_title_draws_exactly_the_visible_text() {
         )
     };
 
-    let plain = build(PLAIN, PLAIN);
-    let coded = build(CODED, CODED);
-    let literal = build(LITERAL, LITERAL);
+    let plain = build(plain_spans(PLAIN), plain_spans(PLAIN));
+    let coded = build(coded_spans(CODED), coded_spans(CODED));
+    let literal = build(plain_spans(LITERAL), plain_spans(LITERAL));
 
     assert!(
         plain.vertex_count() > 0,
@@ -89,27 +135,41 @@ fn a_coded_title_draws_exactly_the_visible_text() {
          wrong hypothesis coincide on this input and the assertion below proves nothing"
     );
     assert_eq!(
-        coded.verts, plain.verts,
-        "a `§c` prefix must be consumed, not drawn: coded emitted {} vertices, plain {}, \
-         and the 'codes are ordinary characters' reading would emit at least the {} of \
-         the literal arm. Buffer equality (not just the count) is asserted because the \
-         measure is centred — if the width still counted the code pair, every vertex \
-         would shift in x.",
+        positions(&coded),
+        positions(&plain),
+        "a `§c` prefix must contribute no glyph and no advance: coded emitted {} \
+         vertices, plain {}, and the 'codes are ordinary characters' reading would \
+         emit at least the {} of the literal arm. Positions (not just the count) are \
+         compared because the measure is centred — if the width still counted the \
+         code pair, every vertex would shift in x.",
         coded.vertex_count(),
         plain.vertex_count(),
         literal.vertex_count(),
     );
+    // And the colour the code named must actually be applied, which the old
+    // `String` path could only do inside the font and this one has to do through
+    // the span pipeline.
+    assert!(
+        has_colour(&coded, RED),
+        "`§c` must recolour the run to vanilla red {RED:?}; it was consumed but its \
+         colour never reached a vertex"
+    );
+    assert!(
+        !has_colour(&plain, RED),
+        "control: the uncoloured arm must not contain red, or the assertion above is \
+         satisfied by something else on this surface"
+    );
 }
 
 /// Boss bar titles. A separate surface with its own centring arithmetic, drawn from
-/// `overlay::BossBarView::title` — a plain `String` that `resolve_to_string` fills
-/// straight from the server's component, `§` codes and all.
+/// `overlay::BossBarView::title` — the spans `boss_bars_from` fills straight from
+/// the server's component.
 #[test]
 fn a_coded_boss_bar_title_draws_exactly_the_visible_text() {
     let stats = DebugStats::default();
-    let build = |title: &str| {
+    let build = |title: Vec<TextSpan>| {
         let bars = [BossBarView {
-            title: title.to_owned(),
+            title,
             progress: 0.5,
             color: [1.0, 0.0, 1.0],
         }];
@@ -125,9 +185,9 @@ fn a_coded_boss_bar_title_draws_exactly_the_visible_text() {
         )
     };
 
-    let plain = build(PLAIN);
-    let coded = build(CODED);
-    let literal = build(LITERAL);
+    let plain = build(plain_spans(PLAIN));
+    let coded = build(coded_spans(CODED));
+    let literal = build(plain_spans(LITERAL));
 
     assert!(
         plain.vertex_count() > 0,
@@ -139,10 +199,15 @@ fn a_coded_boss_bar_title_draws_exactly_the_visible_text() {
         "control failed: the two hypotheses coincide on this input"
     );
     assert_eq!(
-        coded.verts, plain.verts,
+        positions(&coded),
+        positions(&plain),
         "a boss bar title's `§c` must be consumed: coded {} vertices, plain {}, literal {}",
         coded.vertex_count(),
         plain.vertex_count(),
         literal.vertex_count(),
+    );
+    assert!(
+        has_colour(&coded, RED),
+        "`§c` must recolour a boss bar title to vanilla red {RED:?}"
     );
 }

@@ -2532,8 +2532,11 @@ fn title_events_fold_into_the_title_overlay() {
     let (title, subtitle, _alpha) = sim
         .title_overlay()
         .expect("a server-sent title must reach the HUD accessor");
-    assert_eq!(title, "Welcome");
-    assert_eq!(subtitle.as_deref(), Some("to the server"));
+    assert_eq!(crate::overlay::spans_text(&title), "Welcome");
+    assert_eq!(
+        subtitle.as_deref().map(crate::overlay::spans_text),
+        Some("to the server".to_owned())
+    );
 
     // A clear packet must empty the overlay again.
     feed.send(NetUpdate::TitleEvent(ClientEvent::TitlesCleared {
@@ -2542,6 +2545,72 @@ fn title_events_fold_into_the_title_overlay() {
     .unwrap();
     sim.poll_net();
     assert!(sim.title_overlay().is_none());
+}
+
+/// A **hex** colour survives `title_overlay` and `action_bar_overlay`.
+///
+/// These two accessors flattened with `Text::to_legacy_string()`, and that call was
+/// where a modern server's title colour died: the sixteen named colours have `§`
+/// codes and the font layer applies codes at draw time, so they survived a
+/// `String` — `TextColor::Rgb` has none. Hex is therefore the *only* input on which
+/// "flattens to a legacy string" and "hands over spans" differ, which is why a
+/// named colour here would be the coincident-input species of vacuous test.
+///
+/// The three values are pairwise distinct so a title/subtitle/action-bar mix-up
+/// cannot pass, and the mismatches are collected so one bad arm does not hide the
+/// other two.
+#[test]
+fn a_hex_colour_survives_the_title_and_action_bar_accessors() {
+    use crate::net::NetUpdate;
+    use lodestone_model::{ClientEvent, Text, TextColor, TextStyle};
+
+    // Not multiples of 0x11, not near a named colour, all different.
+    const TITLE: u32 = 0x001f_2e3d;
+    const SUBTITLE: u32 = 0x004a_6b8c;
+    const ACTION: u32 = 0x00c4_7b19;
+
+    let hex = |text: &str, rgb: u32| Text {
+        style: TextStyle {
+            color: Some(TextColor::Rgb(rgb)),
+            ..TextStyle::default()
+        },
+        ..Text::literal(text)
+    };
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::TitleEvent(ClientEvent::TitleText {
+        text: hex("T", TITLE),
+    }))
+    .unwrap();
+    feed.send(NetUpdate::TitleEvent(ClientEvent::SubtitleText {
+        text: hex("S", SUBTITLE),
+    }))
+    .unwrap();
+    feed.send(NetUpdate::ActionBar(hex("A", ACTION))).unwrap();
+    sim.poll_net();
+
+    let (title, subtitle, _) = sim
+        .title_overlay()
+        .expect("a server-sent title must reach the HUD accessor");
+    let (action, _) = sim
+        .action_bar_overlay()
+        .expect("a GameInfo message must reach the action-bar accessor");
+    let subtitle = subtitle.expect("the subtitle must reach the accessor too");
+
+    let mut wrong = Vec::new();
+    for (name, spans, want) in [
+        ("title", &title, TITLE),
+        ("subtitle", &subtitle, SUBTITLE),
+        ("action_bar", &action, ACTION),
+    ] {
+        let got: Vec<Option<TextColor>> = spans.iter().map(|s| s.style.color).collect();
+        if got != vec![Some(TextColor::Rgb(want))] {
+            wrong.push(format!("{name}: want Rgb(#{want:06x}) throughout, got {got:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:?}");
 }
 
 #[test]
@@ -2561,7 +2630,7 @@ fn game_info_chat_folds_into_the_action_bar_not_the_feed() {
     let (text, alpha) = sim
         .action_bar_overlay()
         .expect("a GameInfo message must reach the action-bar accessor");
-    assert_eq!(text, "Boss incoming");
+    assert_eq!(crate::overlay::spans_text(&text), "Boss incoming");
     assert!(alpha > 0.0, "a fresh action-bar message is fully opaque");
     // It must not have leaked into the chat scrollback.
     assert!(

@@ -77,10 +77,17 @@ pub struct TabListRow {
 pub struct TabListView {
     /// The rows, already sorted and capped at [`MAX_TAB_ROWS`].
     pub rows: Vec<TabListRow>,
-    /// The server's header, one entry per line. Empty when it sent none.
-    pub header: Vec<String>,
+    /// The server's header, one entry per line, each line **styled spans**. Empty
+    /// when it sent none.
+    ///
+    /// These were `Vec<String>` filled through `to_plain_string`, which is where a
+    /// header's colour died. A legacy `§` code would have survived a `String` —
+    /// the font layer applies codes at draw time — but a hex colour has no legacy
+    /// code, so the flatten was lossy in a way no better string could fix. See
+    /// [`banner_lines`].
+    pub header: Vec<Vec<TextSpan>>,
     /// The server's footer, same shape and same rule.
-    pub footer: Vec<String>,
+    pub footer: Vec<Vec<TextSpan>>,
     /// Whether each row reserves 9 px for an 8×8 player face — vanilla's
     /// `showHead = connection.onlineMode()`. Always `false` here; see the module
     /// doc for what it would take to turn on, and why an offline-mode server
@@ -157,28 +164,39 @@ pub fn tab_list_view(
 /// above and below the player rows.
 ///
 /// A `Text` is a *tree*, and a server writes a multi-line banner as literal
-/// `\n` inside it — so resolving to a plain string and splitting is the whole
-/// job. An absent, empty or whitespace-only banner yields **no lines**, which
+/// `\n` inside it — so resolving and splitting on the breaks is the whole job.
+/// An absent, empty or whitespace-only banner yields **no lines**, which
 /// is what makes `Option`-ing the result at the call site unnecessary: vanilla
 /// draws nothing for an empty header rather than an empty gap
 /// (`PlayerTabOverlay.render`, which only measures a non-null header).
 ///
 /// Trailing empties are dropped but interior blank lines are kept: a server
 /// separating two banner halves with a blank line means it.
+///
+/// The split runs over **spans**, via [`crate::overlay::spans_lines`], not over a
+/// flattened string. Flattening first would be simpler and would silently discard
+/// every colour the banner carried — including hex, which has no legacy `§` code
+/// and therefore cannot be smuggled through a `String` the way the sixteen named
+/// colours can.
 #[must_use]
 pub fn banner_lines(
     banner: Option<&lodestone_model::Text>,
     translate: &dyn Fn(&str) -> Option<String>,
-) -> Vec<String> {
+) -> Vec<Vec<TextSpan>> {
     let Some(banner) = banner else {
         return Vec::new();
     };
-    let plain = lodestone_game::text::resolve(banner, translate).to_plain_string();
-    if plain.trim().is_empty() {
+    let spans = lodestone_game::text::resolve(banner, translate).to_spans();
+    // The whitespace test is on the *wording*: a banner of nothing but spaces and
+    // breaks draws nothing however it is coloured.
+    if crate::overlay::spans_text(&spans).trim().is_empty() {
         return Vec::new();
     }
-    let mut lines: Vec<String> = plain.split('\n').map(str::to_string).collect();
-    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+    let mut lines = crate::overlay::spans_lines(&spans);
+    while lines
+        .last()
+        .is_some_and(|l| crate::overlay::spans_text(l).trim().is_empty())
+    {
         lines.pop();
     }
     lines
@@ -314,15 +332,23 @@ mod tests {
         assert_eq!(names(&tab_list_view(&tabs, &no_tr)), vec!["Seen".to_string()]);
     }
 
+    /// The wording of each banner line, for assertions about the split alone.
+    fn banner_text(banner: Option<&Text>, tr: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+        banner_lines(banner, tr)
+            .iter()
+            .map(|l| crate::overlay::spans_text(l))
+            .collect()
+    }
+
     #[test]
     fn a_banner_splits_on_newlines_and_an_absent_one_yields_no_lines() {
-        assert_eq!(banner_lines(None, &no_tr), Vec::<String>::new());
+        assert_eq!(banner_text(None, &no_tr), Vec::<String>::new());
         assert_eq!(
-            banner_lines(Some(&Text::literal("Welcome")), &no_tr),
+            banner_text(Some(&Text::literal("Welcome")), &no_tr),
             vec!["Welcome".to_string()]
         );
         assert_eq!(
-            banner_lines(Some(&Text::literal("Top\nMiddle\nBottom")), &no_tr),
+            banner_text(Some(&Text::literal("Top\nMiddle\nBottom")), &no_tr),
             vec![
                 "Top".to_string(),
                 "Middle".to_string(),
@@ -331,15 +357,15 @@ mod tests {
         );
         // An empty banner draws nothing rather than an empty gap — the reason
         // the HUD field is a possibly-empty slice and not an `Option`.
-        assert_eq!(banner_lines(Some(&Text::literal("")), &no_tr), Vec::<String>::new());
+        assert_eq!(banner_text(Some(&Text::literal("")), &no_tr), Vec::<String>::new());
         assert_eq!(
-            banner_lines(Some(&Text::literal("   \n  ")), &no_tr),
+            banner_text(Some(&Text::literal("   \n  ")), &no_tr),
             Vec::<String>::new()
         );
         // A trailing blank line is dropped; an *interior* one is kept, because a
         // server separating two banner halves with a gap means it.
         assert_eq!(
-            banner_lines(Some(&Text::literal("A\n\nB\n\n")), &no_tr),
+            banner_text(Some(&Text::literal("A\n\nB\n\n")), &no_tr),
             vec!["A".to_string(), String::new(), "B".to_string()]
         );
     }
@@ -349,15 +375,70 @@ mod tests {
         let banner = Text::translate("multiplayer.title", vec![]);
         let tr = |key: &str| (key == "multiplayer.title").then(|| "Servers".to_string());
         assert_eq!(
-            banner_lines(Some(&banner), &tr),
+            banner_text(Some(&banner), &tr),
             vec!["Servers".to_string()]
         );
         // Negative control: with no table the raw key leaks, so the assertion
         // above is really measuring the translator and not a literal.
         assert_eq!(
-            banner_lines(Some(&banner), &no_tr),
+            banner_text(Some(&banner), &no_tr),
             vec!["multiplayer.title".to_string()]
         );
+    }
+
+    /// A **hex** banner colour survives, on both sides of a line break.
+    ///
+    /// The discriminating input twice over: hex is the only colour a flattened
+    /// `String` cannot carry (the sixteen named ones have `§` codes the font layer
+    /// applies at draw time), and the break is *inside* the coloured component, so
+    /// a splitter that dropped style on the second half would still get the
+    /// wording right. The two lines are given **different** hex values so a
+    /// transposition of the two cannot survive.
+    #[test]
+    fn a_hex_coloured_banner_keeps_its_colour_on_both_sides_of_a_break() {
+        use lodestone_model::{TextColor, TextStyle};
+
+        const TOP: u32 = 0x001f_2e3d;
+        const BOTTOM: u32 = 0x00c4_7b19;
+        let banner = Text {
+            style: TextStyle {
+                color: Some(TextColor::Rgb(TOP)),
+                ..TextStyle::default()
+            },
+            extra: vec![Text {
+                style: TextStyle {
+                    color: Some(TextColor::Rgb(BOTTOM)),
+                    ..TextStyle::default()
+                },
+                ..Text::literal("Bottom")
+            }],
+            ..Text::literal("Top\n")
+        };
+
+        let lines = banner_lines(Some(&banner), &no_tr);
+        let mut wrong = Vec::new();
+        let want = [("Top", TOP), ("Bottom", BOTTOM)];
+        if lines.len() != want.len() {
+            wrong.push(format!(
+                "line count: want {}, got {}",
+                want.len(),
+                lines.len()
+            ));
+        }
+        for (i, (text, hex)) in want.iter().enumerate() {
+            let Some(line) = lines.get(i) else { continue };
+            let got_text = crate::overlay::spans_text(line);
+            if got_text != *text {
+                wrong.push(format!("line {i}: want text {text:?}, got {got_text:?}"));
+            }
+            let got: Vec<Option<TextColor>> = line.iter().map(|s| s.style.color).collect();
+            if got != vec![Some(TextColor::Rgb(*hex))] {
+                wrong.push(format!(
+                    "line {i}: want colour Rgb(#{hex:06x}) throughout, got {got:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
     }
 
     /// **Measures by location, not by frame average**, and the location it

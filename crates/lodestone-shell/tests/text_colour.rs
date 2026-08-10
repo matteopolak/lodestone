@@ -322,6 +322,203 @@ fn a_hex_colour_reaches_the_vertex_stream_byte_exact() {
     );
 }
 
+/// **The producer gate.** A hex colour must survive the *fold* on every HUD
+/// surface whose producer used to flatten to a string, not just the sidebar.
+///
+/// # Why the sidebar tests above could not see this
+///
+/// Everything above drives `HudFrame::sidebar`, which has carried spans since the
+/// sidebar's own fix. The title, subtitle, action bar, boss bar title and tab-list
+/// banners were still `String`s filled by `Text::to_legacy_string` /
+/// `to_plain_string` one layer *above* the renderer, so the renderer's span support
+/// was reachable on exactly one of six surfaces and a hex colour on the other five
+/// was discarded before `HudGeometry::build` ever ran. The fix is in the producers;
+/// this is the gate that they are all wired.
+///
+/// # The discriminating input, and why each surface gets its own value
+///
+/// Hex, because a **named** colour cannot separate a working span path from the old
+/// string one: the sixteen named colours have `§` codes and the font layer applies
+/// codes at draw time, so `to_legacy_string` smuggled them through. `TextColor::Rgb`
+/// has no code and could not be smuggled — it is the only input on which the two
+/// hypotheses differ.
+///
+/// The six values are **pairwise distinct** (and none is a multiple of `0x11` or
+/// near a named colour) so that a surface drawing another surface's text — the
+/// silent-transposition failure two adjacent same-typed fields invite — cannot pass.
+/// Mismatches are collected and asserted on the collection, so one failing surface
+/// does not hide the other five.
+#[test]
+fn a_hex_colour_reaches_every_hud_surface_whose_producer_flattened() {
+    let mut missing = Vec::new();
+    for (name, hex, geo) in hex_surfaces() {
+        let ink = opaque_ink(&geo);
+        if bbox(&ink, unpack(hex)).is_none() {
+            missing.push(format!(
+                "{name}: #{hex:06x} {:?} never reached a vertex; emitted {:?}",
+                unpack(hex),
+                distinct(&ink)
+            ));
+        }
+    }
+    assert!(missing.is_empty(), "{missing:#?}");
+}
+
+/// **Negative control, executed.** The same six surfaces with the colour stripped
+/// must produce none of the six hex values.
+///
+/// Without this, the gate above is satisfied by a detector that reports any colour
+/// present — and, more to the point here, by a renderer that happened to paint one
+/// of these values for an unrelated reason. Each control frame still has to *draw*,
+/// or it would fail for the wrong reason.
+#[test]
+fn control_uncoloured_spans_reach_no_hex_on_any_hud_surface() {
+    let coloured = hex_surfaces();
+    let mut wrong = Vec::new();
+    for ((name, hex, _), (_, _, geo)) in coloured.iter().zip(hex_surfaces_uncoloured()) {
+        let ink = opaque_ink(&geo);
+        if ink.is_empty() {
+            wrong.push(format!(
+                "{name}: the control frame drew nothing at all, so it would pass for \
+                 any renderer"
+            ));
+            continue;
+        }
+        if bbox(&ink, unpack(*hex)).is_some() {
+            wrong.push(format!(
+                "{name}: uncoloured spans still produced #{hex:06x}, so the subject's \
+                 pass says nothing"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// The six surfaces under test, each carrying its own hex colour.
+///
+/// Returns owned geometry rather than frames because `HudFrame` borrows its
+/// sub-views; building and consuming each frame inside this function keeps the
+/// borrows local.
+fn hex_surfaces() -> Vec<(&'static str, u32, HudGeometry)> {
+    hex_surfaces_with(true)
+}
+
+/// The same six with `style.color` left `None` — the executed control.
+fn hex_surfaces_uncoloured() -> Vec<(&'static str, u32, HudGeometry)> {
+    hex_surfaces_with(false)
+}
+
+/// Six pairwise-distinct hex colours, one per surface. Deliberately not multiples
+/// of `0x11` and not near any of [`VANILLA`]'s sixteen, so a fallback to a base
+/// colour or a rounding to a named one would be obvious rather than plausible.
+const SURFACE_HEX: [(&str, u32); 6] = [
+    ("title", 0x001f_2e3d),
+    ("subtitle", 0x004a_6b8c),
+    ("action_bar", 0x00c4_7b19),
+    ("boss_bar_title", 0x0093_2af6),
+    ("tab_header", 0x0026_d17e),
+    ("tab_footer", 0x00e3_5c41),
+];
+
+fn hex_surfaces_with(coloured: bool) -> Vec<(&'static str, u32, HudGeometry)> {
+    use lodestone::hud::HudFrame as Frame;
+    use lodestone::overlay::BossBarView;
+    use lodestone::tablist::{TabListRow, TabListView, ping_sprite};
+
+    let hex = |i: usize| -> Vec<TextSpan> {
+        let colour = coloured.then(|| TextColor::Rgb(SURFACE_HEX[i].1));
+        // "M" on every surface: a glyph with ink in both the vanilla font and the
+        // jar-less fallback, so no arm can fail merely for being blank.
+        vec![span("M", colour)]
+    };
+    let stats = DebugStats::default();
+    // Nothing else may paint, or a stray quad could carry one of these values by
+    // coincidence — the "what else already paints here" check.
+    fn quiet<'a>(stats: &'a DebugStats) -> Frame<'a> {
+        Frame {
+            crosshair: false,
+            show_debug: false,
+            ..Frame::new(stats)
+        }
+    }
+
+    let mut out = Vec::new();
+
+    // Title and subtitle share one `Option` and one draw block but are two
+    // separate call sites at two pose scales, which is exactly how one gets fixed
+    // and the other does not.
+    let frame = Frame {
+        title: Some((hex(0), Some(hex(1)), 1.0)),
+        ..quiet(&stats)
+    };
+    let geo = HudGeometry::build(&frame, W, H);
+    out.push((SURFACE_HEX[0].0, SURFACE_HEX[0].1, geo));
+    let frame = Frame {
+        title: Some((hex(0), Some(hex(1)), 1.0)),
+        ..quiet(&stats)
+    };
+    out.push((
+        SURFACE_HEX[1].0,
+        SURFACE_HEX[1].1,
+        HudGeometry::build(&frame, W, H),
+    ));
+
+    let frame = Frame {
+        action_bar: Some((hex(2), 1.0)),
+        ..quiet(&stats)
+    };
+    out.push((
+        SURFACE_HEX[2].0,
+        SURFACE_HEX[2].1,
+        HudGeometry::build(&frame, W, H),
+    ));
+
+    let bars = [BossBarView {
+        title: hex(3),
+        progress: 0.5,
+        color: [1.0, 0.0, 1.0],
+    }];
+    let frame = Frame {
+        boss_bars: &bars,
+        ..quiet(&stats)
+    };
+    out.push((
+        SURFACE_HEX[3].0,
+        SURFACE_HEX[3].1,
+        HudGeometry::build(&frame, W, H),
+    ));
+
+    // One row, so the overlay lays out as it does live; the row's own name is
+    // uncoloured so it cannot supply either banner's value.
+    let view = TabListView {
+        rows: vec![TabListRow {
+            name: plain_spans("row"),
+            ping_sprite: ping_sprite(10),
+            spectator: false,
+        }],
+        header: vec![hex(4)],
+        footer: vec![hex(5)],
+        show_head: false,
+    };
+    let frame = Frame {
+        players: Some(&view),
+        ..quiet(&stats)
+    };
+    let geo = HudGeometry::build(&frame, W, H);
+    out.push((SURFACE_HEX[4].0, SURFACE_HEX[4].1, geo));
+    let frame = Frame {
+        players: Some(&view),
+        ..quiet(&stats)
+    };
+    out.push((
+        SURFACE_HEX[5].0,
+        SURFACE_HEX[5].1,
+        HudGeometry::build(&frame, W, H),
+    ));
+
+    out
+}
+
 /// Style **inheritance**: a nested component with no colour of its own must
 /// render its parent's colour.
 ///

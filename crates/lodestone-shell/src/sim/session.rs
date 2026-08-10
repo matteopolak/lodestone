@@ -62,6 +62,11 @@
 
 use super::*;
 
+// Named rather than reached through the glob: `sim.rs` does not import it, and
+// the title/action-bar accessors below return spans so a reader can see where the
+// type comes from.
+use lodestone_model::text::TextSpan;
+
 impl Sim {
     /// Open a live connection to `host:port` and attach it, threading this `Sim`'s
     /// one `World` into the client so ingest folds where these systems read.
@@ -823,10 +828,18 @@ impl Sim {
     }
 
     /// The title/subtitle overlay as `(title, subtitle, alpha)`, `Some` while a
-    /// server-sent title is visible. `Text` is flattened to a legacy `§` string
-    /// at read time, matching the chat path, so colour survives once decoded.
+    /// server-sent title is visible. `Text` is flattened to **styled spans** at
+    /// read time, so every colour a server sent survives to the HUD.
+    ///
+    /// This used `to_legacy_string()`, and that one call was where a hex title
+    /// colour died. The sixteen named colours have `§` codes, so they survived a
+    /// `String` — the font layer applies codes at draw time — but
+    /// [`lodestone_model::text::TextColor::Rgb`] has none, so `to_legacy_string`
+    /// dropped it silently, one layer above a HUD that could not have accepted it
+    /// anyway. `to_spans` also applies `TextStyle::inherit` down the tree, so a
+    /// nested run with no colour of its own arrives carrying its parent's.
     #[must_use]
-    pub fn title_overlay(&self) -> Option<(String, Option<String>, f32)> {
+    pub fn title_overlay(&self) -> Option<(Vec<TextSpan>, Option<Vec<TextSpan>>, f32)> {
         let state = self.read(|w| {
             w.get::<TitleOverlay>(self.local)
                 .expect("the local player always carries TitleOverlay")
@@ -835,18 +848,17 @@ impl Sim {
         });
         let title = state.title()?;
         Some((
-            self.resolve_text(title).to_legacy_string(),
-            state
-                .subtitle()
-                .map(|s| self.resolve_text(s).to_legacy_string()),
+            self.resolve_text(title).to_spans(),
+            state.subtitle().map(|s| self.resolve_text(s).to_spans()),
             state.alpha(),
         ))
     }
 
     /// The action-bar message as `(text, alpha)`, `Some` while a GameInfo
-    /// message is visible (fades over its final ticks).
+    /// message is visible (fades over its final ticks). Styled spans rather than a
+    /// legacy `§` string, for the reason [`Self::title_overlay`] gives.
     #[must_use]
-    pub fn action_bar_overlay(&self) -> Option<(String, f32)> {
+    pub fn action_bar_overlay(&self) -> Option<(Vec<TextSpan>, f32)> {
         let state = self.read(|w| {
             w.get::<ActionBarOverlay>(self.local)
                 .expect("the local player always carries ActionBarOverlay")
@@ -854,7 +866,7 @@ impl Sim {
                 .clone()
         });
         let text = state.text()?;
-        Some((self.resolve_text(text).to_legacy_string(), state.alpha()))
+        Some((self.resolve_text(text).to_spans(), state.alpha()))
     }
 
     /// The held-item name highlight (issue #126) as `(styled name, alpha)`,

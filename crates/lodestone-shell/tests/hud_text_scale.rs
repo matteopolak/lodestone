@@ -58,6 +58,7 @@
 // uses, e.g. `held_item_name_pixels.rs:46`.
 use lodestone::hud::{DebugStats, HudFrame, HudGeometry};
 use lodestone::menu::render::logical_canvas;
+use lodestone::overlay::plain_spans;
 
 /// A framebuffer big enough that none of the three surfaces lands off-canvas
 /// even at today's doubled sizes (which would truncate a bounding box and
@@ -175,7 +176,7 @@ fn a_quiet_hud_frame_paints_nothing() {
 fn a_blank_title_paints_nothing() {
     let stats = DebugStats::default();
     let mut f = quiet(&stats);
-    f.title = Some((" ".into(), None, 1.0));
+    f.title = Some((plain_spans(" "), None, 1.0));
     let bbox = ink_bbox(&f);
     assert!(
         bbox.is_none(),
@@ -214,7 +215,7 @@ fn title_subtitle_and_action_bar_match_vanillas_pose_scales() {
 
     let title = {
         let mut f = quiet(&stats);
-        f.title = Some((GLYPH.into(), None, 1.0));
+        f.title = Some((plain_spans(GLYPH), None, 1.0));
         ink_height("title", &f)
     };
 
@@ -222,13 +223,13 @@ fn title_subtitle_and_action_bar_match_vanillas_pose_scales() {
         let mut f = quiet(&stats);
         // Blank title so the only ink is the subtitle — see
         // `a_blank_title_paints_nothing`.
-        f.title = Some((" ".into(), Some(GLYPH.into()), 1.0));
+        f.title = Some((plain_spans(" "), Some(plain_spans(GLYPH)), 1.0));
         ink_height("subtitle", &f)
     };
 
     let action_bar = {
         let mut f = quiet(&stats);
-        f.action_bar = Some((GLYPH.into(), 1.0));
+        f.action_bar = Some((plain_spans(GLYPH), 1.0));
         ink_height("action_bar", &f)
     };
 
@@ -308,12 +309,12 @@ fn the_title_block_sits_where_vanillas_pose_translate_puts_it() {
 
     let (title_top, _) = {
         let mut f = quiet(&stats);
-        f.title = Some((GLYPH.into(), None, 1.0));
+        f.title = Some((plain_spans(GLYPH), None, 1.0));
         ink_top_and_height("title", &f)
     };
     let (subtitle_top, _) = {
         let mut f = quiet(&stats);
-        f.title = Some((" ".into(), Some(GLYPH.into()), 1.0));
+        f.title = Some((plain_spans(" "), Some(plain_spans(GLYPH)), 1.0));
         ink_top_and_height("subtitle", &f)
     };
 
