@@ -553,6 +553,23 @@ Three corollaries, all paid for (§12.160):
   point, an origin, a seed or an identity value, that shared value is exactly where a whole class of bug lives
   unobserved. (The same shape as the docs-index gate scanning three directories and not the fourth.)
 
+  **The shared thing need not be a value — a corpus can share one *construction path*, and that variant is
+  harder to see because no input looks suspicious.** The in-world settings screen had no header/footer bars,
+  no hover tooltips and painted the panorama over the paused world, while the identical page reached from the
+  main menu was correct. Nothing was a regression and no assertion was wrong: `render::frame_for` stamps four
+  canvas facts (`gui_scale`, `panorama_speed`, `list`, `cursor`) and returns `None` for overlay screens by
+  design, and the in-world path built its frame **raw at the draw site**, reaching none of them. Every existing
+  render gate obtained its frame through `frame_for`, so the whole corpus was blind to any caller that did not.
+  Measured on the same page and canvas: `frame_for` → chrome rect `(0, 33, 320, 174)`, raw → `None`.
+
+  Two habits follow. **Ask what constructs the fixture, not just what is in it** — if every gate in a subsystem
+  reaches the subject through one factory, a second caller of that factory's *output type* is unguarded by
+  construction. And **when one field of a shared stamp is missing at a second call site, audit every field in
+  the stamp**: the reported symptom here was the bars, and auditing the other three found the missing tooltips
+  and the panorama-over-world — the latter meaning half of an *earlier* fix had silently never applied,
+  because routing the frame to the overlay path changed the load op and not the frame's own backdrop
+  declaration.
+
   **Two discriminating requirements can be mutually exclusive, and folding them into one test silently voids
   one of them.** Wiring the item-pickup packet needed *both* an ordering claim (the take must reach the wire
   before the entity's removal) and a **partial** pickup (so the `amount` field is not merely the stack size) —
