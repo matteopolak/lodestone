@@ -4925,6 +4925,14 @@ async fn apply_use_item_on<T, P, S>(
     // count per use is part of the specification its own tests pin. Pre-drawing
     // would fix the count at one and desynchronise the stream.
     bone_meal_rng: &mut SpawnRng,
+    // The **world** difficulty, for `EntityType.canSpawn` — a spawn egg on
+    // Peaceful fails for any `notInPeaceful` species rather than spawning and
+    // being evicted on the next tick. Passed by value rather than as the
+    // `WorldStateHandle` because this is the only scalar this function needs and
+    // a handle would invite a second, unrelated read. Spelled with its full path
+    // rather than added to this module's `lodestone_model` import list, which is
+    // edited concurrently by other work.
+    difficulty: lodestone_model::Difficulty,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -5254,6 +5262,64 @@ where
     let neighbour = relative(pos, face);
     let clicked = source.block_state(pos.x, pos.y, pos.z);
     let held_item = inventory.selected_item().map(|stack| stack.item.to_string());
+
+    // `SpawnEggItem.useOn`. Between the block's own `useWithoutItem` above and
+    // `BlockItem.place` below, which is vanilla's order in `Player.useItemOn` —
+    // ahead of the placement branch, or an egg held over air would place a block;
+    // behind the `hand_use` arm, or a click on a lever would eat the egg. See
+    // `crate::spawn_egg` for the placement rule and `docs/spawn-eggs.md` for why
+    // the item-to-entity mapping is a checked derivation rather than a table.
+    //
+    // `block_entities` is consulted first because `SpawnEggItem.useOn` tests
+    // `getBlockEntity(pos) instanceof Spawner` before anything else, and that
+    // branch re-keys the spawner instead of spawning. Nothing is modelled for a
+    // spawner yet, so the guard is "there is a spawner here, do nothing" rather
+    // than a re-key — the honest behaviour, and it keeps the egg from spawning a
+    // mob vanilla would not.
+    if let Some(item) = held_item.as_deref() {
+        let spawner_here = block_entities.with(|reg| {
+            reg.get(pos)
+                .is_some_and(|entity| entity.type_id() == "minecraft:spawner")
+        });
+        if !spawner_here {
+            match crate::spawn_egg::apply_spawn_egg(
+                item,
+                difficulty,
+                pos,
+                face,
+                &|x, y, z| source.block_state(x, y, z),
+                mobs,
+            ) {
+                // Not an egg: fall through to the placement branch below.
+                crate::spawn_egg::SpawnEggApplied::NotSpawnEgg => {}
+                // Vanilla `FAIL`: no entity, no placement, and the stack is
+                // untouched. Returning here rather than falling through is the
+                // load-bearing half — a refused egg must not place a block.
+                crate::spawn_egg::SpawnEggApplied::Refused => return Ok(()),
+                crate::spawn_egg::SpawnEggApplied::Spawned { .. } => {
+                    // `itemStack.consume(1, user)`, *after* the spawn succeeded —
+                    // the same shrink-and-report pair the composter and brewing
+                    // arms above perform, including the window-0 hotbar slot
+                    // update so the held count visibly drops.
+                    let native = usize::from(inventory.selected_hotbar_slot());
+                    let remainder = inventory.native(native).cloned().and_then(|mut stack| {
+                        stack.count -= 1;
+                        (stack.count > 0).then_some(stack)
+                    });
+                    inventory.set_native(native, remainder.clone());
+                    let hotbar_slot =
+                        i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_container_slot(0, 0, hotbar_slot, remainder.as_ref()),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        }
+    }
 
     // Lighting a nether portal. **Ahead of the placement branch**, for the same
     // reason the `hand_use` block above is: `flint_and_steel` is not a block item,
@@ -7404,6 +7470,7 @@ where
                 sleep_vote,
                 player_entity_id,
                 bone_meal_rng,
+                world.difficulty().0,
             )
             .await?;
         }
