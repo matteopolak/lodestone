@@ -1268,10 +1268,18 @@ pub struct HudFrame<'a> {
     pub xp: Option<(i32, f32)>,
     /// The title/subtitle overlay `(title, subtitle, alpha)`, drawn large and
     /// centred with a server-driven fade. `None` when no title is showing.
-    pub title: Option<(String, Option<String>, f32)>,
+    ///
+    /// Both strings are **styled spans**, and the reason is the same one
+    /// [`crate::overlay::Sidebar`] carries: `Sim::title_overlay` used to flatten
+    /// through `Text::to_legacy_string`, which can express only the sixteen colours
+    /// that have a `§` code. A server's hex title therefore arrived here white, and
+    /// no amount of work in the *renderer* could recover it — the loss was one
+    /// layer above. Spans keep [`TextColor`] itself, so hex survives to the quad.
+    pub title: Option<(Vec<TextSpan>, Option<Vec<TextSpan>>, f32)>,
     /// The action-bar message `(text, alpha)`, drawn just above the hotbar
-    /// cluster with a fade. `None` when nothing is showing.
-    pub action_bar: Option<(String, f32)>,
+    /// cluster with a fade. `None` when nothing is showing. Spans rather than a
+    /// `String` for the reason [`Self::title`] gives.
+    pub action_bar: Option<(Vec<TextSpan>, f32)>,
     /// The held-item name highlight `(name, alpha)` — a `§`-coded, already-
     /// styled string (see `lodestone_game::item::styled_hover_name`) and the
     /// opacity from `lodestone_game::player_state::HeldItemHighlight::alpha`.
@@ -2533,8 +2541,12 @@ impl HudGeometry {
         //
         // Not ported: `textWithBackdrop`'s translucent panel behind the glyphs.
         if let Some((msg, alpha)) = frame.action_bar.as_ref().filter(|(_, a)| *a > 0.0) {
-            let tw = b.legacy_width(msg, 1.0);
-            b.text_legacy(
+            // `spans_width`/`text_spans`, not the `legacy_width`/`text_legacy`
+            // pair: a `§` string cannot express a hex colour, so the producer now
+            // hands over spans and the measure has to be the one that matches the
+            // draw or a centred line lands at the wrong `x`.
+            let tw = b.spans_width(msg, 1.0);
+            b.text_spans(
                 msg,
                 cx - tw * 0.5,
                 b.h - 72.0,
@@ -2581,22 +2593,28 @@ impl HudGeometry {
             const TITLE_POSE: f32 = 4.0;
             const SUBTITLE_POSE: f32 = 2.0;
             let cy = b.h * 0.5;
-            let tw = b.text_width(title, TITLE_POSE);
-            b.text(
+            // Spans, so a hex-coloured title keeps its colour — see
+            // [`HudFrame::title`]. `spans_width` is the measurement half of
+            // `text_spans`, and using the other pair here would shift every
+            // centred glyph.
+            let tw = b.spans_width(title, TITLE_POSE);
+            b.text_spans(
                 title,
                 (b.w - tw) * 0.5,
                 cy - 10.0 * TITLE_POSE,
                 TITLE_POSE,
-                [1.0, 1.0, 1.0, *alpha],
+                [1.0, 1.0, 1.0],
+                *alpha,
             );
             if let Some(sub) = subtitle {
-                let sw = b.text_width(sub, SUBTITLE_POSE);
-                b.text(
+                let sw = b.spans_width(sub, SUBTITLE_POSE);
+                b.text_spans(
                     sub,
                     (b.w - sw) * 0.5,
                     cy + 5.0 * SUBTITLE_POSE,
                     SUBTITLE_POSE,
-                    [1.0, 1.0, 1.0, *alpha],
+                    [1.0, 1.0, 1.0],
+                    *alpha,
                 );
             }
         }
@@ -2610,13 +2628,17 @@ impl HudGeometry {
             let bx = (b.w - bar_w) * 0.5;
             for (i, bb) in frame.boss_bars.iter().enumerate() {
                 let top = margin + i as f32 * (line_h + bar_h + 6.0);
-                let tw = b.text_width(&bb.title, scale);
-                b.text(
+                // Spans, for the reason `BossBarView::title` documents: a boss
+                // bar title is often a plugin-coloured component and hex has no
+                // legacy code to smuggle it through a `String`.
+                let tw = b.spans_width(&bb.title, scale);
+                b.text_spans(
                     &bb.title,
                     (b.w - tw) * 0.5,
                     top,
                     scale,
-                    [1.0, 1.0, 1.0, 1.0],
+                    [1.0, 1.0, 1.0],
+                    1.0,
                 );
                 let bar_y = top + line_h;
                 b.rect_px(bx, bar_y, bar_w, bar_h, [0.08, 0.08, 0.10, 0.75]);
@@ -2679,7 +2701,7 @@ impl HudGeometry {
                 .header
                 .iter()
                 .chain(players.footer.iter())
-                .map(|l| b.text_width(l, tab_scale))
+                .map(|l| b.spans_width(l, tab_scale))
                 .fold(0.0f32, f32::max);
             let panel = TabPanel::new(
                 b.w,
@@ -2707,8 +2729,15 @@ impl HudGeometry {
                     TAB_PLATE,
                 );
                 for (i, line) in players.header.iter().enumerate() {
-                    let x = panel.centred_x(b.text_width(line, tab_scale));
-                    b.text(line, x, panel.header_y(i), tab_scale, TAB_INK);
+                    let x = panel.centred_x(b.spans_width(line, tab_scale));
+                    b.text_spans(
+                        line,
+                        x,
+                        panel.header_y(i),
+                        tab_scale,
+                        [TAB_INK[0], TAB_INK[1], TAB_INK[2]],
+                        TAB_INK[3],
+                    );
                 }
             }
 
@@ -2755,8 +2784,15 @@ impl HudGeometry {
                     TAB_PLATE,
                 );
                 for (i, line) in players.footer.iter().enumerate() {
-                    let x = panel.centred_x(b.text_width(line, tab_scale));
-                    b.text(line, x, panel.footer_y(i), tab_scale, TAB_INK);
+                    let x = panel.centred_x(b.spans_width(line, tab_scale));
+                    b.text_spans(
+                        line,
+                        x,
+                        panel.footer_y(i),
+                        tab_scale,
+                        [TAB_INK[0], TAB_INK[1], TAB_INK[2]],
+                        TAB_INK[3],
+                    );
                 }
             }
         }
@@ -6711,8 +6747,8 @@ mod tests {
         };
         let bare = tab_view(3);
         let mut banner = tab_view(3);
-        banner.header = vec!["Welcome".to_string()];
-        banner.footer = vec!["Bye".to_string()];
+        banner.header = vec![crate::overlay::plain_spans("Welcome")];
+        banner.footer = vec![crate::overlay::plain_spans("Bye")];
         let with = build(&banner);
         let without = build(&bare);
         assert!(
@@ -6808,7 +6844,7 @@ mod tests {
         let base_verts = HudGeometry::build(&base, 640, 480).vertex_count();
 
         let full = [BossBarView {
-            title: "Ender Dragon".into(),
+            title: crate::overlay::plain_spans("Ender Dragon"),
             progress: 1.0,
             color: [0.6, 0.2, 0.8],
         }];
@@ -6830,7 +6866,7 @@ mod tests {
         // but the fill colour disappears — so the verts must differ. This guards
         // that the fill actually tracks progress rather than being cosmetic.
         let empty = [BossBarView {
-            title: "Ender Dragon".into(),
+            title: crate::overlay::plain_spans("Ender Dragon"),
             progress: 0.0,
             color: [0.6, 0.2, 0.8],
         }];
@@ -7335,8 +7371,8 @@ mod tests {
             n
         };
 
-        let mut render = |title: Option<(String, Option<String>, f32)>,
-                          action_bar: Option<(String, f32)>|
+        let mut render = |title: Option<(Vec<TextSpan>, Option<Vec<TextSpan>>, f32)>,
+                          action_bar: Option<(Vec<TextSpan>, f32)>|
          -> (usize, usize) {
             let frame = target.acquire().expect("headless acquire");
             clear_view(device, queue, frame.view(), [BG, BG, BG]);
@@ -7356,9 +7392,16 @@ mod tests {
         };
 
         let (empty_title, empty_act) = render(None, None);
-        let (shown_title, title_leak_act) =
-            render(Some(("TITLE".into(), Some("subtitle".into()), 1.0)), None);
-        let (act_leak_title, shown_act) = render(None, Some(("Action bar!".into(), 1.0)));
+        let (shown_title, title_leak_act) = render(
+            Some((
+                crate::overlay::plain_spans("TITLE"),
+                Some(crate::overlay::plain_spans("subtitle")),
+                1.0,
+            )),
+            None,
+        );
+        let (act_leak_title, shown_act) =
+            render(None, Some((crate::overlay::plain_spans("Action bar!"), 1.0)));
 
         eprintln!("=== title/action-bar readback (headless) ===");
         eprintln!("empty:  title_band={empty_title} act_band={empty_act}");

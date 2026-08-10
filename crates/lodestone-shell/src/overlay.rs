@@ -102,12 +102,69 @@ pub fn spans_text(spans: &[TextSpan]) -> String {
     spans.iter().map(|s| s.text.as_str()).collect()
 }
 
-/// A ready-to-draw boss bar: a plain title, a clamped progress fraction, and an
+/// Split a span list at every `\n`, keeping each run's style on both sides of the
+/// break.
+///
+/// A server writes a multi-line tab-list banner as literal newlines *inside* one
+/// component, so a surface that draws one line per row has to break the span list
+/// rather than the string — the whole reason this exists instead of
+/// `spans_text(...).split('\n')`, which would throw away the colour that is the
+/// point of carrying spans at all. A break inside a single span yields two spans
+/// sharing that span's style.
+///
+/// Empty runs are dropped, so a line consisting only of a break is an **empty
+/// line** (an empty `Vec`) rather than a line holding one empty span — the shape
+/// the width measurement and the plate height both already assume. A span list
+/// with no newline yields exactly one line; an empty input yields **no** lines,
+/// because a caller drawing one row per element must draw nothing for nothing.
+#[must_use]
+pub fn spans_lines(spans: &[TextSpan]) -> Vec<Vec<TextSpan>> {
+    let mut lines: Vec<Vec<TextSpan>> = Vec::new();
+    let mut current: Vec<TextSpan> = Vec::new();
+    let mut any = false;
+    for span in spans {
+        any = true;
+        // `split('\n')` on "a\nb" gives ["a", "b"], and on "a\n" gives ["a", ""] —
+        // so the number of pieces is one more than the number of breaks, and
+        // pushing `current` between pieces is exactly one push per break.
+        let mut pieces = span.text.split('\n');
+        if let Some(first) = pieces.next() {
+            if !first.is_empty() {
+                current.push(TextSpan {
+                    text: first.to_owned(),
+                    style: span.style,
+                });
+            }
+        }
+        for piece in pieces {
+            lines.push(std::mem::take(&mut current));
+            if !piece.is_empty() {
+                current.push(TextSpan {
+                    text: piece.to_owned(),
+                    style: span.style,
+                });
+            }
+        }
+    }
+    if any {
+        lines.push(current);
+    }
+    lines
+}
+
+/// A ready-to-draw boss bar: a styled title, a clamped progress fraction, and an
 /// RGB tint derived from the bar colour.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BossBarView {
-    /// Plain-text title.
-    pub title: String,
+    /// The title as **styled spans**, for the same reason [`Sidebar`]'s fields
+    /// are. This was a `String` filled by `resolve_to_string`, which flattens
+    /// through [`lodestone_model::Text::to_plain_string`] — so a boss bar whose
+    /// title carried a hex colour arrived here uncoloured. A legacy `§` code
+    /// survived a `String` (the font layer applies codes at draw time); a
+    /// [`lodestone_model::text::TextColor::Rgb`] has no legacy code and so could
+    /// not, which is why the vocabulary here has to be spans rather than a
+    /// better-flattened string.
+    pub title: Vec<TextSpan>,
     /// Progress in `0.0..=1.0`.
     pub progress: f32,
     /// Bar tint (RGB in `0..1`).
@@ -135,7 +192,12 @@ pub fn boss_bars_from(
 ) -> Vec<BossBarView> {
     bars.iter()
         .map(|(_, b)| BossBarView {
-            title: lodestone_game::text::resolve_to_string(&b.title, translate),
+            // `resolve` then `to_spans`, exactly as `crate::scoreboard`'s own
+            // `spans` helper does: resolving to literals first means the trailing
+            // flatten never consults the model's stub table, and `to_spans`
+            // applies `TextStyle::inherit` down the tree so a nested run with no
+            // colour of its own arrives carrying its parent's.
+            title: lodestone_game::text::resolve(&b.title, translate).to_spans(),
             progress: b.progress.clamp(0.0, 1.0),
             color: boss_color_rgb(b.color),
         })
@@ -206,14 +268,120 @@ mod tests {
         );
 
         let views = boss_bars_from(&bars, &tr);
-        assert_eq!(views[0].title, "Ender Dragon");
+        assert_eq!(spans_text(&views[0].title), "Ender Dragon");
 
         // -- negative control -------------------------------------------------
         // The same fold against a table that knows nothing must surface the raw
         // key, proving the assertion above is reading the translator and not a
         // built-in table that happens to agree.
         let empty = boss_bars_from(&bars, &|_| None);
-        assert_eq!(empty[0].title, "entity.minecraft.ender_dragon");
+        assert_eq!(spans_text(&empty[0].title), "entity.minecraft.ender_dragon");
+    }
+
+    /// [`spans_lines`] breaks on `\n` **and keeps each side's style**.
+    ///
+    /// The discriminating input is a break *inside* one span whose two halves must
+    /// both stay coloured: a `spans_text(...).split('\n')` implementation gets the
+    /// wording right and the colour wrong, so an assertion on the text alone
+    /// cannot separate the two. Mismatches are collected and asserted on the
+    /// collection rather than inside the loop, so a failure reports every arm.
+    #[test]
+    fn spans_lines_breaks_on_newlines_and_carries_style_across_the_break() {
+        use lodestone_model::text::{TextColor, TextSpan, TextStyle};
+
+        let styled = |text: &str, color: TextColor| TextSpan {
+            text: text.to_owned(),
+            style: TextStyle {
+                color: Some(color),
+                ..TextStyle::default()
+            },
+        };
+
+        assert!(
+            spans_lines(&[]).is_empty(),
+            "no spans means no lines, so a caller drawing one row per line draws none"
+        );
+        assert_eq!(
+            spans_lines(&plain_spans("one"))
+                .iter()
+                .map(|l| spans_text(l))
+                .collect::<Vec<_>>(),
+            vec!["one".to_owned()],
+            "a list with no break is one line"
+        );
+
+        // Gold "A\nB" then a separate aqua "\nC": three lines, the middle one made
+        // of the gold tail and the aqua head, and a leading break in the second
+        // span must not merge into the first line.
+        let input = vec![styled("A\nB", TextColor::Gold), styled("\nC", TextColor::Aqua)];
+        let lines = spans_lines(&input);
+        let mut wrong = Vec::new();
+        let want: [(&str, &[Option<TextColor>]); 3] = [
+            ("A", &[Some(TextColor::Gold)]),
+            ("B", &[Some(TextColor::Gold)]),
+            ("C", &[Some(TextColor::Aqua)]),
+        ];
+        if lines.len() != want.len() {
+            wrong.push(format!(
+                "line count: want {}, got {} ({:?})",
+                want.len(),
+                lines.len(),
+                lines.iter().map(|l| spans_text(l)).collect::<Vec<_>>()
+            ));
+        }
+        for (i, (text, colours)) in want.iter().enumerate() {
+            let Some(line) = lines.get(i) else { continue };
+            if spans_text(line) != *text {
+                wrong.push(format!("line {i} text: want {text:?}, got {:?}", spans_text(line)));
+            }
+            let got: Vec<Option<TextColor>> = line.iter().map(|s| s.style.color).collect();
+            if got.as_slice() != *colours {
+                wrong.push(format!("line {i} colours: want {colours:?}, got {got:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// A **hex** title colour survives the fold.
+    ///
+    /// The discriminating input: a named colour cannot separate a working span
+    /// path from the old `String` one, because the font layer applies `§` codes at
+    /// draw time and `to_legacy_string`/`to_plain_string` both keep enough for a
+    /// named colour to be recoverable downstream. `TextColor::Rgb` has no legacy
+    /// code at all, so it is the only input on which the two hypotheses differ.
+    #[test]
+    fn a_hex_title_colour_survives_the_fold() {
+        // Not a multiple of 0x11 and not near any named colour, so a fallback
+        // would be obvious rather than plausible.
+        const HEX: u32 = 0x001f_2e3d;
+        let mut bars = BossBarSet::new();
+        bars.add(
+            uuid::Uuid::from_u128(9),
+            BossBar {
+                title: Text {
+                    style: lodestone_model::TextStyle {
+                        color: Some(lodestone_model::TextColor::Rgb(HEX)),
+                        ..lodestone_model::TextStyle::default()
+                    },
+                    ..Text::literal("Boss")
+                },
+                progress: 1.0,
+                color: BossBarColor::White,
+                overlay: BossBarOverlay::Progress,
+                darken_screen: false,
+                play_music: false,
+                create_fog: false,
+            },
+        );
+
+        let views = boss_bars_from(&bars, &tr);
+        assert_eq!(spans_text(&views[0].title), "Boss", "wording must survive");
+        assert_eq!(
+            views[0].title[0].style.color,
+            Some(lodestone_model::TextColor::Rgb(HEX)),
+            "a hex title colour must reach the view; a flatten to String cannot \
+             carry it, which is the whole reason this field is spans"
+        );
     }
 
     #[test]
@@ -232,11 +400,12 @@ mod tests {
         let views = boss_bars_from(&bars, &tr);
         assert_eq!(views.len(), 2, "one view per active bar");
         assert_eq!(
-            views[0].title, "Ender Dragon",
+            spans_text(&views[0].title),
+            "Ender Dragon",
             "insertion order is render order"
         );
         assert!((views[0].progress - 0.5).abs() < 1e-6);
-        assert_eq!(views[1].title, "Overshoot");
+        assert_eq!(spans_text(&views[1].title), "Overshoot");
         assert!(
             (views[1].progress - 1.0).abs() < 1e-6,
             "progress must clamp to 1.0, got {}",
