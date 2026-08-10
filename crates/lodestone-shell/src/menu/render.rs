@@ -97,7 +97,7 @@ pub use account_screen::{
     accounts_band_top, accounts_list_spec, accounts_row_content_rect, accounts_row_left,
     accounts_row_rect, accounts_row_top, accounts_row_visible,
 };
-pub use dispatch::frame_for;
+pub use dispatch::{frame_for, stamp_canvas_facts};
 pub use draw::{MenuGeometry, SpriteCut, build, geometry};
 pub use favicon::{FaviconMosaic, default_head_icon, favicon_mosaic, head_mosaic};
 pub use frame::{

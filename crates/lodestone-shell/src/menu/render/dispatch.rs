@@ -562,30 +562,71 @@ pub fn frame_for<'a>(
     // the whole menu scales, not only the settings screen that edits the
     // setting.
     frame.map(|mut f| {
-        f.gui_scale = nav.gui_scale();
-        // Stamped for `gui_scale`'s reason, and it has to be stamped here rather
-        // than read out of `nav` inside `title_frame`'s arm: `MenuRenderer` draws
-        // the panorama behind **every** `MenuBackdrop::Panorama` screen (dimmed by
-        // `panorama::dim_for_screen` off the title screen), which is every screen
-        // here that is not drawn over a live world — so the multiplayer, settings
-        // and loading screens sit on it too and would each need their own copy.
-        // One stamp, one reader.
-        f.panorama_speed = Some(nav.panorama_speed());
-        // Stamped for the same reason and in the same place as `gui_scale`: a screen
-        // that has a scrolling list must not also have to remember to tell the draw
-        // about it. `MenuNav::active_list` is the one place that decides, so the
-        // scrollbar the draw paints and the offset the wheel arm clamps are two
-        // readers of one declaration rather than two declarations that agree today.
-        f.list = nav.active_list(ui);
-        // Stamped for the same reason: hover is a *canvas* fact, so any screen with a
-        // hover affordance would otherwise have to remember to plumb the pointer into
-        // its own frame arm. The multiplayer list did that by hand and the Resource
-        // Packs screen would have had to repeat it for its icon overlay. Idempotent
-        // where an arm already set it (the server list sets this exact expression),
-        // and inert everywhere else: the only readers are the two draws that first
-        // check for a row kind carrying a hover overlay.
-        f.cursor = nav.menu_cursor();
+        stamp_canvas_facts(&mut f, ui, nav);
         f
     })
+}
+
+/// Stamp the four **canvas facts** onto a frame — the things that belong to the
+/// canvas rather than to any one screen, so no screen's frame builder has to
+/// remember them.
+///
+/// # Why this is a function and not four lines inside `frame_for`
+///
+/// It was four lines inside [`frame_for`]'s `map`, and that made it *the
+/// full-screen path's* stamp rather than *the menu's*. The screens that draw as an
+/// **overlay** get `None` from `frame_for` by design, so they never reached it: a
+/// player report (2026-08-09, *"the main menu settings have the header/footer, but
+/// if i go in game and open settings it doesnt have it"*) was exactly this. The
+/// in-world settings screen builds `options::settings_frame` directly on the
+/// overlay path, so `f.list` stayed `None`, and the band tint and both separator
+/// bars are gated on it — identical screen, identical page, identical `ListSpec`,
+/// chrome on one path and not the other, and no test failing because every render
+/// test goes through `frame_for`.
+///
+/// Measured on `SettingsPage::Sound` at 320×240, the same page and canvas the
+/// report was made against: `frame_for` yields `list = Some`, and the direct
+/// `settings_frame` call yields `list = None` and `cursor = None` with a cursor set
+/// on the nav. So the fix is not a second chrome draw on the overlay path — two
+/// copies drift — it is making the stamp itself the shared thing, which is what
+/// this function is.
+///
+/// **It deliberately does not touch [`MenuFrame::backdrop`].** That one really is
+/// context-dependent: out of a world the settings tree sits on the panorama, and
+/// in one it must leave the paused world visible ([`MenuBackdrop::Dim`]). The
+/// caller that knows which it is sets it — see
+/// `crate::menu::nav::settings_overlay_frame`.
+pub fn stamp_canvas_facts(
+    f: &mut MenuFrame<'_>,
+    ui: &super::UiState,
+    nav: &super::nav::MenuNav,
+) {
+    f.gui_scale = nav.gui_scale();
+    // Stamped for `gui_scale`'s reason, and it has to be stamped here rather
+    // than read out of `nav` inside `title_frame`'s arm: `MenuRenderer` draws
+    // the panorama behind **every** `MenuBackdrop::Panorama` screen (dimmed by
+    // `panorama::dim_for_screen` off the title screen), which is every screen
+    // here that is not drawn over a live world — so the multiplayer, settings
+    // and loading screens sit on it too and would each need their own copy.
+    // One stamp, one reader.
+    f.panorama_speed = Some(nav.panorama_speed());
+    // Stamped for the same reason and in the same place as `gui_scale`: a screen
+    // that has a scrolling list must not also have to remember to tell the draw
+    // about it. `MenuNav::active_list` is the one place that decides, so the
+    // scrollbar the draw paints and the offset the wheel arm clamps are two
+    // readers of one declaration rather than two declarations that agree today.
+    //
+    // This is also the line the band chrome hangs off: `draw`'s tint and its four
+    // separator rows come from `ListSpec::chrome_rect(list, width)`, so a frame
+    // that never reached this stamp has no chrome at all.
+    f.list = nav.active_list(ui);
+    // Stamped for the same reason: hover is a *canvas* fact, so any screen with a
+    // hover affordance would otherwise have to remember to plumb the pointer into
+    // its own frame arm. The multiplayer list did that by hand and the Resource
+    // Packs screen would have had to repeat it for its icon overlay. Idempotent
+    // where an arm already set it (the server list sets this exact expression),
+    // and inert everywhere else: the only readers are the two draws that first
+    // check for a row kind carrying a hover overlay.
+    f.cursor = nav.menu_cursor();
 }
 

@@ -6899,3 +6899,390 @@ fn the_loading_screen_asks_for_the_panorama_and_the_in_world_screens_do_not() {
 
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// Open the settings tree on `page` **from inside a world**, the way a player does
+/// — enter a world, press Escape, activate the pause menu's Options button, then
+/// click nav rows. Never by writing a page or an `in_world` flag into a field.
+///
+/// The in-world counterpart of `settings_nav_on`, and the premise it asserts is the
+/// one that matters here: `UiState::settings_in_world` must come out `true`, because
+/// a helper that quietly produced an out-of-world nav would make every assertion
+/// below measure the path that already worked.
+fn settings_nav_in_world_on(
+    page: crate::menu::options::SettingsPage,
+) -> (MenuNav, crate::menu::UiState) {
+    use crate::menu::options;
+    let fresh = || {
+        // Not `test_nav`: this nav is seeded with a **non-default** `gui_scale`, so
+        // the gate's `gui_scale` claim is discriminating. At the default `0` the
+        // stamped and the unstamped value coincide, and an input where both
+        // hypotheses give the same answer is not a test. `MenuNav::with_path`
+        // derives `options.json` from the list path's directory, so this stays
+        // inside the temp dir and never touches the developer's real options.
+        let path = std::env::temp_dir().join(format!(
+            "lodestone-render-{}-in-world-settings-chrome/servers.json",
+            std::process::id()
+        ));
+        let dir = path.parent().expect("the temp path has a parent");
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).expect("a temp dir for the seeded options");
+        std::fs::write(dir.join("options.json"), r#"{"gui_scale":3}"#)
+            .expect("seed a non-default gui_scale");
+        let mut nav = MenuNav::with_path(path);
+        assert_eq!(
+            nav.gui_scale(),
+            3,
+            "premise: the seeded gui_scale loaded, so the stamp claim can fail"
+        );
+        let mut ui = crate::menu::UiState::new();
+        ui.enter_dev_world();
+        ui.on_escape();
+        assert!(ui.is_paused(), "premise: Escape from a world pauses it");
+        // Walk the pause menu to Options and activate it, rather than calling
+        // `open_settings_from_pause` directly: that click is what sets
+        // `SettingsNav::in_world`, and the two must be set by the same action or
+        // this helper builds a state no player can reach.
+        for _ in 0..crate::menu::nav::PAUSE_BUTTONS.len() {
+            if nav.pause_button() == crate::menu::nav::PauseButton::Options {
+                break;
+            }
+            nav.key(&mut ui, MenuKey::Down);
+        }
+        assert_eq!(
+            nav.pause_button(),
+            crate::menu::nav::PauseButton::Options,
+            "premise: the pause menu has an Options button to reach"
+        );
+        nav.key(&mut ui, MenuKey::Enter);
+        assert!(
+            ui.is_settings() && ui.settings_in_world(),
+            "premise: the pause menu's Options button opens settings *in world*"
+        );
+        (nav, ui)
+    };
+    let (mut nav, mut ui) = fresh();
+    if nav.settings().page() == page {
+        return (nav, ui);
+    }
+    if let Some(row) = settings_nav_row(&nav, page) {
+        nav.click(&mut ui, row);
+        assert_eq!(nav.settings().page(), page, "premise: {page:?} is up");
+        return (nav, ui);
+    }
+    let parents: Vec<options::SettingsPage> = nav
+        .settings()
+        .visible()
+        .iter()
+        .filter_map(|c| match c.cell {
+            options::Cell::Nav { page: Some(p), .. } => Some(p),
+            _ => None,
+        })
+        .collect();
+    for parent in parents {
+        let (mut n, mut u) = fresh();
+        let Some(row) = settings_nav_row(&n, parent) else {
+            continue;
+        };
+        n.click(&mut u, row);
+        if let Some(row) = settings_nav_row(&n, page) {
+            n.click(&mut u, row);
+            if n.settings().page() == page {
+                return (n, u);
+            }
+        }
+    }
+    panic!("premise: no in-world nav button within two clicks of the root opens {page:?}");
+}
+
+/// **The reported bug** (2026-08-09): *"the main menu settings have the
+/// header/footer, but if i go in game and open settings it doesnt have it. they
+/// should be the exact same menu, not separate"* — and *"the main menu
+/// implementation is the better one, it should fully replace the in-game one"*.
+///
+/// # What this measures, and why nothing caught it
+///
+/// The two screens really are one screen: one `Screen::Settings`, one
+/// `options::settings_frame` that takes no in-world flag, and a `MenuNav::active_list`
+/// arm keyed only on the page. So the *content* was never the difference. The
+/// difference was that `render::frame_for` stamps the canvas facts — `gui_scale`,
+/// `panorama_speed`, `list`, `cursor` — onto everything it returns, and answers
+/// `None` for the overlay screens **by design**, so the in-world path built
+/// `settings_frame` raw and reached none of them. `MenuFrame::list` is what the band
+/// tint and both bevelled separator bars hang off (`ListSpec::chrome_rect`), so the
+/// entire chrome silently vanished on one path of two.
+///
+/// Every render test in this file goes through `frame_for`, which is exactly the
+/// path that worked — the blind spot was the *fixture set*, not any one assertion.
+/// This gate therefore goes through `nav::settings_overlay_frame`, the expression
+/// `app/redraw.rs`'s overlay draw and `nav::on_screen_frame`'s hit-test both use.
+///
+/// # Expected values
+///
+/// All from outside this crate, and identical to
+/// `the_settings_band_carries_vanillas_separators_and_its_tint`'s: the four colours
+/// are the decoded pixels of `textures/gui/{header,footer}_separator.png` and
+/// `menu_list_background.png` from the 26.2 `client.jar` (whose `inworld_*` variants
+/// are byte-identical, which is why one constant is faithful to both arms), and the
+/// two y offsets are `AbstractSelectionList.extractListSeparators`' own `getY() - 2`
+/// and `getBottom()`. The rects come from `ListSpec::chrome_rect`, the call the draw
+/// makes.
+///
+/// # What else paints here
+///
+/// Asked first, because in-world adds a painter the main-menu arm does not have: the
+/// `MenuBackdrop::Dim` wash. It is `OVERLAY_BG`, black at **64/255**, against
+/// `LIST_BAND_TINT`'s black at **112/255** — distinct, so a probe cannot mistake the
+/// wash for the band tint, and the negative assertions below are not satisfied by it.
+/// The sample column is `x = 4`, in the left margin outside the 310 px row column,
+/// clear of the centred title and the 200 px Done button.
+///
+/// # The grid page is asserted too
+///
+/// `SettingsPage::Root` is a widget grid, not an `OptionsList` — `Root.entries()` is
+/// empty, so `active_list` answers `None` and it has no chrome by construction. That
+/// is deliberate (a scrollbar beside a screen with no rows), and `packs.rs` has its
+/// own deliberate `ListChrome::None`. This fix widens no condition, so the claim
+/// asserted for Root is **agreement**: whatever the main menu does, in-world does the
+/// same. Blessing "a grid page has no chrome" as correct is a separate question from
+/// this report and is left alone.
+#[test]
+fn in_world_settings_carries_the_same_band_chrome_as_the_main_menu() {
+    use crate::menu::options::SettingsPage;
+
+    // The canvas the report was made against: short enough that Sound overflows
+    // its band.
+    const W: f32 = 320.0;
+    const H: f32 = 240.0;
+
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut fav = FaviconCache::new();
+    let mut wrong: Vec<String> = Vec::new();
+
+    // -- the two frames, each by the path production actually uses -----------
+    let (nav_out, ui_out) = settings_nav_on(SettingsPage::Sound);
+    assert!(
+        !ui_out.settings_in_world(),
+        "premise: the title-screen walk is out of world"
+    );
+    let out = frame_for(&ui_out, &nav_out, &statuses, &mut fav)
+        .expect("premise: the main-menu settings screen owns its frame");
+
+    let (mut nav_in, ui_in) = settings_nav_in_world_on(SettingsPage::Sound);
+    assert_eq!(
+        nav_in.settings().page(),
+        SettingsPage::Sound,
+        "premise: the same page in both arms"
+    );
+    let inw = crate::menu::nav::settings_overlay_frame(&ui_in, &nav_in)
+        .expect("premise: in-world settings declares an overlay frame");
+    assert!(
+        frame_for(&ui_in, &nav_in, &statuses, &mut fav).is_none(),
+        "premise: in-world settings is an overlay, so `frame_for` must decline it — \
+         if it stops declining, this gate is measuring the wrong path"
+    );
+
+    // -- the field claims, before anything that needs a rect ------------------
+    // Deliberately ahead of the pixel work: the rect claims below report and stop
+    // when there is no rect at all, so a neuter that removes the stamp would
+    // otherwise leave every one of these as an argument rather than an observation.
+    if inw.gui_scale != nav_in.gui_scale() {
+        wrong.push(format!(
+            "in-world settings carries gui_scale {} rather than the option's {} — the \
+             GUI Scale setting does not reach the screen that edits it",
+            inw.gui_scale,
+            nav_in.gui_scale()
+        ));
+    }
+    if inw.backdrop != MenuBackdrop::Dim {
+        wrong.push(format!(
+            "in-world settings declares backdrop {:?}, not Dim, so the panorama paints \
+             over the paused world",
+            inw.backdrop
+        ));
+    }
+    if out.backdrop != MenuBackdrop::Panorama {
+        wrong.push(format!(
+            "the main-menu arm declares backdrop {:?}, not Panorama — the fork went the \
+             wrong way",
+            out.backdrop
+        ));
+    }
+    // `cursor` on a **rebuilt** frame, so `inw` — the one the pixel probes below
+    // rasterise — never carries a cursor and cannot grow a tooltip quad in the
+    // probe column.
+    nav_in.set_menu_cursor(311.0, 229.0, W, H);
+    let with_cursor = crate::menu::nav::settings_overlay_frame(&ui_in, &nav_in)
+        .expect("in-world settings still declares a frame with a cursor set");
+    if with_cursor.cursor != nav_in.menu_cursor() {
+        wrong.push(format!(
+            "in-world settings carries cursor {:?} rather than the nav's {:?}, so hover \
+             affordances and option tooltips are dead in world",
+            with_cursor.cursor,
+            nav_in.menu_cursor()
+        ));
+    }
+
+    // -- the list spec, and that both arms agree on it -----------------------
+    let out_rect = out
+        .list
+        .as_ref()
+        .and_then(|spec| spec.model(H).map(|list| (spec.chrome_rect(&list, W))))
+        .flatten();
+    let in_rect = inw
+        .list
+        .as_ref()
+        .and_then(|spec| spec.model(H).map(|list| (spec.chrome_rect(&list, W))))
+        .flatten();
+    if in_rect.is_none() {
+        wrong.push(format!(
+            "in-world Sound declares no chrome rect (frame.list is {}), so the band \
+             tint and all four separator rows are skipped — this is the reported bug",
+            if inw.list.is_some() { "Some" } else { "None" }
+        ));
+    }
+    if out_rect != in_rect {
+        wrong.push(format!(
+            "the two arms disagree on the chrome rect: main menu {out_rect:?} vs \
+             in-world {in_rect:?}; they are the same screen at the same page and \
+             canvas, so these must be byte-identical"
+        ));
+    }
+
+    // Everything below needs a rect; without one the pixel claims are moot rather
+    // than false, so report and stop instead of unwrapping.
+    let Some((cx, cy, cw, ch)) = in_rect else {
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        unreachable!("in_rect is None but nothing was reported");
+    };
+    // The same 33 px-header / 33 px-footer band vanilla's `OptionsList` is sized
+    // to, asserted here as well as in the main-menu gate so a change to one arm
+    // cannot quietly move both.
+    if (cx, cy, cw, ch) != (0.0, 33.0, W, H - 33.0 - 33.0) {
+        wrong.push(format!(
+            "the in-world chrome rect is {:?}, not the 33/33 band",
+            (cx, cy, cw, ch)
+        ));
+    }
+
+    // -- the chrome, by location and by exact colour, on the in-world frame ---
+    let v = geometry(&inw, W, H);
+    let probe_x = 4.0;
+    let at = |verts: &[f32], y: f32| colour_at(verts, 2.0 * probe_x / W - 1.0, 1.0 - 2.0 * y / H);
+    // `header_separator.png` is light over dark; `footer_separator.png` is the
+    // mirror. Sampled at row centres, since a quad spans `y..y+1`. Collected
+    // rather than asserted in place: an `assert!` here would prove one row and
+    // leave the other three as arguments.
+    for (y, want, what) in [
+        (cy - SEPARATOR_H + 0.5, SEPARATOR_LIGHT, "header bar light row"),
+        (cy - 1.0 + 0.5, SEPARATOR_DARK, "header bar dark row"),
+        (cy + ch + 0.5, SEPARATOR_DARK, "footer bar dark row"),
+        (cy + ch + 1.5, SEPARATOR_LIGHT, "footer bar light row"),
+    ] {
+        let got = at(&v, y);
+        if !got.is_some_and(|c| c.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.002)) {
+            wrong.push(format!(
+                "in-world {what} at y={y} is {got:?}, not the decoded {want:?}"
+            ));
+        }
+    }
+    // And the tint, over the band's whole height in that column.
+    let margin = (0.0, cy, options::row_left(W, 0), ch);
+    let tinted = coverage_of(&v, W, H, margin, LIST_BAND_TINT);
+    if tinted != 1.0 {
+        wrong.push(format!(
+            "the in-world band's left margin {margin:?} is only {tinted} tinted — the \
+             black filter over the paused world does not cover the band"
+        ));
+    }
+    // The tint **stops** at the band: one row above the header bar, one inside the
+    // footer band. A tint that ran the whole canvas would satisfy the claim above
+    // and still be wrong, and in-world that is a live risk because the `Dim` wash
+    // really does cover everything.
+    for (y, what) in [
+        (cy - SEPARATOR_H - 1.5, "above the header bar"),
+        (cy + ch + SEPARATOR_H + 1.5, "below the footer bar"),
+    ] {
+        let got = at(&v, y);
+        if got.is_some_and(|c| c.iter().zip(LIST_BAND_TINT).all(|(a, b)| (a - b).abs() < 0.002)) {
+            wrong.push(format!(
+                "the in-world band tint leaked {what} (y={y}), so the content band is \
+                 not fenced off"
+            ));
+        }
+    }
+
+    // -- the grid page: agreement, not a chrome claim -------------------------
+    let (nav_root_in, ui_root_in) = settings_nav_in_world_on(SettingsPage::Root);
+    let root_in = crate::menu::nav::settings_overlay_frame(&ui_root_in, &nav_root_in)
+        .expect("in-world Root declares an overlay frame");
+    let mut nav_root_out = test_nav("root-out-chrome");
+    let mut ui_root_out = crate::menu::UiState::new();
+    ui_root_out.open_settings();
+    let root_out = frame_for(&ui_root_out, &nav_root_out, &statuses, &mut fav)
+        .expect("premise: main-menu Root owns its frame");
+    assert_eq!(
+        nav_root_in.settings().page(),
+        SettingsPage::Root,
+        "premise: in-world settings opens on Root"
+    );
+    assert_eq!(
+        nav_root_out.settings().page(),
+        SettingsPage::Root,
+        "premise: main-menu settings opens on Root"
+    );
+    if root_in.list.is_some() != root_out.list.is_some() {
+        wrong.push(format!(
+            "the two arms disagree on whether the Root grid has a list: main menu {} vs \
+             in-world {}",
+            root_out.list.is_some(),
+            root_in.list.is_some()
+        ));
+    }
+    // And the deliberate no-chrome case stays no-chrome: a grid page must not have
+    // grown a scrollbar-bearing band on either path.
+    for (frame, what) in [(&root_out, "main menu"), (&root_in, "in-world")] {
+        if frame.list.is_some() {
+            wrong.push(format!(
+                "the {what} Root grid now declares a ListSpec, so a scrollbar hangs \
+                 beside a screen with no rows"
+            ));
+        }
+    }
+    let _ = &mut nav_root_out;
+
+    // -- control, executed ---------------------------------------------------
+    // The **pre-fix construction**: `settings_frame` raw, exactly as
+    // `app/redraw.rs` used to build it. It must produce no chrome at all, which is
+    // what proves (a) the assertions above measure the chrome rather than something
+    // else painting at those rows, and (b) the stamp is what supplies it. Observed
+    // failing before the fix: this was the production frame.
+    let raw = crate::menu::options::settings_frame(
+        nav_in.settings(),
+        nav_in.options(),
+        nav_in.options_save_error(),
+    );
+    if raw.list.is_some() {
+        wrong.push(
+            "control premise broken: the raw `settings_frame` now carries a ListSpec of \
+             its own, so this control no longer demonstrates that the stamp is what \
+             supplies the chrome"
+                .to_owned(),
+        );
+    }
+    let rv = geometry(&raw, W, H);
+    let raw_at = at(&rv, cy - SEPARATOR_H + 0.5);
+    if raw_at.is_some() {
+        wrong.push(format!(
+            "control: the unstamped frame still painted {raw_at:?} where the header bar \
+             goes, so the chrome is not what this gate measured"
+        ));
+    }
+    let raw_tint = coverage_of(&rv, W, H, margin, LIST_BAND_TINT);
+    if raw_tint != 0.0 {
+        wrong.push(format!(
+            "control: the unstamped frame still tinted {raw_tint} of the band"
+        ));
+    }
+
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
