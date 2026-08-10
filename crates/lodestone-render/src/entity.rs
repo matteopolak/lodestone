@@ -222,7 +222,67 @@ fn canonical_model_name(type_path: &str) -> Option<&'static str> {
         "bogged" => return Some("skeleton"),
         _ => {}
     }
-    corpus_names().iter().copied().find(|n| *n == type_path)
+    // The corpus first, then the boat family. Order matters both ways round:
+    // `chest_boat` and `chest_raft` are corpus names that *also* satisfy
+    // [`boat_model_name`]'s `_boat`/`_raft` suffix rules, so testing the suffixes
+    // first would resolve the literal `"chest_boat"` to the plain boat rig.
+    corpus_names()
+        .iter()
+        .copied()
+        .find(|n| *n == type_path)
+        .or_else(|| boat_model_name(type_path))
+}
+
+/// The corpus rig for one of 26.2's twenty boat entity types.
+///
+/// **This is the one alias family the corpus cannot answer for itself.** The
+/// registry has twenty types — nine wood species × (boat, chest boat), plus
+/// `bamboo_raft` and `bamboo_chest_raft` (`lodestone_data::entity_types`, and
+/// `lodestone_data::entity_census`'s per-type Java class column, which names them
+/// `Boat`/`ChestBoat`/`Raft`/`ChestRaft`) — while the corpus carries exactly four
+/// rigs, one per *class*, because that is how vanilla builds them: the species is
+/// a texture, not geometry (`BoatRenderer` takes its `ModelLayerLocation` from the
+/// boat's `getVariant()` and its model from `BoatModel`/`ChestBoatModel`/
+/// `RaftModel`/`ChestRaftModel`). With no alias, `model_for_type("oak_boat")`
+/// returned `None` and the renderer skipped the entity entirely — a placed boat
+/// was invisible.
+///
+/// # The two traps, both real
+///
+/// * **`_chest_boat` must be tested before `_boat`**, because `oak_chest_boat`
+///   ends with `_boat` as well. Testing the shorter suffix first draws every chest
+///   boat as a plain boat — geometry that is wrong by three cubes and, more
+///   visibly, the wrong texture directory.
+/// * **`bamboo_raft` and `bamboo_chest_raft` carry no `_boat` suffix at all**, so a
+///   `_boat`-only rule silently misses two of the twenty. `lodestone_server`'s
+///   `boat` module records the same trap from the item side.
+///
+/// Written as suffix rules rather than twenty arms so a new wood species is
+/// drawable the moment the server sends it, matching how
+/// [`canonical_model_name`]'s corpus fallback treats a newly ported mob. The
+/// ordering above is what makes that safe.
+///
+/// The species texture is **not** resolved here: all nine wood boats draw the
+/// corpus entry's `entity/boat/oak` sheet and both rafts draw
+/// `entity/boat/bamboo`, because each corpus entry holds a single
+/// `EntityTexture::Fixed`. That is a visible-but-minor wrong-colour hull, and
+/// fixing it belongs in `lodestone-assets` (a variant texture on the four
+/// entries), not in a name mapping.
+fn boat_model_name(type_path: &str) -> Option<&'static str> {
+    // Longest first: every `*_chest_boat` also ends with `_boat`.
+    if type_path.ends_with("_chest_boat") {
+        return Some("chest_boat");
+    }
+    if type_path.ends_with("_chest_raft") {
+        return Some("chest_raft");
+    }
+    if type_path.ends_with("_boat") {
+        return Some("boat");
+    }
+    if type_path.ends_with("_raft") {
+        return Some("raft");
+    }
+    None
 }
 
 /// The [`entity_models`] entry name for a player's own body, chosen by skin

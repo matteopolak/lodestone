@@ -609,6 +609,27 @@ the opposite direction (never predict something wrong, but here there is no
 prediction to get wrong — only a decision between never sending and
 sometimes sending one redundant packet).
 
+**Finding 2 had a third branch, and it took a second pass to see it.** The two
+gaps above are the entity and no-target branches; the **block** branch still
+`return`ed after its `UseItemOn` + `SwingArm` pair. So the shield and the bow
+were fixed for a crosshair on a mob or on open air, and still dead the moment
+the crosshair rested on **terrain behind** the mob — which in a real fight is
+most of the screen. Eating, drinking and equip-on-use shared the gate for the
+same reason, and so did boat placement (`docs/boat-placement.md`).
+
+The correction that made the fix non-obvious: **`case BLOCK` is not a `break`
+like `case ENTITY`'s.** Reading `Minecraft.startUseItem` again, `case BLOCK`
+`return`s on `InteractionResult.Success` *and* on `InteractionResult.Fail`, and
+falls out of the switch to `gameMode.useItem` only for a non-consuming result —
+there is no `break` in that arm at all. So the fall-through is conditional:
+`use_item_live` sends the generic use only when its `UseOnDecision` is `Nothing`
+**and** the held item is not a placeable block, which is the shell's stand-in
+for `MultiPlayerGameMode.performUseItemOn` answering `PASS` because the item has
+no `useOn` of its own. An unconditional call would equip a **carved pumpkin**
+(both a placeable block and `equippable`) onto the player's head whenever a
+placement was refused. Both directions are gated in `sim::tests`, and each arm
+fails under the other's neuter.
+
 **A false belief worth recording.** The first pass at `UsingItem` only
 registered it in `Sim::end_session`'s explicit `insert_resource` block — the
 same place `Attacking`/`MiningPredictor`/`PlacementPredictor` are reset on
