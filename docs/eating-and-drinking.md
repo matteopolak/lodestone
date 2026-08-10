@@ -206,13 +206,16 @@ direction.
 
 ## Not done
 
-- **A merely-*held* item still gets `ArmPose::Empty`.** Vanilla's fallthrough
-  (`return itemInHand.is(ItemTags.SPEARS) ? SPEAR : ITEM;`) runs for **any** non-empty
-  hand, in use or not, so every armed humanoid in vanilla has a slightly raised arm
-  and here they hang. Only the in-use half is wired, because the other half changes the
-  silhouette of every armed mob — including the *resting* arm that
-  `bow_draw_pose_pixels` and `aggressive_bow_pose_pixels` difference against. It is a
-  one-line change in `entities::arm_pose_for` plus a re-baseline of those two gates.
+- ~~A merely-*held* item still gets `ArmPose::Empty`.~~ **Landed, and the premise
+  written here was wrong.** This entry claimed vanilla's fallthrough gives every armed
+  humanoid a raised arm, and that widening it needed a re-baseline of
+  `bow_draw_pose_pixels` and `aggressive_bow_pose_pixels`. Both claims came from reading
+  `AvatarRenderer.getArmPose` and generalising it to mobs. **`HumanoidMobRenderer.getArmPose`
+  ends `? SPEAR : EMPTY`**, so a mob's arms hang in vanilla too and the fallthrough is
+  avatar-only. It changes no mob silhouette; both gates use a skeleton subject and a
+  zombie control, so **neither needed re-baselining**. See
+  [arm poses](./item-use-arm-poses.md) for the type set, the controls that were run, and
+  why the armour-stand row is the one that makes the wrong scope visible.
 - **`BLOCK`, `SPYGLASS`, `TOOT_HORN`, `BRUSH`, `THROW_TRIDENT` and `SPEAR` now resolve
   to `ArmPose::Item`**, which is a *closer* wrong answer than `Empty` (the arm goes up,
   which is the half those poses share) but is not right: vanilla reaches each of them

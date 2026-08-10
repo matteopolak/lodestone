@@ -390,6 +390,47 @@ pub fn mob_draws_bow_when_aggressive(type_path: &str) -> bool {
     )
 }
 
+/// Whether this entity type is drawn by `AvatarRenderer` — the **only** renderer
+/// whose `getArmPose` falls through to `ArmPose.ITEM` for a merely *held* item.
+///
+/// # "every armed mob raises an arm in vanilla" is false, and this is the record
+///
+/// Two `getArmPose` implementations sit at the bottom of the humanoid chain, and
+/// they end differently:
+///
+/// ```text
+/// AvatarRenderer.getArmPose      … return itemInHand.is(ItemTags.SPEARS)   ? SPEAR : ITEM;
+/// HumanoidMobRenderer.getArmPose … return itemHeldByArm.is(ItemTags.SPEARS) ? SPEAR : EMPTY;
+/// ```
+///
+/// A **player** holding a sword raises the arm; a **zombie** holding the same sword
+/// does not. Reading only `AvatarRenderer` — which is the file the `ITEM` pose is
+/// naturally discovered in, because it is the one that reaches it — yields the
+/// opposite conclusion, and it was written down here as "vanilla's fallthrough runs
+/// for any non-empty hand, so every armed mob has a raised arm in vanilla and hangs
+/// its arms here". The first clause is true *of that method*; the conclusion is
+/// wrong, because mobs never call that method.
+///
+/// Every humanoid-mob override delegates to `HumanoidMobRenderer`'s `EMPTY` tail:
+/// `AbstractSkeletonRenderer` (aggressive+bow, else `super`),
+/// `AbstractZombieRenderer` (stab, else `super`), `DrownedRenderer`
+/// (aggressive+trident, else `super`), and `PiglinRenderer`, whose pose comes from
+/// the piglin's own server-side enum. So hanging arms on an armed mob is **correct
+/// today**, and widening the fallthrough to all humanoids would have put every armed
+/// zombie, skeleton, husk and armour stand into a pose vanilla never shows.
+///
+/// # The type set
+///
+/// `EntityRenderDispatcher.getRenderer` routes exactly two classes to
+/// `AvatarRenderer`: `AbstractClientPlayer` and `ClientMannequin` — the two
+/// `Avatar` subclasses (`Player extends Avatar`, `Mannequin extends Avatar`). Both
+/// are registered entity types, so this is keyed on the type path the extract stage
+/// has, the same space as [`mob_draws_bow_when_aggressive`].
+#[must_use]
+pub fn renderer_is_avatar(type_path: &str) -> bool {
+    matches!(type_path, "player" | "mannequin")
+}
+
 // Aggressive-driven poses vanilla has that this build does **not** model, and why
 // each is left rather than approximated. Kept as a comment beside the rule it
 // bounds, rather than as a doc on some function nobody calls.

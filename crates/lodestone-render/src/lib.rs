@@ -167,7 +167,7 @@ pub use entity::{
     entity_texture_candidates, entity_variant_sheet, entity_variant_sheet_dirs,
     experience_orb_icon, experience_orb_light, experience_orb_matrix, experience_orb_mesh,
     experience_orb_tint, framed_item_matrix, mob_draws_bow_when_aggressive, model_for_type,
-    plan_entities, sheet_reference_of, special_item_hover_lift,
+    plan_entities, renderer_is_avatar, sheet_reference_of, special_item_hover_lift,
 };
 pub use entity_anim::{AnimFamily, AnimInput, ArmPose, Skeleton};
 pub use entity_pipeline::{
