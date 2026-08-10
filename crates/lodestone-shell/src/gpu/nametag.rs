@@ -812,6 +812,7 @@ mod tests {
             on_fire: false,
             // Not a player, so no skin can apply.
             player_skin: None,
+            variant_sheet: None,
             // Not an experience orb: `None` keeps this subject out of the orb
             // billboard pass entirely.
             experience_orb_value: None,
@@ -884,6 +885,7 @@ mod tests {
             on_fire: false,
             // Not a player, so no skin can apply.
             player_skin: None,
+            variant_sheet: None,
             // Not an experience orb: `None` keeps this subject out of the orb
             // billboard pass entirely.
             experience_orb_value: None,
@@ -978,6 +980,7 @@ mod tests {
             on_fire: false,
             // Not a player, so no skin can apply.
             player_skin: None,
+            variant_sheet: None,
             // Not an experience orb: `None` keeps this subject out of the orb
             // billboard pass entirely.
             experience_orb_value: None,

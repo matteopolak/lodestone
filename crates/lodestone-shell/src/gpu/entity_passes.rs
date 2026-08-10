@@ -400,10 +400,10 @@ impl RenderState {
             ),
         );
 
-        // Split by `(hurt, creeper white-flash alpha, skin url)` here, at the one
-        // point that still knows which `EntityDraw` each instance came from —
-        // `plan_entities` groups by model and drops the input order, so none of the
-        // three can be zipped back on.
+        // Split by `(hurt, creeper white-flash alpha, skin url, variant sheet)` here,
+        // at the one point that still knows which `EntityDraw` each instance came
+        // from — `plan_entities` groups by model and drops the input order, so none
+        // of the four can be zipped back on.
         //
         // The skin half is a `Vec` of groups rather than a `HashMap` because it is
         // *ordered by first appearance* and tiny: one group for everything with no
@@ -411,8 +411,10 @@ impl RenderState {
         // view, which is bounded by the number of players on screen. The white-flash
         // byte joins the key for the same reason `hurt` is in it — the tint is one
         // repeated value per batch — and costs nothing off a creeper's fuse, where
-        // every entity in view shares the byte `0`.
-        let mut groups: Vec<(bool, u8, Option<String>, Vec<_>)> = Vec::new();
+        // every entity in view shares the byte `0`. The variant sheet joins it for
+        // the *skin's* reason rather than the tint's: it selects a bind group, so a
+        // shared group would draw one breed's sheet on every breed.
+        let mut groups: Vec<(bool, u8, Option<String>, Option<&'static str>, Vec<_>)> = Vec::new();
         for e in entities {
             // `resolve_posed`, not `resolve`, and this is the *only* call site that
             // needs it (issue #380): the pitch selects the **placement**, and a
@@ -467,11 +469,15 @@ impl RenderState {
                 )
             };
             let skin = e.player_skin.as_ref().map(|s| s.url.clone());
-            match groups.iter_mut().position(|(hurt, flash, url, _)| {
-                *hurt == e.hurt && *flash == white && *url == skin
+            // The variant sheet joins the key for `skin`'s reason: texture identity
+            // is not the model, so without it every wolf breed shares one bind group
+            // and all nine draw pale. See `EntityDrawBatch::variant_sheet`.
+            let sheet = e.variant_sheet;
+            match groups.iter_mut().position(|(hurt, flash, url, s, _)| {
+                *hurt == e.hurt && *flash == white && *url == skin && *s == sheet
             }) {
-                Some(i) => groups[i].3.push(instance),
-                None => groups.push((e.hurt, white, skin, vec![instance])),
+                Some(i) => groups[i].4.push(instance),
+                None => groups.push((e.hurt, white, skin, sheet, vec![instance])),
             }
         }
 
@@ -482,8 +488,8 @@ impl RenderState {
         // class of bug comes back.
         let plans: Vec<_> = groups
             .into_iter()
-            .map(|(hurt, white, skin, instances)| {
-                (hurt, white, skin, plan_entities(&instances, &frustum))
+            .map(|(hurt, white, skin, sheet, instances)| {
+                (hurt, white, skin, sheet, plan_entities(&instances, &frustum))
             })
             .collect();
         stats.entities_drawn = plans.iter().map(|(.., f)| f.stats.drawn).sum();
@@ -495,13 +501,13 @@ impl RenderState {
         // roughly 1% of the data a per-entity vertex re-bake would.
         plans
             .iter()
-            .flat_map(|(hurt, white, skin, frame)| {
+            .flat_map(|(hurt, white, skin, sheet, frame)| {
                 frame
                     .batches
                     .iter()
-                    .map(move |batch| (*hurt, *white, skin.as_ref(), batch))
+                    .map(move |batch| (*hurt, *white, skin.as_ref(), *sheet, batch))
             })
-            .map(|(hurt, white, skin, batch)| {
+            .map(|(hurt, white, skin, sheet, batch)| {
                 let count = u32::try_from(batch.transforms.len()).unwrap_or(u32::MAX);
                 // Every instance in this batch shares one overlay state — both
                 // halves of it — by construction of the split above, so one repeated
@@ -526,6 +532,7 @@ impl RenderState {
                     count,
                     parts,
                     skin: skin.cloned(),
+                    variant_sheet: sheet,
                 }
             })
             .collect()
@@ -1604,6 +1611,7 @@ mod tests {
             death_time: 0.0,
             on_fire,
             player_skin: None,
+            variant_sheet: None,
             // A flame subject, not an orb.
             experience_orb_value: None,
         }

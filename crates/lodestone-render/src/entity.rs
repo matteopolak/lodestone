@@ -426,6 +426,158 @@ pub fn entity_texture_candidates(model_name: &str) -> &'static [&'static str] {
         .map_or(&[], |(_, paths)| *paths)
 }
 
+/// The corpus sheet **reference** (`"entity/wolf/wolf_ashen"`, no `assets/` prefix
+/// and no extension) for one model and one *wire* variant, or `None` when the
+/// variant carries nothing this model's texture axis can use.
+///
+/// This is the production caller for
+/// [`EntityTexture::resolve`](lodestone_assets::entity::EntityTexture::resolve),
+/// which had none: the corpus modelled every wolf breed and every climate skin, and
+/// the whole render path asked only for `default_path()`. A function with zero
+/// production **readers** is the dual of the usual island, and `cargo xtask
+/// connectedness` structurally cannot see it — the packet reaches the fold and the
+/// fold reaches a component; what is missing is anything downstream *asking*.
+///
+/// # Which axes are lifted, and why not all of them
+///
+/// Only the axes whose wire form actually arrives at the client today. Both of
+/// these come over as [`EntityVariant::Keyed`] — a registry-holder key — which the
+/// v770 metadata decoder raises from the serializer alone:
+///
+/// | model | wire | assets axis |
+/// |---|---|---|
+/// | `wolf` | `Keyed("minecraft:ashen")` | [`WolfCoat`] |
+/// | `pig`, `cow`, `chicken` | `Keyed("minecraft:cold")` | [`Temperature`] |
+///
+/// Horse colour, llama, cat, parrot and mooshroom have corpus entries and their own
+/// axes; they are deliberately absent rather than half-lifted, because each needs
+/// its own answer to "does this key/ordinal actually reach us", and guessing one
+/// wrong produces a confidently wrong skin rather than a missing one.
+///
+/// # The wolf's tame state is **not** lifted, and that is a real gap
+///
+/// [`WolfState`] is pinned to [`WolfState::Wild`] here. Vanilla's tame bit is
+/// `TamableAnimal.DATA_FLAGS_ID & 4`, and no field on
+/// [`EntityMetadataUpdate`](lodestone_model::EntityMetadataUpdate) carries it — so
+/// there is nothing to read, and the client cannot currently know a wolf is tamed.
+/// Pinning `Wild` is the honest answer: it is what an untamed wolf looks like and
+/// what every wolf looked like before this function existed. When the flag is
+/// decoded, this becomes one extra argument here plus one extra grouping key at the
+/// draw site; it is deliberately *not* faked from anything else (a wolf with a
+/// nametag, say), because a plausible-looking guess would make the eventual real
+/// signal impossible to tell from a bug.
+///
+/// [`WolfCoat`]: lodestone_assets::entity::WolfCoat
+/// [`WolfState`]: lodestone_assets::entity::WolfState
+/// [`WolfState::Wild`]: lodestone_assets::entity::WolfState::Wild
+/// [`Temperature`]: lodestone_assets::entity::Temperature
+/// [`EntityVariant::Keyed`]: lodestone_model::EntityVariant::Keyed
+#[must_use]
+pub fn entity_variant_sheet(
+    model_name: &str,
+    variant: &lodestone_model::EntityVariant,
+) -> Option<&'static str> {
+    let axis = variant_axis(model_name, variant)?;
+    let entry = entity_models()
+        .into_iter()
+        .find(|entry| entry.name == model_name)?;
+    Some(entry.texture.resolve(axis))
+}
+
+/// Lifts a wire variant onto the [`lodestone_assets`] texture axis this model's
+/// corpus entry selects on. See [`entity_variant_sheet`] for the table and for why
+/// the wolf's state is pinned.
+fn variant_axis(
+    model_name: &str,
+    variant: &lodestone_model::EntityVariant,
+) -> Option<lodestone_assets::entity::EntityVariant> {
+    use lodestone_assets::entity::{EntityVariant as Axis, Temperature, WolfCoat, WolfState};
+
+    let key = match variant {
+        lodestone_model::EntityVariant::Keyed(id) => id,
+        _ => return None,
+    };
+    // Namespace checked, not ignored: a data pack's `mypack:ashen` is a different
+    // holder from `minecraft:ashen` and has no vanilla sheet.
+    if key.namespace() != "minecraft" {
+        return None;
+    }
+    match model_name {
+        "wolf" => {
+            let coat = match key.path() {
+                "pale" => WolfCoat::Pale,
+                "spotted" => WolfCoat::Spotted,
+                "snowy" => WolfCoat::Snowy,
+                "black" => WolfCoat::Black,
+                "ashen" => WolfCoat::Ashen,
+                "rusty" => WolfCoat::Rusty,
+                "woods" => WolfCoat::Woods,
+                "chestnut" => WolfCoat::Chestnut,
+                "striped" => WolfCoat::Striped,
+                _ => return None,
+            };
+            Some(Axis::Wolf {
+                coat,
+                state: WolfState::Wild,
+            })
+        }
+        "pig" | "cow" | "chicken" => {
+            let temperature = match key.path() {
+                "temperate" => Temperature::Temperate,
+                "cold" => Temperature::Cold,
+                "warm" => Temperature::Warm,
+                _ => return None,
+            };
+            Some(Axis::Temperature(temperature))
+        }
+        _ => None,
+    }
+}
+
+/// Every in-jar sheet directory a variant-driven corpus entry can draw from, as
+/// `"assets/minecraft/textures/entity/wolf/"`-shaped prefixes.
+///
+/// Derived from the corpus rather than hand-listed, for exactly the reason
+/// [`entity_texture_candidates`] is: a second table here could only drift. A loader
+/// walks these prefixes and keys what it finds by reference, so it needs no
+/// enumeration of the variant enums — which is what keeps a new breed or a new
+/// climate from needing a change here at all.
+#[must_use]
+pub fn entity_variant_sheet_dirs() -> Vec<&'static str> {
+    let mut dirs: Vec<&'static str> = entity_models()
+        .into_iter()
+        .filter(|entry| entry.texture.is_variant())
+        .filter_map(|entry| {
+            let reference = entry.texture.default_path();
+            let slash = reference.rfind('/')?;
+            Some(sheet_dir(&reference[..=slash]))
+        })
+        .collect();
+    dirs.sort_unstable();
+    dirs.dedup();
+    dirs
+}
+
+/// `"entity/wolf/"` → `"assets/minecraft/textures/entity/wolf/"`. Interned for the
+/// same reason [`sheet_path`] is: the corpus is a fixed compile-time set, so the
+/// `&'static` signature holds without a lifetime on the caller.
+fn sheet_dir(reference: &str) -> &'static str {
+    Box::leak(format!("assets/minecraft/textures/{reference}").into_boxed_str())
+}
+
+/// The corpus reference a jar path under one of [`entity_variant_sheet_dirs`]'
+/// prefixes corresponds to: the inverse of [`sheet_path`].
+///
+/// `"assets/minecraft/textures/entity/wolf/wolf_ashen.png"` → `"entity/wolf/wolf_ashen"`.
+/// `None` for a path that is not a texture under `assets/minecraft/textures/`, so a
+/// loader can skip a stray `.mcmeta` without knowing this module's layout.
+#[must_use]
+pub fn sheet_reference_of(jar_path: &str) -> Option<&str> {
+    jar_path
+        .strip_prefix("assets/minecraft/textures/")?
+        .strip_suffix(".png")
+}
+
 /// A CPU entity mesh in the shared wide [`ModelVertex`] format, plus the model's
 /// local-space bounding box for culling.
 ///
@@ -4436,6 +4588,203 @@ mod tests {
         assert_eq!(
             entity_texture_candidates("stray"),
             ["assets/minecraft/textures/entity/skeleton/stray.png"]
+        );
+    }
+
+    /// **The variant-resolver gate.** A wire variant must select the *breed's* own
+    /// sheet, not the model's default.
+    ///
+    /// # The discriminating requirement
+    ///
+    /// "Returns `Some`" is satisfied by a resolver that hands back
+    /// `default_path()`, which is exactly the behaviour this replaces — so every
+    /// assertion below is stated as a **difference from the default**, and the nine
+    /// breeds are required to be nine *distinct* sheets so no selector can be a
+    /// constant function.
+    ///
+    /// # Where the expected values come from
+    ///
+    /// `WolfVariants.register` (26.2, `.cache/mc/26.2/src`), which is both halves of
+    /// the answer and neither is guessable from the other: it builds the wild sheet
+    /// as `"entity/wolf/" + fileName`, and it registers `fileName` against a
+    /// **registry key** — `register(context, ASHEN, "wolf_ashen", …)`, with
+    /// `ASHEN = createKey("ashen")`. So the wire's `minecraft:ashen` holder maps to
+    /// the stem `wolf_ashen`, and `PALE` maps to the bare `wolf` rather than to
+    /// `wolf_pale`, which is the one entry a uniform `"wolf_" + key` rule would get
+    /// wrong. That asymmetry is asserted explicitly below.
+    #[test]
+    fn a_wire_variant_selects_the_breeds_own_sheet_not_the_models_default() {
+        use lodestone_model::EntityVariant as Wire;
+
+        let keyed = |path: &str| Wire::Keyed(format!("minecraft:{path}").parse().unwrap());
+        let default = entity_models()
+            .into_iter()
+            .find(|e| e.name == "wolf")
+            .expect("wolf is in the corpus")
+            .texture
+            .default_path();
+        assert_eq!(default, "entity/wolf/wolf", "the default is the pale sheet");
+
+        // (registry key, stem) straight off `WolfVariants.bootstrap`.
+        let vanilla: [(&str, &str); 9] = [
+            ("pale", "wolf"),
+            ("spotted", "wolf_spotted"),
+            ("snowy", "wolf_snowy"),
+            ("black", "wolf_black"),
+            ("ashen", "wolf_ashen"),
+            ("rusty", "wolf_rusty"),
+            ("woods", "wolf_woods"),
+            ("chestnut", "wolf_chestnut"),
+            ("striped", "wolf_striped"),
+        ];
+
+        let mut wrong = Vec::new();
+        let mut seen: Vec<&'static str> = Vec::new();
+        for (key, stem) in vanilla {
+            let want = format!("entity/wolf/{stem}");
+            match entity_variant_sheet("wolf", &keyed(key)) {
+                Some(got) => {
+                    if got != want {
+                        wrong.push(format!("{key}: want {want:?}, got {got:?}"));
+                    }
+                    seen.push(got);
+                }
+                None => wrong.push(format!("{key}: resolved to None")),
+            }
+        }
+        // Eight of the nine must differ from the default; `pale` legitimately *is*
+        // the default, which is why this is a count and not a blanket `!=`.
+        let non_default = seen.iter().filter(|s| **s != default).count();
+        if non_default != 8 {
+            wrong.push(format!(
+                "only {non_default} of 9 breeds resolved away from the default sheet \
+                 — a resolver returning `default_path()` would score 0"
+            ));
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        if seen.len() != 9 {
+            wrong.push(format!(
+                "the nine breeds collapsed to {} distinct sheets, so the selector is \
+                 not reading the coat",
+                seen.len()
+            ));
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// The climate axis, on the same wire shape. `pig`/`cow`/`chicken` all carry it,
+    /// and all three currently draw `_temperate` for every animal in the world.
+    #[test]
+    fn a_climate_variant_selects_the_cold_and_warm_sheets() {
+        use lodestone_model::EntityVariant as Wire;
+
+        let keyed = |path: &str| Wire::Keyed(format!("minecraft:{path}").parse().unwrap());
+        let mut wrong = Vec::new();
+        for model in ["pig", "cow", "chicken"] {
+            for climate in ["temperate", "cold", "warm"] {
+                let want = format!("entity/{model}/{model}_{climate}");
+                match entity_variant_sheet(model, &keyed(climate)) {
+                    Some(got) if got == want => {}
+                    other => wrong.push(format!("{model}/{climate}: want {want:?}, got {other:?}")),
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// **The controls.** Everything the resolver must decline, so "it returns a
+    /// sheet" is demonstrably not unconditional.
+    ///
+    /// A foreign namespace is the one worth stating: a data pack's `mypack:ashen` is
+    /// a different holder with no vanilla sheet, and a path-only comparison would
+    /// hand it `wolf_ashen`.
+    #[test]
+    fn control_the_resolver_declines_what_it_cannot_map() {
+        use lodestone_model::EntityVariant as Wire;
+
+        let keyed = |id: &str| Wire::Keyed(id.parse().unwrap());
+        let mut wrong = Vec::new();
+        for (what, model, variant) in [
+            (
+                "a model with no variant axis",
+                "zombie",
+                keyed("minecraft:ashen"),
+            ),
+            ("an unknown breed key", "wolf", keyed("minecraft:nonesuch")),
+            ("a foreign namespace", "wolf", keyed("mypack:ashen")),
+            (
+                "a wrong-axis variant (sheep dye on a wolf)",
+                "wolf",
+                Wire::Dyed {
+                    color: 4,
+                    sheared: false,
+                },
+            ),
+            (
+                "a model not in the corpus at all",
+                "nonesuch",
+                keyed("minecraft:ashen"),
+            ),
+        ] {
+            if let Some(got) = entity_variant_sheet(model, &variant) {
+                wrong.push(format!("{what}: expected None, got {got:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// **The tame gap, pinned as a fact rather than left as a comment.**
+    ///
+    /// The client has no tame bit: no field of `EntityMetadataUpdate` carries
+    /// `TamableAnimal.DATA_FLAGS_ID & 4`, so [`entity_variant_sheet`] pins
+    /// `WolfState::Wild` and a tamed wolf draws its wild sheet. This asserts that
+    /// deliberate state, which means the day the flag is decoded **this test fails**
+    /// and whoever lands it has to thread the state through rather than discovering
+    /// later that the collar never appeared.
+    ///
+    /// The corpus already knows the tame sheet, and the assertion names it, so the
+    /// gate cannot pass by the tame path merely being unimplemented in the corpus.
+    /// 26.2 also ships a `_baby` axis (`WolfVariants.register` builds six
+    /// identifiers, not three) which `WolfState` does not model at all.
+    #[test]
+    fn a_tamed_wolf_still_resolves_to_its_wild_sheet_because_the_flag_never_arrives() {
+        use lodestone_assets::entity::{EntityVariant as Axis, WolfCoat, WolfState};
+        use lodestone_model::EntityVariant as Wire;
+
+        let entry = entity_models()
+            .into_iter()
+            .find(|e| e.name == "wolf")
+            .expect("wolf is in the corpus");
+        let wild = entry.texture.resolve(Axis::Wolf {
+            coat: WolfCoat::Ashen,
+            state: WolfState::Wild,
+        });
+        let tame = entry.texture.resolve(Axis::Wolf {
+            coat: WolfCoat::Ashen,
+            state: WolfState::Tame,
+        });
+        assert_eq!(
+            (wild, tame),
+            ("entity/wolf/wolf_ashen", "entity/wolf/wolf_ashen_tame"),
+            "the corpus must model both states, or the claim below is vacuous"
+        );
+
+        let got = entity_variant_sheet(
+            "wolf",
+            &Wire::Keyed("minecraft:ashen".parse().unwrap()),
+        );
+        assert_eq!(
+            got,
+            Some(wild),
+            "the wire carries no tame bit, so every wolf must resolve wild"
+        );
+        assert_ne!(
+            got,
+            Some(tame),
+            "if this now fails, the tame flag has become available: thread it into \
+             `variant_axis` and into the draw-grouping key rather than deleting this \
+             assertion"
         );
     }
 

@@ -190,6 +190,8 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        // A zombie has no variant texture axis, so the model sheet applies.
+        variant_sheet: None,
         // Not an experience orb, so the orb billboard pass never claims it.
         experience_orb_value: None,
     };

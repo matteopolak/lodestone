@@ -668,6 +668,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        variant_sheet: None,
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
@@ -702,6 +703,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        variant_sheet: None,
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
@@ -889,6 +891,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        variant_sheet: None,
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
@@ -1457,6 +1460,7 @@ fn orb_draw(value: i32) -> EntityDraw {
         death_time: 0.0,
         on_fire: false,
         player_skin: None,
+        variant_sheet: None,
         experience_orb_value: Some(value),
     }
 }

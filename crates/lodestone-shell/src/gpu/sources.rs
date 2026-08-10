@@ -295,6 +295,7 @@ impl ThirdPersonBodyState {
             // skin reaches the inventory avatar, not this body. `ThirdPersonBodyState`
             // is where the URL would have to be plumbed.
             player_skin: None,
+            variant_sheet: None,
         }
     }
 }

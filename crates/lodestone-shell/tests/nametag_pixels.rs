@@ -146,6 +146,8 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,
+        // These subjects have no variant texture axis; the model sheet applies.
+        variant_sheet: None,
         // Not an experience orb, so the orb billboard pass never claims it.
         experience_orb_value: None,
     }

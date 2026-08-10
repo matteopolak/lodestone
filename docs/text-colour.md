@@ -143,6 +143,50 @@ the sign's dye), so a per-run colour would need `LocalRect` to carry one and the
 to split per run. Consuming the pair is the half that has to be right either way: a dropped
 colour reads as plain text, an emitted pair reads as a bug.
 
+### Hex, and why fixing the renderer was never going to be enough
+
+Everything above is about the sixteen colours that **have** a `§` code. `TextColor::Rgb` has
+none, and that is not a detail — it is what makes the producer, rather than the renderer, the
+place a hex colour dies. `Text::to_legacy_string` can carry the sixteen through a `String`
+because the font layer applies codes at draw time; it cannot carry hex at all, and
+`to_plain_string` carries neither. So a surface whose producer flattens is hex-blind *however*
+correct the draw is, and no amount of work in `VanillaFont` could recover it.
+
+Six surfaces were in that state after the `§` census above, and all six now carry
+`Vec<TextSpan>` from the producer down:
+
+| surface | producer, before | now |
+|---|---|---|
+| title / subtitle overlay | `Sim::title_overlay` → `to_legacy_string` | `to_spans`, `HudFrame::title` is spans |
+| action bar | `Sim::action_bar_overlay` → `to_legacy_string` | `to_spans`, `HudFrame::action_bar` is spans |
+| boss bar title | `overlay::boss_bars_from` → `resolve_to_string` | `resolve(..).to_spans()`, `BossBarView::title` is spans |
+| tab list header / footer | `tablist::banner_lines` → `to_plain_string` | `to_spans` then `overlay::spans_lines`, `TabListView::header`/`footer` are `Vec<Vec<TextSpan>>` |
+
+The draws moved with them, from the `Builder::text`/`text_width` pair to
+`text_spans`/`spans_width` — the pair the scoreboard sidebar already used. **Using one of each
+is a real bug and a quiet one**: the measure decides where a centred line starts, so a mismatch
+shifts every glyph in `x` rather than failing.
+
+`overlay::spans_lines` is the one new piece of logic. A server writes a multi-line tab-list
+banner as literal `\n` *inside* one component, so the split has to happen over spans; splitting
+a flattened string would have been simpler and would have thrown away exactly the colour the
+change exists to keep. It carries each run's style across the break, so a coloured banner stays
+coloured on both lines.
+
+**Chat is still hex-blind, and it is the one that needs real work.** `ChatLog` flattens with
+`to_legacy_string`, and `hud.rs`'s wrapping (`wrap_legacy` / `wrap_legacy_with`, plus
+`ChatWrapCache`, plus `strip_legacy` for `options.chat.color == false`) all operate on `String`.
+Span-aware wrapping means: a `wrap_spans` that breaks a `Vec<TextSpan>` on word boundaries while
+carrying style across each break (`spans_lines` is the newline-only ancestor of it), a
+`ChatWrapCache` keyed on something other than a `&str`, a span-aware `strip_colour`, and
+`ChatLog` keeping spans rather than a legacy string. That is a piece of work in its own right,
+not plumbing, and it is why chat was scoped out of the change above rather than done badly.
+
+The discriminating input for any of this is **a colour with no legacy equivalent**. A named
+colour cannot separate a working span path from a legacy fallback, because the fallback gets it
+right. `tests/text_colour.rs`'s producer gate uses six pairwise-distinct hex values, one per
+surface, so a surface drawing another surface's text also fails.
+
 ### Per surface, in detail
 
 **Chat** already worked for named colours and still does: `ChatLog` flattens to a legacy

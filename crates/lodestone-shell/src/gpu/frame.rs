@@ -674,10 +674,21 @@ impl RenderState {
                     // at once and none of them is an error: no skin declared
                     // (every offline-mode server), a fetch still in flight, and a
                     // fetch that failed. See `EntityRenderer::player_skins`.
+                    //
+                    // The variant sheet (a wolf's breed, a pig's climate) is tried
+                    // next, with the same fallback discipline: a reference the pack
+                    // does not ship, or no pack at all, draws the model's default
+                    // sheet, which is exactly the behaviour before variants were
+                    // resolved. See `EntityDrawBatch::variant_sheet`.
                     let texture = batch
                         .skin
                         .as_ref()
                         .and_then(|url| self.entities.player_skins.get(url))
+                        .or_else(|| {
+                            batch
+                                .variant_sheet
+                                .and_then(|s| self.entities.variant_textures.get(s))
+                        })
                         .or_else(|| self.entities.textures.get(batch.model));
                     let Some(texture) = texture else {
                         continue;

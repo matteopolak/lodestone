@@ -141,6 +141,8 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         // Not a player, so no skin can apply.
         player_skin: None,
         // Not an experience orb, so the orb billboard pass never claims it.
+        // No variant texture axis on these subjects; the model sheet applies.
+        variant_sheet: None,
         experience_orb_value: None,
     }
 }
@@ -481,6 +483,8 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         // Not a player, so no skin can apply.
         player_skin: None,
         // Not an experience orb, so the orb billboard pass never claims it.
+        // No variant texture axis on these subjects; the model sheet applies.
+        variant_sheet: None,
         experience_orb_value: None,
     };
     // The same camera, turned to put the projectile squarely behind it.
