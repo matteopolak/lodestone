@@ -1001,6 +1001,43 @@ impl Sim {
                 self.play_block_place_sound([pos.x, pos.y, pos.z], state);
             }
         }
+
+        // **`case BLOCK`'s fall-through — the only route by which any `use`-based
+        // item works while the crosshair is on a block.** The server's
+        // `ServerPlayerGameMode.useItemOn` never reaches `Item.use`, so a boat,
+        // food, a drink, an equip-on-use helmet and a bow draw are
+        // all reachable *only* through `USE_ITEM`. Until this branch existed the
+        // block path `return`ed after its two sends, so every one of those worked
+        // when aimed at open air or at a mob and did nothing when aimed at a
+        // block — which for a boat means it places over deep water (where the
+        // block ray misses) and never on a shoreline.
+        //
+        // **It is not unconditional, and vanilla's `case BLOCK` is not a `break`.**
+        // Unlike `case ENTITY` (which has an explicit `break` and always falls
+        // through), `Minecraft.startUseItem`'s `case BLOCK` `return`s on
+        // `InteractionResult.Success` *and* on `InteractionResult.Fail`, and reaches
+        // the generic use only for a non-consuming result. So the condition here is
+        // "what would `MultiPlayerGameMode.performUseItemOn` have returned":
+        //
+        // * [`UseOnDecision::Interact`] / [`UseOnDecision::Place`] — vanilla's
+        //   `Success` (the block actuated, or `BlockItem.useOn` placed). Return.
+        // * [`UseOnDecision::Nothing`] with a placeable item — vanilla's `Fail`
+        //   (`BlockItem.place` refused: obstructed, or a non-replaceable target).
+        //   Return. Falling through here is what would make a **carved pumpkin**
+        //   aimed at an illegal face equip itself onto the player's head instead of
+        //   doing nothing — it is both a placeable block and an `equippable`.
+        // * [`UseOnDecision::Nothing`] with no placeable item — vanilla's default
+        //   `Item.useOn`, which is `PASS`. This is the boat, the food, the potion.
+        //
+        // `placeable.is_none()` is therefore standing in for "the held item has no
+        // `useOn` of its own". It is the same shape of over-approximation
+        // `is_interactable_state` makes for blocks, and it
+        // errs the same safe way: an item our block census cannot name is treated as
+        // non-placeable, so at worst a `USE_ITEM` follows a placement the server
+        // accepted, where `Item.use` is `PASS` for a plain `BlockItem` anyway.
+        if matches!(decision, UseOnDecision::Nothing { .. }) && placeable.is_none() {
+            self.use_item_generic();
+        }
     }
 
     /// Vanilla's unconditional generic-use fallback at the bottom of

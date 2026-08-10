@@ -98,15 +98,43 @@ This is also the first reader of `ServerBound::InteractEntity::using_secondary_a
 
 ## Gotchas, and the gaps
 
-* **The client does not fall through from `USE_ITEM_ON` to `USE_ITEM`.** Vanilla's
-  `Minecraft.startUseItem` sends the `use_item_on` packet, sees a non-consuming result, and
-  then sends `use_item` unconditionally — which is the *only* way `BoatItem.use` ever runs,
-  because the server's `ServerPlayerGameMode.useItemOn` never reaches `Item.use`. Our shell's
-  `Sim::use_item_live` returns after the block branch, so a boat aimed at **land or shallow
-  water** sends nothing this module can see. Aimed at water whose bed is out of block reach
-  it works today: the crosshair ray ignores fluids, misses, and the existing no-target branch
-  already calls `use_item_generic`. The fix is one call in the shell's block branch, matching
-  what its own entity and no-target branches already do.
+* **The `USE_ITEM_ON` → `USE_ITEM` fall-through is now wired, and it is *conditional*.** This
+  was the gap that made a boat aimed at land do nothing while a boat aimed at open water past
+  block reach worked (the crosshair ray ignores fluids, misses, and the no-target branch
+  already fell through). `USE_ITEM` is the only way `BoatItem.use` ever runs, because the
+  server's `ServerPlayerGameMode.useItemOn` never reaches `Item.use`.
+
+  The correction worth carrying: **vanilla's `case BLOCK` is not a `break` like `case ENTITY`'s.**
+  `Minecraft.startUseItem` `return`s on `InteractionResult.Success` *and* on
+  `InteractionResult.Fail`, and reaches `gameMode.useItem` only for a non-consuming result. So
+  `Sim::use_item_live` falls through only when its `UseOnDecision` is `Nothing` **and** the held
+  item is not a placeable block — the shell's stand-in for "this item has no `useOn` of its own",
+  which is what `MultiPlayerGameMode.performUseItemOn` would have answered `PASS` for. An
+  unconditional call would have been a real defect, not merely over-eager: a **carved pumpkin**
+  is both a placeable block and `equippable`, so a refused placement would equip it onto the
+  player's head. `sim::tests::{use_item_live_falls_through_to_generic_use_with_a_block_targeted,
+  a_placeable_item_on_a_block_does_not_also_send_the_generic_use}` are the two arms, and each
+  fails under the other's neuter.
+
+  **The fix is worth more than boats.** Every `USE_ITEM` outcome — `apply_use_item`'s
+  `Consuming` (eating, drinking), `Equipped` (equip-on-use), `Draw` (bow/crossbow) and this
+  module's boat arm — was reachable only with the crosshair off a block.
+* **A placed boat used to be invisible, for an unrelated reason.**
+  `lodestone_render::entity::model_for_type` resolves an entity-type path against the
+  `entity_models` corpus, which names the four rigs by vanilla *class* (`boat`, `chest_boat`,
+  `raft`, `chest_raft`) while the registry has twenty *types*. With no alias
+  `model_for_type("oak_boat")` was `None` and `resolve_animated` skipped the entity, so the
+  server streamed a boat nobody could see. `entity::boat_model_name` maps the twenty onto the
+  four; the traps are that `_chest_boat` must be tested before `_boat` (every chest boat ends
+  with both), that `bamboo_raft`/`bamboo_chest_raft` carry no `_boat` suffix at all, and that
+  the corpus lookup must run **before** the suffix rules or the literal corpus name
+  `"chest_boat"` resolves to the plain `boat` rig.
+  `crates/lodestone-render/tests/boat_model_resolution.rs` gates all three.
+* **Every wood species draws the oak hull.** Each corpus entry carries a single
+  `EntityTexture::Fixed` (`entity/boat/oak`, `entity/chest_boat/oak`, `entity/boat/bamboo`,
+  `entity/chest_boat/bamboo`), and vanilla's species *is* a texture rather than geometry, so a
+  spruce boat is oak-coloured. Fixing it means a variant texture on the four `lodestone-assets`
+  entries, not a change to the name mapping.
 * **No dismount packet has a producer.** There is no shift-to-get-out send in the shell, so a
   rider stays aboard until they disconnect. `MobSim::dismount_rider` is ready for it.
 * **A vanished rider is evicted by roster diff, not by a disconnect hook.** `tick_vehicles`
@@ -154,5 +182,6 @@ None. Reach follows the game mode; nothing is behind a feature flag or a game ru
 and the obstruction test, `lodestone_server::fluid::fluid_state_of` for the surface height,
 `lodestone_physics::vehicle` for `BoatState`/`boat_status`/`float_boat` and the shared
 constants, and `lodestone_v770`'s `ServerProtocol` for `SET_PASSENGERS` and the `MOVE_VEHICLE`
-decode. The client half is `lodestone_ecs::{session, riding, vehicle}` and needs no change
-beyond the `USE_ITEM` fall-through noted above.
+decode. The client half is `lodestone_ecs::{session, riding, vehicle}` for the mount and the
+local vehicle simulation, `lodestone_shell::sim::Sim::use_item_live` for the `USE_ITEM` send,
+and `lodestone_render::entity::{model_for_type, boat_model_name}` for the rig.

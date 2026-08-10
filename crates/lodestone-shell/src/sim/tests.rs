@@ -3933,6 +3933,107 @@ fn use_item_generic_sends_nothing_with_an_empty_main_hand() {
     );
 }
 
+/// The third branch, and the one the two above left behind: with a **block**
+/// under the crosshair, `use_item_live` used to `return` after its
+/// `UseItemOn` + `SwingArm` pair and never reach the generic use.
+///
+/// That gate is worth more than the branch it fixes, because the server's
+/// `ServerPlayerGameMode.useItemOn` never reaches `Item.use`: `USE_ITEM` is
+/// the *only* route by which a boat is placed, food is eaten, a drink is
+/// drunk, a helmet is equipped on use, or a bow starts drawing. All of that
+/// worked aimed at open air or at a mob and did nothing aimed at a block —
+/// which is why a boat could be placed over deep water (where the block ray
+/// misses entirely) and not on a shoreline.
+///
+/// A boat is the subject deliberately: `minecraft:oak_boat` is not a block,
+/// so it can never take the placement path and the fall-through is the whole
+/// of its behaviour.
+#[test]
+fn use_item_live_falls_through_to_generic_use_with_a_block_targeted() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:oak_boat");
+    sim.set_ray_target_for_test(Some(RayHit::face_center([4, 64, 4], [0, 1, 0])));
+    assert!(sim.target().is_some(), "precondition: a block is targeted");
+    assert!(
+        sim.entity_target().is_none(),
+        "precondition: no entity targeted, or the entity branch answers instead \
+         and this proves nothing about the block one"
+    );
+
+    sim.use_item_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    let use_on = sent
+        .iter()
+        .position(|a| matches!(a, ClientAction::UseItemOn { .. }));
+    let use_item = sent
+        .iter()
+        .position(|a| matches!(a, ClientAction::UseItem { hand: Hand::Main, .. }));
+    assert!(
+        use_on.is_some(),
+        "the block interaction itself must still be sent, got {sent:?}"
+    );
+    assert!(
+        use_item.is_some(),
+        "a block target must also fall through to the generic use-item send — \
+         this is the only packet that places a boat, eats food or draws a bow. \
+         Got {sent:?}"
+    );
+    assert!(
+        use_on < use_item,
+        "`use_item_on` must precede `use_item` on the wire, as vanilla's \
+         `case BLOCK` reaches `gameMode.useItem` only after `gameMode.useItemOn` \
+         — got {sent:?}"
+    );
+}
+
+/// The discriminating control for the branch above, and the reason it is not
+/// an unconditional `use_item_generic()` call.
+///
+/// Vanilla's `case BLOCK` is **not** a `break` like `case ENTITY`'s:
+/// `Minecraft.startUseItem` returns on `InteractionResult.Success` *and* on
+/// `InteractionResult.Fail`, reaching the generic use only for a non-consuming
+/// result. So a **placeable** item in hand must not produce a second send: the
+/// item's own `useOn` is what answered, and falling through would let a carved
+/// pumpkin aimed at an illegal face equip itself onto the player's head
+/// instead of doing nothing.
+///
+/// `minecraft:stone` against this harness's target yields
+/// `UseOnDecision::Nothing` (the loopback net publishes no `ClientHandle`, so
+/// `block_at` reads `None` and the placement is declined as illegal) — which
+/// is precisely vanilla's `Fail`, and precisely the arm an unconditional
+/// fall-through would get wrong. Same `Sim`, same target, same call as the
+/// gate above; only the held item differs.
+#[test]
+fn a_placeable_item_on_a_block_does_not_also_send_the_generic_use() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:stone");
+    sim.set_ray_target_for_test(Some(RayHit::face_center([4, 64, 4], [0, 1, 0])));
+
+    sim.use_item_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        sent.iter()
+            .any(|a| matches!(a, ClientAction::UseItemOn { .. })),
+        "control precondition: the block send must still happen, or the absence \
+         below is just an unwired Sim — got {sent:?}"
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|a| matches!(a, ClientAction::UseItem { .. })),
+        "a block item answered the click itself, so the generic use must not \
+         follow it — got {sent:?}"
+    );
+}
+
 /// Finding 1: [`Sim::end_use_live`] must send `ReleaseUseItem` when a use
 /// was actually in progress — the packet that was a serverbound island
 /// (encoded by all four protocol adapters, zero producers anywhere in
