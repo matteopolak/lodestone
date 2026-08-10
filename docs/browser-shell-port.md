@@ -266,7 +266,8 @@ table; do not invent a parallel mechanism. A rule for a crate that still calls t
 symbol in ungated code goes red for everyone, so **confine first, then add the
 guard**.
 
-`lodestone-shell` is now in the script's compile list, and has two rules:
+`lodestone-shell` is in both the script's and xtask's compile lists, and has three
+rules (the `thread::spawn` one is described further down):
 
 | rule | bans | allowlist |
 |---|---|---|
@@ -286,6 +287,14 @@ Three things about their shape are deliberate, and each was arrived at the hard 
   `platform::Instant` *is* `std::time::Instant` on native, so the conversion cost
   nothing and turned "the shell never names the trapping clock" from a promise into
   something one grep decides.
+* **The `SystemTime` rule names `::now` and the `Instant` one does not**, and that
+  asymmetry is deliberate rather than an oversight. `screenshot.rs` takes a
+  `now: SystemTime` *parameter* and reads `SystemTime::UNIX_EPOCH` — the type and the
+  constant, never the trapping call — so banning the bare `std::time::SystemTime`
+  path here would go red on a file that cannot trap. The clock rules in the other five
+  crates *do* ban the bare path, because none of them has a legitimate reason to name
+  the type at all. Pattern width follows what the crate legitimately needs, not a
+  house style.
 * **The guard mechanism now skips comment lines.** Every one of these confinements
   deserves a sentence at its call site saying *"not `SystemTime::now()`, because it
   traps"*, and a guard that fires on its own documentation trains people to delete
@@ -296,6 +305,46 @@ Three things about their shape are deliberate, and each was arrived at the hard 
 non-allowlisted file, confirm the rule reports `FAIL` naming `file:line`, then
 restore by `cp` from an md5-checked backup. A confinement rule is an assertion of an
 absence, and it is worth exactly as much as the evidence that it would have fired.
+
+That control is now **mechanical and permanent** rather than a habit:
+`xtask`'s `every_confinement_rule_fires_under_a_planted_violation` plants a probe file
+in the directory each rule scans, requires the scan to report it *by path*, and removes
+it. It runs in `cargo test -p xtask`, so a rule that cannot fail is a red test. Use
+`scripts/wasm-check.sh --confinement-only` to run just the greps in seconds, with no
+cargo build and no `trunk`.
+
+### Two ways a guard reported PASS without running, both now mechanically impossible
+
+Both were measured, and neither was visible by reading the rule table:
+
+* **Five rules' greps never executed.** The script's rule rows are `|`-separated, and
+  the five clock rules spelled a BRE alternation `std::time::\(Instant\|SystemTime\)` —
+  whose `\|` *is* the field separator. `IFS='|' read` truncated the pattern to
+  `std::time::\(Instant\`, grep exited 2 (*"trailing backslash"* on BSD grep,
+  *"parentheses not balanced"* elsewhere), and the `|| true` that swallows grep's
+  no-match exit 1 swallowed the **error** too. An empty result reads as "nothing
+  leaked". The other twelve rules were correct only because no pattern happened to
+  contain a `|`.
+
+  Fixed three ways, in increasing generality: grep's exit status is read and `>= 2` is
+  a hard FAIL printing grep's own stderr; every row is validated to split into exactly
+  four fields before use; and the five alternation rules are split into one rule per
+  hazard, so **every pattern in the table is a literal substring** — which also makes
+  it dialect-independent, since BSD, GNU and ugrep disagree about BRE alternation.
+* **`cargo xtask wasm-check`, the implementation CI actually runs, enforced eight
+  fewer rules than the script it claimed parity with** — all three `lodestone-shell`
+  rules and all five clock rules were absent, and `lodestone-shell` was missing from
+  its compile list. Its parity test hard-coded a list of nine labels, so it kept
+  passing as the script grew to seventeen. A gate that compares a table against a copy
+  of itself cannot tell you a third table exists.
+
+  The parity test now **parses** `scripts/wasm-check.sh`'s `CRATES` and
+  `CONFINEMENT_RULES` arrays and compares field by field, so drift in either direction
+  is red, and a `|` in any pattern fails it as well.
+
+The reusable shape: **a check whose detector errored has measured nothing, and must
+say so.** Wherever a guard maps "no findings" and "could not look" onto the same value,
+that guard is one typo away from being decorative.
 
 ## Configuration
 

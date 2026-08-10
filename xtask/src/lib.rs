@@ -8451,15 +8451,33 @@ pub fn wasm_crates() -> Vec<WasmCrate> {
             name: "lodestone-worldgen",
             extra_args: &[],
         },
+        // The playable game shell — the menu, `Sim`, the renderer, all of it. The
+        // browser consumes this crate's LIB target, and it is the crate most likely
+        // to regress because almost nobody working in it builds for wasm. Placed
+        // last because it sits on top of everything above, so a failure here is
+        // unambiguous rather than transitive.
+        //
+        // It was missing from this table while the reference script listed it, so
+        // `cargo xtask wasm-check` — the implementation CI runs — never named it and
+        // only reached it transitively through the trunk build of `web/`.
+        WasmCrate {
+            name: "lodestone-shell",
+            extra_args: &[],
+        },
     ]
 }
 
 /// One confinement guard rule — parity with scripts/wasm-check.sh's
-/// CONFINEMENT_RULES table. `banned` is matched as a literal substring, which
-/// is exactly what the script's rules mean today: every token (`std::fs::`,
-/// `Instant::now(`, `tokio::time::`, `cpal::`, `std::thread`, `tokio::spawn`)
-/// is literal in grep's BRE/ERE and none carries an active regex
-/// metacharacter.
+/// CONFINEMENT_RULES table, asserted by a test that PARSES that table rather than
+/// restating it.
+///
+/// `banned` is matched as a literal substring, and that is a requirement rather
+/// than an observation: the same string is handed to grep by the script, so a
+/// regex metacharacter would mean two different things on the two sides.
+/// `confinement_rules_match_the_reference_script_table` enforces it. A `|` is the
+/// worst case — it is the script's own field separator, and a `\|` alternation is
+/// what made five rules print PASS with their grep never executing. Split a
+/// two-hazard rule into one rule per hazard instead.
 #[derive(Debug, Clone)]
 pub struct ConfinementRule {
     /// Report label, e.g. "lodestone-assets fs-confinement".
@@ -8541,6 +8559,137 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
             banned: "tokio::spawn",
             allowlist: &["spawn.rs"],
         },
+        // --- lodestone-shell ---
+        // The shell confines both trapping clocks to `crate::platform`, which
+        // re-exports `web_time` (std's own types on native, `performance.now()` /
+        // `Date.now()` in a browser). These rules ban the `std::time::` PATHS rather
+        // than the bare `Instant::now(` spelling, deliberately: the shell's call
+        // sites read `crate::platform::Instant::now()`, so an `Instant::now(`
+        // pattern would match all of them and the rule could never go green. The
+        // path is what distinguishes a trapping call from a portable one.
+        //
+        // `platform.rs` alone is allowlisted — the strongest form. Both rules found
+        // LIVE TRAPS when first added, on a tree whose wasm32 build was already
+        // exit 0, which is the entire argument for having them.
+        ConfinementRule {
+            label: "lodestone-shell instant-confinement",
+            src_dir: "crates/lodestone-shell/src",
+            banned: "std::time::Instant",
+            allowlist: &["platform.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-shell systemtime-confinement",
+            src_dir: "crates/lodestone-shell/src",
+            banned: "std::time::SystemTime::now",
+            allowlist: &["platform.rs"],
+        },
+        // `thread::spawn` TRAPS on wasm32; the three thread entry points do NOT
+        // behave alike, which is why this names one of them and not the family:
+        //
+        //     std::thread::spawn                 TRAPS
+        //     std::thread::sleep                 TRAPS
+        //     std::thread::Builder::new().spawn  Err(Unsupported) — degrades
+        //     std::thread::available_parallelism Err              — degrades
+        //
+        // Allowlist = the three files that confine it behind
+        // cfg(not(target_arch = "wasm32")) with a browser arm beside it. SCOPE
+        // LIMIT: this does NOT cover `thread::sleep`, whose remaining sites are
+        // inside `#[cfg(test)] mod tests` in files whose production halves must stay
+        // covered — a scanner cannot tell a test module from a production one, so
+        // allowlisting those files would buy one hazard and blind two files to it.
+        ConfinementRule {
+            label: "lodestone-shell thread-spawn-confinement",
+            src_dir: "crates/lodestone-shell/src",
+            banned: "thread::spawn",
+            allowlist: &["mesher.rs", "accounts.rs", "status.rs"],
+        },
+        // --- the clock, in every other crate the browser reaches ---
+        //
+        // These exist because lodestone-shell's three rules were not enough. The
+        // browser build reached exit 0 with all three PASSing and still died twice:
+        // once in lodestone-particle (`from_entropy` → `SystemTime::now()`, three
+        // crates below the shell) and once in lodestone-server/lodestone-worldgen on
+        // the way into a world. A confinement guard only covers the crate it names,
+        // and the browser reaches about fifteen.
+        //
+        // lodestone-server is the sharpest case: `collect_nearby_items` already
+        // carried a comment stating the rule — "this crate must not call
+        // std::time::Instant::now() anywhere in lodestone-server, because the crate
+        // links into a wasm32 bundle where that compiles and then panics at runtime"
+        // — and four sites violated it anyway. The rule was right and it was prose.
+        //
+        // ONE RULE PER HAZARD, not one `(Instant|SystemTime)` rule per crate. In the
+        // reference script the alternation form spelled `\|`, which IS that table's
+        // field separator, so all five of those rules had their pattern truncated,
+        // grep exited 2, and a swallowed error printed PASS. Keeping every pattern a
+        // literal substring is what lets both implementations share one table.
+        //
+        // Empty allowlists: these crates have no business reading a wall clock
+        // through `std`. Each uses `web_time`, whose non-wasm arm is
+        // `pub use std::time::*`, so native is byte-identical.
+        ConfinementRule {
+            label: "lodestone-server instant-ban",
+            src_dir: "crates/lodestone-server/src",
+            banned: "std::time::Instant",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-server systemtime-ban",
+            src_dir: "crates/lodestone-server/src",
+            banned: "std::time::SystemTime",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-worldgen instant-ban",
+            src_dir: "crates/lodestone-worldgen/src",
+            banned: "std::time::Instant",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-worldgen systemtime-ban",
+            src_dir: "crates/lodestone-worldgen/src",
+            banned: "std::time::SystemTime",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-particle instant-ban",
+            src_dir: "crates/lodestone-particle/src",
+            banned: "std::time::Instant",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-particle systemtime-ban",
+            src_dir: "crates/lodestone-particle/src",
+            banned: "std::time::SystemTime",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-net instant-ban",
+            src_dir: "crates/lodestone-net/src",
+            banned: "std::time::Instant",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-net systemtime-ban",
+            src_dir: "crates/lodestone-net/src",
+            banned: "std::time::SystemTime",
+            allowlist: &[],
+        },
+        // `async_task.rs`'s only clock hits are inside a `#[cfg(test)] mod`, which
+        // never reaches a browser; a scanner cannot tell a test module from a
+        // production one, so it is named.
+        ConfinementRule {
+            label: "lodestone-ecs instant-ban",
+            src_dir: "crates/lodestone-ecs/src",
+            banned: "std::time::Instant",
+            allowlist: &["async_task.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-ecs systemtime-ban",
+            src_dir: "crates/lodestone-ecs/src",
+            banned: "std::time::SystemTime",
+            allowlist: &["async_task.rs"],
+        },
     ]
 }
 
@@ -8556,9 +8705,12 @@ pub struct ConfinementLeak {
 }
 
 /// Scans one rule's src dir for the banned symbol, skipping allowlisted file
-/// basenames. A missing src dir is an ERROR, not a silent pass — a rule
-/// pointing at a typo'd path would otherwise report green forever (the
-/// script's `grep … 2>/dev/null || true` swallows exactly that hole).
+/// basenames and comment lines. A missing src dir is an ERROR, not a silent pass —
+/// a rule pointing at a typo'd path would otherwise report green forever.
+///
+/// Every rule has a positive control:
+/// `every_confinement_rule_fires_under_a_planted_violation` plants a violating line
+/// in the crate each rule names and requires the scan to report it by path.
 pub fn scan_confinement(
     workspace_root: &Path,
     rule: &ConfinementRule,
@@ -8575,6 +8727,26 @@ pub fn scan_confinement(
     scan_confinement_dir(&root, workspace_root, rule, &mut leaks)?;
     leaks.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
     Ok(leaks)
+}
+
+/// True for a line whose first non-whitespace characters make it a comment, so a
+/// banned symbol inside it cannot execute.
+///
+/// Parity with the reference script, which drops the same three openers. Every one
+/// of these confinements is worth a sentence at its call site saying "use
+/// `crate::platform::Instant`, not `std::time::Instant`, because the latter traps",
+/// and a guard that fires on its own documentation trains people to delete the
+/// documentation. Same reasoning that made a `"` legal inside a `.wgsl` comment.
+///
+/// SCOPE LIMIT, stated because a filter you trust further than it reaches is worse
+/// than none: this is a line-opener test, not a lexer. It does not see a `/* … */`
+/// block whose first line does not start with `*`, and it does not see a trailing
+/// `// …` comment after code — which is the safe direction, since such a line has
+/// executable content anyway. A hand-rolled Rust lexer would be wrong about
+/// lifetimes; three scanners in this repo already were.
+fn is_comment_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with('#')
 }
 
 fn scan_confinement_dir(
@@ -8601,11 +8773,22 @@ fn scan_confinement_dir(
             }
             // Lossy read (not read_to_string) so a non-UTF-8 file is still
             // scanned rather than silently skipped, matching grep's behaviour.
-            let bytes =
-                std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            //
+            // A file that disappeared between `read_dir` and here is skipped rather
+            // than fatal: this is a shared checkout where another agent may delete a
+            // file mid-walk, and a file that no longer exists cannot carry a hazard.
+            // Only NotFound is tolerated — a permissions error still fails loudly,
+            // because that one CAN hide a leak.
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    return Err(err).with_context(|| format!("read {}", path.display()));
+                }
+            };
             let text = String::from_utf8_lossy(&bytes);
             for (index, line) in text.lines().enumerate() {
-                if line.contains(rule.banned) {
+                if line.contains(rule.banned) && !is_comment_line(line) {
                     let rel = path
                         .strip_prefix(workspace_root)
                         .unwrap_or(&path)
@@ -8670,11 +8853,21 @@ pub fn run_wasm_check(workspace_root: &Path) -> Result<()> {
         }
     }
 
+    // A count with a verdict that depends on the count, printed unconditionally. A
+    // confinement rule that reported neither clean nor leaked has measured nothing,
+    // and the whole reason these guards exist is that five of them did exactly that
+    // in the reference script for their entire life.
+    let mut rules_scanned = 0usize;
+    let rule_total = confinement_rules().len();
     for rule in confinement_rules() {
         print!("  {:<34} ", rule.label);
         match scan_confinement(workspace_root, &rule) {
-            Ok(leaks) if leaks.is_empty() => println!("PASS"),
+            Ok(leaks) if leaks.is_empty() => {
+                rules_scanned += 1;
+                println!("PASS");
+            }
             Ok(leaks) => {
+                rules_scanned += 1;
                 println!("FAIL");
                 for leak in &leaks {
                     println!(
@@ -8698,6 +8891,14 @@ pub fn run_wasm_check(workspace_root: &Path) -> Result<()> {
             }
         }
     }
+    println!();
+    println!("  confinement rules that actually ran: {rules_scanned}/{rule_total}");
+    if rules_scanned != rule_total {
+        failures.push(format!(
+            "only {rules_scanned} of {rule_total} confinement rules ran"
+        ));
+    }
+    println!();
 
     // The browser app is its own workspace (outside the crates/ glob), built
     // through trunk so a wasm-bindgen-level break is caught, not just a rustc
@@ -9299,60 +9500,338 @@ mod tests {
         );
     }
 
+    /// Serialises the two tests that walk the REAL crate directories: the positive
+    /// control plants a probe file inside them, and
+    /// `confinement_rules_hold_across_the_real_workspace` walks the same trees.
+    ///
+    /// Measured, not hypothesised: without this the control's probe was removed
+    /// while the other test was mid-read and the walk died with ENOENT — a red test
+    /// that says nothing about the code under guard.
+    static REAL_WORKSPACE_SCAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Workspace root, from the manifest dir rather than cwd so tests work from
+    /// anywhere.
+    fn wasm_test_workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .expect("canonicalize workspace root")
+    }
+
+    /// Reads the reference script's text.
+    fn reference_script_text() -> String {
+        let path = wasm_test_workspace_root()
+            .join("scripts")
+            .join("wasm-check.sh");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
+    }
+
+    /// Pulls the rows out of a `NAME=( … )` bash array of double-quoted strings,
+    /// skipping the comment lines interleaved through it.
+    ///
+    /// The parity gates below PARSE the other implementation's table rather than
+    /// restate it. That distinction is load-bearing: the previous version of
+    /// `confinement_rules_match_the_reference_script_table` hard-coded a list of
+    /// nine labels, so when the script grew to seventeen rules the test kept
+    /// passing and `cargo xtask wasm-check` — the implementation CI runs — silently
+    /// enforced eight fewer rules than the script it claimed parity with. A gate
+    /// that compares one table against a copy of itself cannot tell you a third
+    /// table exists.
+    fn parse_script_array(script: &str, name: &str) -> Vec<String> {
+        let opener = format!("{name}=(");
+        let mut rows = Vec::new();
+        let mut inside = false;
+        for line in script.lines() {
+            if !inside {
+                if line.starts_with(&opener) {
+                    inside = true;
+                }
+                continue;
+            }
+            if line.starts_with(')') {
+                return rows;
+            }
+            let trimmed = line.trim();
+            if let Some(body) = trimmed.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+                rows.push(body.to_string());
+            }
+        }
+        panic!("{name}=( … ) array not found (or unterminated) in the reference script");
+    }
+
     #[test]
     fn wasm_crates_match_the_reference_script_subset() {
+        let script = reference_script_text();
+        let rows = parse_script_array(&script, "CRATES");
+        assert!(
+            rows.len() > 10,
+            "parsed only {} CRATES rows — the parser, not the table, is what broke",
+            rows.len()
+        );
+
+        let expected: Vec<(String, Vec<String>)> = rows
+            .iter()
+            .map(|row| match row.split_once('|') {
+                None => (row.clone(), Vec::new()),
+                Some((pkg, extra)) => (
+                    pkg.to_string(),
+                    extra.split_whitespace().map(str::to_string).collect(),
+                ),
+            })
+            .collect();
+
+        let actual: Vec<(String, Vec<String>)> = wasm_crates()
+            .iter()
+            .map(|c| {
+                (
+                    c.name.to_string(),
+                    c.extra_args.iter().map(|a| a.to_string()).collect(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            actual, expected,
+            "wasm compile subset drifted from scripts/wasm-check.sh's CRATES table"
+        );
+
         let names: Vec<&str> = wasm_crates().iter().map(|c| c.name).collect();
-        let expected = [
-            "lodestone-core",
-            "lodestone-model",
-            "lodestone-world",
-            "lodestone-physics",
-            "lodestone-assets",
-            "lodestone-registry",
-            "lodestone-render",
-            "lodestone-audio",
-            "lodestone-sound",
-            "lodestone-data",
-            "lodestone-v770",
-            "lodestone-v47",
-            "lodestone-net",
-            "lodestone-ecs",
-            "lodestone-client",
-            "lodestone-controller",
-            "lodestone-server",
-            "lodestone-worldgen",
-        ];
-        assert_eq!(names, expected);
-        // The one crate with extra args: lodestone-net needs the ws-web feature.
-        assert_eq!(wasm_crates()[12].extra_args, &["--features", "ws-web"]);
         let mut sorted = names.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len(), "duplicate crate in wasm subset");
     }
 
     #[test]
     fn confinement_rules_match_the_reference_script_table() {
-        let rules = confinement_rules();
-        let labels: Vec<&str> = rules.iter().map(|r| r.label).collect();
-        assert_eq!(
-            labels,
-            [
-                "lodestone-assets fs-confinement",
-                "lodestone-audio device-confinement",
-                "lodestone-audio time-confinement",
-                "lodestone-sound time-confinement",
-                "lodestone-client time-confinement",
-                "lodestone-client instant-ban",
-                "lodestone-client fs-ban",
-                "lodestone-client thread-ban",
-                "lodestone-client spawn-confinement",
-            ]
+        let script = reference_script_text();
+        let rows = parse_script_array(&script, "CONFINEMENT_RULES");
+        assert!(
+            rows.len() > 10,
+            "parsed only {} CONFINEMENT_RULES rows — the parser, not the table, is what broke",
+            rows.len()
         );
-        for rule in &rules {
+
+        // Every row must split into EXACTLY four `|` fields. This is the mechanical
+        // catch for the defect that made five rules vacuous: they spelled a BRE
+        // alternation `\(Instant\|SystemTime\)`, whose `\|` is the script's own field
+        // separator, so `IFS='|' read` truncated the pattern to `std::time::\(Instant\`,
+        // grep exited 2, and a swallowed error printed PASS. Under this assertion that
+        // row is a red test instead.
+        let malformed: Vec<&String> = rows
+            .iter()
+            .filter(|row| row.split('|').count() != 4)
+            .collect();
+        assert!(
+            malformed.is_empty(),
+            "confinement rule rows must have exactly 4 '|'-separated fields; a '|' \
+             inside a pattern truncates it. Offending rows:\n{malformed:#?}"
+        );
+
+        let expected: Vec<(String, String, String, Vec<String>)> = rows
+            .iter()
+            .map(|row| {
+                let fields: Vec<&str> = row.split('|').collect();
+                (
+                    fields[0].to_string(),
+                    fields[1].to_string(),
+                    fields[2].to_string(),
+                    fields[3]
+                        .split(',')
+                        .filter(|f| !f.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                )
+            })
+            .collect();
+
+        let actual: Vec<(String, String, String, Vec<String>)> = confinement_rules()
+            .iter()
+            .map(|r| {
+                (
+                    r.label.to_string(),
+                    r.src_dir.to_string(),
+                    r.banned.to_string(),
+                    r.allowlist.iter().map(|f| f.to_string()).collect(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            actual, expected,
+            "confinement rules drifted from scripts/wasm-check.sh's CONFINEMENT_RULES table"
+        );
+
+        for rule in confinement_rules() {
             assert!(!rule.src_dir.is_empty(), "{} has empty src_dir", rule.label);
             assert!(!rule.banned.is_empty(), "{} has empty banned", rule.label);
+            // A pattern is matched here with `str::contains` and in the script with
+            // grep, so it must be a literal substring in both. `|` additionally
+            // truncates the script's row; the rest would silently mean something
+            // different on one side.
+            for meta in ['|', '(', ')', '[', ']', '*', '+', '?', '\\'] {
+                if meta == '(' && rule.banned.ends_with('(') {
+                    // A trailing `(` is literal in grep's BRE and in `contains`, and
+                    // `Instant::now(` deliberately relies on it to distinguish the
+                    // call from the type.
+                    continue;
+                }
+                assert!(
+                    !rule.banned.contains(meta),
+                    "{}: banned pattern {:?} contains regex metacharacter {meta:?}; \
+                     patterns must be literal substrings in both implementations",
+                    rule.label,
+                    rule.banned
+                );
+            }
         }
+    }
+
+    #[test]
+    fn every_confinement_rule_fires_under_a_planted_violation() -> Result<()> {
+        // THE POSITIVE CONTROL. A confinement rule that has never been observed
+        // failing is a rule you hope works — and five of them did not, for their
+        // whole life, while printing PASS.
+        //
+        // For each rule: create ONE new file in the directory that rule scans,
+        // carrying the rule's banned pattern on a non-comment line, and require the
+        // scan to report it by path. No existing file is touched, so there is
+        // nothing to restore; the probe uses a non-`.rs` extension so cargo never
+        // considers it, and a basename no allowlist names.
+        //
+        // Mismatches are COLLECTED and asserted on the collection. An `assert!`
+        // inside the loop would prove exactly one arm and leave the rest arguments
+        // rather than observations.
+        let _serial = REAL_WORKSPACE_SCAN_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let workspace_root = wasm_test_workspace_root();
+        let rules = confinement_rules();
+        assert!(rules.len() > 10, "suspiciously few rules to control");
+
+        let mut fired: Vec<&str> = Vec::new();
+        let mut silent: Vec<String> = Vec::new();
+
+        for (index, rule) in rules.iter().enumerate() {
+            // Per-rule filename: two rules scan the same dir, and a shared name
+            // would let one rule's probe satisfy another's assertion.
+            let probe_name = format!("zz_wasm_guard_control_{index}.probe");
+            let probe = workspace_root.join(rule.src_dir).join(&probe_name);
+            // Not a comment: the scanner drops lines opening with `//`, `*` or `#`.
+            let planted = format!("let _positive_control = {}PLANTED;\n", rule.banned);
+            std::fs::write(&probe, &planted)
+                .with_context(|| format!("plant probe at {}", probe.display()))?;
+
+            let outcome = scan_confinement(&workspace_root, rule);
+            // Remove the probe before judging, so a failed assertion cannot leave it
+            // behind and turn every later run red.
+            let _ = std::fs::remove_file(&probe);
+
+            match outcome {
+                Ok(leaks) => {
+                    let named = leaks
+                        .iter()
+                        .any(|leak| leak.path.ends_with(Path::new(&probe_name)));
+                    if named {
+                        fired.push(rule.label);
+                    } else {
+                        silent.push(format!(
+                            "{}: planted {:?} in {} and the scan did not report it ({} other leak(s))",
+                            rule.label,
+                            rule.banned,
+                            rule.src_dir,
+                            leaks.len()
+                        ));
+                    }
+                }
+                Err(err) => silent.push(format!("{}: scanner errored: {err:#}", rule.label)),
+            }
+            assert!(
+                !probe.exists(),
+                "probe {} survived cleanup — remove it before re-running",
+                probe.display()
+            );
+        }
+
+        assert!(
+            silent.is_empty(),
+            "{} of {} confinement rules did NOT fire under a planted violation:\n{}",
+            silent.len(),
+            rules.len(),
+            silent.join("\n")
+        );
+        assert_eq!(
+            fired.len(),
+            rules.len(),
+            "every rule must be observed failing; fired: {fired:?}"
+        );
+        // Printed so `-- --nocapture` reports the count rather than only the verdict.
+        println!(
+            "confinement rules observed FAILING under a planted violation: {}/{}",
+            fired.len(),
+            rules.len()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn confinement_scan_ignores_comment_lines_and_allowlisted_files() -> Result<()> {
+        // The two ways a rule is allowed NOT to fire, each given an arm that fails
+        // if the mechanism inverts. Without this, comment-stripping could silently
+        // widen to "starts with any punctuation" and nothing would notice.
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        let src = root.join("crates/probe/src");
+        std::fs::create_dir_all(src.join("nested"))?;
+        std::fs::write(
+            src.join("confined.rs"),
+            "use std::time::Instant;\n", // allowlisted file: must be ignored
+        )?;
+        std::fs::write(
+            src.join("prose.rs"),
+            "// use std::time::Instant; -- traps on wasm32, use crate::platform\n\
+             /// `std::time::Instant` is the trapping one\n\
+             //! std::time::Instant\n\
+             * std::time::Instant\n\
+             # std::time::Instant\n",
+        )?;
+        std::fs::write(
+            src.join("nested/leaky.rs"),
+            "fn f() {\n    let t = std::time::Instant::now();\n}\n",
+        )?;
+
+        let rule = ConfinementRule {
+            label: "probe instant-ban",
+            src_dir: "crates/probe/src",
+            banned: "std::time::Instant",
+            allowlist: &["confined.rs"],
+        };
+        let leaks = scan_confinement(root, &rule)?;
+        let reported: Vec<String> = leaks
+            .iter()
+            .map(|l| format!("{}:{}", l.path.display(), l.line))
+            .collect();
+        assert_eq!(
+            reported,
+            vec!["crates/probe/src/nested/leaky.rs:2"],
+            "exactly the one executable line, found recursively, must be reported"
+        );
+
+        // Control: the same tree with the allowlist emptied must report the
+        // allowlisted file too — proving the previous arm's silence came from the
+        // allowlist and not from the scanner failing to read the file at all.
+        let unguarded = ConfinementRule {
+            allowlist: &[],
+            ..rule.clone()
+        };
+        let leaks = scan_confinement(root, &unguarded)?;
+        assert_eq!(
+            leaks.len(),
+            2,
+            "with an empty allowlist both executable lines must appear; got {leaks:#?}"
+        );
+        Ok(())
     }
 
     #[test]
@@ -9361,8 +9840,13 @@ mod tests {
         // the real crates, so `cargo test -p xtask` (and thus `just health`)
         // trips on a leaked wasm hazard instead of waiting for a manual script
         // run. Env-var manifest dir, not cwd, so it works from any cwd.
-        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let workspace_root = workspace_root.canonicalize()?;
+        //
+        // Shares a lock with the positive control, which plants probe files in these
+        // same directories.
+        let _serial = REAL_WORKSPACE_SCAN_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let workspace_root = wasm_test_workspace_root();
         let mut failures = Vec::new();
         for rule in confinement_rules() {
             let leaks = scan_confinement(&workspace_root, &rule)?;
