@@ -72,13 +72,47 @@
 #   nor a cause. See report_build_failure below for the three properties that
 #   fixed it.
 #
+# A RULE THAT CANNOT RUN IS A FAILURE, NEVER A PASS
+#   Measured, and the reason the loop below looks paranoid: five of these rules
+#   printed PASS for their whole life without their grep ever executing. The rule
+#   table is `|`-separated and five patterns spelled a BRE alternation
+#   `\(Instant\|SystemTime\)`, whose `\|` IS the field separator — so
+#   `IFS='|' read` truncated the pattern to `std::time::\(Instant\`, grep exited 2
+#   ("trailing backslash" on BSD grep, "parentheses not balanced" on others), and
+#   the `|| true` that swallows grep's "no match" exit 1 swallowed the ERROR too.
+#   An empty result reads as "nothing leaked".
+#
+#   Three mechanism fixes, in order of how much they generalise:
+#
+#     1. grep's exit status is now read, and >=2 (an ERROR, as distinct from 1 =
+#        no match) is a hard FAIL naming the rule and grep's own stderr. This is
+#        the general form: a guard whose detector errored has measured nothing.
+#     2. every rule row is validated to split into EXACTLY four fields before it
+#        is used — a `|` anywhere inside a pattern is now a hard FAIL saying so,
+#        rather than a silently truncated regex. The other twelve rules were
+#        correct only because no pattern happened to contain a `|`; nothing in the
+#        mechanism required it.
+#     3. the five alternation rules are split into one rule per hazard
+#        (`std::time::Instant` and `std::time::SystemTime` separately), so every
+#        pattern in the table is now a LITERAL substring. That keeps the table
+#        dialect-independent — BSD, GNU and ugrep disagree about BRE alternation —
+#        and it is what lets `cargo xtask wasm-check` match these patterns with a
+#        plain `str::contains`.
+#
+#   Each rule also has a POSITIVE CONTROL: `xtask`'s
+#   `every_confinement_rule_fires_under_a_planted_violation` plants a violating
+#   line in the crate each rule names, asserts the rule reports it by path, and
+#   removes it. A confinement rule with no control is a rule you hope works.
+#
 # USAGE
-#   scripts/wasm-check.sh
+#   scripts/wasm-check.sh                      # compile pass + guards + trunk build
+#   scripts/wasm-check.sh --confinement-only   # just the greps (seconds, no cargo)
 #
 # PREREQUISITES (the script verifies both and FAILS with the install command if
 # either is missing — a check that cannot run must fail, not pass quietly):
 #   * rustup target: wasm32-unknown-unknown
 #   * trunk (0.21.x) — the browser app is built through it as the final step.
+# `--confinement-only` needs neither, and skips both checks for that reason.
 #
 set -uo pipefail
 
@@ -86,7 +120,23 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 TARGET="wasm32-unknown-unknown"
 
-if ! rustup target list --installed 2>/dev/null | grep -q "$TARGET"; then
+CONFINEMENT_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --confinement-only) CONFINEMENT_ONLY=1 ;;
+    -h|--help)
+      echo "usage: scripts/wasm-check.sh [--confinement-only]"
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument '$arg'"
+      echo "usage: scripts/wasm-check.sh [--confinement-only]"
+      exit 2
+      ;;
+  esac
+done
+
+if (( CONFINEMENT_ONLY == 0 )) && ! rustup target list --installed 2>/dev/null | grep -q "$TARGET"; then
   echo "error: rust target '$TARGET' is not installed."
   echo "       this check CANNOT RUN without it — failing rather than passing quietly."
   echo "       run: rustup target add $TARGET"
@@ -98,7 +148,7 @@ fi
 # a wasm-bindgen-level break is caught, not just a rustc one. A check that cannot
 # run must FAIL, not skip — so a missing trunk is exit 2 with the install command,
 # never a quiet green.
-if ! command -v trunk >/dev/null 2>&1; then
+if (( CONFINEMENT_ONLY == 0 )) && ! command -v trunk >/dev/null 2>&1; then
   echo "error: 'trunk' is not installed (required to build/serve the browser app)."
   echo "       this check CANNOT RUN without it — failing rather than passing quietly."
   echo "       run: cargo install trunk --version 0.21.14"
@@ -225,6 +275,7 @@ echo "target: $TARGET"
 echo
 
 for entry in "${CRATES[@]}"; do
+  (( CONFINEMENT_ONLY == 1 )) && break
   pkg="${entry%%|*}"
   extra=""
   [[ "$entry" == *"|"* ]] && extra="${entry#*|}"
@@ -264,7 +315,16 @@ done
 # original one-off lodestone-assets fs guard.
 #
 # Each rule (fields separated by '|'):
-#   <label> | <src dir under repo root> | <banned grep regex> | <comma-sep allowlisted file basenames>
+#   <label> | <src dir under repo root> | <banned pattern> | <comma-sep allowlisted file basenames>
+#
+# THE PATTERN MUST NOT CONTAIN A '|'. It is the field separator, so a `\|`
+# alternation truncates the pattern mid-escape and grep exits 2 — which is exactly
+# how five of these rules spent their life printing PASS without running. Split the
+# alternation into one rule per hazard instead; the loop below now hard-FAILs any
+# row that does not have exactly four fields, so this cannot recur silently.
+# Keeping every pattern a plain literal substring also keeps the table
+# dialect-independent (BSD, GNU and ugrep disagree about BRE alternation) and lets
+# `cargo xtask wasm-check` match it with `str::contains`.
 #
 # ADD A ROW ONLY AFTER YOUR CRATE ACTUALLY CONFINES THE HAZARD. A rule for a crate
 # that still calls the symbol in ungated code will (correctly) go red for everyone
@@ -362,19 +422,75 @@ CONFINEMENT_RULES=(
   # Empty allowlists: these crates have no business reading a wall clock through `std`.
   # Each now uses `web_time`, whose non-wasm arm is `pub use std::time::*` — so native is
   # byte-identical and the rule costs nothing to keep.
-  "lodestone-server clock-ban|crates/lodestone-server/src|std::time::\(Instant\|SystemTime\)|"
-  "lodestone-worldgen clock-ban|crates/lodestone-worldgen/src|std::time::\(Instant\|SystemTime\)|"
-  "lodestone-particle clock-ban|crates/lodestone-particle/src|std::time::\(Instant\|SystemTime\)|"
-  "lodestone-net clock-ban|crates/lodestone-net/src|std::time::\(Instant\|SystemTime\)|"
-  # `async_task.rs`'s only hit is inside a `#[cfg(test)] mod`, which never reaches a
-  # browser; a grep cannot tell a test module from a production one, so it is named.
-  "lodestone-ecs clock-ban|crates/lodestone-ecs/src|std::time::\(Instant\|SystemTime\)|async_task.rs"
+  #
+  # ONE RULE PER HAZARD, not one `\(Instant\|SystemTime\)` rule per crate. The
+  # alternation form is what broke: `\|` is this table's field separator, so all five
+  # of these rules had their pattern truncated to `std::time::\(Instant\`, grep exited
+  # 2, and the `|| true` reported PASS. Two literal rows per crate cost one extra line
+  # and cannot do that.
+  "lodestone-server instant-ban|crates/lodestone-server/src|std::time::Instant|"
+  "lodestone-server systemtime-ban|crates/lodestone-server/src|std::time::SystemTime|"
+  "lodestone-worldgen instant-ban|crates/lodestone-worldgen/src|std::time::Instant|"
+  "lodestone-worldgen systemtime-ban|crates/lodestone-worldgen/src|std::time::SystemTime|"
+  "lodestone-particle instant-ban|crates/lodestone-particle/src|std::time::Instant|"
+  "lodestone-particle systemtime-ban|crates/lodestone-particle/src|std::time::SystemTime|"
+  "lodestone-net instant-ban|crates/lodestone-net/src|std::time::Instant|"
+  "lodestone-net systemtime-ban|crates/lodestone-net/src|std::time::SystemTime|"
+  # `async_task.rs`'s only clock hits are inside a `#[cfg(test)] mod`, which never
+  # reaches a browser; a grep cannot tell a test module from a production one, so it is
+  # named. Its `use std::time::{Duration, Instant};` does not match the
+  # `std::time::Instant` spelling anyway — the allowlist is here so that a future
+  # `std::time::Instant::now()` in that same test module does not go red either.
+  "lodestone-ecs instant-ban|crates/lodestone-ecs/src|std::time::Instant|async_task.rs"
+  "lodestone-ecs systemtime-ban|crates/lodestone-ecs/src|std::time::SystemTime|async_task.rs"
 )
 
+confinement_ran=0
+
 for rule in "${CONFINEMENT_RULES[@]}"; do
+  # Structural validation FIRST, because a malformed row silently disarms its own
+  # rule. Exactly three separators = exactly four fields; a `|` inside the pattern
+  # (a `\|` BRE alternation is the way it happens) makes this four or more, which
+  # used to truncate the pattern and report PASS. A row that cannot be parsed is a
+  # FAIL, never a skip.
+  seps="$(printf '%s' "$rule" | tr -cd '|' | wc -c | tr -d ' ')"
+  if [[ "$seps" != "3" ]]; then
+    printf '  %-34s ' "${rule%%|*}"
+    echo "FAIL"
+    echo "      malformed rule row: expected 3 '|' separators, found $seps"
+    echo "      row: $rule"
+    echo "      a '|' inside the banned pattern truncates it — split the alternation"
+    echo "      into one rule per hazard instead."
+    fails+=("malformed confinement rule row: $rule")
+    continue
+  fi
   IFS='|' read -r c_label c_dir c_banned c_allow <<< "$rule"
   printf '  %-34s ' "$c_label"
-  leak="$(grep -rn "$c_banned" "$ROOT/$c_dir" 2>/dev/null || true)"
+  # A rule pointed at a missing directory measures nothing. The `2>/dev/null` this
+  # replaces hid exactly that, forever.
+  if [[ ! -d "$ROOT/$c_dir" ]]; then
+    echo "FAIL"
+    echo "      rule scans a missing directory: $ROOT/$c_dir"
+    fails+=("$c_label: missing src dir $c_dir")
+    continue
+  fi
+  # grep's exit status is now READ, and the three cases are distinguished:
+  #   0 = matched, 1 = no match (the PASS case), >=2 = ERROR.
+  # An error means the detector did not run, so it is a FAIL that prints grep's own
+  # stderr. The `|| true` this replaces mapped 2 onto the same empty string as 1,
+  # which is how a broken pattern printed PASS.
+  c_err="$LOGDIR/confinement-stderr.log"
+  leak="$(grep -rn "$c_banned" "$ROOT/$c_dir" 2>"$c_err")"
+  c_status=$?
+  if (( c_status >= 2 )); then
+    echo "FAIL"
+    echo "      grep ERRORED (exit $c_status) — this rule measured NOTHING."
+    echo "      pattern: $c_banned"
+    sed 's/^/      grep: /' "$c_err"
+    fails+=("$c_label: grep errored (exit $c_status) on pattern '$c_banned'")
+    continue
+  fi
+  confinement_ran=$(( confinement_ran + 1 ))
   # Drop COMMENT lines before judging. The banned symbol legitimately appears in
   # prose — every one of these confinements is worth a sentence at its call site
   # saying "`crate::platform::epoch_duration`, not `SystemTime::now()`, because the
@@ -391,7 +507,9 @@ for rule in "${CONFINEMENT_RULES[@]}"; do
     IFS=',' read -ra c_allow_files <<< "$c_allow"
     for f in "${c_allow_files[@]}"; do
       [[ -z "$f" ]] && continue
-      leak="$(printf '%s\n' "$leak" | grep -v "/$f:" || true)"
+      # -F: an allowlist entry is a literal basename, so the `.` in `platform.rs`
+      # must not match any character.
+      leak="$(printf '%s\n' "$leak" | grep -vF "/$f:" || true)"
     done
   fi
   leak="$(printf '%s' "$leak" | sed '/^[[:space:]]*$/d')"
@@ -404,13 +522,25 @@ for rule in "${CONFINEMENT_RULES[@]}"; do
   fi
 done
 
+# A count with a verdict that depends on the count. Every row in the table must have
+# reached its grep and had that grep exit 0 or 1; anything else already appended to
+# `fails` above, so a shortfall here means a row was skipped by a route nobody
+# anticipated. `confinement_ran` is printed unconditionally so a reader can compare it
+# against the table size without trusting this arm.
+echo
+echo "  confinement rules that actually ran: $confinement_ran/${#CONFINEMENT_RULES[@]}"
+if (( confinement_ran != ${#CONFINEMENT_RULES[@]} )); then
+  fails+=("only $confinement_ran of ${#CONFINEMENT_RULES[@]} confinement rules ran")
+fi
+echo
+
 # The browser app is its own workspace (outside the crates/ glob), so it is built
 # from its own directory. This is the end-to-end integration of the subset above,
 # and it is built THROUGH trunk on purpose: trunk runs cargo for wasm32 and then
 # wasm-bindgen, so this step catches a wasm-bindgen-level break (a signature rustc
 # accepts but wasm-bindgen rejects), not only a rustc one. Cheap because the crate
 # graph above is already warm in the shared target dir.
-if [[ -f "$ROOT/web/Cargo.toml" ]]; then
+if (( CONFINEMENT_ONLY == 0 )) && [[ -f "$ROOT/web/Cargo.toml" ]]; then
   printf '  %-34s ' "lodestone-web (trunk build)"
   web_log="$LOGDIR/lodestone-web-trunk.log"
   # No NO_COLOR here, deliberately: `trunk` exposes `--no-color` through clap with
@@ -431,9 +561,19 @@ fi
 
 echo
 if (( ${#fails[@]} > 0 )); then
-  echo "RESULT: FAIL — ${#fails[@]} crate(s) no longer compile to $TARGET:"
+  # "crate(s)" was wrong: this list mixes failed compiles, leaked confinements,
+  # malformed rule rows and errored greps. Naming it "check(s)" stops a reader
+  # concluding a leak was a compile break.
+  echo "RESULT: FAIL — ${#fails[@]} check(s) failed:"
   for f in "${fails[@]}"; do echo "  - $f"; done
   exit 1
+fi
+
+if (( CONFINEMENT_ONLY == 1 )); then
+  echo "RESULT: PASS — ${#CONFINEMENT_RULES[@]} confinement rules ran clean."
+  echo "        (--confinement-only: the wasm32 COMPILE pass and the trunk build were"
+  echo "         SKIPPED. This is not a substitute for a full run.)"
+  exit 0
 fi
 
 echo "RESULT: PASS — all listed crates COMPILE to $TARGET."
