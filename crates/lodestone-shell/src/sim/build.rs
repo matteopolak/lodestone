@@ -394,6 +394,12 @@ impl Sim {
             recover_from_death: true,
             death_message: None,
             won: false,
+            // No dimension until a server names one. `None` is what makes the first
+            // `Respawned` of a session a *baseline* rather than a change — see
+            // `Sim::apply_respawn`.
+            applied_dimension: None,
+            portal_effect_intensity: 0.0,
+            prev_portal_effect_intensity: 0.0,
             // `CameraType::FIRST_PERSON`, vanilla's own `Options` default.
             camera_type: crate::camera_rig::CameraType::default(),
             body_pose: EntityPose::new(feet[0], feet[2], player.yaw, false),

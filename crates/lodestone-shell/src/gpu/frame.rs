@@ -513,7 +513,14 @@ impl RenderState {
             // callers, so the pass always drew `CloudStatus::default()` (FANCY):
             // the FAST quad path and the OFF case both existed in
             // `SkyRenderer::render` and no player could select either.
-            .with_cloud_status(self.cloud_status);
+            .with_cloud_status(self.cloud_status)
+            // The connected dimension's own `Skybox`. `SkyMode::None` (the Nether)
+            // makes `SkyRenderer::render` clear and return, so `stats.sky_drawn`
+            // below stays `true` — the target *was* written, which is exactly what
+            // the block pass's `Load`-vs-`Clear` choice depends on. Reporting
+            // `false` here instead would double-clear and discard the Nether's red
+            // horizon.
+            .with_sky_mode(self.sky_mode);
             let clear = frame.clear_color_wgpu(camera.position.y);
             sky.render(device, queue, &mut encoder, view, camera, &frame, clear);
             true

@@ -96,6 +96,14 @@ impl Sim {
                     // brand-new singleplayer world this is also when generation
                     // happens — columns are generated lazily as they stream.
                     self.set_connect_phase(crate::menu::loading::ConnectPhase::LoadingTerrain);
+                    // The baseline for `apply_respawn`'s comparison. Safe to read
+                    // the shared handle here — unlike in the `Respawned` arm —
+                    // because the fold runs on the net thread *before* the event is
+                    // queued for us (`Driver::emit` does `read_model.apply(&event)`
+                    // and only then sends), so `Login`'s dimension has landed by
+                    // now. Without this the first portal trip of a session would
+                    // compare against `None` and skip its reset entirely.
+                    self.record_login_dimension();
                 }
                 NetUpdate::Chunk { x, z } => {
                     // §12.24 dirty-region signal: no block data travels on the
@@ -342,7 +350,7 @@ impl Sim {
                         ))));
                     }
                 }
-                NetUpdate::Respawned => {
+                NetUpdate::Respawned { dimension } => {
                     // The server confirmed the respawn: the player is alive again.
                     // The fresh spawn position arrives in the placement teleport
                     // that immediately follows this event; the `NetUpdate::Teleport`
@@ -359,6 +367,17 @@ impl Sim {
                         }
                     });
                     self.status = "respawned".into();
+                    // **The same packet is also how a portal trip is reported**, so
+                    // this is the one place the two are told apart:
+                    // `apply_respawn` compares the destination against the
+                    // dimension whose reset already ran and drops the other
+                    // entities and every meshed column only when they differ. A
+                    // death-respawn in the same dimension changes nothing here, and
+                    // nothing player-scoped (inventory, XP, health) is touched on
+                    // either path — see `sim/dimension.rs`'s survives/does-not
+                    // table. It sets its own status line when it fires, which is
+                    // why the "respawned" line above is not the last word.
+                    self.apply_respawn(dimension);
                 }
                 NetUpdate::WinGame => {
                     // Issue #192: a pure latch. `app.rs`'s `drive_ui_from_session`

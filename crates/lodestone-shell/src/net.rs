@@ -726,7 +726,28 @@ pub enum NetUpdate {
     /// The server confirmed a respawn (post-death, dimension change, or
     /// `/respawn`). The fresh position arrives in the placement
     /// [`NetUpdate::Teleport`] that follows.
-    Respawned,
+    Respawned {
+        /// The destination dimension, carried verbatim off
+        /// [`ClientEvent::Respawned`](lodestone_model::event::ClientEvent::Respawned)'s
+        /// own field.
+        ///
+        /// # Why the payload travels rather than being read back at the consumer
+        ///
+        /// `Sim::apply_respawn` has to decide *whether the dimension changed*, and
+        /// that is a question about this event, not about the present moment. The
+        /// read model (`lodestone_ecs::session::ServerDimension`, the single owner
+        /// of the identity) is folded on the **net thread** the instant this event
+        /// is applied, while the shell drains this channel a frame or more later —
+        /// so a consumer that read `Sim::dimension()` here would be comparing the
+        /// new dimension against itself and would never see a change at all. The
+        /// event's own field is ordered with the event; a shared-state read is not.
+        ///
+        /// `Option` because [`forward`] is the shell's router for **every**
+        /// protocol family, and this keeps a family whose adapter cannot report a
+        /// dimension from being forced to invent one — `None` is read as "no
+        /// change I can justify", not as the overworld.
+        dimension: Option<lodestone_client::DimensionId>,
+    },
     /// The server signalled `WIN_GAME` (issue #192): the local player exited
     /// the End through the exit portal after the dragon fight. Carries no
     /// data — see [`lodestone_model::event::ClientEvent::WinGame`]'s own doc
@@ -2923,7 +2944,13 @@ fn forward(
         ClientEvent::Death { message } => NetUpdate::Death {
             message: message.to_plain_string(),
         },
-        ClientEvent::Respawned { .. } => NetUpdate::Respawned,
+        // The dimension travels with the event rather than being read back off the
+        // shared handle at the consumer — see `NetUpdate::Respawned::dimension`'s
+        // doc for why a shared-state read there structurally cannot detect a
+        // change.
+        ClientEvent::Respawned { dimension, .. } => NetUpdate::Respawned {
+            dimension: Some(dimension),
+        },
         // WIN_GAME (issue #192): a pure signal, forwarded unconditionally —
         // `route()` claims this `shell: true, shell_conditional: false`, so
         // this arm is `must_forward()` and its absence would trip `forward`'s

@@ -403,6 +403,18 @@ impl WindowApp {
         // had zero production callers, so every frame drew FANCY whatever the
         // player chose — the FAST quad path was pixel-gated and unreachable.
         render.set_cloud_status(self.nav.options().cloud_status);
+        // The connected dimension's own skybox — vanilla's
+        // `DimensionType.skybox()`, and the half of "the Nether renders under the
+        // overworld sky" that a fog colour cannot fix. `set_fog`/`set_clear_color`
+        // below already pick the Nether's red haze; this is what stops the sun, the
+        // moon, the star field and the cloud deck drawing over it.
+        //
+        // Beside the Clouds push rather than inside the fog block, and
+        // unconditional rather than change-detected: this is a per-frame read of
+        // the one dimension source (`Sim::dimension`), a single enum compare in
+        // `SkyRenderer::render`, and no uniform upload. A change-detected version
+        // would need a second `applied_*` field for no measurable saving.
+        render.set_sky_mode(self.sim.sky_mode());
 
         // Filled maps (issue #184). This is the hop that turns the `SessionMaps`
         // fold from an F3 readout into the picture itself — the palette, the
@@ -663,13 +675,21 @@ impl WindowApp {
                 && held_for_scoping
                     .as_ref()
                     .is_some_and(|loc| loc.namespace() == "minecraft" && loc.path() == "spyglass"),
-            // No potion-effect-duration tracker or nether-portal-proximity
-            // tracker exists anywhere in this codebase yet to compute these
-            // — `0.0` is the honest current answer, not a placeholder
-            // pretending to work. See `docs/screen-overlays.md`'s "Confusion
-            // and portal" section.
+            // No potion-effect-duration tracker exists anywhere in this
+            // codebase yet, so `0.0` is still the honest answer for nausea —
+            // a placeholder pretending to work would be worse. See
+            // `docs/screen-overlays.md`'s "Confusion and portal" section.
             nausea_intensity: 0.0,
-            portal_intensity: 0.0,
+            // The portal overlay's alpha, live: `Sim::portal_effect_intensity`
+            // is vanilla's `Mth.lerp(partialTicks, oPortalEffectIntensity,
+            // portalEffectIntensity)`, ramped +0.0125/tick while the player's
+            // bounding box overlaps a `nether_portal` cell and decayed
+            // -0.05/tick after (`sim/dimension.rs`). This one scalar reaches
+            // **two** effects with different shapes — the overlay's alpha
+            // directly, and `max(portal, nausea)` plus a speed blend for the
+            // world-projection warp — which is why the pass takes the raw
+            // intensity rather than a pre-multiplied strength.
+            portal_intensity: self.sim.portal_effect_intensity(),
         };
         // Route the progressive-mining crack overlay(s) (issue #410): the local
         // player's own dig plus one slot for every *other* player's overlay the

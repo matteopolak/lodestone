@@ -216,6 +216,20 @@ pub struct RenderState {
     /// Defaults to `CloudStatus::default()` — `Fancy`, vanilla's own — so a
     /// renderer nobody pushes the option into draws exactly what it drew before.
     cloud_status: lodestone_render::CloudStatus,
+    /// The connected **dimension's** own `Skybox` — vanilla's
+    /// `DimensionType.skybox()`, not a graphics option. Pushed down per frame by
+    /// `app/redraw.rs` from [`crate::Sim::sky_mode`] and stamped onto the
+    /// `SkyFrame` this renderer builds.
+    ///
+    /// Sits beside [`Self::cloud_status`] rather than inside the fog settings on
+    /// purpose: [`Self::set_fog`]/[`Self::set_clear_color`] carry *colours*, and a
+    /// colour cannot express "draw no sun". The Nether's fog and clear were
+    /// already correct while the overworld sun, moon, star field and cloud deck
+    /// all still drew over it — this is the field that stops them.
+    ///
+    /// Defaults to `SkyMode::default()` (`Overworld`), so a renderer nobody
+    /// pushes this into draws exactly what it drew before.
+    sky_mode: lodestone_render::SkyMode,
     pipeline: BlockPipeline,
     #[allow(dead_code)]
     atlas: GpuAtlas,

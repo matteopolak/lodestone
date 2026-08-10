@@ -94,14 +94,17 @@ impl Sim {
     /// over the dimension fog: standing in lava in the Nether still gets lava
     /// fog, not Nether fog.
     ///
-    /// The dimension is read the same way `refresh_mesh_policy` reads it
-    /// for `SkyDefault` — `net.shared_handle().get().and_then(|h|
-    /// h.player().dimension)` — which is `None` before login and (per
-    /// `docs/dimension-visuals.md`) stale after a portal trip until
-    /// `lodestone-client`'s `Inner::apply` gets a `Respawned` arm; that staleness
-    /// is a pre-existing condition of the dimension field itself; this reads it
-    /// the same way every other dimension-conditioned decision in this crate
-    /// does, no better and no worse.
+    /// The dimension comes from [`Sim::dimension`], the one accessor every
+    /// dimension-conditioned decision in this crate goes through — `None` before
+    /// login, and correct across a portal trip because
+    /// `lodestone_ecs::session::ServerDimension`'s fold handles `Respawned` as
+    /// well as `Login`. **This doc used to record that read as stale after a
+    /// portal trip**; it was, and the fix is described in
+    /// `docs/dimension-visuals.md`.
+    ///
+    /// Fog colour is only half of "the Nether looks like the Nether": the sky
+    /// *pass* is gated separately by [`Sim::sky_mode`], because a colour cannot
+    /// express "draw no sun".
     #[must_use]
     pub fn fog_settings(&self) -> lodestone_render::fog::FogSettings {
         let fluid = self.fluid_state();
@@ -111,11 +114,7 @@ impl Sim {
         if fluid.under_water() {
             return water_fog(self.config.render_distance);
         }
-        let dimension = self
-            .net
-            .as_ref()
-            .and_then(|net| net.shared_handle().get().and_then(|h| h.player().dimension));
-        match dimension {
+        match self.dimension() {
             Some(d) if d.namespace() == "minecraft" && d.path() == "the_nether" => {
                 lodestone_render::fog::FogSettings::nether(self.config.render_distance)
             }

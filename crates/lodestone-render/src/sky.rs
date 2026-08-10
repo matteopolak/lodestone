@@ -932,6 +932,80 @@ pub fn cloud_plane_geometry(
     (positions, uvs)
 }
 
+/// Which sky a dimension draws — vanilla's `DimensionType.Skybox`.
+///
+/// This is a **dimension attribute, not a graphics option**: it comes off the
+/// dimension type's own `skybox` field
+/// (`.cache/mc/26.2/client-src/data/minecraft/dimension_type/*.json`), which is
+/// `"overworld"`, `"end"` or `"none"`.
+///
+/// # Why `None` is a whole-pass gate rather than a per-element flag
+///
+/// Vanilla's `LevelRenderer.addSkyPass` reads
+/// `if (state.skybox != DimensionType.Skybox.NONE)` around the *entire* pass —
+/// disc, sunrise band, sun, moon, stars and the dark disc are all inside it. It
+/// is not "the Nether draws a red disc instead of a blue one": the Nether draws
+/// **no sky geometry at all**, and everything the player sees overhead is the
+/// separate `"clear"` pass at the fog colour, which runs unconditionally. That is
+/// exactly the split [`SkyRenderer::render`](crate::sky_pipeline::SkyRenderer::render)
+/// already has — it clears and then draws — so `None` is "clear, draw nothing".
+///
+/// Clouds are a *different* vanilla pass, gated on
+/// `ARGB.alpha(levelRenderState.cloudColor) > 0`. `EnvironmentAttributes.CLOUD_COLOR`
+/// registers a default of `0` (fully transparent) and `the_nether.json` declares no
+/// `minecraft:visual/cloud_color`, so the Nether's cloud alpha is zero and its
+/// cloud pass never runs either. [`crate::SkyFrame::draws_clouds`] folds that in,
+/// so a caller does not have to know that the two gates have different sources.
+///
+/// # The End is deliberately still [`Self::Overworld`]-shaped here
+///
+/// `the_end.json` says `"skybox": "end"`, which in vanilla is a cube-mapped
+/// `end_sky.png` draw plus the dragon-fight flash — a different pipeline this
+/// renderer does not have. Modelling it as a third variant that behaved like
+/// `None` would replace one wrong sky with a *black* one and lose the End's fog
+/// fade; modelling it as `Overworld` keeps today's flat near-black edge fade,
+/// which is the documented approximation. So this enum carries the two cases the
+/// renderer can actually distinguish, and `docs/dimension-visuals.md` owns the
+/// End gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkyMode {
+    /// `"overworld"` — the disc, the sunrise/sunset band, sun, moon and stars,
+    /// plus clouds. Vanilla's own `Skybox.OVERWORLD`.
+    #[default]
+    Overworld,
+    /// `"none"` — the Nether. No sky geometry and no clouds; the frame clear at
+    /// the fog colour *is* the sky.
+    None,
+}
+
+impl SkyMode {
+    /// Whether this dimension draws sky **geometry** (disc, band, sun, moon,
+    /// stars). `false` for [`Self::None`], where the clear is the whole sky.
+    #[must_use]
+    pub const fn draws_sky_geometry(self) -> bool {
+        matches!(self, Self::Overworld)
+    }
+
+    /// The mode for a well-known dimension level id, as the fallback for a
+    /// server that sends no `registry_data` (the dimension type's `skybox` field
+    /// is present in the captured NBT and dropped by today's decode — see
+    /// `docs/dimension-visuals.md`).
+    ///
+    /// `minecraft:the_nether` is the only vanilla dimension with `"skybox":
+    /// "none"`. Everything else — including the End (see the type's own doc) and
+    /// any data-pack dimension — falls to [`Self::Overworld`], because drawing a
+    /// sky where vanilla draws one is the recoverable direction and a black
+    /// overhead void is not.
+    #[must_use]
+    pub fn for_dimension_name(namespace: &str, path: &str) -> Self {
+        if namespace == "minecraft" && path == "the_nether" {
+            Self::None
+        } else {
+            Self::Overworld
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FANCY clouds (issue #403) — real extruded geometry, built on
 // `crate::cloud_mesh`'s pure face enumeration.
@@ -1367,6 +1441,52 @@ mod tests {
         // keyframe instead would report 0x5f here, and reaching for the last
         // would report 0xb1.
         assert_eq!(sunrise_sunset_color_for_time_of_day(0)[3], 0x71);
+    }
+
+    /// The dimension → `Skybox` mapping, against the vanilla data files rather
+    /// than against a remembered rule.
+    ///
+    /// Every dimension type in
+    /// `.cache/mc/26.2/client-src/data/minecraft/dimension_type/` was read: only
+    /// `the_nether.json` carries `"skybox": "none"`. `the_end.json` carries
+    /// `"skybox": "end"` and `overworld.json` `"overworld"` — and **the End is
+    /// asserted to draw geometry here on purpose**, because this renderer has no
+    /// `end_sky.png` cube map and mapping it to `None` would trade the End's flat
+    /// fog fade for a pure-black void. That is a documented approximation
+    /// (`docs/dimension-visuals.md`), so it is asserted rather than left to be
+    /// "fixed" by someone who reads only the JSON.
+    ///
+    /// The unknown-dimension arm is the one that would fail in the invisible
+    /// direction: a data-pack dimension defaulting to `None` renders a black sky
+    /// with no error anywhere.
+    #[test]
+    fn only_the_nether_draws_no_sky_and_a_datapack_dimension_defaults_to_one() {
+        assert_eq!(
+            SkyMode::for_dimension_name("minecraft", "the_nether"),
+            SkyMode::None,
+            "the_nether.json declares \"skybox\": \"none\""
+        );
+        assert!(!SkyMode::for_dimension_name("minecraft", "the_nether").draws_sky_geometry());
+        for path in ["overworld", "the_end"] {
+            assert_eq!(
+                SkyMode::for_dimension_name("minecraft", path),
+                SkyMode::Overworld,
+                "minecraft:{path} must keep drawing sky geometry"
+            );
+        }
+        assert_eq!(
+            SkyMode::for_dimension_name("mypack", "mine"),
+            SkyMode::Overworld,
+            "an unrecognised dimension must default to a sky, not to a black void"
+        );
+        // The name match is namespaced: a data pack's own `the_nether` is not
+        // vanilla's, and it has its own dimension type.
+        assert_eq!(
+            SkyMode::for_dimension_name("mypack", "the_nether"),
+            SkyMode::Overworld,
+            "the match must be namespaced, not a bare path compare"
+        );
+        assert_eq!(SkyMode::default(), SkyMode::Overworld);
     }
 
     #[test]

@@ -324,6 +324,9 @@ impl RenderState {
             // `Fancy` — vanilla's own default, and what the pass hardcoded through
             // `SkyFrame::new` before the option had anywhere to enter.
             cloud_status: lodestone_render::CloudStatus::default(),
+            // `Overworld` — what the pass drew unconditionally before the
+            // dimension had anywhere to enter.
+            sky_mode: lodestone_render::SkyMode::default(),
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -718,6 +721,26 @@ impl RenderState {
     #[must_use]
     pub fn cloud_status(&self) -> lodestone_render::CloudStatus {
         self.cloud_status
+    }
+
+    /// Push the connected **dimension's** `Skybox` down — vanilla's
+    /// `DimensionType.skybox()`. Read by the sky pass in `gpu/frame.rs` when it
+    /// builds this frame's `lodestone_render::SkyFrame`.
+    ///
+    /// Deliberately a sibling of [`Self::set_cloud_status`] and **not** part of
+    /// [`Self::set_fog`]: fog and the frame clear carry colours, which is why the
+    /// Nether already had the right red horizon while the sun, moon, stars and
+    /// clouds still drew over it. See [`lodestone_render::SkyMode`].
+    pub fn set_sky_mode(&mut self, mode: lodestone_render::SkyMode) {
+        self.sky_mode = mode;
+    }
+
+    /// The sky mode this frame's sky pass will draw. Exposed so a gate can assert
+    /// the pushed value without a GPU adapter, exactly like
+    /// [`Self::cloud_status`].
+    #[must_use]
+    pub fn sky_mode(&self) -> lodestone_render::SkyMode {
+        self.sky_mode
     }
 
     /// [`Self::write_glint_uniform`] for the **world** glint draw — enchanted

@@ -536,6 +536,37 @@ pub struct Sim {
     /// there is no per-session state to fold it into. Reset by
     /// [`Self::end_session`] so a later session starts un-won.
     won: bool,
+    /// The dimension whose one-time client-side reset has already run — **an edge
+    /// detector, not a source of truth.**
+    ///
+    /// "We are in dimension X" is owned by
+    /// [`lodestone_ecs::session::ServerDimension`] and read through
+    /// [`Self::dimension`]; this field answers only "have I already dropped the
+    /// entities and meshes for the dimension I am in". `Some` for a live session
+    /// from the first `Login`, `None` before login and after
+    /// [`Self::end_session`].
+    ///
+    /// See `sim/dimension.rs`'s module doc for why an edge is needed here when the
+    /// per-frame reads (fog, sky mode, sky-light default) need none.
+    applied_dimension: Option<lodestone_client::DimensionId>,
+    /// Vanilla's `LocalPlayer.portalEffectIntensity`, `0.0..=1.0` — the
+    /// portal-transition screen effect's own state, advanced once per tick by
+    /// `Sim::tick_portal_effect`.
+    ///
+    /// A plain field for the same reason [`Self::death_message`] and
+    /// [`Self::won`] are: it is client-only, has one consumer
+    /// (`app/redraw.rs`'s `ScreenEffects`), and must not survive a session
+    /// teardown — which [`Self::end_session`] handles through
+    /// `Sim::reset_dimension_state` so this and `applied_dimension` cannot be
+    /// reset in one place and forgotten in the other.
+    portal_effect_intensity: f32,
+    /// The previous tick's [`Self::portal_effect_intensity`] — vanilla's
+    /// `oPortalEffectIntensity`.
+    ///
+    /// Present so the overlay can be *interpolated* rather than sampled: the ramp
+    /// advances at 20 Hz over four seconds and the overlay draws at the frame
+    /// rate, so reading the raw value paints a visible staircase.
+    prev_portal_effect_intensity: f32,
     /// The camera mode — vanilla's [`CameraType`](crate::camera_rig::CameraType),
     /// all three states, cycled by `F5` through [`Self::cycle_camera_type`].
     ///
@@ -1374,6 +1405,12 @@ mod session;
 mod collide;
 mod step;
 mod render_sources;
+// The dimension cluster: `dimension`/`sky_mode` (the one read of "which dimension
+// are we in"), the portal-transition effect's tick and lerp, and the
+// dimension-change reset. Same bare-`mod` shape as the seams above — every item
+// is an `impl Sim` method plus two private constants and one private free
+// function, so nothing needs re-exporting.
+mod dimension;
 
 // `sim/tests.rs`'s `dirty_sections_for_blocks(...)` calls cross the new
 // sibling boundary; this private `use` re-enters its `use super::*;` glob

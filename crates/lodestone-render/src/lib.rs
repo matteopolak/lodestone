@@ -233,6 +233,7 @@ pub use sky::{
     CLOUD_CELL_BLOCKS, CLOUD_FANCY_RADIUS_CELLS, CLOUD_FANCY_THICKNESS, CLOUD_HEIGHT,
     CLOUD_SCROLL_BLOCKS_PER_TICK, CloudStatus, DAY_PERIOD_TICKS, MOON_HEIGHT, MOON_SIZE,
     SKY_DISC_RADIUS, SKY_FOG_END_DISTANCE, STAR_COUNT, STAR_DISTANCE, STAR_FIELD_SEED, SUN_HEIGHT,
+    SkyMode,
     SUN_SIZE, SUNRISE_FAN_BOW, SUNRISE_FAN_HEIGHT, SUNRISE_FAN_RADIUS, SUNRISE_FAN_VERTICES,
     SUNRISE_MIN_ALPHA, SUNRISE_STEPS, build_star_field, celestial_angle_for_time_of_day,
     celestial_quad_positions, celestial_quad_uvs, celestial_rotation_matrix, cloud_cell_and_offset,

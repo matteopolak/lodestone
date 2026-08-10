@@ -153,6 +153,62 @@ horizon/above-world clear is that same red, not a hard blue wall. `gpu.rs` was
 off limits to the task that wrote the original version of this section; it is
 not off limits to whoever landed this.
 
+### The sky *pass* — gated by the dimension now, and it was not before
+
+**Fog colour and the frame clear were dimension-correct for a whole pass while
+the Nether still drew the overworld's sun, moon, star field and cloud deck
+overhead.** Both halves of the section above are true and neither is enough: a
+colour cannot express *"draw no sun"*, so the Nether's horizon was the right red
+and there was a sun in the sky above it. That is the reported "renders under the
+overworld sky", and it is a second gate rather than a wrong value.
+
+Vanilla's own gate is a whole-pass one. `LevelRenderer.addSkyPass` reads
+`if (state.skybox != DimensionType.Skybox.NONE)` around **everything** — disc,
+sunrise/sunset band, sun, moon, stars, dark disc — and its separate `"clear"`
+pass at the fog colour runs unconditionally. So in the Nether the clear *is* the
+sky, and there is no geometry at all.
+
+The port:
+
+- `lodestone_render::SkyMode` (`sky.rs`) — `Overworld` | `None`, the dimension's
+  own `skybox` field. `SkyMode::for_dimension_name` is the level-id fallback.
+- `SkyFrame::sky_mode` / `with_sky_mode`, plus two pure predicates a gate can
+  read with no GPU: `draws_sky_geometry` and `draws_clouds`.
+- `SkyRenderer::render` returns immediately after the clear when the mode is
+  `None`. **The clear still happens** — this renderer's sky pass *is* the clear,
+  and returning without opening a pass would leave the target untouched while
+  `stats.sky_drawn` still said `true`, so the block pass would `Load` garbage.
+- `RenderState::set_sky_mode` (`gpu/state.rs`), pushed per frame by
+  `app/redraw.rs` from `Sim::sky_mode`. Deliberately a sibling of
+  `set_cloud_status` rather than a field on `FogSettings`, for the reason above.
+
+**Clouds go with it, and not through the same gate.** Vanilla adds its cloud pass
+only when `ARGB.alpha(levelRenderState.cloudColor) > 0`;
+`EnvironmentAttributes.CLOUD_COLOR` registers a default of `0` and
+`the_nether.json` declares no `minecraft:visual/cloud_color`, so the Nether's
+cloud alpha is zero with the *player's* Clouds option still on FANCY.
+`SkyFrame::draws_clouds` folds both gates so a caller cannot reproduce half the
+rule, and `a_nether_frame_draws_no_sky_geometry_and_no_clouds_with_fancy_selected`
+asserts the Nether row **with FANCY explicitly selected** — a Nether frame with
+`cloud_status: Off` could not tell you whether the dimension term was consulted
+at all.
+
+**The End is deliberately `Overworld`-shaped here, and that is asserted rather
+than left to be "fixed".** `the_end.json` says `"skybox": "end"`, which is a
+cube-mapped `end_sky.png` draw plus the dragon-fight flash — a pipeline this
+renderer does not have. Mapping it to `None` from the JSON would trade the End's
+flat near-black fog fade for a pure-black void, so
+`only_the_nether_draws_no_sky_and_a_datapack_dimension_defaults_to_one` pins the
+End at `Overworld` on purpose. Same reasoning for an unrecognised data-pack
+dimension: defaulting to `None` renders a black sky with no error anywhere.
+
+Why the name match rather than the server's own field: the dimension type's
+`skybox` is present in the captured `registry_data` NBT and **dropped by today's
+decode** (see the registry section below), and it is not derivable from what *is*
+decoded — `has_skylight` is `false` in the Nether and `true` in the End while
+their skyboxes are `none` and `end`, two different axes. Carrying `skybox`
+through the decode makes `Sim::sky_mode` a one-line change.
+
 ### Sky darkening (`sky_darken`) — open question, not touched
 
 `crates/lodestone-shell/src/gpu.rs`/`entity_pipeline.rs`/`model_pipeline.rs`
@@ -305,7 +361,20 @@ never consults the level name.
   well-known level-id match only for `dimension_type == None`, i.e. a server that
   sent no `registry_data`. `Sim::fog_settings` has **not** been converted and still
   matches on the level name — the colours it needs live in the dimension type's
-  `attributes` map, which this decode drops.
+  `attributes` map, which this decode drops. `Sim::sky_mode` likewise, for the
+  `skybox` field.
+- **Read the dimension through `Sim::dimension` (`sim/dimension.rs`), not through
+  `net.shared_handle()` again.** Three consumers each grew their own copy of that
+  chain and each carried its own fallback; there is one accessor now and it is the
+  place to add a fourth consumer. `Sim::refresh_mesh_policy` is the one deliberate
+  exception — it needs the dimension *and* the dimension type off **one**
+  `player()` snapshot, so the two cannot describe two different moments, and
+  splitting it into the accessor plus a second snapshot would be a regression.
+- **Anything that must happen *once* on a dimension change goes in
+  `Sim::reset_for_dimension_change`, reached from
+  `Sim::apply_respawn`** — not into a new edge detector of its own. Per-frame
+  reads (fog, sky mode, sky-light default) need no edge at all and must not gain
+  one. See `sim/dimension.rs`'s module doc and `docs/nether-portals.md`.
 - Gotcha: verify a live gate through an **actual dimension change**, not just a
   fresh login into the target dimension. Both `ServerDimension` and
   `ServerDimensionType` move on `Respawned` now, but this is the trap that made the
