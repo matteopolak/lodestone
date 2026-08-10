@@ -8771,3 +8771,60 @@ is judged against real 26.2 server light by `vanilla_light_oracle.rs`. The discr
 fixture asserts that premise. Two negative controls, because the first was thin: skipping the relight after a
 single break disagrees in exactly **1 cell of 18,944**, so a second control skips it after the volume change
 and requires **more than 100** sky disagreements.
+
+**12.171 A field whose every assignment in the tree is the same literal is an island, and no instrument we
+own looks for that.**
+
+Four owner-reported visual defects in one sitting; three were the same shape and the third of those is the one
+worth the entry. `EntityDraw::creeper_swelling` was documented as feeding *"two consumers downstream, both in
+`gpu.rs`"*. It fed none. A grep of the whole `gpu` module for either named function returned **zero hits**, and
+tree-wide `creeper_swell_scale`, `creeper_white_overlay_progress`,
+`creeper_overlay_alpha_from_progress` and `Skeleton::pose_swelling` had **zero production callers between the
+four of them** — every one reached only from its own tests. The chain was complete for eight hops (metadata
+decode → `CreeperSwellDir` → `CreeperFuse` → `tick_creeper_fuse` → interpolation → `EntityDraw`) and died at
+the ninth, because the shell resolved every entity through `resolve_posed`, whose swell argument is a hard
+`0.0`.
+
+Three things make this class invisible, and all three are general:
+
+- **`swell = 0.0` is a documented exact identity.** `pose_swelling` delegates `pose` to itself at zero. So the
+  missing call produced no wrong frame, no moved counter, and no failing test of any formula. **An identity
+  default is perfect camouflage for a missing call site** — a formula whose zero case is the identity needs a
+  gate on its *caller*, not on itself.
+- **`cargo xtask connectedness` structurally cannot see it.** It answers "is this clientbound packet reaching
+  anything", and the packet reached `EntityDraw` correctly. §12.40's scope note already says this; the new
+  instance is that the *last* hop can be the missing one while every earlier hop is green and documented as
+  such.
+- **The written record said the opposite, in the file that would have shown it.** `docs/entity-rendering.md`
+  said the chain was *"already fully wired and tested waiting on exactly this value"*, and the field's own doc
+  comment named two consumers that did not exist. Both were true of the plan and neither was checked against
+  the implementation — the §12 evidence rule about transcriptions applying to *wiring*, not just formulas.
+
+**The detector this suggests is cheap and we do not have it: a field on a render or instance struct whose every
+assignment site in the tree is the same literal constant.** Every `creeper_swelling:` in the repo was `0.0` —
+15 sites, all identical, across five files. The same query would have flagged `death_time` before it existed
+and `SetFlying`'s zero producers (§12.38) from the other direction. It is a grep with an aggregation, not a
+call-graph analysis, and it answers a question `connectedness` is not built to ask.
+
+Two measurements from the sibling fixes in the same pass, both about picking inputs:
+
+- **Hearts.** Vanilla ceils health once and compares integers; we compared floats. The two readings agree on
+  **every even hit point** and diverge at every odd half in **both** directions — 0.5 drew nothing where
+  vanilla draws a half (the report: *"sometimes i get to 0 hearts but im still alive"*), and 1.5 and 19.5 drew
+  a half where vanilla draws a **full**. The neuter failed **3 of 3** half-health arms and left both integer
+  arms green, confirming the integer inputs are coincident. The bug's shape is §12's "seam between two correct
+  functions": the ghost overlay in the *same* `for` body already used the integer frontier correctly, and the
+  composition had no name — hence extracting `hud::heart_fill` so a gate had a subject.
+- **The death fall-over is not linear, and the coincidence is at the obvious tick.**
+  `sqrt((deathTime − 1)/20 · 1.6)` clamped to 1, times 90, **saturates at deathTime 13.5, not 20** — so a mob
+  is flat for the last ~6.5 ticks of a 20-tick death. The plausible "90° over 20 ticks" reading agrees to the
+  bit at **exactly deathTime 20**, which is precisely where anyone would test it. Real vs linear: 25.5° vs 9°
+  at tick 2, 44.1° vs 18° at 4, 90° vs 60.75° at 13.5. Neuter: **6 of 6** discriminating arms failed on the
+  linear value, both coincident arms green.
+
+And one input-selection trap measured inside the death-bridge gate itself: `FrameClock` publishes
+`interp_alpha` from the *residual*, so **two chained half-tick frames bank a whole `TICK_PERIOD`**, the tick
+loop claims it, and the published partial tick is **0.0**. The first draft chained three arms off one
+interpolator and the third reported `4.0` where 4.5 was predicted — which would have silently turned the arm
+that discriminates vanilla's `deathTime > 0 ? deathTime + partialTicks : 0.0F` from the bare sum back into a
+coincident one. A gate that needs a non-zero partial tick must not step the same clock twice.
