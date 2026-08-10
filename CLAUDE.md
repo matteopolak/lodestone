@@ -354,6 +354,20 @@ has been wrong four times in four different ways. Know its scope, because outsid
   does darken the sky, every link green, while the value is wall-clock elapsed-since-join and `tick.rs`'s
   real counter never reaches the encoder. Only a gate whose expected value originates **outside** our own
   producer can see that.
+- **It also cannot see a render/instance struct field that no code ever *reads*, and that is its own island
+  species.** `creeper_swelling` reaches the shader, is computed for real by the extract step, and was
+  nonetheless dead: `prepare_entities` resolved every entity through a path whose swell is a hard `0.0`, so
+  four functions between them had **zero production callers** and no creeper ever swelled. The field's own
+  doc comment named "two consumers downstream, both in `gpu.rs`" and grep returned nothing.
+
+  **The obvious detector is the wrong one, measured.** "Every assignment of this field is the same constant"
+  reads it as 17 constants plus 1 computed — a *healthy* ratio — precisely because the extract step does
+  assign a real value. The durable query is the **dual: a field with zero production readers.** Before the
+  fix that field had 0 production reads and 4 test reads; after, 2. Test reads are what make the naive
+  version lie, so count production and test call sites separately and report both. This is not landed as an
+  xtask: a trustworthy version needs real parsing, and a hand-rolled Rust lexer will be wrong about
+  lifetimes (three scanners here already were). Grep is the interim instrument — and asking "what reads
+  this?" is the habit, not just the tool.
 - **Do not quote a coverage number from memory or from a doc — run it and quote that.** Legacy families
   are thin, and *decode* and *connectedness* are different axes; five issue bodies inherited one
   wrong-axis figure. Serverbound decode lives in `crates/protocol/v770/src/server_protocol.rs`, **not**
