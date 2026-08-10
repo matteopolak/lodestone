@@ -773,6 +773,36 @@ pub enum ServerBound {
     /// links into a wasm32 bundle where `Instant::now()` compiles and then panics
     /// at runtime with no log line.
     ReleaseUseItem,
+    /// The client reporting where the vehicle it rides has got to
+    /// (`ServerboundMoveVehiclePacket`), once per tick while mounted.
+    ///
+    /// **This is not a request — it is authoritative.**
+    /// `Entity.isClientAuthoritative()` delegates to the controlling passenger and
+    /// `Player.isClientAuthoritative()` returns `true`, so the server's own
+    /// `travelRidden` takes the `setDeltaMovement(Vec3.ZERO)` branch and its only
+    /// job is to accept this and relay it. A server that also simulated the boat
+    /// would fight the player.
+    ///
+    /// The packet carries no entity id: vanilla resolves the target as
+    /// `player.getRootVehicle()` and rejects the packet outright when that is the
+    /// player themselves. [`crate::mobs::MobSim::apply_vehicle_move`] is the
+    /// consumer and applies the same rule, which is what stops a connection moving
+    /// a boat it is not sitting in.
+    ///
+    /// The two rejections vanilla *can* answer with (moved too quickly, moved
+    /// wrongly — both followed by `vehicle.absSnapTo(old…)` and a clientbound
+    /// `MOVE_VEHICLE`) are not implemented, so no correction is ever sent. Stated
+    /// because the client already handles one if it arrives
+    /// (`lodestone_ecs::vehicle::apply_vehicle_moved`).
+    VehicleMoved {
+        /// The vehicle's position as the client simulated it.
+        position: Vec3,
+        /// Its yaw in degrees.
+        yaw: f32,
+        /// Its pitch in degrees. A boat never changes it; a land mount takes half
+        /// its rider's, so it is carried rather than dropped.
+        pitch: f32,
+    },
     /// The client's movement-input flags for the current tick
     /// (`ServerboundPlayerInputPacket`, issue #12). Decoded for exactly one
     /// reason: `sprint` is half of vanilla's melee knockback-bonus gate
@@ -1524,6 +1554,36 @@ pub trait ServerProtocol: Send + Sync {
 
     fn encode_commands(&self, tree: &CommandTree) -> ServerDirective {
         let _ = tree;
+        ServerDirective::None
+    }
+
+    /// Encodes vanilla's `ClientboundSetPassengersPacket` — the packet that makes
+    /// a player *be* in a boat.
+    ///
+    /// `ServerEntity.sendPairingData` sends it on spawn and
+    /// `Entity.startRiding`/`stopRiding` re-send it on every change, always as the
+    /// vehicle's **whole** passenger list rather than a delta: dismounting is this
+    /// packet with an empty list, which is why `passenger_ids` is a slice and not an
+    /// `Option`.
+    ///
+    /// # This is the only channel, and without it riding cannot exist
+    ///
+    /// A client learns it is a passenger from nothing else. Our own shell folds it
+    /// into `session::Riding` (`ClientEvent::EntityPassengersChanged`), and
+    /// `lodestone_ecs::vehicle::tick_controlled_vehicle` reads that scalar to decide
+    /// which vehicle to simulate — so with no producer here the whole
+    /// client-authoritative boat pipeline is unreachable, however complete it is.
+    /// That was the state of this tree before boats were placeable: `SET_PASSENGERS`
+    /// was decoded by the v770 adapter, routed by `ingest`, consumed by the seat
+    /// pin, and **emitted by nobody**.
+    ///
+    /// The wire shape is a VarInt vehicle id then `writeVarIntArray` — a VarInt
+    /// length followed by that many VarInts, *not* the generic collection codec.
+    ///
+    /// The default emits nothing, so a protocol family with no passenger support
+    /// need not override it and riding simply never engages there.
+    fn encode_set_passengers(&self, vehicle_id: i32, passenger_ids: &[i32]) -> ServerDirective {
+        let _ = (vehicle_id, passenger_ids);
         ServerDirective::None
     }
 
@@ -2395,6 +2455,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_commands(&self, tree: &CommandTree) -> ServerDirective {
         (**self).encode_commands(tree)
+    }
+
+    fn encode_set_passengers(&self, vehicle_id: i32, passenger_ids: &[i32]) -> ServerDirective {
+        (**self).encode_set_passengers(vehicle_id, passenger_ids)
     }
 
     fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {

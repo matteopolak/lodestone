@@ -1926,6 +1926,23 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 }
             }
         }
+
+        // Every **unridden** boat, one tick — `AbstractBoat.tick`'s buoyancy and
+        // drag. A ridden one is skipped inside `tick_vehicles`, which is the
+        // client-authority handover: while somebody is aboard, their
+        // `MoveVehicle` is the only writer, and ticking the hull here as well is
+        // what would make a boat fight its rider.
+        //
+        // Beside `tick_falling_blocks` because it is the same kind of thing —
+        // vanilla's `entityTickList` walk, after `tickChunks` — and because this
+        // scope already holds the world the collision shapes come from. The
+        // closure is needed rather than `ChunkWorld`'s coarse solidity: a boat's
+        // `waterLevel` is computed from each cell's fluid **amount**, so a
+        // boolean would put every surface `1/9` of a block off.
+        //
+        // No effects to forward: a boat's new position rides the ordinary
+        // `snapshots()` diff exactly as an airborne falling block's does.
+        mobs.with(|sim| sim.tick_vehicles(&|x, y, z| world.block_state(x, y, z)));
         });
 
         clock.record_tick(tick_start.elapsed());
