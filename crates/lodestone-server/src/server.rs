@@ -3579,6 +3579,7 @@ where
                     block_ticks,
                     breaker,
                     !creative && world.block_drops(),
+                    world.block_drops(),
                     pos,
                     advancements,
                     (!creative).then_some(vitals),
@@ -3642,6 +3643,7 @@ where
                 block_ticks,
                 breaker,
                 !creative && world.block_drops(),
+                world.block_drops(),
                 pos,
                 advancements,
                 (!creative).then_some(vitals),
@@ -3681,6 +3683,11 @@ async fn destroy_block<T, P, S>(
     // `removeBlock(pos, false)` there, so a creative break drops nothing and
     // rolls no loot at all (which also means it consumes no RNG draws).
     drop_loot: bool,
+    // The `block_drops` game rule **alone**, without the creative fork above —
+    // for the support cascade only. See [`collapse_unsupported`]'s own doc comment
+    // for why the two gates genuinely differ in vanilla; passing `drop_loot` here
+    // would make a creative player mining under a flower delete the flower.
+    cascade_drops: bool,
     pos: BlockPos,
     // The statistics store, for the `minecraft:mined` counter. Keyed by the block
     // that was broken, and incremented on **every** break including a creative
@@ -3837,7 +3844,145 @@ where
     // above carries no light. See `crate::light` for why this is a column resend
     // rather than a `LIGHT_UPDATE`.
     resend_column_for_light(conn, proto, source, state, &broken, AIR, pos).await?;
+
+    // Vanilla's `setBlock(pos, AIR, UPDATE_ALL)` runs two passes the break above
+    // did not: `updateNeighbourShapes` (every neighbour's `updateShape`, which is
+    // where a torch or a rail that just lost its support turns to air) and then
+    // `updateNeighborsAt` (`neighborChanged`, the redstone/gravity reactions).
+    // **Neither of them happened on a break in this crate** — `propagate_placement`
+    // had exactly one caller, `apply_use_item_on`, so breaking a block beside dust
+    // never recomputed the dust and breaking the block *under* anything never
+    // destroyed it. Both are here now, shapes first, matching that order.
+    let collapsed = collapse_unsupported(source, pos);
+    // `Block.updateOrDestroy` → `Level.destroyBlock(pos, true)` → `dropResources`.
+    //
+    // **Gated on `cascade_drops`, not on `drop_loot`, and the difference is
+    // vanilla's**: the creative no-drop is `ServerPlayerGameMode.destroyBlock`
+    // choosing `removeBlock(pos, false)` for the block *the player broke*, while a
+    // cell that self-destructs goes through `updateOrDestroy`, which knows nothing
+    // about who caused it. So a creative player mining the dirt under a flower does
+    // get the flower, and reusing `drop_loot` here would have silently eaten it.
+    //
+    // The tool is not consulted either: `updateOrDestroy` reaches the
+    // three-argument `Block.dropResources(state, level, pos)`, which carries no
+    // `LootContextParams.TOOL` — hence `None` rather than `held`, and no
+    // `drops_are_allowed` call.
+    if cascade_drops {
+        for (cell, was) in &collapsed {
+            let popped = crate::block_drops::drop_block_loot(
+                crate::block_drops::bundled_tables(),
+                was,
+                *cell,
+                None,
+                drops_rng,
+            );
+            if popped.is_empty() {
+                continue;
+            }
+            mobs.with(|sim| {
+                for drop in popped {
+                    let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
+                    sim.spawn_item(
+                        drop.stack.item.clone(),
+                        drop.position,
+                        drop.velocity,
+                        ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE),
+                    );
+                }
+            });
+        }
+    }
+    let mut fanned: Vec<(BlockPos, String)> = Vec::new();
+    let mut fan_origins: Vec<BlockPos> = vec![pos];
+    fan_origins.extend(collapsed.iter().map(|(cell, _)| *cell));
+    for origin in fan_origins {
+        let (mut changed, scheduled) = propagate_placement(source, origin);
+        block_ticks.request_scheduled_ticks(scheduled);
+        fanned.append(&mut changed);
+    }
+    // The collapsed cells and then whatever the fan-out rewrote, deduped and with
+    // `pos` excluded (it already had its own `block_update` above).
+    let mut notify: Vec<BlockPos> = Vec::new();
+    for cell in collapsed
+        .iter()
+        .map(|(cell, _)| *cell)
+        .chain(fanned.iter().map(|(cell, _)| *cell))
+    {
+        if cell != pos && !notify.contains(&cell) {
+            notify.push(cell);
+        }
+    }
+    for cell in notify {
+        let current = source.block_state(cell.x, cell.y, cell.z);
+        let directive = proto.encode_block_update(cell.x, cell.y, cell.z, &current);
+        apply(conn, state, directive).await?;
+        block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(cell));
+    }
+    // A popped torch or lantern has to darken its column too. `should_relight`
+    // compares the two states' emission and dampening, so a collapsed flower
+    // costs nothing here.
+    for (cell, was) in &collapsed {
+        resend_column_for_light(conn, proto, source, state, was, AIR, *cell).await?;
+    }
     Ok(())
+}
+
+/// Vanilla's `maxChainedNeighborUpdates` for the support cascade specifically.
+///
+/// The tallest real chain is a bamboo or sugar-cane column (16 at the very most)
+/// or a two-cell door, so this is a runaway guard rather than a behavioural
+/// limit — but it has to exist, because [`collapse_unsupported`] re-queues the
+/// neighbours of every cell it removes and a data error in
+/// [`crate::block_support`] would otherwise walk the world.
+const MAX_SUPPORT_COLLAPSE: usize = 64;
+
+/// Runs vanilla's `updateNeighbourShapes` self-destruct pass around `origin`,
+/// transitively: every cell whose support [`crate::block_support`] models and
+/// whose support cell is now gone becomes air, drops its loot, and has its own
+/// neighbours re-examined.
+///
+/// Returns `(pos, state_before)` for each removed cell, already written to air in
+/// `source`, so the caller can send the `block_update`s, roll the loot and
+/// relight. The drops are deliberately **not** rolled here: this function needs no
+/// `MobHandle` and no RNG, which is what lets `crate::support_collapse_gate` drive
+/// the production cascade against a rig world rather than a copy of it.
+pub(crate) fn collapse_unsupported<S>(source: &S, origin: BlockPos) -> Vec<(BlockPos, String)>
+where
+    S: ChunkSource + ?Sized,
+{
+    let mut removed: Vec<(BlockPos, String)> = Vec::new();
+    let mut queue: VecDeque<BlockPos> = crate::neighbor_update::ALL_DIRECTIONS
+        .iter()
+        .map(|d| d.relative(origin))
+        .collect();
+    while let Some(cell) = queue.pop_front() {
+        if removed.len() >= MAX_SUPPORT_COLLAPSE {
+            tracing::warn!(
+                "support collapse from {origin:?} hit its {MAX_SUPPORT_COLLAPSE}-cell bound"
+            );
+            break;
+        }
+        if removed.iter().any(|(seen, _)| *seen == cell) {
+            continue;
+        }
+        let was = source.block_state(cell.x, cell.y, cell.z);
+        if is_air_or_fluid(&was) {
+            continue;
+        }
+        if crate::block_support::survives(cell, &was, |probe| {
+            source.block_state(probe.x, probe.y, probe.z)
+        }) {
+            continue;
+        }
+        source.set_block(cell.x, cell.y, cell.z, AIR);
+        removed.push((cell, was));
+        // The removed cell's own neighbours: this is what makes a stack of sugar
+        // cane collapse all the way up, and a door's upper half follow its lower.
+        for direction in crate::neighbor_update::ALL_DIRECTIONS {
+            queue.push_back(direction.relative(cell));
+        }
+    }
+    removed
 }
 
 /// Re-sends the column owning `pos` when an edit changed the light that cell
@@ -4933,6 +5078,10 @@ async fn apply_use_item_on<T, P, S>(
     // rather than added to this module's `lodestone_model` import list, which is
     // edited concurrently by other work.
     difficulty: lodestone_model::Difficulty,
+    // The acting player's game mode, for `ItemStack.consume`'s
+    // `hasInfiniteMaterials()` gate — a creative placement writes the block and
+    // consumes nothing. See the consumption arm at the end of the placement branch.
+    game_mode: GameMode,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -5301,20 +5450,23 @@ where
                     // the same shrink-and-report pair the composter and brewing
                     // arms above perform, including the window-0 hotbar slot
                     // update so the held count visibly drops.
+                    //
+                    // Routed through `consume_one` rather than shrinking inline, so
+                    // `ItemStack.consume`'s own `!hasInfiniteMaterials()` gate
+                    // applies: a creative player's eggs are not used up, which is
+                    // vanilla and was not true of the inline shrink this replaces.
                     let native = usize::from(inventory.selected_hotbar_slot());
-                    let remainder = inventory.native(native).cloned().and_then(|mut stack| {
-                        stack.count -= 1;
-                        (stack.count > 0).then_some(stack)
-                    });
-                    inventory.set_native(native, remainder.clone());
-                    let hotbar_slot =
-                        i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
-                    apply(
-                        conn,
-                        state,
-                        proto.encode_container_slot(0, 0, hotbar_slot, remainder.as_ref()),
-                    )
-                    .await?;
+                    if consume_one(inventory, native, game_mode) && game_mode != GameMode::Creative {
+                        let remainder = inventory.native(native).cloned();
+                        let hotbar_slot =
+                            i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_container_slot(0, 0, hotbar_slot, remainder.as_ref()),
+                        )
+                        .await?;
+                    }
                     return Ok(());
                 }
             }
@@ -5385,6 +5537,12 @@ where
     // Paired with the `block_update` packets in the notify loop below — see
     // `moving_piston_records`.
     let mut piston_records: Vec<(BlockPos, lodestone_core::Nbt)> = Vec::new();
+    // The remainder of the held stack after a successful placement consumed one
+    // from it, `None` when nothing was placed or the game mode does not consume.
+    // Held out here rather than sent inside the placement block because `state` is
+    // *shadowed* in there by the placed block state — see the `let (state, extra)`
+    // below — so `apply` cannot be reached from inside it.
+    let mut placement_remainder: Option<Option<ItemStack>> = None;
     if is_air_or_fluid(&target_state) || doubling_slab {
         if let Some((item, block_name)) = placed {
             if let Some((entity_block, entity)) = block_entity_for_item(item) {
@@ -5468,7 +5626,42 @@ where
             // block state.
             block_ticks
                 .request_scheduled_ticks(crate::gravity_tick::ticks_after_place(target, &state));
+            // `BlockItem.place`'s own tail: `itemStack.consume(1, player)`. Nothing
+            // in this crate did it, so **every placement was free** — the block was
+            // written, the client predicted its own hotbar and the server never
+            // agreed, so the stack came back on the next window sync.
+            //
+            // `ItemStack.consume` is
+            // `if (entity == null || !entity.hasInfiniteMaterials()) shrink(count)`,
+            // so a creative placement consumes nothing and "placing does not use up
+            // the block" is *correct* there. The gate is explicit rather than
+            // implied for exactly that reason.
+            //
+            // `consume_one` clears the slot outright at a count of one rather than
+            // leaving a zero-count stack naming an item, which renders as a block
+            // you can place forever.
+            if game_mode != GameMode::Creative {
+                let native = usize::from(inventory.selected_hotbar_slot());
+                if consume_one(inventory, native, game_mode) {
+                    placement_remainder = Some(inventory.native(native).cloned());
+                }
+            }
         }
+    }
+    // Tell the client's window-0 hotbar slot what the server thinks is left —
+    // menu slots `36..=44` map onto native `0..=8` (vanilla's `InventoryMenu`),
+    // the same server-initiated slot update the composter, brewing-stand,
+    // bone-meal and spawn-egg arms above send after they consume. `state_id` is
+    // `0`: this crate applies a container diff verbatim and never validates a
+    // stale id (`apply_container_clicked`).
+    if let Some(remainder) = placement_remainder {
+        let hotbar_slot = i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+        apply(
+            conn,
+            state,
+            proto.encode_container_slot(0, 0, hotbar_slot, remainder.as_ref()),
+        )
+        .await?;
     }
     // `pos`/`neighbour` first (the clicked face and the placed cell, which the
     // client predicted), then every cell the fan-out actually rewrote. Deduped
@@ -6603,59 +6796,177 @@ fn launch_intent(path: &str) -> Option<LaunchIntent> {
 /// a vanilla bow finds first anyway.
 const BOW_AMMUNITION: &str = "arrow";
 
-/// Applies a `USE_ITEM`: throws a throwable outright, or opens a bow draw.
+/// One consume (eat or drink) in progress on a connection.
 ///
-/// Returns the tick the draw started on when one began, so the caller can record
-/// it. Called for its side effects otherwise.
+/// Vanilla's `LivingEntity.useItem`/`useItemRemaining` pair, reduced to the two
+/// facts the completion needs: which slot is being eaten from, and when it
+/// finishes. `item` is carried so a slot whose contents changed mid-bite (a
+/// container click, a hotbar swap) cannot complete as if it were still the food
+/// — the same "re-check what you recorded" guard `PendingBreak` applies to a dig.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ItemInUse {
+    /// Native inventory index the food is in.
+    native: usize,
+    /// The item that started the use, full registry name.
+    item: String,
+    /// The `MobSim` tick the use completes on — `started + Consumable.consumeTicks()`.
+    finish_tick: u64,
+}
+
+/// What a `USE_ITEM` started. Vanilla's `Item.use` returns an
+/// `InteractionResult`; this is the subset with a consequence here.
+#[derive(Debug)]
+enum UseItemOutcome {
+    /// Nothing this crate models. Vanilla's `PASS`/`FAIL`.
+    Nothing,
+    /// A bow draw opened; the `RELEASE_USE_ITEM` that follows ends it.
+    Draw(BowDraw),
+    /// A consume opened; the server's own clock ends it.
+    Consuming(ItemInUse),
+    /// An equip swap already happened — arm 2 of `Item.use` is instantaneous,
+    /// unlike arms 1, 3 and 4.
+    Equipped(crate::item_use::EquipSwap),
+}
+
+/// Applies a `USE_ITEM`: `Item.use`'s ordered arms, plus the projectile items
+/// whose own `use` override replaces it.
+///
+/// The order below is `Item.use`'s own, and it is load-bearing — see
+/// `crate::item_use`'s module doc. The launch arm sits first because those items
+/// (`BowItem`, `SnowballItem`, `ThrowablePotionItem`) *override* `Item.use`
+/// entirely rather than being an arm of it, so they are a disjoint set and cannot
+/// race the arms below.
+///
+/// `food_level` and `invulnerable` are the acting player's, for
+/// `Player.canEat`'s two non-item disjuncts.
+#[allow(clippy::too_many_arguments)]
 fn apply_use_item(
     mobs: &MobHandle,
     inventory: &mut PlayerInventory,
     player_pos: Option<(f64, f64, f64)>,
     game_mode: GameMode,
+    food_level: i32,
+    invulnerable: bool,
     hand: u8,
     yaw: f32,
     pitch: f32,
-) -> Option<BowDraw> {
-    // No tracked position means no launch origin, and guessing the origin would
-    // put an arrow at the world origin — the same "no data yet, don't guess" gate
-    // `apply_attack` uses for knockback direction.
-    let (x, y, z) = player_pos?;
+) -> UseItemOutcome {
     let native = if hand == 1 {
         crate::inventory::OFFHAND_NATIVE
     } else {
         usize::from(inventory.selected_hotbar_slot())
     };
-    let held = inventory.native(native)?.item.path().to_owned();
-    match launch_intent(&held)? {
-        LaunchIntent::BeginDraw => {
-            // The arrow check happens at *release*, not here: vanilla lets a
-            // player draw an empty bow (the animation plays) and simply declines
-            // to fire. Refusing the draw would also make the release arm unable to
-            // tell "no ammunition" from "never drew".
-            Some(BowDraw {
-                started_tick: mobs.with(|sim| sim.tick_count()),
-                yaw,
-                pitch,
-            })
-        }
-        LaunchIntent::InstantThrow {
-            projectile,
-            power,
-            pitch_offset,
-        } => {
-            if !consume_one(inventory, native, game_mode) {
-                return None;
+    let Some(stack) = inventory.native(native) else {
+        return UseItemOutcome::Nothing;
+    };
+    let held = stack.item.to_string();
+    let path = stack.item.path().to_owned();
+
+    if let Some(intent) = launch_intent(&path) {
+        // No tracked position means no launch origin, and guessing the origin
+        // would put an arrow at the world origin — the same "no data yet, don't
+        // guess" gate `apply_attack` uses for knockback direction. Checked here
+        // rather than at the top of the function so a *consume* still works before
+        // the first movement packet arrives; it needs no position at all.
+        let Some((x, y, z)) = player_pos else {
+            return UseItemOutcome::Nothing;
+        };
+        return match intent {
+            LaunchIntent::BeginDraw => {
+                // The arrow check happens at *release*, not here: vanilla lets a
+                // player draw an empty bow (the animation plays) and simply
+                // declines to fire. Refusing the draw would also make the release
+                // arm unable to tell "no ammunition" from "never drew".
+                UseItemOutcome::Draw(BowDraw {
+                    started_tick: mobs.with(|sim| sim.tick_count()),
+                    yaw,
+                    pitch,
+                })
             }
-            let velocity = lodestone_entity::projectile::launch_velocity(
-                f64::from(yaw),
-                f64::from(pitch),
-                pitch_offset,
+            LaunchIntent::InstantThrow {
+                projectile,
                 power,
-            );
-            spawn_player_projectile(mobs, projectile, Vec3::new(x, y + EYE_HEIGHT, z), velocity);
-            None
-        }
+                pitch_offset,
+            } => {
+                if !consume_one(inventory, native, game_mode) {
+                    return UseItemOutcome::Nothing;
+                }
+                let velocity = lodestone_entity::projectile::launch_velocity(
+                    f64::from(yaw),
+                    f64::from(pitch),
+                    pitch_offset,
+                    power,
+                );
+                spawn_player_projectile(mobs, projectile, Vec3::new(x, y + EYE_HEIGHT, z), velocity);
+                UseItemOutcome::Nothing
+            }
+        };
     }
+
+    // Arm 1: `DataComponents.CONSUMABLE` → `Consumable.startConsuming`, whose
+    // own `canConsume` is `Player.canEat`. A refusal is vanilla's `FAIL` — no use
+    // starts, so a full player's right-click on steak does nothing at all, which
+    // is the behaviour whose absence is most visible.
+    if let Some(food) = crate::item_use::food_for_item(&held) {
+        if !crate::item_use::can_eat(food, food_level, invulnerable) {
+            return UseItemOutcome::Nothing;
+        }
+        let now = mobs.with(|sim| sim.tick_count());
+        return UseItemOutcome::Consuming(ItemInUse {
+            native,
+            item: held,
+            finish_tick: now + u64::try_from(food.use_ticks.max(0)).unwrap_or(0),
+        });
+    }
+
+    // Arm 2: `DataComponents.EQUIPPABLE` gated on `swappable()`. Instantaneous,
+    // and it is behind arm 1 for the reason `crate::item_use`'s doc gives — an
+    // item that is both eats rather than equips.
+    if let Some(swap) = crate::item_use::swap_with_equipment_slot(
+        inventory,
+        native,
+        game_mode == GameMode::Creative,
+    ) {
+        return UseItemOutcome::Equipped(swap);
+    }
+
+    // Arms 3 and 4 (`BLOCKS_ATTACKS`, `KINETIC_WEAPON`) would only
+    // `startUsingItem`, and nothing here consumes a raised shield.
+    UseItemOutcome::Nothing
+}
+
+/// Finishes a consume whose clock ran out — `LivingEntity.completeUsingItem` →
+/// `Item.finishUsingItem` → `Consumable.onConsume` → `FoodProperties.onConsume`,
+/// which is `player.getFoodData().eat(this)` plus `stack.consume(1, entity)`.
+///
+/// Returns the slot to report and the stack now in it, or `None` when the use is
+/// stale: the slot's contents changed under it (a hotbar swap, a container click)
+/// or the food is gone. `Option<Option<..>>` rather than a bool so an emptied slot
+/// is reported as an *empty* slot rather than as nothing to report — the
+/// zero-count-ghost trap.
+fn finish_consuming(
+    inventory: &mut PlayerInventory,
+    vitals: &mut PlayerVitals,
+    use_in_progress: &ItemInUse,
+    game_mode: GameMode,
+) -> Option<(usize, Option<ItemStack>)> {
+    let still_there = inventory
+        .native(use_in_progress.native)
+        .is_some_and(|stack| stack.item.to_string() == use_in_progress.item);
+    if !still_there {
+        return None;
+    }
+    let food = crate::item_use::food_for_item(&use_in_progress.item)?;
+    let mut data = vitals.food();
+    data.eat(food.nutrition, food.saturation_modifier);
+    vitals.set_food(data);
+    if !consume_one(inventory, use_in_progress.native, game_mode) {
+        return None;
+    }
+    Some((
+        use_in_progress.native,
+        inventory.native(use_in_progress.native).cloned(),
+    ))
 }
 
 /// Applies a `RELEASE_USE_ITEM` that ends a bow draw: computes the charge, refuses
@@ -7172,6 +7483,14 @@ async fn dispatch_play_packet<T, P, S>(
     // `player_pos`: two players can be mid-draw at once and neither's charge is
     // the other's.
     bow_draw: &mut Option<BowDraw>,
+    // This connection's in-progress *consume* — eating or drinking. Held here for
+    // the same reason `bow_draw` is, and separately from it because the two end
+    // differently: a draw ends on a packet (`RELEASE_USE_ITEM`), while a consume
+    // ends on the **server's own clock** — vanilla's `LivingEntity
+    // ::updateUsingItem` counts `useItemRemaining` down and calls
+    // `completeUsingItem` itself, and the client sends nothing at all when a
+    // steak finishes. `serve_play`'s per-tick arm is what finishes it here.
+    item_in_use: &mut Option<ItemInUse>,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -7471,6 +7790,7 @@ where
                 player_entity_id,
                 bone_meal_rng,
                 world.difficulty().0,
+                *game_mode,
             )
             .await?;
         }
@@ -7490,6 +7810,13 @@ where
             apply_game_rule_changed(conn, proto, state, world, entries).await?;
         }
         ServerBound::CarriedItemChanged { slot } => {
+            // `ServerGamePacketListenerImpl.handleSetCarriedItem` calls
+            // `player.stopUsingItem()` before it moves the selection, so switching
+            // off a half-eaten steak cancels the bite rather than letting it
+            // complete against whatever is in the slot now. `finish_consuming` also
+            // re-checks the item as a second layer, because a *container* click can
+            // change the same slot without this packet.
+            *item_in_use = None;
             apply_carried_item_changed(inventory, slot);
         }
         ServerBound::ContainerClicked {
@@ -7609,21 +7936,67 @@ where
         // existed in the protocol crates with no server model behind it, so a
         // player could draw a bow and nothing was ever created.
         ServerBound::UseItem { hand, yaw, pitch } => {
-            let began = apply_use_item(
+            let outcome = apply_use_item(
                 mobs,
                 inventory,
                 *player_pos,
                 *game_mode,
+                vitals.food().food_level(),
+                Abilities::for_mode(*game_mode).invulnerable,
                 hand,
                 yaw,
                 pitch,
             );
-            // Overwritten rather than merged: a fresh `USE_ITEM` restarts the
-            // charge, and a `USE_ITEM` for something that is not chargeable ends
-            // any draw in progress (vanilla's `stopUsingItem` on a new use).
-            *bow_draw = began;
+            // Both slots are overwritten rather than merged, whatever the outcome:
+            // a fresh `USE_ITEM` restarts the charge, and a `USE_ITEM` for
+            // something that is not chargeable ends any draw or bite in progress
+            // (vanilla's `stopUsingItem` on a new use).
+            *bow_draw = None;
+            *item_in_use = None;
+            match outcome {
+                UseItemOutcome::Nothing => {}
+                UseItemOutcome::Draw(draw) => *bow_draw = Some(draw),
+                UseItemOutcome::Consuming(started) => *item_in_use = Some(started),
+                UseItemOutcome::Equipped(swap) => {
+                    // Every slot the swap touched, so the client's own prediction
+                    // is corrected rather than left to drift. The armour slots are
+                    // menu `5..=8` in window 0 (`window_zero_menu_slot`), which is
+                    // what makes the piece show up in the armour bar and on the
+                    // player model rather than only in the server's model.
+                    let mut touched = vec![swap.equipment.0, swap.hand.0];
+                    touched.extend(swap.inventory.iter().copied());
+                    for native in touched {
+                        let Some(menu_slot) = window_zero_menu_slot(native) else {
+                            continue;
+                        };
+                        let held = inventory.native(native).cloned();
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_container_slot(0, 0, menu_slot, held.as_ref()),
+                        )
+                        .await?;
+                    }
+                    // `player.drop(swappedToInventory, false)` — the previously worn
+                    // piece when the inventory was full.
+                    if let Some(spilled) = swap.spilled {
+                        spawn_dropped_stacks(
+                            mobs,
+                            *player_pos,
+                            *player_rot,
+                            drops_rng,
+                            vec![spilled],
+                        );
+                    }
+                }
+            }
         }
         ServerBound::ReleaseUseItem => {
+            // A release *before* the consume clock ran out cancels it with no food
+            // applied — `LivingEntity.releaseUsingItem`, which for a consumable is
+            // `stopUsingItem` and nothing else. This is the arm a player hits
+            // constantly and the one most easily forgotten.
+            *item_in_use = None;
             if let Some(draw) = bow_draw.take() {
                 let fired = apply_release_use_item(
                     mobs,
@@ -8177,6 +8550,9 @@ where
     // Issue #260. This connection's in-progress bow draw — see this parameter's
     // own comment on `dispatch_play_packet`.
     let mut bow_draw: Option<BowDraw> = None;
+    // This connection's in-progress eat or drink — see `item_in_use` on
+    // `dispatch_play_packet`. Finished by the per-tick arm below, not by a packet.
+    let mut item_in_use: Option<ItemInUse> = None;
     // Vanilla's `ServerPlayer::nextContainerCounter` starts at `0` and the
     // very first open bumps it to `1` before use (`ServerPlayer.java:1330,
     // 1343`) — see [`open_container_screen`]'s own `% 100 + 1` wrap.
@@ -8456,6 +8832,7 @@ where
                     // are priced on one monotonic counter.
                     Some(u64::try_from(ticks_since(play_start)).unwrap_or(0)),
                     &mut bow_draw,
+                    &mut item_in_use,
                     packet_id,
                     &payload,
                 )
@@ -8819,11 +9196,57 @@ where
                             block_ticks,
                             player_uuid,
                             !matches!(game_mode, GameMode::Creative) && world.block_drops(),
+                            world.block_drops(),
                             dig.pos,
                             &mut advancements,
                             (!matches!(game_mode, GameMode::Creative)).then_some(&mut vitals),
                         )
                         .await?;
+                    }
+                }
+
+                // `LivingEntity.updateUsingItem`: a consume ends on the server's
+                // own clock, not on a packet — the client sends nothing when a
+                // steak finishes, so without this arm every bite starts and none
+                // ever lands. Read against `MobSim`'s tick counter because that is
+                // the clock `apply_use_item` stamped `finish_tick` from; mixing it
+                // with this loop's `ticks_since(play_start)` would compare two
+                // unrelated counters.
+                if let Some(started) = item_in_use.clone() {
+                    if mobs.with(|sim| sim.tick_count()) >= started.finish_tick {
+                        item_in_use = None;
+                        if let Some((native, remainder)) =
+                            finish_consuming(&mut inventory, &mut vitals, &started, game_mode)
+                        {
+                            if let Some(menu_slot) = window_zero_menu_slot(native) {
+                                apply(
+                                    conn,
+                                    &mut state,
+                                    proto.encode_container_slot(
+                                        0,
+                                        0,
+                                        menu_slot,
+                                        remainder.as_ref(),
+                                    ),
+                                )
+                                .await?;
+                            }
+                            // The food bar itself. `encode_set_health` is vanilla's
+                            // `ClientboundSetHealthPacket`, which carries all three
+                            // of health, food and saturation in one packet — so the
+                            // bar cannot move without re-sending the health beside
+                            // it.
+                            apply(
+                                conn,
+                                &mut state,
+                                proto.encode_set_health(
+                                    vitals.health(),
+                                    vitals.food().food_level(),
+                                    vitals.food().saturation(),
+                                ),
+                            )
+                            .await?;
+                        }
                     }
                 }
 
@@ -9454,6 +9877,11 @@ where
     let mut pending_break: Option<PendingBreak> = None;
     let mut sprinting = false;
     let mut bow_draw: Option<BowDraw> = None;
+    // Tracked for parity with the native loop's shared `dispatch_play_packet`
+    // signature. Never *finished* here: the completion lives on the per-tick timer
+    // the `wasm32` loop does not have, exactly like `vitals`' drowning countdown
+    // above — so a browser session starts a bite and never lands it.
+    let mut item_in_use: Option<ItemInUse> = None;
     // `player_pos`/`vitals` are tracked for parity with the native loop's
     // `dispatch_play_packet` calls (shared function, shared signature), but
     // `vitals` is only ever *ticked* by the native loop's timer, which
@@ -9601,6 +10029,7 @@ where
             // validate; only the timing test is skipped.
             None,
             &mut bow_draw,
+            &mut item_in_use,
             packet_id,
             &payload,
         )
