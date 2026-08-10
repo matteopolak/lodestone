@@ -225,6 +225,13 @@ impl ThirdPersonBodyState {
             // — and with no third-person camera there is nothing to see either.
             // A `false` by construction, not by omission; see `docs/combat.md`.
             hurt: false,
+            // And the same construction, for the same reason, keeps the local
+            // player's own body from toppling: no ingest entity means no
+            // `DeathTime` to read. The local player's death is drawn by
+            // `camera_rig`'s *camera* roll (`GameRenderer.bobHurt`, a different
+            // vanilla expression on the same tick count) rather than by tipping
+            // this body over, which is also what vanilla does in first person.
+            death_time: 0.0,
             id: LOCAL_PLAYER_DRAW_ID,
             type_path: player_model_name(self.slim).to_string(),
             item: None,

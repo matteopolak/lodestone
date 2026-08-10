@@ -150,6 +150,37 @@ pub struct Health(pub f32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HurtTime(pub u32);
 
+/// Ticks since this entity died — vanilla's `LivingEntity.deathTime`, which counts
+/// **up** rather than down. Folded by [`crate::ingest::apply_entity_status`] from
+/// `EntityEvent.DEATH` and aged by [`crate::ingest::tick_death_time`], one per
+/// `GameTick`, the same rate `LivingEntity.tickDeath` increments the vanilla field.
+///
+/// **Absent** until the entity dies, and the absence is the switch a renderer keys
+/// on — exactly like [`FallingBlockState`] below, and unlike [`HurtTime`], whose
+/// zero is a real "not hurt right now" state. A living entity carries no
+/// `DeathTime` at all.
+///
+/// # Present-at-zero is a state, and it is the tick death is announced
+///
+/// Inserted as `DeathTime(0)`, not `DeathTime(1)`. Vanilla's `deathTime` is still
+/// `0` at the instant `die()` runs and only reaches `1` on the *next*
+/// `tickDeath()`, and both consumers of the field test `deathTime > 0`
+/// (`LivingEntityRenderer`'s red overlay and its fall-over rotation). So the first
+/// tick of death draws upright, and the killing blow's own [`HurtTime`] is what
+/// keeps the entity red across that one frame. Seeding `1` would start the
+/// fall-over a tick early and make the seam visible.
+///
+/// # Why counting stops mattering long before it stops
+///
+/// Vanilla's server removes the entity at `deathTime >= 20`, so a client normally
+/// sees 0..=20 and then a removal packet. This keeps counting past that
+/// (`saturating_add`) rather than clamping, because a clamp would be a second
+/// place the animation's own `sqrt` ramp — which already saturates at
+/// `deathTime == 13.5`, well before 20 — could disagree about when the fall-over
+/// ends. Nothing reads the raw count except that ramp.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeathTime(pub u32);
+
 /// The block state a `minecraft:falling_block` entity is imitating —
 /// `FallingBlockEntity.blockState`, as a global block-state id.
 ///

@@ -140,8 +140,8 @@ use glam::Vec3;
 use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
-    AttackSwing, EntityFlags, EntityIndex, ExperienceOrbValue, FallingBlockState, HurtTime, ItemUse,
-    MinecraftEntityId, MobState, Pose,
+    AttackSwing, DeathTime, EntityFlags, EntityIndex, ExperienceOrbValue, FallingBlockState,
+    HurtTime, ItemUse, MinecraftEntityId, MobState, Pose,
 };
 use lodestone_ecs::player::{
     CollisionSource, LocalPlayer, PhysicsState, PlayerCollision, Profile,
@@ -713,11 +713,33 @@ pub struct EntityDraw {
     /// through ~15 struct literals for a value the extract system can already
     /// reach directly.
     ///
-    /// `deathTime` has no component on this side of the wire — vanilla's death
-    /// animation is not decoded — so today this is `hurtTime > 0` alone. That
-    /// makes the overlay end ~10 ticks after the killing blow instead of
-    /// persisting through the fall-over, which is the only visible divergence.
+    /// Both halves of the disjunction are live: [`Self::death_time`] carries
+    /// `deathTime`, so the overlay now persists through the fall-over instead of
+    /// ending ten ticks after the killing blow.
     pub hurt: bool,
+    /// This entity's `deathTime + partialTicks` while it is dying, `0.0` while it
+    /// is alive — vanilla's `LivingEntityRenderer.extractRenderState` writes
+    /// `state.deathTime = entity.deathTime > 0 ? entity.deathTime + partialTicks : 0.0F`.
+    ///
+    /// Read off [`lodestone_ecs::entity::DeathTime`] through [`EntityIndex`] in
+    /// [`extract_entity_draws`], bridged exactly like [`Self::hurt`] and for the
+    /// same reason — the component lives on the *ingest* entity.
+    ///
+    /// # One field, two consumers, and one of them is a rotation
+    ///
+    /// It feeds [`Self::hurt`]'s `deathTime > 0` half (right here, in this module)
+    /// and the **fall-over rotation**
+    /// ([`lodestone_render::entity_anim::death_fall_over_degrees`], composed into
+    /// the placement by [`lodestone_render::dying_entity_model_matrix`]). Keeping
+    /// one tick count rather than a bool and an angle is what stops the tint and the
+    /// topple disagreeing about when death began.
+    ///
+    /// Not to be confused with `camera_rig`'s own `death_roll_degrees`, which is a
+    /// *different* vanilla expression (`GameRenderer.bobHurt`'s
+    /// `40 - 8000/(min(deathTime, 20) + 200)`) on the same input: that one rolls the
+    /// local player's **camera** when *they* die, this one topples an entity's
+    /// **model**. Both are driven by a `deathTime` and they are not interchangeable.
+    pub death_time: f32,
     /// This entity's using-item state, when it has ever reported the
     /// `LivingEntity` flags byte — `None` otherwise, like every other component
     /// bridged off the ingest entity.
@@ -1353,6 +1375,10 @@ pub fn extract_pickup_draws(
             },
             name_tag: None,
             hurt: false,
+            // An item entity is not a `LivingEntity`, so it has no `deathTime` to
+            // topple over — vanilla's fall-over lives on `LivingEntityRenderer`, and
+            // an item's renderer never calls `setupRotations` at all.
+            death_time: 0.0,
             // A flying pickup is an item entity, not a living one: nothing can be
             // using it, so its variant resolves in `DisplaySlot::Ground` alone.
             item_use: None,
@@ -1711,6 +1737,12 @@ pub fn extract_entity_draws(
     // so it is bridged the same way `AttackSwing` is rather than folded through
     // `EntityFacts` — see `EntityDraw::hurt`.
     hurts: Query<&HurtTime>,
+    // `DeathTime` lives on the ingest entity too (`apply_entity_status` resolves
+    // `EntityStatus`'s byte 3 through the same `EntityIndex`), bridged the same way
+    // `HurtTime` is — and read beside it, because vanilla's red overlay is the
+    // disjunction of the two. It is what turns a death packet into a mob toppling
+    // onto its side; see `EntityDraw::death_time`.
+    deaths: Query<&DeathTime>,
     // `ItemUse` lives on the ingest entity too (`apply_entity_item_use` resolves
     // the living-flags byte through the same `EntityIndex`), bridged the same way
     // `AttackSwing` and `HurtTime` are. It is what turns a metadata bit into a bow
@@ -1816,14 +1848,43 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| swings.get(entity).ok())
             .map_or(0.0, |swing| swing.attack_anim_lerp(partial_tick));
-        // `hurtTime > 0`, vanilla's `hasRedOverlay` gate. `false` for an entity
-        // that has never been hit (`HurtTime` absent, like `AttackSwing`) — and
-        // also for one whose countdown has aged out, since `tick_hurt_time`
-        // leaves the component in place at zero rather than removing it.
+        // `deathTime + partialTicks` while dying, `0.0` while alive — vanilla's
+        // `LivingEntityRenderer.extractRenderState`:
+        // `state.deathTime = entity.deathTime > 0 ? entity.deathTime + partialTicks : 0.0F`.
+        //
+        // The ternary is not decoration: `DeathTime` is inserted at **zero** on the
+        // tick death is announced (see its own doc), and a bare `+ partial_tick`
+        // would make that first tick report a fractional death time, starting the
+        // fall-over — and the red overlay's `deathTime > 0` half — mid-frame instead
+        // of on the tick boundary. Absent `DeathTime` is "alive", so this reads
+        // `0.0` for every living entity at no cost.
+        let death_time = index
+            .get(id.0)
+            .and_then(|entity| deaths.get(entity).ok())
+            .map_or(0.0, |death| {
+                if death.0 > 0 {
+                    death.0 as f32 + partial_tick
+                } else {
+                    0.0
+                }
+            });
+        // `hurtTime > 0 || deathTime > 0`, vanilla's `hasRedOverlay` gate in full.
+        // `false` for an entity that has never been hit (`HurtTime` absent, like
+        // `AttackSwing`) — and also for one whose countdown has aged out, since
+        // `tick_hurt_time` leaves the component in place at zero rather than
+        // removing it.
+        //
+        // The `deathTime` half is what this field's doc used to name as its one
+        // known divergence: on `hurtTime` alone the overlay ends ten ticks after the
+        // killing blow, so a mob went red, turned its normal colour again, and only
+        // *then* fell over. The disjunction is why vanilla's tint carries all the
+        // way through the fall-over — the two counters run in opposite directions
+        // and overlap by design.
         let hurt = index
             .get(id.0)
             .and_then(|entity| hurts.get(entity).ok())
-            .is_some_and(|hurt| hurt.0 > 0);
+            .is_some_and(|hurt| hurt.0 > 0)
+            || death_time > 0.0;
         // The using-item state behind the bow/crossbow arm pose. `None` for an
         // entity that has never reported the byte (`ItemUse` absent, like
         // `AttackSwing`), which `arm_pose_for` reads as "not using anything".
@@ -1922,6 +1983,7 @@ pub fn extract_entity_draws(
             ),
             name_tag: name_tag.0.clone(),
             hurt,
+            death_time,
             item_use,
             creeper_swelling,
             on_fire,
@@ -3453,6 +3515,7 @@ mod tests {
                 hurt: false,
                 item_use: None,
                 creeper_swelling: 0.0,
+                death_time: 0.0,
                 on_fire: false,
                 player_skin: skin,
                 // A player, not an experience orb.
@@ -4022,6 +4085,131 @@ mod tests {
         assert!(
             receded < swelling,
             "swelling did not recede after 2s at swell_dir=-1: was {swelling}, now {receded}"
+        );
+    }
+
+    /// The render-side half of the death animation: [`DeathTime`] on the ingest
+    /// entity → [`EntityDraw::death_time`] **and** [`EntityDraw::hurt`], through the
+    /// public `update` seam.
+    ///
+    /// Live player report: *"stuff dying doesnt have the death animation (the one
+    /// where they turn red and tilt on their side)"*. Both halves are this one
+    /// bridge: the tilt reads `death_time`, and the red is
+    /// `hurtTime > 0 || deathTime > 0` — a disjunction whose second operand did not
+    /// exist here before, so an untouched-since-death mob went red for ten ticks and
+    /// then back to normal *before* it fell over.
+    ///
+    /// # `DeathTime(0)` at a non-zero partial tick is the discriminating input
+    ///
+    /// The frame is driven with `dt` of half a tick, so `partial_tick` is `0.5` and
+    /// not zero — which is the only way to tell vanilla's
+    /// `deathTime > 0 ? deathTime + partialTicks : 0.0F` from the bare
+    /// `deathTime + partialTicks` anybody would write instead. At `DeathTime(0)`,
+    /// the tick death is announced, the ternary gives `0.0` and the bare sum gives
+    /// `0.5` — which would start the topple and the red mid-frame instead of on the
+    /// tick boundary. **At any non-zero `DeathTime` the two agree**, so a gate that
+    /// only ever set a live counter would measure that the bridge runs.
+    ///
+    /// # One frame per arm, because two half-ticks are a whole tick
+    ///
+    /// Each arm gets a **fresh** interpolator driven by exactly one half-tick frame,
+    /// rather than one interpolator stepped repeatedly. Chaining two `update(0.025)`
+    /// calls banks a full `TICK_PERIOD`, so `FrameClock::take_tick` claims it and
+    /// `end_frame` publishes an `interp_alpha` of **0.0** — which silently turns the
+    /// discriminating arm above back into a coincident one. Measured, not
+    /// hypothesised: the first draft of this test chained the arms and the third arm
+    /// reported `4.0` where 4.5 was predicted.
+    ///
+    /// Mismatches are collected rather than asserted arm by arm, so a neuter reports
+    /// all four instead of aborting on the first.
+    #[test]
+    fn a_dying_entitys_death_time_reaches_the_draw_and_reddens_it() {
+        // Half of one 20 Hz tick: `FrameClock` publishes `interp_alpha` 0.5 and
+        // claims no tick, so nothing moves the counter underneath the assertion.
+        const HALF_TICK_SECONDS: f32 = 0.025;
+
+        // One frame of one entity, with `death` either absent (alive) or set to a
+        // given tick count on the ingest entity — the same way this module's other
+        // bridged components are exercised; the fold that really writes it lives in
+        // `lodestone_ecs::ingest` and has its own gate there.
+        let draw_with_death = |death: Option<u32>| -> EntityDraw {
+            let mut interp = EntityInterpolator::new();
+            (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+            if let Some(ticks) = death {
+                let world = interp.world_mut();
+                let entity = world
+                    .resource::<EntityIndex>()
+                    .get(1)
+                    .expect("entity 1 is spawned");
+                world.entity_mut(entity).insert(DeathTime(ticks));
+            }
+            interp.update(HALF_TICK_SECONDS);
+            interp
+                .draws()
+                .into_iter()
+                .find(|d| d.id == 1)
+                .expect("no draw for entity 1")
+        };
+
+        let mut mismatches: Vec<String> = Vec::new();
+
+        // Alive: no component at all, so both halves must read their resting value.
+        let alive = draw_with_death(None);
+        if alive.death_time != 0.0 {
+            mismatches.push(format!(
+                "a living entity reported death_time {} — absent DeathTime must read \
+                 0.0, not a default",
+                alive.death_time
+            ));
+        }
+        if alive.hurt {
+            mismatches.push("a living, unhurt entity must not carry the red overlay".into());
+        }
+
+        // The tick death is announced. The ternary must suppress the partial term.
+        let announced = draw_with_death(Some(0));
+        if announced.death_time != 0.0 {
+            mismatches.push(format!(
+                "DeathTime(0) at partial tick 0.5 reported death_time {} — vanilla's \
+                 `deathTime > 0 ? deathTime + partialTicks : 0.0F` gives 0.0, and the \
+                 bare sum gives 0.5, which starts the topple mid-frame",
+                announced.death_time
+            ));
+        }
+        if announced.hurt {
+            mismatches.push(
+                "DeathTime(0) must not redden the entity: vanilla's gate is \
+                 `deathTime > 0`, and the killing blow's own HurtTime is what covers \
+                 this one frame"
+                    .into(),
+            );
+        }
+
+        // Mid-fall. `4 + 0.5` exactly — a predicted value, not a direction. The 0.5
+        // is also what proves the partial term is carried at all, which the arm
+        // above can only prove is *suppressed*.
+        let dying = draw_with_death(Some(4));
+        if (dying.death_time - 4.5).abs() > 1e-6 {
+            mismatches.push(format!(
+                "DeathTime(4) at partial tick 0.5 reported death_time {}, want 4.5 — \
+                 a bare 4.0 means the partial tick never reaches the draw, so the \
+                 topple would step once per tick instead of easing",
+                dying.death_time
+            ));
+        }
+        if !dying.hurt {
+            mismatches.push(
+                "a dying entity must carry the red overlay off deathTime alone, with \
+                 no HurtTime present — this is the disjunction's second operand, and \
+                 the island this test exists to catch"
+                    .into(),
+            );
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "the DeathTime -> EntityDraw bridge is wrong:\n  {}",
+            mismatches.join("\n  ")
         );
     }
 

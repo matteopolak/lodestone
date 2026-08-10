@@ -1478,6 +1478,82 @@ pub fn armour_icon(i: usize, armour: i32) -> ArmourIcon {
     }
 }
 
+/// Which heart sprite one of the ten heart containers shows **over** its backing,
+/// or `None` for a container left empty.
+///
+/// A separate type from [`ArmourIcon`] because the empty case really is different:
+/// an unfilled heart draws the container sprite and nothing on top of it, where an
+/// unfilled armour icon draws its own `hud/armor_empty`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartFill {
+    /// `hud/heart/full` — both halves of this container.
+    Full,
+    /// `hud/heart/half` — the odd half at the frontier.
+    Half,
+}
+
+impl HeartFill {
+    /// The GUI sprite id, so the draw and any gate name the sprite once.
+    #[must_use]
+    pub fn sprite_id(self) -> &'static str {
+        match self {
+            Self::Full => "hud/heart/full",
+            Self::Half => "hud/heart/half",
+        }
+    }
+}
+
+/// Vanilla's `Hud.extractHearts` fill choice for heart `i` of ten, at `health`
+/// **hit points** (not halves) — `None` for a container with nothing drawn over it.
+///
+/// # The `ceil` is the whole function, and it is why this is a named symbol
+///
+/// Vanilla never compares the raw float. `extractPlayerHealth` computes
+/// `currentHealth = Mth.ceil(player.getHealth())` **once**, hands that `int` to
+/// `extractHearts`, and the fill is two integer comparisons against it:
+///
+/// ```text
+/// int halves = containerIndex * 2;
+/// if (halves < currentHealth) {
+///    boolean halfHeart = halves + 1 == currentHealth;
+///    extractHeart(type, …, halfHeart);
+/// }
+/// ```
+///
+/// So the composition — ceil, then an integer frontier — is the thing that has to be
+/// right, and it had no name here before, which is exactly how the two halves came
+/// apart: the ghost-overlay row of the same draw loop already used the
+/// `halves + 1 ==` shape against an integer, while the fill row compared
+/// `health - 2i` against `2.0`/`1.0` as floats. Both readings agree on every **even**
+/// hit point and diverge at every odd half, in both directions:
+///
+/// | health | vanilla | the float reading |
+/// |---|---|---|
+/// | 0.5 | `ceil` 1 → one **half** heart | nothing at all — an empty bar while alive |
+/// | 1.5 | `ceil` 2 → one **full** heart | a half heart |
+/// | 19.5 | `ceil` 20 → **ten full** hearts | nine full and a half |
+/// | 2.0, 20.0 | full hearts | identical |
+///
+/// The first row is the live player report ("sometimes i get to 0 hearts but im still
+/// alive"): under the ceiling an empty bar is reachable only at *exactly* 0, which is
+/// death. Any gate written at an integer health measures only that this function runs.
+///
+/// `health` is clamped at zero rather than trusted, because `hurt` overshoot can
+/// report a small negative and `Mth.ceil` of that would light a heart.
+#[must_use]
+pub fn heart_fill(i: usize, health: f32) -> Option<HeartFill> {
+    let current = health.max(0.0).ceil() as i32;
+    let halves = i as i32 * 2;
+    if halves >= current {
+        return None;
+    }
+    Some(if halves + 1 == current {
+        HeartFill::Half
+    } else {
+        HeartFill::Full
+    })
+}
+
 /// Vanilla's Chat Settings (plus one Accessibility-screen field it shares)
 /// values that shape how the scrollback and input line draw —
 /// `net.minecraft.client.Options`'s `chat*` fields
@@ -3215,11 +3291,17 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
                 };
                 b.sprite(ghost, x, y, icon, icon, white);
             }
-            let units = hp - i as f32 * 2.0;
-            if units >= 2.0 {
-                b.sprite("hud/heart/full", x, y, icon, icon, white);
-            } else if units >= 1.0 {
-                b.sprite("hud/heart/half", x, y, icon, icon, white);
+            // The fill, on vanilla's **integer** frontier rather than the raw
+            // float — see [`heart_fill`], which is where the `Mth.ceil` and the
+            // two integer comparisons live and where the live "0 hearts but still
+            // alive" report is written up. Extracted rather than inlined because
+            // the *composition* (ceil, then frontier) is the thing that was wrong
+            // and an unnamed composition has nothing to point a gate at: the ghost
+            // overlay directly above already used the integer `halves + 1 ==`
+            // shape while this row compared floats, and nothing could see that the
+            // two rows of one loop had come apart.
+            if let Some(fill) = heart_fill(i, hp) {
+                b.sprite(fill.sprite_id(), x, y, icon, icon, white);
             }
         }
     }
@@ -6221,6 +6303,93 @@ mod tests {
         assert!(
             mismatches.is_empty(),
             "armour icon selection diverges from Hud.extractArmor:\n  {}",
+            mismatches.join("\n  ")
+        );
+    }
+
+    /// [`heart_fill`] against `Hud.extractHearts`, at the **half** healths where the
+    /// `Mth.ceil` reading and the float reading give different sprites.
+    ///
+    /// Live player report: *"sometimes i get to 0 hearts but im still alive - im
+    /// assuming vanilla maybe rounds up while we just round either way"*. He was
+    /// right, and 0.5 is the input that proves it — but it is not the only one, which
+    /// is why this drives four healths rather than that one. Vanilla ceils **up**, so
+    /// the divergence runs in both directions: 0.5 gains a half heart the float
+    /// reading never drew, while 1.5 and 19.5 promote a *half* to a **full**.
+    ///
+    /// Every expectation below is hand-expanded from `currentHealth = Mth.ceil(health)`
+    /// and `halves < currentHealth` / `halves + 1 == currentHealth`, and the float
+    /// reading this replaced is evaluated at the same input so each row *records* that
+    /// the two really differ instead of asserting they do. The two integer healths are
+    /// deliberately included as the coincident controls: they must agree, and a gate
+    /// written at 1.0 or 20.0 alone would measure only that the function runs.
+    ///
+    /// Asserted as the ten-sprite **sequence** and collected rather than asserted
+    /// inside the loop, so a neuter reports every arm instead of the first — a count
+    /// of filled hearts cannot see 19.5, where both readings draw ten sprites and only
+    /// the tenth one's identity differs.
+    #[test]
+    fn heart_fill_follows_extract_hearts_at_half_healths() {
+        use HeartFill::{Full, Half};
+        // `None` is a container with nothing over it. Rows hand-expanded from the
+        // record, not from this module.
+        let cases: [(f32, [Option<HeartFill>; 10]); 6] = [
+            // Dead: the only health at which the bar is legitimately empty.
+            (0.0, [None; 10]),
+            // The report. `ceil(0.5) == 1`, so `halves + 1 == 1` at i = 0: a half.
+            (0.5, [Some(Half), None, None, None, None, None, None, None, None, None]),
+            // Coincident control — both readings say one half heart.
+            (1.0, [Some(Half), None, None, None, None, None, None, None, None, None]),
+            // `ceil(1.5) == 2`, so i = 0 is `halves + 1 == 1 != 2`: a **full** heart.
+            (1.5, [Some(Full), None, None, None, None, None, None, None, None, None]),
+            // The top of the bar. `ceil(19.5) == 20`: ten full, no half at i = 9.
+            (19.5, [Some(Full); 10]),
+            // Coincident control at the top.
+            (20.0, [Some(Full); 10]),
+        ];
+        let mut mismatches: Vec<String> = Vec::new();
+        for (health, expected) in cases {
+            let got: Vec<Option<HeartFill>> = (0..10).map(|i| heart_fill(i, health)).collect();
+            if got != expected {
+                mismatches.push(format!("health {health}: expected {expected:?}, got {got:?}"));
+            }
+            // The reading this replaced, evaluated here so a row that stops
+            // discriminating says so rather than passing quietly.
+            let float_reading: Vec<Option<HeartFill>> = (0..10)
+                .map(|i| {
+                    let units = health.max(0.0) - i as f32 * 2.0;
+                    if units >= 2.0 {
+                        Some(Full)
+                    } else if units >= 1.0 {
+                        Some(Half)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let half_health = (health.fract() - 0.5).abs() < 1e-6;
+            if half_health && float_reading == expected {
+                mismatches.push(format!(
+                    "health {health} is not a discriminating input: the float \
+                     `health - 2i` reading gives the same ten sprites, so this row \
+                     measures only that the function runs"
+                ));
+            }
+            if !half_health && float_reading != expected {
+                mismatches.push(format!(
+                    "health {health} was chosen as a coincident control but the two \
+                     readings disagree ({float_reading:?} vs {expected:?}) — the \
+                     control's premise is false"
+                ));
+            }
+        }
+        // A negative health (hurt overshoot) must read as dead, not ceil to a heart.
+        if heart_fill(0, -0.5).is_some() {
+            mismatches.push("a negative health must fill no heart".to_string());
+        }
+        assert!(
+            mismatches.is_empty(),
+            "heart fill diverges from Hud.extractHearts:\n  {}",
             mismatches.join("\n  ")
         );
     }

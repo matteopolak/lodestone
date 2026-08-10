@@ -400,15 +400,19 @@ impl RenderState {
             ),
         );
 
-        // Split by `(hurt, skin url)` here, at the one point that still knows
-        // which `EntityDraw` each instance came from — `plan_entities` groups by
-        // model and drops the input order, so neither can be zipped back on.
+        // Split by `(hurt, creeper white-flash alpha, skin url)` here, at the one
+        // point that still knows which `EntityDraw` each instance came from —
+        // `plan_entities` groups by model and drops the input order, so none of the
+        // three can be zipped back on.
         //
         // The skin half is a `Vec` of groups rather than a `HashMap` because it is
         // *ordered by first appearance* and tiny: one group for everything with no
         // skin (every mob in the world) plus one per distinct skin actually in
-        // view, which is bounded by the number of players on screen.
-        let mut groups: Vec<(bool, Option<String>, Vec<_>)> = Vec::new();
+        // view, which is bounded by the number of players on screen. The white-flash
+        // byte joins the key for the same reason `hurt` is in it — the tint is one
+        // repeated value per batch — and costs nothing off a creeper's fuse, where
+        // every entity in view shares the byte `0`.
+        let mut groups: Vec<(bool, u8, Option<String>, Vec<_>)> = Vec::new();
         for e in entities {
             // `resolve_posed`, not `resolve`, and this is the *only* call site that
             // needs it (issue #380): the pitch selects the **placement**, and a
@@ -421,42 +425,69 @@ impl RenderState {
             // slim rig resolves `player_slim` here and nowhere else. The rig and
             // the sheet have to change together, and this is the rig half — the
             // sheet half is the group key below.
+            // `resolve_animated`, not `resolve_posed`: the creeper swell is a
+            // whole-model scale composed above the root part so it has to reach the
+            // *pose*, and the death fall-over is a Z rotation between the body yaw
+            // and the Y-down flip so it has to reach the *placement*.
+            // `resolve_posed` passes a hard `0.0` for both. Those two missing
+            // arguments are what made the entire creeper swell (the scale, the ±1%
+            // wobble, the bounds pad, the white blink) and the entire death
+            // fall-over reach zero pixels while every formula behind them was built
+            // and unit-tested; `0.0` is an exact identity for each, so nothing
+            // looked wrong anywhere.
             let Some(instance) = self
                 .entities
                 .models
-                .resolve_posed(
+                .resolve_animated(
                     e.model_type_path(),
                     e.feet,
                     e.yaw,
                     e.pitch,
                     e.scale,
                     &e.anim,
+                    e.creeper_swelling,
+                    e.death_time,
                 )
                 .map(|i| i.with_light(entity_light(&self.entity_light, e)))
             else {
                 continue;
             };
+            // `CreeperRenderer.getWhiteOverlayProgress` through
+            // `OverlayTexture`'s 16-column quantise. Suppressed while `hurt` is on
+            // because vanilla's overlay texture puts red and white on **mutually
+            // exclusive rows** (the red row ignores the white column entirely), so
+            // red always wins — a creeper hurt mid-fuse flashes red, never pink.
+            let white = if e.hurt {
+                0
+            } else {
+                lodestone_render::entity_pipeline::creeper_overlay_alpha_from_progress(
+                    lodestone_render::entity_anim::creeper_white_overlay_progress(
+                        e.creeper_swelling,
+                    ),
+                )
+            };
             let skin = e.player_skin.as_ref().map(|s| s.url.clone());
-            match groups
-                .iter_mut()
-                .position(|(hurt, url, _)| *hurt == e.hurt && *url == skin)
-            {
-                Some(i) => groups[i].2.push(instance),
-                None => groups.push((e.hurt, skin, vec![instance])),
+            match groups.iter_mut().position(|(hurt, flash, url, _)| {
+                *hurt == e.hurt && *flash == white && *url == skin
+            }) {
+                Some(i) => groups[i].3.push(instance),
+                None => groups.push((e.hurt, white, skin, vec![instance])),
             }
         }
 
         let frustum = camera.frustum();
-        // The flag, the sheet and the plan they describe travel as one value from
-        // here on. A `Vec<bool>`/`Vec<Option<String>>` parallel to the batches
+        // The two flags, the sheet and the plan they describe travel as one value
+        // from here on. A `Vec<bool>`/`Vec<Option<String>>` parallel to the batches
         // would be an invariant nothing enforces, which is precisely how this
         // class of bug comes back.
         let plans: Vec<_> = groups
             .into_iter()
-            .map(|(hurt, skin, instances)| (hurt, skin, plan_entities(&instances, &frustum)))
+            .map(|(hurt, white, skin, instances)| {
+                (hurt, white, skin, plan_entities(&instances, &frustum))
+            })
             .collect();
-        stats.entities_drawn = plans.iter().map(|(_, _, f)| f.stats.drawn).sum();
-        stats.entities_culled = plans.iter().map(|(_, _, f)| f.stats.culled_frustum).sum();
+        stats.entities_drawn = plans.iter().map(|(.., f)| f.stats.drawn).sum();
+        stats.entities_culled = plans.iter().map(|(.., f)| f.stats.culled_frustum).sum();
 
         // One instance buffer per *part*, not per entity: the mesh's vertices are
         // part-local, so a limb only moves if its own matrices are uploaded
@@ -464,18 +495,24 @@ impl RenderState {
         // roughly 1% of the data a per-entity vertex re-bake would.
         plans
             .iter()
-            .flat_map(|(hurt, skin, frame)| {
+            .flat_map(|(hurt, white, skin, frame)| {
                 frame
                     .batches
                     .iter()
-                    .map(move |batch| (*hurt, skin.as_ref(), batch))
+                    .map(move |batch| (*hurt, *white, skin.as_ref(), batch))
             })
-            .map(|(hurt, skin, batch)| {
+            .map(|(hurt, white, skin, batch)| {
                 let count = u32::try_from(batch.transforms.len()).unwrap_or(u32::MAX);
-                // Every instance in this batch shares one overlay state, by
-                // construction of the split above — so one repeated value rather
-                // than a per-instance vector, and no way for the two to disagree.
-                let tints = vec![InstanceTint::NONE.with_hurt(hurt); batch.transforms.len()];
+                // Every instance in this batch shares one overlay state — both
+                // halves of it — by construction of the split above, so one repeated
+                // value rather than a per-instance vector, and no way for the two to
+                // disagree.
+                let tints = vec![
+                    InstanceTint::NONE
+                        .with_hurt(hurt)
+                        .with_creeper_white_overlay(white);
+                    batch.transforms.len()
+                ];
                 // Every part uploads the *same* light and tint slices: a mob's
                 // lightmap sample and its overlay state are per entity, so its
                 // head and its leg share both values.
@@ -1564,6 +1601,7 @@ mod tests {
             hurt: false,
             item_use: None,
             creeper_swelling: 0.0,
+            death_time: 0.0,
             on_fire,
             player_skin: None,
             // A flame subject, not an orb.

@@ -222,6 +222,68 @@ pub fn creeper_swell_scale(swell: f32) -> [f32; 3] {
     [horizontal, vertical, horizontal]
 }
 
+/// `LivingEntityRenderer.getFlipDegrees`: how far a dead entity ends up rotated.
+///
+/// The base `LivingEntityRenderer` returns a flat `90.0F` — a mob lies flat on its
+/// side — and this is a named constant rather than an inline 90 so the subclasses
+/// that override it (a spider's rig, notably) have somewhere to hang off later.
+pub const FLIP_DEGREES: f32 = 90.0;
+
+/// `LivingEntityRenderer.setupRotations`' death fall-over, in **degrees** about the
+/// entity's Z axis, for a `death_time` of `deathTime + partialTicks` ticks.
+///
+/// Transcribed from the decompiled 26.2 client:
+///
+/// ```text
+///   if (state.deathTime > 0.0F) {
+///      float fall = (state.deathTime - 1.0F) / 20.0F * 1.6F;
+///      fall = Mth.sqrt(fall);
+///      if (fall > 1.0F) {
+///         fall = 1.0F;
+///      }
+///      poseStack.mulPose(Axis.ZP.rotationDegrees(fall * this.getFlipDegrees()));
+///   }
+/// ```
+///
+/// # It is not linear in `deathTime`, and "90° over 20 ticks" is the wrong answer
+///
+/// Two terms make the plausible reading wrong in opposite directions, and they
+/// nearly cancel at `deathTime == 20`, which is exactly the input someone would
+/// reach for to check it:
+///
+/// * The `sqrt` front-loads the motion. The mob is already **halfway over by tick
+///   4** (`sqrt(3/20 · 1.6) = 0.49`, 44°) where a linear ramp would have it at 18°.
+///   That is the whole character of the animation — a body dropping and settling,
+///   not a hand sweeping round a dial.
+/// * The `1.6` factor drives the argument past 1 before the count does, so `fall`
+///   saturates at `deathTime == 13.5`, not 20. The mob is flat on its side for the
+///   last ~6.5 ticks of vanilla's 20-tick death, which is what makes it *lie there*
+///   before the server removes it.
+///
+/// At `deathTime == 20` both readings give 90°, so a gate written there measures
+/// only that the function runs. The discriminating ticks are the early ones and
+/// anything in `1 < t < 13.5`.
+///
+/// # `deathTime == 0` is alive, and the subtraction is why zero is returned twice
+///
+/// The vanilla `if` gates on `deathTime > 0.0`, and `deathTime == 1` independently
+/// makes the expression exactly `0`. Both are returned as `0.0` here — but the
+/// guard is load-bearing rather than redundant: without it `deathTime == 0` would
+/// evaluate `sqrt(-0.08)`, and **`f32::sqrt` of a negative is `NaN`**, which
+/// propagates silently through a rotation matrix into vertices that vanish. A
+/// living entity is the common case, so that NaN would be the *default* path.
+///
+/// `f32::sqrt` rather than vanilla's `Mth.sqrt` table, per the module note: this
+/// feeds a rotation, never the wire.
+#[must_use]
+pub fn death_fall_over_degrees(death_time: f32) -> f32 {
+    if death_time <= 0.0 {
+        return 0.0;
+    }
+    let fall = ((death_time - 1.0) / 20.0 * 1.6).max(0.0).sqrt();
+    fall.min(1.0) * FLIP_DEGREES
+}
+
 /// `CreeperRenderer.getWhiteOverlayProgress`: the white-flash overlay strength
 /// for a given swell, `0.0..=1.0`.
 ///
@@ -1465,6 +1527,91 @@ mod tests {
                 entry.name
             );
         }
+    }
+
+    #[test]
+    /// [`death_fall_over_degrees`] against `LivingEntityRenderer.setupRotations`, at
+    /// ticks where the **linear** reading — "90 degrees over 20 ticks", the answer
+    /// anybody writes from the description — gives a different angle.
+    ///
+    /// Live player report: *"stuff dying doesnt have the death animation (the one
+    /// where they turn red and tilt on their side)"*. The tilt is this function; the
+    /// red is the `hurtTime > 0 || deathTime > 0` disjunction in
+    /// `lodestone-shell`'s `EntityDraw`.
+    ///
+    /// Every expectation is hand-evaluated from `sqrt((deathTime - 1)/20 · 1.6)`
+    /// clamped to 1, times `getFlipDegrees()`'s 90 — and the linear reading is
+    /// evaluated at the same tick so each row *records* that the two differ rather
+    /// than asserting it. **`deathTime == 20` is the coincident input**: both
+    /// readings give exactly 90 there, because the `sqrt` has already saturated, so
+    /// a gate written at the obvious "end of the animation" tick measures only that
+    /// the function runs. It is included as the control that must agree.
+    ///
+    /// Mismatches are collected rather than asserted inside the loop, so a neuter
+    /// reports every arm instead of aborting on the first.
+    #[test]
+    fn death_fall_over_is_a_sqrt_ramp_that_saturates_before_the_count_does() {
+        // (death_time, degrees). Hand-evaluated; `sqrt` saturates at 13.5, not 20.
+        let cases: [(f32, f32); 8] = [
+            // Alive. The guard, not the formula — without it this is `sqrt(-0.08)`.
+            (0.0, 0.0),
+            // The first tick of death: the expression is *independently* zero here.
+            (1.0, 0.0),
+            (2.0, 25.455_844),
+            (4.0, 44.090_82),
+            (6.0, 56.921_04),
+            (10.0, 76.367_54),
+            // The saturation point, and the whole reason "over 20 ticks" is wrong.
+            (13.5, 90.0),
+            // Coincident control: linear and real agree, so this row is not a test.
+            (20.0, 90.0),
+        ];
+        let mut mismatches: Vec<String> = Vec::new();
+        for (death_time, want) in cases {
+            let got = death_fall_over_degrees(death_time);
+            if (got - want).abs() > 1e-3 {
+                mismatches.push(format!("deathTime {death_time}: want {want}, got {got}"));
+            }
+            // A living entity must not produce a NaN, which would propagate through
+            // the rotation matrix and make every vertex vanish — a silent, total
+            // failure rather than a wrong angle. Asserted for every row, since a
+            // reordered guard could NaN anywhere.
+            if !got.is_finite() {
+                mismatches.push(format!("deathTime {death_time}: produced {got}"));
+            }
+            let linear = (death_time / 20.0).min(1.0) * FLIP_DEGREES;
+            let coincident = (linear - want).abs() <= 1e-3;
+            let expected_coincident = death_time == 0.0 || death_time >= 20.0;
+            if coincident != expected_coincident {
+                mismatches.push(format!(
+                    "deathTime {death_time}: the linear reading gives {linear} against a \
+                     real {want} — this row was classified as \
+                     {}, so either the classification or one of the two readings is wrong",
+                    if expected_coincident {
+                        "coincident (a control)"
+                    } else {
+                        "discriminating"
+                    }
+                ));
+            }
+        }
+        // Monotonic, and never past flat: a mob keeps toppling one way and stops.
+        let mut previous = 0.0;
+        for tick in 0u8..=40 {
+            let got = death_fall_over_degrees(f32::from(tick));
+            if got < previous - 1e-4 || got > FLIP_DEGREES + 1e-4 {
+                mismatches.push(format!(
+                    "deathTime {tick}: {got} is not a monotonic approach to \
+                     {FLIP_DEGREES} (previous {previous})"
+                ));
+            }
+            previous = got;
+        }
+        assert!(
+            mismatches.is_empty(),
+            "death fall-over diverges from LivingEntityRenderer.setupRotations:\n  {}",
+            mismatches.join("\n  ")
+        );
     }
 
     #[test]

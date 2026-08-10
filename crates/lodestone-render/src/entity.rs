@@ -536,6 +536,36 @@ impl EntityMesh {
             local_max = Vec3::ZERO;
         }
 
+        // A creeper's drawn size is not its rest size: `pose_swelling` scales the
+        // whole model by up to `MAX_SWELL_SCALE` (~41% horizontally) about the
+        // model-space feet plane while its fuse burns. Everything above derives the
+        // box from `rest_pose` alone, which is this function's own doc comment's
+        // "correct until it clips at the screen edge" bug — a swelling creeper at
+        // the frustum edge would be culled while still visibly on screen.
+        //
+        // Padded once here, at bake time, rather than recomputed per frame in
+        // `EntityInstance::placed`: one constant box that always contains the drawn
+        // model costs a slightly conservative cull and cannot drift from the pose,
+        // where a per-frame exact box is a second derivation of the same geometry.
+        //
+        // The y term is conjugated about `MODEL_FEET_OFFSET` because that is what
+        // `swell_root_affine` does — a plain scale about the model origin would let
+        // the padded box sink below the feet plane rather than grow upward. `min`/
+        // `max` over both corners, so the widening is correct whatever the signs.
+        if model_name == "creeper" {
+            let s = crate::entity_anim::MAX_SWELL_SCALE;
+            let swollen = |v: Vec3| {
+                Vec3::new(
+                    v.x * s,
+                    MODEL_FEET_OFFSET + (v.y - MODEL_FEET_OFFSET) * s,
+                    v.z * s,
+                )
+            };
+            let (a, b) = (swollen(local_min), swollen(local_max));
+            local_min = local_min.min(a.min(b));
+            local_max = local_max.max(a.max(b));
+        }
+
         EntityMesh {
             vertices,
             indices,
@@ -620,12 +650,55 @@ pub(crate) fn push_part_quads(
 /// yields its world position.
 #[must_use]
 pub fn entity_model_matrix(feet: Vec3, body_yaw_deg: f32, scale: f32) -> Mat4 {
+    dying_entity_model_matrix(feet, body_yaw_deg, scale, 0.0)
+}
+
+/// [`entity_model_matrix`] with the **death fall-over** — vanilla's
+/// `LivingEntityRenderer.setupRotations` `Axis.ZP` term, in degrees, from
+/// [`death_fall_over_degrees`](crate::entity_anim::death_fall_over_degrees).
+///
+/// # The roll's position in the product is the whole of this function
+///
+/// It sits between the body yaw and the Y-down flip, because that is where
+/// vanilla's pose stack puts it:
+///
+/// ```text
+///   setupRotations:  mulPose(YP.rotationDegrees(180 - bodyRot))   // `rotate`
+///                    mulPose(ZP.rotationDegrees(fall * 90))       // this term
+///   render:          scale(-1, -1, 1)                             // `flip_scale`
+///                    translate(0, -1.501, 0)                      // `lift`
+/// ```
+///
+/// Two consequences that a "just multiply a Z rotation on" reading gets wrong:
+///
+/// * It is applied **before** the `lift`, so the mob rotates about the plane its
+///   feet stand on and topples sideways. Composing the roll on the *outside*
+///   (`T(feet) · Rz · Ry · …`) rotates about the same point but in the wrong frame,
+///   so the fall direction stops tracking the body yaw; composing it after the lift
+///   swings the mob about its own mid-height and leaves its feet in the air.
+/// * `Rz` commutes with `flip_scale` (a `diag(-s, -s, s)` is `diag(-1,-1,1)` times a
+///   uniform scale, and the sign flips cancel across the xy block), so it is *only*
+///   the `lift` that fixes the position — which is exactly why the roll cannot be
+///   folded into the caller's matrix afterwards and this is a separate function
+///   rather than a multiply at the call site.
+///
+/// `fall_over_deg` of `0.0` is an exact identity (`Mat4::from_rotation_z(0)` is the
+/// identity), so every living entity gets the bit-identical matrix
+/// [`entity_model_matrix`] returned before this existed.
+#[must_use]
+pub fn dying_entity_model_matrix(
+    feet: Vec3,
+    body_yaw_deg: f32,
+    scale: f32,
+    fall_over_deg: f32,
+) -> Mat4 {
     let translate_feet = Mat4::from_translation(feet);
     let rotate = Mat4::from_rotation_y((180.0 - body_yaw_deg).to_radians());
+    let fall_over = Mat4::from_rotation_z(fall_over_deg.to_radians());
     // scale(-1,-1,1) folded with the uniform entity scale.
     let flip_scale = Mat4::from_scale(Vec3::new(-scale, -scale, scale));
     let lift = Mat4::from_translation(Vec3::new(0.0, -MODEL_FEET_OFFSET, 0.0));
-    translate_feet * rotate * flip_scale * lift
+    translate_feet * rotate * fall_over * flip_scale * lift
 }
 
 /// The extra pitch, in degrees, a projectile rig needs on top of the entity's
@@ -773,7 +846,58 @@ impl EntityInstance {
         scale: f32,
         anim: &AnimInput,
     ) -> Self {
-        Self::placed(model, mesh, entity_model_matrix(feet, yaw_deg, scale), anim)
+        Self::new_animated(model, mesh, feet, yaw_deg, scale, anim, 0.0, 0.0)
+    }
+
+    /// [`new`](Self::new) with the two per-entity animation states that are neither
+    /// placement nor skeletal pose: a creeper's **swell** fraction (vanilla's
+    /// `Creeper.getSwelling(partialTick)`) and a dying entity's **`death_time`**
+    /// (`deathTime + partialTicks`, `0.0` while alive).
+    ///
+    /// A separate constructor rather than two more arguments on [`new`](Self::new),
+    /// for [`new_projectile`](Self::new_projectile)'s reason inverted: here the
+    /// variants really *are* one placement with options, and **both** extras have a
+    /// documented exact identity at `0.0` —
+    /// [`Skeleton::pose_swelling`](crate::entity_anim::Skeleton::pose_swelling)
+    /// delegates `pose` to itself at zero swell, and
+    /// [`dying_entity_model_matrix`] reduces to [`entity_model_matrix`] at zero
+    /// roll. So the five call sites with nothing to pass keep working
+    /// bit-identically instead of being widened for symmetry.
+    ///
+    /// The two land in different places, which is why they are not one value: the
+    /// swell reaches the **pose** (a scale about the model-space feet plane composed
+    /// above the root part, so a creeper grows upward out of the ground rather than
+    /// moving), while the fall-over reaches the **placement**, between the body yaw
+    /// and the Y-down flip.
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per independent piece of a live entity's placement, \
+                  pose and animation state; a bundle struct would move the same \
+                  fields behind a name that adds nothing"
+    )]
+    pub fn new_animated(
+        model: &'static str,
+        mesh: &EntityMesh,
+        feet: Vec3,
+        yaw_deg: f32,
+        scale: f32,
+        anim: &AnimInput,
+        swell: f32,
+        death_time: f32,
+    ) -> Self {
+        Self::placed(
+            model,
+            mesh,
+            dying_entity_model_matrix(
+                feet,
+                yaw_deg,
+                scale,
+                crate::entity_anim::death_fall_over_degrees(death_time),
+            ),
+            anim,
+            swell,
+        )
     }
 
     /// Build an instance for a **projectile** — a model
@@ -806,6 +930,9 @@ impl EntityInstance {
             mesh,
             projectile_model_matrix(pos, yaw_deg, pitch_deg, scale),
             anim,
+            // No projectile is a creeper, and `0.0` is `pose_swelling`'s exact
+            // identity case — see [`new_swelling`](Self::new_swelling).
+            0.0,
         )
     }
 
@@ -817,16 +944,27 @@ impl EntityInstance {
     /// rather than copied, so an arrow's culling box, part matrices and light
     /// default can never drift from a mob's. The *only* thing the two callers
     /// disagree about is the matrix.
+    ///
+    /// `swell` is a creeper's swell fraction and `0.0` for everything else, which
+    /// [`Skeleton::pose_swelling`](crate::entity_anim::Skeleton::pose_swelling)
+    /// documents as its exact identity case. The AABB is deliberately **not**
+    /// recomputed from the swollen pose: `mesh.local_min`/`local_max` already
+    /// contain a fully swollen creeper (see
+    /// [`EntityMesh::from_named_model`](EntityMesh::from_named_model)), so a
+    /// creeper's culling box is constant across its fuse rather than growing frame
+    /// by frame — one box that always contains the drawn model, instead of a box
+    /// that is exactly right and has to be rebuilt every frame.
     fn placed(
         model: &'static str,
         mesh: &EntityMesh,
         transform: Mat4,
         anim: &AnimInput,
+        swell: f32,
     ) -> Self {
         let (aabb_min, aabb_max) = transformed_aabb(&transform, mesh.local_min, mesh.local_max);
         let part_transforms = mesh
             .skeleton
-            .pose(anim)
+            .pose_swelling(anim, swell)
             .into_iter()
             .map(|part| transform * part)
             .collect();
@@ -1033,6 +1171,47 @@ impl EntityModelSet {
         scale: f32,
         anim: &AnimInput,
     ) -> Option<EntityInstance> {
+        self.resolve_animated(type_path, feet, yaw_deg, pitch_deg, scale, anim, 0.0, 0.0)
+    }
+
+    /// [`resolve_posed`](Self::resolve_posed) with a creeper's **swell** fraction
+    /// and a dying entity's **`death_time`** — see
+    /// [`EntityInstance::new_animated`] for what each one reaches.
+    ///
+    /// This is the seam the live frame path wants, and the reason it exists is worth
+    /// keeping, because both animations had the *same* defect. Every piece of the
+    /// creeper swell — [`creeper_swell_scale`], the `swell` parameter on
+    /// [`Skeleton::pose_swelling`](crate::entity_anim::Skeleton::pose_swelling),
+    /// the `MAX_SWELL_SCALE` bounds pad, the white-flash blink
+    /// ([`creeper_white_overlay_progress`]), its alpha byte
+    /// ([`crate::entity_pipeline::creeper_overlay_alpha_from_progress`]), the
+    /// instance lane that carries it and the shader that reads it — was built,
+    /// individually tested and **reached zero pixels**, because the one hop from a
+    /// decoded fuse to this call did not exist: the shell resolved every entity
+    /// through `resolve_posed`, whose extras are a hard `0.0`. Both extras being an
+    /// exact identity at `0.0` is what made that invisible, and is why a *live*
+    /// call site passing them is the thing to check rather than either formula.
+    ///
+    /// [`creeper_swell_scale`]: crate::entity_anim::creeper_swell_scale
+    /// [`creeper_white_overlay_progress`]: crate::entity_anim::creeper_white_overlay_progress
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per independent piece of a live entity's placement, pose \
+                  and animation state; bundling them into a struct would move the same \
+                  fields behind a name that adds nothing"
+    )]
+    pub fn resolve_animated(
+        &self,
+        type_path: &str,
+        feet: Vec3,
+        yaw_deg: f32,
+        pitch_deg: f32,
+        scale: f32,
+        anim: &AnimInput,
+        swell: f32,
+        death_time: f32,
+    ) -> Option<EntityInstance> {
         let name = canonical_model_name(type_path)?;
         let mesh = self.get(name)?;
         Some(match projectile_pitch_offset_deg(name) {
@@ -1045,7 +1224,9 @@ impl EntityModelSet {
                 scale,
                 anim,
             ),
-            None => EntityInstance::new(name, mesh, feet, yaw_deg, scale, anim),
+            None => EntityInstance::new_animated(
+                name, mesh, feet, yaw_deg, scale, anim, swell, death_time,
+            ),
         })
     }
 

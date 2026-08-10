@@ -306,12 +306,49 @@ keeping both** — two mechanisms for one flag is how they drift.
 layer of a `LivingEntityRenderer`'s model, not just the body. A hurt mob whose
 breastplate stayed its own colour would read as a rendering fault.
 
-**Still not wired, and why.**
+**`deathTime` is now wired, and it was two islands rather than one.** Vanilla's
+gate is the full disjunction `hurtTime > 0 || deathTime > 0`, and the second
+operand had no component on this side, so the overlay ended ~10 ticks after the
+killing blow — a mob went red, turned its normal colour again, and only *then*
+fell over. Live player report: *"stuff dying doesnt have the death animation (the
+one where they turn red and tilt on their side)"*. The chain now runs:
 
-- **`deathTime`.** Vanilla's gate is `hurtTime > 0 || deathTime > 0`; nothing
-  decodes the death animation on this side of the wire, so the overlay ends
-  ~10 ticks after the killing blow instead of persisting through the fall-over.
-  That is the only known divergence.
+`ClientEvent::EntityStatus` (byte 3, `EntityEvent.DEATH`) → `route()`'s `ingest`
+flag → `ingest::apply_entity_status` → `entity::DeathTime` →
+`ingest::tick_death_time` (counting **up**, `LivingEntity.tickDeath`) →
+`EntityDraw::death_time` → both the red overlay's second operand and the
+fall-over rotation.
+
+Three things about it that are not guessable from the shape:
+
+* **`EntityStatus` was routed nowhere at all** — it sat in `event.rs`'s "claimed
+  by nothing" list, so no byte it carried reached any system. Only byte 3 is
+  claimed now; the other ~40 codes are dropped by `apply_entity_status` rather
+  than by the routing table, because `route` answers "is anything *asked*".
+* **`DeathTime` is inserted at zero, and absence means alive.** Vanilla's
+  `deathTime` is still `0` when `die()` runs and only reaches `1` on the next
+  `tickDeath()`, and both consumers test `deathTime > 0` — so the first tick of
+  death draws upright and un-toppled, and the killing blow's own `HurtTime` is
+  what keeps it red across that one frame. `extract_entity_draws` reproduces
+  vanilla's ternary (`deathTime > 0 ? deathTime + partialTicks : 0.0F`) rather
+  than a bare sum, or that first tick would start both effects mid-frame.
+* **The rotation is not linear in `deathTime`.** It is
+  `sqrt((deathTime - 1)/20 · 1.6)` clamped to 1, times `getFlipDegrees()`'s 90 —
+  see `entity_anim::death_fall_over_degrees`. It saturates at `deathTime == 13.5`,
+  not 20, so the mob lies flat for the last ~6.5 ticks before the server removes
+  it; and "90° over 20 ticks" happens to agree at exactly `deathTime == 20`,
+  which is the one tick a gate must not be written at alone.
+
+**What still does not fire in singleplayer, and it is not a client gap.** Our
+integrated server (`crates/lodestone-server`) sends **no** `entity_event` packet
+at all — there is no encoder for it anywhere in that crate or in
+`v770/src/server_protocol.rs` — so a mob killed on our own server is simply
+removed from the entity stream and never announces its death. The client half
+above is complete and works against a real vanilla server; the producer is the
+remaining half. The identical gap blocks the camera damage tilt, which needs
+`hurt_animation` and has no encoder either.
+
+**Still not wired, and why.**
 - **The local player's own body.** `gpu/sources.rs`'s `into_draw` passes
   `hurt: false` by construction: the local player has no ingest entity carrying
   `HurtTime` (`apply_local_player_login` gives it no `EntityKind`/`Position`),

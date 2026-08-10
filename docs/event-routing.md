@@ -159,8 +159,21 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-**28 of 132** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
+**27 of 132** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
 consumer, which is a normal state for a from-scratch client.
+
+> **`EntityStatus` left the list when mob death animations were wired.** It is worth
+> reading as a template for a *partially* claimed event: the variant carries Mojang's
+> raw per-entity-type event byte, roughly forty codes, and exactly **one** of them
+> (`EntityEvent.DEATH`, byte 3) now has a consumer — `ingest::apply_entity_status`
+> folds it into a `DeathTime` component, and `ingest::tick_death_time` counts it up
+> the way `LivingEntity.tickDeath` does. The other codes are particle and sound
+> effects with no subsystem here to receive them, and they are dropped **by that
+> system** rather than by this table, which is the right split: `route` answers "is
+> anything *asked*", and asking for an event you only partly handle is not
+> over-reporting. The reverse — leaving the whole variant stranded because most of
+> its codes have no home — is what kept the death animation invisible while every
+> formula behind it was built and unit-tested.
 
 > **`VehicleMoved` left the list when the client became authoritative over the
 > vehicle it rides.** It is worth reading as a template for the "no entity id, so
@@ -346,10 +359,10 @@ Both were tracked as separate follow-up issues (#410, #411), closed as follows:
   split into `gather_crack_targets`) and `app.rs`'s one-line call site are the
   brokered choke-point patch that lands alongside this doc update.
 
-The remaining **28**, listed for the record and not as a defect claim:
+The remaining **27**, listed for the record and not as a defect claim:
 
 `Ping`, `BlockChangedAck`, `ChunkCacheCenterChanged`, `ChunkCacheRadiusChanged`,
-`SimulationDistanceChanged`, `EntityStatus`, `EntityLeashed`,
+`SimulationDistanceChanged`, `EntityLeashed`,
 `ItemCooldown`, `PlayerRotationSet`, `CameraSet`, `BookOpened`, `SoundStopped`,
 `PlayerCombatEntered`, `PlayerCombatEnded`, `SignEditorOpened`,
 `AdvancementsTabSelected`, `ProjectilePowerChanged`, `MountScreenOpened`,
