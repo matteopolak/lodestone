@@ -880,3 +880,119 @@ fn taming_publishes_hearts_on_success_and_smoke_on_failure() {
         "sitting a pet emits no particle, so the burst count must not grow"
     );
 }
+
+/// **The tame flag reaches the wire, under the right variant per species.**
+///
+/// The tame *state* was reachable and the *packet* was not: `SimMob::snapshot`
+/// produced metadata for the creeper alone, so a wolf streamed an empty metadata
+/// list and `EntityStreamer::sync` sent no `SET_ENTITY_DATA` at all. Everything
+/// below the sim was correct and the client was never told.
+///
+/// # Why the "not the other one" arm is the point
+///
+/// Index 18 is a `BYTE` for `TamableAnimal.DATA_FLAGS_ID`, `AbstractHorse.DATA_ID_FLAGS`,
+/// `Sheep.DATA_WOOL_ID` and `Shulker.DATA_COLOR_ID` (checked against the committed
+/// jar dump by `lodestone-v770`'s own `index_eighteen_tests`), and the tame bit is
+/// `0x04` on a tamable against `FLAG_TAME = 2` on a horse. One shared "tamed"
+/// variant would compile, encode, and put an **unnamed** bit on whichever species it
+/// was not written for — so that animal reads as untamed with a well-formed packet on
+/// the wire. Asserting only that the right variant is present would pass for a
+/// producer that emits both.
+///
+/// Mismatches are collected rather than asserted in the loop, so every species
+/// reports.
+#[test]
+fn a_tamed_mob_streams_the_flag_variant_its_own_class_uses() {
+    use lodestone_server::MetadataField;
+
+    let world = pen();
+    let mut mismatches: Vec<String> = Vec::new();
+
+    // (species, taming item, the `next_int` bound its tame roll uses)
+    let tamables = [("wolf", "bone", 3), ("cat", "cod", 3), ("parrot", "wheat_seeds", 10)];
+    for &(species, item, bound) in &tamables {
+        let mut sim = MobSim::new(&world);
+        sim.set_tame_rng(SpawnRng::new(seed_where(bound, |d| d == 0)));
+        let id = sim
+            .spawn_species(rk(&format!("minecraft:{species}")), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+
+        // The control: a wild mob's byte is all-zero, which is the client's own
+        // default, so nothing must be streamed. Without this arm the gate below
+        // would pass for a producer that emits the field unconditionally.
+        let wild = sim.get(id).expect("alive").snapshot();
+        if wild
+            .metadata
+            .iter()
+            .any(|f| matches!(f, MetadataField::TamableFlags { .. } | MetadataField::HorseFlags { .. }))
+        {
+            mismatches.push(format!("{species}: a wild mob must stream no flag field"));
+        }
+
+        if sim.interact(id, alice(), Some(&rk(&format!("minecraft:{item}")))) != InteractOutcome::Tamed
+        {
+            mismatches.push(format!("{species}: setup failed — the tame roll did not succeed"));
+            continue;
+        }
+        let tamed = sim.get(id).expect("alive").snapshot();
+        let has_tamable = tamed
+            .metadata
+            .iter()
+            .any(|f| matches!(f, MetadataField::TamableFlags { tame: true, .. }));
+        let has_horse = tamed
+            .metadata
+            .iter()
+            .any(|f| matches!(f, MetadataField::HorseFlags { .. }));
+        if !has_tamable {
+            mismatches.push(format!(
+                "{species}: expected TamableFlags {{ tame: true }}, got {:?}",
+                tamed.metadata
+            ));
+        }
+        if has_horse {
+            mismatches.push(format!(
+                "{species}: must NOT carry HorseFlags — its tame bit is 0x04, the \
+                 horse's is 0x02, so the wrong variant reads as untamed"
+            ));
+        }
+    }
+
+    // The horse family, from the other side of the same collision. Tamed directly
+    // rather than through `interact`, because the horse temper mechanism is a
+    // different (and separately gated) path — what this arm is about is which
+    // variant `snapshot` picks once `tame` is set, not how it got set.
+    for species in ["horse", "donkey", "mule", "skeleton_horse", "zombie_horse"] {
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species(rk(&format!("minecraft:{species}")), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        sim.get_mut(id).expect("alive").tame(MobOwner::Player(alice().uuid));
+        let tamed = sim.get(id).expect("alive").snapshot();
+        if !tamed
+            .metadata
+            .iter()
+            .any(|f| matches!(f, MetadataField::HorseFlags { tame: true }))
+        {
+            mismatches.push(format!(
+                "{species}: expected HorseFlags {{ tame: true }}, got {:?}",
+                tamed.metadata
+            ));
+        }
+        if tamed
+            .metadata
+            .iter()
+            .any(|f| matches!(f, MetadataField::TamableFlags { .. }))
+        {
+            mismatches.push(format!(
+                "{species}: must NOT carry TamableFlags — 0x04 is not in \
+                 AbstractHorse's flag set at all (FLAG_BRED is 8), so the horse \
+                 would read as untamed"
+            ));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "collected so every species reports rather than only the first: {mismatches:?}"
+    );
+}

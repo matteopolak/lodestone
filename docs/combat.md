@@ -339,14 +339,23 @@ Three things about it that are not guessable from the shape:
   it; and "90° over 20 ticks" happens to agree at exactly `deathTime == 20`,
   which is the one tick a gate must not be written at alone.
 
-**What still does not fire in singleplayer, and it is not a client gap.** Our
-integrated server (`crates/lodestone-server`) sends **no** `entity_event` packet
-at all — there is no encoder for it anywhere in that crate or in
-`v770/src/server_protocol.rs` — so a mob killed on our own server is simply
-removed from the entity stream and never announces its death. The client half
-above is complete and works against a real vanilla server; the producer is the
-remaining half. The identical gap blocks the camera damage tilt, which needs
-`hurt_animation` and has no encoder either.
+**This now fires in singleplayer.** `ServerProtocol::encode_entity_event` exists,
+`V770ServerProtocol` implements it against `ClientboundEntityEventPacket.write` (a
+**fixed-width big-endian `i32`** id, not a VarInt, then the status byte), and
+`crate::server::publish_health` sends byte 3 alongside the death notification while
+the mob sim's `take_entity_animations` drain sends it for a mob. The camera damage
+tilt fires from the same landing, through `encode_hurt_animation`.
+
+**One remainder on the mob side, and it is a *retention* problem rather than a wire
+one.** `MobSim::reap_dead` removes a corpse the same tick it dies, so a mob's
+`REMOVE_ENTITIES` lands about one tick after its `entity_event`, and the tip-over is
+cut short. Vanilla holds the body for 20 ticks (`LivingEntity.tickDeath` removes at
+`deathTime == 20`), which is exactly the window the rotation curve above saturates
+inside. Closing it means keeping dead mobs in `self.mobs` with AI off for 20 ticks —
+which touches every gate that asserts a mob count drops on a kill — or holding the
+removal back in `EntityStreamer`. The **player's** own death animation is unaffected:
+a player entity is never removed. The mob hurt flash is unaffected too, since the mob
+stays alive.
 
 **Still not wired, and why.**
 - **The local player's own body.** `gpu/sources.rs`'s `into_draw` passes
@@ -1013,16 +1022,22 @@ nothing calls it yet.
 it anywhere (the same prerequisite gap issue #261 already names for
 per-item armour). Not started.
 
-**No hurt-flash/red-overlay visual for a damaged-but-alive mob.**
-`ServerProtocol` has no `encode_damage_event`/`encode_hurt_animation`
-method, and this pass does not add one — vanilla's `hasRedOverlay` cue
-(issue #98's "per-entity hurt/death red overlay" section above) needs a
-`ClientboundDamageEventPacket`/`ClientboundHurtAnimationPacket` this server
-never sends. What **does** reach the client already, through the pre-existing
-entity-snapshot stream, needs no new encoder: the mob's position (knockback)
-and its removal (death). A real client observes both — see the live gate
-below. Building the visual cue is a real, disclosed remainder, not
-attempted here (it is genuinely new server-side wire work, not "wiring
+**The hurt flash for a damaged-but-alive mob now reaches the client** —
+`ServerProtocol::encode_hurt_animation`, sent from the mob sim's
+`take_entity_animations` drain for every hit that landed (the same `applied > 0.0`
+guard vanilla's `tookFullDamage` is). It carries yaw `0.0`, which is vanilla's own
+value for anything that is not a player: `LivingEntity.getHurtDir` is a constant and
+only `ServerPlayer` overrides it.
+
+**`encode_damage_event` is still absent, and the route is therefore a disclosed
+substitution.** Vanilla broadcasts `ClientboundDamageEventPacket` for a mob and
+reserves `hurt_animation` for the hurt player's own connection
+(`ServerPlayer.indicateDamage`). We send `hurt_animation` in both cases because our
+client folds either into the same `HurtTime`, and because `damage_event` additionally
+needs a `minecraft:damage_type` registry id per source. The pixels are the same; the
+packet is not the one a vanilla client would have received. The paragraph below is
+kept as the record of what used to be missing (it is genuinely new server-side wire
+work, not "wiring
 existing pieces").
 
 **Verification.**
@@ -1091,11 +1106,11 @@ section above. Needs an item-data model (`BlocksAttacks`) this workspace
 does not have anywhere, the same prerequisite class as issue #261's armour
 feed.
 
-**A server-side hurt-flash/red-overlay visual cue for a damaged-but-alive
-mob** — `ServerProtocol` has no `encode_damage_event`/`encode_hurt_animation`
-method; not added this pass (genuinely new wire work, not existing-piece
-wiring). Position (knockback) and death already reach the client through the
-pre-existing entity-snapshot stream with no new encoder.
+**A server-side hurt-flash cue for a damaged-but-alive mob** — **landed.**
+`ServerProtocol::encode_hurt_animation` plus `MobSim::take_entity_animations`. What
+remains is `encode_damage_event` (the *route* vanilla uses for a mob, which needs a
+`minecraft:damage_type` registry id) and the 20-tick corpse retention that makes the
+death tip-over visible rather than one tick long.
 
 ## Configuration
 
@@ -1304,13 +1319,14 @@ pre-existing entity-snapshot stream with no new encoder.
   `PlayerVitals::apply_damage` instead of (or alongside) another `SimMob`.
   `crate::mobs`'s own module doc already flags this as future, separate
   work — not a quick follow-up to this pass.
-- **Adding the hurt-flash/red-overlay visual for a server-damaged mob**:
-  add `ServerProtocol::encode_damage_event`/`encode_hurt_animation` (new
-  trait methods, defaulted to `ServerDirective::None`/empty like every other
-  optional encoder — see `protocol.rs`'s own doc comment on why a boxed
-  protocol must forward every one), implement them in `V770ServerProtocol`
-  against real `ClientboundDamageEventPacket`/`ClientboundHurtAnimationPacket`
-  wire shapes, and send one from `apply_attack` when a hit lands. The
+- **Adding `encode_damage_event`** (the one encoder of this family still missing;
+  `encode_hurt_animation` and `encode_entity_event` are landed): a new trait method
+  defaulted to `ServerDirective::None` like every other optional encoder — see
+  `protocol.rs`'s own doc comment on why a boxed protocol must forward every one —
+  implemented in `V770ServerProtocol` against `ClientboundDamageEventPacket.write`,
+  and sent where `MobAnimation::Hurt` is drained today. Its extra input over
+  `hurt_animation` is a `minecraft:damage_type` registry id per source, which is why
+  it was not folded into the same pass. The
   client-side consumer (`ClientEvent::EntityDamaged`/`EntityHurtAnimation`
   → `HurtTime` → the render overlay) already exists end to end — see "The
   per-entity hurt/death red overlay" above — so this is purely a new

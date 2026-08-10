@@ -89,7 +89,7 @@ use crate::container_click::{Click, MenuKind, MenuLayout, SlotKind, do_click_wit
 use crate::crafting::CraftingState;
 use crate::inventory::{PlayerInventory, window_zero_menu_slot};
 use crate::mob_spawn::SpawnRng;
-use crate::mobs::{MobHandle, PlayerPerception};
+use crate::mobs::{MobHandle, PerceivedPlayer, PlayerIdentity, PlayerPerception};
 use crate::neighbor_update::Direction;
 use crate::players::{ChatLine, PlayerListStreamer, PlayerRegistry, PlayerTicket};
 use crate::plugin_channels::{ClientChannels, PluginChannelRegistry};
@@ -3094,6 +3094,7 @@ where
             | ServerBound::RecipePlaced { .. }
             | ServerBound::ContainerClosed { .. }
             | ServerBound::Attack { .. }
+            | ServerBound::InteractEntity { .. }
             | ServerBound::UseItem { .. }
             | ServerBound::ReleaseUseItem
             | ServerBound::PlayerInput { .. }
@@ -7637,10 +7638,23 @@ where
             // timer, so a stale entry for a motionless player is still the
             // correct answer. The same is true of `held_item` until they move
             // after a hotbar switch.
+            // The identity is what makes ownership expressible: a mob's owner is an
+            // account uuid (vanilla's `TamableAnimal.DATA_OWNERUUID_ID`), and
+            // `MobSim` resolves a tamed pet's owner *position* by looking that uuid
+            // up in this list every tick. `set_players` is generic over
+            // `Into<PerceivedPlayer>`, so supplying the bare perception compiles fine
+            // and silently makes every pet ownerless — the failure is invisible from
+            // the call site, which is why this spells the identity out.
             mobs.with(|sim| {
-                sim.set_players(vec![PlayerPerception {
-                    position: Vec3::new(x, y, z),
-                    held_item: inventory.selected_item().map(|stack| stack.item.clone()),
+                sim.set_players(vec![PerceivedPlayer {
+                    identity: Some(PlayerIdentity {
+                        uuid: player_uuid,
+                        entity_id: player_entity_id,
+                    }),
+                    perception: PlayerPerception {
+                        position: Vec3::new(x, y, z),
+                        held_item: inventory.selected_item().map(|stack| stack.item.clone()),
+                    },
                 }]);
             });
 
@@ -8003,6 +8017,64 @@ where
             // after the damage call, unconditionally for a living target.
             if !Abilities::for_mode(*game_mode).invulnerable {
                 vitals.add_exhaustion(crate::food::EXHAUSTION_ATTACK);
+            }
+        }
+        // The right-click half of the old combined interact packet, and the
+        // **production producer `MobSim::interact` did not have**: every taming,
+        // feeding, sitting and breeding mechanism was driven only from that type's
+        // own gates, so a real client's right-click on a wolf decoded to
+        // `ServerBound::Ignored` and nothing in the game could be tamed.
+        ServerBound::InteractEntity {
+            entity_id,
+            hand,
+            using_secondary_action: _,
+        } => {
+            // Off-hand interactions are dropped rather than duplicated: a vanilla
+            // client sends the main hand first, and running both would roll a tame
+            // chance twice for one right-click — which is invisible in a gate that
+            // drives `interact` directly and only shows up as "taming is suspiciously
+            // easy" in the running game.
+            if hand == 0 {
+                let held = inventory.selected_item().map(|stack| stack.item.clone());
+                let outcome = mobs.with(|sim| {
+                    sim.interact(
+                        entity_id,
+                        PlayerIdentity {
+                            uuid: player_uuid,
+                            entity_id: player_entity_id,
+                        },
+                        held.as_ref(),
+                    )
+                });
+                // Vanilla consumes through `usePlayerItem`, a no-op in creative
+                // (`Player.hasInfiniteMaterials`). A sit toggle is
+                // `InteractionResult.SUCCESS.withoutItem()` and consumes nothing,
+                // which `InteractOutcome::consumes_item` already encodes.
+                //
+                // `consume_one` handles the creative case itself, so the game mode
+                // goes to it rather than being checked here — and the
+                // `encode_container_slot` **is not optional**: without it the server
+                // and client disagree about the stack count, which is a worse bug
+                // than not consuming at all (the next click sends a stale count and
+                // the item appears to come back).
+                if outcome.consumes_item() {
+                    let native = usize::from(inventory.selected_hotbar_slot());
+                    if consume_one(inventory, native, *game_mode) {
+                        let hotbar_slot =
+                            i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_container_slot(
+                                0,
+                                0,
+                                hotbar_slot,
+                                inventory.native(native),
+                            ),
+                        )
+                        .await?;
+                    }
+                }
             }
         }
         // Issue #260: the player's own launch path. Before this, every projectile

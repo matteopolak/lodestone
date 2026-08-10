@@ -236,22 +236,41 @@ Two additions to `resolve_breeding`:
 
 ## 7. What reaches the screen, and what does not
 
-**Particles do, today.** `MobSim::interact` pushes a `WorldEffect::Particles` burst onto
-`pending_vocalisations`, which `tick::run_mob_tick_loop` already drains through
-`take_vocalisations` into real `LEVEL_PARTICLES` packets. Vanilla's mechanism is
+**The right-click reaches this crate now.** `ServerBound::InteractEntity` exists, `v770`'s
+`INTERACT` arm decodes into it, and `dispatch_play_packet` calls `MobSim::interact` with the
+player's `PlayerIdentity` — so a real client can tame a wolf from the game. Before that,
+`minecraft:interact` decoded to `ServerBound::Ignored` and every mechanism here was driven
+only from its own gates. Off-hand interactions are dropped rather than duplicated (a vanilla
+client sends the main hand first, and running both would roll the tame chance twice), and a
+consumed item goes through `consume_one` plus an `encode_container_slot` for the hotbar slot —
+the slot update is not optional, because without it the client's count desyncs.
+
+**Particles do, today — through a substitution that is now replaceable.** `MobSim::interact`
+pushes a `WorldEffect::Particles` burst onto `pending_vocalisations`, which the tick loop
+drains through `take_vocalisations` into real `LEVEL_PARTICLES` packets. Vanilla's mechanism is
 `broadcastEntityEvent(this, (byte)6|7|18)` — the *client* expands the byte into a burst
-(`TamableAnimal.spawnTamingParticles`, `Animal.handleEntityEvent`) — and this server has no
-`ENTITY_EVENT` encoder at all, so the burst is published directly with the same particle type, count
-and spread. A disclosed substitution rather than an approximation of the visual: seven HEART on a
-success or a love, seven SMOKE on a failure, half a block above the mob's feet.
+(`TamableAnimal.spawnTamingParticles`, `Animal.handleEntityEvent`) — and this server had no
+`ENTITY_EVENT` encoder at all when that was written, so the burst is published directly with
+the same particle type, count and spread. A disclosed substitution rather than an
+approximation of the visual: seven HEART on a success or a love, seven SMOKE on a failure,
+half a block above the mob's feet.
 `taming_publishes_hearts_on_success_and_smoke_on_failure` includes a third arm where a sit toggle must
 add **nothing**, so a single hardcoded particle cannot pass.
 
-**The collar does not, and the chain is broken past this crate.** `SimMob::snapshot` produces
-metadata for the creeper only, so a wolf streams an empty metadata list and `EntityStreamer::sync`
-sends no `SET_ENTITY_DATA` at all. Putting the flag on the wire needs a `MetadataField` variant in
-`protocol.rs` and an encode arm in `v770` — written verbatim as brokered hunks, because both files
-belong to other agents this session. Past that, four more hops are broken:
+**That encoder now exists**: `ServerProtocol::encode_entity_event`, with the constants named in
+`lodestone_server::entity_event` (`TAMING_FAILED` 6, `TAMING_SUCCEEDED` 7, `IN_LOVE_HEARTS` 18
+— verified against `EntityEvent`'s own declarations; note `IN_LOVE_HEARTS` is 18 and not
+`LOVE_HEARTS`, which is 12 and is the villager's). Replacing the substitution means pushing an
+entity-event cue instead of a particle burst — `MobSim`'s `pending_animations` queue and its
+`MobAnimation` enum are the existing carrier, drained by the connection's timer arm. It is a
+genuine improvement (the client owns the burst shape, so a version bump cannot silently drift
+our count) but it is *not* a bug fix: the pixels are the same today.
+
+**The collar does not reach the screen, and the chain is broken past this crate.** The
+server-side halves are now done — `MetadataField::TamableFlags`/`HorseFlags` in `protocol.rs`,
+their encode arms in `v770`, and `SimMob::snapshot`'s species switch — so the flag really is on
+the wire for a tamed wolf, cat, parrot, ocelot and the five horse variants. Past that, four
+hops are broken:
 
 | hop | file | state |
 |---|---|---|
@@ -268,13 +287,28 @@ closing that is a self-contained job for whoever owns the entity-rendering clust
 
 ### Index 18 is a collision, and the bit differs per class
 
-Whoever lands the metadata hunks must not share one variant between the wolf and the horse. Verified
-against the committed jar dump (`protocol/v770/tests/support/entity_data_index_jvm.txt`), index 18 is
-a `BYTE` for `TamableAnimal.DATA_FLAGS_ID`, for `AbstractHorse.DATA_ID_FLAGS` **and** for
-`Sheep.DATA_WOOL_ID` — and the tame bit is `& 4` on the first and `getFlag(2)` on the second. One
-"tamed" variant would set `FLAG_TAME` on a wolf and `FLAG_BRED` on a horse. The producer knows the
-species; the encoder must not have to guess. `Sheep.DATA_WOOL_ID`'s existing `MetadataClass::Sheep`
-guard at the same index is the precedent.
+Index 18 is the **most crowded index in the game**: 37 claimants in the committed jar dump
+(`protocol/v770/tests/support/entity_data_index_jvm.txt`), of which **four** are the `BYTE`
+serializer — `TamableAnimal.DATA_FLAGS_ID`, `AbstractHorse.DATA_ID_FLAGS`, `Sheep.DATA_WOOL_ID`
+and `Shulker.DATA_COLOR_ID`. It is also `Creeper.DATA_IS_IGNITED`'s index under `BOOLEAN`. No
+`entity_census` column separates the four `BYTE` ones, unlike the index-8 and index-15
+collisions this repo already documents, so the guard has to live in the **producer**:
+`SimMob::snapshot` switches on the species and the encoder never guesses.
+
+And the bit differs: `TamableAnimal.isTame()` is `& 4`, `AbstractHorse.FLAG_TAME` is `2`. The
+failure mode of one shared variant is worth stating precisely, because it is subtler than "the
+wrong flag": `0x04` is **not in the horse's flag set at all** (`FLAG_BRED` is `8`) and `0x02`
+is not in the tamable's, so a shared variant sets an *unnamed* bit and the animal reads as
+**untamed** — a perfectly-formed packet with nothing visibly wrong to chase.
+
+Three gates hold this mechanically rather than in prose:
+`lodestone-v770`'s `index_eighteen_tests::every_index_eighteen_constant_matches_the_jar_dump`
+checks the constants against the dump, `index_eighteen_really_is_shared_by_several_byte_fields`
+asserts the collision *itself* (so the species switch cannot become pointless ceremony
+unnoticed, and a fifth claimant forces a look), and
+`the_tamable_and_horse_flag_bytes_use_different_bits` asserts neither variant sets the other's
+bit. `taming.rs`'s `a_tamed_mob_streams_the_flag_variant_its_own_class_uses` is the
+producer-side arm, including the control that a **wild** mob streams no field at all.
 
 ---
 

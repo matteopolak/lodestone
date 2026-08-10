@@ -2175,6 +2175,35 @@ impl<'w> SimMob<'w> {
                 metadata.push(MetadataField::CreeperIgnited(true));
             }
         }
+        // Index 18's byte, **whose layout depends on the class** — see
+        // `MetadataField::TamableFlags`. The species switch has to be here, in the
+        // producer, because nothing downstream can recover it: four different `BYTE`
+        // fields share index 18 (`TamableAnimal.DATA_FLAGS_ID`,
+        // `AbstractHorse.DATA_ID_FLAGS`, `Sheep.DATA_WOOL_ID`,
+        // `Shulker.DATA_COLOR_ID`) and no `entity_census` column separates them, so
+        // an encoder handed a single shared "tamed" variant would have to guess.
+        //
+        // Emitted only for a tame mob: a wild one's byte is all-zero, which is the
+        // client's own default, and `EntityStreamer::sync` skips an empty metadata
+        // list entirely — so a wild mob costs no extra packet.
+        //
+        // Species with no arm here stream nothing, which is the honest state rather
+        // than a gap to fill speculatively: a tame llama or fox needs its own flag
+        // layout read off the dump first.
+        if self.tame {
+            match self.entity_type.path() {
+                "wolf" | "cat" | "parrot" | "ocelot" => {
+                    metadata.push(MetadataField::TamableFlags {
+                        tame: true,
+                        sitting: self.is_in_sitting_pose(),
+                    });
+                }
+                "horse" | "donkey" | "mule" | "skeleton_horse" | "zombie_horse" => {
+                    metadata.push(MetadataField::HorseFlags { tame: true });
+                }
+                _ => {}
+            }
+        }
         EntitySnapshot {
             id: self.id,
             uuid: self.uuid,

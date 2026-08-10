@@ -242,6 +242,33 @@ const METADATA_SER_ITEM_STACK: i32 = 7;
 /// [`MetadataField::ExperienceOrbValue`] in its orb loop alone.
 const METADATA_IDX_EXPERIENCE_ORB_VALUE: u8 = 8;
 
+/// `TamableAnimal.DATA_FLAGS_ID`'s metadata index, and the `BYTE` serializer id.
+///
+/// Read off `tests/support/entity_data_index_jvm.txt`
+/// (`18 TamableAnimal.DATA_FLAGS_ID 0 BYTE`). **Index 18 is the most crowded index
+/// in the game** — 37 claimants in that dump, four of them `BYTE`:
+/// `TamableAnimal.DATA_FLAGS_ID`, `AbstractHorse.DATA_ID_FLAGS`,
+/// `Sheep.DATA_WOOL_ID` and `Shulker.DATA_COLOR_ID`. It is also
+/// [`METADATA_IDX_CREEPER_IGNITED`]'s index under the `BOOLEAN` serializer.
+///
+/// Nothing on the wire distinguishes them, and no `entity_census` column separates
+/// the four `BYTE` ones, so the guard is entirely on the *producer*:
+/// `MobSim::snapshot` switches on the species. See
+/// `lodestone_server::MetadataField::TamableFlags`.
+const METADATA_IDX_TAMABLE_FLAGS: u8 = 18;
+const METADATA_SER_BYTE: i32 = 0;
+
+/// `AbstractHorse.DATA_ID_FLAGS`'s metadata index — **also 18**, also `BYTE`.
+///
+/// A separate constant with the same value rather than a reuse of
+/// [`METADATA_IDX_TAMABLE_FLAGS`], for the reason
+/// [`METADATA_IDX_EXPERIENCE_ORB_VALUE`] gives: two different fields that happen to
+/// collide, and one shared constant would make a change to either silently move the
+/// other. The **bit layouts differ** (`FLAG_TAME` is `0x02` here against the
+/// tamable's `0x04`), which is what makes them genuinely different fields rather
+/// than one field with two names.
+const METADATA_IDX_HORSE_FLAGS: u8 = 18;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -3137,17 +3164,32 @@ impl ServerProtocol for V770ServerProtocol {
             // once attack is removed — right-click entity interaction
             // (taming/feeding/mounting/etc.), for which this crate has no
             // interaction model at all yet.
+            // `ServerboundInteractPacket`: VarInt target entity id, VarInt
+            // `InteractionHand` ordinal, a low-precision `Vec3` location
+            // (`Vec3.LP_STREAM_CODEC`), then a trailing boolean for the
+            // secondary-action (shift) modifier. 26.2 split the old combined
+            // interact/attack packet in two (see `ServerBound::Attack`'s own doc
+            // comment); this is the right-click half, and its consumer is
+            // `lodestone_server::mobs::MobSim::interact`.
+            //
+            // The location is read and dropped rather than skipped: it is the only
+            // way the `ensure_empty` below can still prove the frame was fully
+            // consumed, which is what catches a field-order transposition.
             State::Play if packet_id == play::serverbound::INTERACT => {
                 let mut r = Reader::new(payload);
-                let decoded = (|| -> lodestone_core::Result<()> {
-                    let _entity_id = r.var_i32()?;
-                    let _hand = r.var_i32()?;
+                let decoded = (|| -> lodestone_core::Result<ServerBound> {
+                    let entity_id = r.var_i32()?;
+                    let hand = r.var_i32()?;
                     let _location = read_lp_vec3(&mut r)?;
-                    let _using_secondary_action = r.bool()?;
-                    r.ensure_empty()
+                    let using_secondary_action = r.bool()?;
+                    r.ensure_empty()?;
+                    Ok(ServerBound::InteractEntity {
+                        entity_id,
+                        hand,
+                        using_secondary_action,
+                    })
                 })();
-                let _ = decoded;
-                ServerBound::Ignored
+                decoded.unwrap_or(ServerBound::Ignored)
             }
             State::Play if packet_id == play::serverbound::SWING => {
                 let _ = decode_full::<Swing>(payload);
@@ -4284,6 +4326,35 @@ impl ServerProtocol for V770ServerProtocol {
                     w.u8(METADATA_IDX_EXPERIENCE_ORB_VALUE);
                     w.var_i32(METADATA_SER_INT);
                     w.var_i32(*value);
+                }
+                MetadataField::TamableFlags { tame, sitting } => {
+                    // `TamableAnimal.isInSittingPose` is `& 1`, `isTame` is `& 4`.
+                    // Both read off `TamableAnimal`'s own accessors, not from a
+                    // flag-name table: the enum there has no names, only the two
+                    // masks, and inventing an ordering (0x01, 0x02, 0x04, …) would
+                    // put tame at `0x02` — which is the *horse's* bit.
+                    let mut byte = 0i8;
+                    if *sitting {
+                        byte |= 0x01;
+                    }
+                    if *tame {
+                        byte |= 0x04;
+                    }
+                    w.u8(METADATA_IDX_TAMABLE_FLAGS);
+                    w.var_i32(METADATA_SER_BYTE);
+                    w.i8(byte);
+                }
+                MetadataField::HorseFlags { tame } => {
+                    // `AbstractHorse.FLAG_TAME = 2` — deliberately a *different* bit
+                    // from the arm above at the *same* index. See
+                    // [`METADATA_IDX_HORSE_FLAGS`].
+                    let mut byte = 0i8;
+                    if *tame {
+                        byte |= 0x02;
+                    }
+                    w.u8(METADATA_IDX_HORSE_FLAGS);
+                    w.var_i32(METADATA_SER_BYTE);
+                    w.i8(byte);
                 }
             }
         }
@@ -6267,27 +6338,61 @@ mod combat_decode_tests {
         assert_eq!(decoded, ServerBound::Ignored);
     }
 
-    /// `minecraft:interact` (a plain `Interact`, not `Attack`) is deliberately
-    /// **not** given its own `ServerBound` variant — see that variant's own
-    /// doc comment. Pinning it here as `Ignored` rather than leaving it
-    /// undocumented: a future agent adding taming/feeding must change this
-    /// test, not silently discover a gap.
+    /// `minecraft:interact` (a plain `Interact`, not `Attack`) now decodes into
+    /// [`ServerBound::InteractEntity`], through the **real client encoder**.
+    ///
+    /// This test used to assert `Ignored`, with a doc comment saying the variant was
+    /// deliberately absent because *"this crate has no interaction model"* — and it
+    /// asked whoever added taming to change it rather than discover a gap. That is
+    /// what this is.
+    ///
+    /// The expected value comes from the other side of the seam: `V770Adapter`'s own
+    /// `encode_action` builds the payload, so nothing here restates the field order.
+    ///
+    /// Values are **pairwise distinct** so the two adjacent VarInts cannot transpose
+    /// unnoticed: entity `1234`, hand `1` (off hand), and `sneaking: true` — the
+    /// trailing boolean set deliberately *different* from what a default fixture
+    /// would carry, because two adjacent booleans (or a boolean and a defaulted
+    /// field) coincide half the time by chance and a fixture that sets them equal
+    /// cannot see a swap at all.
     #[test]
-    fn decode_plain_interact_from_the_real_client_encoder_is_ignored() {
+    fn decode_plain_interact_reaches_the_interact_entity_variant() {
         let proto = V770ServerProtocol;
         let (packet_id, payload) = crate::adapter()
             .encode_action(
                 ConnectionState::Play,
                 &ClientAction::InteractEntity {
                     entity_id: 1234,
-                    interaction: EntityInteraction::Interact { hand: Hand::Main },
-                    sneaking: false,
+                    interaction: EntityInteraction::Interact { hand: Hand::Off },
+                    sneaking: true,
                 },
             )
             .expect("encodes")
             .expect("Interact always encodes in Play");
         assert_eq!(packet_id, play::serverbound::INTERACT);
         let decoded = proto.decode(State::Play, packet_id, &payload);
+        assert_eq!(
+            decoded,
+            ServerBound::InteractEntity {
+                entity_id: 1234,
+                hand: 1,
+                using_secondary_action: true,
+            },
+            "the right-click half must reach MobSim::interact; `Ignored` here is \
+             what made a real client's right-click on a wolf do nothing"
+        );
+    }
+
+    /// Control: a truncated `interact` payload must drop the packet rather than
+    /// panic or produce a half-decoded variant.
+    ///
+    /// Without this, the `unwrap_or(Ignored)` in the decode arm is an untested
+    /// branch — and it is the branch that stands between a malformed frame and a
+    /// `MobSim::interact` call against a garbage entity id.
+    #[test]
+    fn decode_interact_rejects_a_truncated_payload() {
+        let proto = V770ServerProtocol;
+        let decoded = proto.decode(State::Play, play::serverbound::INTERACT, &[0x01]);
         assert_eq!(decoded, ServerBound::Ignored);
     }
 
@@ -6723,5 +6828,205 @@ mod dimension_wire_tests {
             "the Nether's own window is 16 sections"
         );
         assert_eq!(shape_for_column(&nether).min_y, 0);
+    }
+}
+
+/// Index-18's four `BYTE` claimants, checked mechanically against the committed
+/// jar dump rather than cited in prose — and the two flag *layouts*, which the
+/// dump cannot check because it records the index and serializer, not the bits.
+#[cfg(test)]
+mod index_eighteen_tests {
+    use lodestone_core::Reader;
+    use lodestone_server::{MetadataField, ServerDirective, ServerProtocol};
+
+    use super::{
+        METADATA_IDX_CREEPER_IGNITED, METADATA_IDX_HORSE_FLAGS, METADATA_IDX_TAMABLE_FLAGS,
+        METADATA_SER_BOOLEAN, METADATA_SER_BYTE, V770ServerProtocol,
+    };
+
+    /// `EntityDataIndexOracle`'s output, committed so this gate does not need a JVM.
+    /// The same file `crates/protocol/v770/src/packets/metadata.rs`'s own dump gate
+    /// reads, for the same reason: the expected value has to come from the jar.
+    const INDEX_DUMP: &str = include_str!("../tests/support/entity_data_index_jvm.txt");
+
+    /// `(index, serializer)` for `Owner.FIELD`, or a panic naming the miss.
+    fn dump_row(owner_field: &str) -> (u8, i32) {
+        for line in INDEX_DUMP.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut tok = line.split_whitespace();
+            let index: u8 = tok.next().expect("index column").parse().expect("u8");
+            let owner = tok.next().expect("owner.FIELD column");
+            let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
+            if owner == owner_field {
+                return (index, serializer);
+            }
+        }
+        panic!("{owner_field} is not in the jar dump — read the dump before changing the constant")
+    }
+
+    /// The three constants this module uses at index 18 name accessors the jar
+    /// really does put there, with the serializers this encoder writes.
+    ///
+    /// Collected rather than asserted inside the loop, so a failure reports every
+    /// wrong row instead of aborting on the first — three rows named individually is
+    /// what makes "which one drifted" answerable.
+    #[test]
+    fn every_index_eighteen_constant_matches_the_jar_dump() {
+        let claims: &[(u8, i32, &str, &str)] = &[
+            (
+                METADATA_IDX_TAMABLE_FLAGS,
+                METADATA_SER_BYTE,
+                "TamableAnimal.DATA_FLAGS_ID",
+                "METADATA_IDX_TAMABLE_FLAGS",
+            ),
+            (
+                METADATA_IDX_HORSE_FLAGS,
+                METADATA_SER_BYTE,
+                "AbstractHorse.DATA_ID_FLAGS",
+                "METADATA_IDX_HORSE_FLAGS",
+            ),
+            (
+                METADATA_IDX_CREEPER_IGNITED,
+                METADATA_SER_BOOLEAN,
+                "Creeper.DATA_IS_IGNITED",
+                "METADATA_IDX_CREEPER_IGNITED",
+            ),
+        ];
+        let mut wrong: Vec<String> = Vec::new();
+        for &(index, serializer, accessor, name) in claims {
+            let (want_index, want_serializer) = dump_row(accessor);
+            if index != want_index || serializer != want_serializer {
+                wrong.push(format!(
+                    "{name} says ({index}, ser {serializer}) but the jar says \
+                     {accessor} is ({want_index}, ser {want_serializer})"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// **The collision itself**, asserted rather than described: at least four
+    /// distinct `BYTE` fields share index 18.
+    ///
+    /// This is the premise the producer-side species switch in
+    /// `lodestone_server::mobs::SimMob::snapshot` exists for. If a future version
+    /// collapsed them, the switch would be pointless ceremony and this gate says so;
+    /// if a *fifth* appears, the count moves and whoever is adding a metadata field
+    /// at 18 is forced to look.
+    #[test]
+    fn index_eighteen_really_is_shared_by_several_byte_fields() {
+        let byte_claimants: Vec<&str> = INDEX_DUMP
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter_map(|l| {
+                let mut tok = l.split_whitespace();
+                let index: u8 = tok.next()?.parse().ok()?;
+                let owner = tok.next()?;
+                let serializer: i32 = tok.next()?.parse().ok()?;
+                (index == 18 && serializer == METADATA_SER_BYTE).then_some(owner)
+            })
+            .collect();
+        for expected in [
+            "TamableAnimal.DATA_FLAGS_ID",
+            "AbstractHorse.DATA_ID_FLAGS",
+            "Sheep.DATA_WOOL_ID",
+            "Shulker.DATA_COLOR_ID",
+        ] {
+            assert!(
+                byte_claimants.contains(&expected),
+                "{expected} must be one of index 18's BYTE claimants; the dump lists \
+                 {byte_claimants:?}"
+            );
+        }
+        assert!(
+            byte_claimants.len() >= 4,
+            "index 18 must still be shared — if it is not, the species switch in \
+             SimMob::snapshot is unnecessary. Claimants: {byte_claimants:?}"
+        );
+    }
+
+    /// **The two layouts differ, and neither variant sets the other's bit.**
+    ///
+    /// This is the arm that would have caught one shared "tamed" variant. Note the
+    /// direction of the failure it guards: `0x04` is not in `AbstractHorse`'s flag
+    /// set at all (`FLAG_TAME` is `2`, `FLAG_BRED` is `8`) and `0x02` is not in
+    /// `TamableAnimal`'s, so a shared variant does not set a *wrong* named flag — it
+    /// sets an unnamed bit and the animal reads as **untamed**, with a
+    /// perfectly-formed packet on the wire and nothing visibly wrong to chase.
+    ///
+    /// `sitting: false` with `tame: true` on purpose: setting both would make
+    /// `0x01 | 0x04 = 0x05` and a gate that only checked "non-zero" could not tell
+    /// the tame bit from the sitting bit. The `sitting` bit gets its own arm below.
+    #[test]
+    fn the_tamable_and_horse_flag_bytes_use_different_bits() {
+        let proto = V770ServerProtocol;
+
+        let tamable = flag_byte(
+            &proto,
+            &MetadataField::TamableFlags {
+                tame: true,
+                sitting: false,
+            },
+        );
+        let horse = flag_byte(&proto, &MetadataField::HorseFlags { tame: true });
+
+        assert_eq!(tamable, 0x04, "TamableAnimal.isTame() is `& 4`");
+        assert_eq!(horse, 0x02, "AbstractHorse.FLAG_TAME is 2");
+        assert_ne!(
+            tamable, horse,
+            "one shared variant would put the same bit on both species, and the one \
+             it is wrong for reads as untamed"
+        );
+        // Neither sets the other's bit, stated as its own claim: equality above could
+        // hold for two bytes that both happen to carry both bits.
+        assert_eq!(tamable & 0x02, 0, "a wolf must not carry the horse's tame bit");
+        assert_eq!(horse & 0x04, 0, "a horse must not carry the wolf's tame bit");
+    }
+
+    /// The sitting bit is `0x01` and is independent of tameness.
+    ///
+    /// Three inputs rather than one, because `sitting` and `tame` are two adjacent
+    /// booleans in the same expression: a fixture that sets them equal coincides with
+    /// a swapped implementation half the time and cannot see it at all.
+    #[test]
+    fn the_sitting_bit_is_independent_of_the_tame_bit() {
+        let proto = V770ServerProtocol;
+        let cases = [
+            ((false, false), 0x00u8),
+            ((true, false), 0x04),
+            ((false, true), 0x01),
+            ((true, true), 0x05),
+        ];
+        let mut wrong: Vec<String> = Vec::new();
+        for ((tame, sitting), want) in cases {
+            let got = flag_byte(&proto, &MetadataField::TamableFlags { tame, sitting });
+            if got != want {
+                wrong.push(format!("(tame {tame}, sitting {sitting}) gave {got:#04x}, want {want:#04x}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// The last byte of a one-field `SET_ENTITY_DATA` payload, after checking the
+    /// index and serializer it was written under.
+    fn flag_byte(proto: &V770ServerProtocol, field: &MetadataField) -> u8 {
+        let ServerDirective::Send { payload, .. } =
+            proto.encode_set_entity_data(11, std::slice::from_ref(field))
+        else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().expect("entity id"), 11);
+        assert_eq!(r.u8().expect("metadata index"), 18);
+        assert_eq!(r.var_i32().expect("serializer id"), METADATA_SER_BYTE);
+        let byte = r.i8().expect("flag byte") as u8;
+        // The terminator vanilla's `SynchedEntityData` writes after the last entry.
+        assert_eq!(r.u8().expect("terminator"), 0xFF);
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+        byte
     }
 }
