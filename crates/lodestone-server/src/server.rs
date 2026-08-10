@@ -7649,6 +7649,26 @@ where
             // `SectionPos.blockToSectionCoord` (an arithmetic right shift).
             let cx = (x / 16.0).floor() as i32;
             let cz = (z / 16.0).floor() as i32;
+            // **This is what makes the world tick follow the player.**
+            // `crate::tick::run_tick_loop` used to simulate a 49-column square
+            // nailed to chunk (0, 0) — natural spawning and every randomly-ticking
+            // block stopped once the player walked out of it. See
+            // `crate::tick_area` for the design.
+            //
+            // The dimension is read off `source`, not assumed: a connection's
+            // `SourceRef` switches to `SourceRef::Dimension` on portal travel, so
+            // this is the one place that already knows which world the player is
+            // standing in. Without it a player in the Nether would drag the
+            // *overworld's* tick area to the matching overworld coordinates.
+            //
+            // Position-driven, like the `set_players` call above and with the same
+            // consequence: a perfectly motionless player stops republishing, which
+            // is harmless because the value is a position rather than a timer.
+            world.tick_anchors().publish(vec![crate::tick_area::TickAnchor {
+                dimension: source.dimension(),
+                cx,
+                cz,
+            }]);
             let update = view.recenter(
                 proto,
                 cx,

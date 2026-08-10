@@ -1513,6 +1513,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Random ticks, scheduled ticks, and neighbour-update propagation](./tick-scheduling.md) —
   Five modules in `crates/lodestone-server/src/`, each a generic, vanilla-shaped
   primitive with its own test suite, wired into `tick::run_tick_loop` (issue #284):
+- [The ticked area follows the player](./ticked-area-follows-the-player.md) — The
+  set of chunk columns the integrated server's world tick loop actually simulates —
+  random ticks, scheduled block and fluid ticks, the natural-spawn cycle and its
+  census — and the mechanism that keeps that set **centred on the players** instead
+  of on world spawn. It lives in `lodestone_server::tick_area` (`FollowArea`,
+  `TickAnchors`, `TickAnchor`, `TickFollow`) and is consumed by
+  `lodestone_server::tick::run_tick_loop_with_weather`.
 - [Time-of-day lighting: the day clock and `sky_darken`](./time-of-day-lighting.md) —
   The one number that makes terrain and mobs darker at night: the factor the **sky**
   half of the lightmap is scaled by. **This doc's original scope was the clock feed

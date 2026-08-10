@@ -307,6 +307,10 @@ mod structure_loot;
 /// like the redstone gate modules beside it.
 mod support_collapse_gate;
 mod tick;
+/// Which chunk columns the world tick loop simulates, and how that set **follows
+/// the players** rather than sitting on world spawn. Public because a host wants
+/// to publish player anchors into it and because its gates assert from outside.
+pub mod tick_area;
 mod vitals;
 mod weather;
 mod world_spawn;

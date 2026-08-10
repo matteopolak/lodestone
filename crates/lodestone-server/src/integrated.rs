@@ -883,11 +883,17 @@ impl IntegratedServer {
         // generated **once** for the whole world instead of once here and once
         // more from a second, independent generator (issue #454).
         //
-        // Issue #505: the capacity is derived from `view_radius`, not a literal.
-        // This is the constructor where the union matters most — `tick_area` here
-        // is *not* a subset of the streamed view (it is centred on world spawn and
-        // never moves), so the derivation adds `CONCURRENT_SCAN_COLUMNS` on top of
-        // the view rather than assuming the view covers it.
+        // Issue #505: the capacity is derived from `view_radius`, not a literal, and
+        // the derivation adds `CONCURRENT_SCAN_COLUMNS` on top of the view rather
+        // than assuming the view covers it.
+        //
+        // That headroom used to be justified by the tick area being a *disjoint*
+        // square (it was centred on world spawn and never moved). It follows the
+        // players now — see `crate::tick_area` — so in the steady state it is a
+        // subset of the view and the union has collapsed. The reserve stays because
+        // the collapse is not instantaneous: the area moves the tick a movement
+        // packet lands, before the new strip has finished streaming, and a teleport
+        // or the playerless fallback puts it transiently outside the view again.
         //
         // `for_integrated_view_radius`, i.e. **uncapped**: this is the real
         // singleplayer world, the one whose render-distance slider the player owns.
@@ -1086,6 +1092,24 @@ impl IntegratedServer {
         // evaluated eagerly, and the distinction did not arise.
         let tick_clock = Arc::clone(&clock);
         let tick_source = Arc::clone(&source);
+        // **The world tick follows the player from here on.** `tick_area` above is
+        // now only the fallback the loop uses while no player has reported a
+        // position; the anchor set rides `world_state`, which the connection task
+        // already holds, so the two ends share one store without a new parameter on
+        // the `serve_connection*` chain. See `crate::tick_area`.
+        //
+        // The dimension is this source's own: `IntegratedServer` opens one tick loop
+        // over one `ChunkSource`, so an anchor published while the player is in the
+        // Nether names a dimension this loop does not serve and is correctly
+        // ignored — the overworld simply stops ticking, which is vanilla's "no
+        // player tickets, no ticking".
+        let follow = crate::tick_area::TickFollow {
+            // `DimensionalSource::dimension` — its own inherent accessor, which
+            // returns the dimension it serves rather than the trait's `Option`.
+            dimension: source.dimension(),
+            radius: crate::chunk_store::CONCURRENT_TICK_RADIUS,
+            anchors: world_state.tick_anchors().clone(),
+        };
         let tick_task = spawn_tick_task(&shutdown, async move {
             // Owned by the tick task, with no lock, per `docs/server-ecs.md`.
             // Phase 1 replaces this binding with a `&mut` argument to
@@ -1114,6 +1138,7 @@ impl IntegratedServer {
                 &sleep_feed,
                 scheduled,
                 world_state,
+                follow,
             )
             .await;
         });
@@ -1651,6 +1676,14 @@ impl IntegratedServer {
         let lan_world_state = crate::world_state::WorldStateHandle::new();
         let tick_world_state = lan_world_state.clone();
         let handle_world_state = lan_world_state.clone();
+        // Built out here rather than inline in the call below for the reason every
+        // other `*_clone` in this function is: a `.clone()` written inside the
+        // `async move` would move `lan_world_state` into the coroutine.
+        let lan_follow = crate::tick_area::TickFollow {
+            dimension: crate::dimension::Dimension::Overworld,
+            radius: LAN_TICK_RADIUS,
+            anchors: lan_world_state.tick_anchors().clone(),
+        };
         let tick_task = spawn_tick_task(&shutdown, async move {
             // Owned by the tick task, with no lock, per `docs/server-ecs.md`.
             let _server_world = server_world;
@@ -1689,6 +1722,15 @@ impl IntegratedServer {
                 // source, where there is nothing to persist into.
                 tick_scheduled,
                 tick_world_state,
+                // The LAN path follows its players too, through the same shared
+                // `WorldStateHandle` above — every accepted socket's packet dispatch
+                // publishes into it. The single-anchor caveat bites here rather than
+                // in singleplayer: `TickAnchors::publish` replaces the whole set, so
+                // with two LAN players the tick area follows whichever moved most
+                // recently instead of the union of both. That is strictly better than
+                // the fixed origin box it replaces, and the fix is per-connection
+                // anchor bookkeeping, not more geometry — `FollowArea` already unions.
+                lan_follow,
             )
             .await;
         });

@@ -219,9 +219,14 @@ hold. The three terms of the replacement:
 
 - **the view term** is the bug;
 - **`CONCURRENT_SCAN_COLUMNS` (50)** is added *on top of* the view, not assumed
-  inside it: `run_tick_loop`'s 49-column `tick_area` is centred on world spawn and
-  never moves, so once the player walks away it is 49 columns outside the view
-  that are still touched at 20 Hz, plus the one column `vitals_tick` probes. And
+  inside it, plus the one column `vitals_tick` probes. **The original reason is now
+  historical**: `run_tick_loop`'s 49-column tick area used to be centred on world
+  spawn and never move, so once the player walked away it was 49 columns outside the
+  view still touched at 20 Hz. It follows the players now
+  (`docs/ticked-area-follows-the-player.md`), so in the steady state it is a subset
+  of the view; the reserve stays for the transients — the area moves the tick a
+  movement packet lands, before the new strip has streamed, and a teleport or the
+  playerless fallback square puts it outside the view again. And
   frequency is not residency — #504 measured a 20 Hz-polled column being
   regenerated **12** times over 12 random-tick passes, because the pass touches
   49 columns *after* the poll and leaves the polled column holding the oldest

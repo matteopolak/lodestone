@@ -96,8 +96,14 @@ fn populate_at(
     cycles: usize,
     difficulty: Difficulty,
 ) -> Vec<(String, MobCategory)> {
-    // Leaked for the same reason `MobHandle::new` leaks: `MobSim` borrows its
-    // world for `'static`.
+    // Two handles onto the same terrain, because the two consumers now want
+    // different ownership. `MobSim` still borrows for `'static` (the `Box::leak`
+    // `MobHandle::new` documents), while `NaturalSpawner` refcounts — the
+    // production spawner's view is rebuilt as the tick area follows the player, so
+    // leaking one per rebuild would leak for the life of the process. An identical
+    // clone rather than a shared allocation keeps this fixture honest about which
+    // consumer reads which.
+    let spawn_world = std::sync::Arc::new(world.clone());
     let world: &'static ChunkWorld = Box::leak(Box::new(world));
     let mut sim = MobSim::new(world);
     sim.set_players(vec![player()]);
@@ -108,7 +114,11 @@ fn populate_at(
     spawner.set_difficulty(difficulty);
     let all = chunks();
     for cycle in 0..cycles {
-        spawner.begin_cycle(world, cycle as u64, vec![player().position]);
+        spawner.begin_cycle(
+            std::sync::Arc::clone(&spawn_world),
+            cycle as u64,
+            vec![player().position],
+        );
         let mut state = sim.census(i32::try_from(all.len()).unwrap());
         sim.run_spawn_cycle(&mut state, &mut spawner, &all);
     }
@@ -258,11 +268,11 @@ fn strip_namespace(key: &str) -> &str {
 /// against a table that silently falls back to "no restrictions".
 #[test]
 fn every_candidate_names_a_registered_species() {
-    let world: &'static ChunkWorld = Box::leak(Box::new(plains_world(None)));
+    let world = std::sync::Arc::new(plains_world(None));
     let mut spawner = NaturalSpawner::new(lodestone_server::bundled_biome_spawners().clone(), 7);
     let mut seen = 0;
     for cycle in 0..200 {
-        spawner.begin_cycle(world, cycle, vec![player().position]);
+        spawner.begin_cycle(std::sync::Arc::clone(&world), cycle, vec![player().position]);
         for (cx, cz) in chunks() {
             for category in MobCategory::SPAWNING {
                 for candidate in spawner.cluster(category, cx, cz) {

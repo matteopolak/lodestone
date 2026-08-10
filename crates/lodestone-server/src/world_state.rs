@@ -121,7 +121,36 @@ impl Default for WorldState {
 /// Deliberately has no `subscriber()`: every clone shares the store, which is the
 /// whole point (a per-connection copy is the bug #327 and #328 were reported for).
 #[derive(Debug, Clone, Default)]
-pub struct WorldStateHandle(Arc<Mutex<WorldState>>);
+pub struct WorldStateHandle {
+    state: Arc<Mutex<WorldState>>,
+    /// Where this world's players are, for
+    /// [`crate::tick_area::FollowArea`] — the set that makes the world tick follow
+    /// them instead of sitting on chunk `(0, 0)` forever.
+    ///
+    /// # Why it rides this handle, and why it is a *sibling* of `state`
+    ///
+    /// It rides this handle because this handle is already threaded to **both**
+    /// ends of the problem: every `serve_connection*` wrapper passes it down to the
+    /// packet dispatch (which is where a player's chunk position and its dimension
+    /// are both already in hand), and `crate::tick::run_tick_loop_with_weather`
+    /// receives the same store. Adding a parameter to the `serve_connection*` chain
+    /// instead would change six wrapper signatures and every
+    /// `crates/protocol/v770/tests/*` call site — the exact cost
+    /// [`crate::server::SourceRef`]'s own doc comment records as the reason those
+    /// wrappers exist in the first place.
+    ///
+    /// It is a sibling rather than a field inside [`WorldState`] because
+    /// `WorldState` is the **persisted** scalar set — rules, difficulty, clock,
+    /// spawn — and a player's current chunk is none of those: it is derived from a
+    /// live connection, is meaningless after a restart, and must not appear in a
+    /// save schema. Keeping it outside the same `Mutex` also keeps a per-tick
+    /// anchor read from contending with a rule lookup.
+    ///
+    /// [`is_same_store`](Self::is_same_store) deliberately still compares only
+    /// `state`: it exists as the sharing gate's negative control for the *rules*
+    /// store, and widening it would change what that control measures.
+    anchors: crate::tick_area::TickAnchors,
+}
 
 impl WorldStateHandle {
     /// A handle to a fresh world: every rule at its vanilla default, Normal
@@ -137,7 +166,18 @@ impl WorldStateHandle {
     /// closure cannot contain an `.await`, so the compiler guarantees the guard
     /// never crosses a suspension point.
     pub fn with<R>(&self, f: impl FnOnce(&mut WorldState) -> R) -> R {
-        f(&mut self.0.lock().expect("world state lock poisoned"))
+        f(&mut self.state.lock().expect("world state lock poisoned"))
+    }
+
+    /// This world's player-anchor set — where [`crate::tick_area::FollowArea`] reads
+    /// player positions from, and where a connection publishes them.
+    ///
+    /// A borrow rather than a clone so a caller that only reads does not touch a
+    /// refcount; clone it when a `'static` copy is needed (the tick loop's
+    /// [`crate::tick_area::TickFollow`] takes one).
+    #[must_use]
+    pub fn tick_anchors(&self) -> &crate::tick_area::TickAnchors {
+        &self.anchors
     }
 
     /// Whether this handle and `other` name the same store — for the sharing
@@ -145,7 +185,7 @@ impl WorldStateHandle {
     /// identical otherwise).
     #[must_use]
     pub fn is_same_store(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.state, &other.state)
     }
 
     /// Advances the clock by one world tick and returns the new value.
