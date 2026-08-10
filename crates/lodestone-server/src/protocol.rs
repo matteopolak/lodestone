@@ -305,6 +305,46 @@ pub enum MetadataField {
         /// Points per absorption, vanilla's `getValue()`.
         value: i32,
     },
+    /// `TamableAnimal.DATA_FLAGS_ID` — the wolf/cat/parrot flag byte at index
+    /// **18**, whose `0x01` bit is the sitting pose and `0x04` bit is tameness
+    /// (`TamableAnimal.isInSittingPose` is `& 1`, `isTame` is `& 4`).
+    ///
+    /// # Why this is not shared with [`HorseFlags`](Self::HorseFlags)
+    ///
+    /// Index 18 is the most crowded index in the game — 37 claimants in the
+    /// committed jar dump (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`),
+    /// of which **four** are the `BYTE` serializer: `TamableAnimal.DATA_FLAGS_ID`,
+    /// `AbstractHorse.DATA_ID_FLAGS`, `Sheep.DATA_WOOL_ID` and
+    /// `Shulker.DATA_COLOR_ID`. No census column separates them; the *producer*
+    /// has to know the species, which is why the species switch lives in
+    /// [`crate::mobs::SimMob::snapshot`] and never in an encoder.
+    ///
+    /// And the bit differs: tame is `0x04` here and `FLAG_TAME = 2` on a horse. A
+    /// single shared variant therefore sets an **unnamed** bit on whichever species
+    /// it was not written for — `0x04` is not in the horse's flag set at all
+    /// (`FLAG_BRED` is `8`), and `0x02` is not in the tamable's — so the animal
+    /// reads as *untamed* while the packet looks correct on the wire. That is worse
+    /// than a wrong flag, because there is nothing visibly wrong to chase.
+    TamableFlags {
+        /// `0x04` — `TamableAnimal.isTame()`.
+        tame: bool,
+        /// `0x01` — `TamableAnimal.isInSittingPose()`, the pose
+        /// `SitWhenOrderedToGoal` writes, **not** the persisted `orderedToSit`.
+        sitting: bool,
+    },
+    /// `AbstractHorse.DATA_ID_FLAGS` — the horse family's own flag byte, also at
+    /// index 18. See [`TamableFlags`](Self::TamableFlags) for why this is a
+    /// separate variant.
+    ///
+    /// Only `FLAG_TAME` (`0x02`) is modelled. `FLAG_BRED` (`0x08`), `FLAG_EATING`
+    /// (`0x10`), `FLAG_STANDING` (`0x20`) and `FLAG_OPEN_MOUTH` (`0x40`) have no
+    /// server-side state to drive them yet — the values are transcribed from
+    /// `AbstractHorse`'s own constants so the next one to be wired does not have to
+    /// be looked up again.
+    HorseFlags {
+        /// `0x02` — `AbstractHorse.isTamed()`.
+        tame: bool,
+    },
 }
 
 /// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs (issue
@@ -671,18 +711,35 @@ pub enum ServerBound {
     /// entity id, no hand/location/secondary-action data (see this variant's
     /// consumer, `crate::server::apply_attack`, for the damage/knockback
     /// pipeline this drives). The generic `minecraft:interact` packet
-    /// (`ServerboundInteractPacket`, used for right-click entity interactions
-    /// like taming/feeding/mounting) is deliberately *not* given a variant
-    /// here: this crate has no interaction model for any of those, so
-    /// decoding it into a new `ServerBound` case with nothing to do with it
-    /// would be exactly the manufactured decode-only island `CLAUDE.md`
-    /// warns against — it stays [`Ignored`](Self::Ignored) via the wildcard
-    /// decode arm, the same treatment `BlockAction`'s own doc comment
-    /// documents for the item-action ordinals this crate has no inventory
-    /// model to act on either.
+    /// (`ServerboundInteractPacket`) is the *other* half and has its own
+    /// variant, [`InteractEntity`](Self::InteractEntity): 26.2 split the old
+    /// combined packet in two, and the two halves reach different consumers
+    /// here — attack goes to the damage pipeline, interact to
+    /// `crate::mobs::MobSim::interact`.
     Attack {
         /// Target entity id.
         entity_id: i32,
+    },
+    /// A player right-clicked an entity (`ServerboundInteractPacket`) — the
+    /// taming, feeding, sitting and breeding trigger.
+    ///
+    /// `using_secondary_action` is the packet's trailing boolean (the shift
+    /// modifier), carried rather than dropped because vanilla's own
+    /// `mobInteract` chain consults it — `AbstractHorse.mobInteract`'s
+    /// `isTamed() && player.isSecondaryUseActive()` opens the inventory instead
+    /// of mounting. Nothing reads it yet; it is on the wire and dropping it
+    /// would have to be undone.
+    ///
+    /// The low-precision `Vec3` location the packet also carries is **not**
+    /// here: vanilla uses it only for the `INTERACT_AT` sub-action (clicking a
+    /// specific part of an armour stand), which this crate has no model for.
+    InteractEntity {
+        /// Target entity id.
+        entity_id: i32,
+        /// `InteractionHand` ordinal: `0` = main hand, `1` = off hand.
+        hand: i32,
+        /// Whether the client was sneaking.
+        using_secondary_action: bool,
     },
     /// The player began using the item in `hand` in mid-air
     /// (`ServerboundUseItemPacket`).
