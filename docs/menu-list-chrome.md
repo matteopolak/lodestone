@@ -70,7 +70,7 @@ Two consequences worth knowing before anyone "fixes" them:
   `minecraft.level != null`, and all three pairs are pixel-identical, so one constant
   each is faithful to *both* arms. A `ListChrome` variant for in-world would be dead
   code that looks like fidelity. If a future version makes the pairs differ, the fork
-  goes in `render::draw` beside `MenuFrame::overlay`, which is already the
+  goes in `render::draw` beside `MenuFrame::backdrop`, which is already the
   in-world/out-of-world bit this pass carries.
 
 The header bar is light-over-dark and the footer bar its mirror; the mirroring is the
@@ -83,6 +83,66 @@ Out of a world: panorama → whole-screen `menu_background` (this pass applies i
 In a world: `OVERLAY_BG` → band tint → rows → bars. The band therefore sits two
 washes deep over the panorama and one over the world, which is vanilla's own
 arithmetic.
+
+### The in-world stack above was the plan, and for a while the code did none of it
+
+Worth keeping as the clearest local instance of *a doc that transcribes vanilla
+correctly is not evidence the code does*. The paragraph above was written when the
+chrome landed and it was right about vanilla — and in-world Options drew **no chrome
+at all** for as long as it stood, which the owner reported on 2026-08-09: *"the main
+menu settings have the header/footer, but if i go in game and open settings it doesnt
+have it."*
+
+Nothing about the screen differed. There is one `Screen::Settings`, one
+`options::settings_frame` that takes no in-world flag, and a `MenuNav::active_list`
+arm keyed only on the page. What differed is **which function built the frame**:
+
+| path | builder | `MenuFrame::list` |
+|---|---|---|
+| from the title | `render::frame_for` | `Some` — chrome draws |
+| from the pause menu | `options::settings_frame`, raw | `None` — chrome skipped |
+
+`frame_for` stamps the **canvas facts** onto everything it returns and answers `None`
+for the overlay screens deliberately, so the overlay path never reached the stamp.
+Measured on `SettingsPage::Sound` at 320×240, the page and canvas the report names:
+`frame_for` yields a chrome rect of `(0, 33, 320, 174)` and the raw call yields
+`None`, so the tint and all four separator rows are skipped with nothing red.
+
+Three hypotheses were checked and **ruled out** before this one, and they are worth
+recording because each is the plausible answer:
+
+- *a regression* — no. The main-menu gate passes at every commit since the chrome
+  landed; the overlay path never had it.
+- *the draw path* — no. `MenuRenderer::render` and `render_overlay` share one `draw`
+  body and differ only in the pass's load op, so both emit the chrome identically.
+- *grid versus list* — no. `active_list` does answer `None` for a widget-grid page
+  like `Root`, but Sound is a list page with non-empty entries, so it answers `Some`
+  in both contexts and the page is not the variable.
+
+The fix is `nav::settings_overlay_frame`: one expression, used by `app/redraw.rs`'s
+overlay draw *and* `nav::on_screen_frame`'s hit-test, which stamps the canvas facts
+through the same `render::stamp_canvas_facts` that `frame_for` uses. **No condition
+was widened** — `ListChrome::None` and the empty-`entries()` arm are untouched, so
+the deliberate no-chrome cases stay no-chrome. Adding a second chrome draw on the
+overlay path would have worked and then drifted.
+
+Two things the same raw call was also dropping, found by looking at the whole stamp
+rather than the one field in the report:
+
+- **`MenuFrame::cursor`**, so in-world Options had no hover affordances and none of
+  the per-option tooltips.
+- **`MenuFrame::backdrop`**, which defaults to `Panorama` — so in-world Options was
+  painting the panorama over the paused world, the *2026-08-04* report that made this
+  screen an overlay in the first place. Routing the frame to `render_overlay` changed
+  the load op and not the frame's own backdrop declaration, so half that fix had
+  quietly never applied. `settings_overlay_frame` sets `Dim`, which is what
+  `pause_frame` and `death_frame` already did by hand.
+
+`gui_scale` was dropped too, but only reaches pixels when the option is non-default.
+
+The one thing that stays context-dependent on purpose is the root page's `World
+Options...` row — vanilla's own `inWorld` header fork. That is about *rows*, not
+chrome, and unifying the chrome did not touch it.
 
 ## How to change it
 
@@ -108,6 +168,18 @@ arithmetic.
   canvas-wide quad has no vertex inside a narrow probe rect, so it is invisible to
   that helper. Use `coverage` / `coverage_of` (real rect containment) for anything
   that has to see the chrome.
+- **Gotcha: a screen drawn as an overlay does not go through `render::frame_for`, so
+  it does not get the canvas facts unless someone stamps them.** That is what hid the
+  in-world bug above for a whole session. If you add an overlay screen, build its
+  frame in **one** function that calls `render::stamp_canvas_facts`, and have both the
+  draw (`app/redraw.rs`) and the hit-test (`nav::on_screen_frame`) call that function
+  — `nav::settings_overlay_frame` and `nav::command_block_overlay_frame` are the two
+  worked examples. A frame built inline at the draw site is the defect shape.
+- **Gotcha: every render test in `menu/render/tests.rs` reached the chrome through
+  `frame_for`.** The blind spot was the *fixture set*, not any one assertion — a whole
+  corpus sharing one construction path. `in_world_settings_carries_the_same_band_
+  chrome_as_the_main_menu` is the gate that goes the other way, and its executed
+  control is the pre-fix raw `settings_frame`, which must produce no chrome at all.
 
 ## Configuration
 
@@ -119,6 +191,10 @@ canvas size and the active screen's `ListSpec`.
 - `menu::widget::{ListSpec, ListChrome, ScrollList}` — the declaration and the band
   arithmetic; see [`scrollable-list.md`](./scrollable-list.md).
 - `menu::render::draw` — the three draws, and the row clip they must agree with.
+- `menu::render::stamp_canvas_facts` — what puts a `ListSpec` on a frame in the first
+  place, and therefore what every chrome draw is downstream of. `render::frame_for`
+  applies it to the full-screen screens; `nav::settings_overlay_frame` applies it to
+  the in-world settings overlay.
 - `menu::render`'s `LIST_BAND_TINT` / `SEPARATOR_LIGHT` / `SEPARATOR_DARK` /
   `SEPARATOR_H` — the decoded constants.
 - `menu::panorama` — the whole-screen wash this sits on top of; see

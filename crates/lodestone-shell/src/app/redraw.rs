@@ -1328,15 +1328,20 @@ impl WindowApp {
         // the same shape as pause and death above. Without this block that
         // `None` means the screen draws *nothing*, which is worse than the
         // panorama it replaced, so the two halves must stay together.
-        if self.ui.is_settings()
-            && self.ui.settings_in_world()
+        //
+        // The frame comes from `nav::settings_overlay_frame` rather than from a
+        // `settings_frame` call written out here — the same rule the command
+        // block block below follows, and for a measured reason. This site used to
+        // build it raw, which skipped the canvas facts `frame_for` stamps on
+        // every full-screen frame, so in-world Options had no `MenuFrame::list`
+        // and therefore none of the band chrome the main-menu copy has (a
+        // 2026-08-09 player report), no hover cursor, and a `Panorama` backdrop
+        // over the paused world. One expression, two consumers: `on_screen_frame`
+        // hit-tests the same frame this draws.
+        if let Some(settings_frame) =
+            crate::menu::nav::settings_overlay_frame(&self.ui, &self.nav)
             && let Some(menu) = self.menu.as_mut()
         {
-            let settings_frame = crate::menu::options::settings_frame(
-                self.nav.settings(),
-                self.nav.options(),
-                self.nav.options_save_error(),
-            );
             menu.render_overlay(device, queue, frame.view(), &settings_frame, w, h);
         }
 

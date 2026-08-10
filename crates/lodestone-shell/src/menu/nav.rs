@@ -4295,12 +4295,8 @@ pub fn on_screen_frame<'a>(
     // from exactly the call `app.rs`'s redraw uses to *draw* it, so the frame
     // the click hit-tests against is the frame on the glass — a second
     // construction here is how a click lands on a row the draw put elsewhere.
-    if ui.is_settings() && ui.settings_in_world() {
-        return Some(crate::menu::options::settings_frame(
-            nav.settings(),
-            nav.options(),
-            nav.options_save_error(),
-        ));
+    if let Some(frame) = settings_overlay_frame(ui, nav) {
+        return Some(frame);
     }
     // The fourth overlay screen (#474), and the second instance of the exact
     // shape above. `command_block_overlay_frame` is the *same call* the draw
@@ -4310,6 +4306,64 @@ pub fn on_screen_frame<'a>(
         return Some(frame);
     }
     super::render::frame_for(ui, nav, statuses, favicons)
+}
+
+/// The **in-world** settings screen's overlay frame, or `None` when settings is not
+/// up in a world — one expression with three consumers ([`on_screen_frame`]'s
+/// hit-test, `app/redraw.rs`'s overlay draw, and the gate that measures it).
+///
+/// # Why this exists
+///
+/// A player report (2026-08-09): *"the main menu settings have the header/footer,
+/// but if i go in game and open settings it doesnt have it. they should be the
+/// exact same menu, not separate"*. They **are** the same screen — one
+/// `Screen::Settings`, one [`crate::menu::options::settings_frame`] taking no
+/// in-world flag, and an `active_list` arm keyed only on the page — so nothing
+/// about the *content* differed. What differed is that
+/// [`crate::menu::render::frame_for`] stamps the canvas facts onto everything it
+/// returns and answers `None` for the overlay screens by design, so the in-world
+/// path built `settings_frame` raw and never got them.
+///
+/// Measured on `SettingsPage::Sound` at 320×240 — the page and canvas the report
+/// names — the raw call yields `list: None` where `frame_for` yields `Some`, and the
+/// band tint and both bevelled separator bars are gated on
+/// `ListSpec::chrome_rect`, so the whole chrome silently vanished. `cursor` was
+/// dropped the same way, which is the in-world hover tooltips.
+///
+/// The draw path was **not** the difference and is worth recording as a ruled-out
+/// hypothesis: `MenuRenderer::render` and `render_overlay` share one `draw` body
+/// and differ only in the pass's load op, so both emit the chrome identically.
+///
+/// # The one thing that is legitimately context-dependent
+///
+/// [`crate::menu::render::MenuBackdrop::Dim`], and it is set here rather than in
+/// `settings_frame`. Out of a world the settings tree sits on the panorama; in one
+/// it must leave the paused world visible, which is vanilla's own fork
+/// (`OptionsScreen` over the level vs over the title). `settings_frame` defaults to
+/// `Panorama` and nothing was overriding it, so in-world Options drew the panorama
+/// *over* the paused world — the same 2026-08-04 report that made this an overlay
+/// in the first place, still live because routing the frame to `render_overlay`
+/// changed the load op and not the frame's own backdrop declaration. `pause_frame`
+/// and `death_frame` — the sibling overlays — set `Dim` by hand; this is the third.
+///
+/// The root page's `World Options...` row is **kept** context-dependent on purpose:
+/// that is vanilla's `inWorld` header fork and it is about rows, not chrome.
+#[must_use]
+pub fn settings_overlay_frame<'a>(
+    ui: &UiState,
+    nav: &MenuNav,
+) -> Option<super::render::MenuFrame<'a>> {
+    if !(ui.is_settings() && ui.settings_in_world()) {
+        return None;
+    }
+    let mut frame = crate::menu::options::settings_frame(
+        nav.settings(),
+        nav.options(),
+        nav.options_save_error(),
+    );
+    super::render::stamp_canvas_facts(&mut frame, ui, nav);
+    frame.backdrop = super::render::MenuBackdrop::Dim;
+    Some(frame)
 }
 
 /// The command block edit screen's overlay frame, or `None` when that screen is
