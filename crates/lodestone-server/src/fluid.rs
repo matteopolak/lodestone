@@ -460,7 +460,7 @@ impl FluidEnv {
 /// whatever it is looking at, `ChunkColumn::block_state` indexes unguarded, and a
 /// fluid resting on the floor of the world would therefore panic the world tick
 /// thread. See [`FluidEnv::min_y`].
-fn block_at<S: ChunkSource>(world: &S, env: FluidEnv, pos: BlockPos) -> String {
+fn block_at<S: ChunkSource + ?Sized>(world: &S, env: FluidEnv, pos: BlockPos) -> String {
     if env.contains_y(pos.y) {
         world.block_state(pos.x, pos.y, pos.z)
     } else {
@@ -869,7 +869,7 @@ impl SpreadContext {
         (pos.x - self.origin.x, pos.z - self.origin.z)
     }
 
-    fn block_state<S: ChunkSource>(&mut self, world: &S, pos: BlockPos) -> String {
+    fn block_state<S: ChunkSource + ?Sized>(&mut self, world: &S, pos: BlockPos) -> String {
         let key = self.key(pos);
         let env = self.env;
         self.states
@@ -878,7 +878,7 @@ impl SpreadContext {
             .clone()
     }
 
-    fn is_hole<S: ChunkSource>(&mut self, world: &S, pos: BlockPos) -> bool {
+    fn is_hole<S: ChunkSource + ?Sized>(&mut self, world: &S, pos: BlockPos) -> bool {
         let key = self.key(pos);
         if let Some(&cached) = self.holes.get(&key) {
             return cached;
@@ -922,7 +922,7 @@ fn is_water_hole(top_state: &str, bottom_state: &str, kind: FluidKind) -> bool {
 /// Note rule 3 reads the highest neighbour that this cell can be reached
 /// *from* — `canPassThroughWall` is consulted per direction, so a wall between
 /// two cells stops the level being inherited through it.
-fn new_liquid<S: ChunkSource>(
+fn new_liquid<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
@@ -989,7 +989,7 @@ fn new_liquid<S: ChunkSource>(
 /// Returns `1000` (vanilla's own sentinel) when no hole is within reach. The
 /// recursion never revisits the direction it came from, so it explores a tree
 /// rather than a graph and terminates on depth alone.
-fn slope_distance<S: ChunkSource>(
+fn slope_distance<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     kind: FluidKind,
@@ -1037,7 +1037,7 @@ fn slope_distance<S: ChunkSource>(
 /// the set, `distance <= lowest` adds to it). On flat ground every direction
 /// scores the sentinel `1000` and all four are kept; one cell away from a pit,
 /// exactly one direction scores `0` and the other three are discarded.
-fn spread_targets<S: ChunkSource>(
+fn spread_targets<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
@@ -1114,7 +1114,7 @@ fn spread_targets<S: ChunkSource>(
 /// * lava spreading **down** into water becomes `minecraft:stone`. That is the
 ///   only stone-generation path in the family; the obsidian/cobblestone one is
 ///   [`quench_lava`], from a different callback.
-fn spread_to<S: ChunkSource>(
+fn spread_to<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
@@ -1144,7 +1144,7 @@ fn spread_to<S: ChunkSource>(
 }
 
 /// `FlowingFluid.sourceNeighborCount` (`FlowingFluid.java:345-357`).
-fn source_neighbour_count<S: ChunkSource>(
+fn source_neighbour_count<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
@@ -1164,7 +1164,7 @@ fn source_neighbour_count<S: ChunkSource>(
 /// The `falling` override is the load-bearing line: a falling cell spreads at
 /// `7` no matter what its own amount is, which is why a waterfall spreads a full
 /// seven blocks at its base rather than the six an ordinary `8 - 1` would give.
-fn spread_to_sides<S: ChunkSource>(
+fn spread_to_sides<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
@@ -1195,7 +1195,7 @@ fn spread_to_sides<S: ChunkSource>(
 /// one with three or more adjacent sources spreads sideways as well. That is
 /// what makes a large pool draining into a single hole still fill the rest of
 /// the pool instead of racing to the hole.
-fn spread<S: ChunkSource>(
+fn spread<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
@@ -1250,7 +1250,7 @@ fn spread<S: ChunkSource>(
 /// Note what is *not* here: a lava cell with water **below** it is not quenched
 /// (see [`POSSIBLE_FLOW_DIRECTIONS`]) — that case is lava spreading down into
 /// water, which [`spread_to`] turns into stone instead.
-fn quench_lava<S: ChunkSource>(
+fn quench_lava<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
@@ -1285,7 +1285,7 @@ fn quench_lava<S: ChunkSource>(
 /// `setBlock` is immediate and `getNewLiquid` re-reads), so a version that only
 /// collected changes and applied them afterwards would compute the *second*
 /// cell of a flow against pre-flow terrain.
-fn write_block<S: ChunkSource>(
+fn write_block<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
@@ -1315,7 +1315,7 @@ fn write_block<S: ChunkSource>(
 ///
 /// Every block this writes is appended to `changes` *and* already written
 /// through `world`; the caller forwards `changes` to connected clients.
-pub fn run_scheduled_tick<S: ChunkSource>(
+pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,

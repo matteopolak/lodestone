@@ -499,12 +499,35 @@ impl EntityStreamer {
 /// `Copy` (hand-written, because `#[derive(Copy)]` would demand `S: Copy`)
 /// so it threads through the dispatch chain exactly as cheaply as the `&S`
 /// it replaces.
-#[derive(Debug)]
+///
+/// A third arm was added for portal travel — see [`Dimension`](Self::Dimension).
+///
+/// `Debug` is hand-written too, for the same shape of reason `Copy` is:
+/// `#[derive(Debug)]` would demand `dyn ChunkSource: Debug`, and making `Debug` a
+/// supertrait of `ChunkSource` to satisfy a diagnostic impl is the wrong direction.
 pub(crate) enum SourceRef<'a, S> {
     /// A plain borrow. Generation blocks the calling thread.
     Borrowed(&'a S),
     /// A shared handle. Generation is offloaded to the blocking pool.
     Shared(&'a Arc<S>),
+    /// **Another dimension's** terrain, reached through
+    /// [`ChunkSource::sibling`](crate::ChunkSource::sibling) after a portal trip.
+    /// Generation is offloaded exactly as [`Shared`](Self::Shared) is.
+    ///
+    /// # Why this is not just `Shared`
+    ///
+    /// The Nether's concrete source type is not the overworld's
+    /// (`NetherChunkSource` vs `OverworldChunkSource`, each behind its own
+    /// `ChunkStore` and its own `DimensionalSource`), so no single `S` can name
+    /// both — `Shared(&'a Arc<S>)` is monomorphic in the connection's `S` by
+    /// construction. Erasing to `dyn ChunkSource` here is what lets a connection
+    /// change dimension without the whole `serve_play` state machine being generic
+    /// over which dimension it is in.
+    ///
+    /// This is also why [`get`](Self::get) hands back `&dyn ChunkSource` rather
+    /// than `&S`: every helper it feeds is `S: ChunkSource + ?Sized`, and the
+    /// `?Sized` bounds throughout this file exist for exactly this arm.
+    Dimension(&'a Arc<dyn ChunkSource>),
 }
 
 impl<S> Clone for SourceRef<'_, S> {
@@ -515,15 +538,36 @@ impl<S> Clone for SourceRef<'_, S> {
 
 impl<S> Copy for SourceRef<'_, S> {}
 
+impl<S> std::fmt::Debug for SourceRef<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let arm = match self {
+            Self::Borrowed(_) => "Borrowed",
+            Self::Shared(_) => "Shared",
+            Self::Dimension(_) => "Dimension",
+        };
+        f.debug_tuple("SourceRef").field(&arm).finish()
+    }
+}
+
 impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
     /// The underlying source, for the read/write paths that never generate a
     /// whole batch (`block_state`, `set_block`) and so have nothing to
     /// offload.
-    fn get(self) -> &'a S {
+    fn get(self) -> &'a dyn ChunkSource {
         match self {
             Self::Borrowed(source) => source,
             Self::Shared(source) => &**source,
+            Self::Dimension(source) => &**source,
         }
+    }
+
+    /// Which dimension this reference reads, treating an unlabelled source as the
+    /// overworld — see [`ChunkSource::dimension`](crate::ChunkSource::dimension)
+    /// for why `None` is a distinct answer at the trait but collapses here.
+    fn dimension(self) -> crate::dimension::Dimension {
+        self.get()
+            .dimension()
+            .unwrap_or(crate::dimension::Dimension::Overworld)
     }
 
     /// Generates every column in `coords`, in `coords` order — off the core
@@ -543,8 +587,230 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
         match self {
             Self::Shared(source) => generate_columns_offloaded(Arc::clone(source), coords).await,
             Self::Borrowed(source) => generate_columns_parallel(source, &coords),
+            Self::Dimension(source) => generate_columns_offloaded(Arc::clone(source), coords).await,
         }
     }
+}
+
+/// A completed portal trip: where the player now is, and the terrain they are now
+/// standing on.
+struct PortalTrip {
+    /// What the connection's `SourceRef` becomes from the next loop iteration
+    /// onward: `None` is "back to the source you joined with", `Some` is a sibling
+    /// dimension.
+    ///
+    /// **A return trip is not a sibling lookup.** The connection still holds the
+    /// source it joined with, so coming home is putting that back — which is why
+    /// `crate::dimension::DimensionalSource`'s links only point outward and no
+    /// reference cycle exists to leak a world through.
+    source: Option<Arc<dyn ChunkSource>>,
+    /// Where the player arrived.
+    position: Vec3,
+}
+
+/// Moves a player through a nether portal — the whole server side of a trip.
+///
+/// Returns `None`, having sent nothing, when the trip cannot happen: the world has
+/// no such dimension (a single-dimension world, which is every world built before
+/// `crate::dimension` existed), the destination has no placeable band, or the
+/// hosting protocol cannot encode a dimension change. All three are *declines*
+/// rather than failures — the player stays where they are, standing in a portal,
+/// and nothing is half-applied.
+///
+/// # The order of the packets is the whole correctness argument
+///
+/// 1. **Forget every loaded column.** The client keeps chunks in a store nothing
+///    else clears — its `Respawned` handler does not, and there is no bulk-clear
+///    method on its world sink — so without this the old dimension's columns stay
+///    meshed *and* the client's own `world_extent` can go on reporting the old
+///    dimension's `min_y`/`height` off an arbitrary leftover column. `forget_chunk`
+///    is the one wired path that empties it.
+/// 2. **The dimension change pair** (`respawn` + the placement teleport). This is
+///    what re-frames the client's chunk window: it resolves the new
+///    `dimension_type` holder id and installs that dimension's `min_y` and section
+///    count. Every chunk sent before it would be decoded against the old window.
+/// 3. **The new cache centre, then the chunks.** Both must follow (2), for the same
+///    reason.
+///
+/// # Why the view tracker is rebuilt rather than recentred
+///
+/// [`ViewTracker::recenter`] emits a *difference* — the columns that entered and
+/// left — which is exactly wrong here: nothing the old dimension sent is reusable,
+/// and the new dimension owes the player the entire square. Rebuilding with
+/// [`ViewTracker::new`] and handing the whole square to a fresh
+/// [`JoinChunkStream`](crate::join_scheduler::JoinChunkStream) is the same shape the
+/// join path already uses, and it reuses the same ring order so the ground under the
+/// player's feet arrives first.
+async fn travel_through_portal<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    // The source this connection **joined** with, i.e. home. Separate from
+    // `current` because it is both where a return trip lands and the only thing that
+    // knows the world's siblings — see [`PortalTrip::source`].
+    home: SourceRef<'_, S>,
+    // The dimension the player is in *now*.
+    current: SourceRef<'_, S>,
+    state: &mut State,
+    view: &mut ViewTracker,
+    join_stream: &mut crate::join_scheduler::JoinChunkStream<S>,
+    entry: BlockPos,
+    player_pos: (f64, f64, f64),
+    game_mode: GameMode,
+) -> Result<Option<PortalTrip>, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+{
+    let from = current.dimension();
+    let to = from.nether_portal_destination();
+    // Going home is the `None` arm — the connection's own source, already in hand.
+    // Going out asks *home* for the sibling, because that is where the world's links
+    // live. Bound to a local first so the `&dyn` below outlives the borrow.
+    let sibling: Option<Arc<dyn ChunkSource>> = if to == home.dimension() {
+        None
+    } else {
+        match home.get().sibling(to) {
+            Some(sibling) => Some(sibling),
+            // A single-dimension world. The correct degradation: a player can light a
+            // portal and stand in it, and nothing happens.
+            None => return Ok(None),
+        }
+    };
+    let destination: &dyn ChunkSource = match sibling.as_ref() {
+        Some(arc) => &**arc,
+        None => home.get(),
+    };
+
+    // The index is the *world's*, shared across every dimension of it — see
+    // `crate::portal::PortalIndex`. Read through the source already in hand rather
+    // than the destination's, because both answer with the same store.
+    let index = current.get().portal_index().cloned();
+    // The axis a newly built exit portal takes comes from the block the player is
+    // standing in — vanilla's `getExitPortal` reads it off `portalEntryPos`, which is
+    // why `entry` is threaded this far rather than defaulting to X.
+    let source_axis =
+        crate::portal::Axis::from_state(&current.get().block_state(entry.x, entry.y, entry.z));
+    // # Why the outbound leg is offloaded and the return leg is not
+    //
+    // `resolve_destination` is synchronous CPU work whose *reads* may each generate a
+    // whole column, and the outbound leg is the expensive one by construction: the
+    // destination is a dimension nothing has ever looked at, so the site search's
+    // 33 × 33 footprint means a dozen columns generated from scratch. Left on the core
+    // thread that is measured in seconds, which is a keep-alive timeout rather than a
+    // slow frame — the same shape as the join-strip stall (`DESIGN.md` §12.165), and
+    // offloading is the fix for the same reason it was there.
+    //
+    // The return leg runs inline because it structurally cannot cost that: the
+    // dimension is the one the player joined into and has been streaming from, so its
+    // columns are resident, and the index almost always answers before any scan. It
+    // also *cannot* be offloaded — `home` may be `SourceRef::Borrowed`, which is not
+    // `'static` and so cannot cross `spawn_blocking`. Keeping the two arms honest
+    // about which is which is better than a fork that pretends both are cheap.
+    let resolved = match sibling.clone() {
+        #[cfg(not(target_arch = "wasm32"))]
+        Some(owned) => {
+            let index = index.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::portal::resolve_destination(
+                    &*owned,
+                    from,
+                    to,
+                    index.as_ref(),
+                    player_pos,
+                    source_axis,
+                )
+            })
+            .await
+            .expect("portal destination search panicked")
+        }
+        #[cfg(target_arch = "wasm32")]
+        Some(owned) => crate::portal::resolve_destination(
+            &*owned,
+            from,
+            to,
+            index.as_ref(),
+            player_pos,
+            source_axis,
+        ),
+        None => crate::portal::resolve_destination(
+            destination,
+            from,
+            to,
+            index.as_ref(),
+            player_pos,
+            source_axis,
+        ),
+    };
+    let Some(resolved) = resolved else {
+        return Ok(None);
+    };
+    let arrival = resolved.position;
+    // `resolve_destination` deliberately does not write, so the commit is here — and
+    // it happens *before* the client is told anything, so the terrain the chunk
+    // stream below carries already contains the portal the player is about to be
+    // standing in.
+    if let Some(created) = &resolved.created {
+        for (pos, block) in &created.blocks {
+            destination.set_block(pos.x, pos.y, pos.z, block);
+        }
+        if let Some(index) = index.as_ref() {
+            index.extend(to, created.portal_cells.iter().copied());
+        }
+    }
+
+    // Built *before* anything is sent, so a protocol that cannot encode a dimension
+    // change costs the client nothing at all — rather than emptying its chunk store
+    // and then discovering there is no way to tell it where it now is.
+    let change = proto.encode_dimension_change(to.key(), arrival, game_mode);
+    if change.is_empty() {
+        return Ok(None);
+    }
+
+    for &(cx, cz) in &view.loaded {
+        apply(conn, state, proto.encode_forget_chunk(cx, cz)).await?;
+    }
+    for directive in change {
+        apply(conn, state, directive).await?;
+    }
+
+    let centre_cx = (arrival.x / 16.0).floor() as i32;
+    let centre_cz = (arrival.z / 16.0).floor() as i32;
+    apply(
+        conn,
+        state,
+        proto.encode_chunk_cache_center(centre_cx, centre_cz),
+    )
+    .await?;
+
+    let radius = view.radius;
+    let max_radius = view.max_radius;
+    *view = ViewTracker::new((centre_cx, centre_cz), radius, max_radius);
+    let rings: Vec<Vec<(i32, i32)>> = join_view_rings(radius)
+        .into_iter()
+        .map(|ring| {
+            ring.into_iter()
+                .map(|(dx, dz)| (centre_cx + dx, centre_cz + dz))
+                .collect()
+        })
+        .collect();
+    // The `ringed` arm rather than `windowed`: it holds coordinates only, so it
+    // generates through whichever `SourceRef` the loop hands it — which is the new
+    // dimension's from the next iteration onward. A `windowed` pipeline would have
+    // captured an `Arc` of the *old* dimension at construction and streamed the
+    // wrong world's terrain into the right world's chunk packets.
+    *join_stream = crate::join_scheduler::JoinChunkStream::ringed(rings);
+
+    debug_assert_eq!(
+        destination.dimension().unwrap_or(crate::dimension::Dimension::Overworld),
+        to,
+        "the destination source must be the dimension we told the client about"
+    );
+
+    Ok(Some(PortalTrip {
+        source: sibling,
+        position: arrival,
+    }))
 }
 
 /// Per-connection view-streaming bookkeeping: which chunk columns has this
@@ -1032,6 +1298,14 @@ where
             )
             .await
         }
+        SourceRef::Dimension(src) => {
+            crate::chunk::generate_and_encode_columns_offloaded(
+                Arc::clone(src),
+                update.added.clone(),
+                proto.chunk_encoder(),
+            )
+            .await
+        }
         SourceRef::Borrowed(_) => None,
     };
     match offloaded {
@@ -1148,7 +1422,7 @@ async fn apply<T: Transport>(
 /// plays and saves nothing, with no error and no failing test — the island shape
 /// this repo's first rule is about.
 #[cfg(not(target_arch = "wasm32"))]
-fn player_store<S: ChunkSource>(source: &S) -> Option<crate::player_data::PlayerDataStore> {
+fn player_store<S: ChunkSource + ?Sized>(source: &S) -> Option<crate::player_data::PlayerDataStore> {
     source
         .world_registries()
         .and_then(|registries| registries.player_data)
@@ -2555,7 +2829,13 @@ where
                         }
                         join_stream = crate::join_scheduler::JoinChunkStream::windowed(pipeline);
                     }
-                    SourceRef::Borrowed(_) => {
+                    // The `Dimension` arm rides here rather than with `Shared`
+                    // because it is **unreachable at join**: a connection joins in
+                    // whichever dimension its own source names, and a portal trip
+                    // re-streams through `send_view_update`, not through this block.
+                    // Sharing the ring path costs it nothing it can reach and keeps
+                    // the offload fork below reading as the two arms it is about.
+                    SourceRef::Borrowed(_) | SourceRef::Dimension(_) => {
                         // **Deliberately still per-ring, and this is not the
                         // divergence `805a1fb` warned about.** A borrowed source
                         // is not `'static`, so it cannot be spawned; every batch
@@ -3265,7 +3545,7 @@ async fn apply_block_action<T, P, S>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + ?Sized,
 {
     // Vanilla's very first guard in `handleBlockBreakAction`, ahead of the
     // per-ordinal fork: a break out of reach is dropped whatever phase it is.
@@ -3419,7 +3699,7 @@ async fn destroy_block<T, P, S>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + ?Sized,
 {
     // Issue #337: read the block *before* it becomes air. This is
     // the whole reason the drop has to happen here rather than in a
@@ -3616,7 +3896,7 @@ async fn resend_column_for_light<T, P, S>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + ?Sized,
 {
     if !crate::light::should_relight(old_state, new_state) {
         return Ok(());
@@ -3664,7 +3944,7 @@ async fn send_column_light<T, P, S>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + ?Sized,
 {
     let column = source.column(cx, cz);
     // Both halves have to be present for the cheap path: a family that can
@@ -4649,7 +4929,7 @@ async fn apply_use_item_on<T, P, S>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + ?Sized,
 {
     // Issue #337: a chest that generation placed (a shipwreck's, an igloo's, an
     // ocean ruin's) lives in the *column*, not in the live registry — nothing has
@@ -4974,6 +5254,47 @@ where
     let neighbour = relative(pos, face);
     let clicked = source.block_state(pos.x, pos.y, pos.z);
     let held_item = inventory.selected_item().map(|stack| stack.item.to_string());
+
+    // Lighting a nether portal. **Ahead of the placement branch**, for the same
+    // reason the `hand_use` block above is: `flint_and_steel` is not a block item,
+    // so the placement branch below cannot reach it at all.
+    //
+    // Vanilla's route is `FlintAndSteelItem.useOn` → `level.setBlock(fire)` →
+    // `BaseFireBlock.onPlace`, whose portal branch runs the frame search **from the
+    // cell the fire went in**, not from the block that was clicked — so the search
+    // origin is `relative(pos, face)`. Clicking the top face of a frame's bottom
+    // obsidian therefore searches from the lowest interior cell, which is what makes
+    // the ordinary way of lighting a portal work.
+    //
+    // The fire itself is deliberately *not* placed when there is no frame: fire
+    // spread needs `crate::fire::ticks_after_edit` and a live block-tick queue, and
+    // an inert fire block would look like a working one. Flint and steel therefore
+    // lights portals and nothing else here, and it takes no durability damage — both
+    // gaps, both documented in `docs/nether-portals.md`, neither a regression (this
+    // item did nothing at all before).
+    if held_item.as_deref() == Some("minecraft:flint_and_steel") {
+        let dimension = source
+            .dimension()
+            .unwrap_or(crate::dimension::Dimension::Overworld);
+        if let Some(cells) = crate::portal::ignite(source, dimension, neighbour) {
+            for (cell, cell_state) in &cells {
+                source.set_block(cell.x, cell.y, cell.z, cell_state);
+                apply(
+                    conn,
+                    state,
+                    proto.encode_block_update(cell.x, cell.y, cell.z, cell_state),
+                )
+                .await?;
+            }
+            // Publishing to the index is not bookkeeping — it is what lets the
+            // *return* trip find this portal instead of building a second one beside
+            // it. See `crate::portal::PortalIndex`.
+            if let Some(index) = source.portal_index() {
+                index.extend(dimension, cells.iter().map(|(cell, _)| *cell));
+            }
+            return Ok(());
+        }
+    }
     // The census is the gate: it decides *whether* a placement happens at
     // all and *which* block it writes. `block_entity_for_item` no longer
     // makes that decision — it only supplies the live `BlockEntity` for
@@ -5205,7 +5526,7 @@ pub(crate) fn propagate_placement<S>(
     target: BlockPos,
 ) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<String>>)
 where
-    S: ChunkSource,
+    S: ChunkSource + ?Sized,
 {
     let cx = target.x.div_euclid(16);
     let cz = target.z.div_euclid(16);
@@ -5426,7 +5747,7 @@ async fn apply_client_command<T, P, S>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + ?Sized,
 {
     match action {
         0 if vitals.health() <= 0.0 => {
@@ -6487,7 +6808,7 @@ fn apply_attack(
 /// the cheap single-cell read `ChunkStore` overrides, not a column regeneration
 /// (issue #440). This runs once per movement packet, the same cadence
 /// `view.recenter` already runs at.
-fn fall_sample<S: ChunkSource>(source: &S, x: f64, y: f64, z: f64, on_ground: bool) -> FallSample {
+fn fall_sample<S: ChunkSource + ?Sized>(source: &S, x: f64, y: f64, z: f64, on_ground: bool) -> FallSample {
     let bx = x.floor() as i32;
     let bz = z.floor() as i32;
     let feet = source.block_state(bx, y.floor() as i32, bz);
@@ -6618,7 +6939,7 @@ async fn fall_status_sample<T, P, S>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + ?Sized,
 {
     let Some((x, y, z)) = *player_pos else {
         return Ok(());
@@ -7927,7 +8248,36 @@ where
     // no values at all — see `join_experience`.
     apply(conn, &mut state, join_experience(proto, &experience)).await?;
 
+    // Portal travel state, in the same place as `take_xp_delay` and for the same
+    // reason: it is a per-player per-tick counter and this loop is where those live.
+    let mut portal = crate::portal::PortalTracker::new();
+    // The dimension the player has travelled to, if any. **Two variables, and that
+    // is not redundancy**: `travelled` is borrowed by the shadowed `source` below for
+    // the whole of one `select!`, so an arm that discovered a trip cannot write it.
+    // `pending_travel` is where the arm parks the new source; the top of the next
+    // iteration promotes it.
+    let mut travelled: Option<Arc<dyn ChunkSource>> = None;
+    // `Some(None)` is a pending trip *home*, `Some(Some(..))` a pending trip out, and
+    // `None` no pending trip at all. One variable rather than a flag beside an
+    // `Option`, so "no trip" and "a trip back to the overworld" cannot be confused —
+    // they differ by one layer, and the return trip is the one that reads as success
+    // in a screenshot when it silently does nothing.
+    let mut pending_travel: Option<Option<Arc<dyn ChunkSource>>> = None;
+
     loop {
+        if let Some(next) = pending_travel.take() {
+            travelled = next;
+        }
+        // Shadowing the `source` parameter is what makes a dimension change reach
+        // every arm at once — the view stream, the block reads, the fall sampler and
+        // the drowning probe all take `source`, and none of them has to know that
+        // portals exist. `home` keeps the original, which is where a return trip
+        // lands.
+        let home = source;
+        let source = match travelled.as_ref() {
+            Some(other) => SourceRef::Dimension(other),
+            None => home,
+        };
         tokio::select! {
             // The deferred join view (`JOIN_PRESTREAM_RADIUS`), streamed while this
             // loop goes on servicing everything else — which is the point: a dig,
@@ -8625,6 +8975,82 @@ where
                             player_uuid,
                         )
                         .await?;
+                    }
+                }
+
+                // Portal travel, last in the tick so a player who is about to be
+                // moved has already taken this tick's damage and hunger — vanilla's
+                // own order (`Entity.handlePortal` runs from `Entity.baseTick`, after
+                // `LivingEntity.baseTick`'s damage block).
+                //
+                // The counter is fed "which portal cell am I standing in", read at
+                // the player's **feet**, because `NetherPortalBlock.entityInside` is
+                // driven by the entity's bounding box and the feet cell is the one a
+                // standing player is always inside. Using the eye cell instead means
+                // a 3-tall portal only triggers on its middle row.
+                if let Some((x, y, z)) = player_pos {
+                    let feet = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
+                    let standing_in = crate::portal::is_portal(
+                        &source.get().block_state(feet.x, feet.y, feet.z),
+                    )
+                    .then_some(feet);
+                    // `getPortalTransitionTime`: the creative delay for an
+                    // invulnerable (creative) player, the default otherwise. Read off
+                    // the shared rules, so a `/gamerule` change takes effect on the
+                    // next tick rather than at the next join.
+                    let rules = world.rules();
+                    let transition = if Abilities::for_mode(game_mode).invulnerable {
+                        rules.players_nether_portal_creative_delay()
+                    } else {
+                        rules.players_nether_portal_default_delay()
+                    }
+                    .max(0);
+                    if let Some(entry) = portal.tick(standing_in, transition) {
+                        // `allow_entering_nether_using_portals` is checked here rather
+                        // than inside the tracker: vanilla passes
+                        // `canUsePortal(false)` into `processPortalTeleportation`, so
+                        // the counter still climbs while travel is forbidden, and
+                        // turning the rule back on lets a player who has been standing
+                        // there travel immediately.
+                        let allowed = rules.allow_entering_nether_using_portals()
+                            || source.dimension() == crate::dimension::Dimension::Nether;
+                        if allowed {
+                            let trip = travel_through_portal(
+                                conn,
+                                proto,
+                                home,
+                                source,
+                                &mut state,
+                                &mut view,
+                                &mut join_stream,
+                                entry,
+                                (x, y, z),
+                                game_mode,
+                            )
+                            .await?;
+                            if let Some(trip) = trip {
+                                player_pos = Some((
+                                    trip.position.x,
+                                    trip.position.y,
+                                    trip.position.z,
+                                ));
+                                portal.begin_cooldown();
+                                pending_travel = Some(trip.source);
+                                // The deferred join stream this trip installed has to
+                                // start a fresh batch, so close any batch the previous
+                                // dimension's stream left open.
+                                if join_batch_open {
+                                    apply(
+                                        conn,
+                                        &mut state,
+                                        proto.end_chunk_batch(join_batch_size),
+                                    )
+                                    .await?;
+                                    join_batch_open = false;
+                                    join_batch_size = 0;
+                                }
+                            }
+                        }
                     }
                 }
                 watch.pass("vitals_tick");

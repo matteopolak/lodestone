@@ -282,7 +282,7 @@ fn spawn_pos_in_column(column: &ChunkColumn, cx: i32, cz: i32) -> Option<BlockPo
 }
 
 /// [`spawn_pos_in_column`] for a chunk that is not yet in hand.
-fn get_spawn_pos_in_chunk<S: ChunkSource>(source: &S, cx: i32, cz: i32) -> Option<BlockPos> {
+fn get_spawn_pos_in_chunk<S: ChunkSource + ?Sized>(source: &S, cx: i32, cz: i32) -> Option<BlockPos> {
     spawn_pos_in_column(&source.column(cx, cz), cx, cz)
 }
 
@@ -349,7 +349,7 @@ fn spiral_chunk_offsets() -> Vec<(i32, i32)> {
 /// That is vanilla's own search and it is not a leak — the ±5-chunk box sits
 /// inside the ±9 join view, so a [`crate::ChunkStore`]-wrapped source serves
 /// those columns from cache when the ring loop reaches them.
-pub(crate) fn find_initial_spawn<S: ChunkSource>(source: &S) -> WorldSpawn {
+pub(crate) fn find_initial_spawn<S: ChunkSource + ?Sized>(source: &S) -> WorldSpawn {
     let origin = source.column(0, 0);
     // Vanilla's own pre-seed, and **not** what this line used to say. See
     // [`GENERATOR_SPAWN_HEIGHT`]: the previous form was
@@ -436,7 +436,7 @@ pub(crate) fn is_bed_block(name: &str) -> bool {
 /// remainder: it needs a mob-AABB query this crate's interaction scope does
 /// not carry (shape-B world state; see this module's doc). Without it a bed
 /// in monster range is accepted, a gap the placement half of P2 will close.
-pub(crate) fn is_legal_bed_respawn<S: ChunkSource>(
+pub(crate) fn is_legal_bed_respawn<S: ChunkSource + ?Sized>(
     source: &S,
     bed: BlockPos,
     player_pos: Option<Vec3>,
@@ -516,7 +516,7 @@ fn bed_facing_steps(state: &str) -> Option<(i32, i32)> {
 /// Fail-closed on both halves, which is the safe direction here: an unrecognised
 /// block is not somewhere the search will place a player, so it moves on to the
 /// next offset rather than dropping them into it.
-fn is_standable<S: ChunkSource>(source: &S, pos: BlockPos) -> bool {
+fn is_standable<S: ChunkSource + ?Sized>(source: &S, pos: BlockPos) -> bool {
     let feet = source.block_state(pos.x, pos.y, pos.z);
     let head = source.block_state(pos.x, pos.y + 1, pos.z);
     let below = source.block_state(pos.x, pos.y - 1, pos.z);
@@ -554,7 +554,7 @@ fn is_standable<S: ChunkSource>(source: &S, pos: BlockPos) -> bool {
 ///
 /// The returned position is the cell's centre in x/z, its floor in y — vanilla's
 /// `DismountHelper` returns a `Vec3` at the block's centre-bottom.
-pub(crate) fn resolve_bed_respawn<S: ChunkSource>(
+pub(crate) fn resolve_bed_respawn<S: ChunkSource + ?Sized>(
     source: &S,
     point: RespawnPoint,
 ) -> Option<Vec3> {

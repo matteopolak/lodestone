@@ -342,6 +342,23 @@ pub const BLOCK_DROPS: &str = "block_drops";
 /// `mob_drops` — pre-26.2 `doMobLoot`. Read by `crate::mobs::MobSim::reap_dead`.
 pub const MOB_DROPS: &str = "mob_drops";
 
+/// `allow_entering_nether_using_portals`. Read by `crate::server`'s portal-travel
+/// tick, which is where vanilla consults it (`Level.isAllowedToEnterPortal`).
+///
+/// **One-directional, exactly like vanilla's.** The rule gates *entering* the
+/// Nether; a player already there can always come home, or turning it off would
+/// trap everyone who happened to be through a portal at the time.
+pub const ALLOW_ENTERING_NETHER_USING_PORTALS: &str = "allow_entering_nether_using_portals";
+
+/// `players_nether_portal_default_delay` — ticks a survival player must stand in a
+/// portal, 80 by default. `NetherPortalBlock.getPortalTransitionTime`.
+pub const PLAYERS_NETHER_PORTAL_DEFAULT_DELAY: &str = "players_nether_portal_default_delay";
+
+/// `players_nether_portal_creative_delay` — the same for a player whose abilities
+/// are `invulnerable` (creative), 0 by default, which is why a creative player
+/// travels the instant they step in.
+pub const PLAYERS_NETHER_PORTAL_CREATIVE_DELAY: &str = "players_nether_portal_creative_delay";
+
 /// Looks a rule's spec up by identifier, tolerating a `minecraft:` namespace.
 ///
 /// The namespace is accepted because the rule *registry* is namespaced
@@ -507,6 +524,38 @@ impl GameRules {
             .and_then(|value| value.as_int())
             .unwrap_or(0)
             .max(0) as u32
+    }
+
+    /// `allow_entering_nether_using_portals` — see the constant's doc for why this
+    /// is asymmetric.
+    #[must_use]
+    pub fn allow_entering_nether_using_portals(&self) -> bool {
+        self.get(ALLOW_ENTERING_NETHER_USING_PORTALS)
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// `players_nether_portal_default_delay` — 80 ticks unless the world says
+    /// otherwise.
+    ///
+    /// The default is spelled out here as well as in [`GAME_RULES`] because
+    /// [`Self::get`] answers `None` for a rule nobody has *set*, and falling back to
+    /// `0` would make every survival portal instant — which looks like a working
+    /// portal rather than a broken rule.
+    #[must_use]
+    pub fn players_nether_portal_default_delay(&self) -> i32 {
+        self.get(PLAYERS_NETHER_PORTAL_DEFAULT_DELAY)
+            .and_then(|value| value.as_int())
+            .unwrap_or(80)
+    }
+
+    /// `players_nether_portal_creative_delay` — 0 ticks unless the world says
+    /// otherwise, which is why a creative player travels immediately.
+    #[must_use]
+    pub fn players_nether_portal_creative_delay(&self) -> i32 {
+        self.get(PLAYERS_NETHER_PORTAL_CREATIVE_DELAY)
+            .and_then(|value| value.as_int())
+            .unwrap_or(0)
     }
 }
 

@@ -249,7 +249,7 @@ impl FireEnv {
 /// **Every world read in this module goes through here.** See the module doc for
 /// why that is load-bearing rather than tidy.
 #[must_use]
-pub fn block_at<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> String {
+pub fn block_at<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> String {
     if env.contains_y(pos.y) {
         world.block_state(pos.x, pos.y, pos.z)
     } else {
@@ -351,7 +351,7 @@ pub const BURN_OUT_ORDER: [((i32, i32, i32), i32); 6] = [
 
 /// `FireBlock::isValidFireLocation` — any of the six face neighbours can burn.
 #[must_use]
-pub fn is_valid_fire_location<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
+pub fn is_valid_fire_location<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
     FACE_OFFSETS.iter().any(|&(dx, dy, dz)| {
         can_burn(&block_at(
             world,
@@ -364,7 +364,7 @@ pub fn is_valid_fire_location<S: ChunkSource>(world: &S, env: FireEnv, pos: Bloc
 /// `FireBlock::canSurvive` — the block below has a sturdy up face, or some
 /// neighbour can burn.
 #[must_use]
-pub fn can_survive<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
+pub fn can_survive<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
     face_sturdy_up(&block_at(world, env, below)) || is_valid_fire_location(world, env, pos)
 }
@@ -372,7 +372,7 @@ pub fn can_survive<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> bo
 /// `FireBlock::getIgniteOdds(LevelReader, BlockPos)` — `0` unless the cell itself
 /// is empty, otherwise the **maximum** ignite odds over its six face neighbours.
 #[must_use]
-pub fn ignite_odds_at<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> u8 {
+pub fn ignite_odds_at<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> u8 {
     if !crate::random_tick::is_air_variant(&block_at(world, env, pos)) {
         return 0;
     }
@@ -430,14 +430,14 @@ pub fn fire_tick_delay(rng: &mut SpawnRng) -> u64 {
 /// once; the biome-precipitation term is absent. Scans upward to build height, so
 /// it is only ever called behind [`FireEnv::raining`].
 #[must_use]
-pub fn is_raining_at<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
+pub fn is_raining_at<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
     env.raining && sky_exposed(world, env, pos)
 }
 
 /// `Level::canSeeSky` plus the heightmap term — nothing motion-blocking between
 /// `pos` and build height.
 #[must_use]
-pub fn sky_exposed<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
+pub fn sky_exposed<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
     let top = env.min_y + env.height;
     let mut y = pos.y + 1;
     while y < top {
@@ -452,7 +452,7 @@ pub fn sky_exposed<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> bo
 /// `FireBlock::isNearRain` — raining at this cell or any of its four horizontal
 /// neighbours.
 #[must_use]
-pub fn is_near_rain<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
+pub fn is_near_rain<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> bool {
     if !env.raining {
         return false;
     }
@@ -469,7 +469,7 @@ pub fn is_near_rain<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> b
 /// The five booleans are the client's rendering input: a fire with no floor draws
 /// itself against whichever walls can burn.
 #[must_use]
-pub fn state_for_placement<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> String {
+pub fn state_for_placement<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> String {
     let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
     let below_state = block_at(world, env, below);
     if !can_burn(&below_state) && !face_sturdy_up(&below_state) {
@@ -491,7 +491,7 @@ pub fn state_for_placement<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPo
 /// `BaseFireBlock::getState` — soul fire over a soul-fire base block, otherwise
 /// `FireBlock::getStateForPlacement`.
 #[must_use]
-pub fn state_at<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> String {
+pub fn state_at<S: ChunkSource + ?Sized>(world: &S, env: FireEnv, pos: BlockPos) -> String {
     let below = block_at(world, env, BlockPos::new(pos.x, pos.y - 1, pos.z));
     if SOUL_FIRE_BASE.contains(&base_name(&below)) {
         return SOUL_FIRE.to_owned();
@@ -502,7 +502,7 @@ pub fn state_at<S: ChunkSource>(world: &S, env: FireEnv, pos: BlockPos) -> Strin
 /// `FireBlock::getStateWithAge` — [`state_at`] with `age` written over it, but
 /// only when the answer really is ordinary fire (soul fire has no `age`).
 #[must_use]
-pub fn state_with_age<S: ChunkSource>(
+pub fn state_with_age<S: ChunkSource + ?Sized>(
     world: &S,
     env: FireEnv,
     pos: BlockPos,
@@ -571,7 +571,7 @@ pub fn ticks_after_edit(pos: BlockPos) -> Vec<ScheduledTick<String>> {
 /// `pos` need not still hold fire: a tick whose cell has been replaced since it
 /// was scheduled returns after the reschedule is skipped, so a stale entry costs
 /// one read.
-pub fn run_scheduled_tick<S: ChunkSource>(
+pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
     world: &S,
     env: FireEnv,
     pos: BlockPos,
@@ -706,7 +706,7 @@ pub fn run_scheduled_tick<S: ChunkSource>(
 /// neighbour's burn odds, so a check against stone still costs one draw. That is
 /// the single easiest thing here to "optimise" into a divergent RNG stream.
 #[allow(clippy::too_many_arguments)]
-fn check_burn_out<S: ChunkSource>(
+fn check_burn_out<S: ChunkSource + ?Sized>(
     world: &S,
     env: FireEnv,
     pos: BlockPos,

@@ -1761,6 +1761,45 @@ pub trait ServerProtocol: Send + Sync {
         Vec::new()
     }
 
+    /// Encodes a **dimension change** — the same `ClientboundRespawnPacket` pair
+    /// [`encode_respawn`](Self::encode_respawn) sends, aimed at another level.
+    ///
+    /// # Why this is not `encode_respawn` with an argument
+    ///
+    /// The two differ in the one field that decides what the client throws away.
+    /// `PlayerList.respawn` passes `KEEP_ALL_DATA` (`KEEP_ATTRIBUTE_MODIFIERS |
+    /// KEEP_ENTITY_DATA`) for a dimension change and **zero** for a death, and
+    /// `encode_respawn`'s own doc comment explains why zero is right there: it is
+    /// what makes the client rebuild its player state. Rebuilding player state is
+    /// exactly what a portal trip must *not* do — inventory, XP and health survive
+    /// a trip — so folding the two into one encoder with a boolean would leave the
+    /// dangerous default (`0`) one forgotten argument away.
+    ///
+    /// `dimension` is the destination *level key* (`minecraft:the_nether`), not a
+    /// holder id: mapping a key to the `dimension_type` index its own
+    /// [`encode_registry_data`](Self::encode_registry_data) published is the
+    /// protocol family's business, and a version-free caller cannot know it. An
+    /// implementation that does not recognise the key must emit **nothing** rather
+    /// than guess a holder id, because a wrong id reframes every subsequent chunk
+    /// against the wrong build height.
+    ///
+    /// # The empty return is load-bearing
+    ///
+    /// The default emits nothing, and `crate::server`'s travel path treats an empty
+    /// list as "this protocol cannot change dimension" and **does not move the
+    /// player**. That is the difference between a family without Nether support
+    /// having no portals and having portals that silently drop players into terrain
+    /// their client is still framing as the overworld.
+    fn encode_dimension_change(
+        &self,
+        dimension: &str,
+        spawn: Vec3,
+        mode: GameMode,
+    ) -> Vec<ServerDirective> {
+        let _ = (dimension, spawn, mode);
+        Vec::new()
+    }
+
     /// Encodes a difficulty confirmation (vanilla
     /// `ClientboundChangeDifficultyPacket`, wire id `change_difficulty`),
     /// sent back to the requesting connection after
@@ -2396,6 +2435,15 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_player_combat_kill(&self, player_entity_id: i32, message: &Text) -> ServerDirective {
         (**self).encode_player_combat_kill(player_entity_id, message)
+    }
+
+    fn encode_dimension_change(
+        &self,
+        dimension: &str,
+        spawn: Vec3,
+        mode: GameMode,
+    ) -> Vec<ServerDirective> {
+        (**self).encode_dimension_change(dimension, spawn, mode)
     }
 
     fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {

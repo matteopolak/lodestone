@@ -138,6 +138,16 @@ mod command;
 /// it was an island, which is part of how the island survived.
 pub mod commands;
 mod composter;
+/// The dimensions this server hosts and their geometry (`docs/nether-portals.md`).
+/// Public because [`ChunkSource::sibling`] and [`ChunkSource::dimension`] name
+/// [`dimension::Dimension`], and because a host building a multi-dimension world
+/// constructs [`dimension::DimensionalSource`] itself.
+pub mod dimension;
+/// Nether portal frame detection, ignition, destination search and the per-player
+/// transition counter (`docs/nether-portals.md`). Public for the same reason
+/// [`fire`] is: anything that writes a `nether_portal` block owes
+/// [`portal::PortalIndex`] an entry, or the return trip builds a duplicate.
+pub mod portal;
 /// Server-side `doClick` (the container-click state machine): derives the result
 /// of a click from the slot/button/click-type the wire carries, rather than
 /// applying the client's claimed slot diff.
@@ -309,7 +319,9 @@ pub use brewing::{
     BREW_TIME_TICKS, Bottle, BottleKind, BrewTick, BrewingStand, FUEL_USES, has_mix, is_ingredient,
     mix_bottle,
 };
-pub use chunk::{ChunkColumn, ChunkSource, OverworldChunkSource, WorldgenChunkSource};
+pub use chunk::{
+    ChunkColumn, ChunkSource, NetherChunkSource, OverworldChunkSource, WorldgenChunkSource,
+};
 // Issue #505: `chunk_store::ChunkStore` itself stays crate-private (its methods
 // are `pub(crate)` and `IntegratedServer` is the only thing that should build
 // one), but its **capacity policy** is public, for one reason: the policy is a
@@ -399,8 +411,8 @@ pub use tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 pub use weather::{WeatherEvent, WeatherFeed, WeatherState};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{
-    bundled_biome_spawners, bundled_worldgen_serves, overworld_chunk_source, overworld_generator,
-    BUNDLED_WORLDGEN_SCOPE,
+    bundled_biome_spawners, bundled_worldgen_serves, nether_chunk_source, nether_generator,
+    overworld_chunk_source, overworld_generator, BUNDLED_WORLDGEN_SCOPE,
 };
 
 // Re-exported so a caller (e.g. the shell's local world) can name the generator
