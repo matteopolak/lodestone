@@ -44,7 +44,8 @@ use crate::camera::Camera;
 use crate::cloud_mesh::{CloudCells, CloudFaceCache};
 use crate::fog::{VoidFog, scale_gamma};
 use crate::sky::{
-    CLOUD_FANCY_RADIUS_CELLS, CloudStatus, STAR_FIELD_SEED, SUNRISE_MIN_ALPHA, build_star_field,
+    CLOUD_FANCY_RADIUS_CELLS, CloudStatus, STAR_FIELD_SEED, SUNRISE_MIN_ALPHA, SkyMode,
+    build_star_field,
     celestial_quad_positions, celestial_quad_uvs, celestial_rotation_matrix, cloud_color_for_time_of_day,
     cloud_fancy_max_faces, cloud_plane_geometry, fancy_cloud_geometry_cached, fog_color_for_time_of_day,
     moon_phase_index_for_time_of_day, quad_indices, sky_color_for_time_of_day, sky_disc_indices,
@@ -862,6 +863,20 @@ pub struct SkyFrame {
     /// selected mode's geometry is built, so `Off` is a real saving rather than an
     /// invisible draw — see [`Self::render`](SkyRenderer::render)'s selection.
     pub cloud_status: CloudStatus,
+    /// Which sky this *dimension* draws — vanilla's `DimensionType.Skybox`, not a
+    /// graphics option. [`SkyMode::None`] (the Nether) suppresses every element of
+    /// this pass and the clouds with it, leaving the frame clear as the whole sky.
+    ///
+    /// Defaults to [`SkyMode::Overworld`], so every existing caller is
+    /// byte-identical to its pre-`SkyMode` behaviour. Set it with
+    /// [`with_sky_mode`](Self::with_sky_mode).
+    ///
+    /// **This is the field that decides whether the Nether renders under the
+    /// overworld sky.** Fog colour and the frame clear were already
+    /// dimension-aware, so the Nether's horizon was the right red while the sun,
+    /// the moon, the star field and the cloud deck all still drew overhead — the
+    /// half of "wrong sky" that a fog colour cannot fix.
+    pub sky_mode: SkyMode,
 }
 
 impl SkyFrame {
@@ -877,6 +892,7 @@ impl SkyFrame {
             void_fog: VoidFog::DISABLED,
             sky_fog_end: crate::sky::SKY_FOG_END_DISTANCE,
             cloud_status: CloudStatus::default(),
+            sky_mode: SkyMode::default(),
         }
     }
 
@@ -885,6 +901,41 @@ impl SkyFrame {
     pub fn with_cloud_status(mut self, cloud_status: CloudStatus) -> Self {
         self.cloud_status = cloud_status;
         self
+    }
+
+    /// Sets [`sky_mode`](Self::sky_mode) — the dimension's own `Skybox`.
+    #[must_use]
+    pub fn with_sky_mode(mut self, sky_mode: SkyMode) -> Self {
+        self.sky_mode = sky_mode;
+        self
+    }
+
+    /// Whether this frame draws any sky **geometry** at all (disc, sunrise band,
+    /// sun, moon, stars).
+    ///
+    /// Pure and public so a gate can assert the Nether draws nothing overhead
+    /// without a GPU adapter — the counterpart to
+    /// [`resolve_colors`](Self::resolve_colors) for the colours.
+    #[must_use]
+    pub const fn draws_sky_geometry(&self) -> bool {
+        self.sky_mode.draws_sky_geometry()
+    }
+
+    /// Whether this frame draws clouds.
+    ///
+    /// **Two independent gates**, which is the whole reason this is a method
+    /// rather than a field read: the player's own Clouds option
+    /// ([`cloud_status`](Self::cloud_status)) *and* the dimension's cloud-colour
+    /// alpha, which vanilla checks as `ARGB.alpha(cloudColor) > 0` in
+    /// `LevelRenderer` before it even adds the cloud pass. The Nether declares no
+    /// `minecraft:visual/cloud_color`, and the attribute's registered default is
+    /// `0` — fully transparent — so a Nether cloud deck is suppressed by the
+    /// *dimension*, with the graphics option still on FANCY. Folding both here
+    /// keeps a caller from reproducing half the rule.
+    #[must_use]
+    pub const fn draws_clouds(&self) -> bool {
+        self.sky_mode.draws_sky_geometry()
+            && (self.cloud_status.draws_flat_quad() || self.cloud_status.draws_extruded_cells())
     }
 
     /// Sets the horizon end of the gradient (see
@@ -1334,6 +1385,44 @@ impl SkyRenderer {
         frame: &SkyFrame,
         clear: wgpu::Color,
     ) {
+        // `DimensionType.Skybox.NONE` — the Nether. Vanilla wraps its *whole*
+        // sky pass in `if (state.skybox != DimensionType.Skybox.NONE)`
+        // (`LevelRenderer.addSkyPass`), so there is no disc, no sunrise band, no
+        // sun, no moon and no stars; its separate `"clear"` pass at the fog
+        // colour still runs, and that clear is the entire sky the player sees.
+        //
+        // The clear still happens **here** rather than being skipped with
+        // everything else, because in this renderer the sky pass *is* the clear
+        // (see this method's `clear` parameter): returning without opening a pass
+        // would leave the target untouched, and the block pass below switches to
+        // `LoadOp::Load` whenever the sky "drew" — reading an untouched or
+        // previous-frame target as garbage. So `None` is "clear and draw
+        // nothing", never "do nothing".
+        //
+        // Clouds are gone with it, and not because of this branch: see
+        // `SkyFrame::draws_clouds` for why the Nether's cloud alpha is zero in
+        // vanilla too. This early return means neither cloud geometry is even
+        // built, so the FANCY walk's per-frame cost goes with it.
+        if !frame.draws_sky_geometry() {
+            let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("lodestone-sky-pass-clear-only"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            return;
+        }
+
         let time_of_day = frame.time_of_day;
         let view_proj = camera.sky_view_projection();
         queue.write_buffer(
@@ -1591,6 +1680,65 @@ impl SkyRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Nether frame draws no sky geometry and no clouds, **and the clouds half
+    /// is asserted with the graphics option left on FANCY** — which is the point.
+    ///
+    /// The two suppressions have different sources in vanilla (the pass gate reads
+    /// `DimensionType.Skybox`, the cloud gate reads `ARGB.alpha(cloudColor) > 0`),
+    /// so a Nether frame whose `cloud_status` is `Off` cannot tell you whether
+    /// `draws_clouds` consults the dimension at all. Setting FANCY explicitly is
+    /// what makes this arm able to fail: with the dimension term dropped from
+    /// `draws_clouds`, the overworld row still passes and this one does not.
+    #[test]
+    fn a_nether_frame_draws_no_sky_geometry_and_no_clouds_with_fancy_selected() {
+        let nether = SkyFrame::new(6_000, [0.2, 0.02, 0.02])
+            .with_cloud_status(CloudStatus::Fancy)
+            .with_sky_mode(SkyMode::None);
+        assert!(
+            !nether.draws_sky_geometry(),
+            "the Nether draws no disc, band, sun, moon or stars"
+        );
+        assert!(
+            !nether.draws_clouds(),
+            "the Nether's cloud-colour alpha is 0, so FANCY must still draw nothing"
+        );
+
+        let overworld = SkyFrame::new(6_000, [0.47, 0.65, 1.0]).with_cloud_status(CloudStatus::Fancy);
+        assert!(
+            overworld.draws_sky_geometry(),
+            "the default mode must be the overworld sky — every pre-SkyMode caller \
+             relies on it"
+        );
+        assert!(overworld.draws_clouds(), "FANCY clouds in the overworld");
+        assert!(
+            !overworld
+                .with_cloud_status(CloudStatus::Off)
+                .draws_clouds(),
+            "the player's own Clouds option must still suppress clouds in a \
+             sky-drawing dimension — the dimension gate must not have replaced it"
+        );
+    }
+
+    /// The colours are **unchanged** by the mode, and that is deliberate rather
+    /// than incidental: `clear_color` is what the Nether's entire sky *is*, so if
+    /// `SkyMode::None` had also zeroed the resolved fog colour the fix would have
+    /// painted a black overhead void instead of the red haze.
+    #[test]
+    fn the_sky_mode_does_not_touch_the_resolved_clear_colour() {
+        let base = SkyFrame::new(6_000, [0.2, 0.02, 0.02]).with_fog_color([0.2, 0.02, 0.02]);
+        let nether = base.with_sky_mode(SkyMode::None);
+        assert_eq!(
+            base.clear_color(64.0),
+            nether.clear_color(64.0),
+            "the frame clear is dimension-coloured upstream (Sim::fog_settings); \
+             the skybox gate must not alter it"
+        );
+        assert!(
+            nether.clear_color(64.0)[0] > nether.clear_color(64.0)[2],
+            "a Nether clear must still be red-dominant, not black"
+        );
+    }
 
     /// Issue #399's anti-island check, and the only one in the tree that needs no
     /// GPU adapter: the render distance can only reach the disc if the *shader*

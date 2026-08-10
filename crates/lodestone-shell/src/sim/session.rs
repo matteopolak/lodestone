@@ -224,6 +224,14 @@ impl Sim {
         // session either, for the same reason `death_message` does not: a
         // quit-to-title and reconnect must start un-won.
         self.won = false;
+        // The dimension edge detector and the portal-transition effect, in one
+        // call so this line and the field list in `sim/dimension.rs` cannot drift
+        // — the same reason `reset_local_player` is one call rather than a
+        // field-by-field reset. Leaving `applied_dimension` set would make the
+        // *next* session's login look like a dimension change and drop the
+        // terrain it had just streamed; leaving the portal intensity set would
+        // paint the overlay over the title screen.
+        self.reset_dimension_state();
 
         // §4.1(c): the entity interpolator no longer owns a `World` to throw away,
         // so its tracks are cleared explicitly. Replacing the whole interpolator

@@ -410,23 +410,87 @@ unrelated features that happen to look similar:
    accumulator — imperceptible for a continuously looping spin with no fixed
    start reference. Documented as a simplification, not silently taken.
 
-**Neither intensity has a live producer yet, and that is a real, honestly
-reported gap — not a stub.** `ScreenEffects::nausea_intensity`/
-`portal_intensity` default to `0.0`, at which `view_projection_warped` is
-*provably* identical to plain `view_projection`
-(`view_projection_warped_matches_plain_view_projection_when_inactive`), so
-every existing caller is unaffected. But unlike freeze (#139, whose mechanic
-already existed in `lodestone-physics`) or spyglass (#154, whose mechanic
-already existed via `UsingItem`/held-item), **no potion-effect-duration
-tracker and no nether-portal-proximity tracker exist anywhere in this
-codebase** to compute vanilla's `getEffectBlendFactor(NAUSEA, ...)` or
-`Entity.portalEffectIntensity`. Both live in `lodestone-ecs`/
-`lodestone-physics`, outside this change's ownership, and neither is
-currently claimed by another agent the way #212 (freezing) was. The render
-mechanism — geometry, pipeline, projection warp, gating, mutual exclusion —
-is real, tested (including two GPU-gated pixel gates and eight unit tests
-across `camera.rs`/`screen_effects.rs`) and wired all the way to
-`RenderState::render_inner`; it is simply never told the truth yet, the same
+**`portal_intensity` now has a live producer. `nausea_intensity` still does
+not — read the split, because this paragraph used to cover both.** The two
+were reported together as one gap and they had two different causes:
+
+- **Portal — closed.** `Sim::portal_effect_intensity` (`sim/dimension.rs`)
+  is the producer, and `app/redraw.rs` feeds it into `ScreenEffects`. What
+  was actually missing was never a "proximity tracker": vanilla's
+  `LocalPlayer.handlePortalTransitionEffect` needs only the player's own
+  bounding box and the block states it overlaps, both of which this crate
+  already had (`PlayerState::bounding_box`, `Sim::block_at_world`). The
+  original note asked for a subsystem where a predicate would do.
+- **Nausea — still open, and genuinely.** No potion-effect-duration tracker
+  exists to compute `getEffectBlendFactor(MobEffects.NAUSEA, partialTicks)`.
+  That is `lodestone-ecs` work and remains at an honest `0.0`, at which
+  `view_projection_warped` is *provably* identical to plain
+  `view_projection`
+  (`view_projection_warped_matches_plain_view_projection_when_inactive`).
+
+### The portal curve is asymmetric, and that is the whole feel of it
+
+`LocalPlayer.handlePortalTransitionEffect`, ported in `sim/dimension.rs` as
+`Sim::tick_portal_effect`:
+
+| state | step per tick | ticks to the limit |
+|---|---|---|
+| standing in a `nether_portal` cell | `+0.0125` | 80 (4 s) |
+| anywhere else, while `> 0` | `-0.05` | 20 (1 s) |
+| at rest | `0.0` | — |
+
+Clamped to `0.0..=1.0`. **A linear fade is the wrong answer in both
+directions**: the decay is exactly 4× the ramp, so the effect creeps in over
+four seconds and snaps out in one, and a symmetric curve reads as sluggish
+on exit and abrupt on entry. `the_portal_curve_ramps_over_eighty_ticks_and_decays_over_twenty`
+asserts the ratio as its own claim, so mistyping either constant to match
+the other cannot pass.
+
+Two more things the port does not get to simplify:
+
+- **It is ticked at 20 Hz, not per frame**, for the same reason chest lids
+  and bell shakes are. Per-frame stepping makes the four-second ramp-in
+  1.3 s at 60 fps — a frame-rate-dependent animation speed.
+- **It is read *interpolated*, not sampled.** `Sim::portal_effect_intensity`
+  is `lerp(interp_alpha, prev, current)`, mirroring vanilla's
+  `Mth.lerp(partialTicks, oPortalEffectIntensity, portalEffectIntensity)`.
+  Sampling the raw tick value paints a visible 20-step staircase across the
+  ramp.
+
+### One scalar, two effects, two different shapes
+
+The brief question "is the value the overlay wants the warp term or the
+overlay alpha" has the answer **both, and they are not the same function of
+it** — which is why `ScreenEffects` carries the raw intensity rather than a
+pre-multiplied strength:
+
+| consumer | what it does with the scalar |
+|---|---|
+| overlay alpha | the value **directly**, and portal *wins outright* over nausea (`if portal > 0 … else if nausea > 0`), never blended |
+| warp amount | `max(portal, nausea)` |
+| warp speed | `(portal * 20 + nausea * 7) / (portal + nausea)` — a portal spins ~2.9× faster than nausea at the same amount |
+
+A single scalar driving all three through one multiply would be visibly
+wrong at the ends: at low portal intensity with nausea active the *speed*
+blend is dominated by nausea while the *overlay* must already be pure
+portal.
+
+**The inside-portal predicate is vanilla's own, not a proximity radius.**
+`Sim::eye_or_body_in_nether_portal` deflates the player's bounding box by
+`1.0E-5` (vanilla's `Entity.checkInsideBlocks`) and asks whether any cell it
+overlaps is `minecraft:nether_portal`. A cell test is *exact* rather than an
+approximation, and that needs saying: `NetherPortalBlock` does not override
+`getEntityInsideCollisionShape`, so its inside-shape is the full cube even
+though its collision shape is a thin slab. The match is on the **block
+name**, because `nether_portal` has two states (`axis=x`/`axis=z`) and
+matching one state id would fire in half the portals in the world depending
+on which way the frame was built —
+`both_portal_axes_count_and_neighbouring_blocks_do_not` pins both ids and
+checks obsidian and air do not count.
+
+The render mechanism — geometry, pipeline, projection warp, gating, mutual
+exclusion — was already real, tested and wired all the way to
+`RenderState::render_inner`. It was simply never told the truth, the same
 shape `on_fire` was in before issue #112 closed it.
 
 ### Draw order and gating
@@ -602,12 +666,16 @@ the exact-value gate: it predicts `base_fov * spyglass_fov_modifier(true)`
 (`7.0` from vanilla's `70.0` base) rather than asserting only that the FOV
 changed, with a non-spyglass-item and a not-yet-pressed negative control.
 
-**`nausea_intensity`/`portal_intensity` remain honestly at `0.0`** — no
-potion-effect-duration tracker or nether-portal-proximity tracker exists
-anywhere in this codebase yet to compute vanilla's
-`getEffectBlendFactor(NAUSEA, ...)`/`Entity.portalEffectIntensity`. Both
-would be `lodestone-ecs`/`lodestone-physics` work, outside every file this
-section discusses. Exactly `on_fire`'s pre-#112 shape.
+**`nausea_intensity` remains honestly at `0.0`** — no potion-effect-duration
+tracker exists anywhere in this codebase yet to compute vanilla's
+`getEffectBlendFactor(NAUSEA, ...)`, which would be `lodestone-ecs` work.
+Exactly `on_fire`'s pre-#112 shape.
+
+**`portal_intensity` is live**, produced by `Sim::portal_effect_intensity`
+off `Sim::tick_portal_effect` — see "The portal curve is asymmetric" above.
+This paragraph used to name a "nether-portal-proximity tracker" as the
+blocker for it; there is no such subsystem in vanilla either, and the real
+requirement was a bounding-box/block-state predicate this crate already had.
 
 ## A session-scoped flag needs an explicit reset (issue #390)
 

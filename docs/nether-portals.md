@@ -68,6 +68,67 @@ post-increment counter reaches the delay, and holds a 10-tick cooldown afterward
 5. rebuilds the `ViewTracker` and installs a fresh `JoinChunkStream::ringed` over the
    whole square.
 
+### Arrival, on the client
+
+The server half above puts a player in real Nether terrain. Making the trip *look*
+like a trip is the client's half, and it hangs off one event: `ClientEvent::Respawned`
+carries the destination dimension, so **the same packet reports a death-respawn and a
+portal trip** and the client has to tell them apart.
+
+`Sim::apply_respawn` (`crates/lodestone-shell/src/sim/dimension.rs`) is where that
+happens, and the comparison is the whole safety argument — with it dropped, every
+death in the game would drop the entity index and throw away every meshed column,
+which is a far worse bug than the leftover mobs it exists to fix.
+
+| what the client does on a dimension **change** | what it does on a same-dimension respawn |
+|---|---|
+| drops every other entity (`reset_ingest_entities` + `reset_entity_tracks`) | nothing |
+| forgets every meshed column and flushes in-flight mesh jobs (`TerrainMesh::end_session`) | nothing |
+| resets the interpolator accumulator | nothing |
+| switches the sky pass off (`Sim::sky_mode`) and the fog to the Nether's red | — (per-frame reads, no edge needed) |
+
+Nothing player-scoped is touched on either path — inventory, XP, health, hunger and
+air all cross the portal, and `a_dimension_change_leaves_the_inventory_xp_and_health_alone`
+asserts concrete non-default values rather than merely that the components still
+exist. Getting that split wrong shows up as an emptied inventory on the first trip.
+
+The dimension travels on `NetUpdate::Respawned`'s own field rather than being read
+back off the shared handle at the consumer, and that is not a style choice:
+`Driver::emit` folds the read model (`read_model.apply(&event)`) **before** it queues
+the event, so by the time the shell drains its channel a frame later
+`Sim::dimension()` already reports the *new* dimension — a consumer reading it there
+would compare the new dimension against itself and never see a change at all.
+
+The portal overlay and warp are driven by `Sim::portal_effect_intensity`; the curve
+and the two-consumer split are in [`screen-overlays.md`](./screen-overlays.md).
+
+### Is the `forget_chunk` sweep redundant now?
+
+**No, and the reason is ordering rather than effort.** The client now clears
+everything it can clear safely, but the decoded chunk **store** is deliberately not
+among them:
+
+- the store is written by the **net thread** as packets decode;
+- the shell's reset runs on the **render thread**, when it next drains
+  `NetClient::poll`;
+- columns for the *new* dimension can already be in the store by then, and a bulk
+  clear there would delete terrain no server will resend — trading leftover geometry
+  for a permanent hole.
+
+Dropping the *meshed* columns is safe in exactly the way clearing the store is not: a
+column still in the store is re-meshed the moment anything dirties it, so an
+over-eager mesh drop costs a re-mesh and an over-eager store clear costs the chunk.
+
+So the sweep is still load-bearing, and it is also what makes step 1 of
+`travel_through_portal`'s ordering argument true: `forget_chunk` empties the store
+*from the net thread*, in packet order, before the respawn. The honest client-side fix
+lives at that same point — `lodestone-client`'s `Driver::emit`, in the
+`ClientEvent::Respawned` arm, which runs on the net thread with `read_model`'s
+world-write guard reachable and before the next packet decodes. That would matter for
+a **vanilla** server, which sends no such sweep; it changes nothing against this one.
+It is left undone rather than done badly: it is `lodestone-client` work, and doing it
+in the shell would be the racy version described above wearing a fix's clothes.
+
 ## How to change it
 
 * **Adding the End** is a `Dimension::End` variant, a source in `with_nether` (rename
@@ -141,12 +202,12 @@ Honest list, so nothing here reads as finished:
   the search and the index. It does not drive a live connection walking into a portal
   for 81 ticks, so the `forget_chunk` sweep, the respawn framing and the re-stream are
   verified by construction only.
-* **Client-side teardown on arrival is the client's gap, worked around here.** The
-  shell's `Respawned` handler does not clear the chunk store, drop entities or switch
-  the skybox, and `ScreenEffects::portal_intensity` is hardcoded `0.0` so the fully
-  implemented portal overlay and warp can never fire. The server's `forget_chunk`
-  sweep covers the chunk store; the sky, the leftover entities and the overlay are
-  client work.
+* **Client-side teardown on arrival is done except for the chunk store.** The sky pass,
+  the leftover entities, the meshed columns and the portal overlay are all wired now —
+  see "Arrival, on the client" above. What is still worked around here is the decoded
+  **chunk store**: the `forget_chunk` sweep remains load-bearing because the only
+  race-free place for a client-side clear is `lodestone-client`'s `Driver::emit`, on the
+  net thread. That gap only shows against a *vanilla* server, which sends no sweep.
 * **Flint and steel lights portals and nothing else**, and takes no durability damage.
   A plain fire needs `fire::ticks_after_edit` and a live block-tick queue, and an
   inert fire block looks like a working one. This item did nothing at all before.

@@ -480,6 +480,15 @@ impl Sim {
             // The tick was counted and withdrawn by `FrameClock::take_tick` at the
             // top of this loop, so there is nothing to book-keep here any more.
             self.tick_particles();
+            // The portal-transition screen effect, on the same fixed 20 Hz for the
+            // same reason the lids and bells below are: vanilla's
+            // `LocalPlayer.handlePortalTransitionEffect` ramps by +0.0125 and
+            // decays by -0.05 **per tick**, so advancing it per frame would make
+            // the four-second ramp-in a function of the frame rate — 1.3 s at
+            // 60 fps. After the physics run above, because the predicate is "does
+            // the player's bounding box overlap a portal cell" and that is a fact
+            // about where the tick left them, not where it started.
+            self.tick_portal_effect();
             // Chest lids (issue #23), on the same fixed 20 Hz as everything else
             // here: `ChestLidController.tickLid()` ramps by ±0.1 per tick, so a
             // lid takes exactly 10 ticks to swing. Advancing it per *frame*
