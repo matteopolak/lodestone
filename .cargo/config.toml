@@ -1,32 +1,9 @@
-# Cargo aliases for the workspace's `xtask` automation crate.
-#
-# This makes the documented `cargo xtask <command>` invocations work as a
-# shorthand for `cargo run --package xtask --`, e.g.:
-#   cargo xtask check-isolation
-#   cargo xtask gen-packet-ids --source minecraft-data --version 1.8 --protocol 47
 [alias]
 xtask = "run --quiet --package xtask --"
 
-# ---------------------------------------------------------------------------
-# sccache — ACTIVE since 2026-08-04 (measurements and playbook in
-# docs/build-caching.md). Every builder needs the binary: local dev has
-# /opt/homebrew/bin/sccache (Homebrew), CI installs it via
-# mozilla-actions/sccache-action@v0.0.11. An environment without it can
-# override the wrapper off with RUSTC_WRAPPER="" (verified working).
-#
-# Two rules that keep the cache useful:
-# - Build in a PRIVATE dir via the --target-dir FLAG. Never export
-#   CARGO_TARGET_DIR as an env var — sccache hashes CARGO_* env vars into
-#   its keys, and the env-var form measured 0% hits where the flag form
-#   measured 78-94%.
-# - Do not remove/re-add this wrapper casually: flipping it invalidates
-#   every cargo fingerprint (measured), i.e. one full rebuild per target dir.
 [build]
 rustc-wrapper = "/opt/homebrew/bin/sccache"
 
-# 10G is >3x headroom over measured usage (94-129 MB per config/mode pair;
-# ~1-3 GB estimated steady state across the three health-check configs).
-# Applies on sccache server start; does not override an existing env var.
 [env]
 SCCACHE_CACHE_SIZE = "10G"
-# ---------------------------------------------------------------------------
+MACOSX_DEPLOYMENT_TARGET = "26.5"
