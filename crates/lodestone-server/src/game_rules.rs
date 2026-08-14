@@ -329,6 +329,10 @@ pub const SPAWN_MOBS: &str = "spawn_mobs";
 /// `GameRules.SPAWN_PATROLS`. Read by `crate::tick::run_tick_loop`'s
 /// patrol-spawn pass (`MobSim::run_patrol_spawn_cycle`).
 pub const SPAWN_PATROLS: &str = "spawn_patrols";
+/// `GameRules.SPAWN_WANDERING_TRADERS`. Read by
+/// `crate::tick::run_tick_loop`'s wandering-trader spawn cycle
+/// (`crate::mob_spawn::WanderingTraderTimer`).
+pub const SPAWN_WANDERING_TRADERS: &str = "spawn_wandering_traders";
 /// `GameRules.KEEP_INVENTORY`.
 pub const KEEP_INVENTORY: &str = "keep_inventory";
 
@@ -485,6 +489,13 @@ impl GameRules {
     #[must_use]
     pub fn spawn_patrols(&self) -> bool {
         self.boolean(SPAWN_PATROLS)
+    }
+
+    /// `spawn_wandering_traders` — whether the wandering trader spawn cycle
+    /// runs. Read by `crate::tick::run_tick_loop`'s trader-spawn pass.
+    #[must_use]
+    pub fn spawn_wandering_traders(&self) -> bool {
+        self.boolean(SPAWN_WANDERING_TRADERS)
     }
 
     /// `keep_inventory` — whether a player keeps their items through death.

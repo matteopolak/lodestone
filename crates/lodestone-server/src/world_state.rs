@@ -68,13 +68,51 @@
 use std::sync::{Arc, Mutex};
 
 use lodestone_core::Nbt;
-use lodestone_model::Difficulty;
+use lodestone_model::{Difficulty, GameMode};
 
 use crate::game_rules::{GameRuleError, GameRuleValue, GameRules};
 
 /// Ticks in one vanilla day (`Level.TICKS_PER_DAY`). The client takes
 /// `day_time % 24000` to place the sun; nothing here needs to.
 pub const TICKS_PER_DAY: i64 = 24_000;
+
+/// A `/weather` command's request, applied by the world tick loop's own
+/// [`crate::weather::WeatherState`] the pass after it is queued.
+///
+/// # Why a request queue rather than a direct write
+///
+/// `WeatherState` is owned by `crate::tick::run_tick_loop_with_weather` with
+/// **no lock** — the same reason [`crate::sleep::SleepVote`] exists as a
+/// separate caller-side handle rather than letting a connection touch
+/// `SleepState` directly. This is that shape applied to weather: a command
+/// executor cannot reach `raining`/`thundering` at all, so it leaves a
+/// request here instead, and the loop is the only thing that ever turns one
+/// into a field write.
+///
+/// Mirrors `MinecraftServer::setWeatherParameters`'s three call shapes
+/// (`WeatherCommand.setClear`/`setRain`/`setThunder`), each of which sets the
+/// clear/rain/thunder timers and both booleans **directly** rather than
+/// waiting for the timer to count down — the loop applies it the same way
+/// (see its own call site's comment), which is what makes the transition
+/// visible on the very next world tick instead of up to 180,000 ticks later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeatherRequest {
+    /// `/weather clear [<duration>]` — force clear weather.
+    Clear {
+        /// Ticks the clear spell is forced for.
+        duration: i32,
+    },
+    /// `/weather rain [<duration>]` — force rain, thunder off.
+    Rain {
+        /// Ticks the rain spell is forced for.
+        duration: i32,
+    },
+    /// `/weather thunder [<duration>]` — force rain **and** thunder.
+    Thunder {
+        /// Ticks the thunder spell is forced for.
+        duration: i32,
+    },
+}
 
 /// The two halves of vanilla's clock, as [`WorldStateHandle::time`] reports them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -101,6 +139,16 @@ pub struct WorldState {
     /// yet searched", which is what a brand-new world is — see
     /// [`WorldStateHandle::world_spawn`] for why the distinction matters.
     spawn: Option<crate::world_spawn::WorldSpawn>,
+    /// The game mode a **new** player joins in (`/defaultgamemode`) —
+    /// `LevelSettings.DEFAULT`'s `GameType`. Distinct from any joined player's
+    /// own `game_mode` local: a returning player's saved mode always wins over
+    /// this (see `crate::server::serve_connection_inner`'s join arm), so this
+    /// field only ever decides a *fresh* player's first mode.
+    default_game_mode: GameMode,
+    /// A pending `/weather` request the tick loop has not yet consumed. See
+    /// [`WeatherRequest`]'s own doc for why this exists instead of a direct
+    /// write, and [`WorldStateHandle::take_weather_request`] for the consumer.
+    weather_request: Option<WeatherRequest>,
 }
 
 impl Default for WorldState {
@@ -112,6 +160,9 @@ impl Default for WorldState {
             difficulty_locked: false,
             time: WorldTime::default(),
             spawn: None,
+            // `LevelSettings.DEFAULT`'s game type.
+            default_game_mode: GameMode::Survival,
+            weather_request: None,
         }
     }
 }
@@ -334,6 +385,12 @@ impl WorldStateHandle {
         self.with(|state| state.rules.spawn_patrols())
     }
 
+    /// `spawn_wandering_traders` — whether the wandering trader spawn cycle runs.
+    #[must_use]
+    pub fn spawn_wandering_traders(&self) -> bool {
+        self.with(|state| state.rules.spawn_wandering_traders())
+    }
+
     /// Whether mobs vanilla marks `notInPeaceful` may exist — false on `Peaceful`.
     ///
     /// Difficulty's **first** real consumer: before this, nothing read the stored
@@ -350,6 +407,39 @@ impl WorldStateHandle {
     #[must_use]
     pub fn monsters_may_spawn(&self) -> bool {
         self.with(|state| state.difficulty != Difficulty::Peaceful)
+    }
+
+    /// The game mode a new player joins in — `/defaultgamemode`'s read side,
+    /// and what `crate::server::serve_connection_inner`'s join arm falls back
+    /// to when no saved player data names one.
+    #[must_use]
+    pub fn default_game_mode(&self) -> GameMode {
+        self.with(|state| state.default_game_mode)
+    }
+
+    /// Sets the game mode a new player joins in — `/defaultgamemode`'s write
+    /// side. Never touches an already-connected player; see
+    /// [`Self::default_game_mode`]'s own doc for why only a *fresh* join reads
+    /// this.
+    pub fn set_default_game_mode(&self, mode: GameMode) {
+        self.with(|state| state.default_game_mode = mode);
+    }
+
+    /// Queues a `/weather` request for the world tick loop to apply on its next
+    /// pass — see [`WeatherRequest`]'s own doc for why this cannot be a direct
+    /// write. Overwrites whatever the loop has not yet consumed: `/weather
+    /// rain` immediately followed by `/weather clear` before the next tick must
+    /// land on clear, matching vanilla's single mutable `WeatherData` field.
+    pub fn request_weather(&self, request: WeatherRequest) {
+        self.with(|state| state.weather_request = Some(request));
+    }
+
+    /// Takes and clears the pending `/weather` request, if any — the world
+    /// tick loop's own consumer, called once per pass alongside
+    /// [`Self::tick_time`].
+    #[must_use]
+    pub fn take_weather_request(&self) -> Option<WeatherRequest> {
+        self.with(|state| state.weather_request.take())
     }
 
     /// The world spawn point, or `None` if nothing has resolved one for this world
@@ -625,6 +715,44 @@ mod tests {
         assert!(world.monsters_may_spawn());
         assert!(world.set_difficulty(Difficulty::Peaceful));
         assert!(!world.monsters_may_spawn());
+    }
+
+    /// `/defaultgamemode`'s store: defaults to Survival and only a fresh write
+    /// moves it — never anything to do with a joined player's own mode, which
+    /// this file does not track at all.
+    #[test]
+    fn default_game_mode_starts_survival_and_a_write_sticks() {
+        let world = WorldStateHandle::new();
+        assert_eq!(world.default_game_mode(), lodestone_model::GameMode::Survival);
+        world.set_default_game_mode(lodestone_model::GameMode::Creative);
+        assert_eq!(world.default_game_mode(), lodestone_model::GameMode::Creative);
+    }
+
+    /// A `/weather` request queues until taken, and taking it clears it — so a
+    /// second `take` in the same "tick" sees nothing, exactly like
+    /// `WeatherFeed::drain_all`'s single-consumer contract.
+    #[test]
+    fn a_weather_request_is_queued_then_taken_exactly_once() {
+        let world = WorldStateHandle::new();
+        assert_eq!(world.take_weather_request(), None, "nothing queued yet");
+
+        world.request_weather(WeatherRequest::Rain { duration: 12_000 });
+        assert_eq!(
+            world.take_weather_request(),
+            Some(WeatherRequest::Rain { duration: 12_000 })
+        );
+        assert_eq!(world.take_weather_request(), None, "a taken request is gone");
+
+        // A later request overwrites an unconsumed earlier one — the control
+        // that proves this is a single slot, not a queue that would otherwise
+        // deliver both.
+        world.request_weather(WeatherRequest::Rain { duration: 1 });
+        world.request_weather(WeatherRequest::Clear { duration: 2 });
+        assert_eq!(
+            world.take_weather_request(),
+            Some(WeatherRequest::Clear { duration: 2 }),
+            "the later request must win, and only one request must be delivered"
+        );
     }
 
     /// Every clone is the same store — the property both #327 and #328 were
