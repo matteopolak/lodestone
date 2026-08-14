@@ -1882,6 +1882,27 @@ pub struct MobSim<'w> {
     /// patrol-spawn attempt must not shift which roll a mob spawn, a despawn
     /// pass or a tame attempt sees.
     patrol_rng: SpawnRng,
+    /// Vanilla `WanderingTraderSpawner.tickDelay` — ticks remaining before
+    /// the next 1200-tick poll, decremented once per
+    /// [`run_wandering_trader_spawn_cycle`](Self::run_wandering_trader_spawn_cycle)
+    /// call regardless of outcome, exactly as `patrol_next_tick` is.
+    trader_tick_delay: i32,
+    /// Vanilla's saved-data `WanderingTraderData.spawnDelay` — the
+    /// 24000-tick delay nested inside the 1200-tick poll. This crate has no
+    /// save/load for it (see the doc comment on
+    /// [`run_wandering_trader_spawn_cycle`](Self::run_wandering_trader_spawn_cycle)),
+    /// so it resets with every fresh `MobSim` rather than surviving a
+    /// restart.
+    trader_spawn_delay: i32,
+    /// Vanilla's saved-data `WanderingTraderData.spawnChance` — climbs 25→75
+    /// by 25 each time the outer roll is attempted and misses, and resets to
+    /// 25 on an actual spawn.
+    trader_spawn_chance: i32,
+    /// The `random.nextInt(…)` draws
+    /// [`run_wandering_trader_spawn_cycle`](Self::run_wandering_trader_spawn_cycle)
+    /// makes, on its own stream for the same isolation reason
+    /// [`patrol_rng`](Self::patrol_rng) is separate from every other roll.
+    trader_rng: SpawnRng,
 }
 
 /// One live `AbstractBoat` — wire identity, motion, and who is aboard.
@@ -2000,6 +2021,13 @@ impl<'w> MobSim<'w> {
             // subject to every other gate still applying.
             patrol_next_tick: 0,
             patrol_rng: SpawnRng::new(PATROL_SPAWN_SEED),
+            // Vanilla's own field default (`private int tickDelay = 1200;`)
+            // — the constructor sets it explicitly, unlike `nextTick`, so
+            // the first call does not roll before tick 1200.
+            trader_tick_delay: WANDERING_TRADER_TICK_DELAY,
+            trader_spawn_delay: WANDERING_TRADER_SPAWN_DELAY,
+            trader_spawn_chance: WANDERING_TRADER_MIN_SPAWN_CHANCE,
+            trader_rng: SpawnRng::new(WANDERING_TRADER_SPAWN_SEED),
         }
     }
 
@@ -2021,6 +2049,26 @@ impl<'w> MobSim<'w> {
     /// reason [`set_tame_rng`](Self::set_tame_rng) exists.
     pub fn set_patrol_rng(&mut self, rng: SpawnRng) -> &mut Self {
         self.patrol_rng = rng;
+        self
+    }
+
+    /// Replaces the RNG
+    /// [`run_wandering_trader_spawn_cycle`](Self::run_wandering_trader_spawn_cycle)
+    /// draws from — the injection point a trader-spawn gate needs, for the
+    /// same reason [`set_patrol_rng`](Self::set_patrol_rng) exists.
+    pub fn set_trader_rng(&mut self, rng: SpawnRng) -> &mut Self {
+        self.trader_rng = rng;
+        self
+    }
+
+    /// Overwrites [`run_wandering_trader_spawn_cycle`](Self::run_wandering_trader_spawn_cycle)'s
+    /// two nested countdowns directly — the injection point a gate needs to
+    /// stage a sim past the 1200-tick poll and the 24000-tick delay without
+    /// calling the cycle that many times. `0` for either drives the *next*
+    /// call straight to the roll, matching vanilla's own `<= 0` checks.
+    pub fn set_trader_timers(&mut self, tick_delay: i32, spawn_delay: i32) -> &mut Self {
+        self.trader_tick_delay = tick_delay;
+        self.trader_spawn_delay = spawn_delay;
         self
     }
 
@@ -4277,6 +4325,102 @@ impl<'w> MobSim<'w> {
         spawned
     }
 
+    /// Issue #240: the wandering trader's own spawn cycle — vanilla
+    /// `WanderingTraderSpawner.tick`/`spawn`
+    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java`).
+    /// Same shape as [`run_patrol_spawn_cycle`](Self::run_patrol_spawn_cycle):
+    /// a live, player-following `world` snapshot supplied by the caller
+    /// (never `self.world`, which is a stale snapshot — see that method's
+    /// own doc comment for why), a `spawn_wandering_traders` game-rule flag
+    /// the caller reads, and every counter this cycle owns living on `self`
+    /// so the driver need only call this once per tick.
+    ///
+    /// **No persistence**: vanilla stores `tickDelay`/`spawnDelay`/
+    /// `spawnChance` in a `WanderingTraderData` saved-data file, so the
+    /// cycle survives a server restart. This crate has no save/load for
+    /// `MobSim` at all, so every field here resets with a fresh `MobSim` —
+    /// a disclosed gap, not a silent one.
+    ///
+    /// **Simplified from `WanderingTraderSpawner.spawn`**, matching the
+    /// gaps `docs/wandering-trader.md` already discloses for
+    /// [`spawn_wandering_trader`](Self::spawn_wandering_trader) itself:
+    /// no `PoiTypes.MEETING` search (always searches around a random
+    /// player's own position), no `BiomeTags.WITHOUT_WANDERING_TRADER_SPAWNS`
+    /// exclusion, no `hasEnoughSpace` collision check, and no
+    /// `setDespawnDelay`/`setWanderTarget`/`setHomeTo` afterwards (this sim
+    /// has no despawn-delay or home-position fields to set them on).
+    ///
+    /// Returns the trader's entity id on a successful spawn.
+    pub fn run_wandering_trader_spawn_cycle(
+        &mut self,
+        world: &ChunkWorld,
+        spawn_wandering_traders: bool,
+    ) -> Option<i32> {
+        self.trader_tick_delay -= 1;
+        if self.trader_tick_delay > 0 {
+            return None;
+        }
+        self.trader_tick_delay = WANDERING_TRADER_TICK_DELAY;
+        if !spawn_wandering_traders {
+            return None;
+        }
+        self.trader_spawn_delay -= WANDERING_TRADER_TICK_DELAY;
+        if self.trader_spawn_delay > 0 {
+            return None;
+        }
+        self.trader_spawn_delay = WANDERING_TRADER_SPAWN_DELAY;
+        let chance = self.trader_spawn_chance;
+        self.trader_spawn_chance = (self.trader_spawn_chance
+            + WANDERING_TRADER_SPAWN_CHANCE_INCREASE)
+            .min(WANDERING_TRADER_MAX_SPAWN_CHANCE);
+        // `random.nextInt(100) <= chanceToSpawn` is the entry condition;
+        // missing it draws nothing further and leaves the climbed chance
+        // in place for next time.
+        if self.trader_rng.next_int(100) > chance {
+            return None;
+        }
+        if self.players.is_empty() {
+            // vanilla `spawn`'s `getRandomPlayer() == null` arm returns
+            // `true` — a "success" for chance-reset purposes — without
+            // drawing further or spawning anything.
+            self.trader_spawn_chance = WANDERING_TRADER_MIN_SPAWN_CHANCE;
+            return None;
+        }
+        // `spawn`'s own extra one-in-ten gate, drawn only once a player
+        // exists — vanilla's short-circuit on `player == null` above skips
+        // this draw entirely, which is why the empty-players check has to
+        // come first rather than being folded into a single `if`.
+        if self.trader_rng.next_int(10) != 0 {
+            return None;
+        }
+        let player_pos = self.players
+            [self.trader_rng.next_int(self.players.len() as i32) as usize]
+            .perception
+            .position;
+        let reference = (player_pos.x.floor() as i32, player_pos.z.floor() as i32);
+        // `findSpawnPositionNear`: up to 10 candidates within a 48-block
+        // radius, first one with a real surface wins. No `isSpawnPositionOk`
+        // check beyond "a column exists here" — see the gaps disclosed
+        // above.
+        let mut spawn_pos = None;
+        for _ in 0..10 {
+            let x = reference.0 + self.trader_rng.next_int(96) - 48;
+            let z = reference.1 + self.trader_rng.next_int(96) - 48;
+            if let Some(surface) = surface_y(world, x, z) {
+                spawn_pos = Some(Vec3::new(
+                    f64::from(x) + 0.5,
+                    f64::from(surface + 1),
+                    f64::from(z) + 0.5,
+                ));
+                break;
+            }
+        }
+        let pos = spawn_pos?;
+        let (trader_id, _llamas) = self.spawn_wandering_trader(pos);
+        self.trader_spawn_chance = WANDERING_TRADER_MIN_SPAWN_CHANCE;
+        Some(trader_id)
+    }
+
     /// Whether a death rolls its loot table — the `mob_drops` game rule, handed in
     /// by `crate::tick::run_tick_loop` once a tick (this type is version-free and
     /// holds no world-state handle). Defaults to vanilla's own default, `true`, so a
@@ -4899,6 +5043,19 @@ const PATROL_SPAWN_SEED: u64 = 0x5041_5452_4f4c_5f52;
 /// unlike [`patrol_group_size`], which approximates a genuinely continuous
 /// vanilla formula.
 const PATROL_TIMELINE_GATE: u64 = 120_000;
+
+/// Vanilla `WanderingTraderSpawner`'s own constants —
+/// `DEFAULT_TICK_DELAY`/`DEFAULT_SPAWN_DELAY`/`MIN_SPAWN_CHANCE`/
+/// `MAX_SPAWN_CHANCE`/`SPAWN_CHANCE_INCREASE`.
+const WANDERING_TRADER_TICK_DELAY: i32 = 1200;
+const WANDERING_TRADER_SPAWN_DELAY: i32 = 24_000;
+const WANDERING_TRADER_MIN_SPAWN_CHANCE: i32 = 25;
+const WANDERING_TRADER_MAX_SPAWN_CHANCE: i32 = 75;
+const WANDERING_TRADER_SPAWN_CHANCE_INCREASE: i32 = 25;
+
+/// Default seed for [`MobSim::trader_rng`]. See [`TAME_ROLL_SEED`] for why
+/// it is separate.
+const WANDERING_TRADER_SPAWN_SEED: u64 = 0x5452_4144_455f_524e;
 
 /// The entity-type key every experience orb streams as.
 ///
