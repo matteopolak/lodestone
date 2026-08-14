@@ -11,7 +11,7 @@ added afterward:
    dig — including a miss (empty air) and attacking an entity.
 2. **Left-clicking a living entity sends the real attack packet** — the
    serverbound `Interact`/`Attack` action was fully built and encoded
-   (`crates/protocol/v770/src/adapter.rs`'s `InteractEntity` arm) but had zero
+   (`crates/protocol/v770/src/adapter/serverbound.rs`'s `InteractEntity` arm) but had zero
    callers anywhere in `lodestone-shell`; this is the first one.
 3. **Server-sent knockback now actually moves the local player.** A
    `ClientboundSetEntityMotionPacket` naming our own entity id was silently
@@ -22,17 +22,17 @@ Also landed: the `HurtTime` countdown component (both `EntityDamaged` and
 `EntityHurtAnimation` were decoded-but-unconsumed islands before this), the
 ECS-side half of the hurt-flash window a future render pass can key off.
 
-Also landed, still under issue #12: the `ReleaseUseItem`/`use_item_live`
+Also landed, still under that same issue: the `ReleaseUseItem`/`use_item_live`
 fallthrough fix that makes the shield and the bow reachable at all in combat —
-see "The shield/bow island pair" below. Two of #12's own named gaps
-(attack-strength cooldown bar, hurt tint) already shipped under #121/#98 by
+see "The shield/bow island pair" below. Two of that issue's own named gaps
+(attack-strength cooldown bar, hurt tint) already shipped separately by
 the time of that pass; its "camera shake" line was never a real vanilla
 mechanic (confirmed by grepping `client-src` for `[Ss]hake`, one unrelated
 hit in `ItemInHandRenderer.java`) — noted here so this doc does not repeat a
-stale claim #12 itself still carries.
+stale claim that issue itself still carries.
 
-**Landed in the pass that added this paragraph**, closing issues #16/#27 and
-the rest of #12's genuine remainder:
+**Landed in the pass that added this paragraph**, closing the drop-key gaps
+and the rest of that issue's genuine remainder:
 
 - **The `Q`/`Ctrl+Q` drop key** — two proven serverbound/click islands
   (`ClientAction::DropSelectedItem`/`DropSelectedItemStack`, and
@@ -47,13 +47,13 @@ the rest of #12's genuine remainder:
   degree of freedom, a cross-cutting change out of this pass's scope. See
   "`bobHurt`, still blocked" below.
 
-**Landed in a later pass, closing #12's real remainder** — everything above
+**Landed in a later pass, closing that issue's real remainder** — everything above
 this bullet is about the *client*: swinging, sending the attack packet,
 taking knockback. None of it made attacking a mob **on our own server** do
 anything, because `lodestone-server` never decoded the attack packet at all.
 See "The integrated-server melee-damage gap" below for the full account:
 `ServerBound::Attack`/`PlayerInput` decode, `MobHandle` (the mutation handle
-issue #12's own census said was missing), `MobSim::attack` (damage +
+that issue's own census said was missing), `MobSim::attack` (damage +
 knockback in one call), and a real client proving the exact predicted health
 and knockback position land. Mob-on-player damage gets a real, tested
 `PlayerVitals::apply_damage` entry point but **not** a live trigger — no AI
@@ -66,7 +66,7 @@ model this workspace does not have).
 
 ### Swing dispatch (`Sim::begin_attack`, `crates/lodestone-shell/src/sim.rs`)
 
-Vanilla's `Minecraft.startAttack` (`Minecraft.java:1603-1672`) switches on
+Vanilla's `Minecraft.startAttack` switches on
 `hitResult.getType()` and swings the arm **unconditionally after the switch**,
 on every arm including a miss. Before this fix, only the "a dig actually
 started" arm ever reached `Sim::swing_hand` (through `drive_mining`'s queued
@@ -96,8 +96,9 @@ points at. Recomputed every frame alongside the existing block `RayTarget`, by
 `Sim::update_target`, against a **shorter** range:
 
 - `ENTITY_REACH = 3.0` — vanilla's `DEFAULT_ENTITY_INTERACTION_RANGE`
-  (`Player.java:134`), distinct from and shorter than block `REACH` (`4.5`,
-  `Player.java:133`). Creative's `+2.0` modifier (`Player.java:150`) is **not**
+  (`Player.java`), distinct from and shorter than block `REACH` (`4.5`,
+  `Player.DEFAULT_BLOCK_INTERACTION_RANGE`). Creative's `+2.0` modifier
+  (`Player.CREATIVE_ENTITY_INTERACTION_RANGE_MODIFIER_VALUE`) is **not**
   tracked — this shell has no attribute-modifier pipeline for it yet, so every
   session uses the unmodified survival default.
 - Further shortened to the block hit's own entry distance when a block sits
@@ -129,7 +130,7 @@ Lowers straight to `ClientAction::InteractEntity { entity_id, interaction:
 EntityInteraction::Attack, sneaking }`, sent directly (like
 `Sim::use_item_live`'s sends) rather than queued — an attack is a discrete
 click event, not a per-tick one. The v770 adapter already encodes this variant
-as the dedicated 26.2 `Attack` packet (`crates/protocol/v770/src/adapter.rs`);
+as the dedicated 26.2 `Attack` packet (`crates/protocol/v770/src/adapter/serverbound.rs`);
 before this change nothing in the shell ever constructed
 `ClientAction::InteractEntity` at all, so the encoder was dead, unused code.
 
@@ -138,10 +139,10 @@ damage, no strength scalar. Damage is fully server-authoritative.
 
 ### Knockback (`apply_entity_velocity`, `crates/lodestone-ecs/src/ingest.rs`)
 
-Vanilla's `Entity.lerpMotion` (`Entity.java:2649-2651`) is
+Vanilla's `Entity.lerpMotion` is
 `this.setDeltaMovement(movement)` — an unconditional **replace** despite the
 "lerp" name — and `LocalPlayer` declares no override
-(`ClientPacketListener.handleSetEntityMotion`, `:623-629`). So a
+(`ClientPacketListener.handleSetEntityMotion`). So a
 `ClientboundSetEntityMotionPacket` naming our own id means "overwrite your own
 velocity", not "nudge it".
 
@@ -177,17 +178,17 @@ regardless of what a hermetic test showed (a test that pushes straight onto
 test module for the control that catches this class of bug).
 
 Both events now reset a `HurtTime(pub u32)` component to `10` ticks — vanilla's
-`LivingEntity.handleDamageEvent` (`:2044-2049`) and `LivingEntity.animateHurt`
-(`:1873-1876`) write the identical `hurtDuration = 10; hurtTime = hurtDuration;`
+`LivingEntity.handleDamageEvent` and `LivingEntity.animateHurt`
+write the identical `hurtDuration = 10; hurtTime = hurtDuration;`
 pair, so one countdown covers both reports. `tick_hurt_time`
 (`TickSet::Animate`) ages it toward zero, one per `GameTick`, matching
 vanilla's per-tick decrement. `EntityHurtAnimation`'s `yaw` field is not
 carried into the component — vanilla's own override accepts the parameter and
 never stores it either.
 
-### The per-entity hurt/death red overlay (issue #98, entity half)
+### The per-entity hurt/death red overlay (the entity half)
 
-Issue #98 asked for a "hurt flash and screen shake." Before writing any code,
+This request asked for a "hurt flash and screen shake." Before writing any code,
 both premises were checked against `.cache/mc/26.2/client-src` directly, and
 **neither is a full-screen effect in vanilla**:
 
@@ -196,27 +197,28 @@ both premises were checked against `.cache/mc/26.2/client-src` directly, and
   transliterates — has zero `hurt` references. `Gui.java`, `LevelRenderer.java`
   and `GameRenderer.java` were also grepped clean for any screen-space quad tied
   to `hurtTime`. The only two things vanilla ties to the **local player's own**
-  `hurtTime` are `bobHurt` (a camera *roll*, `GameRenderer.java:297-313`) and
+  `hurtTime` are `bobHurt` (a camera *roll*, `GameRenderer.bobHurt`) and
   the per-entity overlay below — there is no third, separate "screen effect."
-- **`bobHurt` is issue #58's, not #98's**, by #58's own checklist text: "`bobHurt`
+- **`bobHurt` belongs to the camera-roll issue, not this one**, by that
+  issue's own checklist text: "`bobHurt`
   — the damage tilt, from `hurtTime`/`hurtDuration` and `hurtDir`. This is the
-  'screen tilt thing': a roll about the damage direction, not a shake." Issue
-  #98's own body agrees — "Not the same as bobHurt (#58)". This repo's
-  `camera_rig.rs` was deliberately left untouched by the #98 work below to
-  avoid duplicating or conflicting with whoever picks up #58.
+  'screen tilt thing': a roll about the damage direction, not a shake." This
+  issue's own body agrees — "Not the same as bobHurt". This repo's
+  `camera_rig.rs` was deliberately left untouched by the work below to
+  avoid duplicating or conflicting with whoever picks up the camera-roll work.
 - **No camera-shake mechanism exists anywhere in `client-src`**, for
   explosions or anything else: grepping `client/` for `[Ss]hake` turns up only
   the bow-draw item wobble in `ItemInHandRenderer.java` (a held-item pose
   animation, unrelated to the camera). `ClientExplosionTracker.java` — the
   class that *does* react to a nearby explosion client-side — only ever spawns
-  particles; it holds no camera reference at all. Issue #98's "vanilla shakes
+  particles; it holds no camera reference at all. This issue's "vanilla shakes
   the camera on nearby explosions" does not hold up, and nothing was built for
   it here. If this is still wanted, it is a **new game-feel mechanic**, not a
   vanilla port, and should be scoped as one explicitly rather than silently
   invented under a "port" issue.
 
 What vanilla **does** have, and what this pass actually builds, is a per-entity
-model overlay: `LivingEntityRenderer.java:281` sets `state.hasRedOverlay =
+model overlay: `LivingEntityRenderer.extractRenderState` sets `state.hasRedOverlay =
 entity.hurtTime > 0 || entity.deathTime > 0`, sampled from the baked
 `OverlayTexture` lookup (`OverlayTexture.java`) — the `y < 8` row is a flat
 ARGB `-1291911168` for every `x`, i.e. `(178, 255, 0, 0)`: pure red at alpha
@@ -226,8 +228,8 @@ gamma-multiply, and treating it as a multiply would crush the mob toward black
 instead of washing it red. It applies to *any* drawn living entity — including
 the local player's own third-person body — never the local player's own
 screen; a first-person player cannot see their own overlay, matching vanilla
-(there is no first-person hurt feedback beyond `bobHurt`, #58's territory, and
-the HUD heart flash, `hud.rs`'s territory).
+(there is no first-person hurt feedback beyond `bobHurt`, the camera-roll
+issue's territory, and the HUD heart flash, `hud.rs`'s territory).
 
 **The render mechanism**, in `crates/lodestone-render/src/entity_pipeline.rs`:
 
@@ -410,7 +412,7 @@ breaking one hop and re-running:
   catches it. A gate that only checked `EntityDraw::hurt` would have been green
   through it.
 
-### The attack-strength ticker and the crosshair indicator (issue #121)
+### The attack-strength ticker and the crosshair indicator
 
 Built as one unit deliberately: the ticker (state) and the crosshair reticle
 (the thing that displays it) were left unbuilt together in the original
@@ -420,8 +422,8 @@ this doc's "deliberately not built" section.
 
 **The ticker** is `AttackStrengthTicker(pub u32)`
 (`crates/lodestone-ecs/src/player.rs`), a component on the `LocalPlayer`
-entity mirroring vanilla's `attackStrengthTicker` field
-(`Player.java:210`/`268`). `tick_attack_strength`, registered in
+entity mirroring vanilla's `attackStrengthTicker` field (declared on
+`LivingEntity`, incremented in `Player.tick()`). `tick_attack_strength`, registered in
 `LocalPlayerPlugin::build` under `TickSet::Animate` (already chained after
 `Physics`/`Predict` by `CorePlugin`, so no new ordering edge was needed),
 increments it by exactly `1` every `GameTick` — vanilla's unconditional
@@ -430,15 +432,14 @@ increments it by exactly `1` every `GameTick` — vanilla's unconditional
 `Sim::attack_entity` (`crates/lodestone-shell/src/sim.rs`) resets it to `0`
 synchronously on every entity attack — vanilla's
 `MultiPlayerGameMode.attack` calling `player.resetAttackStrengthTicker()`
-right after the client-side `player.attack(entity)`
-(`MultiPlayerGameMode.java:425-430`). Unconditional, because this shell has
+right after the client-side `player.attack(entity)`. Unconditional, because this shell has
 no client-side `cannotAttack` gate (damage is fully server-authoritative, see
 above): every left-click on an entity restarts the cooldown, matching what
 the real client does before any server response is known.
 
 **The delay is not a constant.** `Sim::attack_strength_delay` implements
 vanilla's `getCurrentItemAttackStrengthDelay`, `(1.0 /
-getAttributeValue(Attributes.ATTACK_SPEED)) * 20.0` (`Player.java:1816-1818`).
+getAttributeValue(Attributes.ATTACK_SPEED)) * 20.0`.
 It reads `minecraft:attack_speed` off the local player's own `Attributes`
 component (`crates/lodestone-ecs/src/entity.rs`) through
 `lodestone_entity::attribute::attribute_value` — the same server-fed,
@@ -465,8 +466,8 @@ player, or a live session before login's fold lands), `attribute_value` falls
 back to the registry default `4.0` (unarmed), giving the correct 5-tick delay
 rather than a guess. `Sim::attack_strength_scale` combines ticker and delay
 into vanilla's `getAttackStrengthScale(0.0F)` — the exact call
-`Hud.extractCrosshair` makes for the crosshair-style indicator
-(`Hud.java:448`) — clamped to `0.0..=1.0`.
+`Hud.extractCrosshair` makes for the crosshair-style indicator —
+clamped to `0.0..=1.0`.
 
 **The indicator** is `HudFrame::attack_cooldown: Option<f32>`
 (`crates/lodestone-shell/src/hud.rs`), populated unconditionally in `app.rs`
@@ -475,7 +476,7 @@ the ticker and the attribute default exist before any server connection, so
 this is never `None` on a real run) and drawn inside `HudGeometry::
 build_inner`'s existing crosshair block, nested under `if frame.crosshair`
 right alongside the white-plus reticle. That nesting is deliberate: it reuses
-the same visibility gate the crosshair itself already has (issue #51's
+the same visibility gate the crosshair itself already has (the existing
 container-screen suppression), rather than inventing a second one.
 
 The two sprites (`hud/crosshair_attack_indicator_background`,
@@ -494,14 +495,14 @@ idiom `sprite_vitals` already uses for the XP-bar progress fill.
 
 - **Only `AttackIndicatorStatus::CROSSHAIR`.** Vanilla's real enum
   (`AttackIndicatorStatus.java`) has three variants — `OFF`, `CROSSHAIR`,
-  `HOTBAR` — and issue #121 explicitly scoped this shell to ship the default
-  (crosshair) only, noting the options-menu toggle as future work (#32/#55
-  own that menu). There is no `Options::attack_indicator` read anywhere; the
+  `HOTBAR` — and this shell was explicitly scoped to ship the default
+  (crosshair) only, noting the options-menu toggle as future work (owned by
+  the options-menu work). There is no `Options::attack_indicator` read anywhere; the
   indicator always draws whenever the crosshair does.
 - **No full-charge "ready" icon.** Vanilla replaces the fill bar with a
   distinct `CROSSHAIR_ATTACK_INDICATOR_FULL_SPRITE` circle when the scale
   reaches `1.0` *and* the crosshair is over a living, in-range target *and*
-  the held weapon's delay exceeds 5 ticks (`Hud.java:450-465`) — a slow-weapon
+  the held weapon's delay exceeds 5 ticks (`Hud.extractCrosshair`) — a slow-weapon
   "you're ready" nicety. That needs the crosshair's entity target plus its
   liveness/range, none of which `HudFrame` carries today. At full charge this
   shell simply draws nothing (matching vanilla's non-"ready" default case),
@@ -527,7 +528,7 @@ class this doc's own history already has two instances of
 `end_attack`) but only `(Use, Pressed)` — no release arm existed at all, on
 mouse or keyboard.
 
-Vanilla's `LivingEntity.updateUsingItem` (`LivingEntity.java:3471-3475`)
+Vanilla's `LivingEntity.updateUsingItem`
 auto-completes a use only when `!useItem.useOnRelease()`. Food and potions
 are `useOnRelease() == false`, so they auto-complete on the server's own tick
 count and *appear* to work fine with no release packet at all — exactly why
@@ -535,7 +536,7 @@ this stayed invisible. Bow, crossbow and shield are all
 `useOnRelease() == true` (`:3602-3616`, `releaseUsingItem`/`stopUsingItem`)
 and structurally cannot fire or lower without the explicit packet.
 
-Fix, mirroring vanilla's own gate (`Minecraft.java:1914-1917`,
+Fix, mirroring vanilla's own gate (`Minecraft.handleKeybinds`,
 `this.player.isUsingItem()` guarding `gameMode.releaseUsingItem`):
 
 - `KeyOutcome::Use` became `Use(bool)` (`app.rs`); both the mouse match and
@@ -552,7 +553,7 @@ Fix, mirroring vanilla's own gate (`Minecraft.java:1914-1917`,
   real gate — this client cannot yet tell whether a use is *actually* in
   progress server-side, only that the button is down — but the gap is inert,
   not a wrong transition: `LivingEntity.releaseUsingItem`
-  (`.cache/mc/26.2/src/…/LivingEntity.java:3602-3613`) already no-ops
+  already no-ops
   whenever the server has nothing in progress, so an extra release is a
   harmless duplicate.
 - `Sim::end_use`/`end_use_live` split the same way `begin_attack`/
@@ -566,18 +567,18 @@ combat happens in**, independent of Finding 1. Two structural gaps in
 - Whenever the crosshair was over **any** entity — hostile or not, which is
   the overwhelmingly common combat case — the method called
   `Self::interact_entity` and returned **unconditionally**, never falling
-  through to the generic use-item send. Vanilla's own `case ENTITY`
-  (`Minecraft.java:1693-1708`) only returns early on a **successful**
+  through to the generic use-item send. Vanilla's own `case ENTITY`, in
+  `Minecraft.startUseItem`, only returns early on a **successful**
   interact (`instanceof InteractionResult.Success`); anything else hits an
-  explicit `break;` at `:1708` and falls through to the unconditional
-  generic-use call at `:1730` (`gameMode.useItem`) — the call that actually
+  explicit `break;` and falls through to the unconditional
+  generic-use call (`gameMode.useItem`) — the call that actually
   raises a shield or starts a bow draw. Most hostile mobs have no special
   right-click behaviour, so this is the common path, not an edge case.
 - With **no** target at all — open air, or a mob standing just past block
   reach with nothing behind it — the method `return`ed with **nothing sent**.
-  Vanilla's own `hitResult == null` path skips the whole
-  `if (this.hitResult != null)` switch (`Minecraft.java:1681,1691`) and still
-  reaches the same unconditional fallback at `:1730`.
+  Vanilla's own `hitResult == null` path, also in `Minecraft.startUseItem`,
+  skips the whole `if (this.hitResult != null)` switch and still
+  reaches the same unconditional fallback.
 
 Fix: `use_item_live`'s entity branch now calls the new
 `Self::use_item_generic` after `interact_entity` instead of returning, and
@@ -589,8 +590,7 @@ actually holding something (vanilla's own `!heldItem.isEmpty()` check at the
 same call site), and borrows its block-prediction `sequence` from
 `Placement::take_use_sequence` rather than a second independent counter,
 matching vanilla's single shared `BlockStatePredictionHandler` sequence
-(`MultiPlayerGameMode.startPrediction`,
-`.cache/mc/26.2/client-src/…/MultiPlayerGameMode.java:293-299`).
+(`MultiPlayerGameMode.startPrediction`).
 
 **Deliberate divergence from vanilla, and why:** vanilla's `case ENTITY` only
 skips the fallback on a *locally classified* successful interact
@@ -651,7 +651,7 @@ polled "does a `minecraft:arrow` entity still exist near the player" after
 release, and that poll never once observed one, reading as a fix that still
 did not reach the server. It was wrong about what to measure, not about the
 fix: `AbstractArrow.onHitEntity`
-(`.cache/mc/26.2/src/…/AbstractArrow.java:503-505`) `discard()`s a
+`discard()`s a
 non-piercing arrow the instant it damages something, and the test's pig sits
 ~2 blocks away — well under one tick of flight at a fully-drawn bow's
 velocity, so the arrow is gone before the very first poll iteration runs. Two
@@ -668,13 +668,13 @@ that happens to correlate everywhere except the case under test" mistake
 
 ### The drop key (`Q`)
 
-Two islands, one binding, closing #16/#27. Both were fully built and tested
+Two islands, one binding, closing the drop-key gaps. Both were fully built and tested
 before this landed, with zero producers:
 
 - **`ClientAction::DropSelectedItem`/`DropSelectedItemStack`** — encoded by
   all four protocol adapters (`PLAYER_ACTION` action ids `4`/`3`), round-trip
   tested, never constructed anywhere in `lodestone-shell`.
-- **`Click::drop_one`/`drop_stack`/`do_throw`** (`lodestone-game`, issue #27)
+- **`Click::drop_one`/`drop_stack`/`do_throw`** (`lodestone-game`)
   — `ContainerInput::Throw` only ever reached `OUTSIDE_SLOT` in practice,
   where `doClick`'s own `slot_index >= 0` guard drops it, so the
   slot-drop branch could never execute. **`MenuInput::key_pressed`'s `Drop`
@@ -685,12 +685,12 @@ before this landed, with zero producers:
   otherwise; re-verify a "missing producer" claim against the current tree
   before assuming which hop is actually missing.
 
-**`InputAction::Drop`** (`keybinds.rs`), default `Q` (`Options.java:664`,
+**`InputAction::Drop`** (`keybinds.rs`), default `Q` (`Options.keyDrop`,
 GLFW keysym `81`), category `Inventory` — the twelfth vanilla inventory
 mapping this table now implements. Vanilla's own gate
-(`AbstractContainerScreen.java:495-501`) is `hoveredSlot != null &&
+(`AbstractContainerScreen.keyPressed`) is `hoveredSlot != null &&
 hoveredSlot.hasItem()`, **not** an empty cursor (`doClick` applies that
-itself once the click reaches it, `AbstractContainerMenu.java:513`); `Ctrl`
+itself once the click reaches it, `AbstractContainerMenu.doClick`); `Ctrl`
 selects drop-stack (button `1`) over drop-one (button `0`), and it is `else
 if`, not two independent `if`s — the same three details `PickItem`'s own
 handling already gets right in `key_pressed`, transcribed rather than
@@ -701,8 +701,8 @@ and the two contexts ask their checks in the vanilla order:
 
 | context | mechanism | our route |
 |---|---|---|
-| container open, slot hovered | `ContainerInput::Throw`, button `0`/`1` (`AbstractContainerScreen.java:495-501`) | `KeyOutcome::ContainerDrop { ctrl }` → `MenuInput::key_pressed` → `Click::drop_one`/`drop_stack` |
-| no screen, normal play | bare `PLAYER_ACTION`/`DROP_ITEM`\|`DROP_ALL_ITEMS` (`Minecraft.java:1907-1911`) | `KeyOutcome::Drop { ctrl }` → `ClientAction::DropSelectedItem`/`DropSelectedItemStack` |
+| container open, slot hovered | `ContainerInput::Throw`, button `0`/`1` (`AbstractContainerScreen.keyPressed`) | `KeyOutcome::ContainerDrop { ctrl }` → `MenuInput::key_pressed` → `Click::drop_one`/`drop_stack` |
+| no screen, normal play | bare `PLAYER_ACTION`/`DROP_ITEM`\|`DROP_ALL_ITEMS` (`Minecraft.handleKeybinds`) | `KeyOutcome::Drop { ctrl }` → `ClientAction::DropSelectedItem`/`DropSelectedItemStack` |
 
 `resolve_key` gained a fifth parameter, `ctrl: bool`, per this task's own
 brief rather than reading the modifier at the driver's `match` arm: the
@@ -717,7 +717,7 @@ building a `Click` directly the way `send_container_swap` does, because
 duplicating it would be a second copy that can drift.
 `send_drop_selected`/`drop_selected_action` mirror `send_offhand_swap`/
 `offhand_swap_action`'s shape exactly, including the one guard
-(`!player.isSpectator()`, `Minecraft.java:1908`).
+(`!player.isSpectator()`, in `Minecraft.handleKeybinds`).
 
 **Live gate.** The item-count drop (5 → 4) this task's brief cites as already
 proven is `crates/lodestone-game/tests/live_inventory.rs`, which sends
@@ -734,13 +734,13 @@ nothing about that half changed.
 ### Crit particles
 
 Vanilla's `criticalAttack = fullStrengthAttack && canCriticalAttack(entity)`
-(`Player.java:970-971,1032-1041`), whose visual half is
-`attackVisualEffects`' `this.crit(entity)` call
-(`Player.java:1063-1066` → `LocalPlayer.crit`, `LocalPlayer.java:664-665`).
+(computed in `Player.attack`; `canCriticalAttack` a sibling method), whose
+visual half is `Player.attackVisualEffects`' `this.crit(entity)` call
+(→ `LocalPlayer.crit`).
 
 **This is real vanilla dual simulation, not an invented approximation.**
 `MultiPlayerGameMode.attack` runs the client's own copy of
-`player.attack(entity)` (`MultiPlayerGameMode.java:428`) independently of,
+`player.attack(entity)` independently of,
 and before, the server's authoritative copy of the same method — the server
 computes the real damage, the client predicts only the cosmetic sound and
 particle trigger so the swing has feedback without a round trip. The wire
@@ -760,7 +760,7 @@ style choice.
 !isMobilityRestricted && !isPassenger && entity is LivingEntity &&
 !isSprinting`, gated by the caller's own `fullStrengthAttack =
 getAttackStrengthScale(0.5F) > 0.9F` — note the `0.5F` partial-tick argument,
-**not** the crosshair indicator's `0.0F` (`Hud.java:448`). `Sim::
+**not** the crosshair indicator's `0.0F` (`Hud.extractCrosshair`). `Sim::
 attack_strength_scale` was refactored into a private `attack_strength_scale_at(a)`
 so both call sites share the ticker read and delay computation instead of
 duplicating it; the public accessor is now a one-line call with `a = 0.0`,
@@ -785,14 +785,14 @@ Two clauses are not modelled, both disclosed rather than silent:
   it.
 
 **The burst is one tick of `TrackingEmitter`, not three.** Vanilla's
-`TrackingEmitter` (`TrackingEmitter.java:29-41`) runs for 3 ticks, spawning
+`TrackingEmitter::tick` runs for 3 ticks, spawning
 up to 16 candidates per tick (filtered to a unit sphere, ~52% pass) that
 track the entity's *current* position each tick. This shell's particle
 system has no per-attack persistent emitter — every existing local spawn
 (`Particles::destroy_block`/`breaking_block`) is a one-shot burst — so
 `maybe_spawn_crit_particles` spawns one tick's worth (16 candidates, the same
-unit-sphere filter and the same `Entity.getX(double)`-style position formula,
-`Entity.java:3770-3811`) at the target's position at the moment of the
+unit-sphere filter and the same `Entity.getX(double)`-style position formula)
+at the target's position at the moment of the
 attack, rather than adding new multi-tick emitter machinery for a purely
 cosmetic burst. The per-candidate physics
 (`lodestone_particle::emit::crit`) is exact; only the tick count is a
@@ -814,7 +814,7 @@ pre-existing particle tests already use.
 
 ### The sweep-attack particle
 
-**Built.** Split out of #12 into its own issue (#409) rather
+**Built.** Split out into its own issue rather
 than left buried in a mostly-closed one, since — per the two prior passes
 recorded above — it was the one genuine remainder and its whole rendering
 path was unbuilt, not merely unwired. Landed in `lodestone-particle`
@@ -830,12 +830,12 @@ and one `"sweep_attack"` arm in `Particles::spawn_one`.
 
 No `sim.rs`/`app.rs`/`net.rs` change was needed, and the reason is worth
 recording: vanilla's own trigger
-(`.cache/mc/26.2/src/net/minecraft/world/entity/player/Player.java:1191`,
+(`Player.doSweepAttack`,
 `serverLevel.sendParticles(ParticleTypes.SWEEP_ATTACK, ...)`) is an ordinary
 `LEVEL_PARTICLES` broadcast, and that packet already forwards through
 `ClientEvent::Particles` → `NetUpdate::Particles` → `Particles::
-spawn_particles` → `spawn_one` generically (`crates/lodestone-shell/src/
-net.rs:1466-1478`, `sim.rs::Sim::poll_net`) — the same path `"flame"`/`"crit"`/etc.
+spawn_particles` → `spawn_one` generically (`crates/lodestone-shell/src/net.rs`'s
+`forward`, `sim.rs::Sim::poll_net`) — the same path `"flame"`/`"crit"`/etc.
 already used. Adding the dispatch arm was the entire wiring job; a
 `/particle minecraft:sweep_attack` command or any server broadcasting the
 type reaches pixels immediately.
@@ -897,7 +897,7 @@ a single agent picking it up mid-flight. `ViewBob::hurt`/
 `BobFrame::hurt_roll_degrees` stay exactly where they were: implemented,
 unit-tested, called only by their own tests.
 
-### The integrated-server melee-damage gap: player attacks now deal damage (issue #12)
+### The integrated-server melee-damage gap: player attacks now deal damage
 
 Everything above this section is client-side: swinging, sending the
 `Attack`/`Interact` packet, taking server-sent knockback. This repo also
@@ -906,7 +906,7 @@ and until this pass, punching a mob there did nothing — `ServerBound` had no
 `Attack` variant at all, so the packet was never decoded, `SimMob::apply_damage`
 was reached only by AI-driven `MeleeAttackGoal` hits and explosions, and
 `lodestone-physics/src/knockback.rs`'s `knockback_impulse`/`attack_direction`
-had zero callers anywhere. Two prior passes (recorded on issue #12) found and
+had zero callers anywhere. Two prior passes (recorded on this issue) found and
 scoped this precisely, and named the real blocker: *"there is no way to reach
 a live mob's health from a connection's own task"* — `MobSim` was ticked
 entirely inside its own background task with no shared, lockable handle, the
@@ -975,10 +975,10 @@ in `server_protocol.rs` so a future agent adding taming/feeding changes that
 test deliberately rather than discovering the gap by accident.
 
 **Damage.** `PLAYER_BARE_HAND_ATTACK_DAMAGE = 1.0` — `Player.createAttributes()`'s
-own `.add(Attributes.ATTACK_DAMAGE, 1.0)` (`Player.java:208`), **not**
+own `.add(Attributes.ATTACK_DAMAGE, 1.0)`, **not**
 `LivingEntity`'s generic `2.0` a player would otherwise inherit. This crate
 has no item/weapon-attribute model for the player (`lodestone_entity::damage`'s
-own module doc already names this gap for issue #261) and no server-tracked
+own module doc already names this gap) and no server-tracked
 attack-strength ticker (`Player.attack`'s `baseDamageScaleFactor()`,
 cooldown-scaled damage, is client-cosmetic-prediction-only here — see the
 crit-particle section above), so every hit is the flat constant, full
@@ -988,7 +988,7 @@ new ones this pass introduces.
 **Knockback.** `lodestone_physics::knockback::knockback_impulse` needs a
 horizontal push *direction* — real vanilla uses the **attacker's facing**
 (`attack_direction(yaw)`), which nothing server-side tracked when this was
-written. Issue #262 has since changed that (`PlayerRegistry::set_rotation`,
+written. A later pass has since changed that (`PlayerRegistry::set_rotation`,
 fed by all four movement packets), so the blocker is now only that
 `apply_attack` has not been switched over. `apply_attack` still uses the
 horizontal vector from the attacker's last known position to the target
@@ -1009,7 +1009,7 @@ above already makes (one tick's worth instead of vanilla's three-tick
 `Player.attack`'s real formula is `getKnockback(...) + (isSprinting() &&
 fullStrengthAttack ? 0.5F : 0.0F)`. `getKnockback` resolves to the attacker's
 own `minecraft:attack_knockback` attribute (registry default `0.0`,
-`Attributes.java:18`) — zero for a bare hand, since this crate has no
+`Attributes.ATTACK_KNOCKBACK`) — zero for a bare hand, since this crate has no
 weapon/enchantment model to add to it. So a **non-sprinting** attack's total
 knockback power is exactly `0.0` — not a placeholder, the literal jar
 formula for the one case this crate can model. `sprinting` *is* tracked
@@ -1038,9 +1038,9 @@ is tracked in elsewhere in this doc: real, tested, a documented reason
 nothing calls it yet.
 
 **Shield blocking: confirmed, again, out of scope.** `LivingEntity.applyItemBlocking`
-(`:1308-1345`) is a separate angle-gated reduction keyed off the held item's
+is a separate angle-gated reduction keyed off the held item's
 `BlocksAttacks` data component — this workspace has no item-data model for
-it anywhere (the same prerequisite gap issue #261 already names for
+it anywhere (the same prerequisite gap already named for
 per-item armour). Not started.
 
 **The hurt flash for a damaged-but-alive mob now reaches the client** —
@@ -1100,20 +1100,21 @@ existing pieces").
 Blocked on `Camera` gaining a roll degree of freedom, a change spanning three
 other agents' exclusive territory for this task.
 
-**`HurtTime` now reaches pixels** (issue #98, the entity half) — the chain and
-its three design decisions are in "The per-entity hurt/death red overlay"
-above. It did not for one session: the render mechanism landed with **zero**
-callers in `lodestone-shell`, and the sentence that used to stand here said so.
-Note what that sentence got *wrong* even while its headline was right — it
-named `EntitySnapshot` and two `gpu.rs` line numbers as the patch site, and the
-real fix went through `extract_entity_draws` instead and touched neither. A
-patch spec written from the outside ages faster than the claim it wraps; verify
-the shape before following one. Local-player-specific
-camera feedback (`bobHurt`, the "screen tilt thing") is issue #58's, not #98's
-or this component's — confirmed against #58's own checklist, which already
-names `bobHurt`/`hurtTime`/`hurtDir` as its scope. There is no vanilla
-full-screen colour overlay or camera shake for taking damage at all — see
-issue #98's section above for the jar evidence.
+**`HurtTime` now reaches pixels** (the entity half of the hurt-overlay work) —
+the chain and its three design decisions are in "The per-entity hurt/death red
+overlay" above. It did not for one session: the render mechanism landed with
+**zero** callers in `lodestone-shell`, and the sentence that used to stand here
+said so. Note what that sentence got *wrong* even while its headline was
+right — it named `EntitySnapshot` and two `gpu.rs` line numbers as the patch
+site, and the real fix went through `extract_entity_draws` instead and touched
+neither. A patch spec written from the outside ages faster than the claim it
+wraps; verify the shape before following one. Local-player-specific
+camera feedback (`bobHurt`, the "screen tilt thing") belongs to the
+camera-roll issue, not this component's — confirmed against that issue's own
+checklist, which already names `bobHurt`/`hurtTime`/`hurtDir` as its scope.
+There is no vanilla full-screen colour overlay or camera shake for taking
+damage at all — see the per-entity hurt/death red overlay section above for
+the jar evidence.
 
 **Mob-on-player autonomous damage** — see "Mob-on-player damage: an entry
 point, not a live trigger" above. `PlayerVitals::apply_damage` exists,
@@ -1124,8 +1125,8 @@ health" scope.
 
 **Shield blocking** — confirmed out of scope again this pass; see that
 section above. Needs an item-data model (`BlocksAttacks`) this workspace
-does not have anywhere, the same prerequisite class as issue #261's armour
-feed.
+does not have anywhere, the same prerequisite class as the armour feed's
+own gap.
 
 **A server-side hurt-flash cue for a damaged-but-alive mob** — **landed.**
 `ServerProtocol::encode_hurt_animation` plus `MobSim::take_entity_animations`. What
@@ -1143,7 +1144,7 @@ death tip-over visible rather than one tick long.
 - `crates/lodestone-render/src/entity_pipeline.rs::HURT_OVERLAY_ALPHA_BYTE` —
   `178`, vanilla's hurt/death overlay alpha (`OverlayTexture`'s red row,
   `-1291911168`'s alpha channel). Not configurable; matches
-  `LivingEntityRenderer.java:281`'s boolean gate exactly, with no fade.
+  `LivingEntityRenderer.extractRenderState`'s boolean gate exactly, with no fade.
 - The attack-strength delay has no standalone constant: it is
   `20.0 / attack_speed_attribute`, computed fresh in
   `Sim::attack_strength_delay` every call. The only literal is the registry
@@ -1152,19 +1153,19 @@ death tip-over visible rather than one tick long.
   `lodestone-shell`.
 - `crates/lodestone-shell/src/hud.rs`'s crosshair block hardcodes the
   indicator's native size (`16x4`) and offset (`cx - 8, cy + 9`) — vanilla's
-  own constants (`Hud.java:457-458`), not configurable.
+  own constants (`Hud.extractCrosshair`), not configurable.
 - `crates/lodestone-shell/src/keybinds.rs`'s `InputAction::Drop` default —
-  `KeyCode::KeyQ`, vanilla's `key.drop` (`Options.java:664`, GLFW `81`).
+  `KeyCode::KeyQ`, vanilla's `key.drop` (`Options.keyDrop`, GLFW `81`).
 - `Sim::maybe_spawn_crit_particles`'s per-tick candidate count — `16`,
-  vanilla's `TrackingEmitter.tick()` loop bound (`TrackingEmitter.java:29`).
+  vanilla's `TrackingEmitter.tick()` loop bound.
   Not configurable; see "Crit particles" above for why this is one tick's
   worth rather than `TrackingEmitter`'s real three.
 - `crates/lodestone-server/src/server.rs::PLAYER_BARE_HAND_ATTACK_DAMAGE` —
-  `1.0`, `Player.createAttributes()`'s bare-hand `ATTACK_DAMAGE`
-  (`Player.java:208`). Not weapon-aware; see "Damage" above.
+  `1.0`, `Player.createAttributes()`'s bare-hand `ATTACK_DAMAGE`.
+  Not weapon-aware; see "Damage" above.
 - `crates/lodestone-server/src/server.rs::SPRINT_ATTACK_KNOCKBACK_POWER` —
-  `0.5`, `Player.attack`'s `knockbackAttack` bonus (`Player.java:963-966,
-  987-988`). A non-sprinting attack's power is exactly `0.0` (the attacker's
+  `0.5`, `Player.attack`'s `knockbackAttack` bonus. A non-sprinting attack's
+  power is exactly `0.0` (the attacker's
   `attack_knockback` attribute default, no placeholder) — see "Knockback
   power" above.
 
@@ -1172,7 +1173,7 @@ death tip-over visible rather than one tick long.
 
 - `lodestone_model::{ClientAction::InteractEntity, EntityInteraction}` — the
   outbound action shape (`crates/lodestone-model/src/action.rs`).
-- `crates/protocol/v770/src/adapter.rs` — the existing `InteractEntity` encode
+- `crates/protocol/v770/src/adapter/serverbound.rs` — the existing `InteractEntity` encode
   arm this change is the first caller of.
 - `VersionData::entity_facts` (`lodestone-model`/`lodestone-v770`'s entity
   census) — entity hitbox dimensions for the attack ray, the same seam
@@ -1188,7 +1189,7 @@ death tip-over visible rather than one tick long.
   `hud/crosshair_attack_indicator_progress` sprites (already stitched from
   `client.jar` — no new asset plumbing).
 - `lodestone_render::entity_pipeline::{EntityInstanceRaw, HURT_OVERLAY_ALPHA_BYTE}`
-  — the per-entity hurt/death overlay's render-side mechanism (issue #98).
+  — the per-entity hurt/death overlay's render-side mechanism.
   Currently reached only by `crates/lodestone-render/tests/
   entity_hurt_overlay_pixels.rs`; not yet called from `lodestone-shell`.
 - `lodestone_ecs::entity::EntityIndex` — server entity id → ECS `Entity`,
@@ -1198,7 +1199,7 @@ death tip-over visible rather than one tick long.
   `lodestone_data::entity_census::is_living` — the `LivingEntity` check for
   the crit condition's target clause; the same per-type census
   `docs/backlog.md`'s metadata-index-8/15 collision notes and
-  `crates/protocol/v770/src/adapter.rs`'s `TrackedEntity` already depend on,
+  `crates/protocol/v770/src/adapter/entity.rs`'s `TrackedEntity` already depend on,
   reused rather than re-derived.
 - `lodestone_particle::emit::crit` and `Particles::engine_mut`/
   `ParticleEngine::rng` — the crit particle's own physics and the RNG draws
@@ -1213,7 +1214,7 @@ death tip-over visible rather than one tick long.
   — the drop key's gameplay route, encoded by all four protocol adapters
   already.
 - `lodestone_server::{MobHandle, AttackOutcome, ServerBound::{Attack,
-  PlayerInput}}` — the server-side wiring this pass adds (issue #12).
+  PlayerInput}}` — the server-side wiring this pass adds.
   `MobHandle` is the shared mutation handle onto the live `MobSim`; see "The
   integrated-server melee-damage gap" above for the full design (why it
   leaks its `ChunkWorld`, why it also implements `EntitySource`).
@@ -1243,7 +1244,8 @@ death tip-over visible rather than one tick long.
   through to `quadSize`; only the caller — wherever swing detection lands in
   `sim.rs`, outside this crate's scope — would need building.
 - Adding sweep/crit *sound*: both are ordinary server-broadcast sounds
-  (`Player.java:965,1064`, `playServerSideSound`) — already covered by the
+  (`Player.attack`/`Player.attackVisualEffects`, both calling
+  `playServerSideSound`) — already covered by the
   generic sound pipeline (`docs/sound-playback.md`), no client work needed,
   confirmed under "Already checked and confirmed correct" in the scoping
   pass this section descends from.
@@ -1258,11 +1260,10 @@ death tip-over visible rather than one tick long.
   options toggle: `HudFrame::attack_cooldown` already carries the fraction;
   the missing half is an `Options`-driven read gating which of
   `hud.rs`'s crosshair-block draw (already built) vs. a new hotbar-adjacent
-  draw (not built) runs, mirroring vanilla's `extractItemHotbar`
-  (`Hud.java:606-621`).
+  draw (not built) runs, mirroring vanilla's `extractItemHotbar`.
 - Adding the full-charge "ready" icon: needs the crosshair's live entity
   target's liveness/range plus the held weapon's delay compared against `5`
-  ticks (`Hud.java:450-455`) threaded into `HudFrame`, then a third sprite
+  ticks (`Hud.extractCrosshair`) threaded into `HudFrame`, then a third sprite
   branch (`hud/crosshair_attack_indicator_full`, already in the atlas)
   alongside the existing background/progress branch in `hud.rs`.
 - Changing the delay's item-attribute-modifier source: it is **not** a
@@ -1289,7 +1290,7 @@ death tip-over visible rather than one tick long.
   two disagree about, e.g., a diagonal look direction.
 - **Getting a real attacker-facing knockback direction** (instead of the
   attacker→target stand-in `apply_attack` uses): **the yaw is now available.**
-  Issue #262 added exactly the `player_rot: Option<Rotation>` this entry used
+  A later pass added exactly the `player_rot: Option<Rotation>` this entry used
   to propose, tracked alongside `player_pos` in `serve_play` and fed by all
   four movement packets, so the decode-side work this entry warned about is
   done. What remains is the swap itself: pass that yaw into
@@ -1300,16 +1301,15 @@ death tip-over visible rather than one tick long.
   needs an attack-strength ticker tracked *server*-side (today it is
   client-only, for the cosmetic crosshair indicator) plus a weapon/item
   model to derive `baseDamage`/critical eligibility from. Both are named,
-  disclosed gaps in `lodestone_entity::damage`'s own module doc (issue
-  #261); `PLAYER_BARE_HAND_ATTACK_DAMAGE`'s own doc comment names the exact
+  disclosed gaps in `lodestone_entity::damage`'s own module doc;
+  `PLAYER_BARE_HAND_ATTACK_DAMAGE`'s own doc comment names the exact
   same blocker.
 - **The sweep arc's own multi-entity damage loop is a distinct, still-fully
   unbuilt mechanic — not merely "sweep does bonus damage to the one target
   already hit".** Re-checked directly against the jar rather than assumed,
-  because every existing mention of "sweep" in this doc (and in issue #12's
+  because every existing mention of "sweep" in this doc (and in that issue's
   own history) is about the *particle*: vanilla's `Player.doSweepAttack`
-  (`.cache/mc/26.2/src/net/minecraft/world/entity/player/Player.java:1163-1189`)
-  is called only when `isSweepAttack` holds (`:1043-1052` — full-strength,
+  is called only when `Player.isSweepAttack` holds (full-strength,
   not a crit, not a knockback-bonus hit, attacker on ground, attacker's
   recent horizontal speed under `getSpeed() * 2.5`, main-hand item tagged
   `#minecraft:swords`) and then loops
@@ -1327,10 +1327,10 @@ death tip-over visible rather than one tick long.
   `sweep`/`Sweep` anywhere combat-related in that crate, across the
   directory the `mobs.rs` file split turned it into). It needs the same
   attack-strength-ticker-server-side and sword-item-tag prerequisites the
-  bullet above already names, so it belongs under #261 rather than as new
-  scope here — recorded explicitly because the existing #261 body's
-  "critical-hit/sweep-attack bonus damage" phrase reads as a damage-number
-  tweak and could understate that the actual missing piece is an
+  bullet above already names, so it belongs under that other tracked gap
+  rather than as new scope here — recorded explicitly because that gap's
+  tracked "critical-hit/sweep-attack bonus damage" phrase reads as a
+  damage-number tweak and could understate that the actual missing piece is an
   entity-query loop with its own knockback, not a multiplier.
 - **Wiring mob-on-player damage for real** (not just the entry point):
   give `run_mob_tick_loop`/`MobSim` a live feed of the connected player's
@@ -1354,7 +1354,7 @@ death tip-over visible rather than one tick long.
   per-entity hurt/death red overlay" above — so this is purely a new
   server-side encoder plus one new call site, not a new mechanic.
 
-## The hurt-overlay gate, and what it printed (issue #98)
+## The hurt-overlay gate, and what it printed
 
 `#[ignore]`d GPU gate, needs no `client.jar` (a synthetic flat sheet, like
 `entity_variant_pixels.rs`'s): `cargo test -p lodestone-render --test

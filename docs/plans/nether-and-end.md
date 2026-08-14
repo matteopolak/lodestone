@@ -8,35 +8,35 @@ legacy RNG wiring, the bespoke noise instantiations, the `nether_cave` carver, t
 disabled-aquifer fluid picker, the Nether multi-noise biome source, the `end_islands`
 density type, `TheEndBiomeSource`, End cell geometry, and the serve seam that keeps any of
 it from being an island. Written 2026-08-08 against `HEAD` `5f37fb83`. Engine work only:
-**the data phase is complete** (verified below), and portals/dimension travel (#330) are
+**the data phase is complete** (verified below), and portals/dimension travel are
 gameplay, out of scope — a Nether generator is oracle-testable with no portal existing.
 
 ## What was verified vs assumed (2026-08-08)
 
 - **All 7 `noise_settings` are bundled** (`ls assets/worldgen/noise_settings/` — amplified,
   caves, end, floating_islands, large_biomes, nether, overworld), **all 63 noises**, and
-  **`biome_parameters/nether.json`** (the list #485 paid a bespoke JVM oracle for). The
+  **`biome_parameters/nether.json`** (the list the worldgen-data-census issue paid a bespoke JVM oracle for). The
   rewrite plan's "6 of 7 missing / 2 of 63 noises missing / nether parameter list missing"
   was true when written and is now wrong — corrected in its inventory in this same commit.
   **There is no `[data]` item left for either dimension**
-  ([`worldgen-dimensions.md`](../worldgen-dimensions.md), #485).
+  ([`worldgen-dimensions.md`](../worldgen-dimensions.md)).
 - **Key settings, read from the bundled documents, not recalled**:
   `nether.json` — min_y 0, height 128, sea_level 32, `aquifers_enabled: false`,
   `legacy_random_source: true`, `ore_veins_enabled: false`, size_horizontal 1 /
   size_vertical 2 (**the same 4×8 cell as the overworld — cell-geometry plumbing is
   End-only**). `end.json` — min_y 0, height 128, sea_level 0, size 2/1 (**8-wide/4-tall
   cells** vs the engine's constants), legacy true, aquifers false.
-- **`density/mod.rs:916` panics on `minecraft:end_islands`** (the `other =>` arm of the
-  builder; file now lives in `crates/lodestone-worldgen-core`). Two live trigger paths, per
-  #485's correction: inline in `end.json` **and** inside the already-bundled
+- **`Density::build_object` (`crates/lodestone-worldgen-core/src/density/mod.rs`) panics on `minecraft:end_islands`** (the `other =>` arm of the
+  builder). Two live trigger paths, per
+  the worldgen-data-census issue's correction: inline in `end.json` **and** inside the already-bundled
   `density_function/end/sloped_cheese.json`. It is the only DF type used anywhere in
   vanilla's worldgen data that we do not implement (plan census).
-- **`carver/mod.rs:234` panics on `nether_cave`** (`unsupported carver type`); the config
+- **`CarverConfig::parse` (`crates/lodestone-worldgen/src/carver/mod.rs`) panics on `nether_cave`** (`unsupported carver type`); the config
   document is bundled and unreferenced by any overworld biome, so the panic is latent.
 - **`Resolver::biome_parameters(&self)` takes no dimension argument** — verified at
   `crates/lodestone-worldgen-core/src/density/mod.rs` (default method returning
   `Value::Array(vec![])`), with `EmbeddedResolver::biome_parameters`
-  (`crates/lodestone-server/src/worldgen_data.rs:161`) hardcoding
+  (`crates/lodestone-server/src/worldgen_data.rs`) hardcoding
   `biome_parameters/overworld`. So the Nether list is structurally unreachable today —
   the census is right. **But the fix need not widen the trait**: see NE4 — a per-dimension
   resolver *value* (a wrapper overriding `biome_parameters` and the settings path) reaches
@@ -64,7 +64,7 @@ gameplay, out of scope — a Nether generator is oracle-testable with no portal 
 - Assumed, not verified: that vanilla's Nether biome storage in the region files is
   vertically uniform per column (its climate points are y-independent in 1.18+ lineage).
   **NE4 asserts this from the oracle data before relying on it** — if false, NE4 inherits
-  a dependency on 3-D biome sampling (#512/U11) and must say so.
+  a dependency on 3-D biome sampling (the 3-D-biome-sampling issue's U11) and must say so.
 
 ## The evidence problem, and its shape here
 
@@ -81,26 +81,26 @@ No JVM on the machine (`789c6869`). The two dimensions differ sharply:
   `container` session; the acquisition step is part of NE7's issue, not hand-waved).
 
 The confounder NE5 must design around: vanilla's Nether chunks are fully decorated, and we
-run 3 of 11 decoration steps, have 48/55 feature types unimplemented (#513), and skip
+run 3 of 11 decoration steps, have 48/55 feature types unimplemented (the missing-feature-types issue), and skip
 `scattered_ore` (nether gold/quartz placement). A whole-chunk byte-equality gate is
 therefore structurally red. The gate must **classify, localise and predict** instead —
 see NE5.
 
 ## Unit sequence
 
-### NE1 — `legacy_random_source`: the algorithm switch (#486) (M)
+### NE1 — `legacy_random_source`: the algorithm switch (M)
 
 The gating item: both dimensions set it true; the engine hardcodes the Xoroshiro branch.
-Exactly as #486 sizes it: `Builder`'s concrete
+Exactly as the algorithm-switch issue sizes it: `Builder`'s concrete
 `XoroshiroPositionalFactory` field **and** `Builder::positional_factory`'s concrete return
 type become polymorphic (enum over the two factories — both already exist and are
 JVM-proven), plus threading the flag from the `noise_settings` document.
 
-**The sequencing decision #486 asked for, taken here**: land NE1 against the *current*
-interpreter now, and accept that U4 (#490, re-aimed, not started) re-does the wiring
+**The sequencing decision the algorithm-switch issue asked for, taken here**: land NE1 against the *current*
+interpreter now, and accept that U4 (the flattened-engine rewiring issue, re-aimed, not started) re-does the wiring
 inside the flattened engine. Rationale: U4 has no landing date, group NE is
 schedule-visible, the wiring is small, and the redo is mechanical once the enum exists.
-Record the redo obligation in #490.
+Record the redo obligation in that rewiring issue.
 
 **Gate.** (a) Overworld first: all 13 parity binaries + composed fixture byte-identical
 (the flag is false there; any drift means the polymorphism itself moved a draw).
@@ -117,11 +117,11 @@ digit** pre/post (the harness's 905,459-exact precedent is the standard).
 
 ### NE2 — the two bespoke Nether noises + `NormalNoise`/`BlendedNoise` legacy init (M)
 
-Record definitions: `RandomState.java:55-61` (`nether/temperature` and
+Record definitions: `RandomState.NoiseWiringHelper.visitNoise` (`nether/temperature` and
 `nether/vegetation` instantiate via `NormalNoise.createLegacyNetherBiome(new
 LegacyRandomSource(seed + 0))` and `(seed + 1)` — **raw world seed, not a positional
 fork**, which is exactly why these two were once the only missing noises);
-`NormalNoise.java:26-28` (`useNewInitialization = false`); `RandomState.java:70-73`
+`NormalNoise.createLegacyNetherBiome` (`useNewInitialization = false`); `RandomState.NoiseWiringHelper.wrapNew`
 (`BlendedNoise` legacy arm: `newLegacyInstance(0L)` vs `fromHashOf("terrain")`).
 `PerlinNoise::new_legacy` exists but is private and blended-noise-only — this unit opens
 the `NormalNoise` legacy path.
@@ -139,11 +139,11 @@ observe the assert fail (detector-works, run once). **Strengthening**: extend
 
 (a) `aquifers_enabled: false` → `Aquifer.createDisabled` semantics: solid where
 `density > 0`, else the global fluid picker — for the Nether every position resolves to
-`FluidStatus(32, LAVA)` (`NoiseBasedChunkGenerator.java:68-80`; **not** the overworld
-aquifer with lava as second fluid — #485's audit correction stands: `min(-54, 32)` is
+`FluidStatus(32, LAVA)` (`NoiseBasedChunkGenerator.createFluidPicker`; **not** the overworld
+aquifer with lava as second fluid — the worldgen-data-census issue's audit correction stands: `min(-54, 32)` is
 unreachable at min_y 0). The flag is currently unread; the overworld path must be
 bit-identical after the branch lands (parity suite). (b) `nether_cave` carver replacing
-the `carver/mod.rs:234` panic — record definition: the 26.2 carver sources (cave variant
+the `CarverConfig::parse` (`carver/mod.rs`) panic — record definition: the 26.2 carver sources (cave variant
 with lava replacement below the carve liquid level and the Nether replaceable set); its
 config document is bundled.
 
@@ -164,7 +164,7 @@ identical); Nether fill cost recorded by the same stage counters, reported not g
 
 A `DimensionResolver` wrapper (or equal mechanism) that supplies
 `biome_parameters/nether.json` and `noise_settings/nether` to a second generator instance
-— the smallest change that makes #485's oracle-bought parameter list reachable. Trait
+— the smallest change that makes the worldgen-data-census issue's oracle-bought parameter list reachable. Trait
 widening only if the wrapper leaks.
 
 **Gate — the strongest one in this group.** Per-quart biome equality against the biome
@@ -173,7 +173,7 @@ our multi-noise assignment (through NE2's legacy noises) equals vanilla's stored
 reported as mismatch count **by location with bounding boxes**, target 0. Preconditions
 asserted, not assumed: (a) chunk-count floor 2,444; (b) per-biome floors from the measured
 census (487/327/255/172); (c) **vertical uniformity of vanilla's stored Nether biomes** —
-if this assert fails, stop and re-plan against #512; (d) warped_forest recorded as
+if this assert fails, stop and re-plan against the 3-D-biome-sampling issue; (d) warped_forest recorded as
 unexercised (world species) — the gate output must name it, and the strengthening is one
 `container` session extending the world into a warped forest.
 
@@ -191,7 +191,7 @@ vanilla chunks. **Design, honouring the confounder:**
 
 - Classify every position into: base-terrain class (netherrack/basalt/blackstone/soul
   classes vs air vs lava — surface rules + fill + carve territory, ours to get right) vs
-  decoration-attributable blocks (the #513-absent feature types: fungi, glowstone,
+  decoration-attributable blocks (the missing-feature-types issue's absent feature types: fungi, glowstone,
   ore blobs, etc. — enumerated from the bundled biome JSONs' step arrays, an outside
   source, not from "whatever mismatched").
 - **Predict both hypotheses before running**: correct-wiring hypothesis — base-terrain
@@ -214,8 +214,8 @@ The island rule applied: a generator consumed only by its gate is orphaned by th
 own census definitions. Smallest production consumer: let the integrated server host
 `minecraft:the_nether` as the served dimension behind a world/config option (the shape
 `world_gen_settings.dat` already enumerates), including the Anvil path seam —
-`region_source.rs:91,400` hardcodes `dimensions/minecraft/overworld` (#330's census row).
-**Scope boundary**: this is *hosting one dimension*, deliberately not #330's
+`RegionChunkSource::new` (`region_source.rs`) hardcodes `dimensions/minecraft/overworld` (this plan's census row).
+**Scope boundary**: this is *hosting one dimension*, deliberately not the portal/dimension-travel issue's
 multi-dimension travel (portals, respawn plumbing — gameplay). Gate: join the hosted
 Nether from the real client; a served-chunk screenshot with sky/fog aside — the on-screen
 change is Nether terrain in the world rect, and the serve-path counters show the Nether
@@ -225,11 +225,11 @@ the dimension-correct region path.
 ### NE7 — `minecraft:end_islands` + End evidence acquisition (M)
 
 The DF type behind the `:916` panic. Record definition:
-`DensityFunctions.java:493-544` (`EndIslandDensityFunction`) — transcribed in
+`DensityFunctions.EndIslandDensityFunction` — transcribed in
 [`worldgen-dimensions.md`](../worldgen-dimensions.md); **seeding never consults
-`legacy_random_source`** (`new LegacyRandomSource(seed)` unconditionally,
-`DensityFunctions.java:498`), so this unit is independent of NE1 and could land any time
-(#486's correction). `SimplexNoise::new` is generic over `RandomSource` and takes a
+`legacy_random_source`** (`new LegacyRandomSource(seed)` unconditionally, in its
+constructor), so this unit is independent of NE1 and could land any time
+(the algorithm-switch issue's correction). `SimplexNoise::new` is generic over `RandomSource` and takes a
 `LegacyRandomSource` directly.
 
 **Gate.** (a) Hand-computed expected values from the transcription at ~8 sample points
@@ -248,8 +248,8 @@ stated in the landing message.
 ### NE8 — `TheEndBiomeSource`, End cell geometry, and the End generator (M)
 
 (a) `TheEndBiomeSource` — not multi-noise; four thresholds over the erosion router slot
-(which holds `cache2d(end_islands)`), record `TheEndBiomeSource.java:60-81`, ~a page.
-(b) Cell geometry: End cells are 8×4 (`size 2/1` × 4, `NoiseSettings.java:46-52`) against
+(which holds `cache2d(end_islands)`), record `TheEndBiomeSource.getNoiseBiome`, ~a page.
+(b) Cell geometry: End cells are 8×4 (`size 2/1` × 4, `NoiseSettings.getCellHeight`/`getCellWidth`) against
 the engine's 4×8 constants; `NoiseChunkSampler::new` already takes the dims as parameters
 — thread them from the settings. Gate by counter: cells-per-chunk and corner-evaluation
 counts must land on the 8×4 prediction, with the 4×8 hypothesis's counts precomputed as
@@ -260,12 +260,12 @@ overworld/Nether parity untouched.
 
 ### Out of scope, said explicitly
 
-Portals and dimension switch (#330 — gameplay; NE6 hosts, it does not travel). The dragon
-fight, respawn, gateways beyond the worldgen-placed `end_gateway_return` (#485's audit:
+Portals and dimension switch (gameplay; NE6 hosts, it does not travel). The dragon
+fight, respawn, gateways beyond the worldgen-placed `end_gateway_return` (the worldgen-data-census issue's audit:
 the other paths are gameplay). Fortress/bastion/end_city/nether_fossil generation
 (group S — see [`structures.md`](./structures.md); nether_fossil is also S3's
 beard_thin oracle once both groups land). `scattered_ore` and the other absent feature
-types (#513) — NE5 *classifies around* them and must not quietly absorb them. Ore veins
+types — NE5 *classifies around* them and must not quietly absorb them. Ore veins
 (`ore_veins_enabled` is false in both dimensions; U15 is overworld work).
 
 ## The biggest risk
@@ -274,7 +274,7 @@ types (#513) — NE5 *classifies around* them and must not quietly absorb them. 
 decoration-attributable mismatches to be green at all, and every exclusion is a place a
 real terrain bug can hide. The defences are structural: the exclusion set is derived from
 the bundled biome JSONs' feature lists (outside source), never from observed mismatches;
-the wrong-RNG control's measured count is recorded next to every green run; and as #513
+the wrong-RNG control's measured count is recorded next to every green run; and as the missing-feature-types issue
 closes feature types, the exclusion set must shrink monotonically — a ratchet, asserted,
 so the gate converges on byte-equality instead of ossifying at "classified green".
 
@@ -291,4 +291,5 @@ bundled data under `assets/worldgen/`, `.cache/mc/survival/world` (Nether oracle
 `.cache/mc/26.2/src/` (record definitions), `scripts/worldgen-oracle/` + Apple `container`
 (strengthening). Companions: [`worldgen-dimensions.md`](../worldgen-dimensions.md) (the
 engine-gap report this plan sequences), [`worldgen-gap-census.md`](../worldgen-gap-census.md)
-§1, issues #485/#486/#512/#513/#330.
+§1, and the worldgen-data-census, algorithm-switch, 3-D-biome-sampling, missing-feature-types
+and portal/dimension-travel issues named above.

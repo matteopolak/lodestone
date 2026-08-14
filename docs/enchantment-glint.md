@@ -14,11 +14,11 @@ additively-blended pass over the item's **own geometry**, using vanilla's
 Four things, in order.
 
 **1. The gate.** `glint::has_foil(&ItemComponents)` — vanilla's
-`ItemStack.hasFoil()` (`ItemStack.java:968-971`) is
+`ItemStack.hasFoil()` is
 `enchantment_glint_override ?? !ENCHANTMENTS.isEmpty()`.
 
 **2. The clock and the offsets.** `glint::glint_clock` and `glint::glint_offsets`
-implement `TextureTransform.setupGlintTexturing` (`TextureTransform.java:31-38`):
+implement `TextureTransform.setupGlintTexturing`:
 
 ```
 m     = (long)(millis * glintSpeed * 8.0)      glintSpeed default 0.5
@@ -60,7 +60,7 @@ off 4, and the glint pipeline has two spare groups if it ever needs them.
 
 For contrast: the entity pipeline spends only 2 of 4, so a glint drawn there would
 also have had room. It is not drawn there — items go through the model pipeline
-(`crates/lodestone-shell/src/gpu/world_items.rs:1-16`), and the glint has to
+(`crates/lodestone-shell/src/gpu/world_items.rs`'s own module doc comment), and the glint has to
 rasterise the same positions as whatever pass it overlays.
 
 ## What still needs doing for a player to see it
@@ -69,7 +69,7 @@ rasterise the same positions as whatever pass it overlays.
 composite correctly on a real adapter (see *Gates*), but the production draw call
 is recorded in `lodestone-shell`, which is where the remaining work is:
 
-1. ~~**Set `ItemIcon.enchanted` for real.**~~ **Done (#452).** The hotbar producer
+1. ~~**Set `ItemIcon.enchanted` for real.**~~ **Done.** The hotbar producer
    at `crates/lodestone-shell/src/app/redraw.rs` now fills it from
    `item_icon::stack_has_foil`, which delegates to
    **`glint::has_foil_enchantments`** — a sibling of `has_foil` added because the
@@ -105,11 +105,11 @@ is recorded in `lodestone-shell`, which is where the remaining work is:
    one submit — one buffer written twice hands both passes the last value and the
    shimmer lands nowhere.
 
-   ~~**The 2-D GUI icon site is still open**~~ **Done (#452).** Hotbar cells,
+   ~~**The 2-D GUI icon site is still open**~~ **Done.** Hotbar cells,
    inventory slots, container slots and the carried (cursor) stack all glint now,
    through a *second* glint pipeline in the shell — see "The 2-D GUI glint is its
    own pipeline" below.
-3. ~~**Load the texture.**~~ **Done (#452).** `crate::resources::load_glint_texture`
+3. ~~**Load the texture.**~~ **Done.** `crate::resources::load_glint_texture`
    reads `glint::textures::ITEM` out of the jar and `RenderState::install_glint`
    uploads it **non-sRGB** (see the gotcha below) with `glint::glint_sampler`.
    `glint::textures::ARMOUR` is still unused — armour glint needs the armour pass
@@ -170,10 +170,10 @@ moves a slider.
 ## How to change it, and the gotchas
 
 **The blend is `SRC_COLOR/ONE`, which is the source *squared*.**
-`BlendFunction.GLINT` (`BlendFunction.java:8`) is
+`BlendFunction.GLINT` is
 `(SRC_COLOR, ONE, ZERO, ONE)` — so colour is `dst += src²` and the destination
-alpha is left completely untouched. It is **not** `TRANSLUCENT`
-(`BlendFunction.java:10-12`) and **not** `ADDITIVE` (`:17`); both are the obvious
+alpha is left completely untouched. It is **not** `BlendFunction.TRANSLUCENT`
+and **not** `BlendFunction.ADDITIVE`; both are the obvious
 guess and both are wrong. Measured: with the blend neutered to `ADDITIVE`, the gate
 below flips from `mae=0.00082` to `mae=0.207` while the ADDITIVE prediction goes
 from `0.199` to `0.00105`.
@@ -202,13 +202,13 @@ transfer function. An sRGB upload silently linearises the sheet and makes the
 shimmer darker than the game's.
 
 **`REPEAT`/`LINEAR` is derived, not chosen.** `withTexture("Sampler0", …)` passes a
-`null` sampler (`RenderSetup.java:138-141`), so the sampler comes from the
+`null` sampler (`RenderSetup.withTexture`), so the sampler comes from the
 texture's own `.mcmeta`, which is `{"texture":{"blur":true}}` with no `clamp` —
-`ReloadableTexture.java:24-29` maps that to `REPEAT` + `LINEAR`, no mipmaps.
+`ReloadableTexture.apply` maps that to `REPEAT` + `LINEAR`, no mipmaps.
 `CLAMP_TO_EDGE` would smear one edge texel across the whole item as soon as the
 scroll offset carried a UV past 1.0.
 
-**`glintStrength` defaults to `0.75`, not `1.0`** (`Options.java:867-874`). Treating
+**`glintStrength` defaults to `0.75`, not `1.0`** (`Options.glintStrength` field). Treating
 it as `1.0` is 33% too bright — a *magnitude* error of exactly the kind that shipped
 a hurt overlay here at 70% red where vanilla renders 30%.
 
@@ -242,8 +242,9 @@ entity path reuses the item one.
 - the seven items whose glint comes *only* from a baked
   `ENCHANTMENT_GLINT_OVERRIDE=true` do **not** glint: `enchanted_golden_apple`,
   `experience_bottle`, `written_book`, `nether_star`, `enchanted_book`,
-  `end_crystal`, `debug_stick` (`Items.java:1122`, `:1471`, `:1481`, `:1557`,
-  `:1571`, `:1609`, `:1697`).
+  `end_crystal`, `debug_stick` (`Items.ENCHANTED_GOLDEN_APPLE`, `Items.EXPERIENCE_BOTTLE`,
+  `Items.WRITTEN_BOOK`, `Items.NETHER_STAR`, `Items.ENCHANTED_BOOK`,
+  `Items.END_CRYSTAL`, `Items.DEBUG_STICK`).
 
 That last group is **not** fixable by decoding harder. The override is a *prototype*
 component baked into `Item.Properties`, so a clientbound stack carries no mention of
@@ -252,7 +253,7 @@ the version seam. Note also that `enchanted_book`'s enchantments live in
 `STORED_ENCHANTMENTS`, which vanilla's `isEnchanted` deliberately does not read, so
 it would not glint even with the override modelled by way of the enchantments list.
 `minecraft:compass` has a code-level override (`LODESTONE_TRACKER` present means
-foil, `CompassItem.java:29-31`) and is likewise out of reach.
+foil, `CompassItem.isFoil`) and is likewise out of reach.
 
 Zero glinting items with no vanilla pack is the honest degradation, matching how
 armour, wool and flame counters behave; there is no synthetic-texture fallback.

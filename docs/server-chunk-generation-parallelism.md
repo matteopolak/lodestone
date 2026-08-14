@@ -20,8 +20,8 @@ and every RNG a generator touches is positionally seeded
 `fork_positional`/`from_hash_of` — see `lodestone-worldgen`'s own doc comments).
 There is no shared RNG stream anywhere in that crate, so results are
 order-independent by construction: which OS thread generates column `(3, -2)`,
-or when, cannot change what it contains. `ChunkSource: Send + Sync`
-(`chunk.rs:216`) is the compiler-checked half of that — it's what lets
+or when, cannot change what it contains. `ChunkSource: Send + Sync`'s trait bound
+(`chunk.rs`) is the compiler-checked half of that — it's what lets
 `generate_columns_parallel` share `&S` across worker threads at all — and
 `examples/bench_worldgen.rs` had already been sharing a generator across
 `std::thread::scope` workers for a while before anything in the server used it.
@@ -51,7 +51,7 @@ different coordinate-ordering stories:
   order variance on top of that. Fixed by sorting `added` before generating —
   see the comment at the call site in `server.rs`.
 
-## Parallel is not the same as non-blocking (issue #293)
+## Parallel is not the same as non-blocking
 
 `generate_columns_parallel` closed the **throughput** axis and nothing else. Its
 final `std::thread::scope` join blocks the calling thread until every worker
@@ -80,7 +80,7 @@ singleplayer, not merely fail a test. Measured directly on a
 
 `spawn_blocking` works on a current-thread runtime because the blocking pool is a
 separate set of threads from the core thread, and it stays correct on a
-multi-thread runtime — so issue #281's eventual thread split cannot invalidate
+multi-thread runtime — so a future thread split cannot invalidate
 it.
 
 ### `SourceRef`, and why the public API did not change
@@ -97,13 +97,13 @@ through the private dispatch chain, so both shapes share one body:
 | arm | generation | used by |
 |---|---|---|
 | `Shared(&'a Arc<S>)` | offloaded, never blocks the runtime | every production caller in `integrated.rs` |
-| `Borrowed(&'a S)` | blocking, pre-#293 behaviour | `&S`-shaped test call sites |
+| `Borrowed(&'a S)` | blocking, the original behaviour | `&S`-shaped test call sites |
 
 Two consequences worth keeping:
 
 - **`mod server` is private and `lib.rs` re-exports only `serve_connection`**, so
   the new `serve_connection_shared` / `serve_connection_with_mob_events_shared`
-  entry points are `pub(crate)` and #293 cost **no public API change and no
+  entry points are `pub(crate)` and this change cost **no public API change and no
   `lib.rs` patch at all**.
 - **The `Borrowed` arm is the permanent negative control.** It is not dead
   weight: `chunk.rs`'s `offloaded_generation_lets_a_timer_task_keep_running`
@@ -183,7 +183,7 @@ Two consequences for anyone tuning this:
   that is computing. `store::wait_stats()` counts and times those parks; it reads
   exactly 0 single-threaded, which is its calibration.
 
-`OverworldChunkSource::edits` (`chunk.rs:289`, a `Mutex<HashMap>`) is held only
+`OverworldChunkSource::edits` (`chunk.rs`, a `Mutex<HashMap>`) is held only
 for a lookup/insert per column and isn't a real bottleneck at the concurrency
 levels here (one lock acquisition per column, `available_parallelism()`-wide
 fan-out).

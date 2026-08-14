@@ -23,16 +23,16 @@ function — so the pipeline grew no new stage and no new call site.
 * **The predicate** is `input.blocksMotion() || !input.getFluidState().isEmpty()`,
   read off the record definition itself —
   `MOTION_BLOCKING(4, "MOTION_BLOCKING", Heightmap.Usage.CLIENT, …)`,
-  `.cache/mc/26.2/src/net/minecraft/world/level/levelgen/Heightmap.java:151` — and
+  `Heightmap.Types`'s `MOTION_BLOCKING` constant — and
   already ported as `feature::top_layer::SnowSupport::motion_blocking` over two
   jar-dumped per-state columns. Nothing new is guessed. The fluid half is the one
   a solids-only port drops, and it is what makes an ocean column read 63 rather
   than the seabed.
 * **The stored value** is `topMatchingY + 1 - min_y`.
   `Heightmap.primeHeightmaps` scans each column downward and calls
-  `setHeight(x, z, m + 1)` at the first matching block (`Heightmap.java:60-64`);
-  `setHeight` stores `y - chunk.getMinY()` and `getFirstAvailable` adds it back
-  (`Heightmap.java:70-78`). A column with **no** matching block never gets a
+  `setHeight(x, z, m + 1)` at the first matching block;
+  `setHeight` stores `y - chunk.getMinY()` and `getFirstAvailable` adds it back.
+  A column with **no** matching block never gets a
   `setHeight` call, so its slot stays `0`, i.e. `min_y` — which is why an all-air
   column here is `0` and not a sentinel.
 * **The index** is `Heightmap.getIndex(x, z) = x + z * 16`, matching
@@ -52,7 +52,7 @@ them through `Heightmap.update` per placed block, which is an incremental form o
 exactly this scan. This runs after **every** stage including
 `TOP_LAYER_MODIFICATION`, so nothing is left to place and a top-down scan of the
 finished field lands on the same answer (the same argument
-`feature/top_layer.rs`'s `motion_blocking_first_free` already makes). #516's scope
+`feature/top_layer.rs`'s `motion_blocking_first_free` already makes). This issue's scope
 asks for incremental maintenance through the region view; that is a **cost**
 refinement (worldgen-rewrite candidate 3), not a correctness one, and doing it
 would not change a single stored height.
@@ -110,13 +110,13 @@ omits heightmaps from the Anvil write and relies on vanilla's
 `Heightmap.primeHeightmaps` to re-derive on load, so nothing persists a stale
 value. Only the first send after generation carries it — which is exactly the send
 a client has no other way to derive one for. Maintaining it incrementally is
-scope 1 of #516, and the prerequisite for the vegetation cost-per-draw work.
+this issue's scope 1, and the prerequisite for the vegetation cost-per-draw work.
 
 **Not in scope, deliberately:** the other three sent maps
 (`WORLD_SURFACE`, `OCEAN_FLOOR`, `MOTION_BLOCKING_NO_LEAVES`).
 `MOTION_BLOCKING_NO_LEAVES` in particular is *aliased onto* `WORLD_SURFACE` at
-`feature/vegetation/config.rs:41` with no leaf/log exclusion, so sending it today
-would send a knowingly wrong map — the one thing worse than sending none. #516
+`HeightmapKind::parse` (`feature/vegetation/config.rs`) with no leaf/log exclusion, so sending it today
+would send a knowingly wrong map — the one thing worse than sending none. This issue
 stays open for those.
 
 ## How to change it, and the gotchas

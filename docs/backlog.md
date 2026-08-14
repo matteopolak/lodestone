@@ -79,8 +79,8 @@ recurring defect classes, not because they are generically useful — see
   stays at bare-hand defaults and obsidian is ~4m10s of unbroken holding.
 - ~~**Flat sprite items draw nothing as drops.**~~ **Fixed** in `9980a96` /
   `a9f263f`, and this entry's wording is the single most expensive stale note this
-  repo has produced. `collect_item_model_parts` collects `IconPart::Sprite` too
-  (`block_models.rs:515`), `extruded_sprite_geometry` bakes it into vanilla's thin
+  repo has produced. `collect_item_model_parts` (now `collect_item_variants`) collects `IconPart::Sprite` too
+  (`block_models.rs`), `extruded_sprite_geometry` bakes it into vanilla's thin
   slab, and the result goes into **the same `BlockModels::items` map** as the 3-D
   models. `sprite_drop_pixels` proves the pixels.
 

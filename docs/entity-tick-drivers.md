@@ -8,13 +8,13 @@ them through one call: [`ProjectileRegistry`](../crates/lodestone-entity/src/pro
 for ballistic motion (arrows, snowballs, ender pearls, …) and
 [`ItemEntityRegistry`](../crates/lodestone-entity/src/item_entity.rs) for
 dropped-item age/pickup-delay/merge. Both are now constructed and ticked in
-production by [`MobSim`](../crates/lodestone-server/src/mobs.rs) — see
+production by [`MobSim`](../crates/lodestone-server/src/mobs/mod.rs) — see
 "Production wiring" below; this doc's earlier revision described them as
 unwired, which is no longer true and is corrected here rather than left to
 mislead the next reader.
 
 Both exist because `projectile.rs` and `item_entity.rs` were confirmed
-islands (tracker #211, #215): the per-entity math was correct and unit-tested,
+islands: the per-entity math was correct and unit-tested,
 but nothing outside their own test modules ever called it — no registry, no
 driver, `grep -rn 'projectile::Projectile'` outside the crate was empty. The
 registries are the missing "something owns many of these across ticks" piece.
@@ -38,27 +38,27 @@ ProjectileRegistry                     ItemEntityRegistry
 ```
 
 Entity ids are plain `i32`, matching `SimMob`'s numbering convention in
-`lodestone-server` (`crates/lodestone-server/src/mobs.rs`) so a caller can key
+`lodestone-server` (`crates/lodestone-server/src/mobs/mod.rs`) so a caller can key
 both off the same network entity id space.
 
 `ItemEntityRegistry::merge` also carries a correctness fix found while
-re-verifying `try_merge` against `ItemEntity.java:261-267`: only the
+re-verifying `try_merge` against `ItemEntity`'s `merge(ItemEntity, ItemStack, ItemEntity, ItemStack)` overload: only the
 surviving `to` side picks up state from the merge — `pickup_delay` becomes
 `max(to, from)` and **`age` becomes `min(to, from)`**, resetting the survivor
 to the younger of the two ages. The pre-existing `try_merge` neither touched
 `age` nor limited the `pickup_delay` write to `to` alone; both are fixed.
 
-## Production wiring (closes #211/#215)
+## Production wiring
 
-`#217` closed the "is anything ticking `MobSim` at all" gap first (see
+A prior fix closed the "is anything ticking `MobSim` at all" gap first (see
 `docs/live-mob-sim.md`); this closed the next one out. `MobSim`
-(`crates/lodestone-server/src/mobs.rs`) now owns one `ProjectileRegistry` and
+(`crates/lodestone-server/src/mobs/mod.rs`) now owns one `ProjectileRegistry` and
 one `ItemEntityRegistry` as fields (plus a small `HashMap` each of wire
 metadata — uuid and canonical entity-type key — since both registries stay
 deliberately version/wire-free, the same split `SimMob` already makes for
 mobs). `MobSim::tick()` calls `self.projectiles.tick()` and
 `self.items.tick()` every server tick, so the server's unified tick loop
-(`tick::run_tick_loop`, issue #284 — before that, `run_mob_tick_loop`) — the
+(`tick::run_tick_loop` — before that, `run_mob_tick_loop`) — the
 same background task `IntegratedServer::open_in_memory_with_mobs` spawns for
 singleplayer — advances both automatically, with no new task.
 

@@ -11,7 +11,7 @@ generator, an edit, a stand-in) — into the version-free
 whole-column send every client gets at join, and that `ViewTracker` resends as a
 player walks (`crates/lodestone-server/src/server.rs`).
 
-Until this fix (issue #363), `build_world_column` **collapsed** every solid block
+Until this fix, `build_world_column` **collapsed** every solid block
 to `minecraft:stone` and everything non-solid — air *and every fluid* — to air,
 via `if source.is_solid(...) { section.set_block(..., stone) }`. The server's own
 terrain data was, and is, real (grass, dirt, deepslate, gravel, water, ores as the
@@ -32,7 +32,7 @@ nothing and fell straight through to `resolve_state_id`'s *own* pre-existing
 no-match fallback: air. This crate's own hermetic gate
 (`encode_chunk_carries_real_block_states_including_a_fluid`) caught this the
 first time it ran — its `assert_ne!(water_id, air_id())` sanity check failed —
-which is exactly why that assertion is there: issue #363's own brief predicted
+which is exactly why that assertion is there: this fix's own brief predicted
 "a fix that only thinks about solids will leave \[fluids\] broken and still
 look like progress," and a first pass at this fix did precisely that, from an
 unanticipated angle. See "Two bugs, not one" below.
@@ -76,7 +76,7 @@ it anything but two values," not a container limitation.
 
 ### Two bugs, not one
 
-Issue #363's title names the encoder's collapse, but closing it required
+This fix's title names the encoder's collapse, but closing it required
 fixing a second, independent bug in `resolve_state_id` (also in this file) —
 without which fluids specifically would have stayed broken even after the
 collapse itself was gone:
@@ -87,7 +87,7 @@ collapse itself was gone:
    name-and-properties match, or air. A **bare** block name for a block that
    *requires* properties (water chief among them — there is no propertyless
    water state) never matched anything and fell to tier two: air. This bug
-   predates issue #363 — `encode_block_update` could already have hit it for
+   predates this fix — `encode_block_update` could already have hit it for
    any bare, property-requiring state string, though nothing before this
    change ever exercised that path with one.
 
@@ -124,13 +124,13 @@ Checked, not assumed, before changing this:
     (`ChunkSection::from_containers`'s non-air scan) — so it never depended on
     what this encoder wrote for that field, before or after the fix.
   - **A real vanilla client does not recompute**: `LevelChunkSection.read`
-    (`.cache/mc/26.2/src/net/minecraft/world/level/chunk/LevelChunkSection.java:163-166`)
+    (`.cache/mc/26.2/src/net/minecraft/world/level/chunk/LevelChunkSection.java`)
     stores the wire `nonEmptyBlockCount` directly, and
     `LevelChunk.replaceWithPacketData`
-    (`.../world/level/chunk/LevelChunk.java:523-532`) never calls
+    (`.../world/level/chunk/LevelChunk.java`) never calls
     `recalcBlockCounts` afterward — so a real client trusts whatever count we
     send. Vanilla's own definition
-    (`LevelChunkSection.recalcBlockCounts`, `LevelChunkSection.java:122-153`)
+    (`LevelChunkSection.recalcBlockCounts`)
     counts every state where `!state.isAir()`, i.e. **fluids count as
     non-air** — the same "non-air-id" test `ChunkSection::set_block`'s
     `non_air_count` bookkeeping already used. The pre-fix encoder derived this
@@ -205,8 +205,8 @@ Two gates hold it:
   "lowest id".** A bare block name resolves to the block's **jar-marked default
   state** with the caller's named properties written over it, per
   `lodestone_data::block_states::state_id`'s three tiers. The older "lowest id
-  sharing the name" version shipped three bugs at once — snowy spread grass
-  (#546), wrong-facing directionals (#475), and redstone dust rendering as
+  sharing the name" version shipped three bugs at once — snowy spread grass,
+  wrong-facing directionals, and redstone dust rendering as
   climbing rather than flat. **Do not hand-duplicate the fallback.** Two test
   helpers did, became silent callers when it changed at `43a6e030`, and one failed
   as a 30-second live timeout rather than a mismatch.

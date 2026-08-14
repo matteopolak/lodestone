@@ -50,7 +50,7 @@ placeholder.
 - **Decorative — the Report button**: always inactive, in every session kind.
   It needs secure chat signing (a `ChatSession`/signed-message context), and
   `/usr/bin/grep -rn 'SecureChat\|ChatSession\|signed_chat'` over `crates/`
-  finds nothing — issue #189's own scope explicitly says not to build a fake
+  finds nothing — this screen's own scope explicitly says not to build a fake
   or unsigned report path, so this is the honest state until that dependency
   lands, not a stub. `PauseButton::PlayerReporting`'s doc used to be the only
   place this dependency was written down (a trap the issue itself flagged,
@@ -62,12 +62,12 @@ placeholder.
   self.sim.local_uuid())` and feeds the result to `MenuNav::refresh_social`
   (`menu/nav.rs::MenuNav::refresh_social`), so the roster shown is the real, live tab list, local
   player excluded, every frame.
-- **Wired since this patch (issue #419) — Hide in Chat suppresses signed
+- **Wired since this patch — Hide in Chat suppresses signed
   player chat.** This section used to say hiding a player had no consumer and
   no sender identity to key on. That plumbing now exists end to end: a
   `sender: Option<Uuid>` field on `lodestone_model::ClientEvent::Chat`,
   populated at the one decode site that has it on the wire
-  (`crates/protocol/v770/src/adapter.rs`'s `PLAYER_CHAT` arm reads the sender
+  (`V770Adapter::handle_play_chat`'s (`crates/protocol/v770/src/adapter/chat.rs`) `PLAYER_CHAT` arm reads the sender
   UUID and emits `Some(sender)`; `DISGUISED_CHAT`/`SYSTEM_CHAT`/action-bar
   and every legacy-family chat emit `None`), carried verbatim through
   `net.rs`'s `NetUpdate::Chat` into `sim/net_apply.rs`'s `Chat` arm. There a
@@ -102,9 +102,9 @@ single flat list instead — a documented reduction, not a silent one.
 - **Wiring the Report button** needs secure chat signing to exist first
   (`ChatSession`/message signatures) — not a menu-side change at all once
   that lands; `SocialControl::is_live` is the one place to flip.
-- **Wiring Hide/Show to actually suppress chat** — **done (issue #419)**.
+- **Wiring Hide/Show to actually suppress chat** — **done**.
   `sender: Option<Uuid>` on `ClientEvent::Chat` (populated at
-  `protocol/v770/src/adapter.rs`'s `PLAYER_CHAT` arm, `None` everywhere else)
+  `V770Adapter::handle_play_chat`'s (`protocol/v770/src/adapter/chat.rs`) `PLAYER_CHAT` arm, `None` everywhere else)
   → `NetUpdate::Chat` → `sim/net_apply.rs`'s `Chat` arm, which consults
   `crate::menu::social::should_show_message` against `HiddenPlayers::load()`.
   The predicate lives with this screen (`menu/social.rs`) and is unit-tested
