@@ -15,14 +15,26 @@ Trunk placers ported so far: `Straight` (oak/birch/spruce/pine's default), `Fork
 `DarkOak` (dark oak, and pale oak for free — same placer, different providers), `Giant` (the shared
 2×2 base under mega spruce/pine AND mega jungle), `MegaJungle` (`Giant`'s base plus radial branches),
 `Fancy` (oak's `fancy_oak_*`/`fancy_oak_checked` branch, shared with jungle and dark_forest — the
-slim-trunk-plus-scattered-limb shape, the single highest-value gap named in issue #428, closed in a
-later pass). Foliage placers: `Blob`, `Spruce`, `Pine`, `Acacia`, `DarkOak`, `MegaJungle`, `MegaPine`,
-`Bush`, `Fancy`. `FallenTreeFeature` — a real, distinct feature type, not a trunk/foliage placer at
-all — is also modelled now: a stump plus a horizontal fallen log, reusing the same
+slim-trunk-plus-scattered-limb shape), `Cherry` (cherry_grove's own `CherryTrunkPlacer` — a straight
+column plus one to three side branches), `UpwardsBranching` (mangrove/tall_mangrove's
+`UpwardsBranchingTrunkPlacer` — a straight column that can bud short horizontal branches). Foliage
+placers: `Blob`, `Spruce`, `Pine`, `Acacia`, `DarkOak`, `MegaJungle`, `MegaPine`, `Bush`, `Fancy`,
+`Cherry` (`CherryFoliagePlacer` — a widening canopy with an extra hanging-leaves-below pass off its
+bottom two rows), `RandomSpread` (`RandomSpreadFoliagePlacer` — mangrove's dart-throw scatter, no row
+structure at all). Root placers: `RootPlacerCfg::Mangrove` (`MangroveRootPlacer` — the only vanilla
+`RootPlacer` as of 26.2), which elevates the real trunk's origin above the sapling/propagule position
+and grows a simulated root system down through the gap; `TreeConfig.root_placer` is `None` for every
+species that doesn't carry one, and [`place_tree`]'s `trunk_origin` collapses to `origin` in that
+case — every trunk placer above `Cherry` predates the root-placer plumbing and is unaffected by it.
+`FallenTreeFeature` — a real, distinct feature type, not a trunk/foliage placer at
+all — is also modelled: a stump plus a horizontal fallen log, reusing the same
 `TrunkVineDecorator`/`AttachedToLogsDecorator` machinery `TreeConfig.decorators` already needed for
 `jungle_tree`/`mega_jungle_tree`'s own `trunk_vine` entries (both landed together — `Decorator` is
-shared across both feature types in real vanilla, not duplicated). Still unmodelled: mangrove's
-`UpwardsBranchingTrunkPlacer`, `Cherry`, `Bending`.
+shared across both feature types in real vanilla, not duplicated). Still unmodelled: `Bending`
+(reached by no bundled overworld biome as of this writing) and mangrove/cherry's own
+`leave_vine`/`attached_to_leaves` tree decorators (degrade individually to a silent no-op — see
+`TreeConfig.decorators`' own doc — so mangrove/cherry canopies grow without their hanging vines or
+propagules for now, a narrower gap than the whole tree being unsupported).
 
 ## How it works
 
@@ -90,16 +102,16 @@ chunk's post-ore terrain, runs the step, and folds only the written cells back (
   hive-row selection approximated).
 - **Named per-species gaps, even within the implemented trunk/foliage placers**: real vanilla
   plains/taiga/jungle/etc. roll a `random_selector` between several tree variants per attempt. Now
-  that `fancy_oak_*`/`fancy_oak_checked` and every species' `fallen_*_tree` branch are both modelled,
-  the remaining `ConfiguredFeature::Unsupported` tree-shaped gaps are narrower: mangrove_swamp
-  (`UpwardsBranchingTrunkPlacer`), cherry_grove (`CherryTrunkPlacer`) and any biome whose selector
-  reaches a bare `BendingTrunkPlacer`. See `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`
-  for the maintained, gate-enforced per-biome list of exactly which reasons remain — pruned to match
-  `vegetation_placer_gaps_are_named_not_silent`'s own measured surface once `fancy_oak_*`/
-  `fallen_*_tree` actually landed (every `fallen_tree` row is gone, and `"tree: unsupported..."`
-  survives only where a biome's own placer is genuinely unported — mangrove_swamp and cherry_grove).
-  See the `vegetation` module's own doc "Named per-branch gaps" section for the reasoning behind
-  which placer landed when.
+  that `fancy_oak_*`/`fancy_oak_checked`, every species' `fallen_*_tree` branch, `CherryTrunkPlacer`
+  and `UpwardsBranchingTrunkPlacer` are all modelled, the `"tree: unsupported..."` reason no longer
+  occurs for ANY reachable overworld biome — see
+  `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS` for the maintained, gate-enforced per-biome
+  list of exactly which reasons remain (every surviving row is `multiface_growth` or one of the other
+  named-elsewhere gaps, none of them tree-shaped). See the `vegetation` module's own doc "Named
+  per-branch gaps" section for the reasoning behind which placer landed when. Mangrove/cherry still
+  carry a narrower, non-`Unsupported` gap: their `leave_vine`/`attached_to_leaves` tree decorators
+  degrade individually (a canopy grows, just without hanging vines/propagules) — see the "What it is"
+  section above.
 - **`TrunkVineDecorator`/`AttachedToLogsDecorator` are shared between `ConfiguredFeature::Tree` and
   `ConfiguredFeature::FallenTree`** — both are `TreeDecorator` subclasses in real vanilla, and
   `Decorator` (`config.rs`) models them once rather than per feature type. `jungle_tree`/

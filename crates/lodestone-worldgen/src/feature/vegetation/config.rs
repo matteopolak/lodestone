@@ -17,7 +17,7 @@ use crate::rng::RandomSource;
 use super::grid::VegGrid;
 use super::grid::census::bump as census_bump;
 use super::ids::{IdTags, Tag, tag_at};
-use super::tree::{FoliagePlacerCfg, TrunkPlacerCfg};
+use super::tree::{FoliagePlacerCfg, RootPlacerCfg, TrunkPlacerCfg};
 
 /// `Heightmap.Types` (the subset vegetal decoration references). See this
 /// module's doc "Approximations, named" for why only two scans back all
@@ -435,7 +435,7 @@ pub(super) fn canon_state(v: &Value) -> String {
 }
 
 impl BlockStateProvider {
-    fn try_parse(v: &Value) -> Option<Self> {
+pub(super)     fn try_parse(v: &Value) -> Option<Self> {
         let ty = v["type"].as_str()?;
         match ty.strip_prefix("minecraft:").unwrap_or(ty) {
             "simple_state_provider" => Some(BlockStateProvider::Simple(canon_state(&v["state"]))),
@@ -612,6 +612,12 @@ pub struct VegTags {
     /// (a dark oak trunk can grow up through a neighbour's already-placed
     /// canopy; dense dark forests depend on that).
     pub leaves: HashSet<String>,
+    /// `#minecraft:mangrove_logs_can_grow_through` —
+    /// [`TrunkPlacerCfg::UpwardsBranching`]'s extra `validTreePos` OR-arm.
+    pub mangrove_logs_can_grow_through: HashSet<String>,
+    /// `#minecraft:mangrove_roots_can_grow_through` — [`RootPlacerCfg::Mangrove`]'s
+    /// `canPlaceRoot` extra OR-arm.
+    pub mangrove_roots_can_grow_through: HashSet<String>,
     /// Unit 8: the same membership questions as the sets above, as bitsets
     /// indexed by [`crate::interner::StateId`] — see [`super::ids`] for the whole
     /// design, including why the sets above must not be mutated after
@@ -642,6 +648,8 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         supports_cactus: resolve("minecraft:supports_cactus"),
         supports_sugar_cane: resolve("minecraft:supports_sugar_cane"),
         leaves: resolve("minecraft:leaves"),
+        mangrove_logs_can_grow_through: resolve("minecraft:mangrove_logs_can_grow_through"),
+        mangrove_roots_can_grow_through: resolve("minecraft:mangrove_roots_can_grow_through"),
         // Unbound: the bitsets are per-interner and the interner does not exist
         // yet at generator-construction time. The decoration driver binds them
         // once per pass. See [`super::ids`].
@@ -1286,6 +1294,16 @@ pub(super)     trunk_placer: TrunkPlacerCfg,
 pub(super)     foliage_placer: FoliagePlacerCfg,
 pub(super)     feature_size: FeatureSizeCfg,
 pub(super)     decorators: Vec<Decorator>,
+    /// `TreeConfiguration.rootPlacer` — `Optional<RootPlacer>`. Absent for
+    /// every species except mangrove/tall_mangrove. A `root_placer`
+    /// key that's present in the JSON but fails to parse into a
+    /// [`RootPlacerCfg`] this module implements fails the WHOLE [`TreeConfig`]
+    /// (see [`Self::try_parse`]) rather than silently dropping it — dropping it
+    /// would still place a trunk, just floating at the wrong origin with no
+    /// roots under it, which is the "dangerous direction" `CLAUDE.md` names for
+    /// silent degradation: a present-but-unmodelled root placer must not look
+    /// like a tree with no root placer at all.
+pub(super)     root_placer: Option<RootPlacerCfg>,
 }
 
 impl TreeConfig {
@@ -1294,7 +1312,9 @@ impl TreeConfig {
     /// implement — see module doc on why that must degrade rather than
     /// panic. `below_trunk_provider`/`decorators` degrade individually
     /// instead (a missing/unsupported one just does less, it doesn't sink
-    /// the whole tree).
+    /// the whole tree). `root_placer` is a THIRD shape: absent is fine
+    /// (`None`), but present-and-unparseable fails the whole config — see
+    /// this struct's own `root_placer` field doc.
     fn try_parse(cfg: &Value) -> Option<Self> {
         let trunk_provider = BlockStateProvider::try_parse(&cfg["trunk_provider"])?;
         let foliage_provider = BlockStateProvider::try_parse(&cfg["foliage_provider"])?;
@@ -1309,6 +1329,10 @@ impl TreeConfig {
             .and_then(Value::as_array)
             .map(|arr| arr.iter().map(Decorator::parse).collect())
             .unwrap_or_default();
+        let root_placer = match cfg.get("root_placer") {
+            Some(r) if !r.is_null() => Some(RootPlacerCfg::try_parse(r)?),
+            _ => None,
+        };
         Some(Self {
             below_trunk_provider,
             trunk_provider,
@@ -1317,6 +1341,7 @@ impl TreeConfig {
             foliage_placer,
             feature_size,
             decorators,
+            root_placer,
         })
     }
 }

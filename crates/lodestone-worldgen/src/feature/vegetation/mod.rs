@@ -808,6 +808,7 @@ mod tests {
                 min_clipped_height: None,
             },
             decorators: Vec::new(),
+            root_placer: None,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         let tags = VegTags::default();
@@ -868,6 +869,7 @@ mod tests {
                 min_clipped_height: None,
             },
             decorators: Vec::new(),
+            root_placer: None,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         // Block the space directly above the trunk's base with stone.
@@ -916,6 +918,7 @@ mod tests {
                 min_clipped_height: None,
             },
             decorators: Vec::new(),
+            root_placer: None,
         };
         let tags = VegTags::default();
         let origin = BlockPos { x: 8, y: 70, z: 8 };
@@ -975,6 +978,7 @@ mod tests {
                 min_clipped_height: None,
             },
             decorators: Vec::new(),
+            root_placer: None,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         let mut tags = VegTags::default();
@@ -1330,6 +1334,7 @@ mod tests {
                 min_clipped_height: None,
             },
             decorators: Vec::new(),
+            root_placer: None,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         let tags = VegTags::default();
@@ -1397,6 +1402,7 @@ mod tests {
                 min_clipped_height: None,
             },
             decorators: Vec::new(),
+            root_placer: None,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         let tags = VegTags::default();
@@ -1462,6 +1468,7 @@ mod tests {
                 min_clipped_height: None,
             },
             decorators: Vec::new(),
+            root_placer: None,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
         let tags = VegTags::default();
@@ -1674,6 +1681,7 @@ mod tests {
                 min_clipped_height: Some(4),
             },
             decorators: Vec::new(),
+            root_placer: None,
         };
         for seed in [1i64, 99] {
             let mut grid = grid_with_flat_ground(-64, 384, 69);
@@ -1740,6 +1748,7 @@ mod tests {
                 min_clipped_height: Some(2),
             },
             decorators: Vec::new(),
+            root_placer: None,
         }
     }
 
@@ -1963,6 +1972,291 @@ mod tests {
                 matches!(cfg.log_decorators[0], Decorator::AttachedToLogs { .. }),
                 "expected AttachedToLogs, got {:?}",
                 cfg.log_decorators[0]
+            );
+        }
+    }
+
+    fn cherry_cfg(
+        branch_count: IntProvider,
+        branch_start_offset_from_top: (i32, i32),
+    ) -> TreeConfig {
+        TreeConfig {
+            below_trunk_provider: None,
+            trunk_provider: BlockStateProvider::Simple("minecraft:cherry_log[axis=y]".to_string()),
+            foliage_provider: BlockStateProvider::Simple(
+                "minecraft:cherry_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            ),
+            trunk_placer: TrunkPlacerCfg::Cherry {
+                base_height: 10,
+                height_rand_a: 0,
+                height_rand_b: 0,
+                branch_count,
+                branch_horizontal_length: IntProvider::Constant(2),
+                branch_start_offset_from_top,
+                branch_end_offset_from_top: IntProvider::Constant(0),
+            },
+            foliage_placer: FoliagePlacerCfg::Cherry {
+                radius: IntProvider::Constant(4),
+                offset: IntProvider::Constant(0),
+                height: IntProvider::Constant(5),
+                wide_bottom_layer_hole_chance: 0.0,
+                corner_hole_chance: 0.0,
+                hanging_leaves_chance: 0.0,
+                hanging_leaves_extension_chance: 0.0,
+            },
+            feature_size: FeatureSizeCfg::TwoLayers {
+                limit: 1,
+                lower_size: 0,
+                upper_size: 2,
+                min_clipped_height: None,
+            },
+            decorators: Vec::new(),
+            root_placer: None,
+        }
+    }
+
+    /// `CherryTrunkPlacer.placeTrunk` with a forced `branch_count == 3`
+    /// (`has_middle_branch`) MUST place the FULL `tree_height` column
+    /// regardless of the (still real, still random) branch start offsets —
+    /// the wrong hypothesis "the trunk always stops at the first branch's
+    /// offset" would place strictly fewer than `tree_height` logs here. Also
+    /// checks the attachment count: a middle attachment plus two side
+    /// branches is exactly 3, never 1 or 2.
+    #[test]
+    fn cherry_trunk_with_three_branches_places_the_full_height_column() {
+        let cfg = cherry_cfg(IntProvider::Constant(3), (-5, -4));
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = VegTags::default();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(7));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        let mut log_count = 0;
+        for y in 70..70 + 20 {
+            if base_id(grid.get(8, y, 8)) == "minecraft:cherry_log" {
+                log_count += 1;
+            }
+        }
+        assert_eq!(
+            log_count, 10,
+            "base_height=10, height_rand_a=height_rand_b=0, branch_count=3 must always place all 10 trunk logs"
+        );
+    }
+
+    /// The SAME config, `branch_count` forced to `1` instead of `3`
+    /// (`has_middle_branch == false`, `has_both_side_branches == false`): the
+    /// trunk must stop at `first_branch_offset_from_origin + 1`, which —
+    /// re-derived from `branch_start_offset_from_top = (-5, -4)` and
+    /// `tree_height = 10` — is `10 - 1 + (-5 or -4) + 1`, i.e. exactly `5` or
+    /// `6`, never the full `10` the three-branch case above places. This is
+    /// the discriminating pair: same seed pool, same heights, only
+    /// `branch_count` differs, and the two must disagree.
+    #[test]
+    fn cherry_trunk_with_one_branch_places_a_strictly_shorter_column() {
+        let cfg = cherry_cfg(IntProvider::Constant(1), (-5, -4));
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = VegTags::default();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(7));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        let mut log_count = 0;
+        for y in 70..70 + 20 {
+            if base_id(grid.get(8, y, 8)) == "minecraft:cherry_log" {
+                log_count += 1;
+            }
+        }
+        assert!(
+            log_count == 5 || log_count == 6,
+            "base_height=10, branch_count=1, branch_start_offset_from_top=(-5,-4) must place \
+             exactly 5 or 6 trunk logs (the only two values the formula can produce), got {log_count}"
+        );
+    }
+
+    fn mangrove_trunk_cfg(place_branch_per_log_probability: f32) -> TreeConfig {
+        TreeConfig {
+            below_trunk_provider: None,
+            trunk_provider: BlockStateProvider::Simple("minecraft:mangrove_log[axis=y]".to_string()),
+            foliage_provider: BlockStateProvider::Simple(
+                "minecraft:mangrove_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            ),
+            trunk_placer: TrunkPlacerCfg::UpwardsBranching {
+                base_height: 6,
+                height_rand_a: 0,
+                height_rand_b: 0,
+                extra_branch_steps: IntProvider::Constant(3),
+                place_branch_per_log_probability,
+                extra_branch_length: IntProvider::Constant(0),
+            },
+            foliage_placer: FoliagePlacerCfg::RandomSpread {
+                radius: IntProvider::Constant(3),
+                offset: IntProvider::Constant(0),
+                height: IntProvider::Constant(2),
+                leaf_placement_attempts: 20,
+            },
+            feature_size: FeatureSizeCfg::TwoLayers {
+                limit: 2,
+                lower_size: 0,
+                upper_size: 2,
+                min_clipped_height: None,
+            },
+            decorators: Vec::new(),
+            root_placer: None,
+        }
+    }
+
+    /// `UpwardsBranchingTrunkPlacer.placeTrunk` with
+    /// `place_branch_per_log_probability = 0.0` (`nextFloat() < 0.0` is
+    /// always false — `nextFloat` never returns a negative number) can never
+    /// bud a branch, so this is exactly a straight column: `base_height = 6`
+    /// logs directly above `origin`, no exceptions.
+    #[test]
+    fn upwards_branching_trunk_with_zero_probability_is_a_plain_column() {
+        let cfg = mangrove_trunk_cfg(0.0);
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = VegTags::default();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(5));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        let mut log_count = 0;
+        for y in 70..70 + 12 {
+            if base_id(grid.get(8, y, 8)) == "minecraft:mangrove_log" {
+                log_count += 1;
+            }
+        }
+        assert_eq!(log_count, 6, "base_height=6 with zero branch probability must place exactly 6 logs");
+
+        let mut off_column = 0;
+        for y in 70..70 + 12 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    if (x, z) != (8, 8) && base_id(grid.get(x, y, z)) == "minecraft:mangrove_log" {
+                        off_column += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(off_column, 0, "zero branch probability must never place a log off the trunk column");
+    }
+
+    /// The SAME config with `place_branch_per_log_probability = 1.0`
+    /// (`nextFloat() < 1.0` is always true — `nextFloat` never returns
+    /// exactly `1.0`) branches after EVERY log except the last. The wrong
+    /// hypothesis — a branch that only records an attachment without ever
+    /// writing a log off the trunk column — cannot be told apart from the
+    /// correct one by log COUNT alone (attachments are pushed either way),
+    /// so this asserts POSITION: at least one `mangrove_log` must land off
+    /// the `(origin.x, origin.z)` column.
+    #[test]
+    fn upwards_branching_trunk_with_full_probability_places_logs_off_the_column() {
+        let cfg = mangrove_trunk_cfg(1.0);
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = VegTags::default();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(5));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        let mut off_column = 0;
+        for y in 70..70 + 12 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    if (x, z) != (8, 8) && base_id(grid.get(x, y, z)) == "minecraft:mangrove_log" {
+                        off_column += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            off_column > 0,
+            "place_branch_per_log_probability=1.0 must grow at least one branch log off the trunk column"
+        );
+    }
+
+    fn mangrove_root_cfg(trunk_offset_y: i32) -> TreeConfig {
+        let mut cfg = mangrove_trunk_cfg(0.0);
+        cfg.root_placer = Some(RootPlacerCfg::Mangrove {
+            trunk_offset_y: IntProvider::Constant(trunk_offset_y),
+            root_provider: BlockStateProvider::Simple(
+                "minecraft:mangrove_roots[waterlogged=false]".to_string(),
+            ),
+            above_root_placement: None,
+            can_grow_through: super::ids::Tag::MangroveRootsCanGrowThrough,
+            muddy_roots_in: vec!["minecraft:mud".to_string(), "minecraft:muddy_mangrove_roots".to_string()],
+            muddy_roots_provider: BlockStateProvider::Simple(
+                "minecraft:muddy_mangrove_roots[axis=y]".to_string(),
+            ),
+            max_root_width: 8,
+            max_root_length: 15,
+            random_skew_chance: 0.2,
+        });
+        cfg
+    }
+
+    /// A mangrove `root_placer` shifts the REAL trunk `trunk_offset_y`
+    /// blocks above `origin` — [`super::place::place_tree`]'s `trunk_origin`
+    /// wiring, issue #428's mangrove increment. The wrong hypothesis
+    /// (`root_placer` parsed but never consulted, so `trunk_origin ==
+    /// origin`) places the first trunk log at `origin.y`; the correct one
+    /// places it at `origin.y + trunk_offset_y` and nothing at `origin.y`
+    /// itself (roots occupy that space instead, verified separately below).
+    #[test]
+    fn mangrove_root_placer_shifts_the_trunk_origin_upward() {
+        let cfg = mangrove_root_cfg(4);
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = VegTags::default();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(3));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        assert_ne!(
+            base_id(grid.get(8, 70, 8)),
+            "minecraft:mangrove_log",
+            "the trunk must NOT start at origin.y when trunk_offset_y=4 shifts it upward"
+        );
+        assert_eq!(
+            base_id(grid.get(8, 74, 8)),
+            "minecraft:mangrove_log",
+            "the trunk's first log must land at origin.y + trunk_offset_y (70 + 4 = 74)"
+        );
+
+        // Roots must occupy the space the trunk vacated: `placeRoots`'
+        // column scan (origin.y..trunk_origin.y) plus `trunkOrigin.below()`
+        // itself, at minimum, must carry a root/muddy-root state — a floor,
+        // not the whole shape (the horizontal spread is genuinely random).
+        let mut root_count = 0;
+        for y in 70..74 {
+            let base = base_id(grid.get(8, y, 8));
+            if base == "minecraft:mangrove_roots" || base == "minecraft:muddy_mangrove_roots" {
+                root_count += 1;
+            }
+        }
+        assert!(root_count > 0, "at least one root block must occupy the column between origin and the elevated trunk");
+    }
+
+    /// The root-placer column scan (`placeRoots`' own pre-simulation loop
+    /// over `origin.y..trunk_origin.y`) must abandon the WHOLE tree — no
+    /// trunk, no roots, no leaves — the moment any cell in that column
+    /// cannot host a root. The wrong hypothesis (roots fail silently but the
+    /// trunk still grows) would place a trunk log at `origin.y + 4`
+    /// regardless; this control blocks the column with stone and asserts
+    /// nothing at all gets written.
+    #[test]
+    fn mangrove_root_placer_blocked_column_cancels_the_whole_tree() {
+        let cfg = mangrove_root_cfg(4);
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        // Block the column the roots must scan (origin.y..origin.y+4).
+        grid.seed(8, 71, 8, "minecraft:stone".to_string());
+        let tags = VegTags::default();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(3));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        for y in 70..90 {
+            assert_ne!(
+                base_id(grid.get(8, y, 8)),
+                "minecraft:mangrove_log",
+                "a blocked root column must cancel the whole tree, not merely skip the roots"
             );
         }
     }
