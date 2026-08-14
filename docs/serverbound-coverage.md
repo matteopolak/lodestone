@@ -116,13 +116,21 @@ unverified entry is a real lead and not noise. The sixteen that remain:
 `SetBeaconEffects`, `SetContainerSlotState`, `SignUpdate`, `SpectatorAction`,
 `Stab`, `TeleportToEntity`.
 
-**That list is not trustworthy and is deliberately not in the gate.** At least one
-member is a false positive: `SignUpdate` *is* produced, through
-`submit.into_action()` in `lodestone-shell/src/app/menus.rs`, which calls
-`CommandBlockSubmit::into_action` (`menu/command_block.rs`), an indirection no
-name scanner can follow. Treat the
-eighteen as a list to *audit*, one at a time, by reading the call path rather than
-grepping for the variant name.
+**That list is not trustworthy and is deliberately not in the gate** — but the
+example this paragraph used to give was itself wrong, in the direction that
+matters. It claimed `SignUpdate` was a false positive, produced through
+`submit.into_action()` in `lodestone-shell/src/app/menus.rs`. That call resolves to
+`CommandBlockSubmit::into_action`, which returns `ClientAction::SetCommandBlock` —
+a *different* variant. `SignUpdate` has **no producer anywhere outside
+`crates/protocol/` and `lodestone-model`'s own dispatch**, so it is a genuine
+island: sign text can be encoded by every adapter and nothing in the shell can ever
+send it.
+
+The lesson is the reverse of the one originally drawn here. An indirection no name
+scanner can follow does not mean the scanner is wrong — it means nobody checked,
+and "the code exists" is not evidence a variant is produced. Audit the remaining
+entries one at a time by **reading the call path to its terminal `ClientAction`**,
+not by finding an indirection and assuming it lands where the name suggests.
 
 Two of them are worth auditing first because they are **not** screen-blocked and
 both have a live failure mode:
