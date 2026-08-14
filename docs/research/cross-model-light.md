@@ -11,7 +11,12 @@ block, which the light engine stores as 0. A per-quad fix and its mesh-level pro
 specified in §5–6 below; nothing in the repo has been edited by this read-only investigation.
 
 **Status:** root cause established by reading both sources plus one f32 simulation of our own
-baker. Read-only investigation — nothing in the repo was edited.
+baker. Read-only investigation — nothing in the repo was edited at the time of writing.
+
+**Update:** the fix proposed in §5 below has since landed — `quad_is_on_face_boundary` exists in
+`crates/lodestone-render/src/models.rs` and [`docs/model-smooth-lighting.md`](../model-smooth-lighting.md)'s
+"The light-position rule" section confirms it, independently. The rest of this document is kept
+as the investigation record.
 
 **One-line cause:** `mesh_models` samples light from `pos + quad.direction` for *every* quad.
 Vanilla only does that when the quad's plane is flush with the block boundary (`faceCubic`) or
@@ -51,8 +56,7 @@ face**. `block/tinted_cross.json` and `block/sunflower_top.json` are identical i
 `short_grass`'s blockstate is a bare `{"variants": {"": {"model": "minecraft:block/short_grass"}}}`,
 which inherits `block/cross`.
 
-So in `ModelBlockRenderer.tesselateBlock`
-(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/block/ModelBlockRenderer.java:65-69`):
+So in `ModelBlockRenderer.tesselateBlock`:
 
 ```java
 if (this.ambientOcclusion && blockState.getLightEmission() == 0 && this.parts.getFirst().useAmbientOcclusion()) {
@@ -67,7 +71,7 @@ reads `prepareQuadAmbientOcclusion` is looking at the wrong branch for this bug.
 
 ### 1b. `tesselateFlat` has two sub-cases, keyed on the quad's bucket
 
-`ModelBlockRenderer.java:157-190`:
+`ModelBlockRenderer.tesselateFlat`:
 
 ```java
 for (Direction direction : DIRECTIONS) {
@@ -86,10 +90,10 @@ for (BakedQuad quad : part.getQuads(null)) {                                  //
 }
 ```
 
-`-1` is `BlockModelLighter.CHECK_LIGHT` (`BlockModelLighter.java:19`). The buckets are keyed by
+`-1` is `BlockModelLighter.CHECK_LIGHT`. The buckets are keyed by
 **`cullface`**, not by geometric facing — `QuadCollection.getQuads(null)` returns `this.unculled`
-(`QuadCollection.java:54-63`), and the only producer of a keyed bucket is
-`UnbakedCuboidGeometry.java:64-66`:
+(in `QuadCollection.getQuads`), and the only producer of a keyed bucket is
+`UnbakedCuboidGeometry.bake`:
 
 ```java
 builder.addUnculledFace(quad);                                                    // no cullface
@@ -98,7 +102,7 @@ builder.addCulledFace(Direction.rotate(modelState.transformation().getMatrix(), 
 
 ### 1c. The `faceCubic` rule
 
-`BlockModelLighter.prepareQuadFlat` (`BlockModelLighter.java:197-216`):
+`BlockModelLighter.prepareQuadFlat`:
 
 ```java
 if (lightCoords == -1) {
@@ -110,8 +114,8 @@ if (lightCoords == -1) {
 }
 ```
 
-and `faceCubic` itself (`BlockModelLighter.java:265-272`, from `prepareQuadShape`, whose min/max
-are over the quad's four vertex positions at `:228-239`):
+and `faceCubic` itself (from `BlockModelLighter.prepareQuadShape`, whose min/max
+are over the quad's four vertex positions earlier in the same method):
 
 ```java
 this.faceCubic = switch (quad.direction()) {
@@ -135,7 +139,7 @@ this.faceCubic = switch (quad.direction()) {
 
 Note the first row: for a culled quad the step is the **bucket/`cullface`** direction, which is
 not always `quad.direction()` — `powder_snow`'s east shell is a west-facing quad with
-`cullface: east` (our own `block_models.rs:2031-2032` documents that pair).
+`cullface: east` (our own `block_models.rs`'s `face_occlusion` doc comment documents that pair).
 
 ### 1d. The AO path expresses the same rule twice
 
@@ -153,8 +157,9 @@ if (this.faceCubic || !nextState.isSolidRender()) {                             
 }
 ```
 
-`:39` moves the whole 4-corner AO/light ring back onto the block's own cell for a non-cubic face.
-`:117` is a second, independent guard with the same intent stated plainly: **take the neighbour's
+`basePosition`'s ternary moves the whole 4-corner AO/light ring back onto the block's own cell for
+a non-cubic face. The `this.faceCubic || !nextState.isSolidRender()` check is a second,
+independent guard with the same intent stated plainly: **take the neighbour's
 light only if the face is cubic, or the neighbour is not solid-render.**
 
 ---
@@ -163,7 +168,7 @@ light only if the face is cubic, or the neighbour is not solid-render.**
 
 ### 2a. The divergence
 
-`crates/lodestone-render/src/models.rs:635`:
+`crates/lodestone-render/src/models.rs`'s `mesh_models`, at the time of this investigation:
 
 ```rust
 // Per *quad*, not per block: each face carries the light of
@@ -175,7 +180,7 @@ Unconditional. There is no `faceCubic` test anywhere on this path, and the step 
 `quad.direction` rather than the `cullface`. Every quad in the model path reads the neighbouring
 cell.
 
-`crates/lodestone-render/src/models.rs:636-645` repeats it for the AO ring:
+The same function repeated it for the AO ring:
 
 ```rust
 let face_n = face.normal();
@@ -184,15 +189,15 @@ let np = [x as i32 + face_n[0], y as i32 + face_n[1], z as i32 + face_n[2]];
 
 `np` is always `pos + normal` — vanilla's `faceCubic == true` branch of `:39`.
 
-The consumer chain: `crates/lodestone-shell/src/mesher.rs:867` implements `face_light_at` as
-`SnapshotLight::face_light` (`mesher.rs:692-699`), which is `levels_at(pos + normal)`. Inside a
+The consumer chain: `crates/lodestone-shell/src/mesher.rs`'s `SnapshotModelView::face_light_at` implements it as
+`SnapshotLight::face_light`, which is `levels_at(pos + normal)`. Inside a
 stone cell `levels_at` returns real stored `(0, 0)` — not a missing-nibble default. The
-`SnapshotLight` doc at `mesher.rs:624-638` states the measurement: **99.5 % of solid cells store
+`SnapshotLight` struct's own doc comment states the measurement: **99.5 % of solid cells store
 sky light 0**.
 
 ### 2b. The island: the cross-plant handling already exists and is unreachable
 
-`crates/lodestone-shell/src/mesher.rs:861-865`:
+`crates/lodestone-shell/src/mesher.rs`'s `SnapshotModelView::light_at`, at the time of this investigation:
 
 ```rust
 fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
@@ -202,18 +207,18 @@ fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
 }
 ```
 
-and `SnapshotLight::max_light`'s own doc (`mesher.rs:701-703`) says "geometry with no single
+and `SnapshotLight::max_light`'s own doc says "geometry with no single
 facing (fluid surfaces, **cross-shaped models**)". `mesh_models` never calls `light_at` — the only
-light hooks it calls are `face_light_at` (`:635`) and `corner_light_at` (`:573`). `light_at` on
+light hooks it calls are `face_light_at` and `corner_light_at`. `light_at` on
 `SnapshotModelView` is dead code; the live consumer of `max_light` is `SnapshotFluidView::light_at`
-(`mesher.rs:928`) via `mesh_fluids`. So the intent was written down and the wiring never happened —
+via `mesh_fluids`. So the intent was written down and the wiring never happened —
 `CLAUDE.md` rule 1's island shape.
 
 ### 2c. The prediction, and why the report says "sometimes ... on one side"
 
-`crates/lodestone-assets/src/bake.rs:521-538` (`calculate_facing`, vanilla `FaceBakery::
+`crates/lodestone-assets/src/bake.rs`'s `calculate_facing` (vanilla `FaceBakery::
 calculateFacing`) snaps a rotated quad's normal to the nearest axis, tie-broken by first-wins over
-`DIRECTIONS` at `bake.rs:47-54`, whose order is `Down, Up, North, South, East, West` — **North and
+`bake.rs`'s `DIRECTIONS` const, whose order is `Down, Up, North, South, East, West` — **North and
 South precede East and West.**
 
 A 45°-about-Y rotation puts each cross quad's normal exactly on a diagonal, so every quad is a
@@ -247,19 +252,19 @@ jar:
 - `block/fence_post.json` — post from `[6,0,6]` to `[10,16,10]`; `down`/`up` carry `cullface`,
   the four **side faces carry none** and sit at 0.375/0.625. A fence post against a wall darkens.
   This one is on the *AO* path (`ambientocclusion` defaults to true), so it also hits the `np`
-  divergence at `models.rs:639-643`.
+  divergence in `mesh_models`'s AO-ring computation.
 - `block/template_torch.json` — same shape, `ambientocclusion: false`.
 
 Cross plants are the loud case because the sprite is large and the quad faces horizontally.
 
 ### 2e. The doc that made it invisible
 
-`docs/model-smooth-lighting.md:284` claims our flat branch is "matching `tesselateFlat` **exactly**".
+[`docs/model-smooth-lighting.md`](../model-smooth-lighting.md) claimed our flat branch is "matching `tesselateFlat` **exactly**".
 It matches the uniform-per-vertex, no-AO half and not the light *position* half. The doc's known
-divergence #2 (`docs/model-smooth-lighting.md:192-204`) correctly names the AO-path
+divergence #2 correctly names the AO-path
 `basePosition` fork — but explicitly frames it as affecting "a stair's or slab's interior face",
-and never notices that cross plants take the **flat** path, where the same fork exists at `:207`
-and is undocumented. Both need updating with the fix.
+and never notices that cross plants take the **flat** path, where the same fork exists in
+`BlockModelLighter.prepareQuadFlat` and is undocumented. Both need updating with the fix.
 
 ---
 
@@ -272,7 +277,7 @@ and is undocumented. Both need updating with the fix.
 - This bug is about *choosing the wrong cell*: the sampled cell exists, is present in the
   snapshot, and genuinely stores sky `0` — because it is inside a solid block and vanilla's light
   engine puts `0` there on purpose. `WorldSectionLight`'s `sky_default` is never consulted
-  (`world.rs:184-185` only fires on `LightData::Missing`), so setting it to `Full` would change
+  (`WorldSectionLight::sky_light` only fires on `LightData::Missing`), so setting it to `Full` would change
   nothing here.
 
 They are the same *family* only in the loose sense that both are "light sampled without vanilla's
@@ -285,14 +290,14 @@ rule". Fixing one has no effect on the other, and neither fix touches the other'
 **At the ambient floor, ≈ 0.0935 of the daylight value — not black.** Believed on this chain:
 
 1. `block/cross.json` has `ambientocclusion: false`, so `SnapshotModelView::ambient_occlusion_at`
-   (`crates/lodestone-shell/src/mesher.rs:816-819`) returns false and `mesh_models:646-650` takes
+   (`crates/lodestone-shell/src/mesher.rs`) returns false and `mesh_models` takes
    the flat branch `[(1.0, light); 4]` — the whole quad carries one light byte, `0x00`, with
    `ao = 1.0`.
-2. `shade: false` → `face_shade` (`models.rs:666`) returns `1.0`, so nothing else scales it.
-3. `crates/lodestone-render/src/shaders/model.wgsl:182`: `out.shade = ao * lightmap_term(sky, block)`,
-   applied in gamma space against an sRGB target (`model.wgsl:213-214`).
+2. `shade: false` → `face_shade` (`crates/lodestone-render/src/models.rs`) returns `1.0`, so nothing else scales it.
+3. `crates/lodestone-render/src/shaders/model.wgsl`'s `vs_main`: `out.shade = ao * lightmap_term(sky, block)`,
+   applied in gamma space against an sRGB target in `fs_main`'s `lit_srgb` computation.
 4. `light_term_from_levels(0, 0, 1.0)` = `apply_brightness_option(10/255 + 0)`
-   (`crates/lodestone-render/src/light.rs:192-199`)
+   (`crates/lodestone-render/src/light.rs`)
    = `c + (1-(1-c)^4 - c) * 0.5` with `c = 0.0392157` = **0.0935452**.
 
 So a blade texel that would display as 255 displays as ~24. Perceptually black next to a lit
@@ -307,9 +312,9 @@ diagnosis is wrong** and the light term is being bypassed rather than fed a zero
 `mesh_simple`/`mesh_greedy` (`crates/lodestone-render/src/mesher.rs`) emit only full-cube faces on
 the block boundary, where `faceCubic` is unconditionally true — they are already correct and a
 change there would be wrong. `--headless` drives `mesh_simple` and **cannot** reproduce or verify
-this; the live path is `mesher.rs:1093-1105` → `mesh_snapshot_models` → `mesh_models`.
+this; the live path is `mesh_one` → `mesh_snapshot_models` → `mesh_models`.
 
-### 5a. New helper, next to `quad_is_full_face` (`models.rs:256`)
+### 5a. New helper, next to `quad_is_full_face`
 
 ```rust
 /// Vanilla `BlockModelLighter.prepareQuadShape`'s `faceCubic`
@@ -327,13 +332,13 @@ fn quad_is_on_face_boundary(q: &BakedQuad) -> bool {
 }
 ```
 
-`face_plane` already exists at `models.rs:235-244` and returns exactly the `(axis, 0.0|1.0)` pair
+`face_plane` already exists (`crates/lodestone-render/src/models.rs`) and returns exactly the `(axis, 0.0|1.0)` pair
 vanilla's switch encodes. The `all(...)` form folds vanilla's `minC == maxC` planarity test and
 its `minC < 1e-4` / `maxC > 0.9999` position test into one pass.
 
-### 5b. In `mesh_models`, replace lines 633-650
+### 5b. In `mesh_models`, replace the flat-branch light sampling
 
-Hoist once per block, inside the `for y/z/x` body next to `ao_enabled` (`models.rs:624`):
+Hoist once per block, inside the `for y/z/x` body next to `ao_enabled`:
 
 ```rust
 // Vanilla's `state.isCollisionShapeFullBlock(level, pos)` clause of `faceCubic`
@@ -389,42 +394,43 @@ let corners = if ao_enabled {
 ```
 
 Note this deliberately reuses `corner_light_at` rather than adding a trait method — it already
-returns the exact packed light at a signed coordinate and `SnapshotModelView` already implements
-it correctly (`crates/lodestone-shell/src/mesher.rs:872-875`). Nothing new is needed in
+returns the exact packed light at a signed coordinate and `SnapshotModelView::corner_light_at` already implements
+it correctly. Nothing new is needed in
 `lodestone-shell`. `face` for the AO ring stays `quad.direction` (vanilla's
 `prepareQuadAmbientOcclusion` only ever sees `quad.direction()`); only the base position moves.
 
 This single change fixes three things at once: the flat-path light position (the reported bug), the
-AO-path `basePosition` divergence already recorded as #2 in `docs/model-smooth-lighting.md:192-204`,
+AO-path `basePosition` divergence already recorded as #2 in [`docs/model-smooth-lighting.md`](../model-smooth-lighting.md)'s
+"Three things the old version of this doc had wrong" section,
 and the culled-bucket step direction for quads whose facing differs from their `cullface`.
 
 ### 5c. Existing test views — checked individually, and one to tidy
 
-`corner_light_at`'s trait default is `0xF0` (`models.rs:390-393`), so any view that overrides
+`corner_light_at`'s trait default is `0xF0`, so any view that overrides
 `face_light_at` but not `corner_light_at` now sees a full-bright own cell. I checked every
 `impl ModelSectionView` that asserts a light value:
 
-- `crates/lodestone-render/tests/grass_light_response_gate.rs`'s `OneQuad` (~line 240) —
+- `crates/lodestone-render/tests/grass_light_response_gate.rs`'s `OneQuad` —
   **passes.** It re-seats the blade onto a clip-space rect at `z = 0.5` (`full_frame`), so the quad
   is not on the boundary and falls to the own cell — but the view already overrides
   `corner_light_at` to `self.light`, so its `mesh.vertices.iter().all(|v| v.light == light)`
-  assertion at line 336 still holds.
-- `crates/lodestone-render/src/models.rs:1070`'s `PerFace`
-  (`mesh_models_asks_for_light_per_quad_facing`) — **passes, but accidentally.** `cube_face`
-  (`models.rs:1015-1028`) leaves `positions: [[0.0; 3]; 4]` with the comment "exact corner
+  assertion in the `render_frame` helper still holds.
+- `crates/lodestone-render/src/models.rs`'s `PerFace`
+  (in `mesh_models_asks_for_light_per_quad_facing`) — **passes, but accidentally.** `cube_face`
+  leaves `positions: [[0.0; 3]; 4]` with the comment "exact corner
   positions are irrelevant to the culling logic under test", which was true and is no longer:
   `Up`/`South`/`East` would now fail `quad_is_on_face_boundary`. The test survives only because
   `PerFace::occludes_at` returns `true` unconditionally, including for the block's own cell, so the
   new `own_is_full_cube` clause forces the neighbour branch. **Give `cube_face` real boundary
   positions** so the test proves what its name says rather than riding that clause.
-- `crates/lodestone-shell/src/mesher.rs:2236`'s `cube_quads` (the `LightRule` probe backing
+- `crates/lodestone-shell/src/mesher.rs`'s `cube_quads` (the `LightRule` probe backing
   `face_light_distinguishes_…` and `a_placed_block_meshes_with_its_neighbours_light_not_full_bright`)
   — **unaffected.** It builds real boundary positions *and* `cullface: Some(d)`, so every quad takes
   the culled-bucket branch, which is unchanged.
 
 Docs to update: `docs/model-smooth-lighting.md` — retract the "matching `tesselateFlat` exactly"
-claim at `:284`, and close out divergence #2 at `:192-204`. Add the flat-path half of the rule,
-which the doc currently does not mention at all.
+claim, and close out divergence #2. Add the flat-path half of the rule,
+which the doc did not mention at all. **Done** — see the status update at the top of this document.
 
 ---
 
@@ -456,10 +462,10 @@ neighbour rule, so the view itself encodes no opinion about which cell is right.
 
 Every vertex belonging to a `short_grass` quad carries `light == 0xF0`.
 
-**Expected value's origin, outside our code:** `BlockModelLighter.java:207` says the sample cell is
-`pos` when `faceCubic` is false; `BlockModelLighter.java:268` says `faceCubic` for `NORTH` needs
+**Expected value's origin, outside our code:** `BlockModelLighter.prepareQuadFlat` says the sample cell is
+`pos` when `faceCubic` is false; `BlockModelLighter.prepareQuadShape`'s `faceCubic` switch says `faceCubic` for `NORTH` needs
 `minZ == maxZ`, which `block/cross.json`'s `"angle": 45` rotation makes false; and
-`ModelBlockRenderer.java:65` + `"ambientocclusion": false` selects `tesselateFlat`, whose unculled
+`ModelBlockRenderer.tesselateBlock` + `"ambientocclusion": false` selects `tesselateFlat`, whose unculled
 bucket passes `-1`. The plant's own cell is `0xF0` by the view's construction, so vanilla's answer
 is `0xF0`.
 
@@ -480,7 +486,7 @@ The `(5,1,1)` **stone** block's `North` quad must still read `0x00`.
 
 This is the control that matters, because the naive fix ("always sample the own cell") passes
 assertion 1 and re-introduces `fda948f` — a uniformly dark world, the exact regression
-`SnapshotLight`'s doc (`crates/lodestone-shell/src/mesher.rs:624-638`) was written to prevent.
+`SnapshotLight`'s own doc comment (`crates/lodestone-shell/src/mesher.rs`) was written to prevent.
 Stone's own cell is `0x00` here too, so to make the control discriminating give stone's own cell a
 *distinguishable* value: set `(5,1,1)`'s light to `0x0A` and `(5,1,0)`'s to `0x00`, then assert the
 stone north quad reads **`0x00`** (neighbour) and not `0x0A` (own cell). Stone's faces carry
@@ -501,7 +507,7 @@ than merely *that* it was bright.
 
 If someone wants screen-level proof, the `grass_light_response_gate` harness already has every
 piece. The magnitude prediction is `0.0935452` (light `0x00` vs `0xF0`, derived in §4 from
-vanilla's `AMBIENT_LIGHT_COLOR = 0xFF0A0A0A` at `DimensionTypes.java:36` and `Options.gamma = 0.5`),
+vanilla's `AMBIENT_LIGHT_COLOR = 0xFF0A0A0A`, set in `DimensionTypes.bootstrap` for the overworld, and `Options.gamma = 0.5`),
 against `0.000` if `AmbientColor` were dropped and `1.000` once fixed. Three well-separated values.
 Given the mesh-level gate pins the byte and `model.wgsl`'s consumption of the byte is already
 gated, this is redundant; I would not write it.
@@ -510,21 +516,21 @@ gated, this is redundant; I would not write it.
 
 ## 7. Looked at and ruled out
 
-- **`SkyDefault` / `LightData::Missing`.** Not involved — see §3. `world.rs:184-185` shows the
+- **`SkyDefault` / `LightData::Missing`.** Not involved — see §3. `WorldSectionLight::sky_light` shows the
   default only fires on a genuinely absent nibble; the cell here is present and stores `0`.
 - **`face_shade` / directional shading.** `block/cross.json` sets `"shade": false` on every
-  element, so `models.rs:666` returns `1.0`. Already refuted in
-  `grass_light_response_gate.rs:11-16`; shading a blade would be the defect.
+  element, so `face_shade` (`crates/lodestone-render/src/models.rs`) returns `1.0`. Already refuted in
+  `grass_light_response_gate.rs`; shading a blade would be the defect.
 - **Tint, palette slot, cutout layer.** All three already refuted by measurement in
-  `grass_light_response_gate.rs:14-24`. Not re-investigated.
+  `grass_light_response_gate.rs`. Not re-investigated.
 - **`ao_occludes_at` / `shade_brightness`.** Irrelevant to cross plants: `ambientocclusion: false`
   means the AO branch never runs for them. It *is* relevant to the fence/torch instances in §2d.
-- **`ambient_occlusion_at` wiring.** Correct and live (`crates/lodestone-shell/src/mesher.rs:816-819`).
+- **`ambient_occlusion_at` wiring.** Correct and live (`SnapshotModelView::ambient_occlusion_at`, `crates/lodestone-shell/src/mesher.rs`).
 - **`mesh_simple` / `mesh_greedy` / `--headless`.** Structurally cannot exercise this. Do not
   attempt to reproduce there.
-- **`is_packed_cube` as a live dispatch.** It is *not* one: `crates/lodestone-shell/src/mesher.rs:1093-1106`
+- **`is_packed_cube` as a live dispatch.** It is *not* one: `mesh_one` (`crates/lodestone-shell/src/mesher.rs`)
   sends the entire section through `mesh_snapshot_models` whenever `classifier.models()` is `Some`.
-  The `models.rs:17-24` module doc describes a packed/model split that the live worker does not
+  The `models.rs` module doc describes a packed/model split that the live worker does not
   actually perform, and `is_packed_cube` has callers only in `model_census.rs` and `live_gate.rs`.
   Consequence worth keeping: stone is meshed by `mesh_models` in the live client, so §6's stone
   control is on the same code path as the subject.
@@ -535,5 +541,5 @@ gated, this is redundant; I would not write it.
 - **A live RCON probe of light levels.** Attempted to plan one and dropped it: 26.2 exposes no
   server command that reports a cell's sky/block light (`/data` reads block entities and entities,
   not the light engine). The "solid cells store sky 0" figure is already a repo measurement
-  (`crates/lodestone-shell/src/mesher.rs:627-628`, 99.5 % against the live oracle), and the
+  (`SnapshotLight`'s doc comment, `crates/lodestone-shell/src/mesher.rs`, 99.5 % against the live oracle), and the
   remaining chain is deterministic from source on both sides.
