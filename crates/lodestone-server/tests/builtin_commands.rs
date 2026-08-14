@@ -69,7 +69,8 @@ fn run(
     source: &CommandSource,
     text: &str,
 ) -> Option<lodestone_server::CommandOutcome> {
-    let world = CommandWorld { rules: rules as &(dyn RuleStore + Sync), players };
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let world = CommandWorld { rules: rules as &(dyn RuleStore + Sync), players, state: &state };
     commands.run(&world, source, text)
 }
 
@@ -562,6 +563,7 @@ fn gamerule_writes_the_store_it_is_handed_including_the_production_world_state()
     let command_world = CommandWorld {
         rules: &world_state as &(dyn RuleStore + Sync),
         players: &players,
+        state: &world_state,
     };
     let outcome = commands
         .run(&command_world, &alice, "gamerule random_tick_speed 6")
@@ -685,4 +687,331 @@ fn the_effect_outbox_delivers_to_one_player_once_and_refuses_a_stranger() {
         "a rejoining player must not receive the previous session's queue"
     );
     drop(rejoined);
+}
+
+// ---------------------------------------------------------------------------
+// The new command set (issue #48)
+// ---------------------------------------------------------------------------
+
+fn run_stateful(
+    commands: &ServerCommands,
+    state: &lodestone_server::world_state::WorldStateHandle,
+    players: &[PlayerCandidate],
+    source: &CommandSource,
+    text: &str,
+) -> Option<lodestone_server::CommandOutcome> {
+    let world = CommandWorld { rules: state, players, state };
+    commands.run(&world, source, text)
+}
+
+/// `/time set` writes `day_time` only; `/time add` reads it back and adds; the
+/// three `/time query` forms read pairwise-distinct expressions of the same
+/// clock.
+#[test]
+fn time_set_add_and_query_agree_with_the_clock() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    for _ in 0..30_005 {
+        state.tick_time();
+    }
+    // `game_time` is 30005 and untouched by `/time set`.
+    let outcome = run_stateful(&commands, &state, &players, &alice, "time set 500")
+        .expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+    assert_eq!(state.time().day_time, 500);
+    assert_eq!(state.time().game_time, 30_005, "`/time set` must not touch game_time");
+
+    run_stateful(&commands, &state, &players, &alice, "time add 100").expect("root matched");
+    assert_eq!(state.time().day_time, 600, "add reads the current value back");
+
+    let day = run_stateful(&commands, &state, &players, &alice, "time query day")
+        .expect("root matched");
+    assert_eq!(day.response.lines(), ["The time is 1"], "30005 / 24000 == 1");
+
+    let gametime = run_stateful(&commands, &state, &players, &alice, "time query gametime")
+        .expect("root matched");
+    assert_eq!(gametime.response.lines(), ["The time is 30005"]);
+
+    let daytime = run_stateful(&commands, &state, &players, &alice, "time query daytime")
+        .expect("root matched");
+    assert_eq!(daytime.response.lines(), ["The time is 600"], "600 % 24000 == 600");
+
+    // The named literal is a fixed constant, not the numeric argument's parser.
+    run_stateful(&commands, &state, &players, &alice, "time set noon").expect("root matched");
+    assert_eq!(state.time().day_time, 6_000);
+}
+
+/// A locked difficulty refuses a change, and the query reflects whichever
+/// value actually won.
+#[test]
+fn difficulty_sets_queries_and_a_lock_refuses_a_change() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let outcome = run_stateful(&commands, &state, &players, &alice, "difficulty hard")
+        .expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+    assert_eq!(state.difficulty(), (lodestone_model::Difficulty::Hard, false));
+
+    let query = run_stateful(&commands, &state, &players, &alice, "difficulty").expect("root matched");
+    assert_eq!(query.response.lines(), ["The difficulty is hard"]);
+
+    state.set_difficulty_locked(true);
+    let refused = run_stateful(&commands, &state, &players, &alice, "difficulty peaceful")
+        .expect("root matched");
+    assert!(!refused.response.is_ran(), "{refused:?}");
+    assert_eq!(
+        state.difficulty(),
+        (lodestone_model::Difficulty::Hard, true),
+        "a locked world keeps its difficulty"
+    );
+}
+
+/// `/seed` reports the world seed in vanilla's own `Seed: [<n>]` shape. The
+/// exact value comes from a process-global this test crate cannot set (see
+/// `crate::commands::seed`'s own `#[cfg(test)]` module, in-crate, for the
+/// version of this gate that pins a real value); this checks the command
+/// exists and answers in the right shape rather than crashing or being routed
+/// elsewhere.
+#[test]
+fn seed_answers_in_vanillas_bracketed_shape() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let outcome = run_stateful(&commands, &state, &players, &alice, "seed").expect("root matched");
+    let [line] = outcome.response.lines() else { panic!("{outcome:?}") };
+    assert!(line.starts_with("Seed: ["), "{line:?}");
+    assert!(line.ends_with(']'), "{line:?}");
+}
+
+/// `/setworldspawn` resolves `~`-relative coordinates against the caller's own
+/// position — pairwise-distinct deltas, so a transposed x/y/z would be visible
+/// — and writes the store `WorldStateHandle::world_spawn` reads back.
+#[test]
+fn setworldspawn_resolves_relative_coordinates_and_writes_the_store() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    // Alice stands at (0, 64, 0) per `source()`.
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let outcome = run_stateful(&commands, &state, &players, &alice, "setworldspawn ~11 ~1 ~4")
+        .expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+    // `world_spawn()` itself is `pub(crate)` — read the same value back through
+    // the persisted `level.dat` field surface instead, which is `pub`.
+    use lodestone_core::Nbt;
+    let fields = state.level_data_fields();
+    let (_, spawn) = fields.iter().find(|(name, _)| name == "spawn").expect("a spawn was set");
+    let Nbt::Compound(entries) = spawn else { panic!("{spawn:?}") };
+    let pos = entries.iter().find(|(k, _)| k == "pos").map(|(_, v)| v).expect("pos field");
+    assert_eq!(pos, &Nbt::IntArray(vec![11, 65, 4]));
+}
+
+/// `/kill` produces exactly one [`Effect::Kill`], directed at the resolved
+/// target — bare form targets self, the selector form targets whoever it
+/// resolves.
+#[test]
+fn kill_targets_self_bare_and_a_selector_explicitly() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let bare = run_stateful(&commands, &state, &players, &alice, "kill").expect("root matched");
+    assert_eq!(bare.effects, [DirectedEffect::new(uuid(1), Effect::Kill)]);
+
+    let targeted =
+        run_stateful(&commands, &state, &players, &alice, "kill bob").expect("root matched");
+    assert_eq!(targeted.effects, [DirectedEffect::new(uuid(2), Effect::Kill)]);
+}
+
+/// `/xp add`'s default unit is points; `levels` and `points` are explicit
+/// alternatives, and the amounts stay distinct through the pipeline.
+#[test]
+fn experience_add_defaults_to_points_and_the_unit_literals_select_the_other() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let points =
+        run_stateful(&commands, &state, &players, &alice, "xp add alice 17").expect("root matched");
+    assert_eq!(
+        points.effects,
+        [DirectedEffect::new(uuid(1), Effect::GiveExperience { levels: false, amount: 17 })]
+    );
+
+    let levels = run_stateful(&commands, &state, &players, &alice, "xp add alice 3 levels")
+        .expect("root matched");
+    assert_eq!(
+        levels.effects,
+        [DirectedEffect::new(uuid(1), Effect::GiveExperience { levels: true, amount: 3 })]
+    );
+
+    let set = run_stateful(&commands, &state, &players, &alice, "experience set bob 5 levels")
+        .expect("root matched");
+    assert_eq!(
+        set.effects,
+        [DirectedEffect::new(uuid(2), Effect::SetExperience { levels: true, amount: 5 })]
+    );
+}
+
+/// `/clear` with no arguments targets self with no filter and no cap; the
+/// item and count arguments narrow it, each independently observable in the
+/// resulting effect.
+#[test]
+fn clear_narrows_by_item_and_by_count_independently() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let bare = run_stateful(&commands, &state, &players, &alice, "clear").expect("root matched");
+    assert_eq!(
+        bare.effects,
+        [DirectedEffect::new(uuid(1), Effect::ClearInventory { item: None, max_count: None })]
+    );
+
+    let filtered =
+        run_stateful(&commands, &state, &players, &alice, "clear alice minecraft:diamond 5")
+            .expect("root matched");
+    assert_eq!(
+        filtered.effects,
+        [DirectedEffect::new(
+            uuid(1),
+            Effect::ClearInventory { item: Some("minecraft:diamond".to_string()), max_count: Some(5) }
+        )]
+    );
+}
+
+/// `/setblock` resolves its position against the caller and carries the
+/// requested block id; `/fill` enumerates the whole (inclusive) box in either
+/// corner order and refuses a volume over the vanilla cap without enumerating
+/// it.
+#[test]
+fn setblock_resolves_position_and_fill_enumerates_the_box_and_caps_it() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let outcome =
+        run_stateful(&commands, &state, &players, &alice, "setblock ~11 ~1 ~4 minecraft:stone")
+            .expect("root matched");
+    assert_eq!(
+        outcome.effects,
+        [DirectedEffect::new(
+            uuid(1),
+            Effect::SetBlock { pos: (11, 65, 4), block: "minecraft:stone".to_string() }
+        )]
+    );
+
+    // A 2x2x2 box, corners given in the "wrong" order — `to` before `from` on
+    // every axis — still enumerates all eight distinct cells.
+    let fill = run_stateful(
+        &commands,
+        &state,
+        &players,
+        &alice,
+        "fill 5 5 5 4 4 4 minecraft:dirt",
+    )
+    .expect("root matched");
+    let [directed] = fill.effects.as_slice() else { panic!("{fill:?}") };
+    let Effect::Fill { positions, block } = &directed.effect else { panic!("{directed:?}") };
+    assert_eq!(block, "minecraft:dirt");
+    let mut sorted = positions.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        [
+            (4, 4, 4), (4, 4, 5), (4, 5, 4), (4, 5, 5),
+            (5, 4, 4), (5, 4, 5), (5, 5, 4), (5, 5, 5),
+        ]
+    );
+
+    // Over the 32768 cap, refused before any position is built.
+    let refused = run_stateful(
+        &commands,
+        &state,
+        &players,
+        &alice,
+        "fill 0 0 0 100 100 100 minecraft:dirt",
+    )
+    .expect("root matched");
+    assert!(!refused.response.is_ran(), "{refused:?}");
+    assert!(refused.effects.is_empty());
+}
+
+/// `/say` and `/me` are self-targeted broadcasts; `/msg` is an ordinary
+/// directed [`Effect::Message`] at the resolved recipient, distinct from a
+/// broadcast.
+#[test]
+fn say_me_and_msg_produce_the_three_distinct_effect_shapes() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let say = run_stateful(&commands, &state, &players, &alice, "say hello everyone")
+        .expect("root matched");
+    assert_eq!(
+        say.effects,
+        [DirectedEffect::new(
+            uuid(1),
+            Effect::Broadcast { sender: "Server".to_string(), message: "hello everyone".to_string() }
+        )]
+    );
+
+    let me = run_stateful(&commands, &state, &players, &alice, "me waves").expect("root matched");
+    assert_eq!(
+        me.effects,
+        [DirectedEffect::new(
+            uuid(1),
+            Effect::Broadcast { sender: "alice".to_string(), message: "* waves".to_string() }
+        )]
+    );
+
+    let msg = run_stateful(&commands, &state, &players, &alice, "msg bob hi there")
+        .expect("root matched");
+    assert_eq!(
+        msg.effects,
+        [DirectedEffect::new(
+            uuid(2),
+            Effect::Message("alice whispers to you: hi there".to_string())
+        )]
+    );
+}
+
+/// `/spawnpoint` writes a [`Effect::SetRespawnPoint`] rather than moving the
+/// player — the two are easy to conflate and only one exists here (see the
+/// command's own module doc for why `/tp` itself is out of scope for now).
+#[test]
+fn spawnpoint_sets_a_respawn_point_effect_not_a_teleport() {
+    use lodestone_server::Effect;
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let outcome = run_stateful(&commands, &state, &players, &alice, "spawnpoint ~2 ~3 ~9")
+        .expect("root matched");
+    let [directed] = outcome.effects.as_slice() else { panic!("{outcome:?}") };
+    assert_eq!(directed.target, uuid(1));
+    assert_eq!(
+        directed.effect,
+        Effect::SetRespawnPoint { pos: lodestone_model::BlockPos::new(2, 67, 9) }
+    );
 }
