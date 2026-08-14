@@ -555,35 +555,26 @@ pub fn entity_texture_candidates(model_name: &str) -> &'static [&'static str] {
 /// its own answer to "does this key/ordinal actually reach us", and guessing one
 /// wrong produces a confidently wrong skin rather than a missing one.
 ///
-/// # The wolf's tame state: the wire now carries it, nothing upstream reads it yet
+/// # The wolf's tame state: wired end to end (issue #235)
 ///
-/// **This was stale as of issue #235's audit and is corrected here.** The wire
-/// *does* carry vanilla's tame bit today:
+/// The wire carries vanilla's tame bit:
 /// [`EntityMetadataUpdate`](lodestone_model::EntityMetadataUpdate) declares
 /// `tamed: Option<bool>` and `sitting: Option<bool>`, `v770`'s
 /// `read_entity_metadata` populates both from `TamableAnimal.DATA_FLAGS_ID`'s
 /// low bits under `MetadataClass::Tamable`, and `SimMob::snapshot`
 /// (`crates/lodestone-server/src/mobs/mod.rs`) pushes them for wolf/cat/parrot/
-/// ocelot. So the claim this doc used to make — "no field ... carries it" — is
-/// false; the actual gap moved one layer down.
+/// ocelot. `crates/lodestone-ecs/src/ingest.rs::apply_entity_metadata` now folds
+/// `tamed` into `lodestone_ecs::entity::Tamed` (per-entity, alongside `Baby` —
+/// not a `crate::session` scalar), and the shell's draw-time call site
+/// (`crates/lodestone-shell/src/entities.rs::extract_entity_draws`) bridges that
+/// component off the ingest entity, the same way it bridges `Variant`, and calls
+/// [`entity_variant_sheet_for`] rather than the plain [`entity_variant_sheet`].
 ///
-/// **What is still missing, and it is outside this file:** nothing folds
-/// `EntityMetadataUpdate::tamed` into a per-entity ECS component
-/// (`crates/lodestone-ecs/src/ingest.rs::apply_entity_metadata` has arms for
-/// `flags`/`pose`/`health`/`variant`/etc. but none for `tamed`/`sitting`, and
-/// `crates/lodestone-ecs/src/entity.rs` has no `Tamed`/`Sitting` component to
-/// fold it into), and the shell's draw-time call site
-/// (`crates/lodestone-shell/src/entities.rs`) still calls the plain
-/// [`entity_variant_sheet`], which cannot see it either way. Both are a
-/// different crate's file.
-///
-/// [`entity_variant_sheet_for`] is the render-side half of the actual fix:
-/// it takes the tame bit as a parameter rather than pinning [`WolfState::Wild`]
-/// internally, so a future caller with a real component to read needs no
-/// further change here — see its own doc for the wiring a follow-up needs.
-/// [`entity_variant_sheet`] itself is left alone (still always `Wild`) because
-/// its production callers cannot supply the bit today; changing its signature
-/// would break every one of them for a flag they have no source for yet.
+/// [`entity_variant_sheet_for`] is the render-side half of the fix: it takes the
+/// tame bit as a parameter rather than pinning [`WolfState::Wild`] internally.
+/// [`entity_variant_sheet`] itself is left alone (still always `Wild`) — its
+/// remaining callers are fixtures and other models that have no tame axis, so
+/// changing its signature would only add a parameter every other caller ignores.
 ///
 /// [`WolfCoat`]: lodestone_assets::entity::WolfCoat
 /// [`WolfState`]: lodestone_assets::entity::WolfState

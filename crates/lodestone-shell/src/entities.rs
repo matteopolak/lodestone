@@ -815,7 +815,7 @@ pub struct EntityDraw {
     /// variant axis, or whose reported variant carries nothing that axis can use.
     ///
     /// Resolved once per poll in [`extract_entity_draws`] by
-    /// [`lodestone_render::entity_variant_sheet`], which is
+    /// [`lodestone_render::entity_variant_sheet_for`], which is
     /// `EntityTexture::resolve`'s **first production caller**: the corpus has
     /// modelled nine wolf breeds and three climate skins the whole time, and every
     /// consumer asked only for `default_path()`, so every wolf drew pale and every
@@ -829,10 +829,11 @@ pub struct EntityDraw {
     /// species and different breeds are therefore two batches, which is what vanilla
     /// pays too — its `getTextureLocation` is per entity.
     ///
-    /// **A wolf's tame state is not part of this yet, and that is a real gap.**
-    /// `lodestone_render::entity_variant_sheet` pins `WolfState::Wild` because
-    /// vanilla's tame bit (`TamableAnimal.DATA_FLAGS_ID & 4`) reaches no field of
-    /// `EntityMetadataUpdate`, so the client cannot know. See that function's doc.
+    /// **A wolf's tame state is part of this** (issue #235):
+    /// [`extract_entity_draws`] bridges [`lodestone_ecs::entity::Tamed`] off the
+    /// ingest entity, the same way it bridges `Variant`, and passes it through to
+    /// `entity_variant_sheet_for`'s `tamed` parameter — see that function's own doc
+    /// for the wire chain and for why only a wolf's sheet reads the bit.
     pub variant_sheet: Option<&'static str>,
     /// An experience orb's XP value (`ExperienceOrb.DATA_VALUE`), bridged off the
     /// ingest entity's [`ExperienceOrbValue`] component — `None` for every entity
@@ -1908,9 +1909,15 @@ pub fn extract_entity_draws(
     // which is already at fourteen.
     orb_values: Query<&ExperienceOrbValue>,
     // The wire variant, on the ingest entity, bridged like `orb_values` above —
-    // resolved to a texture sheet by `lodestone_render::entity_variant_sheet`. See
-    // `EntityDraw::variant_sheet`.
+    // resolved to a texture sheet by `lodestone_render::entity_variant_sheet_for`.
+    // See `EntityDraw::variant_sheet`.
     variants: Query<&lodestone_ecs::entity::Variant>,
+    // `Tamed` lives on the ingest entity too (`lodestone_ecs::ingest::
+    // apply_entity_metadata` folds `EntityMetadataUpdate::tamed` into it),
+    // bridged the same way `variants` is. It is the last hop of issue #235's
+    // chain: without it `variant_sheet` below has no source for the tame bit
+    // and a tamed wolf draws the wild sheet forever.
+    tameds: Query<&lodestone_ecs::entity::Tamed>,
     tracks: Query<(
         &MinecraftEntityId,
         &RenderKind,
@@ -2084,10 +2091,18 @@ pub fn extract_entity_draws(
         // `kind.0` and not `model_type_path()`: the variant axis belongs to the
         // *species* corpus entry, and the only case where the two differ is a
         // player's slim rig, which has no variant axis at all.
-        let variant_sheet = index
+        //
+        // `tamed` is bridged off the ingest entity exactly like `variant` above,
+        // and defaults to `false` (the wild sheet) for an entity whose `Tamed`
+        // has never been reported — the honest default for anything that is not
+        // a wolf/cat/parrot/ocelot, and for one of those that really is wild.
+        let tamed = index
             .get(id.0)
-            .and_then(|entity| variants.get(entity).ok())
-            .and_then(|variant| lodestone_render::entity_variant_sheet(&kind.0, &variant.0));
+            .and_then(|entity| tameds.get(entity).ok())
+            .is_some_and(|tamed| tamed.0);
+        let variant_sheet = index.get(id.0).and_then(|entity| variants.get(entity).ok()).and_then(
+            |variant| lodestone_render::entity_variant_sheet_for(&kind.0, &variant.0, tamed),
+        );
         out.0.push(EntityDraw {
             id: id.0,
             type_path: kind.0.clone(),

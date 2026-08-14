@@ -165,6 +165,7 @@ pub use entity::{
     EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange, SheepWoolModelSet, WoolMesh,
     armour_layer_tint, armour_layers, dying_entity_model_matrix, entity_model_matrix,
     entity_texture_candidates, entity_variant_sheet, entity_variant_sheet_dirs,
+    entity_variant_sheet_for,
     experience_orb_icon, experience_orb_light, experience_orb_matrix, experience_orb_mesh,
     experience_orb_tint, framed_item_matrix, mob_draws_bow_when_aggressive, model_for_type,
     non_living_vehicle_matrix, non_living_vehicle_placement, plan_entities, renderer_is_avatar,
