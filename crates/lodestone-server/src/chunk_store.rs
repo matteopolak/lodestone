@@ -240,6 +240,7 @@ use std::collections::hash_map::Entry as MapEntry;
 use std::sync::Mutex;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::ticket::{TicketDelta, TicketKind, TicketOwner, TicketStoreHandle};
 
 /// The floor under [`capacity_for_view_radius`], and the capacity a radius-less
 /// `ChunkStore::new` store retains before evicting the least-recently-used one.
@@ -581,6 +582,11 @@ struct Cache {
     generated: u64,
     /// Cumulative count of evictions, same accumulator caveat.
     evicted: u64,
+    /// The `stamp` value at which [`ChunkStore::maybe_tick_tickets`] should
+    /// next check the ticket graph — see that method's own doc for why this is
+    /// piggybacked on cache-op traffic rather than a new `run_tick_loop`
+    /// parameter. `0` so the very first op after construction always ticks.
+    next_ticket_check: u64,
 }
 
 impl Cache {
@@ -629,6 +635,12 @@ pub(crate) struct ChunkStore<S> {
     /// does not change when the slider moves.
     policy: CapacityPolicy,
     cache: Mutex<Cache>,
+    /// The ticket graph this store's residency answers to — issue #289. See
+    /// [`maybe_tick_tickets`](Self::maybe_tick_tickets) for how it is driven and
+    /// this module's own doc section on the ticket/status pipeline for the
+    /// design (why this is a plain field rather than a new
+    /// [`ChunkSource`] trait method).
+    tickets: TicketStoreHandle,
 }
 
 impl<S> ChunkStore<S> {
@@ -698,7 +710,9 @@ impl<S> ChunkStore<S> {
                 stamp: 0,
                 generated: 0,
                 evicted: 0,
+                next_ticket_check: 0,
             }),
+            tickets: TicketStoreHandle::new(),
         }
     }
 
@@ -777,6 +791,11 @@ impl<S: ChunkSource> ChunkStore<S> {
     /// `last_used` in the map, so [`Cache::evict_down_to`] can never choose it
     /// and the following [`read`](Self::read) is guaranteed to hit.
     fn ensure(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        // Issue #289: a cheap, rate-limited check-in with the ticket graph on
+        // every real op through this store — see `maybe_tick_tickets`'s own
+        // doc for why this piggybacks on read traffic instead of a new
+        // `run_tick_loop` parameter.
+        self.maybe_tick_tickets();
         {
             let mut guard = self.lock();
             let cache = &mut *guard;
@@ -831,6 +850,151 @@ impl<S: ChunkSource> ChunkStore<S> {
         let entry = cache.columns.get_mut(&(cx, cz))?;
         entry.last_used = stamp;
         Some(f(&entry.column))
+    }
+
+    /// How many cache ops [`maybe_tick_tickets`](Self::maybe_tick_tickets)
+    /// waits between ticket-graph check-ins. A `Cache::stamp` unit, not a
+    /// tick or a wall-clock duration — see that method's doc for what this
+    /// trades away and why the trade is deliberate.
+    const TICKET_CHECK_PERIOD: u64 = 20;
+
+    /// A shared handle to this store's own ticket graph, for a caller that
+    /// wants to grant, move or remove tickets — [`set_spawn_ticket`],
+    /// [`set_forced_ticket`] and friends below cover the common cases; this is
+    /// the escape hatch for anything else (e.g. a future player-loading
+    /// ticket once a connection-scoped resource exists to carry it — see this
+    /// module's own doc for why that wiring is not in this store).
+    #[must_use]
+    pub(crate) fn tickets(&self) -> TicketStoreHandle {
+        self.tickets.clone()
+    }
+
+    /// Grants (or refreshes, or moves) the world's one spawn ticket —
+    /// vanilla's `TicketType.PLAYER_SPAWN`: loading-only, expires after 20
+    /// ticks without a refresh (`docs/plans/chunk-lifecycle.md` U7,
+    /// `crate::ticket::ticket_type::PLAYER_SPAWN`).
+    pub(crate) fn set_spawn_ticket(&self, pos: (i32, i32), radius: i32) {
+        self.tickets.set_ticket_with_radius(
+            TicketOwner::Spawn,
+            TicketKind::PlayerSpawn,
+            pos,
+            radius,
+        );
+    }
+
+    /// Refreshes the spawn ticket's countdown without moving it — vanilla's
+    /// `Ready.keepAlive()`. A caller that never refreshes lets it expire
+    /// naturally after 20 ticks, which is correct for "just enough terrain to
+    /// join into," not a bug to route around.
+    pub(crate) fn refresh_spawn_ticket(&self) -> bool {
+        self.tickets
+            .refresh_ticket(TicketOwner::Spawn, TicketKind::PlayerSpawn)
+    }
+
+    /// Grants a persistent, simulating `FORCED` ticket at `pos` — vanilla's
+    /// `/forceload`, `TicketLevel = ChunkLevel.byStatus(ENTITY_TICKING) = 31`.
+    /// `id` distinguishes more than one forced region; the caller owns
+    /// uniqueness (a serial counter is enough).
+    pub(crate) fn set_forced_ticket(&self, id: u64, pos: (i32, i32)) {
+        self.tickets.set_ticket_at_level(
+            TicketOwner::Forced(id),
+            TicketKind::Forced,
+            pos,
+            crate::ticket::ENTITY_TICKING_LEVEL,
+        );
+    }
+
+    /// Withdraws a forced ticket. Its chunk is not dropped synchronously —
+    /// see [`maybe_tick_tickets`](Self::maybe_tick_tickets) — but it becomes
+    /// an eviction candidate on the next check-in.
+    pub(crate) fn remove_forced_ticket(&self, id: u64) -> bool {
+        self.tickets
+            .remove_ticket(TicketOwner::Forced(id), TicketKind::Forced)
+    }
+
+    /// The ticket graph's answer for `(cx, cz)` — `Full` iff some active
+    /// ticket's propagated level reaches it at or below
+    /// [`crate::ticket::MAX_LEVEL`]. Independent of whether the column is
+    /// *actually* cached right now: a chunk can be ticket-resident and still
+    /// cold (nothing has read it since the ticket was granted) or cached and
+    /// ticket-`Empty` (read once, ticket since removed, not yet swept).
+    #[must_use]
+    pub(crate) fn ticket_status(&self, cx: i32, cz: i32) -> crate::ticket::ChunkStatus {
+        self.tickets.status((cx, cz))
+    }
+
+    /// Rate-limited ticket-graph check-in, called from every real op through
+    /// this store ([`ensure`](Self::ensure)).
+    ///
+    /// # Why this, and not a `run_tick_loop` parameter
+    ///
+    /// The obvious design threads a `TicketStoreHandle` into
+    /// `crate::tick::run_tick_loop` and ticks it once per game tick, exactly
+    /// like `BlockTickFeed`/`ExplosionFeed`. That is the *more correct* design
+    /// — ticket expiry would then mean exactly "N real game ticks," matching
+    /// vanilla's own `purgeStaleTickets` — but `run_tick_loop`'s signature has
+    /// eleven direct-or-wrapped call sites across `tick.rs`,
+    /// `redstone_placement_gate.rs` and `integrated.rs`, `tick.rs` carries
+    /// concurrent in-flight redstone work, and this crate's own hazard notes
+    /// name exactly this file as the one to touch with named-anchor
+    /// insertions, never a signature change, when avoidable. Piggybacking on
+    /// this store's own read traffic needs **zero edits to `tick.rs`** and
+    /// still ticks the graph at a real cadence: [`TICKET_CHECK_PERIOD`]
+    /// cache ops is a few generations' worth of traffic in any dimension a
+    /// connection or the tick loop is actually touching, which is the only
+    /// case eviction matters for.
+    ///
+    /// The cost, named rather than hidden: a ticket's expiry is now
+    /// "approximately N ticks, decided by read cadence" rather than exactly
+    /// N game ticks, and a dimension nobody reads from never checks in at
+    /// all (which is also exactly when nothing needs evicting). Tests that
+    /// need exact-tick semantics drive [`TicketStoreHandle::tick`] directly
+    /// rather than going through a store — see `crate::ticket`'s own test
+    /// module.
+    ///
+    /// # Safety of calling `unload` from here
+    ///
+    /// Locks are never held across it: the ticket-graph lock and the cache
+    /// lock are each acquired and released in their own scope before
+    /// `self.source.unload` is called, matching the existing
+    /// `evict_down_to_capacity` pattern in [`ensure`](Self::ensure) — see
+    /// [`ChunkSource::unload`]'s own doc for why it must do no I/O and cannot
+    /// call back into this store.
+    fn maybe_tick_tickets(&self) {
+        let due = {
+            let mut guard = self.lock();
+            let stamp = guard.stamp;
+            if stamp < guard.next_ticket_check {
+                false
+            } else {
+                guard.next_ticket_check = stamp + Self::TICKET_CHECK_PERIOD;
+                true
+            }
+        };
+        if !due {
+            return;
+        }
+        let delta: TicketDelta = self.tickets.tick();
+        if delta.newly_unresident.is_empty() {
+            return;
+        }
+        let evicted: Vec<(i32, i32)> = {
+            let mut guard = self.lock();
+            let cache = &mut *guard;
+            let mut out = Vec::new();
+            for pos in &delta.newly_unresident {
+                if cache.columns.remove(pos).is_some() {
+                    cache.evicted += 1;
+                    out.push(*pos);
+                }
+            }
+            out
+        };
+        // Outside the lock, deliberately — same reasoning as
+        // `evict_down_to_capacity`'s call site in `ensure`.
+        for (vx, vz) in evicted {
+            self.source.unload(vx, vz);
+        }
     }
 }
 
@@ -1065,6 +1229,12 @@ mod tests {
         per_chunk: PerChunk,
         min_y: i32,
         height: i32,
+        /// Every `(cx, cz)` this source's `unload` was called with, in call
+        /// order — issue #289's ticket-driven eviction gate needs to observe
+        /// that `ChunkStore::maybe_tick_tickets` actually reaches the source's
+        /// `unload`, not merely that the cache entry disappeared (which a
+        /// dropped `Entry` alone would also show).
+        unloaded: Arc<Mutex<Vec<(i32, i32)>>>,
     }
 
     type PerChunk = Arc<Mutex<HashMap<(i32, i32), u64>>>;
@@ -1086,11 +1256,16 @@ mod tests {
                 per_chunk: Arc::new(Mutex::new(HashMap::new())),
                 min_y,
                 height,
+                unloaded: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
         fn calls(&self) -> u64 {
             self.calls.load(Ordering::Relaxed)
+        }
+
+        fn unloaded(&self) -> Vec<(i32, i32)> {
+            self.unloaded.lock().expect("unloaded log poisoned").clone()
         }
     }
 
@@ -1143,6 +1318,13 @@ mod tests {
         // inherited — the point of issue #440.
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
             // No storage; edits are discarded by design for this counting stub.
+        }
+
+        fn unload(&self, cx: i32, cz: i32) {
+            self.unloaded
+                .lock()
+                .expect("unloaded log poisoned")
+                .push((cx, cz));
         }
     }
 
@@ -2477,6 +2659,139 @@ mod tests {
             "the tick area and nothing else. {} would mean the unfiltered scan probes the \
              world per entry.",
             EXPECTED_TICK_AREA_COLUMNS as u64 + OPAQUE_ENTITIES as u64
+        );
+    }
+
+    // Issue #289: the ticket graph driving this store's residency, above and
+    // beyond its own LRU capacity backstop. See `ChunkStore::maybe_tick_tickets`
+    // for the design; these gates drive it through the real `ensure()` path
+    // (repeated `column()` calls), never by calling ticket-graph internals
+    // directly, so a broken wiring between `ChunkStore` and `TicketStoreHandle`
+    // would fail here even if `crate::ticket`'s own unit tests stayed green.
+
+    /// Enough `column()` calls to guarantee at least one
+    /// `maybe_tick_tickets` check-in, independent of `TICKET_CHECK_PERIOD`'s
+    /// exact value.
+    fn drive_ticket_check_ins<S: ChunkSource>(store: &ChunkStore<S>, at: (i32, i32), n: u64) {
+        for _ in 0..n {
+            let _ = store.column(at.0, at.1);
+        }
+    }
+
+    /// A spawn ticket makes exactly its Chebyshev-radius square `Full`
+    /// status and nothing outside it — the status half of the gate, matching
+    /// `crate::ticket`'s own hand-derived boundary (distance 3 resident,
+    /// distance 4 not).
+    #[test]
+    fn a_spawn_ticket_makes_its_radius_full_status_and_nothing_outside_it() {
+        let store = Arc::new(ChunkStore::new(CountingSource::new()));
+        store.set_spawn_ticket((0, 0), 3);
+        // The ticket graph must be propagated at least once before status is
+        // meaningful — drive real traffic through the store rather than
+        // calling `tickets()` directly, so this exercises the wiring.
+        drive_ticket_check_ins(&store, (0, 0), ChunkStore::<CountingSource>::TICKET_CHECK_PERIOD + 1);
+
+        assert_eq!(store.ticket_status(3, 0), crate::ticket::ChunkStatus::Full);
+        assert_eq!(store.ticket_status(0, -3), crate::ticket::ChunkStatus::Full);
+        assert_eq!(store.ticket_status(4, 0), crate::ticket::ChunkStatus::Empty);
+        assert_eq!(store.ticket_status(1000, 1000), crate::ticket::ChunkStatus::Empty);
+    }
+
+    /// **The discriminating gate**: a chunk reaches `Full` status under a
+    /// ticket, and removing the ticket lets it unload — observed at the real
+    /// [`ChunkSource::unload`] call the source receives, not merely at the
+    /// cache entry disappearing (which would also happen for an unrelated
+    /// reason, e.g. LRU pressure).
+    #[test]
+    fn removing_a_forced_ticket_lets_its_chunk_unload_and_the_source_observes_it() {
+        let counting = CountingSource::new();
+        let unloaded_log = Arc::clone(&counting.unloaded);
+        let store = Arc::new(ChunkStore::new(counting));
+
+        store.set_forced_ticket(1, (5, 5));
+        drive_ticket_check_ins(&store, (5, 5), ChunkStore::<CountingSource>::TICKET_CHECK_PERIOD + 1);
+        assert_eq!(store.ticket_status(5, 5), crate::ticket::ChunkStatus::Full);
+        assert!(
+            store.is_column_resident(5, 5),
+            "precondition: the forced-ticket chunk must actually be cached before removal, \
+             or the eviction below proves nothing"
+        );
+        assert!(
+            unloaded_log
+                .lock()
+                .expect("unloaded log poisoned")
+                .is_empty(),
+            "precondition: nothing has been unloaded yet"
+        );
+
+        assert!(store.remove_forced_ticket(1));
+        // Drive enough further traffic (elsewhere, so it does not touch (5,5)
+        // and re-cache it) for the next check-in to observe the removal.
+        drive_ticket_check_ins(&store, (500, 500), ChunkStore::<CountingSource>::TICKET_CHECK_PERIOD + 1);
+
+        assert_eq!(
+            store.ticket_status(5, 5),
+            crate::ticket::ChunkStatus::Empty,
+            "the ticket graph itself must show the chunk as no longer wanted"
+        );
+        assert!(
+            !store.is_column_resident(5, 5),
+            "the cache entry must actually be gone, not merely ticket-unresident"
+        );
+        assert_eq!(
+            unloaded_log.lock().expect("unloaded log poisoned").as_slice(),
+            &[(5, 5)],
+            "the source must observe exactly one unload, for exactly the removed ticket's chunk"
+        );
+    }
+
+    /// The permanent negative control for the gate above: with the ticket
+    /// **never removed**, the same amount of driven traffic must leave the
+    /// chunk resident and must call `unload` zero times. Without this, the
+    /// positive gate could be passing because `maybe_tick_tickets` evicts
+    /// unconditionally rather than because it correctly tracks residency.
+    #[test]
+    fn a_forced_ticket_that_is_never_removed_never_unloads() {
+        let counting = CountingSource::new();
+        let unloaded_log = Arc::clone(&counting.unloaded);
+        let store = Arc::new(ChunkStore::new(counting));
+
+        store.set_forced_ticket(1, (5, 5));
+        drive_ticket_check_ins(&store, (5, 5), ChunkStore::<CountingSource>::TICKET_CHECK_PERIOD + 1);
+        drive_ticket_check_ins(&store, (500, 500), ChunkStore::<CountingSource>::TICKET_CHECK_PERIOD * 3);
+
+        assert!(
+            store.is_column_resident(5, 5),
+            "a forced ticket that was never removed must keep its chunk resident indefinitely"
+        );
+        assert!(
+            unloaded_log.lock().expect("unloaded log poisoned").is_empty(),
+            "nothing was ever removed, so nothing may be unloaded — a control that fires here \
+             means eviction is not actually gated on ticket removal"
+        );
+    }
+
+    /// A ticket the caller never grants leaves ticket status at `Empty`
+    /// everywhere and leaves `maybe_tick_tickets` with nothing to do — the
+    /// store's ordinary LRU behaviour (already covered elsewhere in this
+    /// module) must be completely unaffected by a ticket graph nobody has
+    /// used.
+    #[test]
+    fn an_unused_ticket_graph_never_touches_lru_behaviour() {
+        let counting = CountingSource::new();
+        let unloaded_log = Arc::clone(&counting.unloaded);
+        let store = Arc::new(ChunkStore::with_capacity(counting, 2));
+
+        for cx in 0..5 {
+            let _ = store.column(cx, 0);
+        }
+        // With capacity 2 and five distinct columns touched, LRU eviction must
+        // have happened — through the *existing* `evict_down_to_capacity`
+        // path, not the ticket path (no ticket was ever granted).
+        assert!(store.len() <= 2);
+        assert!(
+            !unloaded_log.lock().expect("unloaded log poisoned").is_empty(),
+            "capacity eviction must still call unload exactly as it did before this module existed"
         );
     }
 }

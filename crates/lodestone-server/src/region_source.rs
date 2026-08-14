@@ -1734,4 +1734,156 @@ mod tests {
         );
         assert_eq!(source.block_state(1, 70, 1), MARKER);
     }
+
+    /// Issue #289's discriminating gate over the **real** production stack —
+    /// `ChunkStore -> RegionChunkSource -> disk`, exactly what
+    /// `IntegratedServer::open_persistent_with_mobs` builds — and against a
+    /// **saved world**, not a fresh one: the fixture is reopened from a
+    /// directory an earlier session already wrote to, per CLAUDE.md's own
+    /// warning that every singleplayer-shaped gate here defaults to a fresh
+    /// world and that blind spot has hidden real defects before.
+    ///
+    /// A `FORCED` ticket reaches `Full` status through `ChunkStore`, and
+    /// removing it drives a real [`ChunkSource::unload`] call that
+    /// `RegionChunkSource` observes — proven two ways: the cache entry is
+    /// actually gone (not merely ticket-unresident), and — for a column
+    /// edited *after* the reopen, so there is something in the edit map for
+    /// [`WorldSaveHandle::save`]'s sweep to act on — [`PersistenceStats::unloaded`]
+    /// advances and [`RegionChunkSource::retained_columns`] shrinks once that
+    /// save runs, the same magnitude pair the capacity-eviction gates above
+    /// this one use.
+    #[test]
+    fn a_ticket_removal_unloads_a_column_through_the_real_persistence_stack() {
+        let dir = tempdir("ticket_unload");
+
+        // Session 1: write and save one edited chunk, so the directory this
+        // test reopens is a **saved world** — the chunk exists on disk before
+        // the store under test ever sees it, which a fresh-world fixture
+        // cannot exercise.
+        {
+            let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+            source.set_block(1, 70, 1, MARKER);
+            source.save_handle().save().expect("seed save");
+        }
+
+        // Session 2: reopen the same directory — this is the "saved world"
+        // fixture — and wrap it in a real `ChunkStore`, exactly as
+        // `IntegratedServer::open_persistent_with_mobs` does.
+        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("reopen world");
+        let handle = source.save_handle();
+        let store = std::sync::Arc::new(ChunkStore::new(source.clone()));
+
+        store.set_forced_ticket(1, (0, 0));
+        // Drive real read traffic through the store (never call the ticket
+        // graph's internals directly) until `maybe_tick_tickets` has checked
+        // in at least once.
+        for _ in 0..25 {
+            let _ = store.column(0, 0);
+        }
+        assert_eq!(
+            store.ticket_status(0, 0),
+            crate::ticket::ChunkStatus::Full,
+            "precondition: the forced ticket must actually make (0,0) resident"
+        );
+        assert!(store.is_column_resident(0, 0));
+        assert_eq!(
+            source.block_state(1, 70, 1),
+            MARKER,
+            "precondition: the saved edit must survive the reopen and the ticket grant"
+        );
+
+        // A fresh edit this session, on top of the one carried over from
+        // disk — this is what gives the sweep below something real to defer
+        // then release, exactly like the capacity-eviction gates above.
+        const SECOND_MARKER: &str = "minecraft:gold_block";
+        source.set_block(2, 71, 2, SECOND_MARKER);
+        assert_eq!(source.retained_columns(), 1, "one edited column, in the edit map");
+
+        store.remove_forced_ticket(1);
+        for _ in 0..25 {
+            let _ = store.column(50, 50);
+        }
+
+        assert_eq!(
+            store.ticket_status(0, 0),
+            crate::ticket::ChunkStatus::Empty,
+            "the ticket graph must show (0,0) as no longer wanted once the ticket is gone"
+        );
+        assert!(
+            !store.is_column_resident(0, 0),
+            "the cache entry must actually be dropped, not merely ticket-unresident"
+        );
+
+        // The sweep only *defers* release until the edit is safely on disk —
+        // matching every other release gate in this module. A caller (an
+        // autosave loop in production) drives that here.
+        assert_eq!(handle.save().expect("save"), 1, "the fresh edit must be written");
+        assert_eq!(
+            handle.stats().unloaded.load(Ordering::Relaxed),
+            1,
+            "the real persistence layer must observe exactly one unload, once the edit is on disk"
+        );
+        assert_eq!(
+            source.retained_columns(),
+            0,
+            "the edit map must actually shrink, not just log an unload"
+        );
+        // And the point of the whole exercise: neither edit is lost. Reading
+        // them back after the unload costs a disk load, never a wrong block.
+        assert_eq!(
+            source.block_state(1, 70, 1),
+            MARKER,
+            "the edit carried over from session 1 must survive the ticket-driven unload"
+        );
+        assert_eq!(
+            source.block_state(2, 71, 2),
+            SECOND_MARKER,
+            "the edit made in session 2, right before the unload, must also survive it"
+        );
+    }
+
+    /// The permanent negative control: the same saved-world fixture, the same
+    /// amount of driven traffic, but the ticket is **never removed**. The
+    /// chunk must stay resident and `unload` must never fire — without this,
+    /// the positive gate above could be passing because eviction runs
+    /// unconditionally rather than because it is gated on the ticket.
+    #[test]
+    fn a_ticket_that_is_never_removed_never_unloads_through_the_real_stack() {
+        let dir = tempdir("ticket_no_removal");
+        {
+            let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+            source.set_block(1, 70, 1, MARKER);
+            source.save_handle().save().expect("seed save");
+        }
+
+        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("reopen world");
+        let handle = source.save_handle();
+        let store = std::sync::Arc::new(ChunkStore::new(source.clone()));
+
+        store.set_forced_ticket(1, (0, 0));
+        for _ in 0..25 {
+            let _ = store.column(0, 0);
+        }
+        source.set_block(2, 71, 2, "minecraft:gold_block");
+        // No removal here — the control.
+        for _ in 0..75 {
+            let _ = store.column(50, 50);
+        }
+        let _ = handle.save();
+
+        assert!(
+            store.is_column_resident(0, 0),
+            "a forced ticket that was never removed must keep its chunk resident"
+        );
+        assert_eq!(
+            handle.stats().unloaded.load(Ordering::Relaxed),
+            0,
+            "nothing was removed, so nothing may be unloaded"
+        );
+        assert_eq!(
+            source.retained_columns(),
+            1,
+            "the edit made under an active ticket must stay in the edit map, saved or not"
+        );
+    }
 }
