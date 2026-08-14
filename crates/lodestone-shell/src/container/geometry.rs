@@ -49,6 +49,37 @@ const BREWING_BREW_DECLARED: (f32, f32) = (9.0, 28.0);
 /// `blitSprite(pipeline, BUBBLES_SPRITE, 12, 29, 0, 29 - len, x, y, 12, len)`.
 const BREWING_BUBBLES_DECLARED: (f32, f32) = (12.0, 29.0);
 
+/// `AnvilScreen.extractBackground`'s own blit:
+/// `graphics.blitSprite(pipeline, hasItem ? TEXT_FIELD_SPRITE :
+/// TEXT_FIELD_DISABLED_SPRITE, leftPos + 59, topPos + 20, 110, 16)`. Neither
+/// `container/anvil/text_field` nor `text_field_disabled` is one of the
+/// whole-panel sheets [`ContainerBackground`] stitches (it only loads
+/// `gui/container/*.png` sheets, not `gui/sprites/container/anvil/**`), so
+/// this crate cannot yet sample the real 9-sliced sprite from here without
+/// also touching that loader. Vanilla's own `anvil.png`, at exactly this
+/// rect, is a flat, fully opaque `(255, 0, 0)` placeholder (measured:
+/// 1760/1760 = 110×16 pixels), which is what shows through — a solid red
+/// box — when nothing draws over it.
+const ANVIL_FIELD_X: f32 = 59.0;
+/// See [`ANVIL_FIELD_X`].
+const ANVIL_FIELD_Y: f32 = 20.0;
+/// See [`ANVIL_FIELD_X`].
+const ANVIL_FIELD_W: f32 = 110.0;
+/// See [`ANVIL_FIELD_X`].
+const ANVIL_FIELD_H: f32 = 16.0;
+/// The border colour both `text_field.png` and `text_field_disabled.png`
+/// share — measured as their most common non-fill, non-highlight pixel
+/// (`(55, 55, 55)`, 123 of 1760 texels in each real sprite).
+const ANVIL_FIELD_BORDER: [f32; 4] = [55.0 / 255.0, 55.0 / 255.0, 55.0 / 255.0, 1.0];
+/// The enabled interior fill — `text_field.png`'s dominant pixel `(160, 145,
+/// 114)` (1274 of 1760 texels, measured).
+const ANVIL_FIELD_FILL: [f32; 4] = [160.0 / 255.0, 145.0 / 255.0, 114.0 / 255.0, 1.0];
+/// The disabled interior fill — `text_field_disabled.png`'s dominant pixel
+/// `(78, 71, 55)` (1274 of 1760 texels, measured).
+const ANVIL_FIELD_FILL_DISABLED: [f32; 4] = [78.0 / 255.0, 71.0 / 255.0, 55.0 / 255.0, 1.0];
+/// `EditBox::setTextColor(-1)` (`AnvilScreen.subInit`) — opaque white.
+const ANVIL_FIELD_TEXT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
 /// Geometry for the container overlay: coloured chrome plus, when an item atlas
 /// is attached, real slot icons on the two icon streams.
 #[derive(Debug, Clone, PartialEq)]
@@ -423,6 +454,50 @@ impl ContainerGeometry {
                         {
                             b.bg_sprite(q);
                         }
+                    }
+                }
+                Some(SpecialLayout::Anvil) => {
+                    // Cover vanilla's own red placeholder rect (see
+                    // `ANVIL_FIELD_X`'s doc) with a flat approximation of the
+                    // real `container/anvil/text_field[_disabled]` sprite —
+                    // not the real 9-sliced bevel (this crate has no path to
+                    // that sprite from here; see the doc comment above), but
+                    // enough that a solid red box no longer shows through.
+                    // `AnvilScreen.subInit`: `this.name.setEditable(this.menu
+                    // .getSlot(0).hasItem())`, and `extractBackground` blits
+                    // the disabled sprite variant on the same condition.
+                    let has_item = menu.slot_item(0).is_some();
+                    let fill = if has_item {
+                        ANVIL_FIELD_FILL
+                    } else {
+                        ANVIL_FIELD_FILL_DISABLED
+                    };
+                    b.rect_px(
+                        x + ANVIL_FIELD_X,
+                        y + ANVIL_FIELD_Y,
+                        ANVIL_FIELD_W,
+                        ANVIL_FIELD_H,
+                        ANVIL_FIELD_BORDER,
+                    );
+                    b.rect_px(
+                        x + ANVIL_FIELD_X + 1.0,
+                        y + ANVIL_FIELD_Y + 1.0,
+                        ANVIL_FIELD_W - 2.0,
+                        ANVIL_FIELD_H - 2.0,
+                        fill,
+                    );
+                    // `new EditBox(font, xo + 62, yo + 24, 103, 12, ...)`
+                    // (`AnvilScreen.subInit`), `setBordered(false)`: the
+                    // inset a bordered box would add (`EditBox.java`:
+                    // `this.bordered ? 4 : 0`) is zero, so text sits flush
+                    // with the box's own x. `textY = getY() + (height - 8) /
+                    // 2` centres it in the 12px-tall box. `textShadow`
+                    // defaults `true` and `AnvilScreen` never clears it, so
+                    // this is `shadowed_label`, not `label`.
+                    if let Some(name) = frame.anvil_name
+                        && !name.is_empty()
+                    {
+                        b.shadowed_label(name, x + 62.0, y + 26.0, 1.0, ANVIL_FIELD_TEXT);
                     }
                 }
                 _ => {}
@@ -1160,4 +1235,177 @@ fn drag_preview(menu: &Menu, drag: Option<(i32, &[usize])>) -> Option<DragPrevie
         painted: painted.to_vec(),
         source,
     })
+}
+
+/// Coverage for the anvil rename box (the report: "in the anvil, the input
+/// where it should show the text just shows a solid red box"). Root cause
+/// was `AnvilScreen.extractBackground`'s `TEXT_FIELD_SPRITE`/
+/// `TEXT_FIELD_DISABLED_SPRITE` overlay never being drawn at all — no code
+/// anywhere in this crate referenced `container/anvil/text_field[_disabled]`
+/// — so vanilla's own `anvil.png`, which bakes a flat opaque `(255, 0, 0)`
+/// placeholder under exactly that rect for this reason, showed straight
+/// through. Measured against the real asset: 1760/1760 pixels of the
+/// `leftPos + 59, topPos + 20, 110, 16` rect are pure red.
+///
+/// These gates run against the **real** vanilla jar (background *and*
+/// font), so they skip rather than fail when this environment has none —
+/// the same precondition-skip every other real-asset gate in this crate
+/// uses. They were run once with `Some(SpecialLayout::Anvil)`'s
+/// `b.shadowed_label` call commented out (the historical bug, reproduced):
+/// [`the_rename_box_draws_real_glyph_geometry_not_one_flat_quad`] and
+/// [`glyph_vertex_count_scales_with_the_known_strings_own_width`] both went
+/// red, confirming the gate actually fires on the regression it exists to
+/// catch.
+#[cfg(test)]
+mod anvil_rename_field_tests {
+    use super::*;
+    use lodestone_model::{Identifier, Text};
+
+    const VIEW: (u32, u32) = (1280, 720);
+
+    fn jar_manager() -> Option<lodestone_assets::ResourceManager> {
+        crate::resources::vanilla_manager()
+    }
+
+    /// A 3-slot anvil menu (`Menu::item_combiner(3, 2, SpecialLayout::Anvil)`)
+    /// with slot 0 holding a diamond sword, optionally custom-named —
+    /// mirrors `AnvilScreen.subInit`'s `this.name.setEditable(this.menu
+    /// .getSlot(0).hasItem())` precondition (slot 0 is always occupied here,
+    /// so the box is always the "enabled" variant).
+    fn anvil_menu_with_item(custom_name: Option<&str>) -> Menu {
+        let mut menu = Menu::item_combiner(3, 2, SpecialLayout::Anvil);
+        let item = Identifier::new("minecraft", "diamond_sword").expect("valid id");
+        let mut stack = ItemStack::new(item, 1);
+        if let Some(name) = custom_name {
+            stack.set_custom_name(Some(Text::literal(name)));
+        }
+        menu.set_slot_item(0, Some(stack));
+        menu
+    }
+
+    /// Renders the anvil screen against the **real** vanilla assets — both
+    /// the background (so the real `anvil.png` red placeholder is genuinely
+    /// in play, not a synthetic stand-in) and the font (so glyph counts and
+    /// widths are real vanilla metrics, not the fixed-advance debug font).
+    /// `None` when this environment has no jar.
+    fn anvil_geometry(menu: &Menu, anvil_name: Option<&str>) -> Option<ContainerGeometry> {
+        let manager = jar_manager()?;
+        let bg = ContainerBackground::build(&manager).expect("real background builds");
+        let font = VanillaFont::shared()?;
+        let frame = ContainerFrame::new(Some(menu), "Repair & Name").with_anvil_name(anvil_name);
+        Some(ContainerGeometry::build_inner(
+            &frame,
+            VIEW.0,
+            VIEW.1,
+            crate::config::AUTO_GUI_SCALE,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            Some(&font),
+            Some(&bg),
+        ))
+    }
+
+    /// **The vertex-sampling trap, made concrete**: the border/fill rects
+    /// that cover the red placeholder draw unconditionally, so a detector
+    /// that only asks "did anything draw in the box" cannot tell a real
+    /// label apart from one silently dropped — both leave `verts`
+    /// non-empty. This is why the real gate below measures a **delta**
+    /// against the no-name case instead.
+    #[test]
+    fn a_naive_nonempty_check_cannot_see_a_dropped_label() {
+        let menu = anvil_menu_with_item(Some("Anvil7"));
+        let Some(with_name) = anvil_geometry(&menu, Some("Anvil7")) else {
+            eprintln!("skip: no real vanilla jar in this environment");
+            return;
+        };
+        let Some(without_name) = anvil_geometry(&menu, None) else {
+            return;
+        };
+        assert!(!with_name.verts.is_empty(), "premise: the box draws something");
+        assert!(
+            !without_name.verts.is_empty(),
+            "premise: the covering rects draw even with no name — this is \
+             the trap, not a bug"
+        );
+    }
+
+    /// The real gate. `VanillaFont::draw_legacy` rasterises text as one
+    /// small filled rect per contiguous horizontal ink run, per glyph row
+    /// (`crate::hud::vanilla_font`) — a six-character string is dozens of
+    /// tiny rects, never the single flat quad a border/fill call alone
+    /// would leave. Isolated as the vertex-count *delta* against the same
+    /// frame with no name, so the ever-present border/fill rects cannot pad
+    /// the count.
+    #[test]
+    fn the_rename_box_draws_real_glyph_geometry_not_one_flat_quad() {
+        let name = "Anvil7";
+        let menu = anvil_menu_with_item(Some(name));
+        let Some(with_name) = anvil_geometry(&menu, Some(name)) else {
+            eprintln!("skip: no real vanilla jar in this environment");
+            return;
+        };
+        let Some(without_name) = anvil_geometry(&menu, None) else {
+            return;
+        };
+        assert!(
+            with_name.verts.len() > without_name.verts.len(),
+            "the label must add vertices beyond the border/fill rects"
+        );
+        let delta_floats = with_name.verts.len() - without_name.verts.len();
+        let delta_verts = delta_floats / FLOATS_PER_VERTEX;
+        // One flat quad is 6 vertices (`ColourStream::rect`); two (border +
+        // fill, both already unconditional) is 12. A real 6-glyph string's
+        // ink-run rasterisation is far beyond that.
+        assert!(
+            delta_verts > 12,
+            "expected many glyph-ink rects for {name:?}, got {delta_verts} \
+             vertices (<= 2 flat quads worth) — looks like a flat cover with \
+             no real text"
+        );
+    }
+
+    /// **Magnitude control**: the delta must scale with the font's *own*
+    /// width metric ([`VanillaFont::width`]), computed independently of the
+    /// rasteriser under test — not merely "some vertices appeared". A
+    /// fixed threshold alone cannot distinguish "drew the right text" from
+    /// "drew unrelated placeholder ink"; a longer known string must add
+    /// visibly more.
+    #[test]
+    fn glyph_vertex_count_scales_with_the_known_strings_own_width() {
+        let short = "Anvil7";
+        let long = "Anvil7Repair9Sword";
+        let menu_short = anvil_menu_with_item(Some(short));
+        let menu_long = anvil_menu_with_item(Some(long));
+        let (Some(g_short), Some(g_none_short)) = (
+            anvil_geometry(&menu_short, Some(short)),
+            anvil_geometry(&menu_short, None),
+        ) else {
+            eprintln!("skip: no real vanilla jar in this environment");
+            return;
+        };
+        let (Some(g_long), Some(g_none_long)) = (
+            anvil_geometry(&menu_long, Some(long)),
+            anvil_geometry(&menu_long, None),
+        ) else {
+            return;
+        };
+        let delta = |a: &ContainerGeometry, b: &ContainerGeometry| a.verts.len() - b.verts.len();
+        let d_short = delta(&g_short, &g_none_short);
+        let d_long = delta(&g_long, &g_none_long);
+
+        let font = VanillaFont::shared().expect("checked non-None by anvil_geometry above");
+        let w_short = font.width(short, 1.0);
+        let w_long = font.width(long, 1.0);
+        assert!(
+            w_long > w_short,
+            "premise: the long fixture must actually be wider ({w_short}px vs {w_long}px)"
+        );
+        assert!(
+            d_long > d_short,
+            "glyph vertex count did not scale with the font's own width \
+             (short {w_short}px -> {d_short} verts, long {w_long}px -> {d_long} verts)"
+        );
+    }
 }
