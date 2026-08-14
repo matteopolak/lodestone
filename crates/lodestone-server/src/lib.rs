@@ -476,7 +476,8 @@ pub use weather::{WeatherEvent, WeatherFeed, WeatherState};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{
     bundled_biome_spawners, bundled_worldgen_serves, nether_chunk_source, nether_generator,
-    overworld_chunk_source, overworld_generator, BUNDLED_WORLDGEN_SCOPE,
+    overworld_chunk_source, overworld_chunk_source_of_type, overworld_generator,
+    overworld_generator_of_type, BUNDLED_WORLDGEN_SCOPE, WorldType,
 };
 
 // Re-exported so a caller (e.g. the shell's local world) can name the generator

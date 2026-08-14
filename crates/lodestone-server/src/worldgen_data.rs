@@ -543,12 +543,73 @@ impl Resolver for NetherResolver {
     }
 }
 
-/// The parsed overworld noise settings (parsed once, reused across seeds).
-fn overworld_settings() -> &'static Value {
-    static SETTINGS: OnceLock<Value> = OnceLock::new();
-    SETTINGS.get_or_init(|| {
-        let raw = EmbeddedResolver.raw("noise_settings/overworld");
-        serde_json::from_str(raw).expect("parsing embedded overworld noise settings")
+/// Which bundled overworld `noise_settings` + density functions a generator
+/// uses (issue #519). `Overworld` is the default and is exactly what every
+/// pre-existing call site ([`overworld_generator`]/[`overworld_chunk_source`])
+/// still gets — nothing changes for them.
+///
+/// `Amplified` and `LargeBiomes` need no new engine code: their
+/// `noise_settings/*.json` and `density_function/overworld_amplified/*` /
+/// `overworld_large_biomes/*` documents are already bundled, and
+/// [`EmbeddedResolver::density_function`] already resolves any dotted id
+/// under `density_function/`, so `minecraft:overworld_amplified/depth` (as
+/// referenced by `noise_settings/amplified.json`'s own `noise_router`)
+/// resolves the same way `minecraft:overworld/depth` always has. Both
+/// presets' own `world_preset/*.json` select
+/// `biome_source.preset: "minecraft:overworld"`, so
+/// [`EmbeddedResolver::biome_parameters`]'s hardcoded `biome_parameters/
+/// overworld` table is the *correct* table for them too, not a stand-in —
+/// their biome variety instead comes from `noise_settings/{amplified,
+/// large_biomes}.json`'s own `temperature`/`vegetation` router entries
+/// (`large_biomes` points those at `noise/temperature_large` and
+/// `noise/vegetation_large`, both bundled), which [`OverworldGenerator::new`]
+/// already builds its [`ClimateSampler`](lodestone_worldgen::biome) from
+/// per-call. So selecting a [`WorldType`] is the entire gap; no
+/// `Resolver::biome_parameters` widening is needed for either preset.
+///
+/// Other presets are deliberately absent from this enum: `single_biome_surface`
+/// needs a `FixedBiomeSource` this tree does not have, `flat`/
+/// `flat_all_dimensions` need a `FlatLevelSource`-style generator distinct from
+/// [`OverworldGenerator`], and `debug_all_block_states` needs its own
+/// block-grid generator. Adding a variant for one of those without the
+/// generator behind it would silently produce ordinary overworld terrain
+/// under a preset's name — see this module's own doc on why that is worse
+/// than the preset being unreachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorldType {
+    #[default]
+    Overworld,
+    Amplified,
+    LargeBiomes,
+}
+
+impl WorldType {
+    /// The embedded `noise_settings/<id>` asset key for this world type.
+    const fn settings_asset(self) -> &'static str {
+        match self {
+            WorldType::Overworld => "noise_settings/overworld",
+            WorldType::Amplified => "noise_settings/amplified",
+            WorldType::LargeBiomes => "noise_settings/large_biomes",
+        }
+    }
+}
+
+/// The parsed noise settings for `world_type` (parsed once per type, reused
+/// across seeds and worlds — one `OnceLock` per [`WorldType`] variant rather
+/// than a keyed map, since the variant set is small and fixed).
+fn settings_for(world_type: WorldType) -> &'static Value {
+    static OVERWORLD: OnceLock<Value> = OnceLock::new();
+    static AMPLIFIED: OnceLock<Value> = OnceLock::new();
+    static LARGE_BIOMES: OnceLock<Value> = OnceLock::new();
+    let lock = match world_type {
+        WorldType::Overworld => &OVERWORLD,
+        WorldType::Amplified => &AMPLIFIED,
+        WorldType::LargeBiomes => &LARGE_BIOMES,
+    };
+    lock.get_or_init(|| {
+        let key = world_type.settings_asset();
+        let raw = EmbeddedResolver.raw(key);
+        serde_json::from_str(raw).unwrap_or_else(|e| panic!("parsing embedded '{key}': {e}"))
     })
 }
 
@@ -596,10 +657,21 @@ pub fn active_world_seed() -> i64 {
 
 #[must_use]
 pub fn overworld_generator(seed: i64) -> OverworldGenerator {
+    overworld_generator_of_type(seed, WorldType::Overworld)
+}
+
+/// Builds the bundled overworld generator for `seed`, using `world_type`'s
+/// noise settings and density functions in place of the plain overworld's
+/// (issue #519). This is the parameter [`overworld_generator`] hardcodes to
+/// [`WorldType::Overworld`]; a world-creation UI selecting Amplified or Large
+/// Biomes calls this instead, threading the choice through to persistence the
+/// same way it already threads a seed.
+#[must_use]
+pub fn overworld_generator_of_type(seed: i64, world_type: WorldType) -> OverworldGenerator {
     ACTIVE_WORLD_SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
     OverworldGenerator::new(
         seed,
-        overworld_settings(),
+        settings_for(world_type),
         &EmbeddedResolver,
         DEFAULT_BIOME,
         DEFAULT_BIOME_SNOWS,
@@ -644,7 +716,20 @@ pub fn bundled_biome_spawners()
 /// block states — no simplified second generator lives one layer in.
 #[must_use]
 pub fn overworld_chunk_source(seed: i64) -> crate::chunk::OverworldChunkSource {
-    crate::chunk::OverworldChunkSource::new(overworld_generator(seed))
+    overworld_chunk_source_of_type(seed, WorldType::Overworld)
+}
+
+/// Builds the bundled overworld [`ChunkSource`](crate::ChunkSource) for `seed`
+/// using `world_type` (issue #519) — the server/worldgen boundary a
+/// world-creation UI needs: it persists a [`WorldType`] alongside the seed and
+/// passes it here (and to [`overworld_generator_of_type`]) instead of calling
+/// the `Overworld`-only entry points.
+#[must_use]
+pub fn overworld_chunk_source_of_type(
+    seed: i64,
+    world_type: WorldType,
+) -> crate::chunk::OverworldChunkSource {
+    crate::chunk::OverworldChunkSource::new(overworld_generator_of_type(seed, world_type))
 }
 
 /// The parsed Nether noise settings (parsed once, reused across seeds).

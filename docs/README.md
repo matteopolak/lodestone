@@ -2059,6 +2059,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (`apply_vegetal_decoration_step_3x3_per_source`), not a single chunk in isolation: a
   tree or grass patch near a chunk edge really does spill into the neighbour that
   generates it, matching vanilla's own cross-chunk decoration spill.
+- [Overworld world-type selection](./worldgen-world-type-selection.md) —
+  `worldgen_data::WorldType` (`crates/lodestone-server/src/worldgen_data.rs`), a
+  parameter that picks which bundled overworld `noise_settings` document and
+  density-function set a generator uses. Before issue #519 the overworld's settings
+  were a hardcoded `OnceLock`, so the `amplified` and `large_biomes`
+  `noise_settings`/`density_function` documents — bundled and byte-identical to the
+  jar — were unreachable from any code path. `WorldType` closes that gap for the two
+  presets that need no new engine: `Overworld` (the pre-existing default), `Amplified`
+  and `LargeBiomes`.
 
 ---
 
