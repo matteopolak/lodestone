@@ -206,14 +206,18 @@ fn strip_ns(kind: &str) -> &str {
 /// (`TeamColor.calculate`), so [`TintProvenance::Default`] is the honest label
 /// there rather than `Unmodeled`.
 ///
-/// **Modeled is not the same as drawn.** The one caller in the shell that
-/// draws item icons (`lodestone_shell::hud::item_icon::sprite_layer_tint`)
-/// still resolves every tint against `ItemTintContext::default()` — no stack
-/// in hand at all — which is a pre-existing gap this module's own history
-/// already names for `dye` and that `potion` now shares rather than
-/// introduces: the *resolver* being correct does not mean a drawn creative-menu
-/// potion icon is tinted yet, only that it will be the moment a caller passes
-/// real components through.
+/// **Modeled is not the same as drawn — or rather, it was not.**
+/// `lodestone_shell::hud::item_icon::sprite_layer_tint` used to resolve every
+/// tint against `ItemTintContext::default()` regardless of the stack in hand,
+/// so a correct resolver still drew the wrong colour: every icon got the
+/// definition's own default, dyed leather and mixed potions included. It now
+/// builds a real `ItemTintContext` from the `ItemIcon` record's
+/// `dyed_color`/`potion_color` fields, populated by every producer that has a
+/// live `lodestone_game::item::ItemStack` in hand — the hotbar snapshot, the
+/// container/creative `Builder::draw_stack` path, and the advancements grid
+/// (which reaches `draw_stack` too). A producer with no stack (a recipe
+/// result, a toast/advancement icon built from a bare item id) still leaves
+/// both `None`, which is the honest answer there, not a shortfall.
 ///
 /// **`minecraft:spawn_egg` is deliberately absent, and that is not an
 /// omission.** 26.2 has no spawn-egg tint source: `SpawnEggItem`'s whole class

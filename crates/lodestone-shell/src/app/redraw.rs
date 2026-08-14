@@ -303,6 +303,12 @@ impl WindowApp {
                         damage,
                         max_damage,
                         enchanted: crate::hud::item_icon::stack_has_foil(st),
+                        // Mirrors `container::builder::icon_record` — without these
+                        // a dyed leather item or a mixed potion held in the hotbar
+                        // drew its definition's plain default instead of the real
+                        // colour.
+                        dyed_color: st.dyed_color(),
+                        potion_color: st.potion_color(),
                     })
                 })
             })

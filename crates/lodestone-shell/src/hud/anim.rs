@@ -538,6 +538,8 @@ mod tests {
             damage: None,
             max_damage: None,
             enchanted: false,
+            dyed_color: None,
+            potion_color: None,
         }
     }
 
