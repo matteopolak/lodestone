@@ -171,6 +171,14 @@ impl WindowApp {
         if self.sim.has_won() && self.ui.screen() != crate::menu::Screen::Credits {
             self.ui.show_credits();
         }
+        // Issue #535's scope 2: the pause menu stops offering Open to LAN
+        // once there is nothing left for it to do. `Sim::is_lan_published`
+        // is the ground truth (set from the real `NetUpdate::LanOpened`, not
+        // from `hosted_world` — a multiplayer session is never published
+        // either), reconciled here every frame the same way `has_won`/
+        // `is_dead` are above, so a menu already open catches up the instant
+        // the server confirms the bind rather than needing to be reopened.
+        self.nav.set_lan_published(self.sim.is_lan_published());
         // A transition may have changed grab intent (Connected → Playing grabs;
         // Ended/Death → menu-owned screens release). Only touch the OS grab
         // when it disagrees.
@@ -439,11 +447,21 @@ impl WindowApp {
     /// port rather than the requested one.
     ///
     /// Off a hosted world, or before a net session exists at all, this says so
-    /// in chat instead of doing nothing — `PauseButton::OpenToLan` is enabled
-    /// unconditionally (see its doc), so this is where "there is nothing of
-    /// ours to publish" gets stated. A publish that fails server-side (already
-    /// published, or a bind error) reports through the ordinary
-    /// `NetUpdate::Error` chat path instead — see `NetClient::publish_to_lan`.
+    /// in chat instead of doing nothing — the caller only omits the button
+    /// once it has *itself* learned the world is published (see
+    /// `MenuNav::pause_buttons`), so a stale render (this frame's menu built
+    /// from last frame's `MenuNav` state) can still land here between the
+    /// press and that catch-up, and this is where "there is nothing of ours
+    /// to publish" gets stated for it.
+    ///
+    /// A publish that fails server-side (already published, or a bind error)
+    /// reports through `NetUpdate::LanPublishError` — **not**
+    /// `NetUpdate::Error`, which ends the session — so a race here reads as
+    /// one more chat line, never a kick. See `NetClient::publish_to_lan`'s own
+    /// doc, and `NetUpdate::Error`'s for why the two must stay distinct: they
+    /// used to be one variant, and every "already published" reply rode in on
+    /// the session-ending one, which is exactly the disconnect this doc
+    /// used to (wrongly) say could not happen.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn open_current_world_to_lan(&mut self) {
         if self.hosted_world.is_none() {

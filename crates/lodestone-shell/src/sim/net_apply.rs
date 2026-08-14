@@ -395,6 +395,12 @@ impl Sim {
                     tracing::info!(target: "chat", "Local game hosted on port {port}");
                     self.push_local_chat(format!("Local game hosted on port {port}"));
                     self.status = format!("open to LAN on {port}");
+                    // Issue #535's scope 2: the ground truth
+                    // `app::session::drive_ui_from_session` reconciles into
+                    // `MenuNav::set_lan_published`, so the pause menu stops
+                    // offering a button with nothing left to do. See
+                    // `Self::lan_published`'s own field doc.
+                    self.lan_published = true;
                 }
                 NetUpdate::Sound {
                     name,
@@ -555,6 +561,19 @@ impl Sim {
                     self.set_phase(SessionPhase::Ended(Box::new(SessionEnd::failed(
                         Text::literal(e),
                     ))));
+                }
+                NetUpdate::LanPublishError(e) => {
+                    // The non-fatal counterpart to the arm above: a publish
+                    // attempt (typically a second press of the pause menu's
+                    // Open to LAN, since the world is already published) that
+                    // failed server-side without the net thread's own loop
+                    // ever leaving — see `NetUpdate::LanPublishError`'s own
+                    // doc for why this must never touch `SessionPhase`. A
+                    // real `NetUpdate::Error` here used to run this exact
+                    // message through the arm above and disconnect a
+                    // perfectly healthy session.
+                    tracing::warn!(error = %e, "lan publish failed");
+                    self.push_local_chat(e);
                 }
             }
         }

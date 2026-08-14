@@ -25,10 +25,13 @@ pub(super) fn version_line() -> String {
     format!("Minecraft 26.2 (Lodestone {})", env!("CARGO_PKG_VERSION"))
 }
 
-/// Builds the pause menu's overlay frame: vanilla's **nine** widgets at
-/// vanilla's rects (see [`pause_slot`] and [`super::nav::PauseButton`]), six of
-/// them present-and-disabled, with the highlight tracking
-/// [`super::nav::MenuNav::pause_index`].
+/// Builds the pause menu's overlay frame: vanilla's widgets at vanilla's
+/// rects (see [`pause_slot`] and [`super::nav::PauseButton`]) — **ten** of
+/// them, six present-and-disabled, or **nine** once the hosted world is
+/// published and [`super::nav::MenuNav::pause_buttons`] drops
+/// [`super::nav::PauseButton::OpenToLan`] (issue #535's scope 2; see that
+/// variant's own doc for why an *omission* rather than a disabled row) — with
+/// the highlight tracking [`super::nav::MenuNav::pause_index`].
 ///
 /// Unlike [`frame_for`], this is not gated by [`owns_frame`] and takes no
 /// `UiState`/`StatusCache`/`FaviconCache` — the pause menu has no server list
@@ -39,14 +42,15 @@ pub(super) fn version_line() -> String {
 /// split exists.
 #[must_use]
 pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
-    use super::nav::PAUSE_BUTTONS;
+    let published = nav.is_lan_published();
     MenuFrame {
-        rows: PAUSE_BUTTONS
+        rows: nav
+            .pause_buttons()
             .iter()
             .map(|b| MenuRow {
                 label: b.label().to_string(),
                 enabled: b.enabled(),
-                slot: Some(pause_slot(*b)),
+                slot: Some(pause_slot(*b, published)),
                 icon: b.icon(),
                 ..Default::default()
             })

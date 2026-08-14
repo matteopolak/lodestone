@@ -884,8 +884,29 @@ pub enum NetUpdate {
     /// correct — the translator is a no-op on a `Literal` node, it only
     /// rewrites `Translate` nodes.
     Disconnected(Box<lodestone_model::Text>),
-    /// A transport or setup error.
+    /// A transport or setup error. **Always ends the session** —
+    /// `Sim::poll_net`'s arm for this variant moves `SessionPhase` to
+    /// `Ended(SessionEnd::failed(..))`, the same terminal state a real
+    /// disconnect reaches, just with `SessionEndKind::Failed` instead of
+    /// `::Disconnected`. This is why every producer of this variant is a
+    /// point the net thread's own loop cannot recover from (a missing
+    /// adapter, a connect failure, a codec error) and then either `return`s
+    /// or `break`s. **Never send this for something the session survives** —
+    /// see [`Self::LanPublishError`] for the non-fatal counterpart, added
+    /// after this variant was (incorrectly) used for a mid-session "already
+    /// published" failure and turned a harmless double-press of the pause
+    /// menu's Open to LAN button into a full disconnect.
     Error(String),
+    /// A publish-to-LAN request failed server-side — issue #562's own
+    /// button pressed twice, or before an integrated server exists to
+    /// publish. **Never ends the session**, unlike [`Self::Error`]: the net
+    /// thread's `publish_rx` loop stays in its own `loop {}` and keeps
+    /// draining `action_rx`/`events` exactly as before, so the connection
+    /// this update rides on is exactly as alive after sending it as before.
+    /// `Sim::poll_net` turns this into a local chat line, the same
+    /// "reported, not assumed" shape [`Self::LanOpened`] already uses for the
+    /// success case, rather than [`Self::Error`]'s session-ending one.
+    LanPublishError(String),
     /// The server placed or relocated the player (`TeleportPlayer`): the
     /// authoritative position/rotation the shell's camera must adopt. The shell
     /// runs its own physics and streams an optimistic position every tick, so on
@@ -1674,11 +1695,16 @@ impl NetClient {
     /// passed here.
     ///
     /// Best-effort like [`send_action`](Self::send_action): silently dropped
-    /// if the net thread has already gone away, and a `NetUpdate::Error`
-    /// comes back (through the ordinary [`poll`](Self::poll)) if the session
-    /// running on it is not a singleplayer world, or is one with nothing to
-    /// publish (see `IntegratedServer::publish`'s own doc comment for exactly
-    /// which constructors build a publishable world).
+    /// if the net thread has already gone away, and a
+    /// `NetUpdate::LanPublishError` — **not** `NetUpdate::Error`, which would
+    /// end the session — comes back (through the ordinary
+    /// [`poll`](Self::poll)) if the session running on it is not a
+    /// singleplayer world, is one with nothing to publish (see
+    /// `IntegratedServer::publish`'s own doc comment for exactly which
+    /// constructors build a publishable world), or is already published — a
+    /// second press of the pause menu's Open to LAN button before
+    /// [`crate::menu::nav::MenuNav`] catches up with [`NetUpdate::LanOpened`]
+    /// and stops offering it.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn publish_to_lan(&self, port: u16) {
         let _ = self.publish_tx.send(port);
@@ -2742,12 +2768,24 @@ async fn run_async(
                                 let _ = tx.send(NetUpdate::LanOpened { port: addr.port() });
                             }
                             Err(e) => {
-                                let _ = tx.send(NetUpdate::Error(format!("open to LAN: {e}")));
+                                // Non-fatal: `IntegratedServer::publish` returning
+                                // `Err` (already published, or a bind failure)
+                                // leaves this loop, `integrated_server` and every
+                                // connection it serves untouched — see
+                                // `NetUpdate::LanPublishError`'s own doc for why
+                                // this must never be `NetUpdate::Error`.
+                                let _ = tx
+                                    .send(NetUpdate::LanPublishError(format!("open to LAN: {e}")));
                             }
                         }
                     }
                     None => {
-                        let _ = tx.send(NetUpdate::Error(
+                        // Also non-fatal, for the same reason: a race between this
+                        // request and a session teardown (or a stray request off a
+                        // remote join, which `open_current_world_to_lan` already
+                        // guards against client-side) must not take down a
+                        // connection that has nothing to do with the request.
+                        let _ = tx.send(NetUpdate::LanPublishError(
                             "only a world you are hosting can be opened to LAN".to_string(),
                         ));
                     }

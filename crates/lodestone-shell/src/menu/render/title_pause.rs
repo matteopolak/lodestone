@@ -66,16 +66,25 @@ fn title_menu_column() -> layout::LinearLayout {
 /// rect assertions go red — against the real builder rather than a copy of it.
 ///
 /// The Options row takes vanilla's **`hasSingleplayerServer()`** branch
-/// (`:157-160`): two half-width buttons, Options and Open to LAN, rather than one
-/// full-width Options. This client does host its own worlds, and
-/// since that fix the second button has something to do — the previous version
-/// of this comment said "this client has no integrated server" and had been stale
-/// since singleplayer landed.
+/// (`:157-160`) when `published` is `false`: two half-width buttons, Options
+/// and Open to LAN, rather than one full-width Options. This client does
+/// host its own worlds, and since issue #535's scope 1 the second button has
+/// something to do — the previous version of this comment said "this client
+/// has no integrated server" and had been stale since singleplayer landed.
 ///
-/// Vanilla takes the *other* branch on a remote server, hiding Open to LAN
-/// entirely. This layout is static and always shows it; see
-/// [`PauseButton::OpenToLan`](super::nav::PauseButton::OpenToLan).
-pub(super) fn pause_menu_grid_with(menu_padding_top: i32) -> layout::GridLayout {
+/// `published` — issue #535's scope 2 — instead reproduces the *shape* of
+/// vanilla's other branch (`:160-164`, taken on a remote server): `Options`
+/// alone, full width, no gutter sibling. **Not vanilla's actual reason for
+/// taking that branch** — see [`PauseButton::OpenToLan`]'s own doc for why a
+/// published *singleplayer* world still ends up here despite
+/// `hasSingleplayerServer()` being true. Row 0 (Back to Game), row 1
+/// (Advancements/Statistics) and the icon row are unaffected either way, so
+/// the grid keeps its five rows and its overall size regardless of
+/// `published` — only the Options row's child count changes, and the two
+/// half-width cells already establish the shared column width the full-width
+/// cell reuses. `the_pause_grid_size_matches_whether_or_not_lan_is_published`
+/// pins that invariant.
+pub(super) fn pause_menu_grid_with(menu_padding_top: i32, published: bool) -> layout::GridLayout {
     let button = |w: f32, h: f32| -> Box<dyn widget::LayoutElement> {
         Box::new(Widget::button(0.0, 0.0, w, h, ""))
     };
@@ -107,9 +116,17 @@ pub(super) fn pause_menu_grid_with(menu_padding_top: i32) -> layout::GridLayout 
     let centred = helper.new_cell_settings().align_horizontally_center();
     helper.add_child_with(Box::new(icons), PAUSE_COLUMNS, centred);
     // Options and Open to LAN share a row, one column each — vanilla's
-    // singleplayer branch. Then Disconnect, full width.
-    helper.add_child(button(PAUSE_BUTTON_HALF_W, WIDGET_H));
-    helper.add_child(button(PAUSE_BUTTON_HALF_W, WIDGET_H));
+    // singleplayer branch — unless the world is already published, in which
+    // case Open to LAN has nothing left to offer (see that variant's own
+    // doc) and Options takes the row alone, full width, same as vanilla's
+    // non-singleplayer branch.
+    if published {
+        helper.add_spanning(button(PAUSE_BUTTON_FULL_W, WIDGET_H), PAUSE_COLUMNS);
+    } else {
+        helper.add_child(button(PAUSE_BUTTON_HALF_W, WIDGET_H));
+        helper.add_child(button(PAUSE_BUTTON_HALF_W, WIDGET_H));
+    }
+    // Disconnect, full width, always.
     helper.add_spanning(button(PAUSE_BUTTON_FULL_W, WIDGET_H), PAUSE_COLUMNS);
     drop(helper);
     grid.arrange_elements();
@@ -158,29 +175,52 @@ fn title_block() -> &'static MenuBlock {
     BLOCK.get_or_init(|| MenuBlock::of(&title_menu_column(), 8))
 }
 
-/// The pause-screen grid, arranged once. See [`title_block`].
-fn pause_block() -> &'static MenuBlock {
-    static BLOCK: std::sync::OnceLock<MenuBlock> = std::sync::OnceLock::new();
-    // Every one of `PAUSE_BUTTONS`, four of them inside the nested icon row.
-    // Derived from the table rather than restated: the count moved from 9 to 10
-    // when Open to LAN landed, and a literal here is a second place
-    // to forget.
-    BLOCK.get_or_init(|| {
-        MenuBlock::of(
-            &pause_menu_grid_with(PAUSE_MENU_PADDING_TOP),
-            super::nav::PAUSE_BUTTONS.len(),
-        )
-    })
+/// The pause-screen grid, arranged once per `published` state. See
+/// [`title_block`] for why arranging once (rather than per frame) is safe;
+/// this now caches **two** arrangements rather than one, one per
+/// [`MenuNav::pause_buttons`](super::nav::MenuNav::pause_buttons) answer, and
+/// [`pause_slot`] picks the matching one so a cell index is never read
+/// against the wrong tree.
+fn pause_block(published: bool) -> &'static MenuBlock {
+    static UNPUBLISHED: std::sync::OnceLock<MenuBlock> = std::sync::OnceLock::new();
+    static PUBLISHED: std::sync::OnceLock<MenuBlock> = std::sync::OnceLock::new();
+    // Every one of `PAUSE_BUTTONS`/`PAUSE_BUTTONS_PUBLISHED`, four of them
+    // inside the nested icon row. Derived from the table rather than
+    // restated: the count moved from 9 to 10 when Open to LAN landed, and a
+    // literal here is a second place to forget.
+    if published {
+        PUBLISHED.get_or_init(|| {
+            MenuBlock::of(
+                &pause_menu_grid_with(PAUSE_MENU_PADDING_TOP, true),
+                super::nav::PAUSE_BUTTONS_PUBLISHED.len(),
+            )
+        })
+    } else {
+        UNPUBLISHED.get_or_init(|| {
+            MenuBlock::of(
+                &pause_menu_grid_with(PAUSE_MENU_PADDING_TOP, false),
+                super::nav::PAUSE_BUTTONS.len(),
+            )
+        })
+    }
 }
 
 /// The arranged pause grid's own `(width, height)` — what
 /// [`Origin::PauseGrid`] aligns in the screen rect.
 ///
+/// Takes no `published` flag, unlike [`pause_block`]/[`pause_slot`]: the
+/// published grid drops one row's *sibling*, not a row, so both arrangements
+/// share the same five rows and the same overall size —
+/// `the_pause_grid_size_matches_whether_or_not_lan_is_published` pins that
+/// equality so a future change to either grid's row count cannot drift this
+/// function out from under `Origin::PauseGrid`, which has no `published` input
+/// to give it.
+///
 /// Public so a gate can check it against the hand-derived
 /// [`PAUSE_GRID_W`]×[`PAUSE_GRID_H`] rather than restating either.
 #[must_use]
 pub fn pause_grid_size() -> (f32, f32) {
-    pause_block().size
+    pause_block(false).size
 }
 
 /// Vanilla's rect for one title-screen widget, from
@@ -258,24 +298,50 @@ const ACCOUNTS_ENTRY_MARGIN: f32 = 4.0;
 /// That table now lives in `the_pause_screen_rects_are_vanillas_own`, where it is
 /// the *expectation* instead of the implementation — an expected value has to come
 /// from outside the code under test.
+/// `published` picks which of the two arranged grids (see [`pause_block`])
+/// `button`'s rect comes from — the pause menu's own render call always
+/// passes [`MenuNav::pause_buttons`](super::nav::MenuNav::pause_buttons)'s
+/// own condition, so a caller only ever asks for a button that is actually in
+/// the active list. Passing `true` for [`PauseButton::OpenToLan`] is a caller
+/// bug (that row does not exist in the published grid — see that variant's
+/// own doc) and panics rather than reading a nonsense cell.
 #[must_use]
-pub fn pause_slot(button: PauseButton) -> Slot {
-    // `pause_menu_grid_with`'s insertion order, which is `PAUSE_BUTTONS`' order.
-    // Exhaustive rather than `button as usize` so a new variant is a compile
-    // error and not a silent off-by-one across every rect.
-    let index = match button {
-        PauseButton::BackToGame => 0,
-        PauseButton::Advancements => 1,
-        PauseButton::Statistics => 2,
-        PauseButton::ReportBugs => 3,
-        PauseButton::Feedback => 4,
-        PauseButton::Friends => 5,
-        PauseButton::PlayerReporting => 6,
-        PauseButton::Options => 7,
-        PauseButton::OpenToLan => 8,
-        PauseButton::QuitToTitle => 9,
+pub fn pause_slot(button: PauseButton, published: bool) -> Slot {
+    // `pause_menu_grid_with`'s insertion order, which is `PAUSE_BUTTONS`'/
+    // `PAUSE_BUTTONS_PUBLISHED`'s order. Exhaustive rather than
+    // `button as usize` so a new variant is a compile error and not a silent
+    // off-by-one across every rect.
+    let index = if published {
+        match button {
+            PauseButton::BackToGame => 0,
+            PauseButton::Advancements => 1,
+            PauseButton::Statistics => 2,
+            PauseButton::ReportBugs => 3,
+            PauseButton::Feedback => 4,
+            PauseButton::Friends => 5,
+            PauseButton::PlayerReporting => 6,
+            PauseButton::Options => 7,
+            PauseButton::QuitToTitle => 8,
+            PauseButton::OpenToLan => panic!(
+                "pause_slot(OpenToLan, published: true) — that row does not \
+                 exist in the published grid, see PauseButton::OpenToLan's doc"
+            ),
+        }
+    } else {
+        match button {
+            PauseButton::BackToGame => 0,
+            PauseButton::Advancements => 1,
+            PauseButton::Statistics => 2,
+            PauseButton::ReportBugs => 3,
+            PauseButton::Feedback => 4,
+            PauseButton::Friends => 5,
+            PauseButton::PlayerReporting => 6,
+            PauseButton::Options => 7,
+            PauseButton::OpenToLan => 8,
+            PauseButton::QuitToTitle => 9,
+        }
     };
-    let (dx, dy, w, h) = pause_block().cells[index];
+    let (dx, dy, w, h) = pause_block(published).cells[index];
     Slot {
         origin: Origin::PauseGrid,
         dx,

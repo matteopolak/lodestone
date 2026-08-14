@@ -232,6 +232,9 @@ impl Sim {
         // session either, for the same reason `death_message` does not: a
         // quit-to-title and reconnect must start un-won.
         self.won = false;
+        // The pause menu must offer Open to LAN again on the next hosted
+        // session — see `Self::lan_published`'s own field doc.
+        self.lan_published = false;
         // The dimension edge detector and the portal-transition effect, in one
         // call so this line and the field list in `sim/dimension.rs` cannot drift
         // — the same reason `reset_local_player` is one call rather than a
@@ -556,6 +559,16 @@ impl Sim {
     #[must_use]
     pub fn has_won(&self) -> bool {
         self.won
+    }
+
+    /// Whether `NetUpdate::LanOpened` has arrived this session (issue #535's
+    /// scope 2) — the ground truth `app::session::drive_ui_from_session`
+    /// reconciles into `MenuNav::set_lan_published`, the same shape
+    /// [`Self::has_won`] is reconciled into the credits screen. See
+    /// [`Self::lan_published`]'s own field doc.
+    #[must_use]
+    pub fn is_lan_published(&self) -> bool {
+        self.lan_published
     }
 
     /// Submit a manual respawn request (`ClientAction::Respawn`) — the death

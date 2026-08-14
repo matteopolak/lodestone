@@ -402,6 +402,7 @@ impl Sim {
             recover_from_death: true,
             death_message: None,
             won: false,
+            lan_published: false,
             // No dimension until a server names one. `None` is what makes the first
             // `Respawned` of a session a *baseline* rather than a change — see
             // `Sim::apply_respawn`.
