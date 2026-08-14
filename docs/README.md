@@ -1073,9 +1073,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Player skins](./player-skins.md) — The `textures` profile property — base64 →
   JSON → a URL plus a **wide/slim rig declaration** — the host-restricted fetch
   that turns it into a sheet, and the render halves that draw the declared rig on the
-  inventory avatar and on other players' bodies in the world. All three are landed for
-  both our own account and for remote players; what is left is capes, the first-person
-  arm and the local third-person body, named under [What is
+  inventory avatar, on other players' bodies in the world, and (rig only, not yet the
+  texture) on the local player's own third-person body. What is left is capes, the
+  first-person arm and the local third-person body's *texture*, named under [What is
   missing](#what-is-missing).
 - [The plugin API](./plugin-api.md) — The surface a third-party bevy plugin uses to
   do everything native Lodestone code can do — read world/entity/player state, write
@@ -1691,6 +1691,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   save-format **`DataVersion`**, and its **release date**:
 - [View bobbing, the damage tilt, and view lag](./view-bobbing.md) — Three separate
   mechanisms that a screenshot makes look like one:
+- [Villager professions and trading (issues #243, #245)](./villager-professions-and-trading.md) —
+  Workstation claiming — an unemployed villager finds a nearby job-site block,
+  claims it, and takes the matching profession — plus trade generation for the
+  farmer profession, ported from the real 26.2 registry data. Losing the workstation
+  loses the job. Interacting with a professioned villager opens a real
+  `minecraft:merchant` screen carrying generated offers.
 - [Wandering trader (issue #240)](./wandering-trader.md) — The entity-spawn slice of
   the wandering trader: `MobSim::spawn_wandering_trader` spawns a real
   `minecraft:wandering_trader` with 1–2 `minecraft:trader_llama` escorts leashed to
