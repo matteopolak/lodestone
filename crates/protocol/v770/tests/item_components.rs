@@ -521,6 +521,110 @@ fn a_brick_face_and_a_short_list_both_decode_as_undecorated() {
     assert_eq!(pot.front, None, "past the declared count");
 }
 
+/// `minecraft:potion_contents` decodes into the *mixed* colour, and a component
+/// placed after it in the same patch proves the reader is still correctly
+/// aligned — the general risk with any component whose payload is not
+/// length-prefixed.
+///
+/// Wire shape (`PotionContents.STREAM_CODEC`): `Optional<Holder<Potion>>`,
+/// `Optional<Integer>`, `List<MobEffectInstance>`, `Optional<String>`. This
+/// stack references `minecraft:swiftness` by holder id with no custom colour and
+/// no custom effects, so the expected colour is exactly what
+/// `lodestone_data::potion::potion_color` computes from the potion's own
+/// built-in effect list — an outside source this test does not itself derive.
+#[test]
+fn decodes_potion_contents_into_the_mixed_colour_and_stays_aligned() {
+    let swiftness = lodestone_data::potion::potion_id("minecraft:swiftness").expect("swiftness");
+
+    let mut patch = Writer::default();
+    patch.var_i32(2); // two added components
+    patch.var_i32(0); // none removed
+
+    patch.var_i32(component_id("minecraft:potion_contents"));
+    patch.bool(true); // potion holder present
+    patch.var_i32(swiftness);
+    patch.bool(false); // no custom_color
+    patch.var_i32(0); // no custom_effects
+    patch.bool(false); // no custom_name
+
+    // A second, ordinary component right after it — if `potion_contents`
+    // consumed the wrong number of bytes, this decodes garbage or the patch
+    // reports unmodeled.
+    patch.var_i32(component_id("minecraft:custom_name"));
+    write_network_nbt(&mut patch, &Nbt::String("Zoomer".to_owned())).unwrap();
+
+    let payload = set_slot_with_patch("minecraft:potion", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(
+        !item.components.has_unmodeled,
+        "minecraft:potion_contents is modeled now, so nothing may be flagged partial"
+    );
+    assert_eq!(
+        item.components.potion_color,
+        Some(lodestone_data::potion::potion_color(Some(swiftness), None, &[])),
+        "the mixed colour must come from the potion's own built-in effect list"
+    );
+    assert_eq!(
+        item.components.custom_name.as_ref().map(Text::to_plain_string),
+        Some("Zoomer".to_owned()),
+        "the component after potion_contents must still decode — proves alignment"
+    );
+}
+
+/// A `custom_color` always wins over any effect list — `PotionContents
+/// .getColorOr`'s first branch — and a `customEffects` list with one entry
+/// carrying a present `hiddenEffect` (the codec's one recursive field) must
+/// still leave the reader aligned even though `custom_color` makes the mixed
+/// value itself irrelevant to the outcome.
+#[test]
+fn custom_color_wins_and_a_recursive_hidden_effect_does_not_misalign_the_reader() {
+    let speed = 0i32; // minecraft:speed's own network mob-effect id (index 0).
+
+    let mut patch = Writer::default();
+    patch.var_i32(2);
+    patch.var_i32(0);
+
+    patch.var_i32(component_id("minecraft:potion_contents"));
+    patch.bool(false); // no potion holder
+    patch.bool(true); // custom_color present
+    patch.i32(0x00FF_00FF); // fixed-width int, not a VarInt
+    patch.var_i32(1); // one custom effect
+    patch.var_i32(speed); // MobEffect holder id
+    patch.var_i32(2); // amplifier
+    patch.var_i32(600); // duration
+    patch.bool(false); // ambient
+    patch.bool(true); // showParticles
+    patch.bool(true); // showIcon
+    patch.bool(true); // hiddenEffect present
+    // The nested `Details`, no leading effect id of its own.
+    patch.var_i32(0); // amplifier
+    patch.var_i32(200); // duration
+    patch.bool(false); // ambient
+    patch.bool(true); // showParticles
+    patch.bool(true); // showIcon
+    patch.bool(false); // no further nested hiddenEffect
+    patch.bool(false); // no custom_name
+
+    patch.var_i32(component_id("minecraft:custom_name"));
+    write_network_nbt(&mut patch, &Nbt::String("Trailing".to_owned())).unwrap();
+
+    let payload = set_slot_with_patch("minecraft:potion", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(!item.components.has_unmodeled);
+    assert_eq!(
+        item.components.potion_color,
+        Some(0xFFFF_00FF),
+        "custom_color must win outright and be opaqued"
+    );
+    assert_eq!(
+        item.components.custom_name.as_ref().map(Text::to_plain_string),
+        Some("Trailing".to_owned()),
+        "the recursive hiddenEffect must not misalign the reader"
+    );
+}
+
 /// The join-blocking failure this component was modeled for, end to end: an
 /// `update_advancements` packet whose icon is a `minecraft:decorated_pot`
 /// carrying `minecraft:pot_decorations` decodes, rather than truncating the
