@@ -125,10 +125,15 @@ builds a `MetadataField::TntFuse`.
 physics (straight, sloped and curved rails, powered-rail boost/brake),
 riding, and a TNT minecart's own detonation, which reuses this module's
 `MobSim::explode`/`pending_detonations` pipeline exactly as this doc's own
-"reusing the explosion machinery" section describes. Nothing renders a
-minecart yet, for the identical reason primed TNT itself does not:
-`lodestone-render`'s `entity.rs` has no `"minecart"` (or `"tnt"`) entry in
-its `entity_models()` corpus, so `model_for_type` returns `None` for either
-and the renderer skips both outright — a render-corpus gap, not a wire or
-physics one. See [`docs/minecart.md`](./minecart.md)'s own "what does not
-draw yet" section.
+"reusing the explosion machinery" section describes.
+
+~~And nothing draws a primed TNT either.~~ **Landed since** — see
+`lodestone-shell`'s `merge_primed_tnt` (`gpu/moving_blocks.rs`), which poses
+a primed TNT as a literal block model (vanilla's own `TntRenderer` draws it
+that way) rather than through the baked-rig `entity_models()` corpus;
+`model_for_type("tnt")` correctly stays `None`, because that route never
+needed the corpus at all. A minecart's own renderer is a real cart-frame
+mesh, not a bare block, so it needs the *other* kind of fix (a corpus entry,
+the same shape a boat's hull already has) — still missing, and it is why a
+spawned minecart still draws zero pixels. See
+[`docs/minecart.md`](./minecart.md)'s own "what does not draw yet" section.
