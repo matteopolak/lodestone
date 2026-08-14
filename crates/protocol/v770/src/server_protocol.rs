@@ -67,8 +67,8 @@ use lodestone_model::{
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot, HOTBAR_SIZE,
-    MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MetadataField, PlayerListing, ResourcePackPush, ServerBound,
-    ServerDirective, ServerProtocol, WorldBorder, WorldgenScope,
+    MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MerchantOfferOut, MetadataField, PlayerListing,
+    ResourcePackPush, ServerBound, ServerDirective, ServerProtocol, WorldBorder, WorldgenScope,
 };
 // Test-only: `encode_initialize_border_wire_layout` asserts the wire byte
 // against this constant. Not imported above because the lib-only build (no
@@ -98,6 +98,7 @@ use lodestone_data::entity_types::entity_type_id;
 use lodestone_data::items::{item_id, item_name};
 use lodestone_data::menus::menu_id;
 use lodestone_data::mob_effects::mob_effect_name;
+use crate::entity_variants;
 use crate::packet_ids::{MINECRAFT_VERSION, configuration, handshaking, login, play, status};
 use crate::packets::chunk::ChunkShape;
 use crate::packets::common::{
@@ -282,6 +283,14 @@ const METADATA_IDX_HORSE_FLAGS: u8 = 18;
 /// `AgeableMob.DATA_BABY_ID`, index 16 — a `BOOLEAN`. Matches the decode
 /// side's `IDX_BABY` in `crates/protocol/v770/src/packets/metadata.rs`.
 const METADATA_IDX_BABY: u8 = 16;
+/// `Villager.DATA_VILLAGER_DATA` — index 19, serializer `VILLAGER_DATA` (18).
+/// Both numbers are off the committed jar dump
+/// (`tests/support/entity_data_index_jvm.txt`: `19 Villager.DATA_VILLAGER_DATA
+/// 18 VILLAGER_DATA`), matching `crates/protocol/v770/src/packets/metadata.rs`'s
+/// decode-side `SER_VILLAGER_DATA` constant exactly — this is the same field,
+/// the other direction.
+const METADATA_IDX_VILLAGER_DATA: u8 = 19;
+const METADATA_SER_VILLAGER_DATA: i32 = 18;
 
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
@@ -1895,6 +1904,20 @@ fn encode_status_response_body(
 /// generated registry table (should not happen for anything this crate's own
 /// block-entity/inventory models can produce) degrades to writing an empty
 /// stack rather than panicking or corrupting the rest of the packet.
+/// Resolves a `minecraft:*` key to its wire *holder* value (`id + 1`, `0` if
+/// unresolved) for one of `entity_variants`'s id-to-name tables
+/// (`villager_type`/`villager_profession`), searching by name rather than
+/// duplicating either table here — both are `pub fn`s in
+/// `crate::entity_variants`, which this crate owns, so this stays a single
+/// small hunk rather than a second copy of either list to drift from the
+/// first. `32` covers both tables with room to spare (7 villager types, 15
+/// professions in the 26.2 jar).
+fn villager_registry_wire_id(lookup: fn(i32) -> Option<&'static str>, key: &str) -> i32 {
+    (0..32)
+        .find(|&id| lookup(id) == Some(key))
+        .map_or(0, |id| id + 1)
+}
+
 fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) {
     match item.filter(|stack| stack.count > 0) {
         None => w.var_i32(0),
@@ -1919,6 +1942,88 @@ fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) {
 /// id, the same as `decode_open_screen`'s own `menu_name` lookup), then the
 /// title as a network-form NBT text component — the identical plain-string
 /// shape [`encode_system_chat`] already writes.
+/// Writes one `ItemCost`: item registry id VarInt, count VarInt, an empty
+/// `DataComponentExactPredicate` (VarInt `0`) — the exact mirror of
+/// `crate::adapter::inventory::read_item_cost`'s decode side. An item this
+/// crate cannot resolve to a wire id degrades to a zero-count cost rather
+/// than writing a bad registry id that would desync everything after it.
+fn write_item_cost(w: &mut Writer, cost: &(ResourceKey, i32)) {
+    let (item, count) = cost;
+    match item_id(&item.to_string()) {
+        Some(id) => {
+            w.var_i32(id);
+            w.var_i32(*count);
+            w.var_i32(0);
+        }
+        None => {
+            w.var_i32(0);
+            w.var_i32(0);
+            w.var_i32(0);
+        }
+    }
+}
+
+/// Hand-written encoder for the clientbound `merchant_offers` packet
+/// (`ClientboundMerchantOffersPacket`), which has no existing struct because
+/// it is currently only ever *decoded* (see
+/// `crate::adapter::inventory::decode_merchant_offers`, the exact mirror of
+/// this wire layout) — issue #245.
+///
+/// Wire layout: VarInt window id, VarInt offer count, then per offer:
+/// `cost_a` ([`write_item_cost`]), `result` as one
+/// [`write_optional_item_stack`], a `bool` for whether `cost_b` follows (and
+/// if so, one more [`write_item_cost`]), `out_of_stock` bool, then the five
+/// **big-endian `i32`** fields `uses`/`max_uses`/`xp`/`special_price_diff`
+/// (not VarInts — see `decode_merchant_offers`'s own doc for the trap), a
+/// big-endian `f32` `price_multiplier`, a big-endian `i32` `demand` — and,
+/// past every offer, the trailing VarInt `villager_level`, VarInt
+/// `villager_xp`, `bool` `show_progress`, `bool` `can_restock`.
+///
+/// Every offer this crate generates is freshly created and unused:
+/// `out_of_stock` is always `false`, `uses`/`special_price_diff`/`demand`
+/// always `0`, and `price_multiplier` is vanilla's own no-discount default
+/// (`0.05`) — this crate tracks no villager reputation yet to derive a real
+/// one from (see the reputation issue).
+fn encode_merchant_offers_body(
+    window_id: i32,
+    offers: &[MerchantOfferOut],
+    level: i32,
+    xp: i32,
+    show_progress: bool,
+    can_restock: bool,
+) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(window_id);
+    w.var_i32(i32::try_from(offers.len()).unwrap_or(i32::MAX));
+    for offer in offers {
+        write_item_cost(&mut w, &offer.wants_a);
+        let result = ItemStack::new(
+            offer.gives.0.clone(),
+            u32::try_from(offer.gives.1).unwrap_or(0),
+        );
+        write_optional_item_stack(&mut w, Some(&result));
+        match &offer.wants_b {
+            Some(cost_b) => {
+                w.bool(true);
+                write_item_cost(&mut w, cost_b);
+            }
+            None => w.bool(false),
+        }
+        w.bool(false); // out_of_stock: every generated offer starts fresh.
+        w.i32(0); // uses
+        w.i32(offer.max_uses);
+        w.i32(offer.xp);
+        w.i32(0); // special_price_diff: no reputation/demand pricing yet.
+        w.f32(0.05); // price_multiplier: MerchantOffer's own no-discount default.
+        w.i32(0); // demand
+    }
+    w.var_i32(level);
+    w.var_i32(xp);
+    w.bool(show_progress);
+    w.bool(can_restock);
+    w.into_vec()
+}
+
 fn encode_open_screen_body(window_id: i32, menu_registry_id: i32, title: &str) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(window_id);
@@ -4579,6 +4684,31 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*b);
                 }
+                MetadataField::VillagerData {
+                    kind,
+                    profession,
+                    level,
+                } => {
+                    // `holderRegistry(type) + holderRegistry(profession) + VarInt
+                    // level` — the exact mirror of `decode_value`'s
+                    // `SER_VILLAGER_DATA` arm (`crates/protocol/v770/src/packets/metadata.rs`).
+                    // Each holder is a registry id written as `id + 1`; an
+                    // unresolvable key (should not happen for anything
+                    // `crate::mobs::villager` can produce) falls back to `0`,
+                    // vanilla's inline-direct-holder wire value, rather than
+                    // corrupting the rest of the packet.
+                    w.u8(METADATA_IDX_VILLAGER_DATA);
+                    w.var_i32(METADATA_SER_VILLAGER_DATA);
+                    w.var_i32(villager_registry_wire_id(
+                        entity_variants::villager_type,
+                        &kind.to_string(),
+                    ));
+                    w.var_i32(villager_registry_wire_id(
+                        entity_variants::villager_profession,
+                        &profession.to_string(),
+                    ));
+                    w.var_i32(*level);
+                }
             }
         }
         w.u8(METADATA_EOF);
@@ -5105,6 +5235,30 @@ impl ServerProtocol for V770ServerProtocol {
                 payload: encode_open_screen_body(window_id, id, title),
             },
             None => ServerDirective::None,
+        }
+    }
+
+    /// See [`ServerProtocol::encode_merchant_offers`]'s trait doc comment and
+    /// [`encode_merchant_offers_body`] for the wire layout.
+    fn encode_merchant_offers(
+        &self,
+        window_id: i32,
+        offers: &[MerchantOfferOut],
+        level: i32,
+        xp: i32,
+        show_progress: bool,
+        can_restock: bool,
+    ) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::MERCHANT_OFFERS,
+            payload: encode_merchant_offers_body(
+                window_id,
+                offers,
+                level,
+                xp,
+                show_progress,
+                can_restock,
+            ),
         }
     }
 

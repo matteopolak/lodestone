@@ -67,7 +67,7 @@ use lodestone_core::State;
 use lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE;
 use lodestone_entity::{DamageFlags, ItemLifecycle};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, GameMode, ItemStack, Rotation, Text,
+    BlockActionKind, BlockFace, BlockPos, GameMode, ItemStack, ResourceKey, Rotation, Text,
     TextContent, Vec3, Vec3f,
 };
 use lodestone_data::block_items;
@@ -101,7 +101,8 @@ use crate::neighbor_update::Direction;
 use crate::players::{ChatLine, PlayerListStreamer, PlayerRegistry, PlayerTicket};
 use crate::plugin_channels::{ClientChannels, PluginChannelRegistry};
 use crate::protocol::{
-    Abilities, EntitySnapshot, ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
+    Abilities, EntitySnapshot, MerchantOfferOut, ResourcePackPush, ServerBound, ServerDirective,
+    ServerProtocol,
 };
 use crate::redstone::{COMPARATOR, OBSERVER, REPEATER};
 use crate::redstone_diode::{set_comparator, set_repeater};
@@ -3707,8 +3708,67 @@ fn container_title(menu: &str) -> &'static str {
         "minecraft:grindstone" => "Grindstone",
         "minecraft:smithing" => "Smithing Table",
         "minecraft:enchantment" => "Enchant",
+        "minecraft:merchant" => "Villager",
         _ => "Container",
     }
+}
+
+/// Opens a villager's `minecraft:merchant` trade screen (issue #245's
+/// visible half). Unlike [`open_container_screen`]/`open_crafting_table_screen`,
+/// this sends no `container_set_content`/`container_set_data` at all: a
+/// merchant window's whole state is the `MERCHANT_OFFERS` packet, which
+/// vanilla's `ServerPlayer::openMenu` sends in its own right immediately
+/// after `open_screen` for a `MerchantMenu`.
+///
+/// **Trade purchase is not wired.** Nothing here or in
+/// [`dispatch_play_packet`] produces a `select_trade`/merchant
+/// `container_click` response, so a player can open this screen and see
+/// real offers and cannot yet buy one — issue #245's third piece
+/// (restock/leveling/purchase), named rather than silently absent. See
+/// `crate::mobs::villager::trades`'s own module doc for the same disclosure
+/// on the generation side.
+async fn open_merchant_screen<T, P>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    profession: crate::mobs::villager::Profession,
+    level: i32,
+    xp: i32,
+    next_window_id: &mut i32,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    *next_window_id = *next_window_id % 100 + 1;
+    let window_id = *next_window_id;
+
+    apply(
+        conn,
+        state,
+        proto.encode_open_screen(window_id, "minecraft:merchant", container_title("minecraft:merchant")),
+    )
+    .await?;
+
+    let offers: Vec<MerchantOfferOut> = crate::mobs::villager::trades::offers_up_to(profession, level)
+        .into_iter()
+        .filter_map(|trade| {
+            Some(MerchantOfferOut {
+                wants_a: (trade.wants_item.parse::<ResourceKey>().ok()?, trade.wants_count),
+                wants_b: None,
+                gives: (trade.gives_item.parse::<ResourceKey>().ok()?, trade.gives_count),
+                max_uses: trade.max_uses,
+                xp: trade.xp,
+            })
+        })
+        .collect();
+
+    apply(
+        conn,
+        state,
+        proto.encode_merchant_offers(window_id, &offers, level, xp, true, true),
+    )
+    .await
 }
 
 /// Opens a block-entity's container screen for this connection, mirroring
@@ -9533,6 +9593,26 @@ where
                         )
                     })),
                 };
+                // Issue #245: a villager's trade screen, from
+                // `MobSim::interact`'s own villager short-circuit — checked
+                // ahead of the generic item-consumption handling below
+                // because opening the screen is itself the whole visible
+                // effect of this outcome (there is no slot sync to send).
+                if let Some(crate::mobs::InteractOutcome::OpenTrade { profession, level }) =
+                    outcome
+                {
+                    let xp = mobs.with(|sim| sim.villager_xp(entity_id));
+                    open_merchant_screen(
+                        conn,
+                        proto,
+                        state,
+                        profession,
+                        level,
+                        xp,
+                        next_window_id,
+                    )
+                    .await?;
+                }
                 // Vanilla consumes through `usePlayerItem`, a no-op in creative
                 // (`Player.hasInfiniteMaterials`). A sit toggle is
                 // `InteractionResult.SUCCESS.withoutItem()` and consumes nothing,

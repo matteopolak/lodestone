@@ -375,6 +375,47 @@ pub enum MetadataField {
     /// (`crate::mobs::species_shape`); this variant is what lets the
     /// *client* apply the same shrink to what it draws.
     Baby(bool),
+    /// `Villager.DATA_VILLAGER_DATA` (issue #243) — index **19**, serializer
+    /// `VILLAGER_DATA` (`18`): a `Holder<VillagerType>` + `Holder<VillagerProfession>`
+    /// + a plain level int, which is the *whole* of what a client's
+    /// `VillagerProfessionLayer` needs to pick a texture. Pushed
+    /// unconditionally for every `minecraft:villager` (see
+    /// [`crate::mobs::SimMob::snapshot`]'s doc for why — the same "a
+    /// transition needs the same treatment as the arrival" reasoning
+    /// [`Baby`](Self::Baby) is pushed unconditionally for).
+    VillagerData {
+        /// `minecraft:villager_type`, e.g. `minecraft:plains`. Always
+        /// `minecraft:plains` today — see `crate::mobs::villager`'s module
+        /// doc for why biome-derived type is out of scope.
+        kind: ResourceKey,
+        /// `minecraft:villager_profession`, e.g. `minecraft:farmer`.
+        /// `minecraft:none` for an unemployed villager.
+        profession: ResourceKey,
+        /// `VillagerData.level`, `1..=5`.
+        level: i32,
+    },
+}
+
+/// One generated trade offer, ready for the wire (issue #245) —
+/// [`ServerProtocol::encode_merchant_offers`]'s per-offer payload.
+///
+/// Items are [`ResourceKey`]s rather than a version's numeric registry id:
+/// this type crosses the version-free `lodestone-server` / versioned
+/// `crates/protocol/*` seam the same way every other model type here does
+/// (`MetadataField::Item`, `ItemStack`), and it is the version crate's own
+/// `item_id` table that resolves a key to its wire id at encode time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MerchantOfferOut {
+    /// First input: item and count.
+    pub wants_a: (ResourceKey, i32),
+    /// Optional second input.
+    pub wants_b: Option<(ResourceKey, i32)>,
+    /// What the trade produces.
+    pub gives: (ResourceKey, i32),
+    /// Uses before the trade locks until restocked.
+    pub max_uses: i32,
+    /// Villager xp granted per use.
+    pub xp: i32,
 }
 
 /// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs (issue
@@ -2278,6 +2319,29 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes the clientbound `merchant_offers` packet (vanilla
+    /// `ClientboundMerchantOffersPacket`) that a villager or wandering trader
+    /// interaction sends right after [`encode_open_screen`](Self::encode_open_screen)
+    /// (issue #245). `level`/`xp` are the villager's own
+    /// [`crate::mobs::SimMob::villager_level`]/[`villager_xp`](crate::mobs::SimMob::villager_xp);
+    /// `show_progress` is whether the level/xp bar should be shown (`false`
+    /// for a wandering trader, which has no level); `can_restock` is whether
+    /// working at the workstation refreshes uses (also `false` for a
+    /// wandering trader). The default emits nothing, so a protocol without
+    /// merchant support need not override it.
+    fn encode_merchant_offers(
+        &self,
+        window_id: i32,
+        offers: &[MerchantOfferOut],
+        level: i32,
+        xp: i32,
+        show_progress: bool,
+        can_restock: bool,
+    ) -> ServerDirective {
+        let _ = (window_id, offers, level, xp, show_progress, can_restock);
+        ServerDirective::None
+    }
+
     /// Encodes the clientbound `container_set_content` packet: every slot in
     /// `items`, in vanilla menu order (the container's own slots first, then
     /// the player's standard 27-main + 9-hotbar inventory rows every such
@@ -2754,6 +2818,18 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
         (**self).encode_open_screen(window_id, menu, title)
+    }
+
+    fn encode_merchant_offers(
+        &self,
+        window_id: i32,
+        offers: &[MerchantOfferOut],
+        level: i32,
+        xp: i32,
+        show_progress: bool,
+        can_restock: bool,
+    ) -> ServerDirective {
+        (**self).encode_merchant_offers(window_id, offers, level, xp, show_progress, can_restock)
     }
 
     fn encode_container_content(
