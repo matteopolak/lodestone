@@ -563,16 +563,25 @@ impl RenderState {
             });
             pass.set_pipeline(&self.pipeline.pipeline);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            // Tracks the terrain path's own group-0 bind-group object (packed
+            // or model camera) across both draw loops below, by pointer
+            // identity — see `RenderStats::terrain_camera_bind_group_switches`.
+            // Intentionally *not* reset between the packed and model loops:
+            // entering the model loop after the packed one is one real switch,
+            // which is exactly what the counter should show.
+            let mut terrain_cam_group_last: Option<*const wgpu::BindGroup> = None;
             for (key, section) in &self.sections {
                 if !terrain_cull.visible(key.coord()) {
                     continue;
                 }
                 // One bind group for the whole packed table; the section is
                 // selected by the dynamic offset of its origin slot (issue #76).
-                pass.set_bind_group(
-                    0,
+                bind_terrain_camera(
+                    &mut pass,
                     &self.packed_cam_bind_group,
-                    &[section.origin_alloc.offset() as u32],
+                    section.origin_alloc.offset() as u32,
+                    &mut terrain_cam_group_last,
+                    &mut stats,
                 );
                 pass.set_vertex_buffer(0, section.mesh.vertices.slice(..));
                 pass.set_index_buffer(section.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -644,7 +653,13 @@ impl RenderState {
                 // pays for it; see there.
                 draws.sort_unstable_by_key(|d| d.block);
                 stats.draw_calls += draws.len();
-                stats.terrain_buffer_binds += emit_terrain_draws(&mut pass, model, &draws);
+                stats.terrain_buffer_binds += emit_terrain_draws(
+                    &mut pass,
+                    model,
+                    &draws,
+                    &mut terrain_cam_group_last,
+                    &mut stats.terrain_camera_bind_group_switches,
+                );
             }
 
             // Entities share the terrain depth buffer (depth test + write on, so
@@ -949,7 +964,13 @@ impl RenderState {
                 // arena's reserved zero slot exactly as the item draw below does.
                 if let Some(mesh) = &moving_block_mesh {
                     pass.set_pipeline(&model.pipeline.pipeline);
-                    pass.set_bind_group(0, &model.cam_bind_group, &[model.origin_arena.zero_offset()]);
+                    bind_terrain_camera(
+                        &mut pass,
+                        &model.cam_bind_group,
+                        model.origin_arena.zero_offset(),
+                        &mut terrain_cam_group_last,
+                        &mut stats,
+                    );
                     pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                     pass.set_bind_group(2, &model.palette_bind_group, &[]);
                     pass.set_bind_group(3, &model.anim_bind_group, &[]);
@@ -964,7 +985,13 @@ impl RenderState {
                     // Dropped-item geometry bakes world positions into its own
                     // vertices (spin/bob included), so it has no origin of its
                     // own: bind the shared arena's reserved zero slot.
-                    pass.set_bind_group(0, &model.cam_bind_group, &[model.origin_arena.zero_offset()]);
+                    bind_terrain_camera(
+                        &mut pass,
+                        &model.cam_bind_group,
+                        model.origin_arena.zero_offset(),
+                        &mut terrain_cam_group_last,
+                        &mut stats,
+                    );
                     pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                     pass.set_bind_group(2, &model.palette_bind_group, &[]);
                     pass.set_bind_group(3, &model.anim_bind_group, &[]);
@@ -1000,7 +1027,13 @@ impl RenderState {
                 // replace the atlas rather than join it.
                 if let Some((mesh, texture)) = &framed_maps {
                     pass.set_pipeline(&model.pipeline.pipeline);
-                    pass.set_bind_group(0, &model.cam_bind_group, &[model.origin_arena.zero_offset()]);
+                    bind_terrain_camera(
+                        &mut pass,
+                        &model.cam_bind_group,
+                        model.origin_arena.zero_offset(),
+                        &mut terrain_cam_group_last,
+                        &mut stats,
+                    );
                     pass.set_bind_group(1, texture, &[]);
                     pass.set_bind_group(2, &model.palette_bind_group, &[]);
                     pass.set_bind_group(3, &model.anim_bind_group, &[]);
@@ -1111,8 +1144,13 @@ impl RenderState {
                 }
                 super::terrain::sort_back_to_front(&mut water_draws);
                 stats.draw_calls += water_draws.len();
-                stats.terrain_buffer_binds +=
-                    emit_terrain_draws(&mut pass, model, &water_draws);
+                stats.terrain_buffer_binds += emit_terrain_draws(
+                    &mut pass,
+                    model,
+                    &water_draws,
+                    &mut terrain_cam_group_last,
+                    &mut stats.terrain_camera_bind_group_switches,
+                );
             }
 
             // The *translucent* half of the debris last among the world geometry
@@ -1261,6 +1299,8 @@ fn emit_terrain_draws(
     pass: &mut wgpu::RenderPass<'_>,
     model: &super::terrain::ModelRenderer,
     draws: &[TerrainDraw<'_>],
+    terrain_cam_group_last: &mut Option<*const wgpu::BindGroup>,
+    terrain_camera_bind_group_switches: &mut usize,
 ) -> usize {
     let mut bound: Option<u32> = None;
     let mut bind_pairs = 0usize;
@@ -1291,7 +1331,14 @@ fn emit_terrain_draws(
             None => {}
         }
         // One shared bind group for every section; only the dynamic offset (this
-        // section's slot in the origin arena) changes per draw.
+        // section's slot in the origin arena) changes per draw. Tracked by
+        // pointer identity below, not counted as a switch — see
+        // `bind_terrain_camera`.
+        let ptr = std::ptr::from_ref(&model.cam_bind_group);
+        if *terrain_cam_group_last != Some(ptr) {
+            *terrain_cam_group_last = Some(ptr);
+            *terrain_camera_bind_group_switches += 1;
+        }
         pass.set_bind_group(0, &model.cam_bind_group, &[draw.origin_offset]);
         pass.draw_indexed(
             draw.first_index..draw.first_index + draw.index_count,
@@ -1300,4 +1347,25 @@ fn emit_terrain_draws(
         );
     }
     bind_pairs
+}
+
+/// Bind a terrain draw's group 0 (shared camera + per-section origin arena),
+/// recording a [`RenderStats::terrain_camera_bind_group_switches`] tick only
+/// when the bind-group **object** differs from the previous terrain bind —
+/// never for an offset-only change, which is the cheap, expected-every-draw
+/// case `set_bind_group`'s dynamic-offset argument exists for. See that
+/// field's doc for what a non-flat count would mean.
+fn bind_terrain_camera(
+    pass: &mut wgpu::RenderPass<'_>,
+    group: &wgpu::BindGroup,
+    offset: u32,
+    last: &mut Option<*const wgpu::BindGroup>,
+    stats: &mut RenderStats,
+) {
+    let ptr = std::ptr::from_ref(group);
+    if *last != Some(ptr) {
+        *last = Some(ptr);
+        stats.terrain_camera_bind_group_switches += 1;
+    }
+    pass.set_bind_group(0, group, &[offset]);
 }

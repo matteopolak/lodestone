@@ -128,6 +128,54 @@ impl AtlasStats {
     }
 }
 
+/// Packing occupancy of a stitched 2D atlas: how much of its pixel area is
+/// actually spoken for by sprite rectangles, versus padding/unused space.
+///
+/// The seam issue #160 asked for and this crate did not have: `AtlasStats`
+/// reports sprite/frame *population* (counts), and [`GpuAtlas`] (below)
+/// exposes only `width`/`height` — neither answers "how full is this atlas".
+/// Deliberately CPU-side and GPU-adapter-free: every input
+/// ([`Atlas::width`]/[`height`](Atlas::height) and the per-frame rectangles
+/// [`sprite_rects`] already derives) lives on the asset-pipeline
+/// [`Atlas`], so a bench can compute this for any built atlas — synthetic or
+/// real — with no `wgpu::Device` at all. [`GpuAtlas`] carries the identical
+/// `width`/`height` the physical texture was created at, so this figure
+/// describes the uploaded texture too, not just the CPU-side source.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtlasOccupancy {
+    /// Sum of every physical frame's pixel area (`w * h`), animation frames
+    /// counted individually since each occupies its own physical region —
+    /// the same unit [`sprite_rects`] enumerates.
+    pub used_pixels: u64,
+    /// `width * height` of the atlas as a whole.
+    pub total_pixels: u64,
+    /// `used_pixels / total_pixels`, in `[0.0, 1.0]` for any atlas the builder
+    /// produced (it never places a sprite outside the image). `0.0` on a
+    /// zero-area atlas rather than dividing by zero.
+    pub fraction: f64,
+}
+
+/// Compute [`AtlasOccupancy`] for a built [`Atlas`]. Cheap: one pass over
+/// [`sprite_rects`], no allocation beyond that `Vec`.
+#[must_use]
+pub fn atlas_occupancy(atlas: &Atlas) -> AtlasOccupancy {
+    let used_pixels: u64 = sprite_rects(atlas)
+        .iter()
+        .map(|r| u64::from(r.w) * u64::from(r.h))
+        .sum();
+    let total_pixels = u64::from(atlas.width) * u64::from(atlas.height);
+    let fraction = if total_pixels == 0 {
+        0.0
+    } else {
+        used_pixels as f64 / total_pixels as f64
+    };
+    AtlasOccupancy {
+        used_pixels,
+        total_pixels,
+        fraction,
+    }
+}
+
 /// Which GPU texture layout to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextureLayout {

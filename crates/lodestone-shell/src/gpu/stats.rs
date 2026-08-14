@@ -330,4 +330,26 @@ pub struct RenderStats {
     /// frame with two players digging different blocks now reports `2`, which
     /// is the number a single-target regression cannot produce.
     pub cracks_drawn: usize,
+    /// Distinct terrain **camera bind-group objects** (group 0: shared
+    /// view-projection + per-section origin arena) bound this frame, across
+    /// both the packed and model/fluid draw loops combined.
+    ///
+    /// This is the measured shape the section-camera-uniform fix
+    /// (`docs/section-camera-uniform.md`) actually claims — not "one
+    /// `set_bind_group` call per section" (there are exactly that many, one per
+    /// draw, because each carries a different dynamic offset and that is
+    /// cheap) but "one bind-group **object**, built once, reused by every
+    /// draw." Counted by pointer identity: incremented only when the
+    /// `&wgpu::BindGroup` passed to `set_bind_group(0, ..)` for a terrain draw
+    /// differs from the previous terrain group-0 bind, so a run of draws that
+    /// all reuse `packed_cam_bind_group` or `model.cam_bind_group` contributes
+    /// exactly one regardless of how many sections it covers.
+    ///
+    /// Healthy value: `1` (packed-only or model-only frame) or `2` (both paths
+    /// drew this frame — packed table plus live model terrain, entering each
+    /// exactly once). A value that scales with `sections_drawn` means the
+    /// per-section bind-group shape issue #75/#76 removed has come back — the
+    /// measured counterpart to issue #128's "bind-group count independent of
+    /// section count" ask, rather than a code-reading argument for it.
+    pub terrain_camera_bind_group_switches: usize,
 }

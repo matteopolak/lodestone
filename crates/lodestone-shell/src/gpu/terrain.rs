@@ -270,6 +270,19 @@ impl SectionOriginArena {
     pub(super) fn free(&mut self, alloc: ArenaAllocation) {
         let _ = self.arena.free(alloc);
     }
+
+    /// Slot occupancy against this arena's fixed capacity — used/free byte and
+    /// allocation counts from the underlying [`ArenaBuffer`]. A narrow
+    /// accessor rather than making [`SectionOriginArena`] itself `pub`: issue
+    /// #133/#160 want to watch how close realistic render distances get to
+    /// [`MODEL_ORIGIN_ARENA_SLOTS`]'s fixed ceiling, and this is the seam a
+    /// `lodestone-shell` bench uses for that (via
+    /// [`RenderState::model_origin_arena_stats`]/
+    /// [`RenderState::packed_origin_arena_stats`]) instead of widening this
+    /// type's visibility.
+    pub(super) fn stats(&self) -> lodestone_render::AllocStats {
+        self.arena.stats()
+    }
 }
 
 /// GPU resources for the model render pass: the model pipeline, the complete
@@ -447,6 +460,27 @@ mod tests {
         // truncating divide here would put two rows on top of each other.
         // Section (0,-1,0)'s centre is (8,-8,8): also 16 away.
         assert_eq!(section_center_distance_sq((0, -1, 0), camera), 256.0);
+    }
+}
+
+impl super::RenderState {
+    /// Slot occupancy of the **model** path's per-section origin arena
+    /// against its fixed [`MODEL_ORIGIN_ARENA_SLOTS`] ceiling — a `pub`
+    /// accessor so a `lodestone-shell` bench (issue #133) can watch how close
+    /// realistic render distances get to a ceiling that
+    /// `docs/section-camera-uniform.md` documents as silently dropping
+    /// geometry, not panicking, when exhausted. `None` on the demo path,
+    /// which has no model renderer.
+    #[must_use]
+    pub fn model_origin_arena_stats(&self) -> Option<lodestone_render::AllocStats> {
+        self.model.as_ref().map(|m| m.origin_arena.stats())
+    }
+
+    /// Same, for the packed/demo path's own origin arena (issue #76),
+    /// against its much smaller [`PACKED_ORIGIN_ARENA_SLOTS`] ceiling.
+    #[must_use]
+    pub fn packed_origin_arena_stats(&self) -> lodestone_render::AllocStats {
+        self.packed_origin_arena.stats()
     }
 }
 
