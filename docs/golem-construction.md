@@ -55,13 +55,17 @@ already existed).
 
 ## How to change it, and the gotchas
 
-- **The server.rs hook is not wired yet.** Detection and spawn are complete
-  and tested (`crates/lodestone-server/src/mobs/golem.rs`'s `golem_tests` module),
-  but nothing in `server.rs`'s block-placement path calls
-  `try_construct_golem` — that file is outside this pass's ownership. See
-  the broker note this session left (golem construction server hook) for the
-  exact anchor (`apply_use_item_on`'s generic placement branch, right after
-  its own `propagate_placement` call) and proposed patch.
+- **The `server.rs` hook is wired.** `apply_use_item_on`'s generic placement
+  branch calls `try_construct_golem` right after it writes the placed
+  block's own state (before the neighbour fan-out), keyed on the placed
+  block name being `minecraft:carved_pumpkin` or `minecraft:jack_o_lantern`.
+  A match's `GolemConstruction::consumed` cells (which include the pumpkin
+  cell itself — see the gotcha below) are written to air and folded into the
+  same `changed`/`block_update` notify list every other placement-triggered
+  cell change already uses, so no separate packet path was needed. The
+  spawned golem itself reaches a connection through `MobSim::snapshots`,
+  the same streaming path every other `spawn_species` call uses — no
+  explicit `ADD_ENTITY` send at the call site.
 - **The iron golem's village-POI-count gate does not apply here, and the
   issue that named it was wrong to cite it for this mechanism.** Reading
   `CarvedPumpkinBlock.trySpawnGolem` directly: the player-built path never
