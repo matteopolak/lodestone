@@ -37,6 +37,14 @@ pub struct ChunkWorld {
     // promotion this split needed.
     pub(super) min_y: i32,
     pub(super) height: i32,
+    /// Issue #518 part 2/4: every fresh-off-the-generator column's `SPAWN`
+    /// candidates, drained out of each [`ChunkColumn`] as it is snapshotted
+    /// (`from_source`/`from_columns`) — a column loaded from disk contributes
+    /// nothing here, which is what makes this empty on every reopen of an
+    /// existing world and non-empty only the first time a chunk is ever
+    /// generated. [`MobHandle::reseed`](super::MobHandle::reseed) drains this
+    /// once, after construction, into real placed mobs.
+    pending_generation_spawns: Vec<lodestone_worldgen::spawn_stage::GenerationSpawn>,
 }
 
 impl ChunkWorld {
@@ -49,6 +57,7 @@ impl ChunkWorld {
             columns: HashMap::new(),
             min_y,
             height,
+            pending_generation_spawns: Vec::new(),
         }
     }
 
@@ -65,11 +74,16 @@ impl ChunkWorld {
         cz_range: std::ops::RangeInclusive<i32>,
     ) -> Self {
         let mut columns = HashMap::new();
+        let mut pending_generation_spawns = Vec::new();
         let mut extent: Option<(i32, i32)> = None;
         for cz in cz_range {
             for cx in cx_range.clone() {
-                let col = source.column(cx, cz);
+                let mut col = source.column(cx, cz);
                 extent = Some((col.min_y, col.height));
+                // Issue #518 part 2/4: only non-empty for a column this call
+                // just generated for the first time — see this struct's field
+                // doc.
+                pending_generation_spawns.extend(col.take_generation_spawns());
                 columns.insert((cx, cz), col);
             }
         }
@@ -78,6 +92,7 @@ impl ChunkWorld {
             columns,
             min_y,
             height,
+            pending_generation_spawns,
         }
     }
 
@@ -99,9 +114,12 @@ impl ChunkWorld {
     #[must_use]
     pub fn from_columns(columns: impl IntoIterator<Item = ((i32, i32), ChunkColumn)>) -> Self {
         let mut map = HashMap::new();
+        let mut pending_generation_spawns = Vec::new();
         let mut extent: Option<(i32, i32)> = None;
-        for (coord, col) in columns {
+        for (coord, mut col) in columns {
             extent = Some((col.min_y, col.height));
+            // Issue #518 part 2/4 — see `from_source`'s identical drain.
+            pending_generation_spawns.extend(col.take_generation_spawns());
             map.insert(coord, col);
         }
         let (min_y, height) = extent.unwrap_or((0, 1));
@@ -109,7 +127,20 @@ impl ChunkWorld {
             columns: map,
             min_y,
             height,
+            pending_generation_spawns,
         }
+    }
+
+    /// Takes every `SPAWN`-stage candidate collected while this
+    /// [`ChunkWorld`] was built (issue #518 part 2/4), leaving the list empty.
+    ///
+    /// A [`ChunkWorld`] snapshot is built once per [`MobHandle::reseed`
+    /// ](super::MobHandle::reseed) call — see that method and `ChunkColumn`'s
+    /// own field doc for why draining here, exactly once, is what keeps a
+    /// fresh world's generation-time animals from duplicating across a
+    /// restart.
+    pub fn take_pending_generation_spawns(&mut self) -> Vec<lodestone_worldgen::spawn_stage::GenerationSpawn> {
+        std::mem::take(&mut self.pending_generation_spawns)
     }
 
     /// Sets a single block's solidity at world coordinates, creating the owning
@@ -220,13 +251,11 @@ impl ChunkWorld {
     }
 
     /// Resolves the global block-state id at world coordinates through
-    /// [`state_id_by_name`], if the state at that cell is one the 26.2 census
-    /// knows about.
+    /// [`block_states::state_id`], if the block name at that cell is one the
+    /// 26.2 census knows about.
     #[must_use]
     fn state_id(&self, x: i32, y: i32, z: i32) -> Option<u32> {
-        block_ids::state_id_by_name()
-            .get(self.block_state(x, y, z))
-            .copied()
+        block_states::state_id(self.block_state(x, y, z))
     }
 }
 
