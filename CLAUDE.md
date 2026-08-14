@@ -391,6 +391,25 @@ stale claim was *true and evidenced when written*, which is exactly why it survi
 about it looks wrong on inspection. **A file path in this document is a claim like any other; verify it
 before relying on it.**
 
+**The highest-decay content in this repo is a doc's own status annotation** — "Landed", "still open", "not
+implemented", "blocked by". A drifted *citation* eventually fails visibly, because the path stops resolving
+or the symbol stops existing; a wrong **"Landed: no"** stays perfectly plausible forever, and nothing about
+reading it suggests checking. Four instances surfaced in one day, all as **by-products of a citation sweep**
+rather than by anyone reviewing the claims:
+
+- a plan's blocker-4 prose said the Configuration-state `RESOURCE_PACK_PUSH`/`POP` arms did not exist; there
+  are four such arms, one carrying a comment saying it was added for that blocker
+- `bevy-migration.md`'s Stage 1 "Landed" bullet asserted a type "did not die" that is deleted tree-wide, and
+  its Stage 5 "Moves:" list names fields the struct no longer holds
+- a `GuiScaling::geometry` doc described the bug its own call site had already been fixed for
+- three doc comments said the enderman gaze cone *widens* with range; the formula narrows it
+
+Two things follow. **When you land something a plan or roadmap doc tracks, update that doc's status line in
+the same commit** — it is the one piece of prose guaranteed to be wrong otherwise, and the tracker does not
+cover it because these live in `docs/`, not in issues. And **treat a status annotation as unverified until
+you check the tree**, exactly as with a file path: a doc claiming work is outstanding is the cheapest way to
+send an agent at a problem that no longer exists, which has now happened repeatedly.
+
 - **Zero hits in the file a stale note names is not evidence a feature is unwired** — **grep for the
   producer across the whole tree, not for the consumer in one named file.**
 - **Read the record definition, not a summary of the call site.** Vanilla's
