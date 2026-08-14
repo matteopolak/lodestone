@@ -362,6 +362,20 @@ the answer is nothing, the issue is more accurately open than closed.
 The cheap mechanical tell is an **`#[allow(dead_code)]` nobody removed**. Treat removing one as the signal
 the island actually closed — and if the attribute is still needed afterwards, the wiring did not take.
 
+**A defaulted trait method plus a wrapper impl is an island generator, and it compiles silently.** Measured:
+gating the block-entity scan on residency added `ChunkSource::is_column_resident` with a `true` default, and
+neither `Arc<S>` nor `DimensionalSource<S>` forwarded it. Production always wraps `ChunkStore` in
+`DimensionalSource`, so every call took the default and **the entire fix was a no-op in production** while its
+own tests — which construct the inner type directly — passed. Nothing is red, because supplying a default is
+exactly what makes a wrapper compile without forwarding.
+
+So when you add a method to a trait, **grep for every `impl <Trait> for` in the workspace and check each
+forwards**, not just the implementor you had in mind; wrappers, newtypes and blanket impls are the ones that
+silently inherit. Prefer no default at all when the honest answer is per-implementor — a compile error naming
+each unforwarded wrapper is worth more than a default that is right for one of them. And note the *test* here
+could not see it: a gate that builds the concrete type bypasses the wrapper production always uses, which is
+the shared-construction-path blindness under a different hat.
+
 ### 2. Re-verify before routing around "X doesn't exist yet"
 
 Staleness is the most common defect in the written record — **seven instances in one session**. Every
