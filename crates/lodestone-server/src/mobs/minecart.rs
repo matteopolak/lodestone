@@ -1175,11 +1175,20 @@ mod tests {
         assert!(speed > 0.0, "and must not have been zeroed outright");
     }
 
-    /// **A powered rail really accelerates a slow cart** — the boost is
-    /// `0.06`, a record value, checked as "did real forward speed appear",
-    /// not a plausible guess.
+    /// **A powered rail really nudges a stalled cart, at the exact record
+    /// magnitude — not a plausible guess.** With no rider-input nudge (cut,
+    /// see this module's own doc comment) and a genuinely zero starting
+    /// speed, `moveAlongTrack`'s own `speedLength > 0.01` gate is false, so
+    /// this exercises the *other* powered-rail arm: the two-conductor stall
+    /// nudge, `POWERED_STALL_NUDGE` (`0.02`), not the `0.06` in-motion boost.
+    /// The neighbouring cells at `z = 0`/`z = 2` are also rail (not air),
+    /// and `crate::redstone::is_redstone_conductor`'s own simplified model
+    /// (`!air_or_fluid && !redstone_component`) counts a rail block as a
+    /// conductor — a real, if coarse, existing behaviour of that function,
+    /// not something this feature introduces — so the north/south check
+    /// fires and the cart picks up exactly `0.02` of `+z` velocity.
     #[test]
-    fn a_powered_rail_boosts_a_stalled_cart() {
+    fn a_powered_rail_nudges_a_stalled_cart_by_the_real_stall_constant() {
         let world = |x: i32, y: i32, z: i32| -> String {
             if x == 8 && y == 61 && (0..3).contains(&z) {
                 "minecraft:powered_rail[shape=north_south,powered=true]".to_owned()
@@ -1192,12 +1201,13 @@ mod tests {
         let mut sim = sim();
         let id = sim.spawn_minecart(MinecartKind::Plain, Vec3::new(8.5, 61.0625, 1.5));
         sim.tick_minecarts(&world);
-        let speed = sim
-            .minecarts
-            .get(&id)
-            .map(|c| c.motion.velocity.x.hypot(c.motion.velocity.z))
-            .expect("still alive");
-        assert!(speed > 0.0, "a powered rail must accelerate a stalled cart from rest, got {speed}");
+        let velocity = sim.minecarts.get(&id).map(|c| c.motion.velocity).expect("still alive");
+        assert!(
+            (velocity.z - POWERED_STALL_NUDGE).abs() < 1e-9,
+            "a stalled cart on a powered rail with a conductor to its south must gain exactly the \
+             real 0.02 stall nudge in +z, got {velocity:?}"
+        );
+        assert!(velocity.x.abs() < 1e-12, "the nudge is along the rail axis only, got {velocity:?}");
     }
 
     /// **Riding**: mount refuses a non-rideable kind (a hopper minecart),
