@@ -95,7 +95,7 @@ pub trait MobController {
     /// of sight). Drives `NearestAttackableTargetGoal`.
     ///
     /// **A host that returns [`attack_target`](MobController::attack_target)
-    /// here has written an island, not an implementation** (issue #455): the
+    /// here has written an island, not an implementation**: the
     /// goal that calls this is the same goal that writes `attack_target` in its
     /// `start`, so the loop cannot bootstrap and the mob never attacks
     /// unprovoked. Whatever the host's perception feed is, this must read
@@ -109,11 +109,10 @@ pub trait MobController {
     ///
     /// Vanilla reads it in two places with the *same* number:
     /// `NearestAttackableTargetGoal` acquires within it
-    /// (`ai/goal/target/TargetGoal.java:74-76`, `getFollowDistance`) and
-    /// `TargetGoal.canContinueToUse` **drops a target that leaves it**
-    /// (`TargetGoal.java:57-60`, `distanceToSqr(target) > within * within`).
-    /// The default is `Mob.createMobAttributes()`' `16.0`
-    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/Mob.java:166-168`), so a
+    /// (`TargetGoal::getFollowDistance`) and
+    /// `TargetGoal::canContinueToUse` **drops a target that leaves it**
+    /// (`distanceToSqr(target) > within * within`).
+    /// The default is `Mob::createMobAttributes`'s `16.0`, so a
     /// controller that does not track the attribute still releases targets at a
     /// vanilla-plausible distance rather than chasing one forever.
     fn follow_range(&self) -> f64 {
@@ -141,8 +140,9 @@ pub trait MobController {
     ///
     /// **The host owns the clock, on purpose.** 26.2 stores an **absolute
     /// game-time deadline**, not a countdown
-    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/NeutralMob.java:20-22`,
-    /// `:112-120`; `NO_ANGER_END_TIME = -1`), and the grudge is a uniform
+    /// (`NeutralMob::setTimeToRemainAngry` adds to `level().getGameTime()`, and
+    /// `NeutralMob::isAngry` subtracts the current game time back off the stored
+    /// deadline; `NO_ANGER_END_TIME = -1`), and the grudge is a uniform
     /// `[400, 780]` ticks for all four species (`rangeOfSeconds(20, 39)` →
     /// `UniformInt.of(400, 780)`). A decrementing counter is the wrong model —
     /// it drifts against a stepped tick loop — and this seam has no shared game
@@ -172,22 +172,24 @@ pub trait MobController {
     }
 
     /// The position of this mob's owner, if it has one — vanilla
-    /// `TamableAnimal.getOwner()` (`animal/TamableAnimal.java:180-182`), read
-    /// as a position because that is all this seam carries.
+    /// `OwnableEntity::getOwner` (inherited by `TamableAnimal`, which
+    /// implements `OwnableEntity`), read as a position because that is all
+    /// this seam carries.
     ///
     /// # Why the owner's identity does not cross
     ///
     /// The seam deliberately carries positions, never entity ids — the same
     /// division [`angry_target`](MobController::angry_target) documents — and
     /// a *tamed* owner is, in vanilla, a **player**:
-    /// `TamableAnimal.DATA_OWNERUUID_ID` stores a `UUID` and `getOwner`
-    /// resolves it against the level (`animal/TamableAnimal.java:41`,
-    /// `:127-142`). This seam has no notion of a player at all, so the host
-    /// resolves "who owns me" and feeds only the owner's current position,
-    /// exactly as it feeds [`parent_position`](MobController::parent_position).
+    /// `TamableAnimal::DATA_OWNERUUID_ID` stores an `EntityReference` wrapping
+    /// a `UUID`, and `OwnableEntity::getOwner` resolves it against the level
+    /// (`EntityReference::getLivingEntity`). This seam has no notion of a
+    /// player at all, so the host resolves "who owns me" and feeds only the
+    /// owner's current position, exactly as it feeds
+    /// [`parent_position`](MobController::parent_position).
     /// The host's own record of *which id owns which mob* — the thing a
     /// wolf-pack `alertOthers` same-owner filter needs
-    /// (`ai/goal/target/HurtByTargetGoal.java:88`) — is a census question this
+    /// (`HurtByTargetGoal::alertOthers`) — is a census question this
     /// crate cannot answer; `lodestone_server`'s `SimMob::owner_id` is where
     /// it lives.
     ///
@@ -302,9 +304,8 @@ pub trait MobController {
     }
 
     /// Whether a player is currently staring at this mob — vanilla
-    /// `LivingEntity.isLookingAtMe(player, coneSize, adjustForDistance, …)`
-    /// (`entity/LivingEntity.java:1756-1775`), wrapped for the enderman by
-    /// `isBeingStaredBy` (`monster/EnderMan.java:209-211`).
+    /// `LivingEntity::isLookingAtMe(player, coneSize, adjustForDistance, …)`,
+    /// wrapped for the enderman by `EnderMan::isBeingStaredBy`.
     ///
     /// The host computes the answer from each player's eye position **and view
     /// vector** and feeds only the boolean: the geometric half is the free
@@ -357,9 +358,8 @@ pub trait MobController {
     /// stops), mirroring vanilla clearing `this.partner = null`.
     fn clear_love_partner(&mut self) {}
 
-    /// Whether the mob is ignited (vanilla `Creeper.isIgnited`,
-    /// `.cache/mc/26.2/src/net/minecraft/world/entity/monster/Creeper.java:260-262`).
-    /// While `true`, [`Creeper.java:129-131`] forces the swell direction to
+    /// Whether the mob is ignited (vanilla `Creeper::isIgnited`).
+    /// While `true`, `Creeper::tick` forces the swell direction to
     /// climb every tick regardless of what
     /// [`SwellGoal`](crate::ai::goals::SwellGoal) would otherwise pick.
     /// Defaults to `false` for every mob that carries no fuse.
@@ -367,16 +367,16 @@ pub trait MobController {
         false
     }
 
-    /// The mob's current swell direction (vanilla `Creeper.getSwellDir`,
-    /// `DATA_SWELL_DIR`, `Creeper.java:195-197`). Defaults to `-1`, matching
-    /// vanilla's own default (`Creeper.java:100`,
+    /// The mob's current swell direction (vanilla `Creeper::getSwellDir`,
+    /// `DATA_SWELL_DIR`). Defaults to `-1`, matching
+    /// vanilla's own default (`Creeper::defineSynchedData`'s
     /// `entityData.define(DATA_SWELL_DIR, -1)`) for a mob that never sets one.
     fn swell_dir(&self) -> i32 {
         -1
     }
 
-    /// Sets the swell direction (vanilla `Creeper.setSwellDir`,
-    /// `Creeper.java:199-201`). A no-op for a mob that does not track one.
+    /// Sets the swell direction (vanilla `Creeper::setSwellDir`). A no-op for
+    /// a mob that does not track one.
     fn set_swell_dir(&mut self, dir: i32) {
         let _ = dir;
     }
@@ -384,23 +384,23 @@ pub trait MobController {
     /// The [`BlockCues`] of the block the mob is standing **in** — vanilla's
     /// `level.getBlockState(mob.blockPosition())`.
     ///
-    /// # Why this is a query and not a per-tick feed (issue #456)
+    /// # Why this is a query and not a per-tick feed
     ///
     /// Every other perception method on this trait is a value the host's census
     /// pushed in once per tick (`nearest_player`, `temptation`, …), and a
     /// pre-fed block snapshot would have matched that shape. It would also have
     /// been about **three orders of magnitude** more work than the goals need:
-    /// `EatBlockGoal` is the only reader, and its `can_use` consults a block on
-    /// roughly one tick in 500 (`random.nextInt(adjustedTickDelay(1000))`,
-    /// `ai/goal/EatBlockGoal.java:29`). Pushing two block lookups per mob per
-    /// tick to serve that multiplies by the whole mob population; pulling them
-    /// costs exactly nothing on the 499 ticks nobody asks.
+    /// `EatBlockGoal` is the only reader, and its `EatBlockGoal::canUse` consults
+    /// a block on roughly one tick in 500
+    /// (`random.nextInt(adjustedTickDelay(1000))`). Pushing two block lookups
+    /// per mob per tick to serve that multiplies by the whole mob population;
+    /// pulling them costs exactly nothing on the 499 ticks nobody asks.
     ///
     /// It stays object-safe and mockable because the *world handle does not go
     /// on this trait*. The production implementor already borrows a
     /// `&dyn PathWorld` for pathfinding and answers from that, so there is no
-    /// new lifetime and no new parameter here — which is why this is neither of
-    /// the two options #456 posed, and cheaper than both.
+    /// new lifetime and no new parameter here — which keeps this cheaper than
+    /// pre-feeding a block snapshot each tick.
     ///
     /// Defaults to [`BlockCues::NONE`]. A controller that cannot see blocks
     /// makes every cue-reading goal inert rather than wrong.
@@ -410,7 +410,7 @@ pub trait MobController {
 
     /// The [`BlockCues`] of the block **below** the mob — vanilla's
     /// `mob.blockPosition().below()`, the one a sheep grazes when it is standing
-    /// on grass rather than in it (`ai/goal/EatBlockGoal.java:34`).
+    /// on grass rather than in it (`EatBlockGoal::canUse`).
     ///
     /// Two separate methods rather than one taking an offset because these are
     /// the only two positions any of the goals in question reads, and vanilla
@@ -425,28 +425,27 @@ pub trait MobController {
     /// Records that the mob just ate a block, for the host to resolve into the
     /// world mutation and the species' own `ate()` side effects.
     ///
-    /// Vanilla `EatBlockGoal.tick` does the mutation inline — `destroyBlock` for
+    /// Vanilla `EatBlockGoal::tick` does the mutation inline — `destroyBlock` for
     /// the block at the mob's feet, `setBlock(below, DIRT)` for the grass block
-    /// under it (`ai/goal/EatBlockGoal.java:59-80`) — and then calls
+    /// under it — and then calls
     /// `mob.ate()`, which for a sheep is `setSheared(false)` plus `ageUp(60)`
-    /// (wool regrowth, `animal/sheep/Sheep.java`). None of that is expressible
+    /// (wool regrowth, `Sheep::ate`). None of that is expressible
     /// here: this crate can neither write a block nor touch entity metadata. So
     /// this is an **intent**, the same shape as [`attack`](MobController::attack)
     /// and [`launch_projectile`](MobController::launch_projectile), drained once
     /// per tick by the host.
     ///
     /// **A host that never drains it turns grazing into an island**: the goal
-    /// runs, the animation plays, and the grass never changes. Note vanilla
-    /// calls `ate()` even when the `mobGriefing` gamerule suppresses the block
-    /// change (`:64-68`), so the two effects are separable on the host side and
-    /// the gamerule check belongs there, not here.
+    /// runs, the animation plays, and the grass never changes. Note vanilla's
+    /// `EatBlockGoal::tick` calls `ate()` even when the `mobGriefing` gamerule
+    /// suppresses the block change, so the two effects are separable on the
+    /// host side and the gamerule check belongs there, not here.
     fn ate(&mut self, what: EatenBlock) {
         let _ = what;
     }
 
     /// Records the intent to launch a projectile this tick — vanilla's
-    /// `RangedAttackMob.performRangedAttack`
-    /// (`monster/RangedAttackMob.java:5-7`).
+    /// `RangedAttackMob::performRangedAttack`.
     ///
     /// This is an **intent**, exactly like [`attack`](MobController::attack): a
     /// goal in `lodestone-entity` has no access to a world, an entity id
@@ -459,18 +458,16 @@ pub trait MobController {
         let _ = launch;
     }
 
-    /// Teleports the mob directly to `target` — vanilla `Entity.teleportTo`
-    /// (`entity/Entity.java:1513-1515`) or, for the enderman, its
-    /// `teleport()` / `teleportTowards` displacement variants
-    /// (`monster/EnderMan.java:256-275`).
+    /// Teleports the mob directly to `target` — vanilla `Entity::teleportTo`
+    /// or, for the enderman, its
+    /// `EnderMan::teleport` / `EnderMan::teleportTowards` displacement variants.
     ///
     /// An **instant** relocation, not a fast path-follow: the position is
-    /// rewritten immediately and any in-progress path is abandoned (vanilla's
-    /// `teleportTo` also zeroes the velocity). The enderman's own variants
-    /// pick the destination — `teleport()` a random point within ±32 blocks on
-    /// each axis (`:256-264`), `teleportTowards` 16 blocks past the target in
-    /// its facing direction (`:267-275`) — so the goal or host resolves
-    /// *where* and this primitive resolves *that it happens*.
+    /// rewritten immediately and any in-progress path is abandoned. The
+    /// enderman's own variants pick the destination — `EnderMan::teleport` a
+    /// random point within ±32 blocks on each axis, `EnderMan::teleportTowards`
+    /// 16 blocks past the target in its facing direction — so the goal or
+    /// host resolves *where* and this primitive resolves *that it happens*.
     ///
     /// Defaults to a no-op — a controller without a position to move silently
     /// declines, rather than every implementor having to say so.
@@ -479,9 +476,8 @@ pub trait MobController {
     }
 
     /// Records that this mob wants to damage itself by `amount` — the bee's
-    /// sting self-destruct, where `customServerAiStep` eventually calls
-    /// `this.hurtServer(level, this.damageSources().generic(), this.getHealth())`
-    /// (`animal/Bee.java:374-379`).
+    /// sting self-destruct, where `Bee::customServerAiStep` eventually calls
+    /// `this.hurtServer(level, this.damageSources().generic(), this.getHealth())`.
     ///
     /// An **intent**, exactly like [`attack`](MobController::attack) and
     /// [`launch_projectile`](MobController::launch_projectile): health lives on
@@ -495,7 +491,7 @@ pub trait MobController {
     }
 
     /// This controller viewed as a [`BrainMob`], if it can drive vanilla's *other*
-    /// AI architecture (issue #209). `None` — the default — means it cannot.
+    /// AI architecture. `None` — the default — means it cannot.
     ///
     /// # Why the two architectures meet here
     ///
@@ -517,7 +513,8 @@ pub trait MobController {
     /// # The default is `None` on purpose, and that is load-bearing
     ///
     /// A test fake that overrides every perception method (`ScriptMob`,
-    /// `ai::roster::probe`) is exactly how issues #441 and #455 stayed hidden: the
+    /// `ai::roster::probe`) is exactly how a target-acquisition island and a
+    /// perception-seam island both stayed hidden previously: the
     /// goal had a green unit test while its `can_use` was constant-`false` in
     /// production. Returning `None` by default means a brain installed on a fake
     /// mob does **nothing at all**, loudly — so a brain behaviour cannot be
@@ -535,13 +532,13 @@ pub trait MobController {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EatenBlock {
     /// The block the mob was standing *in* (`#edible_for_sheep`, e.g.
-    /// `short_grass`). Vanilla **destroys** it: `level.destroyBlock(pos, false)`
-    /// (`ai/goal/EatBlockGoal.java:65`) — no drops, hence the `false`.
+    /// `short_grass`). Vanilla **destroys** it in `EatBlockGoal::tick`:
+    /// `level.destroyBlock(pos, false)` — no drops, hence the `false`.
     AtFeet,
     /// The `grass_block` the mob was standing *on*. Vanilla **replaces** it with
     /// dirt rather than destroying it, plus level event `2001` for the break
-    /// particles: `setBlock(below, Blocks.DIRT.defaultBlockState(), 2)`
-    /// (`ai/goal/EatBlockGoal.java:72-74`).
+    /// particles, also in `EatBlockGoal::tick`:
+    /// `setBlock(below, Blocks.DIRT.defaultBlockState(), 2)`.
     Below,
 }
 
@@ -554,18 +551,18 @@ pub enum EatenBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectileKind {
     /// `minecraft:arrow` — skeleton/stray bow shots
-    /// (`monster/skeleton/AbstractSkeleton.java:160-175`).
+    /// (`AbstractSkeleton::performRangedAttack`).
     Arrow,
     /// `minecraft:small_fireball` — blaze
-    /// (`monster/Blaze.java:238-240`).
+    /// (`Blaze.BlazeAttackGoal::tick`).
     SmallFireball,
     /// `minecraft:snowball` — snow golem
-    /// (`animal/golem/SnowGolem.java:118-131`).
+    /// (`SnowGolem::performRangedAttack`).
     Snowball,
-    /// `minecraft:splash_potion` — witch (`monster/Witch.java:222-251`).
+    /// `minecraft:splash_potion` — witch (`Witch::performRangedAttack`).
     SplashPotion,
     /// `minecraft:trident` — drowned
-    /// (`monster/zombie/Drowned.java:531-534`).
+    /// (`Drowned::performRangedAttack`).
     Trident,
 }
 
@@ -574,9 +571,10 @@ pub enum ProjectileKind {
 /// Carries a resolved `origin` and `velocity` rather than a target, because
 /// vanilla's aiming maths is **per species** — the skeleton adds
 /// `horizontalDistance * 0.2` to the vertical component and shoots at power
-/// `1.6` (`AbstractSkeleton.java:165-171`), the blaze normalises a
+/// `1.6` (`AbstractSkeleton::performRangedAttack`), the blaze normalises a
 /// triangle-jittered direction and scales by its acceleration power `0.1`
-/// (`Blaze.java:236-240`, `AbstractHurtingProjectile.java:24,180-183`). Resolving
+/// (`Blaze.BlazeAttackGoal::tick`, `AbstractHurtingProjectile::assignDirectionalMovement`
+/// and its `accelerationPower` field). Resolving
 /// it in the goal keeps that citation next to the numbers it came from, and
 /// leaves the host with nothing to re-derive.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -592,13 +590,14 @@ pub struct ProjectileLaunch {
 
 impl ProjectileLaunch {
     /// A launch aimed along `(dx, dy, dz)` at `power`, mirroring vanilla
-    /// `Projectile.getMovementToShoot` (`projectile/Projectile.java:130-139`):
+    /// `Projectile::getMovementToShoot`:
     /// normalise the direction, then scale by power.
     ///
     /// **The inaccuracy term is not modelled.** Vanilla adds
     /// `random.triangle(0.0, 0.0172275 * uncertainty)` on each axis before
-    /// scaling (`Projectile.java:133-137`), which for a skeleton is
-    /// `14 - difficulty * 4` (`AbstractSkeleton.java:170`) — a real spread. Ours
+    /// scaling, in the same `Projectile::getMovementToShoot`, which for a
+    /// skeleton is `14 - difficulty * 4` (`AbstractSkeleton::performRangedAttack`)
+    /// — a real spread. Ours
     /// flies dead straight. That is a disclosed simplification, not a
     /// transcription error: the spread needs vanilla's `RandomSource.triangle`
     /// distribution to match, and a deterministic velocity is also what lets a
@@ -630,15 +629,14 @@ pub fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
     d.x * d.x + d.y * d.y + d.z * d.z
 }
 
-/// The geometric half of vanilla `LivingEntity.isLookingAtMe`
-/// (`entity/LivingEntity.java:1756-1775`): whether the point `target` lies
-/// inside a viewer's acceptance cone.
+/// The geometric half of vanilla `LivingEntity::isLookingAtMe`: whether the
+/// point `target` lies inside a viewer's acceptance cone.
 ///
 /// `viewer_eye` is the viewer's eye position and `look` its view vector
 /// (normalised internally, matching vanilla's `getViewVector(1.0F).normalize()`);
 /// `target` is the point being stared at — for the enderman,
-/// `EnderMan.isBeingStaredBy` passes `(this.getX(), getEyeY(), this.getZ())`
-/// (`monster/EnderMan.java:209-211`). Vanilla accepts a stare when
+/// `EnderMan::isBeingStaredBy` passes `(this.getX(), getEyeY(), this.getZ())`.
+/// Vanilla accepts a stare when
 ///
 /// ```text
 /// look · dir > 1.0 - coneSize / (adjustForDistance ? dist : 1.0)
