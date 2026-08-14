@@ -6,11 +6,11 @@
 //! standing". Two layers, because vanilla uses two:
 //!
 //! * **Dimensions** carry the cave mood. `AmbientSounds.LEGACY_CAVE_SETTINGS` is set
-//!   on the overworld dimension type (`DimensionTypes.java:43`) and on the End
-//!   (`DimensionTypes.java:125`). The **Nether dimension sets nothing**.
+//!   on the overworld dimension type and on the End (both in
+//!   `DimensionTypes.bootstrap`). The **Nether dimension sets nothing**.
 //! * **Biomes** override it wholesale. Exactly five do — the Nether's — each with its
-//!   own loop, mood and additions (`NetherBiomes.java:67`, `:111`, `:153`, `:191`,
-//!   `:230`).
+//!   own loop, mood and additions (`NetherBiomes.netherWastes`, `.soulSandValley`,
+//!   `.basaltDeltas`, `.crimsonForest`, `.warpedForest`).
 //!
 //! That split is the thing to get right, and getting it wrong fails silently in
 //! whichever direction you lean: a biome-only lookup finds cave ambience in **zero**
@@ -31,7 +31,7 @@
 //!
 //! The dimension half is **not** generated, because it is not in our assets — there
 //! is no `dimension_type/*.json` in this repo — so it is transcribed from
-//! `DimensionTypes.java` with the lines cited on [`DIMENSION_AMBIENT`]. That is a
+//! `DimensionTypes.bootstrap`, cited on [`DIMENSION_AMBIENT`]. That is a
 //! weaker evidence standard than the generated half, and it is called out here rather
 //! than hidden: if a dimension-type asset dump ever lands, this should become
 //! generated too.
@@ -44,8 +44,8 @@ pub use table::BIOME_AMBIENT;
 
 /// Ambient sounds by dimension id, transcribed from `DimensionTypes.java`.
 ///
-/// * `overworld` — `AmbientSounds.LEGACY_CAVE_SETTINGS` (`DimensionTypes.java:43`)
-/// * `the_end` — `AmbientSounds.LEGACY_CAVE_SETTINGS` (`DimensionTypes.java:125`)
+/// * `overworld` — `AmbientSounds.LEGACY_CAVE_SETTINGS` (`DimensionTypes.bootstrap`)
+/// * `the_end` — `AmbientSounds.LEGACY_CAVE_SETTINGS` (`DimensionTypes.bootstrap`)
 /// * `the_nether` — **absent on purpose**: the Nether dimension type sets no
 ///   `AMBIENT_SOUNDS` attribute, so it falls through to
 ///   [`AmbientSounds::EMPTY`] and its biomes supply everything.

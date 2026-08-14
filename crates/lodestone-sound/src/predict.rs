@@ -7,19 +7,19 @@
 //! is the only reliable way. `Level.playSound` takes an `except` player, and the two
 //! sides read that one argument in mirror-image ways:
 //!
-//! | | behaviour | cite |
-//! |---|---|---|
-//! | `ClientLevel.playSeededSound` | plays locally **iff `except == minecraft.player`** | `ClientLevel.java:679-693` |
-//! | `ServerLevel.playSeededSound` | broadcasts to everyone **except** that player | `ServerLevel.java:1036-1058` |
+//! | | behaviour |
+//! |---|---|
+//! | `ClientLevel.playSeededSound` | plays locally **iff `except == minecraft.player`** |
+//! | `ServerLevel.playSeededSound` | broadcasts to everyone **except** that player |
 //!
 //! So `except` is simultaneously "who hears it locally" and "who is left out of the
 //! broadcast". Which player gets passed is then decided by three overrides:
 //!
-//! | method | passes | consequence for the local player | cite |
-//! |---|---|---|---|
-//! | `Entity.playSound` | `null` | **silent** on the client; arrives only as a packet | `Entity.java:1500-1504` |
-//! | `Player.playSound` | `this` | predicted, and the server leaves that player out | `Player.java:398-400` |
-//! | `LocalPlayer.playSound` | — calls `playLocalSound` | **unconditionally local**, no `except` check at all | `LocalPlayer.java:540-542` |
+//! | method | passes | consequence for the local player |
+//! |---|---|---|
+//! | `Entity.playSound` | `null` | **silent** on the client; arrives only as a packet |
+//! | `Player.playSound` | `this` | predicted, and the server leaves that player out |
+//! | `LocalPlayer.playSound` | — calls `playLocalSound` | **unconditionally local**, no `except` check at all |
 //!
 //! The practical rule that falls out: **every `playSound(event, volume, pitch)` call
 //! reached with the local player as `this` is client-predicted**, because
@@ -27,8 +27,9 @@
 //! (`Entity.playStepSound` → the override), muffled steps, and swim sounds.
 //!
 //! And it excludes attacks. `Player` routes those through a method vanilla literally
-//! names **`playServerSideSound`**, which passes `null` (`Player.java:1009-1011`), as
-//! do the level-up and deflect sounds (`:1571`, `:1025`). So *swing and attack sounds
+//! names **`playServerSideSound`**, which passes `null`, as
+//! do the level-up (`Player.giveExperienceLevels`) and deflect
+//! (`Player.deflectProjectile`) sounds. So *swing and attack sounds
 //! are not predicted* — a guess to the contrary would have produced doubled hit
 //! sounds on every swing.
 //!
@@ -57,33 +58,33 @@ use std::collections::VecDeque;
 use glam::{DVec3, Vec3};
 use lodestone_audio::JavaRandom;
 
-/// `Entity.moveDistScale` — `Entity.java:875`. Distance travelled is scaled by this
-/// before accumulating, so the step threshold of 1.0 corresponds to `1 / 0.6 ≈ 1.667`
-/// blocks of travel.
+/// `Entity.applyMovementEmissionAndPlaySound`'s `moveDistScale`. Distance travelled is
+/// scaled by this before accumulating, so the step threshold of 1.0 corresponds to
+/// `1 / 0.6 ≈ 1.667` blocks of travel.
 pub const MOVE_DIST_SCALE: f32 = 0.6;
 
-/// `Entity.nextStep`'s initial value — `Entity.java:246`.
+/// `Entity.nextStep`'s initial field value.
 pub const INITIAL_NEXT_STEP: f32 = 1.0;
 
-/// `Entity.playStepSound`'s volume multiplier on the block's sound type —
-/// `Entity.java:1473` (`soundType.getVolume() * 0.15F`).
+/// `Entity.playStepSound`'s volume multiplier on the block's sound type
+/// (`soundType.getVolume() * 0.15F`).
 pub const STEP_VOLUME_SCALE: f32 = 0.15;
 
-/// `Entity.playMuffledStepSound`'s multipliers — `Entity.java:1468`
+/// `Entity.playMuffledStepSound`'s multipliers
 /// (`volume * 0.05F`, `pitch * 0.8F`). Used for the secondary sound when standing on
 /// a `COMBINATION_STEP_SOUND_BLOCKS` block, and underwater
-/// (`Player.playStepSound:1485-1487`).
+/// (`Player.playStepSound`).
 pub const MUFFLED_STEP_VOLUME_SCALE: f32 = 0.05;
 /// See [`MUFFLED_STEP_VOLUME_SCALE`].
 pub const MUFFLED_STEP_PITCH_SCALE: f32 = 0.8;
 
-/// `Entity.waterSwimSound`'s volume modifier when the entity is its own controller —
-/// `Entity.java:1444`. It is `0.4` when a passenger is steering.
+/// `Entity.waterSwimSound`'s volume modifier when the entity is its own controller.
+/// It is `0.4` when a passenger is steering.
 pub const SWIM_SELF_VOLUME_MODIFIER: f32 = 0.35;
 /// See [`SWIM_SELF_VOLUME_MODIFIER`].
 pub const SWIM_PASSENGER_VOLUME_MODIFIER: f32 = 0.4;
 
-/// `Entity.playSwimSound`'s pitch jitter — `Entity.java:1490`:
+/// `Entity.playSwimSound`'s pitch jitter:
 /// `1.0 + (nextFloat() - nextFloat()) * 0.4`.
 ///
 /// Draws **twice**, in that order, so it is order-sensitive against a shared stream.
@@ -94,8 +95,8 @@ pub fn swim_pitch(rng: &mut JavaRandom) -> f32 {
     1.0 + (rng.next_f32() - rng.next_f32()) * 0.4
 }
 
-/// Vanilla's step-distance accumulator — `Entity.java:875-895` plus
-/// `Entity.nextStep()` at `:1270-1271`.
+/// Vanilla's step-distance accumulator — `Entity.applyMovementEmissionAndPlaySound`
+/// plus `Entity.nextStep()`.
 ///
 /// # Why this is a distance accumulator and not a timer
 ///
@@ -143,8 +144,10 @@ impl StepAccumulator {
     /// `moved` is vanilla's `clippedMovement` — the movement *actually achieved*
     /// after collision, not the movement requested, which is why walking into a wall
     /// produces no footsteps. `climbing` selects the full 3D length instead of the
-    /// horizontal component (`:881`), so climbing a ladder does step.
-    /// `supporting_is_air` suppresses the step entirely (`:883`), which is what keeps
+    /// horizontal component, in `Entity.applyMovementEmissionAndPlaySound`, so
+    /// climbing a ladder does step.
+    /// `supporting_is_air` suppresses the step entirely (the same method's
+    /// `!supportingState.isAir()` guard), which is what keeps
     /// a falling or flying player silent.
     ///
     /// This only reports the crossing; call [`StepAccumulator::consume`] once a sound
@@ -159,8 +162,8 @@ impl StepAccumulator {
         self.move_dist > self.next_step && !supporting_is_air
     }
 
-    /// Re-arm the threshold after a step sound was produced — `Entity.nextStep()`
-    /// (`:1270-1271`): `(int)move_dist + 1`, truncating.
+    /// Re-arm the threshold after a step sound was produced — `Entity.nextStep()`:
+    /// `(int)move_dist + 1`, truncating.
     pub fn consume(&mut self) {
         self.next_step = self.move_dist.trunc() + 1.0;
     }
