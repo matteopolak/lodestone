@@ -361,3 +361,240 @@ impl CollisionView for VehicleCollision<'_> {
         })
     }
 }
+
+#[cfg(test)]
+mod vehicle_tests {
+    use super::*;
+    use super::super::{ChunkWorld, PerceivedPlayer, PlayerIdentity, PlayerPerception};
+
+    /// A stone seabed at `y = 60` and water at `y = 61..=63`, so a boat can float
+    /// and a lake has a bottom. Everything above is air.
+    fn lake() -> impl Fn(i32, i32, i32) -> String {
+        |_x, y, _z| {
+            if y <= 60 {
+                "minecraft:stone".to_owned()
+            } else if y <= 63 {
+                "minecraft:water[level=0]".to_owned()
+            } else {
+                "minecraft:air".to_owned()
+            }
+        }
+    }
+
+    /// Same world as a [`ChunkWorld`], for the sim's own `world` borrow. The
+    /// vehicle tick never reads it (it reads the closure), but `MobSim::new` needs
+    /// one.
+    fn world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    /// **Mounting, and the two refusals that make it mean something.**
+    ///
+    /// Sneak-clicking is the one with a visible symptom: without
+    /// `player.isSecondaryUseActive()`, shift-right-clicking a boat with a block in
+    /// hand boards it instead of placing, and there is no way to interact past a
+    /// boat at all.
+    #[test]
+    fn a_boat_seats_one_player_and_refuses_a_sneak_click() {
+        let world = world();
+        let mut sim = MobSim::new(&world);
+        let boat = sim.spawn_vehicle(
+            "minecraft:oak_boat".parse().expect("a valid key"),
+            Vec3::new(8.5, 63.4, 8.5),
+            41.0,
+        );
+        let mut wrong = Vec::new();
+        if sim.mount_vehicle(boat, 7, true) {
+            wrong.push("a sneak-click must not board");
+        }
+        if sim.vehicle_rider(boat).is_some() {
+            wrong.push("and must leave the boat empty");
+        }
+        if !sim.mount_vehicle(boat, 7, false) {
+            wrong.push("an ordinary click boards");
+        }
+        if sim.vehicle_rider(boat) != Some(7) {
+            wrong.push("and records the rider");
+        }
+        // A second player is refused: this crate seats one, and vanilla's
+        // `getMaxPassengers` of 2 for a plain boat is a documented gap rather than
+        // an accident. Seating two in the same spot would be worse than refusing.
+        if sim.mount_vehicle(boat, 8, false) {
+            wrong.push("an occupied boat refuses a second rider");
+        }
+        if sim.vehicle_rider(boat) != Some(7) {
+            wrong.push("and keeps the one it has");
+        }
+        // A non-vehicle id is not a boat.
+        if sim.mount_vehicle(boat + 500, 7, false) {
+            wrong.push("an id that is not a vehicle cannot be boarded");
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// **The handover, which is the whole point of the vehicle registry.**
+    ///
+    /// While a player is aboard, the server must not move the boat: the client owns
+    /// it (`Player.isClientAuthoritative()`), and a server that also simulated it
+    /// would fight the player. Once the boat is empty the server's float pass takes
+    /// over again.
+    ///
+    /// The discriminating input is a boat parked in **mid-air** at `y = 70`, so the
+    /// two arms differ by a whole gravity step rather than by a hair: a floating
+    /// boat's own drag makes a ridden-vs-unridden comparison at the water surface
+    /// nearly coincident, which is exactly the shape that passes for both
+    /// hypotheses. Mismatches are collected so a failure reports every arm rather
+    /// than aborting at the first.
+    #[test]
+    fn a_ridden_boat_is_not_ticked_by_the_server_and_an_empty_one_is() {
+        let world = world();
+        let mut sim = MobSim::new(&world);
+        let boat = sim.spawn_vehicle(
+            "minecraft:oak_boat".parse().expect("a valid key"),
+            Vec3::new(8.5, 70.0, 8.5),
+            0.0,
+        );
+        assert!(sim.mount_vehicle(boat, 7, false));
+
+        let before = sim.vehicle_transform(boat).expect("the boat exists");
+        for _ in 0..5 {
+            sim.tick_vehicles(&lake());
+        }
+        let after_ridden = sim.vehicle_transform(boat).expect("the boat exists");
+
+        let mut wrong = Vec::new();
+        if (after_ridden.0.y - before.0.y).abs() > 1e-12 {
+            wrong.push(format!(
+                "a ridden boat must not be moved by the server: {} -> {}",
+                before.0.y, after_ridden.0.y
+            ));
+        }
+
+        // Dismount, then the same five ticks. `AbstractBoat.getDefaultGravity()` is
+        // 0.04, so five ticks of free fall move it by strictly more than one tick's
+        // worth — the prediction is a floor derived from the constant rather than a
+        // "did it move at all" sign check.
+        assert_eq!(sim.dismount_rider(7), Some(boat));
+        for _ in 0..5 {
+            sim.tick_vehicles(&lake());
+        }
+        let after_empty = sim.vehicle_transform(boat).expect("the boat exists");
+        let fall = before.0.y - after_empty.0.y;
+        let one_step = f64::from(lodestone_physics::vehicle::BOAT_GRAVITY);
+        if fall <= one_step {
+            wrong.push(format!(
+                "an empty boat in mid-air must fall by more than one {one_step}-block \
+                 gravity step in five ticks, fell {fall}"
+            ));
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// **Steering: a `MoveVehicle` from the rider moves the boat, and one from
+    /// anybody else does not.**
+    ///
+    /// The second arm is the security half and the one a "does the position update"
+    /// gate cannot see: `apply_vehicle_move` resolves the vehicle from the *player*,
+    /// which is vanilla's `getRootVehicle()` rule, so a connection cannot drag a
+    /// boat it is not sitting in.
+    ///
+    /// The reported transform uses pairwise-distinct coordinates so a transposition
+    /// of two of the three axes cannot survive, and a yaw that is neither `0` nor
+    /// equal to any coordinate.
+    #[test]
+    fn only_the_rider_may_move_the_boat() {
+        let world = world();
+        let mut sim = MobSim::new(&world);
+        let boat = sim.spawn_vehicle(
+            "minecraft:bamboo_raft".parse().expect("a valid key"),
+            Vec3::new(8.5, 63.4, 8.5),
+            0.0,
+        );
+        assert!(sim.mount_vehicle(boat, 7, false));
+
+        let mut wrong = Vec::new();
+        if sim
+            .apply_vehicle_move(8, Vec3::new(1.0, 2.0, 3.0), 90.0)
+            .is_some()
+        {
+            wrong.push("a player who rides nothing must not move a boat".to_owned());
+        }
+        let reported = Vec3::new(11.25, 62.75, -4.5);
+        if sim.apply_vehicle_move(7, reported, 137.0) != Some(boat) {
+            wrong.push("the rider's report must be applied".to_owned());
+        }
+        let (position, yaw) = sim.vehicle_transform(boat).expect("the boat exists");
+        if position != reported {
+            wrong.push(format!("{position:?} != {reported:?}"));
+        }
+        if (yaw - 137.0).abs() > f32::EPSILON {
+            wrong.push(format!("yaw {yaw} != 137"));
+        }
+        // And the wire carries it, which is what another viewer's `move_entity`
+        // diff reads.
+        let streamed = sim
+            .snapshots()
+            .into_iter()
+            .find(|s| s.id == boat)
+            .expect("a live boat must be streamed");
+        if streamed.position != reported {
+            wrong.push(format!("snapshot {:?} != {reported:?}", streamed.position));
+        }
+        if (streamed.rotation.yaw - 137.0).abs() > f32::EPSILON {
+            wrong.push(format!("snapshot yaw {:?}", streamed.rotation));
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// **The disconnect self-heal.** A rider who vanishes without dismounting must
+    /// not freeze the boat forever.
+    ///
+    /// The control is the second arm: with an **empty** roster the rider is kept,
+    /// because `set_players` is position-driven and legitimately empty before anyone
+    /// has moved. Without that guard this eviction would fire the instant a player
+    /// boarded, which is the failure direction that looks like "mounting does not
+    /// work".
+    #[test]
+    fn a_rider_who_leaves_the_roster_is_evicted_and_an_empty_roster_is_not_evidence() {
+        let world = world();
+
+        let mut kept = MobSim::new(&world);
+        let boat = kept.spawn_vehicle(
+            "minecraft:oak_boat".parse().expect("a valid key"),
+            Vec3::new(8.5, 70.0, 8.5),
+            0.0,
+        );
+        assert!(kept.mount_vehicle(boat, 7, false));
+        kept.tick_vehicles(&lake());
+        assert_eq!(
+            kept.vehicle_rider(boat),
+            Some(7),
+            "an empty roster means 'no information', not 'nobody is connected'"
+        );
+
+        let mut evicted = MobSim::new(&world);
+        let boat = evicted.spawn_vehicle(
+            "minecraft:oak_boat".parse().expect("a valid key"),
+            Vec3::new(8.5, 70.0, 8.5),
+            0.0,
+        );
+        assert!(evicted.mount_vehicle(boat, 7, false));
+        // Somebody else is connected; player 7 is not.
+        evicted.set_players(vec![PerceivedPlayer {
+            identity: Some(PlayerIdentity {
+                uuid: Uuid::new_v4(),
+                entity_id: 12,
+            }),
+            perception: PlayerPerception {
+                position: Vec3::new(8.5, 64.0, 8.5),
+                held_item: None,
+            },
+        }]);
+        evicted.tick_vehicles(&lake());
+        assert_eq!(
+            evicted.vehicle_rider(boat),
+            None,
+            "a rider absent from a non-empty roster has gone"
+        );
+    }
+}
