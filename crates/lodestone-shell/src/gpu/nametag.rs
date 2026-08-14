@@ -313,10 +313,16 @@ pub(super) fn layout_ink_runs(raster: &RasterFont, text: &str) -> (Vec<LocalRect
 /// scaled by nothing yet — the caller multiplies by [`EntityDraw::scale`].
 /// Falls back to [`FALLBACK_HEIGHT`] for a type path the census cannot
 /// resolve (no `minecraft:<path>` id, or a `0`-height marker type).
+///
+/// Resolves through [`lodestone_data::entity_type::EntityType::from_name`] (a
+/// binary search over the generated registry, issue #523) rather than
+/// `entity_type_id_parts`'s linear `strip_prefix` scan — this runs once per
+/// named entity per frame, not once per spawn, so the O(158) scan was real
+/// per-frame cost.
 #[must_use]
 fn entity_base_height(type_path: &str) -> f32 {
-    lodestone_data::entity_types::entity_type_id_parts("minecraft", type_path)
-        .and_then(lodestone_data::entity_dimensions::base_dimensions)
+    lodestone_data::entity_type::EntityType::from_name(type_path)
+        .map(lodestone_data::entity_dimensions::base_dimensions_for)
         .map(|dims| dims.height)
         .filter(|h| *h > 0.0)
         .unwrap_or(FALLBACK_HEIGHT)
@@ -1003,5 +1009,27 @@ mod tests {
         assert_eq!(entity_base_height("not_a_real_entity_type"), FALLBACK_HEIGHT);
         // A real type resolves to its real (non-fallback) census height.
         assert!((entity_base_height("player") - 1.8).abs() < 1e-6);
+    }
+
+    /// Behavioural gate for issue #523: `entity_base_height` now resolves
+    /// through `EntityType::from_name`'s binary search rather than
+    /// `entity_type_id_parts`'s linear `strip_prefix` scan. The expected
+    /// heights come from `crates/lodestone-data/tests/support/
+    /// entity_dimensions_jvm.txt` (a real 26.2 server's own
+    /// `EntityType.getHeight()` dump), an outside source, not from this
+    /// table round-tripping against itself.
+    ///
+    /// `chicken` and `enderman` are chosen because they are far apart both
+    /// in registry id (26 vs 41) and in height (0.7 vs 2.9): a wrong sort
+    /// order in the new binary search would resolve one of these bare paths
+    /// to a *neighbouring* real entity type rather than failing outright —
+    /// a different, plausible height, not an obvious `None`/panic — and a
+    /// pair this far apart cannot coincidentally agree the way `bogged` and
+    /// `skeleton` do (both `1.99`, see `lodestone-render`'s
+    /// `canonical_model_name` alias).
+    #[test]
+    fn entity_base_height_matches_the_jvm_dump_for_a_discriminating_pair() {
+        assert!((entity_base_height("chicken") - 0.7).abs() < 1e-3);
+        assert!((entity_base_height("enderman") - 2.9).abs() < 1e-3);
     }
 }

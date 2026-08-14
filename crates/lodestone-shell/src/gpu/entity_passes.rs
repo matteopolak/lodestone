@@ -55,9 +55,14 @@ use super::{
 ///
 /// Kept as a free function rather than a method on `EntityDraw` because it reads
 /// `lodestone_data`, which the draw type deliberately does not.
+///
+/// Resolves `type_path` through [`lodestone_data::entity_type::EntityType::from_name`]
+/// (binary search over the generated registry) rather than
+/// `entity_type_id_parts`'s linear `strip_prefix` scan — called once per
+/// on-fire entity per frame, so the scan cost was real (issue #523).
 fn flame_hitbox_width(type_path: &str, age_scale: f32) -> Option<f32> {
-    let id = lodestone_data::entity_types::entity_type_id_parts("minecraft", type_path)?;
-    let dims = lodestone_data::entity_dimensions::base_dimensions(id)?;
+    let entity_type = lodestone_data::entity_type::EntityType::from_name(type_path)?;
+    let dims = lodestone_data::entity_dimensions::base_dimensions_for(entity_type);
     let width = dims.width * age_scale;
     (width > 0.0).then_some(width)
 }
@@ -218,9 +223,10 @@ fn eye_probe_offset(type_path: &str, age_scale: f32) -> f32 {
         return EYE_HEIGHTS[i].1 * age_scale;
     }
     // `EntityDimensions.defaultEyeHeight`: `height * 0.85F`, off the same base
-    // dimensions table `flame_hitbox_width` reads.
-    lodestone_data::entity_types::entity_type_id_parts("minecraft", type_path)
-        .and_then(lodestone_data::entity_dimensions::base_dimensions)
+    // dimensions table `flame_hitbox_width` reads. Same binary-search resolve
+    // as that function, for the same reason (issue #523).
+    lodestone_data::entity_type::EntityType::from_name(type_path)
+        .map(lodestone_data::entity_dimensions::base_dimensions_for)
         .map_or(0.0, |dims| dims.height * 0.85 * age_scale)
 }
 
