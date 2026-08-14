@@ -114,6 +114,12 @@ pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.33"
 rayon = "1.12"
+# Unicode Bidirectional Algorithm (UAX #9), for laying out Arabic/Hebrew runs
+# right-to-left among LTR text (`lodestone-shell`'s vanilla font). Pure Rust,
+# zero dependencies of its own beyond `std` (the default `hardcoded-data`
+# feature bakes in the derived bidi-class tables rather than reading them at
+# runtime), so it costs `lodestone-shell` nothing extra to compile for wasm32.
+unicode-bidi = "0.3"
 
 # --- ECS (owned by lodestone-ecs; docs/bevy-migration.md) ---
 # `default-features = false, features = ["std"]`: no `multi_threaded` (does not

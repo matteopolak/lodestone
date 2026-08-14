@@ -151,11 +151,12 @@ this change.
   three; the census names what changed.
 - **Do not add a fourth `ResourceManager` for fonts.** `jar_manager` is the one
   place the store is stacked; a second stack would drift.
-- **The shadow offset is exposed but not yet used per glyph.** `VanillaFont::draw`
-  offsets the *whole string* by `metrics::SHADOW_OFFSET` in one pass, so a unihex
-  glyph's shadow is 1 px rather than vanilla's 0.5. `Font::shadow_offset` returns
-  the right number today; using it means threading the shadow flag down into
-  `glyph`/`glyph_styled` so each glyph offsets itself.
+- **The shadow offset is now applied per glyph.** `VanillaFont::draw_resolved`
+  (`crates/lodestone-shell/src/hud/vanilla_font.rs`) looks up
+  `Font::shadow_offset(codepoint)` for each glyph's own shadow copy, rather than
+  adding one `metrics::SHADOW_OFFSET` before either drawing pass began — a string
+  mixing a unihex glyph with a sheet glyph now gets 0.5 px for the former and 1 px
+  for the latter, instead of one offset applied to every codepoint.
 
 ### Gotchas that cost time here
 

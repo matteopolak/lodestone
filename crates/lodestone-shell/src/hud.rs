@@ -2196,12 +2196,19 @@ impl HudGeometry {
             );
             // The highlighted suggestion, previewed in grey after the caret —
             // `EditBox.extractRenderState`'s `graphics.text(font, suggestion,
-            // cursorX - 1, textY, -8355712, …)`. Measured from the same
-            // `input`+`caret` string the draw above used, so the two cannot land
-            // on different pens; vanilla's own `- 1` nudge is scaled with
-            // everything else.
+            // cursorX - 1, textY, -8355712, …)`. Vanilla's `cursorX` is
+            // `font.width(value)` — the typed text alone — because its caret is
+            // a separately blinking overlay rectangle that never affects a
+            // measured width. This port instead draws the caret as a literal
+            // appended `_` glyph, so the pen has to reserve that glyph's own
+            // advance to land in the same place, but it must reserve it
+            // **unconditionally**: measuring against the live blinking `caret`
+            // string (`{input}{caret}`, empty half the time) made the ghost's
+            // pen slide by the underscore's width every blink, since the
+            // input text itself is always drawn — only the ghost's *measure*
+            // must not depend on the blink phase.
             if let Some(ghost) = frame.chat_suggestion_ghost {
-                let pen = margin + b.text_width(&format!("{input}{caret}"), chat_pose_scale);
+                let pen = margin + b.text_width(&format!("{input}_"), chat_pose_scale);
                 b.text(
                     ghost,
                     pen - chat_pose_scale,
@@ -5798,6 +5805,72 @@ mod tests {
             caret_on.vertex_count(),
             caret_off.vertex_count() + 30,
             "chat_caret_visible must toggle exactly one `_` glyph (5 lit pixels)"
+        );
+    }
+
+    /// Owner report: "the inline autocomplete suggestion gets offset by the
+    /// ticking underscore, when it should not move." The ghost's pen used to
+    /// be measured from `{input}{caret}`'s live width, and `caret` is `""`
+    /// half of every blink cycle — so the ghost's x shifted by the caret
+    /// glyph's own advance every ~300ms. Fixed by always measuring against
+    /// `{input}_` regardless of the actual blink state.
+    ///
+    /// This predicts the *old* (buggy) pens from first principles — via the
+    /// same jar-less `measure_text` the popup gate above uses — and asserts
+    /// they really would have differed, which is what makes the "now equal"
+    /// assertion below a discriminating regression rather than a vacuous one
+    /// (a font where `_` measured zero-width could satisfy equality by
+    /// accident either way).
+    #[test]
+    fn suggestion_ghost_pen_does_not_move_with_the_caret_blink() {
+        let stats = DebugStats::default();
+        let (w, h) = (640u32, 480u32);
+        let pose = chat_pose_scale(ChatDisplayOptions::default());
+        let underscore_w = measure_text(None, "_", pose);
+        assert!(
+            underscore_w > 0.0,
+            "the fallback font must give `_` a real width, or this test cannot \
+             discriminate the fix from the bug it replaces"
+        );
+
+        let ghost_min_x = |g: &HudGeometry| -> f32 {
+            let mut min_x = f32::INFINITY;
+            for chunk in g.verts.chunks(FLOATS_PER_VERTEX) {
+                if chunk[2..6] == SUGGESTION_GHOST {
+                    min_x = min_x.min(chunk[0]);
+                }
+            }
+            assert!(min_x.is_finite(), "no SUGGESTION_GHOST-coloured vertex found");
+            min_x
+        };
+
+        let frame = |caret_visible: bool| HudFrame {
+            crosshair: false,
+            show_debug: false,
+            chat_input: Some("he"),
+            chat_caret_visible: caret_visible,
+            chat_suggestion_ghost: Some("llo"),
+            ..HudFrame::new(&stats)
+        };
+        let on = HudGeometry::build(&frame(true), w, h);
+        let off = HudGeometry::build(&frame(false), w, h);
+
+        // What the pre-fix formula (`margin + text_width({input}{caret})`)
+        // would have produced: the two pens differ by exactly `_`'s own
+        // advance, since that is the only difference between the two
+        // measured strings.
+        let old_pen_on = measure_text(None, "he_", pose);
+        let old_pen_off = measure_text(None, "he", pose);
+        assert!(
+            (old_pen_on - old_pen_off - underscore_w).abs() < 1e-4,
+            "sanity check on the reproduction itself: the old pens must differ \
+             by exactly the caret glyph's width"
+        );
+
+        assert_eq!(
+            ghost_min_x(&on),
+            ghost_min_x(&off),
+            "the suggestion ghost's x must not move when the caret blinks"
         );
     }
 
