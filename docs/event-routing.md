@@ -382,12 +382,30 @@ The remaining **27**, listed for the record and not as a defect claim:
 `ResourcePackPopped`, `CustomPayload`, `ServerDataReceived`, `PongReceived`,
 `ChatMessageDeleted`, `PlayerLookAt`.
 
-One of those is worth a second look by whoever owns the relevant subsystem, and is
-flagged rather than changed here:
+Two of those are answered already, and staying `Route::NOWHERE` here is correct for
+both rather than a gap this list is tracking:
 
-* **`Ping`** is a clientbound ping the vanilla client answers with `pong`. Nothing
-  consumes it and no `ClientAction` producer exists, which is the *outbound* island
-  shape `ClientAction::SetFlying` had. `PongReceived` is likewise unconsumed.
+* **`Ping`** is a clientbound ping the vanilla client answers with `pong`. This
+  `Route::NOWHERE` used to mean exactly the *outbound* island shape
+  `ClientAction::SetFlying` had (decoded, consumed nowhere, no `ClientAction`
+  producer); it no longer does. `lodestone_client::driver::Driver::emit`'s
+  `ClientEvent::Ping` arm answers with `ClientAction::PongResponse` unconditionally,
+  and `PongResponse` reaches the wire through `encode_action` before the shell's
+  event loop ever sees the notification — see the driver's own doc on that arm for
+  why the reply has to live there rather than in a shell-side producer.
+  `PongReceived` is a distinct, still-genuinely-unconsumed event and this does not
+  cover it.
+* **`ResourcePackPushed`** is answered the same way and for the same reason: a
+  pushed pack must be answered before the shell's event loop starts (a
+  Configuration-phase push predates login), so `Driver::emit`'s own
+  `ResourcePackPushed` arm sends `ClientAction::ResourcePackResponse` before this
+  routing table is ever consulted. Verified end-to-end against a real `v770`
+  encoder/decoder in `crates/protocol/v770/tests/resource_pack_push.rs`, and the
+  automatic (not manually-sent) answer is pinned by
+  `resource_pack_push_is_auto_answered_and_surfaces` in
+  `crates/lodestone-client/tests/driver.rs`. A prior audit re-flagged this as an
+  island on the strength of the `NOWHERE` routing alone — the same false-negative
+  this entry now exists to prevent for `Ping`.
 
 `SimulationDistanceChanged` is deliberately left stranded and is now doing a second
 job: it is the **negative control** for the world-state folds
