@@ -93,7 +93,8 @@ enabled for every `V770ServerProtocol` login.
 
 Issue #273's larger half — the RSA/AES-128-CFB8 handshake and the
 session-server ownership check — is implemented; see
-[`docs/server-online-mode.md`](./server-online-mode.md) for the sequence,
-what's tested, and the one thing still missing (a real dedicated/LAN host
-does not yet call the online-mode entry point — that wiring lives in
-`crate::integrated`, outside this change's ownership split).
+[`docs/server-online-mode.md`](./server-online-mode.md) for the sequence and
+what's tested. A real LAN/dedicated host can now actually turn it on:
+`IntegratedServer::open_to_lan` reads `LanConfig::online_mode`, defaulting to
+`None` (offline, unchanged) — see that doc's "How to change it" and
+[`docs/open-to-lan.md`](./open-to-lan.md) for the field.

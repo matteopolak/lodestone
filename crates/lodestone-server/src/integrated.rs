@@ -58,6 +58,14 @@ use crate::server::{
     EntitySource, NoEntities, serve_connection_shared,
     serve_connection_with_mob_events_and_commands_shared, serve_connection_with_mob_events_shared,
 };
+// `OnlineModeConfig`/`serve_connection_with_online_mode` are themselves
+// `#[cfg(not(target_arch = "wasm32"))]`-gated in `server.rs` (issue #273 is
+// native-only — see `OnlineModeConfig`'s own doc comment on why: the
+// session-server check is an HTTPS call, and singleplayer's browser build has
+// no such dependency to link). `open_to_lan`/`LanConfig`, this import's only
+// user, already carry the identical gate, so this cannot desync from them.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::server::{OnlineModeConfig, serve_connection_with_online_mode};
 use crate::spawn::{Task, spawn};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 // `run_tick_loop`/`run_tick_loop_with_weather` (like `open_in_memory_with_mobs`
@@ -633,6 +641,27 @@ pub struct LanConfig {
     /// the same handle is shared by every accepted connection, so an op granted on
     /// one is an op on the next.
     pub access: crate::access::AccessHandle,
+    /// Online-mode encryption plus session-server ownership verification
+    /// (issue #273; see `docs/server-online-mode.md`). `None` — the default —
+    /// keeps every connection offline, exactly as before this field existed:
+    /// the client's self-reported username/uuid are trusted as-is, no
+    /// encryption is offered, and no request ever reaches Mojang. `Some`
+    /// switches every connection this listener accepts into the real
+    /// RSA/AES-128-CFB8 handshake via
+    /// [`serve_connection_with_online_mode`](crate::server::serve_connection_with_online_mode).
+    ///
+    /// This is the config surface's own knob — the "config flag an operator
+    /// can actually set" that doc named as the one missing piece — not a
+    /// second one: there is no `server.properties`-style file anywhere in
+    /// this crate (`RconConfig`/`QueryConfig`/`AccessHandle` are all
+    /// in-process structs a caller builds, same as this one), so a field
+    /// here alongside `rcon`/`access`/`commands` is the established shape
+    /// rather than a parallel mechanism. `IntegratedServer::open_in_memory*`
+    /// (singleplayer) never reads this field at all — those constructors
+    /// call the plain `_shared` wrapper directly, which always passes `None`
+    /// internally — so singleplayer cannot authenticate no matter what a LAN
+    /// host is configured with.
+    pub online_mode: Option<OnlineModeConfig>,
 }
 
 /// How to announce a LAN world on vanilla's discovery multicast group.
@@ -1938,6 +1967,7 @@ impl IntegratedServer {
             resource_packs,
             plugin_channels,
             access,
+            online_mode,
         } = config;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr().ok();
@@ -2136,6 +2166,13 @@ impl IntegratedServer {
         // Issue #336: moved into the accept loop like the three above it, and
         // cloned per socket below.
         let conn_access = access;
+        // Issue #273: same reasoning as the four above — moved out here so the
+        // `async move` accept arm below doesn't capture `config`'s original,
+        // then cloned per accepted socket. `OnlineModeConfig` is `Clone`
+        // (an `Arc`-boxed HTTP client plus an `Arc`-boxed verify closure), so
+        // this is cheap and every connection shares one `reqwest::Client`
+        // connection pool, matching that field's own doc comment.
+        let conn_online_mode = online_mode;
         // Issue #438: **one** registry for every connection this listener
         // accepts, created out here for the same reason the tick loop above is
         // spawned out here. A registry per connection would make each player
@@ -2249,6 +2286,10 @@ impl IntegratedServer {
                         // the same lists — an op granted by one connection is an
                         // op for the next.
                         let access = conn_access.clone();
+                        // Issue #273: one clone per accepted socket, same as
+                        // `access` above — `None` costs nothing to clone, and
+                        // `Some` shares the one `reqwest::Client` pool.
+                        let online_mode = conn_online_mode.clone();
                         // Issue #438: the mob source and the shared player
                         // registry, composed. `PlayerAwareSource::snapshots`
                         // still returns only the mobs — the players travel
@@ -2304,14 +2345,36 @@ impl IntegratedServer {
                             // `..._mob_events_shared` wrapper, which hardcodes
                             // all three to `::default()` — which is exactly
                             // what left #48/#334/#335 unreachable.
-                            let _ = serve_connection_with_mob_events_and_commands_shared(
-                                &mut conn, &*protocol, &source, &entities, view_radius,
-                                &block_entities, &mobs,
-                                &conn_block_ticks, &conn_explosions,
-                                &commands, &resource_packs, &plugin_channels, &world_state,
-                                &access, peer_ip,
-                            )
-                            .await;
+                            //
+                            // Issue #273: `LanConfig::online_mode` picks which
+                            // of the two sibling entry points this connection
+                            // gets. `serve_connection_with_online_mode` is
+                            // additive over this one — same arguments plus the
+                            // config, never a signature change — matching that
+                            // function's own doc comment on why it exists
+                            // beside this wrapper instead of widening it.
+                            let _ = match &online_mode {
+                                Some(online_mode) => {
+                                    serve_connection_with_online_mode(
+                                        &mut conn, &*protocol, &source, &entities, view_radius,
+                                        &block_entities, &mobs,
+                                        &conn_block_ticks, &conn_explosions,
+                                        &commands, &resource_packs, &plugin_channels, &world_state,
+                                        &access, peer_ip, online_mode,
+                                    )
+                                    .await
+                                }
+                                None => {
+                                    serve_connection_with_mob_events_and_commands_shared(
+                                        &mut conn, &*protocol, &source, &entities, view_radius,
+                                        &block_entities, &mobs,
+                                        &conn_block_ticks, &conn_explosions,
+                                        &commands, &resource_packs, &plugin_channels, &world_state,
+                                        &access, peer_ip,
+                                    )
+                                    .await
+                                }
+                            };
                             // Lets the relay arm above drop this connection's
                             // feeds on its next pass.
                             alive.store(false, std::sync::atomic::Ordering::Relaxed);
