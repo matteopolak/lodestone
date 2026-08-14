@@ -92,6 +92,18 @@ pub(crate) struct Driver<T: Transport> {
     /// reaches the check at all.
     #[cfg(not(target_arch = "wasm32"))]
     auth_unavailable: Option<(String, String)>,
+    /// The live chat-signing session, once its key pair has been fetched from
+    /// the same authenticated surface `auth_session` proves ownership with
+    /// (`docs/secure-chat.md`) — `None` for offline play, or online play
+    /// before the fetch on `ClientEvent::Login` completes (or if it failed;
+    /// chat degrades to unsigned rather than the session dying for it).
+    /// `Some` is this driver's signal to turn an outgoing
+    /// [`ClientAction::SendChat`] into a signed
+    /// [`ClientAction::SendSignedChat`] — see [`Self::maybe_sign_chat`].
+    /// Native-only for the same reason `auth_session` is: signing needs
+    /// `lodestone-auth`'s RSA, which does not build for wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
+    chat_session: Option<lodestone_auth::ChatSession>,
     /// The HTTP client the session-server `join` call goes through. Built once
     /// per driver rather than per join attempt (there is at most one per
     /// session anyway, but a fresh `reqwest::Client` per call would rebuild
@@ -140,6 +152,87 @@ pub(crate) struct Driver<T: Transport> {
 /// its own brand; this vanilla-compatible string keeps headless bots
 /// indistinguishable from the reference client.
 const CLIENT_BRAND: &str = "vanilla";
+
+/// A random per-message signing salt (`ClientAction::SendSignedChat::salt`).
+///
+/// No new RNG dependency: `Uuid::new_v4()`'s bytes are already a CSPRNG draw
+/// (`uuid`'s `v4` feature is already on for the whole workspace), so the first
+/// 8 of its 16 random bytes make a perfectly good `i64` salt without pulling
+/// in a second source of randomness just for this. Native-only along with
+/// every other chat-signing call site — see [`Driver::maybe_sign_chat`].
+#[cfg(not(target_arch = "wasm32"))]
+fn random_chat_salt() -> i64 {
+    let bytes = uuid::Uuid::new_v4().into_bytes();
+    i64::from_be_bytes(bytes[..8].try_into().expect("a uuid is 16 bytes"))
+}
+
+/// Signs `text` over `chat_session`'s **current** last-seen chain (drained
+/// from `chat_tracker`), or `None` when it cannot — a malformed last-seen
+/// entry, an exhausted signing chain (vanilla's own `i32::MAX`-message signal
+/// to start a new session, unhandled here), or a signing failure — in which
+/// case the caller falls back to unsigned rather than dropping the message.
+///
+/// **Never a stale or cached chain**: `generate_and_apply_update` both reads
+/// the window *and* marks its entries no-longer-pending, matching vanilla's
+/// own `LocalPlayer.sendChat`. A signature built from a reordered or stale
+/// window looks fine locally and is exactly what a real server rejects
+/// (`docs/secure-chat.md`) — the reason this reads the tracker itself rather
+/// than taking a pre-computed window from its caller.
+///
+/// A free function, not a `Driver` method, so it needs no live `Connection`
+/// to unit-test — see
+/// `tests::sign_chat_action_signs_over_the_real_last_seen_chain_with_correct_units`.
+#[cfg(not(target_arch = "wasm32"))]
+fn sign_chat_action(
+    text: &str,
+    chat_session: &mut lodestone_auth::ChatSession,
+    chat_tracker: &mut LastSeenTracker,
+) -> Option<ClientAction> {
+    let update = chat_tracker.generate_and_apply_update();
+    let mut last_seen = Vec::with_capacity(update.last_seen.len());
+    for entry in &update.last_seen {
+        let Ok(bytes) = <[u8; lodestone_auth::SIGNATURE_BYTES]>::try_from(entry.as_bytes()) else {
+            // Cannot happen with a v770 adapter — it only ever tracks real
+            // 256-byte RSA signatures — but a malformed entry must not
+            // silently sign over a truncated window; degrade to unsigned
+            // rather than emit a signature the server would reject anyway.
+            tracing::warn!("last-seen entry was not 256 bytes; sending unsigned");
+            return None;
+        };
+        last_seen.push(bytes);
+    }
+
+    let timestamp_millis = lodestone_time::epoch_duration().as_millis() as i64;
+    let timestamp_seconds = timestamp_millis / 1000;
+    let salt = random_chat_salt();
+
+    match chat_session.sign(text, timestamp_seconds, salt, &last_seen) {
+        Ok(Some((signature, _index))) => {
+            let acknowledged: [u8; 3] = update.acknowledged_bytes().try_into().unwrap_or([0u8; 3]);
+            Some(ClientAction::SendSignedChat {
+                text: text.to_owned(),
+                timestamp_millis,
+                salt,
+                signature: signature.to_vec(),
+                last_seen_offset: update.offset,
+                acknowledged,
+                checksum: update.checksum as i8,
+            })
+        }
+        Ok(None) => {
+            // Chain exhausted (`i32::MAX` messages this session) — vanilla's
+            // own signal to start a new session, which nothing here does
+            // yet. Falling back to unsigned keeps the message delivered
+            // rather than silently dropping it.
+            tracing::warn!("chat-signing chain exhausted; sending unsigned");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, "chat signing failed; sending unsigned");
+            None
+        }
+    }
+}
 
 impl<T: Transport> Driver<T> {
     // The driver constructor genuinely needs every collaborator it is handed
@@ -190,6 +283,8 @@ impl<T: Transport> Driver<T> {
             auth_session,
             #[cfg(not(target_arch = "wasm32"))]
             auth_unavailable,
+            #[cfg(not(target_arch = "wasm32"))]
+            chat_session: None,
             #[cfg(not(target_arch = "wasm32"))]
             http: reqwest::Client::new(),
             bundling: false,
@@ -788,6 +883,42 @@ impl<T: Transport> Driver<T> {
                 // previous dimension in the store. Without it the first portal trip
                 // of a session would compare against `None` and skip its clear.
                 self.dimension = Some(dimension.clone());
+
+                // Secure chat: fetch this account's Mojang-issued signing key
+                // pair and announce the session, mirroring
+                // `AccountProfileKeyPairManager`'s own join-time timing. Only
+                // for an online-mode join (`auth_session` is `None` for
+                // offline play, and this is native-only for the same reason
+                // `auth_session` itself is — see `docs/secure-chat.md`).
+                // Best-effort: a failed fetch degrades to unsigned chat for
+                // the rest of the session rather than ending it, the same
+                // choice `emit`'s other auto-responses make for a failure
+                // that is not fatal to the connection.
+                #[cfg(not(target_arch = "wasm32"))]
+                if self.chat_session.is_none()
+                    && let Some(session) = self.auth_session.as_ref()
+                {
+                    let access_token = session.access_token.clone();
+                    let sender = session.profile.id;
+                    match lodestone_auth::fetch_key_pair(&self.http, &access_token).await {
+                        Ok(key_pair) => {
+                            let chat_session = lodestone_auth::ChatSession::new(sender, key_pair);
+                            auto_actions.push(ClientAction::AnnounceChatSession {
+                                session_id: chat_session.session_id(),
+                                expires_at_millis: chat_session.key_pair().expires_at_millis(),
+                                public_key: chat_session.key_pair().public_key_der().to_vec(),
+                                key_signature: chat_session.key_pair().key_signature().to_vec(),
+                            });
+                            self.chat_session = Some(chat_session);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "chat-signing key fetch failed; chat will be sent unsigned"
+                            );
+                        }
+                    }
+                }
             }
             ClientEvent::TeleportPlayer { .. } if self.awaiting_player_load => {
                 // The first teleport after entering the world (or after a
@@ -940,6 +1071,9 @@ impl<T: Transport> Driver<T> {
                 .set_local_movement(*pos, *rotation, *on_ground);
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let action = self.maybe_sign_chat(action);
+
         match self.adapter.encode_action(self.state, &action) {
             Ok(Some((packet_id, payload))) => {
                 if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
@@ -953,6 +1087,25 @@ impl<T: Transport> Driver<T> {
                 tracing::warn!(%error, ?action, "adapter rejected action; dropping");
             }
         }
+    }
+
+    /// Turns a plain [`ClientAction::SendChat`] into a signed
+    /// [`ClientAction::SendSignedChat`] when this session has a live
+    /// `chat_session`. Every other action, and `SendChat` when there is no
+    /// session (offline play, the key fetch hasn't completed, or it failed),
+    /// passes through unchanged, so unsigned chat keeps working exactly as
+    /// it did before this existed. The signing itself is
+    /// [`sign_chat_action`], a free function so it is unit-testable without a
+    /// live `Connection` — see this module's `tests`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn maybe_sign_chat(&mut self, action: ClientAction) -> ClientAction {
+        let ClientAction::SendChat { text } = &action else {
+            return action;
+        };
+        let Some(chat_session) = self.chat_session.as_mut() else {
+            return action;
+        };
+        sign_chat_action(text, chat_session, &mut self.chat_tracker).unwrap_or(action)
     }
 
     /// Encodes and writes a driver-injected protocol action, mirroring the
@@ -1018,4 +1171,198 @@ async fn read_packet_timed<T: Transport>(
     _timeout: Option<Duration>,
 ) -> Result<Option<(i32, Vec<u8>)>, ReadError> {
     conn.read_packet().await.map_err(ReadError::Transport)
+}
+
+/// Unit tests for the signed-chat producer wiring
+/// ([`sign_chat_action`]/[`Driver::maybe_sign_chat`]). Native-only: chat
+/// signing needs `lodestone-auth`'s RSA, which does not build for wasm32 —
+/// same reason every other chat-signing symbol in this file is gated.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey};
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+
+    use super::*;
+
+    /// The same fixed PKCS#8-DER RSA-2048 test key `lodestone-auth`'s own
+    /// `chat_session` tests use (`openssl genpkey`-generated, no code or
+    /// secrecy shared with anything real) — reused rather than generating a
+    /// fresh key per test run, which would need `rsa`'s `rand_core` line
+    /// wired through and cost real wall-clock time for no benefit here.
+    const TEST_PRIVATE_KEY_DER_B64: &str = concat!(
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDtM+q+4UwoW3cZ",
+        "Q8TVkfa9TfGdxpl13PlfNei77mmWz+kLCxeOXpF2hX/VXSoxj3yBjjhtGHZB59eX",
+        "0VW2zw+G913ZMmtT+9phKBA9BOID4c4hNpz852wJ5sp2pFOyrrg47UTrakey9iQT",
+        "+ckO4qfeMR13NTDP44cLFBwa1/ot80Fwq00xg5KHJK6WeWmjPayc+lf3FSPC+cNO",
+        "aOJ3oaWK16b2LFqvzwwkl53e0yyHFgffA5AdClVJgZc7pEDScO0zLHLqe8ySrbsJ",
+        "yZ9PQSTNC7cmXkJPQjlYJJ2M4/+HJRtjY/CQyP5C7sTdu/Lhn1nUawhj74Egyvg8",
+        "HXeysPeZAgMBAAECggEBAMg+0ee+jupq/MpJWbvqc2Awks7dP+QuXh8whX9Rr7Xv",
+        "Yw89l+9KioaCAP8AnYQlW7iLdbszsXHF5U13HWMsvjD0VzfqxoypyxvGFJ9Opfcd",
+        "A0Uqs7EVNTHOshEifL4VndQBCfOrT0gXXzG15zQ3x/tdf0CJmOGHdRO3MFrBBaUP",
+        "XJgVcGCWyKK9/p+uV9lolnQprotiuctX6nI5hYAX7PG1XFJlPAW5k9DLE4W31+8Y",
+        "FiJgsS/WTRAsvjs7zJefGwUNE0+86ylREEmSvHWqjS6pgxf7REZed0208kTHC1P8",
+        "aGP9nnrHZfiKBDtxt2usRbG00Whf9NVTOZBeC9ExKjkCgYEA948Wr8q0lFVMZ7xt",
+        "u5Dx8Mvjvz2Bl5wclX27qrqeu7T3aGnP2EwVSQW5xUB/KpYpxoMFiJIy9cVqo1XT",
+        "Vege7i8WsGRK+D9xpd6QEhME79nIbltmxTVP9Ue9foBev0S0QM5n1Qk6L4hKUnva",
+        "dwQ1Ow6XoPejGcu2BhYzywUPrJsCgYEA9UpuTzZgMg7CVCIRH6Ze8jNP56GADXYB",
+        "8BH5hSuaKO67PukLa/iqSo38w1uZSVLvNgLxts5Q+pinSglJlZ8mRrLVFI8qkcIg",
+        "j/qZKpVP0mfOuBYu/DNkX0VO4nG1pBSKgT1dmUiVVAvBfgbUHeG1vVEENKh0NbSH",
+        "nswL84z8XdsCgYBpnapYJWsVPa7zMvi95QDTcqkfleYMAJZRUOsX07aU7of/C+WY",
+        "qh0Kol63QOUADkCUaKGbuoPzRt5QAPXA2N8ZTw2nA6LYdnjOAz4D+AlLKubP7j7S",
+        "NASA6LJ3ndzOTUl5vJWf1ef1D3hl6GE0FZ+AKqGWExCKmNZ3klFWdDpTsQKBgFG9",
+        "FttApHep4WoF3Czu1O7i2Hq4n6Jcs7KbWsncyMdhHnaNVCgLujuT6ynyiTcc8ufN",
+        "vVyMjgGkAwMx6xp36Vpf14+9UZM23ID+IjJFhU75FrLTeZ7DRWxV/T6KY9wkmC8P",
+        "EvS0ckaKkFT904uNnnFS4RLnG6qV2Se6mTT0w1hHAoGADIwcasJrU/5xnBPICA6f",
+        "u43x6dk1/v+GeRLz0N0aVADsj7tInJ+7pHV1/NrHaGONJKIQ0uWIKxVdHufDmYVU",
+        "KY0Oh6wzS/m5Z2tmxK24z0UJyXvAu67ETx5QUhqH63i5km9a2Au+zkwGXBBg6Bvh",
+        "7kWCpm322pipbRs6hKc7klQ=",
+    );
+
+    /// Builds a throwaway [`lodestone_auth::ChatSession`] (via the test-only
+    /// [`lodestone_auth::ChatKeyPair::for_tests`] fixture builder) and
+    /// returns it alongside its DER-encoded public key, needed to
+    /// independently re-verify what [`sign_chat_action`] produces.
+    fn test_chat_session() -> (lodestone_auth::ChatSession, Vec<u8>) {
+        let der = BASE64.decode(TEST_PRIVATE_KEY_DER_B64).expect("valid base64 fixture");
+        let private_key = RsaPrivateKey::from_pkcs8_der(&der).expect("valid PKCS#8 DER fixture");
+        let public_key = RsaPublicKey::from(&private_key);
+        let public_key_der = public_key
+            .to_public_key_der()
+            .expect("encode test public key")
+            .into_vec();
+        let key_pair = lodestone_auth::ChatKeyPair::for_tests(
+            private_key,
+            public_key_der.clone(),
+            vec![0xAA, 0xBB], // key_signature: opaque to this client, never checked here
+            i64::MAX,
+            i64::MAX,
+        );
+        let sender = uuid::Uuid::from_u128(1);
+        (lodestone_auth::ChatSession::new(sender, key_pair), public_key_der)
+    }
+
+    /// The half of the discriminating pair this issue's verification section
+    /// asks for that is new code: signed-in signs, against the **real**
+    /// last-seen chain rather than an empty or cached one. The other half —
+    /// signed-out sends unsigned — is [`Driver::maybe_sign_chat`]'s one-line
+    /// early return when `chat_session` is `None`, which is exactly the path
+    /// every pre-existing `SendChat` test in `tests/driver.rs` already takes
+    /// (none of them ever populate `auth_session`/`chat_session`) and which
+    /// stayed green across this change, so it is not re-asserted here.
+    #[test]
+    fn sign_chat_action_signs_over_the_real_last_seen_chain_with_correct_units() {
+        let (mut chat_session, public_key_der) = test_chat_session();
+        let sender = uuid::Uuid::from_u128(1);
+        let session_id = chat_session.session_id();
+
+        let mut tracker = LastSeenTracker::vanilla();
+        // A message the tracker has already recorded as pending — what makes
+        // "signs over the real chain" checkable: an implementation that
+        // always signed over `&[]` would still produce *a* signature, just
+        // not one that verifies against this entry.
+        let prior = [0x7Au8; lodestone_auth::SIGNATURE_BYTES];
+        tracker.add_pending(MessageSignature::from(prior.as_slice()), true);
+
+        let action = sign_chat_action("hello", &mut chat_session, &mut tracker)
+            .expect("a live session must produce a signed action");
+        let ClientAction::SendSignedChat {
+            text,
+            timestamp_millis,
+            salt,
+            signature,
+            last_seen_offset,
+            acknowledged,
+            checksum,
+        } = action
+        else {
+            panic!("expected ClientAction::SendSignedChat");
+        };
+
+        assert_eq!(text, "hello");
+        assert_eq!(last_seen_offset, 1, "one prior message was pending");
+        assert_eq!(acknowledged[0] & 0b1, 1, "the one tracked slot is acknowledged");
+        assert_ne!(checksum, 0, "a non-empty last-seen window has a real checksum");
+
+        // Wire unit is epoch millis, and it is a plausible "now" — re-derived
+        // from the same portable clock this test itself calls, not trusted
+        // blindly.
+        let now_millis = lodestone_time::epoch_duration().as_millis() as i64;
+        assert!(
+            (now_millis - timestamp_millis).abs() < 5_000,
+            "timestamp_millis should be close to now: {timestamp_millis}"
+        );
+        // Pairwise-distinct-units control: the signature payload's timestamp
+        // is epoch *seconds*, a different value from the wire's epoch
+        // *millis* field it is derived from, never the same i64 reused.
+        let timestamp_seconds = timestamp_millis / 1000;
+        assert_ne!(
+            timestamp_seconds, timestamp_millis,
+            "seconds and millis must be distinct, not the same field twice"
+        );
+
+        // Re-derive the signature independently through `verify_signature`
+        // against the real link/last-seen entry, rather than only asserting
+        // "a signature is present".
+        let link = lodestone_auth::SignedMessageLink::root(sender, session_id);
+        let signature_bytes: [u8; lodestone_auth::SIGNATURE_BYTES] =
+            signature.try_into().expect("signature must be 256 bytes");
+        assert!(
+            lodestone_auth::verify_signature(
+                &public_key_der,
+                &link,
+                "hello",
+                timestamp_seconds,
+                salt,
+                &[prior],
+                &signature_bytes,
+            )
+            .expect("verify against the real last-seen entry"),
+            "signature must verify against the last-seen chain it was actually signed over"
+        );
+
+        // Transposition control: the same signature must NOT verify against
+        // an empty last-seen window — proving the real chain reached the
+        // payload rather than the implementation happening to sign over
+        // `&[]` regardless of what the tracker held.
+        assert!(
+            !lodestone_auth::verify_signature(
+                &public_key_der,
+                &link,
+                "hello",
+                timestamp_seconds,
+                salt,
+                &[],
+                &signature_bytes,
+            )
+            .expect("verify against an empty window"),
+            "must not also verify against a different (empty) last-seen window"
+        );
+    }
+
+    /// Two successive sends from the same session must land on different
+    /// chain indices — signing "same text" twice must not produce the same
+    /// signature, or replay/reordering on the wire would be undetectable.
+    #[test]
+    fn successive_signed_sends_advance_the_chain_and_differ() {
+        let (mut chat_session, _public_key_der) = test_chat_session();
+        let mut tracker = LastSeenTracker::vanilla();
+
+        let first = sign_chat_action("same text", &mut chat_session, &mut tracker)
+            .expect("first send must sign");
+        let second = sign_chat_action("same text", &mut chat_session, &mut tracker)
+            .expect("second send must sign");
+
+        let ClientAction::SendSignedChat { signature: sig1, .. } = first else {
+            panic!("expected signed chat");
+        };
+        let ClientAction::SendSignedChat { signature: sig2, .. } = second else {
+            panic!("expected signed chat");
+        };
+        assert_ne!(
+            sig1, sig2,
+            "identical content sent twice must sign differently (chain index advanced)"
+        );
+    }
 }
