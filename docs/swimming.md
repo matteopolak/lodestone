@@ -7,8 +7,8 @@ the actual defect this work started from — why sprint-swimming didn't work
 even though the client believed it was sprinting the whole time. Landed in
 `13a1d3a` ("kelp is breakable again, and swimming actually swims").
 
-Issue #59 (look-descent + camera jerk) is documented in its own subsection
-below rather than folded into the narrative above, since it is a later,
+Look-descent and the camera jerk are documented in their own subsection
+below rather than folded into the narrative above, since that was a later,
 unrelated pass over the same subsystem.
 
 ## How it works
@@ -98,17 +98,17 @@ list rather than leaving them to be rediscovered:
   three-stage vanilla `calculateValue()` fold "isn't implemented." That was
   wrong even when written — `lodestone_entity::attribute::AttributeInstance
   ::value()` has done exactly this fold (`AddValue` → `AddMultipliedBase` →
-  `AddMultipliedTotal`, matching `AttributeInstance.calculateValue`,
-  `.cache/mc/26.2/src/.../AttributeInstance.java:148-166`) since the initial
+  `AddMultipliedTotal`, matching `AttributeInstance.calculateValue`) since
+  the initial
   commit. `minecraft:water_movement_efficiency` also already has a real
-  registry default/range (`0.0, 0.0, 1.0`, matching `Attributes.java:108-109`
+  registry default/range (`0.0, 0.0, 1.0`, matching `Attributes.WATER_MOVEMENT_EFFICIENCY`
   exactly) in `attribute::default_def`. Neither piece was ever missing.
 
   What *was* missing, and is now closed on the `lodestone-entity` side:
   `attribute::instance_from_snapshot`/`attribute::attribute_value` convert
   the **wire-shaped** `EntityAttributeSnapshot` (`base` + `modifiers`, no
-  min/max — the shape `read_update_attributes`,
-  `crates/protocol/v770/src/packets/metadata.rs:485`, decodes to) into a
+  min/max — the shape `read_update_attributes`
+  (`crates/protocol/v770/src/packets/metadata.rs`) decodes to) into a
   foldable `AttributeInstance` and read it back through the same `value()`.
   `attribute::water_movement_efficiency_key()` names the attribute id so a
   per-tick caller doesn't hand-parse the literal. See
@@ -162,9 +162,9 @@ list rather than leaving them to be rediscovered:
      actually writes to — which step 2 above already claimed was closed. Before
      building on that claim, it was checked again against the code, not just
      against this file: `lodestone_ecs::ingest::apply_local_player_login`
-     (`crates/lodestone-ecs/src/ingest.rs:166`) still inserts
+     (`crates/lodestone-ecs/src/ingest.rs`) still inserts
      `(MinecraftEntityId, Attributes::default())` on `ClientEvent::Login`, and
-     `apply_entity_attributes` (`ingest.rs:442`) still resolves through
+     `apply_entity_attributes` (also in `ingest.rs`) still resolves through
      `EntityIndex` with no special-case that would exclude the local player's
      own id. Both were true. `CLAUDE.md`'s point about stale notes is
      specifically that a claim can be correct and *still* be worth re-checking,
@@ -200,31 +200,31 @@ list rather than leaving them to be rediscovered:
      reader) is not deleted — it is still the right accessor for a caller
      *outside* the ECS `GameTick` schedule (a plugin, a debug overlay), it is
      just not on the path `player_physics` itself needed.
-- ~~**Bubble columns are not implemented.**~~ **Closed** (issue #199) — see
+- ~~**Bubble columns are not implemented.**~~ **Closed** — see
   [`bubble-columns.md`](./bubble-columns.md). The impulse turned out not to
   belong in `tick_water` at all: `BubbleColumnBlock.entityInside` is reached
   from `applyEffectsFromBlocks`, which `LivingEntity.aiStep` calls *after*
   `travel()`, so it lives one level up beside `update_stuck_multiplier`. The
   `drag` property that blocked it was already on the wire and in the generated
   state table the whole time.
-- ~~**The swim look-descent is not modelled.**~~ **Closed** (issue #59) — see
+- ~~**The swim look-descent is not modelled.**~~ **Closed** — see
   below.
 
-### Lava movement (issue #214)
+### Lava movement
 
-`tick_lava` (`crates/lodestone-physics/src/player.rs`) is `travelInLava`
-(`LivingEntity.java:2539-2555`), and it is a *different* branch from water,
+`tick_lava` (`crates/lodestone-physics/src/player.rs`) is `travelInLava`,
+and it is a *different* branch from water,
 not a retuned copy of it: flat `0.02F` input speed regardless of depth, and an
 extra `-baseGravity/4` term on top of whatever the depth branch below does.
 
 **The predicate.** `isInShallowFluid(LAVA)` = `getFluidHeight(LAVA) <=
 getFluidJumpThreshold()`. The threshold is `eyeHeight() < 0.4 ? 0.0 : 0.4`
-(`fluid_jump_threshold`, `Entity.java:3692-3694`) — `0.4` for every real
+(`fluid_jump_threshold`, `Entity.getFluidJumpThreshold`) — `0.4` for every real
 player pose, since even the swimming pose's eye height is exactly `0.4` and
 `0.4 < 0.4` is false. This is the *same* predicate and the *same*
 `FluidState::lava_height` input `apply_fluid_jump` already used for the jump
 decision (`LivingEntity.aiStep`'s jump block); the movement branch below was
-the one piece of that pair still unported, closing issue #214.
+the one piece of that pair still unported, closing this gap.
 
 **Both arms**, `<= 0.4` (shallow) vs. `> 0.4` (deep):
 
@@ -259,15 +259,15 @@ input through `tick_lava` twice, varying only `lava_height`, and a check that
 the predicate's `<=` (not `<`) is inclusive at the exact threshold.
 
 Out of scope for this port, named rather than silently drifted into: fire
-damage, lava's rendering, and the fluid-flow simulation (issue #309).
+damage, lava's rendering, and the fluid-flow simulation.
 
-### Look-descent and the camera jerk (issue #59)
+### Look-descent and the camera jerk
 
 Two reported bugs, one real cause each — they turned out to be unrelated to
 each other, which is itself the finding.
 
 **Looking down did not make you descend.** `Player.travel`
-(`Player.java:1401-1415`) has an override `LivingEntity.travel` never gets:
+has an override `LivingEntity.travel` never gets:
 
 ```java
 if (this.isSwimming()) {
@@ -288,7 +288,7 @@ was governed entirely by buoyancy and the jump impulse, never by where they
 were looking.
 
 Both constants are exactly `0.085`/`0.06`, read directly from
-`Player.java:1408` in the 26.2 decompile — a caveat in the original issue body
+`Player.travel` in the 26.2 decompile — a caveat in the original issue body
 said these could not be re-verified in 26.2 (a grep of `0.085` over
 `world/entity/` without the `player/` subtree turns up only
 `DropChances.DEFAULT_EQUIPMENT_DROP_CHANCE`), but grepping `Player.java`
@@ -335,8 +335,9 @@ the true control. Run `cargo fmt` on the regenerated file before diffing it
 by eye, or this false alarm reproduces for the next person too.
 
 **`swimAmount` was investigated as a candidate camera fix and ruled out.**
-`LivingEntity.swimAmount`/`swimAmountO` (`LivingEntity.java:174,275-276,
-3478-3483`) is a `0..1` ramp, `±0.09`/tick, clamped — now modelled as
+`LivingEntity.swimAmount`/`swimAmountO` fields, advanced by
+`LivingEntity.updateSwimAmount` at its own `SWIM_AMOUNT_PER_TICK` constant, is
+a `0..1` ramp, `±0.09`/tick, clamped — now modelled as
 [`PlayerState::swim_amount`]/`swim_amount_o`
 (`crates/lodestone-physics/src/player.rs`), advanced in
 `travel_and_check_inside_blocks` right after `update_swimming`, matching
@@ -362,7 +363,7 @@ this.eyeHeight = this.eyeHeight + (this.entity.getEyeHeight() - this.eyeHeight) 
 ```
 
 read back with the same current/previous + partial-tick shape as position
-interpolation (`Camera.alignWithEntity`, `:246-264`):
+interpolation (`Camera.alignWithEntity`):
 `Mth.lerp(partialTicks, eyeHeightOld, eyeHeight)`. A pose change
 (`PlayerState::eye_height`, e.g. `1.62 → 0.4` entering swim) is an atomic snap,
 by design — `crate::pose::update_player_pose` sets it once. `camera_rig.rs`'s
@@ -378,10 +379,12 @@ before any tick, one tick covers exactly half the remaining distance, repeated
 ticks converge without ever snapping, and reversing direction mid-ramp still
 eases rather than jumping), **and it is wired**.
 
-`Sim` holds a persistent `eye_height_smoother` field (`sim.rs:565`), seeded from
-the spawn pose (`:797`) so the first frame does not ease up from zero, ticked once
-per physics tick beside `body_pose` (`:2256`), and read interpolated by
-`Sim::camera` (`:3489`) in place of the raw `interp.eye_height`.
+`Sim` holds a persistent `eye_height_smoother` field
+(`crates/lodestone-shell/src/sim.rs`), seeded from
+the spawn pose in `Sim::build` (`sim/build.rs`) so the first frame does not
+ease up from zero, ticked once
+per physics tick beside `body_pose` in `Sim::step` (`sim/step.rs`), and read interpolated by
+`Sim::camera` (`sim/camera.rs`) in place of the raw `interp.eye_height`.
 
 Note *why* interpolating the entity's own eye height would not have worked: the
 value being interpolated between two ticks is itself already the post-snap one.
@@ -400,7 +403,7 @@ tick — no hysteresis, no per-tick randomness — and `EntityDimensions::
 bounding_box` anchors `min_y` at the feet, so a pose change only ever moves
 the box's *top* face, never the player. See
 [`pose-dimensions.md`](./pose-dimensions.md) for the fuller argument; nothing
-specific to issue #59 turned up here beyond re-confirming both properties
+specific to the camera-jerk report turned up here beyond re-confirming both properties
 still hold.
 
 ### Why this was also a kelp-targeting bug
@@ -444,10 +447,10 @@ does on land.
   alongside any fix so the list doesn't go stale the way `docs/in-flight.md`
   did.
 - **`movement_speed` is not attribute-driven either, and it looks like it is.**
-  Issue #193 / Tier 1 epic #1. `lodestone_ecs::player::player_physics` does
+  `lodestone_ecs::player::player_physics` does
   call the physics seam — `*player = player.with_movement_speed(attr)` — but
   `attr` is `profile.base_movement_speed` (a hardcoded `0.1`,
-  `lodestone-physics`'s `profile.rs:142`) times
+  `lodestone-physics`'s `profile.rs`) times
   `(1 + profile.sprint_speed_modifier)` when sprinting. **No server-reported
   attribute reaches it.** So a `/attribute @s minecraft:movement_speed base
   set 0.5` changes nothing client-side, and Speed/Slowness/Soul Speed/boot
@@ -458,16 +461,15 @@ does on land.
   changed the picture:
 
   1. **Speed/Slowness never need a client-side attribute-modifier fold of
-     their own.** `LivingEntity.onEffectAdded`/`onEffectUpdated`
-     (`.cache/mc/26.2/src/.../LivingEntity.java:1075-1103`) call
+     their own.** `LivingEntity.onEffectAdded`/`onEffectUpdated` call
      `addAttributeModifiers`/`removeAttributeModifiers` on the entity's
      `AttributeMap` only `if (!this.level().isClientSide())` — i.e.
      **server-side only**. The client's own `handleUpdateMobEffect`
-     (`ClientPacketListener.java:1794-1813`) calls `forceAddEffect`, which
+     (`ClientPacketListener`) calls `forceAddEffect`, which
      does *not* touch attributes on that path. The server instead marks the
      attribute dirty and syncs the resulting base+modifiers over the wire via
-     `ClientboundUpdateAttributesPacket` (`ServerEntity.sendChanges`,
-     `ServerEntity.java:289,352`), which is the packet
+     `ClientboundUpdateAttributesPacket` (`ServerEntity.sendChanges`),
+     which is the packet
      `lodestone_ecs::ingest::apply_entity_attributes` already folds into
      `Attributes`. So folding `movement_speed` through the same
      `Attributes`-component seam Depth Strider uses already covers Speed,
@@ -480,10 +482,10 @@ does on land.
   2. **The sprint bonus is itself the same shape of modifier, server-side.**
      `LivingEntity.setSprinting` adds/removes a transient
      `AttributeModifier(SPRINTING_MODIFIER_ID, 0.3F, ADD_MULTIPLIED_TOTAL)`
-     (`LivingEntity.java:154-157,2311-2317`) on the same `MOVEMENT_SPEED`
+     on the same `MOVEMENT_SPEED`
      instance — not a separate multiply in `travel`. `Player.aiStep` then
      does `this.setSpeed((float)this.getAttributeValue(MOVEMENT_SPEED))`
-     (`Player.java:456`) with **no further sprint arithmetic** — vanilla's
+     with **no further sprint arithmetic** — vanilla's
      `getSpeed()` *is* the folded attribute value. The client-local sprint
      multiply `player_physics` already does on top of `profile.
      base_movement_speed` exists only because our sprint intent is
@@ -618,7 +620,7 @@ matching vanilla's default, not a runtime option.
 
 - `lodestone-physics::player` — `tick_water`, `PlayerState::eye_height`,
   `PlayerState::swim_amount`/`swim_amount_o`, `WATER_MOVEMENT_EFFICIENCY`.
-- `lodestone-shell::camera_rig` — `EyeHeightSmoother`, the issue #59 camera-jerk
+- `lodestone-shell::camera_rig` — `EyeHeightSmoother`, the camera-jerk
   fix (wired into `Sim`; see above).
 - `lodestone-physics::pose` — the pose the swim flag feeds
   ([`pose-dimensions.md`](./pose-dimensions.md)): `state.swimming` is
@@ -627,7 +629,7 @@ matching vanilla's default, not a runtime option.
 - `lodestone-entity::attribute` — `AttributeInstance::value` (the vanilla
   three-stage fold), `instance_from_snapshot`/`attribute_value` (the
   wire-shaped `EntityAttributeSnapshot` → fold conversion),
-  `water_movement_efficiency_key`, `movement_speed_key` (issue #193,
+  `water_movement_efficiency_key`, `movement_speed_key` (added
   2026-07-31). `crates/lodestone-ecs/src/player.rs`'s `player_physics` is a
   direct dependent of this module for `water_movement_efficiency_key` (added
   2026-07-30, closing Depth Strider) — see the "still open" note above for
@@ -656,14 +658,14 @@ control, `no_attributes_component_folds_to_the_registry_default` (no
 `Attributes` component at all — the offline/pre-login state — must fold to
 the registry default, not a stale or hard-coded value).
 
-Issue #59: `tests/golden.rs`'s `swim_look_down_dives_matches_golden`,
+Look-descent and camera jerk: `tests/golden.rs`'s `swim_look_down_dives_matches_golden`,
 `swim_surface_look_up_no_pulldown_matches_golden`,
 `swim_surface_look_down_control_matches_golden` (bit-exact vs. the Python
 oracle in `gen_golden.py`, zero tolerance). `camera_rig.rs`'s own test module
 covers `EyeHeightSmoother` in isolation (seed/tick/lerp, convergence, reversal
 mid-ramp) — hermetic, since it is not wired into `Sim` yet.
 
-Issue #193 (`movement_speed`), physics/entity side, 2026-07-31:
+`movement_speed`, physics/entity side, 2026-07-31:
 `lodestone-entity::attribute`'s `movement_speed_key_matches_the_registry_id`
 and `movement_speed_folds_a_speed_ii_modifier_onto_the_player_base` (the
 wire-shaped fold, mirroring the Depth Strider worked example).
