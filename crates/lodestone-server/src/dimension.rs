@@ -29,18 +29,21 @@
 //!
 //! * **The End** ([`Dimension::End`]) has its geometry here, its generator in
 //!   `lodestone_worldgen::end`, its [`crate::chunk::ChunkSource`] in
-//!   [`crate::chunk::EndChunkSource`], and is now wired into
+//!   [`crate::chunk::EndChunkSource`], and is wired into
 //!   [`with_nether`](crate::integrated)'s sibling factory the same way the
 //!   Nether is — a world can `sibling(Dimension::End)` into real End terrain.
-//!   **What is still missing is the trigger**: no code anywhere ignites an
-//!   end-portal-frame ring or teleports a player who steps into an
-//!   `end_portal` block, so no player can reach it through play yet. The travel
-//!   path deliberately does *not* generalise `travel_through_portal` to the End:
-//!   an End portal is not a coordinate-scaled trip (it lands at a fixed
-//!   obsidian platform, [`Dimension::end_spawn_point`],
+//!   **The trigger now exists too**: [`crate::portal::ignite_end_portal_frame`]
+//!   fires on the eye that completes a 12-frame ring, and `crate::server`'s
+//!   `travel_through_end_portal` moves a player who steps into the resulting
+//!   `end_portal` block. It deliberately does *not* generalise
+//!   `travel_through_portal`: an End portal is not a coordinate-scaled trip, it
+//!   lands at a fixed obsidian platform ([`Dimension::end_spawn_point`],
 //!   [`crate::portal::ensure_end_platform`]), so reusing the Nether's
-//!   destination search would put players inside the void. See issue #330's
-//!   tracking comment for the precise remaining diff.
+//!   destination search would put players inside the void. **What remains** is
+//!   the stronghold generator (no ring is placed naturally yet — a hand-built
+//!   one is the only way in) and the return trip from inside the End, which
+//!   needs the exit portal and the dragon fight. See issue #330's tracking
+//!   comment for the session history.
 //! * **`coordinate_scale` is a ratio, never a constant.** `teleport_scale` is
 //!   `from / to`, so the overworld→Nether trip divides by 8 and the return trip
 //!   multiplies by 8 *through the same expression*. A "divide by 8" written at one
@@ -79,12 +82,15 @@ use crate::chunk::{ChunkColumn, ChunkSource};
 ///
 /// **The End's geometry is real** (transcribed from
 /// `data/minecraft/dimension_type/the_end.json`), its generator and
-/// [`crate::chunk::EndChunkSource`] exist, and `crate::integrated`'s
-/// `with_nether` now wires `Dimension::End` into a [`DimensionalSource`]'s
-/// sibling factory the same way it does the Nether. **A player still cannot
-/// reach it**: nothing anywhere ignites an end-portal-frame ring or teleports a
-/// player who steps into an `end_portal` block. See issue #330's tracking
-/// comment for exactly what remains.
+/// [`crate::chunk::EndChunkSource`] exist, `crate::integrated`'s `with_nether`
+/// wires `Dimension::End` into a [`DimensionalSource`]'s sibling factory the
+/// same way it does the Nether, and a player **can** reach it: an eye of ender
+/// placed into a completed frame ring ([`crate::portal::ignite_end_portal_frame`])
+/// opens an `end_portal`, and stepping into it travels there
+/// (`crate::server`'s `travel_through_end_portal`). There is no stronghold
+/// generator, so nothing places a ring naturally yet, and the return trip from
+/// inside the End is unimplemented pending the exit portal and the dragon
+/// fight. See issue #330's tracking comment for the session history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Dimension {
     /// `minecraft:overworld`.
