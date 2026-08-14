@@ -4227,6 +4227,57 @@ impl<'w> MobSim<'w> {
         moved
     }
 
+    /// Spawns a wandering trader at `pos` with 1–2 leashed llama escorts —
+    /// the entity-spawn half of vanilla `WanderingTraderSpawner.spawn`
+    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java:75-120`).
+    /// Returns the trader's id and every llama actually spawned.
+    ///
+    /// **This is only the "given a spawn position, create the entity group"
+    /// half.** `WanderingTraderSpawner` itself is a `CustomSpawner` driven by
+    /// the world tick with its own 1200-tick poll, a 24000-tick base delay,
+    /// a climbing 25→75% chance, a player-anchored 48-block search for a
+    /// `PoiTypes.MEETING` point (falling back to the player), and a
+    /// `BiomeTags.WITHOUT_WANDERING_TRADER_SPAWNS` exclusion — none of which
+    /// exists in this crate. That whole cycle belongs beside
+    /// [`crate::mob_spawn`]'s existing per-species natural-spawn cap/timer
+    /// engine, a file outside this pass's ownership; see this session's
+    /// broker note (wandering trader spawn cycle) for the exact shape a
+    /// caller there needs.
+    ///
+    /// **Simplified escort placement.** Vanilla's `tryToSpawnLlamaFor`
+    /// searches up to 10 candidate positions within 4 blocks and can fail to
+    /// find space, so "2 attempts" does not guarantee 2 llamas. This always
+    /// places both at fixed offsets (`+2, 0, 0` and `-2, 0, 0` from the
+    /// trader) with no space check — this sim has no per-cell obstruction
+    /// query at the `MobSim` level the way vanilla's `BlockGetter` does, and
+    /// two llamas beside an already-chosen valid trader spawn are the common
+    /// case in practice.
+    ///
+    /// **Wares are not generated.** `WanderingTrader.updateTrades` builds
+    /// its offer list from `TradeSets.WANDERING_TRADER_{BUYING,UNCOMMON,COMMON}`
+    /// — this crate has no merchant-offer/trade-table model at all yet (see
+    /// the villager-trading work this is deliberately distinct from). A
+    /// spawned trader here has no wares and cannot be traded with.
+    pub fn spawn_wandering_trader(&mut self, pos: Vec3) -> (i32, Vec<i32>) {
+        let trader_id = self
+            .spawn_species("minecraft:wandering_trader".parse().expect("valid key"), pos)
+            .id();
+        let mut llamas = Vec::new();
+        for dx in [2.0, -2.0] {
+            let llama_id = self
+                .spawn_species(
+                    "minecraft:trader_llama".parse().expect("valid key"),
+                    Vec3::new(pos.x + dx, pos.y, pos.z),
+                )
+                .id();
+            self.get_mut(llama_id)
+                .expect("just spawned")
+                .set_leash_holder(Some(LeashHolder::Mob(trader_id)));
+            llamas.push(llama_id);
+        }
+        (trader_id, llamas)
+    }
+
     pub fn interact(
         &mut self,
         mob_id: i32,
@@ -10092,6 +10143,76 @@ mod leash_tests {
             sim.get(c).expect("spawned").leash_holder(),
             Some(LeashHolder::Player(other_holder)),
             "a mob leashed to a different player must be untouched"
+        );
+    }
+}
+
+/// Issue #240's entity-spawn slice: the trader plus its leashed llama
+/// escort. The spawn-cycle timing/POI search is out of scope here — see
+/// `spawn_wandering_trader`'s own doc comment.
+#[cfg(test)]
+mod wandering_trader_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    #[test]
+    fn spawning_a_wandering_trader_leashes_two_llamas_to_it() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+
+        let (trader_id, llamas) = sim.spawn_wandering_trader(Vec3::new(10.0, 5.0, 10.0));
+
+        assert_eq!(llamas.len(), 2, "vanilla attempts exactly two escorts");
+        let trader = sim.get(trader_id).expect("trader spawned");
+        assert_eq!(trader.entity_type().path(), "wandering_trader");
+
+        for llama_id in llamas {
+            let llama = sim.get(llama_id).expect("llama spawned");
+            assert_eq!(llama.entity_type().path(), "trader_llama");
+            assert_eq!(
+                llama.leash_holder(),
+                Some(LeashHolder::Mob(trader_id)),
+                "each llama must be leashed to the trader, not merely placed near it"
+            );
+        }
+    }
+
+    /// **The leash is real, not cosmetic** — moving the trader and ticking
+    /// leashes must pull an escort that has drifted past the elastic
+    /// distance, exactly as it would for a player-held leash. This is the
+    /// control that separates "the llama has a `leash_holder` field set" from
+    /// "the llama is actually tethered".
+    #[test]
+    fn the_escort_leash_actually_pulls_when_the_trader_moves_away() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let (trader_id, llamas) = sim.spawn_wandering_trader(Vec3::new(0.0, 0.0, 0.0));
+        let llama_id = llamas[0];
+
+        // Drag the trader far enough that the escort (2 blocks from spawn,
+        // at x=2) is past LEASH_ELASTIC_DIST (6) from it but still short of
+        // LEASH_TOO_FAR_DIST (12), so this exercises the *pull* branch —
+        // distance 8, not the snap branch a farther drag would hit instead.
+        // There is no teleport API, so drive it through a knockback impulse
+        // large enough to land at the target position deterministically.
+        let trader_pos = sim.get(trader_id).expect("spawned").position();
+        let target = Vec3::new(10.0, 0.0, 0.0);
+        sim.get_mut(trader_id).expect("spawned").apply_knockback(Vec3::new(
+            target.x - trader_pos.x,
+            target.y - trader_pos.y,
+            target.z - trader_pos.z,
+        ));
+        assert_eq!(sim.get(trader_id).expect("spawned").position(), target);
+
+        let llama_before = sim.get(llama_id).expect("spawned").position();
+        sim.tick_leashes();
+        let llama_after = sim.get(llama_id).expect("still spawned").position();
+        assert_ne!(
+            llama_before, llama_after,
+            "the llama must move toward its holder once the trader is far enough away"
         );
     }
 }

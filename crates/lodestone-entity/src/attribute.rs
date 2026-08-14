@@ -813,6 +813,16 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("attack_damage", 4.0),
             ],
         },
+        // `Villager.createAttributes()` (`npc/villager/Villager.java:227-229`) —
+        // the only override `AbstractVillager`'s hierarchy declares.
+        // `WanderingTrader` has no `createAttributes` of its own, so it
+        // inherits this: `max_health`/`attack_damage`/`armor` stay at the
+        // generic `Mob` defaults, and only `movement_speed` differs from
+        // this sim's own `DEFAULT_FOLLOW_RANGE`-style fallback.
+        "wandering_trader" => TypeSpec {
+            template: BaseTemplate::Mob,
+            overrides: &[("movement_speed", 0.5)],
+        },
         "spider" => TypeSpec {
             template: BaseTemplate::Monster,
             overrides: &[("max_health", 16.0), ("movement_speed", 0.3)],

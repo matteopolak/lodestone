@@ -1085,6 +1085,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   types, a permission node on any node gating it and its whole subtree, tab
   completion, and a dispatcher that resolves an input string and runs a handler with
   `&mut World`.
+- [Plugin data directory, config, and persistent key-value storage](./plugin-data-and-config.md) —
+  `crates/plugins/lodestone-plugin-support` — shared, non-engine conveniences every
+  native plugin would otherwise reimplement for itself: a per-plugin data directory
+  and typed config file (mirroring `JavaPlugin.getDataFolder()`/`getConfig()`), and an
+  in-memory, namespaced key-value store attachable to an entity or a chunk (the
+  non-persistent half of a persistent data container, mirroring Bukkit's
+  `PersistentDataContainer`/`Metadatable.setMetadata`). Neither is engine surface —
+  deleting this crate leaves a working client, per `crates/plugins/README.md`'s own
+  test for what belongs under `crates/plugins/`.
 - [Plugin registration — how a consumer gets their plugin into the client](./plugin-registration.md) —
   The seam that lets a crate outside this repo register a `bevy_app::Plugin` into
   Lodestone's client, headless *or* rendered. `lodestone-app`'s `client_app()` returns
@@ -1605,6 +1614,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   save-format **`DataVersion`**, and its **release date**:
 - [View bobbing, the damage tilt, and view lag](./view-bobbing.md) — Three separate
   mechanisms that a screenshot makes look like one:
+- [Wandering trader (issue #240)](./wandering-trader.md) — The entity-spawn slice of
+  the wandering trader: `MobSim::spawn_wandering_trader` spawns a real
+  `minecraft:wandering_trader` with 1–2 `minecraft:trader_llama` escorts leashed to
+  it, ported from the entity-creation half of vanilla `WanderingTraderSpawner.spawn`
+  (`.cache/mc/26.2/src/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java`).
+  **This is a partial implementation** — see "What is not implemented" below, which
+  is most of the issue's own scope.
 - [The WASM plugin host — runtime plugin loading](./wasm-plugin-host.md) —
   Lodestone's second plugin tier: `crates/lodestone-wasm-host` embeds `wasmtime`,
   loads a WebAssembly component from a **file on disk at runtime**, and drives it
@@ -1685,6 +1701,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   driver's (`lodestone_shell::sim::Sim`). It now holds **one**, behind
   `lodestone_ecs::EcsHandle = Arc<parking_lot::RwLock<World>>`, and that one `World`
   carries **one** `GameTick` schedule driven by **one** 20 Hz accumulator.
+- [Bulk-edit (WorldEdit-class) region API](./worldedit-plugin.md) —
+  `crates/plugins/lodestone-worldedit` — a WorldEdit-class plugin: region
+  fill/replace with a per-session undo/redo stack, built entirely on top of
+  `lodestone_world::World::fill_region_capturing` and
+  `lodestone_ecs::ChunkWorldWrite`, with no engine change of its own beyond the
+  batched-write primitive that backs it. "This is a *second* plugin, conceptually —
+  WorldEdit itself is a plugin in the Java ecosystem, not a server feature"; every
+  region-selection/undo-shaped concern lives here rather than in `lodestone-world` or
+  `lodestone-ecs`.
 - [The beardifier — terrain adaptation under structures (worldgen phase S3)](./worldgen-beardifier.md) —
   The density term that reshapes terrain under an adaptation-bearing structure: it
   grows a flat foundation ("beard") up to a village house's floor, and swallows a
