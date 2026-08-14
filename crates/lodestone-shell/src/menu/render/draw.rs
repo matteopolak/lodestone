@@ -518,6 +518,41 @@ pub fn build(
             }
             continue;
         }
+        // A tab-bar row (issues #564/#567) is tested here, before the
+        // `row.slot.is_some()` gate below, rather than nested inside it —
+        // **that nesting was a real, pre-existing island**: a tab row never
+        // carries a `slot` (its rect comes from `row.tab`'s own dedicated
+        // `row_rect` arm, not a generic `Slot`), so `row.slot.is_some()` is
+        // always `false` for one and the whole `draw_tab` call this used to
+        // gate on it was dead code from the moment it landed — every tab row
+        // silently fell through to the *un-slotted* "centred stack" path
+        // several dozen lines below and drew as a plain `draw_widget` button
+        // sized to the tab's own (correctly resolved) rect, with none of
+        // `draw_tab`'s sprite selection, underline or label-drop. That is
+        // the shape of the owner's report ("way too big... not designed the
+        // same way as vanilla") much better than a missing separator does,
+        // and it is exactly `CLAUDE.md`'s island pattern: individually
+        // correct, registered, and reaching zero of its own pixels because
+        // nothing on the only path that could reach it was true for it.
+        // Caught by `render/tests.rs`'s own point-sampled tab-mesh gates,
+        // which is what a frame-construction-only test (`stats.rs`'s/
+        // `create_world.rs`'s own `#[cfg(test)]`s) structurally cannot see —
+        // they build a `MenuFrame` and never ask `draw`/`geometry` to
+        // rasterise it.
+        if let Some(tab) = row.tab.as_ref() {
+            if let Some((x, y, w, h)) = row_rect(&frame.rows, i, width, height) {
+                let hovered = frame
+                    .cursor
+                    .is_some_and(|(mx, my)| mx >= x && mx <= x + w && my >= y && my <= y + h);
+                // Whether this bar's selected tab should merge with a
+                // content panel below it — only when this screen actually
+                // has one (`chrome`, computed above from `frame.list`). See
+                // `draw_tab`'s own doc for why this is a bool and not the
+                // rect itself.
+                draw_tab(&mut b, row, tab, x, y, w, h, width, chrome.is_some(), hovered);
+            }
+            continue;
+        }
         if row.slot.is_some() {
             // **A slotted row that is a list entry is clipped to the band too**, and
             // `clip_band` above is already `Some` for it. The three list screens handled
@@ -572,25 +607,6 @@ pub fn build(
                     None => {
                         draw_pack_entry(&mut b, &frame.rows, i, width, height, selected, cursor);
                     }
-                }
-                continue;
-            }
-            // One tab of the Statistics screen's tab bar (issue #564). Tested
-            // here for `MenuRow::pack`'s exact reason — its rect *is* the slot,
-            // via `Origin::Stats` — and not clipped, since `Origin::Stats` reports
-            // `false` from `is_scrolling_list_row` (the tab strip sits above the
-            // band, not in it).
-            if let Some(tab) = row.tab.as_ref() {
-                if let Some((x, y, w, h)) = row_rect(&frame.rows, i, width, height) {
-                    let hovered = frame
-                        .cursor
-                        .is_some_and(|(mx, my)| mx >= x && mx <= x + w && my >= y && my <= y + h);
-                    // Whether this bar's selected tab should merge with a
-                    // content panel below it — only when this screen actually
-                    // has one (`chrome`, computed above from `frame.list`).
-                    // See `draw_tab`'s own doc for why this is a bool and not
-                    // the rect itself.
-                    draw_tab(&mut b, row, tab, x, y, w, h, width, chrome.is_some(), hovered);
                 }
                 continue;
             }

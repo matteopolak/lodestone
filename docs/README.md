@@ -1778,8 +1778,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   #190): vanilla's `CreateWorldScreen`, reached from the world list's "Create New
   World" button (`crates/lodestone-shell/src/menu/world_select.rs`'s
   `WorldSelectButton::Create`, now live — issue #397 left it present-and-disabled
-  deliberately for this issue). Collects a world name, seed, game mode, difficulty,
-  and three toggles (generate structures, bonus chest, allow cheats).
+  deliberately for this issue). Collects a world name, seed, world type, game mode,
+  difficulty, three toggles (generate structures, bonus chest, allow cheats), and
+  online mode, across vanilla's own three tabs (issue #567).
 - [World-open latency in singleplayer](./world-open-latency.md) — The two orderings
   that made opening a singleplayer world feel broken — *"it takes forever to load
   and the chunks generated are not close to me"* — and how they were fixed. Mob

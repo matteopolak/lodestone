@@ -1544,6 +1544,22 @@ pub fn tab_bar_geometry(width: f32, tab_count: usize) -> (f32, f32) {
     (start_x, tab_width)
 }
 
+/// The pixel rect of tab `index` of `count` at canvas `width` — [`tab_bar_geometry`]
+/// plus the per-tab offset, in one place so a **second** screen's tab bar cannot
+/// drift from the first's arithmetic.
+///
+/// This is what makes the tab widget actually shared rather than merely
+/// duplicated: before this existed, [`super::render::row_rect`]'s `MenuRow::tab`
+/// arm called `super::stats::tab_row_rect` directly, so a second consumer of the
+/// same [`super::render::TabEntryView`] (Create New World, issue #567) had no
+/// generic geometry to resolve against — only Statistics's own screen-specific
+/// wrapper. Both screens' own `tab_row_rect` helpers now call this.
+#[must_use]
+pub fn tab_bar_row_rect(index: usize, count: usize, width: f32) -> (f32, f32, f32, f32) {
+    let (start_x, tab_width) = tab_bar_geometry(width, count);
+    (start_x + tab_width * index as f32, 0.0, tab_width, TAB_BAR_HEIGHT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2064,5 +2080,32 @@ mod tests {
         let (_, width_zero_guarded) = tab_bar_geometry(854.0, 0);
         assert_eq!(width_one, width_zero_guarded);
         assert_eq!(width_one, round_toward(372.0, 2.0));
+    }
+
+    /// [`tab_bar_row_rect`] must agree with [`tab_bar_geometry`] plus the
+    /// per-tab offset — the shared function two screens' own `tab_row_rect`
+    /// wrappers (`stats::tab_row_rect`, `create_world::tab_row_rect`) now
+    /// resolve through, at a tab count neither of those screens uses (5), so
+    /// this is not merely re-deriving `3` twice.
+    #[test]
+    fn tab_bar_row_rect_matches_geometry_plus_the_per_tab_offset() {
+        let width = 854.0;
+        let count = 5;
+        let (start_x, tab_width) = tab_bar_geometry(width, count);
+        for i in 0..count {
+            let rect = tab_bar_row_rect(i, count, width);
+            assert_eq!(
+                rect,
+                (start_x + tab_width * i as f32, 0.0, tab_width, TAB_BAR_HEIGHT)
+            );
+        }
+        // The discriminating control: two different tab counts at the same
+        // width must not produce the same row rect for the same index, or
+        // this function is silently ignoring `count`.
+        let (start_x_3, tab_width_3) = tab_bar_geometry(width, 3);
+        assert_ne!(
+            tab_bar_row_rect(1, count, width),
+            (start_x_3 + tab_width_3, 0.0, tab_width_3, TAB_BAR_HEIGHT)
+        );
     }
 }

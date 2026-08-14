@@ -29,6 +29,53 @@ present-and-inactive.
 > "Statistics" heading vanilla never draws), and its cause was the *frame*
 > gap this section used to describe, not a missing stamp. See
 > [The tab widget](#the-tab-widget-issue-564) for what changed.
+>
+> **Fourth update (issue #567): `draw_tab` had never actually run — an
+> island from the moment it landed — plus Done's own hover outline and a real
+> vanilla visual audit.** The owner's report ("the tabs are way too big and
+> are not designed the same way as vanilla... they are supposed to mesh with
+> the border and change when selected") sent an audit that found something
+> more basic than a missing separator: `draw`'s tab-row branch
+> (`if let Some(tab) = row.tab.as_ref())` was nested **inside**
+> `if row.slot.is_some()`, and a tab row never carries a `slot` (its rect
+> comes from `row.tab`'s own dedicated `row_rect` arm, not a generic `Slot`)
+> — so the branch was unreachable from the moment issue #564 added it, and
+> every tab row silently fell through to the un-slotted "centred stack" path
+> and drew as a **plain button** (`draw_widget`, vanilla's `widget/button`
+> art) sized to the tab's own correctly-resolved rect, with none of
+> `draw_tab`'s sprite selection, underline or label-drop. That is a much
+> better match for "too big, not designed like vanilla" than a missing
+> separator line is, and it is `CLAUDE.md`'s island pattern in its purest
+> form: correct, registered, unit-tested green at the frame-construction
+> level (`stats.rs`'s/`create_world.rs`'s own tests build a `MenuFrame` and
+> never ask `draw`/`geometry` to rasterise it, so neither could see this),
+> and reaching zero of its own pixels because the one path that could reach
+> it was gated on a field the row never sets. Moved to a top-level sibling
+> check (matching `MenuRow::entry`/`account`/`world`, none of which need a
+> slot either) — see `draw.rs`'s own comment at the fixed call site.
+>
+> Two more things landed in the same pass, now that `draw_tab` is actually
+> reachable: (1) `frame` never set `MenuFrame::hovered`, so Done — this
+> screen's only real button — never drew a hover outline regardless of where
+> the mouse was, the same defect shape as #567's own Create-New-World report,
+> found here by auditing the sibling consumer of the same widget; (2) the tab
+> strip did not "mesh with the border" the way real vanilla's does — a
+> full-width divider used to run under the *entire* bar (including the
+> selected tab, which vanilla never draws a line under), and the selected
+> tab's own bottom edge never merged with the content panel below it
+> (`MenuTabButton.renderMenuBackground`, not previously ported). Both are
+> fixed in `render/draw.rs`'s `draw_tab` and the `render.rs` band chrome it
+> now coordinates with — see [The tab widget](#the-tab-widget-issue-564) for
+> the geometry generalisation that made a *second* consumer possible in the
+> first place, and for what "meshes" means concretely.
+>
+> **The discriminator that caught it**: two new point-sampled `render/
+> tests.rs` gates (below) built through the real `frame_for` dispatch and
+> asked `colour_at` what was actually painted at the flanks and under the
+> selected tab — both failed with "got None" at every sample, which is what
+> led to the trace rather than a guess. Fixed, both pass; the failing run
+> before the fix is the neuter this repo's evidence standards ask for, not a
+> constructed one.
 
 ## How it works
 
@@ -165,17 +212,101 @@ separately. Worth checking the same smell elsewhere: `error_frame`,
 `credits_frame`, and the accounts pending/failed frames all still hard-code
 `selected: 0` on a single-button frame (see "What is deliberately not built").
 
+## Done's own hover outline (issue #567's audit)
+
+A second, separate gap from the tab widget itself, found while auditing this
+screen as the tab widget's other consumer: `frame` never set `MenuFrame::
+hovered`, and `MenuNav::hover` had no `Screen::Statistics` arm at all, so
+`draw_widget`'s `widget.hovered` was `false` for Done on every frame
+regardless of the cursor — the exact defect shape issue #567 reported and
+fixed for Create New World, just never noticed here because nobody moved the
+mouse over Done while looking closely. `StatsNav` now carries a `hovered:
+Option<usize>` and `hover_row`, wired through `MenuNav::hover`'s new
+`Screen::Statistics` arm; the tab bar itself needed no equivalent, since
+`draw_tab`'s hover is derived straight from `MenuFrame::cursor` and the tab's
+own rect rather than from row-hover bookkeeping (see [the tab
+widget](#the-tab-widget-issue-564) below).
+
 ## The tab widget (issue #564)
 
 Built once in `menu/widget.rs` (`TAB_SPRITES`, `tab_underline_colour`,
 `tab_label_dy`) and `menu/layout.rs` (`TAB_BAR_HEIGHT`, `tab_bar_geometry`,
-`round_toward`), for both this screen and Create New World to share — see
-[World Creation screen](./world-creation-screen.md) for why the latter does
-not yet use it. `menu/render/draw.rs`'s `draw_tab` is the draw side; it is
-selected by `MenuRow::tab: Option<TabEntryView>` (in `menu/render/frame.rs`),
-tested the same way `MenuRow::pack` is — before `slot`, because its rect *is*
-the slot (`stats::tab_row_rect`, via `render::row_rect`'s own arm; a `Slot`
-cannot express a `min(400, width)`-clamped row width).
+`round_toward`), for both this screen and [Create New
+World](./world-creation-screen.md) to share — issue #567 made Create New
+World the second real consumer. `menu/render/draw.rs`'s `draw_tab` is the
+draw side; it is selected by `MenuRow::tab: Option<TabEntryView>` (in
+`menu/render/frame.rs`) as a **top-level** check in `draw`'s row loop,
+alongside `MenuRow::entry`/`account`/`world` — none of the four need a
+`slot`, which is exactly why it must not be nested inside `draw`'s
+`row.slot.is_some()` branch the way `MenuRow::pack` legitimately is (a pack
+row's rect really is its slot; a tab row's is not, it comes from a dedicated
+`row_rect` arm keyed on `row.tab` instead). See the next paragraph for what
+went wrong when it briefly was nested there.
+
+**It was dead code from the day it landed, and this is worth reading in
+full.** Issue #564's original `draw_tab` call was written nested inside
+`if row.slot.is_some()`, alongside `MenuRow::pack`'s (legitimately-nested)
+check — a plausible place to put it, since both were "tested here for
+`MenuRow::pack`'s exact reason". But a tab row's `MenuRow::slot` is always
+`None`, so that condition was always `false` for one, and the branch never
+ran: every tab row silently fell through to the screen's *un-slotted*
+"centred stack" path several dozen lines further down and drew as a plain
+`draw_widget` button (vanilla's `widget/button` art) sized to the tab's own
+correctly-resolved rect. No test caught it, because every existing test of
+this screen's tabs (`stats.rs`'s own `#[cfg(test)]`s) builds a `MenuFrame`
+and asserts on its *rows*, never asking `draw`/`geometry` to rasterise it —
+a frame-construction test structurally cannot see a draw-dispatch bug.
+Found by the two point-sampled `render/tests.rs` gates below, built through
+the real `frame_for` production path: both failed with "got None" at every
+sample point, which is what led to tracing the dispatch rather than guessing
+at a missing separator. Fixed by moving the check to the top level, as
+described above.
+
+**The geometry is now screen-agnostic.** `row_rect`'s `MenuRow::tab` arm used
+to call `stats::tab_row_rect` *by name* — harmless while this screen was the
+only consumer, and a hard-coded dependency the moment Create New World became
+a second one. `TabEntryView` now carries its own `count` (how many tabs this
+bar has) alongside `index`, and `layout::tab_bar_row_rect(index, count,
+width)` is the one function both screens' own `tab_row_rect` wrappers resolve
+through — `row_rect` calls it directly, off the row's own fields, knowing
+nothing about which screen produced it.
+
+**The bar now meshes with the border, matching real vanilla (issue #567's
+visual audit).** Two things `draw_tab` did not port before, both now real:
+
+- **The flanking header separator.** `MenuTabBar.extractWidgetRenderState`
+  blits `Screen.HEADER_SEPARATOR` in exactly two places — before the first
+  tab and after the last — never under any tab. `draw_tab` draws these two
+  segments itself, on the bar's first and last tab respectively (`tab.index
+  == 0` / `tab.index + 1 == tab.count`), reusing the same decoded
+  `SEPARATOR_LIGHT`/`SEPARATOR_DARK` pair `render.rs`'s generic band chrome
+  already uses for the *content* header/footer. That generic chrome's own
+  **header** pair is now suppressed whenever the frame has a tab bar at all
+  (`draw`'s own `frame.rows.iter().any(|r| r.tab.is_some())` check) — it used
+  to run full-width under the entire strip, including the selected tab,
+  which is exactly the "not designed the same way as vanilla" the owner
+  reported.
+- **The selected tab's panel merge.** `MenuTabButton.renderMenuBackground`
+  fills the selected tab's own inset body (`x+2, y+2` through `right-2,
+  bottom`) with the same surface the content panel below is drawn on, so its
+  bottom edge visually disappears into the panel. This client has no tiled
+  `menu_background.png`-equivalent texture, so the merge reuses
+  `LIST_BAND_TINT` — the *same* flat colour the content band immediately
+  below a tab bar is already tinted with, gated on `merges_with_band` (`true`
+  only when `frame.list` produced band chrome — Statistics has one, Create
+  New World does not, so its tab bar never paints a merge fill with nothing
+  to merge into).
+
+Both are point-sampled gates in `render/tests.rs`
+(`the_statistics_tab_bar_meshes_selected_tab_only_and_the_flanks_carry_the_header_separator`,
+`create_worlds_tab_bar_gets_the_flanking_separators_but_never_the_merge_fill`)
+— `colour_at`, not a vertex-in-rect probe, since a large enclosing fill (the
+merge panel) is exactly what a `band_coverage`-style probe cannot see (it
+counts vertices *inside* a small rect, and an enclosing quad contributes
+none). The first gate also asserts the selected tab's own bottom edge
+(`layout::TAB_BAR_HEIGHT`) and the content band's own top
+(`ListSpec::model(..).top()`) are the same coordinate, derived from both
+sides' real expressions rather than two copies of the literal `24.0`.
 
 `frame` now emits one real `MenuRow` per `TAB_LABELS` entry (`["General",
 "Items", "Mobs"]`), not a `MenuLabel` each — real `widget/tab*` sprites keyed
@@ -263,8 +394,9 @@ None — this screen has no persisted state of its own.
   non-`OptionsList` screens. **Not** `SUB_HEADER_HEIGHT`/`WIDGET_H` any more —
   see [The tab widget](#the-tab-widget-issue-564) for why this screen's own
   `HEADER_HEIGHT`/`ROW_H` replaced them.
-- `menu/layout.rs` — `TAB_BAR_HEIGHT`, `tab_bar_geometry`, shared with Create
-  New World's own tab strip once it exists.
+- `menu/layout.rs` — `TAB_BAR_HEIGHT`, `tab_bar_geometry`,
+  `tab_bar_row_rect`, now genuinely shared with [Create New
+  World](./world-creation-screen.md)'s own tab strip (issue #567).
 - `menu/widget.rs` — `TAB_SPRITES`, `tab_underline_colour`, `tab_label_dy`.
 - The 26.2 jar's `assets/minecraft/lang/en_us.json` for every caption
   verbatim (`stat.minecraft.*`, `gui.stats`).
