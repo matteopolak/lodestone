@@ -255,7 +255,7 @@ async fn join<T: Transport>(
     client.write_packet(0, &hello_bytes(name, uuid)).await.unwrap();
     let mut seen = Vec::new();
     // login_finished
-    if let Ok(Some(p)) = client.read_packet().await {
+    if let Ok(Some(p)) = common::read_login_packet(client).await {
         seen.push(p);
     }
     client
@@ -263,7 +263,7 @@ async fn join<T: Transport>(
         .await
         .unwrap();
     // finish_configuration
-    if let Ok(Some(p)) = client.read_packet().await {
+    if let Ok(Some(p)) = common::read_login_packet(client).await {
         seen.push(p);
     }
     client

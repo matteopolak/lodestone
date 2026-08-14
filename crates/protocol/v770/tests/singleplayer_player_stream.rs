@@ -32,11 +32,13 @@ use std::time::Duration;
 use lodestone_core::{Decode, Reader, Writer};
 use lodestone_net::{Connection, Transport};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
-use lodestone_testsupport::unique_username;
 use lodestone_v770::V770ServerProtocol;
 use lodestone_v770::packet_ids::{configuration, login, play};
 use lodestone_v770::packets::player_info::PlayerInfoUpdate;
 use uuid::Uuid;
+
+mod common;
+use common::unique_username;
 
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
@@ -103,14 +105,14 @@ async fn join<T: Transport>(client: &mut Connection<T>, name: &str, uuid: Uuid) 
     client.write_packet(0, &handshake_bytes()).await.unwrap();
     client.write_packet(0, &hello_bytes(name, uuid)).await.unwrap();
     let mut seen = Vec::new();
-    if let Ok(Some(p)) = client.read_packet().await {
+    if let Ok(Some(p)) = common::read_login_packet(client).await {
         seen.push(p);
     }
     client
         .write_packet(login::serverbound::LOGIN_ACKNOWLEDGED, &[])
         .await
         .unwrap();
-    if let Ok(Some(p)) = client.read_packet().await {
+    if let Ok(Some(p)) = common::read_login_packet(client).await {
         seen.push(p);
     }
     client
