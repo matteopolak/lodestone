@@ -186,15 +186,23 @@ All four are exercised end-to-end through the real `dispatch_play_packet`/`serve
 loop in `crates/lodestone-server/tests/serve_play.rs`, using that file's own hermetic
 `FakeProtocol` (own wire format, `ServerBound` constructed directly in its `decode` —
 the same pattern the pre-existing `difficulty_change_is_confirmed_back_to_the_connection`
-test already used for issue #268). What this **cannot** prove, and what the `connected`
-figure above correctly still reflects as `13/69`: a real vanilla client's bytes still
-decode to `ServerBound::Ignored` for all four, because
-`crates/protocol/v770/src/server_protocol.rs`'s own arms (`server_protocol.rs:1406`,
-`:1610`, `:1614`, `:1618` as of this writing) still discard the parsed fields with
-`let _ = decoded;` and unconditionally return `Ignored`. Flipping that is a small,
-mechanical edit per arm — swap the discarded local for the new `ServerBound` variant —
-but it is a protocol-crate edit, so it is not done here. See #266 and #270's own tracker
-comments for the exact before/after arm text.
+test already used for issue #268). At the time this section was written, what this
+**could not** prove was that a real vanilla client's bytes decoded to anything but
+`ServerBound::Ignored` for all four, because
+`crates/protocol/v770/src/server_protocol.rs`'s own `V770ServerProtocol::decode` arms for
+`SET_CREATIVE_MODE_SLOT`, `CLIENT_COMMAND`, `CLIENT_INFORMATION` and
+`CHUNK_BATCH_RECEIVED` still discarded the parsed fields with
+`let _ = decoded;` and unconditionally returned `Ignored`.
+
+**That has since changed.** All four arms now match on the decoded payload and construct
+their real `ServerBound` variant (`CreativeModeSlotSet`, `ClientCommand`,
+`ClientInformationChanged`, `ChunkBatchAcknowledged`) instead of discarding it — confirmed
+directly against the current source, not carried forward from this section's original
+claim. The `CLIENT_INFORMATION`/`CHUNK_BATCH_RECEIVED` half of that fix is dated and
+measured in ["`connected` moved to 15/69"](#connected-moved-to-1569-client_informationchunk_batch_received-were-dead-code-decode-arms-2026-08-04)
+above; the `SET_CREATIVE_MODE_SLOT`/`CLIENT_COMMAND` half landed later still and is not
+otherwise dated in this doc. Re-run `cargo xtask connectedness` before quoting a
+`connected` figure from this section — it predates both fixes.
 
 `v47`/`v340`/`v735` were **never measured before today** — `xtask`'s connectedness scanner
 had a hard `if family != "v770" { continue; }` while its own header claimed to take
@@ -255,7 +263,7 @@ real `ServerBound` variant) and does not know which issue a given packet id belo
 ### Decoded-but-stranded: `CHUNK_BATCH_START`, and why it isn't actually a defect
 
 `xtask`'s one flagged island is `CHUNK_BATCH_START`. On inspection
-(`crates/protocol/v770/src/adapter.rs:2030-2034`) the arm calls a real
+(`crates/protocol/v770/src/adapter/chunk.rs`) the arm calls a real
 `self.begin_chunk_batch()` — it starts the rate-timing window that `CHUNK_BATCH_FINISHED`
 closes and reports back via `chunk_batch.rs`'s vanilla-matching `ChunkBatchSizeCalculator`.
 It emits zero `ClientEvent`s, which is all the heuristic can see, but it is not an
@@ -563,7 +571,7 @@ the part this project has already been burned by once.
 
 - **`Directive::BeginEncryption` having "no handler at all" is stale.** It was true when
   written but issue #65 ("Wire lodestone-auth into the join flow so online-mode servers
-  work") closed that gap — `crates/lodestone-client/src/driver.rs:316` has a real
+  work") closed that gap — `Driver::execute` (`crates/lodestone-client/src/driver.rs`) has a real
   `BeginEncryption` arm today, exercised by `crates/lodestone-client/tests/online_mode_handshake.rs`.
   The client-side crypto path is verified end to end against a real vanilla server per
   `docs/accounts.md`; the actual remaining gap in this area is entirely server-side

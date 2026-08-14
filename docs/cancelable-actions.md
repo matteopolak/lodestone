@@ -6,7 +6,7 @@
 protection, anti-grief and anti-cheat plugin actually cancels. A plugin registers a predicate per verb;
 the engine asks *before* it commits, and a `Deny` stops the action before the predictor runs and before
 anything reaches the wire. This is what separates "plugins can read state" from "plugins can be a
-protection plugin". Issue #109.
+protection plugin".
 
 ## How it works
 
@@ -42,7 +42,7 @@ ask site, so a verb losing its wiring fails a test instead of becoming a plugin 
 
 **Why the last two are deferred rather than forced in:**
 
-- `InventoryClick` commits in `SharedState::menu_click` (`state.rs:1048`), which builds the action while
+- `InventoryClick` commits in `SharedState::menu_click` (`state.rs`), which builds the action while
   **holding a write guard** on the `World`. Asking there is legal but wants its own care, and the
   app-layer callers (`app/container_input.rs`) have no `World` access at all.
 - `PlayerInteract` commits in three branches of `Sim::use_item_live`, each of which runs the placement
@@ -56,7 +56,7 @@ become false in either direction.
 
 ### Why a synchronous predicate, and why it gets no `World`
 
-Issue #109 names the constraint itself: *"a plugin system that cancels must not need to re-enter the
+The design constraint itself is: *"a plugin system that cancels must not need to re-enter the
 World to do so"*. Both obvious designs fail it:
 
 - **A `Message` a plugin answers.** The commitment happens inside one system (or one `Sim` method), so a
@@ -87,22 +87,22 @@ predicate, so `allows` returns after **one bit test** when nothing is registered
 That bitset matters because `PlayerMove` is asked on every input change, and the common case is an empty
 registry.
 
-### Relationship to the outbound hook (#157)
+### Relationship to the outbound hook
 
 Two different layers, deliberately:
 
-- `ActionVetoes` (#109) stops a **verb** *before* the predictor runs, so client state never diverges.
-- `EgressFilters` (#157) inspects a **`ClientAction`** at the `ActionQueue` drain, after the fact.
+- `ActionVetoes` stops a **verb** *before* the predictor runs, so client state never diverges.
+- `EgressFilters` inspects a **`ClientAction`** at the `ActionQueue` drain, after the fact.
 
 `EgressFilters` structurally cannot cover attack, use-item or inventory click, because those bypass
 `ActionQueue` and write the socket directly (`docs/outbound-action-hook.md` has the measured list). That
 is precisely why the veto is a separate mechanism at the verb level rather than a special case of the
 hook.
 
-### Closing out issue #101's remaining questions
+### Closing out the remaining design questions
 
-Issue #101 ("Design: event cancellation semantics in an ECS schedule") named four open questions.
-This mechanism answers the first two by construction (a pre-check gate, and "cancelled" is
+The original design question ("event cancellation semantics in an ECS schedule") named four open
+questions. This mechanism answers the first two by construction (a pre-check gate, and "cancelled" is
 absence-of-effect rather than a `bool` a plugin sets or a `Commands`-deferred undo — see "Why a
 synchronous predicate" above). The remaining two:
 
@@ -130,8 +130,7 @@ verb *and* would not by itself have solved the reentrancy constraint that motiva
 the constraint lives in what the predicate is handed, not in how the wrapper is spelled. Verb-keyed
 dispatch was the cheaper generalization for the actual hard part.
 
-**Closed.** Both remaining questions have answers now on record; issue #101 itself is closed
-referencing this document.
+**Closed.** Both remaining questions have answers now on record.
 
 ## How to change it, and the gotchas
 
@@ -179,7 +178,7 @@ check.
 
 ## See also
 
-- [`docs/outbound-action-hook.md`](./outbound-action-hook.md) — issue #157's `ClientAction` layer, and
+- [`docs/outbound-action-hook.md`](./outbound-action-hook.md) — the `ClientAction` layer, and
   the measured list of paths that bypass it.
 - [`docs/plugin-api.md`](./plugin-api.md) — the intent doctrine these verbs sit on top of.
 - [`docs/plugin-async-tasks.md`](./plugin-async-tasks.md) — the same "plugin code never gets a `World`

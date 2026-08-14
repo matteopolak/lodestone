@@ -7,7 +7,7 @@ matching rules (`recipe.rs`), a loader for Mojang's own datapack JSON
 (`recipe_json.rs`), and the crafting-table menu layout that `menus.rs` builds
 when the server opens a `minecraft:crafting` screen.
 
-> **Our own server does this now too** (issue #529) — see
+> **Our own server does this now too** — see
 > [`server-side-crafting.md`](./server-side-crafting.md). Until that landing it
 > stored whatever result the client claimed.
 
@@ -144,9 +144,10 @@ loads it once at GPU bring-up into a `recipe_book: Option<RecipeBook>` field.
 
 **Requires the `json` feature on `lodestone-game`'s dependency edge from
 `lodestone-shell`.** This section previously said that edge was *not yet
-enabled* and named the exact missing line — stale as of issue #163:
-`crates/lodestone-shell/Cargo.toml:35` is now `lodestone-game = { workspace =
-true, features = ["json"] }`. `resources.rs::load_recipe_book` compiles and
+enabled* and named the exact missing line — that has since changed:
+`crates/lodestone-shell/Cargo.toml`'s `lodestone-game` dependency entry is now
+`lodestone-game = { workspace = true, features = ["json"] }`.
+`resources.rs::load_recipe_book` compiles and
 the corpus really does load into the running client; verify with `grep -n
 'features = \["json"\]' crates/lodestone-shell/Cargo.toml` before trusting
 this paragraph either, per this repo's own staleness rule.
@@ -188,8 +189,8 @@ Remaining gaps:
   The other four — `update_recipes`, `recipe_book_add`, `recipe_book_remove`,
   `place_ghost_recipe` — still have no decode and no `ClientEvent`.
 
-  **The blanket "zero hits" claim that stood here was true when written for
-  issue #163 and went stale the moment `fd53995` landed.** Re-run the grep
+  **The blanket "zero hits" claim that stood here was true when written and
+  went stale the moment `fd53995` landed.** Re-run the grep
   rather than trusting this paragraph:
 
   ```
@@ -207,16 +208,17 @@ Remaining gaps:
   `ItemStack.OPTIONAL_STREAM_CODEC`, one carrying a `Holder<TrimPattern>` whose
   `0` discriminator is an inline definition containing a full chat `Component`)
   plus a `RecipeDisplay` dispatcher (5 variants). Recursion is unbounded on the
-  wire and vanilla does not bound it, so a depth cap is required. Measured for
-  issue #436: `grep -rn "SlotDisplay\|RecipeDisplay" --include="*.rs" crates/`
+  wire and vanilla does not bound it, so a depth cap is required. Measured
+  directly: `grep -rn "SlotDisplay\|RecipeDisplay" --include="*.rs" crates/`
   returns **5 hits, every one of them prose in a doc comment** — not a line of
   the codec exists. Estimate 400–600 lines.
 
   Ahead of the codec there is a **design blocker**, and it is the reason
   "the consumer is already built" is only half true: `RecipeUnlockState::unlock`
-  and `remove` key on `Identifier` (`recipe.rs:1304`/`:1312`), the wire carries
-  a `RecipeDisplayId` — a session-assigned integer (`v770/src/packets/game.rs:454`,
-  `:467`) — and a `RecipeDisplay` contains no recipe id at all. So decoding
+  and `remove` (`recipe.rs`) key on `Identifier`, the wire carries
+  a `RecipeDisplayId` — a session-assigned integer (the `recipe` field on
+  `RecipeBookSeenRecipe` and `PlaceRecipe` in `v770/src/packets/game.rs`) —
+  and a `RecipeDisplay` contains no recipe id at all. So decoding
   `recipe_book_add` does not by itself let anything call `unlock`. Either the
   event carries the index plus a resolved result and something owns the
   index→`Identifier` map, or `RecipeUnlockState` gains an index-keyed path.
@@ -224,7 +226,7 @@ Remaining gaps:
   mapping arrives only in `recipe_book_add`. The toast renderer and its
   `app.rs`/`hud.rs` wiring *are* done; it is the key type that does not match.
 
-### Recipe-book settings round trip (issue #436)
+### Recipe-book settings round trip
 
 `recipe_book_settings` (76) folds into
 `lodestone_ecs::session::SessionRecipeBookSettings`, and as of this section the
@@ -265,7 +267,7 @@ visible page, because pagination has to be computed from the filtered set; it is
 only evaluated when `filtering` is set, so the cost is paid only in the state
 that asks for it.
 
-## Recipe-book UI (issue #163)
+## Recipe-book UI
 
 The browsing/unlock UI layered on top of the matcher above: the data and
 geometry in `lodestone-game` (`recipe.rs`, `menu.rs`) and `lodestone-shell`
@@ -286,7 +288,7 @@ captures each recipe JSON's own `"category"` field — real per-recipe data
 (694 of 1585 recipes in 26.2 carry one; `recipe_json.rs`'s `parse_category`
 parses it), not a heuristic. `tabs_for(RecipeBookType)` is vanilla's own
 per-book tab list in **declaration order**
-(`RecipeBookCategories.java:7-19`), which is not alphabetical and is not
+(`RecipeBookCategories`'s field declarations), which is not alphabetical and is not
 symmetric across appliances: `BlastFurnace` has no `Food` tab and `Smoker`
 has *only* `Food`. `RecipeBook::visible_tabs` filters that list down to
 categories with at least one loaded recipe, mirroring
@@ -340,7 +342,7 @@ transcribed from `RecipeBookComponent`/`RecipeBookPage`/`RecipeBookTabButton`/
 
 **One gap, kept deliberately unfixed**: vanilla shifts the *main* container
 screen rightward when the book opens
-(`RecipeBookComponent.updateScreenPosition`, `:173-182`) so the two panels
+(`RecipeBookComponent.updateScreenPosition`) so the two panels
 never overlap. Replicating that would mean threading an "is the book open"
 flag through `panel_origin`/`hit_test`/`ContainerGeometry::build_inner` —
 functions every container screen calls, not just these two — for a change
@@ -358,21 +360,21 @@ loaded `RecipeBook` and the data query never needs a viewport size.
 #### The toggle button's position is per-screen, and getting this wrong shipped
 
 `getRecipeBookButtonPosition` is **abstract with no default**
-(`AbstractRecipeBookScreen.java:36`) and all three book-bearing screen families
+(`AbstractRecipeBookScreen.getRecipeBookButtonPosition`) and all three book-bearing screen families
 override it with a different answer. The first cut of this panel used the
 crafting table's for every screen, and the owner found the button in the wrong
 place in the player inventory — 99 px left and 27 px above vanilla's, landing on
 the armour column.
 
 Local offsets off `(leftPos, topPos)`, with `topPos = (height - imageHeight)/2`
-(`AbstractContainerScreen.java:78`) and `imageHeight` the `176x166` default for
+(`AbstractContainerScreen.init`) and `imageHeight` the `176x166` default for
 all three, so the screen height and `leftPos` cancel:
 
-| screen | jar expression | local |
+| screen | jar expression (`getRecipeBookButtonPosition`) | local |
 |---|---|---|
-| `InventoryScreen.java:64` | `(leftPos + 104, height/2 - 22)` | `(104, 61)` |
-| `CraftingScreen.java:27` | `(leftPos + 5, height/2 - 49)` | `(5, 34)` |
-| `AbstractFurnaceScreen.java:44` | `(leftPos + 20, height/2 - 49)` | `(20, 34)` |
+| `InventoryScreen` | `(leftPos + 104, height/2 - 22)` | `(104, 61)` |
+| `CraftingScreen` | `(leftPos + 5, height/2 - 49)` | `(5, 34)` |
+| `AbstractFurnaceScreen` | `(leftPos + 20, height/2 - 49)` | `(20, 34)` |
 
 `recipe_toggle_local` dispatches on `background_kind`, not a second `match` on
 `special_layout`/`kind` — that function already answers "which vanilla screen
@@ -380,7 +382,7 @@ class is this menu", including the trap that a special-layout menu is
 mechanically a `MenuKind::Generic`.
 
 **Do not conflate this with the screen-shift gap above.** The local offset is
-*invariant* to the shift: `AbstractRecipeBookScreen.java:42-44` re-derives the
+*invariant* to the shift: `AbstractRecipeBookScreen.initButton` re-derives the
 button position off the already-shifted `leftPos`, and `topPos` is never
 re-derived at all. So the button's position was a plain per-screen-constant bug
 and the screen shift remains deliberately unfixed.
@@ -396,8 +398,8 @@ Vanilla's art comes from two places, and the split matters:
 
 - **The page** is a raw texture path, not a sprite:
   `RECIPE_BOOK_LOCATION = "textures/gui/recipe_book.png"`
-  (`RecipeBookComponent.java:59`), blitted as a fixed `147x166` window at
-  `(1, 1)` of a `256x256` sheet (`:305`). The one-pixel inset is real — decoding
+  (`RecipeBookComponent.RECIPE_BOOK_LOCATION`), blitted as a fixed `147x166` window at
+  `(1, 1)` of a `256x256` sheet (`RecipeBookComponent.extractRenderState`). The one-pixel inset is real — decoding
   the PNG shows its opaque region is exactly `x 1..147, y 1..166`. It has **no**
   `.mcmeta` and is not nine-sliced (the only recipe-book sprite that is, is
   `overlay_recipe`, which this client does not draw).
@@ -475,10 +477,10 @@ in the running client calls them yet.
 ### Unlock toast — `RecipeToastQueue` (`recipe.rs`)
 
 Pure timing data mirroring `RecipeToast.java`: `RECIPE_TOAST_DISPLAY_MS =
-5000` (`:17`, **100 ticks** at the fixed 50ms tick), width `160`/height `32`
-(`Toast.java:14-15`). Multiple recipes unlocked within the window merge into
+5000` (`RecipeToast.DISPLAY_TIME`, **100 ticks** at the fixed 50ms tick), width `160`/height `32`
+(`Toast.DEFAULT_WIDTH`/`Toast.SLOT_HEIGHT`). Multiple recipes unlocked within the window merge into
 one toast that **cycles** through them (`displayed_entry`, mirroring
-`RecipeToast.java:49-51`'s formula) rather than stacking separate toasts.
+`RecipeToast.update`'s formula) rather than stacking separate toasts.
 Nothing calls `push` from live data yet — same blocker as unlock tracking —
 but `hud.rs` **does** render it now (`HudFrame::recipe_toast`, see "Shell
 wiring" below), so the toast appears the moment a producer exists.
@@ -591,15 +593,15 @@ Every number is from the **definitions** in `.cache/mc/26.2/client-src`, not a
 summary of a call site — this repo has a documented instance of transcribing a
 Java record's positional fields backwards:
 
-- `Toast.width() == 160`, `Toast.height() == 32` (`Toast.java:39-45`).
+- `Toast.width() == 160`, `Toast.height() == 32`.
 - `xPos(screenWidth, visiblePortion) == screenWidth - width() *
-  visiblePortion` (`Toast.java:31-33`). This is **not** a fixed right margin:
+  visiblePortion` (`Toast.xPos`). This is **not** a fixed right margin:
   it is the slide-in. At `visiblePortion == 1.0` the left edge sits exactly
   160 from the right edge.
-- `yPos(firstSlotIndex) == firstSlotIndex * height()` (`Toast.java:35-37`), so
+- `yPos(firstSlotIndex) == firstSlotIndex * height()` (`Toast.yPos`), so
   the first toast is **flush with the top of the screen at `y == 0`**, not
   inset by a margin. We draw at most one, so `firstSlotIndex == 0`.
-- Contents (`RecipeToast.extractRenderState`, `:55-65`): background sprite
+- Contents (`RecipeToast.extractRenderState`): background sprite
   `toast/recipe` over the full `160×32` (the sprite really is in 26.2's atlas,
   checked against the jar); title at `(30, 7)` colour `-11534256` =
   `0xFF500050`; description at `(30, 18)` colour `-16777216` = black; the
@@ -610,7 +612,7 @@ Java record's positional fields backwards:
   `"Check your recipe book"` — note the parenthesised plural a paraphrase
   loses.
 
-Vanilla's 600ms slide (`ToastManager.java:229-232`) is **not** modelled:
+Vanilla's 600ms slide (`ToastManager.ToastInstance.calculateVisiblePortion`) is **not** modelled:
 `RecipeToastQueue` exposes no animation origin (`last_changed_ms` is private
 and it has no notion of a visibility transition), so `visible_portion` is
 fixed at `1.0`. The field exists and the draw honours it, so whoever gives the
@@ -636,8 +638,6 @@ can call `push`. No fake producer was added to make either light up early —
 that would be the island defect one layer down. `app.rs`'s
 `recipe_toast_now_ms` is the clock a future producer should push on, so the two
 sides cannot pick incompatible origins.
-
-Tracked on [#436](https://github.com/matteopolak/lodestone/issues/436).
 
 ### Gates
 

@@ -2,14 +2,13 @@
 
 ## What it is
 
-The client's half of vanilla's Brigadier command UX (issue #46): a decode
+The client's half of vanilla's Brigadier command UX: a decode
 target for the server's whole command tree, and the tab-completion /
 syntax-highlighting engine that walks it against the chat box's input line.
 This covers **joining** a vanilla server and typing against its tree, not
-hosting one — the server-side dispatcher is issue #48, and a plugin's own
-command registration is issue #118; both are explicitly out of scope here
-and designed to share an argument-type library with this work rather than
-duplicate it.
+hosting one — the server-side dispatcher and a plugin's own command
+registration are both explicitly out of scope here, and are designed to
+share an argument-type library with this work rather than duplicate it.
 
 ## How it works
 
@@ -35,8 +34,8 @@ clientbound id 15). Both route `SHELL` in `event::route` — the same shape as
 and no per-entity/per-session scalar to fold.
 
 `lodestone-model` cannot decode the packet bytes itself — it has no protocol
-dependency by design. The decode lives in `crates/protocol/v770/src/adapter.rs`
-(issue #470), which is the only family that implements it:
+dependency by design. The decode lives in `crates/protocol/v770/src/adapter/chat.rs`,
+which is the only family that implements it:
 
 - `decode_command_tree` reads `ClientboundCommandsPacket`'s private constructor
   order — **the node list first, the root index last** — and each node as
@@ -253,8 +252,8 @@ like `Paused`/`Death`), `nav::on_screen_frame` has no arm either, and
 not for this one — so `command_block_frame` still has no production caller and
 the screen's clicks never hit-test. The tree, the Tab key and the suggestion
 popup rows on that screen are therefore correct-but-dark until that fourth
-overlay block exists; the chat box is the half of #471 that reaches pixels
-today.
+overlay block exists; the chat box is the half of this feature that reaches
+pixels today.
 
 ### The redirect-cycle guard
 
@@ -274,7 +273,7 @@ hypothetical one).
 - **Adding a payload-carrying argument type**: add the variant in
   `lodestone_model::command_tree::ArgumentParser`, the id to
   `ArgumentParser::has_network_payload`, and a branch to
-  `read_argument_parser` in `crates/protocol/v770/src/adapter.rs`. Read the
+  `read_argument_parser` in `crates/protocol/v770/src/adapter/chat.rs`. Read the
   type's own `deserializeFromNetwork` — not `serializeToNetwork`, and not a
   summary of it. Then **re-capture the live fixture**, because a width that is
   wrong in both directions still round-trips.
@@ -291,8 +290,8 @@ hypothetical one).
   2. `menu/render/screens.rs`'s `command_block_frame` already takes
      `tree: Option<&CommandTree>` and threads it into `state.completions(tree)`
      — it just needs the cell's contents instead of the `None` every caller
-     passes today. That is the shortest path to real pixels, now that #47
-     landed and the command-block edit screen actually opens.
+     passes today. That is the shortest path to real pixels, now that the
+     command-block edit screen's own fix has landed and it actually opens.
   3. The chat box's Tab key: `app/menus.rs`'s `handle_chat_key` swallows Tab in
      its `_ => {}` arm, and `menu/nav.rs`'s command-block `MenuKey::Tab` arm is
      a documented no-op "with no command tree ever reaching this client yet".
@@ -332,8 +331,8 @@ client-side option that changes how either is interpreted.
 - `lodestone_model::command_tree` — the decode-target types this module
   walks; no protocol or shell dependency in either direction.
 - `lodestone_client::ClientAction::CommandSuggestion` — already defined and
-  encoded by the v770 adapter (`crates/protocol/v770/src/adapter.rs`); this
-  work is the first thing that constructs it outside the protocol crate,
+  encoded by the v770 adapter (`crates/protocol/v770/src/adapter/serverbound.rs`);
+  this work is the first thing that constructs it outside the protocol crate,
   closing the "constructed nowhere" island the original issue named.
 - `crate::chat::ChatInput` — the input line `complete`/`highlight` are called
   against. Both take the current line as a plain `&str` rather than owning

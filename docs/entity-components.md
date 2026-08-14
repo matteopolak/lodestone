@@ -21,7 +21,7 @@ interpolation clock and the socket behind one lock. Nothing is duplicated across
 them: the net side owns what the server said, the render side owns what is on
 screen this frame.
 
-**Update (issue #36 landed):** for `crate::sim::Sim` specifically, §4.1(c) went
+**Update (landed):** for `crate::sim::Sim` specifically, §4.1(c) went
 further and put both tables' components in the *one* `World` `Sim` owns —
 `Sim` runs its own `IngestPlugin` + `EntityInterpPlugin` pair in a single
 `App`, rather than reading a second, already-released copy through
@@ -246,18 +246,18 @@ a tracked entity and the next extract puts it on screen.
   implementor owns whatever it borrows from, so `tick_item_physics` now runs
   in `GameTick`/`TickSet::Physics` against a `PlayerCollision` resource.
   `fold_entities` staying a hand-called function is now a deliberate choice,
-  not a structural block: issue #36 deleted the `&[EntitySnapshot]` slice that
-  used to be the obstacle (see "Widened, not deleted" below), but turning
-  `fold_entities` into a scheduled system would still mean re-deriving the
-  clocks → ticks → fold ordering the next bullet describes, which the #36
-  fix deliberately did not touch.
+  not a structural block: the `EntitySnapshot` deletion below removed the
+  `&[EntitySnapshot]` slice that used to be the obstacle (see "Widened, not
+  deleted" below), but turning `fold_entities` into a scheduled system would
+  still mean re-deriving the clocks → ticks → fold ordering the next bullet
+  describes, which that fix deliberately did not touch.
 - **The render order is clocks → ticks → fold, which is `Update` before
   `GameTick` and the fold after both** — inverted from the plan's `NetIngest` →
   `GameTick` → `Update` → `Extract`. That is behaviour, not style: every numeric
   expectation in the interpolation tests depends on it. **This did not change
   when `EntitySnapshot` was deleted** — see "Update, and it changes the plan"
-  below for why the reorder issue #36's title implied turned out to be a
-  separate, unneeded change.
+  below for why the reorder this deletion's own tracking once implied turned
+  out to be a separate, unneeded change.
 - **`RenderKind` (a path `String`) and `EntityKind` (a `ResourceKey`) are still
   two components for the same fact**, even after `EntitySnapshot`'s deletion:
   `spawn_track` still populates `RenderKind` from `EntityFacts::type_path`, a
@@ -273,21 +273,19 @@ a tracked entity and the next extract puts it on screen.
   components. The two "no apex" controls correctly keep passing when nothing
   moves; they are controls for the apex assertion, not for physics existing.
 
-### Widened, not deleted (issue #36), and why
+### Widened, not deleted ("Stage 1b: delete `EntitySnapshot` and reorder the schedule"), and why
 
-**This section said "issue #47" in three places and that was wrong** — GitHub #47
-is "Command block edit screen". The deletion is tracked by **#36**, "Stage 1b:
-delete `EntitySnapshot` and reorder the schedule". A reader following the old
-number landed somewhere unrelated. Note also that
-`crates/lodestone-server/src/protocol.rs:30` has an **unrelated homonym**
-`EntitySnapshot`; the deletion must not touch it.
+**This section previously cited the wrong tracker item for this deletion**,
+pointing a reader at unrelated work (a command-block-edit-screen fix). Note
+also that `crates/lodestone-server/src/protocol.rs`'s `EntitySnapshot` struct
+is an **unrelated homonym**; the deletion described here must not touch it.
 
-Issue #36 proposes deleting `EntitySnapshot` outright now that entity state
+"Stage 1b" proposes deleting `EntitySnapshot` outright now that entity state
 lives in one component set, reordering the schedule to `NetIngest` → `GameTick`
 → `Update` → `Extract` so ingest writes the render components directly. That
 was weighed against simply widening `EntitySnapshot`/`EntityDraw` by three
-fields (sheep wool's `variant`, dropped-item `count`) for issues #29/#53, and
-widening won — deletion was **not** free enough to be worth doing as a side
+fields (sheep wool's `variant`, dropped-item `count`) for two other in-flight
+changes, and widening won — deletion was **not** free enough to be worth doing as a side
 effect of an unrelated widening pass:
 
 - **The blocker is structural, not size.** Per the gotcha above,
@@ -318,7 +316,7 @@ Net: deletion is very likely still the better end state — collapsing
 `RenderKind`/`EntityKind` and the three-copy pipeline this doc's intro
 describes is real debt — but it is a separate, larger, schedule-reordering
 change with its own verification burden, not something to fold into a
-three-field widening. #36 stays open.
+three-field widening. This work stays open.
 
 **Update, and it changes the plan.** A later architecture review found the
 deletion does **not** require the schedule reorder, and that coupling the two
@@ -352,7 +350,7 @@ for the handful of live integration tests (`live_entity_render.rs`,
 `live_dropped_item.rs`) that drive a bare `EntityInterpolator` with no
 `IngestPlugin` of its own and so have to translate a view into ingest
 components by hand (see those files' `apply_view`). The schedule stayed
-clocks → ticks → fold, unreordered, exactly as predicted above. Issue #36 is
+clocks → ticks → fold, unreordered, exactly as predicted above. This work is
 closed.
 
 ## Configuration

@@ -2,8 +2,8 @@
 
 ## What it is
 
-The four wire gaps that kept filled maps (#184), the advancements screen (#167)
-and the statistics screen (#188) from having any data at all: the v770 decode arms
+The four wire gaps that kept filled maps, the advancements screen
+and the statistics screen from having any data at all: the v770 decode arms
 for `map_item_data` (id 51) and `update_advancements` (id 130), and the two v770
 `ServerProtocol` overrides — `encode_update_advancements` and `encode_award_stats`
 — that had never existed, so the server's own advancement and statistic tracking
@@ -13,7 +13,7 @@ reached the wire as `ServerDirective::None`.
 
 ### Decode
 
-Both arms live in `crates/protocol/v770/src/adapter.rs` and emit into session
+Both arms live in `crates/protocol/v770/src/adapter/inventory.rs` and emit into session
 state, not per-entity state:
 
 | packet | `ClientEvent` | fold | session component |

@@ -3,14 +3,14 @@
 ## What it is
 
 The record of which serverbound packets this client can **encode** and which it
-actually **produces**, and why those are two different numbers. Issue #304 is the
-encoder half; this doc exists because the encoder half is the half that is easy to
-measure and the wrong one to trust.
+actually **produces**, and why those are two different numbers. A batch of new
+encoders landed the encoder half; this doc exists because the encoder half is the
+half that is easy to measure and the wrong one to trust.
 
 ## How it works
 
 `cargo xtask connectedness` reports, for v770, `serverbound encoded N/69`. That
-counts arms in `crates/protocol/v770/src/adapter.rs`'s `encode_action` match. It
+counts arms in `crates/protocol/v770/src/adapter/mod.rs`'s `encode_action` match. It
 **cannot see a producer**, so an encoder with nothing upstream of it counts as
 coverage — and that has shipped four times:
 
@@ -19,7 +19,7 @@ coverage — and that has shipped four times:
 | `ClientAction::SetFlying` | four adapters encoded it, zero producers; the server kicked us with `multiplayer.disconnect.flying` |
 | `ClientAction::ChangeGameMode` | zero producers until a game-mode switcher was added |
 | `ClientAction::PlaceRecipe` | zero producers; the shell synthesises three container clicks instead |
-| `PlayerCommand::StartFallFlying` | four adapter encoders, zero producers, until riptide (#208) added the first |
+| `PlayerCommand::StartFallFlying` | four adapter encoders, zero producers, until riptide added the first |
 
 So the question to ask of a serverbound packet is never "does it encode" but
 **"what sends it"**.
@@ -32,13 +32,14 @@ listed entry, and the fix is to delete the line.
 
 Measured with `cargo xtask connectedness`, not carried forward from any issue body:
 
-* **before #304**: `serverbound encoded 54/69`
-* **after #304**: `serverbound encoded 67/69`
+* **before the encoder batch**: `serverbound encoded 54/69`
+* **after the encoder batch**: `serverbound encoded 67/69`
 
 The two remaining are `CHAT_COMMAND_SIGNED` and `CHAT_SESSION_UPDATE`, which belong
 to the chat-signing issue and are deliberately out of scope here.
 
-**Note #304's title says twelve and its body lists thirteen.** Thirteen is right:
+**Note the encoder batch's own tracking undercounted: its title said twelve
+packets but its body actually listed thirteen.** Thirteen is right:
 `BLOCK_ENTITY_TAG_QUERY`, `CHANGE_DIFFICULTY`, `DEBUG_SUBSCRIPTION_REQUEST`,
 `ENTITY_TAG_QUERY`, `JIGSAW_GENERATE`, `LOCK_DIFFICULTY`, `SET_COMMAND_MINECART`,
 `SET_GAME_RULE`, `SET_JIGSAW_BLOCK`, `SET_STRUCTURE_BLOCK`, `SET_TEST_BLOCK`,
@@ -69,7 +70,7 @@ Seventeen entries, each verified by hand. The full list with blockers lives in
 * **Creative/operator editor screens that do not exist** — structure block, jigsaw
   block (plus its Generate button), test block, test instance block, command
   minecart. Six entries. Nothing is missing but the screen.
-* **#32's settings menu** — `ChangeDifficulty`, `LockDifficulty`, `SetGameRules`.
+* **The settings menu** — `ChangeDifficulty`, `LockDifficulty`, `SetGameRules`.
   Note the dependency if that work starts.
 * **Debug/shell input** — `QueryBlockEntityTag` and `QueryEntityTag` want vanilla's
   F3+I copy-NBT keybind; `SubscribeDebug` wants a debug-overlay toggle.
@@ -117,8 +118,9 @@ unverified entry is a real lead and not noise. The sixteen that remain:
 
 **That list is not trustworthy and is deliberately not in the gate.** At least one
 member is a false positive: `SignUpdate` *is* produced, through
-`submit.into_action()` in `lodestone-shell/src/app/menus.rs`
-(`menu/command_block.rs:541`), an indirection no name scanner can follow. Treat the
+`submit.into_action()` in `lodestone-shell/src/app/menus.rs`, which calls
+`CommandBlockSubmit::into_action` (`menu/command_block.rs`), an indirection no
+name scanner can follow. Treat the
 eighteen as a list to *audit*, one at a time, by reading the call path rather than
 grepping for the variant name.
 
@@ -153,6 +155,6 @@ None. `cargo xtask connectedness` takes no arguments; the census gate runs under
 
 ## Dependencies
 
-`crates/protocol/v770/src/adapter.rs` for the encoders,
+`crates/protocol/v770/src/adapter/mod.rs` for the encoders,
 `crates/lodestone-model/src/action.rs` for `ClientAction` and `PlayerCommand`, and
 `xtask/src/lib.rs`'s `connectedness_report` for the encoder count.

@@ -8,8 +8,8 @@ built-in and custom argument types, a permission node on any node gating it and 
 subtree, tab completion, and a dispatcher that resolves an input string and runs a handler
 with `&mut World`.
 
-Closes issues #118 (registration API), #119 (argument types and tab completion) and #122
-(per-command-node permission checks). Lives at `crates/lodestone-ecs/src/commands.rs`, built
+Closes the registration API, argument types and tab completion, and per-command-node
+permission checks. Lives at `crates/lodestone-ecs/src/commands.rs`, built
 on `crates/lodestone-command` (see [command-tree.md](command-tree.md)) and
 `lodestone_ecs::permissions` (see [permissions.md](permissions.md)).
 
@@ -68,11 +68,11 @@ letting them fail later:
 Everything that reads the world happens in a block that ends before the handler runs, so a
 handler is free to mutate anything — including the registry.
 
-### Permission gating (#122)
+### Permission gating
 
 Any node can carry a permission. A denied node is invisible **together with its entire
 subtree**, which is vanilla's actual semantics, not a shortcut. From
-`Commands.fillUsableCommands` (`.cache/mc/26.2/src/net/minecraft/commands/Commands.java:421`):
+`Commands.fillUsableCommands`:
 
 ```java
 for (CommandNode<S> child : source.getChildren()) {
@@ -100,7 +100,7 @@ completion.
 Getting these the same way round is the easy mistake: a silent `dispatch` is
 indistinguishable from a typo, and a loud `suggest` leaks the tree to everyone.
 
-### Argument types (#119)
+### Argument types
 
 The primitives come from `lodestone-command`: `IntegerArgument`, `LongArgument`,
 `FloatArgument`, `DoubleArgument`, `BoolArgument`, `StringArgument` (word/quotable/greedy).
@@ -166,9 +166,9 @@ decode arm. **Do not treat it as a one-line wire-up.**
 
 ## Why the registry is here and not in `lodestone-server`
 
-Issue #118 says the registry should be "server-side, since that is where command *execution*
-semantics live". Right about semantics, wrong crate, for a reason the issue could not have
-known:
+The original design note said the registry should be "server-side, since that is where
+command *execution* semantics live". Right about semantics, wrong crate, for a reason that
+note could not have known:
 
 - **`lodestone-server` deliberately does not depend on `lodestone-ecs`** and says so in its
   own manifest. It links neither bevy nor this crate.
@@ -178,13 +178,14 @@ known:
   would be unreachable by every plugin that can currently exist.
 
 So it lives where the plugin API lives. It is a plain `Resource` with no client-specific
-state, so a future server `App` — or #48's dispatcher — inserts the same resource and calls
-the same `dispatch`. Nothing here knows which side it is on.
+state, so a future server `App` — or the server-side Brigadier dispatcher — inserts the same
+resource and calls the same `dispatch`. Nothing here knows which side it is on.
 
-## Issue #435: why the two command-tree representations stay separate
+## Why the two command-tree representations stay separate
 
-#435 asked whether `crates/lodestone-command` and `lodestone_model::command_tree` should be
-reconciled, explicitly allowing "duplication is the right call, in which case this issue
+An earlier design question asked whether `crates/lodestone-command` and
+`lodestone_model::command_tree` should be
+reconciled, explicitly allowing "duplication is the right call, in which case this
 should close with that reasoning recorded". **That is the verdict, with one real duplication
 identified and its fix specified.**
 
@@ -204,37 +205,39 @@ the zero-dependency property that lets it be a graph sink. Making
 `lodestone_model::command_tree` the construction API would mean putting `dyn ArgumentType`
 inside `ArgumentParser` and losing its `PartialEq`.
 
-**The real duplication is narrower than #435 supposed, and it is not the node model.** It is
-`crates/lodestone-shell/src/chat.rs`'s hand-rolled argument semantics:
+**The real duplication was narrower than first supposed, and it was not the node model.** It
+was `crates/lodestone-shell/src/chat.rs`'s hand-rolled argument semantics: `validate_simple`
+duplicating `lodestone_command::argument`'s
+`IntegerArgument`/`LongArgument`/`FloatArgument`/`DoubleArgument` numeric-bounds checks, and
+`read_quoted` duplicating `StringReader.readQuotedString`'s `\"`/`\\` escape handling and a
+separate charset check duplicating `StringReader.isAllowedInUnquotedString`'s
+`[0-9A-Za-z_\-.+]` set.
 
-- `validate_simple` (`chat.rs:390`) — four numeric-bounds checks duplicating
-  `lodestone_command::argument`'s `IntegerArgument`/`LongArgument`/`FloatArgument`/`DoubleArgument`.
-- `read_quoted` (`chat.rs:370`) — a second copy of `StringReader.readQuotedString`'s
-  `\"`/`\\` escape handling.
-- `is_unquoted_string` (`chat.rs:383`) — a second copy of
-  `StringReader.isAllowedInUnquotedString`'s `[0-9A-Za-z_\-.+]` charset.
+**That fix has since landed.** `crates/lodestone-shell/src/chat.rs` now depends on
+`lodestone-command`; `validate_simple` delegates per `ArgumentParser` variant to the matching
+`ArgumentType::parse` through a local `parse_ok` helper, and `read_quoted` delegates to
+`lodestone_command::StringReader::read_string` instead of reimplementing the escape handling.
+The standalone charset-checking function this section used to name is gone — the delegation
+made it unnecessary, confirmed directly against the current source rather than assumed. The
+behaviour the fix had to preserve — `chat.rs` returns a validity bool plus span offsets and
+must tolerate a half-typed last token, where `lodestone_command` returns
+`Result<ParsedValue, ParseError>` — is what `parse_ok` and `read_argument_token` exist to
+bridge; see their own doc comments in `chat.rs`.
 
-**The fix**, for whoever owns `crates/lodestone-shell/src/chat.rs`: add a
-`lodestone-shell → lodestone-command` dependency (acyclic — `lodestone-command` is a sink) and
-have `validate_simple` delegate per `ArgumentParser` variant to the matching
-`ArgumentType::parse`, and `read_quoted`/`is_unquoted_string` to `StringReader`. **One
-behaviour must be preserved:** `chat.rs` returns a validity bool plus span offsets and must
-tolerate a half-typed last token (see its own comment at `chat.rs:527-551`), where
-`lodestone_command` returns `Result<ParsedValue, ParseError>`. A naive delegation would make
-the last token un-completable.
-
-**One thing changed since #435 was filed, and it matters:** at the time, both
+**One thing changed since this question was first raised, and it matters:** at the time, both
 representations were test-only islands. `lodestone-command` now has a real consumer (this
-module), while `lodestone_model::command_tree` still has **zero producers** — no protocol
-family decodes `COMMANDS`, and `ClientEvent::CommandTreeUpdated` is constructed nowhere. They
-are no longer symmetric candidates for a merge: one is load-bearing, the other is still
-waiting for its decoder.
+module). `lodestone_model::command_tree` was long the one still waiting on a producer — no
+protocol family decoded `COMMANDS` and `ClientEvent::CommandTreeUpdated` was constructed
+nowhere — but that has since changed too: `v770`'s adapter now decodes `COMMANDS` and
+`COMMAND_SUGGESTIONS` (see [commands.md](commands.md)), so both representations are now
+load-bearing rather than one waiting on the other. Re-verify before citing either as an
+island — confirmed directly against the current source rather than assumed here.
 
 ## How to change it, and the gotchas
 
 - **A handler is stored per `NodeId` in a side table on `RegisteredCommand`, not on the tree
-  node.** `lodestone-command` has no execution model on purpose (#48 will want to define one
-  differently). Keep handlers out of it. The cost is that `on_execute` must set `executable`
+  node.** `lodestone-command` has no execution model on purpose (the server-side Brigadier
+  dispatcher will want to define one differently). Keep handlers out of it. The cost is that `on_execute` must set `executable`
   *and* insert into the table — it does both, and is the only way to do either.
 - **Dispatch resolves the handler by walking the parsed path backwards.** `CommandTree::parse`
   already rejects a path ending on a non-`executable` node, so the walk only ever skips nodes
@@ -254,7 +257,7 @@ waiting for its decoder.
 - **Adding a resolution step to permission gating means editing
   `lodestone_ecs::permissions`, not here.** This module only supplies the filter closure.
 
-## Issue #123 (`/execute` interop) is **not** closed, and needs a context object
+## `/execute` interop is **not** closed, and needs a context object
 
 `CommandSource` is deliberately only an identity — a subject and a display name. It is **not**
 a vanilla `CommandSourceStack`.
@@ -262,15 +265,16 @@ a vanilla `CommandSourceStack`.
 Vanilla's `/execute as <selector> at <selector> run <command>` rewrites a *context*: executor
 entity, position, rotation, dimension, anchor, plus `store`/`if`/`unless` result propagation.
 None of those fields exist here, and there is nothing to consume them: `/execute` itself does
-not exist (issue #48, Tier 4), and the server has no command dispatch at all. Inventing the
+not exist, and the server has no command dispatch at all. Inventing the
 context object now would be a context-rewriter with nothing to rewrite and nobody to call
-it — an island of precisely the shape `CLAUDE.md` warns about, and #123's own body says it
-"should be filed as a reminder rather than started now".
+it — an island of precisely the shape `CLAUDE.md` warns about, and the tracking note for this
+gap says it "should be filed as a reminder rather than started now".
 
-What this work gives #123 is the **seam**: `dispatch` takes the source by reference and never
+What this work gives that future `/execute` work is the **seam**: `dispatch` takes the source
+by reference and never
 reads it except to resolve permissions, so a future `/execute` can substitute a different
 subject without touching the registry or the tree. Widening `CommandSource` is additive when
-#48 lands.
+the server-side Brigadier dispatcher lands.
 
 ## Configuration
 
@@ -289,6 +293,6 @@ and registers `sync_player_directory` in `GameTick`/`TickSet::Send`.
 
 - [command-tree.md](command-tree.md) — the substrate.
 - [permissions.md](permissions.md) — the gate.
-- [commands.md](commands.md) — the *client's* Brigadier UX (#46), the other representation.
+- [commands.md](commands.md) — the *client's* Brigadier UX, the other representation.
 - [plugin-registration.md](plugin-registration.md) — how a plugin gets into the `App`.
 - [roadmap/plugin-framework.md](roadmap/plugin-framework.md) — the capability audit.

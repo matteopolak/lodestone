@@ -8,8 +8,8 @@ The architectural decision, and the design it produced, to link `lodestone-ecs` 
 machine, always-observable refusal, lifecycle-encodes-verb-shape — instead of a second,
 hand-rolled plugin idiom. This reverses [`docs/server-tick-loop.md`](./server-tick-loop.md)'s
 recommendation not to link `lodestone-ecs` into the server (see that doc's own "Recommendation
-reversed" section for why each of its three original reasons no longer blocks). Filed as issue
-[#433](https://github.com/matteopolak/lodestone/issues/433); this document is the decision record
+reversed" section for why each of its three original reasons no longer blocks). This document is
+the decision record
 and the design five queued implementation phases build against — **nothing in
 `crates/lodestone-server/` implements this yet**. Where this document describes behaviour, it is
 describing the design, not shipped code; where it cites `crates/lodestone-ecs/` today, that code
@@ -19,9 +19,9 @@ The motivating constraint, restated because it is the reason this exists at all:
 standing rule is that the plugin API and the internal API are the same thing, with core
 functionality implemented through the plugin surface — Bukkit/Spigot's own shape. Real Bukkit/Paper
 plugins are overwhelmingly *server* plugins (protection, economy, permissions, minigames), and
-until this decision the entire intent doctrine lived in the client's `World` only. Issue #433 named
-three costed options (adopt an ECS server-side, grow a bespoke hook surface, or defer to #341's JVM
-tier); the owner chose the first.
+until this decision the entire intent doctrine lived in the client's `World` only. The design
+decision named three costed options (adopt an ECS server-side, grow a bespoke hook surface, or
+defer to a separate JVM tier); the owner chose the first.
 
 ## How it works
 
@@ -33,8 +33,8 @@ sufficient:
 
 **(a) Contradictory clock policies.** The client's `GameTick` schedule is driven by `FrameClock`,
 whose accumulator *discards* excess catch-up past `MAX_CATCH_UP_SECS` (10 ticks,
-`lodestone_ecs::MAX_CATCH_UP_TICKS`, `crates/lodestone-ecs/src/resources.rs:42,70`; the clamp
-itself at `resources.rs:134`, `self.accumulator += dt.clamp(0.0, MAX_CATCH_UP_SECS)`) — right for a
+`lodestone_ecs::MAX_CATCH_UP_TICKS`, `crates/lodestone-ecs/src/resources.rs`; the clamp
+itself in `FrameClock::begin_frame`, `self.accumulator += dt.clamp(0.0, MAX_CATCH_UP_SECS)`) — right for a
 predicting client, where replaying a minute of stalled ticks in a burst is worse than dropping it.
 The server has the opposite obligation: it must keep advancing when the render loop stalls or is
 absent entirely (open-to-LAN has no render loop at all), replay small backlogs the way
@@ -46,7 +46,7 @@ catch-up policies cannot both own one accumulator, so they need two `World`s.
 
 **(b) The singleplayer/multiplayer parity failure mode.** Singleplayer here is *already*
 structurally multiplayer: `IntegratedServer::open_in_memory` (and its
-`_with_entities`/`_with_mobs` siblings, `crates/lodestone-server/src/integrated.rs:135` onward)
+`_with_entities`/`_with_mobs` siblings, in `crates/lodestone-server/src/integrated.rs`)
 hands back a real `tokio::io::DuplexStream` and serves genuine protocol bytes over it — there is no
 "local shortcut" path that skips the wire. A shared `World` would punch straight through that: a
 client-plugin system could read server-authoritative state that simply does not exist when the
@@ -86,8 +86,8 @@ plugin can have both, and the two halves are genuinely separate: a server-side p
 never contains a `LocalPlayer`, `FrameClock`, or anything client-only, and a client-side plugin's
 `World` never contains the server's authoritative simulation state. The only channel between them
 is the wire vocabulary already in `lodestone-model` — `ClientEvent`
-(`crates/lodestone-model/src/event.rs:988`) and `ClientAction`
-(`crates/lodestone-model/src/action.rs:14`) — the same vocabulary a real network connection would
+(`crates/lodestone-model/src/event.rs`) and `ClientAction`
+(`crates/lodestone-model/src/action.rs`) — the same vocabulary a real network connection would
 use, because in two of the three deployments below, a real network connection *is* what is
 carrying it.
 
@@ -119,14 +119,15 @@ construction, not by convention.
 This is the rule; the finding that produced it is worth recording on its own, because it is the
 valuable part. `docs/server-tick-loop.md`'s six-timer table lists four per-connection timers left
 out of the unified `run_tick_loop`, and it would be easy to read all four as one category ("things
-that stayed per-connection because they're per-connection"). They are not one category:
+that stayed per-connection because they're per-connection"). They are not one category. All four
+are `const`s in `crates/lodestone-server/src/server.rs`:
 
-| timer | file:line | classification | why |
-|---|---|---|---|
-| `KEEP_ALIVE_INTERVAL` | `crates/lodestone-server/src/server.rs:41` | replication | a health check for one socket; nothing to replay for a new connection |
-| `TIME_SYNC_INTERVAL` | `server.rs:55` | replication | re-derivable from world time × this connection's last-sent value |
-| `CONTAINER_SYNC_INTERVAL` | `server.rs:817` | replication | diffs against what *this* connection was last sent; a second connection has its own cursor |
-| `VITALS_TICK_INTERVAL` | `server.rs:108` | **simulation** | a player's health/food/saturation is authoritative state — it lives per-connection today only because a player is not yet server-`World` state, and there is at most one player per connection |
+| timer | classification | why |
+|---|---|---|
+| `KEEP_ALIVE_INTERVAL` | replication | a health check for one socket; nothing to replay for a new connection |
+| `TIME_SYNC_INTERVAL` | replication | re-derivable from world time × this connection's last-sent value |
+| `CONTAINER_SYNC_INTERVAL` | replication | diffs against what *this* connection was last sent; a second connection has its own cursor |
+| `VITALS_TICK_INTERVAL` | **simulation** | a player's health/food/saturation is authoritative state — it lives per-connection today only because a player is not yet server-`World` state, and there is at most one player per connection |
 
 Three of the four are correctly per-connection replication. `VITALS_TICK_INTERVAL` is the exception:
 a player's vitals are exactly the kind of fact "two connections must agree on" describes (a second
@@ -145,14 +146,14 @@ instead of a per-connection scalar.
 creating a new one.** Two inline mutations already cross from the connection task straight into
 shared simulation state, today, with no scheduling in between:
 
-- `apply_block_action` (`crates/lodestone-server/src/server.rs:1055`) calls `source.set_block(...)`
-  directly from inside `dispatch_play_packet` (`server.rs:1533`, the per-connection packet
-  dispatcher) — at `server.rs:1084` on a confirmed break (`StopDestroy`), and at `server.rs:1189`/
-  `:1192` on a placement in `apply_use_item_on`. `source` is the shared `ChunkSource` every
+- `apply_block_action` (`crates/lodestone-server/src/server.rs`) calls `source.set_block(...)`
+  directly from inside `dispatch_play_packet` (the per-connection packet
+  dispatcher) — on a confirmed break (`StopDestroy`), and on a placement in
+  `apply_use_item_on`. `source` is the shared `ChunkSource` every
   connection reads and writes.
-- `apply_attack` (`server.rs:1490`) mutates the shared mob simulation directly —
-  `mobs.with(|sim| sim.attack(...))` at `server.rs:1502` — called from `dispatch_play_packet` at
-  `server.rs:1661`. `mobs` is the same `MobHandle` `crate::tick::run_tick_loop` (issue #284) ticks
+- `apply_attack` (`server.rs`) mutates the shared mob simulation directly —
+  `mobs.with(|sim| sim.attack(...))` — called from `dispatch_play_packet`.
+  `mobs` is the same `MobHandle` `crate::tick::run_tick_loop` ticks
   and publishes from.
 
 Both are simulation state (a block everyone sees, a mob everyone can hit) mutated inline, on
@@ -210,7 +211,7 @@ actual role, one at a time:
 
 ## How to change it, and the gotchas
 
-- **Do not install `CorePlugin` on the server's `App`.** `crates/lodestone-ecs/src/plugin.rs:33-38`
+- **Do not install `CorePlugin` on the server's `App`.** Its `Plugin::build` (`crates/lodestone-ecs/src/plugin.rs`)
   inserts `FrameClock` (`init_resource::<crate::FrameClock>()`) and configures `Update`'s
   `FrameSet::{Input, Interpolate, Camera, Terrain}` chain — both are lies in a server `World`: there
   is no frame, no camera, and no render-driven `Update` schedule to chain against. The server needs
@@ -247,7 +248,7 @@ records the decision to build that surface, not the surface itself.
 ## Dependencies
 
 - `bevy_app`, `bevy_ecs` — pinned via the same `[workspace.dependencies]` entries `lodestone-ecs`
-  already builds against (root `Cargo.toml:91-92`, `version = "0.19", default-features = false,
+  already builds against (root `Cargo.toml`, `version = "0.19", default-features = false,
   features = ["std"]`, never `multi_threaded` — see the "empirically void" leg in
   `docs/server-tick-loop.md`'s reversed recommendation for why that specific feature omission is
   what makes this migration free of a second threading model).
@@ -276,14 +277,10 @@ records the decision to build that surface, not the surface itself.
   the server needs none of that machinery.
 - [`docs/plugin-api.md`](./plugin-api.md) — the five-clause client-side intent doctrine this
   document's "How the intent doctrine changes server-side" section maps onto the server.
-- Issue [#433](https://github.com/matteopolak/lodestone/issues/433) — the design-options issue this
-  decision resolves.
-- Issue [#77](https://github.com/matteopolak/lodestone/issues/77) — the plugin-framework epic this
-  is a sub-decision of.
-- Issue [#116](https://github.com/matteopolak/lodestone/issues/116) — "one `World`, one `GameTick`,
-  one accumulator" as a permanent decision for the plugin ABI. Two `World`s here does not
+- **"One `World`, one `GameTick`, one accumulator" as a permanent decision for the plugin ABI.**
+  Two `World`s here does not
   contradict it: the invariant is **per `World`**, not "exactly one `World` in the process," and
   each of the client's and the server's `World`s independently keeps exactly one schedule and one
-  accumulator. See that issue's closing comment for the original wording and this document's own
+  accumulator. See the original decision's closing comment for the original wording and this document's own
   "Two `World`s, never one, and why" section above for why a second, wholly separate `World` was the
   right call rather than a violation of it.
