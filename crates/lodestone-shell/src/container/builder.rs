@@ -254,3 +254,33 @@ impl<'a> Builder<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::icon_record;
+
+    /// The `stack -> HotbarSlot` hop: `icon_record` is what every container
+    /// surface (chest, furnace, recipe panel, creative menu) actually reads
+    /// `enchanted` off, so a correct `stack_has_foil` that never reached this
+    /// field would still leave every one of those surfaces dark. Checks both
+    /// the reported case (issue #605's second half, an unenchanted
+    /// `minecraft:enchanted_book`) and a plain item as the negative control.
+    #[test]
+    fn icon_record_carries_the_baked_glint_override_through_to_enchanted() {
+        use lodestone_game::item::ItemStack;
+
+        let book = ItemStack::new(
+            "minecraft:enchanted_book".parse().expect("static id parses"),
+            1,
+        );
+        let record = icon_record(&book).expect("enchanted_book is a valid ResourceLocation");
+        assert!(
+            record.enchanted,
+            "an unenchanted enchanted_book's icon record must set enchanted"
+        );
+
+        let stick = ItemStack::new("minecraft:stick".parse().expect("static id parses"), 1);
+        let record = icon_record(&stick).expect("stick is a valid ResourceLocation");
+        assert!(!record.enchanted, "a plain stick must not set enchanted");
+    }
+}
