@@ -4767,7 +4767,7 @@ where
     // never recomputed the dust and breaking the block *under* anything never
     // destroyed it. Both are here now, shapes first, matching that order.
     let mut collapsed = collapse_unsupported(source, pos);
-    // Issue #579: `NetherPortalBlock.updateShape` is a *second* member of
+    // `NetherPortalBlock.updateShape` is a *second* member of
     // `updateNeighbourShapes`, alongside `block_support`'s survives table
     // `collapse_unsupported` already runs above — a broken frame block must
     // extinguish the portal cells it was holding up, which
