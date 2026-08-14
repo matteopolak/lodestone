@@ -2062,6 +2062,32 @@ fn react_to_notification(
             return Vec::new();
         }
 
+        // 3i. TNT — redstone-signal ignition (`TntBlock::onPlace`/
+        // `neighborChanged`, `TntBlock.java:47-63`). Unlike the dispenser
+        // above there is no `TRIGGERED` state machine: vanilla primes and
+        // removes the block in the same call, unconditionally, whenever
+        // `hasNeighborSignal(pos)` is true. This dispatcher has no `MobSim` to
+        // spawn a `PrimedTnt` into, so it schedules
+        // `crate::mobs::tnt::TICK_TNT_PRIME` instead — see that constant's
+        // own doc for the handoff and its one-tick cost.
+        if crate::mobs::tnt::is_tnt_block(&state) {
+            let has_signal = {
+                let lookup = redstone::make_lookup(column, min_x, min_z);
+                redstone::best_neighbor_signal(&lookup, n.pos, false) > 0
+            };
+            if has_signal
+                && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &crate::mobs::tnt::TICK_TNT_PRIME.to_string())
+            {
+                block_ticks.schedule(
+                    (n.pos.x, n.pos.y, n.pos.z),
+                    crate::mobs::tnt::TICK_TNT_PRIME.to_string(),
+                    current_tick,
+                    TickPriority::Normal,
+                );
+            }
+            return Vec::new();
+        }
+
         Vec::new()
     }
 }

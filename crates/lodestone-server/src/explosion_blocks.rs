@@ -108,8 +108,15 @@
 //! * **Fire.** `ServerExplosion::createFire` runs only when the blast's own `fire`
 //!   flag is set, and a creeper's is `false`. See [`fire_positions`], which
 //!   implements it for whichever future producer sets it.
-//! * **Block entities and `wasExploded`.** A destroyed chest's contents are not
-//!   spilled and TNT is not chain-primed.
+//! * **Block entities.** A destroyed chest's contents are not spilled.
+//! * ~~**`wasExploded` (TNT chain reaction).**~~ Landed, but not in this
+//!   module: [`destroy_blocks`] here has no loot/drop knowledge at all (see
+//!   the **Drops** bullet above) and is not `tick::run_tick_loop`'s
+//!   production path — `crate::block_drops::drop_explosion_loot_in_blast` is,
+//!   and that is where a destroyed `minecraft:tnt` block is now chain-primed
+//!   instead of looted. A caller using [`destroy_blocks`] directly still gets
+//!   no chain reaction; that is this function's existing "no drops at all"
+//!   scope, not a new gap.
 //!
 //! # How to change it
 //!

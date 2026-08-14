@@ -379,6 +379,14 @@ impl WorldStateHandle {
         self.with(|state| state.rules.mob_drops())
     }
 
+    /// `tnt_explodes` — whether igniting TNT actually primes it. See
+    /// [`crate::game_rules::GameRules::tnt_explodes`] for every gated
+    /// producer.
+    #[must_use]
+    pub fn tnt_explodes(&self) -> bool {
+        self.with(|state| state.rules.tnt_explodes())
+    }
+
     /// `spawn_patrols` — whether pillager patrols spawn.
     #[must_use]
     pub fn spawn_patrols(&self) -> bool {

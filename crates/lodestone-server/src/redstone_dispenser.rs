@@ -46,7 +46,7 @@
 //! | bucket | picks a fluid up | **no** — same reason |
 //! | flint and steel | ignites the block ahead (`FlintAndSteelDispenseItemBehavior`) | **partial** ([`flint_and_steel_ignite`]) — the fire-placement arm only; the sulfur-cube-entity-priming arm needs an entity query this crate has none of, and the TNT-block-priming arm needs a primed-TNT entity (see the TNT row) |
 //! | bone meal | grows the crop/water plant ahead (`BoneMealItem.growCrop`) | **yes**, via `crate::bone_meal::apply_bone_meal` — `growWaterPlant` (seagrass/coral) is that module's own pre-existing named gap, not a new one this wiring introduces |
-//! | TNT | spawns a primed-TNT entity | **no** — this crate has no primed-TNT entity at all; `crate::fire`'s own module doc names the identical gap for `TntBlock::prime` |
+//! | TNT | spawns a primed-TNT entity | **yes** — `crate::mobs::MobSim::spawn_tnt`, wired into this arm in `tick.rs`'s `TICK_DISPENSER_FIRE` drain |
 //! | wither skeleton skull | places the skull block, then a `BlockPattern` match for the full wither shape | **no** — needs multi-block shape matching this crate has nowhere |
 //! | carved pumpkin | places the block, then a `BlockPattern` match for snow/iron/copper golem shapes | **no** — same missing subsystem |
 //! | shulker box (+16 colours) | places the block entity | no |
@@ -63,7 +63,7 @@
 //!
 //! So this module now models the shared mechanics (the `TRIGGERED` redstone
 //! state machine, the plain-toss math, and the dropper's container push) plus
-//! five of the ~35 special behaviours (spawn eggs, boats, bone meal, the
+//! six of the ~35 special behaviours (spawn eggs, boats, TNT, bone meal, the
 //! fire-placement half of flint and steel, and — via `crate::hopper` — a
 //! dropper's container push); every skip above names its own missing
 //! mechanism rather than leaving "no" unexplained, per this issue's own trap

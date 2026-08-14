@@ -1141,33 +1141,6 @@ pub enum ServerBound {
         /// Which of the three enchantment offers was chosen.
         button_id: i32,
     },
-    /// The command-block GUI's "Done" button
-    /// (`ServerboundSetCommandBlockPacket`) — issue #48's remainder.
-    /// `crate::server`'s consumer is `ServerGamePacketListenerImpl
-    /// .handleSetCommandBlock`: swap the block to the requested mode
-    /// (preserving `FACING`), write `conditional`, then update the entity's
-    /// command/track-output/"Always Active" fields — see
-    /// `crate::command_block`'s own module doc for exactly how far that
-    /// consumer goes and what still needs a real redstone signal instead of
-    /// this packet.
-    SetCommandBlock {
-        /// The target command block's position.
-        pos: BlockPos,
-        /// The command text to store, unfiltered.
-        command: String,
-        /// `CommandBlockEntity.Mode`'s wire ordinal — see
-        /// `crate::command_block::base_name_for_mode_ordinal`'s own doc for
-        /// the mapping; kept raw here rather than resolved in the protocol
-        /// crate, matching every other packet-shaped variant's "wire shape
-        /// only" convention.
-        mode: i32,
-        /// `COMMAND_BLOCK_FLAG_TRACK_OUTPUT`.
-        track_output: bool,
-        /// `COMMAND_BLOCK_FLAG_CONDITIONAL`.
-        conditional: bool,
-        /// `COMMAND_BLOCK_FLAG_AUTOMATIC` — the "Always Active" toggle.
-        automatic: bool,
-    },
     /// A packet the loop does not need to act on (teleport confirmations,
     /// look-only or status-only movement, and several other decoded-but-
     /// unmodelled families — see `crates/protocol/v770/src/server_protocol.rs`'s
