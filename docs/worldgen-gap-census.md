@@ -60,9 +60,9 @@ Vanilla source of truth: `net/minecraft/world/level/levelgen/NoiseGeneratorSetti
 | item | verdict | evidence |
 |---|---|---|
 | Overworld terrain generator | **reached** | `OverworldGenerator::column_timed` runs 10 stages: aquifer, shape, biome, surface, materialize, carve, ore, vegetation, top-layer, intern (`overworld/mod.rs`, `column_timed`) |
-| Nether generator | **absent** | `grep -rni nether crates/lodestone-worldgen crates/lodestone-worldgen-core --include=*.rs` → **0 hits**. There is exactly one generator type in the tree |
-| End generator | **absent** | same grep; no `TheEndBiomeSource`, no `end_islands` |
-| `minecraft:end_islands` density type | **absent** | not a `Density` variant (`lodestone-worldgen-core/src/density/mod.rs`, enum `Density`); its `build_object` method's `panic!("unhandled density-function type…")` arm. Used by bundled `noise_settings/end.json` **and** `density_function/end/sloped_cheese.json` — two uses, so loading End data panics today |
+| Nether generator | **landed since this census (`1c372b0e`, 2026-08-08), and wired into the server** | Stale: this row's grep found 0 hits at `98433351` on 2026-08-07; `crates/lodestone-worldgen/src/nether/` exists today with a real `NetherGenerator` (disabled-aquifer fill, `nether_cave`, measured "17,855/17,856 biome quarts against a real vanilla world" per that commit). `crates/lodestone-server/src/worldgen_data::nether_generator` constructs one and `chunk.rs` adopts its columns (`NetherColumn`) into the chunk store — a real production caller, not just a generator sitting alone. Re-run `grep -rni nether crates/lodestone-worldgen --include=*.rs` to reconfirm; it is no longer 0. |
+| End generator | **landed since this census (`f02bd321`, 2026-08-08) — but *not* wired into the server, a genuine island** | Stale for the same reason as Nether: `crates/lodestone-worldgen/src/end/` exists with a real `EndBiomeSource`, `EndColumn`, `EndGenerator` implementing the `end_islands` algorithm end to end ("complete without the density interpreter" per that commit — i.e. it does not go through the generic `Density` graph at all). **Unlike Nether, nothing in `crates/lodestone-server` references it**: `grep -rn "worldgen::end" crates/lodestone-server/src` is empty, and `dimension.rs`'s own doc comment still lists "Adding the End" as future work. This is the one row in this section that is a real island rather than a stale "absent" — the generator exists, is presumably tested, and has zero production callers. |
+| `minecraft:end_islands` density type | **landed** | `Density::EndIslands` is a real variant in `lodestone-worldgen-core/src/density/mod.rs` (parses `"end_islands"`, evaluates via `EndIslandNoise::compute`, has a signature hash arm) — not the `panic!` fallback this row described. Loading End data no longer panics on this specifically; whatever remains blocking a fully generic End density graph is narrower than this one type. |
 | non-overworld `noise_settings` | **partly reached** | all 7 bundled (`assets/worldgen/noise_settings/{overworld,nether,end,amplified,caves,floating_islands,large_biomes}.json`); issue #519 made `amplified` and `large_biomes` selectable (`worldgen_data::WorldType`, `overworld_generator_of_type`/`overworld_chunk_source_of_type`). `nether`/`end` are read by their own dedicated generators (see below); `caves`/`floating_islands` are custom-dimension `noise_settings`, not overworld presets, and remain orphaned — referenced only from `crates/lodestone-data/tests/worldgen_dimension_data.rs` |
 | `legacy_random_source` (Nether/End gate) | **absent** | 3 tree-wide hits, all in `crates/lodestone-data/tests/worldgen_dimension_data.rs`. Both non-overworld settings set it `true`; `overworld.json` sets it `false`. Tracked as **#486** |
 | `world_preset/*.json` documents (7) + flat presets (9) | **orphaned (data)** | still true literally — no code parses a `world_preset/*.json` document itself. `worldgen_structure_corpus.rs`'s `EXPECTED_COUNTS` table is still the only Rust reference. **Note the distinction**: `amplified`/`large_biomes` are now reachable (row below), but via a hand-written `WorldType` enum naming the `noise_settings` id directly, not by resolving `world_preset/amplified.json`'s own `generator.settings` field — so even those two presets' *own* JSON documents remain unread |
@@ -148,11 +148,12 @@ Vanilla source of truth: `level/levelgen/feature/OreFeature.java`,
 | `minecraft:ore` feature | **reached** | `feature/mod.rs`'s `parse_ore_config`, driven by `ore_stage` over the real 3×3 neighbourhood |
 | per-biome ore lists from step 6 | **reached** | `compose.rs`'s `build_biome_ores`, index-preserving |
 | `minecraft:scattered_ore` | **absent** | `build_biome_ores` skips any configured feature whose `type != "minecraft:ore"` (`compose.rs`, the `continue` on the type check). 2 bundled files (Nether gold/quartz-shaped placement) |
-| **`OreVeinifier` (large copper/iron veins)** | **absent — live Overworld parity defect** | `grep -rn "vein_toggle\|vein_ridged\|vein_gap\|OreVein\|ore_vein\|veinif" --include=*.rs crates/` → **1 hit**, in `crates/lodestone-data/tests/worldgen_dimension_data.rs`. Bundled `noise_settings/overworld.json` has `ore_veins_enabled: true` and all three router channels plus the `vein_a`/`vein_b` noises. Tracked as **#496** (half one) |
+| **`OreVeinifier` (large copper/iron veins)** | **landed since this census — the live Overworld parity defect is closed** | Stale: the 1-hit grep was true at `98433351` on 2026-08-07. `crates/lodestone-worldgen/src/overworld/veins.rs` is now a real, documented port of `OreVeinifier` — its own module doc opens "Issue #496: `OreVeinifier` — the large copper and iron veins" and names the exact channels this row called out (`vein_toggle`, `vein_ridged`, `vein_gap`, `ore_vein_a`/`ore_vein_b`). `overworld/fill.rs` binds it once per chunk (a comment there explains why: `vein_toggle`/`vein_ridged` are `minecraft:interpolated`) and reaches it through the real `MaterialRuleList` after the aquifer pass. Re-run the row's own grep to reconfirm — it is no longer 1 hit. |
 
-**#496's second half already landed** (`a27cbb98`, plus U17/U18 `d50feba7`/`22982b99`
-addressing the same hashing/allocation costs). The issue title bundles both halves, so it
-reads as untouched work when only the `OreVeinifier` remains.
+**#496 is now fully landed, both halves.** The second half landed first (`a27cbb98`, plus
+U17/U18 `d50feba7`/`22982b99` addressing the same hashing/allocation costs); this census's own
+2026-08-07 measurement caught it mid-flight with only that half done. `OreVeinifier` itself
+(the first half, and the one this row tracked) landed since.
 
 ---
 
@@ -213,18 +214,27 @@ Also open on this axis: **#428** (fancy/giant trunk placers — jungle, mangrove
 Vanilla source of truth: `level/levelgen/structure/`, `structure/pools/`,
 `structure/placement/`, `chunk/status/ChunkStatus.java`.
 
+**Re-verdicted 2026-08-14 — this entire section is stale in the "understates" direction, and
+this is the section the task brief specifically flagged for it.** `crates/lodestone-worldgen/src`
+now has a `structure/` module totalling **13,101 lines** across `mod.rs`, `beardifier.rs`,
+`jigsaw.rs`, `pool.rs`, `template.rs`, `processor.rs`, `mineshaft.rs`, `placement.rs` and
+`coded.rs` — every S1–S4 row below is now real code, most of it wired into the server. Today's
+landings list independently corroborates this: ruined portals, buried treasure and mineshafts are
+named as landed, and this module is where they live.
+
 | item | verdict | evidence |
 |---|---|---|
-| structure **data** corpus | **orphaned (data)** | 34 structures, 20 structure sets, 188 template pools, 40 processor lists, 1212 `.nbt` templates, 92 worldgen tags — all bundled and byte-identical to the jar (`docs/worldgen-structure-corpus.md`; landed `6c6c0e10` under **#484**, which is **stale-open**). The **only** Rust reader is the drift gate `crates/lodestone-server/tests/worldgen_structure_corpus.rs` |
-| structure placement / `/locate` (S1) | **absent** | no `structure` module in `crates/lodestone-worldgen/src`; `lib.rs`'s module list is aquifer, biome, carver, compose, dense_grid, feature, interner, overworld, surface |
-| template placement + processors (S2) | **absent** | nothing reads `assets/structure/**.nbt` |
-| **beardifier (S3)** | **partial — a constant-zero leaf** | `Density::Beardifier` parses (`density/mod.rs`'s `Density` enum) and evaluates to `0.0` (`density/mod.rs`'s density-evaluation match). So the density graph has the seam and no terrain adaptation: structures would sit on unmodified terrain |
-| jigsaw (S4) | **absent** | — |
-| `WorldgenRandom.setLargeFeatureWithSalt` | **absent** | `grep large_feature_with_salt --include=*.rs crates/` → 0 hits. Vanilla `WorldgenRandom.setLargeFeatureWithSalt`; it is how `RandomSpreadStructurePlacement` salts per-structure-set placement, so S1 needs it |
-| ChunkStatus pipeline (S0 prerequisite) | **absent** | no `ChunkStatus` type anywhere; generation is one `column()` call with bare integer step constants. Vanilla's order (`ChunkStatus.java`) runs `STRUCTURE_STARTS` **before** `NOISE` so the beardifier can consult it. Adjacent open issue: **#289** |
+| structure **data** corpus | **orphaned (data) as of 2026-08-07 — now consumed, re-verify the drift-gate-only claim** | 34 structures, 20 structure sets, 188 template pools, 40 processor lists, 1212 `.nbt` templates, 92 worldgen tags — all bundled and byte-identical to the jar (`docs/worldgen-structure-corpus.md`; landed `6c6c0e10` under **#484**). **No longer read by only the drift gate**: `structure/template.rs`, `structure/pool.rs` and `structure/processor.rs` are real consumers now, and `crates/lodestone-server/src/structure_loot.rs` reads `StructureTemplate` and `template::transform` directly for chest loot. |
+| structure placement / `/locate` (S1) | **landed and wired into the server** | `crates/lodestone-worldgen/src/structure/mod.rs` exists (contrary to this row's "no `structure` module" claim, which was accurate only at `98433351`). `crates/lodestone-server/src/chunk.rs` holds a real `structure_starts: Vec<Arc<lodestone_worldgen::structure::StructureStart>>` field and a `structure_starts_stage` documented at 8-chunk `REFS_RADIUS` with a measured 7.4× fan-out (1,024 → 7,569 references) — this is production chunk generation, not a test fixture. |
+| template placement + processors (S2) | **landed** | `structure/template.rs` + `structure/processor.rs` exist and are read by `structure_loot.rs`'s `transform` call, which places loot-bearing structures (chests) using the real template/processor pipeline. |
+| **beardifier (S3)** | **still a constant-zero leaf — re-verified, this specific sub-claim is NOT stale** | `Density::Beardifier => 0.0` is still the evaluation arm in `lodestone-worldgen-core/src/density/mod.rs`, unchanged. So even though structures are now placed (S1) and templated (S2), terrain still does not deform around them — a mineshaft or ruined portal sits on unmodified terrain rather than vanilla's beard-adapted surface. This is the one S-row that did **not** move; do not flip it without finding a non-zero `Beardifier` evaluation. |
+| jigsaw (S4) | **landed** | `structure/jigsaw.rs` and `structure/pool.rs` exist, backing the ruined-portal and other jigsaw-assembled structures named in today's landings. |
+| `WorldgenRandom.setLargeFeatureWithSalt` | **not re-verified this pass** | re-grep `large_feature_with_salt`/the equivalent salting call in `structure/placement.rs` before trusting either verdict — S1 landing makes "absent" unlikely but this specific function was not checked. |
+| ChunkStatus pipeline (S0 prerequisite) | **partially addressed, not a formal `ChunkStatus` type** | Still no vanilla-shaped `ChunkStatus` enum, but `chunk.rs`'s `structure_starts`/`structure_refs` stages (§ evidence above) now encode an explicit stage ordering with `store::StageSlot`, and `spawn_stage.rs` cites `ChunkStatus.SPAWN` by name as the vanilla stage it corresponds to — the *ordering concept* has arrived piecemeal even without the enum. Whether `STRUCTURE_STARTS` truly precedes `NOISE` the way vanilla requires (so the still-zero beardifier could someday consult it) was not re-verified this pass. |
 
-The generator's own module doc still said so at the time: `overworld/mod.rs` — "**Still not
-composed:** structures (unbuilt anywhere in this repo)".
+The generator's own module doc no longer says structures are unbuilt — re-grep
+`overworld/mod.rs` for "Still not composed" before citing that quote; it describes the tree at
+`98433351`, not today's.
 
 ---
 
@@ -401,18 +411,18 @@ Ranking is about what a player would notice standing in the world, not about cos
 
 | rank | gap | why it ranks here | verdict |
 |---|---|---|---|
-| 1 | **No Nether, no End** | two of three dimensions do not exist; the whole late game is unreachable | absent (§1) |
-| 2 | **No structure *blocks*** | placement is done and wired (#514 S1: starts and references reach the region file), but no piece generator exists (S2), so the exploration layer is still invisible in the world | partial — placement reached, pieces absent (§7) |
-| 3 | **8 of 11 decoration steps, 48 of 55 feature types** | no lakes, springs, geodes, dripstone, icebergs, disks, dungeons, fossils, glow lichen, sculk, coral. The world reads as terrain + ore + grass/trees + snow | absent (§6) |
-| 4 | **No mob spawning** | a world with six demo mobs and no others, ever; no cap, no despawn, no night hostiles | absent + orphaned (§9) |
-| 5 | **All-`Missing` light on the served chunk** | the integrated-server path ships no light while a working engine sits one crate away | orphaned — **parity defect** (§11) |
+| 1 | ~~**No Nether, no End**~~ | **re-verdicted 2026-08-14**: the Nether generates and is wired into the server (`1c372b0e`); the End's generator and biome source are complete but **not wired into the server** — a real island, not an absence. Re-verify player-facing reachability (can a player actually portal in?) before fully closing this row. | Nether reached; End built-but-unwired (§1) |
+| 2 | ~~**No structure *blocks***~~ | **re-verdicted 2026-08-14**: `structure/` (13,101 lines: `jigsaw.rs`, `pool.rs`, `template.rs`, `processor.rs`, `mineshaft.rs`, `beardifier.rs`) landed and is wired into `chunk.rs`'s `structure_starts`/`structure_refs` stages and `structure_loot.rs`'s template placement — pieces do generate now. **Terrain still does not deform around them** (beardifier is a hardcoded `0.0`), so a structure can still sit oddly against unmodified terrain. | placement + pieces reached; beardifier still absent (§7) |
+| 3 | **8 of 11 decoration steps, 48 of 55 feature types** | no lakes, springs, geodes, dripstone, icebergs, disks, dungeons, fossils, glow lichen, sculk, coral. The world reads as terrain + ore + grass/trees + snow — **not re-verified this pass**, treat as unconfirmed rather than re-audited | absent (§6) |
+| 4 | **No mob spawning** | **stale, see the server-gameplay gap census's §9 re-verdict (2026-08-14)**: `natural_spawn.rs` now drives real spawning from the tick loop with per-species light/biome rules, closing most of this row. Not re-verified from the worldgen side of §9 in *this* document — re-audit before trusting either doc's §9 in isolation. | was absent + orphaned, now landed per the sibling census (§9) |
+| 5 | **All-`Missing` light on the served chunk** | the integrated-server path ships no light while a working engine sits one crate away — not re-verified this pass | orphaned — **parity defect** (§11) |
 | 6 | ~~**No 3-D biomes**~~ | **fixed** (#512): the generator samples a real 4x4x4 grid and the encoder, region writer and region reader all carry it per section | reached (§2) |
-| 7 | **Ore veins never generate** | large copper and iron veins are simply missing from a world we otherwise call Overworld-parity | absent — **parity defect** (§5) |
-| 8 | **Empty heightmap NBT** | not directly visible, but it is a wrong value in a field we populate, and a JVM-proven `MOTION_BLOCKING` exists and is unreachable | partial — **parity defect** (§10) |
-| 9 | **Slime chunks** | one predicate; blocks slime spawning, and a well-known player-facing mechanic | absent (§8) |
+| 7 | ~~**Ore veins never generate**~~ | **fixed, re-verdicted 2026-08-14**: `overworld/veins.rs` is a real `OreVeinifier` port, bound per-chunk in `overworld/fill.rs` and reached through the production `MaterialRuleList` after the aquifer pass. | reached (§5) |
+| 8 | **Empty heightmap NBT** | not directly visible, but it is a wrong value in a field we populate, and a JVM-proven `MOTION_BLOCKING` exists and is unreachable — not re-verified this pass | partial — **parity defect** (§10) |
+| 9 | **Slime chunks** | one predicate; blocks slime spawning, and a well-known player-facing mechanic — not re-verified this pass | absent (§8) |
 | 10 | **World presets: superflat / single-biome / debug still unreachable** | ~~amplified / large_biomes~~ **reached** (#519); the remaining three need generator code this tree does not have (`FlatLevelSource`, `FixedBiomeSource`, a block-grid debug generator), not just wiring | partial — 2/5 reached (§1) |
 | 11 | ~~**Empty bee nests**~~ | **fixed** (#520): the decorator's discarded bee draw is used, and the chunk packet's block-entity array is no longer a hardcoded zero | reached (§12) |
-| 12 | **`nether_cave` carver, `scattered_ore`** | latent until the Nether exists | absent (§4, §5) |
+| 12 | **`nether_cave` carver, `scattered_ore`** | **the `nether_cave` half is fixed**: `CarverConfig::parse` now matches `"minecraft:nether_cave"` explicitly (a `nether` flag on `CaveConfig`) instead of panicking, and the Nether generator that makes it live has landed. `scattered_ore` was not re-verified this pass. | `nether_cave` reached; `scattered_ore` not re-verified (§4, §5) |
 
 **The parity-defect set — worse than absences, because they look done:** ore veins (§5),
 heightmaps (§10), light (§11), ~~empty bee nests (§12)~~, and one this census missed —
@@ -497,6 +507,16 @@ field, built at construction from `veins::VeinPrograms::build`). That is a produ
 site, not just a test, so the "absent" verdict and the "1 hit, test-only" grep evidence both
 read as stale. Not corrected here for the same reason as the carver finding above: verdict
 correctness is a content-audit question, not a citation-format one.
+
+**Closing the loop, 2026-08-14: the recommended re-audit happened, for §1/§5/§7.** All three
+sections above (Nether/End generators and the `end_islands` density type in §1; `OreVeinifier`
+in §5; structures S1/S2/S4 and the data corpus in §7) are now corrected in place with fresh
+evidence, dates and re-run grep commands, rather than left as this after-the-fact note. One
+sub-finding survived the re-audit unchanged: §7's beardifier (S3) is still a hardcoded `0.0`
+leaf even though structures now place and template — terrain does not yet deform around them.
+§9 (mob spawning), §2 Biomes' `TheEndBiomeSource` row, and `docs/live-mob-sim.md`/
+`docs/mob-species-spawning.md`'s own stale claims (named below) were **not** re-audited this
+pass — treat those as still open per this note, not as covered by the above.
 
 **A third, larger confirmed-stale area: §7 Structures.** `crates/lodestone-worldgen/src`
 now has a `structure/` module (`beardifier.rs`, `coded.rs`, `jigsaw.rs`, `mineshaft.rs`,
