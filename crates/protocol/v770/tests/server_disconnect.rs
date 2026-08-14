@@ -1,4 +1,4 @@
-//! Issue #279: our server can send a Disconnect packet, and actually does.
+//! Our server can send a Disconnect packet, and actually does.
 //!
 //! # The asymmetry this file exists to protect
 //!
@@ -7,8 +7,8 @@
 //!
 //! | phase | packet | reason encoded as |
 //! |---|---|---|
-//! | Login | `ClientboundLoginDisconnectPacket` | **JSON string** (`ByteBufCodecs.lenientJson(262144)`, `login/ClientboundLoginDisconnectPacket.java:18`) |
-//! | Configuration / Play | `ClientboundDisconnectPacket` | **NBT** (`TRUSTED_CONTEXT_FREE_STREAM_CODEC` = `fromCodecTrusted`, `common/ClientboundDisconnectPacket.java:11-12`, `chat/ComponentSerialization.java:44`) |
+//! | Login | `ClientboundLoginDisconnectPacket` | **JSON string** (`ByteBufCodecs.lenientJson(262144)`, `login/ClientboundLoginDisconnectPacket.java`) |
+//! | Configuration / Play | `ClientboundDisconnectPacket` | **NBT** (`TRUSTED_CONTEXT_FREE_STREAM_CODEC` = `fromCodecTrusted`, `common/ClientboundDisconnectPacket.java`, `chat/ComponentSerialization.java`) |
 //!
 //! `login_phase_reason_is_json_and_play_phase_reason_is_nbt` is the load-bearing
 //! test: it asserts each phase's body parses under its *own* encoding and
@@ -77,7 +77,8 @@ impl ChunkSource for AirSource {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). `ChunkSource::set_block` has no default, so this is
+    // stated explicitly rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -91,9 +92,9 @@ fn payload_of(directive: ServerDirective) -> (i32, Vec<u8>) {
 }
 
 /// The reason our server sends on a keep-alive timeout, restated rather than
-/// imported: vanilla's own key (`ServerCommonPacketListenerImpl.java:37`) with
-/// vanilla's own English string for it
-/// (`.cache/mc/26.2/client-src/assets/minecraft/lang/en_us.json:3498`).
+/// imported: vanilla's own key (`ServerCommonPacketListenerImpl.java`) with
+/// vanilla's own English string for it, under the same key, in
+/// `.cache/mc/26.2/client-src/assets/minecraft/lang/en_us.json`.
 const TIMEOUT_KEY: &str = "disconnect.timeout";
 const TIMEOUT_FALLBACK: &str = "Timed out";
 
@@ -327,7 +328,7 @@ fn a_real_client_adapter_decodes_our_play_and_configuration_reasons() {
             decoded.to_plain_string(),
             TIMEOUT_FALLBACK,
             "the fallback string must survive to the client, or a client that \
-             cannot resolve `{TIMEOUT_KEY}` shows the raw key (issue #68)",
+             cannot resolve `{TIMEOUT_KEY}` shows the raw key",
         );
         match decoded.content {
             TextContent::Translate {
@@ -421,7 +422,8 @@ async fn an_unanswered_keep_alive_kicks_the_client_with_a_reason() {
 
     let reason = disconnect_reason.expect(
         "the server must SEND a play-phase disconnect before hanging up; closing \
-         the socket silently is exactly the defect issue #279 reports",
+         the socket silently and leaving the client to time out is the defect \
+         this gate catches",
     );
     match reason.content {
         TextContent::Translate {
@@ -431,7 +433,7 @@ async fn an_unanswered_keep_alive_kicks_the_client_with_a_reason() {
         } => {
             assert_eq!(
                 key, TIMEOUT_KEY,
-                "the key must be vanilla's own (ServerCommonPacketListenerImpl.java:37)",
+                "the key must be vanilla's own (ServerCommonPacketListenerImpl.java)",
             );
             assert_eq!(
                 fallback.as_deref(),
@@ -455,7 +457,7 @@ async fn an_unanswered_keep_alive_kicks_the_client_with_a_reason() {
 #[tokio::test]
 async fn an_invalid_username_is_refused_with_a_login_disconnect() {
     // A tab is `0x09`, which is `<= 32` and so rejected by
-    // `StringUtil.isValidPlayerName` (`StringUtil.java:66-68`).
+    // `StringUtil.isValidPlayerName` (`StringUtil.java`).
     let (sent, outcome) = attempt_login("bad\tname").await;
     let (id, payload) = sent
         .iter()
@@ -509,7 +511,7 @@ async fn a_valid_username_is_not_refused() {
 }
 
 /// The name-validation boundary, straight from `StringUtil.isValidPlayerName`
-/// (`net/minecraft/util/StringUtil.java:66-68`): at most 16 chars, and no char
+/// (`net/minecraft/util/StringUtil.java`): at most 16 chars, and no char
 /// `<= 32` or `>= 127`.
 ///
 /// Exercised through the **server loop**, not by calling a private helper, so it

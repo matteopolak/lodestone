@@ -598,13 +598,14 @@ fn mc_string(text: &str) -> Vec<u8> {
     out
 }
 
-// `nbt_string` for this file lives at the top, beside `utf`/`var_i32`; the #286
-// signature work added a byte-identical second copy here. One definition.
+// `nbt_string` for this file lives at the top, beside `utf`/`var_i32`; the
+// signed-chat signature work added a byte-identical second copy here. One
+// definition.
 
 /// A signed `player_chat` payload: a full 256-byte signature, an empty
 /// last-seen list, no unsigned component, pass-through filter. Feeding this
 /// through the adapter populates its signature cache with `signature` at index
-/// 0 (the issue #286 wiring), which a later `delete_chat` can reference.
+/// 0, which a later `delete_chat` can reference.
 fn signed_player_chat(signature: [u8; 256]) -> Vec<u8> {
     let mut out = var_i32(1); // global index
     out.extend_from_slice(&[0u8; 16]); // sender UUID

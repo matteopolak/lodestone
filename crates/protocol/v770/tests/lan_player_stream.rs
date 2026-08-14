@@ -1,4 +1,4 @@
-//! Issue #438, **production path**: two real TCP clients against one
+//! **Production path**: two real TCP clients against one
 //! `IntegratedServer::bind` see each other as player entities.
 //!
 //! # Why this exists alongside `server_player_entity_stream.rs`
@@ -9,11 +9,11 @@
 //! into the entity source it hands each accepted socket. Without this file
 //! `bind` could ship with `relay_mobs.clone()` unchanged, every assertion in
 //! the other file would still pass, and LAN multiplayer would remain exactly as
-//! invisible as it was before #438: the island failure mode, one level up from
+//! invisible as it once was: the island failure mode, one level up from
 //! the code.
 //!
 //! **Verified as a control, not described**: with
-//! `crates/lodestone-server/src/integrated.rs` reverted to its pre-#438 form
+//! `crates/lodestone-server/src/integrated.rs` reverted to its pre-fix form
 //! this test fails with *"B must receive A's player entity over LAN — got []"*.
 //! It lands together with that file's `PlayerAwareSource` composition and is
 //! meaningless without it.
@@ -26,8 +26,8 @@
 //! configuration complete, then every subsequent read hangs forever with the
 //! timeout never firing. Measured while writing this file — the plain
 //! `#[tokio::test]` version ran past 60 s with no output. This is the same
-//! one-thread contention `crate::server::SourceRef`'s doc comment describes for
-//! issue #293, seen from the test side; the shell runs its own runtime and is
+//! one-thread contention `crate::server::SourceRef`'s doc comment describes,
+//! seen from the test side; the shell runs its own runtime and is
 //! unaffected.
 
 use std::time::Duration;
@@ -66,7 +66,8 @@ impl ChunkSource for AirSource {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). `ChunkSource::set_block` has no default, so this is
+    // stated explicitly rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -136,7 +137,7 @@ async fn drain<T: lodestone_net::Transport>(client: &mut Connection<T>) -> Vec<(
 /// `bind` is still handing each connection the bare mob source"* — a confident
 /// accusation against production for a drain that simply stopped early.
 ///
-/// The join path also got slower underneath it: issue #329's world-spawn search
+/// The join path also got slower underneath it: the world-spawn search
 /// runs before chunk streaming and, against [`AirSource`], finds no valid spawn in
 /// any of its 121 spiral candidates — so it generates 121 full-height columns
 /// (~196 KiB each) on the connection task between `FINISH_CONFIGURATION` and the
@@ -144,7 +145,7 @@ async fn drain<T: lodestone_net::Transport>(client: &mut Connection<T>) -> Vec<(
 ///
 /// So the stopping condition is now the **event**, and the timeout is only a
 /// failure ceiling. This cannot mask the defect the test exists to catch: with
-/// `bind` reverted to its pre-#438 form the `add_entity` never arrives at all, and
+/// `bind` reverted to its pre-fix form the `add_entity` never arrives at all, and
 /// this waits the full deadline and then fails on the same assertion.
 async fn drain_until<T: lodestone_net::Transport>(
     client: &mut Connection<T>,

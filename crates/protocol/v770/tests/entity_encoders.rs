@@ -215,7 +215,7 @@ fn encode_remove_entity_batches_every_id_into_one_packet() {
 }
 
 /// `encode_set_entity_link` round-tripped through the real adapter's own
-/// `SET_ENTITY_LINK` decode arm (issue #236) — the server-encode half meeting
+/// `SET_ENTITY_LINK` decode arm — the server-encode half meeting
 /// the client-decode half this crate already had. Pairwise-distinct ids
 /// (11 and 4, not 1 and 1 or 1 and 4): a transposition of `source_id` and
 /// `target_id` inside the encoder would otherwise round-trip byte-perfectly

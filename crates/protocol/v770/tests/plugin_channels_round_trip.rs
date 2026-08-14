@@ -1,12 +1,12 @@
-//! **The wire path for wire-level plugin messaging, end to end** (issue #335).
+//! **The wire path for wire-level plugin messaging, end to end.**
 //!
 //! The server side of plugin messaging landed as a version-free module
 //! ([`PluginChannelRegistry`]/[`ClientChannels`] in `lodestone-server`'s
 //! `plugin_channels.rs`), a new [`ServerBound::CustomPayload`] variant lifted
 //! by the protocol seam, a defaulted `ServerProtocol::encode_custom_payload`
 //! seam method, its `v770` implementation, and a broadcast drain in
-//! `serve_play`'s `container_sync_tick` timer — the same shape as issue #334's
-//! resource-pack push. A decoder with no encoder, an encoder nobody reaches,
+//! `serve_play`'s `container_sync_tick` timer — the same shape as the
+//! resource-pack push wiring. A decoder with no encoder, an encoder nobody reaches,
 //! or a registry nobody dispatches through is the island shape this file
 //! exists to close: every gate starts at a real action a real client sends (or
 //! a [`PluginChannelRegistry::broadcast`] a host publishes) and ends at the
@@ -22,13 +22,13 @@
 //! | the decode | `V770ServerProtocol`'s `custom_payload` arms lifting `ServerBound::CustomPayload` |
 //! | the dispatch | `PluginChannelRegistry::dispatch` in `serve_play`'s packet loop |
 //! | the handler | a real `PluginChannelHandler` installed on the registry |
-//! | the outbound producer | `PluginChannelRegistry::broadcast`, the same call a future #77 plugin makes |
+//! | the outbound producer | `PluginChannelRegistry::broadcast`, the same call a future plugin makes |
 //! | the outbound drain | `serve_play`'s `container_sync_tick` arm + `encode_custom_payload` |
 //! | the client | the real `V770Adapter` decode arm into `ClientEvent::CustomPayload` |
 //!
 //! # Scope
 //!
-//! Issue #77 owns the plugin-facing API; this file verifies the wire-level
+//! The plugin-facing API is owned elsewhere; this file verifies the wire-level
 //! registry and dispatch underneath it: registered-channel delivery,
 //! unregistered-channel drop, and the server→client broadcast filter
 //! (`ClientChannels`) with the real encoder/decoder join.

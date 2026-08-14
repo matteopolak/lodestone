@@ -1,4 +1,4 @@
-//! End-to-end gate for #466: **a real client places a real block, and the
+//! End-to-end gate: **a real client places a real block, and the
 //! server's own world holds the block the player was holding** — not
 //! `minecraft:stone`.
 //!
@@ -6,8 +6,8 @@
 //!
 //! The client predicts placement locally and predicted it *correctly*
 //! throughout the bug, so a gate that reads `handle.block_at(..)` passes
-//! against the defect. That is precisely how #466 survived: three things hid
-//! it, and one of them is that the wire was fully connected and carrying the
+//! against the defect. That is precisely how this defect survived: three
+//! things hid it, and one of them is that the wire was fully connected and carrying the
 //! wrong value — the failure `cargo xtask connectedness` structurally cannot
 //! see. So the assertion here is on the **server's own** `ChunkSource`, held
 //! through a shared handle the test keeps its own clone of, read after the
@@ -23,17 +23,17 @@
 //! implementation than the real census:
 //!
 //! * `dirt`, `oak_planks`, `white_wool`, `glass` — ordinary blocks, the whole
-//!   subject of #466. All four placed stone before the fix.
+//!   subject of the placement bug. All four placed stone before the fix.
 //! * `redstone` — places `minecraft:redstone_wire`, a **different name**. A
 //!   name-equality resolver (`item_name == block_name`) fails this row, and
-//!   this is also the first half of #465: dust could not be placed at all.
+//!   this is also the first half of the neighbour-update defect: dust could not be placed at all.
 //! * `diamond_sword` — places **nothing**. Both directions matter: the
 //!   fallback for a non-placeable item must leave the world untouched, and
 //!   must specifically not be stone.
 //!
 //! # Scope this deliberately does not assert
 //!
-//! Block *state* is out of scope for #466 (see `apply_use_item_on`'s own doc
+//! Block *state* is out of scope for this gate (see `apply_use_item_on`'s own doc
 //! comment): the server writes each block's bare name, so redstone dust lands
 //! without its `power`/connection properties and a log without its `axis`.
 //! These assertions are on the block, which is what the issue is about.
@@ -226,7 +226,7 @@ async fn every_held_item_places_its_own_block_in_the_servers_own_world() {
     // out, and an `expect` here would report "confirmation never arrived" —
     // burying the actual diagnosis. Letting the per-item assertions below run
     // first makes the failure say *which item placed what*, which is the
-    // whole point of the gate. Observed while running #466's own negative
+    // whole point of the gate. Observed while running this gate's own negative
     // control: with the pre-fix resolver restored, `expect` reported only
     // `Timeout`, while this ordering reports `holding minecraft:dirt must
     // place minecraft:dirt, server wrote "minecraft:stone"`.
@@ -265,7 +265,7 @@ async fn every_held_item_places_its_own_block_in_the_servers_own_world() {
                     "holding {item} must place nothing at {pos:?}, server wrote {actual:?}"
                 );
                 // Named separately from the air check: "not stone" is the
-                // specific regression #466 is about, and an assertion that
+                // specific regression this gate is about, and an assertion that
                 // only said `== air` would not say *why* it matters.
                 assert_ne!(
                     actual, "minecraft:stone",

@@ -102,7 +102,7 @@ impl SetTime {
     ///
     /// # This is the fallback now, not the answer
     ///
-    /// Since issue #288 the crate *does* ingest the `minecraft:world_clock`
+    /// The crate now *does* ingest the `minecraft:world_clock`
     /// registry (see [`crate::packets::registry`]), so the caller can name the
     /// clock the current dimension actually follows and pass its holder id to
     /// [`clock_for`](Self::clock_for). Two things were wrong with the heuristic,

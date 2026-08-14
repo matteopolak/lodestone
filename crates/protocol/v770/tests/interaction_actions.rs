@@ -117,7 +117,7 @@ fn item_actions_map_to_player_action_with_zeroed_target() {
     }
 }
 
-/// Issue #385's protocol half, pinned as a **literal** rather than as one row of
+/// The off-hand-swap action's protocol half, pinned as a **literal** rather than as one row of
 /// the loop above.
 ///
 /// The gameplay off-hand swap is now reachable from a keypress
@@ -128,14 +128,14 @@ fn item_actions_map_to_player_action_with_zeroed_target() {
 /// * **Ordinal 6.** `ServerboundPlayerActionPacket.Action` declares, in order,
 ///   `START_DESTROY_BLOCK, ABORT_DESTROY_BLOCK, STOP_DESTROY_BLOCK,
 ///   DROP_ALL_ITEMS, DROP_ITEM, RELEASE_USE_ITEM, SWAP_ITEM_WITH_OFFHAND, STAB`
-///   (`ServerboundPlayerActionPacket.java:68-78`), and `writeEnum` writes the
+///   (`ServerboundPlayerActionPacket.java`), and `writeEnum` writes the
 ///   ordinal as a VarInt.
 /// * **Field order.** `write` is `writeEnum(action)`, `writeBlockPos(pos)`,
 ///   `writeByte(direction.get3DDataValue())`, `writeVarInt(sequence)`
 ///   (`:37-42`).
 /// * **The zeros.** The sender passes `BlockPos.ZERO, Direction.DOWN`
-///   (`Minecraft.java:1903`); `Direction.DOWN`'s `data3d` is `0`
-///   (`Direction.java:33`); and the three-argument constructor defaults
+///   (`Minecraft.java`); `Direction.DOWN`'s `data3d` is `0`
+///   (`Direction.java`); and the three-argument constructor defaults
 ///   `sequence` to `0` (`:26-28`).
 /// * **Packet id 41.** `generated/reports/packets.json`'s
 ///   `minecraft:player_action`.
@@ -480,7 +480,7 @@ fn interaction_actions_are_ignored_outside_play() {
 /// encoder: `ServerboundPlayerActionPacket.Action` is `START_DESTROY_BLOCK,
 /// ABORT_DESTROY_BLOCK, STOP_DESTROY_BLOCK, DROP_ALL_ITEMS, DROP_ITEM,
 /// RELEASE_USE_ITEM, SWAP_ITEM_WITH_OFFHAND, STAB`
-/// (`ServerboundPlayerActionPacket.java:69-78`).
+/// (`ServerboundPlayerActionPacket.java`).
 ///
 /// **The transposition is the whole reason this asserts both rows.** `3` is the
 /// *whole stack* and `4` is *one item*, which reads backwards from the key

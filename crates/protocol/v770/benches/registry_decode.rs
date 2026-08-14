@@ -1,7 +1,7 @@
-//! Block-state registry resolution benchmark (issue #78 epic, sub-issue #146).
+//! Block-state registry resolution benchmark.
 //!
 //! Not a wire-packet decode, despite the name. There *is* a runtime
-//! `registry_data` decoder now (`src/packets/registry.rs`, issue #288), but it
+//! `registry_data` decoder now (`src/packets/registry.rs`), but it
 //! runs 29 times per connection during Configuration and never again, so it is
 //! not a hot path worth a bench. 26.2's per-block-state census — what this file
 //! actually measures — is baked in at compile time from the real server dump, per

@@ -1,4 +1,4 @@
-//! **Issue #534, end to end**: a real served connection, real terrain with real
+//! **End to end**: a real served connection, real terrain with real
 //! water in it, and the real [`V770ServerProtocol`] — proving the cancellation
 //! is *wired*, not merely implemented.
 //!
@@ -21,8 +21,7 @@
 //!
 //! # Where the expected values come from
 //!
-//! The fall formula, from `LivingEntity.calculateFallDamage`/`calculateFallPower`
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/LivingEntity.java:1846-1857`):
+//! The fall formula, from `LivingEntity.calculateFallDamage`/`calculateFallPower`:
 //! `floor((distance + 1e-6 - 3.0) * blockModifier)`. Every assertion below
 //! predicts an exact health, and each names the wrong-hypothesis value it is
 //! distinguishing itself from.
@@ -238,9 +237,9 @@ async fn the_plain_floor_arm_hurts_by_the_predicted_amount() {
 ///
 /// * correct — water cancels, so neither the water landing nor the later 1-block
 ///   step on stone produces any `set_health` at all;
-/// * pre-#534 — the water landing itself deals `17`, and even an implementation
-///   that only *suppressed accumulation* while submerged would still charge the
-///   next dry landing `floor(21.000001 - 3.0) = 18`.
+/// * uncancelled — the water landing itself deals `17`, and even an
+///   implementation that only *suppressed accumulation* while submerged would
+///   still charge the next dry landing `floor(21.000001 - 3.0) = 18`.
 #[tokio::test]
 async fn a_fall_into_one_block_of_water_hurts_neither_now_nor_later() {
     let mut client = serve();
@@ -295,7 +294,7 @@ async fn a_fall_into_one_block_of_water_hurts_neither_now_nor_later() {
     assert!(
         healths(&later).is_empty(),
         "a 1-block step after a water landing must be free; {banked_hypothesis} damage \
-         here is the pre-#534 banked distance, and any damage at all means the \
+         here is the uncancelled banked distance, and any damage at all means the \
          cancellation is not wired; got {:?}",
         healths(&later)
     );

@@ -1,5 +1,5 @@
 //! Live capture of **every** Configuration-phase `registry_data` payload plus
-//! `update_tags`, against a real vanilla 26.2 server (issue #275).
+//! `update_tags`, against a real vanilla 26.2 server.
 //!
 //! `tests/live_registry_data.rs` already proved (in its own module docs) that
 //! a real server sends exactly the 29 registries named in

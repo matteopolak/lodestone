@@ -385,7 +385,7 @@ fn block_entity_data_rejects_truncated_nbt() {
     );
 }
 
-// ---- block-state writes create and remove block entities (issue #374) ------
+// ---- block-state writes create and remove block entities -------------------
 //
 // The three tests above prove the adapter *records* a `sync_block_entity` call.
 // That is not the claim that matters: a recording sink cannot tell a correct
@@ -482,7 +482,7 @@ fn a_block_update_creates_and_then_removes_a_chests_block_entity() {
         block_entity_types_at(&world, pos),
         vec![(3, 64, 9, chest_type)],
         "a placed chest must gain a block-entity record from the state alone, with \
-         no block_entity_data packet — this is issue #374"
+         no block_entity_data packet"
     );
 
     adapter
@@ -627,7 +627,7 @@ fn a_section_blocks_update_reconstructs_negative_coordinates() {
 /// A `block_entity_data` for a chest whose state is already set must **not** wipe
 /// the record's payload on the next `block_update` that repeats the same state.
 ///
-/// This is vanilla's `isValidBlockState` branch (`LevelChunk.java:332-347`): a
+/// This is vanilla's `isValidBlockState` branch (`LevelChunk.java`): a
 /// same-type sync keeps the existing entity. A chest's contents arrive by
 /// `block_entity_data`, and the server re-sends `block_update` for a chest
 /// whenever its `type`/`facing` changes (a neighbouring chest making it a double),

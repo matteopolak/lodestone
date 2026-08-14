@@ -62,7 +62,8 @@ impl ChunkSource for AirSource {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). `ChunkSource::set_block` has no default, so this is
+    // stated explicitly rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }

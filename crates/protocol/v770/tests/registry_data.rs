@@ -1,5 +1,4 @@
-//! Hermetic `registry_data` decode, replayed against **captured server bytes**
-//! (issue #288).
+//! Hermetic `registry_data` decode, replayed against **captured server bytes**.
 //!
 //! The two fixtures under `tests/fixtures/registry_data_*.hex` are raw payloads
 //! a real vanilla 26.2 server authored during Configuration, captured by
@@ -113,7 +112,7 @@ fn real_dimension_types_resolve_the_fields_that_were_hardcoded_before_288() {
     assert!(
         !nether.has_skylight,
         "the Nether is the one vanilla dimension type without sky light — this \
-         field is what `sky_default_for_dimension` matched on a name for (#34)"
+         field is what `sky_default_for_dimension` matched on a name for"
     );
     assert!(nether.has_ceiling);
     assert!(nether.has_fixed_time);
@@ -165,8 +164,8 @@ fn real_dimension_types_resolve_the_fields_that_were_hardcoded_before_288() {
 /// `registry_data` was folded into must resolve **nothing**.
 ///
 /// Without this, all of the above would also pass if `ClientRegistries` returned
-/// a hardcoded overworld — which is precisely the pre-#288 behaviour this issue
-/// exists to remove.
+/// a hardcoded overworld — which is precisely the old fallback behaviour this
+/// test exists to catch a regression to.
 #[test]
 fn without_registry_data_nothing_resolves() {
     let registries = ClientRegistries::default();
@@ -182,7 +181,7 @@ fn without_registry_data_nothing_resolves() {
 }
 
 // ---------------------------------------------------------------------------
-// Biome sky colours (issue #96)
+// Biome sky colours
 // ---------------------------------------------------------------------------
 
 /// The **holder-id mapping** for biome sky colours, and the elision rule that
@@ -287,8 +286,8 @@ fn biome_sky_colours_resolve_by_holder_id() {
 
 /// The `has_precipitation`/`temperature`/`downfall` triple lives at the top of
 /// the biome compound, a sibling of `attributes` — not nested under it like
-/// `sky_color` — per `Biome.ClimateSettings.CODEC` (`Biome.java:358-368`).
-/// Issue #25 (snow): this is the input `precipitation_for_temperature` and
+/// `sky_color` — per `Biome.ClimateSettings.CODEC`.
+/// This is the input `precipitation_for_temperature` and
 /// `height_adjusted_temperature` (`lodestone-render`'s `weather.rs`) have had
 /// unit tests for but no real caller for, per `docs/weather.md`'s "Snow: the
 /// biome lane, precisely".
@@ -413,7 +412,7 @@ fn a_modifier_wrapped_sky_color_is_still_read() {
 }
 
 /// **Control.** A malformed or unexpected `sky_color` must read as `None` — the
-/// "the server has not told us" fallback every hop in #96's chain uses — and
+/// "the server has not told us" fallback every hop in the biome-registry chain uses — and
 /// must not disconnect, default to a plausible blue, or shift the id space.
 #[test]
 fn an_unusable_sky_color_reads_as_absent_rather_than_as_a_default() {
@@ -449,14 +448,14 @@ fn an_unusable_sky_color_reads_as_absent_rather_than_as_a_default() {
 }
 
 // ---------------------------------------------------------------------------
-// Server-side mirror (issue #275)
+// Server-side mirror
 // ---------------------------------------------------------------------------
 
 /// The server's Configuration-phase registry burst is byte-identical to the
 /// captured vanilla fixtures, for every one of the 29 synchronized
 /// registries, and carries `select_known_packs` first and `update_tags` last.
 ///
-/// Issue #275 made the server send the **full** synchronized-registry set
+/// A later fix made the server send the **full** synchronized-registry set
 /// (previously just `dimension_type`/`world_clock`) plus `select_known_packs`
 /// and `update_tags`.
 /// [`V770ServerProtocol::encode_registry_data`](lodestone_v770::V770ServerProtocol)'s
@@ -630,7 +629,7 @@ fn the_server_protocol_default_emits_no_registry_data() {
         }
 
         // The join and chunk-streaming methods are **required**, with no trait
-        // default, and that is deliberate: issue #440 established that a
+        // default, and that is deliberate: a
         // defaulted `ServerProtocol` method is a trap, because a family that
         // silently inherits a no-op looks implemented. This double exists only
         // to read `encode_registry_data`'s default, so every one of them is

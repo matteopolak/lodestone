@@ -96,7 +96,7 @@ fn container_set_slot_decodes_the_empty_stack() {
 /// `minecraft:dyed_color` (registry id 44, per
 /// `lodestone_data::generated::data_component_types::DATA_COMPONENT_TYPE_NAMES`),
 /// whose payload is `DyedItemColor.STREAM_CODEC` — a bare
-/// `ByteBufCodecs.INT` (`DyedItemColor.java:24`), i.e. 4 big-endian bytes, not
+/// `ByteBufCodecs.INT` (`DyedItemColor.java`), i.e. 4 big-endian bytes, not
 /// a `VarInt` like every other scalar component this file exercises. The rgb
 /// `0x00336699` is arbitrary; the point is that it survives the wire exactly,
 /// unmangled by a VarInt reader that would stop after the first `0x80`-set
@@ -129,7 +129,7 @@ fn container_set_slot_decodes_a_dyed_leather_helmet() {
     }
 }
 
-/// `minecraft:trim` (issue #17). The point of this gate is **not** that the trim
+/// `minecraft:trim`. The point of this gate is **not** that the trim
 /// decodes — it is that a component after it still does.
 ///
 /// Before the `minecraft:trim` arm existed, this component fell to
@@ -141,8 +141,8 @@ fn container_set_slot_decodes_a_dyed_leather_helmet() {
 ///
 /// The trim payload is two `Holder`s in reference form (`registryId + 1`):
 /// material `3` = index 2 = `netherite`, pattern `14` = index 13 = `silence`
-/// (`TrimMaterials`/`TrimPatterns` bootstrap order — see `adapter.rs`'s
-/// `TRIM_MATERIAL_IDS`).
+/// (`TrimMaterials`/`TrimPatterns` bootstrap order — see
+/// `adapter/inventory.rs`'s `TRIM_MATERIAL_IDS`).
 #[test]
 fn container_set_slot_decodes_a_trimmed_chestplate_without_losing_the_rest_of_the_patch() {
     let mut payload = vec![0x01, 0x06, 0x00, 0x25];

@@ -131,7 +131,7 @@ async fn a_pre_ignited_creeper_syncs_its_fuse_and_detonates_with_sound() {
     let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD)
         .unwrap_or_else(|err| panic!("could not reach RCON {RCON_ADDR}: {err}. {REPAIR}"));
 
-    // `ignited:1b` calls `Creeper.ignite()` at load (`Creeper.java:120-122`),
+    // `ignited:1b` calls `Creeper.ignite()` at load (`Creeper.java`),
     // so the very first tick primes the fuse without waiting on proximity AI.
     // `NoAI:1b` only disables the goal selector — `tick()`'s fuse integration
     // is unconditional, so this does not slow detonation, it just keeps the
@@ -253,7 +253,7 @@ async fn a_pre_ignited_creeper_syncs_its_fuse_and_detonates_with_sound() {
         swell_dir,
         Some(1),
         "an ignited creeper's tick() sets swellDir to 1 on its very first tick \
-         (Creeper.java:130); got {swell_dir:?}"
+         (Creeper.java); got {swell_dir:?}"
     );
     // `powered` stays at vanilla's default (`false`), which `SynchedEntityData`
     // never puts on the wire at all for an un-struck creeper — so `None` (never
@@ -270,7 +270,7 @@ async fn a_pre_ignited_creeper_syncs_its_fuse_and_detonates_with_sound() {
             &capture.explode,
         )
         .expect("replaying a real explode packet must not error");
-    // Issue #416: a leading `Particles` directive (the shockwave/smoke
+    // A leading `Particles` directive (the shockwave/smoke
     // visual) now precedes the `Sound` directive this test was already
     // pinning.
     assert_eq!(

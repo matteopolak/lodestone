@@ -285,7 +285,7 @@ fn full_login_sequence_produces_expected_directives() {
         }]
     );
 
-    // Registry data is now *ingested* (issue #288) rather than skipped: it
+    // Registry data is now *ingested* rather than skipped: it
     // produces no directive — nothing is sent, no event is emitted from
     // Configuration — but it is decoded, folded into the connection's registry
     // store, and checked for trailing bytes. `tests/registry_data.rs` asserts
@@ -293,8 +293,9 @@ fn full_login_sequence_produces_expected_directives() {
     // join flow is unchanged by it.
     //
     // This used to assert the opposite ("skipped wholesale") with a payload of
-    // `deadbeef`, which is exactly what made #288 invisible: the packet reaching
-    // the unhandled fall-through was pinned as intended behaviour.
+    // `deadbeef`, which is exactly what made the earlier skip-wholesale behaviour
+    // invisible: the packet reaching the unhandled fall-through was pinned as
+    // intended behaviour.
     assert!(
         adapter
             .handle_packet(
@@ -365,14 +366,14 @@ fn full_login_sequence_produces_expected_directives() {
     // resources (`dimension_type.0`, `biome_sky_colors.0`, and
     // `id`/`game_mode`/`dimension`/`alive` respectively), and the fold is
     // commutative — and it is exactly the assertion that reddened `main` for
-    // one commit when `ClientEvent::BiomeVisuals` (#96) landed a second Emit
+    // one commit when `ClientEvent::BiomeVisuals` landed a second Emit
     // next to `DimensionTypeChanged`, changing the sequence a prior exact-vec
     // assertion pinned. `assert_emits_set` asserts the same four events land,
     // with no ordering claim this test cannot actually back up.
     //
-    // `dimension_type: None` (issue #288) and `sky_colors`/`temperatures`/
-    // `downfall`/`has_precipitation`/`names` all empty (issues #96, #25/#26,
-    // and the biome-registry-names follow-up to `eb423ac`) because this flow
+    // `dimension_type: None` and `sky_colors`/`temperatures`/
+    // `downfall`/`has_precipitation`/`names` all empty (per the biome-registry-
+    // names follow-up to `eb423ac`) because this flow
     // feeds only a `world_clock` registry above, so neither the
     // dimension-type holder id nor the biome registry resolves. All of them
     // must report as **unresolved** rather than defaulting to the overworld —
@@ -493,9 +494,9 @@ fn configuration_disconnect_decodes_nbt_reason() {
 fn unknown_play_packet_is_ignored() {
     // An id **outside the protocol's play clientbound table entirely**, and that
     // is the point. This fixture has now been rewritten twice for the same
-    // reason: it named `BUNDLE_DELIMITER` until #299 gave that a real decode arm,
-    // then `AWARD_STATS` until #26 gave that one — each time asserting the exact
-    // defect the next issue fixed, and each time only noticed because the test
+    // reason: it named `BUNDLE_DELIMITER` until that got a real decode arm,
+    // then `AWARD_STATS` until that one did too — each time asserting the exact
+    // defect the next fix addressed, and each time only noticed because the test
     // went red. Any *real* packet id is a fixture with an expiry date, so this
     // uses one no version of this protocol can ever assign.
     const NOT_A_PACKET: i32 = 0x7FFF;

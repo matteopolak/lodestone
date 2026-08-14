@@ -1,4 +1,4 @@
-//! Issue #262: **a player's facing reaches another connection.**
+//! **A player's facing reaches another connection.**
 //!
 //! # What was broken
 //!
@@ -100,7 +100,8 @@ impl ChunkSource for AirSource {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). `ChunkSource::set_block` has no default, so this is
+    // stated explicitly rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -376,7 +377,7 @@ async fn a_players_facing_reaches_another_connection() {
     // ------------------------------------------------------------------
     // Phase 1 — A walks *and* turns: `move_player_pos_rot`.
     // ------------------------------------------------------------------
-    // This packet's angles were decoded and discarded before issue #262, so
+    // This packet's angles used to be decoded and discarded, so
     // this is the assertion that fails on the old tree.
     client_a
         .write_packet(
@@ -423,7 +424,7 @@ async fn a_players_facing_reaches_another_connection() {
     // ------------------------------------------------------------------
     // Phase 2 — A turns *on the spot*: `move_player_rot`, no position.
     // ------------------------------------------------------------------
-    // A packet that decoded to `ServerBound::Ignored` before issue #262.
+    // A packet that used to decode to `ServerBound::Ignored`.
     client_a
         .write_packet(play::serverbound::MOVE_PLAYER_ROT, &rot_bytes(180.0, 0.0))
         .await

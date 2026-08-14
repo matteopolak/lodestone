@@ -1,4 +1,4 @@
-//! Bit-exact wire gate for `ClientboundRecipeBookAddPacket` (issue #547).
+//! Bit-exact wire gate for `ClientboundRecipeBookAddPacket`.
 //!
 //! A recipe book is a packet a *real vanilla client* parses, and the failure mode
 //! of a wrong layout is not a visibly wrong recipe — it is a desync partway

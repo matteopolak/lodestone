@@ -1,11 +1,11 @@
-//! The integrated server's chunk light, end to end on the wire (issue #517).
+//! The integrated server's chunk light, end to end on the wire.
 //!
 //! # What this gate is for
 //!
 //! `crates/lodestone-world/src/lighting.rs` is a 1,105-line port of vanilla's
 //! `LightEngine`/`BlockLightEngine`/`SkyLightEngine`, unit-tested, benched, and
 //! judged against a real vanilla 26.2 server (`live_terrain_light.rs`). Until
-//! #517 its only production caller was the *client's* singleplayer worldgen.
+//! this crate's own wiring landed, its only production caller was the *client's* singleplayer worldgen.
 //! Every column `V770ServerProtocol::encode_chunk` sent carried
 //! `ColumnLight::new(section_count)` — all-`Missing`, both layers, every section.
 //! The engine was a textbook island: green tests, zero pixels on the server path.
@@ -152,8 +152,8 @@ fn to_world_column(shape: &ChunkShape, src: &lodestone_server::ChunkColumn) -> W
 ///
 /// This was a hand-rolled duplicate whose fallback was "the lowest id sharing the
 /// block name". That was the *pre-`43a6e030`* rule, and it is wrong for 661 of the
-/// 797 multi-state blocks: it made bare `minecraft:grass_block` resolve snowy
-/// (#546), bare directionals face whatever the lowest id faced (#475), and
+/// 797 multi-state blocks: it made bare `minecraft:grass_block` resolve snowy,
+/// bare directionals face whatever the lowest id faced, and
 /// redstone dust render climbing rather than flat. So this helper had already
 /// become a silent caller of a rule the encoder no longer follows — the exact
 /// failure `CLAUDE.md` records, where a *sibling* copy in
@@ -729,7 +729,7 @@ fn seam_detector_fires_when_a_neighbour_holds_the_only_source() {
 /// *generation*, the dominant term the serve path pays unconditionally, timed in
 /// the same run over freshly-coordinated columns.
 ///
-/// Measured in release while landing #517: `compute_column_light` ≈ **1.0 ms per
+/// Measured in release while landing server-side light: `compute_column_light` ≈ **1.0 ms per
 /// column**, column generation ≈ **61 ms**, so light is ~1.6% of generation and
 /// ~2% of a 50 ms tick. For contrast the exact 3×3 compute is ≈ **9.7 ms per
 /// column** — fine *in the chunk source*, alongside generation on the blocking

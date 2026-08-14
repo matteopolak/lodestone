@@ -1,6 +1,6 @@
-//! Decode-throughput benchmark for `minecraft:level_chunk_with_light` (issue
-//! #78 epic, sub-issue #137) — the highest-volume packet in this codebase: one
-//! per loaded chunk, scaling with render distance.
+//! Decode-throughput benchmark for `minecraft:level_chunk_with_light` — the
+//! highest-volume packet in this codebase: one per loaded chunk, scaling with
+//! render distance.
 //!
 //! # Evidence caveat — read before trusting this as a correctness oracle
 //!

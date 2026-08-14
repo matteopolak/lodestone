@@ -95,7 +95,7 @@ const MAX_ATTRIBUTES: usize = 128;
 // ambience, 12 arrow-count, 13 stinger-count, 14 sleeping-pos.
 // Mob: 15 mob-flags. AgeableMob: 16 baby.
 const IDX_SHARED_FLAGS: u8 = 0;
-// `Entity`'s second `defineId` call (`Entity.java:268`, right after
+// `Entity`'s second `defineId` call (`Entity.java`, right after
 // `DATA_SHARED_FLAGS_ID` at :260 and right before `DATA_CUSTOM_NAME` at :269)
 // — `SynchedEntityData.defineId` assigns ids by a class-static counter in
 // declaration order, so this is index 1, verified against the jar's own
@@ -104,12 +104,12 @@ const IDX_AIR_SUPPLY: u8 = 1;
 const IDX_CUSTOM_NAME: u8 = 2;
 const IDX_CUSTOM_NAME_VISIBLE: u8 = 3;
 const IDX_POSE: u8 = 6;
-/// `LivingEntity.DATA_LIVING_ENTITY_FLAGS` (`LivingEntity.java:179`), the first
+/// `LivingEntity.DATA_LIVING_ENTITY_FLAGS`, the first
 /// `defineId` in `LivingEntity` and therefore index 8 — the byte carrying
-/// using-item / off-hand / spin-attack (issue #57).
+/// using-item / off-hand / spin-attack.
 ///
 /// **This index is ambiguous and needs the entity's concrete type.** It is also
-/// where `AbstractArrow.ID_FLAGS` lands (`AbstractArrow.java:66`; `Projectile`
+/// where `AbstractArrow.ID_FLAGS` lands (`Projectile`
 /// declares no synched data of its own, so the arrow's first field is index 8
 /// too), and both are `EntityDataSerializers.BYTE`. So the serializer cannot
 /// disambiguate them the way it does for an item stack, and an arrow's crit bit
@@ -143,11 +143,11 @@ const IDX_LIVING_FLAGS: u8 = 8;
 /// class is the only thing that separates them.
 const IDX_EXPERIENCE_ORB_VALUE: u8 = 8;
 const IDX_HEALTH: u8 = 9;
-/// `Mob.DATA_MOB_FLAGS_ID` (`Mob.java:100`), `Mob`'s **only** `defineId` and
+/// `Mob.DATA_MOB_FLAGS_ID`, `Mob`'s **only** `defineId` and
 /// therefore index 15 — the byte carrying no-AI `0x01` / left-handed `0x02` /
-/// **aggressive `0x04`** (`Mob.java:1313-1336`). Aggressive is what makes a
+/// **aggressive `0x04`** (`Mob.setAggressive`/`Mob.isAggressive`). Aggressive is what makes a
 /// skeleton draw its bow: vanilla's mob renderers read `isAggressive()`, *not*
-/// the using-item bit at index 8, which is a player mechanism (issue #379).
+/// the using-item bit at index 8, which is a player mechanism.
 ///
 /// # This index is ambiguous too, and `living` is **not** a strong enough guard
 ///
@@ -210,7 +210,7 @@ const IDX_HORSE_VARIANT: u8 = 19;
 /// `HorseFlags` doc comment for the server-side encode side of the same split.
 const IDX_TAMABLE_OR_HORSE_FLAGS: u8 = 18;
 
-/// `Creeper.DATA_SWELL_DIR` (`Creeper.java:46`), `Creeper`'s first `defineId`
+/// `Creeper.DATA_SWELL_DIR` (`Creeper.java`), `Creeper`'s first `defineId`
 /// and therefore index 16 — `Monster` (its superclass) declares none of its
 /// own, so the count runs `Entity`(0-7) → `LivingEntity`(8-14) → `Mob`(15) →
 /// `Creeper`(16-18) directly, with no `AgeableMob` in between (a creeper is
@@ -219,19 +219,19 @@ const IDX_TAMABLE_OR_HORSE_FLAGS: u8 = 18;
 /// this exact shape (a class with no `Ageable` in its chain) has cost before.
 ///
 /// An `INT`, `-1` or `1`: which way `swell` is currently moving, integrated
-/// **client-side** every tick exactly as the server does (`Creeper.java:139`,
+/// **client-side** every tick exactly as the server does (`Creeper.java`,
 /// `this.swell += swellDir`) — only the direction is synced, never the
 /// counter itself. See [`crate::adapter`]'s per-tick fuse integration and
 /// `lodestone_render::entity_anim::pose_swelling`'s docs for why that split
 /// exists.
 const IDX_CREEPER_SWELL_DIR: u8 = 16;
-/// `Creeper.DATA_IS_POWERED` (`Creeper.java:47`), index 17 — a `BOOLEAN`, set
-/// once by `thunderHit` (`Creeper.java:206`) and never cleared. Doubles the
-/// explosion radius (`Creeper.java:232`) and gates the charged-creeper skull
+/// `Creeper.DATA_IS_POWERED` (`Creeper.java`), index 17 — a `BOOLEAN`, set
+/// once by `thunderHit` (`Creeper.java`) and never cleared. Doubles the
+/// explosion radius (`Creeper.java`) and gates the charged-creeper skull
 /// drop; not consumed by rendering yet.
 const IDX_CREEPER_POWERED: u8 = 17;
-/// `Creeper.DATA_IS_IGNITED` (`Creeper.java:48`), index 18 — a `BOOLEAN`, set
-/// once by `ignite()` (flint-and-steel or fire-charge, `Creeper.java:264`) and
+/// `Creeper.DATA_IS_IGNITED` (`Creeper.java`), index 18 — a `BOOLEAN`, set
+/// once by `ignite()` (flint-and-steel or fire-charge, `Creeper.java`) and
 /// never cleared. Distinct from a **non**-ignited swell (the `SwellGoal`
 /// proximity case, which moves `swell_dir` without ever setting this):
 /// `ignited` alone would miss a creeper that swells because a player got
@@ -1031,7 +1031,7 @@ mod tests {
     }
 
     /// Index 1, `INT`, decodes to `air_supply` — the field this seam exists to
-    /// close (`docs/sky-and-air-bubbles.md`). Verified against `Entity.java:268`'s
+    /// close (`docs/sky-and-air-bubbles.md`). Verified against `Entity.java`'s
     /// `defineId` declaration order, not assumed.
     #[test]
     fn decodes_air_supply_at_index_1() {
@@ -1049,9 +1049,9 @@ mod tests {
     }
 
     /// Index 8, `BYTE`, on a **living** entity decodes to `living_flags` — the
-    /// using-item bitfield behind a bow draw (issue #57). Index verified against
-    /// `LivingEntity.java:179` being `LivingEntity`'s first `defineId`, not
-    /// assumed from a summary.
+    /// using-item bitfield behind a bow draw. Index verified against
+    /// `LivingEntity.DATA_LIVING_ENTITY_FLAGS` being `LivingEntity`'s first
+    /// `defineId`, not assumed from a summary.
     #[test]
     fn decodes_living_flags_at_index_8_for_a_living_entity() {
         // Using an item, off hand: `setLivingEntityFlag(1, true)` +
@@ -1182,8 +1182,8 @@ mod tests {
     }
 
     /// Index 15, `BYTE`, on a **`Mob`** decodes to `mob_flags` — the byte whose
-    /// `0x04` is `isAggressive()` and therefore whether a skeleton draws its bow
-    /// (issue #379). The index comes from the jar dump, not a hand count; see
+    /// `0x04` is `isAggressive()` and therefore whether a skeleton draws its bow.
+    /// The index comes from the jar dump, not a hand count; see
     /// `every_metadata_index_constant_matches_the_jar_dump`.
     #[test]
     fn decodes_mob_flags_at_index_15_for_a_mob() {
@@ -1209,7 +1209,7 @@ mod tests {
     ///
     /// An **armour stand** is a `LivingEntity`, so `living` does not exclude it —
     /// and its own index-15 `BYTE` uses `0x04` for `CLIENT_FLAG_SHOW_ARMS`
-    /// (`ArmorStand.java:71`). An armour stand with arms is the ordinary
+    /// (`ArmorStand.java`). An armour stand with arms is the ordinary
     /// decorative case, so a `living`-gated decode would report a large fraction
     /// of all armour stands as aggressive mobs and, holding a bow, draw it.
     ///
@@ -1473,7 +1473,7 @@ mod tests {
         assert_eq!(md.creeper_ignited, Some(true));
     }
 
-    /// The idle default: `swell_dir == -1` (`Creeper.java:100`,
+    /// The idle default: `swell_dir == -1` (`Creeper.java`,
     /// `entityData.define(DATA_SWELL_DIR, -1)`), `powered`/`ignited` both
     /// `false`. A real server never puts these on the wire for an ordinary
     /// spawn (`SynchedEntityData` only sends non-default values — the same
@@ -1962,11 +1962,10 @@ mod tests {
     ///
     /// Index **8** is `LivingEntity`'s flags byte *and* `AbstractArrow`'s, both
     /// `BYTE`, with `0x01` meaning "using item" on one and "critical" on the
-    /// other — the `living` guard (issue #57). Index **15** is `Mob`'s flags byte
+    /// other — the `living` guard. Index **15** is `Mob`'s flags byte
     /// *and* `ArmorStand`'s client flags, both `BYTE`, with `0x04` meaning
     /// "aggressive" on one and "show arms" on the other — and since `ArmorStand`
-    /// *is* a `LivingEntity`, that one needs a narrower guard than index 8's
-    /// (issue #379).
+    /// *is* a `LivingEntity`, that one needs a narrower guard than index 8's.
     #[test]
     fn the_jar_dump_contains_the_collisions_the_guards_exist_for() {
         let at_8 = dump_claimants(8);

@@ -111,7 +111,7 @@ async fn real_client_survives_multiple_keep_alive_intervals() {
 /// `time_of_day_anchors_at_join_then_broadcasts_periodically`, and the live
 /// consumer `docs/time-of-day-lighting.md` describes on the client side.
 ///
-/// **`open_in_memory_with_mobs`, not `open_in_memory`** — issue #323. The clock the
+/// **`open_in_memory_with_mobs`, not `open_in_memory`.** The clock the
 /// broadcast carries is now the *world's*, advanced by `run_tick_loop`, and
 /// `open_in_memory` starts no tick loop at all. On the plain constructor this test
 /// used to pass against `ticks_since(play_start)`, wall-clock elapsed since join:

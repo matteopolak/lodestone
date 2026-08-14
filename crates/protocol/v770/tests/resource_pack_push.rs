@@ -1,5 +1,4 @@
-//! **The wire path for a server-initiated resource pack push, end to end**
-//! (issue #334).
+//! **The wire path for a server-initiated resource pack push, end to end.**
 //!
 //! The server side of the resource-pack lifecycle landed as a version-free
 //! vocabulary struct ([`ResourcePackPush`]), a defaulted

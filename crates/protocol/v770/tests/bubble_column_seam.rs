@@ -1,6 +1,6 @@
 //! The `VersionAdapter::block_bubble_column_drag` seam: proves the bubble column's
 //! `drag` property actually reaches a version-free consumer **through the trait
-//! object**. Issue #199.
+//! object**.
 //!
 //! Every adapter here is bound as `&dyn VersionAdapter` before it is called, for the
 //! same reason `tests/block_hardness_seam.rs` does it: calling the concrete
@@ -93,7 +93,7 @@ fn seam_reports_drag_for_both_bubble_column_states() {
 
 /// `drag=true` is the block's **default** state, per `blocks.json`'s `"default":
 /// true` marker and `BubbleColumnBlock`'s constructor
-/// (`registerDefaultState(… setValue(DRAG_DOWN, true))`, `BubbleColumnBlock.java:49`).
+/// (`registerDefaultState(… setValue(DRAG_DOWN, true))`, `BubbleColumnBlock.java`).
 ///
 /// This is the id-independent way to pin the direction: the lower of the two state
 /// ids is the default one, and it must be the drain.

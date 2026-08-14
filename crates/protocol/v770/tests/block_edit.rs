@@ -8,7 +8,7 @@
 //! `server_liveness.rs`'s cheap gradient stand-in): the whole point of this
 //! file is `OverworldChunkSource`'s new edit-retention cache, which
 //! `WorldgenChunkSource` does not have (its `ChunkSource::set_block` is a
-//! `todo!()` since issue #440 — a solidity-only source with no retention — see
+//! `todo!()` — a solidity-only source with no retention — see
 //! `crates/lodestone-server/src/chunk.rs`'s module docs). Seed `1234`, chunk
 //! `(0, 0)` — the coordinates and their
 //! pre-edit content are pinned by `set_up`'s own doc comment below and cross
@@ -86,7 +86,7 @@ fn resolve_state(state: &str) -> u32 {
     // The middle tier's expectation comes from the jar's own default-state
     // column, not from a second copy of the resolver's arithmetic. It used to be
     // "the lowest id sharing the name", which is right for water (`86`) and wrong
-    // for 661 of the 797 multi-state blocks — issue #546. `block_entities_live`'s
+    // for 661 of the 797 multi-state blocks. `block_entities_live`'s
     // sibling helper broke on exactly that, as a timeout rather than a mismatch.
     let mut jar_default: Option<u32> = None;
     for id in 0..lodestone_data::block_states::STATE_COUNT {
@@ -143,9 +143,9 @@ fn base_name_at(handle: &lodestone_client::ClientHandle, pos: BlockPos) -> Strin
 ///   notes about chunk `(0, 0)` at nearby seeds) — the placement target once
 ///   the gravel's `Up` face is clicked, since water is replaceable.
 ///
-/// # A formerly-collapsed wire-fidelity gap, fixed by issue #363
+/// # A formerly-collapsed wire-fidelity gap, now fixed
 ///
-/// Until issue #363, `V770ServerProtocol::encode_chunk`'s
+/// `V770ServerProtocol::encode_chunk`'s
 /// `build_world_column` collapsed every *solid* block in a whole-column send
 /// to a single `minecraft:stone`, and everything non-solid (air **and every
 /// fluid**) to air — it only ever wrote `ChunkSection::set_block(…, stone)`
@@ -207,7 +207,7 @@ async fn dig_and_place_persist_through_forget_and_reload() {
     let air_id = state_id("minecraft:air");
 
     // --- World-species control: the whole-column send now carries real
-    // per-block fidelity (issue #363), so each cell reads as its own
+    // per-block fidelity, so each cell reads as its own
     // distinct real state — deepslate, gravel, and (the fluid, the case
     // most likely to be missed by a fix that only thinks about solids)
     // water — not a collapsed stone/air pair. None of the three already
@@ -261,7 +261,7 @@ async fn dig_and_place_persist_through_forget_and_reload() {
     // so the target cell is the *neighbour* (0, 38, 0), not (0, 37, 0)
     // itself.
     //
-    // The hotbar load is required as of #466. This test used to click with an
+    // The hotbar load is required. This test used to click with an
     // **empty hand** and still get stone, because placement wrote
     // `minecraft:stone` for anything it could not resolve — which turned out
     // to be every ordinary block, and was the bug. An item that places no
@@ -314,7 +314,7 @@ async fn dig_and_place_persist_through_forget_and_reload() {
     // `Some(clicked_pre)`: vanilla's own `handleUseItemOn` unconditionally
     // sends a `block_update` for the clicked cell too (this module's own
     // `apply_use_item_on` mirrors that), but now that the whole-column send
-    // already carries full fidelity (issue #363), that confirmation
+    // already carries full fidelity, that confirmation
     // reconfirms the same real `gravel` id the column already showed rather
     // than upgrading it from a wire-collapsed `stone`.
     assert_eq!(

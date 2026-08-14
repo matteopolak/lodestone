@@ -249,7 +249,7 @@ fn the_comparison_fails_when_the_subtrees_differ() {
 /// **2. We expose one rule vanilla's tree does not: `max_minecart_speed`.** Not a
 /// version skew — it is `registerInteger("max_minecart_speed", …,
 /// FeatureFlagSet.of(FeatureFlags.MINECART_IMPROVEMENTS))`
-/// (`GameRules.java:55-57`), i.e. gated behind an **experimental feature flag**
+/// (`GameRules.java`), i.e. gated behind an **experimental feature flag**
 /// the oracle world does not enable, so vanilla legitimately omits it from the
 /// tree it sends. Our `GAME_RULES` carries no feature-flag concept and therefore
 /// offers it unconditionally. That is the honest description of the gap and it is

@@ -1,4 +1,4 @@
-//! Acceptance gate for issue #425: our own server encoding a creeper's swell
+//! Acceptance gate: our own server encoding a creeper's swell
 //! metadata and its detonation, decoded back through the **real** v770
 //! client adapter — the same one `tests/live_creeper_explosion.rs` already
 //! validated against bytes captured from a real vanilla server.
@@ -32,13 +32,13 @@
 //!   production entry point `crate::tick::run_tick_loop` drives every real
 //!   server tick — produces, through our own encoder, a `SET_ENTITY_DATA`
 //!   payload that the real client decodes to `creeper_swell_dir == Some(1)`
-//!   on the very first tick, matching `Creeper.java:130`'s
+//!   on the very first tick, matching `Creeper.java`'s
 //!   `this.swellDir = 1` and the live-captured assertion in
 //!   `tests/live_creeper_explosion.rs`.
 //! - The same creeper's fuse reaching `MAX_SWELL` (tick 30) makes
 //!   `MobSim::tick` call `MobSim::explode` and populate
-//!   `MobSim::take_detonations` — previously discarded entirely (issue
-//!   #425's own report) — and the resulting `EXPLODE` payload, through our
+//!   `MobSim::take_detonations` — previously discarded entirely — and the
+//!   resulting `EXPLODE` payload, through our
 //!   encoder, decodes to a `Particles` directive then a `Sound` directive
 //!   naming `minecraft:entity.generic.explode` at `SoundCategory::Block`,
 //!   volume `4.0`, pitch in vanilla's rolled `0.56..=0.84` band — again
@@ -47,7 +47,7 @@
 //!
 //! So: a real client that joined our integrated server while this creeper
 //! primed and detonated would now see the swell animation and the
-//! explosion, closing both gaps issue #425 reported.
+//! explosion, closing both gaps this gate was written to catch.
 
 use lodestone_model::adapter::{ConnectionState, Directive, VersionAdapter};
 use lodestone_model::{ClientEvent, ResourceKey, SoundCategory, Vec3};
@@ -60,7 +60,7 @@ fn rk(name: &str) -> ResourceKey {
     name.parse().expect("valid resource key")
 }
 
-/// Vanilla `Creeper.MAX_SWELL` (`Creeper.java:51`) — the tick the fuse
+/// Vanilla `Creeper.MAX_SWELL` (`Creeper.java`) — the tick the fuse
 /// completes and `explodeCreeper` fires. Restated as a literal rather than
 /// imported from `lodestone_entity::ai::MAX_SWELL` because this crate has no
 /// dependency on `lodestone-entity` to add for one constant; already pinned
@@ -197,7 +197,7 @@ fn our_own_server_encodes_a_creepers_swell_and_detonation_byte_accurately_for_th
         swell_dir_first_seen,
         Some(1),
         "an ignited creeper's tick() sets swellDir to 1 on its very first tick \
-         (Creeper.java:130) — our own server must encode that same value"
+         (Creeper.java) — our own server must encode that same value"
     );
 
     // -- detonation tick: predicted exactly, not merely "eventually".

@@ -1,4 +1,4 @@
-//! **The wire path for commands, end to end** (issues #48, #464).
+//! **The wire path for commands, end to end.**
 //!
 //! Plugin commands landed registered, permission-gated and covered by sixteen
 //! registry-driven tests — and reached zero players, because nothing decoded
@@ -31,7 +31,7 @@
 //! [`EcsCommandSink`] is the glue a real host writes, and a host is by
 //! definition a crate that links **both** `lodestone-server` and
 //! `lodestone-ecs`. `lodestone-server` must never link `lodestone-ecs` — that
-//! prohibition is the entire subject of issue #464 — so the gate cannot live
+//! prohibition is the reason this gate cannot live
 //! in `lodestone-server`'s own tests without putting the forbidden edge into
 //! the crate under test's dev-dependencies. This crate already depends on
 //! `lodestone-server` and on the real client, and adding `lodestone-ecs` here
@@ -330,8 +330,9 @@ fn plain(text: &Text) -> String {
 ///
 /// The effect vanished and the client received no reply at all (the sibling
 /// no-sink test failed with `left: None`). So the detector is armed: this gate
-/// fails when the decode hop is removed, which is the whole hop issue #464 is
-/// about. Restored by `cp` from a scratchpad backup, md5 verified identical.
+/// fails when the decode hop that wires a real chat-command frame to its
+/// registered handler is removed. Restored by `cp` from a scratchpad backup,
+/// md5 verified identical.
 #[tokio::test]
 async fn a_real_chat_command_frame_reaches_a_registered_handler_and_its_effect_is_observable() {
     let uuid = uuid::Uuid::new_v4();
@@ -393,8 +394,8 @@ async fn an_unprivileged_caller_cannot_run_a_gated_command_over_the_wire() {
 /// **A missing `Permissions` resource must refuse, never ungate.**
 ///
 /// The wire-path replica of
-/// `dispatch_refuses_rather_than_ungates_when_permissions_are_missing`
-/// (`crates/lodestone-ecs/tests/plugin_command_registry.rs:492`). That test
+/// `dispatch_refuses_rather_than_ungates_when_permissions_are_missing` in
+/// `crates/lodestone-ecs/tests/plugin_command_registry.rs`. That test
 /// holds the property at the registry; this one holds it for a real frame
 /// arriving from a real player, which is the configuration an operator would
 /// actually be exposed by.

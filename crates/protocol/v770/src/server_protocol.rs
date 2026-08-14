@@ -152,7 +152,7 @@ const OVERWORLD_SEA_LEVEL: i32 = 63;
 /// other entity's cosmetic bubble state.
 const LOCAL_PLAYER_ENTITY_ID: i32 = 1;
 
-/// `Entity`'s `DATA_AIR_SUPPLY_ID` metadata index (`Entity.java:268`,
+/// `Entity`'s `DATA_AIR_SUPPLY_ID` metadata index (`Entity.java`,
 /// verified index `1` — see `crates/protocol/v770/src/packets/metadata.rs`'s
 /// `IDX_AIR_SUPPLY` doc comment) and the `INT` serializer it is registered
 /// under
@@ -168,15 +168,15 @@ const METADATA_SER_INT: i32 = 1;
 /// `EOF_MARKER`).
 const METADATA_EOF: u8 = 0xFF;
 
-/// `Creeper.DATA_SWELL_DIR` (`Creeper.java:46`) and `Creeper.DATA_IS_IGNITED`
-/// (`Creeper.java:48`) metadata indices plus the `BOOLEAN` serializer id,
+/// `Creeper.DATA_SWELL_DIR` (`Creeper.java`) and `Creeper.DATA_IS_IGNITED`
+/// (`Creeper.java`) metadata indices plus the `BOOLEAN` serializer id,
 /// restated for the same reason [`METADATA_IDX_AIR_SUPPLY`] restates
 /// `IDX_AIR_SUPPLY`: `crates/protocol/v770/src/packets/metadata.rs`'s own
 /// `IDX_CREEPER_SWELL_DIR`/`IDX_CREEPER_IGNITED`/`SER_BOOLEAN` are private to
 /// that module. **Not hand-counted** — verified against the
 /// `EntityDataIndexOracle` dump already in the tree
-/// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt:116`:
-/// `16 Creeper.DATA_SWELL_DIR 1 INT`; `:166`: `18 Creeper.DATA_IS_IGNITED 8
+/// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`:
+/// `16 Creeper.DATA_SWELL_DIR 1 INT`; also `18 Creeper.DATA_IS_IGNITED 8
 /// BOOLEAN`), the same dump that module's own decode-side constants cite and
 /// whose doc comment records the two shipped off-by-one bugs
 /// (`Sheep.DATA_WOOL_ID`, `Horse.DATA_ID_TYPE_VARIANT`) hand-counting produced
@@ -198,11 +198,11 @@ const METADATA_IDX_CREEPER_IGNITED: u8 = 18;
 const METADATA_SER_BOOLEAN: i32 = 8;
 
 /// `ItemEntity.DATA_ITEM`'s metadata index and the `ITEM_STACK` serializer id
-/// it is registered under (issue #537).
+/// it is registered under.
 ///
 /// **Not hand-counted.** Both numbers are read straight off the
 /// `EntityDataIndexOracle` dump in the tree
-/// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt:55`:
+/// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`:
 /// `8 ItemEntity.DATA_ITEM 7 ITEM_STACK`), and the same two bytes appear in a
 /// packet captured off a real vanilla 26.2 server
 /// (`tests/fixtures/item_entity_metadata_diamond.hex`: `08 07 …`), so there are
@@ -297,7 +297,7 @@ const CTX: Ctx = Ctx { version: 776 };
 
 /// The block-state id for `minecraft:stone`, resolved by name so a change to
 /// the generated table cannot silently desync this from the real registry
-/// id. Test-only since issue #363: `build_world_column` used to write this
+/// id. Test-only now: `build_world_column` used to write this
 /// as its solid-block fallback (before it carried real per-block state) and
 /// `encode_chunk`'s own call site is where that literal lived; now the only
 /// remaining reference is `encode_block_update_wire_layout`'s pinning
@@ -380,7 +380,7 @@ fn explosion_sound_registry_id() -> i32 {
 /// private to that module.
 const SOUND_POSITION_SCALE: f64 = 8.0;
 
-/// The `minecraft:sound_event` registry id for `name` (issue #530), or `None` if
+/// The `minecraft:sound_event` registry id for `name`, or `None` if
 /// 26.2 has no such sound.
 ///
 /// Indexed once into a `name -> id` map rather than scanned per call: a busy tick
@@ -401,7 +401,7 @@ fn sound_event_registry_id(name: &str) -> Option<i32> {
         .copied()
 }
 
-/// The `minecraft:particle_type` registry id for `name` (issue #530), or `None`
+/// The `minecraft:particle_type` registry id for `name`, or `None`
 /// for an unknown one.
 ///
 /// Named "simple" as a warning rather than a filter: this crate has no census of
@@ -424,7 +424,7 @@ fn simple_particle_registry_id(name: &str) -> Option<i32> {
         .copied()
 }
 
-/// This port's own biome registry id space (issue #405) — index in this
+/// This port's own biome registry id space — index in this
 /// **sorted** array is the wire id [`resolve_biome_id`] uses. Regenerable
 /// with `awk '/^row\./{print $2}' scripts/worldgen-oracle/biome_java.txt |
 /// sort -u`, the exact set `lodestone-worldgen`'s embedded overworld
@@ -434,7 +434,7 @@ fn simple_particle_registry_id(name: &str) -> Option<i32> {
 ///
 /// Real vanilla assigns biome wire ids by **registration order** in a
 /// `minecraft:worldgen/biome` dynamic-registry sync sent during the
-/// configuration phase. Issue #275 made this server send that sync too, now
+/// configuration phase. This server sends that sync too, now
 /// (relayed as captured vanilla bytes — see `registry_data_fixtures`'s module
 /// docs), but it is still relayed **opaquely**: nothing in this crate parses
 /// entries back out of it, and nothing on the client reads a biome by wire id
@@ -593,7 +593,7 @@ fn face_from_ordinal(ordinal: i32) -> BlockFace {
 
 /// Maps a wire difficulty ordinal (`0` peaceful … `3` hard,
 /// `Difficulty.STREAM_CODEC`) to [`Difficulty`], mirroring `V770Adapter`'s
-/// own `CHANGE_DIFFICULTY` decode (`adapter.rs`, the clientbound direction of
+/// own `CHANGE_DIFFICULTY` decode (`adapter/player.rs`, the clientbound direction of
 /// the same wire concept): an out-of-range id decodes to `None` rather than
 /// vanilla's `ByIdMap.OutOfBoundsStrategy::WRAP` silently aliasing it to a
 /// different difficulty — a malformed packet drops (`ServerBound::Ignored`),
@@ -800,7 +800,7 @@ mod recipe_display {
     pub const CRAFTING_SHAPED: i32 = 1;
 }
 
-/// `minecraft:recipe_book_category` ids, in `RecipeBookCategories.java:7-19`'s
+/// `minecraft:recipe_book_category` ids, in `RecipeBookCategories.java`'s
 /// registration order. Only the crafting book's four are reachable from the
 /// bundled corpus; the furnace/stonecutter/smithing entries are listed so the
 /// numbering is checkable against the source rather than trusted.
@@ -905,7 +905,7 @@ fn write_recipe_display(w: &mut Writer, display: &ServerRecipeDisplay) {
     }
 }
 
-/// Body of `ClientboundRecipeBookAddPacket` (issue #547): a list of
+/// Body of `ClientboundRecipeBookAddPacket`: a list of
 /// `(RecipeDisplayEntry, flags)` pairs, then the `replace` bool.
 ///
 /// `RecipeDisplayEntry` is `id`, `display`, `OptionalInt group`,
@@ -1047,9 +1047,9 @@ fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
     Some(value)
 }
 
-/// Decodes a `ServerboundCustomPayloadPacket` (issue #335): a length-prefixed
+/// Decodes a `ServerboundCustomPayloadPacket`: a length-prefixed
 /// channel identifier (`string(32767)`, the same bound the clientbound
-/// direction encodes under at `adapter.rs`), then the channel-specific payload
+/// direction encodes under in `adapter/connection.rs`), then the channel-specific payload
 /// as the remaining bytes verbatim.
 ///
 /// Every channel is lifted into [`ServerBound::CustomPayload`] unchanged, where
@@ -1263,7 +1263,7 @@ fn encode_chunk_cache_center_body(cx: i32, cz: i32) -> Vec<u8> {
 /// Hand-written encoder for the clientbound `forget_level_chunk` packet: a
 /// single packed `i64` — `x` in the low 32 bits, `z` in the high 32 — mirroring
 /// vanilla's `ChunkPos.pack` exactly as `V770Adapter::handle_play`'s
-/// `FORGET_LEVEL_CHUNK` decode arm already reads it (`adapter.rs`, the
+/// `FORGET_LEVEL_CHUNK` decode arm already reads it (`adapter/chunk.rs`, the
 /// `packed as i32` / `(packed >> 32) as i32` pair).
 fn encode_forget_chunk_body(cx: i32, cz: i32) -> Vec<u8> {
     let packed = (i64::from(cx) & 0xFFFF_FFFF) | ((i64::from(cz) & 0xFFFF_FFFF) << 32);
@@ -1276,9 +1276,9 @@ fn encode_forget_chunk_body(cx: i32, cz: i32) -> Vec<u8> {
 /// `BlockPos` long ([`pack_block_pos`]) followed by a VarInt block-state
 /// registry id — mirrors `ClientboundBlockUpdatePacket.STREAM_CODEC`
 /// (`BlockPos.STREAM_CODEC` composed with `ByteBufCodecs.idMapper(Block
-/// .BLOCK_STATE_REGISTRY)`, `ClientboundBlockUpdatePacket.java:14-20`) and
+/// .BLOCK_STATE_REGISTRY)`, `ClientboundBlockUpdatePacket.STREAM_CODEC`) and
 /// this crate's own decode of the same packet in `V770Adapter::handle_play`'s
-/// `BLOCK_UPDATE` arm (`adapter.rs`), which reads the identical
+/// `BLOCK_UPDATE` arm (`adapter/chunk.rs`), which reads the identical
 /// packed-i64-then-VarInt shape.
 fn encode_block_update_body(x: i32, y: i32, z: i32, state_id: u32) -> Vec<u8> {
     let mut w = Writer::default();
@@ -1291,9 +1291,9 @@ fn encode_block_update_body(x: i32, y: i32, z: i32, state_id: u32) -> Vec<u8> {
 /// the small keyed world-state channel vanilla uses for weather transitions.
 /// Wire layout: an unsigned byte event id, then a big-endian `f32` param —
 /// exactly `ClientboundGameEventPacket`'s `writeByte(event) + writeFloat(param)`
-/// (`ClientboundGameEventPacket.java:14`), and exactly the shape
+/// (`ClientboundGameEventPacket.STREAM_CODEC`), and exactly the shape
 /// `packets::game::GameEvent`'s `Decode` impl reads back on this crate's own
-/// client side (`V770Adapter`'s `GAME_EVENT` arm, `adapter.rs`).
+/// client side (`V770Adapter`'s `GAME_EVENT` arm, `adapter/chunk.rs`).
 fn game_event_body(kind: u8, value: f32) -> Vec<u8> {
     let mut w = Writer::default();
     w.u8(kind);
@@ -1624,11 +1624,11 @@ fn encode_system_chat(message: &str, overlay: bool) -> Vec<u8> {
     w.into_vec()
 }
 
-/// Lowers a server→client plugin-channel payload (issue #335),
+/// Lowers a server→client plugin-channel payload,
 /// `ClientboundCustomPayloadPacket`: a VarInt-prefixed channel identifier, then
 /// the channel-specific payload verbatim. Hand-written, in the same "no
 /// existing struct" style as [`encode_system_chat`] — the client side only
-/// *decodes* this packet, and that decoder (`adapter.rs`'s `decode_custom_payload`,
+/// *decodes* this packet, and that decoder (`adapter/connection.rs`'s `decode_custom_payload`,
 /// which reads exactly this shape) is the mirror-side specification. Both the
 /// Configuration and Play clientbound ids share this body.
 fn encode_custom_payload_body(channel: &ResourceKey, data: &[u8]) -> Vec<u8> {
@@ -1639,7 +1639,7 @@ fn encode_custom_payload_body(channel: &ResourceKey, data: &[u8]) -> Vec<u8> {
 }
 
 /// Lowers a [`Text`] to a network-NBT chat component, for the **disconnect
-/// reason** field (issue #279).
+/// reason** field.
 ///
 /// # Scope, stated because a partial serializer is a trap
 ///
@@ -1658,7 +1658,7 @@ fn encode_custom_payload_body(channel: &ResourceKey, data: &[u8]) -> Vec<u8> {
 /// `Text::from_nbt`, and that decoder has been validated against real servers'
 /// disconnect packets. Field names follow vanilla's own component codecs —
 /// `Codec.STRING.fieldOf("translate")` and the optional `"fallback"` beside it
-/// (`network/chat/contents/TranslatableContents.java:40-41`).
+/// (`network/chat/contents/TranslatableContents.java`).
 fn text_to_nbt(text: &Text) -> Nbt {
     let mut fields: Vec<(String, Nbt)> = Vec::new();
     match &text.content {
@@ -1712,7 +1712,7 @@ fn encode_component_nbt(text: &Text) -> Vec<u8> {
 /// The login phase predates NBT components on the wire, so
 /// `ClientboundLoginDisconnectPacket` still carries its reason as a
 /// length-prefixed JSON string (`ByteBufCodecs.lenientJson(262144)`,
-/// `login/ClientboundLoginDisconnectPacket.java:18`) while the Configuration and
+/// `login/ClientboundLoginDisconnectPacket.java`) while the Configuration and
 /// Play `ClientboundDisconnectPacket` carries NBT. Writing NBT in the login phase
 /// produces a packet a real client cannot parse, which is the single easiest
 /// mistake to make here — hence two functions rather than one, with the same
@@ -1764,7 +1764,7 @@ fn text_to_json(text: &Text) -> serde_json::Value {
 /// vanilla's favicon field is the only thing in this file that needs base64 at
 /// all (`ServerStatus.Favicon`'s codec is literally
 /// `Base64.getEncoder().encode(...)` behind a fixed prefix —
-/// `status/ServerStatus.java:49`). Standard alphabet, not base64url: vanilla
+/// `status/ServerStatus.java`). Standard alphabet, not base64url: vanilla
 /// uses `java.util.Base64.getEncoder()`, which is the `+`/`/` variant.
 fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1789,7 +1789,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 /// Serializes vanilla's `ServerStatus` document
-/// (`status/ServerStatus.java:17-33`) into the JSON body of a
+/// (`status/ServerStatus.java`) into the JSON body of a
 /// `status_response` packet.
 ///
 /// Field-by-field against that record's codec, in vanilla's own declaration
@@ -1848,7 +1848,7 @@ fn encode_status_response_body(
             // `NameAndId.CODEC` keys these `id` and `name`, and writes the
             // uuid through `UUIDUtil.STRING_CODEC` — the hyphenated string
             // form, not the two-longs array a *packet* field would use
-            // (`server/players/NameAndId.java:12-13`).
+            // (`server/players/NameAndId.java`).
             "sample": sample
                 .iter()
                 .map(|(id, name)| serde_json::json!({ "id": id.to_string(), "name": name }))
@@ -1884,12 +1884,10 @@ fn encode_status_response_body(
 /// non-empty, the item registry id as a VarInt and an empty
 /// `DataComponentPatch` (VarInt `0` added, VarInt `0` removed).
 ///
-/// This is the clientbound twin of `crate::adapter::write_optional_item_stack`
+/// This is the clientbound twin of `adapter::serverbound::write_optional_item_stack`
 /// (the serverbound `set_creative_mode_slot` encoder), restated here rather
-/// than imported: that function is private to its own module, and
-/// `adapter.rs` is presently owned by another agent extracting shared
-/// plumbing (see this crate's own repo-hazard notes) — not a good time to add
-/// a new `pub(crate)` export to it. Both directions genuinely share the same
+/// than imported: that function is private to its own module, and there is
+/// no shared `pub(crate)` export for it. Both directions genuinely share the same
 /// wire shape (`ItemStack.OPTIONAL_STREAM_CODEC` is the same stream codec
 /// constant either way), so this restatement is the same "no existing struct
 /// to derive `Encode` from" situation `encode_system_chat` is already in, not
@@ -1979,8 +1977,8 @@ fn encode_container_slot_body(
 /// (`V770Adapter::handle_play`'s `CONTAINER_SET_DATA` arm): VarInt container
 /// id, then the property index and its value as two big-endian `short`s
 /// (`FriendlyByteBuf.writeContainerId` for the first field only — `id`/
-/// `value` are plain `writeShort` calls, `ClientboundContainerSetDataPacket
-/// .java:29-31`).
+/// `value` are plain `writeShort` calls, per
+/// `ClientboundContainerSetDataPacket.java`).
 fn encode_container_data_body(window_id: i32, property: i32, value: i32) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(window_id);
@@ -2089,12 +2087,12 @@ fn encode_game_login_rest() -> Vec<u8> {
 /// Converts one `lodestone-server` [`ServerChunkColumn`] into the
 /// version-free [`WorldChunkColumn`] the wire codec speaks, carrying the
 /// **real** per-block state the source already computed (grass, dirt,
-/// deepslate, gravel, water, …) rather than a solid/air classification —
-/// see issue #363 — and, since issue #405, the source's real per-quart
+/// deepslate, gravel, water, …) rather than a solid/air classification, and
+/// the source's real per-quart
 /// biome assignment rather than one constant id everywhere. Every block
 /// cell is read as an **integer** via [`ServerChunkColumn::block_state_id`];
 /// every biome **cell** via [`ServerChunkColumn::biome_cell_index`] through
-/// [`resolve_biome_id`] — a real per-`y` grid since issue #512, not one surface
+/// [`resolve_biome_id`] — a real per-`y` grid, not one surface
 /// sample broadcast down the column.
 ///
 /// # This function does no string work at all, and that is recent
@@ -2134,7 +2132,7 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
         shape.biome_id,
     );
 
-    // This column's real 3-D biome grid (issue #512). The column stores its
+    // This column's real 3-D biome grid. The column stores its
     // cells as indices into a small per-column palette — a handful of entries,
     // never the 1,536 cells — so resolving that palette once and indexing per
     // cell is *cheaper* than the 16 `resolve_biome_id` calls this replaced,
@@ -2196,7 +2194,7 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
 /// ([`encode_block_entities`]), then the trailing light payload.
 ///
 /// Heightmaps now carry the generator's real `MOTION_BLOCKING` map when the
-/// column has one (issue #516) — `Heightmap::new(world_height)` picks its own
+/// column has one — `Heightmap::new(world_height)` picks its own
 /// 9-bit width from `height_bits`, so no width is chosen here. A column from
 /// anywhere but the generator (`ChunkColumn::new`, a region-file load) still
 /// sends the zero-entry NBT it always sent: valid and decodable, simply empty.
@@ -2205,7 +2203,7 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
 /// `docs/motion-blocking-heightmap.md` for why sending `NO_LEAVES` today would
 /// send a knowingly wrong map.
 ///
-/// **`light` is no longer all-`Missing`** (issue #517). It is the caller's
+/// **`light` is no longer all-`Missing`.** It is the caller's
 /// computed [`ColumnLight`]; see [`compute_served_light`] for where it comes
 /// from and what `Missing` used to mean on the client.
 fn encode_column_body(
@@ -2284,7 +2282,7 @@ fn resolve_block_entity_type_id(name: &str) -> Option<u32> {
         .find(|&id| lodestone_data::block_entity_types::block_entity_type_name(id) == Some(name))
 }
 
-/// Writes the chunk packet's block-entity array (issue #520): a VarInt count
+/// Writes the chunk packet's block-entity array: a VarInt count
 /// then, per entry, the section-relative XZ packed into one byte (`x << 4 | z`),
 /// the **absolute** Y as a big-endian short, the block-entity type's registry id
 /// as a VarInt, and the network-NBT payload. Exactly the layout
@@ -2347,7 +2345,7 @@ impl LightProperties for V770LightProps {
 
 /// Computes the sky and block light for one served column.
 ///
-/// # Why this exists at all (issue #517)
+/// # Why this exists at all
 ///
 /// Until this landed, every column the integrated server sent carried
 /// `ColumnLight::new(section_count)` — all-`LightData::Missing`
@@ -2414,7 +2412,7 @@ fn compute_served_light(column: &WorldChunkColumn) -> ColumnLight {
 pub struct V770ServerProtocol;
 
 // ---------------------------------------------------------------------------
-// Configuration-phase `registry_data` payloads (issue #275)
+// Configuration-phase `registry_data` payloads
 // ---------------------------------------------------------------------------
 //
 // Each constant is the full serialized **network NBT** for one registry entry
@@ -2807,8 +2805,8 @@ impl ChunkEncoder for V770ServerProtocol {
     }
 }
 
-/// The zlib compression threshold this server enables during login (issue
-/// #273), matching vanilla's own default
+/// The zlib compression threshold this server enables during login,
+/// matching vanilla's own default
 /// (`network-compression-threshold=256` — measured identical across every
 /// `server.properties` under `.cache/mc/`). Packets whose uncompressed body
 /// is at least this many bytes are zlib-framed; smaller ones go out through
@@ -2834,13 +2832,12 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Issue #277: the Status phase. A handshake with `next_state == 1`
-            // has always *reached* `State::Status` here, but nothing answered
+            // The Status phase. A handshake with `next_state == 1`
+            // used to always *reach* `State::Status` here, but nothing answered
             // it, so our server was invisible in a real client's multiplayer
             // list — the client sends `status_request`, waits, and gives up.
             //
-            // `ServerboundStatusRequestPacket` is `StreamCodec.unit(INSTANCE)`
-            // (`status/ServerboundStatusRequestPacket.java:10`): the body is
+            // `ServerboundStatusRequestPacket` is `StreamCodec.unit(INSTANCE)`: the body is
             // genuinely empty, so an empty payload is the *correct* decode, not
             // a truncation. `decode_full` on a zero-field struct would be an
             // equivalent way to say this; the explicit emptiness check is
@@ -2852,8 +2849,8 @@ impl ServerProtocol for V770ServerProtocol {
                     ServerBound::Ignored
                 }
             }
-            // `ServerboundPingRequestPacket`: a single big-endian `long`
-            // (`ping/ServerboundPingRequestPacket.java:19`). The same struct
+            // `ServerboundPingRequestPacket`: a single big-endian `long`.
+            // The same struct
             // the Play-state arm below already decodes — vanilla shares one
             // packet class across both states, which is why
             // `packets::common::PingRequest` documents itself that way.
@@ -2875,7 +2872,7 @@ impl ServerProtocol for V770ServerProtocol {
             State::Login if packet_id == login::serverbound::LOGIN_ACKNOWLEDGED => {
                 ServerBound::LoginAcknowledged
             }
-            // Issue #273: the client's answer to an online-mode
+            // The client's answer to an online-mode
             // `EncryptionRequest`. Pure lift, no crypto — both fields are
             // still RSA ciphertext; `crate::server`'s connection loop owns
             // decrypting them.
@@ -2893,7 +2890,7 @@ impl ServerProtocol for V770ServerProtocol {
             {
                 ServerBound::ConfigurationFinished
             }
-            // Issue #335. A client announces the channels it supports during
+            // A client announces the channels it supports during
             // Configuration, via `minecraft:register`/`minecraft:unregister`
             // custom payloads — the same wire packet as the Play-phase arm
             // below, same lift: every channel becomes `ServerBound::CustomPayload`
@@ -2909,7 +2906,7 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // All four serverbound movement packets are lifted (issue #262).
+            // All four serverbound movement packets are lifted.
             // Vanilla's `LocalPlayer.sendPosition` sends exactly *one* of
             // them per tick, choosing on which of position/look is dirty, so
             // dropping any one of the four is not a redundancy — it is a
@@ -2947,7 +2944,7 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             // `ServerboundPlayerActionPacket.Action`, read off the enum's own
-            // declaration order in 26.2 (`ServerboundPlayerActionPacket.java:69-78`)
+            // declaration order in 26.2 (`ServerboundPlayerActionPacket.java`)
             // rather than guessed: START_DESTROY_BLOCK, ABORT_DESTROY_BLOCK,
             // STOP_DESTROY_BLOCK, **DROP_ALL_ITEMS, DROP_ITEM**, RELEASE_USE_ITEM,
             // SWAP_ITEM_WITH_OFFHAND, STAB. Note 3 is the *whole stack* and 4 is
@@ -2984,7 +2981,7 @@ impl ServerProtocol for V770ServerProtocol {
                             },
                             3 => ServerBound::ItemDropped { whole_stack: true },
                             4 => ServerBound::ItemDropped { whole_stack: false },
-                            // Issue #260: the bow's release. This ordinal used to
+                            // The bow's release. This ordinal used to
                             // fall through to `Ignored`, which is why a player
                             // could draw a bow (the client animates locally) and
                             // never fire anything — the packet that ends the draw
@@ -3015,7 +3012,7 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Issue #260: right-click-in-air, the trigger for every player-side
+            // Right-click-in-air, the trigger for every player-side
             // projectile launch. The yaw/pitch this packet carries is the reason
             // a throw has a direction at all — this crate tracks no per-connection
             // rotation, and the last `PlayerRotated` is not necessarily the facing
@@ -3035,7 +3032,7 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Issue #12: the `Attack` packet is the whole trigger for a
+            // The `Attack` packet is the whole trigger for a
             // melee hit — see `ServerBound::Attack`'s own doc comment for why
             // the sibling `minecraft:interact` packet is deliberately left
             // undecoded (no interaction model to hand it to).
@@ -3061,9 +3058,9 @@ impl ServerProtocol for V770ServerProtocol {
                     _ => ServerBound::Ignored,
                 }
             }
-            // Issue #268: world/block-admin decode. `CHANGE_DIFFICULTY`,
+            // World/block-admin decode. `CHANGE_DIFFICULTY`,
             // `LOCK_DIFFICULTY` and `SET_GAME_RULE` are the three cheap,
-            // observable packets from that issue's 13 — see
+            // observable packets among the thirteen operator/debug ones — see
             // `crate::server::apply_difficulty_change`/
             // `apply_game_rule_changed` for the consumer and
             // `WorldAdminState`'s doc comment for what is deliberately not
@@ -3094,14 +3091,14 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Server-authoritative inventory model: the prerequisite `#266`
+            // Server-authoritative inventory model: the prerequisite this
             // itself asked for, and the two packets that unblock it end to
             // end — see `lodestone_server::inventory`'s module doc comment.
             State::Play if packet_id == play::serverbound::SET_CARRIED_ITEM => {
                 match decode_full::<SetCarriedItem>(payload).and_then(|p| u8::try_from(p.slot).ok())
                 {
                     // Mirrors vanilla's `Inventory.isHotbarSlot` guard
-                    // (`Inventory.java:70-76`) at the decode boundary, per
+                    // (`Inventory.java`) at the decode boundary, per
                     // `ServerBound::CarriedItemChanged`'s own doc comment.
                     Some(slot) if slot < HOTBAR_SIZE => ServerBound::CarriedItemChanged { slot },
                     _ => ServerBound::Ignored,
@@ -3126,7 +3123,7 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
 
-            // Issue #262 (movement/player-state), remaining 6 of 11 —
+            // Movement/player-state, remaining 6 of 11 —
             // `MOVE_PLAYER_ROT` and `MOVE_PLAYER_STATUS_ONLY` now lift into
             // their own variants just below, alongside the two position-
             // carrying siblings above. Every wire layout below is checked
@@ -3137,7 +3134,7 @@ impl ServerProtocol for V770ServerProtocol {
             // client encoder, which already sends every one of these
             // (`crate::adapter`). All eight still decode to `Ignored`: none
             // has an existing `ServerBound` variant to lift into, and
-            // `lodestone-server` (issue #284's tick-loop work, out of this
+            // `lodestone-server` (its tick-loop work, out of this
             // crate's reach) has no flight/load-timeout/tick-alignment/
             // teleport-confirmation/vehicle/boat model yet for any of them.
             State::Play if packet_id == play::serverbound::MOVE_PLAYER_ROT => {
@@ -3202,7 +3199,7 @@ impl ServerProtocol for V770ServerProtocol {
                 ServerBound::Ignored
             }
 
-            // Issue #264 (entity actions/combat/interaction), remaining 6 of
+            // Entity actions/combat/interaction, remaining 6 of
             // 9 — `ATTACK`, `PLAYER_ACTION` and `USE_ITEM_ON` are already
             // decoded and applied above. All six below are field-verified
             // against `.cache/mc/26.2/src`'s decompiled packet classes.
@@ -3255,7 +3252,7 @@ impl ServerProtocol for V770ServerProtocol {
             // `Ignored` and could never run because a `match` picks the
             // first satisfied guard.
             State::Play if packet_id == play::serverbound::PLAYER_COMMAND => {
-                // Issue #325: only the `STOP_SLEEPING` action (0) has a
+                // Only the `STOP_SLEEPING` action (0) has a
                 // server-side consumer — the "wake up" the client sends when
                 // the player climbs out of bed or dies. The other actions
                 // (sprinting/riding/jump states) decode to Ignored, exactly
@@ -3292,10 +3289,10 @@ impl ServerProtocol for V770ServerProtocol {
                 ServerBound::Ignored
             }
 
-            // Issue #266 (inventory/container), remaining packets beyond the
+            // Inventory/container: remaining packets beyond the
             // three already decoded and applied above (`CONTAINER_CLICK`,
             // `CONTAINER_CLOSE`, `SET_CARRIED_ITEM`, into the real
-            // `PlayerInventory` model issue #408 built). Every struct below
+            // `PlayerInventory` model). Every struct below
             // either already exists and is exercised by this crate's own
             // client encoder (`crate::adapter`, itself checked against
             // `docs/container-clicks.md` and `.cache/mc/26.2/src`), or is
@@ -3312,7 +3309,7 @@ impl ServerProtocol for V770ServerProtocol {
             // `PlayerInventory`, mirroring `ContainerClicked`'s own
             // consumer" rather than a new feature — the smallest next step
             // in this family, once someone can touch `lodestone-server`.
-            // Issue #266 follow-up: this used to decode-and-discard. The
+            // A follow-up fix: this used to decode-and-discard. The
             // enchanting table's "choose an offer" button is the only
             // consumer (`ServerBound::ContainerButtonClick`'s own doc
             // comment) — `crate::server`'s handler re-derives the cost from
@@ -3341,7 +3338,7 @@ impl ServerProtocol for V770ServerProtocol {
             // This lifts into [`ServerBound::CreativeModeSlotSet`], whose
             // consumer (`apply_creative_mode_slot_set`) writes through
             // `PlayerInventory::apply_menu_slot_change`. Vanilla's own
-            // `validSlot`/`drop` split (`ServerGamePacketListenerImpl.java:2035`,
+            // `validSlot`/`drop` split (`ServerGamePacketListenerImpl.java`,
             // `1..=45` accepted, `< 0` meaning "drop into the world") is left
             // to that consumer rather than filtered here, so the variant
             // carries the raw wire slot — see its doc comment.
@@ -3362,7 +3359,7 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Issue #529 step 4. `recipe` is a `RecipeDisplayId.index` — an opaque
+            // `recipe` is a `RecipeDisplayId.index` — an opaque
             // position in the book the *server* handed out, not a recipe name; see
             // `ServerBound::RecipePlaced`'s own doc comment.
             State::Play if packet_id == play::serverbound::PLACE_RECIPE => {
@@ -3407,16 +3404,16 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<EditBook>(payload);
                 ServerBound::Ignored
             }
-            // Block-entity text, not item state — arguably miscategorized in
-            // this issue's own packet list (see #266's investigation
-            // comment). Decoded here anyway since sign storage lives in
+            // Block-entity text, not item state — arguably miscategorized
+            // alongside the inventory-model packets above.
+            // Decoded here anyway since sign storage lives in
             // `lodestone-world`, not `PlayerInventory`, so this cannot
             // collide with that territory; still `Ignored` regardless.
             State::Play if packet_id == play::serverbound::SIGN_UPDATE => {
                 let _ = decode_full::<SignUpdate>(payload);
                 ServerBound::Ignored
             }
-            // Issue #266 follow-up: this used to decode-and-discard. The
+            // A follow-up fix: this used to decode-and-discard. The
             // anvil's rename field is the only consumer
             // (`ServerBound::RenameItem`'s own doc comment) —
             // `crate::server`'s handler gates on an open `AnvilMenu` the same
@@ -3427,7 +3424,7 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Issue #558: middle-click pick. `crate::server`'s consumer runs
+            // Middle-click pick. `crate::server`'s consumer runs
             // vanilla's `tryPickItem` three-way split (hotbar-select /
             // inventory-swap / creative-create); this arm is only the wire
             // shape, unpacking `pos` the same way `USE_ITEM_ON` above does.
@@ -3456,9 +3453,9 @@ impl ServerProtocol for V770ServerProtocol {
                 ServerBound::Ignored
             }
 
-            // Issue #268 (world/block-admin), remaining packets beyond
+            // World/block-admin, remaining packets beyond
             // `CHANGE_DIFFICULTY`/`LOCK_DIFFICULTY`/`SET_GAME_RULE` above.
-            // A prior pass on this issue deliberately left the seven below
+            // A prior pass deliberately left the seven below
             // undecoded, reasoning they are "deep features, not decode
             // gaps" (command-block/jigsaw/structure/game-test state, none
             // of which this crate models). That reasoning about the
@@ -3556,7 +3553,7 @@ impl ServerProtocol for V770ServerProtocol {
             // support, at which point the real `Data` type will exist to
             // decode into anyway.
 
-            // Issue #270 (connection-lifecycle/system), remaining packets
+            // Connection-lifecycle/system, remaining packets
             // beyond `KEEP_ALIVE` above. `PONG`/`PING_REQUEST` already have
             // structs exercised by this crate's client encoder; the rest
             // follow the same field-verified-against-decompiled-source
@@ -3587,7 +3584,7 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<Pong>(payload);
                 ServerBound::Ignored
             }
-            // `ServerboundCustomPayloadPacket` (issue #335): a channel
+            // `ServerboundCustomPayloadPacket`: a channel
             // identifier then a channel-specific payload. Where this crate used
             // to model only the `minecraft:brand` channel and drop everything
             // else as vanilla's `DiscardedPayload`, it now lifts **every**
@@ -3602,10 +3599,10 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<ResourcePackResponse>(payload);
                 ServerBound::Ignored
             }
-            // Issue #425 investigation (chunk-streaming regression): this
+            // A chunk-streaming regression investigation found this
             // arm and `CHUNK_BATCH_RECEIVED` below used to decode-then-drop
             // like every other packet in this `Ignored` family, from when
-            // this crate had no consumer for either. Issue #270 later added
+            // this crate had no consumer for either. A later fix added
             // `ServerBound::ClientInformationChanged`/`ChunkBatchAcknowledged`
             // and their consumers in `crate::server` (`ViewTracker::set_view_radius`
             // and the `awaiting_chunk_batch_ack` flow-control gate), but never
@@ -3634,12 +3631,12 @@ impl ServerProtocol for V770ServerProtocol {
             // encoder. The ordinal is passed through unmapped; its consumer
             // (`apply_client_command`) mirrors
             // `ServerGamePacketListenerImpl::handleClientCommand`, including
-            // the `getHealth() > 0.0F → return` respawn guard at that file's
-            // line 1898, and treats `REQUEST_STATS` as a documented no-op.
+            // that method's `getHealth() > 0.0F → return` respawn guard, and
+            // treats `REQUEST_STATS` as a documented no-op.
             //
             // This arm returned `Ignored` while that consumer already
             // existed, so respawn was unreachable — the same dead-variant
-            // shape issue #425 found for `CLIENT_INFORMATION` and
+            // shape found for `CLIENT_INFORMATION` and
             // `CHUNK_BATCH_RECEIVED`, and from the same commit (`c4ad474`),
             // which wired four consumers while only two decode arms were
             // ever updated.
@@ -3652,10 +3649,10 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Issues #48/#464. `ServerboundChatCommandPacket` is a single
+            // `ServerboundChatCommandPacket` is a single
             // string carrying the command **without** its leading `/`; the
             // client-side encoder in this same crate
-            // (`adapter.rs`'s `ClientAction::SendCommand` arm) writes exactly
+            // (`adapter/serverbound.rs`'s `ClientAction::SendCommand` arm) writes exactly
             // this struct to exactly this id, so decode and encode are pinned
             // to one another rather than to a hand-copied layout.
             //
@@ -3676,8 +3673,8 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Issue #469: a player typing a message. `ChatMessage` is the
-            // **same** struct `adapter.rs`'s `ClientAction::SendChat` arm
+            // A player typing a message. `ChatMessage` is the
+            // **same** struct `adapter/serverbound.rs`'s `ClientAction::SendChat` arm
             // encodes, so decode and encode are pinned to one another exactly
             // as `CHAT_COMMAND` above is, rather than to a hand-copied layout.
             // Its field order matches `ServerboundChatPacket`'s own
@@ -3750,7 +3747,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    // Issue #273: mirrors vanilla's own
+    // Mirrors vanilla's own
     // `this.connection.send(new ClientboundHelloPacket("", pubKey, challenge, true))`
     // (`ServerLoginPacketListenerImpl.handleHello`) exactly — empty server-id,
     // the caller's keypair/token, and `should_authenticate` fixed `true`
@@ -3779,7 +3776,7 @@ impl ServerProtocol for V770ServerProtocol {
             properties: Vec::new(),
             session_id: uuid,
         };
-        // Issue #273: enable packet compression before the login-success
+        // Enable packet compression before the login-success
         // reply. Vanilla's own default (`network-compression-threshold=256`
         // in every `server.properties` under `.cache/mc/`) — packets whose
         // *uncompressed* body is at least this many bytes get zlib framing;
@@ -3870,7 +3867,7 @@ impl ServerProtocol for V770ServerProtocol {
 
     fn encode_pong_response(&self, time: i64) -> ServerDirective {
         // `ClientboundPongResponsePacket` is a single big-endian `long`
-        // (`ping/ClientboundPongResponsePacket.java:14-19`), byte-identical to
+        // (`ping/ClientboundPongResponsePacket.java`), byte-identical to
         // the `ServerboundPingRequestPacket` it answers — which is why the
         // client-side `PingRequest` struct is the right thing to encode here
         // rather than a second one-field mirror of it.
@@ -3878,7 +3875,7 @@ impl ServerProtocol for V770ServerProtocol {
     }
 
     fn encode_registry_data(&self) -> Vec<ServerDirective> {
-        // Issue #275: the full Configuration-phase registry burst a real
+        // The full Configuration-phase registry burst a real
         // vanilla client expects, in vanilla's own wire order
         // (`SynchronizeRegistriesTask`): `select_known_packs` (requesting
         // zero packs — this server ships no datapacks), then one
@@ -3931,8 +3928,8 @@ impl ServerProtocol for V770ServerProtocol {
     }
 
     fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
-        // Issue #461: the pre-#461 hardcoded spawn — see the module doc
-        // comment for why these unitless numbers existed. Delegates to
+        // The hardcoded fallback spawn — see the module doc
+        // comment for why these unitless numbers exist. Delegates to
         // `begin_play_at` so the body lives in one place.
         self.begin_play_at(view_radius, Vec3::new(8.0, 100.0, 8.0), GameMode::Survival)
     }
@@ -3979,7 +3976,7 @@ impl ServerProtocol for V770ServerProtocol {
         );
 
         // Chunk column containing the spawn point, derived from the
-        // position rather than assumed (0, 0) — issue #461.
+        // position rather than assumed (0, 0).
         let spawn_cx = (spawn.x / 16.0).floor() as i32;
         let spawn_cz = (spawn.z / 16.0).floor() as i32;
 
@@ -3987,7 +3984,7 @@ impl ServerProtocol for V770ServerProtocol {
             send(play::clientbound::LOGIN, &login),
             // The world border is the first world state a joining player is
             // told about, before the time sync and spawn position — vanilla's
-            // `PlayerList.sendLevelInfo` order (`PlayerList.java:648-663`).
+            // `PlayerList.sendLevelInfo` order.
             // A full-size static default today; the live border's state lands
             // here when the world loop owns a shared `WorldBorder` (see
             // `crate::border`'s module doc, shape B).
@@ -4194,7 +4191,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    // Issue #335. Wire-level plugin messaging, server→client: the broadcast
+    // Wire-level plugin messaging, server→client: the broadcast
     // drain this lifts runs in `serve_play`'s `container_sync_tick` arm, so
     // the payload reaches the client after the configuration handoff — same
     // reasoning as `encode_resource_pack_push`, and the **play** id is the one
@@ -4341,8 +4338,8 @@ impl ServerProtocol for V770ServerProtocol {
     }
 
     /// `ClientboundSetEntityLinkPacket.write`: `writeInt(sourceId)` then
-    /// `writeInt(destId)` — both **plain big-endian `i32`s**, not VarInts (issue
-    /// #236). Ported from `write`/`read` rather than the constructor or the field
+    /// `writeInt(destId)` — both **plain big-endian `i32`s**, not VarInts.
+    /// Ported from `write`/`read` rather than the constructor or the field
     /// declaration, per this crate's own rule for a record whose fields share a
     /// type: here all three orders happen to agree (constructor takes
     /// `(sourceEntity, destEntity)`, fields declare `sourceId` then `destId`,
@@ -4404,7 +4401,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// `ClientboundBlockEntityDataPacket`: a packed `BlockPos` i64, the
     /// `BLOCK_ENTITY_TYPE` registry id as a VarInt, then the nameless network-NBT
     /// update tag — the identical shape this crate's own `BLOCK_ENTITY_DATA`
-    /// decode arm reads back (`adapter.rs`).
+    /// decode arm reads back (`adapter/chunk.rs`).
     ///
     /// Emits nothing when the type key does not resolve in this version's registry
     /// or when the payload does not serialize, for the same reason
@@ -4477,7 +4474,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// Issue #425: the general per-species `SET_ENTITY_DATA` encoder
+    /// The general per-species `SET_ENTITY_DATA` encoder
     /// [`encode_air_supply_update`](Self::encode_air_supply_update)'s own doc
     /// comment says nothing on the server side had ever needed before it —
     /// that one is still hardcoded to [`LOCAL_PLAYER_ENTITY_ID`] and one
@@ -4591,7 +4588,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// Issue #425: the other half of "our server cannot tell a client that
+    /// The other half of "our server cannot tell a client that
     /// anything is ... exploding" — `crate::adapter::decode_explode`'s own
     /// doc comment names the exact `ClientboundExplodePacket` field order
     /// this mirrors (`.cache/mc/26.2/src/net/minecraft/network/protocol/game/ClientboundExplodePacket.java`):
@@ -4616,7 +4613,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// `explosionSound` is encoded as a real registry **reference**, not the
     /// direct/literal-name path `read_sound_holder`'s decode side also
     /// accepts: verified against `ByteBufCodecs.holder`'s own encode arm
-    /// (`.cache/mc/26.2/src/net/minecraft/network/codec/ByteBufCodecs.java:607-617`),
+    /// (`.cache/mc/26.2/src/net/minecraft/network/codec/ByteBufCodecs.java`),
     /// which writes `registryId + 1` for a `Holder.Kind::REFERENCE` — exactly
     /// what a real vanilla server sends for `SoundEvents.GENERIC_EXPLODE` (a
     /// registered constant, never a `Holder::direct`). The registry id is
@@ -4628,12 +4625,12 @@ impl ServerProtocol for V770ServerProtocol {
     ///
     /// Every creeper detonation — charged or not — uses
     /// `minecraft:entity.generic.explode`: `Creeper.explodeCreeper`
-    /// (`Creeper.java:230-238`) only varies `explosionMultiplier` (radius,
+    /// (`Creeper.java`) only varies `explosionMultiplier` (radius,
     /// `2.0F` when `isPowered()`, else `1.0F`) before calling `Level`'s
     /// six-argument `explode` overload, and **every** overload up to the
     /// twelve-argument one this crate's own creeper path effectively mirrors
     /// defaults `explosionSound` to `SoundEvents.GENERIC_EXPLODE`
-    /// unconditionally (`Level.java:579-679`) — there is no powered-creeper
+    /// unconditionally (`Level.java`) — there is no powered-creeper
     /// sound variant to pick between. This crate has no charged-creeper
     /// producer today either way ([`lodestone_server::MobSim::take_detonations`]'s
     /// only source is [`lodestone_server::SwellGoal`]/`ignite()`, neither of
@@ -4646,12 +4643,12 @@ impl ServerProtocol for V770ServerProtocol {
     /// arbitrary pick between the two ids `decode_explode` accepts:
     /// `ServerLevel::explode` selects `largeExplosionParticles`
     /// (`ParticleTypes.EXPLOSION_EMITTER`) whenever `ServerExplosion::isSmall`
-    /// is false (`ServerExplosion.java:312`: `radius < 2.0F ||
+    /// is false (`ServerExplosion.isSmall`: `radius < 2.0F ||
     /// !interactsWithBlocks()`), and a creeper's `CREEPER_EXPLOSION_RADIUS`
     /// (`3.0`) is `>= 2.0` with block-interaction enabled under default game
     /// rules — the only configuration this crate's `MobSim` models — so
     /// `isSmall()` is false and vanilla sends this id too.
-    /// Issue #438. Hand-written rather than derived, for the same reason
+    /// Hand-written rather than derived, for the same reason
     /// `crate::packets::player_info`'s *decoder* is: `player_info_update` is an
     /// action-bitmask packet whose per-entry fields are conditional on the
     /// leading `EnumSet`, which the derive macros cannot express.
@@ -4755,7 +4752,7 @@ impl ServerProtocol for V770ServerProtocol {
         }]
     }
 
-    /// Issue #438. `ClientboundPlayerInfoRemovePacket` is a plain
+    /// `ClientboundPlayerInfoRemovePacket` is a plain
     /// VarInt-prefixed list of profile uuids — see
     /// `crate::packets::player_info::PlayerInfoRemove`'s decoder, this
     /// encoder's independent specification.
@@ -4799,7 +4796,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundSoundPacket` (issue #530), the exact inverse of
+    /// `ClientboundSoundPacket`, the exact inverse of
     /// [`crate::adapter`]'s own `decode_sound`.
     ///
     /// Two byte-level details, both restated from the decode side rather than
@@ -4843,7 +4840,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundLevelEventPacket` (issue #530) — the event code, the packed
+    /// `ClientboundLevelEventPacket` — the event code, the packed
     /// position, the event-specific data, then the global flag, matching
     /// [`crate::packets::game::LevelEvent`]'s own field order.
     fn encode_level_event(&self, event: i32, pos: BlockPos, data: i32, global: bool) -> ServerDirective {
@@ -4858,7 +4855,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// `ClientboundLevelParticlesPacket` (issue #530), mirroring
+    /// `ClientboundLevelParticlesPacket`, mirroring
     /// [`crate::packets::game::LevelParticles`]'s field order.
     ///
     /// The trailing particle field is a `minecraft:particle_type` registry id
@@ -4933,7 +4930,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// player id followed by `read_network_nbt`, matching
     /// `ClientboundPlayerCombatKillPacket`'s own
     /// `VarInt.STREAM_CODEC` + `ComponentSerialization.TRUSTED_STREAM_CODEC`
-    /// (`.cache/mc/26.2/client-src/net/minecraft/network/protocol/game/ClientboundPlayerCombatKillPacket.java:11`).
+    /// (`.cache/mc/26.2/client-src/net/minecraft/network/protocol/game/ClientboundPlayerCombatKillPacket.java`).
     fn encode_player_combat_kill(&self, player_entity_id: i32, message: &Text) -> ServerDirective {
         let mut w = Writer::default();
         w.var_i32(player_entity_id);
@@ -5062,7 +5059,7 @@ impl ServerProtocol for V770ServerProtocol {
         ]
     }
 
-    /// Issue #268's difficulty confirmation — see
+    /// The difficulty confirmation — see
     /// [`ServerProtocol::encode_change_difficulty`]'s trait doc comment and
     /// `crate::server::apply_difficulty_change` for the consumer.
     fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
@@ -5075,7 +5072,7 @@ impl ServerProtocol for V770ServerProtocol {
         )
     }
 
-    /// Issue #268's game-rule confirmation — see
+    /// The game-rule confirmation — see
     /// [`ServerProtocol::encode_game_rule_values`]'s trait doc comment and
     /// `crate::server::apply_game_rule_changed` for the consumer. Carries
     /// only `entries` (the just-changed rules), not vanilla's full current
@@ -5147,8 +5144,8 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// See [`ServerProtocol::encode_set_held_slot`]'s trait doc comment
-    /// (issue #558). The client side of this exact wire shape already exists
+    /// See [`ServerProtocol::encode_set_held_slot`]'s trait doc comment.
+    /// The client side of this exact wire shape already exists
     /// (`adapter::player::handle_play_player`'s `SET_HELD_SLOT` arm decodes
     /// the same single VarInt into `ClientEvent::HeldSlotChanged`); this was
     /// the missing server-side encoder.
@@ -5156,8 +5153,8 @@ impl ServerProtocol for V770ServerProtocol {
         send(play::clientbound::SET_HELD_SLOT, &SetHeldSlot { slot: i32::from(slot) })
     }
 
-    /// See [`ServerProtocol::encode_initialize_border`]'s trait doc comment
-    /// (issue #326, B1). The packet's `old_size`/`new_size`/`lerp_time` triple
+    /// See [`ServerProtocol::encode_initialize_border`]'s trait doc comment.
+    /// The packet's `old_size`/`new_size`/`lerp_time` triple
     /// is the border's `size`/`lerp_target`/`lerp_time` readout, with
     /// `lerp_time` converted from the border's remaining **ticks** to the
     /// milliseconds the lodestone client's `BorderExtent::Moving` interpolates
@@ -5268,7 +5265,7 @@ impl ServerProtocol for V770ServerProtocol {
     }
 
     /// See [`ServerProtocol::encode_recipe_book_add`]'s trait doc. This override
-    /// is what makes `PLACE_RECIPE` reachable at all (issue #547): the ids it
+    /// is what makes `PLACE_RECIPE` reachable at all: the ids it
     /// hands out are the only ids any client can echo back.
     fn encode_recipe_book_add(
         &self,
@@ -5297,7 +5294,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// This host serves the embedded 26.2 worldgen bundle (issue #407): the
+    /// This host serves the embedded 26.2 worldgen bundle: the
     /// `assets/worldgen/` data `lodestone-server` embeds (its `worldgen_data`
     /// module's version gate, `bundled_worldgen_serves`) is this version's
     /// data, so the gate must recognise it. This is the one production
@@ -5689,8 +5686,8 @@ mod block_edit_tests {
     /// found by this crate's own hermetic
     /// `encode_chunk_carries_real_block_states_including_a_fluid` gate below,
     /// which failed its `assert_ne!(water_id, air_id())` sanity check the
-    /// first time it ran, exactly the trap issue #363 warned a
-    /// solids-only fix would fall into. Pins the exact expected id
+    /// first time it ran, exactly the trap a
+    /// solids-only fix falls into. Pins the exact expected id
     /// (`blocks.json`'s own `"default": true` entry for `minecraft:water` is
     /// `level=0`, id `86` — `.cache/mc/26.2/generated/reports/blocks.json`),
     /// not just "not air", so a future table regeneration that changes which
@@ -5716,7 +5713,7 @@ mod block_edit_tests {
         );
     }
 
-    /// Issue #546. A bare name must resolve to the block's **default** state,
+    /// A bare name must resolve to the block's **default** state,
     /// not to its lowest id — and `grass_block` is the case where those differ
     /// visibly: `blocks.json` marks `snowy=false` (id 9) default while id 8 is
     /// `snowy=true`, so the old lowest-id fallback put every spread grass block
@@ -5747,7 +5744,7 @@ mod block_edit_tests {
         );
     }
 
-    /// The hermetic half of issue #363's gate: a whole-column `encode_chunk`
+    /// The hermetic half of the whole-column wire-fidelity gate: a whole-column `encode_chunk`
     /// send, decoded back through the real wire codec
     /// ([`crate::packets::chunk::LevelChunkWithLight::decode`], the same
     /// decoder `tests/join_flow.rs`'s golden vectors and `tests/live_chunk
@@ -5833,7 +5830,7 @@ mod block_edit_tests {
         assert_eq!(decoded.column.get_block(5, 300, 5), air_id());
     }
 
-    /// Issue #516's wire half: a served column carries the generator's real
+    /// The wire half of server-side light: a served column carries the generator's real
     /// `MOTION_BLOCKING` map, not the zero-entry NBT this encoder sent for every
     /// column until now. The expected values come from the **generator's own**
     /// array through a second, independently constructed source — nothing here
@@ -5896,7 +5893,7 @@ mod block_edit_tests {
         assert!(decoded.heightmaps.is_empty());
     }
 
-    /// Issue #405's own island check: real per-quart biome assignment must
+    /// The island check for real per-quart biome assignment: it must
     /// reach the **encoded wire bytes**, not just [`ServerChunkColumn`] —
     /// the exact chain CLAUDE.md's rule 1 asks for (climate sample -> biome
     /// -> the column the encoder sends -> the actual bytes a client would
@@ -5961,7 +5958,7 @@ mod block_edit_tests {
     /// Pins `encode_block_update`'s wire layout end to end: packed `BlockPos`
     /// then a VarInt state id, nothing else — the shape
     /// `ClientboundBlockUpdatePacket.STREAM_CODEC` specifies
-    /// (`ClientboundBlockUpdatePacket.java:14-20`).
+    /// (`ClientboundBlockUpdatePacket.java`).
     #[test]
     fn encode_block_update_wire_layout() {
         let proto = V770ServerProtocol;
@@ -6098,7 +6095,7 @@ mod block_edit_tests {
 
     /// Pins `encode_game_event`'s wire layout end to end: one unsigned byte
     /// event id, then a big-endian `f32` param, nothing else — the shape
-    /// `ClientboundGameEventPacket` writes (`ClientboundGameEventPacket.java:14`)
+    /// `ClientboundGameEventPacket` writes (`ClientboundGameEventPacket.java`)
     /// and the shape this crate's own `GameEvent` decode reads back. The param
     /// is pinned to a non-integral value (`0.5`) so a big-endian `f32` that
     /// somehow slid a byte cannot alias the integer `0`.
@@ -6119,7 +6116,7 @@ mod block_edit_tests {
     }
 }
 
-/// Issue #268: `CHANGE_DIFFICULTY`/`LOCK_DIFFICULTY`/`SET_GAME_RULE` decode
+/// `CHANGE_DIFFICULTY`/`LOCK_DIFFICULTY`/`SET_GAME_RULE` decode
 /// and their two confirmation encoders. Expected values come from
 /// `.cache/mc/26.2/src`'s own record types
 /// (`ServerboundChangeDifficultyPacket`, `ServerboundLockDifficultyPacket`,
@@ -6250,7 +6247,7 @@ mod world_admin_tests {
 /// decode. Where possible the expected wire bytes come from the **real**
 /// client-side encoder (`crate::adapter`'s `V770Adapter::encode_action`),
 /// not a hand-authored fixture — this is the same "real client already sends
-/// this packet in ordinary singleplayer play" encoder the #266 investigation
+/// this packet in ordinary singleplayer play" encoder a prior investigation
 /// found already existed with zero server-side consumer, so decoding what it
 /// actually produces (rather than a bespoke test-only byte layout) is the
 /// strongest hermetic evidence available that this module's decoder agrees
@@ -6314,26 +6311,25 @@ mod inventory_decode_tests {
     //
     // - `ServerboundSetCreativeModeSlotPacket.java`'s `STREAM_CODEC`:
     //   `ByteBufCodecs.SHORT` then `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`.
-    //   `ByteBufCodecs.SHORT` is `ByteBuf::writeShort`, i.e. big-endian `i16`
-    //   (`ByteBufCodecs.java:81`).
+    //   `ByteBufCodecs.SHORT` is `ByteBuf::writeShort`, i.e. big-endian `i16`.
     // - `ServerboundClientCommandPacket.java`'s whole body is one
     //   `writeEnum`, and `FriendlyByteBuf::writeEnum` is
-    //   `writeVarInt(value.ordinal())` (`FriendlyByteBuf.java:472`), over
+    //   `writeVarInt(value.ordinal())`, over
     //   `Action { PERFORM_RESPAWN, REQUEST_STATS, REQUEST_GAMERULE_VALUES }`.
     // - `minecraft:cobblestone`'s item protocol id `62` is read from Mojang's
     //   own `generated/reports/registries.json`, the authoritative generator
     //   output — not from our registry tables.
     // - The menu-slot number `36` is `InventoryMenu`'s first hotbar slot,
-    //   which vanilla's own handler accepts as `validSlot`
-    //   (`ServerGamePacketListenerImpl.java:2035`, `1..=45`) and writes via
-    //   `player.inventoryMenu.getSlot(36)` (line 2038).
+    //   which vanilla's own `ServerGamePacketListenerImpl.handleSetCreativeModeSlot`
+    //   accepts as `validSlot` (`1..=45`) and writes via
+    //   `player.inventoryMenu.getSlot(36)`.
 
     /// A creative-mode palette write of a full stack into the first hotbar
     /// slot, decoded from bytes laid out by hand against vanilla's own
     /// `STREAM_CODEC` (see the block comment above for every byte's source).
     ///
-    /// This arm returned [`ServerBound::Ignored`] until issue #266's wiring
-    /// pass, while `apply_creative_mode_slot_set` and
+    /// This arm returned [`ServerBound::Ignored`] until a wiring
+    /// pass fixed it, while `apply_creative_mode_slot_set` and
     /// `ServerBound::CreativeModeSlotSet` had both already existed since
     /// `c4ad474` — so a real client's entire creative inventory was silently
     /// discarded. `tests/serverbound_wiring.rs` now gates that class
@@ -6418,8 +6414,8 @@ mod inventory_decode_tests {
     /// `PERFORM_RESPAWN`, ordinal `0` — the packet a real client sends when
     /// the player clicks **Respawn** on the death screen.
     ///
-    /// This arm returned [`ServerBound::Ignored`] until issue #270's wiring
-    /// pass, while `apply_client_command`'s respawn path already existed, so
+    /// This arm returned [`ServerBound::Ignored`] until a wiring
+    /// pass fixed it, while `apply_client_command`'s respawn path already existed, so
     /// the button did nothing on a `lodestone` server. That is not a cosmetic
     /// gap: per `CLAUDE.md`'s live-server hazards a dead player is held on the
     /// death screen and is sent **no chunks**, so the connection became a
@@ -6597,7 +6593,7 @@ mod inventory_decode_tests {
     }
 }
 
-/// Issue #12: decode tests for `minecraft:attack` and
+/// Decode tests for `minecraft:attack` and
 /// `minecraft:player_input`, the two packets the melee-damage/knockback
 /// pipeline depends on.
 #[cfg(test)]
@@ -6756,11 +6752,11 @@ mod combat_decode_tests {
     }
 }
 
-/// Regression coverage for the #425 investigation's chunk-streaming bug
+/// Regression coverage for the chunk-streaming investigation's bug
 /// (see the doc comment on the `CLIENT_INFORMATION`/`CHUNK_BATCH_RECEIVED`
 /// decode arms above): both packet ids used to hit the generic
 /// decode-then-drop `Ignored` family from before this crate had any
-/// consumer for either, and issue #270 later added
+/// consumer for either, and a later fix added
 /// `ServerBound::ClientInformationChanged`/`ChunkBatchAcknowledged` plus
 /// `crate::server`'s consumers without ever updating this decode arm to
 /// construct them — so both variants were dead code, and every
@@ -6906,7 +6902,7 @@ mod view_streaming_decode_tests {
     }
 }
 
-/// Encode-side wire layouts for the six world-border packets (issue #326, B1).
+/// Encode-side wire layouts for the six world-border packets.
 ///
 /// Each test drives [`V770ServerProtocol`]'s `encode_*` and re-parses the
 /// produced bytes field by field against the vanilla field order, instead of

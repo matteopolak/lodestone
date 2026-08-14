@@ -106,7 +106,7 @@ impl V770Adapter {
                     latency: entry.latency,
                     display_name: entry.display_name.map(Text::literal),
                     listed: entry.listed,
-                    // Issue #62: carried through rather than dropped. The v770
+                    // Carried through rather than dropped. The v770
                     // `ProfileProperty` and the model's are separate types by the
                     // usual version-seam rule, so this is a lower, not a move.
                     properties: entry.properties.map(|properties| {

@@ -11,7 +11,7 @@
 //! sent `set_health(0.0)` and stopped there, and **`set_health` does not open the
 //! death screen** — not here, and not in vanilla, whose
 //! `ClientPacketListener.handleSetHealth`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/ClientPacketListener.java:1235-1240`)
+//! (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/ClientPacketListener.java`)
 //! calls only `hurtTo`/`setFoodLevel`/`setSaturation`. The screen comes from
 //! `handlePlayerCombatKill` at `:1845-1855`.
 //!
@@ -82,7 +82,7 @@ const SAFE_FALL_DISTANCE: f64 = 3.0;
 
 /// The exact damage a fall of `blocks` deals, from
 /// `LivingEntity.calculateFallDamage`/`calculateFallPower`
-/// (`LivingEntity.java:1846-1857`): `floor((d + 1e-6 - safe) * 1.0 * 1.0)`.
+/// (`LivingEntity.java`): `floor((d + 1e-6 - safe) * 1.0 * 1.0)`.
 fn fall_damage(blocks: f64) -> f32 {
     let raw = (blocks + 1.0e-6 - SAFE_FALL_DISTANCE).floor();
     if raw > 0.0 { raw as f32 } else { 0.0 }

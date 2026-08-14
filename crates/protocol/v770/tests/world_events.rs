@@ -140,10 +140,10 @@ fn game_event_rain_and_thunder_levels_are_surfaced() {
 
 #[test]
 fn game_event_win_game_emits_win_game_event() {
-    // WIN_GAME is event code 4 (`ClientboundGameEventPacket.java:18`,
+    // WIN_GAME is event code 4 (`ClientboundGameEventPacket.java`,
     // `WIN_GAME = new ClientboundGameEventPacket.Type(4)`), the packet vanilla
     // sends on exiting the End through the exit portal
-    // (`ClientPacketListener.java:1548-1552` always opens `WinScreen(true, ..)`
+    // (`ClientPacketListener.java` always opens `WinScreen(true, ..)`
     // regardless of `param` — see `ClientEvent::WinGame`'s own doc for why the
     // event therefore carries no fields).
     let adapter = V770Adapter::new();
@@ -158,7 +158,7 @@ fn game_event_win_game_emits_win_game_event() {
 #[test]
 fn game_event_unhandled_code_consumes_bytes_without_directive() {
     let adapter = V770Adapter::new();
-    // DEMO_EVENT (5, `ClientboundGameEventPacket.java:19`) is fully decoded
+    // DEMO_EVENT (5, `ClientboundGameEventPacket.java`) is fully decoded
     // but produces no canonical event — unlike WIN_GAME (4), which now does
     // (see `game_event_win_game_emits_win_game_event` above).
     let directives = handle(
