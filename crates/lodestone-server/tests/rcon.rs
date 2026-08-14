@@ -104,18 +104,24 @@ async fn rcon_round_trips_a_command_as_the_console() {
         .await
         .expect("connect and authenticate");
 
+    // `warp` names no built-in root (`crate::commands::ServerCommands` has
+    // none by that name — see `tests/builtin_commands.rs`'s own use of
+    // `"warp spawn"` as the same placeholder), so it is guaranteed to fall
+    // through to the host sink under test here rather than being answered by
+    // a real built-in. `say` served this purpose until the built-in command
+    // set grew to include it.
     let response = client
-        .command("say hello")
+        .command("warp hello")
         .await
         .expect("command round-trips");
-    assert_eq!(response, "ran `say hello`");
+    assert_eq!(response, "ran `warp hello`");
 
     // Vanilla's `trimOptionalPrefix`: a leading slash is the same command.
     let response = client
-        .command("/say hello")
+        .command("/warp hello")
         .await
         .expect("slash-prefixed command round-trips");
-    assert_eq!(response, "ran `say hello`");
+    assert_eq!(response, "ran `warp hello`");
 
     // The command reached the host sink as the console ("Rcon"), not as a
     // player — the identity seam the whole command path depends on.
@@ -125,8 +131,8 @@ async fn rcon_round_trips_a_command_as_the_console() {
         seen.iter().all(|(name, _)| name == "Rcon"),
         "every command must arrive as the console, got {seen:?}"
     );
-    assert_eq!(seen[0].1, "say hello");
-    assert_eq!(seen[1].1, "say hello");
+    assert_eq!(seen[0].1, "warp hello");
+    assert_eq!(seen[1].1, "warp hello");
 
     server.shutdown().await;
 }
