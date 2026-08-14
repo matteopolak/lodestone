@@ -39,7 +39,7 @@ pub mod packets;
 /// from it to canonical 26.2 state ids.
 ///
 /// Both used to live in this crate. They now live in `lodestone-canonical`
-/// and are re-exported here unchanged (epic #343 unit U1), because **every**
+/// and are re-exported here unchanged (unit U1's cross-family sharing), because **every**
 /// pre-1.13 family speaks `id:meta` and the dumped table — vanilla's own
 /// 1.13.2 `DataFixerUpper` flattening fix, which upgrades 1.12.2-space ids —
 /// serves all of them: older id spaces are a strict subset, and the

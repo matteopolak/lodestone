@@ -49,7 +49,7 @@ pub const PROTOCOL: i32 = 340;
 /// registry's view of a family cannot drift from the family's own. That
 /// matters more than it looks: the registry needs to answer "does anything
 /// handle protocol N?" *without* constructing an adapter, now that
-/// construction takes the negotiated protocol (epic #343 unit U2).
+/// construction takes the negotiated protocol (unit U2's multi-protocol seam).
 ///
 /// This family is single-protocol, so the slice has one entry. A
 /// multi-protocol family (the plan's v110/v498/v756 groupings) lists each
@@ -129,7 +129,7 @@ pub fn adapter() -> V340Adapter {
 
 /// Returns an adapter configured for the **negotiated** protocol.
 ///
-/// The multi-protocol construction seam (epic #343 unit U2). Before it, every
+/// The multi-protocol construction seam (unit U2). Before it, every
 /// family was built by a zero-argument `make: fn() -> Box<dyn VersionAdapter>`
 /// and the negotiated number reached the adapter nowhere — which is precisely
 /// what stopped one crate serving several protocol revisions, since it had
@@ -262,7 +262,7 @@ fn dimension_id(value: i32) -> Result<lodestone_model::DimensionId, AdapterError
 }
 
 /// Largest block coordinate any vanilla world can legitimately contain, on
-/// either horizontal axis: `WorldBorder.absoluteMaxSize` (`WorldBorder.java:37`)
+/// either horizontal axis: `WorldBorder.absoluteMaxSize` (`WorldBorder.java`)
 /// is 29,999,984, and the border is what bounds every world regardless of the
 /// `worldborder` command or the world's own settings. Anything past this is not
 /// an awkward-but-real position, it is invalid input.
@@ -271,7 +271,7 @@ const ABSOLUTE_MAX_BLOCK: i32 = 29_999_984;
 /// Turns a wire-supplied chunk coordinate into the block coordinate of its
 /// west/north edge, refusing anything the world border makes impossible.
 ///
-/// This exists because of issue #450, a remote panic found by
+/// This exists because of a remote panic found by
 /// `lodestone-fuzz`'s `handle_packet_never_panics` target: `multi_block_change`
 /// read `chunk_x`/`chunk_z` straight off the wire and did an unchecked
 /// `chunk_x * 16`. For any `|chunk|` past `i32::MAX / 16` that **panics in
@@ -757,7 +757,7 @@ impl V340Adapter {
             world.set_block(pos.x, pos.y, pos.z, state);
             // Writing a state is what creates/removes a block entity in
             // vanilla (`LevelChunk.setBlockState`, no packet involved) — the
-            // same #374 reasoning `lodestone-v770`'s `BLOCK_UPDATE` arm
+            // same reasoning `lodestone-v770`'s `BLOCK_UPDATE` arm
             // documents.
             world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
             return Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {

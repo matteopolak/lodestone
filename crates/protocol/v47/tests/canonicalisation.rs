@@ -1,4 +1,4 @@
-//! The canonicalisation gate for protocol 47 (GitHub epic #343, unit U3).
+//! The canonicalisation gate for protocol 47 (multi-version support, unit U3).
 //!
 //! # What this exists to catch
 //!
