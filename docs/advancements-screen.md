@@ -13,8 +13,9 @@ bottom/right edges on `window.png` and a tile background under a
 higher-resolution pack (a real/declared pixel-size mismatch, not a
 nine-slice one — see the Gotchas below), the hover tooltip drawing under
 widget icons, entries popping instead of clipping at the viewport edge, the
-tiled background erasing `window.png`'s baked-in inner shadow, and the item
-icon inside each frame not being clipped at all.
+tiled background erasing `window.png`'s baked-in inner shadow, the item icon
+inside each frame not being clipped at all, and the connector lines drawing
+over every card instead of behind it.
 
 ## How it works
 
@@ -132,8 +133,9 @@ frame while a wrong key draws the raw key.
 ## Gotchas
 
 - **There is no scissor, so `advancements_geometry` clips by hand — and every
-  piece of tree content is clamped.** `advancements_layout` still drops a
-  widget wholly outside the viewport (`overlaps`, deliberately permissive so
+  piece of tree content is clamped, connector lines, frame and icon alike.**
+  `advancements_layout` still drops a widget wholly outside the viewport
+  (`overlaps`, deliberately permissive so
   a click at the very edge lands), but a widget that survives that test has
   its **frame sprite** clamped too
   (`push_sprite_clipped`/`clip_sprite_quad`, in `advancements.rs`): the
@@ -151,6 +153,25 @@ frame while a wrong key draws the raw key.
   3-D streams have no destination rect to shrink the same way, so an icon
   that straddles the edge on either of those paths is dropped whole instead
   — never more pixels than vanilla draws, only ever fewer.
+- **Vanilla draws the connector lines behind every widget, and so does this
+  screen.** The code used to push a widget's frame before the renderer's
+  early "back" bg pass and the pre-lines part of the colour stream, so every
+  line landed in a *later* pass than the frame it crossed and drew over
+  every card it touched — the owner's report. The fix moves the frame loop
+  below both the `bg_slot_floats` and `chrome_floats` markers, and —
+  because the real frame sprite is fully opaque under the icon's own
+  footprint (measured on `task_frame_obtained.png`/
+  `task_frame_unobtained.png`: alpha 255 across the whole 16×16 centre, so a
+  frame drawn after its icon would hide it) — every widget's own icon has to
+  move down into the renderer's carried tier alongside it, rather than
+  staying in the tier the tab icons and the hover tooltip's redraw already
+  used. One documented cost: the hover-dim (`AdvancementsView::fade`) can no
+  longer darken a tree widget's own frame or icon, because there is no third
+  `bg_verts` pass between "chrome" and "carried" to let it do so without
+  also landing on top of the (undarkened) tooltip panel — `advancements.rs`'s
+  module doc and the geometry function's own comments carry the full
+  pass-by-pass account of why that trade-off is unavoidable in the current
+  four-pass architecture.
 - **The hover tooltip used to draw under every widget's icon.**
   The renderer's four-pass order draws every background sprite before any
   item icon, so a tooltip panel pushed alongside the tree's own background

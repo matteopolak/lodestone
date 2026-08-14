@@ -61,6 +61,32 @@
 //! quad — so those are dropped whole rather than clipped when the icon's own
 //! bounding square is not wholly inside the viewport, which can only ever
 //! draw *fewer* pixels than vanilla, never spill past the edge.
+//!
+//! **Vanilla draws the connector lines behind every widget, and so do we.**
+//! `AdvancementTab.extractContents` calls `root.extractConnectivity` (both
+//! the shadow and the foreground pass) for the whole tree *before*
+//! `root.extractRenderState` (the frame-then-icon draw), so a line is always
+//! the bottom layer. The previous code pushed the widget-frame loop before
+//! both `bg_slot_floats` and `chrome_floats` — the renderer's early "back"
+//! bg pass and the pre-lines part of the colour stream — so a frame always
+//! landed in an *earlier* pass or range than the lines crossing it, and a
+//! line drew over every card it touched. Moving that loop below both
+//! markers fixes it for both the real-atlas path (the frame now lands in
+//! the "front" bg pass, which the renderer runs after the "chrome" colour
+//! pass the lines are in) and the jar-less fallback path (the frame lands
+//! later in that same colour stream the lines just wrote). The measured
+//! `task_frame_obtained`/`task_frame_unobtained` sprites are fully opaque
+//! under the icon's own footprint (alpha 255 across the whole 16×16
+//! centre), so — unlike the lines, which never need to sit *in front of*
+//! anything — the frame still has to stay strictly behind the icon it
+//! frames, which is why every widget's own icon draw moved down into the
+//! renderer's *carried* tier alongside the frame, rather than staying in
+//! the tier the tab icons and the hover tooltip's redraw already used. See
+//! [`draw_stack_clipped`]'s call site for the one cost of that move: the
+//! hover-dim (`AdvancementsView::fade`) can no longer darken a widget's own
+//! frame or icon, because there is no third `bg_verts` pass between the
+//! "chrome" colour pass and the carried tier to keep it doing so — a
+//! documented divergence, not an oversight.
 
 use lodestone_assets::ItemAtlas;
 use lodestone_game::item::ItemStack;
@@ -1070,21 +1096,20 @@ pub fn advancements_geometry(
         tab_sprite(layout_tab(layout), true),
         layout.tabs[layout_tab(layout)],
     );
-    for (rect, sprite, _, _) in &plan.frames {
-        push_sprite_clipped(&mut b, background, sprite, *rect, layout.inside);
-    }
-    // `bg_slot_vertex_count`'s split, **before** the hover tooltip's own
-    // sprites: the renderer draws every background sprite pushed up to this
-    // marker before any item icon, so a tooltip panel pushed here would sit
-    // under every widget's icon rather than just the hovered one's. Everything
-    // from here on that belongs to the tooltip is pushed **after** this
-    // marker instead, landing in the "front" bg range the renderer draws once
-    // every icon already has.
+    // `bg_slot_vertex_count`'s split, **before** both the hover tooltip's own
+    // sprites and every widget's own frame. Everything pushed to `bg_verts`
+    // up to this marker — the tile grid, the window art, both tab sprites —
+    // draws in the renderer's early "back" bg pass; everything pushed after
+    // it waits for the "front" bg pass, which the renderer runs once the
+    // "chrome" colour pass (the connector lines, next) and every icon have
+    // already drawn.
     let bg_slot_floats = b.bg_verts.len();
 
     // The connector lines, shadows already ordered before foregrounds by
-    // `draw_plan`. On the colour stream, which draws after the background
-    // sprites and before the item icons.
+    // `draw_plan`. On the colour stream, in the "chrome" pass the renderer
+    // runs right after the "back" bg pass above and before every icon pass
+    // below — see the widget-frame loop's own comment for why that keeps a
+    // line behind every frame it crosses.
     let (shadow_ink, line_ink) = (LINE_BG, LINE_FG);
     for (rect, shadow) in &plan.lines {
         b.rect_px(
@@ -1104,19 +1129,31 @@ pub fn advancements_geometry(
             TITLE_COLOUR,
         );
     }
-    // `chrome_vertex_count`'s split: connector lines and the title above it,
-    // the hover dim below.
+    // `chrome_vertex_count`'s split: connector lines and the title above it.
+    // Everything below — the widget frames included — draws in a later pass,
+    // or a later range of this same colour stream.
     let chrome_floats = b.verts.len();
+
+    // Vanilla draws a connector line *behind* every widget
+    // (`AdvancementTab.extractContents` runs both
+    // `root.extractConnectivity` passes over the whole tree before
+    // `root.extractRenderState`, the frame-then-icon draw), and this loop
+    // used to run before `bg_slot_floats`/`chrome_floats` — the renderer's
+    // "back" bg pass and the pre-lines part of the colour stream above — so
+    // a frame always landed in an *earlier* pass or range than the lines
+    // crossing it, and every line drew over every card it touched. Moved
+    // below both markers instead: a real sprite frame (the `Some` arm, on
+    // `bg_verts`) now lands in the "front" bg pass, which runs after the
+    // "chrome" colour pass the lines are in; a jar-less fallback frame (the
+    // `None` arm, on this same colour stream) now lands after
+    // `chrome_floats`, later in the very draw call the lines just wrote to.
+    // Either way: lines first, frame after.
+    for (rect, sprite, _, _) in &plan.frames {
+        push_sprite_clipped(&mut b, background, sprite, *rect, layout.inside);
+    }
 
     // ---- the chrome/icon split ----
 
-    // Every widget's own icon, clipped to the viewport — [`draw_stack_clipped`]
-    // in the same shape as [`clip_sprite_quad`], which the frame loop above
-    // already uses, rather than growing a second clipping convention. See its
-    // own doc for what it clips and what it can only drop whole.
-    for (_, _, stack, at) in &plan.frames {
-        draw_stack_clipped(&mut b, &assets, stack, at.0, at.1, layout.inside, (w, h));
-    }
     let tab_roots = advancement_tabs();
     for (i, rect) in layout.tabs.iter().enumerate() {
         let Some(root) = tab_roots.get(i) else { continue };
@@ -1130,19 +1167,49 @@ pub fn advancements_geometry(
             rect.y + TAB_ICON_DY,
         );
     }
+    // The hover dim, still ahead of the five markers below and so still in
+    // the same range it always was: it goes on darkening the tile grid, the
+    // connector lines and every tab icon exactly as before. It no longer
+    // reaches a tree widget's own frame or icon, because those now draw
+    // in the tier below, and there is no third `bg_verts` pass
+    // between "chrome" and "carried" to let a colour-stream draw sit between
+    // them the way it used to — see the module doc for why that is an
+    // accepted, documented cost rather than an oversight.
+    if view.fade > 0.0 {
+        b.rect_px(
+            layout.inside.x,
+            layout.inside.y,
+            layout.inside.w,
+            layout.inside.h,
+            [HOVER_DIM_RGB[0], HOVER_DIM_RGB[1], HOVER_DIM_RGB[2], view.fade],
+        );
+    }
     // `slot_item_vertex_count`/`slot_model_vertex_count`/`slot_glint_vertex_
-    // count`/`slot_special_count`'s split — every widget's own icon (drawn
-    // above, at rest) is done; the hovered widget's *redrawn* icon, below, is
-    // the tooltip's. All four stack-draw streams split here together, so an
-    // enchanted hovered item's glint (or a special-rendered icon, e.g. a
-    // shulker box) lands in the same pass as the base icon it belongs to
-    // rather than drawing a stratum early.
+    // count`/`slot_special_count`/`slot_vertex_count`'s split — five markers
+    // taken together, immediately before the one loop they all exist to
+    // delay. Every widget's own icon lands *after* every one of them: all
+    // four of [`Builder::draw_stack`]'s streams (sprite,
+    // model, glint, and the colour-stream chrome a jar-less run degrades to)
+    // move into the renderer's carried tier together, which is the only
+    // tier that runs later than the "front" bg pass the frame loop above now
+    // uses — see [`draw_stack_clipped`]'s own doc. The tab icons above and
+    // the hovered tooltip's own redraw below were already on the correct
+    // side of this split and are unaffected.
     let slot_item_floats = b.item_verts.len();
     let slot_model_verts = b.model_verts.len();
     let slot_glint_floats = b.glint_verts.len();
     let slot_special = b.special.len();
+    let slot_floats = b.verts.len();
 
-    // ---- the rest of the tooltip fix ---------------------------------------
+    // Every widget's own icon, clipped to the viewport. See
+    // [`draw_stack_clipped`]'s doc for the clip itself, and the five markers
+    // just above for why the call has to live here
+    // rather than beside the frame loop it visually belongs next to.
+    for (_, _, stack, at) in &plan.frames {
+        draw_stack_clipped(&mut b, &assets, stack, at.0, at.1, layout.inside, (w, h));
+    }
+
+    // ---- the tooltip's own tier --------------------------------------------
     //
     // Everything from here down is the tooltip, and everything above is not —
     // that is now the *only* fact this split needs to encode, because
@@ -1154,36 +1221,21 @@ pub fn advancements_geometry(
     // the same shape as "content, then a tooltip that must sit above literally
     // everything else". Reusing that pair (rather than adding a third ordering
     // primitive — this module's own advice, learned from the recipe book's
-    // `between_strata` hook) is what the markers above and below are for.
-    //
-    // Within this tier the four-pass order still applies, so three more
-    // sub-splits do the rest of vanilla's own `extractHover` order
-    // (`AdvancementWidget.java`): the dim first (**this** colour
-    // range, which the renderer draws right after every widget's icon, so it
-    // darkens all of them uniformly — matching vanilla's unconditional `fill`
-    // over the whole viewport, not a hovered-cell exclusion); the panel/bars/
-    // frame-redraw next (`bg_slot_floats`'s "front" range, which the renderer
-    // draws after *this* colour range); and the text plus the icon redraw
-    // last of all, in the carried pass proper, so both land above the panel.
-    if view.fade > 0.0 {
-        b.rect_px(
-            layout.inside.x,
-            layout.inside.y,
-            layout.inside.w,
-            layout.inside.h,
-            [HOVER_DIM_RGB[0], HOVER_DIM_RGB[1], HOVER_DIM_RGB[2], view.fade],
-        );
-    }
-    // `slot_vertex_count`'s split: the hover dim above is still "slot" colour
-    // (the renderer's front-bg pass, next, needs to draw after it); the
-    // tooltip text below is `verts`' only carried-pass content.
-    let slot_floats = b.verts.len();
+    // `between_strata` hook) is what the five markers above are for; every
+    // widget's own icon, just pushed, sits in the *early* part of this same
+    // tier, so the tooltip below still lands on top of it.
 
     // The hover tooltip's own sprites: description panel, then the title bar
     // over it, then the icon frame redrawn on top — `extractHover`'s order,
     // and the reason the frame is drawn twice per hovered widget. Pushed
     // *after* `bg_slot_floats`, so the renderer's front-bg pass draws these
-    // once every widget's icon already has.
+    // after the "back" bg pass and the "chrome" colour pass above. Every
+    // widget's own icon now draws in the carried tier below, so this
+    // front-bg pass runs *before* those icons rather than after — harmless
+    // here, because this tooltip content only ever overlaps its own hovered
+    // widget's own frame (pushed earlier in this same front-bg pass, just
+    // above) and its own redrawn icon (pushed in the carried tier below,
+    // after this), never a *different* widget's icon.
     if let Some((_, hover)) = &hover {
         if let Some(panel) = hover.panel {
             push_sprite(&mut b, background, SPRITE_TITLE_BOX, panel);
@@ -1881,6 +1933,105 @@ mod tests {
         );
     }
 
+    // -- z-order: connector lines must draw behind every widget --------------
+
+    /// Reconstructs the pixel-space rect of every flat colour-stream quad in
+    /// `verts` — the same read-back [`clip_quads_from`] uses internally,
+    /// exposed here so a z-order test can find a specific quad by its rect
+    /// rather than by counting vertices, which is six either way and would
+    /// not discriminate submission order.
+    fn decode_colour_quads(verts: &[f32], canvas_w: f32, canvas_h: f32) -> Vec<Rect> {
+        let px = |ndc: f32| (ndc + 1.0) * canvas_w / 2.0;
+        let py = |ndc: f32| (1.0 - ndc) * canvas_h / 2.0;
+        verts
+            .chunks_exact(COLOUR_FLOATS_PER_VERTEX * 6)
+            .map(|chunk| {
+                let x0 = px(chunk[0]);
+                let y0 = py(chunk[1]);
+                let x1 = px(chunk[COLOUR_FLOATS_PER_VERTEX]);
+                let y1 = py(chunk[COLOUR_FLOATS_PER_VERTEX * 2 + 1]);
+                Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+            })
+            .collect()
+    }
+
+    fn rects_close(a: Rect, b: Rect) -> bool {
+        (a.x - b.x).abs() < 0.05
+            && (a.y - b.y).abs() < 0.05
+            && (a.w - b.w).abs() < 0.05
+            && (a.h - b.h).abs() < 0.05
+    }
+
+    /// The magnitude assertion for the ordering fix: for a widget
+    /// whose connector line genuinely crosses its own frame — any non-root
+    /// widget qualifies, since the line's own terminal point sits at the
+    /// widget's centre, well inside its `26 x 26` frame — the line's quad
+    /// must appear **earlier** in the emitted colour stream than the frame's,
+    /// so the frame draws over the line rather than the other way around.
+    /// Exercised on the jar-less fallback path, like every other geometry
+    /// test in this module: `push_sprite_clipped`'s `None` arm puts a frame
+    /// on the very same colour stream the lines are on, so the two really do
+    /// compete for the same paint order rather than living in unrelated
+    /// buffers a submission-order claim could not actually observe.
+    #[test]
+    fn a_connector_line_draws_before_the_frame_it_crosses() {
+        let mut state = AdvancementsState::default();
+        let progress = AdvancementProgress::default();
+        let layout = advancements_layout(&mut state, &progress, 1, 1280, 720).expect("a layout");
+        let plan = draw_plan(&layout, &progress);
+
+        // A widget with a parent, so at least one line segment reaches into
+        // it — the root has no incoming line and would not discriminate.
+        let frame_rect = layout
+            .widgets
+            .iter()
+            .find(|(i, _)| layout.tree.nodes[*i].parent.is_some())
+            .map(|(_, rect)| Rect {
+                x: rect.x + FRAME_DX,
+                y: rect.y,
+                w: FRAME_SIZE,
+                h: FRAME_SIZE,
+            })
+            .expect("the tree has at least one non-root widget on screen");
+
+        // A foreground line segment whose rect actually overlaps that frame —
+        // the terminal segment at the widget's own centre always does, since
+        // `my_x`/`my_y` sit at `node + 13` and the frame spans
+        // `node - FRAME_DX .. node - FRAME_DX + 26`.
+        let crossing = plan
+            .lines
+            .iter()
+            .find(|(r, shadow)| !*shadow && overlaps(*r, frame_rect))
+            .map(|(r, _)| *r)
+            .expect("no connector line crosses the chosen widget's frame");
+
+        let view = AdvancementsView {
+            title: "",
+            hovered: None,
+            hovered_title: "",
+            hovered_description: "",
+            progress: &progress,
+            fade: 0.0,
+        };
+        let geo = advancements_geometry(&layout, view, 1, 1280, 720, None, None, None, None);
+        let (canvas_w, canvas_h) = crate::menu::render::logical_canvas(1, 1280, 720);
+        let quads = decode_colour_quads(&geo.verts, canvas_w, canvas_h);
+
+        let line_index = quads.iter().position(|q| rects_close(*q, crossing)).unwrap_or_else(|| {
+            panic!("the crossing line's own rect never appeared in the colour stream: {crossing:?} in {quads:?}")
+        });
+        let frame_index = quads.iter().position(|q| rects_close(*q, frame_rect)).unwrap_or_else(|| {
+            panic!("the widget's own frame rect never appeared in the colour stream: {frame_rect:?} in {quads:?}")
+        });
+
+        assert!(
+            line_index < frame_index,
+            "the line (quad {line_index}) must draw before the frame it crosses \
+             (quad {frame_index}) — a line drawn after its frame is the reported \
+             bug, lines rendering over the cards"
+        );
+    }
+
     // -- z-order: the tooltip must draw over every icon ----------------------
 
     #[test]
@@ -1919,21 +2070,29 @@ mod tests {
              widget's own icon"
         );
 
-        // The control: with nothing hovered, there is no tooltip content at
-        // all, so the carried range must be empty — proving the assertion
-        // above is measuring the hover, not merely "this screen always has a
-        // carried range" (the hover-dim rect alone, gated on `fade > 0.0`,
-        // could do that on its own if this control did not zero it too).
+        // The control: with nothing hovered, the carried range is no longer
+        // empty — it always carries every widget's own icon now (the
+        // frame-behind-icon ordering needs that tier, see the module doc),
+        // regardless of hover. So the discriminating claim is narrower than
+        // "some carried range exists": hovering must add *more* colour-stream
+        // floats to that range than the icons-only baseline does, proving the
+        // assertion above is measuring the tooltip's own content and not
+        // merely "this screen always has some carried range" (which the
+        // now-unconditional icon move could do on its own).
         let no_hover = AdvancementsView {
             hovered: None,
             fade: 0.0,
             ..view
         };
         let geo_idle = advancements_geometry(&layout, no_hover, 1, 1280, 720, None, None, None, None);
-        assert_eq!(
-            geo_idle.slot_vertex_count,
-            geo_idle.verts.len() / COLOUR_FLOATS_PER_VERTEX,
-            "no hover and no fade, so no carried colour range at all"
+        let hovered_carried_floats = geo.verts.len() - geo.slot_vertex_count * COLOUR_FLOATS_PER_VERTEX;
+        let idle_carried_floats =
+            geo_idle.verts.len() - geo_idle.slot_vertex_count * COLOUR_FLOATS_PER_VERTEX;
+        assert!(
+            hovered_carried_floats > idle_carried_floats,
+            "hovering must add tooltip content on top of the icons-only \
+             baseline: {hovered_carried_floats} carried floats hovered vs \
+             {idle_carried_floats} idle"
         );
     }
 
