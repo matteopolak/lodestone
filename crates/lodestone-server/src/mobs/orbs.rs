@@ -426,3 +426,397 @@ impl<'w> MobSim<'w> {
         ids
     }
 }
+
+#[cfg(test)]
+mod experience_orb_tests {
+    use super::*;
+    use super::super::{ChunkWorld, PlayerPerception};
+    use crate::protocol::MetadataField;
+    use lodestone_entity::DamageFlags;
+
+    /// Flat stone floor at y=0 across one column, so an orb has something to land on.
+    fn flat_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for z in 0..16 {
+            for x in 0..16 {
+                world.set_block(x, 0, z, "minecraft:stone");
+            }
+        }
+        world
+    }
+
+    /// A point above the floor, well inside the column the world covers.
+    fn above_floor() -> Vec3 {
+        Vec3::new(8.0, 1.0, 8.0)
+    }
+
+    /// **The denomination ladder reaches real entities.**
+    ///
+    /// `crate::experience::orb_denominations` is already gated to the integer, and this
+    /// is the join: an award of 100 becomes **four** orbs worth `73, 17, 7, 3` — not one
+    /// orb of 100, and not `73 + 17 + 7 + 1 + 1 + 1`. Orb count is what a player sees.
+    ///
+    /// The ids are consecutive, which is why none of these four can merge with each
+    /// other: the merge rule is congruence mod 40. That is asserted here rather than
+    /// left implicit, because a spawner that *did* merge them would report a plausible
+    /// smaller count.
+    #[test]
+    fn an_award_of_100_spawns_the_four_orbs_the_ladder_predicts() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let spawned = sim.award_experience(above_floor(), Vec3::new(0.0, 0.0, 0.0), 100);
+        assert_eq!(spawned.len(), 4, "100 points is four orbs, not one");
+        let mut values: Vec<i32> = spawned
+            .iter()
+            .map(|&id| sim.orb_state(id).expect("spawned orb is tracked").0)
+            .collect();
+        assert_eq!(values, vec![73, 17, 7, 3], "largest first, and the tail is 3");
+        values.sort_unstable();
+        assert_eq!(values.iter().sum::<i32>(), 100, "the split must conserve the award");
+        assert_eq!(sim.orb_points_outstanding(), 100);
+        assert_eq!(sim.orb_count(), 4);
+    }
+
+    /// **Merging, at a count above the threshold — and the threshold is the point.**
+    ///
+    /// `scanForMerges` only merges orbs whose network ids are congruent mod
+    /// [`ORB_GROUPS_PER_AREA`] (40). Spawning ten orbs and expecting a merge measures
+    /// nothing at all: ids `n..n+9` share no congruence class, so the correct answer is
+    /// zero merges. This spawns **41** orbs of equal value at one point, which is the
+    /// smallest count that guarantees a congruent pair (`n` and `n + 40`).
+    ///
+    /// Two assertions, and the second is the one a wrong merge passes:
+    ///
+    /// * the entity count **falls**, so a merge happened;
+    /// * `orb_points_outstanding` is **unchanged**, so the merge moved absorptions
+    ///   between entities rather than destroying them. A `merge` that overwrote the
+    ///   target's count instead of adding to it satisfies the first and fails this.
+    #[test]
+    fn forty_one_equal_orbs_merge_and_conserve_every_point() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        // `spawn_orb` directly, not `award_experience`: the award path would split a
+        // total into *different* denominations, and only equal-valued orbs may merge.
+        // 41 is the count, 3 is a real ladder denomination.
+        const ORBS: usize = 41;
+        const VALUE: i32 = 3;
+        for _ in 0..ORBS {
+            sim.spawn_orb(VALUE, above_floor(), Vec3::new(0.0, 0.0, 0.0));
+        }
+        let before_points = sim.orb_points_outstanding();
+        assert_eq!(before_points, VALUE * ORBS as i32);
+        assert_eq!(sim.orb_count(), ORBS, "no merge has been scanned for yet");
+
+        // The scan runs on `tick_count % 20 == 1`, so 21 ticks reaches it twice.
+        for _ in 0..21 {
+            sim.tick();
+        }
+
+        assert!(
+            sim.orb_count() < ORBS,
+            "41 equal-valued orbs at one point must produce at least one merge; still \
+             {} entities. If this reads 41 the congruence class arithmetic is wrong",
+            sim.orb_count()
+        );
+        assert_eq!(
+            sim.orb_points_outstanding(),
+            before_points,
+            "a merge must move absorptions between entities, never destroy them"
+        );
+    }
+
+    /// **The control for the merge gate: below the threshold, nothing merges.**
+    ///
+    /// Ten equal orbs at the same point, ticked past the same scan, must stay ten
+    /// entities. Without this arm the gate above is satisfied by a merge rule that
+    /// ignores the id congruence entirely and merges everything it touches — which
+    /// would collapse a vanilla 41-orb pile into one orb and look tidier on screen.
+    #[test]
+    fn control_ten_orbs_below_the_congruence_stride_do_not_merge() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        for _ in 0..10 {
+            sim.spawn_orb(3, above_floor(), Vec3::new(0.0, 0.0, 0.0));
+        }
+        for _ in 0..21 {
+            sim.tick();
+        }
+        assert_eq!(
+            sim.orb_count(),
+            10,
+            "ids n..n+9 share no congruence class mod 40, so none of these may merge"
+        );
+    }
+
+    /// A merged orb takes **`count` absorptions** to consume, each paying `value`.
+    ///
+    /// This is [`OrbState`]'s documented trap made a gate: reading `count` as "the
+    /// points this orb is worth" pays out once and loses the rest, with the entity
+    /// still disappearing at the right moment.
+    #[test]
+    fn absorbing_a_merged_orb_pays_out_once_per_count() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim.spawn_orb(7, above_floor(), Vec3::new(0.0, 0.0, 0.0));
+        // Two more merges into it, reaching a count of 3 — done through the public
+        // spawn-time merge so the state is one a real award could produce.
+        sim.orbs.get_mut(&id).expect("just spawned").count = 3;
+        assert_eq!(sim.orb_points_outstanding(), 21, "3 absorptions of 7");
+
+        let mut paid = Vec::new();
+        for _ in 0..3 {
+            paid.push(sim.take_orb(id).expect("the orb is still there"));
+        }
+        assert_eq!(paid, vec![7, 7, 7], "each absorption pays one value, not the pile");
+        assert_eq!(sim.orb_count(), 0, "the entity goes when its count reaches zero");
+        assert_eq!(
+            sim.take_orb(id),
+            None,
+            "and a fourth absorption finds nothing rather than paying again"
+        );
+    }
+
+    /// **Orbs are pulled toward a nearby player**, and the control is the same orb with
+    /// no player in the sim.
+    ///
+    /// Measured as horizontal displacement toward the player over ten ticks, because
+    /// vertical motion is dominated by gravity and the landing bounce in both arms —
+    /// a "did it move" assertion would pass on gravity alone.
+    #[test]
+    fn an_orb_drifts_toward_a_nearby_player_and_not_without_one() {
+        let start = Vec3::new(8.0, 1.0, 8.0);
+        let player = Vec3::new(11.0, 1.0, 8.0);
+
+        let world = flat_world();
+        let mut followed = MobSim::new(&world);
+        followed.set_players(vec![PlayerPerception {
+            position: player,
+            held_item: None,
+        }]);
+        let followed_id = followed.spawn_orb(1, start, Vec3::new(0.0, 0.0, 0.0));
+
+        let mut alone = MobSim::new(&world);
+        let alone_id = alone.spawn_orb(1, start, Vec3::new(0.0, 0.0, 0.0));
+
+        for _ in 0..10 {
+            followed.tick();
+            alone.tick();
+        }
+
+        let followed_x = followed.orb_position(followed_id).expect("still alive").x;
+        let alone_x = alone.orb_position(alone_id).expect("still alive").x;
+        assert!(
+            followed_x > alone_x + 0.1,
+            "the followed orb must have closed on the player: followed x={followed_x}, \
+             control x={alone_x}. Equal values mean nothing reads the player list"
+        );
+        assert!(
+            followed_x < player.x,
+            "and must not overshoot the player in ten ticks: x={followed_x}"
+        );
+    }
+
+    /// An orb outside the 8-block follow range is not pulled at all — the other side of
+    /// the same rule, and the one a missing range check passes.
+    ///
+    /// # Why this compares two sims rather than a displacement threshold
+    ///
+    /// The first version of this gate asserted the orb moves less than half a block and
+    /// **failed at -0.50**: `spawn_orb` applies `ExperienceOrb`'s own random spawn
+    /// impulse, so an orb with no player anywhere near it still drifts half a block
+    /// before drag kills the kick. The premise "an unpulled orb barely moves" is simply
+    /// false, and it failed in the direction that reads as a code bug.
+    ///
+    /// Both sims are freshly constructed, so `orb_rng` is at the same point in the same
+    /// seeded stream and both orbs receive the **identical** impulse. That makes the
+    /// comparison exact rather than approximate: any pull at all shows up as a
+    /// difference, and there is no threshold to tune.
+    #[test]
+    fn control_an_orb_beyond_the_follow_range_is_not_pulled() {
+        let start = Vec3::new(8.0, 1.0, 8.0);
+        let world = flat_world();
+
+        let mut watched = MobSim::new(&world);
+        watched.set_players(vec![PlayerPerception {
+            // 9 blocks away: outside `ORB_MAX_FOLLOW_DIST`, and only just, so a range
+            // check comparing a squared distance against an unsquared bound would pull
+            // this orb and fail here.
+            position: Vec3::new(start.x + 9.0, start.y, start.z),
+            held_item: None,
+        }]);
+        let watched_id = watched.spawn_orb(1, start, Vec3::new(0.0, 0.0, 0.0));
+
+        let mut alone = MobSim::new(&world);
+        let alone_id = alone.spawn_orb(1, start, Vec3::new(0.0, 0.0, 0.0));
+
+        for _ in 0..10 {
+            watched.tick();
+            alone.tick();
+        }
+
+        let watched_pos = watched.orb_position(watched_id).expect("still alive");
+        let alone_pos = alone.orb_position(alone_id).expect("still alive");
+        assert_eq!(
+            (watched_pos.x, watched_pos.y, watched_pos.z),
+            (alone_pos.x, alone_pos.y, alone_pos.z),
+            "an orb 9 blocks from a player must follow exactly the same path as one with \
+             no player at all"
+        );
+    }
+
+    /// **A player kill drops experience; every other death does not.**
+    ///
+    /// The three arms share one fixture and differ only in how the mob dies, because the
+    /// claim is about `LivingEntity.dropExperience`'s `lastHurtByPlayerMemoryTime > 0`
+    /// guard and nothing else:
+    ///
+    /// | arm | orbs |
+    /// |---|---|
+    /// | killed through `MobSim::attack` (the player path) | some |
+    /// | killed by `damage_self` (no player involved) | **none** |
+    ///
+    /// The second arm is the one that matters: awarding on every death turns any mob
+    /// grinder into an XP farm, and a gate with only the first arm cannot tell the two
+    /// implementations apart.
+    #[test]
+    fn only_a_player_killed_mob_drops_experience() {
+        let world = flat_world();
+
+        let mut by_player = MobSim::new(&world);
+        let id = by_player
+            .spawn_species(
+                "minecraft:zombie".parse().expect("valid key"),
+                above_floor(),
+            )
+            .id();
+        by_player.attack(id, Vec3::new(6.0, 1.0, 8.0), 1_000.0, DamageFlags::default(), 0.0);
+        assert_eq!(by_player.len(), 0, "1000 damage kills a zombie");
+        assert!(
+            by_player.orb_points_outstanding() > 0,
+            "a player kill must pop experience; got no orbs at all"
+        );
+        // `Monster`'s own `xpReward` is 5, and the ladder splits 5 into `3 + 1 + 1`.
+        assert_eq!(
+            by_player.orb_points_outstanding(),
+            5,
+            "a zombie is worth exactly Monster's xpReward of 5"
+        );
+        assert_eq!(
+            by_player.orb_count(),
+            3,
+            "5 points is three orbs — 3 + 1 + 1 over the denomination ladder"
+        );
+
+        let mut alone = MobSim::new(&world);
+        let alone_id = alone
+            .spawn_species(
+                "minecraft:zombie".parse().expect("valid key"),
+                above_floor(),
+            )
+            .id();
+        alone
+            .get_mut(alone_id)
+            .expect("just spawned")
+            .damage_self(1_000.0);
+        alone.tick();
+        assert_eq!(alone.len(), 0, "the self-damaged zombie died too");
+        assert_eq!(
+            alone.orb_points_outstanding(),
+            0,
+            "a death no player caused must drop no experience — this is the arm that \
+             separates a faithful port from an XP farm"
+        );
+    }
+
+    /// A **baby** drops nothing, however it died — `shouldDropExperience()` is
+    /// `!isBaby()`.
+    ///
+    /// Worth its own arm because the obvious implementation (award whenever a player
+    /// killed it) passes every assertion above and fails this one.
+    #[test]
+    fn control_a_player_killed_baby_drops_no_experience() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), above_floor())
+            .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE)
+            .id();
+        assert!(sim.get(id).expect("spawned").is_baby(), "the fixture is a baby");
+        sim.attack(id, Vec3::new(6.0, 1.0, 8.0), 1_000.0, DamageFlags::default(), 0.0);
+        assert_eq!(sim.len(), 0, "the calf died");
+        assert_eq!(
+            sim.orb_points_outstanding(),
+            0,
+            "a baby drops no experience — vanilla's shouldDropExperience is !isBaby()"
+        );
+    }
+
+    /// An animal's reward is a **roll of 1..=3**, not a constant — `Animal`'s own
+    /// `getBaseExperienceReward` override.
+    ///
+    /// Asserted as a range over repeated kills plus the requirement that **more than one
+    /// distinct total appears**, which is what separates the roll from a flat 2. A
+    /// single kill cannot make that distinction, and a range check alone is satisfied by
+    /// any constant inside it.
+    #[test]
+    fn an_animal_rolls_its_reward_rather_than_paying_a_constant() {
+        let world = flat_world();
+        let mut seen: Vec<i32> = Vec::new();
+        let mut out_of_range: Vec<i32> = Vec::new();
+        // One sim across all kills so the orb RNG stream advances, exactly as it would
+        // over a real session.
+        let mut sim = MobSim::new(&world);
+        for _ in 0..24 {
+            let id = sim
+                .spawn_species("minecraft:cow".parse().expect("valid key"), above_floor())
+                .id();
+            let before = sim.orb_points_outstanding();
+            sim.attack(id, Vec3::new(6.0, 1.0, 8.0), 1_000.0, DamageFlags::default(), 0.0);
+            let reward = sim.orb_points_outstanding() - before;
+            if !(1..=3).contains(&reward) {
+                out_of_range.push(reward);
+            }
+            seen.push(reward);
+        }
+        assert!(
+            out_of_range.is_empty(),
+            "every cow must be worth 1..=3 points; these were not: {out_of_range:?}"
+        );
+        seen.sort_unstable();
+        seen.dedup();
+        assert!(
+            seen.len() > 1,
+            "24 cows produced only the reward {seen:?} — Animal's reward is a roll of \
+             1 + nextInt(3), and a constant would look exactly like this"
+        );
+    }
+
+    /// An orb streams as `minecraft:experience_orb` carrying its **value** as metadata.
+    ///
+    /// Both halves have a recorded failure mode in this crate: an entity type that is
+    /// not a real registry key resolves to network id `0` and arrives as
+    /// `minecraft:acacia_boat` with nothing logged, and a client with no value draws the
+    /// smallest of the eleven sprite frames whatever the orb is worth.
+    #[test]
+    fn an_orb_streams_as_an_experience_orb_carrying_its_value() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim.spawn_orb(617, above_floor(), Vec3::new(0.0, 0.0, 0.0));
+        let snapshot = sim
+            .snapshots()
+            .into_iter()
+            .find(|s| s.id == id)
+            .expect("a live orb must be streamed");
+        assert_eq!(snapshot.entity_type.to_string(), "minecraft:experience_orb");
+        assert_eq!(
+            snapshot.metadata,
+            vec![MetadataField::ExperienceOrbValue { value: 617 }],
+            "the value is the only field, and without it the sprite frame is wrong"
+        );
+        assert_eq!(
+            snapshot.object_data, 0,
+            "`ExperienceOrb` does not override getAddEntityPacket, so there is no \
+             object data to send"
+        );
+    }
+}
