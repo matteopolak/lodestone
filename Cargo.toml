@@ -97,6 +97,13 @@ thiserror = "2"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
 png = "0.18"
+# TTF/OTF glyph rasterisation for `lodestone-assets`'s `ttf` font provider
+# (`lodestone_assets::font`). Pure Rust (wraps `ttf-parser`, itself pure
+# Rust), `no_std` + `alloc` with no filesystem or clock access, so it costs
+# nothing extra to confine for wasm32 — verified compiling for
+# `wasm32-unknown-unknown` with its default features (`hashbrown`, `simd`;
+# `simd` is inert off x86/x86_64, per its own feature gate).
+fontdue = "0.9"
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

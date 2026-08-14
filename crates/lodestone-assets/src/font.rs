@@ -27,8 +27,15 @@
 //!   most of the BMP — 114,432 codepoints in vanilla's 26.2 `unifont.zip`
 //!   against 2,414 from the three bitmap sheets, which is why every codepoint
 //!   outside those sheets used to draw the missing-glyph box.
-//! - `ttf` — parsed (so packs using them don't fail to load) but not rasterised
-//!   here; it contributes no glyphs.
+//! - `ttf` — a TrueType/OpenType face, rasterised here with [`fontdue`]. Ported
+//!   from `TrueTypeGlyphProviderDefinition`/`TrueTypeGlyphProvider` in the 26.2
+//!   client: every codepoint the face's own `cmap` covers (minus `skip`) gets a
+//!   [`TtfGlyph`], rendered at `pixelsPerEm = round(size * oversample)` the same
+//!   way vanilla sets FreeType's pixel size, with `shift` applied as a plain
+//!   post-hoc bearing offset (`+shiftX` horizontally, `-shiftY` vertically —
+//!   vertical is negated because glyph-space Y grows up and screen-space Y
+//!   grows down). Vanilla's `default.json` declares no `ttf` provider, so this
+//!   affects resource packs rather than the vanilla font.
 //!
 //! # Where `unifont.zip` comes from
 //!
@@ -431,7 +438,7 @@ pub enum ProviderDef {
         /// Codepoint -> advance width.
         advances: BTreeMap<u32, f32>,
     },
-    /// A TrueType font (parsed, not rasterised here).
+    /// A TrueType/OpenType font, rasterised by [`FontLoader::load_ttf`].
     Ttf {
         /// The `.ttf`/`.otf` file.
         file: ResourceLocation,
@@ -706,6 +713,47 @@ impl UnihexGlyph {
     }
 }
 
+/// A baked `ttf` glyph: enough to place it and re-rasterise its bitmap on
+/// demand from its face.
+///
+/// Faithful to `com.mojang.blaze3d.font.TrueTypeGlyphProvider`: FreeType (here,
+/// [`fontdue`]) renders every glyph at `pixelsPerEm = round(size * oversample)`,
+/// and every logical-pixel field below has already been divided by
+/// `oversample` — and had `shift` folded in — the way
+/// `TrueTypeGlyphProvider.Glyph`'s constructor computes `bearingX`/`bearingY`
+/// from FreeType's `left`/`top` (`bearingX = left / oversample`, `bearingY =
+/// top / oversample`, with the shift already baked into `left`/`top` by
+/// FreeType's own `FT_Set_Transform`). This port applies the shift itself
+/// instead, since [`fontdue`] has no transform hook: `bearing_left = xmin /
+/// oversample + shift.x`, `bearing_top = (ymin + height) / oversample -
+/// shift.y` — the `-shift.y` because FreeType's `transformY` is `-shiftY *
+/// oversample` (glyph space grows up, screen space grows down).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TtfGlyph {
+    /// The source `.ttf`/`.otf` file, keying into [`RasterFont`]'s resident
+    /// faces the same way [`BitmapGlyph::file`] keys into its sheets.
+    pub file: ResourceLocation,
+    /// This face's own glyph index (`FT_Get_Char_Index`'s result) — the key
+    /// [`fontdue::Font::rasterize_indexed`] rasterises by, not the codepoint.
+    pub glyph_index: u16,
+    /// `round(size * oversample)` — the pixel size every rasterisation call
+    /// for this glyph uses (`FT_Set_Pixel_Sizes`'s argument).
+    pub pixels_per_em: f32,
+    /// This provider's oversample factor (`GlyphBitmap.getOversample()`).
+    pub oversample: f32,
+    /// Advance in logical pixels (`scaledAdvance / oversample`).
+    pub advance: f32,
+    /// Left bearing in logical pixels — `GlyphBitmap.getBearingLeft()`.
+    pub bearing_left: f32,
+    /// Top bearing in logical pixels — `GlyphBitmap.getBearingTop()`, the
+    /// quantity [`GlyphRaster::top`]'s `7.0 - bearingTop` formula consumes.
+    pub bearing_top: f32,
+    /// Rasterised bitmap width, in oversampled (source) pixels.
+    pub width: u32,
+    /// Rasterised bitmap height, in oversampled (source) pixels.
+    pub height: u32,
+}
+
 /// A resolved glyph.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Glyph {
@@ -713,7 +761,12 @@ pub enum Glyph {
     Bitmap(BitmapGlyph),
     /// A unihex glyph carrying its own 16 rows of bits.
     Unihex(UnihexGlyph),
-    /// A whitespace glyph carrying only an advance.
+    /// A TrueType/OpenType glyph, rasterised on demand from its face.
+    Ttf(TtfGlyph),
+    /// A whitespace-only glyph carrying only an advance: either an explicit
+    /// `space` provider entry, or a `ttf` glyph whose rasterised bitmap came
+    /// back zero-area (`TrueTypeGlyphProvider.loadGlyph`'s `EmptyGlyph` case —
+    /// vanilla still gives it a real advance, just no bitmap to bake).
     Space {
         /// Advance width.
         advance: f32,
@@ -726,6 +779,7 @@ impl Glyph {
         match self {
             Glyph::Bitmap(g) => g.advance as f32,
             Glyph::Unihex(g) => g.advance(),
+            Glyph::Ttf(g) => g.advance,
             Glyph::Space { advance } => *advance,
         }
     }
@@ -763,6 +817,7 @@ pub struct Font {
     glyphs: HashMap<u32, Glyph>,
     provider_count: usize,
     unihex_count: usize,
+    ttf_count: usize,
     missing_advance: f32,
 }
 
@@ -776,6 +831,14 @@ impl Font {
     pub fn bitmap_glyph(&self, codepoint: u32) -> Option<&BitmapGlyph> {
         match self.glyphs.get(&codepoint) {
             Some(Glyph::Bitmap(g)) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// The TTF glyph for `codepoint`, if it is one.
+    pub fn ttf_glyph(&self, codepoint: u32) -> Option<&TtfGlyph> {
+        match self.glyphs.get(&codepoint) {
+            Some(Glyph::Ttf(g)) => Some(g),
             _ => None,
         }
     }
@@ -829,6 +892,16 @@ impl Font {
     /// moves for a dozen other reasons.
     pub fn unihex_count(&self) -> usize {
         self.unihex_count
+    }
+
+    /// How many codepoints a `ttf` provider **won** (including zero-area
+    /// glyphs that resolved to [`Glyph::Space`] — they still came from the
+    /// face's own `cmap`, unlike an explicit `space` provider entry). A
+    /// `ttf` file no pack supplies is a soft skip returning `0` from that
+    /// provider, for the same reason as [`Font::unihex_count`]'s missing
+    /// `hex_file`.
+    pub fn ttf_count(&self) -> usize {
+        self.ttf_count
     }
 
     /// Whether the font contains `codepoint`.
@@ -912,6 +985,7 @@ impl<'a> FontLoader<'a> {
         let provider_count = active.len();
         let mut glyphs: HashMap<u32, Glyph> = HashMap::new();
         let mut unihex_count = 0usize;
+        let mut ttf_count = 0usize;
         for def in &active {
             match def {
                 ProviderDef::Unihex {
@@ -933,8 +1007,16 @@ impl<'a> FontLoader<'a> {
                 } => {
                     self.load_bitmap(file, *height, *ascent, chars, &mut glyphs)?;
                 }
-                // Not rasterised here; contributes no glyphs.
-                ProviderDef::Ttf { .. } => {}
+                ProviderDef::Ttf {
+                    file,
+                    size,
+                    oversample,
+                    shift,
+                    skip,
+                } => {
+                    ttf_count +=
+                        self.load_ttf(file, *size, *oversample, *shift, skip, &mut glyphs)?;
+                }
                 ProviderDef::Reference { .. } => {}
             }
         }
@@ -943,6 +1025,7 @@ impl<'a> FontLoader<'a> {
             glyphs,
             provider_count,
             unihex_count,
+            ttf_count,
             missing_advance: MISSING_ADVANCE,
         })
     }
@@ -1043,6 +1126,75 @@ impl<'a> FontLoader<'a> {
                 },
                 &mut inserted,
             );
+        }
+        Ok(inserted)
+    }
+
+    /// Reads a `ttf` provider's font file and inserts every glyph its own
+    /// `cmap` supplies (minus `skip`) that no earlier provider already won.
+    ///
+    /// Returns how many codepoints this provider contributed. A `file` no pack
+    /// supplies is a **soft skip returning 0**, not an error — the same
+    /// reasoning as [`FontLoader::load_unihex`]'s absent `hex_file`: a `ttf`
+    /// provider is a resource-pack addition, never vanilla's own `default.json`,
+    /// so an absent file should degrade to "this pack's extra glyphs are
+    /// missing" rather than failing the whole font. Malformed *contents* (a
+    /// file present but not a font [`fontdue`] can parse) still fail loudly.
+    #[allow(clippy::too_many_arguments)]
+    fn load_ttf(
+        &self,
+        file: &ResourceLocation,
+        size: f32,
+        oversample: f32,
+        shift: [f32; 2],
+        skip: &[u32],
+        glyphs: &mut HashMap<u32, Glyph>,
+    ) -> Result<usize, FontError> {
+        // `TrueTypeGlyphProviderDefinition.load`: `resourceManager.open(this.location.withPrefix("font/"))`.
+        let path = format!("assets/{}/font/{}", file.namespace(), file.path());
+        let Some(bytes) = self.manager.read(&path) else {
+            return Ok(0);
+        };
+        let face = fontdue::Font::from_bytes(bytes.as_slice(), fontdue::FontSettings::default())
+            .map_err(|reason| FontError::TtfFont {
+                file: file.to_string(),
+                reason: reason.to_string(),
+            })?;
+
+        let skip_set: HashSet<u32> = skip.iter().copied().collect();
+        // `int pixelsPerEm = Math.round(size * oversample);` — an integral
+        // pixel size, exactly what `FT_Set_Pixel_Sizes` takes.
+        let pixels_per_em = (size * oversample).round();
+
+        let mut inserted = 0usize;
+        for (&ch, &glyph_id) in face.chars() {
+            let cp = ch as u32;
+            if skip_set.contains(&cp) || glyphs.contains_key(&cp) {
+                continue; // pack-declared skip, or an earlier provider already won it
+            }
+            let metrics = face.metrics_indexed(glyph_id.get(), pixels_per_em);
+            let glyph = if metrics.width == 0 || metrics.height == 0 {
+                // `TrueTypeGlyphProvider.loadGlyph`'s `EmptyGlyph` case: still a
+                // real advance, no bitmap to bake.
+                Glyph::Space {
+                    advance: metrics.advance_width / oversample,
+                }
+            } else {
+                Glyph::Ttf(TtfGlyph {
+                    file: file.clone(),
+                    glyph_index: glyph_id.get(),
+                    pixels_per_em,
+                    oversample,
+                    advance: metrics.advance_width / oversample,
+                    bearing_left: metrics.xmin as f32 / oversample + shift[0],
+                    bearing_top: (metrics.ymin + metrics.height as i32) as f32 / oversample
+                        - shift[1],
+                    width: metrics.width as u32,
+                    height: metrics.height as u32,
+                })
+            };
+            glyphs.insert(cp, glyph);
+            inserted += 1;
         }
         Ok(inserted)
     }
@@ -1178,6 +1330,7 @@ impl<'a> FontLoader<'a> {
 pub struct RasterFont {
     font: Font,
     sheets: HashMap<ResourceLocation, Image>,
+    ttf_faces: HashMap<ResourceLocation, fontdue::Font>,
 }
 
 impl RasterFont {
@@ -1190,6 +1343,11 @@ impl RasterFont {
     /// The number of distinct bitmap sheets whose pixels are resident.
     pub fn sheet_count(&self) -> usize {
         self.sheets.len()
+    }
+
+    /// The number of distinct `ttf` faces whose bytes are resident and parsed.
+    pub fn ttf_face_count(&self) -> usize {
+        self.ttf_faces.len()
     }
 
     /// The advance of `codepoint` in logical pixels, or `None` when the font
@@ -1210,10 +1368,13 @@ impl RasterFont {
     }
 
     /// The drawable raster for `codepoint`, or `None` for a whitespace-only or
-    /// uncovered glyph (or one whose sheet failed to decode).
+    /// uncovered glyph (or one whose sheet/face failed to decode/resolve).
     ///
     /// A unihex glyph needs no sheet — it carries its own bits — so it resolves
-    /// here whether or not any PNG decoded.
+    /// here whether or not any PNG decoded. A `ttf` glyph is rasterised here,
+    /// on demand, from its resident face (`TrueTypeGlyphProvider.bake`'s
+    /// equivalent — vanilla also bakes lazily, on first draw, rather than
+    /// eagerly for every codepoint the face's `cmap` supplies).
     pub fn raster(&self, codepoint: u32) -> Option<GlyphRaster<'_>> {
         match self.font.glyph(codepoint)? {
             Glyph::Bitmap(glyph) => {
@@ -1225,6 +1386,13 @@ impl RasterFont {
             Glyph::Unihex(glyph) => Some(GlyphRaster {
                 kind: RasterKind::Unihex(glyph),
             }),
+            Glyph::Ttf(glyph) => {
+                let face = self.ttf_faces.get(&glyph.file)?;
+                let (_, bitmap) = face.rasterize_indexed(glyph.glyph_index, glyph.pixels_per_em);
+                Some(GlyphRaster {
+                    kind: RasterKind::Ttf { glyph, bitmap },
+                })
+            }
             Glyph::Space { .. } => None,
         }
     }
@@ -1233,6 +1401,12 @@ impl RasterFont {
     /// [`Font::unihex_count`], which is the number to log.
     pub fn unihex_count(&self) -> usize {
         self.font.unihex_count()
+    }
+
+    /// How many codepoints came from a `ttf` provider — see
+    /// [`Font::ttf_count`].
+    pub fn ttf_count(&self) -> usize {
+        self.font.ttf_count()
     }
 }
 
@@ -1244,10 +1418,15 @@ impl RasterFont {
 /// `(x + tx * texel_size, y + top() + ty * texel_size)`, where `(x, y)` is the
 /// pen position and `y` is the **top of the line** (not the baseline).
 ///
-/// Both provider families that produce pixels resolve to this one type — a
-/// bitmap sheet cell and a unihex glyph's own 16 rows of bits — so a renderer
-/// written against it needs no branch on provider kind. See [`RasterKind`].
-#[derive(Debug, Clone, Copy)]
+/// Three provider families that produce pixels resolve to this one type — a
+/// bitmap sheet cell, a unihex glyph's own 16 rows of bits, and a rasterised
+/// `ttf` glyph — so a renderer written against it needs no branch on provider
+/// kind. See [`RasterKind`].
+///
+/// Not [`Copy`]: a `ttf` glyph's bitmap is rasterised fresh into an owned
+/// buffer each time [`RasterFont::raster`] is called (see [`RasterKind::Ttf`]),
+/// so cloning this type would re-rasterise rather than share pixels.
+#[derive(Debug, Clone)]
 pub struct GlyphRaster<'a> {
     kind: RasterKind<'a>,
 }
@@ -1258,64 +1437,102 @@ pub struct GlyphRaster<'a> {
 /// `cell_width` × `cell_height` and asking [`GlyphRaster::is_ink`] does not have
 /// to know. The HUD's quad emitter was written against the sheet case and drew
 /// unihex glyphs correctly with **no change**, because every quantity it uses
-/// (`texel_size`, `top`, `advance`, `cell_*`) has a unihex answer here.
-#[derive(Debug, Clone, Copy)]
+/// (`texel_size`, `top`, `advance`, `cell_*`) has a unihex answer here; the same
+/// held for `ttf` once [`GlyphRaster::left`] was added for its (usually
+/// nonzero) left bearing, which the other two kinds don't need.
+#[derive(Debug, Clone)]
 enum RasterKind<'a> {
     Sheet {
         glyph: &'a BitmapGlyph,
         image: &'a Image,
     },
     Unihex(&'a UnihexGlyph),
+    /// `bitmap` is `fontdue::Font::rasterize_indexed`'s coverage output,
+    /// rasterised once per [`RasterFont::raster`] call (not once per texel —
+    /// `is_ink` below indexes straight into it) and owned here rather than
+    /// borrowed, since nothing else keeps a rasterised `ttf` bitmap resident.
+    Ttf {
+        glyph: &'a TtfGlyph,
+        bitmap: Vec<u8>,
+    },
 }
 
+/// Coverage-to-ink threshold for a `ttf` glyph. [`fontdue`] returns
+/// antialiased 0..=255 coverage, but this renderer draws opaque merged quads
+/// (no per-texel alpha blending — the same reason a bitmap sheet's ink test is
+/// a bare `!= 0`), so a `ttf` glyph's edges are binarised at roughly half
+/// coverage rather than blended. This reproduces the glyph's *shape*, not
+/// vanilla's antialiasing.
+const TTF_INK_THRESHOLD: u8 = 127;
+
 impl GlyphRaster<'_> {
-    /// Cell width in source texels — the sheet cell's width, or a unihex
-    /// glyph's trimmed column count.
+    /// Cell width in source texels — the sheet cell's width, a unihex glyph's
+    /// trimmed column count, or a `ttf` glyph's rasterised bitmap width.
     pub fn cell_width(&self) -> u32 {
-        match self.kind {
+        match &self.kind {
             RasterKind::Sheet { glyph, .. } => glyph.cell[2],
             RasterKind::Unihex(g) => g.width().max(0) as u32,
+            RasterKind::Ttf { glyph, .. } => glyph.width,
         }
     }
 
     /// Cell height in source texels ([`UNIHEX_GLYPH_HEIGHT`] for a unihex
-    /// glyph, always).
+    /// glyph, always; a `ttf` glyph's rasterised bitmap height otherwise).
     pub fn cell_height(&self) -> u32 {
-        match self.kind {
+        match &self.kind {
             RasterKind::Sheet { glyph, .. } => glyph.cell[3],
             RasterKind::Unihex(_) => UNIHEX_GLYPH_HEIGHT,
+            RasterKind::Ttf { glyph, .. } => glyph.height,
         }
     }
 
     /// The logical size of one source texel (vanilla's `1 / oversample`) — so
     /// 0.5 for a unihex glyph, which is what makes its 16 rows draw 8 logical
     /// pixels tall next to the ascii sheet's 8×8 at 1.0. A caller that assumed
-    /// 1.0 here would draw every CJK glyph at double size.
+    /// 1.0 here would draw every CJK glyph at double size. A `ttf` glyph uses
+    /// its own provider's oversample the same way.
     pub fn texel_size(&self) -> f32 {
-        match self.kind {
+        match &self.kind {
             RasterKind::Sheet { glyph, .. } => glyph.pixel_scale,
             RasterKind::Unihex(_) => 1.0 / UNIHEX_OVERSAMPLE,
+            RasterKind::Ttf { glyph, .. } => 1.0 / glyph.oversample,
+        }
+    }
+
+    /// The glyph box's left edge relative to the pen position, in logical
+    /// pixels — `GlyphBitmap.getBearingLeft()`. Zero for a sheet or unihex
+    /// glyph (neither overrides the interface default); a `ttf` glyph's own
+    /// [`TtfGlyph::bearing_left`] otherwise, since a TrueType outline is not
+    /// generally flush with its advance box the way a bitmap-sheet cell is.
+    pub fn left(&self) -> f32 {
+        match &self.kind {
+            RasterKind::Ttf { glyph, .. } => glyph.bearing_left,
+            RasterKind::Sheet { .. } | RasterKind::Unihex(_) => 0.0,
         }
     }
 
     /// The glyph box's top edge relative to the line's top, in logical pixels:
-    /// `7 - ascent`, per `GlyphBitmap.getTop`. Negative for tall sheets, which
-    /// is how accented capitals hang above the ascii line. A unihex glyph
-    /// overrides no bearing, so its `ascent` is `GlyphBitmap.getBearingTop`'s
-    /// 7.0 default and this is 0.
+    /// `7 - bearingTop`, per `GlyphBitmap.getTop`. Negative for tall sheets,
+    /// which is how accented capitals hang above the ascii line. A unihex
+    /// glyph overrides no bearing, so its bearing-top is
+    /// `GlyphBitmap.getBearingTop`'s 7.0 default and this is 0. A `ttf`
+    /// glyph's own [`TtfGlyph::bearing_top`] is the FreeType-equivalent
+    /// bearing this same formula was always meant to consume.
     pub fn top(&self) -> f32 {
-        let ascent = match self.kind {
-            RasterKind::Sheet { glyph, .. } => glyph.ascent,
-            RasterKind::Unihex(_) => UNIHEX_ASCENT,
+        let bearing_top = match &self.kind {
+            RasterKind::Sheet { glyph, .. } => glyph.ascent as f32,
+            RasterKind::Unihex(_) => UNIHEX_ASCENT as f32,
+            RasterKind::Ttf { glyph, .. } => glyph.bearing_top,
         };
-        metrics::BEARING_TOP_BASE - ascent as f32
+        metrics::BEARING_TOP_BASE - bearing_top
     }
 
     /// This glyph's advance in logical pixels.
     pub fn advance(&self) -> f32 {
-        match self.kind {
+        match &self.kind {
             RasterKind::Sheet { glyph, .. } => glyph.advance as f32,
             RasterKind::Unihex(g) => g.advance(),
+            RasterKind::Ttf { glyph, .. } => glyph.advance,
         }
     }
 
@@ -1326,8 +1543,11 @@ impl GlyphRaster<'_> {
     /// channel — the same test used here, so coverage and advance agree by
     /// construction rather than by coincidence. For a unihex glyph it is
     /// [`UnihexGlyph::is_ink`], the bit `unpackBitsToBytes` would have written.
+    /// For a `ttf` glyph it is the rasterised coverage byte against
+    /// [`TTF_INK_THRESHOLD`] — see that constant for why this is a threshold
+    /// and not a `!= 0` test.
     pub fn is_ink(&self, tx: u32, ty: u32) -> bool {
-        match self.kind {
+        match &self.kind {
             RasterKind::Sheet { glyph, image } => {
                 if tx >= self.cell_width() || ty >= self.cell_height() {
                     return false;
@@ -1335,6 +1555,13 @@ impl GlyphRaster<'_> {
                 alpha_at(image, glyph.cell[0] + tx, glyph.cell[1] + ty) != 0
             }
             RasterKind::Unihex(g) => g.is_ink(tx, ty),
+            RasterKind::Ttf { glyph, bitmap } => {
+                if tx >= glyph.width || ty >= glyph.height {
+                    return false;
+                }
+                let idx = (ty * glyph.width + tx) as usize;
+                bitmap.get(idx).is_some_and(|&c| c > TTF_INK_THRESHOLD)
+            }
         }
     }
 }
@@ -1371,7 +1598,44 @@ impl FontLoader<'_> {
                 })?;
             sheets.insert(file, Image::decode_png(&bytes)?);
         }
-        Ok(RasterFont { font, sheets })
+
+        // Same "collect the distinct files, then load each once" shape as the
+        // bitmap sheets above. Re-parsing the font here (rather than caching
+        // the `fontdue::Font` from `load_ttf`'s metrics pass) mirrors how a
+        // bitmap sheet is decoded once for [`FontLoader::load`]'s metrics and
+        // again here for [`RasterFont`]'s resident pixels — an existing
+        // redundancy, not a new one.
+        let mut ttf_files: Vec<ResourceLocation> = Vec::new();
+        for cp in font.codepoints() {
+            if let Some(g) = font.ttf_glyph(cp)
+                && !ttf_files.contains(&g.file)
+            {
+                ttf_files.push(g.file.clone());
+            }
+        }
+        let mut ttf_faces = HashMap::with_capacity(ttf_files.len());
+        for file in ttf_files {
+            let path = format!("assets/{}/font/{}", file.namespace(), file.path());
+            let bytes = self
+                .manager
+                .read(&path)
+                .ok_or_else(|| FontError::TtfFont {
+                    file: file.to_string(),
+                    reason: "file present during metrics load is now missing".into(),
+                })?;
+            let face = fontdue::Font::from_bytes(bytes.as_slice(), fontdue::FontSettings::default())
+                .map_err(|reason| FontError::TtfFont {
+                    file: file.to_string(),
+                    reason: reason.to_string(),
+                })?;
+            ttf_faces.insert(file, face);
+        }
+
+        Ok(RasterFont {
+            font,
+            sheets,
+            ttf_faces,
+        })
     }
 }
 

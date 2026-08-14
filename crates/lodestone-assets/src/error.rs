@@ -454,6 +454,14 @@ pub enum FontError {
         /// Why it could not be read.
         reason: String,
     },
+    /// A `ttf` provider's font file could not be parsed by the rasteriser.
+    #[error("ttf font {file} could not be parsed: {reason}")]
+    TtfFont {
+        /// The font's resource location.
+        file: String,
+        /// Why it was rejected.
+        reason: String,
+    },
 }
 
 /// Errors produced while parsing GUI sprite scaling metadata (`gui.scaling`).

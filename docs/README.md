@@ -1657,6 +1657,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (`destroySpeed`, `requiresCorrectToolForDrops`) is the pre-existing hardness census
   documented in [`block-break-timing.md`](./block-break-timing.md). Landed in
   `875f452`.
+- [TTF font glyphs](./ttf-font-glyphs.md) — Rasterisation of vanilla's `ttf` glyph
+  provider — an embedded TrueType/OpenType face in a resource pack's font definition
+  — so that a pack declaring one draws real glyphs instead of the hollow
+  missing-glyph box. This is the last box on "full Unicode text": `unihex` (CJK,
+  Hangul, Thai, Arabic, Cyrillic extensions and most of the rest of the BMP) and
+  bidi/RTL ordering already landed; `ttf` closes the gap for anything neither the
+  three vanilla bitmap sheets nor `unifont.zip` covers — chiefly astral-plane glyphs
+  a pack supplies its own font for. Vanilla's own `default.json` declares no `ttf`
+  provider, so this affects resource packs only, never the base game's own text.
 - [The menu UI framework](./ui-framework.md) — The plan of record for
   vanilla-faithful **menu** screens: a widget type, layout containers, a
   `Screen`-level input layer, and the three target screens — the multiplayer server
