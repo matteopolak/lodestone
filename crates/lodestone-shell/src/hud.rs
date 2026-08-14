@@ -5084,7 +5084,12 @@ impl HudRenderer {
                     // `GuiScaling` is honoured.
                     match s.src {
                         Some(src) => {
-                            if let Some(q) = g.atlas.subregion_quad(s.id, src, s.dst) {
+                            if let Some(q) = g.atlas.subregion_quad_declared(
+                                s.id,
+                                crate::container::RECIPE_PANEL_DECLARED,
+                                src,
+                                s.dst,
+                            ) {
                                 item_icon::push_sprite_quad(
                                     &mut out,
                                     logical_w,
