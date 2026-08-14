@@ -15,8 +15,9 @@
 //! decoded and discarded so the buffer stays aligned — a misparse there would
 //! leave trailing bytes, which the adapter rejects. `INITIALIZE_CHAT` is now
 //! kept (see [`RemoteChatSessionData`]) rather than discarded: this is the
-//! other player's announced chat-signing session, needed to eventually verify
-//! their signed messages.
+//! other player's announced chat-signing session, and `adapter::player`
+//! carries it into `lodestone_model::event::PlayerListEntry::chat_session`,
+//! where `lodestone_client`'s driver reads it to verify their signed messages.
 
 use lodestone_core::{
     Ctx, Decode, Error, Reader, Result, plain_text_from_nbt_component, read_network_nbt,
@@ -100,10 +101,15 @@ pub struct ProfileProperty {
 ///
 /// This is the *receiving* half of secure chat — the public key needed to
 /// verify messages from this player (`lodestone_auth::verify_signature`).
-/// Storing it does not by itself verify anything or mark a message as
-/// "secure" in any UI; a full per-sender chain validator
-/// (`RemoteChatSession`/`SignedMessageChain.Decoder`'s ordering and expiry
-/// rules) is not implemented here.
+///
+/// **Now retained past this decode** (issue #283): the adapter carries this
+/// into `lodestone_model::event::PlayerListEntry::chat_session` (see
+/// `adapter::player`'s `PLAYER_INFO_UPDATE` arm), and `lodestone_client`'s
+/// driver looks it up there to verify a signed `PLAYER_CHAT` message's
+/// signature. What is still missing is the fuller per-sender chain validator
+/// vanilla's own `RemoteChatSession`/`SignedMessageChain.Decoder` runs —
+/// link-index ordering and expiry are not enforced here, only the RSA check
+/// itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteChatSessionData {
     /// This player's chat-session UUID.

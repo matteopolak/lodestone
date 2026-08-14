@@ -139,6 +139,12 @@ fn chat_events_carry_acknowledgement_inputs_for_signed_messages() {
             signature: vec![1, 2, 3, 4],
             global_index: 12,
             was_shown: true,
+            message_index: 0,
+            timestamp_millis: 1_700_000_000_000,
+            salt: 42,
+            raw_content: "hello".to_string(),
+            last_seen: Vec::new(),
+            verified: false,
         }),
     };
     let filtered = ClientEvent::Chat {
@@ -149,6 +155,12 @@ fn chat_events_carry_acknowledgement_inputs_for_signed_messages() {
             signature: vec![5, 6, 7, 8],
             global_index: 13,
             was_shown: false,
+            message_index: 1,
+            timestamp_millis: 1_700_000_001_000,
+            salt: 43,
+            raw_content: "filtered".to_string(),
+            last_seen: Vec::new(),
+            verified: false,
         }),
     };
 
@@ -159,6 +171,7 @@ fn chat_events_carry_acknowledgement_inputs_for_signed_messages() {
                 signature,
                 global_index: 12,
                 was_shown: true,
+                ..
             }),
             ..
         } if signature == vec![1, 2, 3, 4]
@@ -170,6 +183,7 @@ fn chat_events_carry_acknowledgement_inputs_for_signed_messages() {
                 signature,
                 global_index: 13,
                 was_shown: false,
+                ..
             }),
             ..
         } if signature == vec![5, 6, 7, 8]

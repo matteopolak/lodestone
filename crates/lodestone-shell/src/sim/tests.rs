@@ -2746,6 +2746,7 @@ fn tab_overlay_rows_read_the_clients_one_folded_tab_list() {
                     display_name: None,
                     listed: Some(true),
                     properties: None,
+                    chat_session: None,
                 },
                 PlayerListEntry {
                     uuid: alice,
@@ -2755,6 +2756,7 @@ fn tab_overlay_rows_read_the_clients_one_folded_tab_list() {
                     display_name: Some(Text::literal("Alice the Brave")),
                     listed: Some(true),
                     properties: None,
+                    chat_session: None,
                 },
             ],
         },
