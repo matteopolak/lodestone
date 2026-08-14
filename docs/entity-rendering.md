@@ -728,7 +728,7 @@ off-limits (another agent's in-flight change), and the model layer's own
 contract — "`None` means the packet did not carry a variant field; a consumer
 treats that as the type's vanilla default, not 'unknown'" — so the fix
 belongs at the point that first learns an entity is a sheep, not the point
-that consumes the fold. `crates/protocol/v770/src/adapter.rs`'s
+that consumes the fold. `crates/protocol/v770/src/adapter/entity.rs`'s
 `handle_add_entity` already computes `TrackedEntity { class:
 metadata_class(name), .. }` at spawn — the exact "what the server said
 becomes what the entity is" seam — so for a `MetadataClass::Sheep` spawn it

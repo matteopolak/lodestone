@@ -30,7 +30,7 @@ and after join nothing re-sent it:
 
 | link | state before this landed |
 |---|---|
-| `LIGHT_UPDATE` (packet 48) client decode | **present** — `v770/src/adapter.rs` reads all six fields and calls `World::merge_light` |
+| `LIGHT_UPDATE` (packet 48) client decode | **present** — `v770/src/adapter/chunk.rs` reads all six fields and calls `World::merge_light` |
 | `LightPatch::from_light_masks` three-state merge | **present**, gated |
 | client re-mesh on a light change | **present** — the decode arm emits `ClientEvent::ChunkLoaded`, which doubles as "this region is dirty" |
 | **server-side `LIGHT_UPDATE` encoder** | **absent — no `ServerProtocol` method, no v770 override** |

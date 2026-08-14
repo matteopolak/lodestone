@@ -242,7 +242,7 @@ found nine more. All twelve are fixed:
 `RecipeBookSettingsChanged` is a different defect from the other eleven and worth
 separating, because this table cannot see the difference. The others were *decoded
 and unrouted*. This packet had **no decode arm in
-`crates/protocol/v770/src/adapter.rs` at all** — only a registered packet id, which
+`crates/protocol/v770/src/adapter/` at all** — only a registered packet id, which
 proves nothing except that the id is known. `cargo xtask connectedness` is the
 instrument for that axis, not this one.
 

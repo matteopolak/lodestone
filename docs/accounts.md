@@ -328,7 +328,7 @@ nothing in this change does that for you.
 Before this change, `lodestone-client`'s driver had **no arm at all** for
 `Directive::BeginEncryption` — it fell into the generic "ignoring unknown
 directive variant" catch-all, silently. The adapter side
-(`crates/protocol/v770/src/adapter.rs`) already emitted the directive and
+(`crates/protocol/v770/src/adapter/connection.rs`) already emitted the directive and
 already implemented `build_encryption_response` correctly, and both were
 already tested (`crates/protocol/v770/tests/join_flow.rs`); the directive
 simply had no consumer, which is the exact "island" shape `CLAUDE.md`'s rule 1

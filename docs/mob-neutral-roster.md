@@ -168,7 +168,7 @@ both already carried `MobController::angry_target` and `NavigatingMob::set_angry
 seam had already made the deliberate choice that the *deadline* is the host's: `angry_target` is a
 pre-computed **answer**, not a query, because the seam has no shared game clock to compare an
 absolute deadline against. The only missing half was the host, so the whole change is in
-`lodestone-server/src/mobs.rs`.
+`lodestone-server/src/mobs/mod.rs`.
 
 - **State.** `SimMob::anger` holds `{ end_time, target }`, where `end_time` is an absolute
   `MobSim::tick_count`. Not a countdown — 26.2 compares against an absolute game time

@@ -194,8 +194,8 @@ Remaining gaps:
   rather than trusting this paragraph:
 
   ```
-  grep -n "PLACE_GHOST_RECIPE\|RECIPE_BOOK_ADD\|RECIPE_BOOK_REMOVE\|RECIPE_BOOK_SETTINGS\|UPDATE_RECIPES" \
-      crates/protocol/v770/src/adapter.rs
+  grep -rn "PLACE_GHOST_RECIPE\|RECIPE_BOOK_ADD\|RECIPE_BOOK_REMOVE\|RECIPE_BOOK_SETTINGS\|UPDATE_RECIPES" \
+      crates/protocol/v770/src/adapter/
   ```
 
   The packet-id constants in `generated/packet_ids.rs` prove only that the *id*
@@ -625,7 +625,7 @@ own doc comment records.
 
 ### Still brokered
 
-1. **Protocol decode** (`crates/protocol/v770/src/adapter.rs`): clientbound
+1. **Protocol decode** (`crates/protocol/v770/src/adapter/inventory.rs`): clientbound
    arms for `place_ghost_recipe`/`recipe_book_add`/`recipe_book_remove`/
    `recipe_book_settings`/`update_recipes`, plus a `ClientEvent` variant in
    `lodestone-model` to decode into and a `net.rs`/ingest consumer that calls

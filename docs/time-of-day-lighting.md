@@ -34,7 +34,7 @@ look like they're in the daytime"*.
 
 ```text
 set_time packet
-  → V770Adapter (holds a DayClock anchor)      crates/protocol/v770/src/adapter.rs
+  → V770Adapter (holds a DayClock anchor)      crates/protocol/v770/src/adapter/mod.rs
   → ClientEvent::TimeChanged { world_age, time_of_day }
   → WorldTime resource                          crates/lodestone-ecs/src/resources.rs
   → ClientHandle::world_time().1

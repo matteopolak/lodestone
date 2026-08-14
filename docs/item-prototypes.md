@@ -82,7 +82,7 @@ and a direct index keeps the hot lookup a single bounds check.
 ### The two seams it reaches consumers through
 
 1. **`ItemComponents`' effective fields** (`crates/lodestone-model/src/item.rs`).
-   `read_component_patch` in `crates/protocol/v770/src/adapter.rs` seeds
+   `read_component_patch` in `crates/protocol/v770/src/adapter/inventory.rs` seeds
    `max_stack_size` / `max_damage` / `equippable` from the census *before* reading
    the patch, then lets the patch override. This is the route a consumer holding a
    stack should use.

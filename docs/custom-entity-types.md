@@ -169,7 +169,7 @@ fn encode_add_entity(&self, entity: &EntitySnapshot) -> ServerDirective {
 vanilla keys:
 
 ```rust
-// crates/lodestone-server/src/mobs.rs, in MobSim::snapshots
+// crates/lodestone-server/src/mobs/mod.rs, in MobSim::snapshots
 for snapshot in &mut out {
     if let Some(vanilla) = self.disguises.resolve_name(&snapshot.entity_type.to_string()) {
         snapshot.entity_type = vanilla.parse().expect("a table key parses");

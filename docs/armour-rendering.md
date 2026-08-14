@@ -288,7 +288,7 @@ closed** (`64cfdcb`) — this section previously said hop 2's `net.rs` half was
 directly against the working tree rather than trusting the note: real dye
 colours draw today, end to end.
 
-1. **Closed.** `crates/protocol/v770/src/adapter.rs::read_component_patch` now
+1. **Closed.** `crates/protocol/v770/src/adapter/inventory.rs::read_component_patch` now
    decodes `minecraft:dyed_color` (registry id 44, `DyedItemColor.STREAM_CODEC`
    — a bare `ByteBufCodecs.INT`, i.e. `reader.i32()`, not a `VarInt` like every
    other scalar component here) into `ItemComponents::dyed_color: Option<u32>`.
