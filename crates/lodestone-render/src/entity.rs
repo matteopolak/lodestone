@@ -197,6 +197,17 @@ fn corpus_names() -> &'static [&'static str] {
     NAMES.get_or_init(|| entity_models().into_iter().map(|e| e.name).collect())
 }
 
+/// [`corpus_names()`] as a set, computed once behind a `OnceLock` from that
+/// same slice (so the two can never drift), for an O(1) "is this a corpus
+/// entry" test — the up-to-90 linear `&str` compares
+/// [`canonical_model_name`] used to run per entity per frame (issue #523),
+/// x4 for the base/armour/flame/wool passes in `gpu/entity_passes.rs`.
+fn corpus_name_set() -> &'static std::collections::HashSet<&'static str> {
+    static SET: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| corpus_names().iter().copied().collect())
+}
+
 /// Maps an entity-type path to the `name` of the [`entity_models`] entry that
 /// renders it.
 ///
@@ -226,10 +237,13 @@ fn canonical_model_name(type_path: &str) -> Option<&'static str> {
     // `chest_boat` and `chest_raft` are corpus names that *also* satisfy
     // [`boat_model_name`]'s `_boat`/`_raft` suffix rules, so testing the suffixes
     // first would resolve the literal `"chest_boat"` to the plain boat rig.
-    corpus_names()
-        .iter()
+    //
+    // O(1) via `corpus_name_set()` rather than a linear scan over
+    // `corpus_names()` — same corpus, same membership, just not re-walked for
+    // every one of up to 90 entries on every call (issue #523).
+    corpus_name_set()
+        .get(type_path)
         .copied()
-        .find(|n| *n == type_path)
         .or_else(|| boat_model_name(type_path))
 }
 
@@ -1460,6 +1474,12 @@ fn transformed_aabb(m: &Mat4, local_min: Vec3, local_max: Vec3) -> (Vec3, Vec3) 
 #[derive(Debug, Clone)]
 pub struct EntityModelSet {
     models: Vec<(&'static str, EntityMesh)>,
+    /// `name -> index into models`, built once in [`Self::load`] from the same
+    /// vector so it cannot drift from it. Turns [`Self::get`] — called for
+    /// every drawn entity in every one of the base/armour/flame/wool passes,
+    /// every frame — from an O(90) linear scan into an O(1) lookup (issue
+    /// #523).
+    index: std::collections::HashMap<&'static str, usize>,
 }
 
 impl Default for EntityModelSet {
@@ -1472,7 +1492,7 @@ impl EntityModelSet {
     /// Bake every entry in the [`entity_models`] corpus into a renderable mesh.
     #[must_use]
     pub fn load() -> Self {
-        let models = entity_models()
+        let models: Vec<(&'static str, EntityMesh)> = entity_models()
             .into_iter()
             .map(|entry| {
                 (
@@ -1481,13 +1501,18 @@ impl EntityModelSet {
                 )
             })
             .collect();
-        Self { models }
+        let index = models
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| (*name, i))
+            .collect();
+        Self { models, index }
     }
 
     /// The baked mesh for a model name, if present.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&EntityMesh> {
-        self.models.iter().find(|(n, _)| *n == name).map(|(_, m)| m)
+        self.index.get(name).map(|&i| &self.models[i].1)
     }
 
     /// Every `(name, mesh)` pair, in corpus order (for uploading each once).
@@ -4352,6 +4377,76 @@ mod tests {
                 "{ty} shares {wrong}'s texture candidates"
             );
         }
+    }
+
+    /// Control for issue #523: `canonical_model_name` and `EntityModelSet::get`
+    /// were switched from an O(90) linear `&str` scan to a `OnceLock`-cached
+    /// `HashSet`/`HashMap` index. This re-derives the *old* linear scan from
+    /// scratch, independently of both functions under test, and checks it
+    /// against the new implementation for every one of the 158 generated
+    /// entity-type paths plus the non-registry pseudo-types
+    /// (`player_wide`/`player_slim`, the four boat-family aliases) that
+    /// `canonical_model_name` also has to resolve — the "world-species" gate
+    /// the issue asks for, so a roster of only-already-corpus-named types
+    /// cannot pass by never exercising the alias table.
+    #[test]
+    fn canonical_model_name_and_get_agree_with_an_independent_linear_scan() {
+        fn old_canonical_model_name(type_path: &str) -> Option<&'static str> {
+            match type_path {
+                "player" => return Some("player_wide"),
+                "bogged" => return Some("skeleton"),
+                _ => {}
+            }
+            entity_models()
+                .into_iter()
+                .map(|e| e.name)
+                .find(|n| *n == type_path)
+                .or_else(|| boat_model_name(type_path))
+        }
+
+        let set = EntityModelSet::load();
+        let mut checked = 0usize;
+        let mut mismatches = Vec::new();
+        let paths: Vec<&str> = (0..lodestone_data::entity_types::TYPE_COUNT as i32)
+            .filter_map(lodestone_data::entity_types::entity_type_name)
+            .map(|name| name.strip_prefix("minecraft:").unwrap())
+            .collect();
+        // Sanity: the roster really is the full 158, not an accidentally-empty
+        // iterator that would make this test vacuous.
+        assert_eq!(paths.len(), lodestone_data::entity_types::TYPE_COUNT as usize);
+
+        for &type_path in paths
+            .iter()
+            .chain(["player_wide", "player_slim", "oak_boat", "oak_chest_boat", "bamboo_raft", "bamboo_chest_raft"].iter())
+        {
+            checked += 1;
+            let old = old_canonical_model_name(type_path);
+            let new = canonical_model_name(type_path);
+            if old != new {
+                mismatches.push(format!("{type_path}: old={old:?} new={new:?}"));
+                continue;
+            }
+            // And the second scan `EntityModelSet::get` replaced, keyed by
+            // whatever name `canonical_model_name` resolved to.
+            if let Some(name) = new {
+                let via_index = set.get(name);
+                let via_scan = set.models.iter().find(|(n, _)| *n == name).map(|(_, m)| m);
+                if !std::ptr::eq(
+                    via_index.map_or(std::ptr::null(), |m| m as *const _),
+                    via_scan.map_or(std::ptr::null(), |m| m as *const _),
+                ) {
+                    mismatches.push(format!("{name}: EntityModelSet::get index/scan disagree"));
+                }
+            }
+        }
+        assert!(checked >= 158 + 6, "roster too small to be a real gate: {checked}");
+        assert!(
+            mismatches.is_empty(),
+            "{} of {checked} paths disagree between the old linear scan and the new \
+             indexed lookup:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
     }
 
     #[test]
