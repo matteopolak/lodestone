@@ -164,6 +164,37 @@ impl ChatKeyPair {
     pub fn due_refresh(&self, now_millis: i64) -> bool {
         self.refreshed_after_millis < now_millis
     }
+
+    /// Assembles a [`ChatKeyPair`] from already-parsed parts, bypassing
+    /// [`fetch_key_pair`]'s network round trip and [`parse_key_pair_response`]'s
+    /// PEM/base64 framing.
+    ///
+    /// **Test-only fixture builder, not a real acquisition path.** Every
+    /// field here is private for a reason (see the crate's evidence
+    /// standard: nothing outside this module should be able to *mint* a
+    /// signing key), and this exists solely so another crate's hermetic test
+    /// — e.g. `lodestone-client`'s driver-level signed/unsigned choreography
+    /// test — can construct a throwaway [`ChatSession`] without touching the
+    /// real `/player/certificates` endpoint or a keychain. Never call this
+    /// from anything but a test: the whole point of the real path is that
+    /// Mojang, not the caller, generates the private key.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_tests(
+        private_key: RsaPrivateKey,
+        public_key_der: Vec<u8>,
+        key_signature: Vec<u8>,
+        expires_at_millis: i64,
+        refreshed_after_millis: i64,
+    ) -> Self {
+        Self {
+            private_key,
+            public_key_der,
+            key_signature,
+            expires_at_millis,
+            refreshed_after_millis,
+        }
+    }
 }
 
 /// Fetches a fresh [`ChatKeyPair`] for the authenticated account.
