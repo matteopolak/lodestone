@@ -789,6 +789,12 @@ impl WindowApp {
             // Installing it for one and not the other makes mobs darker than the
             // blocks they stand on at midnight.
             let clock = net_handle.clone();
+            // The dimension's own ambient floor rides beside the darken lane
+            // rather than inside it: `sky_darken` is a time-of-day curve that
+            // weather modifies, while this is a constant of wherever the player
+            // currently is. Folding them would make one a second writer of the
+            // other's value.
+            let ambient_handle = net_handle.clone();
             // The sky pass's own clock — see `set_time_of_day_source`'s doc for
             // why it needs the raw tick rather than `set_sky_darken_source`'s
             // already-derived factor.
@@ -811,6 +817,19 @@ impl WindowApp {
                 Some(match &darken_weather {
                     Some(w) => lodestone_render::weather_sky_light_factor(base, &w.state()),
                     None => base,
+                })
+            });
+            // Without this the Nether renders the overworld's own ambient floor
+            // and reads far darker than vanilla — the shaders carried the
+            // overworld grey as a constant until the wire started supplying the
+            // real per-dimension colour. `None` is the honest answer before the
+            // dimension type is known, and the source is polled every frame, so
+            // there is nothing to wait for.
+            render.set_ambient_light_source(move || {
+                let dim = ambient_handle.get()?.player().dimension_type?;
+                Some(match dim.ambient_light_color {
+                    Some(packed) => lodestone_render::light::rgb24_to_channels(packed),
+                    None => lodestone_render::light::OVERWORLD_AMBIENT_LIGHT,
                 })
             });
             render.set_entity_light_source(move |feet| {
