@@ -345,6 +345,16 @@ pub enum MetadataField {
         /// `0x02` — `AbstractHorse.isTamed()`.
         tame: bool,
     },
+    /// `AgeableMob.DATA_BABY_ID` — whether this mob is a baby. Vanilla's
+    /// `LivingEntityRenderer` reads it to apply the age-scale shrink
+    /// (`0.5` generic, or the species' real `BABY_DIMENSIONS` literal where
+    /// one is modelled) to the model, independently of the hitbox — this
+    /// crate's aging unit already computes the correct **hitbox** dimensions
+    /// server-side (`crate::mobs::species_shape`); this variant is what lets
+    /// the *client* apply the same shrink to what it draws. `AgeableMob` is
+    /// the shared ancestor for the whole zombie family, cow, sheep, pig,
+    /// chicken, rabbit and wolf.
+    Baby(bool),
 }
 
 /// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs (issue
@@ -540,8 +550,7 @@ pub enum ServerBound {
     /// The clicked block and face determine the placement cell (see
     /// `crate::server`'s handling); `cursor` is vanilla's
     /// `BlockHitResult.getLocation()` reduced to block-local coordinates, and
-    /// is what decides a stair/slab/trapdoor's `half`. The packet's hand is
-    /// still not threaded through — this crate always uses the main hand.
+    /// is what decides a stair/slab/trapdoor's `half`.
     UseItemOn {
         /// The block face the client clicked.
         pos: BlockPos,
@@ -555,6 +564,11 @@ pub enum ServerBound {
         /// [`BlockAction::sequence`](Self::BlockAction) for why it is
         /// decoded but not yet acted on).
         sequence: i32,
+        /// `0` main hand, `1` off hand — vanilla's `InteractionHand.ordinal()`.
+        /// `crate::server`'s `apply_use_item_on` reads this to resolve which
+        /// native inventory slot the spawn-egg/flint-and-steel/placement
+        /// branches act on; same convention as [`UseItem::hand`](Self::UseItem).
+        hand: u8,
     },
     /// The client asked to change its own game mode
     /// (`ServerboundChangeGameModePacket` — the F4 switcher a
