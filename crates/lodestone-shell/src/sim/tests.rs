@@ -4124,6 +4124,136 @@ fn a_placeable_item_on_a_block_does_not_also_send_the_generic_use() {
     );
 }
 
+// -----------------------------------------------------------------------
+// Throwing a projectile item swings the arm
+// -----------------------------------------------------------------------
+//
+// `SnowballItem.use`/`EggItem.use`/`EnderpearlItem.use`/`ThrowablePotionItem.use`
+// (`.cache/mc/26.2/src/net/minecraft/world/item/`) all return
+// `InteractionResult.SUCCESS`, whose `swingSource()` is `CLIENT`
+// (`InteractionResult.java`) — vanilla's `Minecraft.startUseItem` swings on
+// exactly that condition. `use_item_generic` is the shell's landing site for
+// all four (none of them is a block or an `EntityRayTarget` hit in the common
+// case), and it already calls `swing_hand()` unconditionally whenever the main
+// hand is non-empty — these gates exist because the discriminating check is
+// whether the swing actually **reaches the arm pose**, not merely whether
+// `use_item_generic` was reached (`peak_swing_over` is `hand_swing_progress`
+// wired the same way `a_queued_main_hand_swing_reaches_the_arm_pose` proves
+// for a mining swing).
+
+/// The common case: aiming at open air (or space, past reach) while throwing.
+/// Vanilla's `hitResult == null` path skips the block/entity switch and still
+/// reaches the unconditional generic-use fallback that actually throws the
+/// snowball and swings.
+#[test]
+fn throwing_a_snowball_with_no_target_swings_the_arm() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:snowball");
+    assert!(sim.target().is_none(), "precondition: no block targeted");
+    assert!(sim.entity_target().is_none(), "precondition: no entity targeted");
+
+    sim.use_item_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        sent.iter()
+            .any(|a| matches!(a, ClientAction::SwingArm { hand: Hand::Main })),
+        "throwing a snowball must queue a main-hand SwingArm for the wire, got {sent:?}"
+    );
+    let peak = peak_swing_over(&mut sim, 10);
+    assert!(
+        peak > 0.4,
+        "throwing a snowball must swing the local arm, progress peaked at {peak} \
+         — this is the bug report: the wire action can be present while the local \
+         arm still reads as rested"
+    );
+}
+
+/// The other common case: aiming at ordinary terrain (dirt, stone — nothing
+/// interactable) while throwing. A snowball is not a block, so it can never
+/// take the placement path, and vanilla's `case BLOCK` falls through to the
+/// same generic use as the no-target case whenever the block declines the
+/// click (`Minecraft.java`'s `useResult instanceof InteractionResult.Fail`
+/// `return`s, but a plain block's `useItemOn` is `PASS`, not `Fail`).
+#[test]
+fn throwing_a_snowball_at_a_plain_block_still_swings_the_arm() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:snowball");
+    sim.set_ray_target_for_test(Some(RayHit::face_center([4, 64, 4], [0, 1, 0])));
+    assert!(sim.target().is_some(), "precondition: a block is targeted");
+
+    sim.use_item_live();
+
+    let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        sent.iter()
+            .any(|a| matches!(a, ClientAction::SwingArm { hand: Hand::Main })),
+        "throwing a snowball at a plain block must still queue a SwingArm, got {sent:?}"
+    );
+    let peak = peak_swing_over(&mut sim, 10);
+    assert!(
+        peak > 0.4,
+        "throwing a snowball at a plain block must swing the local arm, \
+         progress peaked at {peak}"
+    );
+}
+
+/// The same gate for the other three throwables the report names, collected
+/// rather than asserted one-at-a-time inside a loop — CLAUDE.md's own
+/// warning about an `assert!` inside a `for` loop stopping at the first
+/// failure and hiding the rest.
+#[test]
+fn every_named_throwable_swings_the_arm_with_no_target() {
+    let items = [
+        "minecraft:egg",
+        "minecraft:ender_pearl",
+        "minecraft:splash_potion",
+    ];
+    let mut failures = Vec::new();
+    for item in items {
+        let (net, _actions, _feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        sim.attach_net(net);
+        give_main_hand_item(&mut sim, item);
+        sim.use_item_live();
+        let peak = peak_swing_over(&mut sim, 10);
+        if peak <= 0.4 {
+            failures.push(format!("{item}: peak={peak}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "these throwables did not swing the local arm: {failures:?}"
+    );
+}
+
+/// Negative control for the three tests above: an **empty** main hand must
+/// swing nothing, matching vanilla's own `!heldItem.isEmpty()` guard —
+/// without this, "swing unconditionally" would satisfy the throw tests
+/// vacuously.
+#[test]
+fn use_item_live_with_an_empty_hand_does_not_swing() {
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    assert!(sim.target().is_none());
+    assert!(sim.entity_target().is_none());
+
+    sim.use_item_live();
+
+    let peak = peak_swing_over(&mut sim, 10);
+    assert_eq!(
+        peak, 0.0,
+        "an empty main hand has nothing to throw and must not swing, got {peak}"
+    );
+}
+
 /// Finding 1: [`Sim::end_use_live`] must send `ReleaseUseItem` when a use
 /// was actually in progress — the packet that was a serverbound island
 /// (encoded by all four protocol adapters, zero producers anywhere in
