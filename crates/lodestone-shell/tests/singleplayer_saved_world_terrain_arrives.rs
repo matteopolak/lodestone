@@ -85,7 +85,17 @@ fn world_dir() -> PathBuf {
 fn write_saved_world(dir: &Path) {
     let source = lodestone_server::overworld_chunk_source(SEED);
     let (min_y, height) = (source.min_y(), source.height());
-    let world = RegionChunkSource::new(source, dir, min_y, height).expect("open the fixture world");
+    // The fixture is an overworld save: `source` is an `OverworldChunkSource`,
+    // so its region store roots at the world directory itself rather than under
+    // the `dimensions/minecraft/<id>/` subtree a Nether or End sibling uses.
+    let world = RegionChunkSource::new(
+        source,
+        dir,
+        lodestone_server::dimension::Dimension::Overworld,
+        min_y,
+        height,
+    )
+    .expect("open the fixture world");
 
     let scheduled = world.scheduled_ticks();
     scheduled.set_game_tick(100);
