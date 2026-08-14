@@ -334,6 +334,24 @@ impl ContainerBackground {
     /// `252 x 140` sample against.
     const BACKGROUND_TEXTURE_SIZE: f32 = 256.0;
 
+    /// The declared (16x-baseline) size of every whole-panel `gui/container/**`
+    /// sheet [`Self::build`] stitches — `256×256` — except
+    /// [`Self::merchant`]'s (see [`Self::MERCHANT_DECLARED`]).
+    ///
+    /// None of these sheets carries a `.mcmeta`, so a resource pack has no
+    /// declared metadata to read for them the way a `gui/sprites/**` entry's
+    /// nine-slice does — vanilla itself never scales its `blit` source rects
+    /// by anything but this literal ratio against the sprite's real placed
+    /// size (see [`Self::advancements_window_quad`]'s doc for the worked
+    /// case), so every sub-rect sampled against one of these sheets is
+    /// rescaled by `sprite.width/height` over this pair before it is added to
+    /// the sprite's atlas offset — issue #582.
+    const SHEET_DECLARED: (f32, f32) = (256.0, 256.0);
+    /// [`Self::merchant`]'s own declared sheet size — see that field's doc
+    /// comment for why it is genuinely `512×256` rather than `256×256` like
+    /// every other sheet [`Self::SHEET_DECLARED`] covers.
+    const MERCHANT_DECLARED: (f32, f32) = (512.0, 256.0);
+
     /// The Advancements screen's window blit (issue #167) —
     /// `graphics.blit(..., WINDOW_LOCATION, leftPos, topPos, 0, 0, 252, 140, 256,
     /// 256)` (`AdvancementsScreen.java`).
@@ -433,6 +451,14 @@ impl ContainerBackground {
     /// A separate entry point from [`Self::quads`] rather than a
     /// [`BackgroundKind`] arm, because the creative screen has no
     /// [`Menu`] to dispatch on — see `super::creative`'s module doc.
+    ///
+    /// Rescales the `195x136` sample by the sprite's real placed size against
+    /// [`Self::SHEET_DECLARED`], the same fix
+    /// [`Self::advancements_window_quad`] applies to its own sheet — issue
+    /// #582: these three sheets carry no `.mcmeta` either, so nothing short
+    /// of this ratio notices a resource pack whose real pixels exceed the
+    /// `256x256` baseline `CREATIVE_PANEL_W`/`CREATIVE_PANEL_H` are declared
+    /// against.
     #[must_use]
     pub(super) fn creative_quad(
         &self,
@@ -448,12 +474,15 @@ impl ContainerBackground {
         };
         let sprite = self.atlas.sprite(loc)?;
         let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
+        let rx = sprite.width as f32 / Self::SHEET_DECLARED.0;
+        let ry = sprite.height as f32 / Self::SHEET_DECLARED.1;
+        let (sample_w, sample_h) = (CREATIVE_PANEL_W * rx, CREATIVE_PANEL_H * ry);
         Some(GuiSpriteQuad {
             dst: [x, y, CREATIVE_PANEL_W, CREATIVE_PANEL_H],
             uv_min: [sprite.x as f32 / aw, sprite.y as f32 / ah],
             uv_max: [
-                (sprite.x as f32 + CREATIVE_PANEL_W) / aw,
-                (sprite.y as f32 + CREATIVE_PANEL_H) / ah,
+                (sprite.x as f32 + sample_w) / aw,
+                (sprite.y as f32 + sample_h) / ah,
             ],
         })
     }
@@ -493,8 +522,10 @@ impl ContainerBackground {
     }
 
     /// A **sub-rectangle** of a static GUI sprite, sampled at `local`
-    /// (`[lx, ly, lw, lh]`, in the sprite's own native pixel space) and drawn
-    /// at `dst` (`[x, y, w, h]`).
+    /// (`[lx, ly, lw, lh]`, in **declared** pixels against `declared`
+    /// (`(width, height)`) — the size vanilla's own `blitSprite` call passes
+    /// as `spriteWidth`/`spriteHeight`, not the sprite's real pixel size) and
+    /// drawn at `dst` (`[x, y, w, h]`).
     ///
     /// [`sprite_quad`](Self::sprite_quad) always samples the *whole* sprite,
     /// which is right for the highlight pair and the empty-slot placeholders
@@ -502,21 +533,34 @@ impl ContainerBackground {
     /// stand's fuel/brew/bubble bars (issue #28): vanilla grows every one of
     /// those from a partial `blitSprite` sub-rectangle of a larger sprite —
     /// e.g. `AbstractFurnaceScreen.java`'s lit flame samples a `14×n`
-    /// window of a `14×14` sprite, offset from the *bottom*. Mirrors the
-    /// `uv` closure [`quads`](Self::quads) already uses for the three/eleven
+    /// window of a `14×14` sprite, offset from the *bottom*, via
+    /// `blitSprite(pipeline, sprite, 14, 14, 0, 14 - h, x, y, 14, h)`. That
+    /// `14, 14` pair is `declared`, not a real pixel measurement, exactly
+    /// like [`GuiScaling::geometry`](lodestone_assets::gui::GuiScaling::geometry)'s
+    /// nine-slice case and
+    /// [`GuiAtlas::subregion_quad_declared`](lodestone_render::GuiAtlas::subregion_quad_declared) —
+    /// on a resource pack whose real pixels exceed `declared`, `local` is
+    /// rescaled by `sprite.width/height` over `declared` before it is added
+    /// to the sprite's atlas offset (issue #582: the un-rescaled version
+    /// sampled only the top-left quadrant of a 32x sprite and drew it 2x too
+    /// big). Mirrors the `uv` closure [`quads`](Self::quads) uses for the
     /// whole-panel sheets, generalised to any sprite in the atlas rather than
     /// the panel sheets specifically.
     #[must_use]
     pub(super) fn sprite_subregion_quad(
         &self,
         id: &str,
+        declared: (f32, f32),
         local: [f32; 4],
         dst: [f32; 4],
     ) -> Option<GuiSpriteQuad> {
         let loc = sprite_location(id)?;
         let sprite = self.atlas.sprite(&loc)?;
         let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
+        let rx = sprite.width as f32 / declared.0;
+        let ry = sprite.height as f32 / declared.1;
         let [lx, ly, lw, lh] = local;
+        let (lx, ly, lw, lh) = (lx * rx, ly * ry, lw * rx, lh * ry);
         let uv_min = [
             (sprite.x as f32 + lx) / aw,
             (sprite.y as f32 + ly) / ah,
@@ -535,9 +579,22 @@ impl ContainerBackground {
     #[must_use]
     pub(super) fn quads(&self, menu: &Menu, x: f32, y: f32) -> Option<Vec<GuiSpriteQuad>> {
         let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
-        let uv = |loc: &ResourceLocation, local: [f32; 4]| -> Option<([f32; 2], [f32; 2])> {
+        // `declared` is the sheet's own declared (16x-baseline) size —
+        // `Self::SHEET_DECLARED` for every sheet but the merchant's (see
+        // `Self::MERCHANT_DECLARED`). `local` is rescaled by the sprite's
+        // real placed size over `declared` before being added to the
+        // sprite's atlas offset — issue #582; none of these sheets carries a
+        // `.mcmeta`, so a resource pack has nowhere else to declare a higher
+        // resolution and nothing upstream would otherwise notice one.
+        let uv = |loc: &ResourceLocation,
+                  declared: (f32, f32),
+                  local: [f32; 4]|
+         -> Option<([f32; 2], [f32; 2])> {
             let sprite = self.atlas.sprite(loc)?;
+            let rx = sprite.width as f32 / declared.0;
+            let ry = sprite.height as f32 / declared.1;
             let [lx, ly, lw, lh] = local;
+            let (lx, ly, lw, lh) = (lx * rx, ly * ry, lw * rx, lh * ry);
             Some((
                 [(sprite.x as f32 + lx) / aw, (sprite.y as f32 + ly) / ah],
                 [
@@ -548,20 +605,26 @@ impl ContainerBackground {
         };
         // A whole-panel `176x166` blit at the sheet's origin — the shape every
         // one of these single-image screens shares, except the hopper (see
-        // `whole_panel_sized` below).
+        // `whole_panel_sized` below). Every sheet this closure is called with
+        // is declared `Self::SHEET_DECLARED`.
         let whole_panel = |loc: &ResourceLocation| -> Option<Vec<GuiSpriteQuad>> {
-            let (uv_min, uv_max) = uv(loc, [0.0, 0.0, 176.0, 166.0])?;
+            let (uv_min, uv_max) = uv(loc, Self::SHEET_DECLARED, [0.0, 0.0, 176.0, 166.0])?;
             Some(vec![GuiSpriteQuad {
                 dst: [x, y, 176.0, 166.0],
                 uv_min,
                 uv_max,
             }])
         };
-        // As `whole_panel`, but at an explicit size — the hopper's `176×133`
-        // (`HopperScreen.java`), the one screen in this whole family that
-        // is not vanilla's usual `166` tall.
-        let whole_panel_sized = |loc: &ResourceLocation, w: f32, h: f32| -> Option<Vec<GuiSpriteQuad>> {
-            let (uv_min, uv_max) = uv(loc, [0.0, 0.0, w, h])?;
+        // As `whole_panel`, but at an explicit size and declared sheet size —
+        // the hopper's `176×133` (`HopperScreen.java`), the one screen in
+        // this whole family that is not vanilla's usual `166` tall, and the
+        // merchant's `276×166` off a genuinely `512×256`-declared sheet.
+        let whole_panel_sized = |loc: &ResourceLocation,
+                                  declared: (f32, f32),
+                                  w: f32,
+                                  h: f32|
+         -> Option<Vec<GuiSpriteQuad>> {
+            let (uv_min, uv_max) = uv(loc, declared, [0.0, 0.0, w, h])?;
             Some(vec![GuiSpriteQuad {
                 dst: [x, y, w, h],
                 uv_min,
@@ -583,12 +646,18 @@ impl ContainerBackground {
             BackgroundKind::Stonecutter => whole_panel(&self.stonecutter),
             BackgroundKind::Cartography => whole_panel(&self.cartography_table),
             BackgroundKind::Dispenser => whole_panel(&self.dispenser),
-            BackgroundKind::Hopper => whole_panel_sized(&self.hopper, 176.0, 133.0),
-            BackgroundKind::Merchant => whole_panel_sized(&self.merchant, 276.0, 166.0),
+            BackgroundKind::Hopper => {
+                whole_panel_sized(&self.hopper, Self::SHEET_DECLARED, 176.0, 133.0)
+            }
+            BackgroundKind::Merchant => {
+                whole_panel_sized(&self.merchant, Self::MERCHANT_DECLARED, 276.0, 166.0)
+            }
             BackgroundKind::Generic { rows } => {
                 let top_h = (rows * 18 + 17) as f32;
-                let (top_min, top_max) = uv(&self.generic, [0.0, 0.0, 176.0, top_h])?;
-                let (bot_min, bot_max) = uv(&self.generic, [0.0, 126.0, 176.0, 96.0])?;
+                let (top_min, top_max) =
+                    uv(&self.generic, Self::SHEET_DECLARED, [0.0, 0.0, 176.0, top_h])?;
+                let (bot_min, bot_max) =
+                    uv(&self.generic, Self::SHEET_DECLARED, [0.0, 126.0, 176.0, 96.0])?;
                 Some(vec![
                     GuiSpriteQuad {
                         dst: [x, y, 176.0, top_h],
@@ -603,5 +672,343 @@ impl ContainerBackground {
                 ])
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lodestone_assets::{MemorySource, ResourceSource};
+
+    fn solid_png(w: u32, h: u32) -> Vec<u8> {
+        let mut data = Vec::new();
+        let mut encoder = png::Encoder::new(&mut data, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        let pixels: Vec<u8> = (0..(w * h)).flat_map(|_| [10, 20, 30, 255]).collect();
+        writer.write_image_data(&pixels).expect("png data");
+        drop(writer);
+        data
+    }
+
+    /// Declared (16x-baseline) real pixel size of a `gui/sprites/**` id this
+    /// atlas stitches. Mirrors `container::tests::synthetic_background_with_window_size`'s
+    /// own per-id table (kept independent rather than shared, since that
+    /// helper lives in a large file this fix does not own) — every number
+    /// here is the same vanilla-sourced literal, cross-checked against
+    /// `crate::container::geometry`'s `*_DECLARED` constants for the five
+    /// furnace/brewing ids.
+    fn declared_sprite_size(id: &str) -> (u32, u32) {
+        use super::super::{
+            BLAST_FURNACE_BURN_PROGRESS, BLAST_FURNACE_LIT_PROGRESS, BREWING_BREW_PROGRESS,
+            BREWING_BUBBLES, BREWING_FUEL_LENGTH, CELL, FURNACE_BURN_PROGRESS,
+            FURNACE_LIT_PROGRESS, SLOT_HIGHLIGHT_BACK, SLOT_HIGHLIGHT_FRONT,
+            SMOKER_BURN_PROGRESS, SMOKER_LIT_PROGRESS,
+        };
+        if id == SLOT_HIGHLIGHT_BACK || id == SLOT_HIGHLIGHT_FRONT {
+            (24, 24)
+        } else if id == FURNACE_LIT_PROGRESS
+            || id == BLAST_FURNACE_LIT_PROGRESS
+            || id == SMOKER_LIT_PROGRESS
+        {
+            (14, 14)
+        } else if id == FURNACE_BURN_PROGRESS
+            || id == BLAST_FURNACE_BURN_PROGRESS
+            || id == SMOKER_BURN_PROGRESS
+        {
+            (24, 16)
+        } else if id == BREWING_FUEL_LENGTH {
+            (18, 4)
+        } else if id == BREWING_BREW_PROGRESS {
+            (9, 28)
+        } else if id == BREWING_BUBBLES {
+            (12, 29)
+        } else if id.starts_with("container/creative_inventory/tab_") {
+            (26, 32)
+        } else if id.starts_with("container/creative_inventory/scroller") {
+            (12, 15)
+        } else if id.starts_with("advancements/tab_") {
+            (28, 32)
+        } else if id.ends_with("_frame_obtained") || id.ends_with("_frame_unobtained") {
+            (26, 26)
+        } else if id == "advancements/title_box" {
+            (200, 26)
+        } else {
+            (CELL as u32, CELL as u32)
+        }
+    }
+
+    /// A [`ContainerBackground`] fixture where every sheet and sprite is real
+    /// at `scale`× its declared vanilla size. `scale == 1` is the
+    /// 16x-equivalent input (declared == real) every other gate in this
+    /// module used before issue #582 — the one input where the bug is
+    /// invisible. `scale == 2` is a genuinely different ("32x") resolution:
+    /// the discriminating input needed to tell a fraction-of-declared
+    /// computation apart from a raw real-pixel one.
+    fn synthetic_background_scaled(scale: u32) -> ContainerBackground {
+        let mut src = MemorySource::default();
+        for name in [
+            "generic_54",
+            "crafting_table",
+            "inventory",
+            "anvil",
+            "grindstone",
+            "smithing",
+            "enchanting_table",
+            "furnace",
+            "blast_furnace",
+            "smoker",
+            "brewing_stand",
+            "loom",
+            "stonecutter",
+            "cartography_table",
+            "dispenser",
+            "hopper",
+            // Real `villager.png` is `512x256` (`Self::MERCHANT_DECLARED`),
+            // not `256x256`×scale like every sheet above — see that
+            // constant's own doc.
+            "creative_inventory/tab_items",
+            "creative_inventory/tab_item_search",
+            "creative_inventory/tab_inventory",
+        ] {
+            src.insert(
+                format!("assets/minecraft/textures/gui/container/{name}.png"),
+                solid_png(256 * scale, 256 * scale),
+            );
+        }
+        src.insert(
+            "assets/minecraft/textures/gui/container/villager.png".to_string(),
+            solid_png(512 * scale, 256 * scale),
+        );
+        src.insert(
+            "assets/minecraft/textures/gui/advancements/window.png".to_string(),
+            solid_png(256 * scale, 256 * scale),
+        );
+        for id in ADVANCEMENT_TILE_IDS {
+            let path = id.strip_prefix("minecraft:").unwrap_or(id);
+            src.insert(
+                format!("assets/minecraft/textures/{path}.png"),
+                solid_png(16 * scale, 16 * scale),
+            );
+        }
+        for id in super::super::all_gui_sprites() {
+            let (dw, dh) = declared_sprite_size(id);
+            src.insert(
+                format!("assets/minecraft/textures/gui/sprites/{id}.png"),
+                solid_png(dw * scale, dh * scale),
+            );
+        }
+        let manager = ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>]);
+        ContainerBackground::build(&manager).expect("synthetic background builds")
+    }
+
+    /// Fraction of `sprite`'s own placed atlas rect that quad `q` samples —
+    /// resolution-independent by construction, so this is what the
+    /// discriminating gates below compare across pack scales instead of raw
+    /// UVs (whose absolute atlas placement can legitimately differ between
+    /// two different-sized fixtures).
+    fn uv_fraction(q: &GuiSpriteQuad, sprite_x: u32, sprite_y: u32, sprite_w: u32, sprite_h: u32, aw: f32, ah: f32) -> [f32; 4] {
+        [
+            (q.uv_min[0] * aw - sprite_x as f32) / sprite_w as f32,
+            (q.uv_min[1] * ah - sprite_y as f32) / sprite_h as f32,
+            (q.uv_max[0] * aw - sprite_x as f32) / sprite_w as f32,
+            (q.uv_max[1] * ah - sprite_y as f32) / sprite_h as f32,
+        ]
+    }
+
+    /// Issue #582, reproduced against every one of `sprite_subregion_quad`'s
+    /// five real call sites (`crate::container::geometry`): the furnace
+    /// family's lit/burn bars and the brewing stand's fuel/brew/bubble bars.
+    /// Each is built at a 16x-equivalent (`scale = 1`) and a 32x
+    /// (`scale = 2`) resolution, and the resolved UV span — as a fraction of
+    /// the sprite's own real placed rect — must be identical at both: the
+    /// same fraction `crate::container::geometry`'s `*_DECLARED` constants
+    /// and vanilla's own `local` literals predict, computed here from
+    /// outside the resolver rather than by calling it twice and comparing.
+    ///
+    /// A sub-rect genuinely smaller than the whole sprite is deliberate for
+    /// every one of these (the lit flame's `[0, 14-h, 14, h]` for `h < 14`,
+    /// the fuel bar's partial length, ...): a wrong ratio must actually move
+    /// the sampled window, not merely fail to matter.
+    #[test]
+    fn sprite_subregion_quad_is_pack_resolution_independent() {
+        use super::super::{
+            BREWING_BREW_PROGRESS, BREWING_BUBBLES, BREWING_FUEL_LENGTH, FURNACE_BURN_PROGRESS,
+            FURNACE_LIT_PROGRESS,
+        };
+        // (id, declared, local src) — the exact shapes `geometry.rs` requests
+        // at less than full progress/length, so the window is a genuine
+        // sub-rect of the sprite at every site.
+        let cases: &[(&str, (f32, f32), [f32; 4])] = &[
+            (FURNACE_LIT_PROGRESS, (14.0, 14.0), [0.0, 6.0, 14.0, 8.0]),
+            (FURNACE_BURN_PROGRESS, (24.0, 16.0), [0.0, 0.0, 10.0, 16.0]),
+            (BREWING_FUEL_LENGTH, (18.0, 4.0), [0.0, 0.0, 9.0, 4.0]),
+            (BREWING_BREW_PROGRESS, (9.0, 28.0), [0.0, 0.0, 9.0, 14.0]),
+            (BREWING_BUBBLES, (12.0, 29.0), [0.0, 12.0, 12.0, 17.0]),
+        ];
+
+        let mut mismatches: Vec<String> = Vec::new();
+        for scale in [1u32, 2u32] {
+            let bg = synthetic_background_scaled(scale);
+            let (aw, ah) = (bg.atlas.width as f32, bg.atlas.height as f32);
+            for (id, declared, local) in cases {
+                let loc = sprite_location(id).expect("valid location");
+                let sprite = bg.atlas.sprite(&loc).expect("sprite placed");
+                let q = bg
+                    .sprite_subregion_quad(id, *declared, *local, [0.0, 0.0, local[2], local[3]])
+                    .unwrap_or_else(|| panic!("{id} at scale {scale} resolves"));
+                let got = uv_fraction(&q, sprite.x, sprite.y, sprite.width, sprite.height, aw, ah);
+                let want = [
+                    local[0] / declared.0,
+                    local[1] / declared.1,
+                    (local[0] + local[2]) / declared.0,
+                    (local[1] + local[3]) / declared.1,
+                ];
+                for i in 0..4 {
+                    if (got[i] - want[i]).abs() >= 1e-4 {
+                        mismatches.push(format!(
+                            "{id} scale={scale} component {i}: got {:.6}, want {:.6}",
+                            got[i], want[i]
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "sprite_subregion_quad is not pack-resolution-independent:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    /// As the gate above, but for [`ContainerBackground::quads`]'s
+    /// whole-panel/`Generic` sub-rects — three representative
+    /// [`BackgroundKind`] shapes exercising every branch of `quads`' `uv`
+    /// closure: [`BackgroundKind::Hopper`] (`whole_panel_sized` against
+    /// [`ContainerBackground::SHEET_DECLARED`]),
+    /// [`BackgroundKind::Merchant`] (`whole_panel_sized` against
+    /// [`ContainerBackground::MERCHANT_DECLARED`], the one sheet with a
+    /// different declared size), and [`BackgroundKind::Generic`] (the
+    /// two-piece top/bottom split).
+    #[test]
+    fn quads_whole_panel_is_pack_resolution_independent() {
+        let cases: &[(&str, Menu, (f32, f32), [f32; 4])] = &[
+            ("hopper", Menu::hopper(), (256.0, 256.0), [0.0, 0.0, 176.0, 133.0]),
+            (
+                "merchant",
+                Menu::merchant(),
+                (512.0, 256.0),
+                [0.0, 0.0, 276.0, 166.0],
+            ),
+        ];
+
+        let mut mismatches: Vec<String> = Vec::new();
+        for scale in [1u32, 2u32] {
+            let bg = synthetic_background_scaled(scale);
+            let (aw, ah) = (bg.atlas.width as f32, bg.atlas.height as f32);
+            for (label, menu, declared, local) in cases {
+                let loc = match background_kind(menu) {
+                    BackgroundKind::Hopper => &bg.hopper,
+                    BackgroundKind::Merchant => &bg.merchant,
+                    other => panic!("unexpected background_kind for {label}: {other:?}"),
+                };
+                let sprite = bg.atlas.sprite(loc).expect("sheet placed");
+                let quads = bg.quads(menu, 0.0, 0.0).expect("quads resolve");
+                let q = &quads[0];
+                let got = uv_fraction(q, sprite.x, sprite.y, sprite.width, sprite.height, aw, ah);
+                let want = [
+                    local[0] / declared.0,
+                    local[1] / declared.1,
+                    (local[0] + local[2]) / declared.0,
+                    (local[1] + local[3]) / declared.1,
+                ];
+                for i in 0..4 {
+                    if (got[i] - want[i]).abs() >= 1e-4 {
+                        mismatches.push(format!(
+                            "{label} scale={scale} component {i}: got {:.6}, want {:.6}",
+                            got[i], want[i]
+                        ));
+                    }
+                }
+            }
+
+            // `Generic`'s two-piece split, at a row count that makes both the
+            // top window and the bottom `126..222` window genuine sub-rects
+            // (never the whole `256x256` sheet). `top_h` is
+            // `background_kind`'s own documented formula
+            // (`rows * 18 + 17`), not a guessed literal.
+            let menu = Menu::generic(27);
+            let rows = 27usize.div_ceil(9).clamp(1, 6);
+            let top_h = (rows * 18 + 17) as f32;
+            let loc = &bg.generic;
+            let sprite = bg.atlas.sprite(loc).expect("generic sheet placed");
+            let quads = bg.quads(&menu, 0.0, 0.0).expect("generic quads resolve");
+            assert_eq!(quads.len(), 2, "generic chest is a two-piece blit");
+            let expected = [
+                (&quads[0], [0.0f32, 0.0, 176.0, top_h]),
+                // bottom: [0, 126, 176, 96]
+                (&quads[1], [0.0f32, 126.0, 176.0, 96.0]),
+            ];
+            for (q, local) in expected {
+                let got = uv_fraction(q, sprite.x, sprite.y, sprite.width, sprite.height, aw, ah);
+                let want = [
+                    local[0] / 256.0,
+                    local[1] / 256.0,
+                    (local[0] + local[2]) / 256.0,
+                    (local[1] + local[3]) / 256.0,
+                ];
+                for i in 0..4 {
+                    if (got[i] - want[i]).abs() >= 1e-4 {
+                        mismatches.push(format!(
+                            "generic scale={scale} component {i}: got {:.6}, want {:.6}",
+                            got[i], want[i]
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "quads' whole-panel sub-rects are not pack-resolution-independent:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    /// As the two gates above, for [`ContainerBackground::creative_quad`]'s
+    /// `195x136`-declared sample.
+    #[test]
+    fn creative_quad_is_pack_resolution_independent() {
+        use super::super::creative::{CREATIVE_PANEL_H, CREATIVE_PANEL_W, CreativeBackground};
+
+        let mut mismatches: Vec<String> = Vec::new();
+        for scale in [1u32, 2u32] {
+            let bg = synthetic_background_scaled(scale);
+            let (aw, ah) = (bg.atlas.width as f32, bg.atlas.height as f32);
+            let sprite = bg.atlas.sprite(&bg.creative_items).expect("sheet placed");
+            let q = bg
+                .creative_quad(CreativeBackground::Items, 0.0, 0.0)
+                .expect("creative quad resolves");
+            let got = uv_fraction(&q, sprite.x, sprite.y, sprite.width, sprite.height, aw, ah);
+            let want = [
+                0.0,
+                0.0,
+                CREATIVE_PANEL_W / 256.0,
+                CREATIVE_PANEL_H / 256.0,
+            ];
+            for i in 0..4 {
+                if (got[i] - want[i]).abs() >= 1e-4 {
+                    mismatches.push(format!(
+                        "creative scale={scale} component {i}: got {:.6}, want {:.6}",
+                        got[i], want[i]
+                    ));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "creative_quad is not pack-resolution-independent:\n{}",
+            mismatches.join("\n")
+        );
     }
 }

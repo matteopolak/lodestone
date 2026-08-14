@@ -708,6 +708,19 @@ pub const RECIPE_SPRITE_SLOT: &str = "recipe_book/slot_craftable";
 /// transparent border.
 pub const RECIPE_PANEL_SRC: [f32; 4] = [1.0, 1.0, RECIPE_PANEL_W, RECIPE_PANEL_H];
 
+/// The declared (16x-baseline) sheet size [`RECIPE_PANEL_SRC`]'s coordinates
+/// are authored against — the trailing `256, 256` of `RecipeBookComponent`'s
+/// `blit(..., 147, 166, 256, 256)`. Not yet consumed: the panel is currently
+/// drawn through
+/// [`GuiAtlas::subregion_quad`](lodestone_render::GuiAtlas::subregion_quad),
+/// which treats [`RECIPE_PANEL_SRC`] as real sprite pixels rather than
+/// rescaling it against this declared size, so a resource pack whose panel
+/// sheet exceeds 256×256 real pixels currently draws the recipe book panel
+/// magnified — issue #582. The fix is
+/// [`GuiAtlas::subregion_quad_declared`](lodestone_render::GuiAtlas::subregion_quad_declared)`(id, RECIPE_PANEL_DECLARED, src, dst)`
+/// at the draw site in `crate::hud`.
+pub const RECIPE_PANEL_DECLARED: (f32, f32) = (256.0, 256.0);
+
 /// Vanilla's 2 px leftward nudge on the **selected** tab's blit —
 /// `RecipeBookTabButton.java`. It shifts only the drawn art; the widget's
 /// own rect (and so its hit region) does not move, which is why
