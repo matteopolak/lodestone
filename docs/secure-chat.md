@@ -144,8 +144,17 @@ mirroring `SignedMessageChain.Encoder`. It returns `None` once the chain hits
 [`verify_signature`] is the decode-side primitive (`SignatureValidator.from`
 + `MessageSignature.verify`) — it checks one signature against one public key
 and payload. It does **not** implement the rest of `SignedMessageChain.Decoder`
-(link-ordering enforcement, expiry, or a per-sender chain state machine), and
-nothing calls it yet; see "What isn't built" below.
+(link-ordering enforcement, expiry, or a per-sender chain state machine).
+**Now called**, in [`Driver`]'s `emit`: on a `PLAYER_CHAT`-shaped
+`ClientEvent::Chat` it looks the sender's announced session up (via
+`SharedState::chat_session_of`, reading the `ChatSessionInfo` the tab-list
+fold now retains — see the wire-shapes section below for the retention half
+of this, which was the actual gap), rebuilds the exact `SignedMessageLink`
+from `ChatAckInfo::message_index`/the sender/the session id, and calls this
+function. `ChatAckInfo::verified` carries the result back out; an unmarked
+message (no signature, unknown sender, or a failed check) gets a
+`[Not Secure] ` tag prepended to its text — see "What is still not built"
+below for the link-ordering/expiry/`MODIFIED` pieces this does not cover.
 
 ### Wire shapes — `crates/protocol/v770/src/packets/game.rs` and `player_info.rs`
 
@@ -161,8 +170,17 @@ nothing calls it yet; see "What isn't built" below.
   (`skip_chat_session`/`skip_byte_array`) purely to stay byte-aligned. It now
   keeps the session as [`RemoteChatSessionData`] on
   [`PlayerInfoEntry::chat_session`] — the public key another player's
-  messages would need to be verified against, once something calls
-  [`verify_signature`] with it.
+  messages need to be verified against.
+  **This decode was never the actual gap** — `PlayerInfoEntry` had carried it
+  correctly for a while. The real block was one layer up: `adapter::player`'s
+  `PLAYER_INFO_UPDATE` arm converted `PlayerInfoEntry` into the canonical
+  `lodestone_model::event::PlayerListEntry` field by field, and that struct
+  had no `chat_session` field to receive it — so the key reached this crate
+  and then had nowhere to go, and no consumer could ever look a sender up.
+  Fixed by adding `ChatSessionInfo` there and `RemoteChatSession` on
+  `lodestone_game::tablist::PlayerListEntry`, folded with the same
+  "`None` means this delta didn't mention it, keep the existing value" rule
+  `properties` already uses.
 
 ### The producer — `lodestone_client::Driver`
 
@@ -236,11 +254,22 @@ than a bullet.
   and chain position across a refresh or starts a fresh session is unread as
   of this writing — check `AccountProfileKeyPairManager`/`LocalChatSession`
   before assuming either.
-- On the receive side, nothing calls [`verify_signature`]. Building a
-  "verified" badge needs the rest of `SignedMessageChain.Decoder`
-  (link-ordering enforcement, expiry, a per-sender chain state machine) plus
-  something that reads [`PlayerInfoEntry::chat_session`] for the sender's
-  public key — a distinct, later feature per this area's own history.
+- **Landed since — the receive side.** `Driver`'s `emit` now calls
+  [`verify_signature`] against the sender's retained `ChatSessionInfo` and
+  surfaces the result (`ChatAckInfo::verified`, and a `[Not Secure] ` text
+  tag on failure — see "How it works" above). What is still missing from
+  vanilla's own `ChatTrustLevel`/`SignedMessageChain.Decoder`:
+  - **link-ordering enforcement and key expiry.** A message whose
+    `SignedMessageLink.index` is out of order, or whose key has passed
+    `ChatSessionInfo::expires_at`, still verifies here if the RSA check
+    passes — vanilla's decoder would reject both independently of the
+    signature.
+  - **the `MODIFIED` trust level.** Every unverified message reads as
+    vanilla's `NOT_SECURE`; `SECURE` vs `MODIFIED` (whether the *displayed*
+    text still contains what was actually signed) is not distinguished.
+  - **a per-sender chain state machine.** Verification is stateless per
+    message; there is no `RemoteChatSession` object tracking a sender's
+    chain across messages the way `SignedMessageChain.Decoder` does.
 
 **Gotcha — the signature payload's timestamp is seconds, everything else on
 the wire is milliseconds.** If you touch [`build_signature_payload`], keep
@@ -351,6 +380,8 @@ acceptance is the one link nothing here can reach.
 [`ChatCommandSigned`]: ../crates/protocol/v770/src/packets/game.rs
 [`ArgumentSignatureEntry`]: ../crates/protocol/v770/src/packets/game.rs
 [`RemoteChatSessionData`]: ../crates/protocol/v770/src/packets/player_info.rs
+[`lodestone_model::event::ChatSessionInfo`]: ../crates/lodestone-model/src/event.rs
+[`lodestone_game::tablist::RemoteChatSession`]: ../crates/lodestone-game/src/tablist.rs
 [`PlayerInfoEntry::chat_session`]: ../crates/protocol/v770/src/packets/player_info.rs
 [`lodestone_game::chat_ack`]: ../crates/lodestone-game/src/chat_ack.rs
 [`lodestone_game::chat_ack::LastSeenTracker`]: ../crates/lodestone-game/src/chat_ack.rs
