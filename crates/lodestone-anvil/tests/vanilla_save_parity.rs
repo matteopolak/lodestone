@@ -44,7 +44,7 @@
 //! | direction | test | catches |
 //! |---|---|---|
 //! | **A**: we write → vanilla loads/saves → we read | [`our_fresh_world_survives_a_vanilla_load_and_save`] | our *writer* emitting something vanilla rejects, silently fixes up, or cannot represent — including a `level.dat`/`world_gen_settings.dat` vanilla refuses, which re-rolls the seed and is invisible in the saved blocks alone |
-//! | **B**: vanilla wrote → we load → we write → vanilla loads/saves → we read | [`a_real_vanilla_world_survives_our_load_and_save`] | our *reader* dropping data it cannot model — the destructive-persistence shape of issue #477, where a saved world comes back with its chests emptied |
+//! | **B**: vanilla wrote → we load → we write → vanilla loads/saves → we read | [`a_real_vanilla_world_survives_our_load_and_save`] | our *reader* dropping data it cannot model — a destructive-persistence shape where a saved world comes back with its chests emptied |
 //!
 //! `crates/lodestone-server/tests/world_persistence_round_trip.rs` is **our
 //! writer through our reader** and says so in its own header. It is a closed
@@ -181,8 +181,9 @@ const WRITTEN_B: i32 = COMPARED_B + 2;
 /// of vacuous test with extra steps.
 ///
 /// Maximising block-entity count is the right objective because that is
-/// precisely what direction B exists to protect (#477: 1,608 of 1,613 kinds
-/// unmodelled and dropped on save). The chosen block and its contents are
+/// precisely what direction B exists to protect (1,608 of 1,613 kinds
+/// unmodelled and dropped on save, measured at the time this gate was
+/// written). The chosen block and its contents are
 /// printed on every run, and asserted against a floor, so a fixture that
 /// drifted below usefulness fails loudly instead of passing quietly.
 ///
@@ -1185,8 +1186,8 @@ fn read_world(world: &Path, coords: &[(i32, i32)]) -> BTreeMap<(i32, i32), Nbt> 
 ///
 /// **A missing container runtime is a named panic, never a skip.** "Skip when
 /// the oracle is absent" is the *precondition* species of vacuous test, and
-/// this repo already carries 277 `#[ignore]` attributes whose rot is unbounded
-/// (#536); a gate that also degrades silently on a missing runtime is
+/// this repo already carries 277 `#[ignore]` attributes whose rot is unbounded;
+/// a gate that also degrades silently on a missing runtime is
 /// unverified in two independent ways at once.
 fn hand_to_vanilla(server_root: &Path, level: &str, commands: &[&str]) {
     let script = repo_root().join("scripts/live-oracles/save-parity.sh");
@@ -1230,7 +1231,7 @@ fn assert_vanilla_accepted_the_world(server_root: &Path) {
     let log = std::fs::read_to_string(&log_path)
         .unwrap_or_else(|e| panic!("read {} ({e}) — the harness should have left one", log_path.display()));
 
-    // Issue #468's exact bug: `readExistingSavedData` failing makes vanilla log
+    // `LevelStorageSource.readExistingSavedData` failing makes vanilla log
     // this and build `WorldOptions.defaultWithRandomSeed()`, silently replacing
     // the seed. Every block already on disk still loads, so no blocks-only
     // assertion can see it.
@@ -1823,8 +1824,9 @@ fn a_light_only_section_is_reported_by_its_y_not_swallowed_by_a_length_change() 
 
 #[test]
 fn a_dropped_block_entity_is_located_and_never_allowlisted() {
-    // #477's exact shape: a chunk that came back with one fewer chest. The
-    // report must name the coordinate, and no allowlist entry may permit it.
+    // The destructive-persistence shape this gate exists to catch: a chunk
+    // that came back with one fewer chest. The report must name the
+    // coordinate, and no allowlist entry may permit it.
     let chest = Nbt::Compound(vec![
         ("id".into(), Nbt::String("minecraft:chest".into())),
         ("x".into(), Nbt::Int(97)),
@@ -1895,8 +1897,8 @@ fn our_fresh_world_survives_a_vanilla_load_and_save() {
     eprintln!("--- direction A fixture census ---\n{before_census:#?}");
     assert_fixture_is_worth_testing("direction A", &before_census, coords.len(), 12, 16);
     // Measured, and reported rather than asserted-away: our generator produces
-    // **no block entities at all** (issue #520 — there is no block-entity layer
-    // on the generator path, so even a generated bee nest ships empty). That is
+    // **no block entities at all** — there is no block-entity layer
+    // on the generator path, so even a generated bee nest ships empty. That is
     // why the block-entity half of this gate lives in direction B, where the
     // fixture is a world a real server authored.
     eprintln!(
@@ -2000,9 +2002,9 @@ fn our_fresh_world_survives_a_vanilla_load_and_save() {
 /// the ones it originally wrote.
 ///
 /// This catches what direction A structurally cannot: our **reader** dropping
-/// data we do not model. That is issue #477's shape — persistence turning a
-/// missing feature into a destructive one, where a world opened here comes back
-/// with its chests emptied. #477 is closed (the `BlockEntity::Opaque`
+/// data we do not model — persistence turning a missing feature into a
+/// destructive one, where a world opened here comes back with its chests
+/// emptied. That destructive-persistence bug is fixed (the `BlockEntity::Opaque`
 /// passthrough landed), so this direction is also the end-to-end evidence that
 /// the passthrough survives a real JVM rather than only our own re-read.
 #[test]
@@ -2250,7 +2252,7 @@ fn a_real_vanilla_world_survives_our_load_and_save() {
     );
 
     // Counted separately from the path comparison, because a count is what
-    // #477's gate requirement asks for and a per-path report can be read as
+    // this gate's requirement asks for and a per-path report can be read as
     // "a few small differences" when it is really every container in the
     // region.
     let after_census = census(&theirs);

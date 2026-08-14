@@ -1,7 +1,6 @@
-//! The self-contained "write a region, read it back" round trip issue #298
-//! asks for as its own scope item — through an actual file on disk this
-//! time (`src/region.rs`'s unit tests cover the in-memory byte-buffer
-//! version). This intentionally checks `decode(encode(x)) == x` against our
+//! The self-contained "write a region, read it back" round trip, through an
+//! actual file on disk this time (`src/region.rs`'s unit tests cover the
+//! in-memory byte-buffer version). This intentionally checks `decode(encode(x)) == x` against our
 //! own writer, which per this repo's own standing rule proves our two
 //! halves agree with each other and nothing more — see
 //! `tests/region_real_world.rs` and `tests/level_dat_real_world.rs` for the

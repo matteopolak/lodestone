@@ -5,17 +5,17 @@
 //! Scheme ids, cited from
 //! `.cache/mc/26.2/src/net/minecraft/world/level/chunk/storage/RegionFileVersion.java`:
 //!
-//! | id | name | `RegionFileVersion` field | citation |
-//! |---|---|---|---|
-//! | 1 | gzip | `VERSION_GZIP` | `RegionFileVersion.java:26-28` |
-//! | 2 | zlib (`deflate`) | `VERSION_DEFLATE`, **the default** | `RegionFileVersion.java:29-33,45` |
-//! | 3 | uncompressed | `VERSION_NONE` | `RegionFileVersion.java:34` |
-//! | 4 | LZ4 | `VERSION_LZ4` | `RegionFileVersion.java:35-39` |
+//! | id | name | `RegionFileVersion` field |
+//! |---|---|---|
+//! | 1 | gzip | `VERSION_GZIP` |
+//! | 2 | zlib (`deflate`) | `VERSION_DEFLATE`, **the default** |
+//! | 3 | uncompressed | `VERSION_NONE` |
+//! | 4 | LZ4 | `VERSION_LZ4` |
 //!
 //! `server.properties`' `region-file-compression` key selects the scheme a
-//! server *writes* (`DedicatedServerProperties.java:112`: `this.get(
-//! "region-file-compression", "deflate")` — deflate is the default there
-//! too), and this repo's three live oracles
+//! server *writes* (`DedicatedServerProperties.regionFileComression`'s
+//! initializer: `this.get("region-file-compression", "deflate")` — deflate
+//! is the default there too), and this repo's three live oracles
 //! (`.cache/mc/{creative,terrain,survival}/server.properties`) all leave it
 //! at that default. So every real `.mca` this crate has been tested against
 //! uses scheme 2 — **not** 4. This corrects an assumption in the issue that
@@ -25,9 +25,9 @@
 //! no real-file evidence behind it, unlike the other three.
 //!
 //! A reader must accept whichever scheme id a chunk was written with
-//! (`RegionFileVersion.fromId`, `RegionFile.java:167-184`) — a region file
-//! can mix schemes across chunks if `region-file-compression` changed
-//! mid-life, since each chunk carries its own id.
+//! (`RegionFileVersion.fromId`, called from `RegionFile.createChunkInputStream`)
+//! — a region file can mix schemes across chunks if `region-file-compression`
+//! changed mid-life, since each chunk carries its own id.
 
 use crate::{Error, Result};
 use std::io::Read;
@@ -36,8 +36,9 @@ use std::io::Read;
 /// be wrapped in. Custom compression (scheme id 127,
 /// `RegionFileVersion.VERSION_CUSTOM`) exists in vanilla only as a
 /// forward-compatibility placeholder that immediately errors on decode
-/// (`RegionFile.java:169-178`, `readUTF` + "Unrecognized custom
-/// compression"), so it is deliberately not modelled as a variant here — see
+/// (`RegionFile.createChunkInputStream`'s `VERSION_CUSTOM` branch, `readUTF`
+/// + "Unrecognized custom compression"), so it is deliberately not modelled
+/// as a variant here — see
 /// [`Error::UnsupportedCompressionScheme`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionScheme {
@@ -45,8 +46,8 @@ pub enum CompressionScheme {
     /// for region-file chunks.
     Gzip,
     /// Scheme id 2. The default for region-file chunks
-    /// (`RegionFileVersion.DEFAULT`, `RegionFileVersion.java:45`) and the
-    /// only scheme any real file this crate has read actually uses.
+    /// (`RegionFileVersion.DEFAULT`) and the only scheme any real file this
+    /// crate has read actually uses.
     Zlib,
     /// Scheme id 3. Stores the chunk NBT with no compression at all.
     Uncompressed,

@@ -3,9 +3,8 @@
 //! # What it is
 //!
 //! The comparison primitive the world-save parity gate reports through
-//! (`tests/vanilla_save_parity.rs`, issue
-//! [#437](https://github.com/matteopolak/lodestone/issues/437)'s
-//! both-directions standard). Given two [`lodestone_core::Nbt`] trees it
+//! (`tests/vanilla_save_parity.rs`'s both-directions standard). Given two
+//! [`lodestone_core::Nbt`] trees it
 //! yields one [`Difference`] per differing leaf, each carrying the **full NBT
 //! path** to that leaf — `Level.sections[3].block_states.palette[7].Name`,
 //! not "chunks differ".
@@ -29,10 +28,9 @@
 //! rather than file bytes — which is what the gate does.
 //!
 //! **This module deliberately knows nothing about the chunk schema.** It is
-//! [`Nbt`]-in, paths-out. Per issue #298's stated trap (and
-//! [`crate::region`]'s module doc), the container crate must not grow a
-//! dependency on chunk internals; the palette/bit-storage decode the parity
-//! gate needs lives in the gate, not here.
+//! [`Nbt`]-in, paths-out. Per [`crate::region`]'s module doc, the container
+//! crate must not grow a dependency on chunk internals; the palette/bit-storage
+//! decode the parity gate needs lives in the gate, not here.
 //!
 //! # How it works
 //!

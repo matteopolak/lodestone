@@ -24,8 +24,8 @@
 //!    cited to a `file:line` — this was observed directly from the real
 //!    directory listing this oracle produced, not read out of decompiled
 //!    source — but worth recording here since it's exactly the kind of
-//!    thing #437's wiring work needs to get right and would otherwise learn
-//!    the hard way.
+//!    thing a future server-wiring layer needs to get right and would
+//!    otherwise learn the hard way.
 //!
 //! # Where the expected values came from
 //!
@@ -47,8 +47,8 @@
 //! chunk *schema* are two different problems). The walk here exists only to
 //! turn that tree into a human-checkable assertion in this one
 //! verification test; it is not exposed as part of the crate's public API,
-//! and issue [#437](https://github.com/matteopolak/lodestone/issues/437) is
-//! where a real chunk-schema layer belongs.
+//! and a future chunk-schema layer, wired into `lodestone-server`, is where
+//! a real version of this walk belongs.
 
 use lodestone_anvil::region::RegionFile;
 use lodestone_core::Nbt;

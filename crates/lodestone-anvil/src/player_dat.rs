@@ -1,5 +1,4 @@
-//! The per-player `.dat` container — 26.2's `PlayerDataStorage` (issue
-//! [#302](https://github.com/matteopolak/lodestone/issues/302)).
+//! The per-player `.dat` container — 26.2's `PlayerDataStorage`.
 //!
 //! # What it is
 //!

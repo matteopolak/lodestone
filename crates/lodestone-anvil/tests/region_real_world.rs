@@ -1,7 +1,7 @@
 //! Reads real `.mca` region files this repo did not write — the primary
-//! evidence gate for issue #298's own rule: `decode(encode(x)) == x` against
-//! our own writer proves nothing, so at least one side of every check here
-//! must be bytes this crate never produced.
+//! evidence gate for this repo's own standing rule: `decode(encode(x)) == x`
+//! against our own writer proves nothing, so at least one side of every
+//! check here must be bytes this crate never produced.
 //!
 //! # What's actually available
 //!
