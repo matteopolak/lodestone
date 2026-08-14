@@ -1118,7 +1118,37 @@ impl Positions {
 #[derive(Clone, Debug)]
 pub enum Decorator {
     Beehive { probability: f32 },
+    /// `TrunkVineDecorator` — a hanging vine on each of a log's four
+    /// horizontal neighbours, one independent coin flip per side (issue
+    /// #428: reached from `mega_jungle_tree`/`jungle_tree`'s own
+    /// `decorators` list, and from every `fallen_*_tree`'s
+    /// `stump_decorators`). See [`super::place::place_trunk_vine_decorator`].
+    TrunkVine,
+    /// `AttachedToLogsDecorator` — one block (a mushroom, for every shipped
+    /// instance) on a random direction off a random log, gated by
+    /// `probability` (issue #428: every `fallen_*_tree`'s `log_decorators`).
+    /// See [`super::place::place_attached_to_logs_decorator`].
+    AttachedToLogs {
+        probability: f32,
+        block_provider: BlockStateProvider,
+        directions: Vec<(i32, i32, i32)>,
+    },
     Unsupported,
+}
+
+/// `Direction.CODEC` — the six cardinal names `AttachedToLogsDecorator`'s
+/// `directions` list can name (every shipped instance uses only `"up"`, but
+/// the field is a general list in vanilla's own codec).
+fn parse_direction(s: &str) -> Option<(i32, i32, i32)> {
+    match s {
+        "down" => Some((0, -1, 0)),
+        "up" => Some((0, 1, 0)),
+        "north" => Some((0, 0, -1)),
+        "south" => Some((0, 0, 1)),
+        "west" => Some((-1, 0, 0)),
+        "east" => Some((1, 0, 0)),
+        _ => None,
+    }
 }
 
 impl Decorator {
@@ -1128,6 +1158,23 @@ impl Decorator {
             "beehive" => Decorator::Beehive {
                 probability: v["probability"].as_f64().unwrap_or(0.0) as f32,
             },
+            "trunk_vine" => Decorator::TrunkVine,
+            "attached_to_logs" => {
+                let block_provider = BlockStateProvider::try_parse(&v["block_provider"]);
+                let directions: Option<Vec<(i32, i32, i32)>> = v["directions"].as_array().map(|arr| {
+                    arr.iter().filter_map(|d| d.as_str().and_then(parse_direction)).collect()
+                });
+                match (block_provider, directions) {
+                    (Some(block_provider), Some(directions)) if !directions.is_empty() => {
+                        Decorator::AttachedToLogs {
+                            probability: v["probability"].as_f64().unwrap_or(0.0) as f32,
+                            block_provider,
+                            directions,
+                        }
+                    }
+                    _ => Decorator::Unsupported,
+                }
+            }
             _ => Decorator::Unsupported,
         }
     }
@@ -1147,6 +1194,15 @@ pub enum FeatureSizeCfg {
         limit: i32,
         lower_size: i32,
         upper_size: i32,
+        /// `FeatureSize.minClippedHeight` — `fancy_oak`'s own `4` (issue
+        /// #428). `None` for every other species' `two_layers_feature_size`
+        /// (oak's straight branch, birch, spruce, pine, acacia), which is
+        /// exactly vanilla's own `OptionalInt.empty()` default. See
+        /// [`place_tree`]'s own doc on the one place this is read: a tree
+        /// clipped by an obstruction can still place a shorter version of
+        /// itself when this is `Some` and the clip doesn't cut below it —
+        /// every other species requires an UNCLIPPED height instead.
+        min_clipped_height: Option<i32>,
     },
     ThreeLayers {
         limit: i32,
@@ -1154,17 +1210,24 @@ pub enum FeatureSizeCfg {
         lower_size: i32,
         middle_size: i32,
         upper_size: i32,
+        /// See [`Self::TwoLayers`]'s own field — no shipped
+        /// `three_layers_feature_size` (dark oak, pale oak) sets this, but
+        /// vanilla's codec allows it on either subclass, so it is parsed
+        /// here too rather than only where a config happens to use it.
+        min_clipped_height: Option<i32>,
     },
 }
 
 impl FeatureSizeCfg {
     fn try_parse(v: &Value) -> Option<Self> {
         let ty = v["type"].as_str()?;
+        let min_clipped_height = v.get("min_clipped_height").and_then(Value::as_i64).map(|n| n as i32);
         match ty.strip_prefix("minecraft:").unwrap_or(ty) {
             "two_layers_feature_size" => Some(Self::TwoLayers {
                 limit: v.get("limit").and_then(Value::as_i64).unwrap_or(1) as i32,
                 lower_size: v.get("lower_size").and_then(Value::as_i64).unwrap_or(0) as i32,
                 upper_size: v.get("upper_size").and_then(Value::as_i64).unwrap_or(1) as i32,
+                min_clipped_height,
             }),
             "three_layers_feature_size" => Some(Self::ThreeLayers {
                 limit: v.get("limit").and_then(Value::as_i64).unwrap_or(1) as i32,
@@ -1172,8 +1235,19 @@ impl FeatureSizeCfg {
                 lower_size: v.get("lower_size").and_then(Value::as_i64).unwrap_or(0) as i32,
                 middle_size: v.get("middle_size").and_then(Value::as_i64).unwrap_or(1) as i32,
                 upper_size: v.get("upper_size").and_then(Value::as_i64).unwrap_or(1) as i32,
+                min_clipped_height,
             }),
             _ => None,
+        }
+    }
+
+    /// `FeatureSize.minClippedHeight()` — see [`Self::TwoLayers`]'s own doc
+    /// on the one caller that reads this.
+pub(super)     fn min_clipped_height(&self) -> Option<i32> {
+        match *self {
+            Self::TwoLayers { min_clipped_height, .. } | Self::ThreeLayers { min_clipped_height, .. } => {
+                min_clipped_height
+            }
         }
     }
 
@@ -1182,14 +1256,14 @@ impl FeatureSizeCfg {
     /// treeHeight - upperLimit`); `TwoLayers` ignores it.
 pub(super)     fn size_at_height(&self, tree_height: i32, y: i32) -> i32 {
         match *self {
-            Self::TwoLayers { limit, lower_size, upper_size } => {
+            Self::TwoLayers { limit, lower_size, upper_size, .. } => {
                 if y < limit {
                     lower_size
                 } else {
                     upper_size
                 }
             }
-            Self::ThreeLayers { limit, upper_limit, lower_size, middle_size, upper_size } => {
+            Self::ThreeLayers { limit, upper_limit, lower_size, middle_size, upper_size, .. } => {
                 if y < limit {
                     lower_size
                 } else if y >= tree_height - upper_limit {
@@ -1304,6 +1378,12 @@ pub enum ConfiguredFeature {
     SimpleBlock(BlockStateProvider),
     Tree(Box<TreeConfig>),
     BlockColumn(Box<BlockColumnConfig>),
+    /// `FallenTreeFeature` (issue #428) — a real, distinct feature type, NOT
+    /// a [`Self::Tree`] variant: a vertical stump plus a horizontal fallen
+    /// log, no trunk/foliage placer involved at all. Reachable from many
+    /// biomes' `fallen_*_tree` `RandomSelector` branches at a small
+    /// (~1-1.25%) chance each. See [`super::features::place_fallen_tree`].
+    FallenTree(Box<super::features::FallenTreeCfg>),
     RandomSelector {
         default: Box<PlacedRef>,
         options: Vec<(f32, PlacedRef)>,
@@ -1444,6 +1524,35 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 "block_column: unsupported layer/direction/predicate".into(),
             ),
         },
+        "fallen_tree" => {
+            let c = &doc["config"];
+            match (
+                BlockStateProvider::try_parse(&c["trunk_provider"]),
+                try_parse_int_provider(&c["log_length"]),
+            ) {
+                (Some(trunk_provider), Some(log_length)) => {
+                    let stump_decorators = c
+                        .get("stump_decorators")
+                        .and_then(Value::as_array)
+                        .map(|arr| arr.iter().map(Decorator::parse).collect())
+                        .unwrap_or_default();
+                    let log_decorators = c
+                        .get("log_decorators")
+                        .and_then(Value::as_array)
+                        .map(|arr| arr.iter().map(Decorator::parse).collect())
+                        .unwrap_or_default();
+                    ConfiguredFeature::FallenTree(Box::new(super::features::FallenTreeCfg {
+                        trunk_provider,
+                        log_length,
+                        stump_decorators,
+                        log_decorators,
+                    }))
+                }
+                _ => ConfiguredFeature::Unsupported(
+                    "fallen_tree: unsupported trunk_provider/log_length".into(),
+                ),
+            }
+        }
         "random_selector" => {
             let cfg = &doc["config"];
             let default = resolve_placed_feature_ref(resolver, &cfg["default"]);
@@ -1762,6 +1871,7 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             ConfiguredFeature::SimpleBlock(_)
             | ConfiguredFeature::Tree(_)
             | ConfiguredFeature::BlockColumn(_)
+            | ConfiguredFeature::FallenTree(_)
             | ConfiguredFeature::Spring(_)
             | ConfiguredFeature::Disk(_)
             | ConfiguredFeature::BlockPile(_)

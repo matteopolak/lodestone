@@ -47,9 +47,12 @@ use crate::feature::{BlockPos, IntProvider};
 use crate::rng::RandomSource;
 
 use super::config::{
-    BlockPredicate, BlockStateProvider, PlacedRef, VegTags, blocks_motion, is_air, is_fluid,
+    BlockPredicate, BlockStateProvider, Decorator, PlacedRef, VegTags, blocks_motion, is_air, is_fluid,
 };
 use super::grid::VegGrid;
+use super::ids::Rewrite;
+use super::place::{place_attached_to_logs_decorator, place_trunk_vine_decorator};
+use super::tree::valid_tree_pos;
 
 /// `level.getSeaLevel()` for the overworld. Only [`place_blue_ice`] reads it.
 pub const SEA_LEVEL: i32 = 63;
@@ -216,6 +219,21 @@ pub struct SculkPatchCfg {
     pub spread_rounds: i32,
     pub extra_rare_growths: IntProvider,
     pub catalyst_chance: f32,
+}
+
+/// `FallenTreeConfiguration` (issue #428) — `FallenTreeFeature`'s own
+/// config. Distinct from [`super::config::TreeConfig`]: no trunk/foliage
+/// placer, no `minimum_size`. `stump_decorators`/`log_decorators` reuse
+/// [`super::config::Decorator`] — the same `TreeDecorator` hierarchy
+/// `TreeConfig.decorators` already parses through, since vanilla's
+/// `TrunkVineDecorator`/`AttachedToLogsDecorator` are shared, not specific
+/// to either feature type.
+#[derive(Clone, Debug)]
+pub struct FallenTreeCfg {
+    pub trunk_provider: BlockStateProvider,
+    pub log_length: IntProvider,
+    pub stump_decorators: Vec<Decorator>,
+    pub log_decorators: Vec<Decorator>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,4 +1432,150 @@ pub(super) fn place_sculk_patch<R: RandomSource>(
             );
         }
     }
+}
+
+/// `FallenTreeFeature.isOverSolidGround` (`isFaceSturdy(UP)` on the block
+/// below) — reuses [`sturdy_at`], this file's own established approximation
+/// for exactly that vanilla concept (see the module doc's table). Affects
+/// only whether the ground check passes, never the RNG stream:
+/// `canPlaceEntireFallenLog` (below) draws no RNG regardless of its verdict.
+fn is_over_solid_ground(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
+    sturdy_at(grid, x, y - 1, z)
+}
+
+/// Applies one `TreeDecorator` list (`stump_decorators`/`log_decorators`)
+/// against `logs`, dispatching the two kinds [`super::place`] implements.
+/// `Beehive` cannot occur here — no shipped `fallen_*_tree` config carries
+/// one, and vanilla's own registry never attaches a beehive to a fallen
+/// tree — so it degrades the same as `Unsupported` rather than getting its
+/// own (unreachable) arm.
+fn apply_fallen_tree_decorators<R: RandomSource>(
+    random: &mut R,
+    logs: &[BlockPos],
+    decorators: &[Decorator],
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    for decorator in decorators {
+        match decorator {
+            Decorator::TrunkVine => place_trunk_vine_decorator(random, logs, grid, tags),
+            Decorator::AttachedToLogs { probability, block_provider, directions } => {
+                place_attached_to_logs_decorator(
+                    random,
+                    logs,
+                    *probability,
+                    block_provider,
+                    directions,
+                    grid,
+                    tags,
+                );
+            }
+            Decorator::Beehive { .. } | Decorator::Unsupported => {}
+        }
+    }
+}
+
+/// `FallenTreeFeature.placeFallenTree` (issue #428) — a vertical stump plus
+/// a horizontal fallen log, reachable from many biomes' `fallen_*_tree`
+/// `RandomSelector` branches at a small (~1-1.25%) chance each. A real,
+/// distinct feature type: `placeLogBlock` places UNCONDITIONALLY (no
+/// `validTreePos` gate the way every trunk placer's own `placeLog` has one)
+/// — `canPlaceEntireFallenLog`'s own pre-check is what decides whether
+/// placement happens at all, and it draws no RNG of its own, so this
+/// function's RNG stream is fixed regardless of that check's outcome.
+///
+/// RNG order, ported from `placeFallenTree` exactly: the stump (one
+/// trunk-provider draw, plus its own `stump_decorators`), then ONE
+/// `Direction.Plane.HORIZONTAL` draw, ONE `log_length` sample, ONE
+/// `nextInt(2)` for the start-position offset — all real draws even when
+/// the walk that follows finds no room at all — then, only if the whole
+/// log's path checks out, the log itself (one trunk-provider draw per
+/// position, unconditional) and its own `log_decorators`.
+pub(super) fn place_fallen_tree<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    cfg: &FallenTreeCfg,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    // `placeStump`: `placeLogBlock` at `origin`, identity axis modifier
+    // (leaves the configured — vertical — axis unchanged).
+    let Some(stump_state) = cfg.trunk_provider.get_state_id(grid, tags, random, origin) else {
+        return;
+    };
+    grid.set_id_if_in_bounds(origin.x, origin.y, origin.z, stump_state);
+    apply_fallen_tree_decorators(random, &[origin], &cfg.stump_decorators, grid, tags);
+
+    // `Direction.Plane.HORIZONTAL.getRandomDirection` — the same NORTH,
+    // EAST, SOUTH, WEST index table every horizontal trunk placer in this
+    // module already uses.
+    const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+    let direction = STEP[random.next_int_bounded(4) as usize];
+    let log_length = cfg.log_length.sample(random) - 2;
+    let step_count = 2 + random.next_int_bounded(2);
+    let mut log_start = BlockPos {
+        x: origin.x + direction.0 * step_count,
+        y: origin.y,
+        z: origin.z + direction.1 * step_count,
+    };
+
+    // `setGroundHeightForFallenLogStartPos`: move up one, then walk down up
+    // to 6 times looking for a valid, solid-ground position. No RNG.
+    log_start.y += 1;
+    for _ in 0..6 {
+        if valid_tree_pos(grid, tags, log_start.x, log_start.y, log_start.z)
+            && is_over_solid_ground(grid, log_start.x, log_start.y, log_start.z)
+        {
+            break;
+        }
+        log_start.y -= 1;
+    }
+
+    // `canPlaceEntireFallenLog`: a pure check over the same walk
+    // `placeFallenLog` below repeats — no RNG draw either way.
+    if log_length > 0 {
+        let mut gap = 0;
+        let mut ok = true;
+        for i in 0..log_length {
+            let pos = BlockPos {
+                x: log_start.x + direction.0 * i,
+                y: log_start.y,
+                z: log_start.z + direction.1 * i,
+            };
+            if !valid_tree_pos(grid, tags, pos.x, pos.y, pos.z) {
+                ok = false;
+                break;
+            }
+            if is_over_solid_ground(grid, pos.x, pos.y, pos.z) {
+                gap = 0;
+            } else {
+                gap += 1;
+                if gap > 2 {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            return;
+        }
+    }
+
+    // `placeFallenLog`: unconditional placement, sideways axis from
+    // `direction`'s own axis (`RotatedPillarBlock.AXIS`).
+    let axis = if direction.0 != 0 { "x" } else { "z" };
+    let mut fallen_log = Vec::with_capacity(log_length.max(0) as usize);
+    for i in 0..log_length.max(0) {
+        let pos = BlockPos {
+            x: log_start.x + direction.0 * i,
+            y: log_start.y,
+            z: log_start.z + direction.1 * i,
+        };
+        if let Some(state) = cfg.trunk_provider.get_state_id(grid, tags, random, pos) {
+            let state = tags.rewrite(grid.interner(), state, Rewrite::Axis(axis)).unwrap_or(state);
+            grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
+            fallen_log.push(pos);
+        }
+    }
+    apply_fallen_tree_decorators(random, &fallen_log, &cfg.log_decorators, grid, tags);
 }

@@ -516,6 +516,10 @@ fn place_configured_feature<R: RandomSource>(
             census_bump(|c| c.block_column += 1);
             place_block_column(random, pos, cfg, grid, tags)
         }
+        ConfiguredFeature::FallenTree(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_fallen_tree(random, pos, cfg, grid, tags)
+        }
         ConfiguredFeature::RandomSelector { default, options } => {
             census_bump(|c| c.random_selector += 1);
             for (chance, option) in options {
@@ -801,6 +805,7 @@ mod tests {
                 limit: 1,
                 lower_size: 0,
                 upper_size: 1,
+                min_clipped_height: None,
             },
             decorators: Vec::new(),
         };
@@ -860,6 +865,7 @@ mod tests {
                 limit: 1,
                 lower_size: 0,
                 upper_size: 1,
+                min_clipped_height: None,
             },
             decorators: Vec::new(),
         };
@@ -907,6 +913,7 @@ mod tests {
                 limit: 2,
                 lower_size: 0,
                 upper_size: 2,
+                min_clipped_height: None,
             },
             decorators: Vec::new(),
         };
@@ -965,6 +972,7 @@ mod tests {
                 lower_size: 0,
                 middle_size: 1,
                 upper_size: 2,
+                min_clipped_height: None,
             },
             decorators: Vec::new(),
         };
@@ -1315,7 +1323,12 @@ mod tests {
                 radius: IntProvider::Constant(1),
                 offset: IntProvider::Constant(0),
             },
-            feature_size: FeatureSizeCfg::TwoLayers { limit: 1, lower_size: 1, upper_size: 2 },
+            feature_size: FeatureSizeCfg::TwoLayers {
+                limit: 1,
+                lower_size: 1,
+                upper_size: 2,
+                min_clipped_height: None,
+            },
             decorators: Vec::new(),
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
@@ -1377,7 +1390,12 @@ mod tests {
                 radius: IntProvider::Constant(2),
                 offset: IntProvider::Constant(0),
             },
-            feature_size: FeatureSizeCfg::TwoLayers { limit: 1, lower_size: 1, upper_size: 2 },
+            feature_size: FeatureSizeCfg::TwoLayers {
+                limit: 1,
+                lower_size: 1,
+                upper_size: 2,
+                min_clipped_height: None,
+            },
             decorators: Vec::new(),
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
@@ -1437,7 +1455,12 @@ mod tests {
                 radius: IntProvider::Constant(2),
                 offset: IntProvider::Constant(1),
             },
-            feature_size: FeatureSizeCfg::TwoLayers { limit: 0, lower_size: 0, upper_size: 0 },
+            feature_size: FeatureSizeCfg::TwoLayers {
+                limit: 0,
+                lower_size: 0,
+                upper_size: 0,
+                min_clipped_height: None,
+            },
             decorators: Vec::new(),
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
@@ -1615,5 +1638,332 @@ mod tests {
         });
         let feature = parse_configured_feature_doc(&EmptyResolver, &doc);
         assert!(matches!(feature, ConfiguredFeature::Tree(_)), "expected Tree, got {feature:?}");
+    }
+
+    /// `FancyTrunkPlacer.makeLimb`'s FINAL call (`makeLimb(origin,
+    /// origin.above(trunkHeight), doPlace=true)`) places the tree's own main
+    /// vertical column unconditionally — no RNG-dependent branch check gates
+    /// it, and on open flat ground every step is `valid_tree_pos`. So its
+    /// log count is exactly `trunk_height + 1` regardless of seed, computed
+    /// here from the same formula the placer itself uses
+    /// (`Mth.floor((tree_height + 2) * 0.618)`), not guessed: with
+    /// `base_height=3, height_rand_a=height_rand_b=0` (deterministic
+    /// `tree_height=3`), `height=5`, `trunk_height=floor(5*0.618)=floor(3.09)=3`,
+    /// so 4 logs. Two different seeds must agree on this exact count even
+    /// though the surrounding branch spray differs between them — the
+    /// discriminating property this test checks is that the count is
+    /// seed-INDEPENDENT, not merely present.
+    #[test]
+    fn fancy_trunk_places_a_deterministic_main_trunk_and_reaches_leaves() {
+        let cfg = TreeConfig {
+            below_trunk_provider: None,
+            trunk_provider: BlockStateProvider::Simple("minecraft:oak_log[axis=y]".to_string()),
+            foliage_provider: BlockStateProvider::Simple(
+                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            ),
+            trunk_placer: TrunkPlacerCfg::Fancy { base_height: 3, height_rand_a: 0, height_rand_b: 0 },
+            foliage_placer: FoliagePlacerCfg::Fancy {
+                height: 4,
+                radius: IntProvider::Constant(2),
+                offset: IntProvider::Constant(4),
+            },
+            feature_size: FeatureSizeCfg::TwoLayers {
+                limit: 0,
+                lower_size: 0,
+                upper_size: 0,
+                min_clipped_height: Some(4),
+            },
+            decorators: Vec::new(),
+        };
+        for seed in [1u64, 99] {
+            let mut grid = grid_with_flat_ground(-64, 384, 69);
+            let tags = VegTags::default();
+            let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(seed));
+            let origin = BlockPos { x: 8, y: 70, z: 8 };
+            place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+            let mut main_trunk_logs = 0;
+            for y in 70..=73 {
+                if base_id(grid.get(8, y, 8)) == "minecraft:oak_log" {
+                    main_trunk_logs += 1;
+                }
+            }
+            assert_eq!(
+                main_trunk_logs, 4,
+                "seed {seed}: the unconditional main-trunk limb must place exactly 4 logs \
+                 (trunk_height=3, 0..=3 inclusive)"
+            );
+
+            let mut leaf_count = 0;
+            for y in 65..90 {
+                for x in 0..16 {
+                    for z in 0..16 {
+                        if base_id(grid.get(x, y, z)) == "minecraft:oak_leaves" {
+                            leaf_count += 1;
+                        }
+                    }
+                }
+            }
+            assert!(leaf_count > 0, "seed {seed}: a placed fancy oak must carry at least one leaf block");
+        }
+    }
+
+    /// `TreeFeature.doPlace`'s `min_clipped_height` acceptance path (issue
+    /// #428's `fancy_oak` increment) — before this, [`place_tree`] rejected
+    /// any tree whose free-height scan found an obstruction at all, which is
+    /// wrong for a species like fancy oak whose `two_layers_feature_size`
+    /// carries `min_clipped_height`. Both arms use the SAME config
+    /// (`tree_height=3` fixed, `min_clipped_height=Some(2)`,
+    /// `feature_size` radius 0 at every height so only the origin's own
+    /// column is scanned) and differ only in WHERE the obstruction sits —
+    /// the discriminating input this rule needs, per CLAUDE.md's "evaluate
+    /// the wrong hypothesis first" rule: the pre-fix code would have
+    /// rejected the accept-case too, so a test that only covers the
+    /// accept-case cannot tell the fix from a no-op.
+    fn fancy_min_clipped_height_cfg() -> TreeConfig {
+        TreeConfig {
+            below_trunk_provider: None,
+            trunk_provider: BlockStateProvider::Simple("minecraft:oak_log[axis=y]".to_string()),
+            foliage_provider: BlockStateProvider::Simple(
+                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            ),
+            trunk_placer: TrunkPlacerCfg::Fancy { base_height: 3, height_rand_a: 0, height_rand_b: 0 },
+            foliage_placer: FoliagePlacerCfg::Fancy {
+                height: 4,
+                radius: IntProvider::Constant(2),
+                offset: IntProvider::Constant(4),
+            },
+            feature_size: FeatureSizeCfg::TwoLayers {
+                limit: 0,
+                lower_size: 0,
+                upper_size: 0,
+                min_clipped_height: Some(2),
+            },
+            decorators: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn fancy_trunk_clip_at_min_clipped_height_still_places_a_shorter_tree() {
+        // Obstruction at origin.y + 4: the free-height scan (`y in
+        // 0..=tree_height+1` = `0..=4`) fails at y=4, so
+        // `clipped = 4 - 2 = 2`. `2 >= min_clipped_height(2)` — accepted,
+        // and `clipped_tree_height=2` is what gets passed to the trunk
+        // placer (not the original 3).
+        let cfg = fancy_min_clipped_height_cfg();
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        grid.seed(8, 74, 8, "minecraft:stone".to_string());
+        let tags = VegTags::default();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(1));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        // clipped_tree_height=2 => height=4, trunk_height=floor(4*0.618)=2,
+        // so the main trunk is exactly 3 logs (y=0..=2), well clear of the
+        // stone obstruction at y=4.
+        let mut main_trunk_logs = 0;
+        for y in 70..=72 {
+            if base_id(grid.get(8, y, 8)) == "minecraft:oak_log" {
+                main_trunk_logs += 1;
+            }
+        }
+        assert_eq!(
+            main_trunk_logs, 3,
+            "accepted via min_clipped_height: a real (shorter) tree must still place"
+        );
+    }
+
+    #[test]
+    fn fancy_trunk_clip_below_min_clipped_height_places_nothing() {
+        // Same config, obstruction one block lower (origin.y + 3): the scan
+        // fails at y=3, `clipped = 3 - 2 = 1`. `1 >= min_clipped_height(2)`
+        // is false and `1 >= tree_height(3)` is also false — rejected
+        // outright, matching vanilla's real `doPlace` returning `false`.
+        let cfg = fancy_min_clipped_height_cfg();
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        grid.seed(8, 73, 8, "minecraft:stone".to_string());
+        let tags = VegTags::default();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(1));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        for y in 70..80 {
+            for x in 4..13 {
+                for z in 4..13 {
+                    assert_ne!(
+                        base_id(grid.get(x, y, z)),
+                        "minecraft:oak_log",
+                        "a clip below min_clipped_height must reject the whole tree, not \
+                         truncate it further"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The real `configured_feature/fancy_oak.json` (transcribed here — same
+    /// convention as the dark_oak/cactus tests above) must parse to
+    /// [`ConfiguredFeature::Tree`], not [`ConfiguredFeature::Unsupported`] —
+    /// the regression control for `fancy_trunk_placer`/`fancy_foliage_placer`/
+    /// `two_layers_feature_size`'s own `min_clipped_height` field, all three
+    /// previously unmodelled.
+    #[test]
+    fn real_fancy_oak_configured_feature_parses_as_tree() {
+        struct EmptyResolver;
+        impl Resolver for EmptyResolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                unimplemented!()
+            }
+        }
+        let doc = serde_json::json!({
+            "type": "minecraft:tree",
+            "config": {
+                "below_trunk_provider": {
+                    "type": "minecraft:rule_based_state_provider",
+                    "rules": [{
+                        "if_true": {
+                            "type": "minecraft:not",
+                            "predicate": {"type": "minecraft:matching_block_tag", "tag": "minecraft:cannot_replace_below_tree_trunk"}
+                        },
+                        "then": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:dirt"}}
+                    }]
+                },
+                "decorators": [],
+                "foliage_placer": {"type": "minecraft:fancy_foliage_placer", "height": 4, "offset": 4, "radius": 2},
+                "foliage_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {"Name": "minecraft:oak_leaves", "Properties": {"distance": "7", "persistent": "false", "waterlogged": "false"}}
+                },
+                "ignore_vines": true,
+                "minimum_size": {
+                    "type": "minecraft:two_layers_feature_size",
+                    "limit": 0,
+                    "min_clipped_height": 4,
+                    "upper_size": 0
+                },
+                "trunk_placer": {"type": "minecraft:fancy_trunk_placer", "base_height": 3, "height_rand_a": 11, "height_rand_b": 0},
+                "trunk_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {"Name": "minecraft:oak_log", "Properties": {"axis": "y"}}
+                }
+            }
+        });
+        let feature = parse_configured_feature_doc(&EmptyResolver, &doc);
+        assert!(matches!(feature, ConfiguredFeature::Tree(_)), "expected Tree, got {feature:?}");
+        if let ConfiguredFeature::Tree(cfg) = feature {
+            assert!(
+                matches!(cfg.feature_size.min_clipped_height(), Some(4)),
+                "fancy_oak's min_clipped_height=4 must survive parsing"
+            );
+        }
+    }
+
+    /// `FallenTreeFeature.placeLogBlock` places the stump UNCONDITIONALLY —
+    /// no `validTreePos` gate — so on any terrain at all, exactly one
+    /// `jungle_log` lands at `origin` regardless of seed. This is the
+    /// discriminating structural guarantee this test leans on for the
+    /// stump half; the horizontal-log half additionally needs terrain that
+    /// makes `canPlaceEntireFallenLog` succeed for every possible random
+    /// direction, which flat open ground (identical in all four horizontal
+    /// directions) provides regardless of seed.
+    #[test]
+    fn fallen_tree_places_a_stump_and_a_horizontal_log_on_flat_ground() {
+        let cfg = features::FallenTreeCfg {
+            trunk_provider: BlockStateProvider::Simple("minecraft:jungle_log[axis=y]".to_string()),
+            // `log_length.sample() - 2 = 2`: small enough that the fallen
+            // log's worst-case reach (offset 3 + length 2 = 5) stays well
+            // inside a 16-wide chunk from a centred origin.
+            log_length: IntProvider::Constant(4),
+            stump_decorators: Vec::new(),
+            log_decorators: Vec::new(),
+        };
+        for seed in [1u64, 7, 42] {
+            let mut grid = grid_with_flat_ground(-64, 384, 69);
+            let tags = VegTags::default();
+            let mut random = LegacyRandomSource::new(seed);
+            let origin = BlockPos { x: 8, y: 70, z: 8 };
+            features::place_fallen_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+            assert_eq!(
+                base_id(grid.get(8, 70, 8)),
+                "minecraft:jungle_log",
+                "seed {seed}: the stump places unconditionally at origin"
+            );
+
+            let mut log_count = 0;
+            for x in 2..15 {
+                for z in 2..15 {
+                    if base_id(grid.get(x, 70, z)) == "minecraft:jungle_log" {
+                        log_count += 1;
+                    }
+                }
+            }
+            assert!(
+                log_count >= 3,
+                "seed {seed}: stump (1) + a 2-block fallen log on flat ground must place at \
+                 least 3 jungle_log blocks total, found {log_count}"
+            );
+        }
+    }
+
+    /// The real `configured_feature/fallen_jungle_tree.json` (transcribed
+    /// here) must parse to [`ConfiguredFeature::FallenTree`], not
+    /// [`ConfiguredFeature::Unsupported`] — the regression control for
+    /// `minecraft:fallen_tree`'s own configured-feature type, plus its
+    /// `trunk_vine`/`attached_to_logs` decorators, all four previously
+    /// unmodelled.
+    #[test]
+    fn real_fallen_jungle_tree_configured_feature_parses_as_fallen_tree() {
+        struct EmptyResolver;
+        impl Resolver for EmptyResolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                unimplemented!()
+            }
+        }
+        let doc = serde_json::json!({
+            "type": "minecraft:fallen_tree",
+            "config": {
+                "log_decorators": [{
+                    "type": "minecraft:attached_to_logs",
+                    "block_provider": {
+                        "type": "minecraft:weighted_state_provider",
+                        "entries": [
+                            {"data": {"Name": "minecraft:red_mushroom"}, "weight": 2},
+                            {"data": {"Name": "minecraft:brown_mushroom"}, "weight": 1}
+                        ]
+                    },
+                    "directions": ["up"],
+                    "probability": 0.1
+                }],
+                "log_length": {"type": "minecraft:uniform", "max_inclusive": 11, "min_inclusive": 4},
+                "stump_decorators": [{"type": "minecraft:trunk_vine"}],
+                "trunk_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {"Name": "minecraft:jungle_log", "Properties": {"axis": "y"}}
+                }
+            }
+        });
+        let feature = parse_configured_feature_doc(&EmptyResolver, &doc);
+        assert!(matches!(feature, ConfiguredFeature::FallenTree(_)), "expected FallenTree, got {feature:?}");
+        if let ConfiguredFeature::FallenTree(cfg) = feature {
+            assert_eq!(cfg.stump_decorators.len(), 1, "trunk_vine stump decorator must parse");
+            assert!(
+                matches!(cfg.stump_decorators[0], Decorator::TrunkVine),
+                "expected TrunkVine, got {:?}",
+                cfg.stump_decorators[0]
+            );
+            assert_eq!(cfg.log_decorators.len(), 1, "attached_to_logs log decorator must parse");
+            assert!(
+                matches!(cfg.log_decorators[0], Decorator::AttachedToLogs { .. }),
+                "expected AttachedToLogs, got {:?}",
+                cfg.log_decorators[0]
+            );
+        }
     }
 }

@@ -67,6 +67,18 @@ pub enum TrunkPlacerCfg {
         height_rand_a: i32,
         height_rand_b: i32,
     },
+    /// `FancyTrunkPlacer` — the `fancy_oak_*`/`fancy_oak_checked` branch
+    /// shared by oak, jungle and dark_forest (issue #428's highest-value
+    /// remaining gap). Structurally distinct from every other placer here:
+    /// a slim central trunk plus a scattered spray of diagonal limbs, each
+    /// walked out from a randomly-angled, randomly-scaled offset and only
+    /// actually grown if a dry-run check finds room. See
+    /// [`place_fancy_trunk`] for the port of `placeTrunk` itself.
+    Fancy {
+        base_height: i32,
+        height_rand_a: i32,
+        height_rand_b: i32,
+    },
 }
 
 impl TrunkPlacerCfg {
@@ -81,6 +93,7 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
             "dark_oak_trunk_placer" => Some(Self::DarkOak { base_height, height_rand_a, height_rand_b }),
             "giant_trunk_placer" => Some(Self::Giant { base_height, height_rand_a, height_rand_b }),
             "mega_jungle_trunk_placer" => Some(Self::MegaJungle { base_height, height_rand_a, height_rand_b }),
+            "fancy_trunk_placer" => Some(Self::Fancy { base_height, height_rand_a, height_rand_b }),
             _ => None,
         }
     }
@@ -91,7 +104,8 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
             | Self::Forking { base_height, height_rand_a, height_rand_b }
             | Self::DarkOak { base_height, height_rand_a, height_rand_b }
             | Self::Giant { base_height, height_rand_a, height_rand_b }
-            | Self::MegaJungle { base_height, height_rand_a, height_rand_b } => {
+            | Self::MegaJungle { base_height, height_rand_a, height_rand_b }
+            | Self::Fancy { base_height, height_rand_a, height_rand_b } => {
                 (base_height, height_rand_a, height_rand_b)
             }
         }
@@ -544,6 +558,288 @@ pub(super) fn place_mega_jungle_trunk<R: RandomSource>(
     placed_any
 }
 
+/// `TrunkPlacer.isFree` — `validTreePos(pos) || pos is a log`. Every other
+/// placer in this module only ever needs [`valid_tree_pos`] on its own
+/// (argued case-by-case in each one's own doc comment: the OR-with-logs
+/// clause never changes the outcome because the subsequent `placeLog` call
+/// re-checks `validTreePos` regardless). [`place_fancy_trunk`]'s dry-run
+/// limb check is the first place in this module where that argument does
+/// NOT apply — `makeLimb`'s `doPlace: false` branch uses `isFree` directly
+/// as its own accept/reject verdict, with no follow-up `placeLog` to fall
+/// back on, so the "OR already a log" half is load-bearing here.
+fn is_free(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i32) -> bool {
+    valid_tree_pos(grid, tags, x, y, z) || tags.has(grid.interner(), Tag::Logs, grid.get_id(x, y, z))
+}
+
+/// `FancyTrunkPlacer.getLogAxis`: the log axis a limb step should carry,
+/// derived from how far this step has moved horizontally from the limb's
+/// own start — `Axis::Y` only when the step hasn't moved horizontally at
+/// all (`maxdiff == 0`), matching vanilla exactly (not merely "usually Y for
+/// a vertical trunk").
+fn fancy_log_axis(start_pos: BlockPos, pos: BlockPos) -> &'static str {
+    let xdiff = (pos.x - start_pos.x).abs();
+    let zdiff = (pos.z - start_pos.z).abs();
+    let maxdiff = xdiff.max(zdiff);
+    if maxdiff > 0 {
+        if xdiff == maxdiff { "x" } else { "z" }
+    } else {
+        "y"
+    }
+}
+
+/// `FancyTrunkPlacer.makeLimb` — walks the straight line from `start_pos` to
+/// `end_pos` in exactly `getSteps(delta)` = `max(|dx|,|dy|,|dz|)` increments
+/// (so every limb, however diagonal, visits its endpoints exactly and
+/// distributes evenly between them), either placing a real log at each step
+/// (`do_place: true`, unconditionally through the whole line) or checking
+/// [`is_free`] at each step and bailing the moment one fails (`do_place:
+/// false`, a pure dry run — real vanilla's own "is there room for this
+/// limb" probe, called with the identical `start_pos`/`end_pos` pair the
+/// placing call would use later).
+///
+/// The `(float) delta / steps` division is real IEEE float division, not
+/// integer division — `steps` can only be `0` when `do_place` is `true` and
+/// the two endpoints coincide (guarded by the caller never doing that; see
+/// [`place_fancy_trunk`]'s own call sites), but the division is written to
+/// match Java's `0.0f/0` = NaN / `x/0.0f` = ±Infinity semantics rather than
+/// risk an integer-division panic if that guarantee is ever loosened.
+#[allow(clippy::too_many_arguments)]
+fn make_limb<R: RandomSource>(
+    random: &mut R,
+    start_pos: BlockPos,
+    end_pos: BlockPos,
+    do_place: bool,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    trunk_provider: &BlockStateProvider,
+    placed_any: &mut bool,
+    trunk_positions: &mut Vec<BlockPos>,
+) -> bool {
+    if !do_place && start_pos == end_pos {
+        return true;
+    }
+    let delta = (end_pos.x - start_pos.x, end_pos.y - start_pos.y, end_pos.z - start_pos.z);
+    let steps = delta.0.abs().max(delta.1.abs()).max(delta.2.abs());
+    let steps_f = steps as f32;
+    let dxf = delta.0 as f32 / steps_f;
+    let dyf = delta.1 as f32 / steps_f;
+    let dzf = delta.2 as f32 / steps_f;
+    for i in 0..=steps {
+        let fi = i as f32;
+        let pos = BlockPos {
+            x: start_pos.x + lodestone_worldgen_core::math::floor(f64::from(0.5_f32 + fi * dxf)),
+            y: start_pos.y + lodestone_worldgen_core::math::floor(f64::from(0.5_f32 + fi * dyf)),
+            z: start_pos.z + lodestone_worldgen_core::math::floor(f64::from(0.5_f32 + fi * dzf)),
+        };
+        if do_place {
+            if valid_tree_pos(grid, tags, pos.x, pos.y, pos.z) {
+                if let Some(state) = trunk_provider.get_state_id(grid, tags, random, pos) {
+                    let axis = fancy_log_axis(start_pos, pos);
+                    let state = tags
+                        .rewrite(grid.interner(), state, Rewrite::Axis(axis))
+                        .unwrap_or(state);
+                    grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
+                    *placed_any = true;
+                    trunk_positions.push(pos);
+                }
+            }
+        } else if !is_free(grid, tags, pos.x, pos.y, pos.z) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `FancyTrunkPlacer.treeShape`: the limb-spray envelope radius at height
+/// `y` of a tree whose total (already `+2`-adjusted) height is `height` —
+/// `-1.0` below `0.3 * height` (no limbs grow that low), `0.0` once the
+/// implied circle would extend past its own centre, and a real ellipse
+/// radius (halved) in between. `distance` is computed unconditionally
+/// before either branch, matching vanilla's own evaluation order exactly
+/// (including that it can transiently hold a value from a negative
+/// `sqrt` argument on the `adjacent == 0.0` path, which is immediately
+/// overwritten rather than read).
+fn tree_shape(height: i32, y: i32) -> f32 {
+    if (y as f32) < (height as f32) * 0.3 {
+        return -1.0;
+    }
+    let radius = height as f32 / 2.0;
+    let adjacent = radius - y as f32;
+    let mut distance = (f64::from(radius * radius - adjacent * adjacent).sqrt()) as f32;
+    if adjacent == 0.0 {
+        distance = radius;
+    } else if lodestone_worldgen_core::math::abs_f32(adjacent) >= radius {
+        return 0.0;
+    }
+    distance * 0.5
+}
+
+/// `FancyTrunkPlacer.trimBranches`: whether a branch based this low
+/// (`local_y`, relative to the tree's own origin) survives into the final
+/// foliage-attachment list at all — `local_y >= height * 0.2`, in `f64`
+/// (Java widens both operands via the `double` literal `0.2`).
+fn trim_branches(height: i32, local_y: i32) -> bool {
+    f64::from(local_y) >= f64::from(height) * 0.2
+}
+
+/// `FancyTrunkPlacer.placeTrunk` — oak's `fancy_oak_*`/`fancy_oak_checked`
+/// branch (issue #428's highest-value remaining gap): a slim central trunk,
+/// plus a scattered spray of short diagonal "check" limbs (one candidate
+/// per `relativeY` level counting down from `height - 5`, gated by
+/// [`tree_shape`]'s envelope), each of which only actually grows — as a
+/// `checkBranchBase → checkStart` limb rooted back at the main trunk — if
+/// its own outward dry-run limb *and* its inward branch-to-trunk dry-run
+/// limb both find room via [`is_free`]. Foliage attaches at every
+/// `checkStart` whose owning branch survives [`trim_branches`], including
+/// the tree's own always-present first entry (`origin.above(height - 5)`,
+/// paired with `trunk_top` as its own "branch base" — added before the walk
+/// even starts, exactly matching vanilla's unconditional first push).
+///
+/// `clusters_per_y` (`Math.min(1, Mth.floor(1.382 + (height/13.0)^2))`) is
+/// carried as vanilla's own formula rather than inlined as the literal `1`
+/// it always evaluates to for every `height >= 0` (the squared term can only
+/// push the sum higher, never below `1.382`, so the `floor` is always `>= 1`
+/// and `min(1, …)` is always exactly `1`) — ported for fidelity to the real
+/// class, not because this module has observed a `height` where it differs.
+///
+/// RNG draw order: `place_below_trunk_block` (draws only if a below-trunk
+/// provider is configured and its own provider draws), then exactly TWO
+/// `next_float` calls per `relative_y` level whose [`tree_shape`] is
+/// non-negative (radius, then angle — in that order, and drawn even when
+/// both of that level's dry-run limb checks go on to fail), then the real
+/// per-log draws inside the main trunk's [`make_limb`] call, then the real
+/// per-log draws inside each surviving branch's own [`make_limb`] call, in
+/// `foliage_coords`' own insertion order (branch spray order, tree-origin
+/// entry first). `Math.sin`/`Math.cos` here are the REAL, unbounded
+/// `f64::sin`/`cos` — **not** [`lodestone_worldgen_core::math::sin`]/`cos`
+/// (the 65536-entry table): `FancyTrunkPlacer.placeTrunk` calls
+/// `Math.sin(angle)`/`Math.cos(angle)` directly, unlike
+/// [`place_mega_jungle_trunk`]'s branch geometry, which really does go
+/// through `Mth.sin`/`Mth.cos`. Verified against `.cache/mc/26.2/src`
+/// rather than assumed from that placer's own precedent.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn place_fancy_trunk<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    tree_height: i32,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    trunk_provider: &BlockStateProvider,
+    below_trunk_provider: &Option<BlockStateProvider>,
+    attachments: &mut Vec<Attachment>,
+    trunk_positions: &mut Vec<BlockPos>,
+) -> bool {
+    if let Some(below_provider) = below_trunk_provider {
+        let below_pos = BlockPos { x: origin.x, y: origin.y - 1, z: origin.z };
+        if let Some(state) = below_provider.get_state_id(grid, tags, random, below_pos) {
+            grid.set_id_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
+            trunk_positions.push(below_pos);
+        }
+    }
+
+    let mut placed_any = false;
+
+    let height = tree_height + 2;
+    let trunk_height = lodestone_worldgen_core::math::floor(f64::from(height) * 0.618);
+    let clusters_per_y = 1i32.min(lodestone_worldgen_core::math::floor(
+        1.382 + (f64::from(height) / 13.0).powi(2),
+    ));
+    let trunk_top = origin.y + trunk_height;
+    let mut relative_y = height - 5;
+
+    struct FoliageCoord {
+        pos: BlockPos,
+        branch_base: i32,
+    }
+    let mut foliage_coords: Vec<FoliageCoord> = Vec::new();
+    foliage_coords.push(FoliageCoord {
+        pos: BlockPos { x: origin.x, y: origin.y + relative_y, z: origin.z },
+        branch_base: trunk_top,
+    });
+
+    while relative_y >= 0 {
+        let shape = tree_shape(height, relative_y);
+        if shape >= 0.0 {
+            for _ in 0..clusters_per_y.max(0) {
+                // `1.0 * treeShape * (nextFloat() + 0.328)` — the whole
+                // expression is `double` (the `1.0`/`0.328` literals force
+                // it), but `angle` below is NOT: Java's
+                // `nextFloat() * 2.0F * Math.PI` multiplies in `float`
+                // first, THEN promotes to `double` for the `Math.PI` term —
+                // preserved here as two separate casts, not one combined
+                // `f64` multiply, because that changes the rounding.
+                let radius = 1.0_f64 * f64::from(shape) * (f64::from(random.next_float()) + 0.328);
+                let angle = f64::from(random.next_float() * 2.0_f32) * std::f64::consts::PI;
+                let x = radius * angle.sin() + 0.5;
+                let z = radius * angle.cos() + 0.5;
+                let check_start = BlockPos {
+                    x: origin.x + lodestone_worldgen_core::math::floor(x),
+                    y: origin.y + relative_y - 1,
+                    z: origin.z + lodestone_worldgen_core::math::floor(z),
+                };
+                let check_end = BlockPos { x: check_start.x, y: check_start.y + 5, z: check_start.z };
+                if make_limb(
+                    random, check_start, check_end, false, grid, tags, trunk_provider, &mut placed_any,
+                    trunk_positions,
+                ) {
+                    let dx = origin.x - check_start.x;
+                    let dz = origin.z - check_start.z;
+                    let sum_sq = dx * dx + dz * dz;
+                    let branch_height = f64::from(check_start.y) - f64::from(sum_sq).sqrt() * 0.381;
+                    let branch_top = if branch_height > f64::from(trunk_top) {
+                        trunk_top
+                    } else {
+                        branch_height as i32
+                    };
+                    let check_branch_base = BlockPos { x: origin.x, y: branch_top, z: origin.z };
+                    if make_limb(
+                        random, check_branch_base, check_start, false, grid, tags, trunk_provider,
+                        &mut placed_any, trunk_positions,
+                    ) {
+                        foliage_coords.push(FoliageCoord { pos: check_start, branch_base: branch_top });
+                    }
+                }
+            }
+        }
+        relative_y -= 1;
+    }
+
+    // The real main trunk — a straight vertical limb from `origin` up
+    // `trunk_height` blocks, placed unconditionally (`do_place: true`).
+    make_limb(
+        random,
+        origin,
+        BlockPos { x: origin.x, y: origin.y + trunk_height, z: origin.z },
+        true,
+        grid,
+        tags,
+        trunk_provider,
+        &mut placed_any,
+        trunk_positions,
+    );
+
+    // `makeBranches`: for every foliage coord whose own base differs from
+    // its attachment position AND survives `trim_branches`, grow the real
+    // branch limb from the trunk out to that attachment.
+    for fc in &foliage_coords {
+        let base_coord = BlockPos { x: origin.x, y: fc.branch_base, z: origin.z };
+        if base_coord != fc.pos && trim_branches(height, fc.branch_base - origin.y) {
+            make_limb(
+                random, base_coord, fc.pos, true, grid, tags, trunk_provider, &mut placed_any,
+                trunk_positions,
+            );
+        }
+    }
+
+    for fc in &foliage_coords {
+        if trim_branches(height, fc.branch_base - origin.y) {
+            attachments.push(Attachment { pos: fc.pos, radius_offset: 0, double_trunk: false });
+        }
+    }
+
+    placed_any
+}
+
 /// `TreeFeature.updateLeaves` — the real post-processing pass vanilla runs
 /// after a tree's trunk, foliage AND decorators have all been placed: a
 /// multi-source BFS from every position in `trunk_positions` (bucket 0),
@@ -813,6 +1109,19 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
+    /// `FancyFoliagePlacer` — oak's `fancy_oak_*` foliage (issue #428),
+    /// paired with [`TrunkPlacerCfg::Fancy`]. A `BlobFoliagePlacer`
+    /// subclass sharing its `height` field and parse shape (like
+    /// [`Self::Bush`]/[`Self::MegaJungle`] above) but overriding both
+    /// `createFoliage` (a widened-middle descending-row shape, no RNG in the
+    /// radius formula itself) and `shouldSkipLocation` (a pure `(dx+0.5,
+    /// dz+0.5)` distance test, no RNG draw — unlike `Blob`'s corner coin
+    /// flip).
+    Fancy {
+        height: i32,
+        radius: IntProvider,
+        offset: IntProvider,
+    },
 }
 
 impl FoliagePlacerCfg {
@@ -853,6 +1162,11 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                 radius,
                 offset,
             }),
+            "fancy_foliage_placer" => Some(FoliagePlacerCfg::Fancy {
+                height: v["height"].as_i64()? as i32,
+                radius,
+                offset,
+            }),
             _ => None,
         }
     }
@@ -881,6 +1195,10 @@ pub(super)     fn foliage_height<R: RandomSource>(&self, random: &mut R, tree_he
             // this module that samples an `IntProvider` here rather than
             // returning a config-literal constant.
             FoliagePlacerCfg::MegaPine { crown_height, .. } => crown_height.sample(random),
+            // `FancyFoliagePlacer` doesn't override `foliageHeight` either —
+            // inherits `BlobFoliagePlacer`'s own constant `height` field,
+            // same shape as `Blob`/`Bush`/`MegaJungle` above.
+            FoliagePlacerCfg::Fancy { height, .. } => *height,
         }
     }
 
@@ -892,7 +1210,8 @@ pub(super)     fn foliage_radius<R: RandomSource>(&self, random: &mut R, trunk_l
             | FoliagePlacerCfg::DarkOak { radius, .. }
             | FoliagePlacerCfg::Bush { radius, .. }
             | FoliagePlacerCfg::MegaJungle { radius, .. }
-            | FoliagePlacerCfg::MegaPine { radius, .. } => radius.sample(random),
+            | FoliagePlacerCfg::MegaPine { radius, .. }
+            | FoliagePlacerCfg::Fancy { radius, .. } => radius.sample(random),
             FoliagePlacerCfg::Pine { radius, .. } => {
                 radius.sample(random) + random.next_int_bounded(trunk_len.max(0) + 1)
             }
@@ -908,7 +1227,8 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
             | FoliagePlacerCfg::DarkOak { offset, .. }
             | FoliagePlacerCfg::Bush { offset, .. }
             | FoliagePlacerCfg::MegaJungle { offset, .. }
-            | FoliagePlacerCfg::MegaPine { offset, .. } => offset.sample(random),
+            | FoliagePlacerCfg::MegaPine { offset, .. }
+            | FoliagePlacerCfg::Fancy { offset, .. } => offset.sample(random),
         }
     }
 
@@ -965,6 +1285,16 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
             // identical in real vanilla — pure geometry, no RNG draw.
             FoliagePlacerCfg::MegaJungle { .. } | FoliagePlacerCfg::MegaPine { .. } => {
                 dx + dz >= 7 || dx * dx + dz * dz > current_radius * current_radius
+            }
+            // `FancyFoliagePlacer.shouldSkipLocation` —
+            // `Mth.square(dx+0.5F) + Mth.square(dz+0.5F) > currentRadius^2`,
+            // comparing a float sum against an int product widened to
+            // float. Pure geometry, no RNG draw.
+            FoliagePlacerCfg::Fancy { .. } => {
+                let dxf = dx as f32 + 0.5;
+                let dzf = dz as f32 + 0.5;
+                let rr = (current_radius * current_radius) as f32;
+                dxf * dxf + dzf * dzf > rr
             }
         }
     }
@@ -1224,6 +1554,22 @@ pub(super)     fn create_foliage<R: RandomSource>(
                     );
                     prev_radius = smooth_radius;
                     yy += 1;
+                }
+            }
+            // `FancyFoliagePlacer.createFoliage` — descends from `offset` to
+            // `offset - foliageHeight` inclusive (same direction as
+            // `Blob`/`Bush` above), widening the radius by 1 for every row
+            // EXCEPT the very top (`yo == offset`) and very bottom
+            // (`yo == offset - foliageHeight`) row. No RNG in the radius
+            // formula itself.
+            FoliagePlacerCfg::Fancy { .. } => {
+                for yo in (offset - foliage_height..=offset).rev() {
+                    let current_radius =
+                        leaf_radius + if yo != offset && yo != offset - foliage_height { 1 } else { 0 };
+                    place_leaves_row(
+                        random, attachment, current_radius, yo, grid, tags, self, provider, placed_any,
+                        double_trunk,
+                    );
                 }
             }
         }
