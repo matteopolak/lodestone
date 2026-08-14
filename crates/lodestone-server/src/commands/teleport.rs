@@ -53,6 +53,34 @@
 //! can a target's — so the entity-destination form preserves the *target's
 //! own* facing instead, a documented approximation rather than the vanilla
 //! copy.
+//!
+//! # There is no bare, `@s`-free `/tp <entity>` self-form
+//!
+//! Vanilla's own tree has `<location>`, `<destination>` and `<targets>` as
+//! three *simultaneous* argument children of `teleport`, and disambiguating
+//! `/tp Steve` (self, to the player named Steve — the bare `<destination>`
+//! path) from `/tp Steve ~5 ~ ~` (move Steve — `<targets>` then `<location>`)
+//! needs exactly the backtracking `lodestone_command::CommandTree::parse`'s
+//! own doc comment says it does not have: "argument children are tried in
+//! insertion order and the **first** success wins" — no retry across
+//! siblings when the winning branch turns out incomplete. A bare name is
+//! valid syntax for *both* `<destination>` (single) and `<targets>`
+//! (multi), so whichever is registered first always wins outright, and every
+//! tree order was tried: putting `<destination>` first breaks every
+//! `<targets>`-prefixed form (`/tp Steve ~5 ~ ~` reads `Steve` as the whole
+//! command and fails on the leftover `~5 ~ ~`); putting `<targets>` first
+//! breaks the bare self-form (`/tp Steve` alone commits to `<targets>`,
+//! which has no executor of its own, and refuses instead of falling back).
+//!
+//! Losing the general, `<targets>`-prefixed forms would be losing the more
+//! valuable half of the command, so this tree drops the bare top-level
+//! `<destination>` node entirely: `/tp <targets>` always wins the "starts
+//! with an entity selector" position, and self-to-entity is reached through
+//! it with an explicit `@s` (`/tp @s Steve`), which is unambiguous — `@s` is
+//! never a bare name, so it cannot collide with `<location>`'s numeric/`~`/
+//! `^` grammar either. A real, disclosed reduction from vanilla's own tree,
+//! not a silent one; `/tp <location>` (also bare, self, but numeric-first so
+//! it never competes with an entity selector) is unaffected.
 
 use lodestone_command::FloatArgument;
 use lodestone_command_mc::{Coordinates, EntityArg, EntitySelector, Vec3Arg};
@@ -88,19 +116,11 @@ fn register_tree(registrar: &mut Registrar, root: lodestone_command::NodeId, nam
         Ok(1)
     });
 
-    // ---- /tp <destination> — self to entity ------------------------------
-    let (dest_node, dest_key) = registrar.arg(tp, "destination", EntityArg::player());
-    registrar.exec(dest_node, move |ctx| {
-        let me = self_uuid(ctx)?;
-        let selector = ctx.get(dest_key).clone();
-        let destination = resolve_one(ctx, &selector)?;
-        let (x, y, z) = (destination.position.x, destination.position.y, destination.position.z);
-        let dest_name = destination.username.clone();
-        let name = ctx.source.name.clone();
-        ctx.effect(me, Effect::Teleport { x, y, z, yaw: None, pitch: None });
-        ctx.send_success(format!("Teleported {name} to {dest_name}"));
-        Ok(1)
-    });
+    // No bare top-level `<destination>` (self to entity, no `@s`) — see the
+    // module doc's "There is no bare, `@s`-free `/tp <entity>` self-form"
+    // section for why `<targets>` must win the "starts with an entity
+    // selector" position outright, and `/tp @s <entity>` (through
+    // `<targets>` → `<destination>` below) is the reachable equivalent.
 
     // ---- /tp <targets> <location> [<yaw> <pitch>] ------------------------
     let (targets_node, targets_key) = registrar.arg(tp, "targets", EntityArg::players());
