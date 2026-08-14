@@ -15,8 +15,16 @@ names azalea as "the best reference for macro ergonomics and ECS client design".
 (`grep -rn bevy --include=Cargo.toml` returned nothing). The architecture described below —
 a `RwLock`-guarded read-model in `lodestone-client`, a channel to a god-object `Sim` in
 `lodestone-shell` — was a *departure* from the design doc that had never been reconciled. This
-migration is a return to it, and Stages 0–3 (§7) have since landed: `bevy_app`/`bevy_ecs` are
-workspace dependencies today, and `crates/lodestone-ecs` is the crate this plan added.
+migration is a return to it, and Stages 0–4 (§7) have since landed, Stage 5 partly, and both
+`World` unifications named in §4.1 ((c) the bevy `World`, (d) the chunk store) have landed too —
+re-verified 2026-08-14 against `crates/lodestone-ecs/src/lib.rs`'s own per-stage module docs and
+`crates/lodestone-shell/src/sim.rs`, whose `struct Sim` doc comment states outright that the
+entity interpolator's `World` "is gone entirely and its systems run in the same schedules as the
+player's". `bevy_app`/`bevy_ecs` are workspace dependencies today, and `crates/lodestone-ecs` is
+the crate this plan added. **Read each stage's own status line below before trusting its body
+text** — several stage sections still narrate blockers that later stages, or §4.1(c)/(d), have
+since removed; where that happened it is called out inline rather than rewritten, so the
+before/after reasoning stays legible.
 
 **It is not a performance win.** Live entity counts are ~30. `bevy_ecs` will not make that
 faster, and azalea's own docs are candid about the trade
@@ -555,13 +563,15 @@ being default-on is the thing most likely to surprise.
 **Landed** (`8be6544`). See [`entity-components.md`](./entity-components.md) for
 the shipped shape and three places it differs from the plan below:
 
-- **`EntitySnapshot` did not die.** Its own doc comment (`entities.rs`) says why:
-  it survives because its producer (`net.rs`) and its consumer (`sim.rs`) are on
-  opposite sides of a boundary this stage did not close, and it is explicitly
-  "slated for deletion" once ingest writes the render-side components directly —
-  which needs the collision source and the snapshot slice to become `'static`,
-  and neither can yet (see `docs/entity-components.md`'s "two things are not
-  systems yet" gotcha; that closes at Stage 4).
+- **`EntitySnapshot` did not die at this stage, but has since.** As written on
+  2026-08-04 this bullet was accurate: the type survived because its producer
+  (`net.rs`) and consumer (`sim.rs`) were on opposite sides of a boundary this
+  stage did not close. Re-verified 2026-08-14: `grep -rn EntitySnapshot crates/`
+  now returns zero hits tree-wide. `docs/entity-components.md`'s "Widened, not
+  deleted" section records the follow-up ("Stage 1b") that deleted it once §4.1(c)
+  put ingest and the interpolator in the same `World`, removing the `'static`
+  obstacle this bullet named. Read that section, not this one, for the current
+  shape.
 - **`EntityView` is the sanctioned intermediate, exactly as planned** —
   components authoritative, the struct derived on demand for
   `ClientHandle::entities()` — not the reverse.
@@ -753,9 +763,14 @@ wrong:
   `lodestone-shell/src/net.rs`; the reverse direction is not an alternative,
   because `Sim.local`'s stability across `end_session` is load-bearing and a
   `World` that changes identity mid-session would invalidate it.
-- **`CorePlugin`'s refusal to insert `WorldTime` is therefore *not* obsolete.**
-  That guard exists to stop two bevy `World`s becoming two diverging clocks, and
-  after Stage 4 there are still three. It stays until (c).
+- **`CorePlugin`'s refusal to insert `WorldTime` was *not* obsolete at this stage** —
+  that guard existed to stop two bevy `World`s becoming two diverging clocks, and
+  after Stage 4 there were still three. **It has since been removed**: §4.1(c) has
+  landed (see that section above), and `crates/lodestone-ecs/src/lib.rs`'s own
+  module docs say so plainly — "`CorePlugin` now inserts `WorldTime` **and**
+  `FrameClock`. The guard that refused to existed only to stop two `World`s
+  becoming two clocks." Re-verify with `grep -n "CorePlugin now inserts"
+  crates/lodestone-ecs/src/lib.rs` before assuming this note itself is current.
 - **The duplication was not two stores holding the same data** — it was two
   stores, *exactly one of them ever populated*, and a three-term branch
   (`vanilla_atlas && net && world_dimensions`) at five read sites to pick. Those
@@ -799,17 +814,29 @@ growing a falling wall at chunk borders, which is the `dirty_columns` coalescing
 
 ### Stage 5 — `Sim` is deleted
 
-**Partly landed — `Sim` is not deleted.** See
-[`sim-dissolution.md`](./sim-dissolution.md) for the field-by-field record. 28 fields
-before, **15** after; `Sim::step` is still the driver loop. Seven places the plan (or
-the brief handed to the stage) was wrong:
+**Partly landed as originally scoped — `Sim` is not deleted — but its own blocker has since
+been removed.** See [`sim-dissolution.md`](./sim-dissolution.md) for the field-by-field record
+as of this stage's landing: 28 fields before, **15** after; `Sim::step` is still the driver loop.
+**Re-verified 2026-08-14: `entity_interp` is gone from `struct Sim`** (`grep -n entity_interp
+crates/lodestone-shell/src/sim.rs` is empty) — §4.1(c) landed since this stage was written, so
+`Sim` now owns exactly one bevy `World` (`EcsHandle`), not two, and the bullet below explaining
+why the authority test is unreachable no longer describes the tree. `Sim` still is not deleted
+(see `sim-dissolution.md` and §4.1(c)'s own text on why `EntityInterpolator` keeps its own
+`World` "on purpose" for GPU-gate isolation), so the authority test still fails, but not for the
+reason stated here. Note the struct has also grown since — 46 fields today
+(`crates/lodestone-shell/src/sim.rs`) — almost entirely new client features (chest lids, bell
+shakes, piston moves, camera options) unrelated to this migration; the "28 → 15" figure is a
+historical measurement of the stage's own effect, not a current field-count claim. Seven places
+the plan (or the brief handed to the stage) was wrong:
 
-- **The authority test as written is unreachable, for the same reason Stage 3's was.**
-  "`struct Sim` no longer exists" requires one owner driving one `App`, and `Sim` owns
-  *two* bevy `World`s (its own and `EntityInterpolator`'s). That is §4.1**(c)**.
-  Thirteen of the fifteen surviving fields would move without (c); the two that would
-  not are `ecs` (a `World` cannot be a resource in itself) and `entity_interp`
-  (nesting a `World` inside a `World` compiles and unifies nothing).
+- **The authority test as written was unreachable when this stage landed, for the same reason
+  Stage 3's was — no longer true.** "`struct Sim` no longer exists" requires one owner driving
+  one `App`; at the time, `Sim` owned *two* bevy `World`s (its own and `EntityInterpolator`'s),
+  which was §4.1**(c)**. Thirteen of the fifteen surviving fields would move without (c); the two
+  that would not were `ecs` (a `World` cannot be a resource in itself) and `entity_interp`
+  (nesting a `World` inside a `World` compiles and unifies nothing). **(c) has since landed** (see
+  §4.1 above) and `entity_interp` is gone — the remaining blocker to deleting `Sim` outright is
+  now only the ~44 other fields above, not a structural World-nesting problem.
 - **The blocker Stage 2 recorded for `Mining`/`Placement` was the wrong one.** It
   named `Sim.target`, `version_data`, the live block store and the particle emitter as
   "Stage 3/4 residents". Re-checked one at a time: all four were free — three were
@@ -847,16 +874,25 @@ the brief handed to the stage) was wrong:
   [`frame-pacing.md`](./frame-pacing.md). Consequence for §6: a plugin adding a
   `GameTick` system today picks not just which `App` but which **clock**.
 
-**Moves:** whatever `Sim` still holds — `input`, `stats`, `target`, `clock_secs`, `particles`,
-`audio`, `language`, `asset_banner`, `interp_alpha`, `tick_count`, `frame_count`, `fly`.
-`Sim::step` (`sim/step.rs`) becomes the four schedules; `App::redraw` becomes `app.update()` then
-`renderer.draw(extracted)`.
+**Moves (as planned; most of this list has since moved — see the status note above):** whatever
+`Sim` still holds — `input`, `stats`, `target`, `clock_secs`, `particles`, `audio`, `language`,
+`asset_banner`, `interp_alpha`, `tick_count`, `frame_count`, `fly`. **Re-verified 2026-08-14: of
+these twelve, only `stats`, `language` and `asset_banner` are still `Sim` fields** — `input` and
+`fly` moved in Stage 2 (per that stage's own corrections above); `target`, `clock_secs`,
+`particles`, `interp_alpha`, `tick_count` and `frame_count` are the ones `lib.rs`'s Stage 5 module
+doc lists as deleted (`crates/lodestone-ecs/src/lib.rs`); `audio` was never a `Sim` field this
+struct definition shows today. Read this list as "what this stage's plan named", not as an
+open task list. `Sim::step` (`sim/step.rs`) is still the four schedules' driver; `App::redraw` is
+`app.update()` then `renderer.draw(extracted)`.
 
 **Stays:** `lodestone-render` bevy-free (§4.4). `lodestone-particle`, `lodestone-audio`,
 `lodestone-assets` stay plain libraries behind resources.
 
-**Authority test:** `struct Sim` no longer exists. `sim.rs` is 3950 lines today; at the end of this
-stage it is gone.
+**Authority test:** `struct Sim` no longer exists. **Not yet met** — `sim.rs` was 3950 lines when
+this stage's plan was written; re-measured 2026-08-14 it is **1454 lines** (`wc -l
+crates/lodestone-shell/src/sim.rs`), a real reduction, but the struct itself still exists with 46
+fields and `Sim::step` is still the driver loop. At the end of this stage it should be gone; it is
+not.
 
 **Verified by:** `cargo xtask check-connected`; the screenshot/pixel gates; `cargo check --workspace
 --all-targets` and `cargo test --workspace --no-fail-fast` (**not** `-p`, which fail-fasts and has
