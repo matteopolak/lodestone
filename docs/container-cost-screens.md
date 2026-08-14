@@ -81,10 +81,10 @@ pub fn slot_layout(menu: &Menu) -> SlotLayout {
 
 | `SpecialLayout` | slots (menu index @ x,y) | source |
 |---|---|---|
-| `Anvil` | `0@27,47` `1@76,47` `2@134,47` | `AnvilMenu.java:42-45,58-60` |
-| `Grindstone` | `0@49,19` `1@49,40` `2@129,34` | `GrindstoneMenu.java:48-60` |
-| `Smithing` | `0@8,48` `1@26,48` `2@44,48` `3@98,48` | `SmithingMenu.java:25-29,58-61` |
-| `Enchanting` | `0@15,47` `1@35,47` | `EnchantmentMenu.java:55-61` |
+| `Anvil` | `0@27,47` `1@76,47` `2@134,47` | `AnvilMenu.createInputSlotDefinitions` |
+| `Grindstone` | `0@49,19` `1@49,40` `2@129,34` | `GrindstoneMenu`'s constructor |
+| `Smithing` | `0@8,48` `1@26,48` `2@44,48` `3@98,48` | `SmithingMenu.createInputSlotDefinitions` |
+| `Enchanting` | `0@15,47` `1@35,47` | `EnchantmentMenu`'s constructor |
 
 All four use vanilla's fixed `addStandardInventorySlots(inventory, 8, 84)` for
 the player section, so `main_y = 84.0` is a constant, not derived from the top
@@ -117,20 +117,20 @@ real background with no separate wiring.
 
 ## The cost numbers: wired (this section used to say otherwise)
 
-**Stale as of issue #28 — re-verified rather than assumed.** This section
+**Stale — re-verified rather than assumed.** This section
 used to describe the anvil/enchanting cost feed as an island: decoded
 (`ClientEvent::ContainerData`) and folded (`Menus::container_data`), but with
 `lodestone_client::state::OpenMenuSnapshot` carrying no `data` field and
 `Sim::open_menu` never populating one, so nothing in `lodestone-shell` could
 reach it. That gap is closed — `OpenMenuSnapshot::data: Vec<(i32, i32)>`
-exists (`crates/lodestone-client/src/state.rs:320`), `Sim::open_menu` fills it
-from `menus.opened_data().to_vec()` (`crates/lodestone-shell/src/sim.rs::Sim::open_menu`),
+exists (`crates/lodestone-client/src/state.rs`), `Sim::open_menu` fills it
+from `menus.opened_data().to_vec()` (`crates/lodestone-shell/src/sim/session.rs::Sim::open_menu`),
 and `app.rs`'s `ContainerFrame::with_cost_context` call already reads
 `open_menu.data.as_slice()` through to `ContainerFrame::cost_data`. Re-checked
 directly against the current source rather than trusted from this doc's own
 prior claim — the exact staleness class `CLAUDE.md`'s rule 2 warns about.
 
-That same feed is what let issue #28's furnace-family lit/burn bars and
+That same feed is what let the furnace-family lit/burn bars and
 brewing-stand fuel/brew/bubble bars (`container-screen.md`'s "The six more
 `special_layout` screens" section) draw with **zero** further `app.rs`/`sim.rs`
 changes: `frame.cost_data` was already the live `container_set_data` properties
@@ -146,8 +146,8 @@ small" — a second stale claim in this same section, caught the same way.**
 `container.rs::geometry::draw_enchanting_costs`) are
 real, non-stub implementations: the anvil's is/isn't-affordable colouring
 (`AnvilMenu::mayPickup`), its `>= 40` "Too Expensive!" branch, and the right-
-aligned backdrop text at `AnvilScreen.java:112-115`'s own `tx`/`ty`; the
-enchanting table's three per-row costs at `EnchantmentScreen.java:96-134`'s
+aligned backdrop text at `AnvilScreen.extractLabels`'s own `tx`/`ty`; the
+enchanting table's three per-row costs at `EnchantmentScreen.extractBackground`'s
 positions, deliberately **not** drawing the enchantment-name cipher text
 (`EnchantmentNames`' Standard Galactic Alphabet font is a separate,
 unstarted subsystem). Both read `frame.cost_data` — the now-confirmed-live
@@ -176,7 +176,7 @@ None — no flags or env vars gate this.
 
 - `crates/lodestone-game/src/{menu.rs,menus.rs,container.rs}` — the model.
 - `crates/lodestone-shell/src/container.rs` — layout, background, draw.
-- `crates/protocol/v770/src/adapter.rs` — `CONTAINER_SET_DATA` decode (already
+- `crates/protocol/v770/src/adapter/inventory.rs`'s `handle_play_inventory` — `CONTAINER_SET_DATA` decode (already
   present, unmodified by this work).
 - [`container-screen.md`](container-screen.md) — the general container-screen
   machinery this builds on.

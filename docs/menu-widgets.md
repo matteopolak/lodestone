@@ -7,7 +7,7 @@ control's bounds, message and state (`active` / `visible` / `focused`) and answe
 the two questions each screen used to answer for itself: **which sprite is my
 background** and **what colour is my label**. With it comes `WidgetSprites`,
 vanilla's four-state sprite record, and therefore the **disabled render path** —
-the thing the settings tree (#55) needs so an unsupported option can be present
+the thing the settings tree needs so an unsupported option can be present
 and greyed out rather than absent.
 
 This is issue #393, the first child of the menu-framework epic #392. The plan of
@@ -34,17 +34,17 @@ implement that half for the two converted screens — see
 
 Vanilla disables its own controls for exactly our reason, which is why these are
 patterns to copy rather than design: the narrator button
-(`OptionsSubScreen.java:43-46`), the anisotropy slider
-(`VideoSettingsScreen.java:166-167`), Multiplayer for a banned account
-(`TitleScreen.java:196`) and telemetry (`OptionsScreen.java:88-92`). The last two
+(`OptionsSubScreen`'s constructor), the anisotropy slider
+(`VideoSettingsScreen.tick`), Multiplayer for a banned account
+(`TitleScreen.createNormalMenuOptions`) and telemetry (`OptionsScreen`'s constructor). The last two
 carry a tooltip saying *why*, which is what makes "unsupported, greyed out" read
 as honest rather than broken.
 
 ### `WidgetSprites` and its collapsing constructors
 
 `WidgetSprites` is a four-field record — `enabled`, `disabled`, `enabled_focused`,
-`disabled_focused` — with three collapsing constructors lifted from
-`WidgetSprites.java:6-16`. The collapse is the interesting part: it is how a widget
+`disabled_focused` — with three collapsing constructors lifted from vanilla's
+`WidgetSprites` record itself. The collapse is the interesting part: it is how a widget
 declares it has *no* disabled art without needing a second type.
 
 | vanilla arity | ours | result |
@@ -58,7 +58,7 @@ Read the fourth field of the 3-argument form again: `disabled_focused` is the
 greyed out, and it is the single rule a hand-rolled highlight is most likely to get
 wrong.
 
-`BUTTON_SPRITES` is `AbstractButton.SPRITES` (`AbstractButton.java:18-22`):
+`BUTTON_SPRITES` is `AbstractButton.SPRITES`:
 `widget/button`, `widget/button_disabled`, `widget/button_highlighted` through the
 3-argument form.
 
@@ -72,8 +72,8 @@ decided in `render.rs` any more.
 
 The rect still comes from `row_rect`, deliberately: that function is also
 `app.rs`'s hit-test, so it stays the one definition of where a row is. `Widget`
-implements the `LayoutElement` seam (read size, write position) that #394's
-containers attach through — see [`menu-layout.md`](./menu-layout.md), which added
+implements the `LayoutElement` seam (read size, write position) that the layout
+work's containers attach through — see [`menu-layout.md`](./menu-layout.md), which added
 `visit_widgets` to that trait once there was a container to walk, and which feeds
 the title and pause rects into `row_rect` from an arranged tree rather than a
 table.
@@ -90,17 +90,18 @@ measures vanilla's real art at vanilla's rects.
   `AbstractSliderButton`.** Verified against the 26.2 jar rather than taken on
   trust: `Checkbox.java` and `AbstractSliderButton.java` never mention
   `WidgetSprites` and pick between a plain and a `_highlighted` sprite by hand
-  (`Checkbox.java:109-117`, `AbstractSliderButton.java:38,42`); `EditBox.java:29-31`
+  (`Checkbox.extractContents`, `AbstractSliderButton.getSprite`/`AbstractSliderButton.getHandleSprite`);
+  `EditBox.SPRITES`
   uses the **two**-argument constructor, which collapses `disabled` onto
   `enabled`. All three rely on the grey label plus blocked input. Construct them
   with `Widget::new` (no sprites), not `Widget::button`.
 - **`button_disabled`'s nine-slice border is 1 where its siblings' are 3.**
-  Measured in #66. Nothing in `widget.rs` encodes a border; `GuiAtlas` reads each
+  Measured directly against the atlas. Nothing in `widget.rs` encodes a border; `GuiAtlas` reads each
   from the sibling `.png.mcmeta`. A hardcoded rect would silently sample the wrong
   slice — which is also why the gates resolve UV windows through `GuiAtlas` at test
   time instead of restating coordinates.
 - **The 89 `container/*.png` textures are invisible to `GuiAtlas` and that is
-  correct.** It globs `gui/sprites/**`; `resources.rs:363` documents the gap and
+  correct.** It globs `gui/sprites/**`; `load_gui_atlas`'s own doc comment (`crates/lodestone-shell/src/resources.rs`) documents the gap and
   `container.rs::background::ContainerBackground` works around it on purpose, because vanilla blits
   hand-placed sub-rects of those 256×256 sheets and `GuiScaling` has no variant for
   an arbitrary sub-rect. Do not widen the glob.
@@ -112,28 +113,28 @@ Found while porting, all three by reading the class rather than a summary of it 
 subtly wrong.
 
 1. **The sprite's second argument is `isHoveredOrFocused()`, not `isFocused()`.**
-   Both #393's body and `ui-framework.md` say focused.
+   Both the original issue's body and `ui-framework.md` say focused.
    `AbstractButton.extractDefaultSprite` passes
-   `SPRITES.get(this.active, … this.isHoveredOrFocused())`
-   (`AbstractButton.java:43-53`), and that is `isHovered() || isFocused()`
-   (`AbstractWidget.java:211-213`). Our single row cursor is moved by *both* the
+   `SPRITES.get(this.active, … this.isHoveredOrFocused())`,
+   and that is `isHovered() || isFocused()`
+   (`AbstractWidget.isHoveredOrFocused`). Our single row cursor is moved by *both* the
    keyboard and `MenuNav::hover`, so one flag is the faithful model and the shipped
-   behaviour was already right — but a #395 that splits hover from focus must join
+   behaviour was already right — but a later change that splits hover from focus must join
    them with an `||` here, not drop one.
 
-   **#395 did split them**, and this is now the state of it: `Widget::hovered` is
+   **A later change did split them**, and this is now the state of it: `Widget::hovered` is
    its own field, `Widget::focused` is keyboard focus alone, and
    `Widget::is_hovered_or_focused` is the `||`. Two things follow —
    `Widget::takes_focus` reads `focused` only (hover is not focus, so hovering a
    widget must not make Tab skip it), and `EditBox` does **not** share the
-   predicate: `EditBox.java:407` passes `isFocused()`, so hovering a text field
+   predicate: `EditBox.extractWidgetRenderState` passes `isFocused()`, so hovering a text field
    draws its plain sprite. See [`menu-focus.md`](./menu-focus.md).
 2. **The two `get` arguments are not the same predicate.** `AbstractButton` passes
-   the raw `active` field; `EditBox.java:407` passes `isActive()` (i.e.
+   the raw `active` field; `EditBox.extractWidgetRenderState` passes `isActive()` (i.e.
    `visible && active`). `WithInactiveMessage.getMessage()` also keys on `active`
-   (`AbstractWidget.java:326-329`). `Widget::background_sprite` and
+   (`AbstractWidget.WithInactiveMessage.getMessage`). `Widget::background_sprite` and
    `Widget::message_colour` follow the button, because an invisible widget is not
-   drawn at all (`AbstractWidget.java:56-62`) so the distinction is unobservable
+   drawn at all (`AbstractWidget.extractRenderState`) so the distinction is unobservable
    for it.
 3. **`EditBox` does use `WidgetSprites`.** "No disabled sprite at all for
    `Checkbox`, `EditBox`, `AbstractSliderButton`" is true about the *art* and
@@ -146,11 +147,11 @@ subtly wrong.
 **No tooltip.** `WidgetTooltipHolder` is what makes "disabled with an explanation"
 honest, and it belongs on this type eventually — but nothing in this shell draws a
 hover tooltip, so a `tooltip` field would reach zero pixels. It lands with the
-screen-level input layer (#395), which is what knows how long the cursor has
+screen-level input layer, which is what knows how long the cursor has
 rested. Adding the field now would be an island; `CLAUDE.md`'s dominant defect
 class, sixteen confirmed.
 
-**#395 landed and it is still deferred**, for the same reason narrowed: that layer
+**That input layer landed and it is still deferred**, for the same reason narrowed: that layer
 turned out to see clicks and keypresses, not hover *dwell time*, so it does not
 know how long the cursor has rested either. See
 [`menu-focus.md`](./menu-focus.md)'s deliberate-gaps list.
@@ -162,7 +163,7 @@ know how long the cursor has rested either. See
   the defaults (`active`/`visible` true — a `derive(Default)` would grey out every
   widget built from `..Default::default()`), and the focus/click gating.
 - **The grey is derived, not transcribed.** `-6250336` is lifted verbatim from
-  `AbstractWidget.java:318` and `argb_to_rgba` must unpack it onto
+  `AbstractWidget.WithInactiveMessage.defaultInactiveMessage` and `argb_to_rgba` must unpack it onto
   `INACTIVE_LABEL`, with a *different* vanilla colour (`EditBox`'s
   `DEFAULT_TEXT_COLOR`, `-2039584`) as the control. Without that the array would
   only ever agree with itself, which is the `decode(encode(x)) == x` trap.

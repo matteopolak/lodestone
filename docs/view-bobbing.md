@@ -26,9 +26,9 @@ installs the matrix once per frame, and `RenderState::world_view_projection` is 
 every world-space uniform reads. Zero `Camera` literals changed.
 
 > **The hand has its own copy of this transform, independent of the world's.**
-> Vanilla applies `bobHurt`/`bobView` to `renderItemInHand` a **second time**
-> (`GameRenderer.java:344-347`), separate from the copy folded into the world's
-> projection (`:534-536`) — not something the arm inherits from the bobbed
+> Vanilla applies `bobHurt`/`bobView` to `GameRenderer.renderItemInHand` a **second time**,
+> separate from the copy folded into the world's
+> projection (`GameRenderer.renderLevel`) — not something the arm inherits from the bobbed
 > world camera. `gpu/first_person.rs`'s `HandBobSource`/`hand_view_proj` are
 > that second application; see [How it works](#how-it-works) below. This used
 > to be listed under "Divergences deliberately not modelled" as "the
@@ -37,7 +37,7 @@ every world-space uniform reads. Zero `Camera` literals changed.
 > and the view-lag feature are unrelated mechanisms, and the arm did not need
 > `xBob`/`yBob` at all, only its own wiring.
 
-> **Issue #391, and the reason it is filed under the menu and not the camera.**
+> **The settings-menu click bug, and the reason it is filed under the menu and not the camera.**
 > "View bobbing does nothing in game" was reported from play with the whole
 > render chain verified hop by hop. It was none of the three camera candidates.
 > The reporter's `options.json` said `"view_bobbing": false`, written six minutes
@@ -60,8 +60,8 @@ Three separate mechanisms that a screenshot makes look like one:
 | `bobHurt` | the damage tilt: a **roll** toward the direction the hit came from | `hurtTime` / `hurtDir` | `ViewBob` |
 | `xBob`/`yBob` | view lag: the held item and third-person body pose against a *smoothed* head rotation | `getXRot()` / `getYRot()` | none yet |
 
-`bobHurt` is **not** the red screen overlay — that is #371, in
-`entity_pipeline.rs`, blended at ~30% red per vanilla's `entity.fsh:57`. The two
+`bobHurt` is **not** the red screen overlay — that is a separate mechanism, in
+`entity_pipeline.rs`, blended at ~30% red per vanilla's `entity.fsh`'s `overlayColor` mix. The two
 fire together and are otherwise unrelated.
 
 ## How it works
@@ -72,7 +72,7 @@ alongside `EyeHeightSmoother`, which has the same shape: per-tick state that
 cannot be a pure function of the current `PlayerState`. From one `BobFrame`
 read per frame, **two independent consumers** apply the identical transform —
 mirroring vanilla's own two call sites for `bobHurt`/`bobView`
-(`GameRenderer.java:534-536` for the world, `:344-347` for the hand):
+(`GameRenderer.renderLevel` for the world, `GameRenderer.renderItemInHand` for the hand):
 
 ```
 Sim::step, once per 20 Hz tick
@@ -106,17 +106,17 @@ All from `.cache/mc/26.2/client-src`, read rather than remembered:
 
 | constant | source |
 |---|---|
-| `walkDist += length(dx, dz) * 0.6` | `LocalPlayer.move`, `LocalPlayer.java:989` |
+| `walkDist += length(dx, dz) * 0.6` | `LocalPlayer.move` |
 | `bob += (min(0.1, speed) - bob) * 0.4`, target `0` unless `onGround && !dead && !swimming` | `AbstractClientPlayer.updateBob` + `ClientAvatarState.updateBob` |
-| `translate(sin(bd·π)·bob·0.5, -abs(cos(bd·π)·bob), 0)` | `GameRenderer.bobView`, `GameRenderer.java:323-327` |
-| `rotate Z by sin(bd·π)·bob·3.0` | `:328` |
-| `rotate X by abs(cos(bd·π − 0.2)·bob)·5.0` | `:329` |
-| `hurtDuration = 10`, `hurtTime = hurtDuration` | `LivingEntity.java:1873-1876`, `:2044-2049` |
-| `sin(t⁴·π) · 14 · damageTiltStrength`, swung by `Ry(∓hurtDir)` | `GameRenderer.bobHurt`, `:297-317` |
-| `xBob += (getXRot() − xBob) · 0.5` | `LocalPlayer.applyInput`, `LocalPlayer.java:694-697` |
-| `rotate X/Y by (getViewXRot(t) − xBob) · 0.1` | `ItemInHandRenderer.java:354-357` |
-| View Bobbing default **on** | `Options.java:600` |
-| `damageTiltStrength` default `1.0` | `Options.java:876-883` |
+| `translate(sin(bd·π)·bob·0.5, -abs(cos(bd·π)·bob), 0)` | `GameRenderer.bobView` |
+| `rotate Z by sin(bd·π)·bob·3.0` | `GameRenderer.bobView` |
+| `rotate X by abs(cos(bd·π − 0.2)·bob)·5.0` | `GameRenderer.bobView` |
+| `hurtDuration = 10`, `hurtTime = hurtDuration` | `LivingEntity.animateHurt`, `LivingEntity.handleDamageEvent` |
+| `sin(t⁴·π) · 14 · damageTiltStrength`, swung by `Ry(∓hurtDir)` | `GameRenderer.bobHurt` |
+| `xBob += (getXRot() − xBob) · 0.5` | `LocalPlayer.applyInput` |
+| `rotate X/Y by (getViewXRot(t) − xBob) · 0.1` | `ItemInHandRenderer.submitHandsWithItems` |
+| View Bobbing default **on** | `Options.bobView` field |
+| `damageTiltStrength` default `1.0` | `Options.damageTiltStrength` field |
 
 ### Four details that are easy to get subtly wrong
 
@@ -250,7 +250,7 @@ needs `Route { ingest: true, shell: true, ..NOWHERE }`.
 ### To land `xBob`/`yBob`
 
 This is **not a camera change, and not the same fix as the arm's bob above** —
-they were conflated in this issue's tracker for a while (`#58`'s own body used
+they were conflated in this tracker's history for a while (its own body used
 to say "the arm does not bob... fix belongs with `xBob`/`yBob`"; it does not).
 `xBob`/`yBob` poses the held item and third-person body against a *smoothed
 follow* of the head rotation — a lag, not a bob — in
@@ -258,7 +258,7 @@ follow* of the head rotation — a lag, not a bob — in
 Add the `x_bob`/`y_bob` pair (same current/previous shape,
 `+= (target − current) · 0.5` per tick) to `ViewBob` and prefix
 `Rx((viewXRot − xBob)·0.1°)`, `Ry((viewYRot − yBob)·0.1°)` onto the hand pose.
-`entity.rs:1702-1703` already names the mechanism.
+`first_person_arm_chain`'s own doc comment (`crates/lodestone-render/src/entity.rs`) already names the mechanism.
 
 ### Divergences deliberately not modelled
 
@@ -268,9 +268,9 @@ Add the `x_bob`/`y_bob` pair (same current/previous shape,
 * **The nearest-*remote*-player case is not modelled** for the hurt direction: the
   yaw comes off the wire, so this one is exact — the gap is the enchanting table's,
   not the camera's.
-* **Third person still bobs, and that is correct for 26.2.** #58's body says
-  vanilla disables bobbing in third person. Re-read against
-  `.cache/mc/26.2/client-src`: `renderLevel` (`:534-536`) has no camera-type check
+* **Third person still bobs, and that is correct for 26.2.** This tracker's body
+  originally said vanilla disables bobbing in third person. Re-read against
+  `.cache/mc/26.2/client-src`: `GameRenderer.renderLevel` has no camera-type check
   and `bobView` itself only tests `isPlayer`. Older versions did suppress it; 26.2
   does not.
 * **`damageTiltStrength` has a config key and a settings-screen row, but the row
@@ -284,16 +284,16 @@ Add the `x_bob`/`y_bob` pair (same current/previous shape,
 `Options::view_bobbing` in
 [`config.rs`](../crates/lodestone-shell/src/config.rs), persisted to
 `options.json`, **default on** (vanilla's `options.viewBobbing`,
-`Options.java:600`).
+`Options.bobView` field).
 
-**Where the row lives moved with #55.** It is now on vanilla's own screen for it:
+**Where the row lives moved with the settings-tree rework.** It is now on vanilla's own screen for it:
 `Options...` → `Accessibility Settings...` → `View Bobbing`, paired with
 `Notification Time` — **not** on Video, which is the intuitive and wrong answer.
 Enter on that row toggles it, a click on it toggles it, and it is one of only
 **two** live options in a tree of 135 (see
 [`settings-screen.md`](./settings-screen.md)).
 
-**A click used to toggle it from the *other* row, which is issue #391.** The
+**A click used to toggle it from the *other* row, which is the settings-menu click bug above.** The
 settings screen had no row cursor on purpose — each control owned a key
 (`key_settings`: Up/Down the scale, Enter the toggle), so `MenuNav::hover` had no
 `Screen::Settings` arm at all. `app.rs`'s click handler translated a click into
@@ -303,7 +303,7 @@ it landed on. The natural thing to click — GUI SCALE, row 0, the row `render.r
 marked `selected` — silently turned the option off and wrote it to disk, and the
 render chain underneath was working the whole time.
 
-#55 removed the cause: the screen has a real cursor and every row resolves to its
+The settings-tree rework removed the cause: the screen has a real cursor and every row resolves to its
 own control, so there is no shared per-screen meaning of `Enter` left to
 mis-apply. The gates were re-pointed rather than deleted —
 `nav::clicking_a_settings_row_acts_on_that_row_and_no_other` is still the negative
@@ -348,7 +348,7 @@ accessibility option — and `0.0` there really does disable it
   wrong phase and the wrong axis. `tests/view_bob_pixels.rs` predicts the pixel
   displacement from vanilla's constants and asserts direction *and* magnitude on
   both axes.
-* **Nothing gated the *inputs* until #391, and that is the hole to keep shut.**
+* **Nothing gated the *inputs* until the settings-menu click bug was found, and that is the hole to keep shut.**
   Every gate above supplies its own `BobFrame`, so all of them prove the
   arithmetic and none of them can see `Sim` feeding it an unrealistic
   `moved`/`speed` — `CLAUDE.md`'s *world* species, invisible in the test source.

@@ -5,11 +5,11 @@
 The two orderings that made opening a singleplayer world feel broken — *"it
 takes forever to load and the chunks generated are not close to me"* — and how
 they were fixed. Mob seeding used to generate the whole tick area **inside the
-constructor** from a second, independent generator (issue #454), and the join
+constructor** from a second, independent generator, and the join
 used to generate all 361 columns of the view before encoding any, in raster
-order from the far corner (issue #453). Both live in `lodestone-server`; both are
+order from the far corner. Both live in `lodestone-server`; both are
 about *ordering*, not throughput. They are the tail of the same report the
-[`ChunkStore`](./chunk-store.md) fix (#289 U3) opened.
+[`ChunkStore`](./chunk-store.md) fix (its U3) opened.
 
 ## How it works
 
@@ -19,10 +19,10 @@ Three things happen when a shell opens a singleplayer world, in this order:
    `IntegratedServer::open_in_memory_with_mobs`, inside `runtime.block_on`.
 2. That constructor wraps the caller's `ChunkSource` in a `ChunkStore`, builds
    the handles, and spawns three tasks: the connection, the world tick loop, and
-   (since #454) mob seeding.
+   (since the mob-seeding fix below) mob seeding.
 3. The client connects and `serve_connection` streams the initial view.
 
-### #454 — nothing generates on the calling thread any more
+### Mob seeding — nothing generates on the calling thread any more
 
 `MobHandle::seeded` used to run at step 2, synchronously, before any task
 spawned. It called `ChunkWorld::from_source`, a plain serial loop over the tick
@@ -44,8 +44,8 @@ The fix is both halves at once:
 
 `world_source` is now ignored. It survives only because
 `open_in_memory_with_mobs`'s signature is named by `net.rs`, a brokered choke
-point in this repo; deleting the parameter is a behaviour-free follow-up
-(issue #436).
+point in this repo; deleting the parameter is a behaviour-free follow-up,
+tracked separately.
 
 Measured in release, at the shell's own parameters, on a quiet box:
 
@@ -63,7 +63,7 @@ real per-column cost is about **222 ms**. The stall was real and worth removing;
 it was 4× smaller than the arithmetic said. Durations here also showed a 2.3×
 spread from machine load alone, so treat both figures as provisional.
 
-### #453 — the view streams outward from the player, encoded as it goes
+### The view streams outward from the player, encoded as it goes
 
 `serve_connection`'s join used to build every coordinate of
 `[-view_radius, view_radius]²` in a `cz`-outer/`cx`-inner walk, `await` one
@@ -120,7 +120,7 @@ a stream that outlives the join without wrapping everything else the play loop
 sends, so the deferred half is batched — which is vanilla's own shape, and what
 `ChunkBatchSizeCalculator` exists to pace (our client answers each
 `chunk_batch_finished` with its desired rate: `ChunkBatchState` in
-`crates/protocol/v770/src/adapter.rs`). The deferred batches are **not** gated on
+`crates/protocol/v770/src/adapter/mod.rs`). The deferred batches are **not** gated on
 `awaiting_chunk_batch_ack`: that gate exists so a *reactive*, unbounded stream
 cannot outrun a client, whereas the join is a finite set the client is already
 owed, and gating it would make delivering the world depend on a reply that no
@@ -170,7 +170,7 @@ function of its coordinates and the seed, never of generation order.
 
 ### The recovery loop this also unblocks
 
-`lodestone-shell/src/sim/collide.rs:257-262` returns `None` for an unloaded
+`live_collision`, `lodestone-shell/src/sim/collide.rs`, returns `None` for an unloaded
 player column, which becomes `PlayerCollision::Pending`, zeroes velocity and
 forces `on_ground = true` — vanilla's wait-for-chunks freeze. A frozen player
 never crosses a chunk boundary, so `recenter`'s `(cx, cz) == center` guard
@@ -200,8 +200,8 @@ either fix.
   `view_radius_store_capacity.rs`, `collect_join_chunks` for the counter-carrying
   probe protocol).
 - **Do not gate the deferred join stream on `ChunkBatchAcknowledged`.** It looks
-  like the missing half of issue #270 and it is not — see above. The failure mode
-  is a 30-second test timeout, the least diagnosable shape available.
+  like the missing half of the chunk-batch-ack mechanism and it is not — see above.
+  The failure mode is a 30-second test timeout, the least diagnosable shape available.
 - **`JoinChunkStream::next` and `ColumnPipeline::next` are `select!` branches, so
   cancel safety is a correctness requirement, not a nicety.** Anything that
   removes work from the stream before that work has been *emitted* loses a column
@@ -283,8 +283,8 @@ Each has a control that was **run and observed to fail**, not described:
   relaxing one cannot quietly disarm the other.
 
 Both fixes were additionally verified by temporarily neutering the real code and
-watching the real gate fail: `got 49` for #454, and
-`the player's own column must be encoded first; got (-9, -9)` for #453.
+watching the real gate fail: `got 49` for the mob-seeding fix, and
+`the player's own column must be encoded first; got (-9, -9)` for the join-streaming fix.
 
 ## Configuration
 
@@ -304,6 +304,6 @@ watching the real gate fail: `got 49` for #454, and
   task and the ring loop both go through.
 - [`server-tick-loop.md`](./server-tick-loop.md) — the tick task seeding must not
   delay.
-- [`plans/chunk-lifecycle.md`](./plans/chunk-lifecycle.md) — issue #289; the ring
+- [`plans/chunk-lifecycle.md`](./plans/chunk-lifecycle.md) — the ring
   ordering is a slice of its U4/U5, and vanilla's priority *is* the ticket level
-  (`ChunkTaskDispatcher.java:62-69`), so there is no separate heuristic here.
+  (`ChunkTaskDispatcher.submit`), so there is no separate heuristic here.

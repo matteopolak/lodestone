@@ -19,15 +19,14 @@ module docs cover composing an outbound line) or the log itself
 chat box is open. The draw (`hud.rs`, just after the `chat_open` local) emits
 a translucent background strip sized to the chat box, then the typed text
 with a trailing `_` standing in for vanilla's append-caret
-(`TextCursorUtils.extractAppendCursor`,
-`.cache/mc/26.2/client-src/net/minecraft/client/gui/components/TextCursorUtils.java:15-17`
+(`TextCursorUtils.extractAppendCursor`
 — the shell's `ChatInput` only ever edits at the end of the line, which is
 vanilla's "cursor at end" case). There is **no leading `>`** — vanilla's
 `ChatScreen`/`EditBox` never draws one.
 
 The caret blinks at vanilla's real rate: `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS`
 is `300`, and `isCursorVisible(millis) == (millis / 300) % 2 == 0`
-(`TextCursorUtils.java:9,20-22`). `HudFrame::chat_caret_visible` carries that
+(`TextCursorUtils.isCursorVisible`). `HudFrame::chat_caret_visible` carries that
 boolean; the caller computes it from wall-clock time (see `app.rs`'s
 `WindowApp::redraw`, right before it builds the `HudFrame`) rather than this
 module owning a clock, matching how every other transient render flag reaches
@@ -139,13 +138,12 @@ implementation rather than two that can drift.
 `hud.rs`'s `wrap_legacy_with` (a free function; `Builder::wrap_legacy` binds it
 to the Builder's own font) greedily wraps a legacy-coded line into rows that
 fit a pixel width, mirroring vanilla's `GuiMessage.splitLines`
-(`ChatComponent.addMessageToDisplayQueue`,
-`.cache/mc/26.2/client-src/net/minecraft/client/gui/components/ChatComponent.java:284-285`):
+(`ChatComponent.addMessageToDisplayQueue`):
 break on a space when the next word would overflow, and hard-break a single
 word character-by-character when it alone exceeds the width. A `§`
 colour/format code seen before a break is carried onto the continuation line
 (a code fully resets formatting to itself —
-`lodestone-model/src/text.rs:626-644` — so tracking only the most recent one
+`from_legacy`, `lodestone-model/src/text.rs` — so tracking only the most recent one
 is sufficient).
 
 Widths come from `Builder::legacy_width`, which is real vanilla proportional
@@ -157,14 +155,16 @@ one that draws.
 Each logical `(line, age)` chat entry can now expand into several visual rows,
 all sharing that entry's age/alpha. Vanilla stacks a wrapped message's *last*
 split line nearest the bottom edge and its earlier lines above it
-(`ChatComponent.java:164-168,288-297`); the draw reproduces that by reversing
+(`ChatComponent.extractRenderState`/`ChatComponent.addMessageToDisplayQueue`); the draw reproduces that by reversing
 each entry's own wrapped rows before stacking them bottom-up.
 
 ### Chat Settings
 
 `crate::hud::ChatDisplayOptions` (a small `Copy` struct on `HudFrame`) carries
 the subset of vanilla's `net.minecraft.client.Options` chat fields
-(`.cache/mc/26.2/client-src/net/minecraft/client/Options.java:271-404,508`)
+(`Options.chatScale`/`Options.chatWidth`/`Options.chatHeightUnfocused`/
+`Options.chatHeightFocused`/`Options.chatLineSpacing`/`Options.chatOpacity`/
+`Options.textBackgroundOpacity`/`Options.chatColors`)
 that this renderer actually consumes:
 
 | field | vanilla option | default | effect |
@@ -212,7 +212,7 @@ for the same note in code.
   unit-tested against a hand-specified width table (see
   `wrap_uses_real_per_glyph_widths_not_a_flat_character_count`) without a GPU,
   an atlas, or a loaded jar.
-- **The wrap result is cached** (`hud::ChatWrapCache`, issue #527). Vanilla
+- **The wrap result is cached** (`hud::ChatWrapCache`). Vanilla
   splits once, on arrival — `GuiMessage.splitLines` from
   `ChatComponent.addMessageToDisplayQueue` — and this is the equivalent: the
   cache is owned by `WindowApp::chat_wrap` (the `HudFrame` is rebuilt every
