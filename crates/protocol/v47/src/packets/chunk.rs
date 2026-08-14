@@ -39,7 +39,7 @@
 //!    `DataFixerUpper` flattening table plus the rename/property bridge — before
 //!    it reaches a container. Unresolvable values become a **counted** air
 //!    substitution ([`ChunkData::fallback`]), logged once per column rather than
-//!    once per block or not at all. See GitHub epic #343 unit U3.
+//!    once per block or not at all. See canonicalisation unit U3.
 //! 2. **Block light** — for each present section, a 2048-byte nibble array.
 //! 3. **Sky light** — for each present section, a 2048-byte nibble array,
 //!    present only in dimensions with sky light (the overworld). `map_chunk`

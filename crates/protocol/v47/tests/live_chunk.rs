@@ -244,7 +244,7 @@ async fn decodes_real_chunks_from_live_1_8_server() {
     //
     // This used to assert the literal `112`, which is 1.8's *wire composite*
     // `(7 << 4) | 0` — correct only while this crate stored composites raw.
-    // Since #343 U3 the store holds **canonical 26.2** state ids, in which 112
+    // Since the canonicalisation unit U3 landed, the store holds **canonical 26.2** state ids, in which 112
     // is `minecraft:lava`. Asserting by name keeps the claim ("the bottom layer
     // is bedrock") independent of either id space, and would have failed on the
     // old behaviour rather than needing this comment. Note no `cargo check` can

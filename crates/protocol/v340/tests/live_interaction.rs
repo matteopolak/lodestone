@@ -472,7 +472,7 @@ async fn join(adapter: &V340Adapter, username: &str) -> (Connection<TcpStream>, 
     (conn, state)
 }
 
-/// Proves `ClientAction::Respawn` (#345/#349/#353's `client_command` action
+/// Proves `ClientAction::Respawn` (encoded as the `client_command` action
 /// `0`) is accepted by a real 1.12.2 server, using the same before/after
 /// server-computed read-back discipline as the break/place oracle above.
 ///

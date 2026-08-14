@@ -49,7 +49,7 @@ pub const PROTOCOL: i32 = 754;
 /// registry's view of a family cannot drift from the family's own. That
 /// matters more than it looks: the registry needs to answer "does anything
 /// handle protocol N?" *without* constructing an adapter, now that
-/// construction takes the negotiated protocol (epic #343 unit U2).
+/// construction takes the negotiated protocol (unit U2's multi-protocol seam).
 ///
 /// This family is single-protocol, so the slice has one entry. A
 /// multi-protocol family (the plan's v110/v498/v756 groupings) lists each
@@ -115,7 +115,7 @@ pub fn adapter() -> V735Adapter {
 
 /// Returns an adapter configured for the **negotiated** protocol.
 ///
-/// The multi-protocol construction seam (epic #343 unit U2). Before it, every
+/// The multi-protocol construction seam (unit U2). Before it, every
 /// family was built by a zero-argument `make: fn() -> Box<dyn VersionAdapter>`
 /// and the negotiated number reached the adapter nowhere — which is precisely
 /// what stopped one crate serving several protocol revisions, since it had
