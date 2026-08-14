@@ -2177,6 +2177,14 @@ impl MenuNav {
             // rows the screen's framework conversion added (see
             // [`EditForm::hover_row`]).
             Screen::ServerEdit => self.form.hover_row(row),
+            // Create New World tracks hover the same way `EditForm` does, and
+            // for the same reason: its text fields take real focus while its
+            // buttons take a highlight only. Its absence from this match is
+            // exactly why none of that screen's buttons drew a hover outline —
+            // the screen already reached `stamp_canvas_facts` through
+            // `render::frame_for`, so every canvas fact was present and only
+            // `MenuFrame::hovered` stayed `None`, every frame.
+            Screen::CreateWorld => self.create_world.hover_row(row),
             // The settings tree now *has* a cursor (issue #55), so hover moves
             // it — this arm's absence is what let #391 happen, because a screen
             // with no hover arm had to route a click through `Enter`. Row indices
@@ -9033,8 +9041,27 @@ mod tests {
 
         let snapshot = crate::menu::stats::StatsSnapshot::default();
         let frame = crate::menu::stats::frame(nav.stats(), &snapshot);
-        assert_eq!(frame.rows.len(), 1, "premise: Done is the only control");
-        assert_eq!(frame.rows[0].label, "Done", "premise: and it is row 0");
+        // Premise, restated after the tab bar landed: this screen used to carry
+        // Done alone, and the assertion said so. It now carries Done plus the
+        // three tab rows, so the old `rows.len() == 1` was measuring the absence
+        // of a feature rather than anything this test is about. It failed loudly
+        // on the day the tabs arrived, which is the whole reason to assert a
+        // premise rather than assume it.
+        assert_eq!(
+            frame.rows.len(),
+            1 + crate::menu::stats::TAB_LABELS.len(),
+            "premise: Done plus the three tabs"
+        );
+        assert_eq!(
+            frame.rows[crate::menu::stats::DONE_ROW].label,
+            "Done",
+            "premise: and Done is still row 0, which the focus assertions below \
+             read through `DONE_ROW`"
+        );
+        assert!(
+            frame.rows[crate::menu::stats::DONE_ROW].tab.is_none(),
+            "premise: row 0 is the button, not a tab row"
+        );
         assert_eq!(
             frame.selected,
             usize::MAX,
@@ -9054,6 +9081,15 @@ mod tests {
 
         // Tab is `Screen.keyPressed`'s TabNavigation, and this screen has one
         // focusable child for it to land on.
+        //
+        // **A known divergence, stated rather than asserted away.** Vanilla's
+        // `MenuTabBar` is itself focusable and sits in tab-order group 0, ahead
+        // of the Done button's group 1 — so real vanilla's first Tab lands on
+        // the tab bar, not on Done. `StatsNav` models focus as a single flag and
+        // the tab rows are not focusable widgets here, so our first Tab reaches
+        // Done directly. That gap is why this assertion reads `DONE_ROW` rather
+        // than "whatever Tab focused": when the tab bar becomes focusable, this
+        // line is the one that should fail.
         nav.key(&mut ui, MenuKey::Tab);
         let focused = crate::menu::stats::frame(nav.stats(), &snapshot);
         assert_eq!(
