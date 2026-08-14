@@ -248,7 +248,9 @@ Editing, and reading the tree:
 
 The machine:
 
-- **The disk fills, and `target/debug/build` is why — not `incremental`.** Six times in one session `target/`
+- **The disk fills, and *which* subdirectory is to blame changes between measurements. Measure, never recall.**
+  Three readings of `target/debug` now exist and they do not agree on even the ordering, so any rule naming a
+  culprit is a rule that will be wrong on its next reading. Six times in one session `target/`
   reached 100–118 GB against a volume with ~30 GB usable, free space hit zero, and **every `Bash` call then
   failed before running** because the harness could not write its own output file — which reads as a dead tool,
   not as a full disk. **An earlier version of this rule blamed `target/debug/incremental` and prescribed
@@ -256,9 +258,13 @@ The machine:
   `incremental` **4.2 GB** — 24× apart, so deleting the cache bought back only ~4 GB each time, which is exactly
   why it kept recurring. **That ratio is not a constant, and treating it as one is the next version of the same
   mistake**: re-measured later the same day at 80 GB of `target/debug`, the split was `build` **46 GB** and
-  `incremental` **34 GB** — 1.35× apart. So `build` is reliably the *largest* consumer but `incremental` is not
-  reliably negligible; **measure the split before choosing what to delete**, rather than reasoning from either
-  figure. This toolchain puts intermediates at
+  `incremental` **34 GB** — 1.35× apart. **A third reading then inverted the ordering outright**: at 101 GB of
+  `target/` (86 GB of it `debug`), `build` was **35 GB** against `incremental`'s **51 GB**. So the successor
+  claim — that `build` is *reliably* the largest and `incremental` merely non-negligible — was itself wrong, and
+  wrong in the same way as the original: it generalised a ratio from the readings taken so far. The three splits
+  are 24× one way, 1.35× one way, and 1.46× **the other**. Nothing about this ratio is stable, so
+  **measure the split before choosing what to delete** and quote the reading you just took, never one from this
+  file. This toolchain puts intermediates at
   `target/debug/build/<pkg>/<hash>/out/*.rcgu.o` and **never GCs the stale hash directories** — 2,150 of them
   under `lodestone-shell` alone, one holding 16,900 objects. `CARGO_INCREMENTAL=0` does not touch them.
 
