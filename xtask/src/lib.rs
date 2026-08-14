@@ -8886,6 +8886,27 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
             banned: "std::time::SystemTime",
             allowlist: &[],
         },
+        // `tokio::time::Instant::now()` is a different literal than
+        // `std::time::Instant`, so the rule above cannot see it, and it traps
+        // identically — `server.rs`'s own `JoinStopwatch` doc says so ("it
+        // bottoms out in std::time::Instant::now() ... and panics identically"),
+        // which did not stop `serve_play`'s keep-alive/time-sync/vitals/
+        // container-sync interval setup from shipping six unguarded calls anyway.
+        // Measured live in the browser build: joining a singleplayer world
+        // panics at `library/std/src/sys/time/unsupported.rs:13:9` the instant
+        // the client reaches Play, and "Joining world..." spins forever because
+        // the connection task that died was the one about to send the rest of
+        // the view. `tick.rs` also names this symbol, but only inside
+        // `run_tick_loop`, which wasm32's `open_in_memory` deliberately never
+        // spawns (see `net.rs`'s own comment on that constructor) — a real,
+        // documented gap rather than a live trap, so it is allowlisted rather
+        // than making this rule impossible to turn green.
+        ConfinementRule {
+            label: "lodestone-server tokio-instant-ban",
+            src_dir: "crates/lodestone-server/src",
+            banned: "tokio::time::Instant",
+            allowlist: &["tick.rs"],
+        },
         ConfinementRule {
             label: "lodestone-worldgen instant-ban",
             src_dir: "crates/lodestone-worldgen/src",
