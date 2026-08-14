@@ -65,6 +65,7 @@ fn seen(identity: PlayerIdentity, at: Vec3) -> PerceivedPlayer {
         perception: PlayerPerception {
             position: at,
             held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, 1.0),
         },
     }
 }
@@ -354,6 +355,7 @@ fn an_unidentified_player_is_never_resolved_as_an_owner() {
     sim.set_players(vec![PlayerPerception {
         position: Vec3::new(6.0, 0.0, 0.0),
         held_item: None,
+        view_direction: Vec3::new(0.0, 0.0, 1.0),
     }]);
     sim.tick();
     let mob = sim.get(wolf).expect("alive");
