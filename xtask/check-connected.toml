@@ -12,3 +12,58 @@ reason = "workspace build tool; it is intentionally not a shipped runtime artifa
 crate = "lodestone-game"
 owner = "impl-game"
 reason = "game orchestration crate is work-in-progress while shell/server seams are being connected"
+
+[[allow]]
+crate = "lodestone-fuzz"
+owner = "impl-xtask"
+reason = "fuzz-target crate (publish = false); like xtask, a workspace dev tool and not a shipped runtime artifact"
+
+[[allow]]
+crate = "lodestone-wasm-host"
+owner = "impl-plugins"
+reason = "WASM plugin host for desktop-only runtime plugin loading (docs/plans/runtime-plugin-loading.md); its own manifest states it must NOT become a dependency of lodestone-app because wasmtime cannot run inside a wasm32-unknown-unknown guest -- adding it there would break the browser build, not just inflate it"
+
+[[allow]]
+crate = "lodestone-plugin-support"
+owner = "impl-plugins"
+reason = "shared conveniences library for native plugins; only consumed by plugins (lodestone-event-logger, lodestone-autopilot) that are themselves deliberately not registered in the shipped client yet"
+
+[[allow]]
+crate = "lodestone-event-logger"
+owner = "impl-plugins"
+reason = "MONITOR-tier example reader plugin (issues #104/#105/#110); exercised end-to-end via the public plugin API in tests/observes_a_real_session.rs but deliberately not registered in the shipped client (see this crate's lib.rs and docs/plugin-api.md)"
+
+[[allow]]
+crate = "lodestone-autopilot"
+owner = "impl-plugins"
+reason = "the bevy-plugin half of the baritone-port navigation work (docs/baritone-port.md); deliberately not registered in the shipped client yet, same reason as lodestone-event-logger"
+
+[[allow]]
+crate = "lodestone-nav"
+owner = "impl-plugins"
+reason = "version-free navigation search core backing lodestone-autopilot, its only non-dev dependent; unreachable only because lodestone-autopilot is itself not yet wired into the shipped client"
+
+[[allow]]
+crate = "lodestone-server-brand"
+owner = "impl-plugins"
+reason = "example plugin consuming the public plugin API (docs/plugin-api.md) to handle the minecraft:brand channel; a demonstration plugin, not part of the engine, and nothing in the engine consumes it"
+
+[[allow]]
+crate = "lodestone-shop-api"
+owner = "impl-plugins"
+reason = "public message crate for the toy cross-plugin messaging example (issue #107, docs/cross-plugin-messages.md); reachable only through lodestone-shop and lodestone-shop-stats, which are themselves example plugins not registered in the shipped client"
+
+[[allow]]
+crate = "lodestone-shop"
+owner = "impl-plugins"
+reason = "toy publisher plugin for the cross-plugin messaging example (issue #107, docs/cross-plugin-messages.md); a demonstration plugin, not registered in the shipped client"
+
+[[allow]]
+crate = "lodestone-shop-stats"
+owner = "impl-plugins"
+reason = "toy subscriber plugin for the cross-plugin messaging example (issue #107, docs/cross-plugin-messages.md); a demonstration plugin, not registered in the shipped client"
+
+[[allow]]
+crate = "lodestone-worldedit"
+owner = "impl-plugins"
+reason = "WorldEdit-class bulk-edit plugin built on lodestone-world/lodestone-ecs primitives; a plugin, not an engine feature, and not registered in the shipped client yet"
