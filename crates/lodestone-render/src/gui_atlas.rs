@@ -333,12 +333,72 @@ impl GuiAtlas {
     /// sprite's own `GuiScaling` is deliberately **ignored**: a sub-rect request
     /// is by definition a fixed window, and a nine-slice of an arbitrary window
     /// is not a thing vanilla ever does.
+    ///
+    /// **`src` is treated as real sprite pixels, byte for byte — it is
+    /// rescaled against nothing.** That is only correct when the caller's
+    /// coordinates already agree with this sprite's *real* placed size, which
+    /// is true exactly at a 1x-equivalent pack (declared == real) and false
+    /// otherwise. Prefer [`Self::subregion_quad_declared`], which takes the
+    /// size `src` was authored against and rescales — see its doc for why a
+    /// raw pass-through here reproduces issue #582 (a 32x pack samples a
+    /// quarter of the intended window and the result draws 2x too big). This
+    /// method is kept, unchanged, only because a caller still passes
+    /// declared-space literals through it; migrate that caller to
+    /// [`Self::subregion_quad_declared`] rather than adding a new user of
+    /// this one.
     #[must_use]
     pub fn subregion_quad(&self, id: &str, src: [f32; 4], dst: [f32; 4]) -> Option<GuiSpriteQuad> {
+        // `declared == native_size(id)` makes the rescale a no-op (ratio
+        // 1.0), so this is byte-identical to the pre-#582 implementation —
+        // deliberately: the one remaining caller of this exact signature
+        // (the recipe book panel, `crate::hud` in `lodestone-shell`) still
+        // passes vanilla's declared `256x256`-baseline literals uninformed of
+        // this fix, and changing this method's own arithmetic would silently
+        // change what that caller draws on any pack where real != declared,
+        // without that caller's own code having been touched to match.
+        let native = self.native_size(id)?;
+        self.subregion_quad_declared(id, (native.0 as f32, native.1 as f32), src, dst)
+    }
+
+    /// As [`Self::subregion_quad`], but `src` is expressed in **declared**
+    /// pixels against `declared` (`(width, height)`) — the size vanilla
+    /// authored `src`'s coordinates against — rather than the sprite's real
+    /// pixel size.
+    ///
+    /// Mirrors vanilla's own
+    /// `GuiGraphicsExtractor.blitSprite(pipeline, sprite, spriteWidth,
+    /// spriteHeight, textureX, textureY, x, y, width, height, color)`, whose
+    /// UV is `sprite.getU((float) textureX / spriteWidth)` — always a
+    /// **fraction** of the declared `spriteWidth`/`spriteHeight` pair applied
+    /// to the sprite's real UV span, never an absolute real-pixel offset. The
+    /// recipe book panel's own doc example —
+    /// `blit(RECIPE_BOOK_LOCATION, xo, yo, 1.0F, 1.0F, 147, 166, 256, 256)` —
+    /// passes `declared = (256.0, 256.0)`; on a 16x pack the sheet's real size
+    /// is also `256x256` so the ratio is `1.0` and this is byte-identical to
+    /// treating `src` as real pixels, but on a 32x pack the sheet is really
+    /// `512x512` and the ratio `2.0` widens the sampled window to match —
+    /// without this, the same `147x166` request would cover only the
+    /// sheet's top-left quadrant and the caller's destination rect would
+    /// show that quadrant magnified 2x, which is issue #582's report.
+    ///
+    /// A `declared` equal to `id`'s own [`Self::native_size`] makes this
+    /// identical to [`Self::subregion_quad`] — the ratio is `1.0` either way.
+    #[must_use]
+    pub fn subregion_quad_declared(
+        &self,
+        id: &str,
+        declared: (f32, f32),
+        src: [f32; 4],
+        dst: [f32; 4],
+    ) -> Option<GuiSpriteQuad> {
         let entry = self.sprites.get(id)?;
         let sprite = self.atlas.sprite(&entry.location)?;
         let (atlas_w, atlas_h) = (self.atlas.width as f32, self.atlas.height as f32);
+        let (declared_w, declared_h) = declared;
+        let rx = sprite.width as f32 / declared_w;
+        let ry = sprite.height as f32 / declared_h;
         let [sx, sy, sw, sh] = src;
+        let (sx, sy, sw, sh) = (sx * rx, sy * ry, sw * rx, sh * ry);
         Some(GuiSpriteQuad {
             dst,
             uv_min: [
@@ -594,6 +654,147 @@ mod tests {
         let quads = with.geometry("title/minecraft", 4.0, 8.0, 256.0, 64.0);
         assert_eq!(quads.len(), 1);
         assert_eq!(quads[0].dst, [4.0, 8.0, 256.0, 64.0]);
+    }
+
+    /// A pack with one real `gui/sprites/**` entry (so `build_with_extras`
+    /// does not fail closed on an empty pack) plus one loose "panel" sheet at
+    /// `panel_px` real pixels — the recipe book panel's own shape (a raw
+    /// `textures/gui/**` path, not a `gui/sprites/**` entry).
+    fn manager_with_panel_sheet(panel_px: (u32, u32)) -> ResourceManager {
+        let mut src = MemorySource::default();
+        src.insert(
+            "assets/minecraft/textures/gui/sprites/hud/heart/full.png",
+            solid_png(9, 9, [200, 20, 30, 255]),
+        );
+        src.insert(
+            "assets/minecraft/textures/gui/title/panel.png",
+            solid_png(panel_px.0, panel_px.1, [10, 20, 30, 255]),
+        );
+        ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>])
+    }
+
+    /// Issue #582's own worked example, reproduced as a gate: a `147×166`
+    /// window at `(1, 1)` of a sheet **declared** `256×256`
+    /// (`RecipeBookComponent.java`'s `blit(RECIPE_BOOK_LOCATION, xo, yo, 1.0F,
+    /// 1.0F, 147, 166, 256, 256)`), built once at 256×256 real pixels (a
+    /// 16x-equivalent pack, where declared and real coincide) and once at
+    /// 512×512 (32x). A sub-rect genuinely smaller than the whole sheet is
+    /// deliberate: a wrong ratio must actually move the sampled window, not
+    /// merely fail to matter because the request already covers everything.
+    ///
+    /// The prediction is derived from outside the resolver: the declared
+    /// window as a **fraction** of the declared sheet
+    /// (`SRC[i] / DECLARED`), which vanilla's own `textureX / spriteWidth`
+    /// formula computes and which is resolution-independent by construction.
+    /// Both packs must resolve to that same fraction of the sprite's real
+    /// placed atlas rect — the discriminating assertion the issue's
+    /// hypothesis predicts and the pre-fix code could not satisfy.
+    #[test]
+    fn subregion_quad_declared_is_pack_resolution_independent() {
+        const DECLARED: (f32, f32) = (256.0, 256.0);
+        const SRC: [f32; 4] = [1.0, 1.0, 147.0, 166.0];
+        const DST: [f32; 4] = [10.0, 20.0, 147.0, 166.0];
+
+        let mut mismatches: Vec<String> = Vec::new();
+        for (label, panel_px) in [("16x-equivalent", (256, 256)), ("32x", (512, 512))] {
+            let atlas = GuiAtlas::build_with_extras(
+                &manager_with_panel_sheet(panel_px),
+                &[("panel", "assets/minecraft/textures/gui/title/panel.png")],
+            )
+            .unwrap_or_else(|e| panic!("{label} atlas builds: {e}"));
+            let sprite = atlas
+                .atlas()
+                .sprite(&ResourceLocation::new("lodestone", "gui/loose/panel").unwrap())
+                .unwrap_or_else(|| panic!("{label}: panel placed"));
+            let (aw, ah) = (atlas.atlas().width as f32, atlas.atlas().height as f32);
+
+            let q = atlas
+                .subregion_quad_declared("panel", DECLARED, SRC, DST)
+                .unwrap_or_else(|| panic!("{label}: quad resolves"));
+            assert_eq!(q.dst, DST, "{label}: dst is untouched by the fix");
+
+            // Fraction of the sprite's own placed rect that the resolved UVs
+            // actually cover — must equal SRC/DECLARED regardless of the
+            // sheet's real pixel size.
+            let got_min_u = (q.uv_min[0] * aw - sprite.x as f32) / sprite.width as f32;
+            let got_min_v = (q.uv_min[1] * ah - sprite.y as f32) / sprite.height as f32;
+            let got_max_u = (q.uv_max[0] * aw - sprite.x as f32) / sprite.width as f32;
+            let got_max_v = (q.uv_max[1] * ah - sprite.y as f32) / sprite.height as f32;
+
+            let want_min_u = SRC[0] / DECLARED.0;
+            let want_min_v = SRC[1] / DECLARED.1;
+            let want_max_u = (SRC[0] + SRC[2]) / DECLARED.0;
+            let want_max_v = (SRC[1] + SRC[3]) / DECLARED.1;
+
+            for (name, got, want) in [
+                ("min_u", got_min_u, want_min_u),
+                ("min_v", got_min_v, want_min_v),
+                ("max_u", got_max_u, want_max_u),
+                ("max_v", got_max_v, want_max_v),
+            ] {
+                if (got - want).abs() >= 1e-5 {
+                    mismatches.push(format!(
+                        "{label} {name}: got {got:.6}, want {want:.6} (diff {:.6})",
+                        (got - want).abs()
+                    ));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "subregion_quad_declared is not pack-resolution-independent:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    /// The negative control for the gate above: the legacy `subregion_quad`
+    /// (kept only for the not-yet-migrated recipe-panel caller — see its own
+    /// doc) treats `SRC` as real pixels with **no** declared/real rescale, so
+    /// it agrees with the declared-aware method only where the ratio is `1.0`
+    /// (16x-equivalent) and must disagree at 32x — proving this gate can
+    /// actually detect the bug the issue reports, not just that the code
+    /// runs.
+    #[test]
+    fn legacy_subregion_quad_reproduces_the_582_bug_at_32x() {
+        const DECLARED: (f32, f32) = (256.0, 256.0);
+        const SRC: [f32; 4] = [1.0, 1.0, 147.0, 166.0];
+        const DST: [f32; 4] = [10.0, 20.0, 147.0, 166.0];
+
+        let manager_16 = manager_with_panel_sheet((256, 256));
+        let atlas_16 = GuiAtlas::build_with_extras(
+            &manager_16,
+            &[("panel", "assets/minecraft/textures/gui/title/panel.png")],
+        )
+        .expect("16x atlas builds");
+        let legacy_16 = atlas_16
+            .subregion_quad("panel", SRC, DST)
+            .expect("16x legacy quad");
+        let declared_16 = atlas_16
+            .subregion_quad_declared("panel", DECLARED, SRC, DST)
+            .expect("16x declared quad");
+        assert_eq!(
+            legacy_16.uv_min, declared_16.uv_min,
+            "at the coincident 16x input the two methods must agree exactly"
+        );
+        assert_eq!(legacy_16.uv_max, declared_16.uv_max);
+
+        let manager_32 = manager_with_panel_sheet((512, 512));
+        let atlas_32 = GuiAtlas::build_with_extras(
+            &manager_32,
+            &[("panel", "assets/minecraft/textures/gui/title/panel.png")],
+        )
+        .expect("32x atlas builds");
+        let legacy_32 = atlas_32
+            .subregion_quad("panel", SRC, DST)
+            .expect("32x legacy quad");
+        let declared_32 = atlas_32
+            .subregion_quad_declared("panel", DECLARED, SRC, DST)
+            .expect("32x declared quad");
+        assert_ne!(
+            legacy_32.uv_min, declared_32.uv_min,
+            "at 32x the undeclared legacy method must diverge from the fix \
+             (this is issue #582's magnification, reproduced as a control)"
+        );
     }
 
     #[test]

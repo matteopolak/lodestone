@@ -26,6 +26,29 @@ use super::{
     SMOKER_BURN_PROGRESS, SMOKER_LIT_PROGRESS,
 };
 
+/// Declared (16x-baseline) full-sprite size the furnace family's lit-flame
+/// sub-rect is authored against — `AbstractFurnaceScreen.java`'s
+/// `blitSprite(pipeline, litProgressSprite, 14, 14, 0, 14 - h, x, y, 14, h)`.
+/// Shared by all three furnace variants: `FurnaceScreen`/`BlastFurnaceScreen`/
+/// `SmokerScreen` all reuse `AbstractFurnaceScreen.extractBackground`, only
+/// the sprite id differs. Needed by
+/// [`ContainerBackground::sprite_subregion_quad`] to rescale the sub-rect for
+/// a resource pack whose real pixels exceed this baseline — issue #582.
+const FURNACE_LIT_DECLARED: (f32, f32) = (14.0, 14.0);
+/// As [`FURNACE_LIT_DECLARED`], for the burn-progress bar —
+/// `blitSprite(pipeline, burnProgressSprite, 24, 16, 0, 0, x, y, w, 16)`.
+const FURNACE_BURN_DECLARED: (f32, f32) = (24.0, 16.0);
+/// The brewing stand's fuel-length bar's declared size —
+/// `BrewingStandScreen.java`'s
+/// `blitSprite(pipeline, FUEL_LENGTH_SPRITE, 18, 4, 0, 0, x, y, len, 4)`.
+const BREWING_FUEL_DECLARED: (f32, f32) = (18.0, 4.0);
+/// The brewing stand's brew-progress bar's declared size —
+/// `blitSprite(pipeline, BREW_PROGRESS_SPRITE, 9, 28, 0, 0, x, y, 9, len)`.
+const BREWING_BREW_DECLARED: (f32, f32) = (9.0, 28.0);
+/// The brewing stand's bubble-column's declared size —
+/// `blitSprite(pipeline, BUBBLES_SPRITE, 12, 29, 0, 29 - len, x, y, 12, len)`.
+const BREWING_BUBBLES_DECLARED: (f32, f32) = (12.0, 29.0);
+
 /// Geometry for the container overlay: coloured chrome plus, when an item atlas
 /// is attached, real slot icons on the two icon streams.
 #[derive(Debug, Clone, PartialEq)]
@@ -330,6 +353,7 @@ impl ContainerGeometry {
                         let lit_h = (lit_progress * 13.0).ceil() + 1.0;
                         if let Some(q) = bg.sprite_subregion_quad(
                             lit_sprite,
+                            FURNACE_LIT_DECLARED,
                             [0.0, 14.0 - lit_h, 14.0, lit_h],
                             [x + 56.0, y + 36.0 + 14.0 - lit_h, 14.0, lit_h],
                         ) {
@@ -346,6 +370,7 @@ impl ContainerGeometry {
                     if burn_w > 0.0
                         && let Some(q) = bg.sprite_subregion_quad(
                             burn_sprite,
+                            FURNACE_BURN_DECLARED,
                             [0.0, 0.0, burn_w, 16.0],
                             [x + 79.0, y + 34.0, burn_w, 16.0],
                         )
@@ -361,6 +386,7 @@ impl ContainerGeometry {
                     if fuel_len > 0
                         && let Some(q) = bg.sprite_subregion_quad(
                             BREWING_FUEL_LENGTH,
+                            BREWING_FUEL_DECLARED,
                             [0.0, 0.0, fuel_len as f32, 4.0],
                             [x + 60.0, y + 44.0, fuel_len as f32, 4.0],
                         )
@@ -373,6 +399,7 @@ impl ContainerGeometry {
                         if brew_len > 0
                             && let Some(q) = bg.sprite_subregion_quad(
                                 BREWING_BREW_PROGRESS,
+                                BREWING_BREW_DECLARED,
                                 [0.0, 0.0, 9.0, brew_len as f32],
                                 [x + 97.0, y + 16.0, 9.0, brew_len as f32],
                             )
@@ -384,6 +411,7 @@ impl ContainerGeometry {
                         if bubble_len > 0
                             && let Some(q) = bg.sprite_subregion_quad(
                                 BREWING_BUBBLES,
+                                BREWING_BUBBLES_DECLARED,
                                 [0.0, (29 - bubble_len) as f32, 12.0, bubble_len as f32],
                                 [
                                     x + 63.0,
