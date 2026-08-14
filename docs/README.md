@@ -1217,9 +1217,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   entity type — in memory and in generated tables. The answer is a **generated enum
   whose discriminant is the registry id**, with the plugin case kept in a separate
   wrapper type so it costs the built-in path nothing. `lodestone_data::block::Block`
-  is the first and, so far, only registry converted; this document records the
-  decision, what was rejected, what was measured, and the order the remaining
-  registries should follow.
+  was the first registry converted; `lodestone_data::item::Item` and
+  `lodestone_data::entity_type::EntityType` are Stage 1, landed the same way. This
+  document records the decision, what was rejected, what was measured, and the order
+  the remaining registries should follow.
 - [Resource Packs screen](./resource-packs-screen.md) —
   `SettingsPage::ResourcePacks` (issue #415): vanilla's `PackSelectionScreen`, two
   transferable columns over a real pack repository. **Available** on the left lists
@@ -2176,6 +2177,17 @@ of these caught the *brief* being wrong rather than the code.
   against a verified tree; two of the four issue bodies contain claims that are false
   against 26.2 or against the current tree, and those corrections are the first
   section rather than a footnote.
+- [Plan: which files and crates to split, and which to leave alone](./plans/crate-and-file-splits.md) —
+  A read-only architecture pass over the workspace's largest files and crates,
+  deciding per candidate whether to split now, split later, or leave — judged on
+  **contention**, not on tidiness. Development here runs many agents concurrently
+  against a single shared checkout with no per-agent worktrees, so a large file is a
+  throughput problem: it is a lock. Every verdict below is backed by a commit-level
+  measurement of who actually edits what, and the plan carries the migration method,
+  the ordering, and a full enumeration of the path-shaped instruments a split would
+  silently blind. Written 2026-08-14 against a verified tree; the
+  `protocol/v770/src/adapter.rs` split (`d983d0e7`..`5ac277f8`) is the precedent,
+  including its warning.
 - [Issue batching: ~250 open issues as agent-sized, file-disjoint dispatch batches](./plans/issue-batching.md) —
   A dispatch plan that clusters the 255 open issues (surveyed 2026-08-04) into batches
   one agent can close in one sitting, scheduled into waves whose file sets are

@@ -54,8 +54,17 @@ architectural dead end — see `docs/roadmap/server-entities.md`.
     `block_states`, `sound_events`, `particle_types`, `menus`, `items`,
     `data_component_types`) are generated from Mojang's own
     `registries.json`/`blocks.json` reports (`.cache/mc/26.2/generated/reports/`),
-    no custom oracle program needed — the drift-guard test parses the report
-    directly.
+    no custom oracle program needed. Two different mechanisms read that
+    report, and they are not interchangeable: `attribute_types`, `entity_types`
+    and `block_states` each have their own `tests/*.rs` drift-guard that
+    parses the report directly (see below). `sound_events`, `particle_types`,
+    `menus`, `items` and `data_component_types` have **no such test** — as
+    documented under "How to change it" — so `cargo xtask gen-registries
+    --check` (which `cargo xtask conformance` runs, pointed at this
+    directory) is the *only* thing that regenerates or drift-checks them.
+    Retiring that xtask step without first giving these five their own
+    `tests/*.rs` guard would leave them with zero drift coverage, not
+    redundant coverage.
   - **JVM-walked tables** (`block_entity_types`, `hardness`, `collision_shapes`, `block_solidity`,
     `entity_census`, `entity_dimensions`, `item_prototypes`, `outline_shapes`,
     `path_types`, `shade_brightness`, `snow_support`, `sound_types`, `tools`) need an
@@ -97,9 +106,18 @@ architectural dead end — see `docs/roadmap/server-entities.md`.
   ```
 
   (substitute the table name; each test file's own header has the exact
-  invocation). `tools`/`particle_types`/`sound_events`/`menus`/`mob_effects`
-  have no such test — they were never gated by a drift guard in `v770` either,
-  and that did not change here.
+  invocation). `tools`/`particle_types`/`sound_events`/`menus`/`items`/
+  `data_component_types`/`mob_effects` have no such test — they were never
+  gated by a `tests/*.rs` drift guard in `v770` either, and that did not
+  change here. `sound_events`, `particle_types`, `menus`, `items` and
+  `data_component_types` are still drift-checked, just by a different
+  mechanism: `cargo xtask gen-registries --check` (default `--out-dir` is
+  this directory, `crates/lodestone-data/src/generated`, not a protocol
+  family's `generated/` — these tables describe the game, not one
+  protocol's wire format, so they live here once rather than once per
+  family), which `cargo xtask conformance` also runs, unconditional of
+  `--family`. `tools` and `mob_effects` have neither kind of drift guard
+  today.
 - `v770`'s `adapter.rs` (`V770Adapter`, implementing
   `lodestone_model::VersionAdapter`) delegates every data-shaped trait method
   (`block_hardness`, `block_collision`, `block_outline`, `block_interaction`,
