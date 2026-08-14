@@ -14,6 +14,14 @@ pub const DEFAULT_PACKET_IDS_OUT: &str = "crates/protocol/v770/src/generated/pac
 /// Default output for the minecraft-data-sourced protocol 47 (Minecraft 1.8.x).
 pub const DEFAULT_PACKET_IDS_OUT_V47: &str = "crates/protocol/v47/src/generated/packet_ids.rs";
 pub const DEFAULT_CONNECTED_ALLOWLIST: &str = "xtask/check-connected.toml";
+/// Where `gen-registries` reads/writes the `sound_event`/`particle_type`/`menu`/
+/// `item`/`data_component_type` registry tables by default, and where
+/// `conformance`'s registry step drift-checks them regardless of `--family`.
+/// These describe **the game**, not **the protocol** (see
+/// `docs/lodestone-data-crate.md`), so unlike `packet_ids.rs` they are not
+/// duplicated per protocol family — there is exactly one committed copy, for
+/// the one canonical internal version (26.2 / v770).
+pub const DEFAULT_REGISTRY_OUT_DIR: &str = "crates/lodestone-data/src/generated";
 
 /// Where a packet report is sourced from.
 ///
@@ -888,7 +896,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-sounds     Download and verify the vanilla .ogg sound corpus (~80 MB) into .cache/mc/<version>/objects/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n    docs-index       Generate docs/README.md from every doc's own H1 + `## What it is` summary\n    bench-compare    Ratio + verdict between two recorded bench-results/*.jsonl runs (issue #82)\n    wasm-check       wasm32 compile + confinement-guard tripwire (tested port of scripts/wasm-check.sh)\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Run `fetch-sounds` for the corpus.\n\nOptions for fetch-sounds:\n    --version <version>   Minecraft version, e.g. 26.2 (fetch-assets must have run first)\n    --all                 Also fetch background music and jukebox discs (+293 MB, 92 objects)\n    --jobs <n>            Concurrent downloads (default 12)\n    --force               Re-download every object even when it already matches its SHA-1\n  Derives the corpus from sounds.json, not a file list: every sample any non-music event can\n  select. Measured on 26.2 -- 4751 objects, 80.14 MB, including all six biome ambience loops.\n  Excluded by default: 70 music tracks + 22 jukebox records = 92 objects, 293.23 MB. The 28 index\n  .ogg objects no event references are fetched in neither mode. Every object's SHA-1 is verified\n  against the index, and a re-run of a complete fetch downloads nothing.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n\nOptions for docs-index:\n    --check               Compare the generated index against docs/README.md and fail on drift without writing\n  Do not hand-edit docs/README.md: add/edit a doc under docs/ (with an H1 and a `## What\n  it is`/`## What this is` summary paragraph) and re-run this command. `cargo test -p xtask`\n  already fails if the committed file drifts from the generator.\n\nOptions for bench-compare:\n    <path>                 A bench-results/<bench>.jsonl file (gitignored local measurement log)\n    --metric <name>        Metric name to compare, e.g. neighbourhood_factor_vs_single\n    --scene <name>          Scene string to compare (must match exactly, including punctuation)\n    --candidate <sha>       Git-sha prefix of the \"after\" run (default: most recent recorded run)\n    --baseline <sha>        Git-sha prefix of the \"before\" run (default: the run immediately\n                            preceding the candidate on the same machine/profile)\n    --tolerance <pct>       Tolerance band as a percentage (default 25, i.e. +/-25%)\n  Never wired into CI by this command -- a manual/local/scheduled check, per\n  docs/roadmap/benchmarks.md's policy. Exits non-zero when the ratio falls outside the\n  tolerance band (useful for a future opt-in script; this alone does not make anything\n  CI-blocking).\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-sounds     Download and verify the vanilla .ogg sound corpus (~80 MB) into .cache/mc/<version>/objects/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n    docs-index       Generate docs/README.md from every doc's own H1 + `## What it is` summary\n    bench-compare    Ratio + verdict between two recorded bench-results/*.jsonl runs (issue #82)\n    wasm-check       wasm32 compile + confinement-guard tripwire (tested port of scripts/wasm-check.sh)\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory (default crates/lodestone-data/src/generated;\n                              crates/protocol/*/src/generated also accepted, for a table\n                              that is genuinely per-family translation data)\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Run `fetch-sounds` for the corpus.\n\nOptions for fetch-sounds:\n    --version <version>   Minecraft version, e.g. 26.2 (fetch-assets must have run first)\n    --all                 Also fetch background music and jukebox discs (+293 MB, 92 objects)\n    --jobs <n>            Concurrent downloads (default 12)\n    --force               Re-download every object even when it already matches its SHA-1\n  Derives the corpus from sounds.json, not a file list: every sample any non-music event can\n  select. Measured on 26.2 -- 4751 objects, 80.14 MB, including all six biome ambience loops.\n  Excluded by default: 70 music tracks + 22 jukebox records = 92 objects, 293.23 MB. The 28 index\n  .ogg objects no event references are fetched in neither mode. Every object's SHA-1 is verified\n  against the index, and a re-run of a complete fetch downloads nothing.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n\nOptions for docs-index:\n    --check               Compare the generated index against docs/README.md and fail on drift without writing\n  Do not hand-edit docs/README.md: add/edit a doc under docs/ (with an H1 and a `## What\n  it is`/`## What this is` summary paragraph) and re-run this command. `cargo test -p xtask`\n  already fails if the committed file drifts from the generator.\n\nOptions for bench-compare:\n    <path>                 A bench-results/<bench>.jsonl file (gitignored local measurement log)\n    --metric <name>        Metric name to compare, e.g. neighbourhood_factor_vs_single\n    --scene <name>          Scene string to compare (must match exactly, including punctuation)\n    --candidate <sha>       Git-sha prefix of the \"after\" run (default: most recent recorded run)\n    --baseline <sha>        Git-sha prefix of the \"before\" run (default: the run immediately\n                            preceding the candidate on the same machine/profile)\n    --tolerance <pct>       Tolerance band as a percentage (default 25, i.e. +/-25%)\n  Never wired into CI by this command -- a manual/local/scheduled check, per\n  docs/roadmap/benchmarks.md's policy. Exits non-zero when the ratio falls outside the\n  tolerance band (useful for a future opt-in script; this alone does not make anything\n  CI-blocking).\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -1442,7 +1450,7 @@ fn parse_gen_registries_args(args: &[String]) -> Result<CliCommand> {
     let mut minecraft_version = None;
     let mut protocol_version = None;
     let mut check = false;
-    let mut out_dir = PathBuf::from("crates/protocol/v770/src/generated");
+    let mut out_dir = PathBuf::from(DEFAULT_REGISTRY_OUT_DIR);
     let mut registries: Option<Vec<String>> = None;
     let mut index = 0;
 
@@ -2572,6 +2580,105 @@ pub fn check_workspace_connected_with_allowlist(
         findings,
         allowed: allowlist,
     })
+}
+
+/// The same connectivity BFS as [`check_workspace_connected`], but with the
+/// reported findings narrowed to the crates that belong to `family` — the
+/// `lodestone-<family>` package itself, plus anything under
+/// `crates/protocol/<family>/`.
+///
+/// Connectivity is a whole-workspace property (a family crate can only be
+/// judged reachable by walking the *entire* dependency graph from every
+/// shipped root), so the BFS itself stays global — only the verdict handed
+/// back to a `--family`-scoped caller is narrowed. Without this, `conformance
+/// --family v340` fails on an unrelated orphan crate anywhere else in the
+/// workspace, making a per-family tool hostage to unrelated workspace state.
+/// This does not introduce a skip path: a real violation in `family`'s own
+/// crates is still a finding here, so a subject that exists can still fail.
+pub fn check_workspace_connected_for_family(
+    workspace_root: &Path,
+    family: &str,
+) -> Result<ConnectedReport> {
+    check_workspace_connected_for_family_with_allowlist(
+        workspace_root,
+        family,
+        Path::new(DEFAULT_CONNECTED_ALLOWLIST),
+    )
+}
+
+pub fn check_workspace_connected_for_family_with_allowlist(
+    workspace_root: &Path,
+    family: &str,
+    allowlist_path: &Path,
+) -> Result<ConnectedReport> {
+    let report = check_workspace_connected_with_allowlist(workspace_root, allowlist_path)?;
+
+    let metadata = cargo_metadata(workspace_root)?;
+    let canonical_root = workspace_root
+        .canonicalize()
+        .with_context(|| format!("canonicalize workspace root {}", workspace_root.display()))?;
+    let packages = metadata
+        .get("packages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("cargo metadata did not include packages"))?;
+    let workspace_members = metadata
+        .get("workspace_members")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("cargo metadata did not include workspace_members"))?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+
+    let mut family_names = BTreeSet::new();
+    for package in packages {
+        let Some(package_id) = package.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !workspace_members.contains(package_id) {
+            continue;
+        }
+        if package_belongs_to_family(&canonical_root, package, family)? {
+            family_names.insert(package_name(package)?.to_owned());
+        }
+    }
+
+    let findings = report
+        .findings
+        .iter()
+        .filter(|finding| family_names.contains(&finding.crate_name))
+        .cloned()
+        .collect();
+
+    Ok(ConnectedReport {
+        roots: report.roots,
+        findings,
+        allowed: report.allowed,
+    })
+}
+
+/// Whether a workspace package is part of protocol family `family`: either
+/// its manifest lives under `crates/protocol/<family>/`, or it is the
+/// `lodestone-<family>` package by name (families whose crate is not nested
+/// under `crates/protocol` — none today, but the name check is the cheaper,
+/// more durable identity and costs nothing to also check).
+fn package_belongs_to_family(canonical_root: &Path, package: &Value, family: &str) -> Result<bool> {
+    if package_name(package)? == format!("lodestone-{family}") {
+        return Ok(true);
+    }
+    let manifest_path = package
+        .get("manifest_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("workspace package is missing manifest_path"))?;
+    let manifest_path = Path::new(manifest_path);
+    let canonical_manifest = manifest_path
+        .canonicalize()
+        .with_context(|| format!("canonicalize manifest path {}", manifest_path.display()))?;
+    let Ok(relative) = canonical_manifest.strip_prefix(canonical_root) else {
+        // A workspace package outside the workspace root cannot be under
+        // crates/protocol/<family>/ either; not an error, just not this family.
+        return Ok(false);
+    };
+    Ok(relative.starts_with(Path::new("crates/protocol").join(family)))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5692,11 +5799,19 @@ pub fn run_conformance(
         .join("reports")
         .join("registries.json");
     if registry_report.exists() {
+        // Registry tables (sound events, particle types, menus, items, data
+        // component types) describe the game, not the wire format for this
+        // one family: they live in crates/lodestone-data/src/generated,
+        // shared by every family, not under this family's own generated/.
+        // Pointing this at `generated_dir` (crates/protocol/<family>/src/generated)
+        // was the stale-location bug — that path has not held these tables
+        // since the lodestone-data extraction, so the check silently read
+        // nothing for the one family (v770) that reaches this branch at all.
         let registry_options = GenRegistriesOptions {
             minecraft_version: options.minecraft_version.clone(),
             protocol_version: options.protocol_version,
             check: true,
-            out_dir: generated_dir.clone(),
+            out_dir: PathBuf::from(DEFAULT_REGISTRY_OUT_DIR),
             registries: default_registry_specs()
                 .iter()
                 .map(|spec| spec.registry_key.to_owned())
@@ -5745,7 +5860,13 @@ pub fn run_conformance(
         outcome: ConformanceOutcome::Passed,
     });
 
-    let connected = check_workspace_connected(workspace_root)?;
+    // The BFS itself is unavoidably workspace-wide (reachability can only be
+    // judged by walking the whole graph from every shipped root), but the
+    // verdict handed to a --family run is scoped to that family's own
+    // crates. Without this, `conformance --family v340` fails or passes
+    // depending on unrelated crates elsewhere in the workspace -- a
+    // per-family tool held hostage to state outside its own subject.
+    let connected = check_workspace_connected_for_family(workspace_root, &options.family)?;
     if connected.has_violations() {
         bail!("{}", connected.violation_summary());
     }
@@ -6243,7 +6364,7 @@ fn resolve_generated_dir(workspace_root: &Path, requested: &Path) -> Result<Path
     validate_relative_child_path(relative)?;
     if !path_is_generated_dir(relative) {
         bail!(
-            "refusing to write outside crates/protocol/*/src/generated; requested {}",
+            "refusing to write outside crates/lodestone-data/src/generated or crates/protocol/*/src/generated; requested {}",
             requested.display()
         );
     }
@@ -6251,6 +6372,13 @@ fn resolve_generated_dir(workspace_root: &Path, requested: &Path) -> Result<Path
     Ok(workspace_root.join(relative))
 }
 
+/// `crates/protocol/*/src/generated` remains legal (a family-scoped override
+/// is still a valid `--out-dir`, e.g. for a table this repo later decides is
+/// genuinely per-protocol-family translation data rather than shared game
+/// data), but `crates/lodestone-data/src/generated` is now the one the
+/// default and `conformance` point at: `sound_events`/`particle_types`/
+/// `menus`/`items`/`data_component_types` are game data, not protocol data,
+/// and live there (see `docs/lodestone-data-crate.md`).
 fn path_is_generated_dir(relative: &Path) -> bool {
     let components: Vec<&std::ffi::OsStr> = relative
         .components()
@@ -6260,11 +6388,18 @@ fn path_is_generated_dir(relative: &Path) -> bool {
         })
         .collect();
 
+    if let [crates, protocol, _crate_name, src, generated] = components.as_slice() {
+        if *crates == "crates" && *protocol == "protocol" && *src == "src" && *generated == "generated"
+        {
+            return true;
+        }
+    }
+
     matches!(
         components.as_slice(),
-        [crates, protocol, _crate_name, src, generated]
+        [crates, data, src, generated]
             if *crates == "crates"
-                && *protocol == "protocol"
+                && *data == "lodestone-data"
                 && *src == "src"
                 && *generated == "generated"
     )
@@ -10496,6 +10631,28 @@ mod tests {
         Ok(())
     }
 
+    /// `sound_events`/`particle_types`/`menus`/`items`/`data_component_types`
+    /// are game data, not protocol data, and the registry extraction moved
+    /// their committed tables to `crates/lodestone-data/src/generated`
+    /// without anyone updating this default -- `gen-registries` (and
+    /// `conformance`'s registry step, which shares this default) kept
+    /// pointing at the old `crates/protocol/v770/src/generated` location,
+    /// which has not held these tables since. This asserts the default
+    /// resolves to where the tables actually live now.
+    #[test]
+    fn gen_registries_default_out_dir_is_lodestone_data() -> Result<()> {
+        let command = parse_cli_args(["gen-registries", "--version", "26.2", "--protocol", "776"])?;
+
+        let CliCommand::GenRegistries { options } = command else {
+            panic!("expected GenRegistries, got {command:?}");
+        };
+        assert_eq!(
+            options.out_dir,
+            PathBuf::from("crates/lodestone-data/src/generated")
+        );
+        Ok(())
+    }
+
     #[test]
     fn cli_parses_conformance_command() -> Result<()> {
         let command = parse_cli_args([
@@ -11149,6 +11306,137 @@ reason = "fixture has no shipped binary root"
                     outcome: ConformanceOutcome::Skipped("--skip-cargo was provided".to_owned()),
                 },
             ]
+        );
+        Ok(())
+    }
+
+    /// Reproduces the stale-location bug directly: `conformance`'s registry
+    /// step used to point at `crates/protocol/<family>/src/generated`, but
+    /// the four registries it drift-checks (`sound_events`, `particle_types`,
+    /// `menus`, `items`) have lived in `crates/lodestone-data/src/generated`
+    /// since the `lodestone-data` extraction. Legacy families skip this step
+    /// entirely (no `registries.json`), so the stale path was unreachable
+    /// for three of four families and, before `check-connected` was fixed,
+    /// unreachable for the fourth too -- two independent guards masking one
+    /// bug. This plants a `registries.json` (making the family the one path
+    /// that reaches the step) and pre-generates the committed tables at the
+    /// *correct*, family-independent location, then asserts the step passes.
+    /// Before the fix this failed with "No such file or directory" against
+    /// `crates/protocol/v999/src/generated/sound_events.rs`, which never
+    /// existed.
+    #[test]
+    fn conformance_registry_check_reads_lodestone_data_not_the_family_generated_dir() -> Result<()>
+    {
+        let workspace = isolation_fixture(
+            "conformance-registry-redirect",
+            &[("crates/protocol/v999", "lodestone-v999", "")],
+        )?;
+        let packet_report_json = r#"{
+            "configuration": {"clientbound": {}, "serverbound": {}},
+            "handshake": {"serverbound": {"minecraft:intention": {"protocol_id": 0}}},
+            "login": {"clientbound": {}, "serverbound": {}},
+            "play": {"clientbound": {}, "serverbound": {}},
+            "status": {"clientbound": {}, "serverbound": {}}
+        }"#;
+        let cache_dir = workspace.join(".cache/mc/test/generated/reports");
+        std::fs::create_dir_all(&cache_dir)?;
+        std::fs::write(cache_dir.join("packets.json"), packet_report_json)?;
+        // Pairwise-distinct entries per registry so a transposition between
+        // registries (all four go through the same generator) cannot survive
+        // unnoticed.
+        std::fs::write(
+            cache_dir.join("registries.json"),
+            r#"{
+                "minecraft:sound_event": {"entries": {"minecraft:test_sound": {"protocol_id": 0}}},
+                "minecraft:particle_type": {"entries": {"minecraft:test_particle": {"protocol_id": 0}}},
+                "minecraft:menu": {"entries": {"minecraft:test_menu": {"protocol_id": 0}}},
+                "minecraft:item": {"entries": {"minecraft:test_item": {"protocol_id": 0}}}
+            }"#,
+        )?;
+        std::fs::create_dir_all(workspace.join("xtask"))?;
+        std::fs::write(
+            workspace.join(DEFAULT_CONNECTED_ALLOWLIST),
+            r#"
+[[allow]]
+crate = "lodestone-v999"
+owner = "xtask-test"
+reason = "fixture has no shipped binary root"
+"#,
+        )?;
+
+        let report = parse_packet_report(packet_report_json, "test", 999)?;
+        let family_generated_dir = workspace.join("crates/protocol/v999/src/generated");
+        std::fs::create_dir_all(&family_generated_dir)?;
+        std::fs::write(
+            family_generated_dir.join("packet_ids.rs"),
+            generate_packet_ids_source(&report)?,
+        )?;
+
+        // Pre-generate the committed registry tables at the real location --
+        // crates/lodestone-data/src/generated, not the family's own
+        // generated/ -- exactly as they are actually committed in this repo.
+        let registry_options = GenRegistriesOptions {
+            minecraft_version: "test".to_owned(),
+            protocol_version: 999,
+            check: false,
+            out_dir: PathBuf::from(DEFAULT_REGISTRY_OUT_DIR),
+            registries: default_registry_specs()
+                .iter()
+                .map(|spec| spec.registry_key.to_owned())
+                .collect(),
+        };
+        let written = generate_registries(&workspace, &registry_options)?;
+        assert_eq!(written.len(), 4);
+        // Positive control: the family's own (stale) location must stay
+        // empty, or this test would not distinguish the fix from the bug.
+        assert!(!family_generated_dir.join("sound_events.rs").exists());
+
+        let conformance = run_conformance(
+            &workspace,
+            &ConformanceOptions {
+                family: "v999".to_owned(),
+                minecraft_version: "test".to_owned(),
+                protocol_version: 999,
+                source: PacketSource::Mojang,
+                skip_cargo: true,
+            },
+        )?;
+        let registry_step = conformance
+            .steps
+            .iter()
+            .find(|step| step.name == "gen-registries --check")
+            .expect("conformance always reports a gen-registries --check step");
+        assert_eq!(registry_step.outcome, ConformanceOutcome::Passed);
+
+        // Negative control: corrupt the committed table at the real location
+        // and confirm conformance's registry step actually reads it (rather
+        // than, say, vacuously passing because the file it checks does not
+        // exist and some earlier bug swallowed the read error).
+        let items_path = workspace.join(DEFAULT_REGISTRY_OUT_DIR).join("items.rs");
+        let pristine = std::fs::read_to_string(&items_path)?;
+        std::fs::write(&items_path, pristine.replace("minecraft:test_item", "minecraft:corrupted"))?;
+        let error = run_conformance(
+            &workspace,
+            &ConformanceOptions {
+                family: "v999".to_owned(),
+                minecraft_version: "test".to_owned(),
+                protocol_version: 999,
+                source: PacketSource::Mojang,
+                skip_cargo: true,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("items.rs is out of date"), "{error}");
+        assert!(
+            error.contains(
+                workspace
+                    .join(DEFAULT_REGISTRY_OUT_DIR)
+                    .join("items.rs")
+                    .to_str()
+                    .expect("workspace path is valid UTF-8")
+            ),
+            "expected the error to name the lodestone-data path, got: {error}"
         );
         Ok(())
     }
@@ -12528,6 +12816,80 @@ reason = ""
             .to_string();
         assert!(error.contains("owner"), "{error}");
         assert!(error.contains("reason"), "{error}");
+        Ok(())
+    }
+
+    /// `conformance --family v340` used to run `check-connected` workspace-
+    /// wide and unconditionally: an orphan crate belonging to an unrelated
+    /// family (or anything else in the workspace) failed v340's conformance
+    /// run even though v340 itself was perfectly fine -- a per-family tool
+    /// held hostage to state outside its own subject, the mirror image of
+    /// the docs-index gate that scanned three directories and not a fourth.
+    ///
+    /// Builds two protocol families, only one wired into the shipped root:
+    /// `lodestone-v999` is reachable, `lodestone-v888` is a genuine orphan.
+    /// Two things must both be true, or this is a skip path rather than a
+    /// scope: family-scoped v999 must NOT see v888's violation (that is the
+    /// fix), and family-scoped v888 must still see its OWN violation (so a
+    /// subject that exists cannot come back "no findings" -- an errored or
+    /// vacuous detector is the failure mode this whole audit exists to catch).
+    #[test]
+    fn check_connected_for_family_scopes_violations_to_the_named_family() -> Result<()> {
+        let workspace = connected_fixture(
+            "connected-family-scope",
+            &[(
+                "apps/lodestone",
+                "lodestone-shell",
+                true,
+                r#"
+[dependencies]
+lodestone-v999 = { path = "../../crates/protocol/v999" }
+"#,
+            )],
+            &[
+                ("crates/protocol/v999", "lodestone-v999", false, ""),
+                ("crates/protocol/v888", "lodestone-v888", false, ""),
+            ],
+            "",
+        )?;
+
+        // Sanity precondition: the global, unscoped check must actually see
+        // both crates' status, or the scoped assertions below prove nothing.
+        let global = check_workspace_connected(&workspace)?;
+        assert!(
+            global
+                .violations()
+                .any(|finding| finding.crate_name == "lodestone-v888"),
+            "{}",
+            global.violation_summary()
+        );
+        assert!(
+            !global
+                .violations()
+                .any(|finding| finding.crate_name == "lodestone-v999"),
+            "{}",
+            global.violation_summary()
+        );
+
+        // The fix: v999's own conformance run must not see v888's orphan.
+        let scoped_to_v999 = check_workspace_connected_for_family(&workspace, "v999")?;
+        assert!(
+            !scoped_to_v999.has_violations(),
+            "v999 must not be held hostage by v888's unrelated violation: {}",
+            scoped_to_v999.violation_summary()
+        );
+
+        // Not a skip path: v888's own conformance run must still catch its
+        // own real violation.
+        let scoped_to_v888 = check_workspace_connected_for_family(&workspace, "v888")?;
+        assert!(scoped_to_v888.has_violations());
+        assert!(
+            scoped_to_v888
+                .violations()
+                .any(|finding| finding.crate_name == "lodestone-v888"),
+            "{}",
+            scoped_to_v888.violation_summary()
+        );
         Ok(())
     }
 
