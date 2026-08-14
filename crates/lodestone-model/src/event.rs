@@ -3065,6 +3065,12 @@ pub fn route(event: &ClientEvent) -> Route {
         // the sole writer of. The subject comes from `session::Riding`, exactly as
         // the seat pin already resolves its vehicle from that same scalar.
         | ClientEvent::VehicleMoved { .. }
+        // The mob's own leash state (issue #236, `SET_ENTITY_LINK`) — per-entity
+        // like every other row in this block, folded by `lodestone_ecs::ingest::
+        // apply_entity_leash` into `Leashed`. Used to be unclaimed entirely (see
+        // the "claimed by nothing" block below, which is where this line lived
+        // until the fold existed).
+        | ClientEvent::EntityLeashed { .. }
         | ClientEvent::EntityAnimation { .. } => INGEST,
         // Both halves, and neither supersedes the other: `ingest` turns this into
         // the per-entity `HurtTime` countdown and destructures with `..`,
@@ -3353,7 +3359,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::ChunkCacheCenterChanged { .. }
         | ClientEvent::ChunkCacheRadiusChanged { .. }
         | ClientEvent::SimulationDistanceChanged { .. }
-        | ClientEvent::EntityLeashed { .. }
         | ClientEvent::ItemCooldown { .. }
         | ClientEvent::PlayerRotationSet { .. }
         | ClientEvent::CameraSet { .. }

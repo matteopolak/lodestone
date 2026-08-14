@@ -1610,6 +1610,11 @@ impl<'w> SimMob<'w> {
             metadata,
             // No mob overrides `getAddEntityPacket`'s data argument.
             object_data: 0,
+            // Resolved by `MobSim::snapshots`, not here: `leash_holder` names a
+            // player by uuid, and only `MobSim` (through `self.players`) can turn
+            // that into the wire entity id `EntitySnapshot::leash_link` carries.
+            // `SimMob` alone has no player list to resolve against.
+            leash_link: None,
         }
     }
 }
@@ -2159,6 +2164,40 @@ impl<'w> MobSim<'w> {
             .iter()
             .find(|v| v.identity.is_some_and(|id| id.uuid == uuid))
             .map(|v| v.perception.position)
+    }
+
+    /// Resolves a [`LeashHolder`] to the wire entity id
+    /// [`ServerProtocol::encode_set_entity_link`] needs as its target — vanilla's
+    /// own `ClientboundSetEntityLinkPacket(entity, holder)` takes a live `Entity`,
+    /// and this is "which id" for each of the three holder shapes this sim
+    /// tracks. Only `MobSim` can answer it — a bare `LeashHolder::Player` carries
+    /// a uuid, not a session-scoped entity id, and resolving that needs
+    /// `self.players` — which is why it is not a method on [`SimMob`] itself.
+    ///
+    /// [`LeashHolder::Player`] resolves through the same uuid-keyed lookup
+    /// [`player_position`](Self::player_position) uses, for the identical reason
+    /// given there: entity ids are reassigned per session, so keying on the uuid
+    /// is what keeps a reconnecting owner's leash pointed at the right client.
+    ///
+    /// [`LeashHolder::Mob`] is already a wire id (`SimMob::id`), so this returns
+    /// it verbatim — no lookup needed.
+    ///
+    /// [`LeashHolder::Fence`] returns `None`: this sim never spawns a
+    /// `LeashFenceKnotEntity` (see that variant's own doc comment for why), so
+    /// there is no entity id on the wire to link to yet. A mob leashed to a fence
+    /// is tracked correctly server-side and draws no rope until a knot entity
+    /// exists — a disclosed gap, not a silent one.
+    #[must_use]
+    fn resolve_leash_target(&self, holder: LeashHolder) -> Option<i32> {
+        match holder {
+            LeashHolder::Player(uuid) => self
+                .players
+                .iter()
+                .find(|v| v.identity.is_some_and(|id| id.uuid == uuid))
+                .map(|v| v.identity.expect("just matched").entity_id),
+            LeashHolder::Mob(id) => Some(id),
+            LeashHolder::Fence(_) => None,
+        }
     }
 
     /// Overrides the id the next [`spawn`](Self::spawn) call assigns (and
@@ -4582,7 +4621,18 @@ impl<'w> MobSim<'w> {
     /// above would still be a closed loop that reaches zero pixels.
     #[must_use]
     pub fn snapshots(&self) -> Vec<EntitySnapshot> {
-        let mut out: Vec<EntitySnapshot> = self.mobs.iter().map(SimMob::snapshot).collect();
+        let mut out: Vec<EntitySnapshot> = self
+            .mobs
+            .iter()
+            .map(|m| {
+                let mut snap = m.snapshot();
+                // Only `MobSim` can resolve a `LeashHolder` to a wire entity id
+                // (a player holder needs `self.players`) — see
+                // `resolve_leash_target`'s own doc for the three shapes.
+                snap.leash_link = m.leash_holder().and_then(|holder| self.resolve_leash_target(holder));
+                snap
+            })
+            .collect();
         for t in self.projectiles.iter() {
             if let Some(meta) = self.projectile_meta.get(&t.id) {
                 out.push(EntitySnapshot {
@@ -4598,6 +4648,8 @@ impl<'w> MobSim<'w> {
                     // data at `0`; only `getAddEntityPacket` overrides carry one,
                     // and no projectile this sim spawns has one.
                     object_data: 0,
+                    // A projectile is never a `Leashable`.
+                    leash_link: None,
                 });
             }
         }
@@ -4657,6 +4709,8 @@ impl<'w> MobSim<'w> {
                 // `ItemEntity` does not override `getAddEntityPacket`; the stack
                 // travels as metadata (above), not as object data.
                 object_data: 0,
+                // A dropped item is never a `Leashable`.
+                leash_link: None,
             });
         }
         // `ExperienceOrb`. Iterated in **sorted** id order, like the falling blocks
@@ -4691,6 +4745,8 @@ impl<'w> MobSim<'w> {
                 // and a client that knew it would still draw one sprite.
                 metadata: vec![MetadataField::ExperienceOrbValue { value: orb.value }],
                 object_data: 0,
+                // An experience orb is never a `Leashable`.
+                leash_link: None,
             });
         }
         // `FallingBlockEntity`. The **only** producer of a non-zero
@@ -4733,6 +4789,8 @@ impl<'w> MobSim<'w> {
                 // three states `crate::gravity_tick::is_gravity_block` accepts all
                 // resolve.
                 object_data: block_states::state_id(&tracked.state).unwrap_or(0) as i32,
+                // A falling block is never a `Leashable`.
+                leash_link: None,
             });
         }
         // Vehicles — the boats. Sorted ids, like the two loops above and for the
@@ -4788,6 +4846,8 @@ impl<'w> MobSim<'w> {
                 metadata: Vec::new(),
                 // `AbstractBoat` does not override `getAddEntityPacket`.
                 object_data: 0,
+                // A boat is never a `Leashable`.
+                leash_link: None,
             });
         }
         out

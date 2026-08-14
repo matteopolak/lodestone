@@ -117,6 +117,7 @@ async fn a_real_client_observes_a_live_entity_spawn_then_move() {
         velocity: Vec3::new(0.0, 0.0, 0.0),
         metadata: Vec::new(),
         object_data: 0,
+        leash_link: None,
     };
 
     let entities = Arc::new(Mutex::new(vec![snapshot(start_pos)]));

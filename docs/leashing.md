@@ -73,19 +73,46 @@ production hook needed) applies vanilla's two distance thresholds:
   already spawns the dropped lead itself); `Refused` falls through to the
   taming chain unchanged, matching vanilla's own `PASS` fallthrough.
 - **`try_leash_to_fence`'s hook (right-click a fence with a lead) is still
-  unwired** — it needs a call site in `apply_use_item_on`'s block-click path,
-  which is a separate anchor from the one above. Not part of this pass.
-- **No `SET_ENTITY_LINK`-equivalent wire packet exists.** Confirmed by
-  reading `ServerProtocol` (`crates/lodestone-server/src/protocol.rs`) and
-  `v770`'s `server_protocol.rs`: there is no `encode_set_entity_link` (or
-  equivalent) trait method or implementation anywhere — only the *client*
-  decode side exists (`v770`'s `adapter/entity.rs` raises
-  `ClientEvent::EntityLeashed` when joining a real server). So a mob leashed
-  through this pass's new hook is pulled toward its holder by `tick_leashes`'
-  physics and that motion is visible, but no lead-line renders, because
-  nothing on the hosting side encodes the link itself. Adding it means a new
-  `ServerProtocol` trait method plus a `v770` implementation, both in files
-  this pass treats as heavily contended rather than owned.
+  unwired** — it needs a call site in `apply_use_item_on`'s block-click path
+  (`crates/lodestone-server/src/item_use.rs`, contended and mid-edit by
+  another pass at the time this line was written), and even wired,
+  `LeashHolder::Fence` still resolves to no wire entity id (see the bare-`BlockPos`
+  gap above), so a fence-anchored lead would still draw no rope until a knot
+  entity exists. Two separate gaps stacked on one interaction; neither
+  closed here.
+- **`SET_ENTITY_LINK` is now encoded and sent (issue #236, closed).**
+  `ServerProtocol::encode_set_entity_link` (`crates/lodestone-server/src/protocol.rs`)
+  and its `v770` implementation exist, ported from
+  `ClientboundSetEntityLinkPacket.write` (two plain big-endian `i32`s, source
+  then dest, `dest == 0` meaning "no holder" — the same order the constructor
+  and the field declaration happen to agree on, checked against `write`
+  anyway per this repo's port-from-`write` rule). `EntitySnapshot::leash_link`
+  carries the resolved wire target — `MobSim::snapshots`'
+  `resolve_leash_target` turns a `LeashHolder` into it: a `Player` resolves
+  through the uuid-keyed player list (never the entity id directly, for the
+  same reconnect reason `player_position` gives), a `Mob` is already a wire
+  id, and a `Fence` resolves to `None` (no knot entity, as above).
+  `EntityStreamer::sync` (`crates/lodestone-server/src/server.rs`) diffs it
+  exactly like `metadata`: once on spawn when already `Some` (the join-late
+  case — a client that joins or re-enters view range of an already-leashed
+  mob still gets the rope, not just whoever witnessed the attach), and again
+  on any update where it changed (covers both attach and detach).
+- **The client-side chain is wired too, through the cheapest available
+  channel.** `v770`'s adapter already decoded `SET_ENTITY_LINK` into
+  `ClientEvent::EntityLeashed`, but nothing claimed it —
+  `lodestone_model::event::route` had it in the "claimed by nothing" bucket.
+  `lodestone_ecs::ingest::apply_entity_leash` now folds it into a `Leashed`
+  component, and `lodestone_ecs::player::push_leash_lines`
+  (`ExtractSet::Debug`) turns a leashed mob's `Position` and its resolved
+  holder position into a `DebugLine` each frame. **This reuses the existing
+  world-space debug-line channel and its already-installed render pass,
+  deliberately** — `DebugLines` is a generic per-frame geometry channel whose
+  pipeline already runs every frame regardless of any F3 toggle (gating, where
+  it exists, lives in the *populating systems*, not the channel), so this adds
+  zero new GPU pipeline, shader or `app.rs` wiring. It is **not** vanilla's
+  rope: no texture, no catenary sag, a flat coloured line between raw
+  (non-interpolated) tick positions. A future pass wanting real parity needs
+  an actual pipeline in `lodestone-render`/`lodestone_shell::gpu`.
 - **Adding a leashable exception**: a species where `!is_hostile_species`
   gives the wrong answer (a water creature, or the eventual hoglin/zoglin)
   needs a small exception table inside `is_leashable_species`, not a rewrite

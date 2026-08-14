@@ -84,6 +84,7 @@ fn zombie_snapshot(id: i32, uuid: Uuid) -> EntitySnapshot {
         velocity: Vec3::new(0.1, 0.0, -0.05),
         metadata: Vec::new(),
         object_data: 0,
+        leash_link: None,
     }
 }
 
@@ -211,4 +212,55 @@ fn encode_remove_entity_batches_every_id_into_one_packet() {
         panic!("expected EntityRemoved, got {:?}", events[0]);
     };
     assert_eq!(entity_ids, &vec![3, 17, 256]);
+}
+
+/// `encode_set_entity_link` round-tripped through the real adapter's own
+/// `SET_ENTITY_LINK` decode arm (issue #236) — the server-encode half meeting
+/// the client-decode half this crate already had. Pairwise-distinct ids
+/// (11 and 4, not 1 and 1 or 1 and 4): a transposition of `source_id` and
+/// `target_id` inside the encoder would otherwise round-trip byte-perfectly
+/// and only show up as the client leashing the wrong entity.
+#[test]
+fn encode_set_entity_link_round_trips_an_attach_through_the_real_adapter() {
+    let proto = V770ServerProtocol;
+    let ServerDirective::Send { packet_id, payload } = proto.encode_set_entity_link(11, Some(4))
+    else {
+        panic!("expected a Send directive");
+    };
+    assert_eq!(packet_id, play::clientbound::SET_ENTITY_LINK);
+
+    let events = decode_events(packet_id, &payload);
+    assert_eq!(events.len(), 1);
+    let ClientEvent::EntityLeashed {
+        entity_id,
+        holder_id,
+    } = &events[0]
+    else {
+        panic!("expected EntityLeashed, got {:?}", events[0]);
+    };
+    assert_eq!(*entity_id, 11);
+    assert_eq!(*holder_id, Some(4));
+}
+
+/// The detach shape: `None` must encode to vanilla's own `destId == 0`
+/// sentinel and decode back to `None`, not to `Some(0)`.
+#[test]
+fn encode_set_entity_link_round_trips_a_detach_through_the_real_adapter() {
+    let proto = V770ServerProtocol;
+    let ServerDirective::Send { packet_id, payload } = proto.encode_set_entity_link(11, None)
+    else {
+        panic!("expected a Send directive");
+    };
+
+    let events = decode_events(packet_id, &payload);
+    assert_eq!(events.len(), 1);
+    let ClientEvent::EntityLeashed {
+        entity_id,
+        holder_id,
+    } = &events[0]
+    else {
+        panic!("expected EntityLeashed, got {:?}", events[0]);
+    };
+    assert_eq!(*entity_id, 11);
+    assert_eq!(*holder_id, None);
 }

@@ -50,8 +50,8 @@ use lodestone_physics::Vec3d;
 use crate::entity::{
     Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName, CustomNameVisible, DeathTime,
     DisplayItem, EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
-    FallingBlockState, HeadYaw, Health, HurtTime, MinecraftEntityId, MobState, OnGround, Passengers,
-    Pose, Position, Rotation, Variant, Vehicle, Velocity,
+    FallingBlockState, HeadYaw, Health, HurtTime, Leashed, MinecraftEntityId, MobState, OnGround,
+    Passengers, Pose, Position, Rotation, Tamed, Variant, Vehicle, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -855,6 +855,15 @@ pub fn apply_entity_metadata(
         if let Some(baby) = metadata.baby {
             entity.insert(Baby(baby));
         }
+        // `TamableAnimal.DATA_FLAGS_ID & 4` (issue #235). Per-entity state —
+        // there can be several tamed wolves at once, each independently tame
+        // or not — so this belongs beside `Baby`/`Health` in `ingest`, not in
+        // `crate::session`, which carries only the local player's own scalars.
+        // See [`Tamed`]'s own doc for why "absent" still means "wild" for a
+        // mob that was already tame when it entered view range.
+        if let Some(tamed) = metadata.tamed {
+            entity.insert(Tamed(tamed));
+        }
         // The creeper fuse direction (`Creeper.DATA_SWELL_DIR`), the last hop of
         // the chain `docs/entity-rendering.md`'s "Creeper swell" section left
         // for this crate: `lodestone-shell::entities`' `CreeperFuse`/
@@ -898,6 +907,35 @@ pub fn apply_entity_metadata(
         if let Reported::Reported(item) = &metadata.item {
             entity.insert(DisplayItem(item.clone()));
         }
+    }
+}
+
+/// `IngestSet::Apply`: `ClientEvent::EntityLeashed` → [`Leashed`] (issue
+/// #236). A dedicated system rather than an arm inside
+/// [`apply_entity_metadata`] immediately above: `EntityLeashed` decodes from
+/// `SET_ENTITY_LINK`, a wholly different packet from the metadata family
+/// that system's arms all share, so folding it there would blur two
+/// unrelated wire packets into one system for no reason beyond proximity.
+///
+/// Per-entity state — there can be several leashed mobs at once, each
+/// independently attached or not — so this belongs beside every other
+/// per-entity fold in this file, not in `crate::session`, which carries only
+/// the local player's own scalars. `ClientEvent::EntityLeashed` routes to
+/// `INGEST` alone (`lodestone_model::event::route`), never to `session`, so
+/// this is mechanically the *only* system in the tree that ever sees it.
+pub fn apply_entity_leash(batch: Res<IngestBatch>, index: Res<EntityIndex>, mut commands: Commands) {
+    for event in batch.events() {
+        let ClientEvent::EntityLeashed {
+            entity_id,
+            holder_id,
+        } = event
+        else {
+            continue;
+        };
+        let Some(entity) = index.get(*entity_id) else {
+            continue;
+        };
+        commands.entity(entity).insert(Leashed(*holder_id));
     }
 }
 
@@ -1181,6 +1219,13 @@ impl Plugin for IngestPlugin {
                 apply_entity_velocity,
                 apply_entity_head_rotation,
                 apply_entity_metadata,
+                // A different packet from the metadata family above
+                // (`SET_ENTITY_LINK`, not `SET_ENTITY_DATA`), but id-addressed the
+                // same way, so it relies on the same `.chain()` sync point after
+                // `apply_entity_spawn` — a mob can arrive and be leashed in one batch
+                // (`EntityStreamer::sync`'s own spawn-time `SET_ENTITY_LINK` emission
+                // for an already-leashed mob).
+                apply_entity_leash,
                 // Reads the *same* `EntityMetadataUpdated` batch `apply_entity_metadata`
                 // just walked, folding the local player's own air supply into `Vitals`
                 // (a different component, on a different entity, than the generic
@@ -1799,6 +1844,119 @@ mod tests {
             Some(&CreeperSwellDir(-1)),
             "a health-only update cleared the swell direction — a creeper mid-fuse would \
              freeze on screen every time it took damage"
+        );
+    }
+
+    /// End-to-end through the **real schedule**: a spawn, then a metadata packet
+    /// carrying `tamed: Some(true)`, produces a [`Tamed`] component (issue
+    /// #235) — the fold `crates/lodestone-render/src/entity.rs`'s
+    /// `entity_variant_sheet_for` needed a caller for, and
+    /// `lodestone-shell/src/entities.rs::extract_entity_draws` now bridges off
+    /// this exact component the same way it bridges `Variant`.
+    #[test]
+    fn tamed_metadata_folds_into_tamed_component() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(31, "minecraft:wolf"));
+        assert!(
+            entity_for(&world, 31).get::<Tamed>().is_none(),
+            "absent until the first packet mentions it, like Baby and MobState"
+        );
+
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    tamed: Some(true),
+                    ..EntityMetadataUpdate::default()
+                },
+                31,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 31).get::<Tamed>(),
+            Some(&Tamed(true)),
+            "a tame report must reach the component unchanged"
+        );
+
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    health: Some(20.0),
+                    ..EntityMetadataUpdate::default()
+                },
+                31,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 31).get::<Tamed>(),
+            Some(&Tamed(true)),
+            "a health-only update must not clear a previously reported tame state"
+        );
+    }
+
+    /// End-to-end through the **real schedule**: `ClientEvent::EntityLeashed`
+    /// (decoded from `SET_ENTITY_LINK`) folds into [`Leashed`] (issue #236),
+    /// covering a fresh attach, a detach, and — the case `handles_event`
+    /// alone cannot prove — that `EntityLeashed` is routed to `INGEST` and
+    /// therefore reaches this exact system in production, not merely in a
+    /// hermetic call to `apply_entity_leash` directly.
+    #[test]
+    fn entity_leashed_folds_into_leashed_component() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(41, "minecraft:wolf"));
+        assert!(
+            entity_for(&world, 41).get::<Leashed>().is_none(),
+            "absent until the first SET_ENTITY_LINK, like Tamed and Baby"
+        );
+
+        feed(
+            &mut world,
+            ClientEvent::EntityLeashed {
+                entity_id: 41,
+                holder_id: Some(77),
+            },
+        );
+        assert_eq!(
+            entity_for(&world, 41).get::<Leashed>(),
+            Some(&Leashed(Some(77))),
+            "an attach must reach the component with the real holder id"
+        );
+
+        feed(
+            &mut world,
+            ClientEvent::EntityLeashed {
+                entity_id: 41,
+                holder_id: None,
+            },
+        );
+        assert_eq!(
+            entity_for(&world, 41).get::<Leashed>(),
+            Some(&Leashed(None)),
+            "a detach must overwrite the previous holder with None, not leave it stale"
+        );
+    }
+
+    /// A mob that is spawned **already leashed** — the join-late case
+    /// `EntityStreamer::sync`'s spawn-time `SET_ENTITY_LINK` emission exists
+    /// for — must still fold, even though the attach happened before this
+    /// client ever saw the entity. Exercises the same `.chain()` sync point
+    /// `apply_entity_passengers`'s own doc names: a mob can arrive and be
+    /// leashed in one batch.
+    #[test]
+    fn a_mob_leashed_in_the_same_batch_as_its_spawn_still_folds() {
+        let mut world = ingest_world();
+        world.resource_mut::<IngestQueue>().push(spawn_event(51, "minecraft:wolf"));
+        world.resource_mut::<IngestQueue>().push(ClientEvent::EntityLeashed {
+            entity_id: 51,
+            holder_id: Some(1),
+        });
+        world.run_schedule(NetIngest);
+        assert_eq!(
+            entity_for(&world, 51).get::<Leashed>(),
+            Some(&Leashed(Some(1))),
+            "a spawn and its leash link in the same batch must both resolve — \
+             this is the wire shape a client joining view of an already-leashed mob sees"
         );
     }
 
@@ -2910,6 +3068,14 @@ mod tests {
         assert!(handles_event(&ClientEvent::FallingBlockState {
             entity_id: 1,
             block_state_id: 7,
+        }));
+        // `EntityLeashed` (issue #236, `SET_ENTITY_LINK`) — per-entity like
+        // `FallingBlockState` immediately above, and used to sit in
+        // `lodestone_model::event::route`'s "claimed by nothing" block until
+        // `apply_entity_leash` existed to claim it.
+        assert!(handles_event(&ClientEvent::EntityLeashed {
+            entity_id: 1,
+            holder_id: Some(2),
         }));
         // And **both** routers claim it, which is the part that is easy to get
         // wrong: this side folds the per-entity `Passengers`/`Vehicle` pair,
