@@ -51,7 +51,9 @@ repo-wide claim.
 |---|---|
 | `lodestone-nav` | version-free autonomous-navigation search core: world view, movement graph, simulation-derived cost model, goals, resumable A\*. No bevy, no ECS, no threads. |
 | `lodestone-autopilot` | the bevy plugin: search driver, per-tick closed-loop executor. **Not a dependency of `lodestone-shell`** — a pre-implemented *external* plugin, for headless bots built on the library. It has no chat commands: `#goto` lived in the shell and was removed with the dependency, and a plugin cannot register its own commands until [#118](https://github.com/matteopolak/lodestone/issues/118). |
-| `lodestone-event-logger` | a toy `EventPriority::Monitor` reader plugin (issues #104/#105/#110): observes `lodestone_ecs::GameEvent`, the plugin event bus, and reports through a plain `Arc<Mutex<_>>` outside the ECS rather than a resource. `MIT OR Apache-2.0`, no licensing table row needed. |
+| `lodestone-event-logger` | a toy `EventPriority::Monitor` reader plugin (the plugin event bus and cross-plugin priority ordering work): observes `lodestone_ecs::GameEvent`, the plugin event bus, and reports through a plain `Arc<Mutex<_>>` outside the ECS rather than a resource. `MIT OR Apache-2.0`, no licensing table row needed. |
+| `lodestone-plugin-support` | shared, non-engine conveniences: a per-plugin data directory and typed config helper (`paths`/`config`), and an in-memory namespaced key-value store attachable to an entity or a chunk (`persistent_data`). `MIT OR Apache-2.0`, no licensing table row needed. |
+| `lodestone-worldedit` | a WorldEdit-class bulk-edit plugin: region fill/replace with a per-session undo/redo stack, built on `lodestone_world::World::fill_region_capturing` and `lodestone_ecs::ChunkWorldWrite`. `MIT OR Apache-2.0`, no licensing table row needed. |
 
 `lodestone-nav`/`lodestone-autopilot` are documented in
 [`docs/autonomous-navigation.md`](../../docs/autonomous-navigation.md), against the
@@ -59,3 +61,7 @@ design in [`docs/baritone-port.md`](../../docs/baritone-port.md).
 `lodestone-event-logger` is documented in
 [`docs/plugin-api.md`](../../docs/plugin-api.md)'s "The plugin event bus and cross-plugin
 priority ordering" section.
+`lodestone-plugin-support` is documented in
+[`docs/plugin-data-and-config.md`](../../docs/plugin-data-and-config.md).
+`lodestone-worldedit` is documented in
+[`docs/worldedit-plugin.md`](../../docs/worldedit-plugin.md).
