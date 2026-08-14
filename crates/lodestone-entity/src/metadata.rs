@@ -361,7 +361,7 @@ impl LivingEntityFlags {
 /// `startUsingItem`. A skeleton shooting at you never sets it — its attack goal
 /// calls `performRangedAttack` without ever entering the item-use state — so a
 /// client that decodes only that bit leaves every mob permanently in the rest
-/// pose while looking, at the wire level, entirely correct (issue #379).
+/// pose while looking, at the wire level, entirely correct.
 ///
 /// # This byte's index collides with an armour stand's, and *living* is too weak
 ///
@@ -387,7 +387,7 @@ impl MobFlags {
         Self { bits }
     }
 
-    /// Whether the mob's AI is disabled (`Mob.isNoAi`, `Mob.java:1328`).
+    /// Whether the mob's AI is disabled (`Mob.isNoAi`).
     ///
     /// Not consumed by rendering, and modelled anyway because the alternative is a
     /// bare `0x04` mask with no name for the bits either side of it.
@@ -396,7 +396,7 @@ impl MobFlags {
         self.bits & Self::NO_AI != 0
     }
 
-    /// Whether the mob is left-handed (`Mob.isLeftHanded`, `Mob.java:1332`).
+    /// Whether the mob is left-handed (`Mob.isLeftHanded`).
     ///
     /// Vanilla's `Mob.getMainArm()` returns `LEFT` when this is set, which flips
     /// which arm every arm pose applies to. Decoded but **not yet consumed**: the
@@ -410,8 +410,7 @@ impl MobFlags {
         self.bits & Self::LEFT_HANDED != 0
     }
 
-    /// Whether the mob is aggressive — `Mob.isAggressive`, `(flags & 4) != 0`
-    /// (`Mob.java:1335`).
+    /// Whether the mob is aggressive — `Mob.isAggressive`, `(flags & 4) != 0`.
     ///
     /// "Aggressive" is vanilla's own name for it and it is set by the ranged and
     /// melee attack goals while a target is being engaged, so it is closer to
@@ -532,7 +531,7 @@ mod tests {
         assert!(LivingEntityFlags::from_bits(0x01).using_item());
         assert!(MobFlags::from_bits(0x01).no_ai());
         // And the mob byte's aggressive bit is *not* the living byte's using-item
-        // bit, which is the whole substance of issue #379: a drawing skeleton sets
+        // bit: a drawing skeleton sets
         // the former and never the former's namesake in the other byte.
         assert!(!LivingEntityFlags::from_bits(0x04).using_item());
         assert!(!MobFlags::from_bits(0x01).aggressive());

@@ -416,7 +416,7 @@ pub struct TrackedProjectile {
 }
 
 /// The live set of ballistic projectiles a driver advances once per server
-/// tick — the seam issue #211 was missing. [`Projectile::tick`] correctly
+/// tick — the seam that was missing. [`Projectile::tick`] correctly
 /// integrates one projectile's motion, but nothing owned a *collection* of
 /// them across ticks: `grep`ping the whole tree outside this crate for
 /// `projectile::Projectile` returned nothing.
@@ -590,7 +590,7 @@ mod tests {
         assert!(p.velocity.y < 0.0, "should be moving downward");
     }
 
-    // -- ProjectileRegistry: the #211 driver ----------------------------
+    // -- ProjectileRegistry: the per-tick driver ----------------------------
 
     #[test]
     fn registry_tick_advances_every_tracked_projectile_through_one_call() {
