@@ -3636,6 +3636,7 @@ where
             | ServerBound::PlayerCommand { .. }
             | ServerBound::RenameItem { .. }
             | ServerBound::ContainerButtonClick { .. }
+            | ServerBound::SetCommandBlock { .. }
             | ServerBound::PickItemFromBlock { .. }
             | ServerBound::PickItemFromEntity { .. }
             | ServerBound::Ignored => {}
@@ -6491,6 +6492,60 @@ where
             // it. See `crate::portal::PortalIndex`.
             if let Some(index) = source.portal_index() {
                 index.extend(dimension, cells.iter().map(|(cell, _)| *cell));
+            }
+            return Ok(());
+        }
+    }
+    // `TntBlock::useItemOn` — flint and steel or a fire charge clicked
+    // directly on a TNT block primes it and clears the block. Checked
+    // against the **clicked** cell (`pos`), not `neighbour` the portal arm
+    // above reads: vanilla's `useItemOn` runs on the block that was actually
+    // clicked, not the face it was clicked from.
+    //
+    // No `tnt_explodes` gamerule gate here — this call site has no
+    // `WorldStateHandle` in scope, matching the portal arm just above, which
+    // takes no durability-damage gate either (this crate's own item stacks
+    // carry no durability at all — see that arm's own comment). Both are
+    // therefore true unconditionally, which is vanilla's own default.
+    if matches!(
+        held_item.as_deref(),
+        Some("minecraft:flint_and_steel" | "minecraft:fire_charge")
+    ) {
+        let clicked = source.block_state(pos.x, pos.y, pos.z);
+        let base = clicked
+            .split_once('[')
+            .map_or(clicked.as_str(), |(base, _)| base);
+        if base == "minecraft:tnt" {
+            source.set_block(pos.x, pos.y, pos.z, crate::chunk::AIR);
+            apply(
+                conn,
+                state,
+                proto.encode_block_update(pos.x, pos.y, pos.z, crate::chunk::AIR),
+            )
+            .await?;
+            mobs.with(|sim| {
+                sim.spawn_tnt(
+                    Vec3::new(f64::from(pos.x) + 0.5, f64::from(pos.y), f64::from(pos.z) + 0.5),
+                    crate::mobs::tnt::DEFAULT_FUSE_TIME,
+                );
+            });
+            // `itemStack.consume(1, player)` for the fire charge;
+            // `itemStack.hurtAndBreak(1, ...)` for flint and steel, which
+            // this crate does not model (see this arm's own comment) — so
+            // only the charge is shrunk.
+            if held_item.as_deref() == Some("minecraft:fire_charge")
+                && consume_one(inventory, hand_native, game_mode)
+                && game_mode != GameMode::Creative
+            {
+                let remainder = inventory.native(hand_native).cloned();
+                if let Some(menu_slot) = window_zero_menu_slot(hand_native) {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
+                    )
+                    .await?;
+                }
             }
             return Ok(());
         }
@@ -9591,6 +9646,59 @@ where
             let creative = *game_mode == GameMode::Creative;
             for directive in apply_rename_item(proto, inventory, open_container.as_mut(), &name, creative) {
                 apply(conn, state, directive).await?;
+            }
+        }
+        // Issue #48's remainder, wire-decode half. `ServerGamePacketListenerImpl
+        // .handleSetCommandBlock`: swap the block to the requested mode
+        // (preserving `FACING`), write `conditional`, then update the entity's
+        // command/track-output/"Always Active" fields. See
+        // `crate::command_block`'s own module doc for what still needs a real
+        // redstone signal instead of this packet, and for why "Always Active"
+        // scheduling here (via `on_automatic_changed`) is faithful to vanilla's
+        // own `CommandBlockEntity.setAutomatic` rather than an addition.
+        ServerBound::SetCommandBlock { pos, command, mode, track_output, conditional, automatic } => {
+            let is_command_block = block_entities
+                .with(|reg| matches!(reg.get(pos), Some(BlockEntity::CommandBlock(_))));
+            if is_command_block {
+                let current_state = source.get().block_state(pos.x, pos.y, pos.z);
+                let facing = crate::command_block::facing(&current_state);
+                let base = crate::command_block::base_name_for_mode_ordinal(mode);
+                let new_state = crate::command_block::state_with(base, facing, conditional);
+                if new_state != current_state {
+                    source.get().set_block(pos.x, pos.y, pos.z, &new_state);
+                    block_ticks.publish(pos.x, pos.y, pos.z, new_state.clone());
+                }
+                let new_mode = crate::command_block::mode_for_block(&new_state);
+                // `markConditionMet`'s predecessor read — the block directly
+                // behind this one's own facing. Read before the registry lock
+                // below so this never nests a second `.with` inside the first.
+                let predecessor_succeeded = conditional.then(|| {
+                    let behind = facing.opposite().relative(pos);
+                    let behind_state = source.get().block_state(behind.x, behind.y, behind.z);
+                    crate::command_block::is_command_block_family(&behind_state)
+                        && block_entities.with(|reg| {
+                            matches!(reg.get(behind), Some(BlockEntity::CommandBlock(d)) if d.success_count > 0)
+                        })
+                });
+                let should_schedule = block_entities.with(|reg| {
+                    let Some(BlockEntity::CommandBlock(data)) = reg.get_mut(pos) else { return false };
+                    data.set_command(command);
+                    data.track_output = track_output;
+                    if !track_output {
+                        data.last_output = None;
+                    }
+                    let should_schedule =
+                        crate::command_block::on_automatic_changed(new_mode, data.auto, automatic, data.powered);
+                    data.auto = automatic;
+                    if should_schedule {
+                        data.condition_met =
+                            crate::command_block::mark_condition_met(conditional, predecessor_succeeded);
+                    }
+                    should_schedule
+                });
+                if should_schedule {
+                    block_ticks.request_scheduled_ticks(crate::command_block::ticks_after_schedule(pos));
+                }
             }
         }
         // The enchanting table's "choose an offer" button
