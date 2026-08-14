@@ -14,7 +14,8 @@ use super::grid::VegGrid;
 use super::grid::census::bump as census_bump;
 use super::ids::{Tag, tag_at};
 use super::tree::{
-    Attachment, TrunkPlacerCfg, place_dark_oak_trunk, place_forking_trunk, update_leaf_distances,
+    Attachment, TrunkPlacerCfg, place_dark_oak_trunk, place_forking_trunk, place_giant_trunk,
+    place_mega_jungle_trunk, update_leaf_distances,
 };
 
 pub(super) fn place_simple_block<R: RandomSource>(
@@ -275,6 +276,28 @@ pub(super) fn place_tree<R: RandomSource>(
             &mut trunk_positions,
         ),
         TrunkPlacerCfg::DarkOak { .. } => place_dark_oak_trunk(
+            random,
+            origin,
+            tree_height,
+            grid,
+            tags,
+            &cfg.trunk_provider,
+            &cfg.below_trunk_provider,
+            &mut attachments,
+            &mut trunk_positions,
+        ),
+        TrunkPlacerCfg::Giant { .. } => place_giant_trunk(
+            random,
+            origin,
+            tree_height,
+            grid,
+            tags,
+            &cfg.trunk_provider,
+            &cfg.below_trunk_provider,
+            &mut attachments,
+            &mut trunk_positions,
+        ),
+        TrunkPlacerCfg::MegaJungle { .. } => place_mega_jungle_trunk(
             random,
             origin,
             tree_height,
