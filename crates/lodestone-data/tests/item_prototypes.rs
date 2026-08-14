@@ -88,8 +88,8 @@ struct Row {
 
 /// Maps vanilla's `EquipmentSlot.getSerializedName()` to the model enum.
 ///
-/// The names come from `EquipmentSlot`'s own constructor arguments
-/// (`EquipmentSlot.java:13-20`); an unknown one is a hard failure rather than a
+/// The names come from `EquipmentSlot`'s own enum-constant constructor arguments;
+/// an unknown one is a hard failure rather than a
 /// silent `None`, because "this item is not equippable" and "this build does not
 /// know that slot" must not look the same.
 fn slot_from_name(name: &str) -> EquipmentSlot {
@@ -357,7 +357,7 @@ fn out_of_range_ids_are_none() {
 }
 
 /// `ItemStack.isDamageableItem` is `has(MAX_DAMAGE) && !has(UNBREAKABLE) &&
-/// has(DAMAGE)` (`ItemStack.java:416-418`) — three components, not one. This
+/// has(DAMAGE)` — three components, not one. This
 /// pins that the first and third always agree in 26.2's prototypes, which is why
 /// [`lodestone_model::ItemPrototype`] carries only `max_damage`. If a future
 /// version separates them, this fails instead of the model quietly answering
@@ -406,8 +406,8 @@ fn armour_declares_its_slot() {
 
 /// `EquipmentSlot::Body` is animal armour and is **not** the chest slot. Vanilla
 /// gates humanoid armour on `EquipmentSlot.Type.HUMANOID_ARMOR`
-/// (`InventoryMenu.java:122`), which covers FEET/LEGS/CHEST/HEAD and excludes
-/// BODY (`EquipmentSlot.java:15-19`). A consumer that folds `"body"` into `Chest`
+/// (`InventoryMenu.quickMoveStack`), which covers FEET/LEGS/CHEST/HEAD and excludes
+/// BODY (`EquipmentSlot`'s enum constants). A consumer that folds `"body"` into `Chest`
 /// makes wolf armour and horse armour placeable in a player's chestplate slot —
 /// this test is the record of which items would do it.
 #[test]
