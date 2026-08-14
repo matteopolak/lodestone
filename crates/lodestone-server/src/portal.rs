@@ -81,6 +81,8 @@ use lodestone_model::BlockPos;
 
 use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
+use crate::neighbor_update::Direction;
+use crate::redstone::{base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property};
 
 /// The narrowest a portal frame's interior may be (`PortalShape.MIN_WIDTH`).
 pub const MIN_WIDTH: i32 = 2;
@@ -1252,18 +1254,217 @@ pub fn end_platform_writes(origin: BlockPos) -> Vec<(BlockPos, &'static str)> {
 /// re-destroy a floor a player has built on top of the platform since their
 /// first visit — vanilla's guard is precisely what makes that survive).
 ///
-/// **Nothing calls this yet.** `Dimension::End` is now reachable through a
-/// [`crate::dimension::DimensionalSource`]'s sibling factory (`crate::integrated`'s
-/// `with_nether`), but the caller this function needs — an End-portal travel
-/// path, mirroring `travel_through_portal`'s role for the Nether — does not
-/// exist, because there is no end-portal-frame ignition or step-into-`end_portal`
-/// trigger anywhere in this crate yet. See `crate::dimension`'s module doc.
+/// Called from `crate::server`'s `travel_through_end_portal`, the End's
+/// counterpart to `travel_through_portal`, via [`end_portal_arrival`]'s own
+/// `platform_origin`.
 pub fn ensure_end_platform<S: ChunkSource + ?Sized>(world: &S, origin: BlockPos) {
     for (pos, block) in end_platform_writes(origin) {
         if world.block_state(pos.x, pos.y, pos.z) != block {
             world.set_block(pos.x, pos.y, pos.z, block);
         }
     }
+}
+
+/// Where a trip **into** the End lands — `EndPortalBlock.getPortalDestination`'s
+/// `fromEnd == false` arm, restricted to the `ServerPlayer` branch (the only
+/// entity kind this crate teleports through a portal).
+///
+/// Returns `(platform_origin, arrival)`:
+/// * `platform_origin` is [`ensure_end_platform`]'s own parameter — the
+///   obsidian layer's `y`, which is `end_spawn_point().1 - 1`
+///   (`BlockPos.containing(Vec3.atBottomCenterOf(spawnBlockPos)).below()` for
+///   the integer constant `(100, 50, 0)`).
+/// * `arrival` is where the *player* materialises: **one block below**
+///   `end_spawn_point()` itself, standing on the obsidian floor rather than
+///   floating over it. Vanilla applies this only for `entity instanceof
+///   ServerPlayer` — `spawnPos.subtract(0.0, 1.0, 0.0)` — every other entity
+///   arrives a block higher, which this function does not model since this
+///   crate only teleports players through a portal.
+///
+/// Dropping the subtraction is the plausible off-by-one here: it reads as
+/// "the platform and the arrival point obviously share a `y`," and the two
+/// are one block apart in vanilla specifically because the platform's
+/// obsidian is *two* blocks below `end_spawn_point()`, not one — see
+/// [`end_platform_writes`]'s own doc for why the platform's origin is
+/// already offset once before this function offsets it again.
+#[must_use]
+pub fn end_portal_arrival() -> (BlockPos, lodestone_model::Vec3) {
+    let (sx, sy, sz) = Dimension::end_spawn_point();
+    let platform_origin = BlockPos::new(sx, sy - 1, sz);
+    let arrival =
+        lodestone_model::Vec3::new(f64::from(sx) + 0.5, f64::from(sy - 1), f64::from(sz) + 0.5);
+    (platform_origin, arrival)
+}
+
+/// The result of successfully placing an eye of ender into an
+/// `end_portal_frame` — `EnderEyeItem.useOn`.
+#[derive(Debug, Clone)]
+pub struct EndPortalIgnition {
+    /// The frame cell's own new state (`eye=true`) — always present, whether
+    /// or not this eye completed a ring.
+    pub frame: (BlockPos, String),
+    /// The 3×3 interior `end_portal` cells, present only when this eye
+    /// completed a full 5×5 ring of 12 correctly-facing, already-eyed frames.
+    pub portal_fill: Option<Vec<(BlockPos, String)>>,
+}
+
+/// Whether `state` is an `end_portal_frame` block, of any facing or eye value.
+#[must_use]
+pub fn is_end_portal_frame(state: &str) -> bool {
+    base_name(state) == END_PORTAL_FRAME_BLOCK
+}
+
+/// The canonical `end_portal_frame` state string for `facing`/`eye`.
+#[must_use]
+pub fn end_portal_frame_state(facing: Direction, eye: bool) -> String {
+    format!(
+        "{END_PORTAL_FRAME_BLOCK}[eye={eye},facing={}]",
+        direction_to_str(facing)
+    )
+}
+
+/// An eye of ender used on `pos` — `EnderEyeItem.useOn`. `None` when `pos` is
+/// not an *unfired* `end_portal_frame` (not a frame at all, or one that
+/// already carries an eye), vanilla's `InteractionResult.PASS` guard.
+///
+/// Otherwise always returns the frame's own `eye=true` write, plus — when
+/// this eye completes a full ring — the 3×3 interior `end_portal` cells. The
+/// caller (`crate::server`'s `apply_use_item_on`) owns every write and the
+/// item's consumption, the same division `ignite` uses for the Nether.
+///
+/// # Why this is not vanilla's generic `BlockPattern` search
+///
+/// `EndPortalFrameBlock.getOrCreatePortalShape` builds a reusable
+/// `BlockPattern` — Mojang's general multi-block matcher, also used for the
+/// iron golem and the wither — and `find` searches a translated, rotated
+/// window for it. Porting that generic engine for one fixed 5×5 pattern would
+/// be porting infrastructure this crate has no other user for. What matters
+/// is the *result* of applying it to this one pattern, and that result is a
+/// single geometric rule, derived (not assumed) from
+/// `BlockPattern.translateAndRotate`'s cross-product construction applied to
+/// this pattern's aisle string
+/// (`"?vvv?" / ">???<" ×3 / "?^^^?"`, `'v'`→`FACING NORTH`, `'^'`→`SOUTH`,
+/// `'>'`→`WEST`, `'<'`→`EAST`): **every one of the 12 rim frames must be eyed
+/// and must face the ring's centre** — the north edge (`min_z`) requires
+/// `facing=south`, the south edge `facing=north`, the west edge `facing=east`,
+/// the east edge `facing=west`. This is exactly the "arrow points inward"
+/// rule every vanilla stronghold portal room exhibits, not folklore standing
+/// in for it — every one of the pattern's 8 valid `(forwards, up)`
+/// orientation branches produces this same characterization, because "faces
+/// the centre" is invariant under the rotations and reflections the generic
+/// search tries.
+///
+/// `pos`'s own facing pins which edge it can be on (a frame facing south can
+/// only be a north-edge cell), so the search below only has to try the three
+/// lateral offsets along that one edge — not the full 24-orientation sweep
+/// `BlockPattern.find` performs.
+#[must_use]
+pub fn ignite_end_portal_frame<S: ChunkSource + ?Sized>(
+    world: &S,
+    pos: BlockPos,
+) -> Option<EndPortalIgnition> {
+    let state = world.block_state(pos.x, pos.y, pos.z);
+    if !is_end_portal_frame(&state) || get_bool_property(&state, "eye") == Some(true) {
+        return None;
+    }
+    let facing = direction_from_str(get_str_property(&state, "facing").unwrap_or("north"));
+    let new_state = end_portal_frame_state(facing, true);
+    let portal_fill = find_completed_ring(world, pos, facing, &new_state);
+    Some(EndPortalIgnition {
+        frame: (pos, new_state),
+        portal_fill,
+    })
+}
+
+/// The 5×5 ring's `(min_x, min_z)` corner for `pos` sitting at lateral
+/// `offset` (1, 2 or 3) along the one edge its `facing` pins it to. `None` for
+/// a non-horizontal facing, which cannot occur for a real `end_portal_frame`
+/// state (its own `FACING` property is `HorizontalDirectionalBlock`'s).
+fn ring_origin_for(pos: BlockPos, facing: Direction, offset: i32) -> Option<(i32, i32)> {
+    match facing {
+        // A south-facing frame points into the ring from its north edge
+        // (min_z); the frame itself sits at that edge's `offset`-th column.
+        Direction::South => Some((pos.x - offset, pos.z)),
+        Direction::North => Some((pos.x - offset, pos.z - 4)),
+        Direction::East => Some((pos.x, pos.z - offset)),
+        Direction::West => Some((pos.x - 4, pos.z - offset)),
+        Direction::Up | Direction::Down => None,
+    }
+}
+
+/// Whether every one of the 12 rim cells of the 5×5 ring anchored at
+/// `(min_x, min_z, y)` is an eyed `end_portal_frame` facing the ring's
+/// centre. `override_pos`/`override_state` stand in for the cell an eye was
+/// just placed into — vanilla writes that state to the world **before**
+/// running the pattern search (`level.setBlock` precedes
+/// `getOrCreatePortalShape().find`), so the search must see it too.
+fn ring_is_complete<S: ChunkSource + ?Sized>(
+    world: &S,
+    min_x: i32,
+    min_z: i32,
+    y: i32,
+    override_pos: BlockPos,
+    override_state: &str,
+) -> bool {
+    let read = |x: i32, z: i32| -> String {
+        if x == override_pos.x && z == override_pos.z {
+            override_state.to_owned()
+        } else {
+            world.block_state(x, y, z)
+        }
+    };
+    let faces_centre = |x: i32, z: i32, want: Direction| -> bool {
+        let state = read(x, z);
+        is_end_portal_frame(&state)
+            && get_bool_property(&state, "eye") == Some(true)
+            && get_str_property(&state, "facing") == Some(direction_to_str(want))
+    };
+    let max_x = min_x + 4;
+    let max_z = min_z + 4;
+    for x in (min_x + 1)..=(min_x + 3) {
+        if !faces_centre(x, min_z, Direction::South) || !faces_centre(x, max_z, Direction::North) {
+            return false;
+        }
+    }
+    for z in (min_z + 1)..=(min_z + 3) {
+        if !faces_centre(min_x, z, Direction::East) || !faces_centre(max_x, z, Direction::West) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The 3×3 interior of the ring anchored at `(min_x, min_z, y)` — the cells
+/// [`ignite_end_portal_frame`] fills with [`END_PORTAL_BLOCK`] once the ring
+/// is complete. `EnderEyeItem.useOn`'s `match.getFrontTopLeft().offset(-3, 0,
+/// -3)` plus its `0..3 × 0..3` loop, re-derived from the ring's own bounding
+/// box rather than from `frontTopLeft` (which this module never constructs).
+fn interior_fill(min_x: i32, min_z: i32, y: i32) -> Vec<(BlockPos, String)> {
+    let mut cells = Vec::with_capacity(9);
+    for x in (min_x + 1)..=(min_x + 3) {
+        for z in (min_z + 1)..=(min_z + 3) {
+            cells.push((BlockPos::new(x, y, z), END_PORTAL_BLOCK.to_owned()));
+        }
+    }
+    cells
+}
+
+/// Tries the three lateral offsets `pos` (now carrying `new_state_for_pos`)
+/// could sit at along the one edge its facing pins it to, and returns the
+/// interior fill for the first that completes a ring.
+fn find_completed_ring<S: ChunkSource + ?Sized>(
+    world: &S,
+    pos: BlockPos,
+    facing: Direction,
+    new_state_for_pos: &str,
+) -> Option<Vec<(BlockPos, String)>> {
+    for offset in 1..=3 {
+        let (min_x, min_z) = ring_origin_for(pos, facing, offset)?;
+        if ring_is_complete(world, min_x, min_z, pos.y, pos, new_state_for_pos) {
+            return Some(interior_fill(min_x, min_z, pos.y));
+        }
+    }
+    None
 }
 
 /// The per-player portal transition counter — vanilla's `Entity.portalProcess`
@@ -1762,5 +1963,180 @@ mod tests {
         assert!(!is_end_portal("minecraft:end_portal_frame"));
         assert!(!is_end_portal("minecraft:end_portal_frame[eye=true,facing=north]"));
         assert!(!is_end_portal("minecraft:air"));
+    }
+
+    /// `is_end_portal_frame` matches any facing/eye combination, unlike
+    /// [`is_end_portal`]'s bare equality.
+    #[test]
+    fn is_end_portal_frame_matches_any_facing_or_eye_value() {
+        assert!(is_end_portal_frame("minecraft:end_portal_frame"));
+        assert!(is_end_portal_frame(
+            "minecraft:end_portal_frame[eye=false,facing=west]"
+        ));
+        assert!(!is_end_portal_frame("minecraft:end_portal"));
+        assert!(!is_end_portal_frame("minecraft:obsidian"));
+    }
+
+    /// The eight-cell endpoint of [`end_portal_arrival`]: the platform's own
+    /// origin is one below `end_spawn_point`, and the player's arrival is a
+    /// **second**, independent one-block drop — not the same offset applied
+    /// twice, and not the two collapsing onto the same `y`. Ties the two
+    /// together through a real [`ensure_end_platform`] write, which is the
+    /// assertion that would catch a dropped `ServerPlayer` subtraction: an
+    /// arrival left at `end_spawn_point`'s own `y` (50) would read as
+    /// "floating one block above the platform," air either way and easy to
+    /// miss without checking what is directly underfoot.
+    #[test]
+    fn end_portal_arrival_stands_on_the_platform_the_same_call_builds() {
+        let (platform_origin, arrival) = end_portal_arrival();
+        assert_eq!(platform_origin, BlockPos::new(100, 49, 0));
+        assert_eq!(arrival, lodestone_model::Vec3::new(100.5, 49.0, 0.5));
+
+        let world = FlatWorld::new();
+        ensure_end_platform(&world, platform_origin);
+        let feet = BlockPos::new(
+            arrival.x.floor() as i32,
+            arrival.y.round() as i32,
+            arrival.z.floor() as i32,
+        );
+        assert_eq!(
+            world.block_state(feet.x, feet.y - 1, feet.z),
+            "minecraft:obsidian",
+            "the arrival cell must have solid ground directly underfoot"
+        );
+        assert_eq!(
+            world.block_state(feet.x, feet.y, feet.z),
+            "minecraft:air",
+            "and the arrival cell itself must be clear, not embedded in the platform"
+        );
+    }
+
+    /// The 12 rim cells of a ring anchored at `(min_x, min_z, y)`, paired with
+    /// the facing a correctly-oriented frame there must have — every edge's
+    /// three cells, in ring order.
+    fn ring_positions(min_x: i32, y: i32, min_z: i32) -> Vec<(BlockPos, Direction)> {
+        let mut cells = Vec::with_capacity(12);
+        for x in (min_x + 1)..=(min_x + 3) {
+            cells.push((BlockPos::new(x, y, min_z), Direction::South));
+            cells.push((BlockPos::new(x, y, min_z + 4), Direction::North));
+        }
+        for z in (min_z + 1)..=(min_z + 3) {
+            cells.push((BlockPos::new(min_x, y, z), Direction::East));
+            cells.push((BlockPos::new(min_x + 4, y, z), Direction::West));
+        }
+        cells
+    }
+
+    /// The discriminating ring gate: eleven correctly-facing, already-eyed
+    /// frames plus one ring cell that is genuinely **absent** (not merely
+    /// un-eyed) must not ignite — the near miss a count-only implementation
+    /// (one with no completion check at all, or one that only checks "does a
+    /// frame exist here" and not "is it eyed") would pass. Placing the
+    /// twelfth and clicking it must then ignite, in the same test, so the
+    /// negative arm cannot be satisfied by an implementation that simply
+    /// never ignites.
+    #[test]
+    fn eleven_eyed_frames_and_one_missing_cell_does_not_ignite_but_the_twelfth_does() {
+        let world = FlatWorld::new();
+        let (min_x, y, min_z) = (200, 70, 300);
+        let positions = ring_positions(min_x, y, min_z);
+
+        // Ten cells already eyed, correctly facing the centre.
+        for &(pos, facing) in &positions[..10] {
+            world.put(pos.x, pos.y, pos.z, &end_portal_frame_state(facing, true));
+        }
+        // The eleventh: a real frame, correctly facing, not yet eyed — the
+        // click under test.
+        let (eleventh_pos, eleventh_facing) = positions[10];
+        world.put(
+            eleventh_pos.x,
+            eleventh_pos.y,
+            eleventh_pos.z,
+            &end_portal_frame_state(eleventh_facing, false),
+        );
+        // The twelfth ring cell is left as air entirely.
+        let (twelfth_pos, twelfth_facing) = positions[11];
+        assert_eq!(world.block_state(twelfth_pos.x, twelfth_pos.y, twelfth_pos.z), "minecraft:air");
+
+        let ignition = ignite_end_portal_frame(&world, eleventh_pos)
+            .expect("an unfired frame always accepts the eye");
+        assert_eq!(
+            ignition.frame,
+            (eleventh_pos, end_portal_frame_state(eleventh_facing, true))
+        );
+        assert!(
+            ignition.portal_fill.is_none(),
+            "eleven eyed, correctly-facing frames plus one missing cell must not complete the ring"
+        );
+        world.set_block(eleventh_pos.x, eleventh_pos.y, eleventh_pos.z, &ignition.frame.1);
+
+        // Now the twelfth appears (correctly facing, unfired) and is clicked:
+        // the ring is finally 12 for 12.
+        world.put(
+            twelfth_pos.x,
+            twelfth_pos.y,
+            twelfth_pos.z,
+            &end_portal_frame_state(twelfth_facing, false),
+        );
+        let ignition = ignite_end_portal_frame(&world, twelfth_pos)
+            .expect("an unfired frame always accepts the eye");
+        let fill = ignition
+            .portal_fill
+            .expect("the twelfth eye must complete the ring");
+        assert_eq!(fill.len(), 9, "a 3x3 interior");
+        assert!(fill.iter().all(|(_, state)| state == END_PORTAL_BLOCK));
+        let mut got: Vec<(i32, i32)> = fill.iter().map(|(p, _)| (p.x, p.z)).collect();
+        got.sort_unstable();
+        let mut want: Vec<(i32, i32)> = Vec::new();
+        for x in (min_x + 1)..=(min_x + 3) {
+            for z in (min_z + 1)..=(min_z + 3) {
+                want.push((x, z));
+            }
+        }
+        want.sort_unstable();
+        assert_eq!(got, want, "the interior is exactly the ring's own 3x3 centre");
+    }
+
+    /// The other half of the discriminating gate: twelve **correctly
+    /// positioned** frames that all face the same direction — right for the
+    /// three cells that direction happens to match, wrong for the other
+    /// nine — must not ignite. A naive implementation that checks "is there a
+    /// frame at each of the 12 rim cells, eyed" but never reads `facing`
+    /// would wrongly light this.
+    #[test]
+    fn a_ring_of_correctly_placed_but_uniformly_rotated_frames_does_not_ignite() {
+        let world = FlatWorld::new();
+        let (min_x, y, min_z) = (400, 70, -100);
+        let positions = ring_positions(min_x, y, min_z);
+
+        // Every rim cell holds a real frame at the right position, but all
+        // facing south — correct only for the three north-edge cells.
+        for &(pos, _correct_facing) in &positions {
+            world.put(pos.x, pos.y, pos.z, &end_portal_frame_state(Direction::South, true));
+        }
+        // Click a north-edge cell specifically, so the search's own geometry
+        // hypothesis is right and the only possible failure is the facing
+        // check — a click on a wrongly-hypothesised cell would fail for the
+        // uninteresting reason of never finding the ring's bounding box at
+        // all.
+        let (click_pos, _) = positions
+            .iter()
+            .copied()
+            .find(|&(pos, _)| pos.z == min_z)
+            .expect("the north edge has three cells");
+        world.set_block(
+            click_pos.x,
+            click_pos.y,
+            click_pos.z,
+            &end_portal_frame_state(Direction::South, false),
+        );
+
+        let ignition = ignite_end_portal_frame(&world, click_pos)
+            .expect("an unfired frame always accepts the eye, regardless of its own rotation");
+        assert!(
+            ignition.portal_fill.is_none(),
+            "a ring of uniformly-rotated frames must not ignite: presence and eye state are not \
+             enough, facing must point at the centre"
+        );
     }
 }
