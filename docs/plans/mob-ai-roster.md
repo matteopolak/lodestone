@@ -9,6 +9,19 @@ roster **cannot be built first**: eight of the thirteen implemented goals are st
 of firing in production today, so this plan sequences a perception-and-driver spine ahead of every
 species unit.
 
+**Status note, added during a later citation pass, not a status audit — verify before relying on
+it:** `crates/lodestone-entity/src/ai/roster/` now exists with `hostile_melee.rs`, `passive.rs`,
+`ranged.rs`, `neutral.rs`, `specialist.rs` and `probe.rs`, and `roster::goals_for` is wired into
+`MobSim::spawn_species` (`crates/lodestone-server/src/mobs/mod.rs`) — confirmed directly against
+the source. That means at least Phase A's roster substrate (A3) and some of Phase B have landed
+since this plan was written, which the rest of this document does not reflect. Several other
+specific findings below have also been individually confirmed stale while fixing this document's
+citations (`crates/lodestone-server/src/mobs.rs` itself no longer exists — it was split into
+`crates/lodestone-server/src/mobs/`; the two `MobCategory` types were unified; projectile hit
+detection now exists) and are marked inline. This is not a complete re-verification of the plan —
+treat every remaining "TRUE"/"does not exist" claim below as unconfirmed since this note was added,
+and re-check before sequencing work against it.
+
 ---
 
 ## 1. Verified state, and what the issues get wrong
@@ -21,38 +34,51 @@ around a problem that no longer exists, or plan against a citation that was neve
 
 This is the largest finding in this plan and it is in no issue, no doc, and no roadmap entry.
 
-`NavigatingMob` is the only production implementor of `MobController`
-(`crates/lodestone-entity/src/ai/navigating_mob.rs:552`). `MobController`
-(`crates/lodestone-entity/src/ai/mob.rs:19`) declares 33 methods, 22 of them with defaults.
-`NavigatingMob` overrides 24 and **leaves 8 perception methods at their trait defaults**:
+`NavigatingMob` was, at the time of writing, the only production implementor of `MobController`
+(`crates/lodestone-entity/src/ai/navigating_mob.rs`). `MobController`
+(`crates/lodestone-entity/src/ai/mob.rs`) declares 33 methods, 22 of them with defaults.
+`NavigatingMob` overrode 24 and **left 8 perception methods at their trait defaults** at the time:
 
-| method | `mob.rs` line | default | overridden by `NavigatingMob`? |
+**Update, confirmed directly against the current source:** `NavigatingMob` now overrides all
+8 of these (`in_water`, `in_lava`, `no_action_time`, `nearest_player`, `last_hurt_by`,
+`temptation`, `avoid_threat`, `is_panicking` all have real implementations in
+`navigating_mob.rs`), consistent with the status note in "What it is" — Unit A1 (the
+perception seam) appears to have landed. The table below is kept as the historical record of
+what was missing when this section was written:
+
+| method | default | overridden by `NavigatingMob` at the time? |
+|---|---|---|
+| `in_water` | `false` | no |
+| `in_lava` | `false` | no |
+| `no_action_time` | `0` | no |
+| `nearest_player` | `None` | no |
+| `last_hurt_by` | `None` | no |
+| `temptation` | `None` | no |
+| `avoid_threat` | `None` | no |
+| `is_panicking` | `false` | no |
+
+At the time of writing, six goals gated `can_use` on exactly those methods, so their `can_use` was a
+compile-time constant
+`false` in production. **Per the update above, this table is now historical**: since
+`NavigatingMob` overrides all 8 perception methods, these gates are no longer hardwired false —
+re-verify each one's actual behaviour before relying on this table.
+
+| goal | gates on | expression | verdict at the time |
 |---|---|---|---|
-| `in_water` | 33 | `false` | no |
-| `in_lava` | 38 | `false` | no |
-| `no_action_time` | 44 | `0` | no |
-| `nearest_player` | 69 | `None` | no |
-| `last_hurt_by` | 99 | `None` | no |
-| `temptation` | 105 | `None` | no |
-| `avoid_threat` | 127 | `None` | no |
-| `is_panicking` | 132 | `false` | no |
+| `FloatGoal` | `crates/lodestone-entity/src/ai/goals.rs` | `mob.in_water() \|\| mob.in_lava()` | never true |
+| `LookAtPlayerGoal` | same file | `mob.nearest_player()` | never `Some` |
+| `HurtByTargetGoal` | same file | `mob.last_hurt_by()` | never `Some` |
+| `TemptGoal` | same file | `mob.temptation()` | never `Some` |
+| `AvoidEntityGoal` | same file | `mob.avoid_threat()` | never `Some` |
+| `PanicGoal` | same file | `!mob.is_panicking()` → early return | never ran |
 
-Six goals gate `can_use` on exactly those methods, so their `can_use` is a compile-time constant
-`false` in production:
-
-| goal | gating line in `ai/goals.rs` | expression | verdict |
-|---|---|---|---|
-| `FloatGoal` | 25 | `mob.in_water() \|\| mob.in_lava()` | never true |
-| `LookAtPlayerGoal` | 133, 148 | `mob.nearest_player()` | never `Some` |
-| `HurtByTargetGoal` | 556 | `mob.last_hurt_by()` | never `Some` |
-| `TemptGoal` | 610, 619 | `mob.temptation()` | never `Some` |
-| `AvoidEntityGoal` | 394 | `mob.avoid_threat()` | never `Some` |
-| `PanicGoal` | 445 | `!mob.is_panicking()` → early return | never runs |
-
-Two more are *overridden but never fed*. `is_in_love`/`find_love_partner`/`parent_position`
-(`navigating_mob.rs:678`, `:682`, `:674`) read `self.love_ticks`/`partner_candidate`/
-`parent_candidate`, and `MobSim::tick` (`crates/lodestone-server/src/mobs.rs:1157-1223`) **never
-populates any of them and never calls `take_bred()`**:
+Two more were *overridden but never fed*. `is_in_love`/`find_love_partner`/`parent_position`
+(`crates/lodestone-entity/src/ai/navigating_mob.rs`) read `self.love_ticks`/`partner_candidate`/
+`parent_candidate`, and `MobSim::tick` (`crates/lodestone-server/src/mobs/mod.rs`), at the time,
+**never
+populated any of them and never called `take_bred()`** — though per A2's own description below,
+this was the planned fix for that gap, so also re-verify against the current source rather than
+this note:
 
 | goal | reads | verdict |
 |---|---|---|
@@ -61,10 +87,10 @@ populates any of them and never calls `take_bred()`**:
 
 So **8 of 13 goals cannot do anything in the running game.** The 5 that work —
 `RandomStrollGoal`, `RandomLookAroundGoal`, `MeleeAttackGoal`, `NearestAttackableTargetGoal`,
-`SwellGoal` — are *exactly* the 5 that `MobSim::spawn_species` installs (`mobs.rs:1120-1137`). That
+`SwellGoal` — are *exactly* the 5 that `MobSim::spawn_species` installs (`mobs/mod.rs`). That
 is not a coincidence: the existing roster was built to the subset that happened to function.
 
-A seventh, subtler case: `RandomStrollGoal`'s idle suppression (`goals.rs:75`,
+A seventh, subtler case: `RandomStrollGoal`'s idle suppression (`impl Goal for RandomStrollGoal`,
 `check_no_action && mob.no_action_time() >= 100`) is *inert in the permissive direction* — the
 default `0` means the suppression never triggers, so stroll is always eligible where vanilla
 suppresses it. `SimMob` does track `no_action_time` (incremented in `MobSim::tick`), but on the
@@ -79,51 +105,55 @@ instance of it across five issues at once.
 
 ### 1.2 Confirmed still-true islands
 
-- **#209 (Brain never ticked outside its crate) — TRUE.** All three greps return zero hits outside
+- **#209 (Brain never ticked outside its crate) — TRUE at the time of writing.** All three greps
+  returned zero hits outside
   `crates/lodestone-entity/`: `brain::`, `BrainMob`, `Brain::`. `BrainMob`
-  (`crates/lodestone-entity/src/brain/mob.rs:13`, 10 methods) has exactly one implementor,
-  `TestMob` at `brain/mod.rs:415`, inside `#[cfg(test)]`. `Brain::tick` (`brain/mod.rs:298`) is
-  called only from `brain/mod.rs`'s own test module (lines 515, 521, 530, 541, 556, 571, 574, 692).
+  (`crates/lodestone-entity/src/brain/mob.rs`, 10 methods) had exactly one implementor,
+  `TestMob` (`crates/lodestone-entity/src/brain/mod.rs`), inside `#[cfg(test)]`. `Brain::tick`
+  (same file) was
+  called only from that file's own test module.
   **`tests/live_brain.rs` does not construct or tick a `Brain` at all** — it is an RCON harness that
   summons a *vanilla* goat and characterises its wander statistically; its four `Brain` word-hits are
-  RCON command strings (`data get entity … Brain`) and doc prose. ~1,900 lines, zero consumers.
-- **#222 (no natural spawn driver) — TRUE.** `MobSim::run_spawn_cycle` (`mobs.rs:1489`),
-  `despawn_pass` (`:1443`) and `census` (`:1524`) are called **only** from
+  RCON command strings (`data get entity … Brain`) and doc prose. ~1,900 lines, zero consumers **at
+  the time.** **Update:** `crates/lodestone-entity/src/ai/navigating_mob.rs` now has
+  `impl BrainMob for NavigatingMob<'_>`, confirmed directly against the source — re-verify this
+  island's status before planning C1 against this bullet.
+- **#222 (no natural spawn driver) — TRUE.** `MobSim::run_spawn_cycle`,
+  `despawn_pass` and `census` (all in `crates/lodestone-server/src/mobs/mod.rs`) are called **only** from
   `crates/lodestone-server/tests/mob_spawn.rs`. `run_tick_loop`
-  (`crates/lodestone-server/src/tick.rs:478`) calls, in order: overload resolution, sleep,
+  (`crates/lodestone-server/src/tick.rs`) calls, in order: overload resolution, sleep,
   `MobSim::tick`, snapshot publish, `take_detonations`, `BlockEntityRegistry::tick_all`,
   `block_ticks.drain_due` (+ `random_tick::propagate_and_react`), `fluid_ticks.drain_due` (**body
   empty**), `random_ticks.tick_chunk`, `clock.record_tick`. No spawn cycle, no despawn pass, no
-  player-position feed. `mobs.rs:1932` says so itself. `impl SpawnCandidateSource` has exactly one
-  implementor tree-wide: `AlwaysSpawns` at `tests/mob_spawn.rs:32`, a test mock.
+  player-position feed. `seed_demo_mobs`'s own doc comment (`mobs/mod.rs`) says so itself. `impl SpawnCandidateSource` has exactly one
+  implementor tree-wide: `AlwaysSpawns` in `tests/mob_spawn.rs`, a test mock.
 - **#221 (no spawn table) — TRUE, and stronger than filed.** `SpawnEnvironment`
-  (`crates/lodestone-entity/src/spawn.rs:265`) has **zero implementors anywhere, including tests**.
+  (`crates/lodestone-entity/src/spawn.rs`) has **zero implementors anywhere, including tests**.
 - **#223 (regional difficulty unmodeled) — TRUE.** `RegionalDifficulty`, `regional_difficulty`,
   `DifficultyInstance`, `effective_difficulty` all return **0 hits tree-wide**. All 64 `Difficulty::`
   hits are the wire/UI enum (create-world menu, `LOGIN`/`CHANGE_DIFFICULTY` encode, HUD). The only
-  crossing into mob logic is `DespawnCtx.difficulty_peaceful` (`spawn.rs:147`), which has zero
+  crossing into mob logic is `DespawnCtx.difficulty_peaceful` (`spawn.rs`), which has zero
   non-test users.
 - **#224 (no spawn eggs / spawners) — TRUE.** All 176 `spawn_egg` hits are rows in two generated
   files (`lodestone-data/src/generated/{item_prototypes,items}.rs`); zero outside `generated/`.
   `SpawnEgg` and `SpawnData` are 0 hits. The spawner exists only as a renderable block state and a
   1.12→1.13 flattening rename. **Every mob in the running game comes from `seed_demo_mobs`
-  (`mobs.rs:1872`)** — a hardcoded ring of `minecraft:zombie` at radius 6.
+  (`crates/lodestone-server/src/mobs/mod.rs`)** — a hardcoded ring of `minecraft:zombie` at radius 6.
 
 ### 1.3 Stale claims — do not plan against these
 
 1. **#425 is landed and its "what is still missing" section is fully stale.** Commit `7cf02e8`
    shipped both encoders, and the first is *generic*, not another hardcoded arm:
-   `encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField])` at
-   `crates/protocol/v770/src/server_protocol.rs:1998`, and `encode_explode(&self, centre, radius)`
-   at `:2085` (`packet_id: play::clientbound::EXPLODE` at `:2098`). Gated by
+   `encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField])`, and `encode_explode(&self, centre, radius)`
+   (both in `crates/protocol/v770/src/server_protocol.rs`, packet id `play::clientbound::EXPLODE`). Gated by
    `crates/protocol/v770/tests/server_creeper_metadata_and_explode.rs`. A creeper's swell **and**
    its detonation already reach a real client. Every later unit that needs per-entity metadata on
    the wire should use `encode_set_entity_data`, not build a new encoder.
 2. **#228's `randomTickSpeed` trap is stale.** It says grazing is blocked because random ticks have
    "no consumer performing per-chunk random ticks — that is the world/block-tick track's job; do not
-   attempt to build a random-tick loop here." `crates/lodestone-server/src/random_tick.rs` exists
-   (issue #307), models grass→dirt directly, and `random_ticks.tick_chunk` **runs in the production
-   tick loop** (`tick.rs:631-641`). Sheep grazing (#238) has a real consumer today and folds into the
+   attempt to build a random-tick loop here." `crates/lodestone-server/src/random_tick.rs` exists,
+   models grass→dirt directly, and `random_ticks.tick_chunk` **runs in the production
+   tick loop** (`crates/lodestone-server/src/tick.rs`). Sheep grazing has a real consumer today and folds into the
    passive unit.
 3. **#228's tempt items are wrong.** It says "wheat for cow/sheep, carrot for pig, seeds for
    chicken". In 26.2 these are **item tags**, resolved from
@@ -139,23 +169,27 @@ instance of it across five issues at once.
 
    Pig is 3 items and chicken is 6, not 1 each. These are **jar data files**, so the temptation table
    must be *generated* from them under the `LODESTONE_REGEN=1` pattern, never hand-written.
-4. **#221's own citation is wrong.** It cites `SpawnRule` at `spawn.rs:215-249`. **`SpawnRule` does
-   not exist as a type anywhere in the repo** — its only two hits are prose, and `spawn.rs:24` is a
+4. **#221's own citation is wrong.** It cites `SpawnRule` in `spawn.rs`. **`SpawnRule` does
+   not exist as a type anywhere in the repo** — its only two hits are prose, and one is a
    *broken intra-doc link* to a type that was never written. The real seam is `SpawnConditions`
-   (`spawn.rs:219`, fields `max_block_light`/`y_range`/`needs_solid_below`, `permits` at `:234`) +
-   `SpawnSample` (`:252`) + `trait SpawnEnvironment` (`:265`).
+   (fields `max_block_light`/`y_range`/`needs_solid_below`, `permits`) +
+   `SpawnSample` + `trait SpawnEnvironment` (all in `crates/lodestone-entity/src/spawn.rs`).
 5. **`EntityDataIndexOracle.java` is not in `scripts/`.** It is at
    `crates/protocol/v770/oracle-java/EntityDataIndexOracle.java`. (`scripts/` holds only the twelve
    worldgen oracles.) The dispatch brief for this plan said `scripts/`; that was wrong.
-6. **There are two independent `MobCategory` types and two `check_despawn` functions**, and nobody
-   has named the fork. `lodestone_entity::spawn::MobCategory` (`spawn.rs:33`, 8 variants,
-   `check_despawn` at `:178` taking a `DespawnCtx`) versus
-   `lodestone_server::mob_spawn::MobCategory` (`mob_spawn.rs:105`, 7 variants + a `SPAWNING: [_; 7]`
-   const at `:127`, `check_despawn` at `:303` taking 5 scalars). **`lodestone-server` uses its own
-   and re-exports it from `lib.rs::mob_spawn::MobCategory`**, so every `MobCategory` hit outside `lodestone-entity`
-   is the server's type, not the entity crate's. `lodestone-entity`'s entire `spawn.rs` — except the
-   shadowed `MobCategory` — is reachable only from its own test module. Unit D1 must pick a winner.
-7. **#234/#237 are partially landed and their landed half is itself an island.** `7bf2873`
+6. **This section previously found two independent `MobCategory` types and two `check_despawn`
+   functions, unnamed as a fork.** **That has since been resolved for the type, though not the
+   function.** `lodestone_entity::spawn::MobCategory` (`crates/lodestone-entity/src/spawn.rs`, 8
+   variants, `check_despawn` taking a `DespawnCtx`) is now the **only** `MobCategory` — its own doc
+   comment records the merge ("Moved here from `lodestone_server::mob_spawn`"), and
+   `lodestone_server::mob_spawn` (`crates/lodestone-server/src/mob_spawn.rs`) now does
+   `pub use lodestone_entity::spawn::MobCategory;` rather than declaring its own. `MobCategory::SPAWNING`
+   (the 7-entry natural-spawning subset, excluding `Misc`) moved with it. What remains split is the
+   **function**: `lodestone_server::mob_spawn::check_despawn` is still a thin 5-scalar wrapper around
+   the entity crate's `DespawnCtx`-taking version, by design (its own doc comment explains why),
+   not an unnoticed fork. Confirmed directly against the current source rather than carried forward
+   from when this was written.
+7. **Breeding and aging are partially landed and their landed half is itself an island.** `7bf2873`
    ("breeding and aging fill the `MobController` no-op defaults (#225, #234, #237)") added 413 lines
    to `navigating_mob.rs` overriding 14 defaults, and a doc. It **did not touch `ai/mob.rs`** (no new
    trait methods) and its own message defers the population search and "resolve `take_bred()` into a
@@ -163,43 +197,45 @@ instance of it across five issues at once.
 
 ### 1.4 Architectural blockers found while verifying
 
-- **`GoalSelector` cannot remove a goal.** `crates/lodestone-entity/src/ai/goal.rs` exposes `add`
-  (`:189`), `disable`/`enable` per `Flag` (`:210`/`:215`), `len`, `is_empty`, `running_indices`,
+- **`GoalSelector` cannot remove a goal.** `crates/lodestone-entity/src/ai/goal.rs` exposes `add`,
+  `disable`/`enable` per `Flag`, `len`, `is_empty`, `running_indices`,
   `is_running`, `tick` — **no `remove`, no per-goal enable**. Vanilla skeletons swap bow↔melee at
-  priority 4 at runtime (`AbstractSkeleton.java:132-146`, `reassessWeaponGoal()`, called from `:72`,
-  `:122`, `:194`, `:201`). Not expressible today. Unit A3 must add the capability.
-- **`SimMob` holds a single `GoalSelector`** (`mobs.rs:533`); `add_goal(priority, Box<dyn Goal>)`
-  (`:588`) is the only dynamic-dispatch extension point in the whole `lodestone-server` crate.
+  priority 4 at runtime (`AbstractSkeleton.reassessWeaponGoal`, called from four sites in the same
+  class). Not expressible today. Unit A3 must add the capability.
+- **`SimMob` holds a single `GoalSelector`** (`crates/lodestone-server/src/mobs/mod.rs`); `add_goal(priority, Box<dyn Goal>)`
+  is the only dynamic-dispatch extension point in the whole `lodestone-server` crate.
   Vanilla has **two** selectors with **separate priority namespaces** — a zombie has
   `goalSelector` priorities 4/8/2/3/6/7 and `targetSelector` priorities 1/2/3/3/5
-  (`Zombie.java:113-128`). `MobAi` (`goal.rs:308`) models the pair and has **zero users tree-wide**
+  (`Zombie.registerGoals`). `MobAi` (`crates/lodestone-entity/src/ai/goal.rs`) models the pair and has **zero users tree-wide**
   (`target_selector` → 0 hits). Merging is *mostly* benign because `Flag::Target` does not contend
   with `Move`/`Look`, but the priority numbers collide. Unit A3 must either adopt `MobAi` or state an
   explicit offset convention and gate it.
 - **`MobSim<'w>` borrows `&'w ChunkWorld`**, entity ids are a bare `next_id: i32` counter with a
-  manual `set_next_id` (`mobs.rs:1016`, used at `:1818` to dodge the player's id), and **there is no
-  `despawn(id)`** — only `despawn_pass(nearest_player, rng)` (`:1443`). All three shapes are hostile
+  manual `set_next_id` (`crates/lodestone-server/src/mobs/mod.rs`, used near `seed_demo_mobs` to dodge the player's id), and **there is no
+  `despawn(id)`** — only `despawn_pass(nearest_player, rng)`. All three shapes are hostile
   to a per-species roster and to the ECS migration.
-- **`run_tick_loop` (`tick.rs:478`) is `pub(crate)`, straight-line, with no way to register per-tick
-  work.** Every driver this plan adds is a hardcoded insertion until
-  [#433](https://github.com/matteopolak/lodestone/issues/433)'s server-ECS migration
+- **`run_tick_loop` (`crates/lodestone-server/src/tick.rs`) is `pub(crate)`, straight-line, with no way to register per-tick
+  work.** Every driver this plan adds is a hardcoded insertion until the server-ECS migration
   (`docs/server-ecs.md`, decided but unimplemented) lands.
 - **No event bus, no cancellation, no hook registration server-side**, so a goal that wants to veto
-  an action has nowhere to do it. Affects #233's anger propagation and #231's schedule gating.
-- **`MobSim::spawn` still hardcodes zombie.** `mobs.rs:1034`:
-  `ResourceKey::from_str("minecraft:zombie")`, and `spawn_with_type` (`:1058`) unconditionally sets
-  `MobCategory::Monster` and installs **zero** goals. `spawn_species` (`:1106`) is the species-aware
-  path; hostility is a literal 8-name string match (`is_hostile_species`, `:505`).
-- **The species roster is a hand-written 8-arm match**, `type_spec()` at
-  `crates/lodestone-entity/src/attribute.rs:597-642`: zombie/husk, skeleton/stray/wither_skeleton/
+  an action has nowhere to do it. Affects the neutral/aggro unit's anger propagation and the
+  villager/piglin unit's schedule gating.
+- **`MobSim::spawn` still hardcodes zombie.** In `crates/lodestone-server/src/mobs/mod.rs`:
+  `ResourceKey::from_str("minecraft:zombie")`, and `spawn_with_type` unconditionally sets
+  `MobCategory::Monster` and installs **zero** goals. `spawn_species` is the species-aware
+  path; hostility is a literal 8-name string match (`is_hostile_species`, `crates/lodestone-server/src/mobs/species.rs`).
+- **The species roster is a hand-written 8-arm match**, `type_spec()` in
+  `crates/lodestone-entity/src/attribute.rs`: zombie/husk, skeleton/stray/wither_skeleton/
   bogged, creeper, spider, pig, cow/mooshroom, sheep, chicken. Everything else falls back to
-  `combat_defaults` (`mobs.rs:461`) plus a 0.6×1.95 body (`species_shape`, `:482`).
+  `combat_defaults` (`crates/lodestone-server/src/mobs/mod.rs`) plus a 0.6×1.95 body (`species_shape`, same file).
 - **Nothing launches a projectile in production.** `ProjectileRegistry::tick` *is* reached
-  (`mobs.rs:1214` inside `MobSim::tick`), but `MobSim::spawn_projectile` (`:1548`) is called only
+  (inside `MobSim::tick`, `crates/lodestone-server/src/mobs/mod.rs`), but `MobSim::spawn_projectile` (`crates/lodestone-server/src/mobs/projectiles.rs`) is called only
   from `tests/projectile_and_item_registries.rs`, and `Projectile::{throwable, ender_pearl}` have
   zero call sites outside `projectile.rs`. The registry is permanently empty at runtime — the island
-  moved one hop, from "nothing ticks it" to "nothing populates it". `mobs.rs:1541-1546` also
-  discloses that hit detection and damage are not implemented.
+  moved one hop, from "nothing ticks it" to "nothing populates it". **This has since changed**:
+  `spawn_projectile`'s own doc comment now says hit detection and impact resolution happen every
+  tick via `resolve_projectile_impacts`, confirmed directly against
+  `crates/lodestone-server/src/mobs/projectiles.rs` rather than carried forward from this note.
 - **No ranged goal of any kind exists.** `RangedAttackGoal` and `BowAttack` are 0 hits tree-wide; all
   27 `Ranged` hits are `RangedAttribute`. Every `bow`/`fireball`/`trident` hit is rendering or
   generated data.
@@ -214,22 +250,23 @@ families in parallel. Brain driver next. Natural spawning after that. Regional d
 The reasoning is §1.1, and it is decisive rather than a preference. A roster unit's entire output is
 a list of goal constructions handed to `SimMob::add_goal`. Eight of the thirteen goals it would
 construct have a `can_use` that is constant-`false` or reads a field nothing writes. So the
-observable delta from landing #228 today is exactly zero: a cow spawned through `spawn_species`
+observable delta from landing the passive-herd roster today is exactly zero: a cow spawned through `spawn_species`
 currently gets `RandomStrollGoal` + `RandomLookAroundGoal` and wanders; add `PanicGoal`, `TemptGoal`,
 `BreedGoal`, `FollowParentGoal` and `FloatGoal` at vanilla's real priorities and it **still just
 wanders**. Every unit test would pass, because a goal's `can_use` is tested against a `ScriptMob`
-test fake (`goals.rs:824`) that *does* override those methods. That is the closed-loop trap in
+test fake (`crates/lodestone-entity/src/ai/goals.rs`) that *does* override those methods. That is the closed-loop trap in
 CLAUDE.md's rule 1, and it would fire across five issues simultaneously.
 
 Two secondary reasons reinforce the order:
 
-- **There is no way to create a non-zombie mob observably.** `seed_demo_mobs` (`mobs.rs:1872`) is the
+- **There is no way to create a non-zombie mob observably.** `seed_demo_mobs` (`crates/lodestone-server/src/mobs/mod.rs`) is the
   only production entry, and it is a hardcoded zombie ring. So even a *working* cow roster is
   unreachable from a client until something spawns a cow. That is why unit A4 exists and why it is
-  in Phase A rather than deferred to #224.
+  in Phase A rather than deferred to the spawn-eggs-and-spawners unit.
 - **The roster substrate does not exist.** There is no `goals_for`, no `install_*_goals`, no
   `SpeciesRegistry` — 0 hits each. Five parallel roster units all editing `spawn_species` inside the
-  1,970-line, heavily-contended `mobs.rs` would serialise on the worst choke point in the crate.
+  heavily-contended `mobs.rs` (since split into `crates/lodestone-server/src/mobs/`, with `spawn_species`
+  now in `mod.rs`) would serialise on the worst choke point in the crate.
   A3 exists to give each family its own file.
 
 **What does *not* go first:** #221/#222 (spawn tables + natural cycle) and #223 (regional
@@ -242,7 +279,7 @@ with, and A4 covers observability in the meantime.
 
 ## 3. Units
 
-Ownership is exclusive for the unit's window. Choke points (`mobs.rs`, `tick.rs`,
+Ownership is exclusive for the unit's window. Choke points (`mobs/mod.rs`, `tick.rs`,
 `lodestone-server/src/lib.rs`, `ai/mod.rs`, `server_protocol.rs`) are brokered through the
 orchestrator; each unit below states the exact patch it needs there.
 
@@ -253,7 +290,7 @@ orchestrator; each unit below states the exact patch it needs there.
 **Broker:** none.
 **Do:** add settable perception inputs to `NavigatingMob` (nearest player, last-hurt-by source,
 temptation position, threat position, panic flag, in-water/in-lava, no-action-time) and override the
-8 trait defaults in the `impl MobController` block at `:552` to read them. Pure additive; no goal
+8 trait defaults in the `impl MobController` block to read them. Pure additive; no goal
 changes. Feet-block water/lava classification comes from the `PathWorld` the struct already holds.
 **Gate:** in-file tests that drive each of the six structurally-dead goals to actually return
 `can_use == true` and then run, using a real `NavigatingMob` over the existing `Arena` fixture (not
@@ -261,21 +298,21 @@ changes. Feet-block water/lava classification comes from the `PathWorld` the str
 **Negative control that must fail:** the same six assertions against a `NavigatingMob` with the new
 inputs left unset — must report `can_use == false` for all six. If that control passes, the test is
 reading `ScriptMob` or its own setters rather than the seam.
-**Vacuous if:** written against `ScriptMob` (`goals.rs:824`), which already overrides all eight —
+**Vacuous if:** written against `ScriptMob` (`crates/lodestone-entity/src/ai/goals.rs`), which already overrides all eight —
 that harness cannot see this bug and is exactly why the bug survived. Also vacuous if it asserts only
 that the setters round-trip, rather than that a *goal* fires.
 
 #### A2 — Perception feed and breeding resolution in `MobSim::tick`
-**Owns:** `crates/lodestone-server/src/mobs.rs` (exclusive; the crate's hottest file — keep the
+**Owns:** `crates/lodestone-server/src/mobs/` (exclusive; the crate's hottest file — keep the
 window short).
-**Broker:** none beyond exclusive `mobs.rs`.
+**Broker:** none beyond exclusive `mobs/`.
 **Depends on:** A1.
-**Do:** in `MobSim::tick` (`:1157`), before `m.mob.tick(&mut m.goals)`, populate each mob's new A1
+**Do:** in `MobSim::tick`, before `m.mob.tick(&mut m.goals)`, populate each mob's new A1
 inputs from the sim's own census — nearest player position, `last_hurt_by` from the existing hurt
 bookkeeping, threat/temptation candidates, panic from recent damage, `no_action_time` from the sim
-record it already increments (`:1157-1223`). Also populate `partner_candidate`/`parent_candidate` and
+record it already increments. Also populate `partner_candidate`/`parent_candidate` and
 **consume `take_bred()`**, applying `PARENT_AGE_AFTER_BREEDING` to both parents and spawning the
-child — the step `7bf2873` explicitly deferred here. This closes #234/#237's landed island.
+child — the step `7bf2873` explicitly deferred here. This closes the breeding/aging landed island.
 **Gate:** `tests/mob_sim.rs` — two cows within breed range, both fed into love, tick until a third
 mob exists with `is_baby() == true` and both parents' age reset to 6000; separately a mob damaged in
 water floats and panics.
@@ -290,27 +327,27 @@ the flag.
 **Owns:** new `crates/lodestone-entity/src/ai/roster/mod.rs`;
 `crates/lodestone-entity/src/ai/goal.rs`.
 **Broker:** one line `pub mod roster;` in `crates/lodestone-entity/src/ai/mod.rs`; and in
-`mobs.rs::spawn_species` (`:1120-1137`) replace the four hardcoded `add_goal` calls with
+`spawn_species` (`crates/lodestone-server/src/mobs/mod.rs`) replace the four hardcoded `add_goal` calls with
 `for (p, g) in roster::goals_for(species, step_per_tick) { m.add_goal(p, g); }`.
 **Do:** define `pub fn goals_for(species: &str, speed: f64) -> Vec<(i32, Box<dyn Goal>)>` — pure,
 world-free, unit-testable, returning an empty vec for unknown species so the fallback is explicit.
 Add `GoalSelector::remove`/per-goal enable for skeleton's weapon swap (§1.4). Decide and **document**
-the two-selector question: either adopt `MobAi` (`goal.rs:308`) or fix a priority-offset convention
+the two-selector question: either adopt `MobAi` (`crates/lodestone-entity/src/ai/goal.rs`) or fix a priority-offset convention
 mapping vanilla's `targetSelector` namespace into the single selector, and gate the chosen mapping.
 **Gate:** `goals_for("creeper", …)` returns exactly vanilla's priority multiset from
-`Creeper.java:65-74`; a removal test proves a goal stops being scheduled after `remove`.
+`Creeper.registerGoals`; a removal test proves a goal stops being scheduled after `remove`.
 **Negative control that must fail:** `goals_for` on an unknown species must return empty and a
 zombie's set must *not* equal a creeper's — an assertion that passes for both means the table is
 being read from the wrong key.
 **Vacuous if:** the expected priorities are copied from our own `goals_for` rather than from the
-cited `.java` line. Cite the file:line in the test.
+cited vanilla source. Cite the symbol in the test, not a line number.
 
 #### A4 — An observable way to create a species (parallel with A2)
 **Owns:** `crates/lodestone-server/src/spawn.rs`.
 **Broker:** whichever of `seed_demo_mobs` / a debug command path the orchestrator prefers; if
-`mobs.rs`, must serialise behind A2.
+`mobs/`, must serialise behind A2.
 **Do:** the minimum that lets a connected client see a named species — either widen the demo seeding
-to a species list, or a creative/debug spawn path. Explicitly **not** #224: no spawn-egg item
+to a species list, or a creative/debug spawn path. Explicitly **not** spawn eggs or spawners: no spawn-egg item
 handling, no spawner block.
 **Gate:** connect the real client adapter to the integrated server and assert an `ADD_ENTITY` for a
 non-zombie type id arrives.
@@ -332,9 +369,10 @@ Each owns one file under `crates/lodestone-entity/src/ai/roster/` plus a registr
   `random_tick.rs` exists. **Touches metadata** (`Sheep.DATA_WOOL_ID`) → must run the oracle, §5.
 - **B3 — ranged (#227).** Owns `crates/lodestone-entity/src/ai/goals/ranged.rs` +
   `roster/ranged.rs`. The largest unit: a new goal family plus the projectile *launch* wiring that
-  §1.4 shows does not exist. Needs A3's `remove` for `reassessWeaponGoal`. Needs a brokered
-  `MobSim::spawn_projectile` call site and, for damage, hit detection that `mobs.rs:1541-1546` says
-  is absent. **Recommend splitting B3 into B3a (launch + tick reaches a client as a moving arrow
+  §1.4 shows does not exist (though hit detection itself has since landed — see the status note
+  in "What it is"). Needs A3's `remove` for `reassessWeaponGoal`. Needs a brokered
+  `MobSim::spawn_projectile` call site (`crates/lodestone-server/src/mobs/projectiles.rs`).
+  **Recommend splitting B3 into B3a (launch + tick reaches a client as a moving arrow
   entity) and B3b (hit detection and damage).**
 - **B4 — neutral/aggro (#233).** Owns `roster/neutral.rs` + a shared anger-timer state machine landed
   **once**. Enderman stare, zombified piglin group alert, bee sting-then-die, wolf pack aggro.
@@ -349,7 +387,7 @@ Each owns one file under `crates/lodestone-entity/src/ai/roster/` plus a registr
 
 - **C1 — Brain driver (#209).** Owns new `crates/lodestone-entity/src/brain/navigating_brain_mob.rs`.
   Broker: a `mod` line, and the driver insertion in `MobSim::tick`/`run_tick_loop`. The
-  `NavigatingMob` composition is the explicit template. **State the #433 dependency:** without the
+  `NavigatingMob` composition is the explicit template. **State the server-ECS-migration dependency:** without the
   ECS migration this is a hardcoded insertion into a `pub(crate)` straight-line loop; that is
   acceptable but must be written down.
   **Gate:** a Brain mob placed in a real `MobSim` world and ticked through the new composition,
@@ -363,10 +401,11 @@ Each owns one file under `crates/lodestone-entity/src/ai/roster/` plus a registr
 ### Phase D — population (after B; D1 → D2, D3 parallel)
 
 - **D1 — spawn table + `MobCategory` unification (#221).** Must resolve the duplicate-type fork
-  (§1.3 item 6) and write `SpawnRule` — a type that has never existed. Generate per-species
+  (§1.3 item 6 — **the `MobCategory` type half is now done**, see the status note in "What it is")
+  and write `SpawnRule` — a type that has never existed. Generate per-species
   conditions and biome spawn lists from the real jar.
 - **D2 — natural spawn cycle (#222).** The driver. Needs D1 and a player-position feed that
-  `mobs.rs:1932` says is missing. Replaces A4's demo seeding.
+  `seed_demo_mobs`'s own doc comment (`crates/lodestone-server/src/mobs/mod.rs`) says is missing. Replaces A4's demo seeding.
 - **D3 — spawn eggs and spawners (#224).** Parallel with D2.
 
 ### Phase E — floats freely
@@ -397,82 +436,86 @@ Every line below is from `.cache/mc/26.2/src/net/minecraft/world/entity/`. Cite 
 implementing test; do not copy the numbers without the citation.
 
 **Zombie** (`monster/zombie/Zombie.java`): `FOLLOW_RANGE 35.0`, `MOVEMENT_SPEED 0.23F`,
-`ATTACK_DAMAGE 3.0` (`:133-135`); baby speed modifier `0.5` `ADD_MULTIPLIED_BASE` (`:73-74`).
-Goals `:113-123` — `4 ZombieAttackTurtleEggGoal(1.0, 3)`, `8 LookAtPlayerGoal(Player, 8.0F)`,
+`ATTACK_DAMAGE 3.0` (`Zombie.createAttributes`); baby speed modifier `0.5` `ADD_MULTIPLIED_BASE`
+(also `Zombie.createAttributes`).
+Goals (`Zombie.registerGoals`) — `4 ZombieAttackTurtleEggGoal(1.0, 3)`, `8 LookAtPlayerGoal(Player, 8.0F)`,
 `8 RandomLookAroundGoal`, `2 SpearUseGoal(1.0, 1.0, 10.0F, 2.0F)`, `3 ZombieAttackGoal(1.0, false)`,
-`6 MoveThroughVillageGoal(1.0, true, 4)`, `7 WaterAvoidingRandomStrollGoal(1.0)`. Targets `:124-128`
+`6 MoveThroughVillageGoal(1.0, true, 4)`, `7 WaterAvoidingRandomStrollGoal(1.0)`. Targets, same method
 — `1 HurtByTargetGoal.setAlertOthers(ZombifiedPiglin)`, `2 NearestAttackableTargetGoal(Player, true)`,
 `3 (AbstractVillager, false)`, `3 (IronGolem, true)`, `5 (Turtle, 10, …)`.
 
-**Creeper** (`monster/Creeper.java`): `maxSwell = 30` (`:55`), `explosionRadius = 3` (`:56`),
-fall adds `fallDistance * 1.5` capped at `maxSwell - 5` (`:89-91`), `DATA_SWELL_DIR` default `-1`
-(`:100`), `DATA_IS_IGNITED` default `false` (`:102`), NBT `Fuse` short default 30 / `ExplosionRadius`
-byte default 3 (`:118-119`). Goals `:65-72` — `1 FloatGoal`, `2 SwellGoal`,
+**Creeper** (`monster/Creeper.java`): `maxSwell = 30`, `explosionRadius = 3`
+(both field declarations),
+fall adds `fallDistance * 1.5` capped at `maxSwell - 5`, `DATA_SWELL_DIR` default `-1`,
+`DATA_IS_IGNITED` default `false`, NBT `Fuse` short default 30 / `ExplosionRadius`
+byte default 3 (field declarations and `addAdditionalSaveData`/`readAdditionalSaveData`). Goals
+(`Creeper.registerGoals`) — `1 FloatGoal`, `2 SwellGoal`,
 `3 AvoidEntityGoal(Ocelot, 6.0F, 1.0, 1.2)`, `3 AvoidEntityGoal(Cat, 6.0F, 1.0, 1.2)`,
 `4 MeleeAttackGoal(1.0, false)`, `5 WaterAvoidingRandomStrollGoal(0.8)`,
-`6 LookAtPlayerGoal(Player, 8.0F)`, `6 RandomLookAroundGoal`. Targets `:73-74`.
+`6 LookAtPlayerGoal(Player, 8.0F)`, `6 RandomLookAroundGoal`. Targets, same method.
 
-**Skeleton** (`monster/skeleton/AbstractSkeleton.java`): `MOVEMENT_SPEED 0.25` (`:90`);
-`RangedBowAttackGoal<>(this, 1.0, 20, 15.0F)` (`:55`) — speed 1.0, attack interval **20 ticks**,
-attack radius **15.0**. Goals `:77-82` — `2 RestrictSunGoal`, `3 FleeSunGoal(1.0)`,
+**Skeleton** (`monster/skeleton/AbstractSkeleton.java`): `MOVEMENT_SPEED 0.25` (`AbstractSkeleton.createAttributes`);
+`RangedBowAttackGoal<>(this, 1.0, 20, 15.0F)` (`AbstractSkeleton.registerGoals`) — speed 1.0, attack interval **20 ticks**,
+attack radius **15.0**. Goals, same method — `2 RestrictSunGoal`, `3 FleeSunGoal(1.0)`,
 `3 AvoidEntityGoal(Wolf, 6.0F, 1.0, 1.2)`, `5 WaterAvoidingRandomStrollGoal(1.0)`,
-`6 LookAtPlayerGoal(Player, 8.0F)`, `6 RandomLookAroundGoal`. `reassessWeaponGoal()` (`:132-146`)
+`6 LookAtPlayerGoal(Player, 8.0F)`, `6 RandomLookAroundGoal`. `reassessWeaponGoal()`
 installs bow *or* melee at priority 4.
 
-**Spider** (`monster/spider/Spider.java`): `MAX_HEALTH 16.0`, `MOVEMENT_SPEED 0.3F` (`:90`).
-Goals `:58-64` — `1 FloatGoal`, `2 AvoidEntityGoal(Armadillo, 6.0F, 1.0, 1.2)`,
+**Spider** (`monster/spider/Spider.java`): `MAX_HEALTH 16.0`, `MOVEMENT_SPEED 0.3F` (`Spider.createAttributes`).
+Goals (`Spider.registerGoals`) — `1 FloatGoal`, `2 AvoidEntityGoal(Armadillo, 6.0F, 1.0, 1.2)`,
 `3 LeapAtTargetGoal(0.4F)`, `4 SpiderAttackGoal`, `5 WaterAvoidingRandomStrollGoal(0.8)`,
 `6 LookAtPlayerGoal(Player, 8.0F)`, `6 RandomLookAroundGoal`.
 
 **Blaze** (`monster/Blaze.java`): `ATTACK_DAMAGE 6.0`, `MOVEMENT_SPEED 0.23F`, `FOLLOW_RANGE 48.0`
-(`:55`). Volley timing (`:207-230`): first shot `attackTime = 60`; steps 2–4 `attackTime = 6`; after
+(`Blaze.createAttributes`). Volley timing (`Blaze`'s attack-tick method): first shot `attackTime = 60`; steps 2–4 `attackTime = 6`; after
 step 4 `attackTime = 100` and `attackStep = 0`; the non-volley branch uses `attackTime = 20`.
 
-**Ghast** (`monster/Ghast.java`): `explosionPower = 1` (`:47`), `MAX_HEALTH 10.0`,
-`FOLLOW_RANGE 100.0` (`:118-119`); `chargeTime` sound at 10, fires at **20**, resets to **-40**
-(`:361-379`).
+**Ghast** (`monster/Ghast.java`): `explosionPower = 1` (field declaration), `MAX_HEALTH 10.0`,
+`FOLLOW_RANGE 100.0` (`Ghast.createAttributes`); `chargeTime` sound at 10, fires at **20**, resets to **-40**
+(`Ghast`'s charge-tick method).
 
-**Guardian** (`monster/Guardian.java`): `ATTACK_TIME = 80` (`:48`), `ATTACK_DAMAGE 6.0`,
-`MOVEMENT_SPEED 0.5`, `MAX_HEALTH 30.0` (`:86`); beam `attackTime` starts at **-10** (`:365`) and
-damage lands at `getAttackDuration()` (`:396-402`).
+**Guardian** (`monster/Guardian.java`): `ATTACK_TIME = 80` (field declaration), `ATTACK_DAMAGE 6.0`,
+`MOVEMENT_SPEED 0.5`, `MAX_HEALTH 30.0` (`Guardian.createAttributes`); beam `attackTime` starts at **-10** and
+damage lands at `getAttackDuration()`.
 
 **Enderman** (`monster/EnderMan.java`): `MOVEMENT_SPEED 0.3F`, `ATTACK_DAMAGE 7.0`,
-`FOLLOW_RANGE 64.0` (`:116-118`); stare test `isLookingAtMe(player, 0.025, true, false, eyeY)`
-(`:210`); `EndermanLookForPlayerGoal` `aggroTime = adjustedTickDelay(5)` (`:510`) and teleport when
-`teleportTime++ >= adjustedTickDelay(30)` (`:565`).
+`FOLLOW_RANGE 64.0` (`EnderMan.createAttributes`); stare test `isLookingAtMe(player, 0.025, true, false, eyeY)`;
+`EndermanLookForPlayerGoal` `aggroTime = adjustedTickDelay(5)` and teleport when
+`teleportTime++ >= adjustedTickDelay(30)` (both in `EndermanLookForPlayerGoal`'s own tick method).
 
-**Zombified piglin** (`monster/zombie/ZombifiedPiglin.java`): `MOVEMENT_SPEED 0.23F` (`:83`);
-`PERSISTENT_ANGER_TIME = TimeUtil.rangeOfSeconds(20, 39)` (`:58`); `ALERT_RANGE_Y = 10` (`:61`);
-`alertOthers()` (`:139`) called from `:132`; `1 HurtByTargetGoal.setAlertOthers()` (`:75`).
+**Zombified piglin** (`monster/zombie/ZombifiedPiglin.java`): `MOVEMENT_SPEED 0.23F` (`ZombifiedPiglin.createAttributes`);
+`PERSISTENT_ANGER_TIME = TimeUtil.rangeOfSeconds(20, 39)` (field declaration); `ALERT_RANGE_Y = 10` (field declaration);
+`alertOthers()` called from `registerGoals`; `1 HurtByTargetGoal.setAlertOthers()` (`ZombifiedPiglin.registerGoals`).
 
-**Bee** (`animal/bee/Bee.java`): `PERSISTENT_ANGER_TIME = TimeUtil.rangeOfSeconds(20, 39)` (`:129`);
-goals `:175-191` — `0 BeeAttackGoal(1.4F, true)`, `2 BreedGoal(1.0)`,
-`3 TemptGoal(1.25, BEE_FOOD)`, `5 FollowParentGoal(1.25)`, `9 FloatGoal`; `hasStung()` (`:496`)
-gates death; roll condition `distanceToSqr < 4.0` (`:464`).
+**Bee** (`animal/bee/Bee.java`): `PERSISTENT_ANGER_TIME = TimeUtil.rangeOfSeconds(20, 39)` (field declaration);
+goals (`Bee.registerGoals`) — `0 BeeAttackGoal(1.4F, true)`, `2 BreedGoal(1.0)`,
+`3 TemptGoal(1.25, BEE_FOOD)`, `5 FollowParentGoal(1.25)`, `9 FloatGoal`; `hasStung()`
+gates death; roll condition `distanceToSqr < 4.0`.
 
 **Wolf** (`animal/wolf/Wolf.java`): `MOVEMENT_SPEED 0.3F`, `MAX_HEALTH 8.0`, `ATTACK_DAMAGE 4.0`
-(`:217`); tamed `MAX_HEALTH 40.0`, untamed `8.0` (`:433`, `:436`). Goals `:129-140`; targets
-`:141-148` — `1 OwnerHurtByTargetGoal`, `2 OwnerHurtTargetGoal`,
+(`Wolf.createAttributes`); tamed `MAX_HEALTH 40.0`, untamed `8.0` (also `Wolf.createAttributes`). Goals (`Wolf.registerGoals`); targets,
+same method — `1 OwnerHurtByTargetGoal`, `2 OwnerHurtTargetGoal`,
 `3 HurtByTargetGoal.setAlertOthers()`, `6 FollowOwnerGoal(1.0, 10.0F, 2.0F)` at goal priority 6.
 
-**Breeding** (`animal/Animal.java`): `PARENT_AGE_AFTER_BREEDING = 6000` (`:44`); `inLove = 600` on
-love start (`:174`); love decrements with a particle every 10 ticks (`:76-77`);
-`resetLove()` on both parents at `:227-228`.
+**Breeding** (`animal/Animal.java`): `PARENT_AGE_AFTER_BREEDING = 6000` (field declaration); `inLove = 600` on
+love start; love decrements with a particle every 10 ticks;
+`resetLove()` on both parents (all in `Animal`'s aging/love-tick method).
 
-**Passive herd** — attributes and full goal lists:
+**Passive herd** — attributes and full goal lists (attribute values from each class's own
+`createAttributes`, goals from `registerGoals`):
 
-| species | file:line (attrs) | health / speed | panic | breed | tempt | follow-parent | stroll | look |
+| species | class | health / speed | panic | breed | tempt | follow-parent | stroll | look |
 |---|---|---|---|---|---|---|---|---|
-| cow | `animal/cow/AbstractCow.java:57` | 10.0 / 0.2F | `1 @2.0` | `2 @1.0` | `3 @1.25 COW_FOOD` | `4 @1.25` | `5 @1.0` | `6 @6.0F` |
-| sheep | `animal/sheep/Sheep.java:108` | 8.0 / 0.23F | `1 @1.25` | `2 @1.0` | `3 @1.1 SHEEP_FOOD` | `4 @1.1` | `6 @1.0` | `7 @6.0F` |
-| pig | `animal/pig/Pig.java:93` | 10.0 / 0.25 | `1 @1.25` | `3 @1.0` | `4 @1.2 PIG_FOOD` | `5 @1.1` | `6 @1.0` | `7 @6.0F` |
-| chicken | `animal/chicken/Chicken.java:114` | 4.0 / 0.25 | `1 @1.4` | `2 @1.0` | `3 @1.0 CHICKEN_FOOD` | `4 @1.1` | `5 @1.0` | `6 @6.0F` |
-| rabbit | `animal/rabbit/Rabbit.java:293` | 3.0 / 0.3F / atk 3.0 | `1 @2.2` | `2 @0.8` | `3 @1.0 RABBIT_FOOD` | — | `6 @0.6` | `11 @10.0F` |
+| cow | `animal/cow/AbstractCow.java` | 10.0 / 0.2F | `1 @2.0` | `2 @1.0` | `3 @1.25 COW_FOOD` | `4 @1.25` | `5 @1.0` | `6 @6.0F` |
+| sheep | `animal/sheep/Sheep.java` | 8.0 / 0.23F | `1 @1.25` | `2 @1.0` | `3 @1.1 SHEEP_FOOD` | `4 @1.1` | `6 @1.0` | `7 @6.0F` |
+| pig | `animal/pig/Pig.java` | 10.0 / 0.25 | `1 @1.25` | `3 @1.0` | `4 @1.2 PIG_FOOD` | `5 @1.1` | `6 @1.0` | `7 @6.0F` |
+| chicken | `animal/chicken/Chicken.java` | 4.0 / 0.25 | `1 @1.4` | `2 @1.0` | `3 @1.0 CHICKEN_FOOD` | `4 @1.1` | `5 @1.0` | `6 @6.0F` |
+| rabbit | `animal/rabbit/Rabbit.java` | 3.0 / 0.3F / atk 3.0 | `1 @2.2` | `2 @0.8` | `3 @1.0 RABBIT_FOOD` | — | `6 @0.6` | `11 @10.0F` |
 
-Cow goals `AbstractCow.java:41-48`; sheep `Sheep.java:76-84` (`5 eatBlockGoal` is grazing);
-pig `Pig.java:81-89` (note **two** `TemptGoal`s at priority 4 — `CARROT_ON_A_STICK` and `PIG_FOOD`);
-chicken `Chicken.java:86-93` plus `eggTime = random.nextInt(6000) + 6000` (`:80`, `:141`);
-rabbit `Rabbit.java:120-130` with three `RabbitAvoidEntityGoal`s at priority 4 (Player 8.0F,
+Cow goals in `AbstractCow.registerGoals`; sheep in `Sheep.registerGoals` (`5 eatBlockGoal` is grazing);
+pig in `Pig.registerGoals` (note **two** `TemptGoal`s at priority 4 — `CARROT_ON_A_STICK` and `PIG_FOOD`);
+chicken in `Chicken.registerGoals` plus `eggTime = random.nextInt(6000) + 6000` (`Chicken`'s egg-lay tick method);
+rabbit in `Rabbit.registerGoals` with three `RabbitAvoidEntityGoal`s at priority 4 (Player 8.0F,
 Wolf 10.0F, Monster 4.0F, all speed 2.2/2.2) and `RaidGardenGoal` at 5.
 
 ---
@@ -488,8 +531,8 @@ wool) is the unit most exposed to a *recurrence* of exactly that bug — treat t
 claim to re-verify against the oracle, not a settled fact.
 
 Pick the guard by which classes actually collide, using
-`lodestone_data::entity_census::{is_living, is_mob}` (`crates/lodestone-data/src/entity_census.rs:105`
-and `:141`, keyed by network entity-type id, `TYPE_COUNT = 158`):
+`lodestone_data::entity_census::{is_living, is_mob}` (`crates/lodestone-data/src/entity_census.rs`,
+keyed by network entity-type id, `TYPE_COUNT = 158`):
 
 - **Index 8** — `LivingEntity.DATA_LIVING_ENTITY_FLAGS` vs `AbstractArrow.ID_FLAGS`, both `BYTE`,
   the arrow's crit bit `0x01` bit-identical to "using item". Living vs non-living → **`is_living`**.
@@ -499,7 +542,7 @@ and `:141`, keyed by network entity-type id, `TYPE_COUNT = 158`):
   `Display` also claims 15 as a `BYTE`.
 
 Do not assume the previous collision's guard generalises. Use `encode_set_entity_data`
-(`server_protocol.rs:1998`) rather than adding another single-purpose encoder.
+(`crates/protocol/v770/src/server_protocol.rs`) rather than adding another single-purpose encoder.
 
 ---
 
@@ -528,20 +571,23 @@ Do not assume the previous collision's guard generalises. Use `encode_set_entity
    A roster author who tests the way the existing tests are written will see green and ship an
    island. Mitigation: A1/A2 are hard gates on all of Phase B, and A1's negative control is written
    specifically to fail on the `ScriptMob` shortcut.
-2. **`mobs.rs` serialises the epic.** It is 1,970 lines, holds `MobSim`, `SimMob`, `spawn_species`,
+2. **`mobs.rs` serialises the epic.** At the time of writing it was 1,970 lines (since split into
+   `crates/lodestone-server/src/mobs/`, with most of this content in `mod.rs`); it holds `MobSim`, `SimMob`, `spawn_species`,
    `run_spawn_cycle`, `despawn_pass` and `seed_demo_mobs`, and is the only place `add_goal` can be
    called. A2, A4, B3, C1, D2 and D3 all want it. Mitigation: A3's `goals_for` moves all per-species
-   data out into per-family files so Phase B never touches `mobs.rs`; A2 takes an exclusive short
+   data out into per-family files so Phase B never touches `mobs/mod.rs`; A2 takes an exclusive short
    window; everything else states a one-line brokered patch. Residual risk is real — this is the
-   choke point that the #433 ECS migration exists to fix, and Phase C/D will feel it.
+   choke point that the server-ECS migration exists to fix, and Phase C/D will feel it.
 3. **#227 (ranged) is mis-scoped as one unit and will stall.** It needs a new goal family, a
    `GoalSelector::remove` that does not exist, a projectile *launch* path that has no production
-   caller, and hit detection plus damage that `mobs.rs:1541-1546` states are not implemented — across
-   `lodestone-entity`, `mobs.rs` and possibly `server_protocol.rs`. Mitigation: split into B3a
+   caller, and — at the time of writing — hit detection plus damage that were not implemented (see the
+   status note in "What it is": `spawn_projectile`'s own doc comment now says this landed) — across
+   `lodestone-entity`, `mobs/` and possibly `server_protocol.rs`. Mitigation: split into B3a
    (an arrow leaves a skeleton and reaches a client as a moving entity) and B3b (it hits and hurts),
    and do not let B3b block B1/B2/B4.
 
-A fourth worth naming: **the two `MobCategory` types** (§1.3 item 6). Nothing fails today because
-`lodestone-server` consistently uses its own, but D1 must unify them, and a unit that imports the
-entity crate's by accident will get 8 variants where the server has 7 and a `check_despawn` with a
-different signature — a type error, not a silent bug, which is the good case.
+A fourth was named here: **the two `MobCategory` types** (§1.3 item 6). **That part of D1 is done** —
+`lodestone_server::mob_spawn` now re-exports `lodestone_entity::spawn::MobCategory` rather than
+declaring its own (confirmed directly against the source; see the status note in "What it is"). The
+two `check_despawn` functions with different signatures remain, by design, and are not a fork to
+unify.
