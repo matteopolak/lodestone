@@ -62,67 +62,81 @@ is *correct* here, not a gap. Checked for a representative sample (pig); the
 `models/item/` at all, confirming each egg item owns its own baked-colour
 model rather than sharing one with tint parameters.
 
-## Finding 2: potion, map-colour and leather-icon dye share one real blocker
+## Finding 2 (superseded in part): dye and potion are now typed; map-colour is not
 
 The remaining three (`minecraft:potion`'s liquid colour, `minecraft:map_color`'s
-border tint, and leather's dye colour in **icon** form) all need the same
-thing evaluation cannot get today: **a typed read of the item stack's own
-component data**, and that does not exist for any of the three components
-involved.
+border tint, and leather's dye colour in **icon** form) all needed the same
+thing evaluation could not get when this doc was written: **a typed read of
+the item stack's own component data**. Two of the three now have it:
+
+- `minecraft:dyed_color` is typed end to end — `lodestone_model::ItemComponents
+  ::dyed_color`, decoded in `crates/protocol/v770/src/adapter/inventory.rs`,
+  reaches `lodestone_game::item::ItemStack` via `DYED_COLOR_COMPONENT` and
+  `.dyed_color()`, and `lodestone_assets::item_tint::resolve`'s `dye` arm reads
+  it live.
+- `minecraft:potion_contents` is typed the same way, but as an **effective**
+  field rather than a raw one: `crates/protocol/v770/src/adapter/inventory.rs`
+  decodes the component's potion/custom-colour/custom-effects and folds them
+  through `lodestone_data::potion::potion_color` (a port of `Potion.calculate`
+  / `PotionContents.getColorOr` / `getColorOptional`, with the potion's own
+  built-in effect list from `lodestone_data::potion`/`crates/lodestone-data/
+  src/generated/{potions,potion_effects,mob_effect_colors}.rs`) into
+  `lodestone_model::ItemComponents::potion_color: Option<u32>` — an
+  already-mixed opaque ARGB, not the raw component. It reaches
+  `lodestone_game::item::ItemStack` via `POTION_COLOR_COMPONENT` and
+  `.potion_color()`, and `item_tint::resolve`'s `potion` arm reads it live,
+  reporting `TintProvenance::Component`.
+- `minecraft:map_color` is still untyped — this doc's original finding stands
+  for it, and for `docs/filled-map-item.md`'s separate "no packet decode at
+  all" gap.
 
 ```
-$ grep -rn "dyed_color\|DYED_COLOR\|potion_contents\|POTION_CONTENTS" crates/lodestone-game/src/
-(no output)
+$ grep -rn "dyed_color\|DYED_COLOR\|potion_contents\|POTION_CONTENTS\|potion_color\|POTION_COLOR" crates/lodestone-game/src/item.rs
+(DYED_COLOR_COMPONENT, dyed_color(), set_dyed_color(), POTION_COLOR_COMPONENT, potion_color(), set_potion_color() all present)
 ```
 
-`crates/lodestone-game/src/item.rs`'s `ComponentValue` enum
-has typed variants for `Int`, `Bool`, `Str`, `Text`,
-`Tool`, `Enchantments` — the handful of components existing game logic
-inspects — and everything else, including `minecraft:potion_contents`,
-`minecraft:dyed_color` and (per `docs/filled-map-item.md`'s separate finding)
-whatever a filled map's own colour would come from, lands as
-`ComponentValue::Opaque(Vec<u8>)`: **structurally present** on the stack
-(item components decode generically over the wire) but not interpretable —
-`ItemComponents::get_int`/`get_str` cannot read an opaque blob, only `Int`/
-`Str` variants.
+**The remaining blocker moved, it did not close.** Both resolvers are correct
+and unit-tested against a stack built with real components, but the *only*
+call site in the shell that resolves an item icon's tint for drawing —
+`lodestone_shell::hud::item_icon::sprite_layer_tint` — still evaluates every
+icon against `ItemTintContext::default()` (no stack in hand at all), for
+every tint source including `dye`. So a decoded dyed leather item and a
+decoded potion both carry the right colour all the way to
+`lodestone_game::item::ItemStack`, and neither one is drawn correctly yet:
+the gap this doc originally named at the *component-typing* layer is now at
+the *draw call site* layer instead, and it is one gap for both sources, not
+two.
 
-Adding a typed variant (or a component-specific NBT reader) means editing
-`crates/lodestone-game/src/item.rs`, which this task's file ownership
-assigns to the cost-screens agent, not this one (`crates/lodestone-game/`
-is listed off-limits in the briefing). So evaluation was **not** built
-speculatively against data this crate cannot yet read — per this session's
-other finding for the filled-map-item work, that would be exactly the island `CLAUDE.md` warns
-about: individually testable with synthetic data, reaching zero pixels in
-play because the real stack's colour is never actually reachable.
-
-**`TintSource.default` is the correct fallback until this lands.** Every
-one of the three tint kinds carries a jar-authored `default` (e.g.
+**`TintSource.default` is still the correct fallback until that lands.**
+Every one of the three tint kinds carries a jar-authored `default` (e.g.
 `minecraft:potion`'s is `-13083194`, `assets/minecraft/items/potion.json`),
 and that default is what a stack with no override should show anyway
 (vanilla's own base "no effect" bottle) — so the current untinted-white
-behaviour is the wrong default and the fix, once evaluation exists, is
-"use `TintSource.default`, then override from the decoded component when
-present" — a two-tier fallback, not a full rewrite.
+behaviour is the wrong default when nothing else is available, and it is
+exactly what `item_tint::resolve` still falls back to whenever
+`ItemTintContext::default()` reaches it.
 
 ## What would unblock this, in order
 
-1. **Type at least `minecraft:dyed_color`** (`{rgb: int}`, the simplest of
-   the three payloads — a single top-level int, unlike potion's nested
-   `{potion: <id>, custom_color: optional int}`) as a new `ComponentValue`
-   variant or a dedicated accessor in `lodestone-game/src/item.rs`. Not
-   this task's file ownership; flagged for the cost-screens agent or a
-   dedicated follow-up.
-2. **A per-item-variant tint table** in `lodestone-render`, parallel to but
-   separate from `BlockModels::tint_palette` — keyed by `(item, layer
-   index)` rather than a block's biome-position lookup, since the colour
-   here comes from the *stack instance*, not world position. This is
-   in-ownership work (`block_models.rs`), gated entirely on (1).
-3. **Potion and map-colour** each need their own resolution logic beyond a
-   raw int read (potion's `custom_color` overrides a *looked-up* base
-   colour from the potion type when absent; map-colour is presently
-   unblocked-by-data at all per `docs/filled-map-item.md`), so they are
-   real follow-up work even after (1) and (2) land, not automatic
-   consequences of them.
+1. ~~Type at least `minecraft:dyed_color`~~ **Done** (`lodestone-game/src/
+   item.rs`'s `DYED_COLOR_COMPONENT`), and `minecraft:potion_contents` is now
+   typed the same way (`POTION_COLOR_COMPONENT`, this session). Only
+   `minecraft:map_color` remains untyped.
+2. **Thread a real stack through `sprite_layer_tint`** (and whatever calls
+   it) instead of `ItemTintContext::default()`. This is now the sole blocker
+   for both `dye` and `potion` reaching a drawn pixel — a per-item-variant
+   tint table in `lodestone-render`, parallel to but separate from
+   `BlockModels::tint_palette` (keyed by `(item, layer index)` rather than a
+   block's biome-position lookup, since the colour here comes from the
+   *stack instance*, not world position), is one way to carry it through to
+   the GPU-facing code; a narrower fix that only threads `ItemTintContext`
+   to the existing per-icon draw call is another. Either lands in
+   `lodestone-render`/`lodestone-shell`'s render code, not in this doc's
+   original file-ownership boundary.
+3. **Map-colour** still needs its own resolution logic beyond a raw int read
+   (its base colour is presently unblocked-by-data at all per
+   `docs/filled-map-item.md`), so it remains real follow-up work independent
+   of (1) and (2).
 
 ## Dependencies
 
