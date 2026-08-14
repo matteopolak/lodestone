@@ -414,6 +414,68 @@ impl PacksNav {
         *self = Self::rebuild(discovered, &order);
     }
 
+    /// Rescans the packs folder **without** discarding the screen's own
+    /// in-progress selection — the folder-watch half of issue #560 ("it would
+    /// be nice if it updated the texture pack list by watching the folder
+    /// changes"), wired to window-focus regain
+    /// (`WindowApp::window_event`'s `WindowEvent::Focused(true)` arm) rather
+    /// than a real filesystem watcher.
+    ///
+    /// # Why focus-gain and not a `notify`-backed watcher
+    ///
+    /// A real watcher needs a new dependency gated `#[cfg(not(target_arch =
+    /// "wasm32"))]` (no file-watching crate exists in this workspace today —
+    /// `std::fs` returns `Err(Unsupported)` on wasm32 and has no watch API
+    /// even natively), debouncing (extracting a pack archive emits a burst of
+    /// filesystem events), and — per this repo's own measured incidents — a
+    /// `#[cfg(test)]` fork so a unit test can never start a background
+    /// thread as a side effect of merely running. Focus-gain needs none of
+    /// that: `WindowEvent::Focused` already fires exactly once per regain,
+    /// already runs on both targets (a no-op on wasm32, which cannot `read_dir`
+    /// a folder either way), and covers the actual reported workflow — extract
+    /// or drop a pack into the folder with a file manager, alt-tab back — for
+    /// zero new dependencies and zero threading. It is a coarser trigger than
+    /// a real watcher (dropping a pack in *without* switching away misses it
+    /// until the next focus change), which is the trade this method's callers
+    /// are making deliberately rather than by omission.
+    ///
+    /// [`Self::reset`] re-derives the *persisted* order
+    /// (`crate::resources::selected_packs`), which is exactly wrong here: the
+    /// user may have the screen open with rows dragged into a different order
+    /// that was never committed via [`commit`], and a background refresh
+    /// silently reverting that mid-edit would read as data loss. This reads
+    /// the order from `self` instead, so only the **Available** column's
+    /// contents can change — new packs appear, vanished ones disappear — and
+    /// the user's own in-progress edit survives untouched. Cursor and scroll
+    /// are preserved across the rebuild for the same reason: nothing about
+    /// this refresh should feel like the screen was reopened.
+    pub fn refresh_available(&mut self) {
+        self.rebuild_keeping_own_selection(discover());
+    }
+
+    /// The pure half of [`Self::refresh_available`]: rebuild from a scan
+    /// result while keeping `self`'s **own current** selection order rather
+    /// than a caller-supplied one. Split out for the same reason
+    /// [`Self::rebuild`] is [`Self::reset`]'s pure half: [`discover`] is
+    /// `#[cfg(test)]`-forked to return nothing (`CLAUDE.md`'s "no test
+    /// touches the real packs folder" discipline), which means
+    /// [`Self::refresh_available`] itself can never demonstrate that it
+    /// *preserves* a selection — every previously-selected pack looks like it
+    /// vanished from the folder, the same as it would under a genuinely
+    /// broken implementation. This method is what a test drives directly,
+    /// with a non-empty fixture.
+    fn rebuild_keeping_own_selection(&mut self, discovered: Vec<crate::resources::DiscoveredPack>) {
+        let order = self.selected_ids();
+        let cursor = self.cursor;
+        let scroll_available = self.scroll_available;
+        let scroll_selected = self.scroll_selected;
+        *self = Self::rebuild(discovered, &order);
+        let control_count = self.controls().len();
+        self.cursor = cursor.min(control_count.saturating_sub(1));
+        self.scroll_available = scroll_available;
+        self.scroll_selected = scroll_selected;
+    }
+
     /// Builds both columns from a scan result and an id order (highest priority
     /// first). The pure half of [`Self::reset`], and what tests drive.
     #[must_use]
@@ -1433,5 +1495,62 @@ mod tests {
         );
         assert!(selected.available().is_empty(), "premise");
         assert_eq!(text(&selected), vec!["Every pack you have is selected"]);
+    }
+
+    /// [`PacksNav::refresh_available`] must actually rescan — this file's
+    /// `discover()` is `#[cfg(test)]`-forked to return nothing, so a real
+    /// rescan clears the two packs [`two_packs`] started with. A no-op stub
+    /// implementation would leave them and pass every other assertion in this
+    /// module, so this is the control that proves the method does something.
+    #[test]
+    fn refresh_available_rescans_the_folder() {
+        let mut nav = PacksNav::rebuild(two_packs(), &[]);
+        assert_eq!(nav.available().len(), 2, "premise");
+        nav.refresh_available();
+        assert!(
+            nav.available().is_empty(),
+            "refresh_available did not rescan: {:?}",
+            nav.available()
+        );
+    }
+
+    /// The property [`PacksNav::refresh_available`] exists for, exercised
+    /// through its pure core [`PacksNav::rebuild_keeping_own_selection`]
+    /// (see that method's doc for why the public, `discover()`-calling
+    /// wrapper cannot demonstrate this itself): a refresh must keep whatever
+    /// the screen's own in-progress selection **currently** is, not whatever
+    /// [`PacksNav::rebuild`] originally constructed it with.
+    ///
+    /// The discriminating step is the click: `nav` starts selected on
+    /// `alpha` (the value passed to the original `rebuild`), then the
+    /// screen's own click API moves the selection to `bravo.zip` — a value
+    /// that was never passed as a `rebuild` argument anywhere. If a refresh
+    /// read from any stale or external source instead of `self`'s live
+    /// state, the selection would revert to `alpha` here.
+    #[test]
+    fn refresh_available_preserves_the_screens_own_in_progress_selection() {
+        let mut nav = PacksNav::rebuild(two_packs(), &["file/alpha".to_string()]);
+        assert_eq!(nav.selected_ids(), vec!["file/alpha".to_string()], "premise");
+
+        let bravo_row = nav
+            .controls()
+            .iter()
+            .position(|c| *c == PacksControl::Entry { list: PackList::Available, row: 0 })
+            .expect("bravo.zip is the only available row");
+        nav.click_row(bravo_row);
+        let after_click = nav.selected_ids();
+        assert_eq!(
+            after_click,
+            vec!["file/bravo.zip".to_string(), "file/alpha".to_string()],
+            "premise: both packs now selected, bravo highest priority"
+        );
+
+        nav.rebuild_keeping_own_selection(two_packs());
+        assert_eq!(
+            nav.selected_ids(),
+            after_click,
+            "a refresh must keep the screen's own current selection order, \
+             not revert to whatever `rebuild` originally constructed it with"
+        );
     }
 }

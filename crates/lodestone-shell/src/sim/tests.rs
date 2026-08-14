@@ -5706,3 +5706,44 @@ fn the_avatar_pose_carries_the_walk_cycle_in_first_person() {
         "the camera must not have changed mode under us"
     );
 }
+
+/// [`Sim::reload_resource_pack_atlas`]'s equality guard: a freshly built `Sim`
+/// seeds `last_pack_generation` to whatever [`crate::resources::pack_generation`]
+/// already was at construction (its own doc explains why — the `BlockResources`
+/// that built this session already reflects that generation, so redoing the
+/// reload on the very first frame would be pure waste). So the very first call,
+/// with nothing having changed the selection since, must be a no-op.
+#[test]
+fn a_fresh_session_does_not_reload_on_its_first_poll() {
+    let mut sim = Sim::with_demo_world(test_config());
+    assert!(
+        sim.reload_resource_pack_atlas().is_none(),
+        "a fresh session's first poll must see no generation change and do nothing"
+    );
+}
+
+/// The demo world has no server world to re-texture and never depends on a
+/// resource pack (`BlockResources::load(false)` always yields the demo
+/// palette), so even a *real* selection change must still be a no-op there —
+/// this is the "no `net`" arm of the method's own doc. Bumping
+/// `crate::resources::pack_generation` here is what makes this call reach
+/// past the equality guard at all; without it this test would only be
+/// re-checking the guard above under a different name.
+#[test]
+fn the_demo_world_never_reloads_even_after_a_real_selection_change() {
+    let mut sim = Sim::with_demo_world(test_config());
+    crate::resources::set_selected_packs(vec!["some-pack".to_string()]);
+    assert!(
+        sim.reload_resource_pack_atlas().is_none(),
+        "the demo world has no vanilla atlas to reload and must stay a no-op \
+         even once the pack selection has genuinely changed"
+    );
+    // And the guard is consumed even though nothing else happened: a second
+    // call with no further selection change must also see no change, rather
+    // than re-attempting the (still pointless, on the demo world) reload
+    // every frame.
+    assert!(
+        sim.reload_resource_pack_atlas().is_none(),
+        "the generation was already observed by the call above"
+    );
+}

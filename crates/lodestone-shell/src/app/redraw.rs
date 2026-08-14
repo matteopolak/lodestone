@@ -85,6 +85,40 @@ impl WindowApp {
         // Bobbing above, but `Sim::set_cutout_leaves`'s own equality guard is
         // what keeps this affordable — see that method's doc.
         self.sim.set_cutout_leaves(self.nav.options().cutout_leaves);
+        // Live resource-pack reload. Polled every frame like the options
+        // above, but the equality guard here is
+        // `crate::resources::pack_generation` rather than a value comparison
+        // — `crate::menu::packs::commit`'s own doc used to name this as the
+        // missing piece ("this client has no live reload"). By the time
+        // `reload_resource_pack_atlas` returns `Some`, every loaded column
+        // has *already* been re-meshed against the new atlas (its own doc);
+        // this block only has to catch the GPU up: swap the terrain atlas's
+        // bind groups in place (never a fifth bind group — see
+        // `RenderState::reload_block_atlas`'s doc) and reattach the HUD's and
+        // menu's own GUI atlases, which are separate stitches with their own
+        // owners.
+        if let Some(atlas) = self.sim.reload_resource_pack_atlas() {
+            if let Some(gpu) = self.gpu.as_ref()
+                && let Some(render) = self.render.as_mut()
+            {
+                render.reload_block_atlas(gpu.device(), gpu.queue(), &atlas);
+            }
+            let format = self.target.as_ref().map(lodestone_render::SurfaceTarget::format);
+            if let Some(format) = format {
+                if let Some(gpu) = self.gpu.as_ref()
+                    && let Some(hud) = self.hud.as_mut()
+                    && let Some(gui) = crate::resources::load_gui_atlas()
+                {
+                    hud.attach_gui(gpu.device(), gpu.queue(), format, gui);
+                }
+                if let Some(gpu) = self.gpu.as_ref()
+                    && let Some(menu) = self.menu.as_mut()
+                    && let Some(gui) = crate::resources::load_menu_gui_atlas()
+                {
+                    menu.attach_gui(gpu.device(), gpu.queue(), gui);
+                }
+            }
+        }
         // Vanilla's eleven `soundSource.*` sliders, pushed beside View Bobbing and
         // **before** `draw_menu`'s early return on purpose: the sliders live on the
         // Sound settings page, so a player dragging Master must hear the menu music

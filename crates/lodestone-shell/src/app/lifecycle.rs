@@ -111,6 +111,13 @@ impl ApplicationHandler for WindowApp {
                 // Presentation resumes at full rate. The pointer is *not*
                 // re-grabbed here — the player clicks to resume, as before.
                 self.pacer.set_focused(true);
+                // The cheap half of issue #560's folder-watch request: if the
+                // Resource Packs screen is open, rescan the folder now — the
+                // shape of "extract or drop a pack in with a file manager,
+                // alt-tab back". See `MenuNav::refresh_open_resource_packs_screen`
+                // for why this is not a real filesystem watcher and why that
+                // is the deliberate choice here, not a shortcut.
+                self.nav.refresh_open_resource_packs_screen();
             }
             WindowEvent::Occluded(occluded) => {
                 // Fully covered or minimised: there is nothing on screen to

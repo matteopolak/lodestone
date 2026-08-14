@@ -864,6 +864,134 @@ impl RenderState {
         self.particle_atlas_bind_group = bind_group;
     }
 
+    /// Re-upload `vanilla`'s packed cube atlas and (if present) its complete
+    /// baked-model atlas, and rebind every pass that samples either — the
+    /// GPU-side half of a live resource-pack reload
+    /// (`crate::sim::Sim::reload_resource_pack_atlas` is the mesh/classifier
+    /// half; call this with the atlas it returns).
+    ///
+    /// # Replaces bind groups in place, never adds a fifth
+    ///
+    /// The model shader is at wgpu's 4-bind-group floor (camera / atlas /
+    /// palette / anim — see `CLAUDE.md`'s rendering-constraints section), so
+    /// this must never grow the pipeline layout. It does not: every pipeline
+    /// (`self.pipeline`, and `model.pipeline`/`water_pipeline`/
+    /// `crack_pipeline` inside [`ModelRenderer`]) is untouched — only the
+    /// *contents* of the atlas/palette/anim bind groups change, following the
+    /// exact "rebuild the GPU object, overwrite the field" shape
+    /// [`Self::install_particle_sheet_atlas`] already established for the
+    /// particle sheet.
+    ///
+    /// # Why every already-uploaded section is dropped, not kept
+    ///
+    /// A fresh atlas re-packs every sprite at new coordinates, so a section
+    /// meshed against the *old* atlas would sample the *new* one at the
+    /// wrong UVs — wrong texels, not missing ones, which is a worse defect
+    /// than a brief blank frame. [`ModelRenderer::sections`] is cleared here
+    /// so nothing draws with stale UVs; the caller's forced remesh (already
+    /// done by the time this runs — see
+    /// `Sim::reload_resource_pack_atlas`'s doc) is what repopulates it over
+    /// the next few frames as the mesh workers catch up.
+    ///
+    /// # What this deliberately does not reach
+    ///
+    /// The particle **sheet** half of [`Self::particle_atlas_bind_group`]
+    /// (flame/smoke/crit sprites) is rebound here to keep pairing with the
+    /// *new* block atlas, but its own pixels are not re-stitched — that is
+    /// [`Self::install_particle_sheet_atlas`]'s job, and calling it separately
+    /// needs `Particles`' own UV table rebuilt in the same step (issue #45's
+    /// exact trap), which is session (`Sim`) state this module cannot reach.
+    /// Entity textures, the item atlas and the GUI/menu atlases are separate
+    /// owners entirely — see `crate::app::lifecycle` for those.
+    pub fn reload_block_atlas(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, vanilla: &BlockAtlas) {
+        let new_atlas = GpuAtlas::from_atlas(device, queue, vanilla.atlas());
+        let new_uv_buffer = sprite_uv_buffer(device, vanilla.uv_table());
+        let new_atlas_bind_group = self
+            .pipeline
+            .atlas_bind_group(device, &new_atlas, &new_uv_buffer);
+        self.atlas = new_atlas;
+        self.uv_buffer = new_uv_buffer;
+        self.atlas_bind_group = new_atlas_bind_group;
+
+        match (vanilla.models(), self.model.as_mut()) {
+            (Some(models), Some(model)) => {
+                let new_model_atlas = GpuAtlas::from_atlas(device, queue, models.atlas());
+                let new_model_atlas_bind_group =
+                    model.pipeline.atlas_bind_group(device, &new_model_atlas);
+                let new_crack_atlas_bind_group =
+                    model.crack_pipeline.atlas_bind_group(device, &new_model_atlas);
+                let new_palette_buffer =
+                    lodestone_render::model_palette_buffer(device, models.tint_palette());
+                let new_palette_bind_group =
+                    model.pipeline.palette_bind_group(device, &new_palette_buffer);
+                let new_animations: Vec<(SpriteAnimation, f32)> = models
+                    .sprite_animations()
+                    .iter()
+                    .cloned()
+                    .zip(models.anim_frame_v().iter().copied())
+                    .collect();
+                let new_anim_buffer = model_anim_buffer(device, &anim_slots_at(&new_animations, 0));
+                let new_anim_bind_group = model.pipeline.anim_bind_group(device, &new_anim_buffer);
+                let new_water_anim_bind_group =
+                    model.water_pipeline.anim_bind_group(device, &new_anim_buffer);
+                let new_crack_resolver = CrackResolver::from_models(models);
+                let new_items: HashMap<ResourceLocation, ItemVariants> = models
+                    .item_forms_iter()
+                    .map(|(id, variants)| (id.clone(), variants.clone()))
+                    .collect();
+
+                model.atlas = new_model_atlas;
+                model.atlas_bind_group = new_model_atlas_bind_group;
+                model.crack_atlas_bind_group = new_crack_atlas_bind_group;
+                model.palette_buffer = new_palette_buffer;
+                model.palette_bind_group = new_palette_bind_group;
+                model.animations = new_animations;
+                model.anim_buffer = new_anim_buffer;
+                model.anim_bind_group = new_anim_bind_group;
+                model.water_anim_bind_group = new_water_anim_bind_group;
+                model.crack_resolver = new_crack_resolver;
+                model.items = new_items;
+                model.sections.clear();
+            }
+            (Some(_), None) => {
+                tracing::warn!(
+                    target: "assets",
+                    "resource pack reload found baked models but this session's \
+                     RenderState has no ModelRenderer to reload — this should be \
+                     unreachable (a live session's Sim gates on vanilla_atlas \
+                     already being Some, which only ever pairs with a ModelRenderer)"
+                );
+            }
+            (None, _) => {}
+        }
+
+        // Rebind the particle-debris half so it samples the *new* block
+        // atlas rather than the one just dropped — see this method's own doc
+        // for why the sheet half is a separate, un-reached surface.
+        let particle_block_atlas = self.model.as_ref().map_or(&self.atlas, |m| &m.atlas);
+        let regenerated_placeholder;
+        let (sheet_view, sheet_sampler) = match &self.particle_sheet_atlas {
+            Some(sheet) => (&sheet.view, &sheet.sampler),
+            None => {
+                regenerated_placeholder = transparent_placeholder_atlas(device, queue);
+                (&regenerated_placeholder.view, &regenerated_placeholder.sampler)
+            }
+        };
+        self.particle_atlas_bind_group = self.particles.atlas_bind_group(
+            device,
+            &particle_block_atlas.view,
+            &particle_block_atlas.sampler,
+            sheet_view,
+            sheet_sampler,
+        );
+
+        tracing::info!(
+            target: "assets",
+            sprites = vanilla.sprite_count(),
+            "reloaded the live block atlas from the currently selected resource packs"
+        );
+    }
+
     /// Whether the stitched particle sheet is uploaded and bound. Same reason
     /// as [`has_sky`](Self::has_sky), with more teeth: with this `false` every
     /// flame, smoke and crit particle resolves, uploads, submits a draw — and

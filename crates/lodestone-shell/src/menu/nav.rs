@@ -1524,6 +1524,23 @@ impl MenuNav {
         &self.settings
     }
 
+    /// Rescans the packs folder and refreshes the Resource Packs screen's
+    /// Available column, **if** that page is the one currently active —
+    /// a no-op otherwise, so a caller (`WindowApp::window_event`'s
+    /// `WindowEvent::Focused(true)` arm) can call this unconditionally on
+    /// every window-focus regain rather than threading a "is this screen
+    /// open" check through from `UiState`.
+    ///
+    /// See [`super::packs::PacksNav::refresh_available`] for why this is not
+    /// [`super::packs::PacksNav::reset`]: this must never revert the user's
+    /// own in-progress (uncommitted) reordering back to the persisted
+    /// selection just because the window regained focus.
+    pub fn refresh_open_resource_packs_screen(&mut self) {
+        if self.settings.page() == crate::menu::options::SettingsPage::ResourcePacks {
+            self.settings.packs_mut().refresh_available();
+        }
+    }
+
     /// The Social Interactions screen's own state (issue #189).
     #[must_use]
     pub fn social(&self) -> &crate::menu::social::SocialNav {
