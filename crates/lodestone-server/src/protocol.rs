@@ -973,6 +973,35 @@ pub enum ServerBound {
         /// The channel-specific payload bytes, verbatim.
         data: Vec<u8>,
     },
+    /// The client typed a new name into an open anvil's name field
+    /// (`ServerboundRenameItemPacket`). Vanilla's own handler
+    /// (`ServerGamePacketListenerImpl.handleRenameItem`) reads this only when
+    /// `player.containerMenu instanceof AnvilMenu` — see `crate::server`'s
+    /// consumer for that same gate. The text is carried raw; filtering and the
+    /// 50-character cap are `AnvilMenu.setItemName`'s own `validateName`,
+    /// ported to [`crate::anvil::validate_rename`] rather than done here, so a
+    /// rejected rename is indistinguishable from one this crate chose not to
+    /// decode.
+    RenameItem {
+        /// The client-typed text, unfiltered.
+        name: String,
+    },
+    /// The client pressed a data-driven button in an open menu
+    /// (`ServerboundContainerButtonClickPacket`). Only `EnchantmentMenu` reads
+    /// this in vanilla (`ServerGamePacketListenerImpl.handleContainerButtonClick`
+    /// → `AbstractContainerMenu.clickMenuButton`) — every other menu's
+    /// `clickMenuButton` override is the default `false`. `button_id` is
+    /// `EnchantmentMenu.clickMenuButton`'s **slot index** (`0..3`), not a cost;
+    /// the cost is that slot's own entry in the table's three
+    /// `container_set_data` properties, re-derived server-side rather than
+    /// trusted from the client.
+    ContainerButtonClick {
+        /// The window the client believes is open — vanilla compares this
+        /// against `player.containerMenu.containerId` before doing anything.
+        window_id: i32,
+        /// Which of the three enchantment offers was chosen.
+        button_id: i32,
+    },
     /// A packet the loop does not need to act on (teleport confirmations,
     /// look-only or status-only movement, and several other decoded-but-
     /// unmodelled families — see `crates/protocol/v770/src/server_protocol.rs`'s

@@ -43,13 +43,11 @@
 //! (`AnvilBlock.damage`/the `chipped_anvil`/`damaged_anvil` state walk) — this
 //! needs block-state writes this module has no `ChunkSource` access to, and
 //! [`crate::server`]'s caller is the natural place to add it if wanted, not
-//! here. The rename path also currently has no reachable input: see
-//! `docs/workstation-economy.md` for why `RENAME_ITEM` never reaches this
-//! crate at all in this build.
+//! here.
 
 use lodestone_model::{ItemEnchantment, ItemStack};
 
-use crate::enchantment_data::{self, EnchantmentDef};
+use crate::enchantment_data;
 use crate::mob_spawn::SpawnRng;
 
 /// The XP-level threshold at which the anvil refuses the whole operation
@@ -121,6 +119,47 @@ fn set_level(list: &mut Vec<(&'static str, u32)>, key: &'static str, level: u32)
 
 fn level_of(list: &[(&'static str, u32)], key: &str) -> u32 {
     list.iter().find(|(k, _)| *k == key).map_or(0, |(_, l)| *l)
+}
+
+/// `StringUtil.isAllowedChatCharacter`/`filterText` — drops control
+/// characters, `DEL` (127), and the `§` formatting-code prefix (code point
+/// 167) from a client-typed string. `char`-wise rather than UTF-16-code-unit-
+/// wise (vanilla's `String.length()` counts the latter); this crate does not
+/// model the surrogate-pair distinction anywhere else either.
+fn filter_text(input: &str) -> String {
+    input
+        .chars()
+        .filter(|&c| {
+            let code = c as u32;
+            code != 167 && code >= 32 && code != 127
+        })
+        .collect()
+}
+
+/// `AnvilMenu.validateName`, reached from `setItemName`: filters, then
+/// **rejects** (never truncates) anything left longer than 50 characters.
+/// `None` means the whole rename attempt is discarded — the caller must leave
+/// [`crate::inventory::PlayerInventory::pending_rename`] exactly as it was,
+/// matching `setItemName`'s own `validatedName != null` gate.
+#[must_use]
+pub fn validate_rename(name: &str) -> Option<String> {
+    let filtered = filter_text(name);
+    if filtered.chars().count() <= 50 {
+        Some(filtered)
+    } else {
+        None
+    }
+}
+
+/// Adds or upgrades one enchantment on `item` to `level` — the write half of
+/// `ItemStack.enchant`, shared by the enchanting table's
+/// `EnchantmentMenu.clickMenuButton` (`crate::server`'s consumer) rather than
+/// duplicating [`enchantments_of`]/[`to_wire_enchantments`]/[`set_level`]'s
+/// read-modify-write shape a second time.
+pub(crate) fn apply_enchantment(item: &mut ItemStack, key: &'static str, level: u32) {
+    let mut list = enchantments_of(item);
+    set_level(&mut list, key, level);
+    item.components.enchantments = to_wire_enchantments(&list);
 }
 
 /// `AnvilMenu.calculateIncreasedRepairCost` — the prior-work-penalty doubling.
@@ -561,6 +600,47 @@ mod tests {
         let out = compute(Some(&input), Some(&addition), None, false);
         assert!(out.result.is_none(), "cost >= 40 must block the result entirely");
         assert!(out.cost >= TOO_EXPENSIVE);
+    }
+
+    /// `filterText` drops the `§` formatting-code prefix and control
+    /// characters but keeps ordinary printable text untouched.
+    #[test]
+    fn rename_filters_section_sign_and_control_characters() {
+        let raw = format!("Exc{}alibur\u{7}\u{1b}", '\u{a7}');
+        assert_eq!(validate_rename(&raw), Some("Excalibur".to_owned()));
+    }
+
+    /// `validateName` **rejects** an over-length name outright rather than
+    /// truncating it to 50 — the plausible-but-wrong reading that would
+    /// silently accept a clipped name instead of leaving the field unchanged.
+    #[test]
+    fn rename_over_fifty_characters_is_rejected_not_truncated() {
+        let exactly_fifty = "a".repeat(50);
+        assert_eq!(validate_rename(&exactly_fifty), Some(exactly_fifty));
+        let fifty_one = "a".repeat(51);
+        assert_eq!(validate_rename(&fifty_one), None);
+    }
+
+    /// [`apply_enchantment`] both adds a fresh enchantment and upgrades an
+    /// existing one to the new level, matching `ItemStack.enchant`'s
+    /// set-not-stack semantics.
+    #[test]
+    fn apply_enchantment_adds_and_upgrades() {
+        let mut item = stack("minecraft:diamond_sword", 1);
+        apply_enchantment(&mut item, "minecraft:sharpness", 2);
+        assert_eq!(enchantments_of(&item), vec![("minecraft:sharpness", 2)]);
+        apply_enchantment(&mut item, "minecraft:sharpness", 4);
+        assert_eq!(
+            enchantments_of(&item),
+            vec![("minecraft:sharpness", 4)],
+            "the level must be replaced, not stacked"
+        );
+        apply_enchantment(&mut item, "minecraft:knockback", 1);
+        assert_eq!(
+            enchantments_of(&item).len(),
+            2,
+            "a second enchantment must be added alongside the first"
+        );
     }
 
     /// Two items of a non-damageable, non-stackable-past-1 kind (an enchanted

@@ -3281,9 +3281,19 @@ impl ServerProtocol for V770ServerProtocol {
             // `PlayerInventory`, mirroring `ContainerClicked`'s own
             // consumer" rather than a new feature — the smallest next step
             // in this family, once someone can touch `lodestone-server`.
+            // Issue #266 follow-up: this used to decode-and-discard. The
+            // enchanting table's "choose an offer" button is the only
+            // consumer (`ServerBound::ContainerButtonClick`'s own doc
+            // comment) — `crate::server`'s handler re-derives the cost from
+            // the currently open table rather than trusting `button_id`
+            // beyond "which of the three slots".
             State::Play if packet_id == play::serverbound::CONTAINER_BUTTON_CLICK => {
-                let _ = decode_full::<ContainerButtonClick>(payload);
-                ServerBound::Ignored
+                match decode_full::<ContainerButtonClick>(payload) {
+                    Some(ContainerButtonClick { window_id, button_id }) => {
+                        ServerBound::ContainerButtonClick { window_id, button_id }
+                    }
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::CONTAINER_SLOT_STATE_CHANGED => {
                 let _ = decode_full::<ContainerSlotStateChanged>(payload);
@@ -3375,9 +3385,16 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<SignUpdate>(payload);
                 ServerBound::Ignored
             }
+            // Issue #266 follow-up: this used to decode-and-discard. The
+            // anvil's rename field is the only consumer
+            // (`ServerBound::RenameItem`'s own doc comment) —
+            // `crate::server`'s handler gates on an open `AnvilMenu` the same
+            // way `ServerGamePacketListenerImpl.handleRenameItem` does.
             State::Play if packet_id == play::serverbound::RENAME_ITEM => {
-                let _ = decode_full::<RenameItem>(payload);
-                ServerBound::Ignored
+                match decode_full::<RenameItem>(payload) {
+                    Some(RenameItem { name }) => ServerBound::RenameItem { name },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::PICK_ITEM_FROM_BLOCK => {
                 let _ = decode_full::<PickItemFromBlock>(payload);
