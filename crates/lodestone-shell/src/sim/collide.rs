@@ -346,3 +346,203 @@ impl Sim {
 /// Deriving it programmatically from the census maxima, rather than restating
 /// them here, is the remaining nit — see `docs/entity-push.md`.
 const NEARBY_ENTITY_RADIUS: f64 = 16.0;
+
+/// Issue #614's last static lead: does `mesher.rs`'s section-to-world-y
+/// placement agree with what [`Sim::live_collision`] queries against, in a
+/// dimension whose `min_y` differs from the overworld's?
+///
+/// # Why both sides are expected to agree, and what would make them not
+///
+/// `TerrainMesh::mesh_column_inner`'s `min_y` comes from
+/// `lodestone_ecs::ChunkWorld::extent`; `Sim::live_collision`'s comes from
+/// `net.world_dimensions()`, which is `lodestone_client::state::SharedState::world_extent`
+/// via `ClientHandle::world_dimensions`. Both are the *same* one-line read —
+/// `world.values().next()?.column.min_y()` — over what should be the *same*
+/// `Arc<RwLock<lodestone_world::World>>` (`ChunkWorld::from_shared` and
+/// `SharedState`'s own store are meant to name one `Arc`; see
+/// `lodestone_ecs::chunks`'s module doc for the `is_same_store` authority
+/// test). So the two numbers are expected to agree, and this test measures
+/// that rather than assuming it: it builds one column via the mesher's own
+/// `ChunkWorld`/`WorldExtent` path, places a known block at a known section
+/// and local-`y`, computes the mesher's world-`y` for that cell with the real
+/// `SectionKey::origin`, and then queries the real
+/// `crate::collision::LiveCollision::block_at` — the exact function
+/// `Sim::live_collision` builds — at that world-`y`. If the two disagreed on
+/// `min_y`, the query would land in the wrong section (or outside the column
+/// entirely) and read back air instead of the known block.
+///
+/// Run once for the overworld's shape (`min_y = -64`, 24 sections) and once
+/// for the Nether's (`min_y = 0`, 8 sections) — a single dimension cannot
+/// discriminate a mapping that hardcodes the overworld's origin from a
+/// correct one, because a wrong constant and a right one both happen to
+/// agree when `min_y` is the one they share.
+#[cfg(test)]
+mod min_y_parity_tests {
+    use std::sync::Arc;
+
+    use lodestone_ecs::ChunkWorldWrite;
+    use lodestone_world::{
+        ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World,
+    };
+
+    use crate::collision::{LiveCollision, SectionGrid};
+    use crate::mesher::SectionKey;
+
+    /// A block id that is not air (`0`) and not equal to any section index or
+    /// local-`y` used below, so a transposition among (section index,
+    /// local-`y`, block id) cannot survive by coincidence.
+    const KNOWN_BLOCK: u32 = 77;
+
+    /// The vanilla atlas, or a loud failure naming the fix — `LiveCollision`
+    /// takes it as a required constructor parameter (not an inferred
+    /// default), so a real one is needed even though this test never reads
+    /// occlusion or collision shape through it.
+    fn vanilla_atlas() -> Arc<lodestone_render::BlockAtlas> {
+        let resources = crate::resources::BlockResources::load(true);
+        resources.vanilla_atlas.expect(
+            "vanilla assets did not load; set LODESTONE_ASSETS to a pack root with \
+             client.jar + generated/reports/blocks.json",
+        )
+    }
+
+    /// One column of `min_y`/`section_count` shape at chunk `(0, 0)`, with
+    /// [`KNOWN_BLOCK`] at local `(5, known_local_y, 9)` inside section
+    /// `known_section`. Returns the store's write handle, from which both the
+    /// mesher's read handle and a manual section fetch are taken.
+    fn shaped_world(
+        min_y: i32,
+        section_count: usize,
+        known_section: usize,
+        known_local_y: i32,
+    ) -> ChunkWorldWrite {
+        let mut column = ChunkColumn::new(
+            min_y,
+            section_count,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            0, // air id
+            0, // biome id
+        );
+        let world_y = min_y + (known_section as i32) * 16 + known_local_y;
+        column.set_block(5, world_y, 9, KNOWN_BLOCK);
+
+        let loaded = LoadedChunk::new(
+            column,
+            ColumnLight::new(section_count),
+            Heightmaps::new(),
+            Vec::new(),
+        );
+        let mut world = World::new();
+        world.load(ChunkPos::new(0, 0), loaded);
+        ChunkWorldWrite::new(world)
+    }
+
+    /// One dimension's worth of the comparison. `collision_min_y` is passed
+    /// separately from the mesher's own reading so a deliberately-wrong value
+    /// can be fed through the same check as a control (see the test below).
+    ///
+    /// Returns `Some(reason)` on a mismatch, so the caller can collect every
+    /// failing case into one assertion rather than aborting on the first.
+    fn check(
+        name: &str,
+        min_y: i32,
+        section_count: usize,
+        collision_min_y: i32,
+        atlas: &Arc<lodestone_render::BlockAtlas>,
+    ) -> Option<String> {
+        let known_section = section_count / 2;
+        let known_local_y = 7;
+        let write = shaped_world(min_y, section_count, known_section, known_local_y);
+        let store = write.read_handle();
+
+        // --- Mesher path: the real `SectionKey::origin`, fed the real
+        // `ChunkWorld::extent` this store reports. ---
+        let extent = store.extent().expect("one column loaded");
+        assert_eq!(extent.min_y, min_y, "{name}: fixture sanity — min_y");
+        assert_eq!(
+            extent.section_count, section_count,
+            "{name}: fixture sanity — section_count"
+        );
+        let key = SectionKey {
+            cx: 0,
+            cz: 0,
+            si: known_section,
+            min_y: extent.min_y,
+        };
+        let mesh_world_y = key.origin()[1] + known_local_y;
+
+        // --- Collision path: the real `LiveCollision::block_at`, fed
+        // `collision_min_y` — the number `Sim::live_collision` would have
+        // read from `net.world_dimensions()` for this same store. ---
+        let section = write.read().section(ChunkPos::new(0, 0), known_section);
+        let mut cells = vec![None; section_count];
+        cells[known_section] = section;
+        let grid = SectionGrid::from_aligned(cells, 0, 0, 1, 1, section_count);
+        let collision = LiveCollision::new(
+            grid,
+            collision_min_y,
+            section_count,
+            Arc::clone(atlas),
+            None, // version data is irrelevant to block_at's raw state-id read
+        );
+
+        let found = collision.block_at(5, mesh_world_y, 9);
+        if found == KNOWN_BLOCK {
+            None
+        } else {
+            Some(format!(
+                "{name}: mesher placed the known block at world-y {mesh_world_y} \
+                 (min_y {min_y}, section {known_section}, local-y {known_local_y}); \
+                 collision queried at that same world-y with min_y {collision_min_y} \
+                 and read back {found}, not {KNOWN_BLOCK}"
+            ))
+        }
+    }
+
+    /// **The measurement.** For both the overworld's shape and the Nether's —
+    /// deliberately different `min_y`/height so a mapping that hardcoded the
+    /// overworld's origin could not coincidentally pass — mesher and
+    /// collision are fed the *same* `min_y` (as they would be in production,
+    /// both reading `ChunkWorld::extent`/`world_extent` off the one store)
+    /// and must agree on where a known block sits.
+    #[test]
+    fn mesher_and_collision_place_the_same_block_at_the_same_world_y_in_both_dimensions() {
+        let atlas = vanilla_atlas();
+        let mut mismatches = Vec::new();
+
+        // Overworld: min_y = -64, 384 blocks tall = 24 sections.
+        if let Some(reason) = check("overworld", -64, 24, -64, &atlas) {
+            mismatches.push(reason);
+        }
+        // The Nether: min_y = 0, 128 blocks tall = 8 sections. Its min_y
+        // differs from the overworld's, which is the whole point: a mapping
+        // that silently reused -64 here would have nothing else to catch it.
+        if let Some(reason) = check("the_nether", 0, 8, 0, &atlas) {
+            mismatches.push(reason);
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "mesher and collision disagree on section-to-world-y placement:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    /// **Control.** The same check as above, but the collision side is fed a
+    /// deliberately wrong `min_y` (the overworld's `-64`, for a Nether-shaped
+    /// world) — proving the detector actually fires on a real mismatch rather
+    /// than passing vacuously. Per `DESIGN.md` §12, an assertion of agreement
+    /// is only as good as the evidence that the mechanism *would* have caught
+    /// disagreement.
+    #[test]
+    fn the_check_fails_when_collision_is_fed_the_wrong_min_y() {
+        let atlas = vanilla_atlas();
+        let reason = check("the_nether_with_overworld_min_y", 0, 8, -64, &atlas);
+        assert!(
+            reason.is_some(),
+            "feeding collision the overworld's min_y (-64) for a Nether-shaped \
+             world (min_y 0) must be caught as a mismatch — if it is not, the \
+             positive result above proves nothing"
+        );
+    }
+}
