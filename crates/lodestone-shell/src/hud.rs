@@ -375,9 +375,20 @@ pub struct DebugStats {
     pub yaw: f32,
     /// Pitch in degrees.
     pub pitch: f32,
-    /// Smoothed frames per second.
+    /// Frames presented in the last completed one-second window — a **count**,
+    /// not a reciprocal, matching vanilla's own `Minecraft.runTick` counter.
+    /// Deliberately not smoothed: an EMA over a per-second count would lag a
+    /// real rate change without making the figure any more stable.
     pub fps: f32,
-    /// Last frame time in milliseconds.
+    /// Time spent *producing* the last frame, in milliseconds — from frame
+    /// start to the end of our own submission, which **excludes** the frame
+    /// limiter's wait.
+    ///
+    /// So this is deliberately **not** `1000.0 / fps`, and the two diverge by
+    /// exactly the wait whenever a cap is active: at a 10 fps cap a frame that
+    /// takes 2 ms of work still leaves ~98 ms of waiting. Reading one as the
+    /// other's reciprocal is what hid a counter that reported 20,000 fps under
+    /// a 10 fps cap, so the overlay labels them as separate quantities.
     pub frame_ms: f32,
     /// Loaded chunk columns.
     pub chunk_count: usize,
@@ -702,11 +713,18 @@ impl DebugStats {
             // fills the shorter column and both start empty.
             //
             // `T:` is the framerate-limit target and the parenthetical after it
-            // is the swapchain present mode. Neither is an option this shell
-            // honours, and printing a limit we do not enforce is the same
-            // fabrication `menu::options` refuses for an unhonoured option, so
-            // the slot carries the frame time we do measure.
-            format!("{:.0} fps ({:.2} ms)", self.fps, self.frame_ms),
+            // is the swapchain present mode. This shell now honours both (see
+            // `app::pacing::effective_target_fps` and `Options::enable_vsync`),
+            // so porting the `T:` half is no longer blocked on fabricating a
+            // limit we do not enforce — it is simply unported, and wants the
+            // target threaded onto `DebugStats` alongside the two fields here.
+            //
+            // The slot meanwhile carries the frame time we measure, labelled
+            // `work` because it is **not** `1000 / fps`: it excludes the
+            // limiter's wait, so under a cap the two legitimately disagree.
+            // Leaving it unlabelled invited exactly that misreading — see both
+            // fields' own docs.
+            format!("{:.0} fps ({:.2} ms work)", self.fps, self.frame_ms),
             String::new(),
             // `DebugEntryLight`'s group, verbatim: `"Client Light: " +
             // rawBrightness + " (" + sky + " sky, " + block + " block)"`.
@@ -5499,7 +5517,7 @@ mod tests {
         // start empty. So the fps line heads the left column and the version
         // line heads the right one — not the other way round.
         assert!(
-            left[0].ends_with("ms)") && left[0].contains(" fps "),
+            left[0].ends_with("ms work)") && left[0].contains(" fps "),
             "the fps line must head the left column, got {:?}",
             left[0]
         );
