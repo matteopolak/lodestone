@@ -60,19 +60,18 @@
 //!   only (`TRIGGER_DURATION`) — [`on_neighbor_changed`]'s
 //!   `schedule_fire` flag. Unlike a diode's delay this one never reschedules
 //!   itself and never changes with any block-state property.
-//! * **The actual dispense is not wired anywhere in this crate yet, and that
-//!   gap is named precisely rather than silently absent**: firing needs a
-//!   9-slot container's live contents (`crate::block_entities::BlockEntity`
-//!   now has a registered `minecraft:dispenser`/`minecraft:dropper`
-//!   `Container` variant — see this module's sibling edit in
-//!   `block_entities.rs` — but nothing threads a `BlockEntityHandle` into
-//!   `tick.rs`'s scheduled-tick drain, the one place `TICK_DISPENSER_FIRE`
-//!   would need to read one from). This is the exact gap the #314/#315/#317
-//!   landing's own comment on this issue named in advance: "no block-entity
-//!   query reachable from `crate::redstone`". [`random_slot`] and
-//!   [`dispense_position`] are the pure math a real caller needs and are
-//!   fully tested against the jar's own formulas; there is simply no
-//!   production call site for them yet.
+//! * **The dispense is now wired**: `tick.rs`'s scheduled-tick drain has a
+//!   `TICK_DISPENSER_FIRE` arm that reads the live container through the
+//!   `BlockEntityHandle` it already carries, picks a slot with
+//!   [`random_slot`], removes one item from it, and tosses it with
+//!   [`plain_toss`] through `MobSim::spawn_item` — the same entry point
+//!   `crate::block_drops` uses for a broken block's loot. An empty container
+//!   (`random_slot` returns `None`) is a silent no-op: vanilla plays a click
+//!   sound instead, which this crate does not model sound effects for yet.
+//!   The **special per-item behaviours** in the table above remain
+//!   unmodelled — every dispensed item takes the plain-toss row regardless of
+//!   what it is, which is wrong for an arrow, a bucket or TNT and
+//!   indistinguishable from correct for a plain stack.
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property, with_property};
@@ -83,17 +82,19 @@ pub const DROPPER: &str = "minecraft:dropper";
 /// `DispenserBlock.TRIGGER_DURATION` (`:56`).
 pub const TRIGGER_DURATION: u32 = 4;
 
-/// `redstone:dispenser_fire` — the scheduled-tick kind, ready for a caller
-/// that can reach a live container (see this module's own doc comment).
+/// `redstone:dispenser_fire` — the scheduled-tick kind `tick.rs`'s drain
+/// dispatches on (see this module's own doc comment).
 pub const TICK_DISPENSER_FIRE: &str = "redstone:dispenser_fire";
+
+/// The seed for `tick.rs`'s per-world dispenser RNG — [`random_slot`]'s pick
+/// and [`plain_toss`]'s toss draw from the one stream, matching vanilla's
+/// single per-level `RandomSource`. Explicit rather than drawn, matching
+/// every other `_BEHAVIOR_SEED` in this crate (`crate::fire::FIRE_BEHAVIOR_SEED`,
+/// `crate::explosion_blocks::EXPLOSION_BEHAVIOR_SEED`).
+pub const DISPENSER_BEHAVIOR_SEED: u64 = 0xD15E_5EED;
 
 /// `DispenserBlock.getDispensePosition`'s own default `scale` (`:161-163`,
 /// the zero-argument overload).
-///
-/// `#[allow(dead_code)]` on this and every plain-toss helper below through
-/// [`facing_name`]: ready for the fire tick this module's own doc comment
-/// names as unwired — nothing in this crate can reach a live container yet.
-#[allow(dead_code)]
 pub const DISPENSE_SCALE: f64 = 0.7;
 
 #[must_use]
@@ -110,7 +111,6 @@ pub fn is_dropper(state: &str) -> bool {
     base_name(state) == DROPPER
 }
 
-#[allow(dead_code)]
 #[must_use]
 pub fn facing(state: &str) -> Direction {
     get_str_property(state, "facing").map(direction_from_str).unwrap_or(Direction::North)
@@ -169,7 +169,6 @@ pub fn on_neighbor_changed(state: &str, should_trigger: bool) -> Option<Neighbor
 /// is exactly what incrementing `replace_odds` once per occupied slot (not
 /// once per slot overall) achieves — the discriminating case is an empty slot
 /// sitting *between* two occupied ones, which must not consume a draw.
-#[allow(dead_code)]
 #[must_use]
 pub fn random_slot(occupied: &[bool], mut next_int: impl FnMut(u32) -> u32) -> Option<usize> {
     let mut replace_slot = None;
@@ -189,7 +188,6 @@ pub fn random_slot(occupied: &[bool], mut next_int: impl FnMut(u32) -> u32) -> O
 /// zero-offset overload — the world-space point [`DISPENSE_SCALE`] of a block
 /// out from `center` (the dispenser's own centre, `pos + 0.5` on every axis)
 /// in the direction it faces.
-#[allow(dead_code)]
 #[must_use]
 pub fn dispense_position(center: (f64, f64, f64), face: Direction) -> (f64, f64, f64) {
     let (dx, dy, dz) = step(face);
@@ -200,7 +198,6 @@ pub fn dispense_position(center: (f64, f64, f64), face: Direction) -> (f64, f64,
     )
 }
 
-#[allow(dead_code)]
 fn step(d: Direction) -> (f64, f64, f64) {
     match d {
         Direction::Down => (0.0, -1.0, 0.0),
@@ -221,6 +218,63 @@ fn step(d: Direction) -> (f64, f64, f64) {
 #[must_use]
 pub fn facing_name(state: &str) -> &'static str {
     direction_to_str(facing(state))
+}
+
+/// `RandomSource.triangle(mean, spread)` (`RandomSource.java:59-61`):
+/// `mean + spread * (next() - next())`. Two draws, always in this order —
+/// [`plain_toss`]'s own doc comment names why draw order matters here as much
+/// as everywhere else in this crate's RNG-threaded code.
+fn triangle(mean: f64, spread: f64, next_f64: &mut impl FnMut() -> f64) -> f64 {
+    mean + spread * (next_f64() - next_f64())
+}
+
+/// `DefaultDispenseItemBehavior.DEFAULT_ACCURACY` (`:12`) — the deviation
+/// [`plain_toss`]'s three [`triangle`] draws share, before the
+/// `0.0172275` scale `spawnItem` multiplies it by (`:44-46`).
+const DEFAULT_ACCURACY: f64 = 6.0;
+
+/// The world-space feet position and velocity of a plain-tossed item —
+/// `DefaultDispenseItemBehavior.execute` → `spawnItem`
+/// (`DefaultDispenseItemBehavior.java:22-49`). Every dropper dispense, and
+/// every dispenser item this module has no special behaviour for (the
+/// `*everything else*` row of this module's own table), uses this.
+///
+/// `next_f64` is threaded rather than captured, matching
+/// `crate::block_drops::pop_resource_placement`'s own convention — a test can
+/// pin an exact draw sequence this way. **Not** byte-parity with vanilla's
+/// Xoroshiro stream: vanilla's `ItemEntity` four-argument constructor draws
+/// two numbers for a default velocity that `spawnItem` immediately
+/// overwrites one line later, so this function skips those two wasted draws
+/// — the same class of divergence `crate::block_drops`'s own module doc
+/// records for its own RNG stream.
+#[must_use]
+pub fn plain_toss(
+    center: (f64, f64, f64),
+    face: Direction,
+    next_f64: &mut impl FnMut() -> f64,
+) -> ((f64, f64, f64), (f64, f64, f64)) {
+    let (px, py, pz) = dispense_position(center, face);
+    // `spawnItem`'s own axis split (`:34-38`): a straight up/down eject sits
+    // closer to the dispenser's own centre than a sideways one does.
+    let y_shift = if matches!(face, Direction::Up | Direction::Down) {
+        0.125
+    } else {
+        0.156_25
+    };
+    let position = (px, py - y_shift, pz);
+
+    let (step_x, _step_y, step_z) = step(face);
+    // Draw 1: the forward push's magnitude, uniform in `[0.2, 0.3)`.
+    let pow = next_f64() * 0.1 + 0.2;
+    let deviation = 0.0172275 * DEFAULT_ACCURACY;
+    // Draws 2-7: x then y then z, matching the argument-evaluation order
+    // inside vanilla's one `setDeltaMovement(...)` call.
+    let velocity = (
+        triangle(step_x * pow, deviation, next_f64),
+        triangle(0.2, deviation, next_f64),
+        triangle(step_z * pow, deviation, next_f64),
+    );
+    (position, velocity)
 }
 
 #[cfg(test)]
@@ -262,7 +316,7 @@ mod tests {
     fn random_slot_skips_empty_slots_without_consuming_their_draw() {
         let occupied = [false, true, false, false, true, false, true];
         let mut bounds_seen = Vec::new();
-        random_slot(&occupied, |bound| {
+        let _ = random_slot(&occupied, |bound| {
             bounds_seen.push(bound);
             1 // always "miss": never replace, so the very first hit (forced below) is the only way to pin a winner.
         });
@@ -319,5 +373,56 @@ mod tests {
     fn is_dropper_distinguishes_the_two_registrations() {
         assert!(is_dropper("minecraft:dropper[facing=up,triggered=false]"));
         assert!(!is_dropper("minecraft:dispenser[facing=up,triggered=false]"));
+    }
+
+    /// A small helper so a test can hand `plain_toss` a fixed draw sequence —
+    /// the same "predict the exact sequence" approach
+    /// `crate::block_drops::pop_resource_placement`'s own tests use.
+    fn fixed_draws(values: &'static [f64]) -> impl FnMut() -> f64 {
+        let mut it = values.iter().copied();
+        move || it.next().expect("test supplied enough draws")
+    }
+
+    /// **`plain_toss`'s sideways case, predicted from the jar's own
+    /// constants** (`DEFAULT_ACCURACY = 6`, `0.0172275` deviation scale,
+    /// `spawnItem`'s `0.15625` off-axis y-shift) rather than a re-derivation
+    /// through the function itself. East is not the Y axis, so the y-shift
+    /// takes the `0.15625` branch and `step_z` is `0.0`, which is the
+    /// discriminating half against the vertical case below.
+    #[test]
+    fn plain_toss_sideways_matches_the_jars_own_formula() {
+        let mut next = fixed_draws(&[0.5, 0.25, 0.75, 0.125, 0.875, 0.375, 0.625]);
+        let (position, velocity) =
+            plain_toss((8.5, 65.5, 8.5), Direction::East, &mut next);
+        assert_eq!(position, (9.2, 65.34375, 8.5), "0.15625 off-axis y-shift");
+
+        let expected = (0.198_317_5, 0.122_476_25, -0.025_841_25);
+        assert!(
+            (velocity.0 - expected.0).abs() < 1e-9
+                && (velocity.1 - expected.1).abs() < 1e-9
+                && (velocity.2 - expected.2).abs() < 1e-9,
+            "velocity {velocity:?} does not match the predicted {expected:?}"
+        );
+    }
+
+    /// **The vertical counterpart**, a different centre and a different draw
+    /// sequence so the pair cannot pass by coincidence: `Down`'s y-shift is
+    /// `0.125` (not `0.15625`) and both `step_x`/`step_z` are `0.0`, so the x
+    /// and z velocities carry no forward push at all — only the triangular
+    /// spread around a mean of zero.
+    #[test]
+    fn plain_toss_vertical_matches_the_jars_own_formula() {
+        let mut next = fixed_draws(&[0.375, 0.625, 0.875, 0.125, 0.25, 0.75, 0.5]);
+        let (position, velocity) =
+            plain_toss((2.5, 70.5, -3.5), Direction::Down, &mut next);
+        assert_eq!(position, (2.5, 69.675, -3.5), "0.125 on-axis y-shift");
+
+        let expected = (-0.025_841_25, 0.187_079_375, 0.025_841_25);
+        assert!(
+            (velocity.0 - expected.0).abs() < 1e-9
+                && (velocity.1 - expected.1).abs() < 1e-9
+                && (velocity.2 - expected.2).abs() < 1e-9,
+            "velocity {velocity:?} does not match the predicted {expected:?}"
+        );
     }
 }
