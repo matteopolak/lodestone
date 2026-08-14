@@ -1104,6 +1104,12 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     let mut blast_drops_rng = crate::mob_spawn::SpawnRng::new(
         crate::explosion_blocks::EXPLOSION_BEHAVIOR_SEED ^ 0x100D_5EED,
     );
+    // `crate::redstone_dispenser`'s slot pick (`random_slot`) and toss math
+    // (`plain_toss`) — one stream for both, matching vanilla's single
+    // `RandomSource` per level: `DispenserBlockEntity.getRandomSlot` and
+    // `DefaultDispenseItemBehavior.execute` draw from the same generator.
+    let mut dispenser_rng =
+        crate::mob_spawn::SpawnRng::new(crate::redstone_dispenser::DISPENSER_BEHAVIOR_SEED);
     let (tick_cx_range, tick_cz_range) = tick_area;
     // **The columns this loop simulates, and they now follow the players.**
     //
@@ -1367,6 +1373,22 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     world_state.spawn_patrols(),
                     is_bright_outside,
                     world_state.difficulty().0,
+                );
+            });
+        }
+        // Issue #240: the wandering trader spawn cycle. Same live,
+        // player-following terrain snapshot and the same "only once
+        // `spawn_terrain` exists" gate as the patrol block just above, for
+        // the same reason — see `MobSim::run_wandering_trader_spawn_cycle`'s
+        // own doc comment. Called every tick `spawn_terrain` is available,
+        // matching vanilla's own `CustomSpawner.tick`, which decrements its
+        // countdown unconditionally.
+        if let Some(terrain) = spawn_terrain.as_ref() {
+            let spawn_world = std::sync::Arc::clone(terrain);
+            mobs.with(|sim| {
+                sim.run_wandering_trader_spawn_cycle(
+                    &spawn_world,
+                    world_state.spawn_wandering_traders(),
                 );
             });
         }
@@ -1772,6 +1794,74 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     let (ex, ey, ez) = event.pos;
                     world.set_block(ex, ey, ez, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
+                }
+                continue;
+            }
+
+            // `crate::redstone_dispenser::TICK_DISPENSER_FIRE` — the one-shot
+            // fire `on_neighbor_changed` schedules on the rising edge. Handled
+            // here, with its own `continue`, because it needs the live
+            // container (`block_entities`) and the mob simulation (`mobs`),
+            // neither of which the `Option<String>` chain below has in scope
+            // — the exact gap `crate::redstone_dispenser`'s own module doc
+            // named as the one thing stopping `random_slot`/`plain_toss` from
+            // ever running in production.
+            if due.kind == crate::redstone_dispenser::TICK_DISPENSER_FIRE {
+                if crate::redstone_dispenser::is_dispenser_family(&state) {
+                    let origin = BlockPos::new(x, y, z);
+                    let slots = block_entities.with(|reg| {
+                        reg.get(origin)
+                            .map(crate::block_entities::BlockEntity::container_slots)
+                    });
+                    // `random_slot`'s own `None` is vanilla's `-1`: an empty
+                    // container plays a click sound instead of dispensing —
+                    // sound effects are out of this crate's scope, so this is
+                    // a silent no-op rather than a missing feature.
+                    let picked = slots.as_ref().and_then(|slots| {
+                        let occupied: Vec<bool> = slots.iter().map(Option::is_some).collect();
+                        crate::redstone_dispenser::random_slot(&occupied, |bound| {
+                            dispenser_rng.next_int(i32::try_from(bound).unwrap_or(i32::MAX)).max(0) as u32
+                        })
+                    });
+                    if let (Some(slots), Some(slot)) = (slots, picked) {
+                        // `ItemStack.split(1)`: one item leaves the picked
+                        // slot, the rest — if any — stays.
+                        let mut stack = slots[slot]
+                            .clone()
+                            .expect("random_slot only ever picks an occupied slot");
+                        let item = stack.item.clone();
+                        stack.count = stack.count.saturating_sub(1);
+                        let remainder = if stack.count == 0 { None } else { Some(stack) };
+                        block_entities.with(|reg| {
+                            if let Some(entity) = reg.get_mut(origin) {
+                                entity.set_container_slot(slot, remainder);
+                            }
+                        });
+                        let face = crate::redstone_dispenser::facing(&state);
+                        let center = (f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5);
+                        let (position, velocity) =
+                            crate::redstone_dispenser::plain_toss(center, face, &mut || {
+                                dispenser_rng.next_f64()
+                            });
+                        mobs.with(|sim| {
+                            sim.spawn_item(
+                                item,
+                                lodestone_model::Vec3::new(position.0, position.1, position.2),
+                                lodestone_model::Vec3::new(velocity.0, velocity.1, velocity.2),
+                                // Vanilla's dispensed `ItemEntity` never calls
+                                // `setDefaultPickUpDelay()`, so it keeps the
+                                // constructor's `pickupDelay = 0` — unlike a
+                                // broken block's drop, it is pickable the
+                                // instant it appears.
+                                lodestone_entity::ItemLifecycle {
+                                    age: 0,
+                                    pickup_delay: 0,
+                                    count: 1,
+                                    max_stack_size: lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
+                                },
+                            );
+                        });
+                    }
                 }
                 continue;
             }
@@ -3182,6 +3272,201 @@ mod tests {
             cell.starts_with("minecraft:fire"),
             "fire over netherrack passes canSurvive and must persist, got {cell:?} — if this \
              is air, the arm is removing fire unconditionally rather than running FireBlock::tick"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #320: the dispenser fire arm. `crate::redstone_dispenser`'s own
+    // tests gate `random_slot`/`plain_toss` in isolation; this one gates the
+    // *wiring* — that the drain actually reaches a live container and mob
+    // simulation through the production `run_tick_loop`, the island shape
+    // CLAUDE.md's rule 1 names (a correct module with zero production
+    // callers). Before this arm existed, `TICK_DISPENSER_FIRE` was scheduled
+    // and never drained, so a dispenser filled with arrows sat there forever.
+    // ---------------------------------------------------------------------
+
+    /// A `ChunkSource` whose `column()` **reflects its own edits** — unlike
+    /// [`OverlayWorld`] above, whose `column()` is hardcoded blank air
+    /// because fire's own arm reads through `world.block_state(...)`
+    /// directly and never through the returned column at all. The dispenser
+    /// arm reads its block state via `column.block_state(...)`, exactly
+    /// like every other arm in the big `for due in
+    /// block_ticks.drain_due(...)` loop (torch/repeater/comparator/
+    /// tripwire/gravity), so a double for it has to answer through that
+    /// path too, or `is_dispenser_family` sees blank air and the arm is a
+    /// silent no-op — which is exactly the failure mode this struct exists
+    /// to avoid reproducing inside the test itself.
+    struct ColumnBackedWorld(Arc<Mutex<std::collections::HashMap<(i32, i32, i32), String>>>);
+
+    impl ColumnBackedWorld {
+        fn with(cells: &[((i32, i32, i32), &str)]) -> Arc<Self> {
+            let map = cells
+                .iter()
+                .map(|&(pos, state)| (pos, state.to_owned()))
+                .collect();
+            Arc::new(Self(Arc::new(Mutex::new(map))))
+        }
+    }
+
+    impl ChunkSource for ColumnBackedWorld {
+        fn column(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
+            let mut column = crate::chunk::ChunkColumn::new(0, 16);
+            for (&(x, y, z), state) in self.0.lock().expect("column-backed world lock poisoned").iter() {
+                if x.div_euclid(16) == cx && z.div_euclid(16) == cz {
+                    column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+                }
+            }
+            column
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.0
+                .lock()
+                .expect("column-backed world lock poisoned")
+                .get(&(x, y, z))
+                .cloned()
+                .unwrap_or_else(|| crate::chunk::AIR.to_owned())
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+            self.0
+                .lock()
+                .expect("column-backed world lock poisoned")
+                .insert((x, y, z), name.to_owned());
+        }
+    }
+
+    /// East is the discriminating facing: the dispenser's own cell
+    /// (`center.x`), an opposite-face (`west`) toss (`center.x - 0.7`) and
+    /// the real dispense point (`center.x + 0.7`) are three different `x`
+    /// values, so a wrong hypothesis for *where* the item lands is
+    /// falsifiable rather than merely "an item appeared somewhere".
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_drains_a_dispenser_fire_and_the_item_lands_off_the_east_face() {
+        let pos = (11, 6, 9);
+        let (px, py, pz) = pos;
+        let world = ColumnBackedWorld::with(&[(pos, "minecraft:dispenser[facing=east,triggered=true]")]);
+        let scheduled = crate::region_source::ScheduledTickHandle::default();
+        scheduled.with(|queues| {
+            queues.block.schedule(
+                pos,
+                crate::redstone_dispenser::TICK_DISPENSER_FIRE.to_owned(),
+                1,
+                TickPriority::Normal,
+            );
+        });
+        let feed = BlockTickFeed::default();
+        let (mobs, out, block_entities) = handles();
+        block_entities.with(|reg| {
+            let mut container =
+                crate::block_entities::BlockEntity::container_of_size("minecraft:dispenser", crate::block_entities::CONTAINER_3X3_SIZE);
+            container.set_container_slot(0, Some(lodestone_model::ItemStack::new(
+                "minecraft:arrow".parse().expect("valid item key"),
+                3,
+            )));
+            reg.insert(BlockPos::new(px, py, pz), container);
+        });
+        tokio::spawn(run_tick_loop(
+            mobs.clone(),
+            out,
+            block_entities.clone(),
+            Arc::new(TickClock::new()),
+            Arc::clone(&world),
+            feed.clone(),
+            (0..=0, 0..=0),
+            ExplosionFeed::default(),
+            scheduled,
+            crate::tick_area::TickFollow::default(),
+        ));
+        tokio::task::yield_now().await;
+
+        // Poll one tick at a time and stop the instant the item exists, so the
+        // captured position is `plain_toss`'s own output with **zero** falling
+        // ticks applied yet — `MobSim::tick` (which steps gravity) runs earlier
+        // in the loop body than the scheduled-tick drain that spawns this item,
+        // so a freshly spawned entity gets its first physics step only on the
+        // *next* iteration.
+        let mut spawned_at_tick = None;
+        for tick in 1..=8 {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+            if mobs.with(|sim| sim.item_count()) >= 1 {
+                spawned_at_tick = Some(tick);
+                break;
+            }
+        }
+        assert!(
+            spawned_at_tick.is_some(),
+            "no item ever appeared — the drain never dispatched TICK_DISPENSER_FIRE at all"
+        );
+
+        let snapshots = mobs.with(|sim| sim.snapshots());
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "exactly one item must exist: {snapshots:?}"
+        );
+        assert_eq!(
+            snapshots[0].entity_type.to_string(),
+            "minecraft:item",
+            "a dispensed stack is an item entity, not something drawing as the block itself"
+        );
+        assert_eq!(
+            snapshots[0].metadata,
+            vec![crate::protocol::MetadataField::Item {
+                item: "minecraft:arrow".parse().expect("valid key"),
+                count: 1,
+            }],
+            "exactly one arrow leaves the stack of three — `ItemStack.split(1)`, not the whole stack"
+        );
+
+        let center_x = f64::from(px) + 0.5;
+        let expected_x = center_x + 0.7; // east: `DISPENSE_SCALE` out from centre.
+        let own_cell_x = center_x; // wrong hypothesis: tossed at the dispenser's own cell.
+        let opposite_x = center_x - 0.7; // wrong hypothesis: facing read backwards (west).
+        let position = snapshots[0].position;
+        assert!(
+            (position.x - expected_x).abs() < 1e-6,
+            "position.x = {} does not match the predicted east dispense point {expected_x}",
+            position.x
+        );
+        assert_eq!(
+            position.z,
+            f64::from(pz) + 0.5,
+            "east does not move z at all — a nonzero drift here means the facing math crossed axes"
+        );
+        // The pair that makes this discriminating: a value strictly between
+        // `own_cell_x` and `expected_x` rules out both wrong hypotheses at
+        // once, since `own_cell_x` sits exactly halfway between `expected_x`
+        // and `opposite_x` by construction (`centre ± DISPENSE_SCALE`).
+        assert!(
+            position.x > own_cell_x + 0.2,
+            "position.x = {} sits at or behind the dispenser's own cell ({own_cell_x}) — the arm \
+             tossed the item at its own position rather than off the facing side",
+            position.x
+        );
+        assert!(
+            position.x > opposite_x + 0.2,
+            "position.x = {} sits toward the opposite (west) face's {opposite_x} rather than \
+             east's {expected_x} — the arm read the facing backwards",
+            position.x
+        );
+        assert!(
+            (position.y - (f64::from(py) + 0.5 - 0.15625)).abs() < 1e-6,
+            "position.y = {} does not match the sideways-toss y-shift (0.15625 below centre)",
+            position.y
+        );
+
+        // And the container itself lost exactly the one item — the other half
+        // of "dispensing", not merely "an item entity exists somewhere".
+        let remaining = block_entities.with(|reg| {
+            reg.get(BlockPos::new(px, py, pz))
+                .map(crate::block_entities::BlockEntity::container_slots)
+        });
+        assert_eq!(
+            remaining.as_ref().and_then(|slots| slots[0].as_ref().map(|s| s.count)),
+            Some(2),
+            "the container's slot 0 must go from 3 to 2, not stay at 3 or empty out entirely: {remaining:?}"
         );
     }
 }
