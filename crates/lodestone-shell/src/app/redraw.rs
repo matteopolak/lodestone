@@ -774,12 +774,15 @@ impl WindowApp {
 
         // Fold GPU counters + timing into the debug overlay.
         let frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-        let inst_fps = if dt > 0.0 { (1.0 / dt) as f32 } else { 0.0 };
-        self.fps_ema = if self.fps_ema == 0.0 {
-            inst_fps
-        } else {
-            self.fps_ema * 0.9 + inst_fps * 0.1
-        };
+        // Counted, not derived from `1.0 / dt` — see
+        // `FramePacer::record_presented_frame`'s doc for why a reciprocal of
+        // the pacer's own scheduling `dt` reports the wrong quantity once a
+        // framerate cap makes the event loop iterate far more often than it
+        // presents. This call site is reached only after every early return
+        // above it (occlusion, missing GPU state, a failed `acquire()`, a
+        // menu screen owning the whole frame) — i.e. only when a frame really
+        // was drawn and is about to be presented.
+        self.pacer.record_presented_frame(frame_start);
         self.sim.stats.section_count = stats.sections_drawn;
         self.sim.stats.quads = stats.total_quads;
         self.sim.stats.vram_bytes = stats.vram_bytes;
@@ -800,7 +803,7 @@ impl WindowApp {
         self.sim.stats.occlusion_active = stats.occlusion_active;
         self.sim.stats.occlusion_walks = stats.occlusion_walks;
         self.sim.stats.frame_ms = frame_ms;
-        self.sim.stats.fps = self.fps_ema;
+        self.sim.stats.fps = self.pacer.fps() as f32;
         // `ServerDifficulty` reached a real, tested ECS fold but nothing in the
         // shell read it — this is that last hop, onto the F3 overlay's own
         // `Difficulty:` line (`hud.rs`'s `DebugStats::left_lines`).
