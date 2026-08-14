@@ -4,7 +4,7 @@
 
 Drawing a `minecraft:filled_map`'s actual picture — the vanilla `MapColor` palette, a per-map 128×128
 texture built from the colour bytes `SessionMaps` folds, and the quads that show it in the hand and in
-an item frame (issue #184).
+an item frame.
 
 ## How it works
 
@@ -57,7 +57,7 @@ invalidation bug. `mip_level_count` is 1 and the sampler is `Nearest`, matching 
 * **In an item frame** — `prepare_framed_maps` walks the `EntityDraw` slice for
   `item_frame`/`glow_item_frame` carrying a `filled_map` and concatenates one quad each into a single
   world-space mesh. Item frames are `HangingEntity` and have **no renderer of their own** (explicitly
-  out of issue #23's block-entity scope), so a framed map draws its picture with no frame border. The
+  out of this work's block-entity scope), so a framed map draws its picture with no frame border. The
   picture is the part a player is looking at.
 
 ## How to change it, and the gotchas
@@ -94,5 +94,5 @@ None. No env vars, no flags. The palette is a `const` table; the sample density 
   `lodestone_ecs::session::SessionMaps` and `Sim::maps`.
 * `lodestone_render::{ModelPipeline, GpuModelMesh, ModelMesh, ModelVertex}` — the shared pipeline the
   quad draws through, and `texture::GpuAtlas` as the shape `atlas_bind_group` accepts.
-* `MAP_ITEM_DATA` decode in `crates/protocol/v770/src/adapter.rs`, which produces
+* `MAP_ITEM_DATA` decode in `crates/protocol/v770/src/adapter/inventory.rs`, which produces
   `ClientEvent::MapItemData`.

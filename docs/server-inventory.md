@@ -1,4 +1,4 @@
-# Server-authoritative inventory (issue #408)
+# Server-authoritative inventory
 
 ## What it is
 
@@ -7,7 +7,7 @@ consumer that lets `SET_CARRIED_ITEM` and `CONTAINER_CLICK` actually change
 server state. Before this, `lodestone-server` had **no inventory/container
 model at all** — three separate doc comments (`server.rs`'s
 `apply_use_item_on`, `protocol.rs`'s `UseItemOn`, `vitals.rs`) already said
-so, and issue #266's own investigation comment concluded that decoding any of
+so, and an earlier investigation comment concluded that decoding any of
 its 16 packets would produce "real bytes parsed with genuinely nothing to
 write into and nothing that would read it." This closes that gap for two of
 the sixteen — the two the investigation named as the shortest path from "a
@@ -20,13 +20,12 @@ model exists" to "a real client moves an item on our server and it sticks."
 `crates/lodestone-server/src/inventory.rs`. 41 native slots — hotbar
 `0..=8`, main storage `9..=35`, armour `36..=39`, off-hand `40` — plus a
 selected-hotbar-slot index. This is a direct restatement of vanilla's
-`Inventory` class
-(`.cache/mc/26.2/src/net/minecraft/world/entity/player/Inventory.java:31-56`,
-`items` sized 36 + `EQUIPMENT_SLOT_MAPPING`'s feet/legs/chest/head/off-hand
+`Inventory` class (`Inventory.items` sized 36 +
+`Inventory.EQUIPMENT_SLOT_MAPPING`'s feet/legs/chest/head/off-hand
 entries), and, deliberately, the **same** native indexing
-`lodestone-game`'s client-side `Menu` already established and documents at
-`crates/lodestone-game/src/menu.rs:5-27` (`PLAYER_NATIVE_SIZE = 41`,
-`OFFHAND_NATIVE = 40`). Restated rather than shared: this crate is
+`lodestone-game`'s client-side `Menu` already established and documents in
+`crates/lodestone-game/src/menu.rs` (`PLAYER_NATIVE_SIZE`,
+`OFFHAND_NATIVE`). Restated rather than shared: this crate is
 version- and client-free and does not depend on `lodestone-game`, so keeping
 the numbering identical (rather than importing it) is what lets a wire
 packet's menu-slot indices land in the same native slot the client's own
@@ -59,12 +58,12 @@ made for the anvil/enchanting-table costs.
   reusing the existing `SetCarriedItem` wire struct
   (`crates/protocol/v770/src/packets/game.rs`). The decoder validates
   `0..HOTBAR_SIZE` before producing the variant, mirroring vanilla's
-  `Inventory.isHotbarSlot` guard (`Inventory.java:70-76`); out of range
+  `Inventory.isHotbarSlot` guard; out of range
   decodes to `ServerBound::Ignored`.
 - `CONTAINER_CLICK` decodes into `ServerBound::ContainerClicked { window_id,
   state_id, changed_slots, carried_item }` via a hand-written decoder
   (`decode_container_click`), mirroring the wire layout the client-side
-  encoder (`crate::adapter::encode_container_click`) already produces: VarInt
+  encoder (`crate::adapter::serverbound::encode_container_click`) already produces: VarInt
   window id, VarInt state id, `i16` slot, `i8` button, VarInt click-type
   ordinal, a changed-slots map (VarInt count, then `i16` slot + `HashedStack`
   per entry), then the carried cursor stack as a trailing `HashedStack`.
@@ -140,7 +139,7 @@ does, in `crates/lodestone-server/src/container_click.rs`. The struck-through
 paragraph that used to be here argued that applying the client's own
 `changed_slots` prediction verbatim could not introduce a *new* desync, which
 was true and beside the point: **it let any client mint any item in any slot by
-naming it in a diff.** Issue #529 closed the crafting *result* alone; this closes
+naming it in a diff.** A previous fix closed the crafting *result* alone; this closes
 the general case.
 
 What the consumer now does with each `CONTAINER_CLICK`:
@@ -207,7 +206,7 @@ The other drop path — clicking outside an open window with a held stack, slot
 routes through the same velocity and delay, which is what vanilla does
 (`doClick`'s outside case calls the same `Player.drop`).
 
-## Pick-block / pick-entity (middle-click, issue #558)
+## Pick-block / pick-entity (middle-click)
 
 `ServerBound::PickItemFromBlock { pos, include_data }` and
 `ServerBound::PickItemFromEntity { entity_id, include_data }` →
@@ -220,8 +219,8 @@ routes through the same velocity and delay, which is what vanilla does
 `MultiPlayerGameMode::handlePickItemFromBlock`/`handlePickItemFromEntity`,
 which do nothing but send the packet — the three-way split below is entirely
 server-authoritative, and the client's `SET_HELD_SLOT` round trip is exactly
-vanilla's own latency, not a missing optimisation. (An earlier note on issue
-#558 assumed the opposite; re-reading `Minecraft.java`/`MultiPlayerGameMode
+vanilla's own latency, not a missing optimisation. (An earlier note here
+assumed the opposite; re-reading `Minecraft.java`/`MultiPlayerGameMode
 .java` in `.cache/mc/26.2/client-src` settled it.)
 
 ### The three-way split: `crate::item_use::try_pick_item`
@@ -318,9 +317,9 @@ own documented simplification.
   *is* modelled and easy to get wrong: the per-item stack cap and the armour-slot
   `mayPlace`, both from `lodestone_data::item_prototypes`' jar dump — a constant
   64 there would let the server itself derive a 64-stack of swords.
-- **`SET_CREATIVE_MODE_SLOT`** — the next packet in #266's list this model
+- **`SET_CREATIVE_MODE_SLOT`** — the next packet this model
   unblocks; needs `read_optional_item_stack`'s decode counterpart (see
-  `crate::adapter::write_optional_item_stack`'s doc comment for the existing
+  `crate::adapter::serverbound::write_optional_item_stack`'s doc comment for the existing
   client-side encoder and its own scope note about the empty component
   patch).
 

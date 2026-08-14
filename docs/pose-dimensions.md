@@ -20,8 +20,7 @@ screen looks right and the server disagrees.
 
 ### The state machine, and the three things it is not
 
-`Player.updatePlayerPose`
-(`.cache/mc/26.2/src/net/minecraft/world/entity/player/Player.java:343-357`) is
+`Player.updatePlayerPose` is
 the whole rule:
 
 ```java
@@ -42,10 +41,9 @@ protected void updatePlayerPose() {
 ```
 
 1. **The desired pose is vetoed, not applied.** `getDesiredPose()` picks
-   `SLEEPING > SWIMMING > FALL_FLYING > SPIN_ATTACK > CROUCHING/STANDING`
-   (`:359-371`), and then
+   `SLEEPING > SWIMMING > FALL_FLYING > SPIN_ATTACK > CROUCHING/STANDING`, and then
    `canPlayerFitWithinBlocksAndEntitiesWhen(pose)` — `level().noCollision(this,
-   getDimensions(pose).makeBoundingBox(position()).deflate(1.0E-7))` (`:373-375`)
+   getDimensions(pose).makeBoundingBox(position()).deflate(1.0E-7))`
    — can refuse it. The fallback chain is `desired → CROUCHING → SWIMMING`.
 2. **The whole body sits behind an outer guard.** If not even the `0.6 × 0.6`
    swimming box fits, `setPose` is never called *at all*: the pose is **sticky**,
@@ -54,7 +52,7 @@ protected void updatePlayerPose() {
    not fit.) A port that reads the body as "fall back to the smallest box that
    fits" gets this backwards.
 3. **There is no recovery if a player's box grows into a space it does not fit.**
-   `Entity.refreshDimensions` (`Entity.java:3395-3411`) calls
+   `Entity.refreshDimensions` calls
    `fudgePositionAfterSizeChange` only when
    `!this.level.isClientSide() && !firstTick && !noPhysics && isSmall && (grew) &&
    !(this instanceof Player)`. Both the client clause and the `Player` clause
@@ -65,15 +63,16 @@ protected void updatePlayerPose() {
 
 `getDesiredPose`'s crouch term is `isShiftKeyDown() && !abilities.flying` — the
 **raw shift key**, the same input the edge back-off reads
-(`Player.java:300-302`), and *not* `isCrouching()`, which is derived from the pose
+(`Player.isStayingOnGroundSurface`), and *not* `isCrouching()`, which is derived from the pose
 and would be circular.
 
 ### What a pose actually changes
 
 `setPose` → `onSyncedDataUpdated(DATA_POSE)` → `refreshDimensions()`, which sets
 `dimensions`, sets `eyeHeight = newDim.eyeHeight()`, and calls `reapplyPosition()`
-(`setPos(position)`, rebuilding the box). Because `makeBoundingBox` anchors `minY`
-at the **feet** (`EntityDimensions.java:19-23`), a pose change never moves the
+(`setPos(position)`, rebuilding the box). Because `EntityDimensions.makeBoundingBox`
+anchors `minY`
+at the **feet**, a pose change never moves the
 player: only the top face moves. Width is `0.6` in every pose a player can hold,
 so the pose decides exactly two numbers — **box height** and **eye height**.
 
@@ -107,7 +106,7 @@ lodestone_physics::tick
     travel → tick_water / tick_lava / tick_elytra / tick_air
     checkInsideBlocks (stuck multiplier)
   [tick_among_entities only] apply_entity_push   ← tail of aiStep
-  update_player_pose                 ← Player.tick's LAST statement (:284)
+  update_player_pose                 ← Player.tick's LAST statement
 ```
 
 Two orderings are load-bearing:
@@ -175,7 +174,7 @@ the third term — remains unmodelled, as it is everywhere else in this crate.
 * **The sneak bit must reach the server, and it already does.** The pose reads
   `MovementInput::sneak`, the same bit `lodestone-controller`'s `movement_intent`
   sends as `ServerboundPlayerInputPacket::shift`
-  (`crates/lodestone-controller/src/ecs.rs:199`), which is what makes the server
+  (`send_player_input`, `crates/lodestone-controller/src/ecs.rs`), which is what makes the server
   call `setShiftKeyDown(true)` and run *its* `updatePlayerPose` the same way. This
   is [`edge-back-off.md`](./edge-back-off.md)'s "inverse trap" with a second
   consequence: a headless/bot path that crouches locally without sending the bit
@@ -192,7 +191,7 @@ the third term — remains unmodelled, as it is everywhere else in this crate.
 ### The `lodestone-ecs` change this is still owed
 
 `lodestone_ecs::player::player_physics` calls `lodestone_physics::tick` and then
-its own `update_pose` (`crates/lodestone-ecs/src/player.rs:418`), which writes
+its own `update_pose` (`crates/lodestone-ecs/src/player.rs`), which writes
 `eye_height` from `swimming`/`intent.sneak` alone — **ungated**. Since physics now
 owns the decision, that write is redundant in every case except the one where it
 is wrong: with the desired pose vetoed (crouch forced under a ≤1.8 ceiling while
@@ -211,7 +210,7 @@ the fog. Two edits close it, neither of which this change was allowed to make:
    `*player = player.with_pose(lodestone_physics::desired_pose(player, intent))`,
    so the two fields stay coupled even on the degraded path.
 2. **`fly_step` must reset the pose, not just the eye height**
-   (`player.rs:475`). It already clears `swimming` and writes
+   (`player.rs`). It already clears `swimming` and writes
    `DEFAULT_EYE_HEIGHT`, for exactly the reason given in its comment: free-fly
    never calls `tick`, so nothing else would. Add
    `player.pose = lodestone_physics::Pose::Standing;` beside it — vanilla's
@@ -292,9 +291,9 @@ Nothing here has been run against a real server. The recipe follows
 
 1. **It must be the survival oracle** (`./scripts/live-oracles/survival.sh`). The
    rubber-band check is skipped for `isCreative()`
-   (`ServerGamePacketListenerImpl.java:1147-1152`), so `creative.sh` gives a
+   (`ServerGamePacketListenerImpl.handleMovePlayer`), so `creative.sh` gives a
    guaranteed vacuous pass.
-2. **Read `Sim::teleport_count`** (`crates/lodestone-shell/src/sim.rs:506`).
+2. **Read `Sim::teleport_count`** (`crates/lodestone-shell/src/sim.rs`).
 3. **Run the *unpatched* build first and confirm the counter does increment**, or
    "no corrections" is the duration species of vacuous test. This is a case where
    the control should fire loudly: with the old always-`1.8` box, a client trying
@@ -320,9 +319,9 @@ Note that the *server* runs the same `updatePlayerPose` on its `ServerPlayer`
 half of this gate. Send only `SetPlayerInput` and the server's pose never becomes
 `SWIMMING`, so it will refuse a movement the client thinks is legal.
 
-## Re-checked for issue #59 (camera jerk), and cleared
+## Re-checked for camera jerk, and cleared
 
-Issue #59 reported a camera jerk entering/leaving swim mode and asked whether
+An earlier report described a camera jerk entering/leaving swim mode and asked whether
 pose oscillation — this gate flipping pose on consecutive ticks — could be a
 second cause distinct from the eye-height snap `docs/swimming.md` documents as
 the real one. It is not, and the two properties that rule it out were
@@ -337,12 +336,12 @@ re-verified rather than assumed:
   it oscillating state, not a bug in the gate reacting to stable state.
 * **`min_y` is anchored at the feet, so only the top face ever moves.**
   Re-read directly off `EntityDimensions::bounding_box`
-  (`crates/lodestone-physics/src/entity.rs:102-112`): `feet.y` is the box's
+  (`crates/lodestone-physics/src/entity.rs`): `feet.y` is the box's
   `min_y` unconditionally, and `feet.y + height` is `max_y`. A pose change
   cannot be "the origin is wrong" here — there is no code path that anchors
   the box anywhere but the feet.
 
-Neither check found anything specific to issue #59; both simply re-confirm
+Neither check found anything specific to that report; both simply re-confirm
 what this doc already documents above. The eye-height snap
 (`docs/swimming.md`'s `EyeHeightSmoother` section) remains the one identified
 cause of the camera jerk.

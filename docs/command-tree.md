@@ -36,9 +36,9 @@ than where the reader's cursor actually is when it notices.
 `ArgumentType`s (`IntegerArgument`, `LongArgument`, `FloatArgument`,
 `DoubleArgument`, `BoolArgument`, `StringArgument` with its `Word`/`Quotable`/
 `Greedy` kinds) plus `ArgumentTypeRegistry`, a name-keyed lookup table a
-plugin populates with its own `ArgumentType` implementations (issue #119's "a
-way for a plugin to register a custom `ArgumentType` with the same two
-functions" — `parse` and `suggest`). A tree never needs the registry to use a
+plugin populates with its own `ArgumentType` implementations (a way for a
+plugin to register a custom `ArgumentType` with the same two functions —
+`parse` and `suggest`). A tree never needs the registry to use a
 type; `add_argument` takes an `Arc<dyn ArgumentType>` directly, and the
 registry exists purely so a plugin can share one named type across several of
 its own command declarations.
@@ -48,46 +48,51 @@ its own command declarations.
 This crate has **zero consumers today**, by design, not by oversight. Three
 are expected and none of them exist yet:
 
-- **#48** — the server-side Brigadier dispatcher. This crate has no
+- **The server-side Brigadier dispatcher.** This crate has no
   `CommandSource` and no execution semantics; `executable` is a bare flag
   with nothing attached to run.
-- **#46** — the client command UX (autocomplete, inline highlighting).
-  **As of this writing, #46 already has its own, separate, decode-oriented
+- **The client command UX** (autocomplete, inline highlighting).
+  **As of this writing, that work already has its own, separate, decode-oriented
   tree model** — `lodestone_model::command_tree` (`CommandTree`,
   `RawCommandNode`, `NodeKind`, `ArgumentParser`) plus
   `lodestone_shell::chat`'s `highlight`/`complete`, documented in
   [`docs/commands.md`](./commands.md). That work targets decoding
   `COMMANDS`/`COMMAND_SUGGESTIONS` off the wire and driving the chat box from
   the result, and it explicitly deferred sharing an argument-type library
-  with #48/#118 rather than build one — this crate is that library, landed
+  with the server-side dispatcher and plugin command registration rather
+  than build one — this crate is that library, landed
   afterward. **The two are not integrated.** Reconciling them (whether
   `chat.rs`'s local argument validation should eventually delegate to
   `lodestone_command::argument`'s parsers, and whether a decoded wire tree
   should build a `lodestone_command::CommandTree` instead of its own) is
-  unresolved and is not attempted here — flagged on issue #46 rather than
-  decided unilaterally, since `lodestone-shell`/`lodestone-client`/
+  unresolved and is not attempted here — flagged as an open question on that
+  work rather than decided unilaterally, since `lodestone-shell`/`lodestone-client`/
   `lodestone-model` are all outside this crate's ownership.
-- **#118** — plugin command registration. Its own issue text says the plugin
-  registry and #48's dispatcher "should share rather than diverge" — this
-  crate is that shared argument-tree substrate for both.
+- **Plugin command registration.** Its own tracking text says the plugin
+  registry and the server-side dispatcher "should share rather than diverge" —
+  this crate is that shared argument-tree substrate for both.
 
 ### `COMMANDS`/`COMMAND_SUGGESTIONS` decode status (verified, not assumed)
 
-Checked directly rather than taken on the issue text's word:
-`grep -rn "clientbound::COMMANDS" crates/protocol/v770/src/adapter.rs` and the
-same for `COMMAND_SUGGESTIONS` both return **zero hits**, even though the
-packet id constants exist in the generated tables
-(`crates/protocol/v770/src/generated/packet_ids.rs:172-173`, ids 15 and 16).
-Every protocol family in this workspace has **zero decode** for both packets
-today. This crate adds none — `crates/protocol/**` was out of scope here
-regardless of that finding, and (per the note above) #46's own work is
-already the one building the decode-consuming side.
+Checked directly rather than assumed, and this has changed since this section
+was first written: `v770`'s adapter now decodes both —
+`decode_command_tree`/`decode_command_suggestions` in
+`crates/protocol/v770/src/adapter/chat.rs` — documented in
+[`docs/commands.md`](./commands.md). The other three families still have
+**zero decode** for both packets, confirmed by grepping
+`clientbound::COMMANDS`/`COMMAND_SUGGESTIONS` across
+`crates/protocol/v47`, `v340` and `v735`, even though the packet id
+constants exist in the generated tables for all of them
+(`crates/protocol/v770/src/generated/packet_ids.rs`, ids 15 and 16). This
+crate adds no decode of its own — `crates/protocol/**` was out of scope here
+regardless of that finding, and (per the note above) the client command UX
+work is already the one building the decode-consuming side.
 
 ### The unconsumed `permission` field
 
 Every `Node` carries `pub permission: Option<NodeId>`
 (`CommandTree::set_permission`). **Nothing reads it.** It is present from day
-one specifically so that issue #122's per-node permission check has somewhere
+one specifically so that a future per-node permission check has somewhere
 to land without changing every node constructor's signature when it arrives.
 Treat any future PR that "adds" a permission field to `Node` as a sign this
 doc has gone stale, not as legitimate new work.
@@ -105,8 +110,9 @@ doc has gone stale, not as legitimate new work.
   `Long`, `Float`, `Double`, `Bool`, `String`, `Custom(String)`) rather than
   `Box<dyn Any>`, so it stays `PartialEq`/`Debug`/testable without forcing
   every custom type to carry those bounds too. A future consumer needing a
-  richer payload (e.g. #48 wanting a resolved player UUID rather than a raw
-  name string) should widen this enum rather than reach for `Any` — the
+  richer payload (e.g. the server-side dispatcher wanting a resolved player
+  UUID rather than a raw name string) should widen this enum rather than
+  reach for `Any` — the
   parser/reader logic and the value representation are deliberately
   decoupled, and `Any` would only benefit one future caller at the cost of
   making every existing match arm fallible.
@@ -116,7 +122,7 @@ doc has gone stale, not as legitimate new work.
   collapsed here to one `can_read()` check) already bounds recursion depth by
   the input's length for *any* tree shape — an ordinary redirect cycle cannot
   actually hang. The extra `(node, cursor)` visited-set exists only to catch
-  a custom `ArgumentType` (a plugin's, via #119's registry) that moves the
+  a custom `ArgumentType` (a plugin's, via the argument-type registry) that moves the
   reader's cursor backward and defeats that bound from outside `parse`'s
   control. `crates/lodestone-command/tests/brigadier_spec.rs` has both a test
   that exercises this with such an adversarial type and a control proving
