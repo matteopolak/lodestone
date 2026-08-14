@@ -116,6 +116,22 @@ localized display name, and tag queries (`#minecraft:logs`) are not modelled.
   the draw and the hit test, through one function. A layout built at a different
   scale than the frame was drawn with silently mis-resolves every click — the
   warning `container/layout.rs` already carries.
+- **`CreativeLayout::grid` must be empty on the inventory tab, and this is now
+  enforced at `creative_layout` rather than left to each consumer to
+  remember.** The generic 45-cell item-picker grid sits on the same
+  `GRID_X0`/`SLOT` pitch this panel reuses for the survival layout
+  (`inventory_tab_slots`), so a populated `grid` geometrically overlaps the
+  player's own armour/main/hotbar rects at that tab. The item-draw loop
+  already skipped `grid` there (`kind != CreativeTabKind::Inventory`), but
+  `creative_hit_test` checked it unconditionally and checked it *before*
+  `layout.inventory` — so a cursor over the armour wells resolved to a
+  mismatched `CreativeHit::Grid` cell instead of the real
+  `CreativeHit::Inventory` slot, and the hover highlight was drawn at that
+  wrong grid rect: a "slot" appearing where it should not, overlapping the
+  armour area. Fixed by making `grid` itself empty on this tab (mirroring how
+  `inventory`/`destroy` are already conditioned), so every consumer —
+  present or future — inherits the fix rather than needing its own
+  `kind != CreativeTabKind::Inventory` guard.
 
 ## Configuration
 
