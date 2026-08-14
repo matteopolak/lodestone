@@ -6,16 +6,21 @@
 
 use std::cell::RefCell;
 
+use lodestone_worldgen_core::hash::FastSet;
+
 use crate::feature::BlockPos;
+use crate::interner::StateId;
 use crate::rng::RandomSource;
 
 use super::config::{BlockColumnConfig, BlockStateProvider, Decorator, TreeConfig, VegTags};
 use super::grid::VegGrid;
 use super::grid::census::bump as census_bump;
-use super::ids::{Tag, tag_at};
+use super::ids::{Rewrite, Tag, tag_at};
 use super::tree::{
-    Attachment, TrunkPlacerCfg, place_dark_oak_trunk, place_fancy_trunk, place_forking_trunk,
-    place_giant_trunk, place_mega_jungle_trunk, update_leaf_distances,
+    AboveRootPlacementCfg, Attachment, RootPlacerCfg, TrunkPlacerCfg, can_place_root,
+    place_cherry_trunk, place_dark_oak_trunk, place_fancy_trunk, place_forking_trunk,
+    place_giant_trunk, place_mega_jungle_trunk, place_upwards_branching_trunk, simulate_roots,
+    update_leaf_distances,
 };
 
 pub(super) fn place_simple_block<R: RandomSource>(
@@ -55,6 +60,15 @@ thread_local! {
     static TRUNKS: RefCell<Vec<BlockPos>> = const { RefCell::new(Vec::new()) };
     /// Reusable scratch for one tree's foliage attachments.
     static ATTACHMENTS: RefCell<Vec<Attachment>> = const { RefCell::new(Vec::new()) };
+    /// Reusable scratch for one tree's placed foliage positions — this
+    /// module's stand-in for real vanilla's `FoliageSetter.isSet`
+    /// (`TreeFeature.place`'s `foliage` `Set<BlockPos>`), which
+    /// [`FoliagePlacerCfg::Cherry`](super::tree::FoliagePlacerCfg::Cherry)'s
+    /// hanging-leaves-below rows query. Cleared once per [`place_tree`] call
+    /// (scoped to the WHOLE tree, matching vanilla — not per attachment).
+    static FOLIAGE_POS: RefCell<FastSet<(i32, i32, i32)>> = RefCell::new(FastSet::default());
+    /// Reusable scratch for [`place_roots`]'s per-direction root simulation.
+    static ROOT_POSITIONS: RefCell<Vec<BlockPos>> = const { RefCell::new(Vec::new()) };
 }
 
 /// `BlockColumnFeature.place`: samples every layer's height up front (so the
@@ -142,6 +156,135 @@ pub(super) fn truncate_layers(layer_heights: &mut [i32], total_height: i32, new_
     }
 }
 
+/// `RootPlacer.getPotentiallyWaterloggedState` + the write itself: rewrites
+/// `state`'s `waterlogged` property (if it has one) from the CURRENT grid
+/// content at `pos` before overwriting it, exactly like [`super::tree::try_place_leaf`]'s
+/// own fix-up.
+fn write_potentially_waterlogged_state(grid: &mut VegGrid, tags: &VegTags, pos: BlockPos, state: StateId) {
+    let existing = grid.get_id(pos.x, pos.y, pos.z);
+    let is_water_source = tags.has(grid.interner(), Tag::Water, existing);
+    let state = tags
+        .rewrite(grid.interner(), state, Rewrite::Waterlogged(is_water_source))
+        .unwrap_or(state);
+    grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
+}
+
+/// `MangroveRootPlacer.placeRoot` (overriding `RootPlacer.placeRoot`
+/// entirely — see this function's own doc on why no `canPlaceRoot` recheck
+/// happens here). If the CURRENT block at `pos` is one of `muddy_roots_in`
+/// (`minecraft:mud`/`minecraft:muddy_mangrove_roots`), write the muddy-roots
+/// state instead of the ordinary root state and skip the above-root
+/// placement entirely; otherwise draw `root_provider` and, on success, roll
+/// `above_root_placement`.
+///
+/// **No `canPlaceRoot` recheck**: real `MangroveRootPlacer.placeRoot`
+/// overrides the base method, and its own "not muddy" branch calls
+/// `super.placeRoot`, whose `canPlaceRoot` gate DOES run again in Java — but
+/// every position reaching this function already passed the identical,
+/// side-effect-free predicate during [`place_roots`]'s simulation phase
+/// against an unchanged grid, so the recheck can only ever re-confirm the
+/// same answer. Skipping it changes no RNG draw (`canPlaceRoot` draws
+/// nothing) and no write.
+#[allow(clippy::too_many_arguments)]
+fn place_root<R: RandomSource>(
+    random: &mut R,
+    pos: BlockPos,
+    root_provider: &BlockStateProvider,
+    above_root_placement: &Option<AboveRootPlacementCfg>,
+    muddy_roots_in: &[String],
+    muddy_roots_provider: &BlockStateProvider,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    let existing_base = super::base_id(grid.get(pos.x, pos.y, pos.z)).to_string();
+    if muddy_roots_in.iter().any(|b| *b == existing_base) {
+        if let Some(state) = muddy_roots_provider.get_state_id(grid, tags, random, pos) {
+            write_potentially_waterlogged_state(grid, tags, pos, state);
+        }
+        return;
+    }
+    let Some(state) = root_provider.get_state_id(grid, tags, random, pos) else {
+        return;
+    };
+    write_potentially_waterlogged_state(grid, tags, pos, state);
+    if let Some(above) = above_root_placement {
+        let above_pos = BlockPos { x: pos.x, y: pos.y + 1, z: pos.z };
+        if random.next_float() < above.chance
+            && tag_at(grid, tags, Tag::Air, above_pos.x, above_pos.y, above_pos.z)
+        {
+            if let Some(state2) = above.provider.get_state_id(grid, tags, random, above_pos) {
+                write_potentially_waterlogged_state(grid, tags, above_pos, state2);
+            }
+        }
+    }
+}
+
+/// `MangroveRootPlacer.placeRoots`. Returns `false` — writing NOTHING, since
+/// every write below only happens after the whole simulation across all four
+/// directions succeeds — the moment either the trunk-to-origin column is
+/// blocked or [`simulate_roots`] aborts in any direction (hitting
+/// `max_root_length` — see that function's own doc). The caller
+/// ([`place_tree`]) must treat a `false` return as "place nothing at all for
+/// this tree", matching `TreeFeature.doPlace`'s own
+/// `if (... && !placeRoots(...)) return false;`.
+pub(super) fn place_roots<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    trunk_origin: BlockPos,
+    cfg: &RootPlacerCfg,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) -> bool {
+    let RootPlacerCfg::Mangrove {
+        root_provider,
+        above_root_placement,
+        can_grow_through,
+        muddy_roots_in,
+        muddy_roots_provider,
+        max_root_width,
+        max_root_length,
+        random_skew_chance,
+        ..
+    } = cfg;
+    let can_grow_through = *can_grow_through;
+
+    let mut y = origin.y;
+    while y < trunk_origin.y {
+        if !can_place_root(grid, tags, can_grow_through, BlockPos { x: origin.x, y, z: origin.z }) {
+            return false;
+        }
+        y += 1;
+    }
+
+    let mut root_positions = ROOT_POSITIONS.take();
+    root_positions.clear();
+    root_positions.push(BlockPos { x: trunk_origin.x, y: trunk_origin.y - 1, z: trunk_origin.z });
+
+    const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)]; // NORTH, EAST, SOUTH, WEST
+    for dir in STEP {
+        let pos = BlockPos { x: trunk_origin.x + dir.0, y: trunk_origin.y, z: trunk_origin.z + dir.1 };
+        let mut positions_in_direction = Vec::new();
+        let ok = simulate_roots(
+            random, pos, dir, trunk_origin, &mut positions_in_direction, 0, grid, tags, can_grow_through,
+            *max_root_length, *max_root_width, *random_skew_chance,
+        );
+        if !ok {
+            ROOT_POSITIONS.set(root_positions);
+            return false;
+        }
+        root_positions.extend(positions_in_direction);
+        root_positions.push(pos);
+    }
+
+    for i in 0..root_positions.len() {
+        let pos = root_positions[i];
+        place_root(random, pos, root_provider, above_root_placement, muddy_roots_in, muddy_roots_provider, grid, tags);
+    }
+
+    ROOT_POSITIONS.set(root_positions);
+    true
+}
+
 pub(super) fn place_tree<R: RandomSource>(
     random: &mut R,
     origin: BlockPos,
@@ -154,18 +297,30 @@ pub(super) fn place_tree<R: RandomSource>(
     let trunk_len = tree_height - foliage_height;
     let leaf_radius = cfg.foliage_placer.foliage_radius(random, trunk_len);
 
-    // `rootPlacer` is always absent for every species this module
-    // implements, so `trunkOrigin == origin`: `minY == origin.y`,
-    // `maxY == origin.y + treeHeight + 1`.
-    if origin.y < grid.min_y + 1 || origin.y + tree_height + 1 > grid.min_y + grid.height + 1 {
+    // `BlockPos trunkOrigin = config.rootPlacer.map(rootPlacer ->
+    // rootPlacer.getTrunkOrigin(origin, random)).orElse(origin)` — every
+    // species except mangrove has no `root_placer` at all, so `trunk_origin
+    // == origin` and this draws nothing; mangrove's `MangroveRootPlacer
+    // .trunkOffsetY` is the first real user of this indirection.
+    let trunk_origin = match &cfg.root_placer {
+        Some(rp) => rp.get_trunk_origin(origin, random),
+        None => origin,
+    };
+
+    // `int minY = Math.min(origin.getY(), trunkOrigin.getY()); int maxY =
+    // Math.max(origin.getY(), trunkOrigin.getY()) + treeHeight + 1`.
+    let min_y = origin.y.min(trunk_origin.y);
+    let max_y = origin.y.max(trunk_origin.y) + tree_height + 1;
+    if min_y < grid.min_y + 1 || max_y > grid.min_y + grid.height + 1 {
         return;
     }
 
-    // `getMaxFreeTreeHeight`: scan the tree's own footprint for anything
-    // that isn't air/replaceable-by-trees/a log (a log counts as "free" —
-    // `TrunkPlacer.isFree` — so an already-placed neighbour trunk doesn't
-    // block this one). `ignore_vines` is `true` for every species here, so
-    // the vine half of vanilla's check never applies.
+    // `getMaxFreeTreeHeight`: scan the tree's own footprint (anchored at
+    // `trunk_origin`, not `origin` — real vanilla passes `trunkOrigin` here
+    // too) for anything that isn't air/replaceable-by-trees/a log (a log
+    // counts as "free" — `TrunkPlacer.isFree` — so an already-placed
+    // neighbour trunk doesn't block this one). `ignore_vines` is `true` for
+    // every species here, so the vine half of vanilla's check never applies.
     let mut clipped = tree_height;
     'scan: for y in 0..=tree_height + 1 {
         let r = cfg.feature_size.size_at_height(tree_height, y);
@@ -178,7 +333,7 @@ pub(super) fn place_tree<R: RandomSource>(
                 //
                 // `y` here is the loop's tree-relative offset and `clipped` is
                 // derived from it, so the absolute position must NOT shadow it.
-                let id = grid.get_id(origin.x + dx, origin.y + y, origin.z + dz);
+                let id = grid.get_id(trunk_origin.x + dx, trunk_origin.y + y, trunk_origin.z + dz);
                 let interner = grid.interner();
                 let free = tags.has(interner, Tag::Air, id)
                     || tags.has(interner, Tag::ReplaceableByTrees, id)
@@ -212,11 +367,24 @@ pub(super) fn place_tree<R: RandomSource>(
     let clipped_tree_height = clipped;
 
     // Marks where this tree's own writes begin, so `update_leaf_distances`
-    // can later derive its bbox from exactly this tree's own `trunks ∪
-    // foliage ∪ decorations` — see that function's own doc comment on why
+    // can later derive its bbox from exactly this tree's own `roots ∪ trunks
+    // ∪ foliage ∪ decorations` — see that function's own doc comment on why
     // the bbox must be this narrow (real vanilla's `updateLeaves` is scoped
-    // the same way, to one tree at a time, not the whole grid).
+    // the same way, to one tree at a time, not the whole grid). Captured
+    // BEFORE root placement, which is the first thing that can write.
     let dirty_start = grid.dirty_len();
+
+    // `if (config.rootPlacer.isPresent() && !config.rootPlacer.get()
+    // .placeRoots(...)) return false;` — if a root placer is configured and
+    // its simulation fails (mangrove growing over water deeper than
+    // `max_root_length`), the WHOLE tree is abandoned: nothing below this
+    // point may run, matching `place_roots`'s own doc on why it writes
+    // nothing until every direction's simulation has succeeded.
+    if let Some(root_placer) = &cfg.root_placer {
+        if !place_roots(random, origin, trunk_origin, root_placer, grid, tags) {
+            return;
+        }
+    }
 
     // Dispatch trunk placement by placer kind — `Straight`'s own
     // `placeBelowTrunkBlock` + single-column loop stayed inline here (this
@@ -242,9 +410,9 @@ pub(super) fn place_tree<R: RandomSource>(
         TrunkPlacerCfg::Straight { .. } => {
             if let Some(below_provider) = &cfg.below_trunk_provider {
                 let below_pos = BlockPos {
-                    x: origin.x,
-                    y: origin.y - 1,
-                    z: origin.z,
+                    x: trunk_origin.x,
+                    y: trunk_origin.y - 1,
+                    z: trunk_origin.z,
                 };
                 if let Some(state) = below_provider.get_state_id(grid, tags, random, below_pos) {
                     grid.set_id_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
@@ -254,9 +422,9 @@ pub(super) fn place_tree<R: RandomSource>(
             let mut placed_log = false;
             for y in 0..clipped_tree_height {
                 let pos = BlockPos {
-                    x: origin.x,
-                    y: origin.y + y,
-                    z: origin.z,
+                    x: trunk_origin.x,
+                    y: trunk_origin.y + y,
+                    z: trunk_origin.z,
                 };
                 let id = grid.get_id(pos.x, pos.y, pos.z);
                 let interner = grid.interner();
@@ -272,9 +440,9 @@ pub(super) fn place_tree<R: RandomSource>(
             }
             attachments.push(Attachment {
                 pos: BlockPos {
-                    x: origin.x,
-                    y: origin.y + clipped_tree_height,
-                    z: origin.z,
+                    x: trunk_origin.x,
+                    y: trunk_origin.y + clipped_tree_height,
+                    z: trunk_origin.z,
                 },
                 radius_offset: 0,
                 double_trunk: false,
@@ -283,7 +451,7 @@ pub(super) fn place_tree<R: RandomSource>(
         }
         TrunkPlacerCfg::Forking { .. } => place_forking_trunk(
             random,
-            origin,
+            trunk_origin,
             clipped_tree_height,
             grid,
             tags,
@@ -294,7 +462,7 @@ pub(super) fn place_tree<R: RandomSource>(
         ),
         TrunkPlacerCfg::DarkOak { .. } => place_dark_oak_trunk(
             random,
-            origin,
+            trunk_origin,
             clipped_tree_height,
             grid,
             tags,
@@ -305,7 +473,7 @@ pub(super) fn place_tree<R: RandomSource>(
         ),
         TrunkPlacerCfg::Giant { .. } => place_giant_trunk(
             random,
-            origin,
+            trunk_origin,
             clipped_tree_height,
             grid,
             tags,
@@ -316,7 +484,7 @@ pub(super) fn place_tree<R: RandomSource>(
         ),
         TrunkPlacerCfg::MegaJungle { .. } => place_mega_jungle_trunk(
             random,
-            origin,
+            trunk_origin,
             clipped_tree_height,
             grid,
             tags,
@@ -327,12 +495,53 @@ pub(super) fn place_tree<R: RandomSource>(
         ),
         TrunkPlacerCfg::Fancy { .. } => place_fancy_trunk(
             random,
-            origin,
+            trunk_origin,
             clipped_tree_height,
             grid,
             tags,
             &cfg.trunk_provider,
             &cfg.below_trunk_provider,
+            &mut attachments,
+            &mut trunk_positions,
+        ),
+        TrunkPlacerCfg::Cherry {
+            branch_count,
+            branch_horizontal_length,
+            branch_start_offset_from_top,
+            branch_end_offset_from_top,
+            ..
+        } => place_cherry_trunk(
+            random,
+            trunk_origin,
+            clipped_tree_height,
+            grid,
+            tags,
+            &cfg.trunk_provider,
+            &cfg.below_trunk_provider,
+            branch_count,
+            branch_horizontal_length,
+            *branch_start_offset_from_top,
+            branch_end_offset_from_top,
+            &mut attachments,
+            &mut trunk_positions,
+        ),
+        TrunkPlacerCfg::UpwardsBranching {
+            extra_branch_steps,
+            place_branch_per_log_probability,
+            extra_branch_length,
+            ..
+        } => place_upwards_branching_trunk(
+            random,
+            trunk_origin,
+            clipped_tree_height,
+            grid,
+            tags,
+            &cfg.trunk_provider,
+            &cfg.below_trunk_provider,
+            extra_branch_steps,
+            *place_branch_per_log_probability,
+            extra_branch_length,
+            Tag::MangroveLogsCanGrowThrough,
             &mut attachments,
             &mut trunk_positions,
         ),
@@ -345,6 +554,13 @@ pub(super) fn place_tree<R: RandomSource>(
     // (always exactly one attachment) this is behaviourally identical to
     // the pre-#428 single call it replaces — no draw-count change for
     // oak/birch/spruce/pine.
+    // `foliage_positions` is this module's stand-in for real vanilla's
+    // `FoliageSetter.isSet` — see [`FOLIAGE_POS`]'s own doc. Scoped to the
+    // WHOLE tree (cleared here, read/written across every attachment's
+    // `create_foliage` call), matching `TreeFeature.place`'s single `foliage`
+    // set shared by every `foliageAttachment`.
+    let mut foliage_positions = FOLIAGE_POS.take();
+    foliage_positions.clear();
     let mut placed_leaf = false;
     for attachment in &attachments {
         let offset = cfg.foliage_placer.sample_offset(random);
@@ -359,9 +575,11 @@ pub(super) fn place_tree<R: RandomSource>(
             grid,
             tags,
             &cfg.foliage_provider,
+            &mut foliage_positions,
             &mut placed_leaf,
         );
     }
+    FOLIAGE_POS.set(foliage_positions);
 
     if !placed_log && !placed_leaf {
         TRUNKS.set(trunk_positions);
@@ -372,7 +590,7 @@ pub(super) fn place_tree<R: RandomSource>(
     for decorator in &cfg.decorators {
         match decorator {
             Decorator::Beehive { probability } => {
-                place_beehive_decorator(random, *probability, origin, tree_height, grid, tags);
+                place_beehive_decorator(random, *probability, trunk_origin, tree_height, grid, tags);
             }
             Decorator::TrunkVine => {
                 place_trunk_vine_decorator(random, &trunk_positions, grid, tags);
@@ -397,10 +615,15 @@ pub(super) fn place_tree<R: RandomSource>(
     // `update_leaf_distances`'s own doc comment. Draws no RNG (a pure grid
     // post-process), so it is safe to run unconditionally here regardless
     // of which branch above produced `trunk_positions`. The bbox is exactly
-    // `BoundingBox.encapsulatingPositions(trunks ∪ foliage ∪ decorations)`
-    // (no `rootPositions` — no root placer implemented) — every absolute
-    // position this ONE tree call wrote, from `dirty_start` (captured right
-    // before trunk placement began) to now (right after decorators ran).
+    // `BoundingBox.encapsulatingPositions(roots ∪ trunks ∪ foliage ∪
+    // decorations)` — every absolute position this ONE tree call wrote, from
+    // `dirty_start` (captured right before root placement began) to now
+    // (right after decorators ran). Root positions are not part of
+    // `update_leaf_distances`'s own BFS seed (only `trunk_positions` is —
+    // matching vanilla, whose `toCheck.get(0)` seeds from `logs` alone, never
+    // `rootPositions`), but they are still part of the bbox this loop derives
+    // from `grid`'s own dirty range, exactly as vanilla's
+    // `BoundingBox.encapsulatingPositions` includes them.
     // `dirty_cell_ids`, not `dirty_cells`: the latter resolves every position's
     // state to a `&'static str` through the interner's read guard, and this loop
     // discards the state entirely — it only wants the coordinates. Unit 8.

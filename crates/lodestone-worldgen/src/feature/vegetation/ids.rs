@@ -123,12 +123,20 @@ pub(super) enum Tag {
     Cactus,
     /// Base `minecraft:sugar_cane` — `SugarCaneBlock.canSurvive`'s own half.
     SugarCane,
+    /// `#minecraft:mangrove_logs_can_grow_through` — issue #428's mangrove
+    /// increment: `UpwardsBranchingTrunkPlacer.validTreePos`'s extra OR-arm
+    /// (a mangrove trunk can grow up through e.g. its own leaves/propagules,
+    /// same shape as [`Tag::Leaves`]'s `isAirOrLeaves` anchor for dark oak).
+    MangroveLogsCanGrowThrough,
+    /// `#minecraft:mangrove_roots_can_grow_through` — `MangroveRootPlacer
+    /// .canPlaceRoot`'s extra OR-arm.
+    MangroveRootsCanGrowThrough,
 }
 
 impl Tag {
     /// Every variant, in declaration order. `TAG_COUNT` and the mask layout are
     /// both derived from this, so it is the single place a new tag registers.
-    pub(super) const ALL: [Tag; 13] = [
+    pub(super) const ALL: [Tag; 15] = [
         Tag::CannotReplaceBelowTreeTrunk,
         Tag::SupportsVegetation,
         Tag::ReplaceableByTrees,
@@ -142,6 +150,8 @@ impl Tag {
         Tag::Lava,
         Tag::Cactus,
         Tag::SugarCane,
+        Tag::MangroveLogsCanGrowThrough,
+        Tag::MangroveRootsCanGrowThrough,
     ];
 
     const fn slot(self) -> usize {
@@ -359,6 +369,8 @@ impl VegTags {
             Tag::Lava => base == "minecraft:lava",
             Tag::Cactus => base == "minecraft:cactus",
             Tag::SugarCane => base == "minecraft:sugar_cane",
+            Tag::MangroveLogsCanGrowThrough => self.mangrove_logs_can_grow_through.contains(base),
+            Tag::MangroveRootsCanGrowThrough => self.mangrove_roots_can_grow_through.contains(base),
         }
     }
 
@@ -558,7 +570,7 @@ mod tests {
     /// order and complete.
     #[test]
     fn tag_all_is_complete_and_in_discriminant_order() {
-        assert_eq!(TAG_COUNT, 13, "TAG_COUNT is derived from Tag::ALL");
+        assert_eq!(TAG_COUNT, 15, "TAG_COUNT is derived from Tag::ALL");
         for (i, tag) in Tag::ALL.iter().enumerate() {
             assert_eq!(
                 tag.slot(),
