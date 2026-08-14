@@ -1,4 +1,4 @@
-//! Issue #107 — cross-plugin custom event messages.
+//! Cross-plugin custom event messages.
 //!
 //! # What it is
 //!

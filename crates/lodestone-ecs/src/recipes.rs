@@ -1,4 +1,4 @@
-//! Runtime recipe registration for plugins — issue #148, the `Bukkit.addRecipe`
+//! Runtime recipe registration for plugins — the `Bukkit.addRecipe`
 //! analogue.
 //!
 //! # What this is
@@ -25,7 +25,7 @@
 //! gets the same result either way, and the shell needs no knowledge of which
 //! plugins exist.
 //!
-//! This matches issue #148's own scoping — "*during setup, before any session
+//! This matches the intended scoping — "*during setup, before any session
 //! starts*" — while still supporting the live case, because `adopt_corpus` is not
 //! a one-shot: [`RecipeRegistry::register`] applies straight to the book once one
 //! has been adopted, and bumps [`RecipeRegistry::revision`] so a cached reader
@@ -258,8 +258,8 @@ impl Plugin for RecipeRegistryPlugin {
 /// `App`-level recipe registration, so a plugin's `build` reads as one call
 /// rather than four lines of resource plumbing.
 ///
-/// The shape mirrors `Bukkit.addRecipe` deliberately (issue #77's portability
-/// goal): a plugin author coming from Paper looks for a one-call registration on
+/// The shape mirrors `Bukkit.addRecipe` deliberately, for portability:
+/// a plugin author coming from Paper looks for a one-call registration on
 /// the server handle, and `App` is this framework's server handle.
 pub trait RecipeRegistryExt {
     /// Registers a recipe, installing [`RecipeRegistry`] first if absent.

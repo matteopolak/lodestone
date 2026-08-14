@@ -1,8 +1,8 @@
-//! Issue #301 — typed, per-channel `custom_payload` delivery to a plugin.
+//! Typed, per-channel `custom_payload` delivery to a plugin.
 //!
 //! # What it is
 //!
-//! The dispatch layer issue #301 asks for, at the one layer where a *plugin*
+//! The dispatch layer this module provides, at the one layer where a *plugin*
 //! can actually be the consumer: a plugin declares a channel with
 //! [`PluginChannel`] (inbound) or [`OutboundPluginChannel`] (outbound), calls
 //! [`PluginChannelAppExt::add_plugin_channel`] /
@@ -14,7 +14,7 @@
 //!
 //! # Why this exists when `ChannelRegistry` already does
 //!
-//! `lodestone_client::ChannelRegistry` (the same issue) is a **passive fold a
+//! `lodestone_client::ChannelRegistry` (the same underlying need) is a **passive fold a
 //! caller drives by hand**, and its module doc is explicit that this is
 //! deliberate: `lodestone_model::event::route` sends `CustomPayload` to
 //! `Route::NOWHERE`, so a registry wired into `Driver` would have nowhere to be
@@ -22,7 +22,7 @@
 //! nothing in this module touches `route`, `Driver`, or the ingest/session/shell
 //! pipeline.
 //!
-//! But it leaves the plugin case unserved, and that is the half of #301 that was
+//! But it leaves the plugin case unserved, and that is the half that was
 //! an island. A plugin is an `impl bevy_app::Plugin` inside the `App`; it does
 //! not own the driver's event stream and has no call site from which to drive a
 //! caller-held `ChannelRegistry`. So `ChannelRegistry` is reachable only by an

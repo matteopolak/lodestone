@@ -6,11 +6,11 @@
 //!
 //! Every citation below is `.cache/mc/26.2/src/net/minecraft/…`.
 //!
-//! `Entity.rideTick()` (`world/entity/Entity.java:2385-2391`) zeroes the
+//! `Entity.rideTick()` zeroes the
 //! passenger's velocity and then hands positioning to the **vehicle**:
 //!
 //! ```text
-//! Entity.positionRider(passenger, moveFunction)          // Entity.java:2399-2403
+//! Entity.positionRider(passenger, moveFunction)
 //!   position = this.getPassengerRidingPosition(passenger)
 //!   offset   = passenger.getVehicleAttachmentPoint(this)
 //!   passenger.setPos(position - offset)
@@ -26,34 +26,34 @@
 //! ```
 //!
 //! * `getPassengerRidingPosition` = `position() + getPassengerAttachmentPoint(...)`
-//!   (`Entity.java:2412-2414`; `LivingEntity.java:3981-3982` overrides it only to
+//!   (`LivingEntity.getPassengerRidingPosition` overrides it only to
 //!   pass pose dimensions and a scale).
 //! * `getPassengerAttachmentPoint` →
 //!   `attachments.getClamped(EntityAttachment.PASSENGER, index, vehicle.yRot)`
-//!   (`Entity.java:2416-2423`), where `index` is
+//!   (`Entity.getDefaultPassengerAttachmentPoint`), where `index` is
 //!   `vehicle.getPassengers().indexOf(passenger)`.
 //! * `getVehicleAttachmentPoint` = `attachments.get(VEHICLE, 0, this.yRot)`
-//!   (`Entity.java:2408-2410`) — always index `0`, and rotated by the
+//!   (`Entity.getVehicleAttachmentPoint`) — always index `0`, and rotated by the
 //!   **passenger's** own yaw.
 //! * the rotation is `point.yRot(-rotY * π/180)`
-//!   (`EntityAttachments.java:78-80`), i.e. `Vec3.yRot`
-//!   (`world/phys/Vec3.java:241-248`): `x' = x·cos + z·sin`, `z' = z·cos − x·sin`.
+//!   (`EntityAttachments.transformPoint`), i.e. `Vec3.yRot`:
+//!   `x' = x·cos + z·sin`, `z' = z·cos − x·sin`.
 //!
 //! # Two constants that are easy to get wrong, and were checked
 //!
 //! * **The `PASSENGER` fallback is `(0, height, 0)` — `height × 1.0`, the *top* of
-//!   the vehicle's box.** `EntityAttachment.java:7` declares
-//!   `PASSENGER(Fallback.AT_HEIGHT)` and `EntityAttachment.java:25` is
+//!   the vehicle's box.** `EntityAttachment` declares
+//!   `PASSENGER(Fallback.AT_HEIGHT)` and its
 //!   `AT_HEIGHT = (width, height) -> List.of(new Vec3(0.0, height, 0.0))`. The
 //!   tempting `height × 0.85` is a *different* quantity —
-//!   `EntityDimensions.defaultEyeHeight` (`EntityDimensions.java:11-13`) — and
+//!   `EntityDimensions.defaultEyeHeight` — and
 //!   using it here would sink every unlisted mount by 15% of its height.
 //! * **The player's `VEHICLE` attachment is not zero.** `VEHICLE`'s fallback *is*
-//!   `AT_FEET = Vec3.ZERO` (`EntityAttachment.java:8`, `:24`), but the player
+//!   `AT_FEET = Vec3.ZERO`, but the player
 //!   declares one explicitly: `Avatar.DEFAULT_VEHICLE_ATTACHMENT =
-//!   new Vec3(0.0, 0.6, 0.0)` (`world/entity/Avatar.java:17`), wired in at
-//!   `EntityTypes.java:1143` and baked into `Avatar.STANDING_DIMENSIONS`
-//!   (`Avatar.java:21-23`). It is **subtracted**, so it lowers the player 0.6
+//!   new Vec3(0.0, 0.6, 0.0)`, wired in at
+//!   `EntityTypes.PLAYER` and baked into `Avatar.STANDING_DIMENSIONS`.
+//!   It is **subtracted**, so it lowers the player 0.6
 //!   below the seat point. Dropping it would float the rider 0.6 blocks above
 //!   every saddle — the single largest error available in this function.
 //!
@@ -79,33 +79,32 @@
 //! Each of these is a *per-instance animation* on top of the static point, not a
 //! different rule, and each needs state this crate does not hold:
 //!
-//! * `AbstractHorse.java:1041-1044` adds
+//! * `AbstractHorse.getPassengerAttachmentPoint` adds
 //!   `(0, 0.15·standAnim, −0.7·standAnim)` while the horse rears — `standAnimO`
 //!   is a client-side animation clock with no wire field.
-//! * `Strider.java:190-200` adds `0.12·cos(walkPos·1.5)·2·min(0.25, walkSpeed)`
+//! * `Strider.getPassengerAttachmentPoint` adds `0.12·cos(walkPos·1.5)·2·min(0.25, walkSpeed)`
 //!   — the walk-animation bob, which is *explicitly* client-cosmetic (the server
-//!   returns plain `super` at `:191-193`).
-//! * `Camel.java:495-512` replaces the point entirely with a sit/stand
+//!   returns plain `super`).
+//! * `Camel.getPassengerAttachmentPoint` replaces the point entirely with a sit/stand
 //!   interpolation (`SITTING_HEIGHT_DIFFERENCE = 1.43`, 40-tick sit / 52-tick
 //!   stand). A camel therefore uses its `AT_HEIGHT` fallback here, which is its
 //!   standing seat to within the sit animation's range.
-//! * `AbstractMinecart.java:178-182` lowers the point to `ZERO` for villagers and
+//! * `AbstractMinecart.getPassengerAttachmentPoint` lowers the point to `ZERO` for villagers and
 //!   wandering traders only — never for a player.
-//! * the second boat seat's `Animal` nudge (`AbstractBoat.java:146-148`).
+//! * the second boat seat's `Animal` nudge (`AbstractBoat.getPassengerAttachmentPoint`).
 
 use lodestone_physics::Vec3d;
 
-/// Vanilla's `EntityAttachment.Fallback.AT_HEIGHT` factor
-/// (`EntityAttachment.java:25`): the default `PASSENGER` point sits at the
+/// Vanilla's `EntityAttachment.Fallback.AT_HEIGHT` factor:
+/// the default `PASSENGER` point sits at the
 /// **full** height of the vehicle's box.
 ///
 /// Named rather than inlined because the plausible-but-wrong neighbour —
-/// `EntityDimensions.defaultEyeHeight`'s `0.85`
-/// (`EntityDimensions.java:11-13`) — is a real constant in the same file family,
+/// `EntityDimensions.defaultEyeHeight`'s `0.85` — is a real constant in the same file family,
 /// and the two are indistinguishable at a glance in a call site.
 pub const PASSENGER_HEIGHT_FACTOR: f64 = 1.0;
 
-/// `Avatar.DEFAULT_VEHICLE_ATTACHMENT.y` (`Avatar.java:17`), the player's own
+/// `Avatar.DEFAULT_VEHICLE_ATTACHMENT.y`, the player's own
 /// `VEHICLE` attachment, **subtracted** from the vehicle's seat point.
 pub const PLAYER_VEHICLE_ATTACHMENT_Y: f64 = 0.6;
 
@@ -123,14 +122,14 @@ pub const PLAYER_VEHICLE_ATTACHMENT_Y: f64 = 0.6;
 /// `seat_index` is the passenger's position in the vehicle's
 /// [`Passengers`](crate::entity::Passengers) list. Out-of-range **clamps to the
 /// last seat** rather than failing, which is vanilla's own
-/// `EntityAttachments.getClamped` (`EntityAttachments.java:68-76`,
-/// `Mth.clamp(index, 0, size - 1)`) — a third rider on a two-seat vehicle
+/// `EntityAttachments.getClamped`
+/// (`Mth.clamp(index, 0, size - 1)`) — a third rider on a two-seat vehicle
 /// silently shares the last seat there too, and `getClamped` is what the
 /// passenger path calls (the throwing `get`/`getNullable` are used elsewhere).
 ///
 /// # The boat family bypasses the attachment table entirely
 ///
-/// `AbstractBoat.getPassengerAttachmentPoint` (`AbstractBoat.java:135-152`) never
+/// `AbstractBoat.getPassengerAttachmentPoint` never
 /// consults `dimensions.attachments()`; it builds the point from an abstract
 /// `rideHeight(dimensions)` and a **Z** (forward/back) offset:
 ///
@@ -141,9 +140,9 @@ pub const PLAYER_VEHICLE_ATTACHMENT_Y: f64 = 0.6;
 /// ```
 ///
 /// `rideHeight` is `height / 3.0` for boats and chest boats
-/// (`Boat.java:15-17`, `ChestBoat.java:15-17`) and `height × 0.8888889` for rafts
-/// and chest rafts (`Raft.java:15-17`, `ChestRaft.java:15-17`). At the shared
-/// `sized(1.375, 0.5625)` (`EntityTypes.java:149-156`) that is `0.1875` and
+/// (`Boat.rideHeight`, `ChestBoat.rideHeight` repeats it) and `height × 0.8888889` for rafts
+/// and chest rafts (`Raft.rideHeight`, `ChestRaft.rideHeight` repeats it). At the shared
+/// `sized(1.375, 0.5625)` (a boat's `EntityTypes` declaration) that is `0.1875` and
 /// `0.5` respectively — so a raft seat is nearly three times higher than a
 /// boat's, and reading one rule for both is a visible error.
 ///
@@ -156,22 +155,22 @@ pub fn passenger_attachment_local(entity_type_path: &str, height: f32, seat_inde
     // The boat family, in `path()` form. `is_raft` before `is_boat` would be
     // wrong the other way round, so both are matched by suffix on the *whole*
     // path: every wood variant is `<wood>_boat` / `<wood>_raft` /
-    // `<wood>_chest_boat` / `<wood>_chest_raft` (`EntityTypes.java:149-207`).
+    // `<wood>_chest_boat` / `<wood>_chest_raft` (`EntityTypes`'s boat block).
     let raft = entity_type_path.ends_with("raft");
     let boat = raft || entity_type_path.ends_with("boat");
     if boat {
         let ride_height = if raft {
-            // `Raft.java:16` — a `float` literal in vanilla, widened here.
+            // `Raft.rideHeight` — a `float` literal in vanilla, widened here.
             height * f64::from(0.888_888_9_f32)
         } else {
-            // `Boat.java:16` — `dimensions.height() / 3.0F`.
+            // `Boat.rideHeight` — `dimensions.height() / 3.0F`.
             height / 3.0
         };
         let chest = entity_type_path.contains("chest_");
         let z = if seat_index == 0 {
             // One-passenger case and the front seat of a two-passenger boat
-            // differ: `AbstractChestBoat.java:43-45` returns `0.15` where
-            // `AbstractBoat.java:612-614` returns `0.0`, but a *shared* boat
+            // differ: `AbstractChestBoat.getSinglePassengerXOffset` returns `0.15` where
+            // `AbstractBoat.getSinglePassengerXOffset` returns `0.0`, but a *shared* boat
             // overrides both with `0.2` for index 0. We do not know the other
             // seats' occupancy here — the caller does, through `Passengers` —
             // and passing that in for a difference of 0.05 blocks is not worth
@@ -179,7 +178,7 @@ pub fn passenger_attachment_local(entity_type_path: &str, height: f32, seat_inde
             // rather than hidden.
             if chest { 0.15 } else { 0.0 }
         } else {
-            // `AbstractBoat.java:143` — every seat past the first.
+            // `AbstractBoat.getPassengerAttachmentPoint` — every seat past the first.
             -0.6
         };
         return Vec3d::new(0.0, ride_height, z);
@@ -192,7 +191,7 @@ pub fn passenger_attachment_local(entity_type_path: &str, height: f32, seat_inde
 }
 
 /// The explicitly-declared `PASSENGER` points for the types a **player** can
-/// ride, each with its `EntityTypes.java` line.
+/// ride, each verified against its `EntityTypes` declaration.
 ///
 /// `None` means "this type declares none here", which the caller turns into
 /// vanilla's `AT_HEIGHT` fallback — the same answer vanilla gives for a type that
@@ -202,13 +201,13 @@ pub fn passenger_attachment_local(entity_type_path: &str, height: f32, seat_inde
 /// instead of here.
 fn declared_passenger_attachment(entity_type_path: &str, seat_index: usize) -> Option<Vec3d> {
     // Every value below is `passengerAttachments(y)`, i.e. `(0, y, 0)` —
-    // `EntityType.Builder.passengerAttachments(float...)`, `EntityType.java:516-521`.
+    // `EntityType.Builder.passengerAttachments(float...)`.
     let y = match entity_type_path {
-        // `EntityTypes.java:665-668`, shared by every minecart variant: chest,
+        // Shared by every minecart variant: chest,
         // furnace, hopper, tnt, spawner and command-block minecarts all repeat
         // `.sized(0.98F, 0.7F).passengerAttachments(0.1875F)` verbatim
-        // (`:284-287`, `:468-471`, `:525-528`, `:964-967`, `:889-892`,
-        // `:302-305`), so one arm covers the family. Note it is far *below* the
+        // in their own `EntityTypes` declarations, so one arm covers the
+        // family. Note it is far *below* the
         // `0.7` box top the fallback would give — a minecart seat is inside the
         // cart, not on its roof.
         "minecart"
@@ -218,17 +217,17 @@ fn declared_passenger_attachment(entity_type_path: &str, seat_index: usize) -> O
         | "tnt_minecart"
         | "spawner_minecart"
         | "command_block_minecart" => 0.1875,
-        // `EntityTypes.java:531`.
+        // `EntityTypes.HORSE`.
         "horse" => 1.443_75,
-        // `EntityTypes.java:338`.
+        // `EntityTypes.DONKEY`.
         "donkey" => 1.112_5,
-        // `EntityTypes.java:675`.
+        // `EntityTypes.MULE`.
         "mule" => 1.212_5,
-        // `EntityTypes.java:852` and `:1104` — the same value, declared twice.
+        // `EntityTypes.SKELETON_HORSE` and `EntityTypes.ZOMBIE_HORSE` — the same value, declared twice.
         "skeleton_horse" | "zombie_horse" => 1.318_75,
-        // `EntityTypes.java:754`.
+        // `EntityTypes.PIG`.
         "pig" => 0.868_75,
-        // `EntityTypes.java:620` and `:973` — the only rideable-adjacent entry
+        // `EntityTypes.LLAMA` and `EntityTypes.TRADER_LLAMA` — the only rideable-adjacent entry
         // with a non-zero Z, so it cannot use the `y`-only tail below. A llama
         // is not player-rideable, but a *caravan* makes it a vehicle and the
         // point is cheap to state correctly while the citation is open.
@@ -243,8 +242,8 @@ fn declared_passenger_attachment(entity_type_path: &str, seat_index: usize) -> O
 }
 
 /// Rotate a vehicle-local attachment point into world space —
-/// `EntityAttachments.transformPoint` (`EntityAttachments.java:78-80`) composed
-/// with `Vec3.yRot` (`world/phys/Vec3.java:241-248`).
+/// `EntityAttachments.transformPoint` composed
+/// with `Vec3.yRot`.
 ///
 /// The angle is **negated** degrees-to-radians, and the sign matters: getting it
 /// backwards mirrors a boat's seat from the bow to the stern, which reads as a
@@ -270,7 +269,7 @@ pub fn rotate_attachment(point: Vec3d, yaw_degrees: f32) -> Vec3d {
 
 /// Where the **local player**'s feet go while riding `entity_type_path` at
 /// `vehicle_feet` — the whole of `Entity.positionRider`
-/// (`Entity.java:2399-2403`) for the one passenger this client controls.
+/// for the one passenger this client controls.
 ///
 /// ```text
 /// vehicle_feet + rotate(passenger_attachment, vehicle_yaw) - (0, 0.6, 0)
@@ -281,13 +280,12 @@ pub fn rotate_attachment(point: Vec3d, yaw_degrees: f32) -> Vec3d {
 /// yaw, which is a no-op for a `y`-only point, so no player yaw is taken here —
 /// stated so the missing parameter reads as a derivation rather than an omission.
 ///
-/// The camera needs nothing further: 26.2's `Camera.alignWithEntity`
-/// (`client-src/net/minecraft/client/Camera.java:246-264`) has **no
+/// The camera needs nothing further: 26.2's `Camera.alignWithEntity` has **no
 /// `isPassenger()` branch** except one for lerped new-behaviour minecarts, and
 /// riding does not change the player's pose or eye height — `Player.updatePlayerPose`
-/// (`world/entity/player/Player.java:343-357`) has no riding case and there is no
-/// `SITTING` pose, so a mounted player keeps `Avatar.DEFAULT_EYE_HEIGHT = 1.62`
-/// (`Avatar.java:16`). Moving the feet here therefore moves the eye, and that is
+/// has no riding case and there is no
+/// `SITTING` pose, so a mounted player keeps `Avatar.DEFAULT_EYE_HEIGHT = 1.62`.
+/// Moving the feet here therefore moves the eye, and that is
 /// the entire camera-on-the-vehicle mechanism.
 #[must_use]
 pub fn player_seat_position(
@@ -317,7 +315,7 @@ mod tests {
     /// this guards is exactly a plausible-but-wrong seat height.
     #[test]
     fn a_minecart_seats_the_player_below_its_own_roof() {
-        // `EntityTypes.java:667`: minecart is `sized(0.98F, 0.7F)` with
+        // `EntityTypes.MINECART`: minecart is `sized(0.98F, 0.7F)` with
         // `passengerAttachments(0.1875F)`. Seat = 0.1875, minus the player's own
         // 0.6 vehicle attachment.
         let seat = player_seat_position(Vec3d::new(0.0, 64.0, 0.0), 0.0, "minecart", 0.7, 0);
@@ -343,9 +341,9 @@ mod tests {
     /// available here, so it gets its own assertion in both directions.
     #[test]
     fn the_players_vehicle_attachment_lowers_the_seat_by_six_tenths() {
-        // `Avatar.java:17`: `DEFAULT_VEHICLE_ATTACHMENT = new Vec3(0.0, 0.6, 0.0)`.
+        // `Avatar.DEFAULT_VEHICLE_ATTACHMENT = new Vec3(0.0, 0.6, 0.0)`.
         let with = player_seat_position(Vec3d::new(0.0, 0.0, 0.0), 0.0, "pig", 0.9, 0);
-        // `EntityTypes.java:754`: pig declares `passengerAttachments(0.86875F)`.
+        // `EntityTypes.PIG`: pig declares `passengerAttachments(0.86875F)`.
         assert!((with.y - (0.868_75 - 0.6)).abs() < 1e-9, "pig seat {}", with.y);
         assert!(
             with.y < 0.868_75,
@@ -358,21 +356,21 @@ mod tests {
     /// box, so reading one rule for both is visible.
     #[test]
     fn a_raft_seats_higher_than_a_boat_of_the_same_box() {
-        const BOAT_HEIGHT: f32 = 0.5625; // `EntityTypes.java:151`
+        const BOAT_HEIGHT: f32 = 0.5625; // `EntityTypes`'s boat block, `sized(1.375F, 0.5625F)`
         let boat = passenger_attachment_local("oak_boat", BOAT_HEIGHT, 0);
         let raft = passenger_attachment_local("bamboo_raft", BOAT_HEIGHT, 0);
-        // `Boat.java:16` / `Raft.java:16`, evaluated by hand:
+        // `Boat.rideHeight` / `Raft.rideHeight`, evaluated by hand:
         // 0.5625 / 3 = 0.1875; 0.5625 * 0.8888889 = 0.5.
         assert!((boat.y - 0.1875).abs() < 1e-6, "boat ride height {}", boat.y);
         assert!((raft.y - 0.5).abs() < 1e-6, "raft ride height {}", raft.y);
         // A chest boat keeps the boat ride height but shifts Z.
         let chest = passenger_attachment_local("oak_chest_boat", BOAT_HEIGHT, 0);
         assert!((chest.y - 0.1875).abs() < 1e-6);
-        // `AbstractChestBoat.java:44`.
+        // `AbstractChestBoat.getSinglePassengerXOffset`.
         assert!((chest.z - 0.15).abs() < 1e-6, "chest boat z {}", chest.z);
-        // `AbstractBoat.java:613` — a plain boat's single-passenger Z is zero.
+        // `AbstractBoat.getSinglePassengerXOffset` — a plain boat's single-passenger Z is zero.
         assert!(boat.z.abs() < 1e-9, "plain boat z {}", boat.z);
-        // `AbstractBoat.java:143` — the second seat sits behind the first.
+        // `AbstractBoat.getPassengerAttachmentPoint` — the second seat sits behind the first.
         let second_seat = passenger_attachment_local("oak_boat", BOAT_HEIGHT, 1);
         assert!(
             (second_seat.z + 0.6).abs() < 1e-6,
@@ -420,7 +418,7 @@ mod tests {
     /// — a zero would put the rider's feet 0.6 blocks *inside* the mount.
     #[test]
     fn an_undeclared_type_uses_vanillas_at_height_fallback() {
-        // `EntityTypes.java:941`: strider is `sized(0.9F, 1.7F)` and declares no
+        // `EntityTypes.STRIDER`: strider is `sized(0.9F, 1.7F)` and declares no
         // `passengerAttachments`, so vanilla itself uses `(0, 1.7, 0)`.
         let local = passenger_attachment_local("strider", 1.7, 0);
         // Tolerance is f32-sized, not f64-sized, and that is not slack: the height
@@ -444,7 +442,7 @@ mod tests {
     }
 
     /// A seat index past the end clamps rather than panicking or wrapping —
-    /// `EntityAttachments.getClamped` (`EntityAttachments.java:74`).
+    /// `EntityAttachments.getClamped`.
     #[test]
     fn an_out_of_range_seat_index_clamps() {
         let first = passenger_attachment_local("horse", 1.6, 0);
