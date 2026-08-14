@@ -60,6 +60,106 @@ use super::{
 /// (binary search over the generated registry) rather than
 /// `entity_type_id_parts`'s linear `strip_prefix` scan — called once per
 /// on-fire entity per frame, so the scan cost was real (issue #523).
+/// Issue #573: `AvatarRenderer.setupRotations`'s swim branch — vanilla's own
+/// player-only body-pitch rotation toward horizontal as `swim_amount` ramps
+/// `0..1`, applied as an extra whole-body rotation on top of whatever
+/// [`lodestone_render::dying_entity_model_matrix`] already placed. A no-op
+/// when `swim_amount <= 0.0`, which is every non-swimming entity, every
+/// frame.
+///
+/// # Player only, not every `LivingEntity`
+///
+/// Vanilla's base `LivingEntityRenderer.setupRotations` has **no** swim
+/// branch at all; only `AvatarRenderer` (the player) and `DrownedRenderer`
+/// override it, and they use two different formulas — a plain rotation about
+/// the origin for the player, a `rotateAround` the vertical centre for a
+/// drowned zombie. Porting one formula to every `LivingEntity` would be
+/// wrong for the entities that report `Pose.SWIMMING` and are not a player.
+/// `EntityDraw::swim_amount` is populated for every entity kind (see
+/// `crate::entities::SwimRamp`), so the type gate lives at the call site in
+/// [`RenderState::prepare_entities`], not in here.
+///
+/// # Composed by conjugation, not by re-deriving the placement
+///
+/// `instance.transform`/`part_transforms`/`hand_transforms` already equal
+/// `A * flip_scale * lift` for `A = T(feet) · Ry(180 − yaw) · Rz(fall_over)`
+/// — `dying_entity_model_matrix`'s own documented decomposition, bit for
+/// bit. Vanilla inserts the swim rotation exactly between the yaw/fall-over
+/// term and the Y-down flip (`AvatarRenderer.setupRotations` calls
+/// `super.setupRotations` — which applies the `Ry`/`Rz` terms — and *then*
+/// `mulPose(Axis.XP.rotationDegrees(xAngle))`, before `render`'s
+/// `poseStack.scale(-1, -1, 1)`), so left-multiplying every already-baked
+/// matrix by `A · Rx(xAngle) · A⁻¹` reproduces `A · Rx(xAngle) · flip_scale
+/// · lift` exactly, without decomposing the baked matrices back into their
+/// factors. `A` is rebuilt here from the same `feet`/`yaw`/`death_time`
+/// inputs the resolver was called with, so it is bit-identical to the `A`
+/// already folded into `instance`.
+///
+/// # Two vanilla pieces not ported, both because the input is not available
+/// at this call site
+///
+/// * `AvatarRenderer.setupRotations`'s `targetXRot` is `isInWater ? -90 −
+///   xRot : -90`; this always takes the water branch. `PlayerState::swimming`
+///   (the producer behind the ramp) requires `FluidState::in_water`/
+///   `under_water` to ever become true, so for the overwhelming majority of
+///   a nonzero `swim_amount` the player genuinely is submerged — the gap is
+///   only the tail of the ramp decaying back to `0.0` after leaving the
+///   water, which `RenderState::prepare_entities` has no fluid query to
+///   detect.
+/// * `isVisuallySwimming`'s extra `translate(0, -1, 0.3)` (the crawling
+///   nudge) is not ported — same reason, no fluid/on-ground state reaches
+///   this call site today.
+fn apply_swim_rotation(
+    instance: &mut lodestone_render::EntityInstance,
+    feet: glam::Vec3,
+    yaw_deg: f32,
+    death_time: f32,
+    pitch_deg: f32,
+    swim_amount: f32,
+) {
+    if swim_amount <= 0.0 {
+        return;
+    }
+    let fall_over_deg = lodestone_render::entity_anim::death_fall_over_degrees(death_time);
+    let a = glam::Mat4::from_translation(feet)
+        * glam::Mat4::from_rotation_y((180.0 - yaw_deg).to_radians())
+        * glam::Mat4::from_rotation_z(fall_over_deg.to_radians());
+    // `AvatarRenderer.setupRotations`: `Mth.lerp(swimAmount, 0.0F, -90.0F - xRot)`.
+    let x_angle_deg = swim_amount * (-90.0 - pitch_deg);
+    let rx = glam::Mat4::from_rotation_x(x_angle_deg.to_radians());
+    let extra = a * rx * a.inverse();
+
+    instance.transform = extra * instance.transform;
+    for part in &mut instance.part_transforms {
+        *part = extra * *part;
+    }
+    for hand in &mut instance.hand_transforms {
+        if let Some(h) = hand {
+            *h = extra * *h;
+        }
+    }
+    // Conservative AABB recompute: the rotation is about `feet`, so the new
+    // extent is bounded by a sphere of the old maximum corner distance from
+    // `feet` — cheaper than re-deriving true per-corner bounds, and it can
+    // only widen the box, never wrongly cull something a tighter box would
+    // have kept on screen.
+    let radius = [
+        glam::Vec3::new(instance.aabb_min.x, instance.aabb_min.y, instance.aabb_min.z),
+        glam::Vec3::new(instance.aabb_min.x, instance.aabb_min.y, instance.aabb_max.z),
+        glam::Vec3::new(instance.aabb_min.x, instance.aabb_max.y, instance.aabb_min.z),
+        glam::Vec3::new(instance.aabb_min.x, instance.aabb_max.y, instance.aabb_max.z),
+        glam::Vec3::new(instance.aabb_max.x, instance.aabb_min.y, instance.aabb_min.z),
+        glam::Vec3::new(instance.aabb_max.x, instance.aabb_min.y, instance.aabb_max.z),
+        glam::Vec3::new(instance.aabb_max.x, instance.aabb_max.y, instance.aabb_min.z),
+        instance.aabb_max,
+    ]
+    .into_iter()
+    .map(|corner| (corner - feet).length())
+    .fold(0.0f32, f32::max);
+    instance.aabb_min = feet - glam::Vec3::splat(radius);
+    instance.aabb_max = feet + glam::Vec3::splat(radius);
+}
+
 fn flame_hitbox_width(type_path: &str, age_scale: f32) -> Option<f32> {
     let entity_type = lodestone_data::entity_type::EntityType::from_name(type_path)?;
     let dims = lodestone_data::entity_dimensions::base_dimensions_for(entity_type);
@@ -443,23 +543,25 @@ impl RenderState {
             // fall-over reach zero pixels while every formula behind them was built
             // and unit-tested; `0.0` is an exact identity for each, so nothing
             // looked wrong anywhere.
-            let Some(instance) = self
-                .entities
-                .models
-                .resolve_animated(
-                    e.model_type_path(),
-                    e.feet,
-                    e.yaw,
-                    e.pitch,
-                    e.scale,
-                    &e.anim,
-                    e.creeper_swelling,
-                    e.death_time,
-                )
-                .map(|i| i.with_light(entity_light(&self.entity_light, e)))
-            else {
+            let Some(mut instance) = self.entities.models.resolve_animated(
+                e.model_type_path(),
+                e.feet,
+                e.yaw,
+                e.pitch,
+                e.scale,
+                &e.anim,
+                e.creeper_swelling,
+                e.death_time,
+            ) else {
                 continue;
             };
+            // Issue #573: the swim body-pitch rotation. Gated on `type_path`,
+            // not on `swim_amount > 0.0` alone — see `apply_swim_rotation`'s
+            // own doc for why only the player is ported.
+            if e.type_path == "player" {
+                apply_swim_rotation(&mut instance, e.feet, e.yaw, e.death_time, e.pitch, e.swim_amount);
+            }
+            let instance = instance.with_light(entity_light(&self.entity_light, e));
             // `CreeperRenderer.getWhiteOverlayProgress` through
             // `OverlayTexture`'s 16-column quantise. Suppressed while `hurt` is on
             // because vanilla's overlay texture puts red and white on **mutually
@@ -1629,6 +1731,7 @@ mod tests {
             hurt: false,
             item_use: None,
             creeper_swelling: 0.0,
+            swim_amount: 0.0,
             death_time: 0.0,
             on_fire,
             player_skin: None,
@@ -1786,6 +1889,77 @@ mod tests {
         assert_eq!(
             entity_light(&source, &subject("zombie", 64.5, 1.0, false)),
             column_light(66)
+        );
+    }
+
+    /// Issue #573's own discriminating assertion: `swim_amount = 0.0` must be
+    /// the exact untouched orientation, `1.0` must rotate the body
+    /// substantially, and `0.5` must sit **strictly between** the two —
+    /// which a boolean/threshold implementation (snapping at some cutoff)
+    /// cannot do, since it can only ever agree with one endpoint or the
+    /// other.
+    #[test]
+    fn swim_rotation_interpolates_and_does_not_snap_at_a_threshold() {
+        let feet = glam::Vec3::new(4.0, 70.0, -2.0);
+        let yaw = 0.0;
+        let pitch = 0.0;
+        let base = lodestone_render::dying_entity_model_matrix(feet, yaw, 1.0, 0.0);
+
+        let orientation_at = |swim_amount: f32| {
+            let mut instance = lodestone_render::EntityInstance {
+                model: "player_wide",
+                transform: base,
+                part_transforms: vec![base],
+                hand_transforms: [None, None],
+                aabb_min: feet,
+                aabb_max: feet + glam::Vec3::ONE,
+                light: 0,
+            };
+            apply_swim_rotation(&mut instance, feet, yaw, 0.0, pitch, swim_amount);
+            (
+                instance.transform.transform_vector3(glam::Vec3::Y),
+                instance.part_transforms[0],
+            )
+        };
+
+        let (at0, part0) = orientation_at(0.0);
+        let (at_half, _) = orientation_at(0.5);
+        let (at1, part1) = orientation_at(1.0);
+
+        // `swim_amount <= 0.0` must be a hard no-op — not "rotate by zero
+        // degrees", which a floating-point conjugation could round away from
+        // bit-identical.
+        assert_eq!(
+            at0,
+            base.transform_vector3(glam::Vec3::Y),
+            "swim_amount=0.0 must leave the transform untouched"
+        );
+
+        let full_swing = (at1 - at0).length();
+        assert!(
+            full_swing > 0.5,
+            "swim_amount=1.0 did not rotate the body toward horizontal at all: \
+             at0={at0}, at1={at1} (delta {full_swing})"
+        );
+
+        // The discriminating input: a boolean implementation puts `at_half`
+        // exactly on one of the two endpoints (`d0` or `d1` would be ~0); a
+        // real linear ramp puts it strictly between both.
+        let d0 = (at_half - at0).length();
+        let d1 = (at_half - at1).length();
+        assert!(
+            d0 > 0.1 && d1 > 0.1,
+            "swim_amount=0.5 must sit strictly between the two endpoints, not \
+             snap to either (d0={d0}, d1={d1}, full_swing={full_swing})"
+        );
+
+        // Every part transform must move with the body, not just the root —
+        // a fix that only rotated `instance.transform` and left
+        // `part_transforms` alone would still make the mob upright and this
+        // catches it.
+        assert_ne!(
+            part0, part1,
+            "part_transforms[0] did not rotate with the body"
         );
     }
 }

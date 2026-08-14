@@ -442,6 +442,9 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         item_use: None,
         // Not a creeper: only a creeper ever swells.
         creeper_swelling: 0.0,
+        // A zombie, not a player — this build's swim rotation only reads this
+        // for `type_path == "player"`.
+        swim_amount: 0.0,
         death_time: 0.0,
         // No flame overlay from this construction site.
         on_fire: false,
