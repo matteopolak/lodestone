@@ -141,10 +141,20 @@ for the species name `"minecart"` (`non_living_vehicle_matrix`, landed
 alongside a broader non-living-entity placement fix) but its
 `model_for_type`/`entity_models()` corpus has no `"minecart"` mesh entry at
 all, so `model_for_type("minecart")` returns `None` and the renderer skips
-the entity outright — the same "reaches the wire, draws zero pixels" gap
-`crate::mobs::tnt`'s own primed-TNT entity has, for the identical reason
-(a per-type render arm in a crate this feature did not own). Adding a
-minecart mesh/rig to the corpus is the remaining link in the chain.
+the entity outright.
+
+This is a different, and narrower, gap than primed TNT's own used to be:
+vanilla's `TntRenderer` draws a primed TNT as a literal block model (a cube
+with a translate/rotate dance for the fuse flash), so
+`lodestone-shell`'s `merge_primed_tnt` (`gpu/moving_blocks.rs`) could pose
+it beside the falling-block path with no baked rig at all — landed, and
+`model_for_type("tnt")` is *still*, correctly, `None`, because that route
+never goes through the corpus. A minecart's own renderer
+(`AbstractMinecartRenderer`) is not a bare block, though — it is a real
+cart-frame mesh, the same shape a boat's hull is — so the fix here is a
+corpus entry (`model_for_type`/`non_living_vehicle_matrix`'s counterpart
+for boats), not a `merge_primed_tnt`-style shortcut. Neither exists yet for
+a minecart, which is why it still draws zero pixels.
 
 ## Configuration
 
