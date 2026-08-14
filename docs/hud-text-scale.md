@@ -14,12 +14,12 @@ All three live in `Hud.java` (`.cache/mc/26.2/client-src/net/minecraft/client/gu
 
 | surface | method | pose scale | cite |
 |---|---|---|---|
-| title | `extractTitle` | `4.0` | `Hud.java:378` |
-| subtitle | `extractTitle` | `2.0` | `Hud.java:385` |
-| action bar / overlay message | `extractOverlayMessage` | **none → 1.0** | `Hud.java:327-355` |
-| held-item name (reference) | `extractSelectedItemName` | **none → 1.0** | `Hud.java:626-645` |
+| title | `extractTitle` | `4.0` | `Hud.java` |
+| subtitle | `extractTitle` | `2.0` | `Hud.java` |
+| action bar / overlay message | `extractOverlayMessage` | **none → 1.0** | `Hud.java` |
+| held-item name (reference) | `extractSelectedItemName` | **none → 1.0** | `Hud.java` |
 
-Position comes from the same pose. `extractTitle` translates once to the screen centre (`Hud.java:376`) and then draws each string at an offset **inside** its own scale, so the offsets multiply out:
+Position comes from the same pose. `extractTitle` translates once to the screen centre (`Hud.java`) and then draws each string at an offset **inside** its own scale, so the offsets multiply out:
 
 ```
 title    top y = h/2 + (-10 * 4.0) = h/2 - 40     (Hud.java:376, 378, 381)
@@ -33,16 +33,16 @@ Note the horizontal centring is *not* a bug in vanilla despite looking like one:
 
 Two independent scale factors are in play in `HudGeometry::build_inner`, and they multiply:
 
-1. `crates/lodestone-shell/src/hud.rs:748` — `logical_canvas(gui_scale, width, height)` divides the **physical** framebuffer down by the resolved GUI scale (`menu/render/measure.rs`, `logical_canvas`). Every pixel constant below it is therefore already laid into vanilla's own GUI pixel unit. This is correct and is the fix for "the HUD draws half-size on Retina".
-2. `crates/lodestone-shell/src/hud.rs:751` — `let scale = 2.0;`, a fixed "legibility factor" applied on top.
+1. `HudGeometry::build_inner`'s call to `logical_canvas(gui_scale, width, height)` divides the **physical** framebuffer down by the resolved GUI scale (`menu/render/measure.rs`, `logical_canvas`). Every pixel constant below it is therefore already laid into vanilla's own GUI pixel unit. This is correct and is the fix for "the HUD draws half-size on Retina".
+2. `HUD_TEXT_SCALE` (`crates/lodestone-shell/src/hud.rs`) — a fixed "legibility factor" of `2.0` applied on top.
 
 The three draw sites then multiply vanilla's factor by that `scale`:
 
 | surface | site | ours | vanilla | ratio |
 |---|---|---|---|---|
-| action bar | `hud.rs:1098-1106` | `scale` = 2.0 | 1.0 | **2×** |
-| title | `hud.rs:1133-1136` | `scale * 4.0` = 8.0 | 4.0 | **2×** |
-| subtitle | `hud.rs:1138-1146` | `scale * 2.0` = 4.0 | 2.0 | **2×** |
+| action bar | `HudGeometry::build_inner` | `scale` = 2.0 | 1.0 | **2×** |
+| title | `HudGeometry::build_inner` | `scale * 4.0` = 8.0 | 4.0 | **2×** |
+| subtitle | `HudGeometry::build_inner` | `scale * 2.0` = 4.0 | 2.0 | **2×** |
 
 **The error is a flat 2× at every GUI scale, not a scale-dependent one.** This is worth stating because the obvious hypothesis is the opposite. `logical_canvas` divides by the GUI scale and `scale` is a constant, so the *ratio* to vanilla is scale-invariant; what grows with GUI scale is only the absolute error in physical pixels (2× of a larger number). A bug report of "worse at higher GUI scale" would therefore point somewhere else.
 
@@ -50,8 +50,8 @@ The three draw sites then multiply vanilla's factor by that `scale`:
 
 History, not intent. `let scale = 2.0;` dates to the repo's initial commit (`32fb577`), when the HUD drew a fixed 5×7 procedural font straight into **physical** framebuffer pixels and 2× was a plain legibility multiplier. `logical_canvas` entered `hud.rs` much later (`c5c0b49`, `572e8ec`), dividing the canvas down by the GUI scale — and the 2× was never removed. The same latent double-apply has already been fixed twice at other sites, both by dropping to `1.0`:
 
-* the XP level number (issue #256), whose regression gate at `hud.rs:3999-4009` explicitly asserts `digit_width < font.width("5", 2.0)` with the message *"the old `let scale = 2.0;` bug is back"*;
-* the held-item name (issue #126), at `hud.rs:1117-1127`, whose comment warns the next reader not to reintroduce `scale` there.
+* the XP level number, whose regression gate (`xp_level_number_is_the_right_size_and_the_right_distance_above_the_bar` in `crates/lodestone-shell/src/hud.rs`) explicitly asserts `digit_width < font.width("5", 2.0)` with the message *"the old `let scale = 2.0;` bug is back"*;
+* the held-item name, in `HudGeometry::build_inner` (`crates/lodestone-shell/src/hud.rs`), whose comment warns the next reader not to reintroduce `scale` there.
 
 So this is the third instance of one root cause, and the two earlier fixes are the precedent for the shape of this one.
 
@@ -74,7 +74,7 @@ Every ratio is exactly 2.000. The two hypotheses differ by 1× the reference gly
 
 Three controls pass, and they are what make the numbers mean anything:
 
-* `a_quiet_hud_frame_paints_nothing` — with `show_debug` and `crosshair` off (both default `true`, `hud.rs:484-485`) the buffer is empty, so each measurement really is the surface under test and not something that already paints there.
+* `a_quiet_hud_frame_paints_nothing` — with `show_debug` and `crosshair` off (both default `true` in `HudFrame::new`, `crates/lodestone-shell/src/hud.rs`) the buffer is empty, so each measurement really is the surface under test and not something that already paints there.
 * `a_blank_title_paints_nothing` — a single-space title is inkless, which is what lets the subtitle be isolated (title and subtitle share one `Option` and one draw block).
 * `vertex_layout_is_still_six_floats` — guards the NDC stride the gate inverts.
 
@@ -86,24 +86,24 @@ cargo test -p lodestone-shell --test hud_text_scale -- --ignored --nocapture
 
 ## How to change it
 
-The fix is **not** to change `scale` at `hud.rs:751`. That constant is also the debug overlay's and the chat box's stride, and moving it would change four unrelated surfaces at once. Fix the three sites to use vanilla's absolute factors, exactly as the XP number and held-item name already do.
+The fix is **not** to change `HUD_TEXT_SCALE` (`crates/lodestone-shell/src/hud.rs`). That constant is also the debug overlay's and the chat box's stride, and moving it would change four unrelated surfaces at once. Fix the three sites to use vanilla's absolute factors, exactly as the XP number and held-item name already do.
 
 Gotchas, in order of how easy each is to get wrong:
 
-* **The subtitle's position depends on the title's scale today.** `hud.rs:1142` stacks it at `ty + ts * 9.0`, so correcting `ts` from 8.0 to 4.0 silently *moves* the subtitle. The title block has to be rebuilt on vanilla's own pose translate (`h/2`, then `-10 * 4.0` and `+5 * 2.0`), not patched two constants at a time.
+* **The subtitle's position depends on the title's scale today.** `HudGeometry::build_inner` (`crates/lodestone-shell/src/hud.rs`) stacks it at `ty + ts * 9.0`, so correcting `ts` from 8.0 to 4.0 silently *moves* the subtitle. The title block has to be rebuilt on vanilla's own pose translate (`h/2`, then `-10 * 4.0` and `+5 * 2.0`), not patched two constants at a time.
 * **The action bar's size and position are separable.** Its anchor is `bars_y - line_h - 6.0`, where `line_h` is the debug-font stride and carries no dependency on the action bar's own scale — so changing the scale alone leaves the position untouched. That position is *also* wrong (measured 198 px against vanilla's `h - 72` = 168 px on the procedural, atlas-free path), but it hangs off the vitals cluster's anchor rather than off a constant, so it is a separate change with its own reasoning. Do not fold it in blind.
-* **`line_h` is not vanilla's line height.** It is `(GLYPH_H + 2) * scale` = 18, our 5×7 debug font's analogue; vanilla's is 9 (`ChatComponent.java:151,154`). Out of scope here, but do not treat it as a vanilla constant.
-* **Chat has the same double-apply.** `chat_pose_scale = scale * opts.scale` (`hud.rs:784`) is 2.0 at the default `chatScale` of 1.0, where vanilla's chat pose scale is `chatScale` **alone** (`ChatComponent.java:146` reading `ChatComponent.java:413`). So the chat box is 2× vanilla too. Not part of the reported bug and not covered by the gate above — recorded here so the next reader does not rediscover it.
+* **`line_h` is not vanilla's line height.** It is `(GLYPH_H + 2) * scale` = 18, our 5×7 debug font's analogue; vanilla's is 9 (`ChatComponent.extractRenderState`). Out of scope here, but do not treat it as a vanilla constant.
+* **Chat has the same double-apply.** `chat_pose_scale` (`crates/lodestone-shell/src/hud.rs`) is `scale * opts.scale`, which is 2.0 at the default `chatScale` of 1.0, where vanilla's chat pose scale is `chatScale` **alone** (`ChatComponent.getScale`). So the chat box is 2× vanilla too. Not part of the reported bug and not covered by the gate above — recorded here so the next reader does not rediscover it.
 
 ## Configuration
 
 **Vanilla has no title, subtitle or action-bar size option, and we should not add one.** Verified against the jar rather than from memory:
 
-* Title size is the literal `4.0F` at `Hud.java:378`; subtitle size the literal `2.0F` at `Hud.java:385`; the action bar has no scale call at all (`Hud.java:327-355`). Neither method reads `Options`, and neither do their callees — `getFont()` (`Hud.java:1272-1274`) is a bare field return, and `textWithBackdrop` (`GuiGraphicsExtractor.java:291-299`) touches only `getBackgroundColor`, which is backdrop opacity, not size. The title state itself (`setTitle`/`setSubtitle`/`setTimes`, `Hud.java:1227-1252`; `setOverlayMessage`, `Hud.java:1221`) carries text and timing only, no size field.
+* Title size is the literal `4.0F` in `Hud.extractTitle`; subtitle size the literal `2.0F` in the same method; the action bar has no scale call at all (`Hud.extractOverlayMessage`). Neither method reads `Options`, and neither do their callees — `Hud.getFont` is a bare field return, and `GuiGraphicsExtractor.textWithBackdrop` touches only `getBackgroundColor`, which is backdrop opacity, not size. The title state itself (`Hud.setTitle`/`Hud.setSubtitle`/`Hud.setTimes`; `Hud.setOverlayMessage`) carries text and timing only, no size field.
 * No `titleScale`, `subtitleScale`, `hudScale`, `textScale`, `fontScale` or `actionBarScale` exists anywhere in the client source.
-* No row on any options screen sizes them: `OptionsScreen.java:54` registers only `fov`; `VideoSettingsScreen.java:47-81` registers `guiScale` (`:72`) among quality/display options; `ChatOptionsScreen.java:13-30` registers `chatScale` (`:19`); `AccessibilityOptionsScreen.java:23-46` registers none. `showSubtitles` (`AccessibilityOptionsScreen.java:24`) is the **sound**-caption overlay (`Hud.java:253-259` → `SubtitleOverlay`), not the title-packet subtitle — an easy and costly confusion.
+* No row on any options screen sizes them: `OptionsScreen.init` registers only `fov`; `VideoSettingsScreen.displayOptions` registers `guiScale` among the display options; `ChatOptionsScreen.options` registers `chatScale`; `AccessibilityOptionsScreen.options` registers none. `showSubtitles` (`AccessibilityOptionsScreen.options`) is the **sound**-caption overlay (`Hud.extractSubtitleOverlay` → `SubtitleOverlay`), not the title-packet subtitle — an easy and costly confusion.
 
-So the honest answer to "should these have sizing options?" is: **vanilla scales chat but not titles, and `guiScale` is the only control for these three.** `chatScale` is real — `Options.java:363`, `UnitDouble` 0.0–1.0, default 1.0, surfaced at `ChatOptionsScreen.java:19` and applied at `ChatComponent.java:146` via `ChatComponent.java:413` — and it is consumed by the chat box and nothing else (three call sites tree-wide, none in the title or overlay-message path). `guiScale` is `Options.java:905-915`, default `0` = auto, and it scales the entire GUI coordinate space uniformly.
+So the honest answer to "should these have sizing options?" is: **vanilla scales chat but not titles, and `guiScale` is the only control for these three.** `chatScale` is real — the `Options.chatScale` field, `UnitDouble` 0.0–1.0, default 1.0, surfaced at `ChatOptionsScreen.options` and applied at `ChatComponent.extractRenderState` via `ChatComponent.getScale` — and it is consumed by the chat box and nothing else (three call sites tree-wide, none in the title or overlay-message path). `guiScale` is the `Options.guiScale` field, default `0` = auto, and it scales the entire GUI coordinate space uniformly.
 
 Adding a non-vanilla per-surface size option would be a parity divergence with no upstream counterpart, and — more practically — it would paper over this bug rather than fix it: a user would "solve" oversized titles by turning a knob to 0.5, which is exactly the factor the double-apply introduced.
 

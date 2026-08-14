@@ -1,6 +1,6 @@
 # Real per-position biome tint (grass, foliage, water)
 
-Issue-adjacent to #171/#174 (biome tint). See [`worldgen-biomes.md`](./worldgen-biomes.md) for the
+See [`worldgen-biomes.md`](./worldgen-biomes.md) for the
 data half (biome assignment, per-quart climate) this builds on.
 
 ## What it is
@@ -66,7 +66,7 @@ matching vanilla's own `ClientLevel.calculateBlockTint` box-blend.
   `SectionSnapshot`, and it is why one lives in a `RefCell` on the view rather than anywhere
   longer-lived. Holding a `RefCell` makes those views `!Sync`, which is sound because the mesh
   worker pool parallelises over *sections*, one view each.
-- `NamedBiomeTint`'s four-entry name→effects memo (#542) is still there and still measures as a
+- `NamedBiomeTint`'s four-entry name→effects memo is still there and still measures as a
   win, but it is no longer load-bearing for the table scan itself. Note it deliberately does **not**
   memoise an unresolvable name, so a section whose biome id is past the registry reaches the table
   on every sample rather than once — the arm the first-byte index helped most (3.2× on the isolated
@@ -141,7 +141,7 @@ matching vanilla's own `ClientLevel.calculateBlockTint` box-blend.
   describe as open.** `crates/protocol/v770/src/packets/registry.rs`'s
   `ClientRegistries::entry_names(BIOME)` already decoded a real server's registry-sync order
   correctly; the missing piece was carrying it past that crate. The path, end to end:
-  `crates/protocol/v770/src/adapter.rs`'s `LOGIN` handler now emits a third biome event,
+  `V770Adapter::handle_play_chunk`'s `LOGIN` handling (`crates/protocol/v770/src/adapter/chunk.rs`) now emits a third biome event,
   `ClientEvent::BiomeRegistryNames { names }`, alongside `BiomeVisuals`/`BiomeClimates` →
   `crates/lodestone-shell/src/net.rs`'s `forward` folds it into a new `BiomeNameCell` (same
   "whole table replaces at once, never queued" shape as `BiomeClimateCell`), exposed as

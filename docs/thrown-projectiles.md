@@ -11,8 +11,8 @@ Before this landed, **no projectile of any kind rendered**: `entity_models.rs` h
 no corpus entry for any of them, so `model_for_type` missed and nothing was drawn
 while the entities were tracked, interpolated and counted perfectly.
 
-Arrows, spectral arrows and tridents have since landed on their own path (issue
-#380) — see [`projectile-renderers.md`](./projectile-renderers.md). The other
+Arrows, spectral arrows and tridents have since landed on their own path
+— see [`projectile-renderers.md`](./projectile-renderers.md). The other
 projectile shapes are **still missing**; see
 [What is deliberately not here](#what-is-deliberately-not-here).
 
@@ -104,7 +104,7 @@ the field dirty when a constructor *sets* it, so a snowball thrown by a snow gol
 **Today the fallback is the *only* path taken, and that is a one-line gate, not a
 missing decode.** `fold_snapshots` inserts into `ItemStacks` for **any** entity
 type, so the stack is present in the ECS — but `extract_entity_draws`
-(`lodestone-shell/src/entities.rs:790`) narrows it on the way out:
+(`lodestone-shell/src/entities.rs`) narrows it on the way out:
 
 ```rust
 item: (kind.0 == ITEM_ENTITY_TYPE_PATH)
@@ -183,8 +183,8 @@ one by guessing fails a test rather than shipping a wrong billboard.
   exactly what arrows got in
   [`projectile-renderers.md`](./projectile-renderers.md), through
   `EntityModelSet::resolve_posed` rather than through this path at all.
-- **The wire's stack does not reach a projectile yet** — one predicate at
-  `entities.rs:790`, described under
+- **The wire's stack does not reach a projectile yet** — one predicate in
+  `extract_entity_draws` (`entities.rs`), described under
   [Which item id actually gets drawn](#which-item-id-actually-gets-drawn). Harmless
   today; needed before per-stack variants can show.
 - **The stack's data components are dropped** at the `EntitySnapshot` boundary

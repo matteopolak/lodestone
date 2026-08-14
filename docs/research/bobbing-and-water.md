@@ -2,10 +2,10 @@
 
 ## What it is
 
-Two read-only diagnoses. **View bobbing**: not a bug — issue #391's fix is intact and
-unchanged in every relevant file; the report's own install simply has the option
-persisted off, which correctly never auto-heals on its own. **Distant water
-blockiness**: two causes, one already fixed (#389's air-vs-unloaded chunk-seam
+Two read-only diagnoses. **View bobbing**: not a bug — an already-fixed bug's fix is
+intact and unchanged in every relevant file; the report's own install simply has the
+option persisted off, which correctly never auto-heals on its own. **Distant water
+blockiness**: two causes, one already fixed (an air-vs-unloaded chunk-seam
 conflation) and one newly found here — the singleplayer integrated server never pads
 its `view_radius` by the `+1` ring vanilla's `ChunkTrackingView` always sends, so the
 outermost ring's neighbour section never arrives and that ring's mesh (water and
@@ -25,7 +25,7 @@ other files that does not touch anything below).
 option → `Sim::view_bob.tick` (every physics tick) → `Sim::bob_frame()` →
 `bobbed_camera` → `Sim::render_camera` → the actual `render_with_effects`/
 `render_with_crack_and_effects` call `app.rs` makes every frame — is fully wired
-and matches vanilla's constants exactly. This is **already-fixed issue #391**,
+and matches vanilla's constants exactly. This is an **already-fixed bug**,
 and the fix is unmodified since it landed.
 
 Chain, with citations:
@@ -38,33 +38,35 @@ Chain, with citations:
 - `crates/lodestone-shell/src/sim.rs::Sim::render_camera` folds the
   bob via `bobbed_camera(self.camera(aspect), self.bob_frame(), 0.0)`, **not**
   gated on third-person (verified against `.cache/mc/26.2/client-src`'s
-  `GameRenderer.java:534-536`, which has no camera-type check in 26.2).
+  `GameRenderer.renderLevel`, whose `bobView` call has no camera-type check in
+  26.2).
 - `crates/lodestone-shell/src/app.rs::WindowApp::redraw` — `render_camera` computed every
   frame; it is what's actually handed to `render.render_*`.
 - `crates/lodestone-shell/src/app.rs::WindowApp::redraw` — `self.sim.set_view_bobbing(self.nav.view_bobbing())`
   pushed down every presented frame.
-- `crates/lodestone-shell/src/menu/nav.rs:1699-1706` — `apply_settings` maps
+- `crates/lodestone-shell/src/menu/nav.rs` — `apply_settings` maps
   `SettingsOutcome::Cycle(LiveOption::ViewBobbing)` → `toggle_view_bobbing()`.
-- `crates/lodestone-shell/src/menu/nav.rs:1832-1835` — `toggle_view_bobbing`
+- `crates/lodestone-shell/src/menu/nav.rs` — `toggle_view_bobbing`
   flips `Options::view_bobbing` and persists immediately (eager persistence).
-- `crates/lodestone-shell/src/menu/options.rs:1508-1515` — `SettingsNav::click_row`
-  resolves a click to *that row's own control* (the #391 fix: it used to be
+- `crates/lodestone-shell/src/menu/options.rs` — `SettingsNav::click_row`
+  resolves a click to *that row's own control* (the fix for the original
+  view-bobbing bug: it used to be
   `hover(row)` + `MenuKey::Enter`, which meant every click on the old
   single-screen settings page fired `Enter`'s hardcoded meaning, "toggle View
   Bobbing").
-- `crates/lodestone-shell/src/menu/options.rs:658-665` — View Bobbing now lives
-  on its own row (`Accessibility Settings... → View Bobbing`), paired with
-  `notificationDisplayTime`, not sharing a row with GUI Scale (which is on the
-  separate Video page, `options.rs:452`).
-- Math: `crates/lodestone-shell/src/camera_rig.rs:384-608` (`ViewBob`,
+- `crates/lodestone-shell/src/menu/options.rs`'s `ACCESSIBILITY` table — View
+  Bobbing now lives on its own row (`Accessibility Settings... → View
+  Bobbing`), paired with `notificationDisplayTime`, not sharing a row with GUI
+  Scale (which is on the separate `VIDEO` table, Video page).
+- Math: `crates/lodestone-shell/src/camera_rig.rs` (`ViewBob`,
   `BobFrame`) is a line-for-line transcription of `GameRenderer.bobView`
-  (`.cache/mc/26.2/client-src/.../GameRenderer.java:323-329`), with unit tests
+  (`.cache/mc/26.2/client-src`), with unit tests
   pinning it against a hand-evaluated `P·B·V` to 1e-4 and a pixel gate
   (`crates/lodestone-shell/tests/view_bob_pixels.rs`) predicting +8.50 px /
   −3.50 px displacement of a rendered chest and asserting a byte-identical
   negative control at `bob == 0`.
 
-**This is verbatim issue #391** ("View bobbing does nothing in game"), fixed in
+**This is verbatim the original report** ("View bobbing does nothing in game"), fixed in
 `4909cd1 fix(menu): view bobbing was off because clicking GUI SCALE toggled it (#391)`
 (2026-08-02 00:13:25). `docs/view-bobbing.md` records the whole investigation,
 including this line: *"A persisted `false` cannot be told from a deliberate
@@ -79,7 +81,7 @@ No commit since 4909cd1 has touched `nav.rs`, `options.rs`, `config.rs`,
 ### Live evidence gathered on this machine
 
 `crate::menu::servers::data_dir()` resolves to
-`~/Library/Application Support/lodestone` on macOS (`servers.rs:290-318`), and
+`~/Library/Application Support/lodestone` on macOS (`servers.rs`), and
 that is a real, populated directory here:
 
 ```
@@ -93,7 +95,7 @@ Aug  3 13:53:24 2026
 ```
 
 The key is only ever *written* when the option is off (config.rs's asymmetric
-persistence, matched by `options.rs:626-662`'s test
+persistence, matched by `options.rs`'s test
 `view_bobbing_defaults_on_and_only_writes_a_key_when_turned_off`), so this file
 is direct proof the option is **currently persisted OFF** on this install. The
 release binary that produced it is fresh and post-fix:
@@ -108,7 +110,7 @@ b065021 2026-08-03 12:04:47
 i.e. the binary was built from current `HEAD` (~3 min after that commit landed)
 and the option file was written **after** that build, by a fully-fixed client.
 So the "toggling does nothing" symptom, if reproduced against *this* binary, is
-not the pre-#391 wiring bug — the wiring is correct and unchanged.
+not the original wiring bug — the wiring is correct and unchanged.
 
 ### Island / wrong-value / missing-feature verdict
 
@@ -145,7 +147,7 @@ walk bob's last 0.3° of roll, and `xBob`/`yBob`), none of which would explain
 - Gate that already exists and is dispositive if run live:
   `cargo test -p lodestone-shell --test view_bob_pixels -- --ignored --nocapture`
   (needs a GPU adapter + `client.jar`). Predicted values are hand-derived from
-  vanilla's constants (`GameRenderer.java:323-329`), not from our own encoder:
+  vanilla's constants (`GameRenderer.bobView`), not from our own encoder:
   dip moves a rendered chest **+8.50 px** down (tolerance 1.5 px), sway moves it
   **−3.50 px** left, and a `BobFrame::default()` frame must be **byte-identical**
   to the unbobbed frame (the negative control — run it and watch it pass/fail,
@@ -174,14 +176,15 @@ walk bob's last 0.3° of roll, and `xBob`/`yBob`), none of which would explain
   a direct field push, so the "island via a `_ => {}` arm" defect class does not
   apply here.
 - Wrong constants: `camera_rig.rs`'s formulas were checked line-for-line against
-  `GameRenderer.java:323-329` in `.cache/mc/26.2/client-src` and match, including
+  `GameRenderer.bobView` in `.cache/mc/26.2/client-src` and match, including
   the two "easy to get subtly wrong" details the module doc calls out
   (`bd` is an extrapolation, not a lerp; the nod's `−0.2` is inside the cosine in
   radians, not `(bd−0.2)·π`).
-- A regression reintroducing #391's GUI-Scale/View-Bobbing row collision: GUI
-  Scale now lives on the separate **Video** page (`options.rs:452`), View
-  Bobbing on **Accessibility** (`options.rs:664`) — they can no longer share a
-  row, and `click_row` resolves per-row regardless.
+- A regression reintroducing the original GUI-Scale/View-Bobbing row collision:
+  GUI Scale now lives on the separate **Video** page (`options.rs`'s `VIDEO`
+  table), View Bobbing on **Accessibility** (`options.rs`'s `ACCESSIBILITY`
+  table) — they can no longer share a row, and `click_row` resolves per-row
+  regardless.
 
 ---
 
@@ -189,7 +192,7 @@ walk bob's last 0.3° of roll, and `xBob`/`yBob`), none of which would explain
 
 ### Root cause — two candidates, both concrete
 
-#### Candidate A: issue #389 (already fixed, symptom is a near-verbatim match)
+#### Candidate A: a chunk-seam mesh bug (already fixed, symptom is a near-verbatim match)
 
 `docs/section-mesh-invalidation.md` documents **exactly** this report as its
 motivating case: *"distant water is visibly blocky along chunk boundaries —
@@ -207,7 +210,7 @@ that has not arrived (#389)` (2026-08-02 00:10:43), via a real
 `Neighbour::{Present, Air, Unloaded}` distinction
 (`crates/lodestone-shell/src/mesher.rs`, `Neighbour` enum) and a
 `SnapshotOutcome::Deferred` that holds a section's *first* build back until its
-neighbourhood is complete (`mesher.rs:1323-1348`, `route`), while
+neighbourhood is complete (`mesher.rs`'s `TerrainMesh::route`), while
 `Sim::on_column_arrived` → `TerrainMesh::mark_neighbours_dirty` re-drives any
 section whose missing neighbour has since landed — which is how "corrects
 itself on approach" is supposed to happen.
@@ -220,10 +223,10 @@ from a screenshot."* It has never been confirmed against a real render.
 #### Candidate B: a newly-introduced regression of the same invariant, in singleplayer specifically
 
 While tracing what actually supplies chunks to the client (the precondition
-#389's fix depends on — "every rendered section's neighbourhood is complete"),
-I found that the **singleplayer integrated server**, added *after* #389 in
-`75b91dd feat(shell): Singleplayer starts a real integrated server`
-(2026-08-02 21:35:47 — ~21 hours after the #389 fix), does not reproduce
+Candidate A's fix depends on — "every rendered section's neighbourhood is
+complete"), I found that the **singleplayer integrated server**, added *after*
+that fix in `75b91dd feat(shell): Singleplayer starts a real integrated server`
+(2026-08-02 21:35:47 — ~21 hours after Candidate A's fix), does not reproduce
 vanilla's neighbour-padding:
 
 - `crates/lodestone-shell/src/app.rs::launch::launch_singleplayer` (the `view_radius` computation
@@ -238,10 +241,10 @@ vanilla's neighbour-padding:
   ```
   This `view_radius` is threaded unmodified through
   `launch_singleplayer` (`app.rs::launch::launch_singleplayer`) → `NetClient::open_singleplayer`
-  (`net.rs:767-783`) → `Origin::Integrated { view_radius, .. }` →
+  (`net.rs`) → `Origin::Integrated { view_radius, .. }` →
   `IntegratedServer::open_in_memory` → `serve_connection` →
-  `ViewTracker::new`/`recenter` (`crates/lodestone-server/src/server.rs:176-184`,
-  `:200-...`), which sends **exactly** `[-view_radius, view_radius]²` columns —
+  `ViewTracker::new`/`recenter` (`crates/lodestone-server/src/server.rs`),
+  which sends **exactly** `[-view_radius, view_radius]²` columns —
   no buffer ring, at every call site I traced.
 
 - Vanilla's real server sends one more ring than the client's view distance,
@@ -263,7 +266,7 @@ vanilla's neighbour-padding:
 - Consequence: in singleplayer, the outermost ring of chunks at
   `render_distance` from the player permanently lacks its one outward
   neighbour (the server will never send it — the client isn't asking, and nothing
-  else requests it). Per `mesher.rs:1335-1346`, a `Deferred` section that was
+  else requests it). Per `TerrainMesh::route` (`mesher.rs`), a `Deferred` section that was
   never previously uploaded is held back indefinitely (**not** queued for
   removal, so it also isn't obviously "missing" in the logs — `TerrainMesh::deferred`
   just keeps counting it). Because `SnapshotOutcome::Deferred` fires when *any*
@@ -274,7 +277,7 @@ vanilla's neighbour-padding:
 
   Partial mitigation, worth being honest about: this ring sits almost exactly at
   the fog cutoff — `sky_fog_end_for_render_distance_blocks` clamps fog end to
-  `render_distance * 16` blocks (`crates/lodestone-render/src/sky.rs:500-502`),
+  `render_distance * 16` blocks (`crates/lodestone-render/src/sky.rs`),
   the same distance in blocks as `render_distance` chunks — so the affected ring
   is heavily fogged, which may be why this reads as "blocky" rather than as an
   obvious hole: what's visible through the fog is whatever solid ring **was**
@@ -294,13 +297,14 @@ servers already send the `+1` ring vanilla always has.
   confirmation is still owed, not done.
 - Candidate B: a **missing feature** relative to vanilla's own
   `ChunkTrackingView` padding, freshly introduced by the singleplayer feature
-  and not covered by any existing #389 test (those tests exercise the
-  mesher/snapshot logic directly with a hand-built `ColumnSource`/neighbourhood,
-  never the actual chunk-streaming radius a real `IntegratedServer` connection
-  uses). Not an island in the classic sense (something built and never called)
-  — more a case of a fixed invariant (#389's "the frontier the mesher defers on
-  is the ring the server also doesn't draw") being silently violated by code
-  that landed after it and never re-read the invariant.
+  and not covered by any existing test for Candidate A's fix (those tests
+  exercise the mesher/snapshot logic directly with a hand-built
+  `ColumnSource`/neighbourhood, never the actual chunk-streaming radius a real
+  `IntegratedServer` connection uses). Not an island in the classic sense
+  (something built and never called) — more a case of a fixed invariant
+  ("the frontier the mesher defers on is the ring the server also doesn't
+  draw") being silently violated by code that landed after it and never
+  re-read the invariant.
 
 ### Minimal fix
 
@@ -322,8 +326,8 @@ does not touch `self.config.render_distance` itself, so the camera far plane
 the extra ring "exists to be a neighbour, not to be drawn"
 (`docs/section-mesh-invalidation.md`). The stale comment immediately above the
 line (which currently asserts the server "never withholds one [the renderer]
-wants" — no longer true post-#389) should be corrected in the same change, or a
-future reader will re-derive the same wrong assumption.
+wants" — no longer true after Candidate A's fix) should be corrected in the
+same change, or a future reader will re-derive the same wrong assumption.
 
 For Candidate A: no code change indicated by this review; the fix looks correct
 by static and hermetic evidence. The outstanding action is the live/GPU
@@ -335,7 +339,7 @@ For Candidate B specifically (this is the one worth a new gate — nothing today
 exercises the actual streamed radius of a real integrated-server connection):
 
 - **Expected value, from outside our code**: vanilla's own
-  `ChunkTrackingView.java:92,96` — `maxX/maxZ = center + viewDistance + 1`. A
+  `ChunkTrackingView.Positioned.maxX`/`maxZ` — `maxX/maxZ = center + viewDistance + 1`. A
   correct implementation must send `2*(view_radius) + 3` columns per side after
   the fix (`-(radius+1)..=(radius+1)`), not `2*view_radius + 1`.
 - **The gate**: spin up `lodestone_server::IntegratedServer::open_in_memory`

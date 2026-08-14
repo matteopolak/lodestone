@@ -51,7 +51,7 @@ mapping cannot be derived).
 
 ## What does not
 
-* **Trims — landed** (issue #17). See "Trims" below. The one remaining hole is
+* **Trims — landed.** See "Trims" below. The one remaining hole is
   the *local player's own* trim in third person, which is a
   `lodestone-game` `ComponentMap` gap rather than a rendering one — that
   boundary drops `trim`, exactly as it drops the local player's dye.
@@ -343,9 +343,9 @@ armour, and every mob in the game goes through `EntityInstanceRaw::new`.
 
 `EntityPipeline::armour_pipeline` is a second `wgpu::RenderPipeline` over the
 *same* bind-group layout objects. It was created because it needed a different
-`depth_compare` from the base pipeline; **since issue #21 the two are
-depth-identical** (both `LessEqual`) and it survives for its label and to keep
-the armour pass's requirement explicit at its own call site.
+`depth_compare` from the base pipeline; **the two are now depth-identical**
+(both `LessEqual`) and it survives for its label and to keep the armour
+pass's requirement explicit at its own call site.
 
 Vanilla's entity depth state is
 `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, writeDepth = true)`
@@ -358,8 +358,8 @@ vanilla is reversed-Z — that is **`LessEqual`**.
 This section used to say the base pipeline's `Less` "is the one that departs from
 vanilla. It is left alone rather than 'fixed': changing it alters how every mob's
 coplanar geometry resolves, and this work has no pixel gate to prove that safe."
-That was accurate when written, and it named its own missing prerequisite. Issue
-#21 built the gate — `lodestone-render/tests/entity_depth_coincident_pixels.rs`,
+That was accurate when written, and it named its own missing prerequisite. A
+follow-up built the gate — `lodestone-render/tests/entity_depth_coincident_pixels.rs`,
 which measured the bug directly (two coincident quads, red drawn first, blue
 second: the frame read `[189, 0, 0]` with blue covering **0 of 16384** pixels, so
 the *first* draw was winning) — and then made the change.
@@ -370,7 +370,8 @@ depth test against the base at every texel and is silently invisible.
 `armour_layers_drawn` counts *layers* rather than pieces so a regression here is
 legible: a count that drops to one per piece means resolution broke, a count that
 stays at two with no overlay on screen means depth did. The same mechanism was
-costing every mob its coincident geometry one layer up, which is what #21 fixed.
+costing every mob its coincident geometry one layer up, which the depth-compare
+fix above resolved.
 
 Sharing `self`'s layout objects (rather than creating equivalent descriptors)
 means every camera and texture bind group already built through the base pipeline
@@ -449,7 +450,7 @@ re-read `net.rs` directly rather than trusting that note and found the patch
 already present. **Nothing is open here anymore** — see "Trims" below for
 what remains in this doc's scope.
 
-## Trims: the render-side capability is built; it is a named island (#436)
+## Trims: the render-side capability is built; it is a named island
 
 This section previously said trims were "designed, not landed" and listed
 three blockers: the undecoded wire component, a third depth mode, and "an
@@ -458,8 +459,7 @@ directly against `.cache/mc/26.2/client-src` and `client.jar` rather than
 trusted from the old write-up — one of the three turned out to be a wrong
 diagnosis, and the other two are now built. **What remains is entirely outside
 `lodestone-render`/`lodestone-assets`'s ownership**, so this is filed as a
-named island on [#436](https://github.com/matteopolak/lodestone/issues/436)
-rather than shipped further.
+named island rather than shipped further.
 
 ### What actually needed building, corrected
 
@@ -529,7 +529,7 @@ vanilla content — the fork still has to exist because `decal` is registry
 data a resource pack or a future version can set, not a constant this engine
 is free to assume.
 
-### How a trim reaches the screen — all three hops, landed (issue #17)
+### How a trim reaches the screen — all three hops, landed
 
 **This section used to say all three of these were missing. Every claim in it
 was stale by the time it was read** — most usefully the first, which named a
@@ -547,8 +547,8 @@ decoder that had already landed — so it is rewritten as the live description.
    beside `RenderEquipment`/`RenderEquipmentDye` rather than a wider tuple,
    because a piece can be dyed **and** trimmed at once, and the two reach the
    GPU by different routes.
-   (`net::entity_snapshot` is gone — issue #36 deleted it; every reference to
-   it in an older revision of this doc is stale.)
+   (`net::entity_snapshot` is gone — a later change deleted it; every
+   reference to it in an older revision of this doc is stale.)
 3. **The draw.** `gpu::entities::load_trim_sprites` bakes every trim sprite out
    of the jar at startup into `EntityRenderer::trim_textures`, keyed by
    `trim_sprite_id`'s `ResourceLocation`. `prepare_armour` appends one batch per

@@ -2,7 +2,7 @@
 
 ## What it is
 
-`crates/lodestone-fuzz` is a property-based fuzzing harness (issue #282) for lodestone's
+`crates/lodestone-fuzz` is a property-based fuzzing harness for lodestone's
 wire decoders — the first one in the repo. It exists to check properties that need no
 expected value at all: a decoder must never panic on arbitrary bytes, a truncated prefix
 of a valid packet must error cleanly, and a length prefix must not force an allocation
@@ -48,7 +48,7 @@ Each test file targets a different property or a different decoder direction:
 | `tests/no_panic_v770_serverbound.rs` | no panic on arbitrary bytes | `V770ServerProtocol::decode`, serverbound |
 | `tests/no_panic_net_codec.rs` | no panic, and terminates, on arbitrary bytes | `lodestone_net::Codec` (frame length + compression, ahead of every `VersionAdapter`) |
 | `tests/truncation_is_clean.rs` | truncated valid packet errors cleanly | `handle_packet`, corpus-driven |
-| `tests/length_prefix_allocation.rs` | length prefix must not over-allocate | `GameLogin::decode`, `RegistryData::decode` (proves the fix, issue #417) |
+| `tests/length_prefix_allocation.rs` | length prefix must not over-allocate | `GameLogin::decode`, `RegistryData::decode` (proves the fix) |
 
 ### The control (`tests/harness_control.rs`)
 
@@ -78,7 +78,7 @@ covers:
   `ServerProtocol` (`CLAUDE.md`: only `v770` can host).
 - **`lodestone-net`'s frame-level `Codec`** (`feed`/`next_packet`) — the length-prefix and
   zlib-compression layer every packet passes through *before* any `VersionAdapter` sees it,
-  shared by all four families. Issue #282's own body named this codec directly as the
+  shared by all four families. The issue that scoped this crate named this codec directly as the
   reason its scope could stay narrow ("the immediate risk is lower... but that conclusion
   currently rests on manual code reading"); `tests/no_panic_net_codec.rs` is that
   conclusion turned into a running check, including a termination bound (`next_packet` is
@@ -122,7 +122,7 @@ rule applies to fuzz seeds, so `truncation_is_clean.rs` ranks its corpus explici
   families). That gap is real; closing it would mean joining a legacy-protocol oracle and
   checking in fixtures the way `v770`'s live tests already do.
 
-### Bug found and fixed: unbounded allocation from a length prefix (issue #417)
+### Bug found and fixed: unbounded allocation from a length prefix
 
 `length_prefix_allocation.rs` both stated and **measured** a real violation of the "must not
 pre-allocate" property. `lodestone-macros`' `decode_vec` (`crates/lodestone-macros/src/lib.rs`,
@@ -190,10 +190,10 @@ bound than "as many elements as fit in the remaining bytes" for fields where the
 one (e.g. a registry with a known maximum entry count). That tightening is optional follow-up
 work, not a gap left open by this fix.
 
-### Bug found and fixed: a remote panic from `multi_block_change`'s coordinate maths (issue #450)
+### Bug found and fixed: a remote panic from `multi_block_change`'s coordinate maths
 
 `handle_packet_never_panics` found a real remote panic in `v340`'s `multi_block_change` decode
-(`crates/protocol/v340/src/adapter.rs`, added by `714209b` for #349):
+(`crates/protocol/v340/src/adapter.rs`, added by `714209b`):
 
 ```rust
 let x = chunk_x * 16 + rel_x;   // chunk_x is straight off the wire
@@ -201,7 +201,8 @@ let x = chunk_x * 16 + rel_x;   // chunk_x is straight off the wire
 
 An unchecked `i32` multiply on a wire-supplied chunk coordinate. For `|chunk_x| > i32::MAX / 16`
 (= 134,217,727) it **panics in debug** and — worse — **silently wraps in release**, writing a
-block at a position the packet never named. Note the direction, which is the opposite of #417's:
+block at a position the packet never named. Note the direction, which is the opposite of the
+length-prefix allocation bug's:
 this is the *client* decoding a *server* packet, so the hostile party is a malicious or buggy
 **server**.
 
@@ -211,7 +212,7 @@ refused:
 
 - `checked_mul(16)` — the **structural** half. Cannot panic or wrap whatever the bound says, so
   a later edit that loosens the range check still cannot reintroduce either failure.
-- a range check against `WorldBorder.absoluteMaxSize` (`WorldBorder.java:37`) at ±29,999,984
+- a range check against `WorldBorder.absoluteMaxSize` (`WorldBorder.java`) at ±29,999,984
   blocks — the **semantic** half. A chunk coordinate past the border names a position no vanilla
   world can contain, so it is refused at the seam with an `AdapterError::Decode`. Deliberately
   **not clamped**: a clamp invents a position exactly the way the release-mode wrap did, and
@@ -257,11 +258,13 @@ this is a shape rather than a one-off. Nothing else is reachable from the wire:
 - `v340`'s own `block_change` reads a **packed** `Position` instead of chunk coordinates, so its
   x/z arrive pre-bounded at ±33,554,431 by the 26-bit field width, and it only ever does `>> 4`
   and `rem_euclid(16)` — no multiply, no overflow. (It can still name a position 3.5M blocks
-  outside the border; that is a wrong-but-harmless write, not a panic, and out of #450's scope.)
-- `v47/packets/chunk.rs:356`, `v340/packets/chunk.rs:470` (`block_z * 16 + block_x`) and
-  `v735/packets/chunk.rs:272` (`cy_global * 16 + cz * 4 + cx`) all multiply **loop indices**
-  bounded by `0..4`/`0..16` in the source, never wire values.
-- `v340/flattening.rs:128` and `v340/canonical.rs:117,155` (`old_block_id * 16 + meta`) promote a
+  outside the border; that is a wrong-but-harmless write, not a panic, and out of this fix's scope.)
+- `v47/packets/chunk.rs`'s and `v340/packets/chunk.rs`'s `downsample_biomes`
+  (`block_z * 16 + block_x`) and `v735/packets/chunk.rs`'s `section_biomes`
+  (`cy_global * 16 + cz * 4 + cx`) all multiply **loop indices** bounded by `0..4`/`0..16` in the
+  source, never wire values.
+- `lodestone-canonical/src/flattening.rs`'s `lookup` and `lodestone-canonical/src/canonical.rs`'s
+  `resolve` and `build_slot_table` (`old_block_id * 16 + meta`) promote a
   `u8` to `usize` first; the maximum is `255 * 16 + 15 = 4095`.
 - `v47` does store raw packed `(id << 4) | meta` composites, but that is a value, not a
   coordinate, and it is already range-checked against the 4,095-slot legacy table.
@@ -286,8 +289,8 @@ this is a shape rather than a one-off. Nothing else is reachable from the wire:
   `real_registry_data_fixture_still_decodes_cleanly_after_the_fix`, in the very same file, never
   calls `peak_alloc_during`, so it never takes the lock, and its fixture read plus
   `RegistryData::decode` allocate into the shared atomic from a parallel harness thread. Result:
-  issue #417's own DoS regression gate passed alone and failed in a full parallel run — issue
-  #450's second half, and `CLAUDE.md`'s *accumulator* species of vacuous test (a global
+  the length-prefix bug's own DoS regression gate passed alone and failed in a full parallel run —
+  this fix's second half, and `CLAUDE.md`'s *accumulator* species of vacuous test (a global
   outliving the gate's own window).
 
   **Fixed by scoping the counter, not by serialising the tests**: `PEAK_SINGLE_ALLOC` is now a
@@ -314,7 +317,7 @@ this is a shape rather than a one-off. Nothing else is reachable from the wire:
   where they came from — proptest's shrink line, a live capture, whichever) and assert them in
   `tests/fuzz_regressions.rs` via `lodestone_fuzz::regression_fixture_path`. Keep the
   `.proptest-regressions` seed file too; they fail for independent reasons. And assert what the
-  decoder *does*, not merely that it survived: #450's release-mode behaviour was a silent wrong
+  decoder *does*, not merely that it survived: the `multi_block_change` bug's release-mode behaviour was a silent wrong
   write, which every "no panic" assertion in this crate accepts by construction.
 - **Raising `ProptestConfig::with_cases`** raises run time roughly linearly; see "Cost, in
   numbers" for the current baseline before changing it.

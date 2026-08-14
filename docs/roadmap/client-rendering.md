@@ -147,25 +147,29 @@ these is plausible to mistake for missing from a summary description alone:
   (with a known 26.2-timeline divergence, #49), Nether/End fog colour presets, and
   keybindings — all as described in the original briefing.
 - **Chat itself**: real text entry and scrollback (`crates/lodestone-shell/src/chat.rs`,
-  `hud.rs:491-522`), a first-class `Screen::Chat` sub-mode. Only the *settings* screen is
+  drawn in `HudGeometry::build_inner` in `hud.rs`), a first-class `Screen::Chat` sub-mode. Only the *settings* screen is
   missing (#195).
 - **Status effect icons, boss bar, scoreboard sidebar, tab list, and the action bar** are all
   **drawn today**, not merely modelled as ECS components: `hud.rs` has real draw calls for
-  each (`effects.rs`; `hud.rs:705-709` boss bars; `hud.rs:730` scoreboard; `hud.rs:753` tab
-  list; `hud.rs:294,669` action bar, pixel-gated). `docs/session-components.md`'s framing —
+  each, all inside `HudGeometry::build_inner` (`effects.rs` for the status icons; boss bars,
+  scoreboard sidebar, tab list and action bar draw inline in `build_inner`, pixel-gated).
+  `docs/session-components.md`'s framing —
   "the scoreboard, tab list, boss bars and menus as ECS components" — describes the *data*
   layer accurately but reads, out of context, like these might not reach the screen. They do.
-- **Item durability bars** are drawn (`crates/lodestone-shell/src/hud/item_icon.rs:161-170`,
+- **Item durability bars** are drawn (`draw_item_icon_counted` in
+  `crates/lodestone-shell/src/hud/item_icon.rs`,
   a real hue-lerped bar shared by the hotbar and container screens) — genuinely easy to miss
   with a shallow grep, which is exactly how it ended up on a "still needed" list once already.
 - **Animated block/item textures** are real frame-cycling, not frame-0-only: `.mcmeta`
-  animation metadata is fully parsed (`crates/lodestone-assets/src/texture.rs:167-224`) into a
+  animation metadata is fully parsed (`AnimationMeta::from_value` in
+  `crates/lodestone-assets/src/texture.rs`) into a
   runtime `AnimTable` sampled every tick into a GPU uniform
-  (`crates/lodestone-render/src/block_models.rs:934`), pixel-verified by
-  `tests/animated_block_pixels.rs`.
+  (`BlockModels::anim_slot_uniforms` in `crates/lodestone-render/src/block_models.rs`),
+  pixel-verified by `tests/animated_block_pixels.rs`.
 - **Third-person camera switching** is landed and wired every frame
-  (`crates/lodestone-shell/src/camera_rig.rs:103`, F5 → `Sim::toggle_third_person` →
-  `render.set_third_person_body_source` in `app.rs::WindowApp::redraw`). Only vanilla's third
+  (F5 → `Sim::cycle_camera_type` in `crates/lodestone-shell/src/sim/camera.rs` →
+  `render.set_third_person_body_source` in `WindowApp::redraw`,
+  `crates/lodestone-shell/src/app/redraw.rs`). Only vanilla's third
   (front-facing) F5 stage is missing — filed narrowly as #186, not as a full
   "third-person perspectives" rewrite.
 - **The generic sound-event engine, and spatial/directional audio**, are both real: any named
@@ -193,7 +197,8 @@ original briefing text. Two things in the briefing itself were wrong:
    narrow sense (the front-facing F5 stage). The camera-mode switch itself is landed and
    currently wired; an earlier line inside `docs/third-person-player-body.md` itself claims a
    stale `None` for the render-state wiring, which is also now corrected by this pass — the
-   doc's own later "Wired" section and the current `app.rs::WindowApp::redraw` call site already
+   doc's own later "Wired" section and the current `WindowApp::redraw` call site
+   (`crates/lodestone-shell/src/app/redraw.rs`) already
    contradicted its own earlier sentence before this roadmap pass even started.
 
 ## Traps that apply across this whole area
