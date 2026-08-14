@@ -1520,10 +1520,19 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // change and on placement (`crate::random_tick`'s hopper arms), and
         // `HopperBlockEntity` then simply obeys it. Recomputing would duplicate
         // the signal walk and could disagree with what the client was told.
+        //
+        // Issue #504: `is_loaded` gates the scan by chunk residency *before*
+        // `enabled` ever reaches `world.block_state` — `ChunkStore::block_state`
+        // regenerates a whole column on a miss, and this closure used to run
+        // that for every registered hopper, every tick, forever (the registry
+        // has no eviction). `is_column_resident` answers with no generation at
+        // all, so a hopper outside every loaded chunk now costs a `HashMap`
+        // lookup instead of a worldgen call.
         block_entities.with(|registry| {
-            registry.tick_all_with_hopper_lock(&|pos| {
-                crate::redstone::hopper_enabled(&world.block_state(pos.x, pos.y, pos.z))
-            });
+            registry.tick_all_with_hopper_lock(
+                &|pos| world.is_column_resident(pos.x.div_euclid(16), pos.z.div_euclid(16)),
+                &|pos| crate::redstone::hopper_enabled(&world.block_state(pos.x, pos.y, pos.z)),
+            );
         });
 
         // Issue #323. The clock is the **world's**, not this loop's: one
@@ -1537,6 +1546,49 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         let world_time = world_state.tick_time();
         game_tick = world_time.game_time.max(0) as u64;
         day_time = world_time.day_time;
+        // `/weather`'s consumer half: a caller-side request queued on
+        // `WorldStateHandle` (the same handle this loop already reads for
+        // `tick_time` above — see `crate::world_state::WeatherRequest`'s own
+        // doc for why a request queue rather than a direct write). Applied
+        // **before** this tick's own `weather.tick` call, and directly to the
+        // `pub(crate)` fields rather than through a method, so the flip is
+        // immediate — `weather.tick`'s own transition detection compares
+        // against whatever `raining`/`thundering` already are when it starts,
+        // so a request applied first is what makes the boolean flip (and its
+        // `StartRaining`/`StopRaining` event) land on *this* tick instead of
+        // never, since nothing would otherwise notice a value that was
+        // already set going in.
+        if let Some(request) = world_state.take_weather_request() {
+            let was_raining = weather.raining;
+            match request {
+                crate::world_state::WeatherRequest::Clear { duration } => {
+                    weather.clear_weather_time = duration.max(1);
+                    weather.raining = false;
+                    weather.thundering = false;
+                }
+                crate::world_state::WeatherRequest::Rain { duration } => {
+                    weather.clear_weather_time = 0;
+                    weather.rain_time = duration.max(1);
+                    weather.thunder_time = duration.max(1);
+                    weather.raining = true;
+                    weather.thundering = false;
+                }
+                crate::world_state::WeatherRequest::Thunder { duration } => {
+                    weather.clear_weather_time = 0;
+                    weather.rain_time = duration.max(1);
+                    weather.thunder_time = duration.max(1);
+                    weather.raining = true;
+                    weather.thundering = true;
+                }
+            }
+            if was_raining != weather.raining {
+                weather_out.publish(if weather.raining {
+                    crate::weather::WeatherEvent::StartRaining
+                } else {
+                    crate::weather::WeatherEvent::StopRaining
+                });
+            }
+        }
         // Issue #324 / `docs/plans/world-state.md` W1: the weather cycle is
         // world-global state, so it belongs to the world tick (not to any
         // connection — the straddle the world-state plan's migration exists
