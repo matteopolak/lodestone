@@ -15,15 +15,15 @@ decompiled client — not inherited from the briefing, whose errors are listed a
 loops that iterate **every resident section, one draw call each, with no frustum, distance or
 occlusion test**:
 
-| line | loop | pass |
-|---|---|---|
-| `frame.rs:459` | `self.sections.values()` | packed table (demo world only) |
-| `frame.rs:480` | `model.sections.values()` | live opaque terrain |
-| `frame.rs:720` | `model.sections.values()` | translucent water |
+| loop | pass |
+|---|---|
+| `self.sections.values()` | packed table (demo world only), in `render_inner` |
+| `model.sections.values()` | live opaque terrain, in `render_inner` |
+| `model.sections.values()` | translucent water, in `render_inner` |
 
 Each visible-section draw costs ~4 encoder calls (`set_bind_group` with dynamic offset,
 `set_vertex_buffer`, `set_index_buffer`, `draw_indexed`); water sections pay a second set.
-Per-frame per-section uniform writes were already eliminated (issues #75/#76): the only
+Per-frame per-section uniform writes were already eliminated in earlier work: the only
 per-frame per-section cost left **is** the submission itself, which is why culling and
 batching are the whole plan.
 
@@ -32,7 +32,7 @@ measured figure: *"model pipeline draws 931 sections with 441k quads"* at the de
 render distance 8 (289–361 resident columns, per `docs/mesh-fill-rate.md`). That is
 **~2.6–3.2 non-empty sections per column** (~474 quads/section) on default terrain — fully
 solid underground sections and all-air sky sections mesh to nothing and are never uploaded
-(`gpu/sections.rs:89` drops empty geometry). Projections that matter:
+(`gpu/sections.rs`'s `upload_resident` drops empty geometry). Projections that matter:
 
 | rd | streamed columns (square, `view_radius = rd+1`) | vanilla-drawn columns (circle, see U2) | projected terrain draws at ~3 sections/col |
 |---|---|---|---|
@@ -49,7 +49,7 @@ a constant, and re-measure with the U1 counters before quoting any of these.
 mesh events per section, 0 of 26,168,839 frames with a full queue; post-`bdf93a28` fill is
 ~17 ms/column, linear. This plan does not touch meshing throughput.
 
-**Adjacent known cost, out of scope here:** `sim/step.rs:671` still calls
+**Adjacent known cost, out of scope here:** `Sim::refresh_stats` (`sim/step.rs`) still calls
 `store.read().heap_bytes()` (a full resident-world walk under the read lock) every frame for
 an F3 field, verified present at `297706a1`. Another agent may own it; nothing below depends
 on it either way.
@@ -69,7 +69,7 @@ with **zero production consumers** — the repo's island defect class, at archit
 * **`crates/lodestone-render/src/camera.rs`** — `Camera::frustum()` →
   `Frustum::section_visible(coord)`, Gribb–Hartmann planes for the `[0,1]` depth
   convention, conservative AABB test. `Camera::far_for_render_distance` (= `rd·16·4`) is
-  already used by the live camera (`camera_rig.rs:731`) — the far plane tracks rd but at 4×
+  already used by the live camera (`camera_rig.rs`) — the far plane tracks rd but at 4×
   the view distance it culls nothing resident; distance culling must come from U2, not the
   far plane.
 * **`crates/lodestone-render/src/scene.rs`** — `WorldScene::plan_frame` composes frustum ∩
@@ -91,7 +91,7 @@ with **zero production consumers** — the repo's island defect class, at archit
 * **`crates/lodestone-render/src/translucency.rs`** — `SortViewpoint` (vanilla's
   `TranslucencyPointOfView` octant quantization, verified against the 26.2 source) and
   `TranslucentMesh` (centroid back-to-front resort). **Consumed only by
-  `tests/gpu.rs`.** Production water (`frame.rs:720`) draws each section's static index
+  `tests/gpu.rs`.** Production water (`render_inner`'s water loop) draws each section's static index
   order, in **HashMap iteration order across sections** — both halves of vanilla's
   translucent ordering are currently absent from the live path.
 
@@ -130,7 +130,7 @@ come after U3.
 `prepare_entities` already frustum-culls entities — terrain is the only unculled geometry).
 Guard all three loops with `frustum.section_visible(coord)` via a small
 `SectionKey → SectionCoord` helper (`origin()/16`). Apply vanilla's
-`offsetToFullyIncludeCameraCube(8)` equivalent (`SectionOcclusionGraph.java:357-358`):
+`offsetToFullyIncludeCameraCube(8)` equivalent (`SectionOcclusionGraph.offsetFrustum`):
 translate the near plane back so sections straddling the camera never pop — without this,
 the section you stand in flickers at cell boundaries, which is the classic
 "correct-looking cull that fails at certain positions".
@@ -147,8 +147,8 @@ straddle). Predict per-fixture exactly in the gate; in live F3, the invariant is
 `sections_drawn + sections_culled_frustum == resident_with_OPAQUE_geometry`, and a matching
 `water_sections_drawn + water_sections_culled_frustum == resident_with_WATER_geometry`.
 Written against a single `resident_with_geometry` it is simply false: `sections_drawn` is
-incremented only by the opaque loop (`frame.rs:480`), so a **water-only** section (`mesh:
-None`, still issuing a water draw at `frame.rs:720`) appears in neither term — measured 189
+incremented only by the opaque loop in `render_inner`, so a **water-only** section (`mesh:
+None`, still issuing a water draw in the same function's water loop) appears in neither term — measured 189
 `sections_drawn` against 195 uploads. New `RenderStats` fields, both pairs surfaced in F3 —
 the on-screen consumer that keeps this unit from being an island even before U2/U3 land.
 
@@ -185,8 +185,8 @@ else). (b) The straddle fixture above is the known failure mode pinned as a perm
 
 **What the free cull actually is.** Not the fog bound the briefing proposed (see
 Corrections). Vanilla does not render the streamed square: section membership is gated by
-`ChunkTrackingView.isInViewDistance` (`.cache/mc/26.2/src/net/minecraft/server/level/
-ChunkTrackingView.java:71-80`) —
+`ChunkTrackingView.isInViewDistance`, whose real expression lives in
+`ChunkTrackingView.isWithinDistance` —
 
 ```java
 long dx = Math.max(0, Math.abs(chunkX - centerX) - 1);
@@ -210,11 +210,11 @@ keeps them — and it composes with U1 multiplicatively.
 
 **Where.** Same guard site as U1: `in_circle(camera_chunk, rd, section_chunk) &&
 frustum.section_visible(...)`. `RenderState` already carries `render_distance_chunks`
-(`gpu/state.rs:322`, set via `set_fog`). New counter `sections_culled_distance`, added to
+(`gpu/state.rs`, set via `RenderState::set_fog`). New counter `sections_culled_distance`, added to
 the same F3 invariant sum.
 
 **Fog corollary (bounds check, not the mechanism).** The render-distance fog term is
-cylindrical `max(|Δxz|, |Δy|)` with **end = rd·16** (`fog.rs:211-222`, `fog_factor`); a
+cylindrical `max(|Δxz|, |Δy|)` with **end = rd·16** (`fog.rs`'s `fog_factor`); a
 drawn column inside the circle has nearest-point cylindrical distance < ~(rd+1)·16·√2 only
 at the buffer rim, and in practice everything the circle keeps starts before full fog — so
 the circle cull cannot create a visible hard edge inside the fog ramp. That is the check;
@@ -251,8 +251,8 @@ confirmed from `SectionOcclusionGraph.java`: per-section face-connectivity compu
 mesh time** (`VisGraph` → `VisibilitySet`), a BFS from the camera **decoupled from the
 frustum** (reachability is recomputed only when invalidated; the frustum is applied
 per-frame over the cached reachable set via the Octree walk), invalidation when the camera
-crosses an **8-block (half-section) cell** or FOV changes (`invalidateIfNeeded`,
-`SectionOcclusionGraph.java:95-109`), incremental re-propagation from changed sections
+crosses an **8-block (half-section) cell** or FOV changes (`SectionOcclusionGraph.invalidateIfNeeded`),
+incremental re-propagation from changed sections
 (`schedulePropagationFrom`), and the full rebuild ran **async** on a background executor.
 
 #### U3a — producer + graph + shadow-mode counter (lands first, consumed by F3)
@@ -284,8 +284,8 @@ crosses an **8-block (half-section) cell** or FOV changes (`invalidateIfNeeded`,
 * **Upgrade `walk_visible` to vanilla's node semantics before trusting it.** Verified
   divergence: our BFS visits each section once with a single entry face; vanilla
   **merges source directions on re-reach** (`existingNode.addSourceDirection(direction)`,
-  `SectionOcclusionGraph.java:342-344`) and passes a neighbour if *any* accumulated source
-  face connects (`:288-301`). Ours is stricter and can **over-cull** — a section reachable
+  in `SectionOcclusionGraph.runUpdates`) and passes a neighbour if *any* accumulated source
+  face connects. Ours is stricter and can **over-cull** — a section reachable
   through face B but first visited through face C gets B's exits pruned. That is exactly
   the "geometry disappears at certain angles" bug class; fix it in `visibility.rs` first,
   with a unit fixture whose section is reachable only via the second-visited face (the
@@ -305,7 +305,7 @@ crosses an **8-block (half-section) cell** or FOV changes (`invalidateIfNeeded`,
   diagnostic (toggle it: if terrain reappears, the walk over-culled) and the A/B lever for
   counters.
 * **Not ported:** vanilla's `MINIMUM_ADVANCED_CULLING_DISTANCE = 60` ray-march
-  (`:304-340`) — an *additional* aggressive cull for distant sections with measured
+  (also in `SectionOcclusionGraph.runUpdates`) — an *additional* aggressive cull for distant sections with measured
   false-cull history upstream (it is why vanilla caps it to >60 blocks). Skip it; the
   connectivity walk is the win, and the ray-march can be a separate later unit with its own
   soak if counters justify it.
@@ -415,7 +415,7 @@ gate inherits the culling gates' fixtures).
 Verified current state: `SortViewpoint`/`TranslucentMesh` are implemented and match
 vanilla's `TranslucencyPointOfView`, but production water never resorts (static index
 order from mesh time) and cross-section draw order is **HashMap iteration order**
-(`frame.rs:720`) — both halves of vanilla's ordering are absent, which is a live visual
+(in `render_inner`'s water loop) — both halves of vanilla's ordering are absent, which is a live visual
 parity bug at some camera angles today, independent of performance.
 
 * **Cross-section order:** sort visible water sections back-to-front by section-center
@@ -423,7 +423,7 @@ parity bug at some camera angles today, independent of performance.
   the set; this is the interaction that makes U5 sequence after culling.
 * **Intra-section resort:** keep the water quad refs CPU-side (`TranslucentMesh`), resort
   on octant change and re-upload that section's index buffer via `write_buffer`. Cadence
-  is vanilla's (`LevelRenderer.java:841-862`): nearby sections when the camera block
+  is vanilla's (`LevelRenderer.scheduleTranslucentSectionResort`): nearby sections when the camera block
   changes, plus a round-robin `max(visible/8, 15)` per frame over the rest — bounded by
   counter, never all-sections-per-frame (`translucency.rs`'s own module doc: "sorting
   every section every frame is unaffordable").
@@ -465,11 +465,11 @@ at different depths along the view axis or cross-section order is unexercised.
 **Verified against the tree at `297706a1`:** the three uncalled loops and their exact
 lines; zero production consumers of `visibility.rs`/`scene.rs`/`strategy.rs`/
 `section_arena.rs`/`translucency.rs` (tree-wide grep for producers, not one named file);
-`RenderStats`/F3 wiring (`redraw.rs:514`); `render_distance_chunks` reaching `RenderState`;
-the live far plane varying with rd (`camera_rig.rs:731`); `heap_bytes` still per-frame at
-`step.rs:671`; `SectionKey`/`Meshed`/`SectionGeometry` shapes and the empty-mesh-removal
+`RenderStats`/F3 wiring (`app/redraw.rs`'s `redraw`); `render_distance_chunks` reaching `RenderState`;
+the live far plane varying with rd (`camera_rig.rs`); `heap_bytes` still per-frame in
+`Sim::refresh_stats` (`sim/step.rs`); `SectionKey`/`Meshed`/`SectionGeometry` shapes and the empty-mesh-removal
 behaviour; the mesh-worker's `occludes_at` being available off-thread; wgpu = "30"
-(workspace `Cargo.toml:101`).
+in the workspace `Cargo.toml`'s `[workspace.dependencies]`.
 
 **Verified against the 26.2 decompiled client (record definitions, not summaries):**
 `VisGraph`'s 256-threshold and flood; `VisibilitySet`'s symmetric face-pair bitset;
@@ -490,7 +490,7 @@ anywhere above.
 ## Corrections to the briefing
 
 1. **The fog formula quoted is the fog *start*, not the end.** `rd·16 − clamp(rd·16/10, 4, 64)`
-   is where fading *begins* (`FogRenderer.java:198-200`, `fog.rs:211-222`); geometry there is
+   is where fading *begins* (`FogRenderer.setupFog`, `fog.rs`'s `fog_factor`); geometry there is
    barely fogged. Full fog is at cylindrical distance ≥ **rd·16**.
 2. **"Fully fogged ⇒ provably invisible" does not hold.** A fully-fogged fragment is exactly
    the fog colour, which matches the below-horizon clear and the horizon rim — but a
@@ -517,7 +517,7 @@ anywhere above.
    dominated by wiring and by the walk-fidelity gap (U3b's source-direction merge), not by
    new architecture.
 
-## Measured baseline in instructions retired (added after the plan, issue #543)
+## Measured baseline in instructions retired (added after the plan)
 
 This plan says of its projected draw counts: *"re-measure with the U1 counters before quoting
 any of these"*. The submission term has now been measured **before** U1 exists, so each unit's
@@ -542,8 +542,8 @@ Three consequences for the units above:
    combined.
 
 2. **U1's stated invariant would not have held as written — now corrected above.** `sections_drawn`
-   is incremented only by the opaque loop (`frame.rs:480`), and a water-only section carries
-   `mesh: None` there while still issuing a water draw at `frame.rs:720` — measured **189**
+   is incremented only by the opaque loop in `render_inner`, and a water-only section carries
+   `mesh: None` there while still issuing a water draw in the same function's water loop — measured **189**
    `sections_drawn` against **195** uploads and **304** `draw_calls`. A single
    `sections_drawn + sections_culled_frustum == resident_with_geometry` therefore reads 189
    against 195 and looks exactly like a cull bug. U1's paragraph now states the invariant
@@ -559,7 +559,7 @@ Three consequences for the units above:
 **The plan's biggest miss, from the same measurement:** this document scopes itself to
 submission and culling, which is correct for *frame* cost — but the client chunk path's
 one-off cost is **96.3% meshing** (112,245,079 instructions per column, of which `mesh_fluids`
-is 58.8% at 13,708 instructions per fluid cell — issue #542). `docs/mesh-fill-rate.md`'s
+is 58.8% at 13,708 instructions per fluid cell). `docs/mesh-fill-rate.md`'s
 "the mesher is not the bottleneck" is a statement about the mesher not being the *rate limiter*
 for filling the view, and it is true; it does not mean meshing is not where the CPU work is.
 Both statements hold, and this plan should not be read as implying the second.
