@@ -3,8 +3,8 @@
 //!
 //! # What it is
 //!
-//! Two layers, both extracted here from `lodestone-v340` (GitHub epic #343,
-//! unit U1) so that *every* pre-1.13 protocol family can share one copy
+//! Two layers, both extracted here from `lodestone-v340` so that *every*
+//! pre-1.13 protocol family can share one copy
 //! instead of each carrying its own:
 //!
 //! - [`flattening`] — the `(old_block_id, meta)` → modern-block-state table,

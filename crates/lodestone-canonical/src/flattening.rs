@@ -1,6 +1,6 @@
 //! Pre-Flattening `id:meta` (protocol 340 / Minecraft 1.12.2) &rarr; modern
-//! block-state lookup: the table epic #343 asked for as the forcing function
-//! for multi-version support, built and verified against the real 1.13.2
+//! block-state lookup: the table multi-version support asked for as the
+//! forcing function, built and verified against the real 1.13.2
 //! server jar's own `DataFixerUpper` flattening fix (the same conversion
 //! vanilla itself runs to upgrade a pre-1.13 world) rather than written by
 //! hand or trusted blindly from a community dataset.
