@@ -87,11 +87,14 @@
 //!
 //! # Configuration
 //!
-//! The world directory, passed to [`RegionChunkSource::new`]. Region files
-//! land in `<world>/dimensions/minecraft/overworld/region/r.<rx>.<rz>.mca`,
-//! which is 26.2's real layout (verified against `.cache/mc/survival/world`,
-//! **not** the pre-1.21 `<world>/region/`). Chunks are written with
-//! [`CompressionScheme::Zlib`], vanilla's `RegionFileVersion.DEFAULT`.
+//! The world directory and the [`Dimension`] being persisted, both passed to
+//! [`RegionChunkSource::new`]. Region files land in
+//! `<world>/dimensions/minecraft/<dimension>/region/r.<rx>.<rz>.mca` —
+//! `<dimension>` from [`Dimension::dir_name`] — which is 26.2's real layout
+//! (verified against `.cache/mc/survival/world`, **not** the pre-1.21
+//! `<world>/region/`; that snapshot has a real `dimensions/minecraft/overworld/`
+//! directory too, so the overworld is not a special case here). Chunks are
+//! written with [`CompressionScheme::Zlib`], vanilla's `RegionFileVersion.DEFAULT`.
 //!
 //! # Dependencies
 //!
@@ -112,6 +115,7 @@ use lodestone_model::BlockPos;
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::{ChunkColumn, ChunkSource};
 use crate::chunk_nbt::{self, ChunkExtras};
+use crate::dimension::Dimension;
 
 /// Vanilla's `RegionFileVersion.DEFAULT`, and the only scheme any real file
 /// this repo has read actually uses.
@@ -432,7 +436,8 @@ pub struct PersistenceStats {
 /// The state a save needs, shared between the source and its save handle.
 #[derive(Debug)]
 struct WorldState {
-    /// `<world>/dimensions/minecraft/overworld/region`.
+    /// `<world>/dimensions/minecraft/<dimension>/region` — see
+    /// [`RegionChunkSource::new`]'s `dimension` parameter.
     region_dir: PathBuf,
     /// `<world>/players/data`, or `None` if it could not be created (issue
     /// #302). Handed out through [`ChunkSource::world_registries`].
@@ -754,15 +759,22 @@ impl<S> Clone for RegionChunkSource<S> {
 }
 
 impl<S: ChunkSource> RegionChunkSource<S> {
-    /// Wraps `inner` with persistence rooted at `world_dir`.
+    /// Wraps `inner` with persistence rooted at `world_dir`'s `dimension`
+    /// subdirectory.
     ///
     /// Creates the region directory eagerly so that a later save cannot fail
     /// for a reason the caller could have been told about at open time.
-    pub fn new(inner: S, world_dir: &Path, min_y: i32, height: i32) -> Result<Self, Error> {
+    pub fn new(
+        inner: S,
+        world_dir: &Path,
+        dimension: Dimension,
+        min_y: i32,
+        height: i32,
+    ) -> Result<Self, Error> {
         let region_dir = world_dir
             .join("dimensions")
             .join("minecraft")
-            .join("overworld")
+            .join(dimension.dir_name())
             .join("region");
         std::fs::create_dir_all(&region_dir).map_err(io(&region_dir))?;
         // Issue #305, and it happens **here**, before any task spawns and before
@@ -1553,6 +1565,36 @@ mod tests {
         }
     }
 
+    /// Issue #579: a Nether world and an End world must land in **different**
+    /// region directories from the overworld and from each other, matching
+    /// `.cache/mc/survival/world`'s own layout
+    /// (`dimensions/minecraft/the_nether/region`,
+    /// `dimensions/minecraft/the_end/region`) rather than all three colliding
+    /// on `dimensions/minecraft/overworld/region` — which is what every call
+    /// site got before `dimension` was threaded through, since `new` hardcoded
+    /// `"overworld"` regardless of the caller's intent.
+    #[test]
+    fn each_dimension_gets_its_own_region_directory() {
+        let dir = tempdir("per-dimension-paths");
+        let overworld =
+            RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open overworld");
+        let nether =
+            RegionChunkSource::new(Flat, &dir, Dimension::Nether, MIN_Y, HEIGHT).expect("open nether");
+        let end = RegionChunkSource::new(Flat, &dir, Dimension::End, MIN_Y, HEIGHT).expect("open end");
+
+        assert!(dir.join("dimensions/minecraft/overworld/region").is_dir());
+        assert!(dir.join("dimensions/minecraft/the_nether/region").is_dir());
+        assert!(dir.join("dimensions/minecraft/the_end/region").is_dir());
+
+        // A block set into one dimension's edit map must not appear as an
+        // edit in another's — the collision this test exists to rule out.
+        overworld.set_block(1, 70, 1, MARKER);
+        nether.set_block(1, 70, 1, MARKER);
+        assert_eq!(overworld.retained_columns(), 1);
+        assert_eq!(nether.retained_columns(), 1);
+        assert_eq!(end.retained_columns(), 0, "the End was never written to");
+    }
+
     fn tempdir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lodestone-unload-4m8k-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1573,7 +1615,7 @@ mod tests {
     #[test]
     fn an_evicted_column_is_released_from_the_edit_map_once_it_is_on_disk() {
         let dir = tempdir("released");
-        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world");
         let handle = source.save_handle();
         let store = ChunkStore::with_capacity(source.clone(), 2);
 
@@ -1631,7 +1673,7 @@ mod tests {
     #[test]
     fn a_column_mutated_after_its_eviction_is_written_then_released() {
         let dir = tempdir("redirtied");
-        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world");
         let handle = source.save_handle();
         let store = ChunkStore::with_capacity(source.clone(), 1);
 
@@ -1671,7 +1713,7 @@ mod tests {
     #[test]
     fn the_sweep_defers_a_column_that_is_dirty_when_it_runs() {
         let dir = tempdir("deferred");
-        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world");
         let handle = source.save_handle();
 
         source.set_block(1, 70, 1, MARKER);
@@ -1710,7 +1752,7 @@ mod tests {
     #[test]
     fn a_save_with_nothing_dirty_still_releases_evicted_columns() {
         let dir = tempdir("idle");
-        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world");
         let handle = source.save_handle();
         let store = ChunkStore::with_capacity(source.clone(), 1);
 
@@ -1761,7 +1803,7 @@ mod tests {
         // the store under test ever sees it, which a fresh-world fixture
         // cannot exercise.
         {
-            let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+            let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world");
             source.set_block(1, 70, 1, MARKER);
             source.save_handle().save().expect("seed save");
         }
@@ -1769,7 +1811,7 @@ mod tests {
         // Session 2: reopen the same directory — this is the "saved world"
         // fixture — and wrap it in a real `ChunkStore`, exactly as
         // `IntegratedServer::open_persistent_with_mobs` does.
-        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("reopen world");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("reopen world");
         let handle = source.save_handle();
         let store = std::sync::Arc::new(ChunkStore::new(source.clone()));
 
@@ -1851,12 +1893,12 @@ mod tests {
     fn a_ticket_that_is_never_removed_never_unloads_through_the_real_stack() {
         let dir = tempdir("ticket_no_removal");
         {
-            let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("open world");
+            let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world");
             source.set_block(1, 70, 1, MARKER);
             source.save_handle().save().expect("seed save");
         }
 
-        let source = RegionChunkSource::new(Flat, &dir, MIN_Y, HEIGHT).expect("reopen world");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("reopen world");
         let handle = source.save_handle();
         let store = std::sync::Arc::new(ChunkStore::new(source.clone()));
 

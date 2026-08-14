@@ -116,6 +116,27 @@ impl Dimension {
         }
     }
 
+    /// This dimension's directory name under `<world>/dimensions/minecraft/`
+    /// — [`Self::key`] without its `"minecraft:"` prefix. Verified against
+    /// `.cache/mc/survival/world`'s own layout: `dimensions/minecraft/overworld`,
+    /// `dimensions/minecraft/the_nether` and `dimensions/minecraft/the_end` all
+    /// exist there, each holding its own `region/`, `entities/` and `poi/` —
+    /// the overworld is **not** at the pre-1.21 world-root `<world>/region/`
+    /// in this snapshot, so [`crate::region_source`] rooting there for every
+    /// dimension (not just the Nether/End) is correct rather than a
+    /// convenient shortcut. [`crate::poi_storage::PoiStorage::new`] already
+    /// derives the same string by stripping [`Self::key`]'s prefix; this is
+    /// the same answer as a named method so [`crate::region_source`] does not
+    /// need to duplicate the stripping.
+    #[must_use]
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            Self::Overworld => "overworld",
+            Self::Nether => "the_nether",
+            Self::End => "the_end",
+        }
+    }
+
     /// Parses a level key. `None` for a dimension this server does not host.
     #[must_use]
     pub fn from_key(key: &str) -> Option<Self> {
@@ -572,6 +593,20 @@ mod tests {
     #[test]
     fn the_end_spawn_point_is_the_vanilla_constant() {
         assert_eq!(Dimension::end_spawn_point(), (100, 50, 0));
+    }
+
+    /// [`Dimension::dir_name`] against every dimension, and against
+    /// [`Dimension::key`] with its prefix stripped — the two must agree, since
+    /// [`crate::poi_storage`] derives its own directory name that second way.
+    #[test]
+    fn dir_name_matches_the_stripped_key_for_every_dimension() {
+        for dimension in Dimension::ALL {
+            let stripped = dimension.key().strip_prefix("minecraft:").unwrap();
+            assert_eq!(dimension.dir_name(), stripped);
+        }
+        assert_eq!(Dimension::Overworld.dir_name(), "overworld");
+        assert_eq!(Dimension::Nether.dir_name(), "the_nether");
+        assert_eq!(Dimension::End.dir_name(), "the_end");
     }
 
     /// Issue #504's real production bug, reproduced directly: `is_column_resident`
