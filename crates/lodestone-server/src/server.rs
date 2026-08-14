@@ -101,8 +101,8 @@ use crate::neighbor_update::Direction;
 use crate::players::{ChatLine, PlayerListStreamer, PlayerRegistry, PlayerTicket};
 use crate::plugin_channels::{ClientChannels, PluginChannelRegistry};
 use crate::protocol::{
-    Abilities, EntitySnapshot, MerchantOfferOut, ResourcePackPush, ServerBound, ServerDirective,
-    ServerProtocol,
+    Abilities, BossBarSnapshot, EntitySnapshot, MerchantOfferOut, ResourcePackPush, ServerBound,
+    ServerDirective, ServerProtocol,
 };
 use crate::redstone::{COMPARATOR, OBSERVER, REPEATER};
 use crate::redstone_diode::{set_comparator, set_repeater};
@@ -364,6 +364,18 @@ pub trait EntitySource: Send + Sync {
     fn players(&self) -> Option<&PlayerRegistry> {
         None
     }
+
+    /// The boss bars a client should currently hold — the dragon fight's own
+    /// health bar, and any future producer this trait gains. Defaulted to
+    /// empty for the identical reason [`players`](Self::players) is: adding a
+    /// method here must not force every existing implementor (including the
+    /// version-crate test doubles) to grow one.
+    ///
+    /// [`crate::mobs::MobSim::boss_bars`] is today's one real producer, reached
+    /// through [`crate::mobs::LiveMobSource`]/[`crate::mobs::MobHandle`].
+    fn boss_bars(&self) -> Vec<BossBarSnapshot> {
+        Vec::new()
+    }
 }
 
 /// Runs one full streaming pass for a connection: tab-list diff first, then the
@@ -402,6 +414,7 @@ where
         snapshots.extend(view.entities);
     }
     directives.extend(streamer.sync(proto, &snapshots));
+    directives.extend(streamer.sync_boss_bars(proto, &entities.boss_bars()));
     directives
 }
 
@@ -429,6 +442,12 @@ impl EntitySource for NoEntities {
 #[derive(Debug, Default)]
 struct EntityStreamer {
     last_sent: HashMap<i32, EntitySnapshot>,
+    /// The boss bars this connection has been sent `ADD` for and not yet
+    /// `REMOVE` — the same last-sent-state shape [`last_sent`](Self::last_sent)
+    /// keeps for entities, one level simpler (a bar has no spawn/update split
+    /// on the wire, only add/update-progress/remove). See
+    /// [`sync_boss_bars`](Self::sync_boss_bars).
+    boss_bars_sent: HashMap<uuid::Uuid, BossBarSnapshot>,
 }
 
 impl EntityStreamer {
@@ -499,6 +518,61 @@ impl EntityStreamer {
                         directives.push(proto.encode_set_entity_link(entity.id, entity.leash_link));
                     }
                     self.last_sent.insert(entity.id, entity.clone());
+                }
+                Some(_) => {}
+            }
+        }
+
+        directives
+    }
+
+    /// The `BOSS_EVENT` twin of [`sync`](Self::sync) — diffs `current` against
+    /// what this connection was last sent and returns the add/update/remove
+    /// directives that close the gap.
+    ///
+    /// Vanilla's `ClientboundBossEventPacket` carries no "visible" bit of its
+    /// own (see [`BossBarSnapshot`]'s own doc): a bar this pass reports
+    /// `visible: false` is therefore removed (or, if it was never added,
+    /// simply never added) rather than sent with a false flag, and a bar
+    /// whose id vanished from `current` entirely — the boss despawned — is
+    /// removed the same way an entity id vanishing from [`sync`](Self::sync)'s
+    /// `current` triggers `REMOVE_ENTITIES`.
+    fn sync_boss_bars<P: ServerProtocol>(
+        &mut self,
+        proto: &P,
+        current: &[BossBarSnapshot],
+    ) -> Vec<ServerDirective> {
+        let mut directives = Vec::new();
+
+        let live: HashSet<uuid::Uuid> = current.iter().map(|b| b.id).collect();
+        let vanished: Vec<uuid::Uuid> = self
+            .boss_bars_sent
+            .keys()
+            .copied()
+            .filter(|id| !live.contains(id))
+            .collect();
+        for id in vanished {
+            self.boss_bars_sent.remove(&id);
+            directives.push(proto.encode_boss_event_remove(id));
+        }
+
+        for bar in current {
+            match self.boss_bars_sent.get(&bar.id) {
+                None if bar.visible => {
+                    directives.push(proto.encode_boss_event_add(bar.id, &bar.name, bar.progress));
+                    self.boss_bars_sent.insert(bar.id, bar.clone());
+                }
+                // Never added and still not visible: nothing to do, and
+                // nothing to remember — matches vanilla never broadcasting an
+                // invisible `ServerBossEvent` to a player in the first place.
+                None => {}
+                Some(_) if !bar.visible => {
+                    directives.push(proto.encode_boss_event_remove(bar.id));
+                    self.boss_bars_sent.remove(&bar.id);
+                }
+                Some(prev) if prev.progress != bar.progress => {
+                    directives.push(proto.encode_boss_event_update_progress(bar.id, bar.progress));
+                    self.boss_bars_sent.insert(bar.id, bar.clone());
                 }
                 Some(_) => {}
             }
@@ -13056,11 +13130,16 @@ mod tests {
         );
     }
 
-    /// **The control for the assertion of absence above.** Forces the
-    /// `AttributeMap::iter()`-only bug back (reading only entries the map
-    /// happens to hold) and shows the same removal sequence fails at exactly
-    /// the step the owner reported — proving the detector actually fires
-    /// rather than passing vacuously.
+    /// **The control for the assertion of absence above.** Reinstates the
+    /// original `AttributeMap::iter()`-only implementation (reading only
+    /// entries the map happens to hold, the exact code
+    /// `player_attribute_snapshots` had before this fix) and shows it
+    /// reproduces the owner-reported symptom at the final step of the same
+    /// removal sequence: `minecraft:armor` is omitted entirely once the last
+    /// piece comes off, rather than published at `0.0`. Proves the
+    /// `.expect("...must still publish minecraft:armor, explicitly")` above
+    /// would actually have fired against the old code, rather than the fix
+    /// happening to pass vacuously.
     #[test]
     fn the_sparse_iteration_bug_is_caught_by_the_removal_sequence_above() {
         fn buggy_snapshots(inventory: &PlayerInventory) -> Vec<EntityAttributeSnapshot> {
