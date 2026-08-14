@@ -427,7 +427,7 @@ mod tests {
         assert!(c.section(2).unwrap().is_air_only());
     }
 
-    // --- `set_biome_section`: the `chunks_biomes` write path (issue #26) ---
+    // --- `set_biome_section`: the `chunks_biomes` write path ---
 
     #[test]
     fn set_biome_section_replaces_biomes_without_touching_blocks() {

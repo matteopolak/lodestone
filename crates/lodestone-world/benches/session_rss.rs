@@ -1,6 +1,6 @@
-//! Resident-set growth over a synthetic session (issue #151).
+//! Resident-set growth over a synthetic session.
 //!
-//! # The trap this issue is one step away from
+//! # The trap this bench is one step away from
 //!
 //! RSS is a process-wide counter that outlives any gate measuring it, which is
 //! exactly `CLAUDE.md`'s **duration species** of vacuous test — the flaw would
@@ -10,10 +10,10 @@
 //!
 //! 1. **Nothing here asserts an absolute RSS.** An absolute reading is mostly a
 //!    statement about how much of the binary, the allocator's arenas and the
-//!    fixture data happened to be resident, none of which is what #151 is
-//!    about. Every recorded figure is a *delta* against a baseline taken after
-//!    warm-up, or a cycle-over-cycle growth rate.
-//! 2. **The detector is proved before it is trusted.** #151 asks for this
+//!    fixture data happened to be resident, none of which is what this bench
+//!    is about. Every recorded figure is a *delta* against a baseline taken
+//!    after warm-up, or a cycle-over-cycle growth rate.
+//! 2. **The detector is proved before it is trusted.** This bench does that
 //!    explicitly: a synthetic session with a deliberately reintroduced leak (one
 //!    skipped `unload`) whose growth this measurement *must* observe. That
 //!    control is `leaky_arm` below, and the gate is a comparison between the two
@@ -31,9 +31,9 @@
 //! render-distance-sized area, unload it, load a *different* area, repeat. The
 //! GPU-side counterpart — arena occupancy returning to exactly zero across
 //! load/evict cycles — is `lodestone-render`'s `benches/render_submit.rs`
-//! (`bench_arena_occupancy`, issue #160) and `tests/world_mesher_bench.rs`'s
+//! (`bench_arena_occupancy`) and `tests/world_mesher_bench.rs`'s
 //! `gpu_world_mesher_upload_evict_roundtrip`. Entity spawn/despawn churn is not
-//! covered here; it needs the shell's ECS and belongs with #97/#99.
+//! covered here; it needs the shell's ECS and is tracked separately.
 //!
 //! Run with: `cargo bench -p lodestone-world --bench session_rss`
 
@@ -98,8 +98,8 @@ fn unload_area(world: &mut World, centre_x: i32) {
 /// Runs `CYCLES` load/unload cycles, each over a *different* area, and returns
 /// (RSS after cycle 1, RSS after the last cycle, columns per cycle).
 ///
-/// `leak` skips the unload, which is the deliberately-reintroduced leak #151
-/// asks for as the control. Everything else about the two arms is identical.
+/// `leak` skips the unload, which is the deliberately-reintroduced leak used
+/// as the control. Everything else about the two arms is identical.
 fn churn(leak: bool) -> (u64, u64, usize) {
     let mut world = World::new();
     let mut after_first = 0u64;
@@ -123,8 +123,7 @@ fn churn(leak: bool) -> (u64, u64, usize) {
     (after_first, rss_bytes(), columns)
 }
 
-/// **Issue #151** — does RSS return to a plateau across load/unload churn, or
-/// ratchet upward?
+/// Does RSS return to a plateau across load/unload churn, or ratchet upward?
 ///
 /// The gate is the *ratio between the two arms*, not a threshold on either.
 /// A healthy session's growth across cycles 2..N should be a small fraction of

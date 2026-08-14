@@ -1,5 +1,6 @@
 //! Chunk-insertion throughput for the real per-chunk multiplayer consumer
-//! (issue #78 epic — client-side chunk loading half): [`World::load`], the
+//! (the client-side chunk-loading half of this crate's per-chunk throughput
+//! benchmarks): [`World::load`], the
 //! exact call `protocol/v770/src/adapter.rs`'s `LEVEL_CHUNK_WITH_LIGHT` handler
 //! makes once a packet is fully decoded —
 //! `world.load(pos, LoadedChunk::new(chunk.column, chunk.light,
@@ -11,8 +12,8 @@
 //! in its module doc: **"MP consumes server light; SP computes it. Do not run
 //! `compute_column_light` on live columns."** For the wire path this bench
 //! measures, light and heightmaps arrive *already decoded* — the post-decode
-//! "light propagation" work this epic asks about is exactly zero here, by
-//! design, not by omission. The other per-chunk consumer —
+//! "light propagation" work is exactly zero here, by design, not by
+//! omission. The other per-chunk consumer —
 //! `compute_column_light`, which `lodestone-shell/src/worldgen.rs` calls for
 //! every locally generated (singleplayer) column — gets its own dedicated
 //! `light_propagation` bench in this same crate. Heightmap *decode* (the wire

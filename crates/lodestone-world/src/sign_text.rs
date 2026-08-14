@@ -1,4 +1,4 @@
-//! Typed parse of a sign block entity's NBT (issue #23's sign scope).
+//! Typed parse of a sign block entity's NBT.
 //!
 //! See `docs/block-entity-renderers.md`'s "Sign" section for how this shape
 //! was confirmed: a standalone wire probe joined the live creative oracle, placed
@@ -9,12 +9,9 @@
 //!
 //! # Field names, from the real codec
 //!
-//! `SignText.DIRECT_CODEC`
-//! (`.cache/mc/26.2/src/net/minecraft/world/level/block/entity/SignText.java:33-41`)
-//! is `{ messages: [Component; 4], filtered_messages?: [Component; 4], color:
-//! DyeColor = black, has_glowing_text: bool = false }`, and
-//! `SignBlockEntity.saveAdditional`
-//! (`.cache/mc/26.2/src/net/minecraft/world/level/block/entity/SignBlockEntity.java:94-99`)
+//! `SignText.DIRECT_CODEC` is `{ messages: [Component; 4],
+//! filtered_messages?: [Component; 4], color: DyeColor = black,
+//! has_glowing_text: bool = false }`, and `SignBlockEntity.saveAdditional`
 //! stores one of these per side under `front_text`/`back_text`, plus a
 //! sibling `is_waxed` boolean. `filtered_messages` is the server's
 //! profanity-filter shadow copy for chat-filtering clients
@@ -58,9 +55,9 @@
 
 use lodestone_core::Nbt;
 
-/// One dyed colour a sign's text can use — `DyeColor`'s sixteen values
-/// (`.cache/mc/26.2/client-src/net/minecraft/world/item/DyeColor.java:30-45`),
-/// the type [`SignSide::color`] resolves `SignText`'s `color` field into.
+/// One dyed colour a sign's text can use — `DyeColor`'s sixteen enum
+/// constants, the type [`SignSide::color`] resolves `SignText`'s `color`
+/// field into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SignDyeColor {
     /// `minecraft:white`.
@@ -127,19 +124,18 @@ impl SignDyeColor {
     }
 }
 
-/// One face's text — `SignText`
-/// (`.cache/mc/26.2/src/.../SignText.java:43-46`), minus `filteredMessages`
-/// (see the module doc).
+/// One face's text — `SignText`'s `messages`, `color` and `hasGlowingText`
+/// fields, minus `filteredMessages` (see the module doc).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignSide {
     /// Resolved plain text, one entry per line, top to bottom. Always four —
     /// vanilla's `SignText.LINES = 4`. An empty string is a blank line, not
     /// "no line".
     pub lines: [String; 4],
-    /// `has_glowing_text` (`SignText.java:46`) — full-bright dye colour
-    /// instead of the darkened default when set.
+    /// `has_glowing_text` (`SignText.hasGlowingText`) — full-bright dye
+    /// colour instead of the darkened default when set.
     pub glowing: bool,
-    /// `color` (`SignText.java:45`), defaulting to
+    /// `color` (`SignText.color`), defaulting to
     /// [`SignDyeColor::Black`] exactly as the codec's own
     /// `optionalAlwaysPresentFieldOf(..., DyeColor.BLACK)` does.
     pub color: SignDyeColor,
@@ -147,7 +143,7 @@ pub struct SignSide {
 
 impl Default for SignSide {
     /// Four empty lines, black, not glowing — vanilla's own
-    /// `new SignText()` default (`SignText.java:50-52`), and what a sign
+    /// `new SignText()` no-arg constructor default, and what a sign
     /// block entity with no NBT at all (a freshly-placed sign the server
     /// has not yet sent text for) should draw: nothing, rather than an
     /// error.
