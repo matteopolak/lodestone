@@ -170,6 +170,16 @@ explicit flush described above.
 
 ## Known gaps
 
+* **This still restarts the world rather than publishing the running one.** "The shell caller"
+  section above already names the mechanism (`open_to_lan` is a constructor, not a `publish()`
+  on a live handle); re-verified against current code and it still holds — `open_in_memory*`
+  (singleplayer) is a strictly single-connection `memory_pair` duplex with no `PlayerRegistry`
+  and no accept loop, while `open_to_lan`/`bind` is a structurally different multi-connection
+  `TcpListener` construction, and `IntegratedServer` retains no type-erased `Arc<dyn
+  ChunkSource>`/`Arc<dyn ServerProtocol>` after construction for a hypothetical `publish()` to
+  reuse. Closing it for real needs the two paths unified onto one multi-connection-capable core
+  rather than a quick patch — see the owner-filed issue for the investigation and a candidate
+  shape.
 * **No port field, no game mode, no allow-commands toggle, and (issue #331) no password field
   for RCON.** Vanilla's `MultiplayerOptionsScreen` is a form; this publishes straight away on
   `net::LAN_DEFAULT_PORT` (25565), with no dialog of any kind in between the button press and
