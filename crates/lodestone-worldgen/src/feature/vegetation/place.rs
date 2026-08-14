@@ -14,8 +14,8 @@ use super::grid::VegGrid;
 use super::grid::census::bump as census_bump;
 use super::ids::{Tag, tag_at};
 use super::tree::{
-    Attachment, TrunkPlacerCfg, place_dark_oak_trunk, place_forking_trunk, place_giant_trunk,
-    place_mega_jungle_trunk, update_leaf_distances,
+    Attachment, TrunkPlacerCfg, place_dark_oak_trunk, place_fancy_trunk, place_forking_trunk,
+    place_giant_trunk, place_mega_jungle_trunk, update_leaf_distances,
 };
 
 pub(super) fn place_simple_block<R: RandomSource>(
@@ -190,9 +190,26 @@ pub(super) fn place_tree<R: RandomSource>(
             }
         }
     }
-    if clipped < tree_height {
+    // `TreeFeature.doPlace`'s own accept gate: `clippedTreeHeight >=
+    // treeHeight` (no obstruction at all — every species this module shipped
+    // before issue #428's fancy-oak increment) OR (a `min_clipped_height` is
+    // configured AND the clip didn't cut below it) — `fancy_oak`'s own `4`
+    // is the only shipped config that sets this, so this second arm is new
+    // territory: every earlier species can still ONLY pass via the first.
+    let min_clipped_height = cfg.feature_size.min_clipped_height();
+    let accepted =
+        clipped >= tree_height || min_clipped_height.is_some_and(|m| clipped >= m);
+    if !accepted {
         return;
     }
+    // `clippedTreeHeight` — real vanilla passes THIS, not the original
+    // `treeHeight`, to `trunkPlacer.placeTrunk` (`foliageHeight`/`leafRadius`
+    // above already used the original, pre-clip `treeHeight`, matching
+    // vanilla's own evaluation order). For every species other than fancy
+    // oak, `clipped == tree_height` is the only way `accepted` can be true,
+    // so this substitution changes nothing for them; fancy oak is the first
+    // real user of a genuinely shorter, clipped trunk.
+    let clipped_tree_height = clipped;
 
     // Marks where this tree's own writes begin, so `update_leaf_distances`
     // can later derive its bbox from exactly this tree's own `trunks ∪
@@ -235,7 +252,7 @@ pub(super) fn place_tree<R: RandomSource>(
                 }
             }
             let mut placed_log = false;
-            for y in 0..tree_height {
+            for y in 0..clipped_tree_height {
                 let pos = BlockPos {
                     x: origin.x,
                     y: origin.y + y,
@@ -256,7 +273,7 @@ pub(super) fn place_tree<R: RandomSource>(
             attachments.push(Attachment {
                 pos: BlockPos {
                     x: origin.x,
-                    y: origin.y + tree_height,
+                    y: origin.y + clipped_tree_height,
                     z: origin.z,
                 },
                 radius_offset: 0,
@@ -267,7 +284,7 @@ pub(super) fn place_tree<R: RandomSource>(
         TrunkPlacerCfg::Forking { .. } => place_forking_trunk(
             random,
             origin,
-            tree_height,
+            clipped_tree_height,
             grid,
             tags,
             &cfg.trunk_provider,
@@ -278,7 +295,7 @@ pub(super) fn place_tree<R: RandomSource>(
         TrunkPlacerCfg::DarkOak { .. } => place_dark_oak_trunk(
             random,
             origin,
-            tree_height,
+            clipped_tree_height,
             grid,
             tags,
             &cfg.trunk_provider,
@@ -289,7 +306,7 @@ pub(super) fn place_tree<R: RandomSource>(
         TrunkPlacerCfg::Giant { .. } => place_giant_trunk(
             random,
             origin,
-            tree_height,
+            clipped_tree_height,
             grid,
             tags,
             &cfg.trunk_provider,
@@ -300,7 +317,18 @@ pub(super) fn place_tree<R: RandomSource>(
         TrunkPlacerCfg::MegaJungle { .. } => place_mega_jungle_trunk(
             random,
             origin,
-            tree_height,
+            clipped_tree_height,
+            grid,
+            tags,
+            &cfg.trunk_provider,
+            &cfg.below_trunk_provider,
+            &mut attachments,
+            &mut trunk_positions,
+        ),
+        TrunkPlacerCfg::Fancy { .. } => place_fancy_trunk(
+            random,
+            origin,
+            clipped_tree_height,
             grid,
             tags,
             &cfg.trunk_provider,
@@ -345,6 +373,20 @@ pub(super) fn place_tree<R: RandomSource>(
         match decorator {
             Decorator::Beehive { probability } => {
                 place_beehive_decorator(random, *probability, origin, tree_height, grid, tags);
+            }
+            Decorator::TrunkVine => {
+                place_trunk_vine_decorator(random, &trunk_positions, grid, tags);
+            }
+            Decorator::AttachedToLogs { probability, block_provider, directions } => {
+                place_attached_to_logs_decorator(
+                    random,
+                    &trunk_positions,
+                    *probability,
+                    block_provider,
+                    directions,
+                    grid,
+                    tags,
+                );
             }
             Decorator::Unsupported => {}
         }
@@ -468,4 +510,92 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
         z: hz,
         bees,
     });
+}
+
+/// Both [`TreeDecorator`]-family functions below share one input shape with
+/// real vanilla's `TreeDecorator.Context`: `context.logs()` is built from a
+/// `Set<BlockPos>` (this module's own insertion-order approximation of the
+/// same ambiguous-iteration-order ground the beehive decorator above already
+/// names) and then SORTED BY Y ascending — a real, non-approximated step
+/// (`Comparator.comparingInt(Vec3i::getY)`, a stable sort). For a fallen
+/// tree's own horizontal log that sort is a no-op (every position shares one
+/// Y), but a straight vertical trunk (`jungle_tree`/`mega_jungle_tree`'s own
+/// `trunk_vine` decorator) has one Y per level, so the sort is load-bearing
+/// there. Both functions below sort a **copy**, matching `Context`'s own
+/// `new ObjectArrayList<>(set)` — the caller's `trunk_positions`/log buffer
+/// is untouched.
+///
+/// [`TreeDecorator`]: net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator
+fn y_sorted(logs: &[BlockPos]) -> Vec<BlockPos> {
+    let mut sorted = logs.to_vec();
+    sorted.sort_by_key(|p| p.y);
+    sorted
+}
+
+/// `TrunkVineDecorator.place` — a hanging vine on each of `logs`' four
+/// horizontal neighbours (west, east, north, south, in that exact order),
+/// each gated by its OWN independent `random.nextInt(3) > 0` coin flip.
+/// Every draw happens regardless of outcome (Java evaluates `nextInt(3)`
+/// before the `> 0` test, so the draw is never skipped), and regardless of
+/// whether the neighbour turns out to be air.
+pub(super) fn place_trunk_vine_decorator<R: RandomSource>(
+    random: &mut R,
+    logs: &[BlockPos],
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    // (neighbour offset, the vine property SET on that neighbour — it clings
+    // back toward the log, so e.g. the log's WEST neighbour gets `east=true`).
+    const SIDES: [((i32, i32), &str); 4] =
+        [((-1, 0), "east"), ((1, 0), "west"), ((0, -1), "south"), ((0, 1), "north")];
+    for pos in y_sorted(logs) {
+        for ((dx, dz), prop) in SIDES {
+            if random.next_int_bounded(3) > 0 {
+                let (nx, nz) = (pos.x + dx, pos.z + dz);
+                if tag_at(grid, tags, Tag::Air, nx, pos.y, nz) {
+                    grid.set_if_in_bounds(nx, pos.y, nz, format!("minecraft:vine[{prop}=true]"));
+                }
+            }
+        }
+    }
+}
+
+/// `AttachedToLogsDecorator.place` — one block (a mushroom, for every
+/// shipped `fallen_*_tree` config) on a random direction off a random log.
+/// `Util.shuffledCopy` is a real Fisher-Yates pass over the Y-sorted log
+/// list (`i` from `logs.len()` down to `2`, `logs.len() - 1` draws total —
+/// zero for a one-log stump, matching real vanilla exactly), THEN, per log
+/// in the shuffled order: one direction draw, one probability draw (always,
+/// even when the direction/air check that follows would reject), and only
+/// on success a state-provider draw (a `weighted_state_provider`'s own
+/// single `nextInt`, for every shipped instance).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn place_attached_to_logs_decorator<R: RandomSource>(
+    random: &mut R,
+    logs: &[BlockPos],
+    probability: f32,
+    block_provider: &BlockStateProvider,
+    directions: &[(i32, i32, i32)],
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    if directions.is_empty() {
+        return;
+    }
+    let mut shuffled = y_sorted(logs);
+    let n = shuffled.len();
+    for i in (2..=n).rev() {
+        let j = random.next_int_bounded(i as i32) as usize;
+        shuffled.swap(i - 1, j);
+    }
+    for pos in shuffled {
+        let idx = random.next_int_bounded(directions.len() as i32) as usize;
+        let (dx, dy, dz) = directions[idx];
+        let target = BlockPos { x: pos.x + dx, y: pos.y + dy, z: pos.z + dz };
+        if random.next_float() <= probability && tag_at(grid, tags, Tag::Air, target.x, target.y, target.z) {
+            if let Some(state) = block_provider.get_state_id(grid, tags, random, target) {
+                grid.set_id_if_in_bounds(target.x, target.y, target.z, state);
+            }
+        }
+    }
 }

@@ -235,6 +235,11 @@ pub(super) enum Rewrite {
     Distance(u8),
     /// `waterlogged=true|false`, `try_place_leaf`'s fix-up.
     Waterlogged(bool),
+    /// `axis=x|y|z`, `RotatedPillarBlock.AXIS` — `FancyTrunkPlacer.getLogAxis`
+    /// and `FallenTreeFeature`'s own `getSidewaysStateModifier`, both of which
+    /// pick a log's axis from the direction it was placed in rather than the
+    /// configured (vertical) default.
+    Axis(&'static str),
 }
 
 impl Default for IdTags {
@@ -443,6 +448,7 @@ impl VegTags {
             Rewrite::Distance(n) => ("distance=", DISTANCE_LITERALS[usize::from(n.min(15))]),
             Rewrite::Waterlogged(true) => ("waterlogged=", "true"),
             Rewrite::Waterlogged(false) => ("waterlogged=", "false"),
+            Rewrite::Axis(v) => ("axis=", v),
         };
         let out = rewrite_property(interner.name_of(id), property, value)
             .map(|name| interner.id_of(&name));

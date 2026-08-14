@@ -13,12 +13,16 @@ generates it, matching vanilla's own cross-chunk decoration spill.
 
 Trunk placers ported so far: `Straight` (oak/birch/spruce/pine's default), `Forking` (acacia),
 `DarkOak` (dark oak, and pale oak for free — same placer, different providers), `Giant` (the shared
-2×2 base under mega spruce/pine AND mega jungle), `MegaJungle` (`Giant`'s base plus radial branches).
-Foliage placers: `Blob`, `Spruce`, `Pine`, `Acacia`, `DarkOak`, `MegaJungle`, `MegaPine`, `Bush`. Still
-unmodelled: `Fancy` (oak's `fancy_oak_*`/`fancy_oak_checked` branch — the single highest-value
-remaining gap, shared across oak, jungle and dark_forest), mangrove's `UpwardsBranchingTrunkPlacer`,
-`Cherry`, `Bending`, and `FallenTreeFeature` (a distinct feature type, not a trunk/foliage placer at
-all).
+2×2 base under mega spruce/pine AND mega jungle), `MegaJungle` (`Giant`'s base plus radial branches),
+`Fancy` (oak's `fancy_oak_*`/`fancy_oak_checked` branch, shared with jungle and dark_forest — the
+slim-trunk-plus-scattered-limb shape, the single highest-value gap named in issue #428, closed in a
+later pass). Foliage placers: `Blob`, `Spruce`, `Pine`, `Acacia`, `DarkOak`, `MegaJungle`, `MegaPine`,
+`Bush`, `Fancy`. `FallenTreeFeature` — a real, distinct feature type, not a trunk/foliage placer at
+all — is also modelled now: a stump plus a horizontal fallen log, reusing the same
+`TrunkVineDecorator`/`AttachedToLogsDecorator` machinery `TreeConfig.decorators` already needed for
+`jungle_tree`/`mega_jungle_tree`'s own `trunk_vine` entries (both landed together — `Decorator` is
+shared across both feature types in real vanilla, not duplicated). Still unmodelled: mangrove's
+`UpwardsBranchingTrunkPlacer`, `Cherry`, `Bending`.
 
 ## How it works
 
@@ -59,12 +63,20 @@ chunk's post-ore terrain, runs the step, and folds only the written cells back (
 
 - **Anything this module doesn't implement degrades to a silent no-op, never a panic.** This is
   deliberate: `build_biome_vegetation` resolves *every* biome's vegetation list at generator
-  construction time, including biomes nobody asked for yet (fancy oak's trunk, mangrove's
-  above-water-root trunk, `FallenTreeFeature`, azalea's environment-scan placement). A `panic!` on any
-  one of those would break world generation for every biome, not just the untested one. When adding a
-  new trunk placer / foliage placer / feature size / block-state provider / placement modifier, its
+  construction time, including biomes nobody asked for yet (mangrove's above-water-root trunk,
+  cherry's trunk/foliage, azalea's environment-scan placement). A `panic!` on any one of those would
+  break world generation for every biome, not just the untested one. When adding a new trunk placer /
+  foliage placer / feature size / block-state provider / placement modifier / tree decorator, its
   `try_parse` must return `Option`/degrade on anything unrecognised — follow the existing pattern,
   don't add a bare `panic!`.
+- **`TreeConfig.minimum_size`'s `min_clipped_height` is the one place a clipped tree still places.**
+  Every species before `Fancy` only ever passed [`place_tree`]'s accept gate via `clipped ==
+  tree_height` (no obstruction at all), so `clipped` and `tree_height` were interchangeable at every
+  call site — until fancy oak's real `two_layers_feature_size` sets `min_clipped_height: 4`, meaning a
+  *partially* obstructed fancy oak still grows, shorter, rather than being rejected outright. The
+  trunk placer receives `clipped_tree_height` (NOT the original `tree_height`) for exactly this
+  reason; `foliage_height`/`leaf_radius` still use the original, matching vanilla's own
+  `TreeFeature.doPlace` evaluation order (both computed before the clip scan runs at all).
 - **No JVM oracle validates this stage yet.** `docs/worldgen-parity.md`'s harness composes shape +
   aquifer + biome + surface + carve + ore against a real vanilla dump, but vegetation is not part of
   `ComposedChunkOracle.java`, and no isolated oracle for it exists in `scripts/worldgen-oracle/`
@@ -77,12 +89,23 @@ chunk's post-ore terrain, runs the step, and folds only the written cells back (
   `VegetationBlock`'s rule, heightmap types collapsed from five to two scans, the beehive decorator's
   hive-row selection approximated).
 - **Named per-species gaps, even within the implemented trunk/foliage placers**: real vanilla
-  plains/taiga/jungle/etc. roll a `random_selector` between several tree variants per attempt. Oak's
-  `fancy_oak_bees_*`/`fancy_oak_checked` branch (~10-33% depending on biome) and every species'
-  `fallen_*_tree` branch are `ConfiguredFeature::Unsupported` — those attempts place nothing. See
-  `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS` for the maintained, gate-enforced per-biome
-  list of exactly which reasons remain, and the `vegetation` module's own doc "Named per-branch gaps"
-  section for the reasoning behind which placer landed when.
+  plains/taiga/jungle/etc. roll a `random_selector` between several tree variants per attempt. Now
+  that `fancy_oak_*`/`fancy_oak_checked` and every species' `fallen_*_tree` branch are both modelled,
+  the remaining `ConfiguredFeature::Unsupported` tree-shaped gaps are narrower: mangrove_swamp
+  (`UpwardsBranchingTrunkPlacer`), cherry_grove (`CherryTrunkPlacer`) and any biome whose selector
+  reaches a bare `BendingTrunkPlacer`. See `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`
+  for the maintained, gate-enforced per-biome list of exactly which reasons remain — **that table
+  needs pruning as a follow-up**: several entries whose only cited reason was `fancy_oak_checked`
+  and/or `fallen_*_tree` no longer apply, and this pass did not touch it (`crates/lodestone-server/src/**`
+  belongs to a different owner in the session this landed in). See the `vegetation` module's own doc
+  "Named per-branch gaps" section for the reasoning behind which placer landed when.
+- **`TrunkVineDecorator`/`AttachedToLogsDecorator` are shared between `ConfiguredFeature::Tree` and
+  `ConfiguredFeature::FallenTree`** — both are `TreeDecorator` subclasses in real vanilla, and
+  `Decorator` (`config.rs`) models them once rather than per feature type. `jungle_tree`/
+  `mega_jungle_tree`'s own `decorators` list (not `fallen_*_tree`'s `stump_decorators`/
+  `log_decorators`) is what first exercises `TrunkVine` for a *vertical* log list — real vanilla's
+  `TreeDecorator.Context` sorts by Y before either decorator runs, which is a no-op for a fallen tree's
+  single-Y horizontal log but load-bearing there. See `place_trunk_vine_decorator`'s own doc comment.
 
 ## Configuration
 
