@@ -46,17 +46,17 @@ bundle, which links `lodestone-server` and links neither today.
 
 But the registry has to live in `lodestone-ecs`, because that is where the
 plugin API lives — a registry in `lodestone-server` would be unreachable by
-every plugin that can exist, which is why [#118]'s own body was unbuildable as
-written.
+every plugin that can exist, which is why a design proposing that was
+unbuildable as written.
 
 So the inbound path crosses exactly the boundary the server crate exists to
-avoid. [#464] listed three ways out:
+avoid. Three ways out were considered:
 
 | option | verdict |
 |---|---|
 | 1. `lodestone-server` gains a `lodestone-ecs` dependency | **rejected** — contradicts the boundary, and the cost is already measured |
 | 2. a callback/queue seam the host installs | **taken** |
-| 3. dispatch moves server-side, registry mirrored across the seam | **rejected** — reintroduces the duplication [#435] declined to create, and leaves plugins registering into a registry dispatch does not read |
+| 3. dispatch moves server-side, registry mirrored across the seam | **rejected** — reintroduces duplication the design deliberately declined to create, and leaves plugins registering into a registry dispatch does not read |
 
 Option 2 inverts the dependency: `lodestone-server` declares a trait in
 ECS-free vocabulary, and the **host** — a crate that legitimately links both —
@@ -101,7 +101,7 @@ to know what a permission is.
 no sink and answers `UNKNOWN_COMMAND` without consulting anything. An absent
 dispatcher must never read as blanket permission. This mirrors
 `dispatch_refuses_rather_than_ungates_when_permissions_are_missing`
-(`crates/lodestone-ecs/tests/plugin_command_registry.rs:492`) one layer out: a
+(`crates/lodestone-ecs/tests/plugin_command_registry.rs`) one layer out: a
 missing *resource*, and now a missing *sink*, both refuse.
 
 **2. The caller identity cannot be influenced by the command text.** The
@@ -250,17 +250,58 @@ writing the suggestions id before the parser payload instead of after makes it
 fail (measured). `brigadier:long` and `minecraft:angle` are the two ids no
 vanilla command uses, so they carry their own id-and-payload-length assertions.
 
+#### Selectors
+
+`@s`/`@p`/`@a`/`@r`/`@e`/`@n`, a bare player name, and a bare uuid, all through
+`lodestone_command_mc::EntityArg`/`EntitySelector` (`crates/lodestone-command-mc/src/entity.rs`)
+and resolved against the roster by `lodestone_server::commands::source::resolve_players`.
+The v1 filter set is `type`, `name`, `distance`, `limit`, `sort`, `gamemode`,
+`x`/`y`/`z`, `dx`/`dy`/`dz` — ported from `EntitySelectorParser`/`EntitySelector`
+in the 26.2 decompile, each with vanilla's `!` inversion where vanilla has one.
+`scores`, `nbt`, `advancements`, `predicate`, `tag`, `team`, `level` and the two
+`*_rotation` options are refused **by name** rather than silently ignored (see
+that module's own doc for why each needs a subsystem this server does not have).
+None of it is visible on the wire — `minecraft:entity` carries one flags byte
+and no option list — so the deferred set cannot desync tree parity.
+
+**Resolution only ever reaches players.** `CommandWorld` carries
+`&[PlayerCandidate]`, never a general entity list, because entity resolution
+would need a world this crate is structurally forbidden from depending on (see
+this document's "Why there is a seam at all"). `@e`/`@n` therefore parse the
+full grammar but resolve to nothing beyond the player roster — `/kill @e[type=cow]`
+is legal syntax that correctly matches zero candidates, the same narrowing
+`/gamemode`'s and `/give`'s `<target>` already made.
+
 #### The commands, and how they are gated
 
 `/gamerule` (one literal per rule, so the value's type comes from the rule's own
-spec), `/gamemode` and `/give`, each read off the decompiled 26.2 source rather
-than from memory. Per-command parity is asserted against
+spec), `/gamemode`, `/give` and `/effect` were the original four; `/time`,
+`/difficulty`, `/seed`, `/setworldspawn`, `/spawnpoint` (self-only), `/kill`,
+`/experience` (`/xp`), `/clear`, `/setblock`, `/fill`, `/say`, `/me`, `/msg`
+(`/tell`/`/w`) and `/help` (root listing only) followed. Each reads off the
+decompiled 26.2 source rather than from memory where a real tree exists to
+check against, and each has one execution test in
+`crates/lodestone-server/tests/builtin_commands.rs` per the registrar's own
+stated bar (its own doc names the three residual runtime panics that fire on a
+command's *first* execution, which is exactly what that bar catches). Four
+new argument types back them: `lodestone_command_mc::{TimeArg, BlockArg}` and
+the pre-existing `Vec3Arg`/`BlockPosArg` for `~`/`^` coordinates.
+
+Per-command wire parity for the original four is asserted against
 `crates/protocol/v770/tests/fixtures/command_tree_creative.hex` — 30,248 bytes and
 2,017 nodes captured from a real vanilla 26.2 server — comparing node kinds,
 names, parser variants *including payload flags*, executable bits, restricted
 bits, redirect topology and suggestion ids, recursively and in child order. The
 gate carries its own control: pointing the comparison at two different subtrees
 must panic.
+
+**The newer commands have no such fixture and therefore no wire-parity gate.**
+The captured tree was taken before any of them existed, so their execution
+tests are the only gate on record — a real risk this doc states rather than
+hides: a node shape one of them gets wrong (an argument order, a literal vs.
+argument choice) would ship undetected until a real client's autocompletion
+disagreed with what the server accepts. Recapturing the fixture against a
+26.2 server that has these commands too would close it.
 
 Three shapes the fixture settled that a reconstruction gets wrong:
 
@@ -337,13 +378,13 @@ lives in the plugin API.**
   command still *runs*, the player just never learns what happened. A family that
   wants commands must implement it.
 * **26.2 has five permission levels, not four**, and no longer a bare number:
-  `PermissionLevel::{All, Moderators, Gamemasters, Admins, Owners}`. [#127]'s
-  body says four and is wrong; `crates/lodestone-ecs/src/permissions.rs` already
-  transliterates the five — use it rather than re-deriving.
+  `PermissionLevel::{All, Moderators, Gamemasters, Admins, Owners}`. An earlier
+  design's body said four and was wrong; `crates/lodestone-ecs/src/permissions.rs`
+  already transliterates the five — use it rather than re-deriving.
 * **`lodestone_model::command_tree` and `lodestone-command` are not the same
   thing and must not be merged.** One is a flat, wire-shaped *decode target*
   keyed by registry id that tolerates unknown ids; the other is an arena-based
-  *construction API* with `dyn ArgumentType` as behaviour. [#435] kept both
+  *construction API* with `dyn ArgumentType` as behaviour. Both were kept
   deliberately.
 * **`crates/lodestone-shell/src/.../chat.rs` still carries three hand-rolled
   copies of Brigadier reader/parser logic** (`validate_simple`, `read_quoted`,
@@ -405,22 +446,72 @@ other work:
 
 1. `PluginCommandsPlugin` is added in **zero** production code paths (only
    tests), so no production `World` even holds a `CommandRegistry`. The place to
-   add it is `crates/lodestone-shell/src/sim/build.rs:127`.
+   add it is `client_app`, `crates/lodestone-shell/src/sim/build.rs`.
 2. `IntegratedServer::open_in_memory_with_mobs`
-   (`crates/lodestone-server/src/integrated.rs:358`) — the production
+   (`crates/lodestone-server/src/integrated.rs`) — the production
    singleplayer constructor — has no way to accept a `CommandDispatch` and calls
    `serve_connection_with_mob_events_shared` internally.
-3. `crates/lodestone-shell/src/net.rs:1531` is the one place a `World` handle and
+3. `connect_impl`, `crates/lodestone-shell/src/net.rs`, is the one place a `World` handle and
    the `IntegratedServer` are simultaneously in scope, so it is where the sink
    would be constructed and installed.
 
+**The `COMMANDS` (id 16) encoder now sends.** `server.rs` transmits the
+per-player-pruned projection at the join sequence's vanilla position, so a
+real client's tab completion and command highlighting work against every
+built-in listed above, not only the original four.
+
 Still open, and each is now additive rather than blocked:
 
-* **The `COMMANDS` (id 16) encoder.** The projection exists and is gated; nothing
-  transmits it. Until it lands, tab completion against the server's own commands
-  does not work, and `CHAT_COMMAND_SIGNED` stays unreachable (see *Gotchas*).
-* **`/execute`** ([#123]). The modifier/fork substrate it needs is built and
-  gated; what is left is the subcommand tree itself.
+* **`/execute`, command blocks, functions and datapacks.** The modifier/fork
+  substrate `/execute` needs is built and gated; what is left is the
+  subcommand tree itself. `SET_COMMAND_BLOCK`/`SET_COMMAND_MINECART` still
+  decode into `ServerBound::Ignored`, so a command block's NBT cannot be set
+  over the wire, let alone tick. None of this was started.
+* **`/tp`/`/teleport`.** Not registered at all. `ServerProtocol` has no
+  generic post-join teleport/position-sync encoder — the one free function
+  that builds that packet (`encode_player_position_teleport` in
+  `crates/protocol/v770/src/server_protocol.rs`) is used only by the join
+  sequence and is not exposed through the trait, so `dispatch_play_packet`
+  (which is generic over `P: ServerProtocol`) cannot call it. Adding one means
+  a new trait method plus a `V770ServerProtocol` implementation, in the one
+  file this repo's own contention notes flag as heavily contended; deliberately
+  left for a pass that can own that file.
+* **`/weather`.** Not registered. `crate::weather::WeatherState` is owned by
+  the world tick loop with no lock and no shared handle — unlike
+  `WorldStateHandle`'s difficulty/clock, there is nothing a command executor
+  can reach to force a transition. Wiring it needs a channel shaped like
+  `crate::sleep::SleepVote` (a caller-side request the tick loop consults each
+  pass), not a one-line store-and-read.
+* **`/summon`.** Not registered. There is no synchronous "spawn one mob now"
+  entry point reachable from a command executor — natural spawning is driven
+  entirely by the tick loop's own passes (`crate::mob_spawn`,
+  `crate::natural_spawn`), with no callable single-spawn seam a command could
+  use instead.
+* **`/defaultgamemode`.** Not registered. No store exists for "the game mode a
+  *new* player joins in" — only the per-connection `game_mode` local a joined
+  player already has.
+* **`/publish`** (the Open-to-LAN port command) is a separate, LAN-specific
+  issue and was not attempted here.
+* **`/xp query`** parses and resolves its target, then refuses rather than
+  answering. A live player's experience is a connection-local
+  `PlayerExperience` this crate cannot read cross-connection — `PlayerCandidate`
+  (the roster snapshot selectors resolve against) carries a position and a game
+  mode, the same two scalars `/gamemode`'s `gamemode=` filter needs, but no
+  experience field. Answering the query for real needs that snapshot widened,
+  the same way game mode already was.
+* **`/setblock`/`/fill`/`/say`/`/me` are unreachable from RCON**, unlike every
+  other new command. `Effect::SetBlock`/`Fill` need the chunk source only a
+  live connection's own `ChatCommand` arm has in scope; RCON's `run_command`
+  has no such source at all. `Effect::Broadcast` (`/say`/`/me`) is the one
+  exception — RCON already holds the player registry, so `rcon.rs` calls
+  `PlayerRegistry::say` directly for that one effect kind. See `rcon.rs`'s own
+  module doc for the up-to-date roster of what RCON can and cannot run.
+* **`/spawnpoint` has no `<targets>` form**, only the caller-implicit one.
+  `RespawnPoint` is a connection-local variable
+  (`dispatch_play_packet`'s own `respawn: &mut Option<RespawnPoint>`); reaching
+  a *different* connection's copy would need a directed effect this crate does
+  not have yet (`Effect::SetRespawnPoint` is deliberately self-targeted-only —
+  see its own doc comment).
 * **A textual SNBT parser.** `ItemArg` v1 refuses a `[…]` component patch by name
   rather than dropping it, because no textual SNBT parser exists anywhere in this
   tree (`read_component_patch` is *wire* decode, a different problem). Since
@@ -473,8 +564,4 @@ Still open, and each is now additive rather than blocked:
   only one that can host commands at all.
 
 [#48]: https://github.com/matteopolak/lodestone/issues/48
-[#118]: https://github.com/matteopolak/lodestone/issues/118
-[#123]: https://github.com/matteopolak/lodestone/issues/123
-[#127]: https://github.com/matteopolak/lodestone/issues/127
-[#435]: https://github.com/matteopolak/lodestone/issues/435
 [#464]: https://github.com/matteopolak/lodestone/issues/464
