@@ -108,19 +108,66 @@ before — so a LAN player heard no server-caused sounds at all.
 ## The shell caller
 
 `PauseButton::OpenToLan` → `MenuAction::OpenToLan` → `WindowApp::open_current_world_to_lan`
-(`app/session.rs`) → `NetClient::open_to_lan` → `net.rs`'s `open_lan_world`.
+(`app/session.rs`) → `NetClient::publish_to_lan` → the net thread's own loop, which calls
+`IntegratedServer::publish` on the handle it already holds.
 
-### It reopens the world instead of publishing the live handle
+### It publishes the live handle in place — issue #562
 
-`open_to_lan` **constructs** a server — it binds the listener, builds the `ChunkStore` and
-spawns the tick loop. There is no `publish()` on a running `IntegratedServer`, so the only
-way to get a socket in front of the world you are in is to end the current session and open
-the same launch again with LAN on. `WindowApp::hosted_world` remembers the launch for exactly
-that; the player sees the loading screen briefly and then rejoins over `127.0.0.1`.
+This used to reopen the world: `open_current_world_to_lan` called `Sim::end_session` and then
+`NetClient::open_to_lan`, which **constructs** a fresh server — a new `ChunkStore`, a new tick
+loop, the local player rejoining over `127.0.0.1` like a stranger. The button that vanilla
+treats as invisible-if-nothing-happens produced a real loading screen every time.
 
-`Sim::end_session` runs **first**, and the order is load-bearing: the running server holds the
-world's region directory, and binding a second one over the same files is two writers to the
-same chunks.
+`IntegratedServer::publish(&mut self, addr, discovery_motd)` fixes this by adding a *second*
+accept loop to a server that is already running, mirroring vanilla's
+`Minecraft.getSingleplayerServer().publishServer`. It works because
+`open_in_memory_with_mobs`/`open_persistent_with_mobs` (the two constructors with a shared tick
+loop and `PlayerRegistry`) now also build a `HostCore`: type-erased handles
+(`Arc<Box<dyn ServerProtocol>>`, a double-`Arc`'d `Arc<dyn ChunkSource>`, the block-entity
+registry, the live-mob source, the player registry, the tick loop's outbound hub, and the relay's
+live subscriber list) stashed on the `IntegratedServer` itself. `publish` binds a
+`TcpListener`, reads `host: &HostCore` back off `self`, and spawns an accept loop that clones
+those handles into every accepted connection — the same composition `open_to_lan`'s own accept
+loop already uses, just reached from `&mut self` instead of from a constructor's local variables.
+
+**The relay unification that made this possible.** Before this, singleplayer's one in-memory
+connection read the tick loop's `BlockTickFeed`/`ExplosionFeed` **directly** — safe with exactly
+one consumer, and exactly what a second (published) connection could not share without racing it
+for the same drain-all queues. `open_in_memory_with_mobs_using` now spawns the same
+hub-plus-relay-plus-subscriber shape `open_to_lan` already used for LAN: the tick loop publishes
+into a hub, a relay task drains it once per tick period and fans out to a live subscriber list,
+and the constructor's own local connection is subscriber #1 — pushed into `HostCore.subscribers`
+before the constructor even returns. `publish` pushes every later connection into that **same**
+list, so a published joiner receives the identical block-tick/detonation/effect stream the local
+player already does. `IntegratedServer` gained two more background-task fields for this
+(`relay_task`, `publish_task`) with the usual join-or-abort treatment in `shutdown`/`Drop`.
+
+`Arc<dyn ChunkSource>`/`Arc<Box<dyn ServerProtocol>>` reaching a `serve_connection*` entry point's
+generic `S`/`P` bounds needed two small, purely-additive trait impls: `chunk.rs` gained
+`impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S>` (hand-forwarded, mirroring
+`protocol.rs`'s existing `impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P>`), and
+`HostCore::source` is a *double* `Arc` (`Arc<Arc<dyn ChunkSource>>`) because `serve_connection*`'s
+`source: &Arc<S>` parameter always wraps its own generic `S` in one more `Arc` — satisfying it
+with an erased source needs `S` itself to already be `Arc<dyn ChunkSource>`. One gotcha the new
+blanket surfaced: `DimensionalSource` has its own **inherent** `dimension() -> Dimension`
+(deliberately shadowing the trait's `Option<Dimension>`, per that method's own doc comment), and
+Rust's method resolution stops at the *first* receiver type with any match at all — so calling
+`.dimension()` through an `Arc<DimensionalSource<..>>` directly now resolves to the new blanket's
+*trait* method instead of continuing to deref to the inherent one. The one call site this bit
+(`open_in_memory_with_mobs_using`'s own `TickFollow` construction) now writes `(*source).dimension()`
+to force resolution to start one deref past the `Arc`.
+
+### Vanilla parity, and what is deliberately not carried over
+
+Every connection `publish` accepts gets `CommandDispatch::none()`, a default
+`ResourcePackPushFeed`/`PluginChannelRegistry`, and a default `AccessHandle` — the same inert
+starting point `bind` gives a freshly-built LAN world. A host that wants RCON, real commands or
+access control still needs `open_to_lan` at world-open time; `publish` is deliberately the
+minimal "add a socket" verb, not a second config surface. `discovery_motd: Option<String>` is
+carried through to `spawn_lan_discovery` exactly as `LanConfig::discovery` is, but the shell does
+not pass one yet — `open_current_world_to_lan` has no route to the running session's world
+directory at the point it calls `publish_to_lan`, so a joining player still needs to be told the
+address rather than finding the world in their own multiplayer list.
 
 ### One transport, no privileged host
 
@@ -170,27 +217,24 @@ explicit flush described above.
 
 ## Known gaps
 
-* **This still restarts the world rather than publishing the running one.** "The shell caller"
-  section above already names the mechanism (`open_to_lan` is a constructor, not a `publish()`
-  on a live handle); re-verified against current code and it still holds — `open_in_memory*`
-  (singleplayer) is a strictly single-connection `memory_pair` duplex with no `PlayerRegistry`
-  and no accept loop, while `open_to_lan`/`bind` is a structurally different multi-connection
-  `TcpListener` construction, and `IntegratedServer` retains no type-erased `Arc<dyn
-  ChunkSource>`/`Arc<dyn ServerProtocol>` after construction for a hypothetical `publish()` to
-  reuse. Closing it for real needs the two paths unified onto one multi-connection-capable core
-  rather than a quick patch — see the owner-filed issue for the investigation and a candidate
-  shape.
 * **No port field, no game mode, no allow-commands toggle, and (issue #331) no password field
-  for RCON.** Vanilla's `MultiplayerOptionsScreen` is a form; this publishes straight away on
-  `net::LAN_DEFAULT_PORT` (25565), with no dialog of any kind in between the button press and
-  the publish. A port already in use fails the publish loudly rather than sliding to another,
-  because a host who reads "opened on 25565" and is actually on 25566 has been given a wrong
-  answer. The RCON gap is the same shape as the port one: `LanConfig::rcon` is real and correctly
-  wired (`start_rcon`, tested against a real vanilla RCON server in
+  for RCON.** Vanilla's `MultiplayerOptionsScreen` is a form; this publishes straight away on an
+  OS-assigned port (`publish_to_lan(0)`, issue #559 — matching vanilla's own
+  `HttpUtil.getAvailablePort()` default), with no dialog of any kind in between the button press
+  and the publish. The port actually bound is read back from the listener and reported through
+  `NetUpdate::LanOpened`, never the `0` that was requested — `IntegratedServer::publish`'s own
+  doc comment and its `publish_reports_the_actual_bound_port_not_the_requested_zero` gate are the
+  discriminating check (asserting only "some port came back" would pass for a hardcoded echo of
+  the request). `net::LAN_DEFAULT_PORT` (25565, vanilla's well-known port) still exists, kept for
+  an explicit-port control to default a text field to — vanilla's `/publish <port>`, not yet
+  wired into this crate's command set — rather than for anything the automatic publish path binds
+  today. The RCON gap is the same shape: `LanConfig::rcon` is real and correctly wired
+  (`start_rcon`, tested against a real vanilla RCON server in
   `crates/lodestone-server/tests/rcon_live_oracle.rs`), but `RconConfig` requires a non-empty
   password by design (mirrors vanilla refusing to enable RCON with an empty `rcon.password`), so
   there is no config-literal fix the way `query`'s was — someone has to add the settings screen
-  before this field can ever be `Some`.
+  before this field can ever be `Some`. `IntegratedServer::publish` does not expose an RCON
+  option at all yet; a host who wants one still needs `open_to_lan` at world-open time.
 * **The button is always present**, where vanilla hides the whole half-width row on a remote
   server. `PauseButton::enabled` is a pure function of the variant at every call site, so the
   "there is nothing of ours to publish" case is stated in chat instead.

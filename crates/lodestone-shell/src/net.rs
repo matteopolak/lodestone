@@ -913,6 +913,16 @@ pub struct NetClient {
     /// Outbound actions (movement, swings, chat) queued for the net thread to
     /// hand to the client. Kept off the render thread; the net loop drains it.
     action_tx: Sender<ClientAction>,
+    /// "Open to LAN" requests (issue #562): a port to add a TCP listener on,
+    /// drained by the net thread's own loop rather than handed to the client
+    /// handle like [`Self::action_tx`] — this is not a wire packet, it is a
+    /// local call into the **running** `IntegratedServer` this thread already
+    /// holds (`IntegratedServer::publish`). Native only: the capability itself
+    /// is (no TCP on wasm32), and every construction path — including the two
+    /// `#[cfg(test)]` loopbacks — still creates one so the struct has a single
+    /// field list; a request into a loopback's receiver is simply never drained.
+    #[cfg(not(target_arch = "wasm32"))]
+    publish_tx: Sender<u16>,
     stop: Arc<AtomicBool>,
     /// The driver's OS thread, joined on `Drop`.
     ///
@@ -1157,15 +1167,17 @@ const SINGLEPLAYER_ADDRESS: (&str, u16) = ("singleplayer", 0);
 /// line on the builder.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The port the pause menu's Open to LAN asks for (issue #535).
+/// Vanilla's well-known Minecraft port — the one a joining player will try
+/// first if they only know the host's address.
 ///
-/// Vanilla's `MultiplayerOptionsScreen` defaults to `HttpUtil.getAvailablePort()`
-/// — a random free one — and lets the host type another. There is no port field
-/// on this side yet, so this is the well-known Minecraft port instead, which is
-/// the one a joining player will try first if they only know the host's address.
-/// It is a **request**: a port already in use fails the publish loudly rather
-/// than silently sliding to another, because a host who reads "opened on 25565"
-/// and is actually on 25566 has been given a wrong answer.
+/// **Not what the pause menu's Open to LAN asks for since issue #559.**
+/// `PauseButton::OpenToLan` now calls `NetClient::publish_to_lan(0)`, matching
+/// vanilla's own `MultiplayerOptionsScreen`, which defaults to
+/// `HttpUtil.getAvailablePort()` — an OS-assigned port, reported back through
+/// `NetUpdate::LanOpened` once bound — rather than this fixed one. This
+/// constant is kept for an explicit-port control (vanilla's `/publish <port>`)
+/// to default its text field to, once one exists; it names *a* well-known
+/// port, not the one this shell binds automatically.
 #[cfg(not(target_arch = "wasm32"))]
 pub const LAN_DEFAULT_PORT: u16 = 25565;
 
@@ -1479,8 +1491,14 @@ impl NetClient {
     /// than the in-memory duplex, so there is exactly one kind of connection on
     /// this server and the host is not a special case.
     ///
-    /// `port` of `0` asks the OS for a free one, which is what a test wants;
-    /// [`LAN_DEFAULT_PORT`] is what the menu passes.
+    /// `port` of `0` asks the OS for a free one.
+    ///
+    /// **Not the pause menu's Open to LAN entry point since issue #562** — a
+    /// world already running (the common case, since the button lives on the
+    /// pause menu of a session already in progress) publishes in place through
+    /// [`Self::publish_to_lan`] instead of coming back through here, which
+    /// rebuilds the world from scratch. This constructor is still the right
+    /// one for *starting* a session already in LAN mode.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn open_to_lan(
@@ -1523,6 +1541,8 @@ impl NetClient {
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let (action_tx, action_rx) = mpsc::channel();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (publish_tx, publish_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
         let handle: SharedHandle = Arc::new(OnceLock::new());
@@ -1549,6 +1569,7 @@ impl NetClient {
                     protocol,
                     tx,
                     action_rx,
+                    publish_rx,
                     stop_thread,
                     handle_thread,
                     weather_thread,
@@ -1596,6 +1617,8 @@ impl NetClient {
         Self {
             rx,
             action_tx,
+            #[cfg(not(target_arch = "wasm32"))]
+            publish_tx,
             stop,
             #[cfg(not(target_arch = "wasm32"))]
             thread: Some(thread),
@@ -1626,6 +1649,23 @@ impl NetClient {
     /// dropped (the shell keeps rendering regardless).
     pub fn send_action(&self, action: ClientAction) {
         let _ = self.action_tx.send(action);
+    }
+
+    /// Ask the net thread to add a TCP listener to the **already-running**
+    /// integrated server (issue #562) — "Open to LAN" without a restart.
+    /// `port` of `0` asks the OS for one (issue #559); the actual bound port
+    /// is reported back through [`NetUpdate::LanOpened`], never the number
+    /// passed here.
+    ///
+    /// Best-effort like [`send_action`](Self::send_action): silently dropped
+    /// if the net thread has already gone away, and a `NetUpdate::Error`
+    /// comes back (through the ordinary [`poll`](Self::poll)) if the session
+    /// running on it is not a singleplayer world, or is one with nothing to
+    /// publish (see `IntegratedServer::publish`'s own doc comment for exactly
+    /// which constructors build a publishable world).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn publish_to_lan(&self, port: u16) {
+        let _ = self.publish_tx.send(port);
     }
 
     /// Read the single block state at a world position from the client-owned
@@ -1897,6 +1937,9 @@ impl NetClient {
         let client = Self {
             rx,
             action_tx,
+            // Its receiver is dropped with `_publish_rx` below, same as `_tx`
+            // above: nothing on a loopback ever calls `publish_to_lan`.
+            publish_tx: mpsc::channel().0,
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
@@ -1952,6 +1995,9 @@ impl NetClient {
         let client = Self {
             rx,
             action_tx,
+            // See `loopback`'s identical field for why an immediately-dropped
+            // receiver is fine here.
+            publish_tx: mpsc::channel().0,
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
@@ -2089,6 +2135,11 @@ async fn run_async(
     protocol: i32,
     tx: Sender<NetUpdate>,
     action_rx: Receiver<ClientAction>,
+    // Issue #562. Native only — the capability it drives (`IntegratedServer::publish`)
+    // needs a real TCP socket, which wasm32 does not have; the wasm `spawn_local`
+    // call site below passes nothing for this parameter, matching how `world_dir`/
+    // `lan_port` are already cfg-gated on `Origin::Integrated`.
+    #[cfg(not(target_arch = "wasm32"))] publish_rx: Receiver<u16>,
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
     weather: SharedWeather,
@@ -2617,6 +2668,41 @@ async fn run_async(
                     tracing::debug!(target: "net", "handed {handed_actions} action(s) to client handle (encode is the adapter's job)");
                 }
             }
+            // Issue #562: "Open to LAN" without a restart. `publish_to_lan`
+            // requests land here rather than through `handle.send_action` above
+            // — this is not a wire packet, it is a local call into the
+            // **already-running** `IntegratedServer` this loop is holding for
+            // exactly this session (singleplayer only; `integrated_server` is
+            // `None` for a remote join, and a request against `None` is
+            // reported rather than silently dropped, same as a genuine bind
+            // failure below).
+            #[cfg(not(target_arch = "wasm32"))]
+            while let Ok(port) = publish_rx.try_recv() {
+                match integrated_server.as_mut() {
+                    Some(server) => {
+                        // No discovery motd here: the shell does not yet carry
+                        // a running session's world directory down to this
+                        // loop (only `Origin::Integrated`'s *opening* arm has
+                        // it) — see that arm's `lan_motd`. Discovery is a
+                        // "nice to find it without typing the address"
+                        // convenience, not the fix this issue is about; a
+                        // joiner who knows the host's address is unaffected.
+                        match server.publish(("0.0.0.0", port), None).await {
+                            Ok(addr) => {
+                                let _ = tx.send(NetUpdate::LanOpened { port: addr.port() });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(NetUpdate::Error(format!("open to LAN: {e}")));
+                            }
+                        }
+                    }
+                    None => {
+                        let _ = tx.send(NetUpdate::Error(
+                            "only a world you are hosting can be opened to LAN".to_string(),
+                        ));
+                    }
+                }
+            }
             // A short timeout keeps the outbound drain responsive even when the
             // server is quiet (no inbound events to wake us).
             match tokio::time::timeout(Duration::from_millis(15), events.recv()).await {
@@ -2704,6 +2790,7 @@ fn run(
     protocol: i32,
     tx: Sender<NetUpdate>,
     action_rx: Receiver<ClientAction>,
+    publish_rx: Receiver<u16>,
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
     weather: SharedWeather,
@@ -2730,6 +2817,7 @@ fn run(
         protocol,
         tx,
         action_rx,
+        publish_rx,
         stop,
         shared_handle,
         weather,
