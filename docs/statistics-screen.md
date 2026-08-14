@@ -21,6 +21,14 @@ present-and-inactive.
 > reads it — see [Where the numbers come from](#where-the-numbers-come-from).
 > The section below that used to be titled "Why every value is zero" is kept as
 > the record of the state it described.
+>
+> **Third update (issue #564): the tab bar is a real widget now, not three
+> `MenuLabel`s.** The bug this replaced is kept below in ["What is
+> deliberately not built"](#what-is-deliberately-not-built) — its symptom was
+> the reported one (tab captions drawn crossing the divider under a
+> "Statistics" heading vanilla never draws), and its cause was the *frame*
+> gap this section used to describe, not a missing stamp. See
+> [The tab widget](#the-tab-widget-issue-564) for what changed.
 
 ## How it works
 
@@ -157,22 +165,66 @@ separately. Worth checking the same smell elsewhere: `error_frame`,
 `credits_frame`, and the accounts pending/failed frames all still hard-code
 `selected: 0` on a single-button frame (see "What is deliberately not built").
 
+## The tab widget (issue #564)
+
+Built once in `menu/widget.rs` (`TAB_SPRITES`, `tab_underline_colour`,
+`tab_label_dy`) and `menu/layout.rs` (`TAB_BAR_HEIGHT`, `tab_bar_geometry`,
+`round_toward`), for both this screen and Create New World to share — see
+[World Creation screen](./world-creation-screen.md) for why the latter does
+not yet use it. `menu/render/draw.rs`'s `draw_tab` is the draw side; it is
+selected by `MenuRow::tab: Option<TabEntryView>` (in `menu/render/frame.rs`),
+tested the same way `MenuRow::pack` is — before `slot`, because its rect *is*
+the slot (`stats::tab_row_rect`, via `render::row_rect`'s own arm; a `Slot`
+cannot express a `min(400, width)`-clamped row width).
+
+`frame` now emits one real `MenuRow` per `TAB_LABELS` entry (`["General",
+"Items", "Mobs"]`), not a `MenuLabel` each — real `widget/tab*` sprites keyed
+by `(selected, hovered)`, the underline under the selected tab, and vanilla's
+3 px label drop while unselected. Only General is `enabled`/`selected`;
+Items/Mobs are present-and-inactive for the same reason they always were (see
+[What is deliberately not built](#what-is-deliberately-not-built)).
+
+**No "Statistics" title label any more, either.** Vanilla's `TITLE` (`gui.
+stats`) is passed to `Screen`'s constructor for narration only — nothing in
+`StatsScreen` ever draws it, because the header *is* the tab bar. Drawing it
+here at `dy: 12` was what put a stray heading over the tab row.
+
+**This screen's header height is [`layout::TAB_BAR_HEIGHT`] (24 px), not
+[`options::SUB_HEADER_HEIGHT`] (33 px)** — `stats::HEADER_HEIGHT` now says so
+explicitly, and `band_top`/`list_spec`/`LIST_WINDOW_PX` all read it instead.
+The wrong (33 px) header height is exactly what put the tab row's own
+labels — drawn at `dy: 28` under the old scheme — crossing the divider bar a
+33 px header draws at its own bottom edge: 5 px of overlap, the owner's
+reported symptom.
+
+**Zebra striping is real now too.** `general_row_colour` (`index % 2 == 0` →
+white, odd → `0xFFBABABA`) matches `GeneralStatisticsList.Entry.
+extractContent`'s own `color` variable, applied to both the caption and the
+value on the same row. Row height is vanilla's real `14` px
+(`GeneralStatisticsList`'s `itemHeight`, `StatsScreen.java:177`), not the 20 px
+`options::WIDGET_H` this screen used to borrow from every other non-`OptionsList`
+list — `stats::ITEMS_ROW_H`/`MOBS_ROW_H` (22/`9*4`) are recorded alongside it
+for when Items/Mobs get real lists, expression rather than literal for the
+36 px one (four lines of the 9 px font).
+
 ## What is deliberately not built
 
 Items and Mobs as real, clickable, sortable `ContainerObjectSelectionList`s —
 not because they are hard, but because with zero underlying data they would
 always render empty regardless, so building the enumeration machinery now
-buys nothing until a decoder exists. The two tab labels are drawn, greyed,
-matching vanilla's own disabled-tab-with-empty-list behaviour.
+buys nothing until a decoder exists. The two tabs are present, drawn through
+the same real widget General is (issue #564), and inactive — matching
+vanilla's own disabled-tab-with-empty-list behaviour exactly, including the
+underline's grey (`tab_underline_colour(false)`) rather than white.
 
-**A second, separate gap, surfaced while fixing the focus default:** all three
-tabs are drawn as `MenuLabel`s, not `MenuRow`s, so **none of them is a control**.
-In vanilla they are real focusable widgets and — per the focus section above —
-the General tab is the screen's *first* tab stop. Here Done is the only row, so
-tab traversal has exactly one destination and the tab bar cannot be focused,
-hovered or clicked at all. That is honest for Items/Mobs (they are disabled in
-vanilla too, with zero data) but not for General, which vanilla focuses first.
-Building them is #188 territory and deliberately not done here.
+**The gap that used to be here is fixed.** All three tabs used to be
+`MenuLabel`s, not `MenuRow`s, so none of them was a control at all — with
+Done as the only row, tab traversal had exactly one destination and the tab
+bar could not be focused, hovered or clicked. That was honest for Items/Mobs
+(disabled in vanilla too) but not for General, which vanilla focuses first.
+The tabs are real `MenuRow`s now (see [above](#the-tab-widget-issue-564)); a
+keyboard-focus stop is still `#188`/`#564` follow-up territory, since only
+`StatsNav::focus_next` (one destination: Done) exists today.
 
 Two more single-button frames still hard-code `selected: 0`, so they draw their
 one button focused on open the way this screen used to: `error_frame`
@@ -205,14 +257,21 @@ None — this screen has no persisted state of its own.
 
 ## Dependencies
 
-- `menu/options.rs` — `SUB_HEADER_HEIGHT`, `FOOTER_HEIGHT`, `LIST_TOP_INSET`,
-  `WIDGET_H`, `SMALL_BUTTON_WIDTH`, `Placement::Footer` — reused for this
-  screen's footer, the same way `menu/key_binds.rs` and `menu/social.rs`
-  reuse them for their own non-`OptionsList` screens.
+- `menu/options.rs` — `FOOTER_HEIGHT`, `LIST_TOP_INSET`, `SMALL_BUTTON_WIDTH`,
+  `Placement::Footer` — reused for this screen's footer, the same way
+  `menu/key_binds.rs` and `menu/social.rs` reuse them for their own
+  non-`OptionsList` screens. **Not** `SUB_HEADER_HEIGHT`/`WIDGET_H` any more —
+  see [The tab widget](#the-tab-widget-issue-564) for why this screen's own
+  `HEADER_HEIGHT`/`ROW_H` replaced them.
+- `menu/layout.rs` — `TAB_BAR_HEIGHT`, `tab_bar_geometry`, shared with Create
+  New World's own tab strip once it exists.
+- `menu/widget.rs` — `TAB_SPRITES`, `tab_underline_colour`, `tab_label_dy`.
 - The 26.2 jar's `assets/minecraft/lang/en_us.json` for every caption
   verbatim (`stat.minecraft.*`, `gui.stats`).
 - `.cache/mc/26.2/client-src/net/minecraft/stats/{Stats,StatFormatter}.java`
   — the 77-stat census and the four format rules.
+- `.cache/mc/26.2/client-src/net/minecraft/client/gui/components/tabs/
+  MenuTabBar.java` — the tab bar's own geometry and sprite rules.
 
 ## See also
 

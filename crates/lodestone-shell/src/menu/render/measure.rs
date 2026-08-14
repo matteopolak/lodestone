@@ -171,6 +171,16 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
         }
         return Some(world_list_row_rect(view.index, width, scroll));
     }
+    // A Statistics tab-bar row (issue #564) is placed by `MenuTabBar.
+    // arrangeElements`'s arithmetic, which a `Slot` cannot express either —
+    // not because of an integer division like the three arms above, but
+    // because the row's own *width* is a function of the canvas
+    // (`layout::tab_bar_geometry`'s `min(400, width)` clamp), and `Slot::w` is
+    // a fixed field. Answered here for this function's whole reason: the draw
+    // and `app.rs`'s hit-test must read one definition of where a tab is.
+    if let Some(tab) = row.tab.as_ref() {
+        return Some(super::stats::tab_row_rect(tab.index, width));
+    }
     if let Some(slot) = row.slot {
         return Some(slot.resolve(width, height));
     }

@@ -199,6 +199,12 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
     let mut nav = test_nav("owns");
     let mut fav = FaviconCache::new();
     let statuses = StatusCache::with_probe(unavailable_probe());
+    // A real cursor position, not the default `None` — so the mechanical
+    // check below (issue #567) has something to actually distinguish. A
+    // frame that left `cursor` at its own `..Default::default()` of `None`
+    // would pass a `None == None` comparison vacuously; this makes the
+    // stamped value `Some(_)`, which only the real stamp can produce.
+    nav.set_menu_cursor(42.0, 24.0, 854.0, 480.0);
 
     let mut reached = 0;
     // `Screen::ALL`, not a list restated here: this loop's own copy was a
@@ -290,13 +296,16 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
         if built {
             let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
             // A vanilla-laid-out screen has no centred heading string — its
-            // heading is the logo texture (title) or a positioned
-            // `MenuLabel` (pause), so requiring `title` would be requiring
-            // the *un*-vanilla layout. It must still say something.
+            // heading is the logo texture (title), a positioned `MenuLabel`
+            // (pause), or a real widget row with no separate label at all
+            // (Statistics' tab bar, issue #564 — vanilla draws no "Statistics"
+            // heading either, see `stats::frame`'s own doc), so requiring
+            // `title` would be requiring the *un*-vanilla layout. It must
+            // still say something.
             if f.vanilla {
                 assert!(
-                    f.logo || !f.labels.is_empty(),
-                    "{screen:?} is vanilla-laid-out but draws neither a logo nor a label"
+                    f.logo || !f.labels.is_empty() || !f.rows.is_empty(),
+                    "{screen:?} is vanilla-laid-out but draws no logo, label or row"
                 );
             } else {
                 assert!(!f.title.is_empty(), "{screen:?} has no title");
@@ -304,6 +313,42 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
             assert!(
                 !geometry(&f, 1280.0, 720.0).is_empty(),
                 "{screen:?} draws nothing"
+            );
+            // The mechanical check issue #567 asks for: every screen `frame_for`
+            // returns `Some` for must carry the four canvas facts
+            // `stamp_canvas_facts` stamps — `cursor` in particular, since a
+            // frame with `cursor: None` has no hover affordance at all
+            // (`render::draw_widget`'s `hovered` only ever comes from
+            // `MenuFrame::hovered`, which is a *different* fact — see
+            // `create_world.rs`'s own doc on that split). This is a tripwire
+            // for the *architectural* shape of the bug — a screen arm that
+            // stops going through `frame_for`'s unconditional `.map(stamp_
+            // canvas_facts)`, or one that sets its own conflicting value —
+            // not a substitute for `frame_for_defers_to_an_overlay_for_
+            // in_world_settings` below: that test is what covers the one
+            // screen (`Settings` while `settings_in_world()`) that
+            // deliberately returns `None` here and reaches the draw through
+            // a *second* path (`nav::settings_overlay_frame`) this loop never
+            // visits at all, exactly as `owns_frame`'s own doc says.
+            assert_eq!(
+                f.cursor,
+                nav.menu_cursor(),
+                "{screen:?}'s cursor is not the shared canvas stamp"
+            );
+            assert_eq!(
+                f.gui_scale,
+                nav.gui_scale(),
+                "{screen:?}'s gui_scale is not the shared canvas stamp"
+            );
+            assert_eq!(
+                f.panorama_speed,
+                Some(nav.panorama_speed()),
+                "{screen:?}'s panorama_speed is not the shared canvas stamp"
+            );
+            assert_eq!(
+                f.list,
+                nav.active_list(&ui),
+                "{screen:?}'s list is not the shared canvas stamp"
             );
         }
     }

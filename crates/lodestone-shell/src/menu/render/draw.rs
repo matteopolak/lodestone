@@ -543,6 +543,20 @@ pub fn build(
                 }
                 continue;
             }
+            // One tab of the Statistics screen's tab bar (issue #564). Tested
+            // here for `MenuRow::pack`'s exact reason — its rect *is* the slot,
+            // via `Origin::Stats` — and not clipped, since `Origin::Stats` reports
+            // `false` from `is_scrolling_list_row` (the tab strip sits above the
+            // band, not in it).
+            if let Some(tab) = row.tab.as_ref() {
+                if let Some((x, y, w, h)) = row_rect(&frame.rows, i, width, height) {
+                    let hovered = frame
+                        .cursor
+                        .is_some_and(|(mx, my)| mx >= x && mx <= x + w && my >= y && my <= y + h);
+                    draw_tab(&mut b, row, tab, x, y, w, h, hovered);
+                }
+                continue;
+            }
             match clip_band {
                 Some((top, band_h)) => b.with_clip(0.0, top, width, band_h, |b| {
                     draw_widget(b, &frame.rows, i, width, height, selected, hovered);
@@ -1654,6 +1668,69 @@ fn draw_widget(
     let tx = ((left + right) * 0.5 - tw * 0.5).floor();
     let ty = widget.label_top(LINE_H);
     b.text(label, tx, ty, 1.0, colour);
+}
+
+/// Draws one [`MenuRow::tab`] entry — vanilla's `MenuTabButton.
+/// extractWidgetRenderState` (`MenuTabBar.java:124-138`): a `widget/tab*`
+/// background keyed by `(selected, hoveredOrFocused)` (see [`widget::
+/// TAB_SPRITES`]'s own doc for why that is the right axis, not `active`), a
+/// label centred horizontally and dropped 3 px while unselected, and — only
+/// while selected — a 1 px underline under the label, tinted white while the
+/// tab is clickable and vanilla's grey while it is present-and-inactive.
+///
+/// **Not ported**: vanilla's `renderMenuBackground` (`MenuTabBar.java:132,
+/// 140-142`), an inset panel drawn behind a *selected* tab's label so it
+/// visually merges with the content panel below. Every tab this client draws
+/// selected sits directly above the `ListSpec` band's own chrome tint, which
+/// already reads as one surface without a second overlapping panel — see
+/// `stats.rs`'s module docs for what is and is not built on this screen.
+fn draw_tab(
+    b: &mut Quads<'_>,
+    row: &MenuRow,
+    tab: &TabEntryView,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    hovered: bool,
+) {
+    let sprite = widget::TAB_SPRITES.get(tab.selected, hovered);
+    if b.has_sprite(sprite) {
+        b.sprite(sprite, x, y, w, h, LABEL);
+    } else {
+        // Jar-less fallback — the same flat-fill discipline `draw_widget` uses
+        // when the atlas has no `widget/button*` sprites.
+        let fill = if tab.selected { ROW_SEL } else { ROW_BG };
+        b.rect(x, y, w, h, fill);
+    }
+
+    // `renderLabel`: centred in `[x + 1, x + w - 1]`, top dropped 3 px unless
+    // selected (`widget::tab_label_dy`). Colour follows `active` — vanilla's
+    // `WithInactiveMessage`, the same rule `Widget::message_colour` already
+    // applies everywhere else.
+    let colour = if row.enabled {
+        widget::ACTIVE_LABEL
+    } else {
+        widget::INACTIVE_LABEL
+    };
+    let (left, right) = (x + 1.0, x + w - 1.0);
+    let tw = b.text_width(&row.label, 1.0);
+    let tx = ((left + right) * 0.5 - tw * 0.5).floor();
+    let ty = y + widget::tab_label_dy(tab.selected);
+    b.text(&row.label, tx, ty, 1.0, colour);
+
+    if tab.selected {
+        let underline_w = tw.min(w - widget::TAB_UNDERLINE_SIDE_MARGIN);
+        let ux = (x + (w - underline_w) * 0.5).floor();
+        let uy = y + h - widget::TAB_UNDERLINE_MARGIN_BOTTOM;
+        b.rect(
+            ux,
+            uy,
+            underline_w,
+            widget::TAB_UNDERLINE_H,
+            widget::tab_underline_colour(row.enabled),
+        );
+    }
 }
 
 /// Width of a [`MenuRow::arrow`] triangle, in logical pixels. Odd, so the apex

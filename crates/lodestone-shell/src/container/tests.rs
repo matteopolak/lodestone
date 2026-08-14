@@ -1492,6 +1492,19 @@ fn hit_test_agrees_with_the_dispenser_grid_it_was_never_told_about() {
 /// for the three real sheets, so `ContainerBackground::build` succeeds
 /// hermetically — no `client.jar` needed for this test.
 fn synthetic_background() -> ContainerBackground {
+    synthetic_background_with_window_size(256, 256)
+}
+
+/// [`synthetic_background`], with the Advancements `window.png` stand-in at
+/// `(window_w, window_h)` instead of vanilla's real `256x256` — issue #565's
+/// first defect, a 2x-resolution pack cropping the window's own bottom and
+/// right edges off. `advancements_window_quad`/`advancements_tile_quad`
+/// scale their sample by the sprite's *real* placed size against the
+/// declared vanilla one, so this is the one knob a test needs to turn to
+/// exercise that: every other sheet in this pack stays at its real vanilla
+/// size regardless, matching `synthetic_background`'s own doc on why the GUI
+/// sprite sizes are real rather than uniform.
+fn synthetic_background_with_window_size(window_w: u32, window_h: u32) -> ContainerBackground {
     use lodestone_assets::{MemorySource, ResourceManager, ResourceSource};
 
     fn solid_png(w: u32, h: u32) -> Vec<u8> {
@@ -1542,12 +1555,14 @@ fn synthetic_background() -> ContainerBackground {
             solid_png(256, 256),
         );
     }
-    // The Advancements screen's loose art (issue #167): the `256 x 256` window
-    // sheet and the five `16 x 16` tab backgrounds, keyed by the same ids
+    // The Advancements screen's loose art (issue #167): the window sheet
+    // (vanilla's real size is `256 x 256`; `window_w`/`window_h` let a test
+    // stand in a higher-resolution pack instead — see this function's own
+    // doc) and the five `16 x 16` tab backgrounds, keyed by the same ids
     // `ContainerBackground::build` loads.
     src.insert(
         "assets/minecraft/textures/gui/advancements/window.png".to_string(),
-        solid_png(256, 256),
+        solid_png(window_w, window_h),
     );
     for id in super::background::ADVANCEMENT_TILE_IDS {
         let path = id.strip_prefix("minecraft:").unwrap_or(id);
@@ -1610,6 +1625,74 @@ fn synthetic_background() -> ContainerBackground {
     }
     let manager = ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>]);
     ContainerBackground::build(&manager).expect("synthetic background builds")
+}
+
+/// Issue #565's first defect: a higher-resolution `window.png` must still
+/// sample its **whole** `252x140` sub-rect, not a fixed 252x140 *real
+/// pixels* starting at the sprite's atlas origin (which, for a 2x sheet, is
+/// only the top-left quarter — the "missing bottom and right edges" report).
+///
+/// The expected value is derived from the sprite's own real placed size via
+/// `ContainerBackground::atlas()`, not hand-computed, so this measures the
+/// fix's actual formula rather than restating it.
+#[test]
+fn advancements_window_quad_scales_its_sample_with_a_higher_resolution_sheet() {
+    use crate::menu::advancements::{WINDOW_H, WINDOW_W};
+
+    let native = synthetic_background_with_window_size(256, 256);
+    let doubled = synthetic_background_with_window_size(512, 512);
+
+    let q_native = native
+        .advancements_window_quad(0.0, 0.0)
+        .expect("window sprite resolves");
+    let q_doubled = doubled
+        .advancements_window_quad(0.0, 0.0)
+        .expect("window sprite resolves");
+
+    // The destination rect is logical-pixel, so it must be identical either
+    // way — this fix is about *which pixels get sampled*, not where the
+    // window draws or how big it is on screen.
+    assert_eq!(q_native.dst, [0.0, 0.0, WINDOW_W, WINDOW_H]);
+    assert_eq!(q_doubled.dst, [0.0, 0.0, WINDOW_W, WINDOW_H]);
+
+    // Real sampled pixel width/height, recovered from the UV span and each
+    // background's own atlas size — the same unpacking `clip_sprite_quad`'s
+    // tests in `menu::advancements` use for a plain quad.
+    let sampled_w = |bg: &ContainerBackground, q: &lodestone_render::GuiSpriteQuad| {
+        (q.uv_max[0] - q.uv_min[0]) * bg.atlas().width as f32
+    };
+    let sampled_h = |bg: &ContainerBackground, q: &lodestone_render::GuiSpriteQuad| {
+        (q.uv_max[1] - q.uv_min[1]) * bg.atlas().height as f32
+    };
+
+    let native_w = sampled_w(&native, &q_native);
+    let doubled_w = sampled_w(&doubled, &q_doubled);
+    let native_h = sampled_h(&native, &q_native);
+    let doubled_h = sampled_h(&doubled, &q_doubled);
+
+    assert!(
+        (native_w - WINDOW_W).abs() < 0.01,
+        "a native 256x256 sheet must sample exactly {WINDOW_W} real px, got {native_w}"
+    );
+    assert!(
+        (native_h - WINDOW_H).abs() < 0.01,
+        "a native 256x256 sheet must sample exactly {WINDOW_H} real px, got {native_h}"
+    );
+    // The control: the pre-#565 formula would report the *same* 252x140 real
+    // pixels here too — a fixed span regardless of resolution — so this is
+    // the assertion that actually distinguishes the fix from the bug.
+    assert!(
+        (doubled_w - 2.0 * WINDOW_W).abs() < 0.5,
+        "a 2x sheet must sample {} real px ({WINDOW_W} x 2), got {doubled_w} \
+         — {WINDOW_W} alone would mean only the sheet's left half is ever sampled",
+        2.0 * WINDOW_W
+    );
+    assert!(
+        (doubled_h - 2.0 * WINDOW_H).abs() < 0.5,
+        "a 2x sheet must sample {} real px ({WINDOW_H} x 2), got {doubled_h} \
+         — {WINDOW_H} alone would mean only the sheet's top half is ever sampled",
+        2.0 * WINDOW_H
+    );
 }
 
 // ---------------------------------------------------------------------

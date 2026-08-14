@@ -207,6 +207,20 @@ pub struct MenuRow {
     /// and its lines are the player sample), so `draw_server_entry` reports it from
     /// the geometry it already has. This field is the whole-widget kind.
     pub tooltip: Option<String>,
+    /// Set on one of the Statistics screen's tab-bar rows (issue #564).
+    ///
+    /// Its presence routes the row to [`draw_tab`] instead of [`draw_widget`],
+    /// tested before `slot` for [`Self::pack`]'s reason: a tab is not a button
+    /// with a label in it, it draws a different sprite set keyed by
+    /// `(selected, hovered)` rather than `(active, hoveredOrFocused)`, plus an
+    /// underline the generic path has no field for. `label` (the tab's own
+    /// caption) and `enabled` (vanilla's `active`, `StatsScreen.
+    /// setTabActiveStateAndTooltip`) are read off the row itself, exactly as a
+    /// pack row reads `label`/`favicon` off `MenuRow` rather than duplicating
+    /// them here — this view carries only `selected`, which has nowhere else to
+    /// live (it is not [`MenuFrame::selected`]; see [`TabEntryView::selected`]'s
+    /// own doc).
+    pub tab: Option<TabEntryView>,
 }
 
 impl MenuRow {
@@ -284,6 +298,32 @@ pub struct PackEntryView {
     /// the built-in pack, which is `isFixedPosition() && isRequired()` and
     /// therefore draws no overlay at all, exactly as vanilla's does not.
     pub can_unselect: bool,
+}
+
+/// One Statistics tab-bar row's state (issue #564).
+///
+/// `label` and `enabled` are already [`MenuRow`] fields (the caption and
+/// vanilla's `active`), so this carries only what has nowhere else to live —
+/// [`WorldEntryView`]'s reason for its own two fields.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TabEntryView {
+    /// This tab's position in `stats::TAB_LABELS` — **not** its position in
+    /// [`MenuFrame::rows`], which also carries the Done button and so is one
+    /// higher for every tab. What [`super::stats::tab_row_rect`] places from,
+    /// the same split [`WorldEntryView::index`]/[`ServerEntryView`] already
+    /// make between "row position in the frame" and "position in the screen's
+    /// own list".
+    pub index: usize,
+    /// Whether this is the tab currently showing — `TabManager.getCurrentTab()
+    /// == this.tab` (`TabButton.isSelected`, `TabButton.java:34-36`).
+    ///
+    /// A different question from [`MenuFrame::selected`], which on every other
+    /// screen carries the **keyboard-focused** row: this screen's tab bar has
+    /// no per-tab keyboard focus of its own yet (see `stats.rs`'s module docs
+    /// on what is and is not wired), so `selected` here is driven by which tab
+    /// is showing, the same split [`WorldEntryView::selected`] already argues
+    /// for on the save list.
+    pub selected: bool,
 }
 
 /// One world-list row's state (the save list, issue #468's reading 2).

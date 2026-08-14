@@ -75,15 +75,44 @@
 //! non-`OptionsList` screens, reusing [`super::options`]'s footer primitives
 //! rather than a fourth reimplementation of the same arithmetic.
 
+use super::layout;
 use super::options::{self, Placement};
-use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
+use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot, TabEntryView};
 use super::widget;
 
 /// `gui.stats`.
 pub const TITLE: &str = "Statistics";
 
-/// The row index of Done, this screen's only [`MenuRow`] — vanilla's
-/// `layout.addToFooter(Button.builder(GUI_DONE, …))` (`StatsScreen.java:90`).
+/// `StatsScreen.GENERAL_BUTTON`/`ITEMS_BUTTON`/`MOBS_BUTTON` — `stat.
+/// generalButton`/`stat.itemsButton`/`stat.mobsButton`, verbatim from
+/// `en_us.json`. This screen's tab bar (issue #564).
+pub const TAB_LABELS: [&str; 3] = ["General", "Items", "Mobs"];
+/// [`TAB_LABELS`]'s index of the only tab this screen builds a real list for
+/// (see the module docs above) — General.
+pub const GENERAL_TAB: usize = 0;
+
+/// The pixel rect of tab `index` (into [`TAB_LABELS`]) at canvas `width` —
+/// vanilla's `MenuTabBar.arrangeElements` (`MenuTabBar.java:67-82`), via
+/// [`layout::tab_bar_geometry`]. The one definition [`super::render::row_rect`]
+/// (the draw, the hover, and `app.rs`'s click hit-test) and the draw's own
+/// hover check both resolve a tab's position from — see
+/// [`super::render::TabEntryView::index`]'s own doc on why a `Slot` cannot
+/// express this row's *width*, let alone its `x`.
+#[must_use]
+pub fn tab_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+    let (start_x, tab_width) = layout::tab_bar_geometry(width, TAB_LABELS.len());
+    (
+        start_x + tab_width * index as f32,
+        0.0,
+        tab_width,
+        layout::TAB_BAR_HEIGHT,
+    )
+}
+
+/// The row index of Done — vanilla's `layout.addToFooter(Button.builder(
+/// GUI_DONE, …))` (`StatsScreen.java:90`). Was this screen's only [`MenuRow`]
+/// before issue #564 gave it three tab rows too; still `0` and still first,
+/// since the tabs are appended after it (see [`frame`]).
 ///
 /// Named rather than written as a bare `0` at three sites, because "row 0" and
 /// "the Done button" being the same number is exactly what made the focus bug
@@ -377,11 +406,28 @@ pub fn general_rows(snapshot: &StatsSnapshot) -> Vec<(&'static str, String)> {
 
 // -- geometry: a flat list, same departure key_binds.rs/social.rs make ------
 
-/// Row height — no vanilla source (`ObjectSelectionList`'s own row height for
-/// this list is 14 px content in a 33 px-separated flow this pipeline's flat
-/// model does not reproduce); reuses [`options::WIDGET_H`] like every other
-/// non-`OptionsList` list in this tree.
-pub const ROW_H: f32 = options::WIDGET_H;
+/// `GeneralStatisticsList`'s own `itemHeight` (`StatsScreen.java:177`:
+/// `super(minecraft, StatsScreen.this.width, StatsScreen.this.layout.
+/// getContentHeight(), 33, 14)` — the last constructor argument). **Not**
+/// [`options::WIDGET_H`] (20 px) — that was this constant's previous value,
+/// reused from every other non-`OptionsList` list in this tree on the
+/// assumption that this screen had no real vanilla row height to port; it
+/// does, and it is smaller, which issue #564 named directly.
+///
+/// [`ITEMS_ROW_H`]/[`MOBS_ROW_H`] are the other two tabs' own heights, ported
+/// alongside this one even though neither tab has a real list yet (see the
+/// module docs) — so a future `ItemStatisticsList`/`MobsStatisticsList`
+/// conversion has the right constant already sitting here rather than a
+/// second archaeology pass through the jar.
+pub const ROW_H: f32 = 14.0;
+/// `ItemStatisticsList`'s own `itemHeight` (`StatsScreen.java:247`: `super(…,
+/// 33, 22)`). Not yet consumed — see [`ROW_H`]'s own doc.
+pub const ITEMS_ROW_H: f32 = 22.0;
+/// `MobsStatisticsList`'s own `itemHeight` (`StatsScreen.java:542`: `super(…,
+/// 33, 9 * 4)` — four lines of the 9 px font, ported as the expression rather
+/// than the literal `36` so a font-size change would not silently desync it).
+/// Not yet consumed — see [`ROW_H`]'s own doc.
+pub const MOBS_ROW_H: f32 = 9.0 * 4.0;
 /// Half the list's column width — the name column runs from
 /// [`Origin::ScreenTop`]`- COLUMN_HALF_W + NAME_LEFT_INSET` to centre, the
 /// value column from centre to `+ COLUMN_HALF_W - VALUE_RIGHT_MARGIN`.
@@ -389,8 +435,21 @@ const COLUMN_HALF_W: f32 = 150.0;
 const VALUE_RIGHT_MARGIN: f32 = 10.0;
 const NAME_LEFT_INSET: f32 = 4.0;
 
+/// This screen's header height (issue #564) — **not**
+/// [`options::SUB_HEADER_HEIGHT`], which is `HeaderAndFooterLayout`'s default
+/// 33 px title band and is not what this screen uses. `StatsScreen.
+/// repositionElements` calls `this.layout.setHeaderHeight(tabAreaTop)`, where
+/// `tabAreaTop` is the tab bar's own `getRectangle().bottom()` — a fixed
+/// [`layout::TAB_BAR_HEIGHT`] (24 px), since `MenuTabBar` is `y = 0` height
+/// `HEIGHT = 24` (`MenuTabBar.java:17,81`). Using the *default* 33 px header
+/// here is exactly what put the General list's own top separator 9 px below
+/// where the tab row's underline sits — close enough to look plausible, far
+/// enough to still collide with a tab label drawn at `dy: 28`, which was the
+/// owner's reported symptom.
+pub const HEADER_HEIGHT: f32 = layout::TAB_BAR_HEIGHT;
+
 pub const LIST_WINDOW_PX: f32 =
-    crate::config::MIN_SCALED_HEIGHT as f32 - options::SUB_HEADER_HEIGHT - options::FOOTER_HEIGHT - options::LIST_TOP_INSET;
+    crate::config::MIN_SCALED_HEIGHT as f32 - HEADER_HEIGHT - options::FOOTER_HEIGHT - options::LIST_TOP_INSET;
 
 #[must_use]
 pub fn visible_rows_len() -> usize {
@@ -400,22 +459,22 @@ pub fn visible_rows_len() -> usize {
 /// Top of the list band — the y a row at scroll `0.0` starts at.
 #[must_use]
 pub fn band_top() -> f32 {
-    options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET
+    HEADER_HEIGHT + options::LIST_TOP_INSET
 }
 
 /// This screen's [`widget::ListSpec`] (issue #445), the one declaration the
 /// scrollbar, the wheel and the row placement all read.
 ///
-/// `top` is [`options::SUB_HEADER_HEIGHT`] rather than [`band_top`]: the spec's
-/// band is the *window*, and [`widget::ScrollList`] adds
-/// [`widget::LIST_CONTENT_PADDING`] itself as `first_entry_y`. Passing the
-/// already-inset value would inset twice, which is the one arithmetic slip this
-/// conversion can make and still look right at scroll zero.
+/// `top` is [`HEADER_HEIGHT`] rather than [`band_top`]: the spec's band is the
+/// *window*, and [`widget::ScrollList`] adds [`widget::LIST_CONTENT_PADDING`]
+/// itself as `first_entry_y`. Passing the already-inset value would inset
+/// twice, which is the one arithmetic slip this conversion can make and still
+/// look right at scroll zero.
 #[must_use]
 pub fn list_spec(len: usize, scroll: f32) -> widget::ListSpec {
     widget::ListSpec::uniform(
         ROW_H,
-        options::SUB_HEADER_HEIGHT,
+        HEADER_HEIGHT,
         options::FOOTER_HEIGHT,
         len,
         COLUMN_HALF_W * 2.0,
@@ -436,6 +495,20 @@ pub fn list_spec(len: usize, scroll: f32) -> widget::ListSpec {
 #[must_use]
 pub fn row_label_y(row: u16, scroll: f32) -> f32 {
     band_top() - scroll.floor() + f32::from(row) * ROW_H
+}
+
+/// `GeneralStatisticsList.Entry.extractContent`'s zebra striping
+/// (`StatsScreen.java:218`): `index % 2 == 0 ? -1 : -4539718` — opaque white
+/// on an even displayed row, `0xFFBABABA` on an odd one. `index` is the row's
+/// position in the **already-sorted** list ([`general_rows`]'s output order),
+/// matching vanilla's `children().indexOf(this)`.
+#[must_use]
+pub fn general_row_colour(index: usize) -> [f32; 4] {
+    if index % 2 == 0 {
+        widget::argb_to_rgba(-1)
+    } else {
+        widget::argb_to_rgba(-4_539_718)
+    }
 }
 
 /// This screen's own scroll cursor. No selection/activation at all on the
@@ -561,53 +634,24 @@ impl StatsNav {
 }
 
 /// Builds the whole Statistics frame.
+///
+/// ## No "Statistics" title label — issue #564's second half
+///
+/// The owner: *"'Statistics' is [not] even supposed to be in the UI at all"*.
+/// Vanilla's `TITLE` (`gui.stats`) is passed to `Screen`'s constructor for
+/// narration only; nothing in `StatsScreen.extractRenderState`/
+/// `extractMenuBackground` ever draws it — the header **is** the tab bar
+/// (`extractMenuBackground` blits `CreateWorldScreen.TAB_HEADER_BACKGROUND`
+/// behind it, then the content below), and there is no second heading above
+/// that. This used to draw `TITLE` as a centred label at `dy: 12`, which the
+/// tab row then drew straight through at `dy: 28`, 9 px below where the real
+/// header ends at [`HEADER_HEIGHT`] (24) — close enough to look like a
+/// heading, and exactly what put every tab label crossing the divider a
+/// screen used to draw at `y = 33` (`options::SUB_HEADER_HEIGHT`, this
+/// screen's *old*, wrong header height).
 #[must_use]
 pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
-    let rows = general_rows(snapshot);
-
-    let mut labels = vec![
-        MenuLabel {
-            text: TITLE.to_string(),
-            origin: Origin::ScreenTop,
-            dx: 0.0,
-            dy: 12.0,
-            align: Align::Centre,
-            colour: widget::ACTIVE_LABEL,
-            scale: 1.0,
-        },
-        // The three tab buttons, drawn as labels rather than `MenuRow`s: only
-        // General is a real destination and it is already showing, so there
-        // is nothing for a click on any of the three to *do* — see the
-        // module docs on why Items/Mobs are correctly inactive rather than
-        // approximately so.
-        MenuLabel {
-            text: "[General]".to_string(),
-            origin: Origin::ScreenTop,
-            dx: -100.0,
-            dy: 28.0,
-            align: Align::Left,
-            colour: widget::ACTIVE_LABEL,
-            scale: 1.0,
-        },
-        MenuLabel {
-            text: "Items".to_string(),
-            origin: Origin::ScreenTop,
-            dx: -10.0,
-            dy: 28.0,
-            align: Align::Left,
-            colour: widget::INACTIVE_LABEL,
-            scale: 1.0,
-        },
-        MenuLabel {
-            text: "Mobs".to_string(),
-            origin: Origin::ScreenTop,
-            dx: 60.0,
-            dy: 28.0,
-            align: Align::Left,
-            colour: widget::INACTIVE_LABEL,
-            scale: 1.0,
-        },
-    ];
+    let stats = general_rows(snapshot);
 
     // **Every** row is emitted, not a `[first..end]` window (issue #445). The
     // slice was what made a partially-scrolled row impossible to express: a
@@ -615,16 +659,22 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
     // band by `render::draw`, so a row straddling the bottom now paints its
     // visible half instead of vanishing.
     let scroll = nav.scroll();
-    let mut list_labels = Vec::with_capacity(rows.len() * 2);
-    for (i, (caption, value)) in rows.iter().enumerate() {
+    let mut list_labels = Vec::with_capacity(stats.len() * 2);
+    for (i, (caption, value)) in stats.iter().enumerate() {
         let y = row_label_y(i as u16, scroll);
+        // Zebra striping (issue #564) — `GeneralStatisticsList.Entry.
+        // extractContent` (`StatsScreen.java:218`): both the name and the
+        // value get the *same* `color`, computed once per row from the
+        // row's own displayed index (this loop's `i`, matching vanilla's
+        // `children().indexOf(this)` in the already-sorted list).
+        let colour = general_row_colour(i);
         list_labels.push(MenuLabel {
             text: (*caption).to_string(),
             origin: Origin::ScreenTop,
             dx: -COLUMN_HALF_W + NAME_LEFT_INSET,
             dy: y,
             align: Align::Left,
-            colour: widget::ACTIVE_LABEL,
+            colour,
             scale: 1.0,
         });
         list_labels.push(MenuLabel {
@@ -633,31 +683,50 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
             dx: COLUMN_HALF_W - VALUE_RIGHT_MARGIN,
             dy: y,
             align: Align::Right,
-            colour: widget::ACTIVE_LABEL,
+            colour,
             scale: 1.0,
         });
     }
 
+    let mut rows = vec![MenuRow {
+        label: "Done".to_string(),
+        enabled: true,
+        slot: Some(Slot {
+            origin: Origin::Settings(Placement::Footer { index: 0, count: 1 }),
+            dx: 0.0,
+            dy: 0.0,
+            w: options::SMALL_BUTTON_WIDTH,
+            h: options::WIDGET_H,
+        }),
+        ..Default::default()
+    }];
+    // Vanilla's real tab widget (issue #564), one [`MenuRow`] per
+    // [`TAB_LABELS`] entry rather than a `MenuLabel` each — see [`tab_row_rect`]
+    // for why `slot` cannot express its geometry. Only General is `enabled`:
+    // `StatsScreen.setTabActiveStateAndTooltip` disables a tab whose list is
+    // empty (`:124-133`), and Items/Mobs are unconditionally empty here — see
+    // the module docs on why that is already-correct behaviour, not a
+    // shortcut.
+    rows.extend(TAB_LABELS.iter().enumerate().map(|(index, &label)| MenuRow {
+        label: label.to_string(),
+        enabled: index == GENERAL_TAB,
+        tab: Some(TabEntryView {
+            index,
+            selected: index == GENERAL_TAB,
+        }),
+        ..Default::default()
+    }));
+
     MenuFrame {
-        rows: vec![MenuRow {
-            label: "Done".to_string(),
-            enabled: true,
-            slot: Some(Slot {
-                origin: Origin::Settings(Placement::Footer { index: 0, count: 1 }),
-                dx: 0.0,
-                dy: 0.0,
-                w: options::SMALL_BUTTON_WIDTH,
-                h: options::WIDGET_H,
-            }),
-            ..Default::default()
-        }],
+        rows,
         // `usize::MAX` is `MenuFrame::selected`'s documented "highlights
         // nothing" sentinel (the same value `command_block`'s frame uses), not
         // an out-of-range accident. It used to be a hard `0`, i.e. Done, which
         // is the player report [`StatsNav::focused`] documents.
         selected: if nav.focused() { DONE_ROW } else { usize::MAX },
         vanilla: true,
-        labels,
+        // No `labels` — this screen draws no separate heading; see this
+        // function's own doc on why vanilla has none either.
         list_labels,
         ..Default::default()
     }
@@ -817,14 +886,19 @@ mod tests {
     // -- the frame --------------------------------------------------------
 
     #[test]
-    fn the_frame_has_a_title_a_done_button_and_every_row_scrolled_into_view() {
+    fn the_frame_has_no_title_label_a_done_button_and_every_row_scrolled_into_view() {
         let mut nav = StatsNav::default();
         let snapshot = StatsSnapshot::default();
         let f = frame(&nav, &snapshot);
-        assert_eq!(f.rows.len(), 1, "one control: Done");
-        assert_eq!(f.rows[0].label, "Done");
-        assert!(f.rows[0].enabled);
-        assert!(f.labels.iter().any(|l| l.text == TITLE));
+        assert_eq!(f.rows.len(), 1 + TAB_LABELS.len(), "Done plus three tabs");
+        assert_eq!(f.rows[DONE_ROW].label, "Done");
+        assert!(f.rows[DONE_ROW].enabled);
+        assert!(f.rows[DONE_ROW].tab.is_none(), "Done is not a tab row");
+        // No "Statistics" heading — vanilla draws none; see `frame`'s own doc.
+        assert!(
+            !f.labels.iter().any(|l| l.text == TITLE),
+            "vanilla draws no separate title label on this screen"
+        );
 
         // Every row is emitted now, not a window — the slice is what made a
         // half-scrolled row inexpressible. The last alphabetical row is present
@@ -859,6 +933,70 @@ mod tests {
         );
     }
 
+    // -- the tab widget (issue #564) -----------------------------------------
+
+    #[test]
+    fn the_frame_carries_three_real_tab_rows_and_only_general_is_live() {
+        let nav = StatsNav::default();
+        let snapshot = StatsSnapshot::default();
+        let f = frame(&nav, &snapshot);
+        for (index, &label) in TAB_LABELS.iter().enumerate() {
+            let row = &f.rows[1 + index];
+            assert_eq!(row.label, label);
+            let view = row.tab.expect("a tab-bar row must carry a TabEntryView");
+            assert_eq!(view.index, index);
+            let live = index == GENERAL_TAB;
+            assert_eq!(row.enabled, live, "{label} active state");
+            assert_eq!(view.selected, live, "{label} selected state");
+        }
+    }
+
+    #[test]
+    fn tab_rows_lay_out_left_to_right_with_no_overlap_and_within_the_canvas() {
+        let width = 854.0;
+        let mut prev_right = 0.0f32;
+        for index in 0..TAB_LABELS.len() {
+            let (x, y, w, h) = tab_row_rect(index, width);
+            assert_eq!(y, 0.0, "the tab bar sits at the very top");
+            assert_eq!(h, layout::TAB_BAR_HEIGHT);
+            assert!(x >= prev_right, "tab {index} at x={x} overlaps its neighbour");
+            assert!(x + w <= width, "tab {index} overruns the canvas");
+            prev_right = x + w;
+        }
+    }
+
+    #[test]
+    fn general_row_colour_alternates_and_the_two_shades_are_vanillas_own_argb() {
+        // Expected values originate outside this function: `-1`/`-4539718` are
+        // `StatsScreen.java:218`'s own literals, unpacked by the shared
+        // `argb_to_rgba` rather than restated as a second pair of floats.
+        assert_eq!(general_row_colour(0), widget::argb_to_rgba(-1));
+        assert_eq!(general_row_colour(1), widget::argb_to_rgba(-4_539_718));
+        assert_eq!(general_row_colour(2), widget::argb_to_rgba(-1), "alternates back");
+        // The discriminating control: the two shades must actually differ, and
+        // an all-white implementation (the pre-#564 behaviour) must not pass —
+        // exercised directly on the frame with a discriminating (odd) row.
+        assert_ne!(general_row_colour(0), general_row_colour(1));
+        let snapshot = StatsSnapshot::default();
+        let f = frame(&StatsNav::default(), &snapshot);
+        let rows = general_rows(&snapshot);
+        // Row 1 (odd) is the discriminating input — row 0 passes under a
+        // solid-white implementation too, so asserting only the first row
+        // would not have caught the pre-#564 bug.
+        let (odd_caption, _) = rows[1];
+        let odd_label = f
+            .list_labels
+            .iter()
+            .find(|l| l.text == odd_caption)
+            .expect("row 1's caption must be emitted");
+        assert_eq!(odd_label.colour, widget::argb_to_rgba(-4_539_718));
+        assert_ne!(
+            odd_label.colour,
+            widget::ACTIVE_LABEL,
+            "an odd row must not be plain white — that is the bug this gate catches"
+        );
+    }
+
     /// **The magnitude assertion, not the sign.** "It scrolled" is satisfied by
     /// a snap-to-row implementation, which is exactly what this conversion
     /// removed — so the predicted value is computed from this screen's own
@@ -870,9 +1008,9 @@ mod tests {
         nav.scroll_by(-1.0, canvas);
 
         // `scrollRate` is `defaultEntryHeight / 2` under *integer* division
-        // (`AbstractSelectionList.java:44`): 20 / 2 = 10.
+        // (`AbstractSelectionList.java:44`): 14 / 2 = 7.
         let predicted = (ROW_H / 2.0).floor();
-        assert_eq!(predicted, 10.0, "derived from this screen's own ROW_H of 20");
+        assert_eq!(predicted, 7.0, "derived from this screen's own ROW_H of 14");
         assert_eq!(nav.scroll(), predicted, "one notch must be {predicted} px");
         assert_ne!(nav.scroll(), ROW_H, "the row-index model's answer is excluded");
         assert_ne!(
@@ -894,11 +1032,11 @@ mod tests {
         // Three notches must land somewhere that is not a whole number of rows.
         let mut three = StatsNav::default();
         three.scroll_by(-3.0, canvas);
-        assert_eq!(three.scroll(), 30.0);
+        assert_eq!(three.scroll(), 21.0, "3 * predicted (7 px)");
         assert_ne!(
             three.scroll() % ROW_H,
             0.0,
-            "30 px must not be expressible as whole rows, or this gate has stopped \
+            "21 px must not be expressible as whole rows, or this gate has stopped \
              discriminating against the row-index model"
         );
     }
@@ -918,7 +1056,7 @@ mod tests {
         // The clamp is vanilla's `maxScrollAmount() = contentHeight() - height`,
         // computed here from the outside rather than read back off the nav.
         let content = GENERAL_STATS.len() as f32 * ROW_H + 2.0 * widget::LIST_CONTENT_PADDING;
-        let band = canvas - options::FOOTER_HEIGHT - options::SUB_HEADER_HEIGHT;
+        let band = canvas - options::FOOTER_HEIGHT - HEADER_HEIGHT;
         assert_eq!(
             nav.scroll(),
             content - band,

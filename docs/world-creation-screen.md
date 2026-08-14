@@ -45,6 +45,54 @@ sub-structure rather than a widget shape). `docs/ui-framework.md` already
 names hand-arithmetic layout as legitimate vanilla (`TitleScreen` itself uses
 no layout class); this is the same call at a coarser grain.
 
+**The tab widget issue #564 built (`menu/widget.rs`'s `TAB_SPRITES`, `menu/
+layout.rs`'s `tab_bar_geometry`) is available for this screen too** — it was
+built once, for the Statistics screen and this one, per the owner's own
+report that they want the same tabs both places. It is not wired in here yet:
+this doc's own reasoning above (no `LevelStorageSource`, no data-pack loader,
+no game-rule model — a data-carrying widget with nothing behind three of its
+tabs) still applies to the *tab* half of vanilla's `CreateWorldScreen`
+specifically, independent of whether the tab-strip *widget* itself exists.
+Reusing it here without those three tabs having real content would swap
+"one flat list" for "three tabs, two of them still holding the flat list"
+— a shape change with no functional gain until the data-pack/game-rule model
+this doc already tracks as missing exists. See [Statistics
+screen](./statistics-screen.md) for where the widget *is* wired in.
+
+## Hover outline (issue #567)
+
+Every button row on this screen used to draw with no hover outline at all,
+ever, regardless of where the mouse was — reported as "the third instance"
+of the frame-built-without-the-shared-canvas-stamp bug (in-world Settings,
+then this issue's own opening report). **It was not a third instance of that
+bug.** `Screen::CreateWorld`'s arm in `render::frame_for` returns `Some`
+unconditionally (no `settings_in_world()`-style deferral to a second draw
+path), so it already reaches `render::stamp_canvas_facts` through
+`frame_for`'s own unconditional `frame.map(...)` — `cursor`/`gui_scale`/
+`panorama_speed`/`list` were never the gap.
+
+The real cause: `CreateWorldNav` had no field to record which row the mouse
+was over, and `MenuNav::hover`'s match in `menu/nav.rs` had no
+`Screen::CreateWorld` arm, so `frame`'s `MenuFrame::hovered` stayed `None`
+unconditionally and `render::draw_widget`'s `widget.hovered` was `false`
+every frame. Fixed the same shape `menu/nav.rs`'s `EditForm::hover_row`
+already uses (a field row does nothing, a button row records `Self::
+hovered`) — see `CreateWorldNav::hover_row`/`hovered` — plus the one-line
+`menu/nav.rs` match arm `Screen::CreateWorld => self.create_world.hover_row(
+row)`, in `MenuNav::hover`.
+
+**The mechanical check** the issue asked for lives in `menu/render/tests.rs`'s
+`owns_frame_agrees_with_frame_for_on_every_screen`: every screen `frame_for`
+returns `Some` for now also asserts its frame's `cursor`/`gui_scale`/
+`panorama_speed`/`list` equal `stamp_canvas_facts`'s own inputs, with a real
+(non-`None`) cursor position set first so the comparison cannot pass
+vacuously. It is a tripwire for the *architectural* shape (a screen arm that
+stops going through `frame_for`'s stamp, or sets a conflicting value of its
+own) — not a substitute for the existing `frame_for_defers_to_an_overlay_
+for_in_world_settings` test, which is what covers the one screen that
+deliberately reaches the draw through a *second* path this loop never
+visits.
+
 ## Wired vs. decorative
 
 - **Wired**: reaching the screen (the button is live) and back (Escape/

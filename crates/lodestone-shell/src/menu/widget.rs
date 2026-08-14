@@ -783,6 +783,61 @@ pub const SCROLLER_SPRITE: &str = "widget/scroller";
 /// (`AbstractScrollArea.java:16`).
 pub const SCROLLER_BACKGROUND_SPRITE: &str = "widget/scroller_background";
 
+// -- the tab widget (issue #564) ---------------------------------------------
+//
+// Vanilla's `MenuTabBar.MenuTabButton` (`MenuTabBar.java:107-158`) — the tab
+// strip `StatsScreen` and `CreateWorldScreen` both use. Built once here rather
+// than per-screen, per the owner report: "Statistics and Create New World want
+// the same widget."
+
+/// `MenuTabButton.SPRITES` (`MenuTabBar.java:108-113`): the four `widget/tab*`
+/// ids a tab selects between.
+///
+/// Keyed by `(selected, hoveredOrFocused)`, **not** `(active, …)` like every
+/// other [`WidgetSprites`] user in this module — a tab's *background* never
+/// reads `this.active` at all (`extractWidgetRenderState`, `MenuTabBar.java:
+/// 125-138`); only the underline colour and the label do. `WidgetSprites::get`
+/// is generic on its two `bool`s, so the (enabled, focused)-shaped API still
+/// answers this (selected, hovered)-shaped question correctly — the field
+/// names are just the wrong axis for this one caller.
+pub const TAB_SPRITES: WidgetSprites = WidgetSprites::new(
+    "widget/tab_selected",
+    "widget/tab",
+    "widget/tab_selected_highlighted",
+    "widget/tab_highlighted",
+);
+
+/// `MenuTabButton.extractWidgetRenderState`'s `underlineColor`
+/// (`MenuTabBar.java:130`): vanilla's raw ARGB `-1` (white) while the tab is
+/// clickable, `-6250336` while it is present-and-inactive (issue #564's
+/// Items/Mobs tabs, which have no data to show yet — see `stats.rs`'s module
+/// docs).
+///
+/// **Measured equal to [`ACTIVE_LABEL`]/[`INACTIVE_LABEL`]**:
+/// `argb_to_rgba(-6250336)` is `(160, 160, 160, 255)`, i.e. `0xFFA0A0A0`, the
+/// same colour [`INACTIVE_LABEL`] already names — so this reuses those two
+/// constants instead of re-deriving the ARGB literal a second time.
+#[must_use]
+pub fn tab_underline_colour(active: bool) -> [f32; 4] {
+    if active { ACTIVE_LABEL } else { INACTIVE_LABEL }
+}
+
+/// `MenuTabButton.renderLabel`'s vertical offset (`MenuTabBar.java:144-149`):
+/// `getY() + (isSelected() ? 0 : 3)` — an unselected tab's label drops 3 px
+/// because the selected tab alone draws the inset background/underline that
+/// would otherwise collide with a label sitting flush against the top.
+#[must_use]
+pub fn tab_label_dy(selected: bool) -> f32 {
+    if selected { 0.0 } else { 3.0 }
+}
+
+/// `MenuTabButton.UNDERLINE_HEIGHT`/`_MARGIN_BOTTOM` (`MenuTabBar.java:
+/// 116-118,152-157`): a 1 px bar, its own height above the tab's bottom edge,
+/// centred under the label and no wider than `tab_width - 4`.
+pub const TAB_UNDERLINE_H: f32 = 1.0;
+pub const TAB_UNDERLINE_MARGIN_BOTTOM: f32 = 2.0;
+pub const TAB_UNDERLINE_SIDE_MARGIN: f32 = 4.0;
+
 /// Vanilla's `AbstractScrollArea` + `AbstractSelectionList` scroll model: a
 /// **pixel** scroll offset, a scrollbar, and a `hovered`/`selected` pair that are
 /// two separate pieces of state.
@@ -3151,5 +3206,37 @@ mod tests {
         );
         // And the two really do disagree, so the builder is not a no-op.
         assert_ne!(spanning.row_right(854.0), spec.row_right(854.0));
+    }
+
+    // -- the tab widget (issue #564) -----------------------------------------
+
+    #[test]
+    fn tab_sprites_are_keyed_by_selected_and_hovered_not_active() {
+        // `MenuTabBar.java:108-113`: unselected+plain, selected+plain,
+        // unselected+hovered, selected+hovered — all four combinations, none of
+        // them consulting an "active" flag at all.
+        assert_eq!(TAB_SPRITES.get(false, false), "widget/tab");
+        assert_eq!(TAB_SPRITES.get(true, false), "widget/tab_selected");
+        assert_eq!(TAB_SPRITES.get(false, true), "widget/tab_highlighted");
+        assert_eq!(TAB_SPRITES.get(true, true), "widget/tab_selected_highlighted");
+    }
+
+    #[test]
+    fn tab_underline_colour_matches_vanillas_two_argb_constants() {
+        // Expected values originate outside this module: `-1` and `-6250336`
+        // are `MenuTabBar.java:130`'s own literals, unpacked by the shared
+        // `argb_to_rgba` rather than restated as a second pair of floats.
+        assert_eq!(tab_underline_colour(true), argb_to_rgba(-1));
+        assert_eq!(tab_underline_colour(false), argb_to_rgba(-6_250_336));
+        // And the control: the two must actually differ, or a caller could not
+        // tell an active tab's underline from an inactive one's.
+        assert_ne!(tab_underline_colour(true), tab_underline_colour(false));
+    }
+
+    #[test]
+    fn tab_label_drops_three_pixels_only_while_unselected() {
+        // `MenuTabBar.java:146`: `getY() + (isSelected() ? 0 : 3)`.
+        assert_eq!(tab_label_dy(true), 0.0);
+        assert_eq!(tab_label_dy(false), 3.0);
     }
 }

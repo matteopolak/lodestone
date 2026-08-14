@@ -309,6 +309,23 @@ pub struct CreateWorldNav {
     pub widgets: CreateWorldWidgets,
     focus: FocusSet,
     config: WorldCreationConfig,
+    /// Which button row the mouse is over, if any — separate from keyboard
+    /// focus for [`super::nav::EditForm::hovered`]'s exact reason (this
+    /// screen has the same shape: two [`EditBox`]es plus five button rows).
+    ///
+    /// **This is the whole of issue #567's reported bug.** `CreateWorld`
+    /// already reaches [`super::render::stamp_canvas_facts`] through
+    /// `render::frame_for`'s own `frame.map` — every screen's frame does,
+    /// unconditionally, unless its arm returns `None` the way in-world
+    /// `Settings` deliberately does — so `cursor`/`gui_scale`/
+    /// `panorama_speed`/`list` were never the gap here, unlike the two
+    /// earlier instances of this defect shape. What was missing is this
+    /// field: nothing on this screen ever recorded *which* row the cursor
+    /// was over, so [`frame`]'s `MenuFrame::hovered` stayed `None`
+    /// unconditionally and `widget.hovered` (`render::draw_widget`) was
+    /// `false` for every row, every frame — no outline, ever, regardless of
+    /// where the mouse was.
+    hovered: Option<usize>,
 }
 
 fn button(row: usize, label: impl Into<String>) -> Widget {
@@ -349,7 +366,12 @@ impl CreateWorldNav {
             focus.add_renderable_widget(row);
         }
         focus.set_initial_focus(&mut widgets, NAME_FIELD);
-        Self { widgets, focus, config }
+        Self {
+            widgets,
+            focus,
+            config,
+            hovered: None,
+        }
     }
 
     #[must_use]
@@ -360,6 +382,30 @@ impl CreateWorldNav {
     #[must_use]
     pub fn focused(&self) -> Option<usize> {
         self.focus.focused()
+    }
+
+    /// The mouse moved over row `row` — mirrors
+    /// [`super::nav::EditForm::hover_row`] exactly, including its reason: a
+    /// field row (`NAME_FIELD`/`SEED_FIELD`) does nothing here, so hovering
+    /// the Seed field while typing in Name cannot steal the caret out from
+    /// under the player (vanilla's `ContainerEventHandler` moves focus only
+    /// from a *click* or Tab traversal, never from hover — `EditBox` itself
+    /// has no hover highlight at all). Every other row records only
+    /// [`Self::hovered`], which is what lets the mouse travel to Create
+    /// without touching whichever field currently has the keyboard.
+    pub fn hover_row(&mut self, row: usize) {
+        match row {
+            NAME_FIELD | SEED_FIELD => {}
+            GAME_MODE_ROW | DIFFICULTY_ROW | STRUCTURES_ROW | BONUS_CHEST_ROW
+            | ALLOW_CHEATS_ROW | CREATE_ROW | CANCEL_ROW => self.hovered = Some(row),
+            _ => {}
+        }
+    }
+
+    /// The row the mouse is over, for [`super::render::MenuFrame::hovered`].
+    #[must_use]
+    pub fn hovered(&self) -> Option<usize> {
+        self.hovered
     }
 
     /// Difficulty is locked to Hard and its own row inactive while Hardcore
@@ -541,6 +587,12 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     MenuFrame {
         rows,
         selected,
+        // Issue #567: this used to be left at its `..Default::default()` of
+        // `None` unconditionally — nothing on this screen ever recorded which
+        // row the mouse was over (see `CreateWorldNav::hovered`'s own doc) —
+        // so `render::draw_widget`'s `widget.hovered` was `false` for every
+        // row, every frame, and no button ever drew its hover outline.
+        hovered: nav.hovered(),
         vanilla: true,
         labels: vec![
             MenuLabel {
@@ -824,5 +876,81 @@ mod tests {
             footer_y >= content_bottom,
             "footer at {footer_y} must sit at or below the last content row's bottom {content_bottom}"
         );
+    }
+
+    // -- hover (issue #567) --------------------------------------------------
+
+    #[test]
+    fn a_fresh_screen_has_nothing_hovered_so_the_frame_carries_none() {
+        let nav = CreateWorldNav::new();
+        assert_eq!(nav.hovered(), None);
+        assert_eq!(
+            frame(&nav).hovered,
+            None,
+            "the frame must reflect the nav's own hover state, not invent one"
+        );
+    }
+
+    #[test]
+    fn hovering_a_button_row_reaches_the_frame() {
+        let mut nav = CreateWorldNav::new();
+        nav.hover_row(CREATE_ROW);
+        assert_eq!(nav.hovered(), Some(CREATE_ROW));
+        assert_eq!(
+            frame(&nav).hovered,
+            Some(CREATE_ROW),
+            "MenuFrame::hovered must carry the row render::draw_widget outlines"
+        );
+
+        // A second hover replaces the first — only one row highlights at once.
+        nav.hover_row(CANCEL_ROW);
+        assert_eq!(nav.hovered(), Some(CANCEL_ROW));
+    }
+
+    /// The control: hovering a **field** must not be recorded as a button
+    /// hover, mirroring `EditForm::hover_row`'s exact reason — a text field
+    /// has no hover highlight in vanilla, and if a field row were treated as
+    /// a hoverable button the mouse passing over Name while Seed is focused
+    /// would draw a spurious outline on a row that is not a button at all.
+    #[test]
+    fn hovering_a_field_row_does_nothing() {
+        let mut nav = CreateWorldNav::new();
+        nav.hover_row(NAME_FIELD);
+        assert_eq!(nav.hovered(), None, "a field row is not a hoverable button");
+        nav.hover_row(SEED_FIELD);
+        assert_eq!(nav.hovered(), None);
+
+        // And it must not clobber a real hover already recorded, the same
+        // property `hover_row`'s own doc argues protects the *focused* field
+        // from a stray mouse move — here it is the *hover* state's turn not
+        // to be reset by passing over a field.
+        nav.hover_row(CREATE_ROW);
+        nav.hover_row(NAME_FIELD);
+        assert_eq!(
+            nav.hovered(),
+            Some(CREATE_ROW),
+            "moving the mouse back over a field must not clear a button's hover"
+        );
+    }
+
+    /// Every button row (not the two fields) must be able to report hover —
+    /// a gap here is exactly how issue #567 shipped: `hover_row` existed on
+    /// `EditForm` and on other screens, but `CreateWorldNav` had no such
+    /// method at all, so no row on this screen could ever be hovered.
+    #[test]
+    fn every_button_row_can_be_hovered() {
+        for row in [
+            GAME_MODE_ROW,
+            DIFFICULTY_ROW,
+            STRUCTURES_ROW,
+            BONUS_CHEST_ROW,
+            ALLOW_CHEATS_ROW,
+            CREATE_ROW,
+            CANCEL_ROW,
+        ] {
+            let mut nav = CreateWorldNav::new();
+            nav.hover_row(row);
+            assert_eq!(nav.hovered(), Some(row), "row {row} did not record hover");
+        }
     }
 }
