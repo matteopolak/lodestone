@@ -71,10 +71,15 @@
 //! for what a [`jigsaw::JigsawConfig`] refuses to model, and
 //! `tests/structure_jigsaw.rs` for the oracle's own coverage of each.
 //!
-//! **What genuinely remains**: `stronghold` (placement math only —
-//! [`placement`]'s `ConcentricRingsStructurePlacement` — no piece generator;
-//! `StrongholdPieces.java` is ~1,800 lines and the oracle world at
-//! `.cache/mc/survival` contains none to verify against), `monument`
+//! **`stronghold` now has a real piece generator** — [`stronghold`], the whole
+//! `StrongholdPieces` tree ending in a portal room every generated stronghold
+//! is guaranteed to contain. The oracle world at `.cache/mc/survival`
+//! contains no stronghold to verify piece assembly against (only ring
+//! placement, [`placement`]'s `ConcentricRingsStructurePlacement`, predates
+//! this), so its correctness rests on the decompiled record plus the
+//! self-consistency gates in `stronghold`'s own test module.
+//!
+//! **What genuinely remains**: `monument`
 //! (`OceanMonumentPieces.java` is ~2,000 lines of coded rooms), and
 //! `ruined_portal_nether` (the Nether-side setup of the *same* `type` id
 //! `ruined_portals` overworld already covers — refused wholesale, see
