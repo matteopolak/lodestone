@@ -1094,6 +1094,187 @@ pub fn shulker_lid_pose(progress: f32) -> (f32, f32) {
     )
 }
 
+/// Model name of the decorated pot's base (neck + top + bottom) — one
+/// texture (`decorated_pot_base`) for every pot in the world, regardless of
+/// its stored sherds.
+pub const DECORATED_POT_BASE: &str = "decorated_pot_base";
+
+/// Model name of the pot's front side quad — see
+/// `lodestone_assets::block_entity_models::decorated_pot_side_part`'s doc for
+/// why this is a distinct model from the other three sides rather than one
+/// model reused with an override.
+pub const DECORATED_POT_SIDE_FRONT: &str = "decorated_pot_side_front";
+/// Model name of the pot's back side quad.
+pub const DECORATED_POT_SIDE_BACK: &str = "decorated_pot_side_back";
+/// Model name of the pot's left side quad.
+pub const DECORATED_POT_SIDE_LEFT: &str = "decorated_pot_side_left";
+/// Model name of the pot's right side quad.
+pub const DECORATED_POT_SIDE_RIGHT: &str = "decorated_pot_side_right";
+
+/// The jar sheet the pot's base always draws with —
+/// `Sheets.DECORATED_POT_BASE` (`entity/decorated_pot/decorated_pot_base`).
+pub const DECORATED_POT_BASE_TEXTURE_STEM: &str = "entity/decorated_pot/decorated_pot_base";
+
+/// The jar sheet an undecorated side draws with —
+/// `Sheets.DECORATED_POT_SIDE` (`entity/decorated_pot/decorated_pot_side`),
+/// `DecoratedPotRenderer.getSideSprite`'s fallback for an absent or
+/// unrecognised sherd.
+pub const DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM: &str =
+    "entity/decorated_pot/decorated_pot_side";
+
+/// A stored sherd's item path (namespace stripped, e.g.
+/// `"angler_pottery_sherd"`) to the sherd's own pattern texture stem —
+/// `DecoratedPotPatterns.itemToPatternMappings` plus
+/// `DecoratedPotPattern.assetId()`/`Sheets.DECORATED_POT_MAPPER`, transcribed
+/// from `.cache/mc/26.2/client-src/net/minecraft/world/level/block/entity/
+/// DecoratedPotPatterns.java`'s own `bootstrap` — the pattern's registered
+/// asset id, not a guess from the sherd's own name (they happen to share a
+/// `<name>_pottery_pattern`/`<name>_pottery_sherd` stem, but that is a jar
+/// convention this reads off the real registration, not an assumption).
+///
+/// `None` (an absent side, or an item path this table does not recognise —
+/// vanilla's own `getSideSprite` falls back identically for a `null` map
+/// lookup) maps to [`DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM`] by the caller,
+/// not here, so this function's contract stays "sherd path in, pattern stem
+/// out" with no third case to remember at the call site.
+#[must_use]
+pub fn decorated_pot_pattern_texture_stem(sherd_item_path: &str) -> Option<&'static str> {
+    Some(match sherd_item_path {
+        "angler_pottery_sherd" => "entity/decorated_pot/angler_pottery_pattern",
+        "archer_pottery_sherd" => "entity/decorated_pot/archer_pottery_pattern",
+        "arms_up_pottery_sherd" => "entity/decorated_pot/arms_up_pottery_pattern",
+        "blade_pottery_sherd" => "entity/decorated_pot/blade_pottery_pattern",
+        "brewer_pottery_sherd" => "entity/decorated_pot/brewer_pottery_pattern",
+        "burn_pottery_sherd" => "entity/decorated_pot/burn_pottery_pattern",
+        "danger_pottery_sherd" => "entity/decorated_pot/danger_pottery_pattern",
+        "explorer_pottery_sherd" => "entity/decorated_pot/explorer_pottery_pattern",
+        "flow_pottery_sherd" => "entity/decorated_pot/flow_pottery_pattern",
+        "friend_pottery_sherd" => "entity/decorated_pot/friend_pottery_pattern",
+        "guster_pottery_sherd" => "entity/decorated_pot/guster_pottery_pattern",
+        "heart_pottery_sherd" => "entity/decorated_pot/heart_pottery_pattern",
+        "heartbreak_pottery_sherd" => "entity/decorated_pot/heartbreak_pottery_pattern",
+        "howl_pottery_sherd" => "entity/decorated_pot/howl_pottery_pattern",
+        "miner_pottery_sherd" => "entity/decorated_pot/miner_pottery_pattern",
+        "mourner_pottery_sherd" => "entity/decorated_pot/mourner_pottery_pattern",
+        "plenty_pottery_sherd" => "entity/decorated_pot/plenty_pottery_pattern",
+        "prize_pottery_sherd" => "entity/decorated_pot/prize_pottery_pattern",
+        "scrape_pottery_sherd" => "entity/decorated_pot/scrape_pottery_pattern",
+        "sheaf_pottery_sherd" => "entity/decorated_pot/sheaf_pottery_pattern",
+        "shelter_pottery_sherd" => "entity/decorated_pot/shelter_pottery_pattern",
+        "skull_pottery_sherd" => "entity/decorated_pot/skull_pottery_pattern",
+        "snort_pottery_sherd" => "entity/decorated_pot/snort_pottery_pattern",
+        _ => return None,
+    })
+}
+
+/// Every decorated-pot sheet: the base, the undecorated-side default, and
+/// all twenty-three sherd patterns — the union [`block_entity_texture_stems`]
+/// folds in, so a pot with any combination of sherds always finds a bind
+/// group.
+#[must_use]
+pub fn decorated_pot_texture_stems() -> Vec<&'static str> {
+    let mut stems = vec![
+        DECORATED_POT_BASE_TEXTURE_STEM,
+        DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM,
+    ];
+    for sherd in [
+        "angler_pottery_sherd",
+        "archer_pottery_sherd",
+        "arms_up_pottery_sherd",
+        "blade_pottery_sherd",
+        "brewer_pottery_sherd",
+        "burn_pottery_sherd",
+        "danger_pottery_sherd",
+        "explorer_pottery_sherd",
+        "flow_pottery_sherd",
+        "friend_pottery_sherd",
+        "guster_pottery_sherd",
+        "heart_pottery_sherd",
+        "heartbreak_pottery_sherd",
+        "howl_pottery_sherd",
+        "miner_pottery_sherd",
+        "mourner_pottery_sherd",
+        "plenty_pottery_sherd",
+        "prize_pottery_sherd",
+        "scrape_pottery_sherd",
+        "sheaf_pottery_sherd",
+        "shelter_pottery_sherd",
+        "skull_pottery_sherd",
+        "snort_pottery_sherd",
+    ] {
+        if let Some(stem) = decorated_pot_pattern_texture_stem(sherd) {
+            stems.push(stem);
+        }
+    }
+    stems
+}
+
+/// The world placement transform for a decorated pot at `pos` facing
+/// `facing_yaw_deg` — `DecoratedPotRenderer.createModelTransformation`:
+/// `rotateAround(Axis.YP.rotationDegrees(180.0F - entityDirection.toYRot()),
+/// 0.5F, 0.5F, 0.5F)`.
+///
+/// **Not [`block_entity_placement_matrix`] with a yaw**: the pivot is the
+/// block's *centre* (`0.5, 0.5, 0.5`, like [`shulker_placement_matrix`]'s,
+/// not chest's floor pivot) and the angle carries an extra `180°` term chest
+/// does not. Reusing the chest matrix draws every pot rotated a half-turn
+/// from its real facing, which still looks like a plausible pot.
+#[must_use]
+pub fn decorated_pot_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4 {
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    let pivot = Vec3::splat(0.5);
+    Mat4::from_translation(origin + pivot)
+        * Mat4::from_rotation_y((180.0 - facing_yaw_deg).to_radians())
+        * Mat4::from_translation(-pivot)
+}
+
+/// The version-free description of one decorated pot to draw this frame.
+///
+/// The caller owns every field: `HORIZONTAL_FACING` off the block state →
+/// `facing_yaw_deg` (the same [`horizontal_facing_yaw`] convention chest
+/// uses); the block entity's own NBT `"sherds"` list, namespace-stripped and
+/// ordered `[back, left, right, front]` per `PotDecorations.CODEC` → the four
+/// `Option<String>` fields (`None` for an absent side — vanilla's own
+/// `PotDecorations` maps a stored `minecraft:brick` to absent at parse time,
+/// so a caller reading raw NBT should do the same rather than passing
+/// `Some("brick")` through); world light → `light`.
+///
+/// No wobble phase: `DecoratedPotBlockEntity`'s hit-wobble is a `BLOCK_EVENT`
+/// animation with no producer in this workspace yet, the same
+/// not-yet-triggered gap [`ShulkerSpawn::progress`] documents for the lid.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DecoratedPotSpawn {
+    /// Block position.
+    pub pos: [i32; 3],
+    /// `Direction.toYRot()` for the block's `HORIZONTAL_FACING`.
+    pub facing_yaw_deg: f32,
+    /// The front side's stored sherd item path, or `None`.
+    pub front: Option<String>,
+    /// The back side's stored sherd item path, or `None`.
+    pub back: Option<String>,
+    /// The left side's stored sherd item path, or `None`.
+    pub left: Option<String>,
+    /// The right side's stored sherd item path, or `None`.
+    pub right: Option<String>,
+    /// Packed sky/block light. Pass [`ENTITY_FULLBRIGHT`] only when there is
+    /// genuinely no world to sample.
+    pub light: u8,
+}
+
+impl DecoratedPotSpawn {
+    /// A south-facing, undecorated, full-bright pot at `pos` — the minimum a
+    /// hermetic gate needs.
+    #[must_use]
+    pub fn at(pos: [i32; 3]) -> Self {
+        DecoratedPotSpawn {
+            pos,
+            facing_yaw_deg: 0.0,
+            light: ENTITY_FULLBRIGHT,
+            ..Default::default()
+        }
+    }
+}
+
 /// Model name of the open-book rig, keying both the mesh set and the shell's
 /// texture map.
 ///
@@ -1401,6 +1582,7 @@ pub fn block_entity_texture_stems() -> Vec<&'static str> {
     stems.extend(banner_texture_stems());
     stems.extend(shulker_texture_stems());
     stems.extend(book_texture_stems());
+    stems.extend(decorated_pot_texture_stems());
     stems
 }
 
@@ -1651,6 +1833,72 @@ impl BlockEntityModelSet {
             light: spawn.light,
             tint: [255, 255, 255],
         })
+    }
+
+    /// Resolves one decorated pot into a base instance plus up to four
+    /// independently textured side instances — the base plus per-side
+    /// decomposition [`docs/block-entity-renderers.md`] names as the way
+    /// around the `(model, texture)` single-texture-per-instance batch key.
+    /// `None` only if the base model itself is missing from the corpus (the
+    /// four side models are checked the same way, per side, and a missing
+    /// one simply omits that side rather than failing the whole pot).
+    ///
+    /// # Five instances, five ordinary batch slots — no new mechanism
+    ///
+    /// Unlike [`Self::resolve_banner`], nothing here needs a second,
+    /// unbatched draw pass. A banner layers N *tinted masks* over **one**
+    /// mesh, which the plain `(model, texture)` key cannot express and which
+    /// is why that pass exists at all. A decorated pot instead needs four
+    /// **distinct diffuse textures on four distinct quads** — a shape the
+    /// ordinary batcher was already built for, the same way two chests with
+    /// different materials batch separately today. Each returned instance
+    /// carries its own `model/texture` pair and rejoins
+    /// [`plan_block_entities`]'s normal instanced draw exactly like a chest
+    /// or a skull; two pots sharing a sherd on the same side coalesce into
+    /// one GPU instance of one batch, the same as two oak chests would.
+    ///
+    /// # Every side always draws
+    ///
+    /// Vanilla's `DecoratedPotRenderer.submit` calls `submitModelPart` for
+    /// `front`/`back`/`left`/`right` unconditionally, falling back to
+    /// `Sheets.DECORATED_POT_SIDE` per side rather than skipping an
+    /// undecorated one — so this returns all four side instances always, not
+    /// only the decorated ones. Skipping a blank side would draw a pot with
+    /// invisible faces on three sides of the corpus's test cases and silently
+    /// autocorrect on real ones the moment a player added their first sherd.
+    #[must_use]
+    pub fn resolve_decorated_pot(&self, spawn: &DecoratedPotSpawn) -> Option<[BlockEntityInstance; 5]> {
+        let placement = decorated_pot_placement_matrix(spawn.pos, spawn.facing_yaw_deg);
+
+        let instance = |model: &'static str, texture: &'static str| -> Option<BlockEntityInstance> {
+            let mesh = self.get(model)?;
+            let part_transforms = mesh.part_transforms(placement, &[]);
+            let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
+            Some(BlockEntityInstance {
+                model,
+                texture,
+                transform: placement,
+                part_transforms,
+                aabb_min,
+                aabb_max,
+                light: spawn.light,
+                tint: [255, 255, 255],
+            })
+        };
+
+        let side_texture = |sherd: &Option<String>| -> &'static str {
+            sherd
+                .as_deref()
+                .and_then(decorated_pot_pattern_texture_stem)
+                .unwrap_or(DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM)
+        };
+
+        let base = instance(DECORATED_POT_BASE, DECORATED_POT_BASE_TEXTURE_STEM)?;
+        let front = instance(DECORATED_POT_SIDE_FRONT, side_texture(&spawn.front))?;
+        let back = instance(DECORATED_POT_SIDE_BACK, side_texture(&spawn.back))?;
+        let left = instance(DECORATED_POT_SIDE_LEFT, side_texture(&spawn.left))?;
+        let right = instance(DECORATED_POT_SIDE_RIGHT, side_texture(&spawn.right))?;
+        Some([base, front, back, left, right])
     }
 
     /// Resolves one ground/standing banner into its opaque body+flag
@@ -2818,9 +3066,10 @@ mod tests {
         let set = set();
         assert_eq!(
             set.len(),
-            12,
+            17,
             "3 chest layers + 2 skull canvases + bell + 4 banner parts (standing \
-             and wall, body and flag) + shulker box + book"
+             and wall, body and flag) + shulker box + book + decorated pot (base \
+             plus 4 side models)"
         );
         for (name, mesh) in set.iter() {
             assert!(mesh.quad_count() > 0, "{name} baked no quads");
@@ -4460,5 +4709,232 @@ mod special_item_tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// Every stored sherd this table names resolves to a **distinct** pattern
+    /// stem, and an unrecognised path (a datapack item, or `None`'s own
+    /// caller-side default) resolves to nothing rather than a plausible wrong
+    /// sherd — the same "decline rather than guess" contract
+    /// [`special_item_rig`]'s own tests hold `kind` to.
+    #[test]
+    fn every_named_sherd_resolves_to_a_distinct_pattern_stem() {
+        let sherds = [
+            "angler_pottery_sherd",
+            "archer_pottery_sherd",
+            "arms_up_pottery_sherd",
+            "blade_pottery_sherd",
+            "brewer_pottery_sherd",
+            "burn_pottery_sherd",
+            "danger_pottery_sherd",
+            "explorer_pottery_sherd",
+            "flow_pottery_sherd",
+            "friend_pottery_sherd",
+            "guster_pottery_sherd",
+            "heart_pottery_sherd",
+            "heartbreak_pottery_sherd",
+            "howl_pottery_sherd",
+            "miner_pottery_sherd",
+            "mourner_pottery_sherd",
+            "plenty_pottery_sherd",
+            "prize_pottery_sherd",
+            "scrape_pottery_sherd",
+            "sheaf_pottery_sherd",
+            "shelter_pottery_sherd",
+            "skull_pottery_sherd",
+            "snort_pottery_sherd",
+        ];
+        let mut stems: Vec<&'static str> = Vec::with_capacity(sherds.len());
+        for sherd in sherds {
+            let stem = decorated_pot_pattern_texture_stem(sherd)
+                .unwrap_or_else(|| panic!("{sherd} must resolve to a pattern stem"));
+            assert!(
+                stem.starts_with("entity/decorated_pot/") && stem.ends_with("_pottery_pattern"),
+                "{sherd} resolved to {stem}, which does not look like a decorated-pot pattern"
+            );
+            stems.push(stem);
+        }
+        let mut deduped = stems.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            stems.len(),
+            "two different sherds resolved to the same pattern stem: {stems:?}"
+        );
+
+        // Absence and the "not a real sherd" case both decline, per the
+        // function's own contract — a resolver that fell back to a plausible
+        // pattern here would draw a datapack item as a real vanilla sherd.
+        assert_eq!(decorated_pot_pattern_texture_stem("brick"), None);
+        assert_eq!(decorated_pot_pattern_texture_stem("diamond_pickaxe"), None);
+        assert_eq!(decorated_pot_pattern_texture_stem(""), None);
+    }
+
+    /// An undecorated pot resolves to five instances — the base plus all
+    /// four sides, every side falling back to
+    /// [`DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM`] — matching
+    /// `DecoratedPotRenderer.submit`'s own unconditional four
+    /// `submitModelPart` calls: a blank side is drawn with the default
+    /// sprite, not skipped.
+    #[test]
+    fn an_undecorated_pot_resolves_to_a_base_and_four_default_sides() {
+        let models = BlockEntityModelSet::load();
+        let spawn = DecoratedPotSpawn::at([5, 70, -3]);
+        let [base, front, back, left, right] = models
+            .resolve_decorated_pot(&spawn)
+            .expect("the decorated-pot corpus must resolve");
+
+        assert_eq!(base.model, DECORATED_POT_BASE);
+        assert_eq!(base.texture, DECORATED_POT_BASE_TEXTURE_STEM);
+
+        for (name, inst, model) in [
+            ("front", &front, DECORATED_POT_SIDE_FRONT),
+            ("back", &back, DECORATED_POT_SIDE_BACK),
+            ("left", &left, DECORATED_POT_SIDE_LEFT),
+            ("right", &right, DECORATED_POT_SIDE_RIGHT),
+        ] {
+            assert_eq!(inst.model, model, "{name} took the wrong model");
+            assert_eq!(
+                inst.texture, DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM,
+                "{name} of a blank pot must draw the default side sprite"
+            );
+        }
+    }
+
+    /// **The discriminating gate.** Four *pairwise-distinct* sherds, one per
+    /// side, must resolve to four distinct textures **on the correct named
+    /// model** — not merely "four different textures somewhere". Checking by
+    /// `model` rather than by position is what makes this transposition-proof
+    /// per `CLAUDE.md`'s evidence standard: a resolver that swapped, say,
+    /// `left` and `right` would still produce "four distinct textures" but
+    /// would fail this assertion, where a plain `HashSet::len() == 4` check
+    /// would not catch it.
+    ///
+    /// The four sherds are chosen pairwise-distinct on purpose (never reusing
+    /// one sherd across two sides) — the same discipline `CLAUDE.md` requires
+    /// of adjacent same-typed fields, because a fixture with a repeated sherd
+    /// cannot distinguish "resolved independently" from "one sherd painted
+    /// everywhere".
+    #[test]
+    fn four_distinct_sherds_produce_four_distinct_textures_on_the_right_faces() {
+        let models = BlockEntityModelSet::load();
+        let spawn = DecoratedPotSpawn {
+            front: Some("angler_pottery_sherd".to_string()),
+            back: Some("skull_pottery_sherd".to_string()),
+            left: Some("heart_pottery_sherd".to_string()),
+            right: Some("danger_pottery_sherd".to_string()),
+            ..DecoratedPotSpawn::at([1, 64, 1])
+        };
+        let [base, front, back, left, right] = models
+            .resolve_decorated_pot(&spawn)
+            .expect("the decorated-pot corpus must resolve");
+
+        let expect = [
+            ("front", &front, DECORATED_POT_SIDE_FRONT, "entity/decorated_pot/angler_pottery_pattern"),
+            ("back", &back, DECORATED_POT_SIDE_BACK, "entity/decorated_pot/skull_pottery_pattern"),
+            ("left", &left, DECORATED_POT_SIDE_LEFT, "entity/decorated_pot/heart_pottery_pattern"),
+            ("right", &right, DECORATED_POT_SIDE_RIGHT, "entity/decorated_pot/danger_pottery_pattern"),
+        ];
+        let mut wrong: Vec<String> = Vec::new();
+        for (name, inst, model, texture) in expect {
+            if inst.model != model {
+                wrong.push(format!("{name}: expected model {model}, got {}", inst.model));
+            }
+            if inst.texture != texture {
+                wrong.push(format!("{name}: expected texture {texture}, got {}", inst.texture));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+
+        // The base never varies with the sides.
+        assert_eq!(base.model, DECORATED_POT_BASE);
+        assert_eq!(base.texture, DECORATED_POT_BASE_TEXTURE_STEM);
+
+        // Pairwise-distinct textures, not merely four non-default ones — a
+        // resolver that mapped every side through the same lookup bug (e.g.
+        // always the *first* sherd) would still clear the "not default"
+        // check but fail this one.
+        let textures = [front.texture, back.texture, left.texture, right.texture];
+        for i in 0..textures.len() {
+            for j in (i + 1)..textures.len() {
+                assert_ne!(
+                    textures[i], textures[j],
+                    "sides at index {i} and {j} share a texture: {:?}",
+                    textures
+                );
+            }
+        }
+    }
+
+    /// A partially-decorated pot: only two of the four sides carry a sherd.
+    /// The undecorated pair must still fall back to the default sprite while
+    /// the decorated pair keeps its own — proving the fallback is per-side,
+    /// not all-or-nothing.
+    #[test]
+    fn a_partially_decorated_pot_mixes_sherds_and_the_default_sprite() {
+        let models = BlockEntityModelSet::load();
+        let spawn = DecoratedPotSpawn {
+            front: Some("brewer_pottery_sherd".to_string()),
+            back: None,
+            left: None,
+            right: Some("miner_pottery_sherd".to_string()),
+            ..DecoratedPotSpawn::at([0, 64, 0])
+        };
+        let [_base, front, back, left, right] = models
+            .resolve_decorated_pot(&spawn)
+            .expect("the decorated-pot corpus must resolve");
+
+        assert_eq!(front.texture, "entity/decorated_pot/brewer_pottery_pattern");
+        assert_eq!(right.texture, "entity/decorated_pot/miner_pottery_pattern");
+        assert_eq!(back.texture, DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM);
+        assert_eq!(left.texture, DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM);
+    }
+
+    /// [`decorated_pot_texture_stems`] must carry the base, the default side,
+    /// and all twenty-three named patterns — the set
+    /// [`block_entity_texture_stems`] (and so the shell's GPU texture loader)
+    /// has to iterate for a pot with any combination of sherds to always find
+    /// a bind group.
+    #[test]
+    fn decorated_pot_texture_stems_covers_the_base_default_and_every_pattern() {
+        let stems = decorated_pot_texture_stems();
+        assert!(stems.contains(&DECORATED_POT_BASE_TEXTURE_STEM));
+        assert!(stems.contains(&DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM));
+        assert_eq!(
+            stems.len(),
+            25,
+            "expected base + default side + 23 sherd patterns, got {stems:?}"
+        );
+        assert!(block_entity_texture_stems().contains(&DECORATED_POT_BASE_TEXTURE_STEM));
+    }
+
+    /// The placement matrix's rotation term carries the `180°` offset chest's
+    /// does not, and the pivot is the block's centre rather than its floor —
+    /// both measured directly rather than merely "the pot draws somewhere",
+    /// per [`decorated_pot_placement_matrix`]'s own doc on why this is not
+    /// [`block_entity_placement_matrix`] with a yaw.
+    #[test]
+    fn decorated_pot_placement_uses_the_centre_pivot_and_the_180_degree_term() {
+        let m = decorated_pot_placement_matrix([2, 5, 9], 0.0);
+        // At `facing_yaw_deg == 0`, the rotation term is `180° - 0 = 180°`, a
+        // half-turn about the block's own vertical centre line — so a point
+        // on the +X face of the unit cube (local `(1, 0.5, 0.5)`) must land on
+        // the -X side of the block after placement, not back on the +X side
+        // the way an identity or a `0°` rotation would leave it.
+        let p = m.transform_point3(Vec3::new(1.0, 0.5, 0.5));
+        let origin_centre = Vec3::new(2.5, 5.5, 9.5);
+        assert!(
+            p.x < origin_centre.x,
+            "expected the 180-degree term to flip +X across the block's centre; \
+             got {p}, centre {origin_centre}"
+        );
+        // The centre pivot: a point already at local (0.5, 0.5, 0.5) is the
+        // rotation axis itself and must map to the block's own centre exactly,
+        // not the floor pivot chest's matrix uses.
+        let centre = m.transform_point3(Vec3::splat(0.5));
+        assert!(
+            (centre - origin_centre).length() < 1e-5,
+            "expected the centre point fixed at the block's own centre {origin_centre}, got {centre}"
+        );
     }
 }

@@ -39,7 +39,7 @@ use super::terrain::{
 };
 use super::{
     BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource, CampfireSource,
-    DEFAULT_RENDER_DISTANCE_CHUNKS, EnchantingTableSource, ShulkerSource,
+    DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
     NameTagRenderer, OutlineRenderer, OutlineShapeSource,
@@ -299,6 +299,8 @@ impl RenderState {
             bell_source: BellSource::default(),
             // Likewise `set_shulker_source`.
             shulker_source: ShulkerSource::default(),
+            // Likewise `set_decorated_pot_source`.
+            decorated_pot_source: DecoratedPotSource::default(),
             // Likewise `set_map_source` (issue #184).
             map_source: MapSource::default(),
             // Likewise `set_banner_source`.
@@ -1231,6 +1233,20 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::ShulkerSpawn> + Send + Sync + 'static,
     ) {
         self.shulker_source = ShulkerSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's decorated pots — the decorated-pot
+    /// equivalent of [`set_shulker_source`](Self::set_shulker_source).
+    ///
+    /// Leaving it unset is a **hole in the world**, not a missing decoration:
+    /// a 26.2 decorated pot's block model is `assets/minecraft/models/block/
+    /// decorated_pot.json`, and every visible triangle — base *and* sides —
+    /// comes from this pass. Same failure mode as chest and shulker.
+    pub fn set_decorated_pot_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::DecoratedPotSpawn> + Send + Sync + 'static,
+    ) {
+        self.decorated_pot_source = DecoratedPotSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's banners.
