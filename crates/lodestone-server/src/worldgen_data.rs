@@ -953,15 +953,15 @@ mod tests {
     /// `lodestone_worldgen::feature::vegetation::ConfiguredFeature::Unsupported`
     /// string that biome's `VEGETAL_DECORATION` step actually reaches —
     /// `multiface_growth` (glow lichen, `MultifaceGrowthFeature` — never in
-    /// #406's scope, present in nearly every biome), `fallen_tree`
-    /// (`FallenTreeFeature`), `tree: unsupported trunk/foliage/size/provider`
-    /// (fancy/giant trunks — oak's `fancy_oak` branch and every
-    /// jungle/dark-oak/acacia/mangrove/cherry tree, none of which parse a
-    /// `TreeConfig` this engine implements), plus a shrinking tail of features
-    /// #406 never claimed (coral, `bamboo`, `huge_*_mushroom`, `root_system`,
-    /// cave-only `lush_caves` features). Measured by running every reachable
-    /// biome through `lodestone_worldgen::compose::build_biome_vegetation` +
-    /// `vegetation::collect_unsupported` and transcribing the result — see
+    /// #406's scope, present in nearly every biome), `tree: unsupported
+    /// trunk/foliage/size/provider` (a trunk/foliage placer combination this
+    /// engine has no `TrunkPlacerCfg`/`FoliagePlacerCfg` variant for — after
+    /// fancy oak, only mangrove and cherry still hit this), plus a shrinking
+    /// tail of features #406 never claimed (coral, `bamboo`,
+    /// `huge_*_mushroom`, `root_system`, cave-only `lush_caves` features,
+    /// `simple_block: unsupported to_place`). Measured by running every
+    /// reachable biome through `lodestone_worldgen::compose::build_biome_vegetation`
+    /// + `vegetation::collect_unsupported` and transcribing the result — see
     /// [`vegetation_placer_gaps_are_named_not_silent`] below, whose failure
     /// output prints the measured list per biome, which is what to paste in
     /// rather than editing a row by hand.
@@ -976,6 +976,20 @@ mod tests {
     /// regression — the previous entry was hiding two features behind one
     /// unparsed wrapper.
     ///
+    /// **Fancy oak and the fallen-tree family (`dc637859`) closed
+    /// `fallen_tree`, plus most of the surviving `"tree: unsupported..."`
+    /// rows, in one pass.** `fallen_tree` (`FallenTreeFeature`) no longer
+    /// occurs anywhere — it was never a fancy-oak-shaped gap, so its own
+    /// close is unrelated to the other one, just coincident in the same
+    /// commit. `"tree: unsupported..."` closed for bamboo_jungle/dark_forest/
+    /// jungle/sparse_jungle (the `fancy_oak_checked`/`fancy_oak_leaf_litter`
+    /// branch every RandomSelector those biomes use also carries) and for
+    /// birch_forest/forest/plains/… (oak's own `fancy_oak` branch, drawn
+    /// directly rather than through a selector). It stays for
+    /// `minecraft:mangrove_swamp` and `minecraft:cherry_grove`: mangrove's
+    /// and cherry's trunk/foliage/root placers are their own vanilla classes
+    /// with no variant here yet, not a fancy-oak case.
+    ///
     /// **A floor, not a ceiling.** [`vegetation_gap_mismatches`] fails loudly
     /// in BOTH directions: a biome producing a reason NOT listed here (a new
     /// silent gap — the exact failure mode this gate exists to catch) or a
@@ -987,85 +1001,89 @@ mod tests {
     /// to force that kind of entry to be written down, not to auto-shrink.
     const KNOWN_VEGETATION_GAPS: &[(&str, &[&str])] = &[
         ("minecraft:badlands", &["multiface_growth"]),
-        // bamboo_jungle/jungle/sparse_jungle's `"tree: unsupported..."`
-        // entries REMAIN even after issue #428's `TrunkPlacerCfg::MegaJungle`/
+        // bamboo_jungle/jungle/sparse_jungle's `"tree: unsupported..."` entry
+        // is gone: fancy oak (`d102eb1d`) closed the 10%-weight
+        // `fancy_oak_checked` branch every jungle variant's RandomSelector
+        // also carries, on top of issue #428's `TrunkPlacerCfg::MegaJungle`/
         // `FoliagePlacerCfg::MegaJungle` (mega_jungle_tree, 33.3% of
-        // trees_jungle) and `FoliagePlacerCfg::Bush` (jungle_bush, 50%): the
-        // 10%-weight `fancy_oak_checked` branch every jungle variant's
-        // RandomSelector also carries is still a `FancyTrunkPlacer`/
-        // `FancyFoliagePlacer` tree — unmodelled.
-        ("minecraft:bamboo_jungle", &["bamboo", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        // trees_jungle) and `FoliagePlacerCfg::Bush` (jungle_bush, 50%).
+        ("minecraft:bamboo_jungle", &["bamboo", "multiface_growth"]),
         ("minecraft:beach", &["multiface_growth"]),
-        ("minecraft:birch_forest", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:birch_forest", &["multiface_growth"]),
         ("minecraft:cherry_grove", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:cold_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        // dark_forest's `"tree: unsupported..."` entry REMAINS even after
-        // issue #428's `DarkOakTrunkPlacer`/`DarkOakFoliagePlacer`: the
-        // 66.7%-weight dark_oak branch of dark_forest_vegetation now parses
-        // and places, but the 10%-weight `fancy_oak_leaf_litter` branch is
-        // still a `FancyTrunkPlacer`/`FancyFoliagePlacer` tree — unmodelled.
-        ("minecraft:dark_forest", &["fallen_tree", "huge_brown_mushroom", "huge_red_mushroom", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:deep_cold_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:deep_dark", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:deep_frozen_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:deep_lukewarm_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:deep_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:cold_ocean", &["multiface_growth"]),
+        // dark_forest's `"tree: unsupported..."` entry is gone: fancy oak
+        // (`d102eb1d`) closed the 10%-weight `fancy_oak_leaf_litter` branch,
+        // on top of issue #428's `DarkOakTrunkPlacer`/`DarkOakFoliagePlacer`
+        // for the 66.7%-weight dark_oak branch.
+        ("minecraft:dark_forest", &["huge_brown_mushroom", "huge_red_mushroom", "multiface_growth"]),
+        ("minecraft:deep_cold_ocean", &["multiface_growth"]),
+        ("minecraft:deep_dark", &["multiface_growth"]),
+        ("minecraft:deep_frozen_ocean", &["multiface_growth"]),
+        ("minecraft:deep_lukewarm_ocean", &["multiface_growth"]),
+        ("minecraft:deep_ocean", &["multiface_growth"]),
         ("minecraft:desert", &["multiface_growth"]),
-        ("minecraft:dripstone_caves", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:dripstone_caves", &["multiface_growth"]),
         ("minecraft:eroded_badlands", &["multiface_growth"]),
-        ("minecraft:flower_forest", &["fallen_tree", "multiface_growth", "simple_block: unsupported to_place", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:forest", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:frozen_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:flower_forest", &["multiface_growth", "simple_block: unsupported to_place"]),
+        ("minecraft:forest", &["multiface_growth"]),
+        ("minecraft:frozen_ocean", &["multiface_growth"]),
         ("minecraft:frozen_peaks", &["multiface_growth"]),
-        ("minecraft:frozen_river", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:frozen_river", &["multiface_growth"]),
         ("minecraft:grove", &["multiface_growth"]),
-        ("minecraft:ice_spikes", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:ice_spikes", &["multiface_growth"]),
         ("minecraft:jagged_peaks", &["multiface_growth"]),
-        ("minecraft:jungle", &["bamboo", "fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:lukewarm_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:jungle", &["bamboo", "multiface_growth"]),
+        ("minecraft:lukewarm_ocean", &["multiface_growth"]),
         ("minecraft:lush_caves", &["block_column: unsupported layer/direction/predicate", "multiface_growth", "root_system"]),
+        // mangrove_swamp's `"tree: unsupported..."` entry is genuinely
+        // unported (not a fancy-oak case): the mangrove trunk/foliage/root
+        // placers are their own vanilla classes, with no `TrunkPlacerCfg`/
+        // `FoliagePlacerCfg` variant here yet.
         ("minecraft:mangrove_swamp", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:meadow", &["multiface_growth", "simple_block: unsupported to_place", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:meadow", &["multiface_growth", "simple_block: unsupported to_place"]),
         ("minecraft:mushroom_fields", &["huge_brown_mushroom", "huge_red_mushroom", "multiface_growth"]),
-        ("minecraft:ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:old_growth_birch_forest", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:ocean", &["multiface_growth"]),
+        ("minecraft:old_growth_birch_forest", &["multiface_growth"]),
         // old_growth_pine_taiga/old_growth_spruce_taiga's `mega_pine`/
         // `mega_spruce` configured features use `giant_trunk_placer` +
         // `mega_pine_foliage_placer` — issue #428's `TrunkPlacerCfg::Giant`/
         // `FoliagePlacerCfg::MegaPine` close the "tree: unsupported..."
-        // entry for both; `fallen_tree` stays (still unimplemented).
-        ("minecraft:old_growth_pine_taiga", &["fallen_tree", "multiface_growth"]),
-        ("minecraft:old_growth_spruce_taiga", &["fallen_tree", "multiface_growth"]),
+        // entry for both; the fallen-tree family (`dc637859`) closed
+        // `fallen_tree`.
+        ("minecraft:old_growth_pine_taiga", &["multiface_growth"]),
+        ("minecraft:old_growth_spruce_taiga", &["multiface_growth"]),
         // pale_garden's `"tree: unsupported..."` entry closed with the same
         // issue #428 change — pale_oak/pale_oak_creaking reuse the dark oak
         // trunk/foliage placers with their own providers.
         ("minecraft:pale_garden", &["multiface_growth"]),
-        ("minecraft:plains", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:river", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:plains", &["multiface_growth"]),
+        ("minecraft:river", &["multiface_growth"]),
         // savanna/savanna_plateau/windswept_savanna all resolve through
         // trees_savanna's RandomSelector (oak_checked default, acacia_checked
         // 80%, fallen_oak_tree 1.25%) — issue #428's `TrunkPlacerCfg::Forking`/
         // `FoliagePlacerCfg::Acacia` closes the "tree: unsupported..." entry
-        // for all three; `fallen_tree` stays (still unimplemented).
-        ("minecraft:savanna", &["fallen_tree", "multiface_growth"]),
-        ("minecraft:savanna_plateau", &["fallen_tree", "multiface_growth"]),
+        // for all three; the fallen-tree family (`dc637859`) closed
+        // `fallen_tree`.
+        ("minecraft:savanna", &["multiface_growth"]),
+        ("minecraft:savanna_plateau", &["multiface_growth"]),
         ("minecraft:snowy_beach", &["multiface_growth"]),
-        ("minecraft:snowy_plains", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:snowy_plains", &["multiface_growth"]),
         ("minecraft:snowy_slopes", &["multiface_growth"]),
-        ("minecraft:snowy_taiga", &["fallen_tree", "multiface_growth"]),
-        ("minecraft:sparse_jungle", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:snowy_taiga", &["multiface_growth"]),
+        ("minecraft:sparse_jungle", &["multiface_growth"]),
         ("minecraft:stony_peaks", &["multiface_growth"]),
         ("minecraft:stony_shore", &["multiface_growth"]),
         ("minecraft:sulfur_caves", &["multiface_growth"]),
-        ("minecraft:sunflower_plains", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:sunflower_plains", &["multiface_growth"]),
         ("minecraft:swamp", &["multiface_growth"]),
-        ("minecraft:taiga", &["fallen_tree", "multiface_growth"]),
-        ("minecraft:warm_ocean", &["coral_claw", "coral_mushroom", "coral_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:windswept_forest", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:windswept_gravelly_hills", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:windswept_hills", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:windswept_savanna", &["fallen_tree", "multiface_growth"]),
-        ("minecraft:wooded_badlands", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:taiga", &["multiface_growth"]),
+        ("minecraft:warm_ocean", &["coral_claw", "coral_mushroom", "coral_tree", "multiface_growth"]),
+        ("minecraft:windswept_forest", &["multiface_growth"]),
+        ("minecraft:windswept_gravelly_hills", &["multiface_growth"]),
+        ("minecraft:windswept_hills", &["multiface_growth"]),
+        ("minecraft:windswept_savanna", &["multiface_growth"]),
+        ("minecraft:wooded_badlands", &["multiface_growth"]),
     ];
 
     /// Diffs a measured `biome -> sorted, deduped reasons` map against

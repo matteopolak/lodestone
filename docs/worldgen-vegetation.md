@@ -94,11 +94,12 @@ chunk's post-ore terrain, runs the step, and folds only the written cells back (
   the remaining `ConfiguredFeature::Unsupported` tree-shaped gaps are narrower: mangrove_swamp
   (`UpwardsBranchingTrunkPlacer`), cherry_grove (`CherryTrunkPlacer`) and any biome whose selector
   reaches a bare `BendingTrunkPlacer`. See `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`
-  for the maintained, gate-enforced per-biome list of exactly which reasons remain — **that table
-  needs pruning as a follow-up**: several entries whose only cited reason was `fancy_oak_checked`
-  and/or `fallen_*_tree` no longer apply, and this pass did not touch it (`crates/lodestone-server/src/**`
-  belongs to a different owner in the session this landed in). See the `vegetation` module's own doc
-  "Named per-branch gaps" section for the reasoning behind which placer landed when.
+  for the maintained, gate-enforced per-biome list of exactly which reasons remain — pruned to match
+  `vegetation_placer_gaps_are_named_not_silent`'s own measured surface once `fancy_oak_*`/
+  `fallen_*_tree` actually landed (every `fallen_tree` row is gone, and `"tree: unsupported..."`
+  survives only where a biome's own placer is genuinely unported — mangrove_swamp and cherry_grove).
+  See the `vegetation` module's own doc "Named per-branch gaps" section for the reasoning behind
+  which placer landed when.
 - **`TrunkVineDecorator`/`AttachedToLogsDecorator` are shared between `ConfiguredFeature::Tree` and
   `ConfiguredFeature::FallenTree`** — both are `TreeDecorator` subclasses in real vanilla, and
   `Decorator` (`config.rs`) models them once rather than per feature type. `jungle_tree`/
