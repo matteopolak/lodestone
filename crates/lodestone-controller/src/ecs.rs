@@ -61,9 +61,9 @@ pub struct RawInput(pub InputState);
 /// `movement_intent_with_food` vetoes sprint while sneaking, which is right on
 /// land (`isMovingSlowly()`). Underwater it is wrong:
 /// `LocalPlayer.canStartSprinting` is
-/// `… && (!isMovingSlowly() || isUnderWater())` (`LocalPlayer.java:1137-1144`)
+/// `… && (!isMovingSlowly() || isUnderWater())` (`LocalPlayer.java`)
 /// and `shouldStopSwimSprinting` explicitly *keeps* a swim-sprint alive while
-/// shift is held (`LocalPlayer.java:923-925`). Shift is how you steer downward
+/// shift is held (`LocalPlayer.java`). Shift is how you steer downward
 /// while swimming (`goDownInWater`), so vetoing sprint on it means a submerged
 /// player cannot swim and descend at the same time — they stop dead.
 ///
@@ -72,7 +72,7 @@ pub struct RawInput(pub InputState);
 /// apart. Only the sprint bit is taken; `sneak` itself stays set, so the sink
 /// impulse and the crouch pose still see it.
 ///
-/// `sprint_allowed_by_food` (issue #200) is threaded through unchanged to both
+/// `sprint_allowed_by_food` (vanilla's food-level sprint gate) is threaded through unchanged to both
 /// calls — food does not depend on submersion, so it is one value for the
 /// whole tick, not something the swim recomputation could disagree with.
 #[must_use]
@@ -112,7 +112,7 @@ pub fn swim_adjusted_intent(
 /// The one-tick lag on submersion is deliberate and is vanilla's own:
 /// `baseTick` computes submersion before `aiStep` reads it.
 ///
-/// # The food gate (issue #200)
+/// # The food gate
 ///
 /// `Vitals`/`Abilities` are read `Option`al because both start absent until
 /// [`lodestone_ecs::session::insert_session_components`] runs (spawn, or
@@ -211,7 +211,7 @@ pub fn send_move_action(
 pub fn send_player_input(
     egress: Res<Egress>,
     mut queue: ResMut<ActionQueue>,
-    // Issue #109's veto registry. `Option`, so a client with no plugin installed
+    // The player-move veto registry. `Option`, so a client with no plugin installed
     // is unchanged.
     vetoes: Option<Res<lodestone_ecs::veto::ActionVetoes>>,
     mut players: Query<(&MovementIntent, &mut LastPlayerInput), With<LocalPlayer>>,
@@ -233,7 +233,7 @@ pub fn send_player_input(
         if last.0 == Some(next) {
             continue;
         }
-        // Issue #109's player-move veto. Asked only when the input actually
+        // The player-move veto. Asked only when the input actually
         // CHANGED (after the edge check above), so a plugin freezing a player
         // is asked once per real input change rather than 20 times a second --
         // and, more importantly, so a denial does not latch `LastPlayerInput`.
@@ -417,10 +417,10 @@ mod tests {
         );
     }
 
-    /// #200: the food gate is independent of the swim exception — vanilla ANDs
+    /// The food gate is independent of the swim exception — vanilla ANDs
     /// `hasEnoughFoodToDoExhaustiveManoeuvres()` into `isSprintingPossible`
     /// regardless of the shallow-water/underwater branch it also gates
-    /// (`Player.java:1131-1135`), so "food says no" must win even in the one
+    /// (`Player.java`), so "food says no" must win even in the one
     /// case (submerged + sneaking) that would otherwise grant a swim-sprint.
     #[test]
     fn the_food_gate_applies_even_to_a_swim_sprint() {
@@ -486,7 +486,7 @@ mod tests {
         );
     }
 
-    /// #200: the system, not just the free functions — `Vitals::food` has to
+    /// The food gate has to reach the system, not just the free functions — `Vitals::food` has to
     /// actually reach `compute_movement_intent` for a low-food player to stop
     /// sprinting. The healthy-food tick is the control: without it, "low food
     /// stops sprint" could pass against a system that vetoes sprint
@@ -534,7 +534,7 @@ mod tests {
     }
 
     /// Vanilla's `mayfly` ability bypasses the food check entirely
-    /// (`Player.java:1592-1594`'s `||`), so creative/spectator sprint must
+    /// (`Player.java`'s `||`), so creative/spectator sprint must
     /// survive food exhaustion.
     #[test]
     fn may_fly_bypasses_the_food_gate() {
