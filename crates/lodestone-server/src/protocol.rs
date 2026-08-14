@@ -2954,6 +2954,18 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_set_entity_data(entity_id, fields)
     }
 
+    fn encode_boss_event_add(&self, id: Uuid, name: &Text, progress: f32) -> ServerDirective {
+        (**self).encode_boss_event_add(id, name, progress)
+    }
+
+    fn encode_boss_event_update_progress(&self, id: Uuid, progress: f32) -> ServerDirective {
+        (**self).encode_boss_event_update_progress(id, progress)
+    }
+
+    fn encode_boss_event_remove(&self, id: Uuid) -> ServerDirective {
+        (**self).encode_boss_event_remove(id)
+    }
+
     fn encode_explode(&self, centre: Vec3, radius: f32) -> ServerDirective {
         (**self).encode_explode(centre, radius)
     }
