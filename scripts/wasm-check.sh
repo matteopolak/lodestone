@@ -448,6 +448,43 @@ CONFINEMENT_RULES=(
   # `std::time::Instant::now()` in that same test module does not go red either.
   "lodestone-ecs instant-ban|crates/lodestone-ecs/src|std::time::Instant|async_task.rs"
   "lodestone-ecs systemtime-ban|crates/lodestone-ecs/src|std::time::SystemTime|async_task.rs"
+  # --- crates outside the wasm build, tightened toward "no crate but
+  # lodestone-time may name std::time's clocks" ---
+  #
+  # None of these four crates appears in the CRATES compile subset above: each is
+  # either dev-dependency-only (lodestone-testsupport, confirmed: every one of its
+  # dependents lists it under [dev-dependencies], so its lib target is never
+  # linked into a --lib build, wasm or native), a native-only bin nothing depends
+  # on (lodestone-allocbench — a standalone allocator benchmark, already excluded
+  # from the workspace-wide --all-features sweep for its allocator-feature
+  # mutual-exclusion), or reaches wasm only PARTIALLY, with its clock call sites
+  # confined behind a module-level `#[cfg(not(target_arch = "wasm32"))]`
+  # (lodestone-auth's `browser_login`/`migrate` modules) or a `#[cfg(test)]`
+  # module that never enters a `--lib` build either way (lodestone-world's
+  # `fill_region_lock_hold_time_on_a_large_synthetic_fill` benchmark-style test).
+  #
+  # Rules for them still earn their keep: a rule here is what turns "this file
+  # structurally cannot reach wasm" from a claim into something a grep re-checks
+  # on every run, and it is what stops a NEW file in one of these crates from
+  # growing an ungated clock call unnoticed.
+  #
+  # PATTERN CHOICE: none of these four crates depends on `lodestone-time`, so
+  # there is no legitimate `lodestone_time::Instant::now()` call anywhere in them
+  # to avoid catching — unlike lodestone-server/worldgen/particle/net/ecs above,
+  # which must use the qualified `std::time::` path specifically so a legitimate
+  # `lodestone_time::Instant::now()` elsewhere in the same crate does not false-
+  # positive. These four instead use the bare `Instant::now(`/`SystemTime::now(`
+  # method-call spelling (as lodestone-audio/lodestone-sound do for the same
+  # "no legitimate caller exists" reason) because their actual call sites are a
+  # mix of qualified and unqualified spellings and the bare form catches both.
+  "lodestone-auth instant-ban|crates/lodestone-auth/src|Instant::now(|browser_login.rs,migrate.rs"
+  "lodestone-auth systemtime-ban|crates/lodestone-auth/src|SystemTime::now(|browser_login.rs,migrate.rs"
+  "lodestone-world instant-ban|crates/lodestone-world/src|Instant::now(|world.rs"
+  "lodestone-world systemtime-ban|crates/lodestone-world/src|SystemTime::now(|world.rs"
+  "lodestone-testsupport instant-ban|crates/lodestone-testsupport/src|Instant::now(|lib.rs"
+  "lodestone-testsupport systemtime-ban|crates/lodestone-testsupport/src|SystemTime::now(|lib.rs"
+  "lodestone-allocbench instant-ban|crates/lodestone-allocbench/src|Instant::now(|main.rs"
+  "lodestone-allocbench systemtime-ban|crates/lodestone-allocbench/src|SystemTime::now(|main.rs"
   # --- lodestone-time itself ---
   #
   # The whole point of issue #552 (this crate) is that it is the ONE place

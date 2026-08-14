@@ -8937,6 +8937,84 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
             banned: "std::time::SystemTime",
             allowlist: &["async_task.rs"],
         },
+        // --- crates outside the wasm build, tightened toward "no crate but
+        // lodestone-time may name std::time's clocks" ---
+        //
+        // None of these four crates appears in wasm_crates() above: each is either
+        // dev-dependency-only (lodestone-testsupport — every dependent lists it
+        // under [dev-dependencies], so its lib target is never linked into a --lib
+        // build, wasm or native), a native-only bin nothing depends on
+        // (lodestone-allocbench, already excluded from the workspace-wide
+        // --all-features sweep for its allocator mutual-exclusion), or reaches
+        // wasm only PARTIALLY, with its clock call sites confined behind a
+        // module-level cfg(not(target_arch = "wasm32")) (lodestone-auth's
+        // browser_login/migrate modules) or a #[cfg(test)] module that never
+        // enters a --lib build either way (lodestone-world's
+        // fill_region_lock_hold_time_on_a_large_synthetic_fill test).
+        //
+        // A rule here still earns its keep: it turns "this file structurally
+        // cannot reach wasm" from a claim into something re-checked on every run,
+        // and it is what stops a NEW file in one of these crates from growing an
+        // ungated clock call unnoticed.
+        //
+        // PATTERN CHOICE: none of these four crates depends on lodestone-time, so
+        // there is no legitimate lodestone_time::Instant::now() call anywhere in
+        // them to avoid catching — unlike lodestone-server/worldgen/particle/net/
+        // ecs above, which must use the qualified std::time:: path specifically so
+        // a legitimate lodestone_time::Instant::now() elsewhere in the same crate
+        // does not false-positive. These four instead use the bare
+        // Instant::now(/SystemTime::now( method-call spelling (as
+        // lodestone-audio/lodestone-sound do, for the same "no legitimate caller
+        // exists" reason) because their actual call sites mix qualified and
+        // unqualified spellings and the bare form catches both.
+        ConfinementRule {
+            label: "lodestone-auth instant-ban",
+            src_dir: "crates/lodestone-auth/src",
+            banned: "Instant::now(",
+            allowlist: &["browser_login.rs", "migrate.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-auth systemtime-ban",
+            src_dir: "crates/lodestone-auth/src",
+            banned: "SystemTime::now(",
+            allowlist: &["browser_login.rs", "migrate.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-world instant-ban",
+            src_dir: "crates/lodestone-world/src",
+            banned: "Instant::now(",
+            allowlist: &["world.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-world systemtime-ban",
+            src_dir: "crates/lodestone-world/src",
+            banned: "SystemTime::now(",
+            allowlist: &["world.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-testsupport instant-ban",
+            src_dir: "crates/lodestone-testsupport/src",
+            banned: "Instant::now(",
+            allowlist: &["lib.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-testsupport systemtime-ban",
+            src_dir: "crates/lodestone-testsupport/src",
+            banned: "SystemTime::now(",
+            allowlist: &["lib.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-allocbench instant-ban",
+            src_dir: "crates/lodestone-allocbench/src",
+            banned: "Instant::now(",
+            allowlist: &["main.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-allocbench systemtime-ban",
+            src_dir: "crates/lodestone-allocbench/src",
+            banned: "SystemTime::now(",
+            allowlist: &["main.rs"],
+        },
         // lodestone-time itself: the ONE place allowed to depend on
         // `web-time`, so every other crate's rule above can ban
         // `std::time::{Instant,SystemTime}` with an empty allowlist. This
