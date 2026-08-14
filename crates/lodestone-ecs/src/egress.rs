@@ -1,37 +1,38 @@
-//! Issue #157 — the outbound action hook: inspect, replace or suppress a
+//! The outbound action hook: inspect, replace or suppress a
 //! [`ClientAction`] after one plugin queued it and before it reaches the wire.
 //!
 //! # What it is
 //!
 //! [`EgressFilters`] is a `Resource` holding callbacks the driver runs over
-//! [`crate::ActionQueue`] at the moment it is drained — the seam issue #157 asks
-//! for: "a `Message`/callback fired when `ActionQueue` is drained, before each
-//! `ClientAction` reaches `NetClient::send_action`, with a `bool` a plugin can
-//! set to suppress that one action". ProtocolLib's outbound side, at the one
+//! [`crate::ActionQueue`] at the moment it is drained — the seam this module
+//! provides: "a `Message`/callback fired when `ActionQueue` is drained, before
+//! each `ClientAction` reaches `NetClient::send_action`, with a `bool` a plugin
+//! can set to suppress that one action". ProtocolLib's outbound side, at the one
 //! layer where it is version-free.
 //!
 //! # Scope: suppression and *version-free* replacement, never encoded bytes
 //!
-//! The issue is explicit that encoded-packet mutation must not be attempted
-//! without re-opening the packet-interception-ABI design issue's version-leak
-//! concern (#156, still open). Nothing here goes near encoded bytes: the hook
+//! Encoded-packet mutation must not be attempted without re-opening the
+//! packet-interception-ABI design's version-leak concern, which is still open.
+//! Nothing here goes near encoded bytes: the hook
 //! sees [`ClientAction`], which is `lodestone_model`'s **version-free**
 //! vocabulary. That is the whole reason [`Verdict::Replace`] is safe to offer —
 //! a `ClientAction` contains no protocol id, no field order and no wire
 //! encoding, so handing one back cannot leak a version into a shared crate. The
-//! concern #156 guards is about the *other* layer, inside a version crate's
+//! version-leak concern is about the *other* layer, inside a version crate's
 //! `VersionAdapter`, and this hook cannot reach it.
 //!
 //! So: **replace and suppress, yes; mutate encoded packets, no.** The second
-//! stays closed pending #156.
+//! stays closed pending that design work.
 //!
 //! # The gap this hook has, measured rather than assumed
 //!
-//! `ActionQueue` is documented as "the one sanctioned egress"
-//! (`player.rs:755`), and for anything a *plugin* queues it is. It is **not**
-//! the only path to the socket. Three of the six interaction verbs issue #109
-//! cares about bypass it entirely and call `NetClient::send_action` directly, to
-//! control wire ordering for discrete clicks:
+//! [`crate::player::ActionQueue`] is documented as "the one sanctioned egress",
+//! and for anything a *plugin* queues it is. It is **not**
+//! the only path to the socket. Three of the six interaction verbs the
+//! cancelable-action wrapper cares about bypass it entirely and call
+//! `NetClient::send_action` directly, to control wire ordering for discrete
+//! clicks:
 //!
 //! | verb | direct-send site |
 //! |---|---|
@@ -81,7 +82,7 @@ pub enum Verdict {
     /// be re-replaced into a loop.
     ///
     /// Version-free by construction — see the module doc on why this does not
-    /// touch #156's concern.
+    /// touch the packet-interception-ABI version-leak concern.
     Replace(Box<ClientAction>),
 }
 
@@ -112,7 +113,7 @@ pub struct EgressStats {
 ///
 /// # Why a callback list rather than a `Message`
 ///
-/// The issue offers "a `Message`/callback". A `Message` cannot work here: the
+/// A `Message` was the first shape considered, and it cannot work here: the
 /// drain happens *after* `GameTick` has finished, in the driver, so a plugin
 /// system that read a `Message<AboutToSend>` would not run again until the next
 /// tick — by which time the action has already gone. Suppression has to be
@@ -124,8 +125,8 @@ pub struct EgressStats {
 /// the `World` guard, so a callback handed a `World` would be one
 /// `hold_read` away from the reentrant deadlock `handle.rs`'s rule 1 exists to
 /// stop. A filter that needs world state captures an `Arc` its own system keeps
-/// up to date, and issue #109's veto covers the cases that genuinely need to
-/// consult the world.
+/// up to date, and [`crate::veto`]'s cancelable-action wrapper covers the cases
+/// that genuinely need to consult the world.
 #[derive(Resource, Default)]
 pub struct EgressFilters {
     filters: Vec<Filter>,

@@ -1,4 +1,4 @@
-//! Issue #114 — async task hand-back: run blocking work off-tick and rejoin the
+//! Async task hand-back: run blocking work off-tick and rejoin the
 //! `World` safely.
 //!
 //! # What it is
@@ -68,8 +68,8 @@
 //! - `EcsHandle` is a type *alias* for `Arc<RwLock<World>>`, so `handle.read()`
 //!   and `handle.write()` are `parking_lot`'s own inherent methods. They cannot
 //!   be intercepted, so a worker that calls them directly still hangs. That is
-//!   the same gap issue #20 ("route the ~12 direct `ecs.read()` calls through
-//!   `hold_read`") exists to close, and closing it makes this guard total. Until
+//!   the same gap ("route the ~12 direct `ecs.read()` calls through
+//!   `hold_read`") that, once closed, makes this guard total. Until
 //!   then, the guard covers the *sanctioned* path and nothing more.
 //! - Threads a plugin spawns itself with `std::thread::spawn` are not marked.
 //!   The guard is a property of *this pool's* workers, which is what the pool
@@ -506,9 +506,9 @@ fn worker_loop(shared: &Arc<Shared>) {
             }
         };
         let Some(job) = job else { return };
-        // A panicking plugin job must not take the worker down with it — issue
-        // #168's concern, handled locally here rather than left to chance,
-        // because a dead worker silently stops draining the queue.
+        // A panicking plugin job must not take the worker down with it, handled
+        // locally here rather than left to chance, because a dead worker
+        // silently stops draining the queue.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
         if outcome.is_err() {
             // `catch_unwind` already printed the panic through the hook.
@@ -859,8 +859,7 @@ mod tests {
     }
 
     /// A panicking plugin job must not kill the worker: the pool keeps draining.
-    /// Issue #168's concern, bounded locally, because a dead worker silently
-    /// stops all later work.
+    /// Bounded locally, because a dead worker silently stops all later work.
     #[test]
     fn a_panicking_job_does_not_kill_the_worker() {
         let pool = AsyncTaskPool::with_threads(1);

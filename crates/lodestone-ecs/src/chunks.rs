@@ -15,7 +15,7 @@
 //! meant. That branch is what this deletes. One store, named once, reachable
 //! from a system.
 //!
-//! Issue #423 splits the one handle in two. [`ChunkWorld`] is the **read** side:
+//! The split divides the one handle in two. [`ChunkWorld`] is the **read** side:
 //! a plugin or read-only system takes it and physically cannot mutate the store.
 //! [`ChunkWorldWrite`] is the **write** side, held only by the store's legitimate
 //! writers (`drive_placement`, `Sim::predict_block`, `Sim::set_block_world`, the
@@ -38,7 +38,7 @@ use lodestone_world::{ChunkPos, ChunkSection, World};
 /// resource, so a decoded column written by the net thread is visible to the
 /// mesher with no copy and no second store to keep in step.
 ///
-/// **This is the read side of the issue #423 split.** There is deliberately no
+/// **This is the read side of the chunk-store split.** There is deliberately no
 /// write path here, and no way to obtain the store's `Arc`: a system that asked
 /// for a [`ChunkWorld`] physically cannot mutate the chunk store, so the
 /// state+block-entity pairing of `write_predicted_block` and the re-mesh that
@@ -139,7 +139,7 @@ impl ChunkWorld {
     }
 }
 
-/// The **write side** of the chunk-store split (issue #423).
+/// The **write side** of the chunk-store split.
 ///
 /// The same `Arc<RwLock<World>>` as the paired [`ChunkWorld`] read handle,
 /// exposed deliberately: this is the one type a system may hold to mutate the
@@ -246,8 +246,9 @@ mod tests {
         );
     }
 
-    /// The issue #423 split is real: a read handle and its write handle name the
-    /// *same* `Arc`, and the read handle exposes no path back to a write lock.
+    /// The chunk-store split is real: a read handle and its write handle name
+    /// the *same* `Arc`, and the read handle exposes no path back to a write
+    /// lock.
     #[test]
     fn the_read_handle_derived_from_a_write_handle_is_the_same_store() {
         let write = ChunkWorldWrite::default();

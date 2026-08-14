@@ -22,8 +22,8 @@ use parking_lot::RwLock;
 /// `docs/bevy-migration.md` §4.1(c), as shipped: since the unification the
 /// driver holds this too, because there is exactly one `World` and the net
 /// thread's ingest writes into it. azalea's `Client` wraps the same shape
-/// (`azalea-client/src/client.rs:143`) so bot code can read and write from async
-/// context (`azalea/src/bot.rs:85`). `parking_lot` rather than
+/// (`azalea-client/src/client.rs`) so bot code can read and write from async
+/// context (`azalea/src/bot.rs`). `parking_lot` rather than
 /// `std::sync::RwLock` per §11, matching azalea's choice for the same lock.
 ///
 /// # Lock discipline — three rules, and the reasons are not style
@@ -207,7 +207,7 @@ impl Ledger {
     /// that cannot make progress. See [`check`](Self::check).
     #[track_caller]
     fn enter(handle: &EcsHandle, write: bool) -> Self {
-        // Rule 2 (issue #114), checked before rule 1: a guard taken from an
+        // Rule 2, checked before rule 1: a guard taken from an
         // `AsyncTaskPool` worker thread is a different defect from a reentrant
         // one — it is not this thread's *second* guard, it is a guard taken from
         // a thread that must never take one at all — and it would otherwise
@@ -402,7 +402,7 @@ pub fn new_handle() -> EcsHandle {
 /// to register schedules and systems) and is then discarded, keeping the
 /// `World` it produced. That is azalea's own shape: it takes the `World` out of
 /// the `App` and puts it behind an `Arc<RwLock<_>>`
-/// (`azalea-client/src/client.rs:143`) because the driver is a hand-written
+/// (`azalea-client/src/client.rs`) because the driver is a hand-written
 /// loop, not `App::run`. Nothing here calls `App::update`, so the discarded
 /// `App`'s own `Main` schedule ordering is irrelevant; the caller runs named
 /// schedules on the `World` directly (`world.run_schedule(NetIngest)`).
