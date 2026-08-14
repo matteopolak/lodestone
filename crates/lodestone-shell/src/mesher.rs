@@ -1054,6 +1054,17 @@ impl ModelSectionView for SnapshotModelView<'_> {
         self.models.is_leaves(id)
     }
 
+    /// Owner report: "the nether portal swirly block is missing is opaque when
+    /// it isnt supposed to be". `BlockModels::layer` already classifies
+    /// nether_portal (and stained glass, ice, …) as
+    /// `RenderLayer::Translucent` from the real texture's alpha — the gap was
+    /// that nothing read the classification when routing quads into a mesh.
+    /// Mirrors `quads_at`'s lookup: same state id, same `BlockModels`.
+    fn is_translucent_at(&self, x: usize, y: usize, z: usize) -> bool {
+        let id = self.snapshot.at(0, 0, 0).get_block(x, y, z);
+        self.models.layer(id) == lodestone_render::RenderLayer::Translucent
+    }
+
     /// Vanilla's ambient-occlusion occluder test, `getShadeBrightness == 0.2F`
     /// — a **collision** predicate, not the `occludes_at` culling one above.
     ///
@@ -1153,6 +1164,30 @@ pub fn mesh_snapshot_models(
         cutout_leaves,
     };
     mesh_models(&view)
+}
+
+/// Like [`mesh_snapshot_models`], but keeps
+/// [`RenderLayer::Translucent`](lodestone_render::RenderLayer::Translucent)
+/// blocks (stained glass, ice, the nether portal swirl) in a **second** mesh
+/// instead of folding them into the opaque/cutout one — see
+/// [`lodestone_render::mesh_models_layers`]'s doc for why the split exists.
+/// `mesh_one` is this function's only production caller; the merged
+/// [`mesh_snapshot_models`] above stays as-is for existing test/bench callers
+/// that only want the combined geometry.
+#[must_use]
+fn mesh_snapshot_models_layers(
+    snapshot: &SectionSnapshot,
+    models: &BlockModels,
+    cutout_leaves: bool,
+) -> (ModelMesh, ModelMesh) {
+    let view = SnapshotModelView {
+        snapshot,
+        models,
+        light: SnapshotLight::new(snapshot),
+        tint: RefCell::new(BlendedTintCursor::new(BLEND_RADIUS)),
+        cutout_leaves,
+    };
+    lodestone_render::mesh_models_layers(&view)
 }
 
 /// This section's face connectivity for the occlusion graph (U3) — the producer
@@ -1413,6 +1448,16 @@ pub enum SectionGeometry {
         opaque: ModelMesh,
         /// Translucent water surface geometry.
         water: ModelMesh,
+        /// Translucent **block** geometry — stained glass, ice, the nether
+        /// portal swirl and anything else `BlockModels::layer` classifies as
+        /// [`RenderLayer::Translucent`](lodestone_render::RenderLayer::Translucent)
+        /// from real per-texel alpha. Kept separate from `water` (a different
+        /// pipeline: `FLUID_WGSL` tints untinted quads with the water colour
+        /// and carries no palette bind group, wrong for a palette-tinted
+        /// translucent block) and drawn through its own
+        /// `ModelPipeline::for_layer(.., RenderLayer::Translucent)` pass — see
+        /// `gpu/frame.rs`.
+        translucent_blocks: ModelMesh,
         /// This section's face connectivity for the occlusion graph (U3), from
         /// [`snapshot_visibility`].
         ///
@@ -1434,9 +1479,12 @@ impl SectionGeometry {
     pub fn quad_count(&self) -> usize {
         match self {
             SectionGeometry::Packed(m) => m.quad_count(),
-            SectionGeometry::Model { opaque, water, .. } => {
-                opaque.quad_count() + water.quad_count()
-            }
+            SectionGeometry::Model {
+                opaque,
+                water,
+                translucent_blocks,
+                ..
+            } => opaque.quad_count() + water.quad_count() + translucent_blocks.quad_count(),
         }
     }
 }
@@ -1474,14 +1522,17 @@ fn mesh_one(snap: SectionSnapshot, classifier: &ShellClassifier, cutout_leaves: 
     // the demo classifier has none → mesh through the packed full-cube path.
     let mesh = match classifier.models() {
         Some(models) => {
-            let mut opaque = mesh_snapshot_models(&snap, models, cutout_leaves);
+            let (mut opaque, translucent_blocks) =
+                mesh_snapshot_models_layers(&snap, models, cutout_leaves);
             let fluids = mesh_snapshot_fluids(&snap, models);
             // Lava is opaque and full-bright: fold it into the opaque pass. Water
-            // is translucent and drawn separately.
+            // and translucent blocks (glass, ice, the nether portal swirl) are
+            // translucent and drawn separately, each through its own pipeline.
             opaque.merge(&fluids.lava);
             SectionGeometry::Model {
                 opaque,
                 water: fluids.water,
+                translucent_blocks,
                 visibility: snapshot_visibility(&snap, models),
             }
         }
@@ -3076,6 +3127,9 @@ mod tests {
             height: 256,
             logical_height: 128,
             ambient_light: 0.1,
+            // Irrelevant to this fixture's own policy, same rule as the other
+            // fields this doc comment calls out.
+            ambient_light_color: None,
         }
     }
 

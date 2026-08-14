@@ -56,6 +56,16 @@ pub struct RenderStats {
     /// Water sections culled this frame, all three reasons summed (the split is
     /// only tracked for the opaque pass, which is the dominant one).
     pub water_sections_culled: usize,
+    /// Sections with **translucent block** geometry (stained glass, ice, the
+    /// nether portal swirl) drawn this frame — the same shape as
+    /// [`water_sections_drawn`](Self::water_sections_drawn), for the same
+    /// reason: a translucent-block-only section carries `mesh: None` and
+    /// never reaches [`sections_drawn`](Self::sections_drawn) while still
+    /// issuing a draw.
+    pub translucent_sections_drawn: usize,
+    /// Translucent-block sections culled this frame (view-distance + frustum
+    /// combined, matching [`water_sections_culled`](Self::water_sections_culled)).
+    pub translucent_sections_culled: usize,
     /// Total merged quads across all drawn sections.
     pub total_quads: usize,
     /// Draw calls issued (one per non-empty section).

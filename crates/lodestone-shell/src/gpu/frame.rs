@@ -1151,6 +1151,58 @@ impl RenderState {
                     &mut terrain_cam_group_last,
                     &mut stats.terrain_camera_bind_group_switches,
                 );
+
+                // Translucent **block** geometry — stained glass, ice, the
+                // nether portal swirl — drawn right after water through its
+                // own pipeline (`RenderLayer::Translucent`'s `MODEL_WGSL`
+                // variant, not the fluid shader: it needs the palette bind
+                // group a fluid-tinted quad has none of). Owner report: "the
+                // nether portal swirly block is missing is opaque when it
+                // isnt supposed to be" — before this pass existed, every
+                // block regardless of `RenderLayer` was folded into the one
+                // opaque/cutout mesh above, which draws with no blending.
+                //
+                // Same camera/atlas/palette/anim bind groups as the opaque
+                // pass (see `ModelRenderer::translucent_pipeline`'s doc for
+                // why that reuse is sound), same back-to-front-by-section
+                // order as water. Not interleaved with water's own sort: the
+                // two are separate pipelines and separate draw batches, so a
+                // translucent block and a water surface that overlap along
+                // the view axis in the *same* section pair can still
+                // composite in the wrong order relative to each other. Known,
+                // narrower limitation than "opaque" — see `translucent`
+                // field's doc.
+                pass.set_pipeline(&model.translucent_pipeline.pipeline);
+                pass.set_bind_group(1, &model.atlas_bind_group, &[]);
+                pass.set_bind_group(2, &model.palette_bind_group, &[]);
+                pass.set_bind_group(3, &model.anim_bind_group, &[]);
+                let mut translucent_draws: Vec<TerrainDraw> =
+                    Vec::with_capacity(model.sections.len() / 16);
+                for (key, section) in &model.sections {
+                    let Some(translucent) = section.translucent.as_ref() else {
+                        continue;
+                    };
+                    if !terrain_cull.visible(key.coord()) {
+                        stats.translucent_sections_culled += 1;
+                        continue;
+                    }
+                    stats.translucent_sections_drawn += 1;
+                    let mut draw =
+                        TerrainDraw::new(translucent, section.origin_alloc.offset() as u32);
+                    draw.sort_dist2 =
+                        super::terrain::section_center_distance_sq(key.coord(), camera.position);
+                    translucent_draws.push(draw);
+                    stats.total_quads += section.translucent_quad_count;
+                }
+                super::terrain::sort_back_to_front(&mut translucent_draws);
+                stats.draw_calls += translucent_draws.len();
+                stats.terrain_buffer_binds += emit_terrain_draws(
+                    &mut pass,
+                    model,
+                    &translucent_draws,
+                    &mut terrain_cam_group_last,
+                    &mut stats.terrain_camera_bind_group_switches,
+                );
             }
 
             // The *translucent* half of the debris last among the world geometry
