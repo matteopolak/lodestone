@@ -5,10 +5,10 @@
 A staged plan for moving Lodestone's world/entity/session state onto `bevy_ecs`, so that
 third-party extensions are native Rust plugins with the same power as built-in code.
 
-**This is not a new direction.** [`DESIGN.md:520`](../DESIGN.md) already specifies
+**This is not a new direction.** [`DESIGN.md` §8](../DESIGN.md) already specifies
 `bevy_ecs` standalone, 0.19, "for world/entity state — gives systems, schedules, and natural
-plugin points for both the renderer and third-party extensions", and `DESIGN.md:521` adds that
-the renderer should be "a separate crate that observes the same ECS world". `DESIGN.md:2083`
+plugin points for both the renderer and third-party extensions", and adds that
+the renderer should be "a separate crate that observes the same ECS world". `DESIGN.md` §13
 names azalea as "the best reference for macro ergonomics and ECS client design".
 
 **At the time this plan was written, there was no `bevy` dependency anywhere in the tree**

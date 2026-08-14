@@ -55,7 +55,7 @@ Both are closed. The factory in both directions is the routing switch — see "H
 
 ```
 ClientboundPlayerAbilitiesPacket
-  → v770 adapter.rs:3301                       decode (already existed)
+  → v770 adapter/player.rs                      decode (already existed)
   → ClientEvent::AbilitiesChanged
   → session::handles_event                     ← THE NEW SWITCH ARM
   → session::apply_local_player_state          fold, whole-record assign
@@ -72,7 +72,7 @@ player::apply_creative_flight_input            double-tap toggle, gated on may_f
   → session::Abilities.flying
   → interact::send_abilities                   ← THE NEW PRODUCER
   → ClientAction::SetFlying
-  → v770 adapter.rs:4136 → ServerboundPlayerAbilitiesPacket
+  → v770 adapter/serverbound.rs → ServerboundPlayerAbilitiesPacket
 ```
 
 **The switch arm is the load-bearing line.** `SharedState::apply` forwards only events that
