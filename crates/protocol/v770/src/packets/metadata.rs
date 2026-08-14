@@ -1660,6 +1660,152 @@ mod tests {
         assert_eq!(md.creeper_ignited, None);
     }
 
+    fn a_dragon() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::Dragon),
+            living: true,
+            mob: true,
+        }
+    }
+
+    fn an_end_crystal() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::EndCrystal),
+            living: false,
+            mob: false,
+        }
+    }
+
+    /// A dragon's phase (index 16, `INT`) is raised only when the caller says
+    /// the entity is a dragon.
+    #[test]
+    fn dragon_phase_is_raised_for_a_known_dragon() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_DRAGON_PHASE);
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(5)); // SittingFlaming
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_dragon())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.dragon_phase, Some(5));
+    }
+
+    /// **The control, and it must fail without the class guard.** Index 16's
+    /// `INT` is also `Warden.CLIENT_ANGER_LEVEL`/`Creeper.DATA_SWELL_DIR`/etc
+    /// — bit-identical serializer, no other signal distinguishes them. A
+    /// following field proves alignment survived the unmatched value.
+    #[test]
+    fn dragon_phase_without_dragon_class_is_consumed_but_not_surfaced() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_DRAGON_PHASE);
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(37)); // a plausible warden anger level
+        bytes.push(IDX_HEALTH);
+        bytes.extend(varint(SER_FLOAT));
+        bytes.extend(4.0f32.to_be_bytes());
+        bytes.push(EOF_MARKER);
+        for tracked in [a_mob(), a_creeper(), a_sheep()] {
+            let mut reader = Reader::new(&bytes);
+            let md = read_entity_metadata(&mut reader, tracked)
+                .expect("decode")
+                .metadata;
+            reader.ensure_empty().expect("the value must be consumed, staying aligned");
+            assert_eq!(
+                md.dragon_phase, None,
+                "a non-dragon's index-16 INT must not surface as a dragon phase"
+            );
+            assert_eq!(md.health, Some(4.0), "the following field must still align");
+        }
+    }
+
+    /// An end crystal's `showsBottom` (index 9, `BOOLEAN`) is raised only when
+    /// the caller says the entity is an end crystal — pairwise-distinct from a
+    /// neighbouring bool so a transposition cannot survive (see the beam
+    /// target test right below, which sets the opposite value at index 8).
+    #[test]
+    fn crystal_show_bottom_is_raised_for_a_known_crystal() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_CRYSTAL_SHOW_BOTTOM);
+        bytes.extend(varint(SER_BOOLEAN));
+        bytes.push(0); // false — the collision-species neighbours default true-ish, keep it distinct
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, an_end_crystal())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.crystal_show_bottom, Some(false));
+    }
+
+    /// **The control**: index 9's `BOOLEAN` is also `AreaEffectCloud.DATA_WAITING`
+    /// and `FishingHook.DATA_BITING`. Without the class guard this would
+    /// surface as `crystal_show_bottom` for any mob.
+    #[test]
+    fn crystal_show_bottom_without_end_crystal_class_is_consumed_but_not_surfaced() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_CRYSTAL_SHOW_BOTTOM);
+        bytes.extend(varint(SER_BOOLEAN));
+        bytes.push(1);
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_mob())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("the value must be consumed, staying aligned");
+        assert_eq!(md.crystal_show_bottom, None);
+    }
+
+    /// An end crystal's beam target (index 8, `OPTIONAL_BLOCK_POS`) is
+    /// self-identifying by `(index, value shape)` and needs **no** class
+    /// guard — present case: presence bool `true` then the packed position.
+    /// Coordinates are pairwise-distinct so a transposed unpack cannot survive.
+    #[test]
+    fn crystal_beam_target_present_needs_no_class_guard() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_CRYSTAL_BEAM_TARGET);
+        bytes.extend(varint(SER_OPTIONAL_BLOCK_POS));
+        bytes.push(1); // present
+        // The same packing `pack_block_pos` (server_protocol.rs) writes and
+        // this module's own `unpack_block_pos` reverses — independently
+        // re-derived here rather than calling either, so this assertion
+        // cannot pass by construction against a shared bug.
+        let packed: i64 = ((11i64 & 0x3FF_FFFF) << 38) | ((4i64 & 0x3FF_FFFF) << 12) | (65i64 & 0xFFF);
+        bytes.extend(packed.to_be_bytes());
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_mob())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(
+            md.crystal_beam_target,
+            Reported::Reported(Some(BlockPos::new(11, 65, 4)))
+        );
+    }
+
+    /// Absent case: presence bool `false`, no position bytes at all —
+    /// `Reported::Reported(None)`, distinct from `Reported::Unreported`
+    /// (the field was not merely absent from the packet; it was present and
+    /// explicitly cleared).
+    #[test]
+    fn crystal_beam_target_absent_is_reported_cleared_not_unreported() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_CRYSTAL_BEAM_TARGET);
+        bytes.extend(varint(SER_OPTIONAL_BLOCK_POS));
+        bytes.push(0); // absent
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_mob())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.crystal_beam_target, Reported::Reported(None));
+        assert!(md.crystal_beam_target.is_reported());
+    }
+
     /// A registry-holder appearance variant (here a wolf, serializer 25) is
     /// self-identifying: it raises `Keyed` from the serializer alone, at whatever
     /// index it appears and with no class context. Wire value is `id + 1`.
@@ -1856,6 +2002,8 @@ mod tests {
         assert_eq!(metadata_class("minecraft:wolf"), Some(MetadataClass::Tamable));
         assert_eq!(metadata_class("minecraft:cat"), Some(MetadataClass::Tamable));
         assert_eq!(metadata_class("minecraft:parrot"), Some(MetadataClass::Tamable));
+        assert_eq!(metadata_class("minecraft:ender_dragon"), Some(MetadataClass::Dragon));
+        assert_eq!(metadata_class("minecraft:end_crystal"), Some(MetadataClass::EndCrystal));
         assert_eq!(metadata_class("minecraft:cow"), None);
         assert_eq!(metadata_class("minecraft:villager"), None);
     }
