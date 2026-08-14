@@ -320,6 +320,24 @@ const BG: [f32; 4] = [0.10, 0.10, 0.12, 1.0];
 /// calmer over a busy world than ours does.
 const OVERLAY_BG: [f32; 4] = [0.0, 0.0, 0.0, 64.0 / 255.0];
 
+/// The death screen's own backdrop, decoded rather than eyeballed —
+/// `DeathScreen.extractDeathBackground` calls
+/// `GuiGraphicsExtractor.fillGradient(0, 0, width, height, 1615855616, -1602211792)`,
+/// and `fillGradient`'s two ints are ARGB colours for the top and bottom edges
+/// respectively (`innerFill` -> `ColoredRectangleRenderState`, whose two colours
+/// are the start and end of the interpolation top-to-bottom).
+///
+/// `1615855616` as ARGB is alpha `96/255`, red `80/255`, no green or blue: a
+/// dark, mostly-transparent red at the top of the screen.
+const DEATH_GRADIENT_TOP: [f32; 4] = [80.0 / 255.0, 0.0, 0.0, 96.0 / 255.0];
+/// `-1602211792` as ARGB (i.e. its bit pattern read unsigned) is alpha
+/// `160/255`, red `128/255`, green and blue `48/255` each: a more opaque,
+/// lighter red-brown at the bottom of the screen. Together with
+/// [`DEATH_GRADIENT_TOP`] this is why the death screen reads noticeably redder
+/// and darker toward the bottom than the top, unlike the flat [`OVERLAY_BG`]
+/// every other in-world overlay uses.
+const DEATH_GRADIENT_BOTTOM: [f32; 4] = [128.0 / 255.0, 48.0 / 255.0, 48.0 / 255.0, 160.0 / 255.0];
+
 /// The tint a scrolling list's band carries on top of the screen backdrop —
 /// `textures/gui/menu_list_background.png`, decoded out of the 26.2 `client.jar`:
 /// a 16×16 greyscale+alpha PNG in which **every pixel is grey 0, alpha 112**. So
