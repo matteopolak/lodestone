@@ -9,18 +9,23 @@ roster **cannot be built first**: eight of the thirteen implemented goals are st
 of firing in production today, so this plan sequences a perception-and-driver spine ahead of every
 species unit.
 
-**Status note, added during a later citation pass, not a status audit — verify before relying on
-it:** `crates/lodestone-entity/src/ai/roster/` now exists with `hostile_melee.rs`, `passive.rs`,
-`ranged.rs`, `neutral.rs`, `specialist.rs` and `probe.rs`, and `roster::goals_for` is wired into
-`MobSim::spawn_species` (`crates/lodestone-server/src/mobs/mod.rs`) — confirmed directly against
-the source. That means at least Phase A's roster substrate (A3) and some of Phase B have landed
-since this plan was written, which the rest of this document does not reflect. Several other
-specific findings below have also been individually confirmed stale while fixing this document's
-citations (`crates/lodestone-server/src/mobs.rs` itself no longer exists — it was split into
-`crates/lodestone-server/src/mobs/`; the two `MobCategory` types were unified; projectile hit
-detection now exists) and are marked inline. This is not a complete re-verification of the plan —
-treat every remaining "TRUE"/"does not exist" claim below as unconfirmed since this note was added,
-and re-check before sequencing work against it.
+**Status note, superseded 2026-08-14 by a real re-verdict pass (not just a citation fix) — see
+§1.2 and §1.4 inline for the details.** The original note below (added during a citation pass,
+explicitly *not* a status audit) already found `crates/lodestone-entity/src/ai/roster/` real and
+wired. The 2026-08-14 pass went further and re-checked every remaining "TRUE"/"does not exist"
+claim in §1.2 and two more in §1.4 against the tree: **six of the eight islands this plan's §1
+originally catalogued have since closed** — natural spawning now has a driver
+(`natural_spawn.rs`, wired into the production tick loop), regional difficulty is modelled
+(`regional_difficulty.rs`), spawn eggs work, ranged goals exist and fire real projectiles in
+production (`ai/roster/ranged.rs` + `MobSim::tick`'s launch drain), and Brain AI is now reachable
+in production because natural spawning's species table overlaps `BRAIN_SPECIES`. Two did **not**
+close: `SpawnEnvironment` still has zero implementors, and spawner blocks are still unmodelled.
+Original note, kept for its own history: `crates/lodestone-entity/src/ai/roster/` now exists with
+`hostile_melee.rs`, `passive.rs`, `ranged.rs`, `neutral.rs`, `specialist.rs` and `probe.rs`, and
+`roster::goals_for` is wired into `MobSim::spawn_species`
+(`crates/lodestone-server/src/mobs/mod.rs`); `crates/lodestone-server/src/mobs.rs` itself no
+longer exists (split into `crates/lodestone-server/src/mobs/`); the two `MobCategory` types were
+unified; projectile hit detection exists.
 
 ---
 
@@ -103,42 +108,52 @@ Both children would compile, pass their own unit tests, and change nothing on sc
 repo's dominant defect class — the island — and building the roster first manufactures a tenth
 instance of it across five issues at once.
 
-### 1.2 Confirmed still-true islands
+### 1.2 Confirmed still-true islands — re-verdicted 2026-08-14, and most of them no longer are
 
-- **Brain never ticked outside its crate — TRUE at the time of writing.** All three greps
-  returned zero hits outside
-  `crates/lodestone-entity/`: `brain::`, `BrainMob`, `Brain::`. `BrainMob`
-  (`crates/lodestone-entity/src/brain/mob.rs`, 10 methods) had exactly one implementor,
-  `TestMob` (`crates/lodestone-entity/src/brain/mod.rs`), inside `#[cfg(test)]`. `Brain::tick`
-  (same file) was
-  called only from that file's own test module.
-  **`tests/live_brain.rs` does not construct or tick a `Brain` at all** — it is an RCON harness that
-  summons a *vanilla* goat and characterises its wander statistically; its four `Brain` word-hits are
-  RCON command strings (`data get entity … Brain`) and doc prose. ~1,900 lines, zero consumers **at
-  the time.** **Update:** `crates/lodestone-entity/src/ai/navigating_mob.rs` now has
-  `impl BrainMob for NavigatingMob<'_>`, confirmed directly against the source — re-verify this
-  island's status before planning C1 against this bullet.
-- **No natural spawn driver — TRUE.** `MobSim::run_spawn_cycle`,
-  `despawn_pass` and `census` (all in `crates/lodestone-server/src/mobs/mod.rs`) are called **only** from
-  `crates/lodestone-server/tests/mob_spawn.rs`. `run_tick_loop`
-  (`crates/lodestone-server/src/tick.rs`) calls, in order: overload resolution, sleep,
-  `MobSim::tick`, snapshot publish, `take_detonations`, `BlockEntityRegistry::tick_all`,
-  `block_ticks.drain_due` (+ `random_tick::propagate_and_react`), `fluid_ticks.drain_due` (**body
-  empty**), `random_ticks.tick_chunk`, `clock.record_tick`. No spawn cycle, no despawn pass, no
-  player-position feed. `seed_demo_mobs`'s own doc comment (`mobs/mod.rs`) says so itself. `impl SpawnCandidateSource` has exactly one
-  implementor tree-wide: `AlwaysSpawns` in `tests/mob_spawn.rs`, a test mock.
-- **No spawn table — TRUE, and stronger than filed.** `SpawnEnvironment`
-  (`crates/lodestone-entity/src/spawn.rs`) has **zero implementors anywhere, including tests**.
-- **Regional difficulty unmodeled — TRUE.** `RegionalDifficulty`, `regional_difficulty`,
-  `DifficultyInstance`, `effective_difficulty` all return **0 hits tree-wide**. All 64 `Difficulty::`
-  hits are the wire/UI enum (create-world menu, `LOGIN`/`CHANGE_DIFFICULTY` encode, HUD). The only
-  crossing into mob logic is `DespawnCtx.difficulty_peaceful` (`spawn.rs`), which has zero
-  non-test users.
-- **No spawn eggs / spawners — TRUE.** All 176 `spawn_egg` hits are rows in two generated
-  files (`lodestone-data/src/generated/{item_prototypes,items}.rs`); zero outside `generated/`.
-  `SpawnEgg` and `SpawnData` are 0 hits. The spawner exists only as a renderable block state and a
-  1.12→1.13 flattening rename. **Every mob in the running game comes from `seed_demo_mobs`
-  (`crates/lodestone-server/src/mobs/mod.rs`)** — a hardcoded ring of `minecraft:zombie` at radius 6.
+**Four of these five bullets have flipped since they were written; only "no spawn table" is
+still accurate.** The chain that closed them is one commit path: `natural_spawn.rs` (new,
+1,442 lines) landed and is driven from the production tick loop
+(`tick.rs`'s `sim.run_spawn_cycle(&mut state, &mut natural_spawner, area.chunks())`), and
+`MobSim::run_spawn_cycle` calls `self.spawn_species(candidate.entity_type, candidate.pos)`
+(`crates/lodestone-server/src/mobs/mod.rs`) for every candidate — the same `spawn_species` that
+installs goals via `roster::goals_for`, which (per `roster/mod.rs`'s own doc, line ~444) gives
+any `BRAIN_SPECIES` match "a single `BrainGoal` and nothing else". Chase each bullet below with
+that chain in mind.
+
+- **Brain never ticked outside its crate — FLIPPED, now reachable in production.** The 2026-08-04
+  update already found `impl BrainMob for NavigatingMob<'_>`. What was still missing then was a
+  live spawn path that actually produces a `BRAIN_SPECIES` individual — now there is one:
+  `natural_spawn.rs`'s `SPAWN_RULES` table includes `armadillo`, `axolotl`, `camel`, `frog`,
+  `goat`, `hoglin` and `piglin`, all of which are also in `BRAIN_SPECIES`
+  (`crates/lodestone-entity/src/brain/roster.rs`). A naturally-spawned individual of any of those
+  seven now goes tick.rs → `run_spawn_cycle` → `spawn_species` → `roster::goals_for` → a real,
+  ticking `BrainGoal`. Not independently re-checked this pass: whether `GoalSelector::tick`
+  actually advances a `BrainGoal` the same as any other `Goal` (the doc calls the seam "real and
+  generic", which implies yes, but confirm before closing C1 on this alone).
+- **No natural spawn driver — FLIPPED.** `crate::natural_spawn::NaturalSpawner` (`impl
+  SpawnCandidateSource for NaturalSpawner`) is now a second, real, non-test implementor of
+  `SpawnCandidateSource` beyond the old `AlwaysSpawns` test mock, and `run_spawn_cycle` is called
+  from `tick.rs`'s production loop, not only from `tests/mob_spawn.rs`. `run_tick_loop`'s step
+  list in this bullet is now missing a step: re-read `tick.rs` for where the natural-spawn call
+  sits relative to the others listed, rather than trusting the old sequence.
+- **No spawn table — still TRUE, re-verified.** `SpawnEnvironment` (`crates/lodestone-entity/src/spawn.rs`)
+  still has zero implementors tree-wide (`grep -rn "impl SpawnEnvironment" crates/` is empty).
+  `natural_spawn.rs` did **not** adopt this trait — it built its own `SpawnRule` struct instead
+  (matching the parallel finding in `docs/server-gameplay-gap-census.md`'s §9 re-verdict, same
+  date: `lodestone-entity/src/spawn.rs` remains a dead second engine). Do not flip this one.
+- **Regional difficulty unmodeled — FLIPPED.** `crates/lodestone-server/src/regional_difficulty.rs`
+  now exists and is a real module, consumed by `lightning.rs` and `world_state.rs` (both new/landed
+  since this plan was written). Re-check whether it reaches mob logic specifically
+  (`DespawnCtx.difficulty_peaceful` or an equivalent) before assuming this closes any particular
+  mob-AI unit — the module existing is confirmed, its reach into this plan's units is not.
+- **No spawn eggs / spawners — half-flipped.** Spawn eggs landed: `crate::spawn_egg::apply_spawn_egg`
+  (new module, 747 lines) is called from `apply_use_item_on` in `server.rs` and calls
+  `sim.spawn_species(...)` on success — so eggs are a second production entry into the same
+  `spawn_species`/`roster::goals_for` chain as natural spawning. **Spawner blocks are still
+  absent, re-verified**: `server.rs`'s use-item-on handling has an explicit spawner guard whose own
+  comment says "Nothing is modelled for a spawner yet". `seed_demo_mobs` is no longer the *only*
+  spawn source (natural spawning and spawn eggs both landed beside it), but it is unclear from
+  this pass whether it is still the *initial* one at world load — not re-checked.
 
 ### 1.3 Stale claims — do not plan against these
 
@@ -228,17 +243,22 @@ instance of it across five issues at once.
   `crates/lodestone-entity/src/attribute.rs`: zombie/husk, skeleton/stray/wither_skeleton/
   bogged, creeper, spider, pig, cow/mooshroom, sheep, chicken. Everything else falls back to
   `combat_defaults` (`crates/lodestone-server/src/mobs/mod.rs`) plus a 0.6×1.95 body (`species_shape`, same file).
-- **Nothing launches a projectile in production.** `ProjectileRegistry::tick` *is* reached
-  (inside `MobSim::tick`, `crates/lodestone-server/src/mobs/mod.rs`), but `MobSim::spawn_projectile` (`crates/lodestone-server/src/mobs/projectiles.rs`) is called only
-  from `tests/projectile_and_item_registries.rs`, and `Projectile::{throwable, ender_pearl}` have
-  zero call sites outside `projectile.rs`. The registry is permanently empty at runtime — the island
-  moved one hop, from "nothing ticks it" to "nothing populates it". **This has since changed**:
-  `spawn_projectile`'s own doc comment now says hit detection and impact resolution happen every
-  tick via `resolve_projectile_impacts`, confirmed directly against
-  `crates/lodestone-server/src/mobs/projectiles.rs` rather than carried forward from this note.
-- **No ranged goal of any kind exists.** `RangedAttackGoal` and `BowAttack` are 0 hits tree-wide; all
-  27 `Ranged` hits are `RangedAttribute`. Every `bow`/`fireball`/`trident` hit is rendering or
-  generated data.
+- **Nothing launches a projectile in production — FLIPPED, re-verdicted 2026-08-14.** Both halves
+  named in this bullet are now closed. `crates/lodestone-entity/src/ai/roster/ranged.rs`'s own
+  module doc names the exact remaining wire this bullet describes — "`MobSim::tick`'s drain on
+  the fourth line above does not exist yet ... a concurrent agent holds it [`mobs.rs`]" — and that
+  drain now exists: `MobSim::tick` (`crates/lodestone-server/src/mobs/mod.rs`, well before the
+  file's `#[cfg(test)] mod tests` boundary, so this is production code) collects
+  `m.mob.take_new_launches()` per mob into `launches`, then calls
+  `self.spawn_projectile_from(key, projectile, Some(shooter))` for each one — a real, non-test
+  caller of the spawn path this bullet said had none. `resolve_projectile_impacts` (hit detection)
+  is likewise wired, matching the update already recorded here.
+- **No ranged goal of any kind exists — FLIPPED.** `crates/lodestone-entity/src/ai/roster/ranged.rs`
+  is a real module (`RangedBowAttackGoal`, a blaze fireball-burst goal, and the generic
+  `ProjectileLaunch` intent) — its own doc opens by quoting this exact prior state ("`RangedAttackGoal`
+  and `BowAttack` were zero hits tree-wide, so no mob in this repo could shoot anything") as the
+  problem it solves. Combined with the drain above, a skeleton-shaped species installed through
+  this roster can now aim, fire, and have its arrow actually spawn and hit in production.
 
 ---
 
