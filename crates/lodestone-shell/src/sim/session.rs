@@ -475,10 +475,18 @@ impl Sim {
     /// scalar count [`Self::terrain_progress`] reports. See
     /// [`crate::menu::loading::ChunkCellStatus`]'s doc for why this has two
     /// states rather than vanilla's twelve.
+    ///
+    /// **Bounded by [`crate::menu::loading::MAX_GRID_RADIUS`], not by the view
+    /// radius**: vanilla's own status view is a constant 17 regardless of
+    /// render distance, and an unbounded grid overflows the top of the screen
+    /// (see that constant's doc). The cells are still whole, real columns; at a
+    /// large render distance this is the innermost square of the view rather
+    /// than all of it.
     #[must_use]
     pub fn terrain_chunk_grid(&self) -> Option<crate::menu::loading::TerrainChunkGrid> {
         let net = self.net()?;
-        let radius = self.expected_view_radius?;
+        let radius =
+            crate::menu::loading::TerrainChunkGrid::view_radius(self.expected_view_radius?);
         let position = self.player().position;
         let pcx = (position.x.floor() as i32).div_euclid(16);
         let pcz = (position.z.floor() as i32).div_euclid(16);
