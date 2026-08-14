@@ -1,4 +1,4 @@
-//! Issue #275: the 27 Configuration-phase `registry_data` payloads this crate
+//! The 27 Configuration-phase `registry_data` payloads this crate
 //! has no typed model for, plus `update_tags` and `select_known_packs`.
 //!
 //! `server_protocol.rs` already sends `minecraft:dimension_type` and

@@ -1,6 +1,6 @@
 //! End-to-end: a **real** `lodestone-client`, running the real
 //! [`V770Adapter`](lodestone_v770::adapter), attacks a live mob over the real
-//! [`V770ServerProtocol`] over the in-memory transport — issue #12's own
+//! [`V770ServerProtocol`] over the in-memory transport — this crate's own
 //! acceptance shape: "a real client against our integrated server," the same
 //! choice `block_entities_live.rs` makes and for the identical reason —
 //! [`serve_connection`] is driven directly (not through
@@ -49,7 +49,8 @@ impl ChunkSource for AirSource {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). `ChunkSource::set_block` has no default, so this is
+    // stated explicitly rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -76,14 +77,14 @@ fn address() -> ServerAddress {
 ///
 /// * **Damage**: `Player.createAttributes()`'s bare-hand `ATTACK_DAMAGE =
 ///   1.0` (`.cache/mc/26.2/src/net/minecraft/world/entity/player/
-///   Player.java:208`) against a real zombie's `ARMOR = 2.0`, no toughness
-///   override (`Zombie.java:135-136`, `Monster.createMonsterAttributes()`'s
+///   Player.java`) against a real zombie's `ARMOR = 2.0`, no toughness
+///   override (`Zombie.java`, `Monster.createMonsterAttributes()`'s
 ///   base has no `ARMOR_TOUGHNESS`), through
 ///   `CombatRules.getDamageAfterAbsorb`: `toughness = 2 + 0/4 = 2`,
 ///   `realArmor = clamp(2 - 1.0/2, 2*0.2, 20) = 1.5`, `frac = 1.5/25 =
 ///   0.06`, `damage = 1.0 * (1 - 0.06) = 0.94`.
 /// * **Knockback**: sprinting supplies `SPRINT_ATTACK_KNOCKBACK_POWER = 0.5`
-///   (`Player.attack`'s `knockbackAttack` bonus, `Player.java:963-966,987-988`);
+///   (`Player.attack`'s `knockbackAttack` bonus, `Player.java`);
 ///   attacker→target direction `(dx, dz) = (1, 0)`, target starts at rest,
 ///   grounded — `lodestone_physics::knockback::knockback_impulse`'s own
 ///   formula gives `(x', y', z') = (-0.5, 0.4, 0.0)` (the identical

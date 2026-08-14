@@ -1,4 +1,4 @@
-//! Issue #465: placing a block must trigger the same neighbour-update
+//! Placing a block must trigger the same neighbour-update
 //! fan-out every other mutation already gets, and the result must reach the
 //! player.
 //!
@@ -106,8 +106,9 @@ const ORACLE_DUST_ATTENUATION: &[(i32, u8)] = &[
 /// one returns a fresh all-air `ChunkColumn` and ignores its own edit map, so
 /// the neighbour fan-out — which reads a whole column, not single blocks —
 /// would see an empty world, find no torch and no dust, and compute nothing.
-/// The gate would then fail for a reason that has nothing to do with #465,
-/// and (worse) a *passing* variant of it would prove nothing at all.
+/// The gate would then fail for a reason that has nothing to do with the
+/// neighbour-update defect it exists to catch, and (worse) a *passing* variant
+/// of it would prove nothing at all.
 /// `SharedWorld`'s edit log: `(x, y, z) -> block name`.
 type EditMap = Arc<Mutex<HashMap<(i32, i32, i32), String>>>;
 
@@ -343,7 +344,7 @@ async fn place_one_dust_into_the_gap() -> (Vec<(i32, Option<u8>)>, Vec<(i32, Opt
     (computed, delivered)
 }
 
-/// **The #465 gate.** A player placing one redstone dust into the gap must
+/// **The neighbour-update gate.** A player placing one redstone dust into the gap must
 /// light the whole run, in the server's own world, to the live server's own
 /// attenuation profile at every coordinate.
 ///
@@ -355,10 +356,10 @@ async fn place_one_dust_into_the_gap() -> (Vec<(i32, Option<u8>)>, Vec<(i32, Opt
 /// | hypothesis | power at `x` | at `x = 1` | at `x = 15` |
 /// |---|---|---|---|
 /// | oracle (live 26.2) | `16 - x` | 15 | 1 |
-/// | **#465 unfixed: no neighbour update** | `0` everywhere | 0 | 0 |
+/// | unfixed: no neighbour update | `0` everywhere | 0 | 0 |
 /// | wrong: dust carries the source undecayed | `15` | 15 | 15 |
 ///
-/// The unfixed-#465 hypothesis differs from the oracle at all 15 coordinates,
+/// The unfixed (no-neighbour-update) hypothesis differs from the oracle at all 15 coordinates,
 /// and the no-decay hypothesis at 14 of them. A gate asserting only "the run
 /// has some power somewhere" would pass under the no-decay model; a gate
 /// asserting only that the placed cell *is* dust would pass under the unfixed
@@ -384,7 +385,7 @@ async fn placing_dust_into_a_gap_powers_the_whole_run_in_the_servers_own_world()
     assert!(
         wrong.is_empty(),
         "the server's own world disagrees with the live-26.2 oracle at {} of {} coordinates \
-         (#465: placement ran no neighbour update):\n  {}",
+         (placement ran no neighbour update):\n  {}",
         wrong.len(),
         ORACLE_DUST_ATTENUATION.len(),
         wrong.join("\n  ")
@@ -396,7 +397,7 @@ async fn placing_dust_into_a_gap_powers_the_whole_run_in_the_servers_own_world()
     let agreements_with_no_decay = ORACLE_DUST_ATTENUATION.iter().filter(|(_, p)| *p == 15).count();
     assert_eq!(
         agreements_with_unfixed, 0,
-        "the unfixed-#465 hypothesis (every cell 0) must differ from the oracle at every \
+        "the unfixed (no-neighbour-update) hypothesis (every cell 0) must differ from the oracle at every \
          coordinate, otherwise this gate cannot separate them"
     );
     assert_eq!(
@@ -407,11 +408,13 @@ async fn placing_dust_into_a_gap_powers_the_whole_run_in_the_servers_own_world()
 }
 
 /// The **delivered** half of the computed-vs-delivered pair, and the reason
-/// #465 cannot be closed as "a player can see redstone work".
+/// the neighbour-update fix alone cannot be closed as "a player can see
+/// redstone work".
 ///
 /// # Why this is ignored, and what unblocks it
 ///
-/// It fails for a reason that is neither of #465's two named causes, is
+/// It fails for a reason that is neither the missing neighbour update nor the
+/// wire-delivery defect described below, is
 /// **pre-existing**, and lives outside `lodestone-server` entirely:
 /// [`resolve_state_id`] in `crates/protocol/v770/src/server_protocol.rs`
 /// matches a state string against the block-state table by **exact property
@@ -447,8 +450,8 @@ async fn placing_dust_into_a_gap_powers_the_whole_run_in_the_servers_own_world()
 /// server's own state.
 ///
 /// The cosmetic half that *used* to remain wrong is now right too, and by a
-/// different mechanism than the one described above: since issue #546 the
-/// fallback is the block's **jar-marked default state with the caller's named
+/// different mechanism than the one described above: the
+/// fallback is now the block's **jar-marked default state with the caller's named
 /// properties written over it** — vanilla's own `defaultBlockState().setValue`
 /// — rather than the lowest id agreeing on them. Dust's four connection
 /// properties therefore come out `none`, its real default, so it renders flat

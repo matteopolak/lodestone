@@ -1,4 +1,4 @@
-//! Issue #273's encryption half: `V770ServerProtocol::encode_encryption_request`
+//! The encryption half: `V770ServerProtocol::encode_encryption_request`
 //! builds vanilla's exact `hello` wire shape, `decode` lifts a client's `key`
 //! reply into `ServerBound::EncryptionResponse` with no crypto of its own, and
 //! the RSA math on both ends of that wire round-trips through `lodestone-net`'s

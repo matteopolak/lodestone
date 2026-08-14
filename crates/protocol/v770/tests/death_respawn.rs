@@ -126,7 +126,7 @@ fn handle_play_respawn_emits_dimension_and_game_mode_without_death_location() {
             golden,
         )
         .expect("handle respawn");
-    // Since issue #288 a respawn emits the dimension **type** first, then the
+    // A respawn emits the dimension **type** first, then the
     // `Respawned` event. `None` here because this test feeds no `registry_data`,
     // which is also the assertion that the holder id is not defaulted.
     match directives.as_slice() {

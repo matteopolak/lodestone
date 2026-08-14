@@ -1,4 +1,4 @@
-//! Issue #438: **a player is an entity that another connection receives.**
+//! **A player is an entity that another connection receives.**
 //!
 //! # Why this test is shaped the way it is
 //!
@@ -29,7 +29,7 @@
 //!
 //! The player-info ordering requirement comes from the jar too, and it is not a
 //! nicety: `ClientPacketListener.createEntityFromPacket`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/ClientPacketListener.java:591-604`)
+//! (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/ClientPacketListener.java`)
 //! returns `null` for a `PLAYER`-typed spawn whose uuid has no `PlayerInfo`,
 //! logging *"Server attempted to add player prior to sending player info"* —
 //! the entity is never added to the level. A server that streamed a
@@ -107,7 +107,8 @@ impl ChunkSource for AirSource {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). `ChunkSource::set_block` has no default, so this is
+    // stated explicitly rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -424,8 +425,8 @@ async fn two_connections_see_each_other_as_player_entities() {
     // This expected `y = 100.0` and had to change. `100.0` is
     // `ServerProtocol::begin_play`'s *default* spawn
     // (`server_protocol.rs`'s `begin_play_at(view_radius, Vec3::new(8.0, 100.0,
-    // 8.0))`), but `serve_connection` does not use that default: since issues #461
-    // and #329 it calls `begin_play_at` with the result of
+    // 8.0))`), but `serve_connection` does not use that default: it now
+    // calls `begin_play_at` with the result of
     // `world_spawn::find_initial_spawn`, a real search over the source. Nothing in
     // the adapter changed — the root cause is entirely on the server side, and the
     // constant here was a stale copy of a default this path stopped taking.
@@ -440,7 +441,7 @@ async fn two_connections_see_each_other_as_player_entities() {
     // fires, and `-63` is *inside the bedrock floor* — the player is buried in the
     // dark, which reads as a server hang. `world_spawn::GENERATOR_SPAWN_HEIGHT` is
     // now vanilla's own `ChunkGenerator.getSpawnHeight`
-    // (`.cache/mc/26.2/src/net/minecraft/world/level/chunk/ChunkGenerator.java:432`,
+    // (`.cache/mc/26.2/src/net/minecraft/world/level/chunk/ChunkGenerator.java`,
     // a literal `64` that `NoiseBasedChunkGenerator` does not override), which is
     // what `MinecraftServer.setInitialSpawn` pre-seeds the world spawn with. See
     // DESIGN.md §12.129.
@@ -514,7 +515,7 @@ async fn two_connections_see_each_other_as_player_entities() {
         })
         .expect(
             "B must receive a player_info_update carrying A's uuid — without it a real \
-             client discards A's ADD_ENTITY entirely (ClientPacketListener.java:591-604)",
+             client discards A's ADD_ENTITY entirely (ClientPacketListener.java)",
         );
     let first_spawn = b_join
         .iter()
@@ -609,9 +610,10 @@ async fn two_connections_see_each_other_as_player_entities() {
 /// that reports no registry.
 ///
 /// This is the arm that would have failed for the entire life of this repo
-/// before #438, and it is what stops the main test from being satisfiable by
+/// before player streaming was wired up, and it is what stops the main test
+/// from being satisfiable by
 /// some unrelated entity happening to be in range — the *world* species of
-/// vacuous test that issue #438's own body warns about.
+/// vacuous test this file's own module doc warns about.
 #[tokio::test]
 async fn without_a_player_registry_no_player_entity_is_streamed_at_all() {
     let name_a = unique_username();
@@ -621,7 +623,8 @@ async fn without_a_player_registry_no_player_entity_is_streamed_at_all() {
     let (client_b_io, server_b_io) = memory_pair();
 
     // `NoEntities` — not `PlayerAwareSource`. Its `EntitySource::players()`
-    // default returns `None`, which is precisely the pre-#438 world.
+    // default returns `None`, which is precisely the world before player
+    // streaming was wired up.
     let task_a = tokio::spawn(async move {
         let mut conn = Connection::new(server_a_io);
         serve_connection(

@@ -7,8 +7,8 @@ use std::time::Instant;
 use lodestone_core::{
     Ctx, Decode, Encode, Reader, Writer, plain_text_from_nbt_component, read_network_nbt,
 };
-// The wire-shaped, decode-target command tree (issue #470). Deliberately *not*
-// `lodestone-command`'s arena/`dyn ArgumentType` construction API — see #435 and
+// The wire-shaped, decode-target command tree. Deliberately *not*
+// `lodestone-command`'s arena/`dyn ArgumentType` construction API — see
 // `lodestone_model::command_tree`'s module doc for why the two stay separate.
 use lodestone_model::command_tree::{
     ArgumentParser, CommandSuggestionEntry, CommandSuggestionsResponse, CommandTree, NodeKind,
@@ -152,8 +152,8 @@ pub struct V770Adapter {
     /// The overworld day clock, held across packets because `set_time` mostly
     /// does **not** carry it. See [`DayClock`].
     clock: Arc<Mutex<DayClock>>,
-    /// Registries folded out of the Configuration `registry_data` stream (issue
-    /// #288). Empty until Configuration runs; every reader falls back
+    /// Registries folded out of the Configuration `registry_data` stream.
+    /// Empty until Configuration runs; every reader falls back
     /// explicitly, because a server that sends none must still play.
     registries: Arc<Mutex<ClientRegistries>>,
     /// Holder id of the `minecraft:world_clock` entry the **current dimension**
@@ -165,7 +165,7 @@ pub struct V770Adapter {
     /// time). Both fall back to `SetTime::day_clock`'s lowest-holder-id pick;
     /// see the `set_time` arm.
     clock_holder: Arc<Mutex<Option<i32>>>,
-    /// The client's 128-entry signed-chat signature cache (issue #286). Packed
+    /// The client's 128-entry signed-chat signature cache. Packed
     /// ids in `PLAYER_CHAT`'s last-seen list and in `delete_chat` index into it;
     /// every received signed body is pushed back so future ids resolve. Guarded
     /// by a [`Mutex`] only to satisfy `Sync`, like the other per-connection
@@ -384,8 +384,9 @@ impl V770Adapter {
     ///
     /// Returns the [`DimensionTypeInfo`] to publish, or `None` when the id did
     /// not resolve — in which case the shape falls back to
-    /// [`ChunkShape::for_dimension`]'s level-name match, exactly the pre-#288
-    /// behaviour. That fallback is *not* dead code: a protocol family or server
+    /// [`ChunkShape::for_dimension`]'s level-name match, exactly the old
+    /// behaviour before registry-driven resolution existed. That fallback is
+    /// *not* dead code: a protocol family or server
     /// that sends no `registry_data` still has to join, and the client must not
     /// disconnect over a registry it merely wanted.
     ///
@@ -397,7 +398,7 @@ impl V770Adapter {
     /// `mypack:mine` at the vanilla overworld type, or give
     /// `minecraft:overworld` a 1024-tall custom type, and a name match gets both
     /// wrong. `ChunkShape::for_dimension`'s own doc comment already admitted
-    /// this; it is the height half of the same bug #34 filed for sky light.
+    /// this; it is the height half of the same class of bug filed for sky light.
     fn enter_dimension(&self, holder_id: i32, level_name: &str) -> Option<DimensionTypeInfo> {
         let resolved = self
             .registries
@@ -750,8 +751,8 @@ impl VersionAdapter for V770Adapter {
     }
 
     fn entity_dimensions(&self, entity_type_id: i32) -> Option<EntityBaseDimensions> {
-        // The base hitbox census is 26.2 game data homed in `lodestone-data`
-        // (issue #361); the registry seam reaches it through here so a
+        // The base hitbox census is 26.2 game data homed in `lodestone-data`;
+        // the registry seam reaches it through here so a
         // version-free consumer never names v770 or the data crate directly.
         // Base dims only — the caller folds SCALE/STEP_HEIGHT from the
         // entity's attribute map.
@@ -776,7 +777,7 @@ impl VersionAdapter for V770Adapter {
 
     fn block_hardness(&self, state_id: u32) -> Option<BlockHardness> {
         // The per-block-state hardness census is 26.2 game data homed in
-        // `lodestone-data` (issue #361); the registry seam reaches it through
+        // `lodestone-data`; the registry seam reaches it through
         // here so a version-free consumer never names v770 or the data crate
         // directly. `requires_correct_tool` is the *block's* requirement, not
         // the player's tool match — see `BlockHardness`.
@@ -789,7 +790,7 @@ impl VersionAdapter for V770Adapter {
     fn tool_mining(&self, held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
         // The `minecraft:tool` census — item prototypes, block tag membership,
         // and the block-state→block-registry map — is 26.2 game data homed in
-        // `lodestone-data` (issue #361); the registry seam reaches it through
+        // `lodestone-data`; the registry seam reaches it through
         // here so a version-free consumer never names v770 or the data crate
         // directly. The returned `correct_tool` is already
         // `Player.hasCorrectToolForDrops`, block requirement folded in, so the
@@ -799,7 +800,7 @@ impl VersionAdapter for V770Adapter {
 
     fn block_collision(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
         // The per-block-state collision census is 26.2 game data homed in
-        // `lodestone-data` (issue #361; dumped from the real 26.2 server's
+        // `lodestone-data` (dumped from the real 26.2 server's
         // `Block.BLOCK_STATE_REGISTRY`); the registry seam reaches it through
         // here so a version-free consumer never names v770 or the data crate
         // directly. Zero-copy: `collision_shapes::Aabb` *is* `BlockAabb`, so
@@ -818,7 +819,7 @@ impl VersionAdapter for V770Adapter {
     fn block_outline(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
         // `BlockStateBase.getShape` — the shape `Entity.pick` clips against, and
         // a third thing beside collision and fluid presence. 26.2 game data
-        // homed in `lodestone-data` (issue #361); zero-copy out of rodata. See
+        // homed in `lodestone-data`; zero-copy out of rodata. See
         // `lodestone_data::outline_shapes` for why half of all states disagree
         // with `block_collision`.
         lodestone_data::outline_shapes::outline_boxes(state_id)
@@ -834,7 +835,7 @@ impl VersionAdapter for V770Adapter {
     fn item_prototype(&self, item: &str) -> Option<ItemPrototype> {
         // The item-prototype census (`minecraft:max_stack_size`,
         // `minecraft:max_damage`, `minecraft:equippable`) is 26.2 game data
-        // homed in `lodestone-data` (issue #361), because a clientbound stack
+        // homed in `lodestone-data`, because a clientbound stack
         // carries only the *patch* against it and so none of the three is
         // ever on the wire. Stacks decoded
         // by this adapter already have these folded into

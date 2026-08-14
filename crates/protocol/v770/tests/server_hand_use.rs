@@ -1,4 +1,4 @@
-//! Issue #532 spot check: a right-click actually operates a block on a real
+//! Spot check: a right-click actually operates a block on a real
 //! served connection.
 //!
 //! `crate::hand_use`'s own unit tests cover the five families' *decisions*. The
@@ -261,8 +261,8 @@ async fn right_clicking_a_door_opens_and_closes_both_halves() {
 /// Flipping a lever by hand reaches `powered=true` on the wire.
 ///
 /// The point is not the lever's own state but that a player can now *drive*
-/// redstone at all: `redstone.rs` would propagate the signal, and until #532
-/// nothing could set it.
+/// redstone at all: `redstone.rs` would propagate the signal, but before this
+/// was wired up nothing could set it.
 #[tokio::test]
 async fn flipping_a_lever_by_hand_powers_it() {
     let mut client = serve();

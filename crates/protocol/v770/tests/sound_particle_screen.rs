@@ -374,7 +374,7 @@ fn explode_bytes() -> Vec<u8> {
 fn explode_decodes_the_explosion_sound_at_its_centre() {
     let adapter = V770Adapter::new();
     let directives = handle(&adapter, play::clientbound::EXPLODE, &explode_bytes());
-    // Issue #416: a leading `Particles` directive (the shockwave/smoke
+    // A leading `Particles` directive (the shockwave/smoke
     // visual) now precedes the `Sound` directive this test was already
     // pinning — see `decode_explode`'s doc comment.
     assert_eq!(
@@ -472,7 +472,7 @@ fn explode_stays_aligned_past_a_present_player_knockback() {
     bytes.push(0xBC);
     bytes.push(0x05);
     let directives = handle(&adapter, play::clientbound::EXPLODE, &bytes);
-    // Issue #416: `directives[0]` is now the leading `Particles` directive.
+    // `directives[0]` is now the leading `Particles` directive.
     let Directive::Emit(ClientEvent::Sound { sound, pos, .. }) = &directives[1] else {
         panic!("expected a Sound directive");
     };

@@ -136,7 +136,7 @@ impl V770Adapter {
         if packet_id == play::clientbound::UPDATE_ADVANCEMENTS {
             return decode_update_advancements(payload);
         }
-        // ---- issue #26: the remaining clientbound set ----------------------
+        // ---- the remaining clientbound set -----------------------------
         //
         // Every layout below was read off the record definition in
         // `.cache/mc/26.2/src`. Where a payload is carried as opaque bytes the
@@ -275,7 +275,7 @@ pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, A
 }
 
 /// `minecraft:trim_material` registry paths in **vanilla bootstrap order**
-/// (`TrimMaterials.bootstrap`, `TrimMaterials.java:25-35`), which is the order a
+/// (`TrimMaterials.bootstrap`, `TrimMaterials.java`), which is the order a
 /// vanilla server's Configuration-phase registry sync assigns ids in.
 ///
 /// # Why this table and not a synced registry
@@ -308,7 +308,7 @@ const TRIM_MATERIAL_IDS: &[&str] = &[
     "resin",
 ];
 /// `minecraft:trim_pattern` registry paths in vanilla bootstrap order
-/// (`TrimPatterns.bootstrap`, `TrimPatterns.java:31-48`). See
+/// (`TrimPatterns.bootstrap`, `TrimPatterns.java`). See
 /// [`TRIM_MATERIAL_IDS`] for the id-space caveat — and note this is **not** the
 /// alphabetical order `lodestone_assets::trim::TRIM_PATTERNS` uses.
 const TRIM_PATTERN_IDS: &[&str] = &[
@@ -332,7 +332,7 @@ const TRIM_PATTERN_IDS: &[&str] = &[
     "bolt",
 ];
 /// Decodes `minecraft:trim`'s payload — `ArmorTrim.STREAM_CODEC`
-/// (`ArmorTrim.java:26-28`), a `Holder<TrimMaterial>` then a
+/// (`ArmorTrim.java`), a `Holder<TrimMaterial>` then a
 /// `Holder<TrimPattern>`.
 ///
 /// Each holder is `ByteBufCodecs.holder(registry, DIRECT_STREAM_CODEC)`: a VarInt
@@ -344,16 +344,16 @@ const TRIM_PATTERN_IDS: &[&str] = &[
 ///
 /// The inline bodies, from the two `DIRECT_STREAM_CODEC`s:
 ///
-/// * `TrimMaterial` (`TrimMaterial.java:22-24`) — a `MaterialAssetGroup` (an
+/// * `TrimMaterial` (`TrimMaterial.java`) — a `MaterialAssetGroup` (an
 ///   `AssetInfo` = one UTF-8 string, then a map of `ResourceKey -> AssetInfo`,
 ///   i.e. a VarInt count of `(string, string)` pairs) then a description
 ///   `Component` (network NBT).
-/// * `TrimPattern` (`TrimPattern.java:25-33`) — an `Identifier` (string), a
+/// * `TrimPattern` (`TrimPattern.java`) — an `Identifier` (string), a
 ///   description `Component`, then a `bool` `decal`.
 ///
 /// **The inline material carries no registry name**, only its asset suffix, so
 /// that is what is reported: for every vanilla material the suffix *is* the
-/// registry path (`MaterialAssetGroup::create(base)`, `MaterialAssetGroup.java:36-46`),
+/// registry path (`MaterialAssetGroup::create(base)`, `MaterialAssetGroup.java`),
 /// and it is also the half `lodestone_assets::trim::trim_sprite_id` actually needs.
 fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
     let material = match reader.var_i32().map_err(dec_err)? {
@@ -493,7 +493,7 @@ fn read_component_patch(
                 components.tool = ToolPatch::Set(read_tool(reader)?);
             }
             // `DyedItemColor.STREAM_CODEC` is a bare `ByteBufCodecs.INT`
-            // (`DyedItemColor.java:24`) — fixed-width, not a `VarInt` like
+            // (`DyedItemColor.java`) — fixed-width, not a `VarInt` like
             // every other scalar component here, so this is the one `i32()`
             // read in this match rather than `var_i32()`.
             Some("minecraft:dyed_color") => {
@@ -506,8 +506,8 @@ fn read_component_patch(
                 components.trim = Some(read_armor_trim(reader)?);
             }
             // `MapId.STREAM_CODEC` is `ByteBufCodecs.VAR_INT.map(MapId::new, …)`
-            // (`MapId.java:19`), registered `networkSynchronized` at
-            // `DataComponents.java:229`. Decoded for the same reason as the trim
+            // (`MapId.java`), registered `networkSynchronized` at
+            // `DataComponents.java`. Decoded for the same reason as the trim
             // above — a filled map in any inventory was truncating the packet from
             // here on, not merely losing which map it showed.
             Some("minecraft:map_id") => {
@@ -523,7 +523,7 @@ fn read_component_patch(
             Some("minecraft:pot_decorations") => {
                 components.pot_decorations = Some(read_pot_decorations(reader)?);
             }
-            // Both of these are `ByteBufCodecs.VAR_INT` (`DataComponents.java:110-115`)
+            // Both of these are `ByteBufCodecs.VAR_INT` (`DataComponents.java`)
             // and both *override* the prototype value seeded above. They are
             // decoded rather than treated as unmodeled not because servers send
             // them often — they essentially never do — but because a patch that
@@ -676,10 +676,10 @@ fn read_component_patch(
                 // jar rather than inherited from this comment.** 26.2 has two patch
                 // codecs: `DataComponentPatch.STREAM_CODEC` writes each payload raw
                 // and `DELIMITED_STREAM_CODEC` length-prefixes it
-                // (`DataComponentPatch.java:62-76`). Clientbound stacks use
+                // (`DataComponentPatch.java`). Clientbound stacks use
                 // `ItemStack.OPTIONAL_STREAM_CODEC`, built on the **undelimited**
                 // one; the delimited variant is `OPTIONAL_UNTRUSTED_STREAM_CODEC`,
-                // i.e. serverbound only (`ItemStack.java:124-126`). So there is no
+                // i.e. serverbound only (`ItemStack.java`). So there is no
                 // length to skip and no self-describing framing to walk. The only
                 // way to stop a given component being a decode cliff is to model
                 // it, which is what the `minecraft:trim` arm above does.
@@ -730,7 +730,7 @@ fn read_component_patch(
             Some("minecraft:tool") => components.tool = ToolPatch::Removed,
             // A removal clears the component back to *nothing*, and vanilla's
             // own fallback with no `minecraft:max_stack_size` at all is **1**,
-            // not 64 (`ItemInstance.java:14-16`) — so this is a real, if exotic,
+            // not 64 (`ItemInstance.java`) — so this is a real, if exotic,
             // way to make an item unstackable.
             Some("minecraft:max_stack_size") => components.max_stack_size = Some(1),
             // No `minecraft:max_damage` means not damageable, which is exactly

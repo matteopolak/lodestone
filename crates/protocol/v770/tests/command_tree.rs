@@ -1,5 +1,5 @@
 //! Hermetic replay of a real server's `minecraft:commands` /
-//! `minecraft:command_suggestions` bytes (issue #470).
+//! `minecraft:command_suggestions` bytes.
 //!
 //! Every fixture here was authored by a **real vanilla 26.2 server** and
 //! captured by `tests/live_command_tree.rs` — never by our own encoder. That

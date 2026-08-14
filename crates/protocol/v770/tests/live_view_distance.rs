@@ -1,8 +1,8 @@
 //! End-to-end: **raising** render distance mid-session actually streams the new
-//! rings (issue #545).
+//! rings.
 //!
 //! The owner's report was *"render distance doesn't seem to apply to the server
-//! until I relog"*. Two halves. The client half (#506) was that the shell never
+//! until I relog"*. Two halves. The client half was that the shell never
 //! told the server at all; that is fixed, and `Session::set_render_distance` now
 //! sends a `SetClientSettings`. The server half is this file's subject: the
 //! `ClientInformationChanged` consumer clamped a live request against *this
@@ -82,7 +82,7 @@ fn settings(view_distance: i8) -> ClientSettings {
     }
 }
 
-/// **Issue #545's acceptance gate.**
+/// **Raised-render-distance acceptance gate.**
 ///
 /// Joins at `view_radius = 1` (a 3×3, 9 columns), then asks for `3` (a 7×7, 49
 /// columns) exactly as the render-distance slider does, and requires the client
@@ -134,7 +134,7 @@ async fn raising_render_distance_mid_session_streams_the_new_rings() {
         .unwrap_or_else(|_| {
             panic!(
                 "raising render distance streamed nothing: still {} columns. \
-                 Before #545 the live request was clamped against this \
+                 This used to be clamped against this \
                  connection's own join radius, so a raise was a no-op.",
                 handle.loaded_chunks().len()
             )

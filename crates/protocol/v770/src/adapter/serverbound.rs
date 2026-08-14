@@ -294,7 +294,7 @@ fn encode_seen_advancements(tab: Option<&ResourceKey>) -> Result<Vec<u8>, Adapte
     }
     Ok(w.into_vec())
 }
-// ---- issue #304: the operator/debug serverbound encoders --------------------
+// ---- the operator/debug serverbound encoders --------------------------------
 //
 // Thirteen packets a vanilla client can send that this adapter could not encode
 // at all. Every layout below was read off the record definition in
@@ -896,7 +896,7 @@ impl V770Adapter {
                 };
                 Ok(Some((packet_id, encode_body(&body)?)))
             }
-            // Issue #301: the general case `SendBrand` above is vanilla's one
+            // The general case `SendBrand` above is vanilla's one
             // built-in instance of. `custom_payload`'s wire body is just
             // channel + raw bytes (`ClientboundCustomPayloadPacket`'s
             // `DiscardedPayload`, mirrored on the serverbound side), so this
@@ -1205,7 +1205,7 @@ impl V770Adapter {
                     encode_body(&body)?,
                 )))
             }
-            // Issue #291: `cookie_response` exists in Login, Configuration and
+            // `cookie_response` exists in Login, Configuration and
             // Play alike (`ServerCookiePacketListener` is common to all
             // three), so this is one arm with a per-state packet id rather
             // than three separate ones.
@@ -1223,7 +1223,7 @@ impl V770Adapter {
                 Ok(Some((packet_id, encode_body(&body)?)))
             }
 
-            // ---- issue #304: the operator/debug set -------------------------
+            // ---- the operator/debug set --------------------------------------
             ClientAction::QueryBlockEntityTag {
                 transaction_id,
                 pos,

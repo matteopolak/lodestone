@@ -1,4 +1,4 @@
-//! Issue #304's wire gate: the thirteen operator/debug serverbound encoders,
+//! The wire gate for the thirteen operator/debug serverbound encoders,
 //! with expected bytes taken from the **record definition** in
 //! `.cache/mc/26.2/src` rather than from any decoder of ours.
 //!

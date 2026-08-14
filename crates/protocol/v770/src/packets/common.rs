@@ -71,7 +71,7 @@ pub struct ResourcePackResponse {
 
 /// Serverbound `cookie_response`, shared by the Login, Configuration and Play
 /// states — `ServerCookiePacketListener` is common to all three
-/// (`ServerboundCookieResponsePacket.java`), issue #291.
+/// (`ServerboundCookieResponsePacket.java`).
 ///
 /// Wire layout: the cookie key (a UTF string — `writeIdentifier` writes the
 /// same VarInt-length-prefixed UTF-8 as `writeUtf`, matching [`BrandPayload`]'s

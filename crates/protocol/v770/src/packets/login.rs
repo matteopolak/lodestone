@@ -112,7 +112,7 @@ pub struct LoginDisconnect {
 }
 
 /// Serverbound `custom_query_answer`, replying to a clientbound `custom_query`
-/// (issue #301) — the old, pre-`custom_payload` login-phase plugin-message
+/// — the old, pre-`custom_payload` login-phase plugin-message
 /// mechanism (historically Forge/FML's handshake). `payload` is nullable on
 /// the wire (`writeNullable`); this crate never has one to send, matching
 /// vanilla's own reference client

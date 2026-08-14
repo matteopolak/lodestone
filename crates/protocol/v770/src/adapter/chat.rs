@@ -55,7 +55,7 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text,
                 kind: ChatKind::Chat,
-                // Issue #419: `PLAYER_CHAT` is the one chat format whose wire
+                // `PLAYER_CHAT` is the one chat format whose wire
                 // carries the sender's profile UUID — this is what the Social
                 // Interactions Hide-in-Chat filter keys on.
                 sender: Some(sender),
@@ -277,7 +277,7 @@ fn read_chat_type_bound(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
 }
 
 /// `ClientboundCommandsPacket`'s own node-flag bits
-/// (`.cache/mc/26.2/client-src/net/minecraft/network/protocol/game/ClientboundCommandsPacket.java:36-40`).
+/// (`.cache/mc/26.2/client-src/net/minecraft/network/protocol/game/ClientboundCommandsPacket.java`).
 mod command_node_flags {
     /// `MASK_TYPE`: the low two bits select root / literal / argument.
     pub(super) const MASK_TYPE: u8 = 3;

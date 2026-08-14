@@ -106,7 +106,7 @@ impl ChunkShape {
 
     /// Selects the shape for a vanilla dimension by its identifier.
     ///
-    /// **This is the fallback, not the primary path, since issue #288.** Heights
+    /// **This is the fallback, not the primary path.** Heights
     /// belong to the dimension-type registry, and the adapter now decodes it
     /// (`crate::packets::registry`): `V770Adapter::enter_dimension` builds the
     /// shape from the resolved dimension type's real `min_y`/`height`, and only

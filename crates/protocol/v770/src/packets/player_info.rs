@@ -62,8 +62,9 @@ pub struct PlayerInfoEntry {
     /// Profile properties, from `ADD_PLAYER`.
     ///
     /// **These carry the skin.** They were decoded and discarded into `let _`
-    /// until issue #62's decode half: `minecraft:textures`' base64 payload never
-    /// left this crate, so no remote player could have a skin. `None` means the
+    /// until a decoder for `minecraft:textures` landed: before that, its base64
+    /// payload never left this crate, so no remote player could have a skin.
+    /// `None` means the
     /// update had no `ADD_PLAYER` action at all, which a merging fold must treat
     /// as "unchanged" rather than "no properties".
     pub properties: Option<Vec<ProfileProperty>>,
@@ -115,8 +116,8 @@ fn skip_chat_session(r: &mut Reader<'_>) -> Result<()> {
 /// Reads the `ADD_PLAYER` action: the player name, then the profile-property
 /// multimap. Each property is a name, a value, and an optional signature.
 ///
-/// **This used to discard the properties**, and that was the whole of issue #62's
-/// remote-player gap: `minecraft:textures` — base64 JSON holding the skin URL and
+/// **This used to discard the properties**, and that was the whole of the
+/// remote-player skin gap: `minecraft:textures` — base64 JSON holding the skin URL and
 /// its model declaration — was read off the wire into `let _` and never left this
 /// crate, so every remote player rendered with the default skin. The bytes were
 /// always correct; nothing carried them.
@@ -307,7 +308,7 @@ mod tests {
         );
     }
 
-    /// Issue #62. `read_add_player` used to consume all three fields of every
+    /// `read_add_player` used to consume all three fields of every
     /// property into `let _`, so `minecraft:textures` — the skin — was read off the
     /// wire and discarded, and no remote player could have one. The bytes were
     /// always right; nothing carried them.

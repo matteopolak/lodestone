@@ -20,8 +20,8 @@
 //! It has happened twice, both times from one commit. `c4ad474`
 //! ("creative-slot writes, respawn, view-distance and chunk-batch acks now
 //! reach a real consumer") added **four** `ServerBound` variants with four
-//! consumers, and updated only **two** decode arms. Issue #425 later found
-//! and fixed `ClientInformationChanged` and `ChunkBatchAcknowledged` — while
+//! consumers, and updated only **two** decode arms. A later investigation
+//! found and fixed `ClientInformationChanged` and `ChunkBatchAcknowledged` — while
 //! `CreativeModeSlotSet` and `ClientCommand`, from the very same commit,
 //! stayed dead for longer still. The user-visible cost of the second one:
 //! `apply_client_command`'s `PERFORM_RESPAWN` path was unreachable, so a
@@ -47,7 +47,7 @@
 //!   ServerBound::Foo { .. })`) count as a construction, so a broken arm
 //!   would be masked by its own test.
 //! - Scanning raw text let a *comment* count as one. Measured: at the commit
-//!   this gate was written against, `server_protocol.rs:1446` contained the
+//!   this gate was written against, `server_protocol.rs` contained the
 //!   prose `// it up is "add a `ServerBound::CreativeModeSlotSet { slot,` —
 //!   and the draft gate reported only `ClientCommand` stranded, silently
 //!   missing the second of the two live islands. One comment was the entire
@@ -436,8 +436,8 @@ fn decode(&self, id: i32) -> ServerBound {
 /// blank comments.
 ///
 /// The `MaskedByComment` case is not hypothetical — it is
-/// `server_protocol.rs:1446` at the commit this gate was written against, and
-/// it hid one of the two live islands.
+/// a real comment `server_protocol.rs` carried at the commit this gate was
+/// written against, and it hid one of the two live islands.
 #[test]
 fn a_comment_or_a_test_assertion_is_not_a_construction() {
     let decode_src = "\

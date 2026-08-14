@@ -1,4 +1,4 @@
-//! Issue #26's decode gate for the eighteen clientbound packets that had no arm
+//! The decode gate for the eighteen clientbound packets that had no arm
 //! at all, with every input byte hand-built from the record definition in
 //! `.cache/mc/26.2/src`.
 //!

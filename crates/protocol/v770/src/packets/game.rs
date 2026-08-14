@@ -163,7 +163,7 @@ pub struct SetHealth {
 ///
 /// **One deliberate divergence: the lerp time is in milliseconds, not vanilla's
 /// ticks.** Vanilla writes `border.getLerpTime()` — the extent's remaining
-/// *server ticks* — directly (`ClientboundInitializeBorderPacket.java:32`),
+/// *server ticks* — directly (`ClientboundInitializeBorderPacket.java`),
 /// and the vanilla client re-runs that count as its own tick count. This
 /// crate's client instead decodes the field as `lerp_time_ms` and interpolates
 /// on
@@ -173,7 +173,7 @@ pub struct SetHealth {
 /// this crate's client already shows the same mismatch on this field.
 ///
 /// `old_size`/`new_size` are the extent's `getSize()` and `getLerpTarget()`
-/// (`ClientboundInitializeBorderPacket.java:35-38`) — for a static border they
+/// (`ClientboundInitializeBorderPacket.java`) — for a static border they
 /// are equal and the lerp time is 0.
 #[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
 #[mc(name = "minecraft:initialize_border", state = Play, bound = Client)]
@@ -222,7 +222,7 @@ pub struct SetBorderCenter {
 /// lerp time in **milliseconds** — the same deliberate divergence from the
 /// vanilla wire as [`InitializeBorder`]'s lerp time (see that packet's doc).
 /// Vanilla writes `border.getLerpTime()` — remaining *server ticks* — directly
-/// in both packets (`ClientboundSetBorderLerpSizePacket.java:20`, no ×50); this
+/// in both packets (`ClientboundSetBorderLerpSizePacket.java`, no ×50); this
 /// crate's client decodes the field as `lerp_time_ms` and interpolates on
 /// wall-clock, so the server converts ticks → ms before it reaches this
 /// encoder, which writes the ms value verbatim. A vanilla client served by
@@ -866,7 +866,7 @@ pub struct SetCarriedItem {
     pub slot: i16,
 }
 
-/// Serverbound `change_difficulty` packet (issue #268).
+/// Serverbound `change_difficulty` packet.
 ///
 /// Wire layout: a single VarInt difficulty ordinal
 /// (`ServerboundChangeDifficultyPacket`, `Difficulty.STREAM_CODEC` —
@@ -885,7 +885,7 @@ pub struct ChangeDifficultyServerbound {
 
 /// Clientbound `change_difficulty` packet — the confirmation
 /// [`crate::server_protocol::V770ServerProtocol::encode_change_difficulty`]
-/// sends back (issue #268).
+/// sends back.
 ///
 /// Wire layout: VarInt difficulty ordinal, then a `locked` bool
 /// (`ClientboundChangeDifficultyPacket`).
@@ -901,7 +901,7 @@ pub struct ChangeDifficultyClientbound {
     pub locked: bool,
 }
 
-/// Serverbound `lock_difficulty` packet (issue #268).
+/// Serverbound `lock_difficulty` packet.
 ///
 /// Wire layout: a single bool (`ServerboundLockDifficultyPacket`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
@@ -929,7 +929,7 @@ pub struct GameRuleEntry {
     pub value: String,
 }
 
-/// Serverbound `set_game_rule` packet (issue #268).
+/// Serverbound `set_game_rule` packet.
 ///
 /// Wire layout: a VarInt-prefixed list of [`GameRuleEntry`]
 /// (`ServerboundSetGameRulePacket`).
@@ -942,7 +942,7 @@ pub struct SetGameRule {
 
 /// Clientbound `game_rule_values` packet — the confirmation
 /// [`crate::server_protocol::V770ServerProtocol::encode_game_rule_values`]
-/// sends back (issue #268). Vanilla's own struct carries the *whole* current
+/// sends back. Vanilla's own struct carries the *whole* current
 /// rule table as a map (`ClientboundGameRuleValuesPacket`); this crate has no
 /// default rule set to include the rest of, so
 /// `V770ServerProtocol::encode_game_rule_values` only ever sends the entries
@@ -1062,7 +1062,7 @@ pub struct PickItemFromEntity {
 }
 
 /// Clientbound `set_held_slot` packet — the server's answer to a middle-click
-/// pick (issue #558), resynchronising the client's selected hotbar slot after
+/// pick, resynchronising the client's selected hotbar slot after
 /// `ServerGamePacketListenerImpl::tryPickItem`. Also the packet a real
 /// vanilla server sends for any other server-initiated selection change; this
 /// crate's client already decodes it into `ClientEvent::HeldSlotChanged`

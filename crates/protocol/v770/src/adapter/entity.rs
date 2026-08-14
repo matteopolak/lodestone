@@ -405,7 +405,7 @@ fn handle_add_entity(
     }
 
     // Same synthesis, same reason, for a creeper's three fields
-    // (`Creeper.java:100-102`: `entityData.define(DATA_SWELL_DIR, -1)` /
+    // (`Creeper.java`: `entityData.define(DATA_SWELL_DIR, -1)` /
     // `DATA_IS_POWERED, false` / `DATA_IS_IGNITED, false`). An ordinary,
     // uncharged, unlit creeper is *entirely* at its accessors' defaults, so a
     // real spawn's initial `set_entity_data` never mentions any of the three —

@@ -5,11 +5,10 @@
 //!
 //! During Configuration the server sends one `registry_data` packet **per
 //! synchronized registry** — measured 29 on the creative oracle, matching
-//! `RegistryDataLoader::SYNCHRONIZED_REGISTRIES` exactly. Until issue #288 this
-//! client dropped every one of them on the floor, so anything the server
+//! `RegistryDataLoader::SYNCHRONIZED_REGISTRIES` exactly. This
+//! client used to drop every one of them on the floor, so anything the server
 //! declares by registry rather than by name had to be hardcoded: chunk column
-//! heights, sky light, the day/night clock. That is the whole bug class #288
-//! names.
+//! heights, sky light, the day/night clock.
 //!
 //! Two surprises from the measured set, both of which would break a lookup by
 //! guessed name:
@@ -255,7 +254,7 @@ impl DimensionType {
 /// to decide rain versus snow per biome, plus `downfall` for a future
 /// `lodestone_assets::BiomeTint` implementor.
 ///
-/// Read from `Biome.ClimateSettings.CODEC` (`Biome.java:358-368`), the same
+/// Read from `Biome.ClimateSettings.CODEC` (`Biome.java`), the same
 /// top-level compound `has_precipitation`/`temperature`/`downfall` live in —
 /// **not** under `attributes` like [`biome_sky_color`]'s field. This is a
 /// **data-pack** registry like the rest of the biome table: a pack can change
@@ -265,7 +264,7 @@ impl DimensionType {
 ///
 /// `temperature_modifier` (`"none"`/`"frozen"`) and the per-block height
 /// falloff above `sea_level + 17` are both real inputs to vanilla's exact
-/// `getHeightAdjustedTemperature` (`Biome.java:112-121`) and neither is decoded
+/// `getHeightAdjustedTemperature` (`Biome.java`) and neither is decoded
 /// here — this is the same documented approximation
 /// `docs/worldgen-biomes.md`'s `cold_enough_to_snow` gotcha already describes
 /// for the *server*-side climate table, carried over to the client-side one
@@ -278,7 +277,7 @@ pub struct BiomeClimate {
     pub has_precipitation: bool,
     /// `temperature`, declared (not height-adjusted). `>= 0.15` is rain,
     /// otherwise snow, when `has_precipitation` is `true`
-    /// (`Biome.warmEnoughToRain`, `Biome.java:175-176`).
+    /// (`Biome.warmEnoughToRain`, `Biome.java`).
     pub temperature: f32,
     /// `downfall`, `0.0..=1.0`. Feeds the grass/foliage colormap sample
     /// alongside `temperature`; not consulted for precipitation.
@@ -336,7 +335,7 @@ pub struct ClientRegistries {
     ///
     /// The *names* of these entries still live in [`Self::other`] like every
     /// other unmodelled registry; only this one attribute is lifted out, because
-    /// only this one has a consumer (the sky disc's tint, issue #96).
+    /// only this one has a consumer (the sky disc's tint).
     biome_sky_colors: Vec<Option<u32>>,
     /// `minecraft:worldgen/biome` climates (`has_precipitation`/`temperature`/
     /// `downfall`), in registry order: index `i` is holder id `i`, exactly as
@@ -447,7 +446,8 @@ impl ClientRegistries {
     }
 
     /// Whether any `registry_data` has been folded in yet. `false` means the
-    /// caller must use its pre-#288 fallback: the fields are absent, not empty.
+    /// caller must use its no-registries fallback: the fields are absent, not
+    /// empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.dimension_types.is_empty() && self.world_clocks.is_empty() && self.other.is_empty()
@@ -755,7 +755,7 @@ mod tests {
     #[test]
     fn a_dimension_type_missing_has_skylight_is_an_error_not_a_default() {
         // `has_skylight` is `fieldOf`, not `optionalFieldOf`, in vanilla's codec.
-        // Defaulting it would be the #34 bug in a new place: an unparseable
+        // Defaulting it would be the same class of bug as the sky-light height gap, in a new place: an unparseable
         // entry must read as "unknown", so the adapter falls back, rather than
         // as "the overworld".
         let err = DimensionType::from_nbt(&Nbt::Compound(vec![(

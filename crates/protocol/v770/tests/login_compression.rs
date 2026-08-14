@@ -1,4 +1,4 @@
-//! Issue #273 (compression half): `V770ServerProtocol::login_success` must
+//! The compression half: `V770ServerProtocol::login_success` must
 //! enable compression in the same order vanilla does — the
 //! `login_compression` packet **uncompressed**, then the switch, then
 //! `login_finished` **compressed** — or the two sides disagree about which

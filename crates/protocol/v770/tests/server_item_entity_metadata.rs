@@ -1,4 +1,4 @@
-//! Acceptance gate for issue #537: **our own server** telling a client what a
+//! Acceptance gate: **our own server** telling a client what a
 //! dropped item entity is, byte-checked against a packet captured off a real
 //! vanilla 26.2 server.
 //!
@@ -30,7 +30,7 @@
 //!
 //! The index itself has a **second**, independent outside source: the
 //! `EntityDataIndexOracle` dump already in the tree
-//! (`tests/support/entity_data_index_jvm.txt:55` — `8 ItemEntity.DATA_ITEM 7
+//! (`tests/support/entity_data_index_jvm.txt` — `8 ItemEntity.DATA_ITEM 7
 //! ITEM_STACK`), produced by booting the real 26.2 server headlessly. Index 8 is
 //! the most contended index in that dump (nineteen claimants), and see
 //! `server_protocol.rs`'s `METADATA_IDX_ITEM_ENTITY_ITEM` for why the separating
@@ -41,7 +41,7 @@
 //! A client draws nothing for an item entity whose stack it has not been told:
 //! vanilla's `ItemEntityRenderer.submit` returns early on
 //! `state.item.isEmpty()`, and this project's own client does the same. Before
-//! #537 our server sent `EntitySnapshot::metadata: Vec::new()` for every drop,
+//! this was fixed, our server sent `EntitySnapshot::metadata: Vec::new()` for every drop,
 //! so a broken block spawned a real item entity that fell, merged and could be
 //! picked up — the pickup *visibly*, since the inventory slot updates — while
 //! drawing zero pixels. Every link on that path read green.
@@ -133,7 +133,7 @@ fn our_server_encodes_a_dropped_diamond_exactly_as_vanilla_does() {
 }
 
 /// The same bytes, back through the **real client adapter** — the decoder that
-/// was already validated against live vanilla captures before #537 existed, so
+/// was already validated against live vanilla captures before this fix existed, so
 /// it is not co-authored with the encoder under test.
 ///
 /// This is the "reaches a consumer" half: the client's own `ClientEvent` must
@@ -182,7 +182,7 @@ fn the_real_client_adapter_reads_our_bytes_back_as_the_right_stack() {
 
 /// **The control for the two gates above, and it fails their assertion.**
 ///
-/// The pre-#537 behaviour was not "a wrong item field" — it was *no field at
+/// The old behaviour was not "a wrong item field" — it was *no field at
 /// all*: `MobSim::snapshots` set `metadata: Vec::new()` for every drop. So the
 /// thing the gates must be able to detect is an empty field list, and this
 /// asserts exactly what that produces: [`ServerDirective::None`], no packet,

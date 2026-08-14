@@ -1,4 +1,4 @@
-//! End-to-end gate for #469: **a message typed by connection A reaches
+//! End-to-end gate: **a message typed by connection A reaches
 //! connection B's wire, carrying both the text and the sender.**
 //!
 //! # What makes this non-vacuous
@@ -32,7 +32,7 @@
 //! # The sender receives their own message
 //!
 //! Checked against the jar rather than assumed:
-//! `PlayerList.broadcastChatMessage` (`PlayerList.java:738-753`) loops
+//! `PlayerList.broadcastChatMessage` (`PlayerList.java`) loops
 //! `for (ServerPlayer player : this.players)` with no sender exclusion, and a
 //! vanilla client does not echo its own chat locally — it waits for the
 //! server. So A must see A's own message too, and this test asserts it.
@@ -74,7 +74,8 @@ impl ChunkSource for AirSource {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). `ChunkSource::set_block` has no default, so this is
+    // stated explicitly rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }

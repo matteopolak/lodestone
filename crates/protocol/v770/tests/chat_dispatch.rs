@@ -155,8 +155,8 @@ fn player_chat_signed_surfaces_ack_info() {
         })] => {
             assert_eq!(text.to_plain_string(), "hello world");
             assert_eq!(*kind, ChatKind::Chat);
-            // The wire sender UUID must reach `ClientEvent::Chat` — issue
-            // #419's filter key. `player_chat` writes a nil sender, so the
+            // The wire sender UUID must reach `ClientEvent::Chat` — it is
+            // the chat-ack filter key. `player_chat` writes a nil sender, so the
             // expected value is exact, not a `is_some` direction.
             assert_eq!(*sender, Some(uuid::Uuid::nil()));
             let ChatAckInfo {

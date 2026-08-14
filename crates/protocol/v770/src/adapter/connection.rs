@@ -122,8 +122,8 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::PongReceived { time })]);
         }
         if packet_id == play::clientbound::UPDATE_TAGS {
-            // Same wire shape and override as the Configuration-state arm
-            // (issue #296) — vanilla can resend tags in Play too (e.g. a
+            // Same wire shape and override as the Configuration-state arm —
+            // vanilla can resend tags in Play too (e.g. a
             // reload), and `ClientCommonPacketListener::handleUpdateTags` is
             // shared by both states in the decompiled source.
             decode_update_tags(payload)?;
@@ -136,8 +136,8 @@ impl V770Adapter {
             // BundleDelimiterPacket.java`) — vanilla's own pipeline
             // (`BundlerInfo.java`) never puts a body on the wire for it either;
             // it is purely a toggle the pipeline uses to group the packets
-            // between two delimiters into one atomic apply. Issue #299: before
-            // this arm, `BUNDLE_DELIMITER` fell through to the catch-all below
+            // between two delimiters into one atomic apply. Before
+            // this arm existed, `BUNDLE_DELIMITER` fell through to the catch-all below
             // and decoded to zero directives, silently and safely (each real
             // packet is still independently length-framed by the transport, so
             // nothing about framing was ever at risk) — the actual gap was that
@@ -171,7 +171,7 @@ impl V770Adapter {
 /// `ClientRegistries::BIOME` — the registry's own resource key, not a name we
 /// invent.
 const BLOCK_REGISTRY_KEY: &str = "minecraft:block";
-/// Decodes `update_tags` (issue #296), shared by the Configuration and Play
+/// Decodes `update_tags`, shared by the Configuration and Play
 /// states — `ClientboundUpdateTagsPacket` is a `ClientCommonPacketListener`
 /// packet with one wire shape used in both
 /// (`.cache/mc/26.2/src/net/minecraft/network/protocol/common/ClientboundUpdateTagsPacket.java`):
@@ -247,8 +247,8 @@ fn decode_update_tags(payload: &[u8]) -> Result<(), AdapterError> {
 
 /// Decodes a clientbound `custom_payload`: a channel identifier followed by
 /// however many bytes remain in the packet (`ClientboundCustomPayloadPacket`).
-/// Shared by the Configuration and Play states — issue #301 found
-/// Configuration had no arm for this at all; only Play did.
+/// Shared by the Configuration and Play states — Configuration used to have
+/// no arm for this at all; only Play did.
 ///
 /// Only `minecraft:brand` gets a specially-typed codec in vanilla (a single
 /// UTF-8 string); every other channel is `DiscardedPayload`, which just
@@ -298,8 +298,8 @@ fn decode_custom_query(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 
 /// Decodes a clientbound `cookie_request`: a single identifier key, no other
 /// fields (`ClientboundCookieRequestPacket`, `ClientCookiePacketListener`).
-/// Shared by the Login, Configuration and Play states — issue #291's
-/// "aren't handled in `handle_login` at all" applied equally to
+/// Shared by the Login, Configuration and Play states — the same "aren't
+/// handled in `handle_login` at all" gap applied equally to
 /// `handle_configuration`, which also had no arm for this before now, only
 /// `handle_play` did.
 fn decode_cookie_request(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
@@ -363,12 +363,12 @@ impl V770Adapter {
             return Ok(vec![Directive::Disconnect(Text::literal(body.reason))]);
         }
         if packet_id == login::clientbound::COOKIE_REQUEST {
-            // Issue #291: this state had no arm at all before now, a
+            // This state had no arm at all before now, a
             // different code path from the Play-state one below.
             return decode_cookie_request(payload);
         }
         if packet_id == login::clientbound::CUSTOM_QUERY {
-            // Issue #301: zero decode existed for this at all. See
+            // Zero decode existed for this at all before now. See
             // `decode_custom_query`'s own doc for why the reply is
             // unconditionally empty, matching vanilla's own client.
             return decode_custom_query(payload);
@@ -388,7 +388,7 @@ impl V770Adapter {
             )?]);
         }
         if packet_id == configuration::clientbound::REGISTRY_DATA {
-            // Issue #288: this arm did not exist, so 29 registries a join hit
+            // This arm used to not exist, so 29 registries a join hit
             // the `Ok(Vec::new())` fall-through below and dimension heights, sky
             // light and the day clock were all hardcoded by level name instead.
             //
@@ -422,7 +422,7 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Ping { id: ping.id })]);
         }
         if packet_id == configuration::clientbound::UPDATE_TAGS {
-            // Issue #296: block/item tags were always hardcoded from the
+            // Block/item tags used to always be hardcoded from the
             // vanilla census; this installs the server's own `minecraft:block`
             // tag set as an override — see `decode_update_tags`'s own doc for
             // the wire shape and `lodestone_data::tool`'s module docs for why
@@ -431,13 +431,13 @@ impl V770Adapter {
             return Ok(Vec::new());
         }
         if packet_id == configuration::clientbound::COOKIE_REQUEST {
-            // Issue #291: also missing here, not just in `handle_login` — the
-            // issue named Login and Play explicitly; Configuration had the
+            // Also missing here, not just in `handle_login` — a fix
+            // named Login and Play explicitly; Configuration had the
             // identical gap.
             return decode_cookie_request(payload);
         }
         if packet_id == configuration::clientbound::CUSTOM_PAYLOAD {
-            // Issue #301: only `handle_play` decoded this before now; a
+            // Only `handle_play` decoded this before now; a
             // server that sends plugin messages during Configuration (the
             // vanilla mod-handshake window, before `minecraft:brand` is even
             // announced by some servers) hit the fall-through below and lost
@@ -445,7 +445,7 @@ impl V770Adapter {
             return decode_custom_payload(payload);
         }
         if packet_id == configuration::clientbound::RESOURCE_PACK_PUSH {
-            // Issue #294: `handle_play` decoded this before now; vanilla
+            // `handle_play` decoded this before now; vanilla
             // servers commonly push a required resource pack during
             // Configuration, before the client reaches Play, and the
             // fall-through below dropped it silently. Wire format is
@@ -472,7 +472,7 @@ impl V770Adapter {
             })]);
         }
         if packet_id == configuration::clientbound::RESOURCE_PACK_POP {
-            // Issue #294, same story as `RESOURCE_PACK_PUSH` just above: the
+            // Same story as `RESOURCE_PACK_PUSH` just above: the
             // pop for a pack pushed during Configuration never arrived at the
             // client before now.
             let mut reader = Reader::new(payload);

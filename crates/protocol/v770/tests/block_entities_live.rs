@@ -38,7 +38,7 @@ use lodestone_v770::{V770ServerProtocol, adapter};
 /// `server_inventory_live.rs` makes for its own `AirSource`. **Unlike**
 /// that one, this one needs `set_block`/`block_state` overrides: this test
 /// asserts the placement's *effect* (a real furnace block on the wire), and
-/// `ChunkSource::set_block` has no default since issue #440 — an implementor
+/// `ChunkSource::set_block` has no default — an implementor
 /// must choose explicitly, and a source with no retention cannot persist the
 /// edit (the same trap `WorldgenChunkSource`'s `todo!()` documents for the
 /// solidity-only transport source). Caught by running this test the first
@@ -103,8 +103,8 @@ fn stack(name: &str, count: u32) -> ItemStack {
 ///
 /// It used to compute "the lowest id sharing the block name", the same thing
 /// `server_protocol.rs`'s `resolve_state_id` used to do — and it broke, with a
-/// 30-second *timeout* rather than a mismatch, the moment issue #546 fixed that
-/// fallback to resolve a bare name to the block's real default state. Lowest-id
+/// 30-second *timeout* rather than a mismatch, the moment that
+/// fallback was fixed to resolve a bare name to the block's real default state. Lowest-id
 /// disagrees with the marked default for 661 of 797 multi-state blocks, and
 /// `minecraft:furnace` is one of them. So the expectation now comes from
 /// `lodestone_data::snow_support::is_default_state` — vanilla's own
@@ -286,7 +286,7 @@ async fn real_client_places_a_furnace_and_the_server_registers_it() {
 /// branch, not a registry that inserts on every placement regardless of what
 /// was held.
 ///
-/// Before #466 this asserted the *stone* fallback, which was the pre-existing
+/// This used to assert the *stone* fallback, which was the pre-existing
 /// behaviour: `block_entity_for_item`'s `None` arm wrote `minecraft:stone`
 /// for anything it did not recognise. That arm was the path every ordinary
 /// block took, so it was removed; a held item that places no block now leaves
@@ -398,12 +398,12 @@ async fn placing_with_an_empty_hand_places_nothing_and_registers_nothing() {
     assert_eq!(
         handle.block_at(target_pos),
         Some(air_id),
-        "an empty hand must place nothing at all (#466)"
+        "an empty hand must place nothing at all"
     );
     assert_ne!(
         handle.block_at(target_pos),
         Some(stone_id),
-        "an empty hand must not fall back to stone (#466)"
+        "an empty hand must not fall back to stone"
     );
 
     handle.shutdown();

@@ -18,7 +18,7 @@ impl V770Adapter {
                 AdapterError::Decode(format!("invalid dimension {}", body.dimension))
             })?;
             // The biome registry's sky colours, indexed by holder id — the
-            // integer a chunk section's biome palette stores (issue #96).
+            // integer a chunk section's biome palette stores.
             // Emitted here rather than off `registry_data` itself for the same
             // reason `DimensionTypeChanged` is: `Login` is the point at which
             // the Configuration set is known complete, and re-entering
@@ -30,9 +30,10 @@ impl V770Adapter {
                 .ok()
                 .map(|registries| registries.biome_sky_colors().to_vec())
                 .unwrap_or_default();
-            // The same registry generation's climate table (issue #25/#26's
-            // shared biome lane), emitted at the same point and for the same
-            // reason as `biome_sky_colors` just above — see `BiomeClimates`'s
+            // The same registry generation's climate table (the shared biome
+            // lane the `chunks_biomes` seam also uses), emitted at the same
+            // point and for the same reason as `biome_sky_colors` just above
+            // — see `BiomeClimates`'s
             // own doc for why this is a second variant rather than two more
             // fields on `BiomeVisuals`.
             let (biome_temperatures, biome_downfall, biome_has_precipitation) = self
@@ -52,11 +53,12 @@ impl V770Adapter {
                 })
                 .unwrap_or_default();
             // The same registry generation's entry *names*, indexed by holder
-            // id exactly like the two tables above (follow-up to issue #96 /
-            // `eb423ac`) — see `ClientEvent::BiomeRegistryNames`'s own doc for
+            // id exactly like the two tables above (a follow-up to the biome
+            // sky-colour and climate lanes above, `eb423ac`) — see
+            // `ClientEvent::BiomeRegistryNames`'s own doc for
             // why the mesher's `FALLBACK_BIOME_NAMES` fallback is otherwise
             // wrong against a third-party server. `entry_names` already
-            // decodes this correctly (it has since #288); nothing before this
+            // decodes this correctly; nothing before this
             // change carried it past this crate.
             let biome_names = self
                 .registries
@@ -281,8 +283,8 @@ impl V770Adapter {
             world.set_block(pos.x, pos.y, pos.z, state);
             // Writing a block state is what creates (or destroys) a block
             // entity: vanilla does it inside `LevelChunk.setBlockState`, with no
-            // packet involved (`LevelChunk.java:341`). Skipping this is issue
-            // #374 — a placed chest with a state, no record, and zero pixels,
+            // packet involved. Skipping this leaves
+            // a placed chest with a state, no record, and zero pixels,
             // which still *opened* because interaction reads the state.
             // `World::sync_block_entity` documents the create/keep/replace/remove
             // rule; the `Option` is the version-specific half.
@@ -335,9 +337,9 @@ impl V770Adapter {
             // Every state write goes through `sync_block_entity`, one call per
             // changed cell, for the same reason `BLOCK_UPDATE` does: in vanilla
             // `LevelChunk.setBlockState` is what creates and removes block
-            // entities, no packet involved (`LevelChunk.java:308-348`). A piston
+            // entities, no packet involved. A piston
             // or a `/fill` arrives here rather than as N `BLOCK_UPDATE`s, so
-            // skipping it would leave exactly the #374 bug for bulk edits.
+            // skipping it would leave exactly the same missing-block-entity bug for bulk edits.
             // Section-relative coordinates back to absolute — `set_blocks` does
             // the same conversion internally, but this seam takes absolute
             // coordinates because a block entity is keyed by world position.
@@ -370,13 +372,13 @@ impl V770Adapter {
             // mirroring BLOCK_UPDATE/SECTION_BLOCKS_UPDATE: a no-op if the owning
             // chunk is not currently loaded.
             //
-            // Since #374 this is what it is in vanilla — *data for an entity that
+            // This is what it is in vanilla — *data for an entity that
             // already exists*, created by the chunk packet's block-entity list or
             // by a state write through `sync_block_entity`. It nonetheless still
             // **creates** on a miss (`set_block_entity` is an upsert), which is a
             // deliberate divergence: vanilla's `handleBlockEntityData` drops the
             // payload when `getBlockEntity(pos, type)` is empty
-            // (`ClientPacketListener.java:1476`, `BlockGetter.java:27-30`) because
+            // (`ClientPacketListener.java`, `BlockGetter.java`) because
             // it has `pendingBlockEntities` to promote from later, and we do not.
             // The two failure modes are not symmetric: an orphan record whose
             // state is not a chest resolves to no material and draws nothing (see
@@ -481,8 +483,8 @@ impl V770Adapter {
             // `sky_darken` to a session constant. Re-anchor only on a real clock
             // update; otherwise extrapolate the held anchor at the server's own
             // rate. See `DayClock` and `SetTime::day_clock`.
-            // Which clock is "the" day clock is a *registry* question, and until
-            // #288 it was answered by "the lowest holder id present", which is
+            // Which clock is "the" day clock is a *registry* question, and it used
+            // to be answered by "the lowest holder id present", which is
             // the overworld clock in every dimension because vanilla registers
             // it first. In the End the right clock is `minecraft:the_end`
             // (holder 1) — see `ClientRegistries::world_clock_id`.
@@ -545,11 +547,11 @@ impl V770Adapter {
                         vec![Directive::Emit(ClientEvent::GameModeChanged { game_mode })]
                     })
                     .unwrap_or_default(),
-                // WIN_GAME (issue #192): exiting the End through the exit
+                // WIN_GAME: exiting the End through the exit
                 // portal after the dragon fight. Vanilla's own handler
-                // ignores `param` for this event and always opens the
-                // credits screen with `showCredits = true`
-                // (`ClientPacketListener.java:1548-1552`), so nothing from
+                // (`ClientPacketListener.handleGameEvent`'s `WIN_GAME` arm)
+                // ignores `param` for this event and always opens
+                // `WinScreen` with `poem = true`, so nothing from
                 // the wire needs to ride along — see `ClientEvent::WinGame`'s
                 // own doc.
                 4 => vec![Directive::Emit(ClientEvent::WinGame)],
@@ -989,7 +991,7 @@ fn decode_sound_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 
 /// The `explosion_emitter`/`explosion` particle registry ids — the two
 /// "simple" (argument-less) particle types every `Level.explode` call site
-/// passes as `explosionParticle` (`Level.java:593,619,645`, all
+/// passes as `explosionParticle` (`Level.java`, all
 /// `ParticleTypes.EXPLOSION_EMITTER`; `ServerExplosion`'s small/large split
 /// can also choose `ParticleTypes.EXPLOSION`).
 /// `ParticleTypes.STREAM_CODEC` dispatches on a registry id
@@ -1011,7 +1013,7 @@ const PARTICLE_ID_EXPLOSION: i32 = 30;
 /// Unlike a player's own block break (`e2544b9`: no level event is ever sent
 /// at all, and the sound is predicted), an explosion's sound rides explicitly
 /// on this packet's `explosionSound` field, and
-/// `ClientPacketListener.handleExplosion` (`ClientPacketListener.java:1357`)
+/// `ClientPacketListener.handleExplosion` (`ClientPacketListener.java`)
 /// does nothing but play exactly what the server sent, at a
 /// **client-rolled** pitch:
 ///
@@ -1040,12 +1042,12 @@ const PARTICLE_ID_EXPLOSION: i32 = 30;
 /// partial item-stack decode, deliberately, not an oversight.
 ///
 /// The flying block-debris particles (`blockParticles`) remain unimplemented
-/// for the reason above. The shockwave/smoke visual itself is issue #416:
+/// for the reason above. The shockwave/smoke visual itself is implemented:
 /// this decoder now also emits a `ClientEvent::Particles` directive for
 /// `explosion_emitter` (`ParticleTypes.EXPLOSION_EMITTER`, the id this
 /// packet actually carries — `HugeExplosionSeedParticle` is what schedules
 /// the follow-up `HugeExplosionParticle`s vanilla-side, per
-/// `docs/particle-catalogue.md`'s "Built, issue #416" entry), alongside the
+/// `docs/particle-catalogue.md`'s "Built" entry), alongside the
 /// existing `Sound` directive. `net.rs`/`sim.rs` need no new arm: this
 /// crate's `ClientEvent::Particles` already forwards generically into
 /// `Particles::spawn_particles`.
@@ -1073,7 +1075,7 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     // `blockParticles` follows and is deliberately not decoded — see the
     // function doc above. No `reader.ensure_empty()` call here on purpose.
     //
-    // Issue #416: the shockwave/smoke visual, alongside the sound below.
+    // The shockwave/smoke visual, alongside the sound below.
     // Always `explosion_emitter` regardless of which of the two ids this
     // packet carried — `HugeExplosionSeedParticle` is what schedules the
     // follow-up `HugeExplosionParticle`s client-side (see

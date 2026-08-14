@@ -20,7 +20,7 @@
 //! Of the ~20 tables that used to be generated into this crate, only
 //! [`packet_ids`] is wire format. Every other census (block collision,
 //! hardness, entity dimensions, item prototypes, ...) was extracted to
-//! [`lodestone_data`] (issue #361): it describes the game, not the protocol,
+//! [`lodestone_data`]: it describes the game, not the protocol,
 //! and a version-free consumer (`lodestone-server` in particular) can now
 //! read it without depending on this crate at all. [`adapter`]'s
 //! `VersionAdapter` impl is a thin seam over those tables for consumers that
@@ -45,7 +45,7 @@ pub mod adapter;
 pub mod chunk_batch;
 pub mod entity_variants;
 pub mod packets;
-/// Issue #275: the 27 synchronized `registry_data` payloads (of 29) this
+/// The 27 synchronized `registry_data` payloads (of 29) this
 /// crate relays as captured vanilla bytes rather than a typed encode, plus
 /// `update_tags` and `select_known_packs`. Not `pub`: only
 /// [`server_protocol`] calls into it.

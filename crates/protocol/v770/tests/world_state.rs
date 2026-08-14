@@ -119,7 +119,7 @@ fn handle_play_respawn_emits_respawned_event() {
             &respawn_golden(),
         )
         .expect("handle respawn");
-    // Two directives since issue #288: the dimension **type** (resolved against
+    // Two directives: the dimension **type** (resolved against
     // the ingested `registry_data`, `None` here because no registry was fed)
     // then the `Respawned` event, in that order.
     match directives.as_slice() {
@@ -407,7 +407,7 @@ fn handle_play_set_time_rejects_trailing_bytes() {
     assert!(result.is_err(), "a misaligned set_time must be rejected");
 }
 
-// --- The registry-resolved day clock (issue #288) --------------------------
+// --- The registry-resolved day clock ---------------------------------------
 
 /// A `respawn` body pointing at dimension-type holder `holder_id` and level
 /// `dimension`. Built off [`respawn_golden`] so the rest of the layout stays in
@@ -494,7 +494,7 @@ fn set_time_full_sync(game_time: i64, overworld_ticks: u32, end_ticks: u32) -> V
     bytes
 }
 
-/// Issue #288. In the End the day clock is `minecraft:the_end`, holder id `1`.
+/// In the End the day clock is `minecraft:the_end`, holder id `1`.
 /// `day_clock`'s lowest-holder-id pick returned holder `0` — the *overworld's*
 /// clock — in every dimension, so the End's sky followed overworld time. This is
 /// vanilla's default behaviour, not a data-pack edge case.
@@ -528,8 +528,9 @@ fn in_the_end_the_resolved_clock_is_the_end_clock_not_the_lowest_holder_id() {
 
 /// The control for the test above, and the reason it is evidence of anything:
 /// with **no** `registry_data` the very same packets select the lowest holder id,
-/// i.e. the overworld's `6_000`, in the End. That is the pre-#288 behaviour, and
-/// it is also the fallback a server sending no registries still has to get.
+/// i.e. the overworld's `6_000`, in the End. That is the old hardcoded
+/// behaviour, and it is also the fallback a server sending no registries still
+/// has to get.
 #[test]
 fn without_registry_data_the_end_still_falls_back_to_the_lowest_holder_id() {
     let adapter = V770Adapter::new();
@@ -537,7 +538,7 @@ fn without_registry_data_the_end_still_falls_back_to_the_lowest_holder_id() {
     assert_eq!(
         time_of_day_after(&adapter, &set_time_full_sync(1000, 6_000, 18_000)),
         6_000,
-        "no registry: the lowest-holder-id fallback, unchanged from before #288"
+        "no registry: the lowest-holder-id fallback, unchanged from before registry-driven resolution"
     );
 }
 
@@ -593,7 +594,7 @@ fn respawn_emits_the_dimension_type_before_the_respawned_event() {
             assert_eq!(info.name.to_string(), "minecraft:the_nether");
             assert!(
                 !info.has_skylight,
-                "this is the bit `sky_default_for_dimension` reads (#34)"
+                "this is the bit `sky_default_for_dimension` reads"
             );
             assert_eq!(info.min_y, 0);
             assert_eq!(info.height, 256);

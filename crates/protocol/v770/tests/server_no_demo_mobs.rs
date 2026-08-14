@@ -6,7 +6,7 @@
 //! `MobSim`'s only production path to a client-visible mob was
 //! `mobs::seed_demo_mobs`: a fixed ring of six, placed once around the world spawn
 //! at world open. `DEMO_SPECIES` says outright what it is for — "this exists purely
-//! so issue #217's actual subject, computed AI motion reaching the wire, has a
+//! so computed AI motion reaching the wire has a
 //! population to move" — and it lists the six in order: zombie, cow, wolf, blaze,
 //! **guardian**, creeper, one per roster family. `lodestone-shell/src/net.rs`
 //! passed `6`, so every new singleplayer world opened with a guardian flopping

@@ -1,4 +1,4 @@
-//! Live `registry_data` capture and gate (issue #288).
+//! Live `registry_data` capture and gate.
 //!
 //! Joins the flat creative 26.2 oracle (game :25570) and captures the **raw
 //! `registry_data` payloads the server itself authored** for
@@ -25,8 +25,8 @@
 //! the authoritative source for these two registries and are independent of both
 //! our decoder and our encoder.
 //!
-//! Note `generated/reports/registries.json` — which issue #288 names as the
-//! cross-check — **does not contain either registry**: both are data-pack
+//! Note `generated/reports/registries.json` — the obvious cross-check —
+//! **does not contain either registry**: both are data-pack
 //! registries loaded from JSON, so `registries.json` reports them as absent.
 //! The `client-src/data/.../dimension_type/*.json` files are the right oracle.
 
@@ -396,7 +396,7 @@ async fn registry_data_from_a_real_server_decodes_and_matches_mojangs_own_data()
 }
 
 /// The biome sky colours the server itself sent, checked entry by entry against
-/// Mojang's own biome JSONs (issue #96's fourth box).
+/// Mojang's own biome JSONs.
 ///
 /// Joins the same oracle as the gate above and reads
 /// `minecraft:worldgen/biome` — **not** `minecraft:biome`; `Registries.BIOME`'s
@@ -575,7 +575,7 @@ async fn biome_sky_colours_from_a_real_server_match_mojangs_own_biome_files() {
 }
 
 /// Live counterpart to `tests/registry_data.rs::biome_climates_resolve_by_holder_id_and_hold_place_for_a_bad_entry`
-/// (issue #25/#26's shared biome lane): captures the same real `registry_data`
+/// (the same shared biome lane): captures the same real `registry_data`
 /// bytes the sky-colour gate above does, but checks
 /// [`ClientRegistries::biome_climates`] against Mojang's own
 /// `has_precipitation`/`temperature`/`downfall` fields instead of
@@ -695,7 +695,7 @@ async fn biome_climates_from_a_real_server_match_mojangs_own_biome_files() {
     // running can still sanity-check this gate's shape: desert has no
     // precipitation and is warm; frozen_peaks has precipitation and is cold
     // enough to snow. Both read straight from the same JSON files above.
-    // `Biome.warmEnoughToRain`'s threshold (`Biome.java:175-176`), inlined
+    // `Biome.warmEnoughToRain`'s threshold (`Biome.java`), inlined
     // rather than a cross-crate import: this protocol crate must not depend on
     // `lodestone-render` for one constant, and `lodestone_render::
     // WARM_ENOUGH_TO_RAIN` already pins the same `0.15` from the same source.
@@ -721,7 +721,7 @@ async fn biome_climates_from_a_real_server_match_mojangs_own_biome_files() {
 
 /// `has_precipitation`/`temperature`/`downfall` as Mojang's own biome file
 /// declares them (top-level fields, siblings of `attributes` — see
-/// `Biome.ClimateSettings.CODEC`, `Biome.java:358-368`), or `None` if any of
+/// `Biome.ClimateSettings.CODEC`, `Biome.java`), or `None` if any of
 /// the three required fields is absent from the file.
 fn mojang_biome_climate(short_name: &str) -> Option<lodestone_v770::packets::registry::BiomeClimate> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -793,7 +793,7 @@ fn an_empty_registry_store_resolves_nothing() {
     assert!(registries.dimension_type(0).is_none());
     assert!(registries.dimension_type_by_name("minecraft:overworld").is_none());
     assert!(registries.world_clock_id("minecraft:overworld").is_none());
-    // #96: an empty biome table must read as "no biome registry", which the
+    // An empty biome table must read as "no biome registry", which the
     // shell renders as its dimension default. An empty *table* and a table of
     // `None`s mean the same thing to a consumer, and neither is a colour.
     assert!(registries.biome_sky_colors().is_empty());

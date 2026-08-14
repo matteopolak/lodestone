@@ -16,7 +16,7 @@
 //! static: the ids are stable for vanilla, and a static table needs no
 //! cross-phase state.
 //!
-//! Note that since issue #288 the cross-phase state *does* exist —
+//! Note that the cross-phase state *does* exist now —
 //! `crate::packets::registry::ClientRegistries` keeps the ordered entry names of
 //! every synchronized registry, these variant registries included — so switching
 //! a table here to a registry lookup is now a choice rather than a blocked one.

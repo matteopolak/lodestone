@@ -1,4 +1,4 @@
-//! Issue #277: our server answers the Status phase — server-list ping, MOTD,
+//! Our server answers the Status phase — server-list ping, MOTD,
 //! version, and pong.
 //!
 //! # Which implementation do these tests actually resolve to?
@@ -97,7 +97,8 @@ impl ChunkSource for UnusedSource {
     }
 
     // No storage: this fixture serves fresh columns and edits are discarded by
-    // design. Explicit rather than inherited — issue #440.
+    // design. `ChunkSource::set_block` has no default, so this is stated
+    // explicitly rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -136,7 +137,7 @@ fn read_status_json(payload: &[u8]) -> String {
          reports status_response_trailing_bytes = 0, and \
          ClientboundStatusResponsePacket's STREAM_CODEC is a single \
          lenientJson(32767) field with nothing after it \
-         (status/ClientboundStatusResponsePacket.java:16)",
+         (status/ClientboundStatusResponsePacket.java)",
         payload.len() - json.len(),
     );
     json
@@ -177,7 +178,7 @@ where
         .await
         .expect("handshake writes");
     // `status_request`: packet id 0, **empty** body — `StreamCodec.unit`
-    // (status/ServerboundStatusRequestPacket.java:10).
+    // (status/ServerboundStatusRequestPacket.java).
     for _ in 0..=extra_status_requests {
         client
             .write_packet(0, &[])
@@ -186,7 +187,7 @@ where
     }
     if let Some(time) = ping_time {
         // `ping_request`: packet id 1, a single big-endian i64
-        // (ping/ServerboundPingRequestPacket.java:19,23).
+        // (ping/ServerboundPingRequestPacket.java).
         let mut w = Writer::default();
         w.i64(time);
         client
@@ -199,7 +200,7 @@ where
     //
     // **This is not a convenience.** With no ping, our server — like vanilla's,
     // which only closes on a ping or a repeat request
-    // (`ServerStatusPacketListenerImpl.java:36,46`) — deliberately keeps the
+    // (`ServerStatusPacketListenerImpl.java`) — deliberately keeps the
     // connection open after answering a status request. An unbounded
     // `while let Ok(Some(..)) = read_packet()` therefore *deadlocks* here: both
     // ends hold the transport and neither will speak again. The first version of
@@ -318,7 +319,7 @@ async fn packet_ids_and_framing_match_a_live_vanilla_servers_own_reply() {
         "pong_response payload must be the same 8 bytes vanilla sent",
     );
     // Vanilla terminates a status connection after answering the ping
-    // (ServerStatusPacketListenerImpl.java:46); the capture observed exactly
+    // (ServerStatusPacketListenerImpl.java); the capture observed exactly
     // that (`server_closed_after_pong: true`, `bytes_after_pong: 0`).
     assert!(
         capture["server_closed_after_pong"] == serde_json::Value::Bool(true),
@@ -335,7 +336,7 @@ async fn packet_ids_and_framing_match_a_live_vanilla_servers_own_reply() {
 ///
 /// The live capture confirms verbatim echo for one value
 /// (`echo_is_verbatim: true`); `ClientboundPongResponsePacket` writes the same
-/// `long` it read (`ping/ClientboundPongResponsePacket.java:14,18`), so every
+/// `long` it read (`ping/ClientboundPongResponsePacket.java`), so every
 /// value must survive. This is a *magnitude*-species guard: asserting merely
 /// that some 8 bytes came back would pass for a server that always echoed zero.
 #[tokio::test]
@@ -396,7 +397,7 @@ async fn status_json_carries_every_key_the_live_vanilla_document_did() {
         assert!(
             ours_obj.contains_key(key),
             "our status document is missing `{key}`, which a live vanilla 26.2 \
-             server sent (ServerStatus.java:24-33). Present: {:?}",
+             server sent (ServerStatus.java). Present: {:?}",
             ours_obj.keys().collect::<Vec<_>>(),
         );
     }
@@ -425,22 +426,22 @@ async fn status_json_carries_every_key_the_live_vanilla_document_did() {
     assert!(
         ours["players"]["max"].is_i64() && ours["players"]["online"].is_i64(),
         "players.max/online must be JSON integers (Codec.INT, \
-         ServerStatus.java:55-56), got {:?}",
+         ServerStatus.java), got {:?}",
         ours["players"],
     );
     assert!(
         ours["version"]["protocol"].is_i64(),
         "version.protocol must be a JSON integer (Codec.INT, \
-         ServerStatus.java:66)",
+         ServerStatus.java)",
     );
     assert!(
         ours["version"]["name"].is_string(),
-        "version.name must be a JSON string (Codec.STRING, ServerStatus.java:66)",
+        "version.name must be a JSON string (Codec.STRING, ServerStatus.java)",
     );
     assert!(
         ours["players"]["sample"].is_array(),
         "players.sample must be a JSON array (NameAndId.CODEC.listOf(), \
-         ServerStatus.java:57)",
+         ServerStatus.java)",
     );
 }
 
@@ -477,7 +478,7 @@ async fn status_json_reports_the_real_motd_cap_version_and_protocol() {
 
     // Both optional-with-a-default fields must be *absent*, not present-and-
     // empty. `Favicon.CODEC` errors with "Unknown format" on any string lacking
-    // the `data:image/png;base64,` prefix (ServerStatus.java:38-40), so an
+    // the `data:image/png;base64,` prefix (ServerStatus.java), so an
     // empty-string favicon would make a real client reject the whole document;
     // and the live capture omits both keys entirely.
     assert!(
@@ -486,7 +487,7 @@ async fn status_json_reports_the_real_motd_cap_version_and_protocol() {
     );
     assert!(
         !ours.as_object().unwrap().contains_key("enforcesSecureChat"),
-        "enforcesSecureChat defaults to false (ServerStatus.java:30) and vanilla \
+        "enforcesSecureChat defaults to false (ServerStatus.java) and vanilla \
          omits it; the live capture has no such key",
     );
 }
@@ -520,7 +521,7 @@ async fn our_own_real_server_status_parser_accepts_the_document() {
 /// A second status request on one connection is a disconnect, not a second
 /// reply — `ServerStatusPacketListenerImpl.handleStatusRequest` guards on
 /// `hasRequestedStatus` and calls `connection.disconnect` otherwise
-/// (`ServerStatusPacketListenerImpl.java:17,35-40`).
+/// (`ServerStatusPacketListenerImpl.java`).
 #[tokio::test]
 async fn a_second_status_request_terminates_the_connection() {
     let (sent, outcome) = status_exchange(V770ServerProtocol, None, 1).await;
@@ -538,7 +539,7 @@ async fn a_second_status_request_terminates_the_connection() {
 
 /// A ping with no preceding status request is still answered. Vanilla's
 /// `handlePingRequest` has no `hasRequestedStatus` guard at all
-/// (`ServerStatusPacketListenerImpl.java:44-47`) — so neither may we, or a
+/// (`ServerStatusPacketListenerImpl.java`) — so neither may we, or a
 /// latency-only probe gets nothing.
 #[tokio::test]
 async fn a_ping_with_no_preceding_status_request_is_still_answered() {
@@ -551,7 +552,7 @@ async fn a_ping_with_no_preceding_status_request_is_still_answered() {
 
 /// A `status_request` carrying a body is malformed and must be dropped, not
 /// answered. Its codec is `StreamCodec.unit`
-/// (`status/ServerboundStatusRequestPacket.java:10`) — the body is empty by
+/// (`status/ServerboundStatusRequestPacket.java`) — the body is empty by
 /// construction, so bytes in it mean a peer that is not speaking this protocol.
 #[tokio::test]
 async fn a_status_request_with_a_body_is_dropped_rather_than_answered() {
@@ -591,7 +592,7 @@ async fn a_status_request_with_a_body_is_dropped_rather_than_answered() {
 /// **Negative control.** The same exchange, against a protocol that decodes the
 /// Status packets correctly but leaves the two encoders at their
 /// [`ServerProtocol`] defaults — i.e. the server exactly as it behaved before
-/// issue #277.
+/// Status responses were wired up.
 ///
 /// It must send **zero** packets. If this ever passes *and* the positive tests
 /// above also pass, the positive tests are measuring something other than the
@@ -669,7 +670,7 @@ async fn favicon_is_a_data_uri_whose_base64_matches_the_os_encoder() {
             favicon,
             format!("data:image/png;base64,{expected}"),
             "favicon must be the mandatory `data:image/png;base64,` prefix \
-             (ServerStatus.java:36) followed by exactly what base64(1) produces \
+             (ServerStatus.java) followed by exactly what base64(1) produces \
              for {bytes:?}",
         );
         // And, for a real PNG, our own real-server favicon decoder must recover
@@ -697,7 +698,7 @@ async fn favicon_is_a_data_uri_whose_base64_matches_the_os_encoder() {
 /// uuid string form.
 ///
 /// `NameAndId.CODEC` writes the id through `UUIDUtil.STRING_CODEC`
-/// (`server/players/NameAndId.java:12-13`) — a string, not the two-longs array a
+/// (`server/players/NameAndId.java`) — a string, not the two-longs array a
 /// packet field would use. The live capture's own sample entry is
 /// `{"id": "00000000-0000-0000-0000-000000000000", "name": "Anonymous Player"}`,
 /// which pins both the keys and the format.
@@ -776,6 +777,6 @@ async fn enforces_secure_chat_is_written_only_when_true() {
     assert_eq!(
         value["enforcesSecureChat"],
         serde_json::Value::Bool(true),
-        "an enforcing server must say so (ServerStatus.java:30)",
+        "an enforcing server must say so (ServerStatus.java)",
     );
 }

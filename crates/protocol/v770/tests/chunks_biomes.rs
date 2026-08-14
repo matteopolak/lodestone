@@ -1,4 +1,4 @@
-//! Hermetic framing tests for `minecraft:chunks_biomes` (id `13`, issue #26).
+//! Hermetic framing tests for `minecraft:chunks_biomes` (id `13`).
 //!
 //! `ClientboundChunksBiomesPacket` (`.cache/mc/26.2/src/net/minecraft/network/
 //! protocol/game/ClientboundChunksBiomesPacket.java`) carries a VarInt-prefixed

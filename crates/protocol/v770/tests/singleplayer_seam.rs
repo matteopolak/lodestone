@@ -1,5 +1,5 @@
 //! The **registry seam** for singleplayer, driven end-to-end to a joined
-//! session (issue #287).
+//! session.
 //!
 //! `server_liveness.rs` already proves the real client can join the real
 //! [`V770ServerProtocol`] over an in-memory duplex — but it names

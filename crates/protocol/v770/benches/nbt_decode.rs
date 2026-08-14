@@ -1,4 +1,4 @@
-//! NBT decode-throughput benchmark (issue #78 epic, sub-issue #142).
+//! NBT decode-throughput benchmark.
 //!
 //! Exercises `lodestone_core::read_network_nbt`, the decoder every
 //! NBT-carrying field in every protocol crate goes through (item components,

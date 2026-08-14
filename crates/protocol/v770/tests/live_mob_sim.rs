@@ -1,6 +1,5 @@
-//! End-to-end acceptance gate for issue #217: a real `lodestone-client`
-//! observes a **real, AI-ticked** [`lodestone_server::MobSim`] — not a
-//! hand-mutated stand-in.
+//! End-to-end acceptance gate: a real `lodestone-client` observes a **real,
+//! AI-ticked** [`lodestone_server::MobSim`] — not a hand-mutated stand-in.
 //!
 //! `tests/entity_streaming_live.rs` already proved the spawn/update/remove
 //! *wire pipeline* (encode/decode/client fold) end to end, but explicitly
@@ -68,8 +67,8 @@
 //!
 //! Reporting a position is only half of it: the position has to be somewhere the
 //! mobs are. `v770`'s `begin_play` teleports a joining client to a hardcoded
-//! `(8, ~64, 8)` (issue #461: spawn Y is terrain-derived via
-//! `PlayerSpawnFinder.getLevelRespawnPos`, and
+//! `(8, ~64, 8)` (spawn Y is meant to be terrain-derived via
+//! `PlayerSpawnFinder.getLevelRespawnPos`, matching
 //! the `spawn_x`/`spawn_y`/`spawn_z` literals it must agree with), and there is
 //! no terrain-derived spawn anywhere in the server. This gate's floor used to be
 //! at y=0 inside a world of `-64..=63`, so the reported player sat **100 blocks
@@ -88,7 +87,7 @@
 //!
 //! The hardcoded spawn altitude is a real defect in its own right — on normal
 //! terrain, whose surface is nearer y=64, it puts every joining player in the air
-//! by construction — but it is filed separately (#461) and now fixed: spawn Y
+//! by construction — but it is a separate defect, now fixed: spawn Y
 //! comes from `PlayerSpawnFinder.getLevelRespawnPos` and `begin_play_at` carries
 //! the terrain-derived position through the protocol seam.
 
@@ -172,9 +171,9 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
     // instances of the same deterministic generator — one for the terrain the
     // client is streamed, one for the terrain the mob sim paths over — which was
     // observationally equivalent and generated the whole mob area twice at world
-    // open (issue #454). Since #436 there is one parameter and one source, so the
-    // mob sim paths over the byte-identical terrain the client was sent rather
-    // than over a second copy that merely agrees.
+    // open. Now there is one parameter and one source, so the mob sim paths over
+    // the byte-identical terrain the client was sent rather than over a second
+    // copy that merely agrees.
     let source = WorldgenChunkSource::new(floor_density(), min_y, height);
 
     let mob_count = 3;
@@ -223,7 +222,7 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
         mob_ids.len(),
         "not every demo mob reached the client within 60s"
     );
-    // **Issue #457's wire assertion.** `seed_demo_mobs` used to be a hardcoded
+    // **The streamed-species wire assertion.** `seed_demo_mobs` used to be a hardcoded
     // `minecraft:zombie` ring and this loop asserted exactly that. It now
     // cycles `lodestone_server::DEMO_SPECIES`, whose first three entries are
     // one per roster family, so `mob_count` of 3 must produce one of each.
@@ -253,7 +252,7 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
         species,
         vec!["cow", "wolf", "zombie"],
         "the first three DEMO_SPECIES entries must each reach the client; a \
-         result of [zombie, zombie, zombie] is the pre-#457 single-species ring"
+         result of [zombie, zombie, zombie] is the old hardcoded single-species ring"
     );
 
     // Move: poll for *any* mob's client-folded position to diverge from its

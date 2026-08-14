@@ -1,6 +1,6 @@
-//! Palette-expansion throughput (issue #78 epic, sub-issue #88's middle
-//! stage): the cost of resolving a decoded [`PalettedContainer`]'s local
-//! indices through its palette to raw block-state ids —
+//! Palette-expansion throughput: the cost of resolving a decoded
+//! [`PalettedContainer`]'s local indices through its palette to raw
+//! block-state ids —
 //! [`PalettedContainer::iter`]/`get`, called once per cell by any consumer
 //! that needs concrete ids rather than the compact wire form.
 //!
@@ -10,14 +10,14 @@
 //! by reading `container.rs`'s `Storage::Indirect` arm — a palette lookup per
 //! cell, not a precomputed dense array). So "decode" and "expand to raw ids"
 //! are genuinely two separate costs paid at different times, which is exactly
-//! the seam #88 asks to be measured in isolation from `chunk_load.rs`'s
+//! the seam this bench measures in isolation from `chunk_load.rs`'s
 //! `World::load` (which, per its own module doc, only ever sees *already
 //! expanded* content — it moves a `ChunkColumn`, it does not walk a
 //! container).
 //!
 //! Two variety shapes, matching `lodestone-world/tests/memory.rs`'s
 //! `measure_flatworld_like_column`/`measure_dense_varied_column` split (the
-//! same two shapes #88 explicitly asks to reuse): a low-variety section
+//! same two shapes reused here): a low-variety section
 //! (mostly one value, `Storage::Single` — the cheap case, no palette lookup
 //! at all) and a high-variety section (many distinct values, forcing
 //! `Storage::Indirect` — a real palette lookup per cell).

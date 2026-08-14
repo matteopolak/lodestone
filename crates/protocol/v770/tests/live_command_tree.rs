@@ -1,4 +1,4 @@
-//! Live `commands` / `command_suggestions` capture (issue #470).
+//! Live `commands` / `command_suggestions` capture.
 //!
 //! Joins the flat creative 26.2 oracle (game :25570), captures the **raw
 //! `minecraft:commands` payload the server itself authored**, then sends a real
@@ -24,7 +24,7 @@
 //! # Why the suggestion round trip is captured too
 //!
 //! `command_suggestions` is the *response* half. Its request half is already
-//! encoded (`adapter.rs`'s `ClientAction::CommandSuggestion` arm), so the
+//! encoded (`adapter/serverbound.rs`'s `ClientAction::CommandSuggestion` arm), so the
 //! response arm is not an island — but that is a claim about our encoder, and
 //! the only thing that proves the pair actually round-trips against vanilla is
 //! a real server answering a frame we really sent. This gate sends
