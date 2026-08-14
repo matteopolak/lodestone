@@ -60,7 +60,7 @@
 //!   coverage rather than a no-op: [`crate::random_tick::RandomTickScheduler`]
 //!   reads block state directly off this loop's own `ChunkSource`, and a
 //!   scheduled tick restored from a dimension's own saved region file is
-//!   already sitting in *this* loop's own [`crate::region_source::ScheduledTickHandle`]
+//!   already sitting in *this* loop's own [`crate::scheduled_tick::ScheduledTickHandle`]
 //!   before any placement-routing question arises. See this module's own
 //!   test for both, ticking a dimension with zero anchors and a control that
 //!   proves an un-ticked scheduler would not have advanced.
@@ -79,7 +79,12 @@ use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
 use crate::mobs::{LiveMobSource, MobHandle};
-use crate::region_source::ScheduledTickHandle;
+// The portable path, not the `region_source`-gated re-export: this whole
+// module's `DimensionTickContext` (and, on `wasm32`, `crate::integrated`'s
+// no-op `start_sibling_tick_loop` twin) has to resolve this type without
+// `region_source` existing at all — see `crate::integrated::sibling_chunk_source`'s
+// own doc comment for the wasm32 break this avoids.
+use crate::scheduled_tick::ScheduledTickHandle;
 use crate::sleep::{SleepFeed, SleepVote};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock};
 use crate::tick_area::TickFollow;
