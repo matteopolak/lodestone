@@ -159,6 +159,8 @@ uses for wire formats:
 ./scripts/live-oracles/creative.sh
 cargo test -p lodestone-v770 --features live-registry --test live_registry_data \
     -- --ignored --nocapture          # capture + assert against Mojang's own data
+cargo test -p lodestone-v770 --features live-registry --test live_registry_data_full_set \
+    -- --ignored --nocapture          # capture the other 27 registries + update_tags
 cargo test -p lodestone-v770 --test registry_data   # hermetic replay, always on
 ```
 
@@ -167,9 +169,15 @@ cargo test -p lodestone-v770 --test registry_data   # hermetic replay, always on
   `tests/fixtures/registry_data_*.hex`, and checks the decoded content against
   `.cache/mc/26.2/client-src/data/minecraft/dimension_type/*.json` — Mojang's own
   shipped data files, parsed at test time rather than transcribed.
+- `tests/live_registry_data_full_set.rs` joins the same oracle and captures
+  **every** synchronized registry plus `update_tags` into
+  `tests/fixtures/registry_data_*.hex` / `update_tags_configuration.hex`,
+  asserting a floor of the 29 names in `RegistryDataLoader.SYNCHRONIZED_REGISTRIES`
+  (a data-pack-added registry on a differently configured server would not fail
+  it — only a missing one would).
 - `tests/registry_data.rs` replays those fixtures hermetically with a
   trailing-byte check, and — since issue #275 — asserts the server's own
-  `encode_registry_data` payloads are byte-identical to them.
+  `encode_registry_data` payloads are byte-identical to them, for the full set.
 
 Two notes on the oracle, both of which cost time to discover:
 
@@ -188,29 +196,60 @@ The decode above exists because *vanilla* sends these packets; issue #275 gave
 integrated server. The encoder lives in `crates/protocol/v770/src/server_protocol.rs`:
 
 - `ServerProtocol::encode_registry_data` is a version-free trait method returning
-  the Configuration-phase `registry_data` directives. The `V770ServerProtocol`
-  override emits exactly two packets — `minecraft:dimension_type` and
-  `minecraft:world_clock` — the two this join sequence actually depends on.
-- The per-entry NBT bodies are **captured vanilla bytes**, not values rebuilt from
-  `lodestone-data`: byte constants copied from the same
-  `tests/fixtures/registry_data_*.hex` fixtures this doc's live gate writes, so a
-  vanilla client reads its own wire format rather than a re-encoding of our
-  understanding. `tests/registry_data.rs` asserts the emitted payloads are
-  byte-identical to those fixtures — `decode(encode(fixture)) == fixture` with the
-  fixture standing outside both.
+  the Configuration-phase directives. The `V770ServerProtocol` override emits the
+  **full burst** a real client expects, in vanilla's own wire order
+  (`SynchronizeRegistriesTask`): `select_known_packs` (requesting zero packs —
+  this server ships no datapacks), then all **29** `registry_data` packets
+  (`RegistryDataLoader.SYNCHRONIZED_REGISTRIES`, read off the decompiled source —
+  **not** `generated/reports/registries.json`, which omits `dimension_type` and
+  `world_clock` entirely because both are data-pack-loaded registries; following
+  that file literally builds a set missing the registry the client needs most),
+  then `update_tags`.
+- `minecraft:dimension_type` and `minecraft:world_clock` stay hand-built
+  structured tables (`DIMENSION_TYPE_REGISTRY`, `WORLD_CLOCK_OVERWORLD_NBT`),
+  because this crate resolves *holder ids* out of them elsewhere (`login`'s
+  dimension type, `set_time`'s clock keys). Every other registry — `enchantment`,
+  `banner_pattern`, `worldgen/biome`, and 24 more — is relayed as **opaque
+  captured bytes** from `crates/protocol/v770/src/registry_data_fixtures.rs`,
+  `include_str!`-embedding `tests/fixtures/registry_data_*.hex` and
+  `update_tags_configuration.hex`. Nothing in this crate parses an entry back out
+  of the pass-through set; a real client just needs a self-consistent copy to
+  resolve `Holder`/tag references inside data components it already decodes.
+- Every fixture is a whole packet payload a real vanilla 26.2 server authored,
+  captured verbatim by `tests/live_registry_data_full_set.rs` on the flat
+  creative oracle — not a re-encoding of our own understanding of ~20
+  data-driven registries. `tests/registry_data.rs`'s
+  `server_registry_data_payloads_match_the_captured_vanilla_fixtures` asserts
+  the emitted directives are byte-identical to those fixtures, for the full set
+  — not a magnitude check.
+- `select_known_packs` needs no fixture: `ClientboundSelectKnownPacks(List.of())`
+  is a single VarInt `0`. This server does **not** wait for the client's own
+  reply before sending registries (unlike vanilla's task-queue implementation) —
+  see `registry_data_fixtures`'s module docs for why an **empty** requested-packs
+  list makes `SynchronizeRegistriesTask.handleResponse`'s negotiated set
+  unconditionally empty regardless of what the client answers, so firing the
+  whole burst without reading the reply first reaches the same wire content a
+  negotiating server would. The reply itself is safely ignored when it arrives
+  (`ServerBound::Ignored` — no decode arm claims `select_known_packs`
+  serverbound).
 - `serve_connection_inner`'s `LoginAcknowledged` arm calls `encode_registry_data`
-  **before** `begin_configuration`, so the registries precede
+  **before** `begin_configuration`, so the whole burst precedes
   `FINISH_CONFIGURATION`. That ordering is a version-free invariant in the loop,
   not a per-implementor promise.
 - The default method emits nothing, so a hosting family with nothing to declare,
   or a legacy family that does not host at all, sends no packets — the same
   additive seam as every other optional encoder.
 
-**How to change it.** To ship more registries (e.g. `minecraft:worldgen/biome`),
-capture the payload from the live oracle (extend `tests/live_registry_data.rs`),
-check the fixture in, and add a packet to the override's vec. Our join claims **no
-known packs**, so the server must not elide entry contents either — the
-`bool(true)` + full-NBT shape is what a vanilla client that knows no packs expects.
+**How to change it.** To parse a passthrough registry's *contents* instead of
+just forwarding its bytes (e.g. to resolve `EntityDamaged.damage_type_id`), add
+a typed arm to `ClientRegistries::apply` on the **decode** side — the encode
+side does not need to change, since it already ships the real bytes. To
+re-capture the fixtures (a Minecraft version bump, or a registry gaining a
+field), re-run `tests/live_registry_data_full_set.rs` with
+`LODESTONE_CAPTURE_FIXTURES=1` against a matching oracle and review the diff;
+`dimension_type`/`world_clock` are captured separately by
+`tests/live_registry_data.rs` and are deliberately excluded from the full-set
+capture so the two gates cannot clobber each other's fixtures.
 
 Measured values, from the live run:
 
@@ -261,11 +300,16 @@ handler. The `live-registry` Cargo feature gates only the live capture test, and
   `EnvironmentAttributes.SKY_LIGHT_LEVEL`, not directly from a clock. The
   `attributes` map is dropped by this decode, so the sky curve is still our own
   port rather than a data-driven read. See [`dimension-visuals.md`](./dimension-visuals.md).
-- The other 27 registries are names-only on the *client* and not emitted at all
-  by our *server* — issue #275 shipped only `dimension_type` and `world_clock`,
-  the two this join sequence reads. When a third becomes load-bearing (damage
-  types, `worldgen/biome`), the capture-and-replay harness above extends to it in
-  both directions.
+- The other 27 registries are still names-only **on the client** — the server
+  now sends real bytes for all of them, but `ClientRegistries::apply` only
+  parses `dimension_type` and `world_clock` into typed data today. When a third
+  becomes load-bearing (damage types, `worldgen/biome`), add a decode arm; the
+  server side needs no change since the real bytes already flow.
+- Encryption and the online-mode session-server ownership check are a separate,
+  much larger gap (issue #273) — this server still logs every client in as
+  `online_mode: false` with no `EncryptionRequest` ever sent. See
+  [`server-login-compression.md`](./server-login-compression.md) for the piece
+  of #273 that *is* done (compression) and what is deliberately still missing.
 
 [#288]: https://github.com/matteopolak/lodestone/issues/288
 [#34]: https://github.com/matteopolak/lodestone/issues/34
