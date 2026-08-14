@@ -6,7 +6,7 @@
 
 use bevy_ecs::schedule::SystemSet;
 
-/// Bukkit-style cross-plugin event-priority tiers (issue #105): a chain of
+/// Bukkit-style cross-plugin event-priority tiers: a chain of
 /// `SystemSet`s two plugins that have never heard of each other can order
 /// against, mirroring `org.bukkit.event.EventPriority` almost exactly.
 ///
@@ -19,9 +19,9 @@ use bevy_ecs::schedule::SystemSet;
 /// crate depends on the other's types to name in `.before()`/`.after()`.
 /// `EventPriority` is published from `lodestone-ecs` specifically so both
 /// sides can `.in_set(EventPriority::High)` without ever importing one
-/// another — the actual Bukkit guarantee, and the reason issue #105 calls
-/// this "the only option that lets two plugins that have never heard of
-/// each other agree on order."
+/// another — the actual Bukkit guarantee, and the only option that lets
+/// two plugins that have never heard of
+/// each other agree on order.
 ///
 /// # `Monitor` is a distinct tier, not just the last one
 ///
@@ -65,7 +65,7 @@ pub enum EventPriority {
     Monitor,
 }
 
-/// Issue #110's structural half: panics if `system` has any mutable `World`
+/// The structural half of the monitor-tier guarantee: panics if `system` has any mutable `World`
 /// access, so a plugin author who registers a mutating handler under
 /// [`EventPriority::Monitor`] gets a startup panic rather than a silently
 /// broken "read only, guaranteed to run last" guarantee.
@@ -89,7 +89,7 @@ pub enum EventPriority {
 /// mutations are deferred and applied later via `System::apply_deferred`, out
 /// of band from the access set `System::initialize` returns. A `Monitor`
 /// system that takes `Commands` and queues a mutation passes this check
-/// today and still breaks the guarantee. Tracked on issue #110 rather than
+/// today and still breaks the guarantee. Tracked as a known gap rather than
 /// worked around here; see `docs/plugin-api.md`.
 ///
 /// # Why this checks the system directly rather than walking a built schedule
@@ -151,7 +151,7 @@ pub enum IngestSet {
 /// Ordering within [`crate::GameTick`]. `Send` is last so a movement/input
 /// packet reflects everything the tick did — azalea's
 /// `game_tick_packet.after(PhysicsSystems).after(MiningSystems).after(send_position)`
-/// (`azalea-client/src/plugins/tick_end.rs:18-26`) is the precedent.
+/// (`azalea-client/src/plugins/tick_end.rs`) is the precedent.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TickSet {
     /// Poll the platform's held keys / raw device state for this tick.
@@ -234,7 +234,7 @@ pub enum ExtractSet {
 
 #[cfg(test)]
 mod tests {
-    //! Issue #110: [`assert_monitor_system_is_read_only`]'s enforcement, plus
+    //! [`assert_monitor_system_is_read_only`]'s enforcement, plus
     //! proof that it composes with a real schedule the way a plugin would use
     //! it — `.in_set(EventPriority::Monitor)` inside a real `GameTick`, not
     //! only a standalone function call.

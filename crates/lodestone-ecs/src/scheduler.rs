@@ -1,18 +1,18 @@
-//! Issue #113 — the sync scheduler: `runTaskLater`/`runTaskTimer` for plugins.
+//! The sync scheduler: `runTaskLater`/`runTaskTimer` for plugins.
 //!
 //! # What it is
 //!
 //! [`TaskScheduler`] is a `Resource` holding closures to run on a future
 //! [`crate::GameTick`], once ([`TaskScheduler::schedule_once`]) or on a period
 //! ([`TaskScheduler::schedule_repeating`]). It is Bukkit's
-//! `BukkitScheduler.runTaskLater` / `runTaskTimer` — "the single most-used
-//! non-event API surface in the Java ecosystem" per the issue — and it exists
+//! `BukkitScheduler.runTaskLater` / `runTaskTimer` — the single most-used
+//! non-event API surface in the Java ecosystem — and it exists
 //! to delete the counter-component-plus-per-tick-system boilerplate a plugin
 //! author otherwise hand-rolls for every cooldown, countdown and particle loop.
 //!
 //! # The closure signature, and why it is `&mut World` rather than `Commands`
 //!
-//! The issue names the signature as "the main design question", flagging that
+//! The closure signature was the main design question here, since
 //! `FnMut(&mut World)` "re-opens the reentrancy question if the closure is
 //! invoked while a guard is already held elsewhere". It does not, and the
 //! reason is the thing worth writing down:
@@ -28,7 +28,7 @@
 //! What *would* deadlock is a closure that captured an [`crate::EcsHandle`]
 //! clone and called `hold_write` on it — the reentrancy hazard is real, it is
 //! simply not created by this signature. That is
-//! [`crate::async_task`]'s territory (issue #114), and the runtime guard there
+//! [`crate::async_task`]'s territory, and the runtime guard there
 //! catches it for worker threads.
 //!
 //! `Commands` was the alternative. It is strictly weaker here: a task that
@@ -90,7 +90,7 @@
 //! An **end-of-tick** pool (a task that wants to observe what this tick just
 //! did) is a named follow-up rather than a silent gap: it needs a second anchor,
 //! and adding an ordering-anchor variant is an ABI change that goes through
-//! `docs/plugin-api.md`'s ordering-anchor changelog (issue #170). A task
+//! `docs/plugin-api.md`'s ordering-anchor changelog. A task
 //! needing end-of-tick semantics today schedules with `delay 1` and reads the
 //! previous tick's result, which is the same information one tick later.
 //!

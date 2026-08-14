@@ -16,7 +16,7 @@ pub struct NetIngest;
 /// The 20 Hz Minecraft simulation tick. Catch-up capped at ten ticks per
 /// driver iteration (`docs/frame-pacing.md`, matching vanilla's own
 /// `MAX_TICKS_PER_UPDATE` and azalea's `run_schedule_loop`,
-/// `azalea-client/src/client.rs:199-206`) — see [`crate::Runner`].
+/// `azalea-client/src/client.rs`) — see [`crate::Runner`].
 #[derive(ScheduleLabel, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GameTick;
 
