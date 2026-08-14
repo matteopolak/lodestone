@@ -472,6 +472,16 @@ send an agent at a problem that no longer exists, which has now happened repeate
   `DepthStencilState(…, 1.0F, 10.0F)` was transcribed as "constant 1.0, slope 10.0" — backwards.
 - **A hand-rolled Rust lexer will be wrong about lifetimes** — `&'static str` opened a "char literal"
   flag that never closed, silently disabling comment detection in three scanners.
+- **A grep for a *field name* finds every struct that has one — read what the literal belongs to before
+  building a diagnosis on it.** A `mip_level_count: 1` in `lodestone-render`'s `block.rs` was quoted as
+  proof the block atlas had no mip chain; it is `DepthBuffer::new`'s depth texture, and the atlas has had
+  a real per-sprite chain all along (`AtlasBuilder::with_mip_levels` → `GpuAtlas::upload_mips`). The tell
+  is that a field-name hit carries no subsystem: name the enclosing symbol in the claim, and if you
+  cannot, you have not read enough to make it. The agent sent at that diagnosis correctly refused it and
+  found the real bugs — **no gutter reserved for the stitched sprites, and the gutter extruded only at
+  mip level 0** — which is worth its own note: *isolating mip **generation** per sprite does not isolate
+  **sampling***, because a bilinear tap at a sprite's own UV edge still reaches its neighbour. Two
+  independent guards, and having the first is what makes the second's absence invisible.
 
 **Prefer `cargo xtask connectedness` over any hand-derived coverage number**; the hand-derived version
 has been wrong four times in four different ways. **But first check the instrument runs at all** — it was
