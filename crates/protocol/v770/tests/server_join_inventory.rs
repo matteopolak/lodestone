@@ -64,8 +64,8 @@ use common::unique_username;
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
 
-/// `InventoryMenu`'s slot count — result + 2×2 grid + 4 armour + 27 main + 9 hotbar
-/// + off-hand. Written as the sum rather than as `46` so the arithmetic is the
+/// `InventoryMenu`'s slot count — result + 2×2 grid + 4 armour + 27 main + 9 hotbar +
+/// off-hand. Written as the sum rather than as `46` so the arithmetic is the
 /// assertion's own justification.
 const MENU_SLOTS: usize = 1 + 4 + 4 + 27 + 9 + 1;
 

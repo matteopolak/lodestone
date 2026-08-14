@@ -54,7 +54,7 @@ fn var_i32(v: i32) -> Vec<u8> {
 /// plausible payload.
 #[test]
 fn hurt_animation_encodes_a_varint_id_then_a_float_yaw() {
-    let proto = V770ServerProtocol::default();
+    let proto = V770ServerProtocol;
     let yaw = 23.130_102_f32;
 
     let mut expected = var_i32(300);
@@ -110,7 +110,7 @@ fn hurt_animation_encodes_a_varint_id_then_a_float_yaw() {
 /// `EntityEvent.DEATH`) instead of once per call site.
 #[test]
 fn entity_event_encodes_a_fixed_width_id_then_the_status_byte() {
-    let proto = V770ServerProtocol::default();
+    let proto = V770ServerProtocol;
 
     let mut expected = 300i32.to_be_bytes().to_vec();
     expected.push(entity_event::DEATH);
@@ -162,7 +162,7 @@ fn entity_event_encodes_a_fixed_width_id_then_the_status_byte() {
 /// the transcription from `EntityEvent` lives.
 #[test]
 fn every_named_status_byte_reaches_the_wire_unchanged() {
-    let proto = V770ServerProtocol::default();
+    let proto = V770ServerProtocol;
     // Collected rather than asserted inside the loop, so a failure reports every
     // wrong arm instead of aborting on the first.
     let mut wrong: Vec<(u8, u8)> = Vec::new();

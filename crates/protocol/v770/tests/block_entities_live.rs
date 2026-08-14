@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use lodestone_client::{BlockPos, ClientBuilder, Hand, LoginProfile, ServerAddress};
 use lodestone_data::block_states::{block_name, properties};
-use lodestone_model::{BlockFace, ClientAction, ContainerClickType, ContainerSlotChange, GameMode, ItemStack, Vec3f};
+use lodestone_model::{BlockFace, ClientAction, ContainerClickType, GameMode, ItemStack, Vec3f};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     BlockEntity, BlockEntityHandle, ChunkColumn, ChunkSource, Furnace, FurnaceKind, MobHandle,

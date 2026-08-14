@@ -613,10 +613,10 @@ fn descendant_argument(tree: &CommandTree, start: usize, name: &str) -> Option<A
             continue;
         }
         let node = tree.node(index)?;
-        if let NodeKind::Argument { name: found, parser, .. } = &node.kind {
-            if found == name {
-                return Some(parser.clone());
-            }
+        if let NodeKind::Argument { name: found, parser, .. } = &node.kind
+            && found == name
+        {
+            return Some(parser.clone());
         }
         pending.extend(node.children.iter().copied());
     }

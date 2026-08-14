@@ -90,11 +90,11 @@ fn resolve_state_id_legacy(state: &str) -> u32 {
     let mut merged: Vec<(&str, &str)> = properties(base).unwrap_or(&[]).to_vec();
     let mut overridden = false;
     for &(key, value) in &wanted {
-        if let Some(slot) = merged.iter_mut().find(|(have_key, _)| *have_key == key) {
-            if slot.1 != value {
-                slot.1 = value;
-                overridden = true;
-            }
+        if let Some(slot) = merged.iter_mut().find(|(have_key, _)| *have_key == key)
+            && slot.1 != value
+        {
+            slot.1 = value;
+            overridden = true;
         }
     }
     if !overridden {

@@ -238,10 +238,14 @@ const IDX_CREEPER_POWERED: u8 = 17;
 /// close and then backs off before detonation, since that path only ever
 /// touches `DATA_SWELL_DIR`.
 const IDX_CREEPER_IGNITED: u8 = 18;
-/// Both of index 18's claimants share nothing (`BYTE` vs `BOOLEAN`), so the
-/// serializer alone tells them apart at decode time — but see the module's
-/// `decode_value` for why the *index* still needs a class guard: a mob this
-/// seam does not model could in principle also declare a `BOOLEAN` at 18.
+// Both of index 18's claimants share nothing (`BYTE` vs `BOOLEAN`), so the
+// serializer alone tells them apart at decode time — but see the module's
+// `decode_value` for why the *index* still needs a class guard: a mob this
+// seam does not model could in principle also declare a `BOOLEAN` at 18.
+//
+// This is a standalone note, not documentation of `MetadataClass` below —
+// hence `//` rather than `///`, which is what the empty line before that
+// enum's own doc comment used to trip clippy's dangling-doc-comment lint on.
 
 /// The mobs whose cosmetic variant sits at an index that other mobs reuse for an
 /// unrelated field, so the raiser can only read it when the concrete entity type
@@ -423,7 +427,12 @@ enum Value {
     /// is `false` when an unmodeled data component left the reader parked
     /// mid-payload, which ends the whole list (see the module header).
     Item {
-        stack: Option<ItemStack>,
+        // Boxed: `ItemStack` carries `ItemComponents`, which alone pushes this
+        // variant past clippy's large-enum-variant threshold and every other
+        // `Value` variant is a handful of bytes. Boxing this one field keeps
+        // the enum small without touching the version-free `ItemStack` shape
+        // itself.
+        stack: Option<Box<ItemStack>>,
         complete: bool,
     },
     /// Consumed correctly but not surfaced.
@@ -599,11 +608,11 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
                 .map_err(|err| Error::Custom(err.to_string()))?;
             match decoded {
                 crate::adapter::DecodedStack::Complete(stack) => Value::Item {
-                    stack,
+                    stack: stack.map(Box::new),
                     complete: true,
                 },
                 crate::adapter::DecodedStack::Partial(stack) => Value::Item {
-                    stack,
+                    stack: stack.map(Box::new),
                     complete: false,
                 },
             }
@@ -645,7 +654,7 @@ pub fn read_entity_metadata(
         // irrelevant. (It is 8 on a dropped item and an item frame, and 8 on
         // thrown projectiles too, but nothing needs to know that.)
         if let Value::Item { stack, complete } = value {
-            md.item = Reported::Reported(stack);
+            md.item = Reported::Reported(stack.map(|boxed| *boxed));
             if !complete {
                 // The reader is parked inside an unmodeled component's payload.
                 // Every following byte would decode as a plausible-but-wrong

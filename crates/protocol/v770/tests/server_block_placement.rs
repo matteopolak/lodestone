@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{BlockPos, ClientBuilder, Hand, LoginProfile, ServerAddress};
-use lodestone_model::{BlockFace, ClientAction, ContainerClickType, ContainerSlotChange, GameMode, ItemStack, Vec3f};
+use lodestone_model::{BlockFace, ClientAction, GameMode, ItemStack, Vec3f};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, serve_connection,
@@ -62,9 +62,12 @@ use lodestone_v770::{V770ServerProtocol, adapter};
 /// `ChunkSource::set_block`'s default is a documented no-op, so a unit-struct
 /// source silently discards every placement and each assertion below would
 /// read air and fail for a reason unrelated to the code under test.
+/// `SharedAirSource`'s edit log: `(x, y, z) -> block name`.
+type EditMap = Arc<Mutex<HashMap<(i32, i32, i32), String>>>;
+
 #[derive(Clone, Default)]
 struct SharedAirSource {
-    edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>>,
+    edits: EditMap,
 }
 
 impl SharedAirSource {
@@ -121,7 +124,11 @@ fn stack(name: &str) -> ItemStack {
 /// inside the 16-block column, because `view_radius = 0` means no other chunk
 /// is ever sent — a negative coordinate here would floor-divide into a
 /// never-loaded chunk and the client would never see a confirmation.
-const PLACEMENTS: &[(u8, &str, (i32, i32, i32), Option<&str>)] = &[
+/// One row: hotbar slot, item name, target position, expected result block
+/// name (`None` = nothing placed).
+type Placement = (u8, &'static str, (i32, i32, i32), Option<&'static str>);
+
+const PLACEMENTS: &[Placement] = &[
     (0, "minecraft:dirt", (2, 5, 2), Some("minecraft:dirt")),
     (1, "minecraft:oak_planks", (4, 5, 2), Some("minecraft:oak_planks")),
     // Neither placeable-by-name nor a block entity: the row that fails

@@ -128,40 +128,39 @@ fn our_own_server_encodes_a_creepers_swell_and_detonation_byte_accurately_for_th
     for tick in 1..=MAX_SWELL {
         sim.tick();
 
-        if let Some(snapshot) = sim.snapshots().into_iter().find(|s| s.id == creeper_id) {
-            if snapshot.metadata != last_metadata {
-                let directive = proto.encode_set_entity_data(creeper_id, &snapshot.metadata);
-                let lodestone_server::ServerDirective::Send { packet_id, payload } = directive
-                else {
-                    panic!(
-                        "encode_set_entity_data must return Send for non-empty metadata, got \
-                         {directive:?}"
-                    );
-                };
-                assert_eq!(packet_id, play::clientbound::SET_ENTITY_DATA);
+        if let Some(snapshot) = sim.snapshots().into_iter().find(|s| s.id == creeper_id)
+            && snapshot.metadata != last_metadata
+        {
+            let directive = proto.encode_set_entity_data(creeper_id, &snapshot.metadata);
+            let lodestone_server::ServerDirective::Send { packet_id, payload } = directive else {
+                panic!(
+                    "encode_set_entity_data must return Send for non-empty metadata, got \
+                     {directive:?}"
+                );
+            };
+            assert_eq!(packet_id, play::clientbound::SET_ENTITY_DATA);
 
-                let directives = adapter
-                    .handle_packet(
-                        &mut decode_world,
-                        ConnectionState::Play,
-                        packet_id,
-                        &payload,
-                    )
-                    .expect("the real client adapter must accept our own SET_ENTITY_DATA payload");
-                for directive in directives {
-                    if let Directive::Emit(ClientEvent::EntityMetadataUpdated { metadata, .. }) =
-                        directive
-                    {
-                        if swell_dir_first_seen.is_none() {
-                            swell_dir_first_seen = metadata.creeper_swell_dir;
-                        }
-                        if let Some(v) = metadata.creeper_ignited {
-                            ignited_first_seen = Some(v);
-                        }
+            let directives = adapter
+                .handle_packet(
+                    &mut decode_world,
+                    ConnectionState::Play,
+                    packet_id,
+                    &payload,
+                )
+                .expect("the real client adapter must accept our own SET_ENTITY_DATA payload");
+            for directive in directives {
+                if let Directive::Emit(ClientEvent::EntityMetadataUpdated { metadata, .. }) =
+                    directive
+                {
+                    if swell_dir_first_seen.is_none() {
+                        swell_dir_first_seen = metadata.creeper_swell_dir;
+                    }
+                    if let Some(v) = metadata.creeper_ignited {
+                        ignited_first_seen = Some(v);
                     }
                 }
-                last_metadata = snapshot.metadata;
             }
+            last_metadata = snapshot.metadata;
         }
 
         let detonations = sim.take_detonations();
