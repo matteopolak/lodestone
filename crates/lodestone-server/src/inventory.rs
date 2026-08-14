@@ -103,6 +103,20 @@ pub struct PlayerInventory {
     /// to the open station (`2` for the anvil/grindstone, `3` for smithing) by
     /// [`open_workstation`](Self::open_workstation).
     workstation: Option<Vec<Option<ItemStack>>>,
+    /// An open anvil's typed-but-not-yet-taken rename text (`AnvilMenu.itemName`,
+    /// issues #253-#255's rename gap). `None` means "never touched this menu
+    /// instance", which is distinct from a touched-but-blank field clearing an
+    /// existing custom name — see [`crate::anvil::compute`]'s own `item_name`
+    /// doc. Reset by [`open_workstation`](Self::open_workstation), the same "a
+    /// new menu instance starts with no typed name" rule
+    /// `AnvilMenu`'s own field default gives every fresh menu.
+    pending_rename: Option<String>,
+    /// An open enchanting table's `EnchantmentMenu.enchantmentSeed` — the roll
+    /// every offer this table shows is derived from, rerolled after every
+    /// successful enchant. Reset to `0` by
+    /// [`open_workstation`](Self::open_workstation) and set to a fresh draw by
+    /// `crate::server::open_enchanting_screen`'s own caller.
+    enchant_seed: i64,
 }
 
 impl Default for PlayerInventory {
@@ -114,6 +128,8 @@ impl Default for PlayerInventory {
             click_state: crate::container_click::ClickState::default(),
             table_crafting: None,
             workstation: None,
+            pending_rename: None,
+            enchant_seed: 0,
         }
     }
 }
@@ -323,9 +339,43 @@ impl PlayerInventory {
     }
 
     /// Opens a fresh, empty workstation with `inputs` cells — called when an
-    /// anvil/grindstone/smithing-table menu opens.
+    /// anvil/grindstone/smithing-table/enchanting-table menu opens. Also resets
+    /// [`pending_rename`](Self::pending_rename) and
+    /// [`enchant_seed`](Self::enchant_seed): a new menu instance starts with
+    /// neither a typed name nor a rolled seed, matching `AnvilMenu`/
+    /// `EnchantmentMenu`'s own fresh-instance field defaults.
     pub fn open_workstation(&mut self, inputs: usize) {
         self.workstation = Some(vec![None; inputs]);
+        self.pending_rename = None;
+        self.enchant_seed = 0;
+    }
+
+    /// The open anvil's typed-but-not-yet-taken rename text, if any. See this
+    /// struct's own `pending_rename` field doc for what `None` means.
+    #[must_use]
+    pub fn pending_rename(&self) -> Option<&str> {
+        self.pending_rename.as_deref()
+    }
+
+    /// Sets (or clears) the open anvil's pending rename text —
+    /// `AnvilMenu.setItemName`'s write half; see `crate::server`'s consumer for
+    /// the validation that happens before this is called.
+    pub fn set_pending_rename(&mut self, name: Option<String>) {
+        self.pending_rename = name;
+    }
+
+    /// The open enchanting table's current offer seed
+    /// (`EnchantmentMenu.enchantmentSeed`).
+    #[must_use]
+    pub fn enchant_seed(&self) -> i64 {
+        self.enchant_seed
+    }
+
+    /// Sets the open enchanting table's offer seed — called once with a fresh
+    /// roll when the screen opens, and again after every successful enchant
+    /// (`Player.onEnchantmentPerformed`'s own reroll).
+    pub fn set_enchant_seed(&mut self, seed: i64) {
+        self.enchant_seed = seed;
     }
 
     /// Closes the open workstation and returns whatever was in it, so the

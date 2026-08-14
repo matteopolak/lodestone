@@ -91,7 +91,13 @@ both are deliberately economy-free, matching their own module docs — in the
 `ServerBound::ContainerClicked` handler in `server.rs`, which detects a
 result-slot take (the clicked menu slot equals the station's result index)
 and charges/awards `PlayerExperience` from the **pre-click** cells before
-`apply_container_clicked` overwrites `PlayerInventory::workstation`.
+`apply_container_clicked` overwrites `PlayerInventory::workstation`. The
+enchanting table's own XP/lapis charge is a third, sibling site rather than a
+fourth station folded into that same handler: `MenuKind::Enchanting` has no
+result slot to take at all (see above), so its economy is charged by
+`ServerBound::ContainerButtonClick`'s own consumer,
+`crate::server::apply_container_button_click`, on a successful enchant
+rather than on a take.
 
 ## How to change it
 
@@ -119,23 +125,51 @@ and charges/awards `PlayerExperience` from the **pre-click** cells before
   cannot show the enchantment's *name* until `encode_registry_data` grows a
   `minecraft:enchantment` entry — a `crates/protocol/v770` change outside
   this crate's ownership.
-- **The enchanting table's offer cannot be taken.** Choosing an offer is
-  `ServerboundContainerButtonClickPacket` (`ClientAction::ContainerButtonClick`),
-  which `crates/protocol/v770/src/server_protocol.rs` currently decodes and
-  discards (`ServerBound::Ignored`) — it never reaches this crate. Everything
-  up to that point is real: the screen opens, `bookshelf_power` reads the
-  actual world, and `table_costs`/`select_enchantments` compute genuine,
-  vanilla-shaped offers — a player just cannot yet click "enchant" on a real
-  connection. The three `container_set_data` costs sent at open time reflect
-  the (empty) menu at that instant; they are not live-recomputed per click
-  (that would need `ChunkSource` and `PlayerExperience` threaded into
-  `apply_container_clicked`'s ~16 call sites, a much larger change than the
-  inert "enchant" button justifies right now).
-- **The anvil's rename field is equally unreachable.** `ServerboundRenameItemPacket`
-  (`ClientAction::RenameItem`) is decoded and discarded the same way. The
-  repair-with-material and combine-repair paths do **not** depend on it (they
-  are ordinary slot clicks) and are fully playable; only the "type a name,
-  see the 1-XP rename cost" path is blocked.
+- **Closed: the enchanting table's offer can now be taken.**
+  `ServerboundContainerButtonClickPacket` (`ClientAction::ContainerButtonClick`)
+  used to decode-and-discard in `crates/protocol/v770/src/server_protocol.rs`;
+  it now lifts into `ServerBound::ContainerButtonClick { window_id, button_id }`
+  and reaches `crate::server::apply_container_button_click`. That function
+  re-derives the slot's cost from the *live* world (`enchanting::bookshelf_power`
+  read at click time, not cached), re-derives the offer from
+  `enchanting::select_enchantments` seeded off
+  `PlayerInventory::enchant_seed`, and on a successful pick: applies the
+  enchantment(s) (transmuting a plain book to `minecraft:enchanted_book` the
+  same way vanilla does), spends XP levels (`PlayerExperience::take_levels`),
+  consumes lapis, and rerolls the seed — `Player.onEnchantmentPerformed`'s own
+  reroll, so the next offer set is not a repeat. The three `container_set_data`
+  costs sent at open time still reflect the (empty) menu at that instant and
+  are still not live-recomputed as the item slot changes (`slotsChanged`'s
+  own recompute) — a real client's displayed numbers can lag what a click
+  actually prices until the *next* full resend, which is a display gap, not a
+  gameplay one: the button's own re-derivation is what is trusted.
+  `PlayerInventory::enchant_seed` is seeded once at open
+  (`open_enchanting_screen`'s own `enchant_seed_roll` parameter, a pre-drawn
+  value from the connection's `SpawnRng` — the same shape
+  `apply_use_item_on`'s composter `roll` already uses) rather than from a
+  persistent per-player field vanilla keeps in `Player`, which this crate has
+  no equivalent of; the practical difference is invisible past the first
+  table open in a session.
+- **Closed: the anvil's rename field is reachable.**
+  `ServerboundRenameItemPacket` (`ClientAction::RenameItem`) used to decode-
+  and-discard the same way; it now lifts into `ServerBound::RenameItem { name }`
+  and reaches `crate::server::apply_rename_item`, gated on an anvil actually
+  being open (mirrors `ServerGamePacketListenerImpl.handleRenameItem`'s own
+  `containerMenu instanceof AnvilMenu` check). The text is filtered and
+  length-capped by `crate::anvil::validate_rename` (`AnvilMenu.validateName`,
+  ported field for field: drops control characters, `DEL` and the `§` prefix,
+  then **rejects** — never truncates — anything left over 50 characters), then
+  stored as `PlayerInventory::pending_rename` and threaded into every
+  subsequent `crate::anvil::compute` call for that menu, so the "type a name,
+  see the 1-XP rename cost" path — the one thing `docs/container-cost-screens.md`
+  already had a client-side reader waiting for — now actually reaches pixels.
+  One genuinely bespoke case needed a second fix: `container_click::take_result`'s
+  own internal re-derivation of the anvil outcome is deliberately rename-free
+  (that module carries no economy state at all), so a take priced *purely* by
+  a pending rename saw a zero price internally and would have wrongly cleared
+  a present-but-not-consumed addition cell as if a real combine had happened.
+  `apply_workstation_clicked` corrects this after the fact, with the real
+  rename text available — a no-op unless a click actually took such a result.
 - **The anvil block's own 12% degrade chance is not modelled** — it needs
   block-state writes (`chipped_anvil`/`damaged_anvil`) this module has no
   `ChunkSource` access to. Cosmetic only; the repair/combine economy itself
@@ -161,4 +195,6 @@ documented non-JVM-bit-compatible RNG `crate::loot` already uses; draw
 ```bash
 cargo test -p lodestone-server --lib --no-fail-fast -- enchantment_data:: anvil:: smithing:: enchanting:: container_click::
 cargo test -p lodestone-server --lib --no-fail-fast -- server::tests::the_anvil_repairs server::tests::the_grindstone_strips server::tests::the_smithing_table_upgrades
+cargo test -p lodestone-server --lib --no-fail-fast -- server::tests::rename_item server::tests::container_button_click server::tests::a_pure_rename_take
+cargo test -p lodestone-v770 --no-fail-fast -- serverbound_interaction_tier2::
 ```
