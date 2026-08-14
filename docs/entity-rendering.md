@@ -974,6 +974,54 @@ never varies any of those), is why it needs its own vertex entry point
   one, every mob is `ENTITY_FULLBRIGHT`. The equivalent world lookup already
   exists for particles in `Sim::extract_particles`.
 
+### The swim body-pitch rotation (issue #573), and why it is player-only
+
+`lodestone_physics::player::PlayerState::swim_amount`/`swim_amount_o` (the local
+player's own `0..1` ramp toward the swim pose) and `crate::entities::SwimRamp` /
+`tick_swim_ramp` (the same ramp, integrated client-side for every *other* tracked
+entity off the ingest `Pose` component — only the pose is ever synced, never the ramp,
+exactly like `CreeperFuse`) both existed with nothing reading them: the model pose stood
+upright regardless. `EntityDraw::swim_amount` is the last hop, and
+`gpu/entity_passes.rs`'s `apply_swim_rotation` is the consumer.
+
+**Gated on `type_path == "player"`, not on `swim_amount > 0.0` alone.** Vanilla's base
+`LivingEntityRenderer.setupRotations` has **no** swim branch — only `AvatarRenderer`
+(the player) and `DrownedRenderer` override it, with two different formulas (a plain
+rotation for the player, a `rotateAround` the vertical centre for a drowned zombie).
+`SwimRamp` is populated for every entity kind because the *pose* concept is universal;
+the rotation this build applies is not, so the species gate lives at the render call
+site rather than upstream in the producer.
+
+**Composed by conjugation.** `resolve_animated`'s output already equals
+`A · flip_scale · lift` for `A = T(feet) · Ry(180 − yaw) · Rz(fall_over)` — the same
+decomposition `dying_entity_model_matrix`'s own doc names. Vanilla inserts the swim
+rotation exactly between the yaw/fall-over term and the Y-down flip, so
+`apply_swim_rotation` rebuilds `A` from the same `feet`/`yaw`/`death_time` the resolver
+was called with and left-multiplies every already-baked matrix
+(`transform`/`part_transforms`/`hand_transforms`) by `A · Rx(xAngle) · A⁻¹` — reproducing
+`A · Rx(xAngle) · flip_scale · lift` without decomposing the baked matrices back into
+their factors. The entity's AABB is conservatively re-inflated to a sphere around `feet`
+sized by the old maximum corner distance, since the true rotated box is more expensive to
+recompute and a larger box only costs an occasional missed cull, never a wrong one.
+
+**Two vanilla pieces are not ported**, both because the input is not available at this
+call site: the `isInWater` branch of `targetXRot` (this always takes the water-submerged
+reading — `PlayerState::swimming` requires real fluid contact to ever ramp up, so this is
+wrong only for the tail of the ramp decaying back to `0.0` after leaving the water), and
+`isVisuallySwimming`'s extra `translate(0, -1, 0.3)` crawl nudge (no fluid/on-ground
+state reaches `prepare_entities` today).
+
+**Remote players are covered; the local player's own third-person body is not.**
+`gpu/sources.rs`'s `ThirdPersonBodyState` (what `F5` third person draws for your own
+avatar) has no `swim_amount` field yet — `sim/camera.rs::third_person_body_state` builds
+it from `Sim`'s own `PlayerState`, but nothing plumbs the value through, so `into_draw`
+sets `swim_amount: 0.0` unconditionally. **Crawling is not covered either**: it shares
+vanilla's `Pose.SWIMMING` mechanism (crawling *is* the swimming pose, entered under a
+one-block gap) and therefore shares this same rotation once `Pose` reports it, but the
+`isVisuallySwimming` translate above is exactly the crawling-specific piece this build
+does not port — so a crawling entity gets the body-pitch rotation but not the forward
+nudge vanilla adds on top of it.
+
 ### Which cell an entity samples, and what fire does to it
 
 `gpu/entity_passes.rs`'s `entity_light` is the single place any entity pass gets

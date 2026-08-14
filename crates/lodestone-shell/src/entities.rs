@@ -776,6 +776,20 @@ pub struct EntityDraw {
     /// the white-flash overlay — see those two functions' docs for why one
     /// swelling value is enough to drive both.
     pub creeper_swelling: f32,
+    /// `LivingEntity.swimAmount`, interpolated for this frame — a `0..1` ramp
+    /// toward the swim pose, `0.0` for every entity that has never reported
+    /// [`Pose`]`::`[`Swimming`](lodestone_model::EntityPose::Swimming). Mirrors
+    /// [`lodestone_physics::player::PlayerState::swim_amount`] for a network
+    /// entity we do not run physics for; see [`SwimRamp`]/[`tick_swim_ramp`]
+    /// for the client-side integration this interpolates between.
+    ///
+    /// Its only consumer today is the body-pitch rotation
+    /// `gpu/entity_passes.rs` applies to a `"player"` [`Self::type_path`] —
+    /// see that module for why only the player is ported (vanilla's own
+    /// `LivingEntityRenderer.setupRotations` has no swim branch at all; only
+    /// `AvatarRenderer` and `DrownedRenderer` override it, with two different
+    /// formulas, and this field only drives the one this build implements).
+    pub swim_amount: f32,
     /// Whether this entity's shared-flags byte reports bit `0x01` — vanilla's
     /// `displayFireAnimation()` gate, `Entity.isOnFire() && !isSpectator()`
     /// (`.cache/mc/26.2/client-src/net/minecraft/world/entity/Entity.java:
@@ -1029,6 +1043,80 @@ pub fn tick_creeper_fuse(mut fuses: Query<&mut CreeperFuse>) {
     for mut fuse in &mut fuses {
         fuse.old_swell = fuse.swell;
         fuse.swell = (fuse.swell + fuse.swell_dir).clamp(0, CREEPER_MAX_SWELL_TICKS);
+    }
+}
+
+/// `LivingEntity.swimAmount`, integrated **client-side** one tick at a time —
+/// the render-track counterpart of [`CreeperFuse`], and the same reason it
+/// exists: only the *pose* (`Pose.SWIMMING`, at metadata index 6) is ever on
+/// the wire, never the ramp itself, so [`tick_swim_ramp`] has to advance it
+/// here exactly as `LivingEntity.updateSwimAmount()` does
+/// (`LivingEntity.java:3478-3483`) rather than reading a synced value.
+///
+/// **Present on every track entity**, not gated by [`RenderKind`] the way
+/// [`CreeperFuse`] is gated to `"creeper"` — vanilla's swim rotation is not
+/// species-specific machinery the way a creeper's swell is (see
+/// [`crate::gpu::entity_passes`]'s swim rotation for the one species this
+/// build actually ports it for), and an entity that never reports
+/// `Pose.SWIMMING` just sits at `0.0` forever, which costs nothing to carry.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct SwimRamp {
+    /// The last-synced pose, read from [`Pose`] at metadata index 6 every
+    /// tick. [`tick_swim_ramp`] both reads and writes this component, unlike
+    /// [`CreeperFuse::swell_dir`] which [`update_track`] writes from a
+    /// snapshot — the ingest [`Pose`] component is already the up-to-date
+    /// synced value, so there is no separate fold step to bridge it through.
+    pub swimming: bool,
+    /// The integrated ramp one tick ago — what [`extract_entity_draws`]
+    /// interpolates *from*, exactly as `LivingEntity.swimAmountO` does.
+    pub old: f32,
+    /// The integrated ramp as of the most recent tick — what
+    /// [`extract_entity_draws`] interpolates *to*.
+    pub current: f32,
+}
+
+impl SwimRamp {
+    /// A freshly tracked entity starts unswum, exactly as [`spawn_track`]
+    /// starts every other ease at rest: both ends of the ramp are `0.0`, so a
+    /// newly seen entity that happens to already be mid-swim ramps up over
+    /// the next ~11 ticks rather than snapping to a bent pose on its first
+    /// frame.
+    pub const IDLE: Self = Self {
+        swimming: false,
+        old: 0.0,
+        current: 0.0,
+    };
+}
+
+/// `LivingEntity.updateSwimAmount()`, run against the last pose
+/// [`tick_swim_ramp`] itself read off the ingest [`Pose`] component — advances
+/// by `SWIM_AMOUNT_PER_TICK` (`0.09F`, the same constant
+/// `lodestone_physics::player::update_swim_amount` uses for the local player)
+/// toward `1.0` while swimming, back toward `0.0` otherwise, clamped both
+/// ends.
+///
+/// `GameTick` / `TickSet::Animate`, beside [`tick_creeper_fuse`]. Bridges
+/// [`Pose`] off the *ingest* entity through [`EntityIndex`] itself, the same
+/// way [`extract_entity_draws`] bridges [`AttackSwing`]/[`HurtTime`]/etc. —
+/// this system, not a fold through [`EntityFacts`], is the source of truth
+/// for "is this entity swimming right now".
+pub fn tick_swim_ramp(
+    index: Res<EntityIndex>,
+    poses: Query<&Pose>,
+    mut ramps: Query<(&MinecraftEntityId, &mut SwimRamp)>,
+) {
+    const SWIM_AMOUNT_PER_TICK: f32 = 0.09;
+    for (id, mut ramp) in &mut ramps {
+        ramp.swimming = index
+            .get(id.0)
+            .and_then(|entity| poses.get(entity).ok())
+            .is_some_and(|pose| pose.0 == lodestone_model::EntityPose::Swimming);
+        ramp.old = ramp.current;
+        ramp.current = if ramp.swimming {
+            (ramp.current + SWIM_AMOUNT_PER_TICK).min(1.0)
+        } else {
+            (ramp.current - SWIM_AMOUNT_PER_TICK).max(0.0)
+        };
     }
 }
 
@@ -1409,6 +1497,9 @@ pub fn extract_pickup_draws(
             item_use: None,
             // An item entity is never a creeper.
             creeper_swelling: 0.0,
+            // An item entity never swims — `Item.updateSwimAmount` is a
+            // `LivingEntity` behaviour and `ItemEntity` is not one.
+            swim_amount: 0.0,
             // A pickup-flight animation is synthetic (this pass's own item, not
             // a tracked entity with `EntityFlags`) and vanishes in 3 ticks — not
             // worth threading a real flag lookup through for.
@@ -1936,6 +2027,10 @@ pub fn extract_entity_draws(
         // "absence is the switch" shape `ItemPhysics` uses elsewhere in this
         // module. Every non-creeper entity matches `None` here at zero cost.
         Option<&CreeperFuse>,
+        // Bare, not `Option`: `spawn_track` inserts this on every track entity
+        // unconditionally — see [`SwimRamp`]'s own doc for why it is not
+        // gated by `RenderKind` the way `CreeperFuse` is.
+        &SwimRamp,
     )>,
     mut out: ResMut<ExtractedDraws>,
 ) {
@@ -1960,6 +2055,7 @@ pub fn extract_entity_draws(
         name_tag,
         player_skin,
         fuse,
+        swim,
     ) in &tracks
     {
         // One lookup, not two: `item` and `count` both come from the same
@@ -2049,6 +2145,9 @@ pub fn extract_entity_draws(
             let new = fuse.swell as f32;
             (old + (new - old) * partial_tick) / (CREEPER_MAX_SWELL_TICKS as f32 - 2.0)
         });
+        // `Mth.lerp(partialTick, swimAmountO, swimAmount)` — see [`SwimRamp`]
+        // for why this is integrated here rather than read off the wire.
+        let swim_amount = swim.old + (swim.current - swim.old) * partial_tick;
         // Bit `0x01` of the shared-flags byte. `false` for an entity that has
         // never reported the byte at all (`EntityFlags` absent, like
         // `HurtTime`/`AttackSwing`) — see `EntityDraw::on_fire`.
@@ -2136,6 +2235,7 @@ pub fn extract_entity_draws(
             death_time,
             item_use,
             creeper_swelling,
+            swim_amount,
             on_fire,
             player_skin: player_skin.0.clone(),
             experience_orb_value,
@@ -2542,6 +2642,7 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
         RenderWool(sheep_wool(&snap.type_path, snap.variant.as_ref())),
         RenderNameTag(snap.name_tag.clone()),
         RenderPlayerSkin(snap.player_skin.clone()),
+        SwimRamp::IDLE,
     ));
     if is_item {
         entity.insert(new_item_physics(snap));
@@ -2746,6 +2847,7 @@ impl Plugin for EntityInterpPlugin {
         app.add_systems(GameTick, tick_walk_animation.in_set(TickSet::Animate));
         app.add_systems(GameTick, tick_pickup_animations.in_set(TickSet::Animate));
         app.add_systems(GameTick, tick_creeper_fuse.in_set(TickSet::Animate));
+        app.add_systems(GameTick, tick_swim_ramp.in_set(TickSet::Animate));
         app.add_systems(Extract, extract_entity_draws.in_set(ExtractSet::Entities));
         // **`.after` is load-bearing, not tidiness.** `extract_entity_draws`
         // clears `ExtractedDraws`; without the ordering, bevy is free to run this
@@ -3666,6 +3768,7 @@ mod tests {
                 hurt: false,
                 item_use: None,
                 creeper_swelling: 0.0,
+                swim_amount: 0.0,
                 death_time: 0.0,
                 on_fire: false,
                 player_skin: skin,
@@ -4479,6 +4582,94 @@ mod tests {
         assert!(
             receded < swelling,
             "swelling did not recede after 2s at swell_dir=-1: was {swelling}, now {receded}"
+        );
+    }
+
+    /// Issue #573's producer-side wiring, traced end to end: [`Pose`] on the
+    /// ingest entity (what `apply_entity_metadata` inserts from the pose
+    /// accessor at index 6) → [`SwimRamp`]/[`tick_swim_ramp`] →
+    /// [`EntityDraw::swim_amount`]. The rotation math this value feeds is a
+    /// separate, already-covered concern (`gpu::entity_passes`'s own
+    /// `swim_rotation_interpolates_and_does_not_snap_at_a_threshold`); this
+    /// test exists so a break in *this* link — the one `tick_swim_ramp` not
+    /// running, or not being reached by `index`/`poses` — cannot hide behind
+    /// that one passing.
+    #[test]
+    fn a_swimming_pose_ramps_swim_amount_and_it_reaches_the_draw() {
+        let mut interp = EntityInterpolator::new();
+        (snap(3, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
+        let draw_for = |interp: &EntityInterpolator, id: i32| -> EntityDraw {
+            interp
+                .draws()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("no draw for entity {id}"))
+        };
+        assert_eq!(
+            draw_for(&interp, 3).swim_amount,
+            0.0,
+            "an entity that has never reported Pose::Swimming must read 0.0"
+        );
+
+        // `Pose` is not modelled by `IngestSnap` (crouching reads it the same
+        // direct way — see `extract_entity_draws`'s own `poses` query), so it
+        // is inserted straight onto the ingest entity here, exactly as
+        // `apply_entity_metadata` would.
+        let ingest_entity = interp
+            .world_mut()
+            .resource::<EntityIndex>()
+            .get(3)
+            .expect("entity 3 is spawned");
+        interp
+            .world_mut()
+            .entity_mut(ingest_entity)
+            .insert(Pose(lodestone_model::EntityPose::Swimming));
+
+        // Two ticks (0.1s at 20 Hz) — short enough that `SWIM_AMOUNT_PER_TICK
+        // = 0.09` cannot have saturated, so a nonzero-but-under-1.0 reading
+        // is only possible if the ramp is actually integrating per tick.
+        interp.update(0.1);
+        let ramping = draw_for(&interp, 3).swim_amount;
+        assert!(
+            ramping > 0.0,
+            "2 ticks with Pose::Swimming produced no ramp at all — \
+             tick_swim_ramp is not reaching this entity (the island this \
+             test exists to catch)"
+        );
+        assert!(
+            ramping < 1.0,
+            "2 ticks in produced swim_amount {ramping}, which should not yet \
+             be able to reach 1.0 (that needs ~12 ticks) — the tick rate \
+             looks wrong"
+        );
+
+        // `update` caps catch-up at `MAX_CATCH_UP_TICKS` (10) per call, so a
+        // single `update(1.0)` does not advance a full 20 ticks — three calls
+        // guarantee at least 30 more ticks regardless of that cap or of how
+        // the first `update(0.1)` above rounded, which is enough to saturate
+        // either way.
+        for _ in 0..3 {
+            interp.update(1.0);
+        }
+        assert_eq!(
+            draw_for(&interp, 3).swim_amount,
+            1.0,
+            "well over enough ticks at Pose::Swimming must saturate at the vanilla clamp"
+        );
+
+        // Backing off — the pose reverts to standing — must bring the ramp
+        // back down, proving `tick_swim_ramp` reads the pose fresh every
+        // tick rather than latching the direction once.
+        interp
+            .world_mut()
+            .entity_mut(ingest_entity)
+            .insert(Pose(lodestone_model::EntityPose::Standing));
+        interp.update(0.2);
+        let receded = draw_for(&interp, 3).swim_amount;
+        assert!(
+            receded < 1.0,
+            "swim_amount did not recede after leaving Pose::Swimming: still {receded}"
         );
     }
 

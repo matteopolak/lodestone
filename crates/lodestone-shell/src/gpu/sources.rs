@@ -285,6 +285,16 @@ impl ThirdPersonBodyState {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            // The local player's own swim ramp is not plumbed to
+            // `ThirdPersonBodyState` yet — `SwimRamp`/`tick_swim_ramp` in
+            // `entities.rs` integrate off the ingest `Pose` component, and the
+            // local player has no ingest entity to read one from (same root
+            // cause as `hurt`/`on_fire`/`death_time` above). `0.0` by
+            // construction: our own third-person body stands upright while
+            // swimming until `sim/camera.rs::third_person_body_state` grows a
+            // source for this, the same gap that field's own doc records for
+            // the fetched skin.
+            swim_amount: 0.0,
             // The local player's own body cannot report `on_fire` either, for
             // the same reason `hurt` above cannot: no ingest entity, hence no
             // `EntityFlags` to read. `false` by construction, not by omission.

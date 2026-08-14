@@ -812,6 +812,8 @@ mod tests {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            // A pig, not a player.
+            swim_amount: 0.0,
             death_time: 0.0,
             // Not on fire: these literals exist to position a nametag, not to
             // draw the entity, so no flame billboard is wanted.
@@ -885,6 +887,8 @@ mod tests {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            // A pig, not a player.
+            swim_amount: 0.0,
             death_time: 0.0,
             // Not on fire: these literals exist to position a nametag, not to
             // draw the entity, so no flame billboard is wanted.
@@ -980,6 +984,8 @@ mod tests {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            // A pig, not a player.
+            swim_amount: 0.0,
             death_time: 0.0,
             // Not on fire: these literals exist to position a nametag, not to
             // draw the entity, so no flame billboard is wanted.
