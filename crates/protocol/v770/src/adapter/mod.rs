@@ -74,6 +74,7 @@ use crate::packets::game::{
     AcceptTeleportation, Attack, BlockEntityTagQuery, COMMAND_BLOCK_FLAG_AUTOMATIC,
     COMMAND_BLOCK_FLAG_CONDITIONAL,
     COMMAND_BLOCK_FLAG_TRACK_OUTPUT, ChangeGameMode, ChatAck, ChatCommand, ChatMessage,
+    ChatSessionUpdate,
     ChunkBatchFinished, ChunkBatchReceived, ClientCommand, ClientTickEnd, CommandSuggestion,
     ConfigurationAcknowledged, ContainerButtonClick, ContainerClose, ContainerSlotStateChanged,
     EditBook, EntityTagQuery, GameEvent, GameLogin, LevelEvent, LevelParticles,

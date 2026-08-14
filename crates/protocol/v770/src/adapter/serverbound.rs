@@ -613,6 +613,54 @@ impl V770Adapter {
                 play::serverbound::CHAT,
                 encode_body(&ChatMessage::unsigned(text.clone()))?,
             ))),
+            ClientAction::SendSignedChat {
+                text,
+                timestamp_millis,
+                salt,
+                signature,
+                last_seen_offset,
+                acknowledged,
+                checksum,
+            } if state == ConnectionState::Play => {
+                // `crate::packets::game::MessageSignature` fully-qualified: this
+                // module's glob `use super::*` already brings
+                // `lodestone_game::chat_ack::MessageSignature` into scope under
+                // the same name (the driver's stateful last-seen tracker), and
+                // that is a different type from the wire's fixed 256-byte body.
+                let signature: [u8; 256] = signature.as_slice().try_into().map_err(|_| {
+                    AdapterError::Encode(format!(
+                        "signed chat signature was {} bytes, expected 256",
+                        signature.len()
+                    ))
+                })?;
+                let body = ChatMessage {
+                    message: text.clone(),
+                    timestamp: *timestamp_millis,
+                    salt: *salt,
+                    signature: Some(crate::packets::game::MessageSignature(signature)),
+                    last_seen_offset: *last_seen_offset,
+                    acknowledged: *acknowledged,
+                    checksum: *checksum,
+                };
+                Ok(Some((play::serverbound::CHAT, encode_body(&body)?)))
+            }
+            ClientAction::AnnounceChatSession {
+                session_id,
+                expires_at_millis,
+                public_key,
+                key_signature,
+            } if state == ConnectionState::Play => {
+                let body = ChatSessionUpdate {
+                    session_id: *session_id,
+                    expires_at: *expires_at_millis,
+                    public_key: public_key.clone(),
+                    key_signature: key_signature.clone(),
+                };
+                Ok(Some((
+                    play::serverbound::CHAT_SESSION_UPDATE,
+                    encode_body(&body)?,
+                )))
+            }
             ClientAction::Respawn if state == ConnectionState::Play => {
                 // `client_command` action 0 = perform_respawn; leaves the death screen.
                 let body = ClientCommand { action: 0 };
