@@ -45,6 +45,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use lodestone_data::block::Block;
 use lodestone_data::block_items;
 
 fn manifest_dir() -> PathBuf {
@@ -113,7 +114,14 @@ fn generate(rows: &[Row]) -> String {
     );
     out.push_str(
         "//! Generated item -> placed-block table for protocol 776 (Minecraft 26.2),\n\
-         //! indexed by item network registry id. Consumed by [`crate::block_items`].\n\n",
+         //! indexed by item network registry id. Consumed by [`crate::block_items`].\n\
+         //!\n\
+         //! The column holds [`crate::block::Block`] rather than the block's name. Both\n\
+         //! spellings are the same fact, but a `&'static str` column costs a pointer and\n\
+         //! a length per row plus a relocation each, where the enum costs one `u16` and\n\
+         //! resolves to the single copy of the name already in\n\
+         //! `BLOCK_REGISTRY_NAMES` — and it cannot hold a string that is not a block.\n\n\
+         use crate::block::Block;\n\n",
     );
 
     let _ = writeln!(out, "/// Number of item entries (ids are `0..ITEM_COUNT`).");
@@ -125,11 +133,26 @@ fn generate(rows: &[Row]) -> String {
          /// for the {} of {count} items that are not `BlockItem`s and place nothing.",
         count - placeable
     );
-    let _ = writeln!(out, "pub static BLOCK_FOR_ITEM: [Option<&str>; {count}] = [");
+    let _ = writeln!(
+        out,
+        "pub static BLOCK_FOR_ITEM: [Option<Block>; {count}] = ["
+    );
     for row in rows {
         match &row.block {
             Some(block) => {
-                let _ = writeln!(out, "    Some(\"{block}\"), // {} {}", row.id, row.item);
+                // Resolving through `Block::from_name` rather than emitting the
+                // camel-cased path directly is deliberate: a name the block
+                // registry does not contain fails generation here, naming the
+                // item, instead of emitting a variant that does not exist and
+                // reporting it as a compile error in a generated file.
+                let variant = Block::from_name(block).unwrap_or_else(|| {
+                    panic!("item {} places {block}, which is not a built-in block", row.item)
+                });
+                let _ = writeln!(
+                    out,
+                    "    Some(Block::{variant:?}), // {} {}",
+                    row.id, row.item
+                );
             }
             None => {
                 let _ = writeln!(out, "    None, // {} {}", row.id, row.item);
@@ -160,7 +183,10 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
     let mut checked_none = 0usize;
     for row in &rows {
         let id = i32::try_from(row.id).expect("item id fits i32");
-        let actual = block_items::block_for_item_id(id);
+        // Compared as *names*, so the expected value stays the dump's own
+        // string rather than a `Block` this crate produced — the table is typed
+        // now, but the anchor must still come from outside it.
+        let actual = block_items::block_for_item_id(id).map(Block::name);
         assert_eq!(
             actual,
             row.block.as_deref(),
@@ -191,6 +217,15 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
 /// Every block this table names must actually exist in the block registry.
 /// A typo or a stale block rename would otherwise ship a `set_block` call for
 /// a block nothing can resolve.
+///
+/// # What the `Block` column already guarantees, and what is left for this test
+///
+/// Half of this assertion is now true by construction: the column is
+/// [`Block`]-typed, so it cannot hold a name the *registry* lacks — a bad name
+/// fails generation instead. What remains is a genuine cross-table join, and it
+/// is the half that was always the real risk: the registry is registration-
+/// ordered and the block-*state* table is name-sorted, two independently
+/// generated censuses, and this asserts every placeable block appears in both.
 #[test]
 fn every_placed_block_is_a_real_registered_block() {
     let mut checked = 0usize;
@@ -199,7 +234,7 @@ fn every_placed_block_is_a_real_registered_block() {
             continue;
         };
         let found = (0..lodestone_data::block_states::STATE_COUNT)
-            .any(|state| lodestone_data::block_states::block_name(state) == Some(block));
+            .any(|state| lodestone_data::block_states::block_name(state) == Some(block.name()));
         assert!(found, "item id {id} places {block:?}, which is not a registered block");
         checked += 1;
     }
