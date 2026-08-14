@@ -1037,16 +1037,21 @@ mod tests {
         // being stared at (the sibling blink branch is the stared-at one).
         mob.set_stared_at(false);
 
-        // 29 ticks: teleport_time reaches 29, still short of the >=30 gate.
-        for n in 1..=29 {
+        // Vanilla's gate is a Java post-increment, `teleportTime++ >= 30`:
+        // the comparison reads the value *before* incrementing, so the first
+        // tick that reads 30 is the 31st call (ticks 1..=30 leave
+        // teleport_time at 1..=30 without ever comparing a value >= 30 — the
+        // comparison on tick 30 sees the pre-increment 29). 30 ticks must
+        // therefore not teleport yet.
+        for n in 1..=30 {
             goal.tick(&mut mob);
             assert_eq!(
                 mob.position(),
                 start,
-                "tick {n} of 29 must not teleport yet"
+                "tick {n} of 30 must not teleport yet"
             );
         }
-        // The 30th tick crosses the gate.
+        // The 31st tick crosses the gate.
         goal.tick(&mut mob);
 
         // Independently derived expectation: `EnderMan::teleportTowards`
