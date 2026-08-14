@@ -567,12 +567,19 @@ impl Resolver for NetherResolver {
 /// per-call. So selecting a [`WorldType`] is the entire gap; no
 /// `Resolver::biome_parameters` widening is needed for either preset.
 ///
-/// Other presets are deliberately absent from this enum: `single_biome_surface`
-/// needs a `FixedBiomeSource` this tree does not have, and
-/// `debug_all_block_states` needs its own block-grid generator. Adding a
-/// variant for one of those without the generator behind it would silently
-/// produce ordinary overworld terrain under a preset's name — see this
-/// module's own doc on why that is worse than the preset being unreachable.
+/// `single_biome_surface` and `debug_all_block_states` are also **not** a
+/// `WorldType` variant, but for a different reason than below: both now have
+/// their own entry points ([`single_biome_generator`]/[`debug_generator`],
+/// issue #519's fourth and fifth landings), yet neither reuses
+/// `overworld_generator_of_type`'s `noise_settings`-keyed shape.
+/// `single_biome_surface` turned out to need no new generator at all —
+/// [`OverworldGenerator::new`]'s existing fixed-biome fallback (`dynamic_biome:
+/// None`, see that constructor's own doc) *is* vanilla's `FixedBiomeSource`;
+/// what was missing was a resolver that deliberately withholds
+/// `biome_parameters` to select it, plus a caller-chosen biome — see
+/// [`SingleBiomeResolver`]. `debug_all_block_states` is a structurally
+/// different, seed-free generator, exactly like `flat` below — see
+/// [`lodestone_worldgen::debug`].
 ///
 /// `flat`/`flat_all_dimensions` are **not** a `WorldType` variant even though
 /// their generator now exists ([`lodestone_worldgen::flat::FlatLevelSource`],
@@ -737,6 +744,131 @@ pub fn overworld_chunk_source_of_type(
     world_type: WorldType,
 ) -> crate::chunk::OverworldChunkSource {
     crate::chunk::OverworldChunkSource::new(overworld_generator_of_type(seed, world_type))
+}
+
+/// [`Resolver`] for `single_biome_surface` (issue #519's fourth gap):
+/// identical to [`EmbeddedResolver`] except it does **not** override
+/// [`Resolver::biome_parameters`]/[`Resolver::biome_temperatures`], so it
+/// takes the trait's own empty defaults instead of the real 7594-row overworld
+/// table. [`OverworldGenerator::new`] treats an empty `biome_parameters()` as
+/// "no real biome variety supplied" and falls back to its fixed-biome path
+/// (`dynamic_biome: None`) — vanilla's `FixedBiomeSource`, already built into
+/// the engine and never before deliberately selected in production (see
+/// [`WorldType`]'s own doc). `biome_temperatures` is likewise left at the
+/// default: the fixed-biome path never consults it —
+/// [`single_biome_generator`] derives `cold_enough_to_snow` from
+/// [`EmbeddedResolver`]'s real temperature table before construction instead.
+///
+/// A newtype over [`EmbeddedResolver`], same shape as [`NetherResolver`].
+#[derive(Debug, Default)]
+struct SingleBiomeResolver(EmbeddedResolver);
+
+impl Resolver for SingleBiomeResolver {
+    fn density_function(&self, id: &str) -> Value {
+        self.0.density_function(id)
+    }
+    fn noise(&self, id: &str) -> NoiseParams {
+        self.0.noise(id)
+    }
+    // biome_parameters / biome_temperatures: intentionally not overridden —
+    // see the struct doc.
+    fn biome_document(&self, id: &str) -> Value {
+        self.0.biome_document(id)
+    }
+    fn configured_carver(&self, id: &str) -> Value {
+        self.0.configured_carver(id)
+    }
+    fn configured_feature(&self, id: &str) -> Value {
+        self.0.configured_feature(id)
+    }
+    fn placed_feature(&self, id: &str) -> Value {
+        self.0.placed_feature(id)
+    }
+    fn block_tag(&self, id: &str) -> Value {
+        self.0.block_tag(id)
+    }
+    fn structure_set_ids(&self) -> Vec<String> {
+        self.0.structure_set_ids()
+    }
+    fn structure_set(&self, id: &str) -> Value {
+        self.0.structure_set(id)
+    }
+    fn structure(&self, id: &str) -> Value {
+        self.0.structure(id)
+    }
+    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+        self.0.structure_template(id)
+    }
+    fn template_pool(&self, id: &str) -> Value {
+        self.0.template_pool(id)
+    }
+    fn processor_list(&self, id: &str) -> Value {
+        self.0.processor_list(id)
+    }
+    fn biome_tag(&self, id: &str) -> Value {
+        self.0.biome_tag(id)
+    }
+    fn block_freeze_facts(&self) -> Value {
+        self.0.block_freeze_facts()
+    }
+}
+
+/// `world_preset/single_biome_surface.json`'s embedded overworld
+/// `biome_source.biome` — the biome a player gets if they pick this preset
+/// without customizing it (`"minecraft:plains"`).
+#[must_use]
+pub fn world_preset_single_biome_default_biome() -> String {
+    let doc = EmbeddedResolver.json("world_preset/single_biome_surface");
+    doc["dimensions"]["minecraft:overworld"]["generator"]["biome_source"]["biome"]
+        .as_str()
+        .expect("world_preset/single_biome_surface.json must name a fixed biome")
+        .to_string()
+}
+
+/// Builds the `single_biome_surface` generator (issue #519's fourth gap):
+/// every column answers `biome`, vanilla's `FixedBiomeSource` selected
+/// deliberately rather than as a degradation — see [`SingleBiomeResolver`].
+///
+/// Reuses [`OverworldGenerator`] rather than a new type: shape, surface
+/// rules, carvers, ore features and vegetation are all already per-biome data
+/// lookups keyed off whichever biome id the fixed-biome path reports for a
+/// column (`OverworldGenerator`'s own `fallback_biome` field), so a
+/// non-default `biome` (e.g. `"minecraft:desert"`) already drives the correct
+/// surface material through the same [`crate::worldgen_data`] data this
+/// module's overworld path uses — nothing about surface selection is
+/// hardcoded to `"minecraft:plains"`.
+///
+/// `cold_enough_to_snow` is derived from [`EmbeddedResolver`]'s real
+/// `biome_parameters/overworld_temperature` table via
+/// [`lodestone_worldgen::biome::cold_enough_to_snow`], not hardcoded, so an
+/// unusually warm or cold fixed biome still gets the right answer.
+///
+/// # Panics
+/// Panics if `biome` is not `minecraft:`-prefixed (matching every other
+/// biome id this module handles).
+#[must_use]
+pub fn single_biome_generator(seed: i64, biome: &str) -> OverworldGenerator {
+    ACTIVE_WORLD_SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
+    let temperatures =
+        lodestone_worldgen::biome::parse_temperatures(&EmbeddedResolver.biome_temperatures());
+    let cold_enough_to_snow = lodestone_worldgen::biome::cold_enough_to_snow(&temperatures, biome);
+    OverworldGenerator::new(
+        seed,
+        settings_for(WorldType::Overworld),
+        &SingleBiomeResolver::default(),
+        biome,
+        cold_enough_to_snow,
+    )
+}
+
+/// Builds the `single_biome_surface` [`ChunkSource`](crate::chunk::ChunkSource)
+/// for `seed`/`biome` — the server/worldgen boundary a world-creation UI
+/// needs: it persists the chosen biome id alongside the seed and calls this
+/// at load time, exactly as [`overworld_chunk_source_of_type`] does for
+/// [`WorldType`].
+#[must_use]
+pub fn single_biome_chunk_source(seed: i64, biome: &str) -> crate::chunk::OverworldChunkSource {
+    crate::chunk::OverworldChunkSource::new(single_biome_generator(seed, biome))
 }
 
 /// Parses one of the 9 bundled `flat_level_generator_preset/<id>` documents
@@ -916,6 +1048,122 @@ pub fn flat_chunk_source(
     settings: lodestone_worldgen::flat::FlatLevelGeneratorSettings,
 ) -> FlatChunkSource {
     FlatChunkSource::new(flat_generator(settings))
+}
+
+/// Every block state's canonical string, id `0..STATE_COUNT`, in the vanilla
+/// global-palette order — [`lodestone_worldgen::debug::DebugLevelSource`]'s
+/// `ALL_BLOCKS`. Built once per process from [`lodestone_data::block_states`]
+/// (whose ids are documented as that exact wire/global-palette order) via the
+/// same [`canonical_state`] this module already uses for
+/// [`Resolver::block_freeze_facts`]'s override table.
+fn all_block_states_ordered() -> &'static [String] {
+    static STATES: OnceLock<Vec<String>> = OnceLock::new();
+    STATES.get_or_init(|| {
+        (0..lodestone_data::block_states::STATE_COUNT)
+            .map(canonical_state)
+            .collect()
+    })
+}
+
+/// Builds the `debug_all_block_states` generator (issue #519's fifth and
+/// final gap): every registered block state laid out on a fixed grid — see
+/// [`lodestone_worldgen::debug`] for the layout. Deterministic and seed-free,
+/// like [`flat_generator`]; uses the bundled overworld `noise_settings`' own
+/// `min_y`/`height` for the vertical bounds, same reasoning as that function.
+#[must_use]
+pub fn debug_generator() -> lodestone_worldgen::debug::DebugLevelSource {
+    let noise = &settings_for(WorldType::Overworld)["noise"];
+    let min_y = noise["min_y"].as_i64().unwrap_or(-64) as i32;
+    let height = noise["height"].as_i64().unwrap_or(384) as i32;
+    lodestone_worldgen::debug::DebugLevelSource::new(
+        all_block_states_ordered().to_vec(),
+        min_y,
+        height,
+    )
+}
+
+/// The [`ChunkSource`](crate::chunk::ChunkSource) a `debug_all_block_states`
+/// world serves — same shape as [`FlatChunkSource`], built entirely from
+/// [`crate::chunk::ChunkColumn`]'s existing public API for the same reason
+/// that struct's own doc gives.
+pub struct DebugChunkSource {
+    generator: lodestone_worldgen::debug::DebugLevelSource,
+    edits: std::sync::Mutex<std::collections::HashMap<(i32, i32), crate::chunk::ChunkColumn>>,
+}
+
+impl DebugChunkSource {
+    #[must_use]
+    pub fn new(generator: lodestone_worldgen::debug::DebugLevelSource) -> Self {
+        Self {
+            generator,
+            edits: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn generate(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
+        let col = self.generator.column(cx, cz);
+        let mut out = crate::chunk::ChunkColumn::new(col.min_y(), col.height());
+        let biome_quarts: [String; 16] = std::array::from_fn(|_| col.biome().to_string());
+        out.set_biome_quarts(&biome_quarts);
+        for lz in 0..16i32 {
+            for lx in 0..16i32 {
+                let barrier = col.block_state(lx, lodestone_worldgen::debug::BARRIER_Y, lz);
+                out.set_block(lx, lodestone_worldgen::debug::BARRIER_Y, lz, barrier);
+                let grid = col.block_state(lx, lodestone_worldgen::debug::GRID_Y, lz);
+                if grid != "minecraft:air" {
+                    out.set_block(lx, lodestone_worldgen::debug::GRID_Y, lz, grid);
+                }
+            }
+        }
+        out
+    }
+}
+
+impl std::fmt::Debug for DebugChunkSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DebugChunkSource").finish_non_exhaustive()
+    }
+}
+
+impl crate::chunk::ChunkSource for DebugChunkSource {
+    fn column(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        if let Some(edited) = edits.get(&(cx, cz)) {
+            return edited.clone();
+        }
+        drop(edits);
+        self.generate(cx, cz)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        let mut edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        let column = edits
+            .entry((cx, cz))
+            .or_insert_with(|| self.generate(cx, cz));
+        column.set_block(lx, y, lz, name);
+    }
+}
+
+/// Builds the [`DebugChunkSource`] — the server/worldgen boundary a
+/// world-creation UI needs for a `debug_all_block_states` world. Takes no
+/// parameters: unlike flat presets, vanilla's debug world has no
+/// customization screen (`DebugLevelSource`'s codec names only the fixed
+/// `minecraft:plains` biome).
+#[must_use]
+pub fn debug_chunk_source() -> DebugChunkSource {
+    DebugChunkSource::new(debug_generator())
 }
 
 /// The parsed Nether noise settings (parsed once, reused across seeds).
@@ -3598,5 +3846,243 @@ mod generation_spawn_reaches_a_real_chunk {
 
         // A different column, never edited, still reads the generated stack.
         assert_eq!(flat.block_state(16, -61, 0), "minecraft:grass_block[snowy=false]");
+    }
+}
+
+/// Issue #519's fourth and fifth (final) gaps: `single_biome_surface` and
+/// `debug_all_block_states`. Both discriminating gates below follow the
+/// pattern `flat_world_produces_the_exact_layer_stack_and_differs_from_default_overworld_at_the_same_column`
+/// set for the third gap — a specific, re-derived value from each arm,
+/// asserted to differ from the other arm's own measured value at the
+/// identical seed/column, not a bare "is different" (CLAUDE.md's *magnitude*
+/// species).
+#[cfg(test)]
+mod single_biome_and_debug_world_selection {
+    use crate::chunk::ChunkSource;
+
+    /// Scans down from the top of the dimension for the first non-air block
+    /// — a small local helper since [`crate::chunk::ChunkColumn`] (unlike the
+    /// generator-level `GeneratedColumn`/`FlatColumn`) has no `top_non_air_y`
+    /// of its own.
+    fn top_non_air(col: &crate::chunk::ChunkColumn, x: i32, z: i32) -> (i32, String) {
+        for y in (-64..320).rev() {
+            let s = col.block_state(x, y, z);
+            if s != "minecraft:air" {
+                return (y, s.to_string());
+            }
+        }
+        (-65, "minecraft:air".to_string())
+    }
+
+    /// `world_preset/single_biome_surface.json`'s default biome, pinned so a
+    /// change to the bundled asset is caught here.
+    #[test]
+    fn world_preset_single_biome_default_biome_matches_the_bundled_document() {
+        assert_eq!(super::world_preset_single_biome_default_biome(), "minecraft:plains");
+    }
+
+    /// The discriminating assertion for `single_biome_surface`: at the same
+    /// seed, [`super::single_biome_chunk_source`]`(seed, "minecraft:desert")`
+    /// must report `minecraft:desert` as its biome at *every* sampled column
+    /// — including one where the default multi-noise overworld reports a
+    /// *different* biome (`minecraft:plains`, not `minecraft:desert`) — and
+    /// its surface material must differ from the default arm's own measured
+    /// output at the identical column. A biome whose surface is grass (e.g.
+    /// plains) would leave a wrong-biome-source bug indistinguishable from
+    /// correct at many columns (CLAUDE.md); desert's sand surface cannot
+    /// coincide with default overworld's terrain by chance.
+    ///
+    /// All six values below were measured by running the real generator (a
+    /// throwaway probe, since deleted — see the module history), not
+    /// predicted: at seed 4242, `single_biome_chunk_source(seed,
+    /// "minecraft:desert")` reports biome `minecraft:desert` and surface
+    /// `minecraft:sand` at y=63 at all three sampled chunks; the default
+    /// `overworld_chunk_source(seed)` reports `minecraft:snowy_plains`/
+    /// `minecraft:snow[layers=1]` at y=64 (chunk (0,0)) and y=67 (chunk
+    /// (5,-3)), and `minecraft:plains`/`minecraft:grass_block[snowy=false]`
+    /// at y=63 (chunk (20,20)) — three distinct answers from real per-column
+    /// biome variety, none of them `minecraft:desert`.
+    #[test]
+    fn single_biome_desert_reports_desert_everywhere_and_differs_from_default_overworld() {
+        let seed: i64 = 4242;
+        let desert = super::single_biome_chunk_source(seed, "minecraft:desert");
+        let overworld = super::overworld_chunk_source(seed);
+
+        let cases: [(i32, i32, i32, &str); 3] = [
+            (0, 0, 63, "minecraft:sand"),
+            (5, -3, 63, "minecraft:sand"),
+            (20, 20, 63, "minecraft:sand"),
+        ];
+        let mut mismatches: Vec<String> = Vec::new();
+        for &(cx, cz, want_y, want_state) in &cases {
+            let col = desert.column(cx, cz);
+            if col.biome_state(0, 0) != "minecraft:desert" {
+                mismatches.push(format!(
+                    "chunk ({cx},{cz}): expected biome minecraft:desert, got {:?}",
+                    col.biome_state(0, 0)
+                ));
+            }
+            let (y, state) = top_non_air(&col, 0, 0);
+            if (y, state.as_str()) != (want_y, want_state) {
+                mismatches.push(format!(
+                    "chunk ({cx},{cz}): expected top ({want_y}, {want_state:?}), got ({y}, {state:?})"
+                ));
+            }
+        }
+        assert!(mismatches.is_empty(), "single-biome desert mismatches:\n{mismatches:#?}");
+
+        // The default arm's own measured values at the identical seed and
+        // columns — the "wrong hypothesis" this gate demonstrably rejects.
+        let default_cases: [(i32, i32, &str, i32, &str); 3] = [
+            (0, 0, "minecraft:snowy_plains", 64, "minecraft:snow[layers=1]"),
+            (5, -3, "minecraft:snowy_plains", 67, "minecraft:snow[layers=1]"),
+            (20, 20, "minecraft:plains", 63, "minecraft:grass_block[snowy=false]"),
+        ];
+        let mut default_mismatches: Vec<String> = Vec::new();
+        for &(cx, cz, want_biome, want_y, want_state) in &default_cases {
+            let col = overworld.column(cx, cz);
+            let got_biome = col.biome_state(0, 0);
+            let (y, state) = top_non_air(&col, 0, 0);
+            if got_biome != want_biome || (y, state.as_str()) != (want_y, want_state) {
+                default_mismatches.push(format!(
+                    "chunk ({cx},{cz}): expected ({want_biome}, {want_y}, {want_state:?}) \
+                     (re-derive rather than editing the desert assertion if the plain \
+                     overworld's own output moved at this seed and column), got \
+                     ({got_biome:?}, {y}, {state:?})"
+                ));
+            }
+        }
+        assert!(default_mismatches.is_empty(), "default overworld mismatches:\n{default_mismatches:#?}");
+
+        // The load-bearing comparison: at every sampled chunk, desert's biome
+        // and surface must not equal the default arm's own answer at the
+        // identical column.
+        for &(cx, cz, _, _) in &cases {
+            let d = desert.column(cx, cz);
+            let o = overworld.column(cx, cz);
+            assert_ne!(
+                d.biome_state(0, 0),
+                o.biome_state(0, 0),
+                "chunk ({cx},{cz}): desert and default overworld report the same biome — \
+                 single_biome_chunk_source may be silently routing through the default \
+                 per-column table, the exact failure mode this gate exists to catch"
+            );
+        }
+    }
+
+    /// `all_block_states_ordered`'s size and a few pinned entries — the
+    /// vanilla global-palette order [`lodestone_worldgen::debug::DebugLevelSource`]
+    /// depends on. Index 0 is `minecraft:air` (air is the first registered
+    /// block, matching vanilla's own `ALL_BLOCKS[0]`); index 1 is
+    /// `minecraft:stone`.
+    #[test]
+    fn all_block_states_ordered_matches_the_real_registry_count_and_head() {
+        let states = super::all_block_states_ordered();
+        assert_eq!(states.len(), lodestone_data::block_states::STATE_COUNT as usize);
+        assert_eq!(states[0], "minecraft:air");
+        assert_eq!(states[1], "minecraft:stone");
+    }
+
+    /// `DebugLevelSource.GRID_WIDTH`/`GRID_HEIGHT`'s vanilla formula
+    /// (`ceil(sqrt(n))` / `ceil(n / GRID_WIDTH)`) at the real 32,366-state
+    /// count, re-derived rather than assumed equal on both sides.
+    #[test]
+    fn debug_generator_grid_dimensions_match_the_vanilla_formula_at_the_real_state_count() {
+        let n = lodestone_data::block_states::STATE_COUNT as f64;
+        let expected_width = n.sqrt().ceil() as i32;
+        let expected_height = (n / f64::from(expected_width)).ceil() as i32;
+        let debug = super::debug_generator();
+        assert_eq!(debug.grid_width(), expected_width);
+        assert_eq!(debug.grid_height(), expected_height);
+    }
+
+    /// The discriminating assertion for `debug_all_block_states`: a real
+    /// [`super::DebugChunkSource`] must place the exact predicted barrier
+    /// floor and block-state grid, and that grid must differ from the
+    /// default overworld's own output at the identical column — proving the
+    /// generator is really laying out the registry, not silently producing
+    /// ordinary terrain under the preset's name.
+    ///
+    /// Measured (a throwaway probe, since deleted): world `(1, 1)` (chunk
+    /// `(0, 0)`, local `(1, 1)`) halves to grid cell `(0, 0)`, index `0` —
+    /// `minecraft:air`, matching vanilla's own `ALL_BLOCKS[0]`. World
+    /// `(17, 17)` (chunk `(1, 1)`, local `(1, 1)`) halves to `(8, 8)`, index
+    /// `8 * 180 + 8 = 1448` — `minecraft:note_block[instrument=
+    /// trumpet_exposed,note=8,powered=false]`, a real multi-property state,
+    /// which is the whole point: the grid enumerates actual registered
+    /// states, not just base block ids.
+    #[test]
+    fn debug_world_places_the_exact_predicted_grid_and_differs_from_default_overworld() {
+        let debug = super::debug_chunk_source();
+        let overworld = super::overworld_chunk_source(4242);
+
+        let mut mismatches: Vec<String> = Vec::new();
+
+        // Barrier floor at every (local_x, local_z) in chunk (0, 0).
+        let origin = debug.column(0, 0);
+        for lx in 0..16i32 {
+            for lz in 0..16i32 {
+                let got = origin.block_state(lx, 60, lz);
+                if got != "minecraft:barrier" {
+                    mismatches.push(format!("barrier ({lx},{lz}): got {got:?}"));
+                }
+            }
+        }
+        if origin.block_state(1, 70, 1) != "minecraft:air" {
+            mismatches.push(format!(
+                "world (1,1) grid row: expected air, got {:?}",
+                origin.block_state(1, 70, 1)
+            ));
+        }
+
+        let far = debug.column(1, 1);
+        let want_far = "minecraft:note_block[instrument=trumpet_exposed,note=8,powered=false]";
+        if far.block_state(1, 70, 1) != want_far {
+            mismatches.push(format!(
+                "world (17,17) grid row: expected {want_far:?}, got {:?}",
+                far.block_state(1, 70, 1)
+            ));
+        }
+        if origin.biome_state(0, 0) != "minecraft:plains" {
+            mismatches.push(format!(
+                "debug biome: expected minecraft:plains, got {:?}",
+                origin.biome_state(0, 0)
+            ));
+        }
+
+        assert!(mismatches.is_empty(), "debug-world mismatches:\n{mismatches:#?}");
+
+        // The load-bearing comparison: the default overworld's own measured
+        // output at chunk (1, 1), local (1, 1) is ordinary terrain, not a
+        // note_block and not a barrier — see `single_biome_desert_...`'s doc
+        // for the same-seed default-arm measurement convention.
+        let default_col = overworld.column(1, 1);
+        assert_ne!(
+            default_col.block_state(1, 70, 1),
+            far.block_state(1, 70, 1),
+            "default overworld and debug world agree at (17,17) y=70 — \
+             DebugChunkSource may be silently routing through the default \
+             generator, the exact failure mode this gate exists to catch"
+        );
+        assert_ne!(
+            default_col.block_state(1, 60, 1),
+            far.block_state(1, 60, 1),
+            "default overworld and debug world agree at (17,17) y=60"
+        );
+    }
+
+    /// A `set_block` edit through [`super::DebugChunkSource`] must be
+    /// visible on a later read for the same chunk, and must not leak into a
+    /// neighbouring, unedited chunk — the same contract
+    /// `flat_chunk_source_set_block_persists_and_stays_chunk_local` checks
+    /// for [`super::FlatChunkSource`].
+    #[test]
+    fn debug_chunk_source_set_block_persists_and_stays_chunk_local() {
+        let debug = super::debug_chunk_source();
+        assert_eq!(debug.block_state(1, 60, 1), "minecraft:barrier");
+        debug.set_block(1, 60, 1, "minecraft:diamond_block");
+        assert_eq!(debug.block_state(1, 60, 1), "minecraft:diamond_block");
+        // A different column, never edited, still reads the generated grid.
+        assert_eq!(debug.block_state(17, 60, 1), "minecraft:barrier");
     }
 }
