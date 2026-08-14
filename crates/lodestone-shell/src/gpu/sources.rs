@@ -633,6 +633,35 @@ impl std::fmt::Debug for ShulkerSource {
     }
 }
 
+/// Where this frame's decorated pots come from — same shape as
+/// [`ShulkerSource`]: no partial tick and no animation map, because the
+/// hit-wobble is a `BLOCK_EVENT` this workspace does not decode yet (see
+/// [`lodestone_render::DecoratedPotSpawn`]'s doc), so a pot always draws at
+/// rest.
+#[derive(Default)]
+pub struct DecoratedPotSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<
+        Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::DecoratedPotSpawn> + Send + Sync>,
+    >,
+);
+
+impl DecoratedPotSource {
+    /// This frame's decorated pots, or none when unset.
+    #[must_use]
+    pub(super) fn decorated_pots(&self, eye: glam::Vec3) -> Vec<lodestone_render::DecoratedPotSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for DecoratedPotSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DecoratedPotSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's lectern books come from — same shape as
 /// [`ShulkerSource`], and for the same reason: a lectern book's pose is a
 /// compile-time constant, so the closure needs neither a partial tick nor an

@@ -1332,14 +1332,16 @@ impl RenderState {
         let banners = self.banner_source.banners(eye);
         let lecterns = self.lectern_source.lecterns(eye);
         let enchanting_tables = self.enchanting_table_source.enchanting_tables(eye);
-        // All seven, not any subset: an early return on only `chests`/`skulls`
+        let decorated_pots = self.decorated_pot_source.decorated_pots(eye);
+        // All eight, not any subset: an early return on only `chests`/`skulls`
         // would make a bell in an otherwise chestless, skull-less room draw
         // nothing, which is exactly how this pass would have grown a third
         // island — a shulker box in an empty end-city room is the fourth
         // instance of the same shape, a banner in a village the fifth, a
-        // lectern in an otherwise bare village library the sixth, and an
-        // enchanting table alone in a room the seventh. Every source
-        // added here has to join this condition.
+        // lectern in an otherwise bare village library the sixth, an
+        // enchanting table alone in a room the seventh, and a decorated pot
+        // alone the eighth. Every source added here has to join this
+        // condition.
         //
         // **`CampfireSource` is the one exception, and it is not a subset
         // oversight**: a campfire's renderer contributes no cuboid instance at
@@ -1360,6 +1362,7 @@ impl RenderState {
             && banners.is_empty()
             && lecterns.is_empty()
             && enchanting_tables.is_empty()
+            && decorated_pots.is_empty()
             && specials.is_empty()
         {
             return (Vec::new(), Vec::new());
@@ -1433,6 +1436,18 @@ impl RenderState {
             enchanting_tables
                 .iter()
                 .filter_map(|spawn| self.block_entities.models.resolve_enchanting_table(spawn)),
+        );
+
+        // Decorated pots. `resolve_decorated_pot` returns five ordinary opaque
+        // instances at once (base + four sides) rather than one — unlike
+        // banner's `layers`, none of the five need a second, unbatched draw
+        // pass: each carries its own `(model, texture)` pair and rejoins this
+        // same batcher, so `.flatten()` is all that is needed to fold them in.
+        instances.extend(
+            decorated_pots
+                .iter()
+                .filter_map(|spawn| self.block_entities.models.resolve_decorated_pot(spawn))
+                .flatten(),
         );
 
         // Banners. `resolve_banner` returns three things at once: the

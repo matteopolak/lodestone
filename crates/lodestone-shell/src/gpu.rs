@@ -68,7 +68,8 @@ pub use occlusion::TerrainOcclusion;
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    BannerSource, BellSource, BlockEntitySource, CampfireSource, EnchantingTableSource,
+    BannerSource, BellSource, BlockEntitySource, CampfireSource, DecoratedPotSource,
+    EnchantingTableSource,
     EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource,
     MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource, SkullSource,
     SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
@@ -420,6 +421,13 @@ pub struct RenderState {
     /// no block model of its own, so an unset source leaves an empty cell where
     /// every box is, exactly as chest does.
     shulker_source: ShulkerSource,
+    /// Where this frame's decorated pots come from. Same "unset means
+    /// draw nothing" convention as [`Self::skull_source`] — and here that
+    /// degradation is a **hole**, not a missing decoration: a 26.2 decorated
+    /// pot has real block-model geometry declared but every visible triangle
+    /// (base and sides alike) comes from this pass, exactly as chest and
+    /// shulker.
+    decorated_pot_source: DecoratedPotSource,
     /// Where this frame's banners come from. Same "unset means draw
     /// nothing" convention as [`Self::skull_source`], and here that degradation is
     /// merely a missing decoration: a banner's pole and cloth **are** drawn by this
