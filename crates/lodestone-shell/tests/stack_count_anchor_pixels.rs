@@ -2,7 +2,7 @@
 //!
 //! Reported from play as "the number should be lower and further left".
 //! `GuiGraphicsExtractor.itemCount` (`:947-952`, identical in
-//! `SpectatorGui.java:79`):
+//! `SpectatorGui.java`):
 //!
 //! ```java
 //! this.text(font, amount, x + 19 - 2 - font.width(amount), y + 6 + 3, -1, true);

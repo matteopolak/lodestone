@@ -9,8 +9,8 @@
 //! cover all six boundary faces) — where vanilla asks
 //! `BlockBehaviour.getShadeBrightness`, i.e.
 //! `state.isCollisionShapeFullBlock(..) ? 0.2F : 1.0F` with seven class
-//! overrides (`BlockBehaviour.java:315-317`, consumed at
-//! `BlockModelLighter.java:45-110`). Leaves are a **full collision cube whose
+//! overrides (`BlockBehaviour.java`, consumed at
+//! `BlockModelLighter.java`). Leaves are a **full collision cube whose
 //! cutout sprite does not occlude for culling**, so every AO corner beside a leaf
 //! contributed `1.0` instead of `0.2`.
 //!

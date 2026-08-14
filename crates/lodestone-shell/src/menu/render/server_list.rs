@@ -16,7 +16,7 @@ use super::*;
 // a shared constant would make a divergence in one screen silently move the
 // other.
 
-/// `new HeaderAndFooterLayout(this, 33, 60)` (`JoinMultiplayerScreen.java:30`) —
+/// `new HeaderAndFooterLayout(this, 33, 60)` (`JoinMultiplayerScreen.java`) —
 /// the header band. This is the default 33 spelled out, not
 /// [`layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT`], because the *footer* is not the
 /// default and the pair is one constructor call.
@@ -41,19 +41,19 @@ const SERVER_LIST_LOWER_BUTTON_W: f32 = 74.0;
 /// turn a row index into a pixel top, and a second copy of `36.0` in `nav.rs`
 /// is exactly how the draw and the hit-test drift apart.
 pub const SERVER_LIST_ITEM_H: f32 = 36.0;
-/// `ServerSelectionList.getRowWidth()` (`ServerSelectionList.java:139-141`) — a
+/// `ServerSelectionList.getRowWidth()` (`ServerSelectionList.java`) — a
 /// 305 px override of `AbstractSelectionList`'s 220.
 pub(super) const SERVER_LIST_ROW_W: f32 = 305.0;
-/// `AbstractSelectionList.Entry.CONTENT_PADDING` (`AbstractSelectionList.java:435`).
+/// `AbstractSelectionList.Entry.CONTENT_PADDING` (`AbstractSelectionList.java`).
 /// The entry rect is inset by this on each side, so a 36 px row has a **32** px
 /// content box — exactly [`SERVER_ENTRY_ICON`], which is why the favicon fills
 /// the row's height.
 const SERVER_LIST_ENTRY_PADDING: f32 = 2.0;
-/// `getFirstEntryY() = getY() + 2` (`AbstractSelectionList.java:104-106`): the
+/// `getFirstEntryY() = getY() + 2` (`AbstractSelectionList.java`): the
 /// gap above row 0. A different expression from [`SERVER_LIST_ENTRY_PADDING`]
 /// that happens to be the same 2 — only one of them insets a row.
 const SERVER_LIST_FIRST_ENTRY_Y: f32 = 2.0;
-/// `OnlineServerEntry.ICON_SIZE` (`ServerSelectionList.java:246`).
+/// `OnlineServerEntry.ICON_SIZE` (`ServerSelectionList.java`).
 pub(super) const SERVER_ENTRY_ICON: f32 = 32.0;
 /// `OnlineServerEntry.SPACING` (`:247`) — the gap the status icon and the status
 /// text keep from the content's right edge, and from each other.
@@ -75,10 +75,10 @@ pub(super) const SERVER_ENTRY_MOTD_LINES: usize = 2;
 /// its own literal, not the content padding.
 pub(super) const SERVER_ENTRY_MOTD_INSET: f32 = SERVER_ENTRY_ICON + 2.0;
 /// A `StringWidget`'s height, which is what the title header is
-/// (`StringWidget.java:15`, `HeaderAndFooterLayout.addTitleHeader`).
+/// (`StringWidget.java`, `HeaderAndFooterLayout.addTitleHeader`).
 const SERVER_LIST_TITLE_H: f32 = 9.0;
 
-/// The MOTD and status colour, `-8355712` (`ServerSelectionList.java:310,349`).
+/// The MOTD and status colour, `-8355712` (`ServerSelectionList.java`).
 /// A mid grey — `0xFF808080`.
 pub(super) const SERVER_ENTRY_DIM: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
 /// `CANT_RESOLVE_TEXT`/`CANT_CONNECT_TEXT`'s `withColor(-65536)` (`:68-69`) —
@@ -89,9 +89,9 @@ pub(super) const SERVER_ENTRY_BAD: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 /// shows where a compatible one shows its player count (`:344-346`).
 pub(super) const SERVER_ENTRY_INCOMPATIBLE: [f32; 4] = [1.0, 85.0 / 255.0, 85.0 / 255.0, 1.0];
 /// The selected row's interior, `-16777216` — opaque black, filled inside the
-/// 1 px outline (`AbstractSelectionList.java:363-370`).
+/// 1 px outline (`AbstractSelectionList.java`).
 pub(super) const SERVER_LIST_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-/// The hovered row's icon dim, `fill(…, -1601138544)` (`ServerSelectionList.java:365`)
+/// The hovered row's icon dim, `fill(…, -1601138544)` (`ServerSelectionList.java`)
 /// — `0xA0909090`, a translucent grey *over* the favicon, which is what makes
 /// the join/move arrows on top of it readable.
 pub(super) const SERVER_ICON_DARKEN: [f32; 4] = [144.0 / 255.0, 144.0 / 255.0, 144.0 / 255.0, 160.0 / 255.0];
@@ -124,7 +124,7 @@ pub(super) const SERVER_UNKNOWN_ICON: &str = "misc/unknown_server";
 /// *server* texture to follow the code.
 pub(super) const WORLD_UNKNOWN_ICON: &str = SERVER_UNKNOWN_ICON;
 
-/// Vanilla's `JoinMultiplayerScreen.init` (`JoinMultiplayerScreen.java:48-130`)
+/// Vanilla's `JoinMultiplayerScreen.init` (`JoinMultiplayerScreen.java`)
 /// as a real [`layout::HeaderAndFooterLayout`], arranged for a `width`×`height`
 /// canvas.
 ///
@@ -304,7 +304,7 @@ pub fn server_list_footer_slot(button: super::nav::ServerListButton) -> Slot {
 
 /// The left edge of every list row: `getRowLeft()`, which is
 /// `getX() + this.width / 2 - getRowWidth() / 2` with `getX() == 0`
-/// (`AbstractSelectionList.java:372-374`).
+/// (`AbstractSelectionList.java`).
 ///
 /// **Not `(width - 305) / 2`.** Vanilla halves each term separately with integer
 /// division, so at an odd width the two differ by a pixel; the `floor`s are that
@@ -316,7 +316,7 @@ pub fn server_row_left(width: f32) -> f32 {
 }
 
 /// The top of list row `index`: `getFirstEntryY() + index * itemHeight -
-/// scrollAmount` — `repositionEntries` (`AbstractSelectionList.java:993-996`).
+/// scrollAmount` — `repositionEntries` (`AbstractSelectionList.java`).
 ///
 /// **`scroll` is pixels, not rows.** It was a row count when this
 /// landed for that fix, for a reason that was true then and is not now: the pipeline
@@ -347,7 +347,7 @@ pub fn server_row_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32,
 
 /// A row's *content* rect — the entry rect inset by
 /// [`SERVER_LIST_ENTRY_PADDING`] on each side
-/// (`AbstractSelectionList.java:477-506`). Everything an
+/// (`AbstractSelectionList.java`). Everything an
 /// `OnlineServerEntry` draws is measured from this, not from the row.
 #[must_use]
 pub fn server_row_content_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
@@ -363,7 +363,7 @@ pub fn server_row_content_rect(index: usize, width: f32, scroll: f32) -> (f32, f
 /// Whether row `index` is inside the list's band on a `height`-tall canvas at
 /// `scroll` **pixels** of offset — `extractListItems`' own visibility test,
 /// `child.getY() + child.getHeight() >= getY() && child.getY() <= getBottom()`
-/// (`AbstractSelectionList.java:346-352`).
+/// (`AbstractSelectionList.java`).
 ///
 /// `row_rect` calls this too (through [`MenuRow::entry`]'s carried `scroll`), so
 /// a click can no longer land on a row that is not on screen — see
@@ -390,7 +390,7 @@ pub fn server_row_visible(index: usize, height: f32, scroll: f32) -> bool {
 }
 
 /// Rows guaranteed visible at [`crate::config::MIN_SCALED_HEIGHT`] (vanilla's
-/// `Window.java:453`), so scroll-into-view (keyboard) and the wheel's fallback
+/// `Window.java`), so scroll-into-view (keyboard) and the wheel's fallback
 /// clamp are correct at every canvas and merely conservative at a larger one —
 /// the same trade `options::LIST_WINDOW_PX` and `accounts::VISIBLE_ROWS` make,
 /// for the same reason named on [`server_row_visible`]: this pipeline has no
@@ -460,7 +460,7 @@ pub fn server_list_max_scroll(entry_count: usize, height: f32) -> f32 {
 }
 
 /// The favicon's rect in row `index` — the content origin, 32×32
-/// (`ServerSelectionList.java:313,438-440`).
+/// (`ServerSelectionList.java`).
 ///
 /// **Public because the click needs it too.** `MenuNav::click` decides whether a
 /// click joins, moves the row up or moves it down from which quadrant of *this*
@@ -475,7 +475,7 @@ pub fn server_entry_icon_rect(index: usize, width: f32, scroll: f32) -> (f32, f3
 /// The rect of the status icon in row `index`, and the x the status *text* is
 /// right-aligned against.
 ///
-/// `statusIconX = getContentRight() - 10 - 5` (`ServerSelectionList.java:329`),
+/// `statusIconX = getContentRight() - 10 - 5` (`ServerSelectionList.java`),
 /// at `getContentY()` — the icon is **not** vertically centred in the row.
 #[must_use]
 pub fn server_status_icon_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {

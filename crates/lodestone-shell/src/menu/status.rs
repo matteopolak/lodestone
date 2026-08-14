@@ -73,16 +73,16 @@ pub struct ServerStatus {
     /// Carried alongside the rendered string rather than folded into it because
     /// the tooltip needs the count, not the line: vanilla appends
     /// `multiplayer.status.and_more` ("... and N more ...") when the sample is
-    /// short of it (`ServerStatusPinger.java:90-110`), and that arithmetic is
+    /// short of it (`ServerStatusPinger.java`), and that arithmetic is
     /// [`player_sample_lines`]'s job, not the probe's.
     pub online: Option<u32>,
     /// Online players' names, from the status `sample`, in server order.
     ///
     /// This is what a "who's online" tooltip reads (vanilla
-    /// `ServerSelectionList.java:410,430`). Plain names rather than the full
+    /// `ServerSelectionList.java`). Plain names rather than the full
     /// `(id, name)` pairs the net layer decodes, because the row only displays
     /// names — the anonymous-profile shaping vanilla applies per id
-    /// (`ServerStatusPinger.java:99-104`) needs the profile the shell drops,
+    /// (`ServerStatusPinger.java`) needs the profile the shell drops,
     /// and the "and N more" shaping needs the numeric [`Self::online`] count
     /// carried alongside; both belong to the tooltip ([`player_sample_lines`]),
     /// not to this model.
@@ -95,7 +95,7 @@ pub struct ServerStatus {
     /// cosmetic: vanilla compares `serverData.protocol` with
     /// `SharedConstants.getCurrentVersion().protocolVersion()` and paints
     /// `server_list/incompatible` plus the version string in red on any
-    /// mismatch (`ServerSelectionList.java:284-288,344-346`). A server that
+    /// mismatch (`ServerSelectionList.java`). A server that
     /// omits `version.protocol` therefore reads as incompatible, in vanilla
     /// (where the field defaults to `0`) and here (where it is `None`) alike.
     pub protocol: Option<i32>,
@@ -106,7 +106,7 @@ pub struct ServerStatus {
 }
 
 /// The lines a "who's online" tooltip draws for a status's sample — vanilla's
-/// `data.playerList` (`ServerStatusPinger.java:90-110`): the sample's names in
+/// `data.playerList` (`ServerStatusPinger.java`): the sample's names in
 /// order, then `multiplayer.status.and_more` ("... and %s more ...") when the
 /// sample is short of the reported online count.
 ///
@@ -179,7 +179,7 @@ impl StatusSlot {
     /// The mapping is one-to-one except at the top: vanilla has a distinct
     /// `INITIAL` state that exists for exactly one frame (`extractContent`
     /// flips it to `PINGING` the first time it draws a row,
-    /// `ServerSelectionList.java:269-271`), and [`StatusSlot::Idle`] is the
+    /// `ServerSelectionList.java`), and [`StatusSlot::Idle`] is the
     /// same "no probe has been started" fact.
     #[must_use]
     pub fn state(&self, our_protocol: i32) -> ServerState {
@@ -245,7 +245,7 @@ pub const PINGING_SPRITES: [&str; 5] = [
 /// slot rather than the status one because that is what vanilla does:
 /// `ServerStatusPinger.pingServer` assigns `data.motd = translatable(
 /// "multiplayer.status.pinging")` and blanks `data.status`
-/// (`ServerStatusPinger.java:65`).
+/// (`ServerStatusPinger.java`).
 pub const PINGING_MOTD: &str = "Pinging...";
 
 /// `ServerSelectionList.INCOMPATIBLE_SPRITE`.
@@ -495,7 +495,7 @@ impl StatusCache {
     /// using it for a refresh would leave every row exactly as it was. Vanilla
     /// gets the same effect by discarding the screen and rebuilding it with a
     /// fresh `ServerList`, whose entries all start in `State.INITIAL`
-    /// (`JoinMultiplayerScreen.java:167-169`).
+    /// (`JoinMultiplayerScreen.java`).
     pub fn refresh_all(&mut self, entries: &[ServerEntry]) {
         for entry in entries {
             self.refresh_one(entry);
@@ -766,7 +766,7 @@ mod tests {
     }
 
     /// The buckets are `< 150 / < 300 / < 600 / < 1000 / else`
-    /// (`ServerSelectionList.java:417-427`), and they run *downward*: five bars
+    /// (`ServerSelectionList.java`), and they run *downward*: five bars
     /// for a fast server. The boundary values are the point — a `<=` instead of
     /// a `<` moves every one of them by a millisecond, which no "a ping bar
     /// drew" assertion can see.
@@ -923,7 +923,7 @@ mod tests {
 
     /// That fix: the "who's online" tooltip is the sample's names, plus vanilla's
     /// `multiplayer.status.and_more` — "... and N more ..." — when the sample is
-    /// short of the reported online count (`ServerStatusPinger.java:90-110`).
+    /// short of the reported online count (`ServerStatusPinger.java`).
     #[test]
     fn player_sample_lines_shapes_the_tooltip() {
         // The full case: 2 of 5 named.

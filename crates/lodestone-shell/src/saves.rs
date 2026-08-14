@@ -44,7 +44,7 @@
 //! [`saves_dir`] is the root; every world is a subdirectory of it holding a
 //! `level.dat` (vanilla's own layout, so nothing had to move). Enumeration is
 //! `LevelStorageSource.findLevelCandidates` + `loadLevelSummaries`
-//! (`LevelStorageSource.java:210-270`) collapsed into one synchronous pass:
+//! (`LevelStorageSource.java`) collapsed into one synchronous pass:
 //!
 //! - list the root's entries, keep the **directories**, keep those with a
 //!   regular `level.dat` (vanilla additionally accepts the pre-1.13
@@ -147,20 +147,20 @@ pub const DEFAULT_WORLD_NAME: &str = "world";
 
 /// `selectWorld.newWorld` — the name [`available_dir_name`] falls back to for an
 /// empty typed name, matching `WorldCreationUiState.findResultFolder`
-/// (`WorldCreationUiState.java:105`).
+/// (`WorldCreationUiState.java`).
 pub const DEFAULT_NEW_WORLD_NAME: &str = "New World";
 
 /// `WorldCreationUiState.findResultFolder`'s own second fallback (`:108`), used
 /// when the first one cannot produce a usable folder name at all.
 const LAST_RESORT_NAME: &str = "World";
 
-/// `SharedConstants.ILLEGAL_FILE_CHARACTERS` (`SharedConstants.java:137`),
+/// `SharedConstants.ILLEGAL_FILE_CHARACTERS` (`SharedConstants.java`),
 /// verbatim and in vanilla's own order.
 const ILLEGAL_FILE_CHARACTERS: [char; 15] = [
     '/', '\n', '\r', '\t', '\0', '\u{c}', '`', '?', '*', '\\', '<', '>', '|', '"', ':',
 ];
 
-/// `FileUtil.MAX_FILE_NAME` (`FileUtil.java:19`).
+/// `FileUtil.MAX_FILE_NAME` (`FileUtil.java`).
 const MAX_FILE_NAME: usize = 255;
 
 /// The root every world folder lives under.
@@ -214,13 +214,13 @@ pub struct WorldSummary {
     /// to turn one back into a directory, and it re-checks that.
     pub dir_name: String,
     /// `LevelName`, or [`Self::dir_name`] when it is absent or empty —
-    /// `LevelSummary.getLevelName` (`LevelSummary.java:54-56`).
+    /// `LevelSummary.getLevelName` (`LevelSummary.java`).
     pub display_name: String,
     /// `LastPlayed`, epoch millis, or `-1` when unknown.
     ///
     /// `-1` is vanilla's own sentinel, not ours: `SymlinkLevelSummary.getLastPlayed`
-    /// returns `-1L` (`LevelSummary.java:317-319`) and `WorldListEntry` tests
-    /// `lastPlayed != -1L` before formatting a date (`WorldSelectionList.java:428`).
+    /// returns `-1L` (`LevelSummary.java`) and `WorldListEntry` tests
+    /// `lastPlayed != -1L` before formatting a date (`WorldSelectionList.java`).
     pub last_played: i64,
     /// `GameType`: 0 survival, 1 creative, 2 adventure, 3 spectator. `None`
     /// when the field is absent.
@@ -314,7 +314,7 @@ impl WorldSummary {
         out
     }
 
-    /// `WorldListEntry`'s second text line (`WorldSelectionList.java:426-431`):
+    /// `WorldListEntry`'s second text line (`WorldSelectionList.java`):
     /// the folder name, plus the last-played timestamp in parentheses when
     /// there is one.
     ///
@@ -400,7 +400,7 @@ pub fn list_worlds() -> Vec<WorldSummary> {
 /// crash on.
 ///
 /// Unlike vanilla this does **not** create `root` when it is missing
-/// (`findLevelCandidates` does, `LevelStorageSource.java:211-215`). Listing is a
+/// (`findLevelCandidates` does, `LevelStorageSource.java`). Listing is a
 /// read; the directory is created by [`create_world_in`], the one operation that
 /// needs it to exist. A client that is opened and never played should write
 /// nothing.
@@ -477,7 +477,7 @@ fn summarise_dir(path: &Path) -> Option<WorldSummary> {
     }
 }
 
-/// `FileUtil.sanitizeName` (`FileUtil.java:23-29`): every
+/// `FileUtil.sanitizeName` (`FileUtil.java`): every
 /// [`ILLEGAL_FILE_CHARACTERS`] becomes `_`, then so does every `.`, `/` and `"`.
 ///
 /// The second pass overlaps the first (`/` and `"` are in both lists) and is
@@ -709,7 +709,7 @@ pub fn create_world(name: &str, game_type: i32) -> Result<PathBuf, SaveError> {
 /// Three steps, in this order and for these reasons:
 ///
 /// 1. `create_dir_all(root)` — vanilla's `findResultFolder` does the same
-///    (`WorldCreationUiState.java:94-100`), and it must happen before
+///    (`WorldCreationUiState.java`), and it must happen before
 ///    [`available_dir_name`] probes for a free name.
 /// 2. `create_dir` (**not** `create_dir_all`) for the world itself: the name
 ///    came from `available_dir_name`, so an `AlreadyExists` here means another

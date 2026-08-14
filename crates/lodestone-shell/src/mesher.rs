@@ -1015,7 +1015,7 @@ impl ModelSectionView for SnapshotModelView<'_> {
     /// geometry it was baked alongside.
     ///
     /// Note this is only the model-flag third of
-    /// `ModelBlockRenderer.java:65`'s predicate; the `getLightEmission() == 0`
+    /// `ModelBlockRenderer.java`'s predicate; the `getLightEmission() == 0`
     /// clause has no data source in this codebase yet — see
     /// `docs/model-smooth-lighting.md`.
     fn ambient_occlusion_at(&self, x: usize, y: usize, z: usize) -> bool {

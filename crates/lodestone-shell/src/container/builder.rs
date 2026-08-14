@@ -125,7 +125,7 @@ impl<'a> Builder<'a> {
 
     /// One of vanilla's two container labels: the **proportional** font when one
     /// is attached, and **no drop shadow** either way — the trailing `false` in
-    /// `AbstractContainerScreen.java:190-191`'s `graphics.text` calls. Every
+    /// `AbstractContainerScreen.java`'s `graphics.text` calls. Every
     /// other text surface in this crate is shadowed, which is why this needs its
     /// own entry point rather than reusing `VanillaFont::draw`.
     ///
@@ -145,7 +145,7 @@ impl<'a> Builder<'a> {
 
     /// The anvil/enchanting-table cost numbers' own text call — vanilla's
     /// **default** `graphics.text(font, str, x, y, colour)` overload
-    /// (`GuiGraphicsExtractor.java:239-241`), which defaults `dropShadow` to
+    /// (`GuiGraphicsExtractor.java`), which defaults `dropShadow` to
     /// `true`, unlike [`label`](Self::label)'s explicit `false` for the two
     /// container labels. Degrades to the same fixed-advance debug font
     /// [`label`](Self::label) does on a jar-less run.

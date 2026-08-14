@@ -612,7 +612,7 @@ impl AccountsNav {
             let logical = rendered_row;
             // **Only `focus`.** `focus` is what draws highlighted;
             // `highlighted` is what Select/Remove act on — vanilla's `hovered`
-            // (`AbstractSelectionList.java:41`) and `selected` (`:40`), which are
+            // (`AbstractSelectionList.java`) and `selected` (`:40`), which are
             // separate fields that nothing ever copies between.
             //
             // This line used to also write `st.highlighted = logical`, and that
@@ -727,8 +727,8 @@ impl AccountsNav {
                 if st.focus < list_len {
                     let logical = st.focus;
                     // A click **does** select — `AbstractSelectionList.mouseClicked`
-                    // ends in `setSelected` (`ObjectSelectionList.java:69-72` plus
-                    // `AbstractSelectionList.java:299-311`). Only *hover* does not.
+                    // ends in `setSelected` (`ObjectSelectionList.java` plus
+                    // `AbstractSelectionList.java`). Only *hover* does not.
                     //
                     // `highlighted` has to move with it, or the hover fix opens a
                     // new gap in the other direction: a click reached here through
@@ -1755,7 +1755,7 @@ mod tests {
         // A *pixel* offset, so it is expressible in units a row index cannot reach —
         // and the value is predicted from vanilla's own arithmetic rather than read
         // off the implementation. `scrollToEntry`'s bottom branch
-        // (`AbstractSelectionList.java:251-261`) solves
+        // (`AbstractSelectionList.java`) solves
         // `bottom() - row_top(7) - 36 - CONTENT_PADDING = 0`, i.e.
         // `scroll = row_offset(8) + 2 * CONTENT_PADDING - band`:
         //

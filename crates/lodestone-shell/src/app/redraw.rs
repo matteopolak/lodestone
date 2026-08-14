@@ -269,7 +269,7 @@ impl WindowApp {
 
         // The hand needs its own copy of the view bob: vanilla applies `bobView`
         // a *second* time to a fresh pose stack seeded with the unbobbed
-        // model-view (`GameRenderer.java:333-362`), rather than letting the hand
+        // model-view (`GameRenderer.java`), rather than letting the hand
         // inherit the world's bobbed matrix. Without this the whole chain is an
         // island — `hand_view_proj` reads a source nothing installs, so the arm
         // stays rigid while the camera bobs, which is what the player reported.
@@ -497,7 +497,7 @@ impl WindowApp {
         //
         // A ramping rain level therefore re-uploads the fog uniform every tick
         // rather than only on a fluid crossing. That is intended: the ramp is
-        // ±0.01/tick over ~100 ticks (`ServerLevel.java:762-768`), and a
+        // ±0.01/tick over ~100 ticks (`ServerLevel.java`), and a
         // change-detected upload that ignored it would render a storm at clear-sky
         // colours until the player happened to swim.
         let weather_state = self.weather.as_ref().map(|w| w.state());
@@ -556,7 +556,7 @@ impl WindowApp {
         // In-world music, beside the listener update because both are "audio
         // follows the frame we actually drew".
         //
-        // The three inputs are the ones `Minecraft.java:2601-2621` uses, and two of
+        // The three inputs are the ones `Minecraft.java` uses, and two of
         // them are easy to get wrong: `creative` is `instabuild && mayfly` and not
         // a gamemode check (`Sim::music_creative`), and `underwater` is
         // water-specific rather than any fluid (`Sim::music_underwater`).
@@ -700,7 +700,7 @@ impl WindowApp {
         //
         // Matched on the item id rather than on
         // `minecraft:equippable.camera_overlay`, which is what vanilla actually
-        // keys on (`Hud.extractCameraOverlays`, `Hud.java:269-291`). That is a
+        // keys on (`Hud.extractCameraOverlays`, `Hud.java`). That is a
         // deliberate narrowing and it matches `ScreenEffects::wearing_pumpkin`'s
         // own doc: carved pumpkin is the only item shipping with that component
         // field set, so the general per-item lookup would have exactly one entry.
@@ -726,7 +726,7 @@ impl WindowApp {
             wearing_pumpkin,
             freeze_percent,
             // `Player.isScoping()` is `isUsingItem() && getUseItem().is(Items.
-            // SPYGLASS)` (`Player.java:1936-1938`). Both halves: `Sim::
+            // SPYGLASS)` (`Player.java`). Both halves: `Sim::
             // using_item()` (the two-line accessor issue #154 was waiting
             // on) and `held_for_scoping`, the same item id already computed
             // above for the first-person hand pass.
@@ -908,7 +908,7 @@ impl WindowApp {
         // Vanilla blinks the text cursor on a 300 ms half-period:
         // `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS == 300` and
         // `isCursorVisible(ms) == (ms / 300) % 2 == 0`
-        // (`.cache/mc/26.2/client-src/.../TextCursorUtils.java:9,20-22`). The
+        // (`.cache/mc/26.2/client-src/.../TextCursorUtils.java`). The
         // phase has to come from wall time rather than the tick clock, because
         // the caret keeps blinking while the game is paused.
         // `crate::platform::epoch_duration`, not `SystemTime::now()`: the latter
@@ -1028,7 +1028,7 @@ impl WindowApp {
         // The container overlay draws **after** the HUD (issue #51/#61): vanilla's
         // `Gui.render` draws the HUD unconditionally behind any world-following
         // screen (`hud_follows_world` above), and the screen then paints its own
-        // translucent background over it (`Screen.java:375-386`,
+        // translucent background over it (`Screen.java`,
         // `AbstractContainerScreen::isInGameUi`) — the dim is draw order, not a
         // per-element alpha. Drawing this block before the HUD (as it used to)
         // meant the HUD painted back over the container's dim every frame and the
@@ -1108,7 +1108,7 @@ impl WindowApp {
             player_menu = self.sim.player_menu();
             // **"Crafting"**, not "Inventory" (issue #370). `InventoryScreen`
             // passes `translatable("container.crafting")` as its title
-            // (`InventoryScreen.java:28`) — it names the 2x2 grid — and the
+            // (`InventoryScreen.java`) — it names the 2x2 grid — and the
             // literal `"Inventory"` that used to sit here was wrong twice: wrong
             // word, and, going in as the *title*, drawn at the title anchor,
             // which on this one screen is `x = 97`. The word "Inventory" does
@@ -1126,7 +1126,7 @@ impl WindowApp {
             // constant here is not the #52 defect class repeating: vanilla reads
             // it from `Inventory.getDisplayName()`, itself the client-side
             // constant `translatable("container.inventory")`
-            // (`Inventory.java:55`), so there is no server component to resolve.
+            // (`Inventory.java`), so there is no server component to resolve.
             let inventory_label =
                 crate::container::player_inventory_label(self.sim.translator().as_ref());
             // `merchant.trades` — "Trades", the merchant screen's second label
@@ -1549,7 +1549,7 @@ impl WindowApp {
         )
     }
 
-    /// Vanilla's `options.vsync` (`Options.java:511-513`, default `true`).
+    /// Vanilla's `options.vsync` (`Options.java`, default `true`).
     /// Polled every presented frame rather than pushed on toggle — see
     /// `docs/frame-pacing.md` and the deleted `unlock_framerate` debug knob
     /// this reuses the exact reasoning (and the exact `SurfaceTarget` API) of.

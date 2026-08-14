@@ -21,11 +21,11 @@ use super::*;
 pub enum Origin {
     /// `(w / 2, 0)` — the top of the screen, for the logo band and the pause
     /// screen's title. `this.width` is `int` everywhere vanilla anchors off it
-    /// (e.g. `this.width / 2 - 100` at `TitleScreen.java:144`), so `w / 2` is
+    /// (e.g. `this.width / 2 - 100` at `TitleScreen.java`), so `w / 2` is
     /// Java integer division — hence the `floor`.
     ScreenTop,
     /// `(floor(w / 2), floor(h / 4) + 48)` — vanilla `TitleScreen.init`'s
-    /// `topPos` (`TitleScreen.java:113`) for y, and the same `this.width / 2`
+    /// `topPos` (`TitleScreen.java`) for y, and the same `this.width / 2`
     /// as [`Origin::ScreenTop`] for x. Both are Java integer division, hence
     /// both `floor`s (only the y one used to be here).
     TitleTop,
@@ -33,12 +33,12 @@ pub enum Origin {
     /// `(floor((w - 212) / 2), floor((h - 166) / 4))`.
     ///
     /// That comes from `FrameLayout.alignInRectangle(grid, 0, 0, w, h, 0.5, 0.25)`
-    /// (`PauseScreen.java:181`), and since that fix it is *evaluated* rather than
+    /// (`PauseScreen.java`), and since that fix it is *evaluated* rather than
     /// restated: [`layout::align_in_dimension`] applied to
     /// [`pause_grid_size`], which is the arranged
     /// [`GridLayout`](layout::GridLayout)'s own output. The `floor`s in the
     /// formula above are vanilla's truncating `(int)` cast
-    /// (`FrameLayout.java:113-116`); the two differ only for a canvas narrower
+    /// (`FrameLayout.java`); the two differ only for a canvas narrower
     /// than the grid, which `calculate_gui_scale`'s 320 px floor rules out.
     PauseGrid,
     /// `(0, h)` — bottom-left corner text (the title screen's version string).
@@ -80,7 +80,7 @@ pub enum Origin {
     Centre,
     /// `(floor(w / 4), 0)` — the death screen's title anchor.
     /// `DeathScreen.visitText` draws it at `middleLine / 2` where
-    /// `middleLine = this.width / 2` (`DeathScreen.java:118-120`), i.e.
+    /// `middleLine = this.width / 2` (`DeathScreen.java`), i.e.
     /// **centred on the screen's left quarter, not the middle** — this is
     /// vanilla's own layout (seemingly an oversight nobody ever fixed, not a
     /// deliberate design), reproduced faithfully rather than "corrected" to
@@ -144,12 +144,12 @@ pub enum Origin {
     /// where Delete was cannot press Yes" property is a statement about two
     /// **arranged** rects, and a restated offset could be right while the drawn
     /// rect was not. `ConfirmScreen.repositionElements` arranges the tree and then
-    /// `centerInRectangle`s it (`ConfirmScreen.java:59-62`), so the canvas is an
+    /// `centerInRectangle`s it (`ConfirmScreen.java`), so the canvas is an
     /// input and the tree has to be run.
     Confirm(super::confirm::ConfirmPlacement),
     /// The command block edit screen's Done/Cancel row:
     /// `(floor(w/2), floor(h/4) + 132)` —
-    /// `AbstractCommandBlockEditScreen.java:71,74`'s
+    /// `AbstractCommandBlockEditScreen.java`'s
     /// `this.height / 4 + 120 + 12` for `y`, the same `width/2` x-anchor as
     /// every other widget on that screen ([`Origin::ScreenTop`]). Not folded
     /// into [`Origin::TitleTop`] (`floor(h/4) + 48`): the two screens' extra

@@ -23,9 +23,9 @@
 //!
 //! # The stages, and why these boundaries
 //!
-//! The boundaries are the ones production already crosses, read from
-//! `crates/protocol/v770/src/adapter.rs:3689-3716` (the real
-//! `LEVEL_CHUNK_WITH_LIGHT` arm) rather than invented here:
+//! The boundaries are the ones production already crosses, read from the
+//! `LEVEL_CHUNK_WITH_LIGHT` arm of `handle_play_chunk`
+//! (`crates/protocol/v770/src/adapter/chunk.rs`) rather than invented here:
 //!
 //! | stage | the exact production call |
 //! |---|---|
@@ -40,8 +40,9 @@
 //! then with every fixture section, and divide by the section count. The fixed
 //! per-frame cost (sky, clears, encoder setup, queue submit, driver bring-up)
 //! cancels, leaving the term that actually scales with render distance — which
-//! is the whole question, since `gpu/frame.rs:459/480/720` iterate *every*
-//! resident section with no frustum and no distance cull.
+//! is the whole question, since `RenderState::render_inner`
+//! (`crate::gpu::frame`) iterates *every* resident section with no frustum
+//! and no distance cull.
 //!
 //! Nothing here imports a version crate. `handle_packet` is reached through
 //! `lodestone_registry::adapter_for_protocol`, the same seam `net.rs` uses, so
@@ -871,10 +872,11 @@ fn measure_draw_submission(
     // than from whatever this fixture's camera happens to see.
     state.set_terrain_culling(false);
     let (loaded, stats) = arm(&state, &mut one_frame);
-    // `sections_drawn` is incremented only by the **opaque** loop
-    // (`frame.rs:480`), and a water-only section — an ocean surface with no solid
-    // blocks — carries `mesh: None` there while still issuing a water draw at
-    // `frame.rs:720`. So `sections_drawn` legitimately undercounts uploads by the
+    // `sections_drawn` is incremented only by the opaque pass of
+    // `RenderState::render_inner`, and a water-only section — an ocean surface
+    // with no solid blocks — carries `mesh: None` there while still issuing a
+    // water draw in that same function's water pass. So `sections_drawn`
+    // legitimately undercounts uploads by the
     // water-only share; measured at 189 of 195 on this fixture. The floor is
     // therefore a fraction, and `draw_calls` (which counts both passes) is
     // reported beside it — that gap *is* the render plan's "water sections pay a
@@ -1317,8 +1319,9 @@ fn client_chunk_path_cycle_attribution() {
     let models: &BlockModels = atlas
         .models()
         .expect("the vanilla load must attach baked block models");
-    // `SectionKey::min_y` must be the dimension's own `min_y` (mesher.rs:526);
-    // read it off the resident column rather than restating -64, so a fixture at
+    // `SectionKey::min_y` must be the dimension's own `min_y`
+    // (`snapshot_section_live`'s own doc); read it off the resident column
+    // rather than restating -64, so a fixture at
     // a different build-height window keys its sections correctly instead of
     // silently snapshotting nothing.
     let min_y = world
@@ -1371,7 +1374,8 @@ fn client_chunk_path_cycle_attribution() {
         cycles: s3_models.cycles + s3_fluids.cycles,
     };
 
-    // Decomposing the fluid stage: `mesh_fluids` (`models.rs:1158`) scans all
+    // Decomposing the fluid stage: `mesh_fluids`
+    // (`lodestone_render::models::mesh_fluids`) scans all
     // 4096 cells and `continue`s on `fluid_at(..) == None`, so a section with no
     // fluid still pays the full scan. Splitting the snapshots by whether they
     // contain any fluid cell at all answers whether the cost is the fluid
@@ -1521,8 +1525,8 @@ fn client_chunk_path_cycle_attribution() {
     // by the section count. The fixed per-frame cost (sky, clears, depth,
     // encoder setup, queue submit, driver bring-up) cancels, leaving the term
     // that scales with render distance — which is the whole question, since
-    // `gpu/frame.rs:459/480/720` iterate every resident section with no frustum
-    // and no distance cull.
+    // `RenderState::render_inner` iterates every resident section with no
+    // frustum and no distance cull.
     //
     // The same `RenderState` and the same target are used for both arms, in
     // that order, so the two readings differ in nothing but section residency.

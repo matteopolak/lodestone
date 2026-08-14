@@ -31,7 +31,7 @@
 //! ## Why the jitter is not vanilla's exact RNG sequence
 //!
 //! Vanilla reuses one `RandomSource` field, reseeded once per
-//! `extractPlayerHealth` call (`Hud.java:783`, `random.setSeed(tickCount *
+//! `extractPlayerHealth` call (`Hud.java`, `random.setSeed(tickCount *
 //! 312871)`) and then consumed sequentially across heart containers and food
 //! pips in a fixed draw order. Reproducing that exact sequence buys nothing
 //! visible — nobody can screenshot-diff a purely cosmetic jitter against a
@@ -72,7 +72,7 @@ pub(super) fn jitter(tick: i64, salt: u64, bound: u32) -> u32 {
 
 /// Cross-frame heart-row animation state — vanilla's
 /// `lastHealth`/`displayHealth`/`healthBlinkTime`/`lastHealthTime`
-/// (`Hud.java:167-170`). One instance lives for the life of a
+/// (`Hud.java`). One instance lives for the life of a
 /// [`super::HudRenderer`], so a fresh renderer (a gate, a reconnect) starts
 /// idle rather than inheriting a previous connection's blink window.
 #[derive(Debug, Clone, Copy)]
@@ -95,11 +95,11 @@ impl HeartAnim {
 
     /// Advances the state to `tick` for this frame's `health` (in
     /// half-points, `Player.getHealth()`'s unit) and returns vanilla's
-    /// `blink` (`Hud.java:766`) and `displayHealth` (`Hud.java:777,782` —
+    /// `blink` (`Hud.java`) and `displayHealth` (`Hud.java` —
     /// the count the "ghost" heart overlay draws during a blink window).
     ///
     /// `blink` is read from the *previous* call's window before this call's
-    /// health comparison updates it — `Hud.java:766` runs before the
+    /// health comparison updates it — `Hud.java` runs before the
     /// `healthBlinkTime` reassignment at `:770`/`:773` — so a hit's blink
     /// becomes visible starting the following tick, not the same one that
     /// registered the change. That one-tick lag is vanilla's, not an
@@ -120,12 +120,12 @@ impl HeartAnim {
                 self.caught_up_tick = tick;
             }
             Some(last) if current < last => {
-                // Damage, `Hud.java:768-770`: 20-tick blink window.
+                // Damage, `Hud.java`: 20-tick blink window.
                 self.blink_until_tick = tick + 20;
                 self.caught_up_tick = tick;
             }
             Some(last) if current > last => {
-                // Heal, `Hud.java:771-773`: 10-tick blink window.
+                // Heal, `Hud.java`: 10-tick blink window.
                 self.blink_until_tick = tick + 10;
                 self.caught_up_tick = tick;
             }
@@ -133,7 +133,7 @@ impl HeartAnim {
         }
         self.last_health = Some(current);
 
-        // `timeMillis - lastHealthTime > 1000` (`Hud.java:776-779`); 1000ms is
+        // `timeMillis - lastHealthTime > 1000` (`Hud.java`); 1000ms is
         // 20 ticks at this module's 50ms/tick.
         if tick - self.caught_up_tick > 20 {
             self.display_health = current;
@@ -144,16 +144,16 @@ impl HeartAnim {
     }
 }
 
-/// The critical-health y-jitter (`Hud.java:863-865`): once
+/// The critical-health y-jitter (`Hud.java`): once
 /// `currentHealth + absorption <= 4`, every heart **container** redraws with
 /// a fresh `0..=1`px offset. Vanilla reseeds one shared RNG stream per
-/// `extractPlayerHealth` call (`Hud.java:783`); this keys an independent draw
+/// `extractPlayerHealth` call (`Hud.java`); this keys an independent draw
 /// by `(tick, container)` instead — see the module doc.
 pub(super) fn heart_jitter(tick: i64, container: usize) -> f32 {
     jitter(tick, 0xBEEF_0000_u64 ^ container as u64, 2) as f32
 }
 
-/// The hunger-row wobble while saturation is empty (`Hud.java:977-979`):
+/// The hunger-row wobble while saturation is empty (`Hud.java`):
 /// `getSaturationLevel() <= 0.0 && tickCount % (food * 3 + 1) == 0` gates a
 /// fresh `-1..=1`px offset per pip; any other tick draws flush (no
 /// cross-frame memory needed — unlike the heart row, this is a pure function
@@ -173,12 +173,12 @@ pub(super) fn hunger_wobble(tick: i64, food: i32, saturation: f32, pip: usize) -
 
 /// Cross-frame per-slot hotbar "pop" timers — vanilla's `ItemStack.popTime`,
 /// set to `5` by `Inventory.add` whenever a stack merges into or fills a slot
-/// (`Inventory.java:220,268`) and decremented once per tick
-/// (`ItemStack.java:713-714`). [`HotbarPop::tick`] detects the same trigger
+/// (`Inventory.java`) and decremented once per tick
+/// (`ItemStack.java`). [`HotbarPop::tick`] detects the same trigger
 /// client-side (a slot's item identity changed, or its count rose) since
 /// nothing forwards the server's own `Inventory.add` call site here, and
 /// returns each slot's current pop amount on vanilla's own `5.0 → 0.0` scale
-/// (`Hud.java:1146`, `getPopTime() - partialTick`), stepped once per tick
+/// (`Hud.java`, `getPopTime() - partialTick`), stepped once per tick
 /// rather than partial-tick-interpolated.
 #[derive(Debug, Clone)]
 pub(super) struct HotbarPop {
@@ -287,7 +287,7 @@ const XP_FLASH_TICKS: i64 = 10;
 /// `experienceDisplayStartTick`, which `Hud.willPrioritizeExperienceInfo` uses
 /// to keep the XP bar *chosen* over the other contextual bars for 100 ticks;
 /// and `Player.giveExperienceLevels` plays the level-up sound every fifth level
-/// (`Player.java:1569-1572`).
+/// (`Player.java`).
 ///
 /// So this is **not** a parity port and must not be described as one. It is the
 /// effect the issue asks for, built to sit alongside the other animations in

@@ -641,7 +641,7 @@ impl Sim {
     /// `food` does — or `None` before the first `set_health`.
     ///
     /// Read by the HUD's hunger wobble (issue #30): vanilla shakes the hunger
-    /// row only while saturation is exhausted (`Hud.java:977-979`), so without
+    /// row only while saturation is exhausted (`Hud.java`), so without
     /// this the animation is computed correctly and never fires on a live
     /// server. `Vitals::saturation` was already populated; only the accessor
     /// and `app.rs`'s one assignment were missing.
@@ -794,7 +794,7 @@ impl Sim {
     /// The ticks a fresh attack must wait before it is back at full strength —
     /// vanilla's `getCurrentItemAttackStrengthDelay`, `(1.0 /
     /// getAttributeValue(Attributes.ATTACK_SPEED)) * 20.0`
-    /// (`Player.java:1816-1818`, `.cache/mc/26.2/src`).
+    /// (`Player.java`, `.cache/mc/26.2/src`).
     ///
     /// Reads `minecraft:attack_speed` off the local player's own
     /// [`Attributes`] snapshot — the same server-fed, per-item-aware value
@@ -855,8 +855,8 @@ impl Sim {
 
     /// The attack-cooldown fraction the crosshair indicator fills to,
     /// `0.0..=1.0` — vanilla's `getAttackStrengthScale(0.0F)`
-    /// (`Player.java:1826-1828`), the exact call `Hud.extractCrosshair` makes
-    /// for the crosshair-style indicator (`Hud.java:448`). The `a` (partial
+    /// (`Player.java`), the exact call `Hud.extractCrosshair` makes
+    /// for the crosshair-style indicator (`Hud.java`). The `a` (partial
     /// tick) argument is fixed at `0.0` here, same as that call site; nothing
     /// in this shell threads a render-time partial tick into `Sim`'s other
     /// accessors either (see [`Self::health`]/[`Self::xp`]).
@@ -865,12 +865,12 @@ impl Sim {
         self.attack_strength_scale_at(0.0)
     }
 
-    /// `getAttackStrengthScale(a)` (`Player.java:1826-1828`) with the partial
+    /// `getAttackStrengthScale(a)` (`Player.java`) with the partial
     /// tick argument exposed, because vanilla itself calls this with two
     /// different values for two different purposes: `0.0F` for the crosshair
-    /// indicator ([`Self::attack_strength_scale`], `Hud.java:448`) and `0.5F`
+    /// indicator ([`Self::attack_strength_scale`], `Hud.java`) and `0.5F`
     /// for `Player.attack`'s own `fullStrengthAttack` gate
-    /// (`Player.java:956,962`), which [`Self::maybe_spawn_crit_particles`]
+    /// (`Player.java`), which [`Self::maybe_spawn_crit_particles`]
     /// needs. One private helper rather than two public accessors that would
     /// otherwise duplicate the ticker read and delay computation.
     #[must_use]
@@ -940,7 +940,7 @@ impl Sim {
 
     /// `Player.hasInfiniteMaterials()` — `Abilities.instabuild`
     /// (`Player.java`; `AnvilMenu.mayPickup` and
-    /// `EnchantmentScreen.java:111` both gate on it). Used by
+    /// `EnchantmentScreen.java` both gate on it). Used by
     /// `app.rs`'s `ContainerFrame::with_cost_context` for the anvil/enchanting
     /// affordability colours — see `docs/container-cost-screens.md`.
     #[must_use]
@@ -1350,7 +1350,7 @@ impl Sim {
     }
 
     /// Select a merchant trade row — vanilla's `ServerboundSelectTradePacket`
-    /// (`MerchantScreen.postButtonClick`, `MerchantScreen.java:61-65`), sent
+    /// (`MerchantScreen.postButtonClick`, `MerchantScreen.java`), sent
     /// when the player clicks a trade-list row (issue #245's UI half).
     ///
     /// [`ClientAction::SelectTrade`] was already encoded by every protocol
@@ -1582,7 +1582,7 @@ impl Sim {
     /// The world border's warning-overlay strength for this frame, in `0.0..=1.0`
     /// — issue #436's `SessionWorldBorder` island reaching pixels.
     ///
-    /// A direct port of `Hud.extractVignette` (`Hud.java:1057-1069`,
+    /// A direct port of `Hud.extractVignette` (`Hud.java`,
     /// `.cache/mc/26.2/client-src`):
     ///
     /// ```text
@@ -1597,17 +1597,17 @@ impl Sim {
     /// # The clock is `FrameClock`, deliberately
     ///
     /// Not `WorldTime`: the server can freeze `WorldTime` with `advance_time`,
-    /// and a frozen clock would freeze a resize mid-flight. `apply_world_border`
-    /// stamps the extent off `FrameClock` for the same reason
-    /// (`lodestone-ecs/src/session.rs:566-596`), so reading it with anything
+    /// and a frozen clock would freeze a resize mid-flight.
+    /// `lodestone_ecs::session::apply_world_border` stamps the extent off
+    /// `FrameClock` for the same reason, so reading it with anything
     /// else would compare two different time bases.
     ///
     /// # A unit hazard, recorded rather than silently resolved
     ///
     /// Vanilla's `getLerpSpeed()` is `abs(from - to) / (lerpEnd - lerpBegin)`
-    /// (`WorldBorder.java:403-405`) where that denominator is
+    /// (`WorldBorder.java`) where that denominator is
     /// `lerpSizeBetween`'s third parameter — named **`ticks`**
-    /// (`WorldBorder.java:195`), not milliseconds. Our `BorderExtent::Moving`
+    /// (`WorldBorder.java`), not milliseconds. Our `BorderExtent::Moving`
     /// stores `duration_ms`, documented as milliseconds as the server sent it,
     /// so the conversion below is explicit at [`MILLIS_PER_TICK`].
     ///
@@ -1618,7 +1618,7 @@ impl Sim {
     /// shrinking a border and a measurement of when the tint first appears. The
     /// static case, which is what the gates pin, is exact either way because
     /// `StaticBorderExtent.getLerpSpeed()` returns `0.0`
-    /// (`WorldBorder.java:534-535`) and the floor wins outright.
+    /// (`WorldBorder.java`) and the floor wins outright.
     /// The command block the crosshair is on, resolved into the edit screen's
     /// opening state — issue #47's missing trigger, tracked on #436.
     ///
@@ -1762,7 +1762,7 @@ pub(crate) fn border_warning(
     // Vanilla does not clamp the low end here, but `distance_to_border` goes
     // negative outside the border, which would push this above 1.0. Vanilla
     // clamps immediately afterwards (`Mth.clamp(borderWarningStrength, 0, 1)`,
-    // `Hud.java:1073`), so clamping here is the same answer one step earlier.
+    // `Hud.java`), so clamping here is the same answer one step earlier.
     #[allow(clippy::cast_possible_truncation)]
     let strength = (1.0 - dist / warning_distance).clamp(0.0, 1.0) as f32;
     (dist, warning_distance, strength)

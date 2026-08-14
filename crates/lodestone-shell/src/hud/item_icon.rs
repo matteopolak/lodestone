@@ -403,7 +403,7 @@ pub(crate) fn draw_item_icon_counted(
     }
 }
 
-/// Vanilla's pickup-"pop" destination rect (`Hud.java:1146-1152`), as a pure
+/// Vanilla's pickup-"pop" destination rect (`Hud.java`), as a pure
 /// function so the transform math is checkable with no atlas, no sink and no
 /// `ItemStack` — just numbers in, numbers out.
 ///
@@ -434,10 +434,10 @@ fn pop_squeeze_rect(x: f32, y: f32, size: f32, pop: f32) -> [f32; 4] {
 /// vanilla's pickup "pop" animation before settling.
 ///
 /// `pop` is vanilla's `ItemStack.getPopTime() - partialTick`
-/// (`Hud.java:1146`): `5.0` the instant a stack lands in the slot — set by
+/// (`Hud.java`): `5.0` the instant a stack lands in the slot — set by
 /// `Inventory.add` whenever an item merges into or fills one
-/// (`Inventory.java:220,268`) — decaying to `0.0` over 5 ticks
-/// (`ItemStack.java:713-714`, one tick per call there). `0.0` (idle) draws
+/// (`Inventory.java`) — decaying to `0.0` over 5 ticks
+/// (`ItemStack.java`, one tick per call there). `0.0` (idle) draws
 /// pixel-identically to [`draw_item_icon`]; every caller of that function is
 /// unaffected by this one existing.
 ///
@@ -449,7 +449,7 @@ fn pop_squeeze_rect(x: f32, y: f32, size: f32, pop: f32) -> [f32; 4] {
 ///
 /// The durability bar and stack count draw **unsquashed**, at the original
 /// `(x, y, size)` — vanilla's own `graphics.itemDecorations` call sits after
-/// the pose is popped (`Hud.java:1155-1160`), outside the transform, and
+/// the pose is popped (`Hud.java`), outside the transform, and
 /// [`draw_item_icon_counted`] already draws that tail at squeeze `1.0`; this
 /// duplicates just that tail rather than sharing it, so this function stays
 /// fully self-contained and callers of [`draw_item_icon_counted`] (the
@@ -552,7 +552,7 @@ pub(crate) fn draw_item_icon_popped(
 /// Where a stack count's **right edge** sits, in slot-local GUI pixels.
 ///
 /// `GuiGraphicsExtractor.itemCount` (`:947-952`, and identically
-/// `SpectatorGui.java:79`):
+/// `SpectatorGui.java`):
 ///
 /// ```java
 /// this.text(font, amount, x + 19 - 2 - font.width(amount), y + 6 + 3, -1, true);
@@ -1317,7 +1317,7 @@ pub(crate) fn build_sprite_pipeline(
 }
 
 /// This frame's [`GuiGlintUniform`], at the player's **Glint Speed** and **Glint
-/// Strength** (`Options.java:858-874`, two `UnitDouble`s defaulting to `0.5` and
+/// Strength** (`Options.java`, two `UnitDouble`s defaulting to `0.5` and
 /// `0.75`).
 ///
 /// The clock is wall-clock milliseconds, vanilla's `Util.getMillis()` — the same
@@ -2157,7 +2157,7 @@ fn build_special_batches(
 
 /// Which **stratum** an icon draw belongs to — vanilla's `graphics.nextStratum()`
 /// in `AbstractContainerScreen.extractCarriedItem`
-/// (`AbstractContainerScreen.java:126`), which is called immediately before the
+/// (`AbstractContainerScreen.java`), which is called immediately before the
 /// carried stack is drawn and nowhere else on that screen.
 ///
 /// The distinction is not cosmetic and cannot be expressed as push order, which

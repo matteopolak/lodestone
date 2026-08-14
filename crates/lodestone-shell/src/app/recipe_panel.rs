@@ -47,7 +47,7 @@ pub(super) struct RecipePanelState {
     pub(super) restored_type: Option<lodestone_model::RecipeBookType>,
 }
 
-/// `searchBox.setMaxLength(50)` (`RecipeBookComponent.java:126`).
+/// `searchBox.setMaxLength(50)` (`RecipeBookComponent.java`).
 pub(super) const RECIPE_SEARCH_MAX_LEN: usize = 50;
 
 /// Wall-clock milliseconds for the recipe-toast window.
@@ -70,7 +70,7 @@ pub(super) fn recipe_toast_now_ms() -> u64 {
 /// point in its 5000ms window without a sleep.
 ///
 /// `visible_portion` is fixed at `1.0` — fully on screen. Vanilla's 600ms slide
-/// (`ToastManager.java:229-232`) needs an animation origin, and
+/// (`ToastManager.java`) needs an animation origin, and
 /// [`lodestone_game::recipe::RecipeToastQueue`] exposes none (its
 /// `last_changed_ms` is private, and it has no notion of a visibility
 /// transition). Drawing at rest is the honest subset; whoever lands the decode

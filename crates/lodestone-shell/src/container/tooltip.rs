@@ -50,9 +50,9 @@ use lodestone_game::menu::Menu;
 
 use super::builder::Builder;
 
-/// `TooltipRenderUtil.MOUSE_OFFSET` (`TooltipRenderUtil.java:12`) — the tooltip's
+/// `TooltipRenderUtil.MOUSE_OFFSET` (`TooltipRenderUtil.java`) — the tooltip's
 /// text origin sits `(+12, -12)` from the cursor
-/// (`DefaultTooltipPositioner.java:14`).
+/// (`DefaultTooltipPositioner.java`).
 const MOUSE_OFFSET: f32 = 12.0;
 /// `TooltipRenderUtil.PADDING` (`:13`), the same `3` on all four sides.
 const PADDING: f32 = 3.0;
@@ -70,7 +70,7 @@ const LINE_H: f32 = 9.0;
 ///
 /// This and the two border colours are the pre-sprite constants from
 /// `GuiGraphics.renderTooltipInternal`; 26.2 draws `tooltip/background` and
-/// `tooltip/frame` instead (`TooltipRenderUtil.java:9-10`), which are nine-slice
+/// `tooltip/frame` instead (`TooltipRenderUtil.java`), which are nine-slice
 /// PNGs whose art reproduces exactly this look. See the module doc for why the
 /// sprites are out of reach from this stream.
 const TOOLTIP_BG: [f32; 4] = [16.0 / 255.0, 0.0, 16.0 / 255.0, 240.0 / 255.0];
@@ -83,7 +83,7 @@ const BORDER_BOTTOM: [f32; 4] = [80.0 / 255.0, 0.0, 127.0 / 255.0, 40.0 / 255.0]
 /// — i.e. white — is right for the overwhelming majority of items.
 const NAME_COLOUR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// `ChatFormatting.DARK_GRAY`, `0x555555` — what the advanced lines use
-/// (`ItemStack.java:924, 927`).
+/// (`ItemStack.java, 927`).
 const DARK_GRAY: [f32; 4] = [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 1.0];
 
 /// One tooltip line: its text and its colour.
@@ -99,7 +99,7 @@ pub(super) struct TooltipLine {
 /// order, restricted to what this build actually has data for.
 ///
 /// The first line is always the hover name. `advanced` adds
-/// `addDetailsToTooltip`'s `isAdvanced()` block (`ItemStack.java:919-929`), in
+/// `addDetailsToTooltip`'s `isAdvanced()` block (`ItemStack.java`), in
 /// vanilla's order: durability first (**only when damaged**), then the item id,
 /// then the component count.
 ///
@@ -166,7 +166,7 @@ pub(super) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLin
 ///   needing a second gate here.
 /// * **slot holds a stack** — vanilla's
 ///   `if (hoveredSlot != null && hoveredSlot.hasItem())`
-///   (`AbstractContainerScreen.java:202`).
+///   (`AbstractContainerScreen.java`).
 /// * **nothing carried** — the same line's `&& carried.isEmpty()`. This is also
 ///   what makes the submission-order layering sound: the tooltip is emitted after
 ///   the carried stack, so if both could show at once the tooltip would cover it.

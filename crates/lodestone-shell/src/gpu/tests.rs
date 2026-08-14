@@ -22,15 +22,15 @@ use super::*;
 /// Expected bytes are hand-derived from vanilla, not from this crate's own
 /// formula: `NIGHT_FOG_COLOR_MULTIPLIER_START = ARGB.colorFromFloat(1.0,
 /// 0.05, 0.05, 0.09)` and `..._END = colorFromFloat(1.0, 0.09, 0.09, 0.09)`
-/// (`Timelines.java:33-34`), where `as8BitChannel` **floors**
-/// (`ARGB.java:229-231`: `Mth.floor(value * 255.0F)`) — `0.05*255=12.75`
+/// (`Timelines.java`), where `as8BitChannel` **floors**
+/// (`ARGB.java`: `Mth.floor(value * 255.0F)`) — `0.05*255=12.75`
 /// floors to `12`, `0.09*255=22.95` floors to `22`, giving multiplier
 /// keyframes `(12,12,22)` at tick 13670 and `(22,22,22)` at tick 22330, not
 /// the `(13,13,22)` an earlier draft of this investigation misread from a
 /// rounded guess. At tick 18000 (exactly the segment midpoint, `alpha =
 /// 4330/8660 = 0.5`) `Mth.lerpInt`'s floor gives `(17,17,22)`.
 /// `ARGB.multiply` is truncating integer division
-/// (`ARGB.java:80-86`: `red(lhs) * red(rhs) / 255`), so against our day
+/// (`ARGB.java`: `red(lhs) * red(rhs) / 255`), so against our day
 /// base `SKY_COLOR` (`#87B5EB` = `(135,181,235)`):
 ///
 /// | tick | multiplier | predicted (exact integer) |

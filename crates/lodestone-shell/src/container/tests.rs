@@ -457,7 +457,7 @@ fn menu_with_a_stack(slot: usize, count: i32) -> Menu {
 }
 
 /// `Q` and `Ctrl+Q` differ **only** in the wire button number (`0` vs `1`,
-/// `AbstractContainerScreen.java:499`'s `event.hasControlDown() ? 1 : 0`),
+/// `AbstractContainerScreen.java`'s `event.hasControlDown() ? 1 : 0`),
 /// which is what `do_throw` reads to pick drop-one from drop-stack.
 #[test]
 fn the_drop_key_throws_from_the_hovered_slot_and_control_makes_it_a_stack() {
@@ -481,7 +481,7 @@ fn the_drop_key_throws_from_the_hovered_slot_and_control_makes_it_a_stack() {
 /// slot must send nothing (so the guard exists at all), and a **loaded
 /// cursor** must still send (so the guard is not `checkHotbarKeyPressed`'s
 /// `getCarried().isEmpty()`, copied one method too far). Vanilla leaves the
-/// carried check to `AbstractContainerMenu.java:513`, so suppressing it here
+/// carried check to `AbstractContainerMenu.java`, so suppressing it here
 /// would withhold a packet the server expects.
 #[test]
 fn the_drop_key_needs_an_item_in_the_slot_but_not_an_empty_cursor() {
@@ -508,7 +508,7 @@ fn the_drop_key_needs_an_item_in_the_slot_but_not_an_empty_cursor() {
 
 /// Unlike middle-click, the pick-block **key** is not gated on infinite
 /// materials at the screen layer: `keyPressed` (`:496-497`) sends CLONE
-/// unconditionally and `doClick` (`AbstractContainerMenu.java:508`) is where
+/// unconditionally and `doClick` (`AbstractContainerMenu.java`) is where
 /// `hasInfiniteMaterials()` lives. The control is the mouse path in the same
 /// state, which *is* gated — so this asserts a real difference between the
 /// two entry points rather than restating one of them.
@@ -531,10 +531,10 @@ fn the_pick_block_key_clones_even_in_survival_where_the_mouse_does_not() {
 }
 
 // ---------------------------------------------------------------------
-// Gap (a): `canTakeItemForPickAll` — AbstractContainerScreen.java:387.
+// Gap (a): `canTakeItemForPickAll` — AbstractContainerScreen.java.
 // ---------------------------------------------------------------------
 
-/// Vanilla `AbstractContainerScreen.java:387` gates the whole double-click
+/// Vanilla `AbstractContainerScreen.java` gates the whole double-click
 /// gather branch on `menu.canTakeItemForPickAll(ItemStack.EMPTY, slot)`,
 /// which every result-bearing menu overrides to exclude its own result
 /// slot. So double-clicking a crafting result must send **nothing** — not
@@ -575,7 +575,7 @@ fn double_clicking_an_ordinary_slot_still_gathers() {
 
 // ---------------------------------------------------------------------
 // Gap (b): shift+double-click "move all matching" —
-// AbstractContainerScreen.java:388-398.
+// AbstractContainerScreen.java.
 // ---------------------------------------------------------------------
 
 /// The gather-by-shift branch sends one `QUICK_MOVE` per slot that shares
@@ -625,7 +625,7 @@ fn shift_double_click_gathers_only_matching_slots_in_the_same_backing_container(
 
 /// Control for the test above: `last_quick_moved` is captured off the
 /// double-clicked slot's *own* contents at press time
-/// (`AbstractContainerScreen.java:312`), so shift+double-clicking an
+/// (`AbstractContainerScreen.java`), so shift+double-clicking an
 /// **empty** slot records vanilla's `ItemStack.EMPTY` — and
 /// `!this.lastQuickMoved.isEmpty()` then suppresses the gather entirely,
 /// sending nothing. This proves the emitted clicks in the test above come
@@ -651,7 +651,7 @@ fn shift_double_click_on_an_empty_slot_sends_nothing() {
 //
 // The machine's arm for this (`click.rs::do_pickup`'s "slot rejects
 // placement but same item" branch, vanilla
-// `AbstractContainerMenu.java:459-465`) was present, correct and tested.
+// `AbstractContainerMenu.java`) was present, correct and tested.
 // What was broken is *which packet the release sends*: an unfiltered paint
 // set turned a click-with-a-jiggle on the result slot into a
 // `QUICK_CRAFT` sequence the machine then dropped on the floor. These tests
@@ -682,8 +682,8 @@ fn result_and_cursor(result_count: i32, carried_count: i32) -> Menu {
 /// it, so the release falls through to the plain `PICKUP` vanilla sends —
 /// which is the only click that reaches the cursor-merge arm.
 ///
-/// Hand-derived from `AbstractContainerScreen.java:554-561`: the result
-/// slot's `mayPlace` is `false` (`ResultSlot.java:24-27`), so
+/// Hand-derived from `AbstractContainerScreen.java`: the result
+/// slot's `mayPlace` is `false` (`ResultSlot.java`), so
 /// `shouldAddSlotToQuickCraft` is `false`, `quickCraftSlots` stays empty, and
 /// `mouseReleased`'s `isQuickCrafting && !quickCraftSlots.isEmpty()` test
 /// fails into the `else if (!carried.isEmpty())` branch at `:420-430`.
@@ -711,7 +711,7 @@ fn dragging_across_a_crafting_result_sends_a_pickup_not_a_dead_drag() {
 /// …and driven into the real machine, that `PICKUP` **merges**: the cursor
 /// grows by the result's count and the grid is charged one item per cell.
 ///
-/// Expected value hand-derived from `AbstractContainerMenu.java:459-465`,
+/// Expected value hand-derived from `AbstractContainerMenu.java`,
 /// which on `!slot.mayPlace(carried) && isSameItemSameComponents` does
 /// `tryRemove(clicked.getCount(), carried.getMaxStackSize() - carried.getCount())`
 /// then `carried.grow(taken)` — 4 + 1 = 5 — plus `ResultSlot.onTake`
@@ -775,7 +775,7 @@ fn the_paint_gate_also_honours_item_identity_and_the_cursor_count() {
     let dirt = |n: i32| ItemStack::new("minecraft:dirt".parse().unwrap(), n);
 
     // `canItemQuickReplace`: an occupied cell holding a *different* item is
-    // never painted (`AbstractContainerMenu.java:726-731`).
+    // never painted (`AbstractContainerMenu.java`).
     let mut mismatched = Menu::generic(9);
     mismatched.set_slot_item(0, Some(dirt(1)));
     mismatched.set_carried(Some(stick(8)));
@@ -934,7 +934,7 @@ fn a_painted_drag_changes_the_geometry_it_would_not_otherwise() {
 }
 
 /// Vanilla's `extractSlot` **returns before drawing anything** when exactly
-/// one cell is painted (`AbstractContainerScreen.java:203-205`), so that cell
+/// one cell is painted (`AbstractContainerScreen.java`), so that cell
 /// blanks — including whatever it already held. Easy to miss, and visible:
 /// the drag is about to be re-dispatched as an ordinary click.
 #[test]
@@ -1101,9 +1101,9 @@ fn background_kind_recognises_the_hopper_as_a_shorter_panel_not_a_generic_row() 
 }
 
 /// The hopper's own panel is genuinely shorter than every other special
-/// layout — `176×133`, not `166` (`HopperScreen.java:15`) — because its
+/// layout — `176×133`, not `166` (`HopperScreen.java`) — because its
 /// `addStandardInventorySlots` call uses `main_y = 51`, not `84`
-/// (`HopperMenu.java:27`). The wrong hypothesis this rules out: reusing
+/// (`HopperMenu.java`). The wrong hypothesis this rules out: reusing
 /// the other special layouts' fixed `84.0` would still produce a
 /// plausible-looking layout, just one 33px taller than the real panel,
 /// with the hopper's own five slots overlapping the top of the main
@@ -1134,7 +1134,7 @@ fn hopper_slots_land_at_vanillas_real_positions_on_a_shorter_panel() {
 }
 
 /// The anvil's three slots land at vanilla's real positions
-/// (`AnvilMenu.java:42-45`), not [`generic_layout`]'s plain left-to-right
+/// (`AnvilMenu.java`), not [`generic_layout`]'s plain left-to-right
 /// row — and the panel is the real `176x166`, not whatever height a
 /// 3-slot generic container's single row would compute.
 #[test]
@@ -1204,7 +1204,7 @@ fn anvil_cost_reaches_pixels_and_colours_by_affordability() {
         "control: no cost_data must draw neither cost colour"
     );
 
-    // Control: cost > 0 but the result slot is empty — `AnvilScreen.java:102-103`
+    // Control: cost > 0 but the result slot is empty — `AnvilScreen.java`
     // draws nothing in this case either.
     let data = [(0, 17)];
     let frame_no_result = base.with_cost_context(&data, false, 20);
@@ -1214,7 +1214,7 @@ fn anvil_cost_reaches_pixels_and_colours_by_affordability() {
             + ink_near(&empty_geo.verts, [1.0, 96.0 / 255.0, 96.0 / 255.0], 0.05),
         0,
         "control: cost > 0 with an empty result slot must draw nothing \
-         (AnvilScreen.java:102-103)"
+         (AnvilScreen.java)"
     );
 
     // Subject: a result item present and enough levels — green ink.
@@ -1259,7 +1259,7 @@ fn anvil_cost_reaches_pixels_and_colours_by_affordability() {
     assert!(
         ink_near(&expensive_geo.verts, [1.0, 96.0 / 255.0, 96.0 / 255.0], 0.05) > 0,
         "cost >= 40 without infinite materials must draw red \"Too Expensive!\" \
-         (AnvilScreen.java:99-101) even with an empty result slot and a high level"
+         (AnvilScreen.java) even with an empty result slot and a high level"
     );
 
     // Control: the same >= 40 cost, but with infinite materials, must
@@ -1271,13 +1271,13 @@ fn anvil_cost_reaches_pixels_and_colours_by_affordability() {
     assert!(
         ink_near(&creative_geo.verts, [128.0 / 255.0, 1.0, 32.0 / 255.0], 0.05) > 0,
         "infinite materials must bypass the >= 40 \"Too Expensive!\" branch \
-         (AnvilScreen.java:99: `!hasInfiniteMaterials()`)"
+         (AnvilScreen.java: `!hasInfiniteMaterials()`)"
     );
 }
 
 /// The enchanting table's three per-row level costs: reach pixels, in
 /// vanilla's own affordable/disabled colours
-/// (`EnchantmentScreen.java:110-129`). Deliberately does not check the
+/// (`EnchantmentScreen.java`). Deliberately does not check the
 /// enchantment-name text — this build has no Standard Galactic Alphabet
 /// glyphs, see [`draw_enchanting_costs`]'s doc.
 #[test]
@@ -1317,7 +1317,7 @@ fn enchanting_costs_reach_pixels_and_colour_by_affordability() {
     assert!(
         ink_near(&geo.verts, [64.0 / 255.0, 127.0 / 255.0, 16.0 / 255.0], 0.05) > 0,
         "row 1 (not enough lapis) must draw the disabled half-brightness green \
-         (EnchantmentScreen.java:115's col = -12550384)"
+         (EnchantmentScreen.java's col = -12550384)"
     );
 
     // Control: row 2's cost is 0, so removing it must not change the
@@ -1363,9 +1363,9 @@ fn the_other_three_special_layouts_match_their_menu_constructors() {
 
 /// The six menus issue #28 added, checked against the same vanilla slot
 /// constructor arguments cited in `special_layout_positions`'s own doc
-/// table (`AbstractFurnaceMenu.java:63-65`, `BrewingStandMenu.java:48-52`,
-/// `LoomMenu.java:64-82`, `StonecutterMenu.java:54-55`,
-/// `CartographyTableMenu.java:49-61`, `DispenserMenu.java:26,30-37`).
+/// table (`AbstractFurnaceMenu.java`, `BrewingStandMenu.java`,
+/// `LoomMenu.java`, `StonecutterMenu.java`,
+/// `CartographyTableMenu.java`, `DispenserMenu.java`).
 ///
 /// The wrong hypothesis this rules out: before `special_layout_positions`
 /// grew these arms, every one of them fell through to `generic_layout`'s
@@ -1601,19 +1601,19 @@ fn synthetic_background_with_window_size(window_w: u32, window_h: u32) -> Contai
         } else if id == BREWING_BUBBLES {
             (12, 29)
         } else if id.starts_with("container/creative_inventory/tab_") {
-            // `26 x 32` (`CreativeModeInventoryScreen.java:827`).
+            // `26 x 32` (`CreativeModeInventoryScreen.java`).
             (26, 32)
         } else if id.starts_with("container/creative_inventory/scroller") {
             // `12 x 15` (`:753`).
             (12, 15)
         } else if id.starts_with("advancements/tab_") {
-            // `28 x 32` for `AdvancementTabType.ABOVE` (`AdvancementTabType.java:19-20`).
+            // `28 x 32` for `AdvancementTabType.ABOVE` (`AdvancementTabType.java`).
             (28, 32)
         } else if id.ends_with("_frame_obtained") || id.ends_with("_frame_unobtained") {
-            // `26 x 26` (`AdvancementWidget.java:164`).
+            // `26 x 26` (`AdvancementWidget.java`).
             (26, 26)
         } else if id == "advancements/title_box" {
-            // `200 x 26` — `BOX_WIDTH` by `HEIGHT` (`AdvancementWidget.java:26-28`).
+            // `200 x 26` — `BOX_WIDTH` by `HEIGHT` (`AdvancementWidget.java`).
             (200, 26)
         } else {
             (CELL as u32, CELL as u32)
@@ -1707,7 +1707,7 @@ fn advancements_window_quad_scales_its_sample_with_a_higher_resolution_sheet() {
 // unconditional.
 // ---------------------------------------------------------------------
 
-/// `AnvilScreen.java:30` fixes `titleLabelX = 60` — a literal typed from the
+/// `AnvilScreen.java` fixes `titleLabelX = 60` — a literal typed from the
 /// decompile, so the expected value originates entirely outside this crate
 /// and needs no font.
 #[test]
@@ -1743,7 +1743,7 @@ fn an_anvil_titles_at_vanillas_fixed_sixty_not_the_usual_eight() {
 }
 
 /// The centred family, `(imageWidth - font.width(title)) / 2` floored
-/// (`AbstractFurnaceScreen.java:39`). Reusing this crate's own
+/// (`AbstractFurnaceScreen.java`). Reusing this crate's own
 /// `VanillaFont::width` is not circular: the glyph metrics are validated by
 /// the font's own gates, so what this pins is the **centring arithmetic**.
 ///
@@ -1921,7 +1921,7 @@ fn geo_with_background_and_data(menu: &Menu, data: &[(i32, i32)]) -> ContainerGe
 }
 
 /// The furnace family's lit-flame and burn-progress bars
-/// (`AbstractFurnaceScreen.java:53-72`), driven entirely by
+/// (`AbstractFurnaceScreen.java`), driven entirely by
 /// `frame.cost_data` — the same `container_set_data` feed the
 /// anvil/enchanting cost lines already read, so this needs no new
 /// wiring to reach `app.rs`. `data[0]` litTime `100`, `data[1]`
@@ -1979,7 +1979,7 @@ fn control_an_unlit_furnace_with_no_container_data_draws_neither_bar() {
 }
 
 /// The brewing stand's three progress widgets
-/// (`BrewingStandScreen.java:34-51`). `data[1]` fuel `15` gives
+/// (`BrewingStandScreen.java`). `data[1]` fuel `15` gives
 /// `fuelLength = (18*15+19)/20 = 14`; `data[0]` brewingTicks `100` gives
 /// `brewLength = floor(28*(1 - 100/400)) = 21` and
 /// `bubbleLength = BUBBLELENGTHS[(100/2) % 7] = BUBBLELENGTHS[1] = 24`.
@@ -2031,7 +2031,7 @@ fn control_an_idle_brewing_stand_with_no_container_data_draws_no_bars() {
     assert!(!has([px + 63.0, py + 19.0, 12.0, 24.0]));
 }
 
-/// `AbstractContainerScreen.java:155`/`:161` —
+/// `AbstractContainerScreen.java`/`:161` —
 /// `blitSprite(SLOT_HIGHLIGHT_{BACK,FRONT}, slot.x - 4, slot.y - 4, 24, 24)`.
 /// Both sprites, at the same rect, on opposite sides of the marker.
 ///
@@ -2240,7 +2240,7 @@ fn a_single_chest_blits_vanillas_two_part_split_at_the_right_offsets() {
         .quads(&menu, 10.0, 20.0)
         .expect("every id used by `synthetic_background` is present");
     assert_eq!(quads.len(), 2, "the chest background is vanilla's two blits");
-    // Top piece: `ContainerScreen.java:25` — height `rows*18+17`, at the
+    // Top piece: `ContainerScreen.java` — height `rows*18+17`, at the
     // panel's own origin.
     assert_eq!(quads[0].dst, [10.0, 20.0, 176.0, 3.0 * 18.0 + 17.0]);
     // Bottom piece: `:26` — 96 tall, placed immediately below the top one,
@@ -2343,7 +2343,7 @@ fn id(name: &str) -> lodestone_model::Identifier {
 /// rejected hypothesis. Both hypotheses were wrong, because both placed
 /// the book relative to the **container panel**. Vanilla's
 /// `getXOrigin()` is `(width - 147) / 2 - xOffset`
-/// (`RecipeBookComponent.java:167-169`) — screen-centred — and the
+/// (`RecipeBookComponent.java`) — screen-centred — and the
 /// *panel* is what moves (`updateScreenPosition`).
 ///
 /// So the expected value now comes from that expression, computed here
@@ -2728,9 +2728,9 @@ fn recipe_panel_contents_reports_one_page_for_zero_matches_not_zero() {
 ///
 /// `abs_y` is the screen's own `getRecipeBookButtonPosition().y()` as a
 /// function of the logical canvas height, and `topPos` is
-/// `AbstractContainerScreen.java:78`'s `(height - imageHeight) / 2`. Both use
+/// `AbstractContainerScreen.java`'s `(height - imageHeight) / 2`. Both use
 /// **integer** division, as Java does; `imageHeight` is the `176x166` default
-/// (`AbstractContainerScreen.java:33-34, 57-59`) for all three of these
+/// (`AbstractContainerScreen.java, 57-59`) for all three of these
 /// screens.
 fn vanilla_toggle_local_y(canvas_h: i32, abs_y: impl Fn(i32) -> i32) -> f32 {
     let top_pos = (canvas_h - 166) / 2;
@@ -2751,14 +2751,14 @@ fn logical_view_h() -> i32 {
 ///
 /// This is the owner-reported bug, and the shipped value was the crafting
 /// table's, applied to every screen. `getRecipeBookButtonPosition` is
-/// `abstract` with no default (`AbstractRecipeBookScreen.java:36`) and each
+/// `abstract` with no default (`AbstractRecipeBookScreen.java`) and each
 /// family overrides it:
 ///
 /// | screen | absolute (jar) | local |
 /// |---|---|---|
-/// | `InventoryScreen.java:64` | `(leftPos + 104, height/2 - 22)` | `(104, 61)` |
-/// | `CraftingScreen.java:27` | `(leftPos + 5, height/2 - 49)` | `(5, 34)` |
-/// | `AbstractFurnaceScreen.java:44` | `(leftPos + 20, height/2 - 49)` | `(20, 34)` |
+/// | `InventoryScreen.java` | `(leftPos + 104, height/2 - 22)` | `(104, 61)` |
+/// | `CraftingScreen.java` | `(leftPos + 5, height/2 - 49)` | `(5, 34)` |
+/// | `AbstractFurnaceScreen.java` | `(leftPos + 20, height/2 - 49)` | `(20, 34)` |
 ///
 /// The y values are recomputed from those absolute expressions by
 /// [`vanilla_toggle_local_y`], not restated.
@@ -3112,7 +3112,7 @@ fn synthetic_recipe_gui_atlas() -> lodestone_render::GuiAtlas {
 /// **The bug 1 gate.** The panel page's UV window is the `147x166` sub-rect at
 /// `(1, 1)` of the `256x256` sheet, byte-exact.
 ///
-/// `RecipeBookComponent.java:305` is
+/// `RecipeBookComponent.java` is
 /// `blit(RenderPipelines.GUI_TEXTURED, RECIPE_BOOK_LOCATION, xo, yo, 1.0F,
 /// 1.0F, 147, 166, 256, 256)` — a fixed window, `u = v = 1`. The one-pixel
 /// inset is real: decoding the PNG shows its opaque region is exactly
@@ -3263,7 +3263,7 @@ fn recipe_panel_emits_vanillas_art_in_an_order_that_cannot_bury_a_control() {
 
     // Tabs: `panel_geo_for` selects tab 0, so exactly one is the selected art
     // and it is nudged 2 px left of its own hit rect
-    // (`RecipeBookTabButton.java:55-57`) while the rest are not.
+    // (`RecipeBookTabButton.java`) while the rest are not.
     let selected = find(RECIPE_SPRITE_TAB_SELECTED);
     let plain = find(RECIPE_SPRITE_TAB);
     assert_eq!(selected.len(), 1, "one tab is selected");
@@ -3744,7 +3744,7 @@ fn only_the_player_inventory_carries_an_avatar() {
 /// independent guess at it.
 ///
 /// The expectation comes from `widget_rect` — the rect the panel art is actually
-/// blitted into by this same geometry — plus `InventoryScreen.java:101`'s `+26`
+/// blitted into by this same geometry — plus `InventoryScreen.java`'s `+26`
 /// and `+8`. Restating `panel_origin_with_scale` here instead would be a control
 /// that agrees with the draw by coincidence rather than by construction.
 #[test]
@@ -4148,7 +4148,7 @@ fn merchant_screen_opens_and_renders_its_trade_list_through_the_real_path() {
     let layout = crate::container::slot_layout(&menu);
     assert_eq!(
         layout.width, 276.0,
-        "the merchant panel is 276px wide, not the generic 176 — MerchantScreen.java:57"
+        "the merchant panel is 276px wide, not the generic 176 — MerchantScreen.java"
     );
     assert_eq!(background_kind(&menu), BackgroundKind::Merchant);
 

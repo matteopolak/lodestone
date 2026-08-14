@@ -160,7 +160,7 @@ fn the_command_block_done_button_sends_a_real_set_command_block_action() {
         "the action must carry the screen's edits, field for field"
     );
 
-    // Vanilla closes after sending (`CommandBlockEditScreen.java:111-114`).
+    // Vanilla closes after sending (`CommandBlockEditScreen.java`).
     assert_ne!(
         app.ui.screen(),
         crate::menu::Screen::CommandBlockEdit,
@@ -201,7 +201,7 @@ fn empty_seed_is_random_not_a_fixed_fallback() {
     );
 }
 
-/// Issue #190's queued patch, driven end to end: two different
+/// A queued-patch check driven end to end: two different
 /// `WorldCreationConfig`s (the exact type `Screen::CreateWorld` collects)
 /// resolved through the *production* `resolve_launch_seed` must generate
 /// **different real terrain** at the same coordinate — not merely
@@ -211,8 +211,9 @@ fn empty_seed_is_random_not_a_fixed_fallback() {
 ///
 /// `lodestone_server::overworld_generator` is exactly what
 /// `crate::net::run`'s `Origin::Integrated` arm calls with this
-/// function's resolved seed (`net.rs:1354` at the time of writing) — so
-/// this proves the seed that would reach the wire, not a stand-in.
+/// function's resolved seed, once it has gone through
+/// `lodestone_server::region_source::resolve_world_seed` — so this proves
+/// the seed that would reach the wire, not a stand-in.
 #[test]
 fn resolved_seeds_from_different_world_creation_configs_generate_different_terrain() {
     let config_a = crate::menu::create_world::WorldCreationConfig {
@@ -405,7 +406,7 @@ fn accumulate_scroll_moves_several_slots_per_notch_at_high_sensitivity() {
 }
 
 /// A direction reversal must drop the old carry rather than fight it
-/// (`ScrollWheelHandler.java:14-16`): three-quarters of a slot built up
+/// (`ScrollWheelHandler.java`): three-quarters of a slot built up
 /// scrolling one way must not partially cancel a fresh scroll the other
 /// way, or a player flicking back and forth would see scroll amounts
 /// depend on unrelated history.
@@ -494,7 +495,7 @@ fn the_crosshair_and_the_hotbar_disagree_behind_a_screen() {
 #[test]
 fn vanillas_cap_is_ten_ticks_of_real_time() {
     // Guards the constant against a silent edit. 10 ticks × 50 ms = 500 ms;
-    // read from Minecraft.java:262 / :1176 (see `MAX_TICKS_PER_UPDATE`).
+    // read from Minecraft.java / :1176 (see `MAX_TICKS_PER_UPDATE`).
     assert_eq!(MAX_TICKS_PER_UPDATE, 10);
     assert!((MAX_CATCHUP_SECS - 0.5).abs() < 1e-12, "{MAX_CATCHUP_SECS}");
 }
@@ -840,13 +841,13 @@ fn effective_target_fps_matches_vanillas_framerate_limit_tracker() {
         Some(120)
     );
     // `Minimized` never reduces for idle input, however long — only `Afk`
-    // does (`FramerateLimitTracker.java:37`'s own gate).
+    // does (`FramerateLimitTracker.java`'s own gate).
     assert_eq!(
         effective_target_fps(120, InactivityFpsLimit::Minimized, 10_000.0),
         Some(120)
     );
     // SHORT_AFK: `min(limit, 30)` past 60 s idle, vanilla's own formula
-    // (`FramerateLimitTracker.java:31`) — a limit *above* 30 gets capped down.
+    // (`FramerateLimitTracker.java`) — a limit *above* 30 gets capped down.
     assert_eq!(
         effective_target_fps(120, InactivityFpsLimit::Afk, 90.0),
         Some(30)
@@ -863,7 +864,7 @@ fn effective_target_fps_matches_vanillas_framerate_limit_tracker() {
         Some(30)
     );
     // LONG_AFK: flatly 10 past 600 s, vanilla's own `LONG_AFK_LIMIT`
-    // (`FramerateLimitTracker.java:30`), regardless of the raw limit.
+    // (`FramerateLimitTracker.java`), regardless of the raw limit.
     assert_eq!(
         effective_target_fps(120, InactivityFpsLimit::Afk, 700.0),
         Some(10)
@@ -1122,7 +1123,7 @@ fn default_playing_expectations() -> Vec<(KeyCode, KeyOutcome)> {
         (KeyCode::F5, KeyOutcome::TogglePerspective),
         // Issue #197: F3 is now the debug *modifier*, reporting both edges; the
         // overlay toggle happens on the release when no chord fired (see
-        // `resolve_key`, and vanilla `KeyboardHandler.java:554-555`).
+        // `resolve_key`, and vanilla `KeyboardHandler.java`).
         (KeyCode::F3, KeyOutcome::DebugModifier(true)),
         (KeyCode::Escape, KeyOutcome::Pause),
         (KeyCode::Digit1, KeyOutcome::SelectSlot(0)),
@@ -1296,7 +1297,7 @@ fn the_inventory_key_closes_a_container_and_escape_pauses_instead() {
 /// slot while a container screen is open; they issue a `ContainerInput::SWAP`
 /// with that hotbar index against the hovered slot
 /// (`AbstractContainerScreen.checkHotbarKeyPressed`,
-/// `AbstractContainerScreen.java:506-522`, and the number keys are handled in
+/// `AbstractContainerScreen.java`, and the number keys are handled in
 /// `Minecraft.handleKeybinds` only when `screen == null`).
 ///
 /// Before this they fell into the container arm's swallow: they neither
@@ -1357,7 +1358,7 @@ fn the_number_keys_swap_with_the_hovered_slot_instead_of_selecting_one() {
 
 /// The off-hand key's container half (issues #378 part 3 / #382).
 ///
-/// `key.swapOffhand` defaults to `F` (`Options.java:663`, GLFW keysym 70).
+/// `key.swapOffhand` defaults to `F` (`Options.java`, GLFW keysym 70).
 /// It could not be added while `key.lodestone.toggleFly` squatted on `F`;
 /// #382 deleted that binding, and this is the assertion that the freed key
 /// actually reaches `Click::offhand_swap` rather than merely existing in
@@ -1450,8 +1451,8 @@ fn the_offhand_key_in_the_world_sends_the_swap_action_to_the_wire() {
 }
 
 /// **The spectator control**, and the one guard vanilla actually applies
-/// (`Minecraft.java:1901`, re-checked server-side at
-/// `ServerGamePacketListenerImpl.java:1295`).
+/// (`Minecraft.java`, re-checked server-side at
+/// `ServerGamePacketListenerImpl.java`).
 ///
 /// Watched failing: with the `Spectator` arm removed,
 /// `offhand_swap_action(Spectator)` returns the action and the first
@@ -1606,7 +1607,7 @@ fn the_drop_key_in_the_world_sends_the_drop_action_to_the_wire() {
 }
 
 /// The spectator control, the one guard vanilla applies
-/// (`Minecraft.java:1908`) — same shape as `a_spectator_does_not_send_
+/// (`Minecraft.java`) — same shape as `a_spectator_does_not_send_
 /// the_offhand_swap_and_everyone_else_does`, watched failing the same way:
 /// remove the `Spectator` arm from `drop_selected_action` and the first
 /// assertion below reports `Some(DropSelectedItem)`.
@@ -1879,7 +1880,7 @@ fn the_mouse_path_resolves_the_default_attack_and_use_buttons() {
         Some(InputAction::Use)
     );
     // Middle **is** a gameplay binding now: `key.pickItem` defaults to
-    // `Type.MOUSE, 2` (`Options.java:669`), so it is the primary route for
+    // `Type.MOUSE, 2` (`Options.java`), so it is the primary route for
     // pick-item rather than a rebound one. This assertion previously read
     // `None`, which was correct only while pick-item did not exist — the
     // premise went stale when the binding landed, not the code.
@@ -2152,7 +2153,7 @@ fn drive_ui_from_session_opens_credits_on_the_real_win_game_event() {
     assert_eq!(
         app.ui.screen(),
         crate::menu::Screen::Credits,
-        "the real WIN_GAME event (GAME_EVENT code 4, ClientPacketListener.java:1548) \
+        "the real WIN_GAME event (GAME_EVENT code 4, ClientPacketListener.java) \
          must open the credits screen"
     );
 }
@@ -2176,7 +2177,7 @@ fn drive_ui_from_session_opens_credits_on_the_real_win_game_event() {
 /// weather` — the raw climate is pulled straight off the `BiomeClimateCell`
 /// and vanilla's own threshold is applied by hand, quoted from the
 /// decompiled source rather than from this crate's constant:
-/// `Biome.java:176`, `return this.getTemperature(pos, seaLevel) >= 0.15F;`
+/// `Biome.java`, `return this.getTemperature(pos, seaLevel) >= 0.15F;`
 /// (`warmEnoughToRain`, called from `getPrecipitationAt` at `:108`). A
 /// wrong threshold in either implementation would show up as a mismatch
 /// against this independently-computed expectation rather than agreeing
@@ -2326,8 +2327,8 @@ async fn live_precipitation_matches_vanillas_own_threshold_for_real_biomes() {
 
         // Independent re-derivation, not a call to `lodestone_render::
         // weather`: vanilla's own height falloff
-        // (`Biome.getHeightAdjustedTemperature`, `Biome.java:112-121`)
-        // and its own rain/snow threshold (`Biome.java:176`, `0.15F`).
+        // (`Biome.getHeightAdjustedTemperature`, `Biome.java`)
+        // and its own rain/snow threshold (`Biome.java`, `0.15F`).
         let above = (y - crate::worldgen::SEA_LEVEL) as f32;
         let adjusted = if above > 0.0 {
             temperature - above * 0.05 / 40.0
@@ -2835,9 +2836,9 @@ const CB_FB_H: u32 = 400;
 /// Asking `row_rect` where a row is and then clicking there would be
 /// `decode(encode(x)) == x`: it passes for any self-consistent geometry,
 /// including one that draws the buttons off-screen. These are computed from
-/// `AbstractCommandBlockEditScreen.java`'s own arithmetic — `:71` places Done
-/// at `width/2 - 4 - 150`, `:74` places Cancel at `width/2 + 4`, both `150x20`
-/// at `height/4 + 120 + 12`, and `:50` puts the mode row at `width/2 - 154`,
+/// `AbstractCommandBlockEditScreen.java`'s own arithmetic — Done sits
+/// at `width/2 - 4 - 150`, Cancel at `width/2 + 4`, both `150x20`
+/// at `height/4 + 120 + 12`, and the mode row at `width/2 - 154`,
 /// `100x20`, `y = 165`.
 #[test]
 fn clicking_a_command_block_row_at_its_own_coordinates_activates_that_row() {
@@ -2874,7 +2875,7 @@ fn clicking_a_command_block_row_at_its_own_coordinates_activates_that_row() {
          `false`, which is why every click on it was silently dropped"
     );
 
-    // `AbstractCommandBlockEditScreen.java:71,74` — the footer anchor is
+    // `AbstractCommandBlockEditScreen.java` — the footer anchor is
     // `(width/2, height/4 + 120 + 12)` and the buttons are `150x20`.
     let anchor_x = (CB_FB_W as f32 / 2.0).floor();
     let footer_y = (CB_FB_H as f32 / 4.0).floor() + 132.0;

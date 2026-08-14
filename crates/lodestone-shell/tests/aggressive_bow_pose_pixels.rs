@@ -14,7 +14,7 @@
 //! The decision was wrong for every mob. That fix selected the pose from
 //! `LivingEntity`'s **using-item** bit, which is the mechanism a *player* uses.
 //! Vanilla's `AbstractSkeletonRenderer.getArmPose` reads `Mob.isAggressive()`
-//! instead (`AbstractSkeletonRenderer.java:38`), and a skeleton's ranged attack
+//! instead (`AbstractSkeletonRenderer.java`), and a skeleton's ranged attack
 //! goal calls `performRangedAttack` without ever entering the item-use state — so
 //! the using-item bit is `false` for the entire life of every skeleton that has
 //! ever shot at anyone. Correct pose, correct plumbing, zero mobs.
@@ -65,7 +65,7 @@
 //!    ran".
 //! 3. **...and the same zombie must still move**, because `aggressive` is *also*
 //!    `animateZombieArms`' arm-drop parameter (`-PI/1.5` aggressive vs `-PI/2.25`
-//!    not — `AnimationUtils.java:74`), which was a second island: `AnimInput`
+//!    not — `AnimationUtils.java`), which was a second island: `AnimInput`
 //!    carried the field, `Skeleton::animate_zombie_arms` consumed it, and every
 //!    call site in the shell passed a hardcoded `false`. This half is what proves
 //!    control 1's byte-identity is caused by *pose selection* rather than by the
@@ -109,7 +109,7 @@ const H: u32 = 240;
 /// silhouette, so this constant is load-bearing rather than cosmetic.
 const BODY_YAW: f32 = 90.0;
 
-/// `Mob.DATA_MOB_FLAGS_ID`'s aggressive bit (`Mob.java:1324`, `val | 4`).
+/// `Mob.DATA_MOB_FLAGS_ID`'s aggressive bit (`Mob.java`, `val | 4`).
 const AGGRESSIVE_BIT: u8 = 0x04;
 
 /// Minimum extra silhouette width the draw must add, in pixels.
@@ -408,7 +408,7 @@ fn an_aggressive_skeleton_draws_its_bow_and_a_calm_one_does_not() {
         subject_angry.anim.arm_pose,
         ArmPose::BowAndArrow,
         "an aggressive skeleton holding a bow must select BOW_AND_ARROW \
-         (AbstractSkeletonRenderer.java:38)"
+         (AbstractSkeletonRenderer.java)"
     );
     assert!(
         !control_calm.anim.aggressive,

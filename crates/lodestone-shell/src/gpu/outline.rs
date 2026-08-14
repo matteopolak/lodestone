@@ -179,7 +179,7 @@ const FLOATS_PER_VERT: usize = 7;
 
 /// Minimum vanilla-style line width in logical pixels, and the reference
 /// window width it scales from. Ported from `Window.getAppropriateLineWidth`
-/// (`com/mojang/blaze3d/platform/Window.java:569`):
+/// (`com/mojang/blaze3d/platform/Window.java`):
 /// `max(2.5, windowWidth / 1920 * 2.5)`. That is the width the *real* hit
 /// outline draws with — see [`OutlineRenderer`]'s doc for why this is not the
 /// F3 debug-shape call site.
@@ -196,14 +196,14 @@ const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 /// An earlier version of this pass drew the 12 edges as `PrimitiveTopology::LineList`,
 /// which rasterizes at exactly one *physical* pixel regardless of resolution or
 /// DPI scale. Vanilla's real hit-outline draw — `LevelRenderer.submitBlockOutline`
-/// → `submitHitOutline`'s non-debug branch at `LevelRenderer.java:760` (**not**
+/// → `submitHitOutline`'s non-debug branch at `LevelRenderer.java` (**not**
 /// the F3-style collision/occlusion/interaction shape dump at `:740-758`, which
 /// is gated behind `SharedConstants.DEBUG_SHAPES` and is a different draw
 /// entirely) — passes an explicit `width` argument down to
 /// `SubmitNodeCollection.submitShapeOutline` (`:282`), sourced from
 /// `GameRenderer.gameRenderState().windowRenderState.appropriateLineWidth`
-/// (`LevelRenderer.java:724`). That width is attached per-vertex via
-/// `VertexConsumer.setLineWidth` (`ShapeOutlineFeatureRenderer.java:25-26`) and
+/// (`LevelRenderer.java`). That width is attached per-vertex via
+/// `VertexConsumer.setLineWidth` (`ShapeOutlineFeatureRenderer.java`) and
 /// expanded into real screen-space quad geometry downstream, because — same
 /// conclusion the issue reached — wgpu (and modern Minecraft's own renderer,
 /// for the same reason) does not portably support a GPU line-width parameter.
@@ -225,7 +225,7 @@ const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 /// unchanged; only the geometry generation changed.
 ///
 /// The depth setup was also checked and left alone: vanilla's `LINES` render
-/// pipeline (`RenderPipelines.java:565`) uses `DepthStencilState.DEFAULT`
+/// pipeline (`RenderPipelines.java`) uses `DepthStencilState.DEFAULT`
 /// (`GREATER_THAN_OR_EQUAL`, **no** bias) — the `LINES_DEPTH_BIAS` variant at
 /// `:572` exists but is not what the hit outline uses. Per `CLAUDE.md`,
 /// vanilla's `GREATER_THAN_OR_EQUAL` under reversed-Z is this engine's

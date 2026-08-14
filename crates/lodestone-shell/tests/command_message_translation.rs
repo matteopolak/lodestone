@@ -49,37 +49,37 @@ use lodestone_model::{Text, TextColor, TextStyle};
 /// [`transcribed_patterns_match_the_real_en_us_json`], which is what stops this
 /// list quietly becoming a table of this test's own opinions.
 const PATTERNS: &[(&str, &str)] = &[
-    // `GameModeCommand.java:45` / `:51`.
+    // `GameModeCommand.java` / `:51`.
     ("commands.gamemode.success.self", "Set own game mode to %s"),
     (
         "commands.gamemode.success.other",
         "Set %s's game mode to %s",
     ),
-    // `GameModeCommand.java:43` builds `"gameMode." + newType.getName()`.
+    // `GameModeCommand.java` builds `"gameMode." + newType.getName()`.
     ("gameMode.creative", "Creative Mode"),
     ("gameMode.survival", "Survival Mode"),
-    // `GameModeCommand.java:48`, the message the *target* receives.
+    // `GameModeCommand.java`, the message the *target* receives.
     ("gameMode.changed", "Your game mode has been updated to %s"),
-    // `GiveCommand.java:98` / `:102`.
+    // `GiveCommand.java` / `:102`.
     ("commands.give.success.single", "Gave %s %s to %s"),
     ("commands.give.success.multiple", "Gave %s %s to %s players"),
-    // `GiveCommand.java:56`, a `sendFailure`.
+    // `GiveCommand.java`, a `sendFailure`.
     (
         "commands.give.failed.toomanyitems",
         "Can't give more than %s of %s",
     ),
-    // `GameRuleCommand.java:46` / `:52`.
+    // `GameRuleCommand.java` / `:52`.
     ("commands.gamerule.set", "Gamerule %s is now set to: %s"),
     (
         "commands.gamerule.query",
         "Gamerule %s is currently set to: %s",
     ),
-    // `CommandSourceStack.java:480`, the op broadcast — this is where vanilla's
+    // `CommandSourceStack.java`, the op broadcast — this is where vanilla's
     // *italics* come from.
     ("chat.type.admin", "[%s: %s]"),
     // An item display name, for `/give`'s second argument.
     ("item.minecraft.diamond_sword", "Diamond Sword"),
-    // `Inventory.java:55`'s client-side default, already used by the container
+    // `Inventory.java`'s client-side default, already used by the container
     // screen — included as a cross-check that this list agrees with a key the
     // shell resolves in production.
     ("container.inventory", "Inventory"),
@@ -101,7 +101,7 @@ fn resolve(text: &Text) -> String {
     lodestone_game::text::resolve_to_string(text, &lang.translator())
 }
 
-/// `/gamemode creative` on yourself — `GameModeCommand.java:43,45`:
+/// `/gamemode creative` on yourself — `GameModeCommand.java`:
 ///
 /// ```java
 /// Component mode = Component.translatable("gameMode." + newType.getName());
@@ -135,7 +135,7 @@ fn gamemode_success_self_resolves_to_vanillas_sentence() {
     assert_ne!(resolve(&message), "Set own game mode to creative");
 }
 
-/// `/gamemode` on someone else — `GameModeCommand.java:51`,
+/// `/gamemode` on someone else — `GameModeCommand.java`,
 /// `translatable("commands.gamemode.success.other", target.getDisplayName(), mode)`.
 ///
 /// Two same-typed arguments in a pattern that reads naturally **either way
@@ -162,7 +162,7 @@ fn gamemode_success_other_puts_the_player_first_and_the_mode_second() {
     );
 }
 
-/// `/give` — `GiveCommand.java:98`,
+/// `/give` — `GiveCommand.java`,
 /// `translatable("commands.give.success.single", count, prototypeItemStack.getDisplayName(), <target>)`.
 ///
 /// The middle argument is the item's **display name**, not its id. That is the
@@ -184,7 +184,7 @@ fn give_success_single_uses_the_items_display_name_not_its_id() {
     assert_ne!(resolve(&message), "Gave 3 minecraft:diamond_sword to Steve");
 }
 
-/// `/gamerule` set and query — `GameRuleCommand.java:46` / `:52`. Two keys whose
+/// `/gamerule` set and query — `GameRuleCommand.java` / `:52`. Two keys whose
 /// *only* difference is "is now" versus "is currently", so a wrong key here is
 /// invisible unless both are pinned.
 #[test]
@@ -208,7 +208,7 @@ fn gamerule_set_and_query_are_two_different_sentences() {
     assert_ne!(resolve(&set), resolve(&query));
 }
 
-/// Where the **italics** live: `CommandSourceStack.java:480`.
+/// Where the **italics** live: `CommandSourceStack.java`.
 ///
 /// ```java
 /// Component broadcast = Component.translatable("chat.type.admin", this.getDisplayName(), message)

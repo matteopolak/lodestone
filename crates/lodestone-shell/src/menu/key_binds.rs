@@ -62,17 +62,17 @@
 //!   is this tall. Unlike `OptionsList`, there is no
 //!   [`super::options::header_padding_top`] rule: a `CategoryEntry` is added
 //!   through the same `addEntry(entry, defaultEntryHeight)` as a `KeyEntry`
-//!   (`KeyBindsList.java:36,45`, `AbstractSelectionList.java:119`), so the
+//!   (`KeyBindsList.java`, `AbstractSelectionList.java`), so the
 //!   window math here has no first-entry special case.
 //! - `getRowWidth() = 340` (`:59-61`). `getRowLeft() = x + width/2 -
-//!   rowWidth/2` (`AbstractSelectionList.java:372-374`), and this list's `x`
+//!   rowWidth/2` (`AbstractSelectionList.java`), and this list's `x`
 //!   is 0 (the whole canvas width), so [`ROW_LEFT`] is `width/2 - 170`.
 //! - `scrollBarX() = getRowRight() + scrollbarWidth() + 2`
-//!   (`AbstractSelectionList.java:289-291`), and `scrollbarWidth()` is the
-//!   record default `6` (`AbstractScrollArea.java:145`) — `width/2 + 170 + 8`.
+//!   (`AbstractSelectionList.java`), and `scrollbarWidth()` is the
+//!   record default `6` (`AbstractScrollArea.java`) — `width/2 + 170 + 8`.
 //! - `KeyEntry.extractContent` (`:129-143`): `resetButtonX = scrollBarX() -
 //!   50 - 10`, `changeButtonX = resetButtonX - 5 - 75`, `buttonY =
-//!   getContentY() - 2`. `getContentY() = getY() + 2` (`AbstractSelectionList.java:481-483`),
+//!   getContentY() - 2`. `getContentY() = getY() + 2` (`AbstractSelectionList.java`),
 //!   so `buttonY` is exactly the entry's own `y` — a button fills its 20 px
 //!   row with no inset, unlike `OptionsList`'s 2 px content margin.
 //! - The name label draws at `(getContentX(), getContentYMiddle() - 9/2)`
@@ -93,7 +93,7 @@
 //!   ([`CATEGORY_TEXT_DY`]) rather than `FocusableTextWidget`'s real border
 //!   metrics, which this client does not model.
 //! - The footer is `LinearLayout.horizontal().spacing(8)` of two default-width
-//!   (150 px) buttons (`KeyBindsScreen.java:47-49`) — **identical** in shape
+//!   (150 px) buttons (`KeyBindsScreen.java`) — **identical** in shape
 //!   to [`super::options::SettingsPage::Accessibility`]'s own two-button
 //!   footer, so this reuses [`super::options::Placement::Footer`] and
 //!   [`super::options::footer_rects`] directly rather than a second
@@ -141,9 +141,9 @@ const RESET_RIGHT_GAP: f32 = 10.0;
 /// `changeButtonX = resetButtonX - 5 - 75`'s gap (`:134`).
 const BIND_RESET_GAP: f32 = 5.0;
 /// `AbstractScrollArea.ScrollbarSettings` default `scrollbarWidth` (`:145`),
-/// plus `scrollBarX()`'s own `+ 2` (`AbstractSelectionList.java:289-291`).
+/// plus `scrollBarX()`'s own `+ 2` (`AbstractSelectionList.java`).
 const SCROLLBAR_GAP: f32 = 6.0 + 2.0;
-/// `getContentX()`'s `+2` (`AbstractSelectionList.java:477-479`).
+/// `getContentX()`'s `+2` (`AbstractSelectionList.java`).
 const NAME_LEFT_INSET: f32 = 2.0;
 /// The name label's line-top offset from the entry's own `y` — derived in the
 /// module docs: `getContentYMiddle() - 9/2 = (y + 10) - 4 = y + 6`.
@@ -168,7 +168,7 @@ pub fn visible_rows_len() -> usize {
     (LIST_WINDOW_PX / ROW_H).floor().max(1.0) as usize
 }
 
-/// `getRowLeft()` on a `width`-wide canvas (`AbstractSelectionList.java:372-374`,
+/// `getRowLeft()` on a `width`-wide canvas (`AbstractSelectionList.java`,
 /// this list's own `x = 0`).
 #[must_use]
 pub fn row_left(width: f32) -> f32 {
@@ -302,7 +302,7 @@ impl KeyControl {
     /// The label drawn on the widget.
     ///
     /// `awaiting` decorates the one bind button currently capturing input
-    /// with vanilla's own `"> {name} <"` (`KeyBindsList.java:187-195`) —
+    /// with vanilla's own `"> {name} <"` (`KeyBindsList.java`) —
     /// there is no `changeButton.getMessage` state to read here, so the
     /// decoration is computed fresh from the same fact
     /// [`KeyBindsNav::awaiting`] already tracks, the same "one source of
@@ -833,7 +833,7 @@ pub fn frame(nav: &KeyBindsNav, keybinds: &Keybinds) -> MenuFrame<'static> {
 
 /// The category's caption, verbatim from `en_us.json`'s **real** 26.2 key —
 /// `key.category.minecraft.<id>` (`KeyMapping.Category.label`,
-/// `KeyMapping.java:227-229`, `Identifier.toLanguageKey(String)`). **Not**
+/// `KeyMapping.java`, `Identifier.toLanguageKey(String)`). **Not**
 /// `key.categories.<id>`, which is legacy/unused text still sitting in the lang
 /// file from an older versioning scheme — a trap worth naming because it reads
 /// as the obvious key and is wrong (measured by reading `toLanguageKey`'s
@@ -936,7 +936,7 @@ mod tests {
             })
             .collect();
         // 29 since that fix added Pick Block and Take Screenshot. Vanilla puts
-        // them in Gameplay and Misc respectively (`Options.java:669,675`), both
+        // them in Gameplay and Misc respectively (`Options.java`), both
         // categories that were already non-empty — so the *category* list above
         // is unchanged and only the action count moves. Deriving this from
         // `InputAction::ALL.len()` would make the assertion vacuous: it would
@@ -954,7 +954,7 @@ mod tests {
     /// Vanilla's registration order, not declaration order — the trap the
     /// module docs name. `Category::SORT_ORDER` is Movement, Misc,
     /// Multiplayer, Gameplay, Inventory, Creative, Spectator, Debug
-    /// (`KeyMapping.java:204-211`). `InputAction::ALL`'s own *declaration*
+    /// (`KeyMapping.java`). `InputAction::ALL`'s own *declaration*
     /// order is different: Movement, then Gameplay (Attack/Use), then
     /// Inventory, then Multiplayer (Chat/Command/PlayerList), then Misc
     /// (TogglePerspective/Pause), then Debug — Gameplay and Inventory both

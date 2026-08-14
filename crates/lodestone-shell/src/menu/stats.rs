@@ -92,7 +92,7 @@ pub const TAB_LABELS: [&str; 3] = ["General", "Items", "Mobs"];
 pub const GENERAL_TAB: usize = 0;
 
 /// The pixel rect of tab `index` (into [`TAB_LABELS`]) at canvas `width` —
-/// vanilla's `MenuTabBar.arrangeElements` (`MenuTabBar.java:67-82`), via
+/// vanilla's `MenuTabBar.arrangeElements` (`MenuTabBar.java`), via
 /// [`layout::tab_bar_geometry`]. The one definition [`super::render::row_rect`]
 /// (the draw, the hover, and `app.rs`'s click hit-test) and the draw's own
 /// hover check both resolve a tab's position from — see
@@ -110,7 +110,7 @@ pub fn tab_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
 }
 
 /// The row index of Done — vanilla's `layout.addToFooter(Button.builder(
-/// GUI_DONE, …))` (`StatsScreen.java:90`). Was this screen's only [`MenuRow`]
+/// GUI_DONE, …))` (`StatsScreen.java`). Was this screen's only [`MenuRow`]
 /// before issue #564 gave it three tab rows too; still `0` and still first,
 /// since the tabs are appended after it (see [`frame`]).
 ///
@@ -133,7 +133,7 @@ pub enum StatFormat {
     /// Redstone ticks (1/20 s) in, the largest whole unit over 0.5 out —
     /// `StatFormatter.TIME`. The `< 0.5 min` branch is `seconds + " s"` on a
     /// raw `f64`, **not** through `DECIMAL_FORMAT` — vanilla's own code, not
-    /// an inconsistency introduced here (`StatFormatter.java:32`).
+    /// an inconsistency introduced here (`StatFormatter.java`).
     Time,
 }
 
@@ -230,7 +230,7 @@ fn java_double_to_string(v: f64) -> String {
 /// `Stats.java`'s 77 `makeCustomStat` calls, in declaration order — id, the
 /// verbatim `en_us.json` caption at `stat.minecraft.<id>`, and its
 /// [`StatFormat`]. Declaration order does not matter for display (vanilla
-/// sorts by *translated* caption, `StatsScreen.java:170`,
+/// sorts by *translated* caption, `StatsScreen.java`,
 /// `Comparator.comparing(k -> I18n.get(...))`) — see [`general_rows`], which
 /// sorts at call time instead of requiring this table pre-sorted, so adding a
 /// stat here never has to also get its alphabetical position right.
@@ -392,7 +392,7 @@ impl StatsSnapshot {
 }
 
 /// One row: caption plus formatted value, in vanilla's **display** order —
-/// sorted by the translated caption (`StatsScreen.java:170`), not by
+/// sorted by the translated caption (`StatsScreen.java`), not by
 /// [`GENERAL_STATS`]'s declaration order.
 #[must_use]
 pub fn general_rows(snapshot: &StatsSnapshot) -> Vec<(&'static str, String)> {
@@ -406,7 +406,7 @@ pub fn general_rows(snapshot: &StatsSnapshot) -> Vec<(&'static str, String)> {
 
 // -- geometry: a flat list, same departure key_binds.rs/social.rs make ------
 
-/// `GeneralStatisticsList`'s own `itemHeight` (`StatsScreen.java:177`:
+/// `GeneralStatisticsList`'s own `itemHeight` (`StatsScreen.java`:
 /// `super(minecraft, StatsScreen.this.width, StatsScreen.this.layout.
 /// getContentHeight(), 33, 14)` — the last constructor argument). **Not**
 /// [`options::WIDGET_H`] (20 px) — that was this constant's previous value,
@@ -420,10 +420,10 @@ pub fn general_rows(snapshot: &StatsSnapshot) -> Vec<(&'static str, String)> {
 /// conversion has the right constant already sitting here rather than a
 /// second archaeology pass through the jar.
 pub const ROW_H: f32 = 14.0;
-/// `ItemStatisticsList`'s own `itemHeight` (`StatsScreen.java:247`: `super(…,
+/// `ItemStatisticsList`'s own `itemHeight` (`StatsScreen.java`: `super(…,
 /// 33, 22)`). Not yet consumed — see [`ROW_H`]'s own doc.
 pub const ITEMS_ROW_H: f32 = 22.0;
-/// `MobsStatisticsList`'s own `itemHeight` (`StatsScreen.java:542`: `super(…,
+/// `MobsStatisticsList`'s own `itemHeight` (`StatsScreen.java`: `super(…,
 /// 33, 9 * 4)` — four lines of the 9 px font, ported as the expression rather
 /// than the literal `36` so a font-size change would not silently desync it).
 /// Not yet consumed — see [`ROW_H`]'s own doc.
@@ -441,7 +441,7 @@ const NAME_LEFT_INSET: f32 = 4.0;
 /// repositionElements` calls `this.layout.setHeaderHeight(tabAreaTop)`, where
 /// `tabAreaTop` is the tab bar's own `getRectangle().bottom()` — a fixed
 /// [`layout::TAB_BAR_HEIGHT`] (24 px), since `MenuTabBar` is `y = 0` height
-/// `HEIGHT = 24` (`MenuTabBar.java:17,81`). Using the *default* 33 px header
+/// `HEIGHT = 24` (`MenuTabBar.java`). Using the *default* 33 px header
 /// here is exactly what put the General list's own top separator 9 px below
 /// where the tab row's underline sits — close enough to look plausible, far
 /// enough to still collide with a tab label drawn at `dy: 28`, which was the
@@ -498,7 +498,7 @@ pub fn row_label_y(row: u16, scroll: f32) -> f32 {
 }
 
 /// `GeneralStatisticsList.Entry.extractContent`'s zebra striping
-/// (`StatsScreen.java:218`): `index % 2 == 0 ? -1 : -4539718` — opaque white
+/// (`StatsScreen.java`): `index % 2 == 0 ? -1 : -4539718` — opaque white
 /// on an even displayed row, `0xFFBABABA` on an odd one. `index` is the row's
 /// position in the **already-sorted** list ([`general_rows`]'s output order),
 /// matching vanilla's `children().indexOf(this)`.
@@ -533,7 +533,7 @@ pub struct StatsNav {
     /// Vanilla focuses nothing here, and the jar is unusually explicit about
     /// it in two independent ways:
     ///
-    /// - `Screen.init` calls `setInitialFocus()` (`Screen.java:328`), whose
+    /// - `Screen.init` calls `setInitialFocus()` (`Screen.java`), whose
     ///   base implementation (`:161-169`) is wrapped entirely in
     ///   `if (this.minecraft.getLastInputType().isKeyboard())`. This screen is
     ///   reached by **clicking** the pause menu's Statistics button, so the
@@ -599,7 +599,7 @@ impl StatsNav {
     }
 
     /// Tab traversal: `Screen.keyPressed`'s `TabNavigation`
-    /// (`Screen.java:153`), which on this screen has exactly one focusable
+    /// (`Screen.java`), which on this screen has exactly one focusable
     /// child to land on. With one child, forward Tab focuses it and stays
     /// there — vanilla's wrap is `clearFocus()`-then-retry, which re-finds the
     /// same child — so this is idempotent rather than a toggle.
@@ -663,7 +663,7 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
     for (i, (caption, value)) in stats.iter().enumerate() {
         let y = row_label_y(i as u16, scroll);
         // Zebra striping (issue #564) — `GeneralStatisticsList.Entry.
-        // extractContent` (`StatsScreen.java:218`): both the name and the
+        // extractContent` (`StatsScreen.java`): both the name and the
         // value get the *same* `color`, computed once per row from the
         // row's own displayed index (this loop's `i`, matching vanilla's
         // `children().indexOf(this)` in the already-sorted list).
@@ -968,7 +968,7 @@ mod tests {
     #[test]
     fn general_row_colour_alternates_and_the_two_shades_are_vanillas_own_argb() {
         // Expected values originate outside this function: `-1`/`-4539718` are
-        // `StatsScreen.java:218`'s own literals, unpacked by the shared
+        // `StatsScreen.java`'s own literals, unpacked by the shared
         // `argb_to_rgba` rather than restated as a second pair of floats.
         assert_eq!(general_row_colour(0), widget::argb_to_rgba(-1));
         assert_eq!(general_row_colour(1), widget::argb_to_rgba(-4_539_718));
@@ -1008,7 +1008,7 @@ mod tests {
         nav.scroll_by(-1.0, canvas);
 
         // `scrollRate` is `defaultEntryHeight / 2` under *integer* division
-        // (`AbstractSelectionList.java:44`): 14 / 2 = 7.
+        // (`AbstractSelectionList.java`): 14 / 2 = 7.
         let predicted = (ROW_H / 2.0).floor();
         assert_eq!(predicted, 7.0, "derived from this screen's own ROW_H of 14");
         assert_eq!(nav.scroll(), predicted, "one notch must be {predicted} px");

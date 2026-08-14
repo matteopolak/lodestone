@@ -23,7 +23,7 @@
 //!   `SelectWorldScreen` pins Delete to a footer band. So a second click where
 //!   the first one landed hits **nothing**;
 //! - **nothing is focused when this screen opens.** Vanilla's `ConfirmScreen.init`
-//!   (`:45-56`) calls no `setInitialFocus`, unlike `SelectWorldScreen.java:147`,
+//!   (`:45-56`) calls no `setInitialFocus`, unlike `SelectWorldScreen.java`,
 //!   so Enter immediately after opening presses nothing. Reproducing that is both
 //!   faithful *and* the safe direction: a held Enter cannot roll through the
 //!   confirmation.
@@ -37,7 +37,7 @@
 //! [`confirm_block`] arranges vanilla's own tree — `LinearLayout.vertical()
 //! .spacing(8)` holding a title `StringWidget`, the message, and a
 //! `LinearLayout.horizontal().spacing(4)` of two `Button.DEFAULT_WIDTH` buttons
-//! with `paddingTop(16)` (`ConfirmScreen.java:47-53`) — and
+//! with `paddingTop(16)` (`ConfirmScreen.java`) — and
 //! `FrameLayout.centerInRectangle`s it in the canvas (`:59-62`). Every leaf is
 //! then read back as a [`ConfirmPlacement`], which [`Origin::Confirm`] resolves,
 //! so the buttons' rects come out of the arranged tree rather than out of
@@ -85,29 +85,29 @@ use super::widget::{self, LayoutElement, Widget};
 pub const DELETE_QUESTION: &str = "Are you sure you want to delete this world?";
 /// `selectWorld.deleteWarning` (`en_us.json`), whose `%s` is the world's
 /// **display** name — `LevelSummary.getLevelName()`, not the folder
-/// (`WorldSelectionList.java:633`).
+/// (`WorldSelectionList.java`).
 pub const DELETE_WARNING: &str = "'%s' will be lost forever! (A long time!)";
 /// `selectWorld.deleteButton` — vanilla's affirmative label here is **"Delete"**,
-/// not `gui.yes` (`WorldSelectionList.java:634`). The wording is part of the
+/// not `gui.yes` (`WorldSelectionList.java`). The wording is part of the
 /// safety: a button saying `Yes` answers a question the player may not have read.
 pub const DELETE_BUTTON: &str = "Delete";
 /// `CommonComponents.GUI_CANCEL` = `gui.cancel` (`:635`).
 pub const CANCEL_BUTTON: &str = "Cancel";
 
-/// `LinearLayout.vertical().spacing(8)` (`ConfirmScreen.java:17`), and the same 8
+/// `LinearLayout.vertical().spacing(8)` (`ConfirmScreen.java`), and the same 8
 /// on the message-to-buttons gap.
 const BLOCK_SPACING: i32 = 8;
 /// `LinearLayout.horizontal().spacing(4)` for the button row (`:51`).
 const BUTTON_SPACING: i32 = 4;
 /// `buttonLayout.defaultCellSetting().paddingTop(16)` (`:52`).
 const BUTTON_PADDING_TOP: i32 = 16;
-/// A `StringWidget`'s height (`StringWidget.java:18-20`) — the title, and the one
+/// A `StringWidget`'s height (`StringWidget.java`) — the title, and the one
 /// message line this port reserves (see the module doc's first deviation).
 const LINE_H: f32 = 9.0;
 
 /// The affirmative button's row index, and its [`FocusSet`] id.
 ///
-/// `addButtons` adds yes **then** no (`ConfirmScreen.java:72-73`), so this is
+/// `addButtons` adds yes **then** no (`ConfirmScreen.java`), so this is
 /// vanilla's own order — which is also the tab order, since nothing overrides
 /// `getTabOrderGroup`.
 pub const YES_ROW: usize = 0;
@@ -140,7 +140,7 @@ pub enum ConfirmPlacement {
 
 /// Vanilla's `ConfirmScreen.init` as a real [`LinearLayout`] tree, arranged and
 /// then centred in a `width`×`height` canvas — `repositionElements`' own two
-/// steps (`ConfirmScreen.java:59-62`).
+/// steps (`ConfirmScreen.java`).
 ///
 /// Returns the four leaf rects in `visitWidgets` order: title, message, yes, no.
 /// Built per call rather than cached, because `centerInRectangle` reads the
@@ -393,7 +393,7 @@ impl ConfirmNav {
 
     /// One key, in vanilla's `Screen.keyPressed` order.
     ///
-    /// Escape is `callback.accept(false)` (`ConfirmScreen.java:97-104`) — note
+    /// Escape is `callback.accept(false)` (`ConfirmScreen.java`) — note
     /// `shouldCloseOnEsc()` is `false` on this screen precisely so that the
     /// *callback* runs rather than a bare `onClose`, which is why this is a `No`
     /// and not a silent dismissal.

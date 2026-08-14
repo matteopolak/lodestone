@@ -73,7 +73,7 @@ impl ApplicationHandler for WindowApp {
         event: WindowEvent,
     ) {
         // Vanilla's `FramerateLimitTracker::onInputReceived`, called from
-        // `KeyboardHandler.java:419` and three sites in `MouseHandler.java`
+        // `KeyboardHandler.java` and three sites in `MouseHandler.java`
         // (key press, mouse press, scroll) — deliberately **not**
         // `CursorMoved`, which vanilla never routes through it. Resets the AFK
         // clock `inactivityFpsLimit` reads (`app::pacing::effective_target_fps`).
@@ -490,7 +490,7 @@ impl ApplicationHandler for WindowApp {
                         (Some(InputAction::Use), ElementState::Released) => {
                             self.sim.end_use();
                         }
-                        // Middle-click by default (`Options.java:669` binds
+                        // Middle-click by default (`Options.java` binds
                         // `key.pickItem` to `Type.MOUSE, 2`), so unlike
                         // attack/use this is the *primary* route rather than the
                         // rebound one. Press-only: `pickBlockOrEntity` is a
@@ -541,7 +541,7 @@ impl ApplicationHandler for WindowApp {
             // goes through **verbatim**, as vanilla's `scrollY`, and
             // `MenuNav::scroll_server_list` turns it into
             // `scrollY * scrollRate()` pixels — 18 px for a 36 px row
-            // (`AbstractScrollArea.java:34`, `AbstractSelectionList.java:44`).
+            // (`AbstractScrollArea.java`, `AbstractSelectionList.java`).
             //
             // **This used to collapse `dy` to `-1`/`0`/`+1` rows**, and that was
             // the owner's bug report: a list that jumps a whole 36 px entry per
@@ -582,7 +582,7 @@ impl ApplicationHandler for WindowApp {
                 let dy = wheel_notches(delta);
                 // The same boundary transform the hotbar arm above uses, because
                 // vanilla computes it **once** for both: `MouseHandler.onScroll`
-                // (`MouseHandler.java:189-192`) hands one `scaledYOffset` to
+                // (`MouseHandler.java`) hands one `scaledYOffset` to
                 // `screen().mouseScrolled(..)` and to `ScrollWheelHandler` alike.
                 // Deliberately **not** run through `accumulate_scroll`, which exists
                 // for the hotbar's sub-notch *quantization*: `cycle_slot` takes a
@@ -750,7 +750,7 @@ impl ApplicationHandler for WindowApp {
                     Some(KeyOutcome::DebugModifier(down)) => {
                         // Issue #197. Vanilla's
                         // `keyDebugModifier.setDown(!didDebugAction)`
-                        // (`KeyboardHandler.java:554-555`): the overlay toggles
+                        // (`KeyboardHandler.java`): the overlay toggles
                         // on the **release**, and only if no chord consumed the
                         // hold. Without that, F3+B would both open the overlay
                         // and toggle hitboxes on one keystroke.
@@ -801,7 +801,7 @@ impl ApplicationHandler for WindowApp {
                             let mut typed = false;
                             for ch in text.chars().filter(|c| !c.is_control()) {
                                 // `searchBox.setMaxLength(50)`
-                                // (`RecipeBookComponent.java:126`).
+                                // (`RecipeBookComponent.java`).
                                 if self.recipe_panel.search.chars().count() < RECIPE_SEARCH_MAX_LEN {
                                     self.recipe_panel.search.push(ch);
                                     typed = true;

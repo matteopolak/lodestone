@@ -35,7 +35,7 @@
 
 use glam::Vec3;
 
-/// `SubtitleOverlay.DISPLAY_TIME` (`SubtitleOverlay.java:23`), in milliseconds.
+/// `SubtitleOverlay.DISPLAY_TIME` (`SubtitleOverlay.java`), in milliseconds.
 /// Vanilla multiplies this by the `notificationDisplayTime` option, which this
 /// client does not model; at its default of `1.0` the product is this constant.
 pub(crate) const DISPLAY_MS: u64 = 3000;
@@ -49,7 +49,7 @@ const BRIGHTNESS_NEW: f32 = 255.0;
 const BRIGHTNESS_OLD: f32 = 75.0;
 
 /// `forwards.dot(delta) > 0.5` — the cone within which vanilla considers the
-/// sound to be *in view* and draws no arrow (`SubtitleOverlay.java:86`).
+/// sound to be *in view* and draws no arrow (`SubtitleOverlay.java`).
 const IN_VIEW_DOT: f64 = 0.5;
 
 /// One recorded play of a caption's sound: where, and when.
@@ -108,7 +108,7 @@ impl SubtitleQueue {
     ///
     /// Refreshes an existing row when the text already appears, replacing any
     /// entry at the identical position first — `Subtitle.refresh`
-    /// (`SubtitleOverlay.java:158-161`), which is what stops a looping sound at a
+    /// (`SubtitleOverlay.java`), which is what stops a looping sound at a
     /// fixed point growing an unbounded position list.
     pub fn push(&mut self, text: &str, pos: Vec3, now_ms: u64) {
         if let Some(existing) = self.subtitles.iter_mut().find(|s| s.text == text) {

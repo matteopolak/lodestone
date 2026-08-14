@@ -181,7 +181,7 @@ impl ShellMusic {
 /// The situation for a **menu** screen: not in world, so
 /// `MusicSituation::situational_music` selects `musics::MENU`.
 ///
-/// `MENU` is `20/600` ticks with `replaceCurrentMusic` set (`Musics.java:11-21`),
+/// `MENU` is `20/600` ticks with `replaceCurrentMusic` set (`Musics.java`),
 /// so it *interrupts* rather than queues — and `Music::can_replace`'s second
 /// clause is what stops it restarting itself every tick.
 pub(crate) fn menu_situation() -> MusicSituation<'static> {
@@ -196,14 +196,14 @@ pub(crate) fn menu_situation() -> MusicSituation<'static> {
 /// # The selection input is not the biome, and not `GameMode`
 ///
 /// 26.2 asks the camera's environment-attribute probe for
-/// `audio/background_music` (`Minecraft.java:2601-2621`,
-/// `EnvironmentAttributes.java:94-95`), which yields a three-slot
+/// `audio/background_music` (`Minecraft.java`,
+/// `EnvironmentAttributes.java`), which yields a three-slot
 /// [`BackgroundMusic`] whose precedence is **underwater → creative → default**
-/// (`BackgroundMusic.java:35-41`). Our biome table *is* that probe's answer
+/// (`BackgroundMusic.java`). Our biome table *is* that probe's answer
 /// (a biome is what sets the attribute), so `background_music` is looked up per
 /// biome — but the final pick is [`BackgroundMusic::select`], never the biome id.
 ///
-/// And `creative` there is **`instabuild && mayfly`** (`Minecraft.java:2615`), not
+/// And `creative` there is **`instabuild && mayfly`** (`Minecraft.java`), not
 /// a gamemode check. Wiring it to `GameMode::Creative` would look right and be
 /// wrong: a survival player granted both abilities gets creative music in vanilla,
 /// and a creative player with `mayfly` revoked does not.
@@ -363,7 +363,7 @@ mod tests {
     ///
     /// A count, not a duration — see [`ShellMusic::requests`]'s doc. Asserted on
     /// **both** sides of the boundary, which is what makes it a gate on the jar's
-    /// `MusicManager.java:25` starting delay of 100 ticks rather than a vague
+    /// `MusicManager.java` starting delay of 100 ticks rather than a vague
     /// "music eventually starts": one tick short must be silent, and the boundary
     /// tick must produce precisely one named request.
     #[test]

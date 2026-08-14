@@ -58,7 +58,7 @@
 //! # The arm *does* bob once the shell feeds it one (that fix's hand-side gap)
 //!
 //! Vanilla prefixes `bobHurt` and `bobView` onto `renderItemInHand`'s pose stack
-//! a **second, independent** time (`GameRenderer.java:344-346`), separate from
+//! a **second, independent** time (`GameRenderer.java`), separate from
 //! the world's own copy (`:534-536`) — not something the hand inherits from the
 //! bobbed world camera. `gpu/first_person.rs`'s `HandBobSource`/`hand_view_proj`
 //! are that second application, and `the_arm_moves_when_a_hand_bob_source_is_installed`
@@ -380,7 +380,7 @@ fn spawns(world: &World, pos: ChunkPos, eye: glam::Vec3) -> Vec<ChestSpawn> {
 ///
 /// `hand_bob` is a **separate** input from `cam` and that is the point: vanilla
 /// applies `bobView`/`bobHurt` to the hand a second, independent time
-/// (`GameRenderer.java:344-347`), so this helper models the two real installers
+/// (`GameRenderer.java`), so this helper models the two real installers
 /// a live `Sim` drives independently — `Sim::render_camera` (folded into `cam`
 /// by the caller, same as before) and `RenderState::set_hand_bob_source` (which
 /// this helper installs directly). Passing `BobFrame::default()` here is what

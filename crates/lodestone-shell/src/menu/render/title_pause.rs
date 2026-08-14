@@ -10,7 +10,7 @@ use super::*;
 /// horizontal row, then the Options/Quit pair as another horizontal row.
 ///
 /// **Vanilla's `TitleScreen` uses no layout class at all** — it hand-centres on
-/// `this.width / 2 - 100` and steps `topPos` by 24 (`TitleScreen.java:105-205`),
+/// `this.width / 2 - 100` and steps `topPos` by 24 (`TitleScreen.java`),
 /// and that fix's plan is explicit that a hand-arithmetic screen is legitimate
 /// vanilla. What makes this re-expression faithful rather than invented is that
 /// the two are *numerically identical*, which is not a coincidence:
@@ -20,7 +20,7 @@ use super::*;
 /// - the column's width is `max(200, 68, 200) = 200`, so centring it on
 ///   `width / 2` is `width / 2 - 100`;
 /// - `getHorizontalPosition(n, 3, 20)` is `width/2 - 34 + (n-1) * 24`
-///   (`TitleScreen.java:170-173`), and a 68 px row centred in the 200 px column
+///   (`TitleScreen.java`), and a 68 px row centred in the 200 px column
 ///   is at `lerp(0.5, 0, 200 - 68) = 66`, i.e. `width/2 - 100 + 66` — the same
 ///   `width/2 - 34`. The 34 is `totalWidth / 2` and the 66 is `(200 - 68) / 2`;
 ///   they agree because `100 - 66 == 34`.
@@ -57,7 +57,7 @@ fn title_menu_column() -> layout::LinearLayout {
     column
 }
 
-/// Vanilla's `PauseScreen.createPauseMenu` (`PauseScreen.java:91-183`) as a real
+/// Vanilla's `PauseScreen.createPauseMenu` (`PauseScreen.java`) as a real
 /// [`layout::GridLayout`], arranged.
 ///
 /// `menu_padding_top` is `MENU_PADDING_TOP` (50) in production; it is a parameter
@@ -185,7 +185,7 @@ pub fn pause_grid_size() -> (f32, f32) {
 
 /// Vanilla's rect for one title-screen widget, from
 /// `TitleScreen.init`/`createNormalMenuOptions`
-/// (`TitleScreen.java:105-205`) — **read out of the arranged
+/// (`TitleScreen.java`) — **read out of the arranged
 /// `title_menu_column`**, not written down.
 ///
 /// The offsets are relative to [`Origin::TitleTop`], whose x is `width / 2`,
@@ -240,7 +240,7 @@ const ACCOUNTS_ENTRY_W: f32 = 90.0;
 const ACCOUNTS_ENTRY_MARGIN: f32 = 4.0;
 
 /// Vanilla's rect for one pause-screen widget, from
-/// `PauseScreen.createPauseMenu` (`PauseScreen.java:91-183`) — **read out of the
+/// `PauseScreen.createPauseMenu` (`PauseScreen.java`) — **read out of the
 /// arranged grid** (`pause_menu_grid_with`) rather than resolved by hand.
 ///
 /// It used to be a table of nine hand-derived offsets, and the derivation is
@@ -251,7 +251,7 @@ const ACCOUNTS_ENTRY_MARGIN: f32 = 4.0;
 /// `paddingLeft`/`paddingTop` because the default `xAlignment` is 0 — and with
 /// `padding(4, 4, 4, 0)` a full-width button's `mostOffset` is also 4, so
 /// alignment could not move it anyway. The icon row is the one centred cell
-/// (`alignHorizontallyCenter`, `PauseScreen.java:154`):
+/// (`alignHorizontallyCenter`, `PauseScreen.java`):
 /// `lerp(0.5, 4, 212 - 92 - 4) = 60`, and its own `LinearLayout` spaces four
 /// 20 px children 4 px apart from there — 60, 84, 108, 132.
 ///
@@ -287,10 +287,10 @@ pub fn pause_slot(button: PauseButton) -> Slot {
 
 /// Vanilla's rect for one death-screen button:
 /// `this.width / 2 - 100, this.height / 4 + 72 | 96, 200, 20`
-/// (`DeathScreen.java:47-58`). Both buttons share `x`; only `y` differs.
+/// (`DeathScreen.java`). Both buttons share `x`; only `y` differs.
 ///
 /// `height / 4 + 72` and `+ 96` are `Origin::TitleTop`'s own anchor
-/// (`height / 4 + 48`, `TitleScreen.java:113`) plus `24`/`48` — the death
+/// (`height / 4 + 48`, `TitleScreen.java`) plus `24`/`48` — the death
 /// screen and the title screen both lay their stacks out from
 /// `this.height / 4`, so reusing that origin here rather than adding a
 /// second one is deliberate, not a coincidence to "clean up".

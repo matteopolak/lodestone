@@ -15,10 +15,10 @@
 //!
 //! | surface | vanilla pose scale | cite |
 //! |---|---|---|
-//! | title | `scale(4.0F, 4.0F)` | `Hud.java:378` |
-//! | subtitle | `scale(2.0F, 2.0F)` | `Hud.java:385` |
-//! | action bar / overlay message | **no scale call at all** → 1.0 | `Hud.java:327-355` |
-//! | held-item name (this gate's reference) | **no scale call at all** → 1.0 | `Hud.java:626-645` |
+//! | title | `scale(4.0F, 4.0F)` | `Hud.java` |
+//! | subtitle | `scale(2.0F, 2.0F)` | `Hud.java` |
+//! | action bar / overlay message | **no scale call at all** → 1.0 | `Hud.java` |
+//! | held-item name (this gate's reference) | **no scale call at all** → 1.0 | `Hud.java` |
 //!
 //! # Why the assertions are ratios, not absolute pixel heights
 //!
@@ -115,7 +115,7 @@ fn ink_bbox(frame: &HudFrame<'_>) -> Option<(f32, f32, f32, f32)> {
 /// multiplies; the top edge is what vanilla's pose translate fixes. The fixed
 /// debug font starts a glyph's ink exactly at the `y` handed to the draw (the
 /// reference surface measures `y0 == b.h - 59.0` to the digit, matching
-/// `Hud.java:634`), so the top edge is directly comparable to vanilla's own
+/// `Hud.java`), so the top edge is directly comparable to vanilla's own
 /// expression with no baseline correction.
 fn ink_top_and_height(label: &str, frame: &HudFrame<'_>) -> (f32, f32) {
     let bbox = ink_bbox(frame)
@@ -201,7 +201,7 @@ fn title_subtitle_and_action_bar_match_vanillas_pose_scales() {
     let stats = DebugStats::default();
 
     // The reference: the held-item name, drawn at scale 1.0 exactly as vanilla
-    // draws it (`Hud.java:626-645`, no pose scale). Everything else is measured
+    // draws it (`Hud.java`, no pose scale). Everything else is measured
     // as a multiple of this.
     let reference = {
         let mut f = quiet(&stats);
@@ -245,14 +245,14 @@ fn title_subtitle_and_action_bar_match_vanillas_pose_scales() {
 
     // `(surface, measured, vanilla-correct ratio, double-applied ratio, cite)`
     let cases = [
-        ("title", title, 4.0_f32, 8.0_f32, "Hud.java:378 scale(4.0F, 4.0F)"),
-        ("subtitle", subtitle, 2.0, 4.0, "Hud.java:385 scale(2.0F, 2.0F)"),
+        ("title", title, 4.0_f32, 8.0_f32, "Hud.java scale(4.0F, 4.0F)"),
+        ("subtitle", subtitle, 2.0, 4.0, "Hud.java scale(2.0F, 2.0F)"),
         (
             "action bar",
             action_bar,
             1.0,
             2.0,
-            "Hud.java:327-355, no pose scale",
+            "Hud.java, no pose scale",
         ),
     ];
 
@@ -285,9 +285,9 @@ fn title_subtitle_and_action_bar_match_vanillas_pose_scales() {
 }
 
 /// Vanilla's title block is positioned entirely by one pose translate to the
-/// **screen centre** (`Hud.java:376`), after which the title is drawn at
-/// `y = -10` inside `scale(4.0)` (`Hud.java:378,381`) and the subtitle at
-/// `y = 5` inside `scale(2.0)` (`Hud.java:385,387`). Multiplying through, the
+/// **screen centre** (`Hud.java`), after which the title is drawn at
+/// `y = -10` inside `scale(4.0)` (`Hud.java`) and the subtitle at
+/// `y = 5` inside `scale(2.0)` (`Hud.java`). Multiplying through, the
 /// two top edges are fixed offsets from the vertical centre:
 ///
 /// * title    `h/2 + (-10 * 4.0)` = `h/2 - 40`
@@ -331,12 +331,12 @@ fn the_title_block_sits_where_vanillas_pose_translate_puts_it() {
 
     assert!(
         (title_top - want_title).abs() < 1.0,
-        "the title's top edge must be `h/2 - 10*4` (`Hud.java:376,378,381`): \
+        "the title's top edge must be `h/2 - 10*4` (`Hud.java`): \
          predicted {want_title:.2} logical px, measured {title_top:.2}"
     );
     assert!(
         (subtitle_top - want_subtitle).abs() < 1.0,
-        "the subtitle's top edge must be `h/2 + 5*2` (`Hud.java:376,385,387`): \
+        "the subtitle's top edge must be `h/2 + 5*2` (`Hud.java`): \
          predicted {want_subtitle:.2} logical px, measured {subtitle_top:.2}"
     );
     assert!(

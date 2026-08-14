@@ -22,7 +22,7 @@ use super::server_list::SERVER_LIST_FOOTER_H;
 /// The MOTD column is vanilla's `serverData.motd`, which the pinger *overwrites*
 /// per state rather than keeping alongside the real MOTD: it is
 /// `multiplayer.status.pinging` while a probe is in flight
-/// (`ServerStatusPinger.java:65`) and the red `CANT_CONNECT_MESSAGE` when one
+/// (`ServerStatusPinger.java`) and the red `CANT_CONNECT_MESSAGE` when one
 /// fails (`:168`). So a failed row shows its reason in the MOTD line and an empty
 /// status column (`:169` sets `status` to empty), which is exactly where this
 /// screen already put it.
@@ -108,7 +108,7 @@ fn server_list_frame(
                     status_sprite: status::status_sprite(state, latency, millis, i),
                     // Vanilla's `onlinePlayersTooltip` — set for SUCCESSFUL and
                     // INCOMPATIBLE rows in `refreshStatus`
-                    // (`ServerSelectionList.java:410,430`), never for INITIAL,
+                    // (`ServerSelectionList.java`), never for INITIAL,
                     // PINGING or UNREACHABLE.
                     online_players: match (state, slot) {
                         (
@@ -253,7 +253,7 @@ pub fn frame_for<'a>(
                 "Add Server"
             };
             // Vanilla disables Done rather than printing an error
-            // (`ManageServerScreen.java:92-93`) — the greyed `widget/
+            // (`ManageServerScreen.java`) — the greyed `widget/
             // button_disabled` sprite this row now draws *is* the feedback,
             // so no extra text duplicates it.
             let valid = form.is_valid();

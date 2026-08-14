@@ -220,7 +220,7 @@ pub fn open_pack_stack(root: &Path) -> Option<ResourceManager> {
 /// Lays the currently selected user packs on top of the built-in pack.
 ///
 /// `builtin` is the bottom of the stack — vanilla's own `Pack.Position.BOTTOM`
-/// fixed-position built-in pack (`Pack.java:145-157`), which is why the
+/// fixed-position built-in pack (`Pack.java`), which is why the
 /// Resource Packs screen can never move or remove it.
 fn build_pack_stack(builtin: Box<dyn ResourceSource>) -> ResourceManager {
     let mut sources: Vec<Box<dyn ResourceSource>> = vec![builtin];
@@ -693,7 +693,7 @@ pub fn load_block_entity_textures()
 /// The recipe book's **panel background**, which is the one piece of its art
 /// vanilla does not put through the sprite atlas.
 ///
-/// `RecipeBookComponent.java:59` declares it as a raw texture path
+/// `RecipeBookComponent.java` declares it as a raw texture path
 /// (`RECIPE_BOOK_LOCATION = "textures/gui/recipe_book.png"`) and `:305` blits a
 /// `147×166` window at `(1, 1)` out of the `256×256` sheet. Everything else the
 /// book draws — the toggle button, tabs, filter, page arrows and recipe slots —
@@ -875,7 +875,7 @@ pub fn load_glint_texture() -> Option<lodestone_assets::Image> {
 /// [`GuiAtlas::build_with_extras`](lodestone_render::GuiAtlas::build_with_extras).
 ///
 /// Vanilla's `LogoRenderer` blits these two by raw path
-/// (`LogoRenderer.java:10-12`), not through the sprite atlas, so they live
+/// (`LogoRenderer.java`), not through the sprite atlas, so they live
 /// outside `textures/gui/sprites/**` and [`load_gui_atlas`] can never see them.
 ///
 /// Both are **hi-res** in 26.2 — `minecraft.png` is 1024×256 and `edition.png`
@@ -910,7 +910,7 @@ pub const UNKNOWN_SERVER_TEXTURE: (&str, &str) = (
 );
 
 /// The Resource Packs screen's fallback pack icon —
-/// `PackSelectionScreen.DEFAULT_ICON` (`PackSelectionScreen.java:67`), blitted at
+/// `PackSelectionScreen.DEFAULT_ICON` (`PackSelectionScreen.java`), blitted at
 /// 32×32 for any pack that ships no readable `pack.png`, which includes the
 /// built-in row.
 ///

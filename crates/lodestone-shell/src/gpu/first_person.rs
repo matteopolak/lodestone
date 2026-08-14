@@ -336,11 +336,11 @@ impl std::fmt::Debug for HandBobSource {
 
 /// The hand pass's whole camera-space transform: [`hand_projection`] composed
 /// with a fresh copy of the walk/hurt bob — vanilla's own second application
-/// of it (`GameRenderer.java:344-347`), described in full on
+/// of it (`GameRenderer.java`), described in full on
 /// [`HandBobSource`]'s doc.
 ///
 /// **Post-multiplied, matching vanilla's own `projectionMatrix.mul(bobStack.
-/// pose())` (`GameRenderer.java:539`)** — the bob lands between the projection
+/// pose())` (`GameRenderer.java`)** — the bob lands between the projection
 /// and the already-camera-space arm/item pose, exactly where vanilla's own
 /// `Proj · ModelViewStack · PoseStack` puts it once the view rotation cancels
 /// (see [`hand_projection`]'s own doc for that cancellation). Pre-multiplying
@@ -630,7 +630,7 @@ impl RenderState {
         let texture = self.entities.textures.get(entry.name)?;
         // The bare arm takes the *same* dip: `renderPlayerArm` is called with the
         // very `inverseArmHeight` `submitArmWithItem` computed for the item branch
-        // (`ItemInHandRenderer.java:446`), so swapping an item away for an empty slot
+        // (`ItemInHandRenderer.java`), so swapping an item away for an empty slot
         // lowers the item and raises the arm as one continuous motion.
         let pose =
             first_person_arm_pose_with_equip(mesh, ARM, self.hand_swing.value(), inverse_arm_height)?;
@@ -756,11 +756,11 @@ impl RenderState {
     /// call through:
     ///
     /// ```java
-    /// // EntityRenderer.java:48-50
+    /// // EntityRenderer.java
     /// BlockPos blockPos = BlockPos.containing(entity.getLightProbePosition(partialTickTime));
     /// return LightCoordsUtil.pack(this.getBlockLightLevel(entity, blockPos),
     ///                             this.getSkyLightLevel(entity, blockPos));
-    /// // Entity.java:2001-2003
+    /// // Entity.java
     /// public Vec3 getLightProbePosition(final float partialTickTime) {
     ///    return this.getEyePosition(partialTickTime);
     /// }
@@ -770,7 +770,7 @@ impl RenderState {
     /// [`EntityLightSource::sample`](super::sources::EntityLightSource) returns
     /// vanilla's **packed** pair — sky in the high nibble, block in the low (see
     /// [`lodestone_render::ENTITY_FULLBRIGHT`], which is `15 << 4`) — and
-    /// `entity.wgsl:180-181` unpacks both:
+    /// `entity.wgsl`'s `vs_main` unpacks both:
     ///
     /// ```wgsl
     /// let sky = f32((light >> 4u) & 15u) / 15.0;

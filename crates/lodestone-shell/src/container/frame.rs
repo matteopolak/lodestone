@@ -32,8 +32,8 @@ pub struct ContainerFrame<'a> {
     /// Unlike [`title`](Self::title) this never comes from a packet: vanilla
     /// reads it from `Inventory.getDisplayName()`, whose default is the
     /// client-side constant `Component.translatable("container.inventory")`
-    /// (`Inventory.java:55`), so resolving it locally *is* the vanilla
-    /// behaviour. The default below is `en_us.json:3218`'s value, which is what
+    /// (`Inventory.java`), so resolving it locally *is* the vanilla
+    /// behaviour. The default below is `en_us.json`'s value, which is what
     /// a jar-less run and every hermetic gate see; `app.rs` overrides it with
     /// the same key run through the live language table so a non-English client
     /// gets its own word.
@@ -88,13 +88,13 @@ pub struct ContainerFrame<'a> {
     /// [`with_avatar_pose`](Self::with_avatar_pose).
     pub avatar_pose: lodestone_render::AnimInput,
     /// `Player.hasInfiniteMaterials()` — `Abilities.instabuild`
-    /// (`AnvilMenu.java:70-71`, `EnchantmentScreen.java:111`). Gates the
+    /// (`AnvilMenu.java`, `EnchantmentScreen.java`). Gates the
     /// anvil's "Too Expensive!" branch and the enchanting rows' afford
     /// check. `false` (the default) is the honest value for every existing
     /// caller and for a survival session.
     pub has_infinite_materials: bool,
     /// The local player's XP level, for the same afford checks
-    /// (`AnvilMenu.mayPickup`, `EnchantmentScreen.java:111`). `0` (the
+    /// (`AnvilMenu.mayPickup`, `EnchantmentScreen.java`). `0` (the
     /// default) matches every existing caller.
     pub xp_level: i32,
     /// Whether to draw the hovered slot's tooltip, and whether
@@ -375,7 +375,7 @@ pub fn menu_title(
     lodestone_game::text::resolve_to_string(title, translate)
 }
 
-/// `en_us.json:3218`'s value for `container.inventory` — the fallback
+/// `en_us.json`'s value for `container.inventory` — the fallback
 /// [`ContainerFrame::inventory_label`] carries when no caller supplies a
 /// translated one.
 const DEFAULT_INVENTORY_LABEL: &str = "Inventory";
@@ -386,11 +386,11 @@ const DEFAULT_INVENTORY_LABEL: &str = "Inventory";
 const DEFAULT_TRADES_LABEL: &str = "Trades";
 
 /// Vanilla's `merchant.level.1`..`merchant.level.5` — `VillagerData`'s level
-/// names, `en_us.json:5727-5731`. Index `0` is level `1` ("Novice").
+/// names, `en_us.json`. Index `0` is level `1` ("Novice").
 const MERCHANT_LEVEL_WORDS: [&str; 5] = ["Novice", "Apprentice", "Journeyman", "Expert", "Master"];
 
 /// Vanilla's `merchant.title` — the level-badge combined title
-/// (`MerchantScreen.extractLabels`, `MerchantScreen.java:86-95`):
+/// (`MerchantScreen.extractLabels`, `MerchantScreen.java`):
 ///
 /// ```java
 /// if (traderLevel > 0 && traderLevel <= 5 && this.menu.showProgressBar()) {
@@ -402,7 +402,7 @@ const MERCHANT_LEVEL_WORDS: [&str; 5] = ["Novice", "Apprentice", "Journeyman", "
 /// }
 /// ```
 ///
-/// `merchant.title` is `"%s - %s"` (`en_us.json:5732`) — a genuinely nested
+/// `merchant.title` is `"%s - %s"` (`en_us.json`) — a genuinely nested
 /// translation, the villager's own name as the first argument and a *second*
 /// translated component (the level word) as the second, which is why this
 /// goes through [`lodestone_game::text::resolve_to_string`] rather than a
@@ -446,7 +446,7 @@ pub fn merchant_title(
 }
 
 /// Vanilla's `merchant.trades` — the merchant screen's second label, "Trades"
-/// (`MerchantScreen.java:49,99`), resolved the same way
+/// (`MerchantScreen.java`), resolved the same way
 /// [`player_inventory_label`] resolves `container.inventory`.
 #[must_use]
 pub fn merchant_trades_label(translate: &dyn Fn(&str) -> Option<String>) -> String {
@@ -458,11 +458,11 @@ pub fn merchant_trades_label(translate: &dyn Fn(&str) -> Option<String>) -> Stri
 
 /// The player inventory screen's own title: **"Crafting"**, not "Inventory".
 ///
-/// `InventoryScreen.java:28` passes `Component.translatable("container.crafting")`
+/// `InventoryScreen.java` passes `Component.translatable("container.crafting")`
 /// to `super`, naming the 2×2 grid rather than the screen. This client used to
 /// hardcode the string `"Inventory"` here (`app.rs`), which is wrong twice over:
 /// wrong word, and — because it went in as the *title* — drawn at the title
-/// anchor, which for this one screen is `x = 97` (`InventoryScreen.java:29`), not
+/// anchor, which for this one screen is `x = 97` (`InventoryScreen.java`), not
 /// `x = 8`.
 ///
 /// Resolved through the language table for the same reason [`menu_title`] is: a
@@ -477,7 +477,7 @@ pub fn player_inventory_title(translate: &dyn Fn(&str) -> Option<String>) -> Str
 
 /// Vanilla's `playerInventoryTitle` — `container.inventory`, "Inventory".
 ///
-/// A *client-side* constant in vanilla too (`Inventory.java:55`'s `DEFAULT_NAME`),
+/// A *client-side* constant in vanilla too (`Inventory.java`'s `DEFAULT_NAME`),
 /// so unlike a container's title this is legitimately resolved locally rather
 /// than read off a packet. See [`ContainerFrame::inventory_label`].
 #[must_use]
@@ -515,18 +515,18 @@ pub struct LabelLayout {
 ///
 /// | screen | `titleLabelX` | second label | source |
 /// |---|---|---|---|
-/// | generic container | `8` | yes | `AbstractContainerScreen.java:68-71` |
-/// | crafting table | `29` | yes | `CraftingScreen.java:22` |
-/// | player inventory | `97` | **no** | `InventoryScreen.java:29,73-75` |
+/// | generic container | `8` | yes | `AbstractContainerScreen.java` |
+/// | crafting table | `29` | yes | `CraftingScreen.java` |
+/// | player inventory | `97` | **no** | `InventoryScreen.java` |
 ///
 /// The player inventory screen is the only one that omits the second label, and
 /// it does so by *overriding `extractLabels`* to drop the second `graphics.text`
-/// call entirely (`InventoryScreen.java:73-75`) — so the label is not wrong in
+/// call entirely (`InventoryScreen.java`) — so the label is not wrong in
 /// general, only there. Deleting it globally would trade one bug for another.
 ///
 /// `inventory` is `[8, layout.height - 94]`: `inventoryLabelX = 8` and
-/// `inventoryLabelY = imageHeight - 94` (`AbstractContainerScreen.java:70-71`,
-/// restated by `ContainerScreen.java:17` for the row-count-dependent chest).
+/// `inventoryLabelY = imageHeight - 94` (`AbstractContainerScreen.java`,
+/// restated by `ContainerScreen.java` for the row-count-dependent chest).
 /// [`SlotLayout::height`] *is* `imageHeight` — 166 for the player and crafting
 /// panels, `114 + rows * 18` for a chest, both matching vanilla's own
 /// constructors — so this is the same expression the panel art is blitted with,
@@ -549,7 +549,7 @@ pub struct LabelLayout {
 #[must_use]
 pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
     // The merchant's `inventoryLabelX` is `107`, not `8`
-    // (`MerchantScreen.java:58`'s constructor sets `this.inventoryLabelX =
+    // (`MerchantScreen.java`'s constructor sets `this.inventoryLabelX =
     // 107`), the one screen in this whole family whose player-inventory
     // section is not left-aligned with the panel — see
     // `SpecialLayout::Merchant`'s doc comment. `title_x`/`title_y` here are
@@ -590,14 +590,14 @@ pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
 ///
 /// | wire `menu_type` | screen | `titleLabelX` | `titleLabelY` | source |
 /// |---|---|---|---|---|
-/// | `furnace` / `blast_furnace` / `smoker` | `AbstractFurnaceScreen` subclasses | centred | `6` | `AbstractFurnaceScreen.java:39` |
-/// | `brewing_stand` | `BrewingStandScreen` | centred | `6` | `BrewingStandScreen.java:25` |
-/// | `generic_3x3` | `DispenserScreen` (dispenser **and** dropper) | centred | `6` | `DispenserScreen.java:20` |
-/// | `crafter_3x3` | `CrafterScreen` | centred | `6` | `CrafterScreen.java:33` |
-/// | `anvil` | `AnvilScreen` | `60` | `6` | `AnvilScreen.java:30` |
-/// | `loom` | `LoomScreen` | `8` | `4` | `LoomScreen.java:68` (`titleLabelY -= 2`) |
-/// | `stonecutter` | `StonecutterScreen` | `8` | `5` | `StonecutterScreen.java:45` (`titleLabelY--`) |
-/// | `cartography_table` | `CartographyTableScreen` | `8` | `4` | `CartographyTableScreen.java:29` (`titleLabelY -= 2`) |
+/// | `furnace` / `blast_furnace` / `smoker` | `AbstractFurnaceScreen` subclasses | centred | `6` | `AbstractFurnaceScreen.java` |
+/// | `brewing_stand` | `BrewingStandScreen` | centred | `6` | `BrewingStandScreen.java` |
+/// | `generic_3x3` | `DispenserScreen` (dispenser **and** dropper) | centred | `6` | `DispenserScreen.java` |
+/// | `crafter_3x3` | `CrafterScreen` | centred | `6` | `CrafterScreen.java` |
+/// | `anvil` | `AnvilScreen` | `60` | `6` | `AnvilScreen.java` |
+/// | `loom` | `LoomScreen` | `8` | `4` | `LoomScreen.java` (`titleLabelY -= 2`) |
+/// | `stonecutter` | `StonecutterScreen` | `8` | `5` | `StonecutterScreen.java` (`titleLabelY--`) |
+/// | `cartography_table` | `CartographyTableScreen` | `8` | `4` | `CartographyTableScreen.java` (`titleLabelY -= 2`) |
 ///
 /// Note the last three are expressed in vanilla as *decrements of the inherited
 /// `titleLabelY`*, not as absolute values. They are resolved to absolutes here
@@ -627,7 +627,7 @@ pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
 ///
 /// **`merchant` has its own branch below, not a table row.** Two things set it
 /// apart from the "centred" family: its centring formula has a `49` offset
-/// vanilla's own default centring does not (`MerchantScreen.java:94`:
+/// vanilla's own default centring does not (`MerchantScreen.java`:
 /// `49 + this.imageWidth / 2 - this.font.width(this.title) / 2`, vs. the
 /// plain `(imageWidth - width) / 2` the furnace family etc. use), and its
 /// *title text itself* is composed from the trader's level
@@ -657,7 +657,7 @@ pub fn menu_type_title_anchor(
         return Some([((layout.width - text_width) / 2.0).floor(), 6.0]);
     }
     if key.path() == "merchant" {
-        // `MerchantScreen.java:90-94` — the same `49 +` offset in both the
+        // `MerchantScreen.java` — the same `49 +` offset in both the
         // level-badge and bare-name branches, which is why this is unaffected
         // by which form `title` (already composed by [`merchant_title`])
         // actually is.

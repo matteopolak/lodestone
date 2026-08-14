@@ -724,7 +724,7 @@ fn a_locally_predicted_chest_reaches_pixels_with_no_server_packet() {
 /// That fix asks what happens when the server disagrees, and the answer is that no new
 /// mechanism is needed: vanilla's server sends a `ClientboundBlockUpdatePacket` for
 /// **both** the clicked position and the adjacent one after *every* `use_item_on`,
-/// whatever it decided (`ServerGamePacketListenerImpl.java:1397-1398`) — so the
+/// whatever it decided (`ServerGamePacketListenerImpl.java`) — so the
 /// predicted cell is always overwritten within one round trip, and since that fix that
 /// write calls `sync_block_entity`, which removes the record.
 ///

@@ -119,10 +119,10 @@ impl Sim {
     /// neighbour pushes the player only if vanilla's crowd pass reaches
     /// `player.push(neighbour)`, which needs three things: the type is a
     /// `LivingEntity` (the sole caller of `pushEntities()`, at
-    /// `LivingEntity.java:3163`), its `pushEntities()` can still see a player
-    /// (`Bat.java:95` empties it; `ArmorStand.java:178` narrows it to ridable
+    /// `LivingEntity.java`), its `pushEntities()` can still see a player
+    /// (`Bat.java` empties it; `ArmorStand.java` narrows it to ridable
     /// minecarts), and its `doPush(Entity)` still reaches `entity.push(this)`
-    /// for one (`Parrot.java:390` skips players outright).
+    /// for one (`Parrot.java` skips players outright).
     ///
     /// Note this is *not* the neighbour's `isPushable()`. That gates the
     /// **pushee** — it is the `input` of `EntitySelector.pushableBy` — which is
@@ -142,7 +142,7 @@ impl Sim {
     /// # What the census deliberately excludes
     ///
     /// Boats and rideable minecarts do push players in vanilla, but from their
-    /// own ticks — `AbstractBoat.push(Entity)` (`AbstractBoat.java:289`, with a
+    /// own ticks — `AbstractBoat.push(Entity)` (`AbstractBoat.java`, with a
     /// Y-ordering condition at `:181`) and
     /// `NewMinecartBehavior.pushEntities(AABB)` (`:537`, gated on
     /// `isRideable()` and querying a `1.0E-7`-inflated box). Those cannot join

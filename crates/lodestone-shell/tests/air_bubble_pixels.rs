@@ -15,7 +15,7 @@
 //!
 //! Bubbles are drawn into a row of their own, one icon-height **above** the
 //! health/hunger line (`hud.rs`'s `air_row_y = row_y - icon - 1.0`, vanilla's
-//! `yLineAir = yLineBase - 10`, `Hud.java:791,806`). Nothing else in this
+//! `yLineAir = yLineBase - 10`, `Hud.java`). Nothing else in this
 //! fixture paints there: the debug overlay, crosshair, hotbar frame and hotbar
 //! items are all switched off, and health/hunger sit *below* it. So the
 //! measurement is simply "non-backdrop pixels inside the air row's rect".
@@ -28,7 +28,7 @@
 //! # The controls, all executed
 //!
 //! Vanilla's visibility rule is `isUnderWater || currentAirSupplyTicks <
-//! maxAirSupplyTicks` (`Hud.java:910`) — an **or**. The first draft of this gate
+//! maxAirSupplyTicks` (`Hud.java`) — an **or**. The first draft of this gate
 //! got that wrong, asserting that leaving the water hides the row immediately;
 //! it does not, and must not, because that is precisely what makes the gradual
 //! refill visible after you surface. The controls below isolate the two
@@ -58,7 +58,7 @@ const W: u32 = 640;
 const H: u32 = 480;
 
 /// Vanilla's full air supply — `Entity.TOTAL_AIR_SUPPLY`
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/Entity.java:194`), the same
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/Entity.java`), the same
 /// constant `HudState::MAX_AIR` carries.
 const MAX_AIR: i32 = 300;
 
@@ -293,7 +293,7 @@ fn the_air_bubble_row_reaches_the_screen_through_the_real_hud_path() {
     assert_eq!(
         full_dry_px, 0,
         "control failed to fail: the row drew {full_dry_px} px on full air out of water, \
-         where both of vanilla's disjuncts (`Hud.java:910`) are false"
+         where both of vanilla's disjuncts (`Hud.java`) are false"
     );
     assert!(
         full_wet_px > 200,

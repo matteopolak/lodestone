@@ -110,7 +110,7 @@ const H: u32 = 240;
 
 /// Vanilla's overlay colour: `OverlayTexture`'s red row is a flat
 /// `ARGB.color(-1291911168)` = `(a = 178, 255, 0, 0)`, sampled whenever
-/// `LivingEntityRenderer.java:281` sets `hasRedOverlay`. The predicate below is
+/// `LivingEntityRenderer.java` sets `hasRedOverlay`. The predicate below is
 /// derived from *this*, not from any measured pixel value.
 const VANILLA_OVERLAY_RGB: [i32; 3] = [255, 0, 0];
 

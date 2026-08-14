@@ -64,7 +64,7 @@ use super::geometry::ContainerGeometry;
 use super::layout::Rect;
 use super::{BG_FLOATS_PER_VERTEX, CELL, FLOATS_PER_VERTEX};
 
-/// `super(..., 195, 136)` (`CreativeModeInventoryScreen.java:118`) — **not** the
+/// `super(..., 195, 136)` (`CreativeModeInventoryScreen.java`) — **not** the
 /// `176 x 166` every other container screen defaults to.
 pub const CREATIVE_PANEL_W: f32 = 195.0;
 /// See [`CREATIVE_PANEL_W`].
@@ -216,14 +216,14 @@ pub enum CreativeTabKind {
 
 impl CreativeTabKind {
     /// `tab.canScroll()` — only `Type.INVENTORY` calls `noScrollBar()`
-    /// (`CreativeModeTabs.java:1637`).
+    /// (`CreativeModeTabs.java`).
     #[must_use]
     pub fn scrolls(self) -> bool {
         self != Self::Inventory
     }
 
     /// `tab.showTitle()` — only the inventory tab calls `hideTitle()`
-    /// (`CreativeModeTabs.java:1630`).
+    /// (`CreativeModeTabs.java`).
     #[must_use]
     pub fn shows_title(self) -> bool {
         self != Self::Inventory

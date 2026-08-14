@@ -127,7 +127,7 @@ impl MenuInput {
     ///
     /// This used to say "while this is true the screen should draw the drag
     /// preview rather than a hover highlight." **That is not what vanilla does.**
-    /// `extractSlotHighlightBack`/`Front` (`AbstractContainerScreen.java:153-163`)
+    /// `extractSlotHighlightBack`/`Front` (`AbstractContainerScreen.java`)
     /// are gated on `hoveredSlot != null && hoveredSlot.isHighlightable()` and on
     /// nothing else — not on `isQuickCrafting` — so the highlight and the drag
     /// preview are drawn *together* mid-drag, and `build_inner` does the same.
@@ -145,7 +145,7 @@ impl MenuInput {
     /// same slot twice it arms the gather that fires on release.
     ///
     /// `menu` is read only to capture `last_quick_moved` off the slot about to
-    /// be quick-moved (vanilla `AbstractContainerScreen.java:312`) — it does
+    /// be quick-moved (vanilla `AbstractContainerScreen.java`) — it does
     /// not otherwise change what this method sends.
     pub fn press(
         &mut self,
@@ -189,7 +189,7 @@ impl MenuInput {
         self.skip_next_release = true;
         // `quickKey` in vanilla: a shift-click on a real slot. Captured before
         // the `if` chain below because vanilla's own assignment
-        // (`AbstractContainerScreen.java:312`) happens as a side effect of
+        // (`AbstractContainerScreen.java`) happens as a side effect of
         // computing this same condition, and `cloning` takes priority over it
         // there (the two are mutually exclusive `if`/`else` arms, not just
         // independent conditions).
@@ -306,7 +306,7 @@ impl MenuInput {
     /// supplies the slots to sweep — see [`gather_shift_matches`](Self::gather_shift_matches)
     /// — and also captures `last_quick_moved` for the plain shift-click path,
     /// at the second of the two sites vanilla sets it
-    /// (`AbstractContainerScreen.java:426`; the first is [`press`](Self::press)).
+    /// (`AbstractContainerScreen.java`; the first is [`press`](Self::press)).
     pub fn release(
         &mut self,
         hit: MenuHit,
@@ -328,7 +328,7 @@ impl MenuInput {
 
         if gather && button == MenuButton::Left {
             if let MenuHit::Slot(i) = hit {
-                // `AbstractContainerScreen.java:387`: the whole gather branch
+                // `AbstractContainerScreen.java`: the whole gather branch
                 // (both this and the shift variant below) is gated on
                 // `menu.canTakeItemForPickAll(ItemStack.EMPTY, slot)`. Every
                 // result-bearing menu overrides that to exclude its own
@@ -380,7 +380,7 @@ impl MenuInput {
             MenuHit::Panel => return Vec::new(),
         };
         let clone_click = button == MenuButton::Pick && ctx.creative;
-        // `AbstractContainerScreen.java:426`: the second `lastQuickMoved`
+        // `AbstractContainerScreen.java`: the second `lastQuickMoved`
         // site, inside the (non-clone) loaded-cursor release path — mirrored
         // in `press` for the empty-cursor press path.
         let quick_key = !clone_click && shift && slot != OUTSIDE_SLOT;
@@ -437,7 +437,7 @@ impl MenuInput {
     /// * **The gate is "the slot has an item", not "the cursor is empty."**
     ///   Unlike `checkHotbarKeyPressed` (`:507`), this branch does not consult
     ///   the carried stack at all — `doClick`'s own `getCarried().isEmpty()`
-    ///   guard (`AbstractContainerMenu.java:513`) is what makes a loaded-cursor
+    ///   guard (`AbstractContainerMenu.java`) is what makes a loaded-cursor
     ///   `THROW` a no-op, one layer down. Adding a `cursor_loaded` check here
     ///   would suppress a packet vanilla sends, which is a desync in the
     ///   direction nothing corrects: the server would never see it.
@@ -446,7 +446,7 @@ impl MenuInput {
     ///   `ctx.creative`. The two are not inconsistent: `mouseClicked` (`:285`)
     ///   uses `hasInfiniteMaterials` to decide *which mouse button means clone*,
     ///   while the permission itself lives in `doClick`'s CLONE arm
-    ///   (`AbstractContainerMenu.java:508`, `&& player.hasInfiniteMaterials()`).
+    ///   (`AbstractContainerMenu.java`, `&& player.hasInfiniteMaterials()`).
     ///   A key has no such ambiguity, so vanilla sends it in survival too and
     ///   lets the menu drop it.
     /// * **`else if`, not two `if`s.** A key bound to both actions clones only.
@@ -476,7 +476,7 @@ impl MenuInput {
         }]
     }
 
-    /// `AbstractContainerScreen.java:388-398`: shift+double-click does not
+    /// `AbstractContainerScreen.java`: shift+double-click does not
     /// gather onto the cursor — it sends one `QUICK_MOVE` per slot that is in
     /// the **same backing container** as the double-clicked slot, may be
     /// picked up, is non-empty, and matches `last_quick_moved`
