@@ -52,6 +52,53 @@
 
 use super::*;
 
+/// `LivingEntity.tick`'s per-tick candidate for the body yaw *before* easing:
+/// `yBodyRotT`. Defaults to the body's own unchanged yaw (no candidate this
+/// tick, so [`tick_head_turn`]'s catch-up term is a no-op), becomes the
+/// **walking** direction once the feet moved far enough to matter
+/// (`sideDist > 0.0025`, vanilla's own epsilon — `dx`/`dz` are this tick's
+/// feet delta), flipped 180° when that direction is more than 95° off the
+/// look yaw (so walking backwards keeps the body facing the way the eyes look
+/// rather than the way the feet are moving), and snaps straight to the look
+/// yaw while an arm swing is in progress (`attackAnim > 0.0F`), overriding
+/// the walking clause outright — vanilla checks it *after*, unconditionally.
+#[must_use]
+fn body_yaw_target(body_yaw: f32, look_yaw: f32, dx: f64, dz: f64, attacking: bool) -> f32 {
+    let mut target = body_yaw;
+    let side_dist = (dx * dx + dz * dz) as f32;
+    if side_dist > 0.002_500_000_2 {
+        let walk_direction = (dz as f32).atan2(dx as f32).to_degrees() - 90.0;
+        let diff = (wrap_degrees(look_yaw) - walk_direction).abs();
+        target = if diff > 95.0 && diff < 265.0 {
+            walk_direction - 180.0
+        } else {
+            walk_direction
+        };
+    }
+    if attacking {
+        target = look_yaw;
+    }
+    target
+}
+
+/// `LivingEntity.tickHeadTurn`: eases the body yaw 30% of the way toward
+/// `target` this tick, then clamps so the look yaw never ends up more than
+/// `max_head_rotation` degrees from the eased body — forcing an instant snap
+/// of the body (not the head, which is never clamped here) when the head
+/// would otherwise exceed it. `max_head_rotation` is
+/// `getMaxHeadRotationRelativeToBody()`: `50.0` by default
+/// (`LivingEntity`), narrowed to `15.0` while a `Player` blocks with a
+/// shield (`Player`'s override — see [`Sim::is_blocking`]).
+#[must_use]
+fn tick_head_turn(body_yaw: f32, look_yaw: f32, target: f32, max_head_rotation: f32) -> f32 {
+    let mut body = body_yaw + wrap_degrees(target - body_yaw) * 0.3;
+    let head_diff = wrap_degrees(look_yaw - body);
+    if head_diff.abs() > max_head_rotation {
+        body += head_diff - head_diff.signum() * max_head_rotation;
+    }
+    body
+}
+
 impl Sim {
     /// Number of meshing jobs still outstanding.
     #[must_use]
@@ -313,6 +360,24 @@ impl Sim {
         self.body_pose.attack_anim_lerp(self.clock().interp_alpha)
     }
 
+    /// Vanilla's `Player.isBlocking()`:
+    /// `isUsingItem() && getUseItem().getUseAnimation() == UseAnim.BLOCK`.
+    /// Approximated by item id, the same simplification `spyglass_scoping`
+    /// (`sim/camera.rs`) makes for `isScoping()`: a shield is the only item
+    /// this client raises a block pose for, so an id check stands in for
+    /// resolving `use_animation` off the item's data components. Feeds
+    /// [`Sim::step`]'s body-yaw clamp — vanilla narrows
+    /// `getMaxHeadRotationRelativeToBody()` from `50°` to `15°` while
+    /// blocking (`Player`'s override of `LivingEntity`'s default).
+    #[must_use]
+    fn is_blocking(&self) -> bool {
+        self.using_item()
+            && self
+                .player_menu()
+                .player_native(self.selected_slot())
+                .is_some_and(|st| st.item().to_string() == "minecraft:shield")
+    }
+
     /// Advance the simulation by real elapsed time, running fixed 20 Hz `GameTick`
     /// schedules against the world's collision. Rendering interpolates between
     /// ticks via [`Sim::interp_alpha`].
@@ -428,8 +493,42 @@ impl Sim {
             // takes its own short read guard, and holding one across another
             // accessor is exactly what this crate's locking rules forbid.
             let p = self.player();
+            // The body yaw fed to `EntityPose::tick` must already be the
+            // eased, clamped value — that type stores whatever it is given
+            // (see its own doc: "call once for every entity every time a
+            // movement/rotation update is applied"), it does not run
+            // `tickHeadTurn` itself. Feeding it the raw look yaw for *both*
+            // body and head (as this used to) collapses the two: the body
+            // then always faces exactly where the camera does, with no lag
+            // and no clamp, which is `LivingEntity.tickHeadTurn`'s entire
+            // job left undone.
+            //
+            // `self.body_pose.body_yaw` here is still *last* tick's result —
+            // `EntityPose::tick` below is what overwrites it — matching
+            // vanilla, where `tickHeadTurn`'s own `this.yBodyRot` read
+            // happens before that same call reassigns it. `attacking` reads
+            // last tick's `attack_anim` for the same reason `pre_position`
+            // was captured before this tick's physics: the value vanilla's
+            // `attackAnim > 0.0F` check would see has not been produced yet
+            // this iteration, and re-deriving it correctly would mean
+            // splitting `EntityPose::tick`'s swing-time update out from its
+            // orientation update. The result can be one tick stale relative
+            // to vanilla's own ordering, which already has a two-tick lag
+            // between `start_swing` and `attack_anim` turning positive (see
+            // `EntityPose::start_swing`) — not a new class of imprecision.
+            let attacking = self.body_pose.attack_anim > 0.0;
+            let target = body_yaw_target(
+                self.body_pose.body_yaw,
+                p.yaw,
+                p.position.x - pre_position.x,
+                p.position.z - pre_position.z,
+                attacking,
+            );
+            let max_head_rotation = if self.is_blocking() { 15.0 } else { 50.0 };
+            let body_yaw =
+                tick_head_turn(self.body_pose.body_yaw, p.yaw, target, max_head_rotation);
             self.body_pose
-                .tick(p.position.x, p.position.z, p.yaw, p.yaw, p.pitch);
+                .tick(p.position.x, p.position.z, body_yaw, p.yaw, p.pitch);
             // The camera's eye chases the entity's, half the gap per tick, so a
             // pose change eases instead of snapping. Same read guard as above.
             self.eye_height_smoother.tick(p.eye_height);

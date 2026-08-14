@@ -204,22 +204,20 @@ in `crates/lodestone-shell`:
    `WindowApp`). `anim`'s walk cycle and idle age come from `Sim::body_pose`
    (a `lodestone_entity::pose::EntityPose`), ticked once per physics tick from
    the player's own post-physics position exactly the way `entities.rs`'s
-   `Track::render_anim` drives one for a tracked network entity — but facing
-   (`body_yaw_deg`/`head_pitch_deg`) is read straight off the *interpolated
-   player state* instead of that pose's own smoothed rotation, so the local
-   avatar's facing never lags the camera by a tick the way a *remote* player's
-   body yaw legitimately does. Held items are exactly the "rides along for
-   free" case this doc predicted: main hand (selected hotbar slot) and off
-   hand (native inventory index `40`, per `lodestone_game::menu`'s own slot
-   table) both resolve into `ThirdPersonBodyState::equipment`.
+   `Track::render_anim` drives one for a tracked network entity. Facing now
+   models `LivingEntity.tickHeadTurn` for real — see "Head yaw now diverges
+   from body yaw" below. It used to read `body_yaw_deg` straight off the
+   *interpolated player state* (the raw look yaw) with no lag and no clamp at
+   all, so the local avatar's body always faced exactly wherever the camera
+   did. Held items are exactly the "rides along for free" case this doc
+   predicted: main hand (selected hotbar slot) and off hand (native inventory
+   index `40`, per `lodestone_game::menu`'s own slot table) both resolve into
+   `ThirdPersonBodyState::equipment`.
 
-Two gaps carried forward exactly where the equivalent gap already existed
-elsewhere, not guessed at: **head yaw never diverges from body yaw**
-(vanilla's `LivingEntity.tickHeadTurn` is not modelled for the local player
-anywhere in this engine, so `AnimInput::head_yaw_deg` is always `0`), and
-**`slim` stays `false`** (no real skin-model bit exists yet — unchanged from
-this doc's original "How to change it" note below, which is still exactly
-right about the fix).
+One gap carried forward exactly where the equivalent gap already existed
+elsewhere, not guessed at: **`slim` stays `false`** (no real skin-model bit
+exists yet — unchanged from this doc's original "How to change it" note
+below, which is still exactly right about the fix).
 
 `update_target` and `set_audio_listener` deliberately keep reading `Sim::camera`
 (the true, un-pulled-back eye) rather than `Sim::render_camera` — block
@@ -299,12 +297,35 @@ reachable in principle, but on the one path a shipped binary actually runs.
   Still unmodelled, because `ArmPose` does not carry the poses that need it:
   `HumanoidModel.java:370`'s extra `-PI/12` on a crouching `TOOT_HORN`/`BRUSH`
   arm.
-- **Head yaw never diverges from body yaw.** `Sim::third_person_body_state`
-  always passes `head_yaw_deg: 0.0` — vanilla's independent
-  head-turn-then-body-catches-up (`LivingEntity.tickHeadTurn`) is not modelled
-  for the local player anywhere in this engine. Adding it is a `sim.rs`-side
-  animation-input concern (a second smoothed yaw alongside `Sim::body_pose`),
-  not a change to this bridge.
+- **Head yaw now diverges from body yaw.** `Sim::step` (`sim/step.rs`) ports
+  `LivingEntity.tickHeadTurn`: a body-yaw candidate
+  (`body_yaw_target` — the current body yaw by default, the walking direction
+  once the feet move enough, flipped 180° for a backwards-relative walk, or
+  the raw look yaw outright mid-swing — `LivingEntity.tick`'s `yBodyRotT`)
+  eased 30%/tick toward the body (`tick_head_turn`), then clamped so the head
+  never sits more than `Sim::is_blocking`'s `15.0`/`50.0` degrees from it
+  (`Player.getMaxHeadRotationRelativeToBody`). The eased, clamped value is
+  what feeds `Sim::body_pose` (an `EntityPose`, which does not compute this
+  itself — see its own module doc: it stores whatever `body_yaw` it is
+  given), and `Sim::body_anim`/`Sim::third_person_body_state` read the
+  pose's own `body_yaw`/`head_yaw` back out rather than the raw look yaw.
+  Before this, both parameters were fed the same raw look yaw and
+  `AnimInput::head_yaw_deg` was hardcoded `0.0` on top of that, so the body
+  always equalled the head unconditionally. **Not modelled**: vanilla's
+  `attackAnim`-driven snap reads the swing state one tick later than
+  `Sim::step`'s own tick ordering allows without splitting `EntityPose::tick`
+  in two — see `body_yaw_target`'s doc for the exact staleness, which is the
+  same order of magnitude as `EntityPose::start_swing`'s own two-tick lag
+  before `attack_anim` turns positive.
+- **Remote players have the same gap `entities.rs` owns.** `entities.rs`'s
+  `render_anim` feeds `EntityPose`-equivalent logic the network `Rotation`
+  yaw directly as the body yaw every frame — there is no per-tick easing
+  toward a movement-direction candidate for a tracked entity, only the
+  head-to-body clamp (`clamp_head_to_body`, `75°`, mirroring
+  `Mob.clampHeadRotationToBody`, not `Player`'s `50°`/`15°`). A correct fix
+  is the same shape as this one: compute a `tick_head_turn`-eased body yaw
+  per entity per tick from its own previous body yaw and the network yaw,
+  before building the `RenderPose`. Out of scope here — filed as a follow-up.
 - **Held items ride along for free.** Because the body is folded into the same
   `entities` slice `prepare_item_geometry` reads, the local player's own held
   item renders through `merge_held_items` exactly like a mob's does — no

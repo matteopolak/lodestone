@@ -5953,3 +5953,195 @@ fn a_healthy_live_session_never_fires_the_id_space_diagnostic() {
         sim.stats.status
     );
 }
+
+/// The discriminating gate for the vanilla `yBodyRot`/`yHeadRot` split
+/// (`LivingEntity.tickHeadTurn`): looking around while standing still must
+/// **not** turn the third-person body until the head exceeds `50°` relative
+/// to it (`Player.getMaxHeadRotationRelativeToBody`'s default), and once it
+/// does, the body must snap so the head sits at *exactly* that clamp — not
+/// at the raw look yaw, which is what this engine did before (the body
+/// always equalled the head, unconditionally). Three arms in one input space
+/// — inside, exactly at, and beyond the clamp — collected and asserted
+/// together, per this repo's own rule against an `assert!` inside a `for`
+/// loop hiding every failure but the first.
+///
+/// A head yaw of `0` relative to the body is the coincident input where the
+/// clamped and unclamped readings agree; every arm here uses a nonzero
+/// offset so the two hypotheses can actually disagree.
+#[test]
+fn body_yaw_holds_still_within_the_clamp_and_snaps_once_it_is_exceeded() {
+    struct Case {
+        name: &'static str,
+        offset: f32,
+        // Expected body yaw delta from the base yaw after one tick.
+        expected_body_delta: f32,
+        // Expected |head yaw relative to body| after one tick.
+        expected_head_relative: f32,
+    }
+    let cases = [
+        Case {
+            name: "inside the clamp (30 of 50)",
+            offset: 30.0,
+            expected_body_delta: 0.0,
+            expected_head_relative: 30.0,
+        },
+        Case {
+            name: "exactly at the clamp (50 of 50)",
+            offset: 50.0,
+            expected_body_delta: 0.0,
+            expected_head_relative: 50.0,
+        },
+        Case {
+            name: "beyond the clamp (90 of 50)",
+            offset: 90.0,
+            // tick_head_turn: no movement candidate, so the 0.3 catch-up
+            // term is a no-op (target == body_yaw); the clamp then bumps
+            // body_yaw by (90 - 50) = 40 so the head sits exactly at the
+            // 50° boundary. Derived from `LivingEntity.tickHeadTurn`, not
+            // guessed.
+            expected_body_delta: 40.0,
+            expected_head_relative: 50.0,
+        },
+    ];
+
+    let mut mismatches = Vec::new();
+    for case in cases {
+        let mut sim = Sim::new(test_config());
+        sim.cycle_camera_type();
+        let base_yaw = sim.player().yaw;
+        sim.player_mut(|p| p.yaw = base_yaw + case.offset);
+        sim.step(lodestone_ecs::TICK_PERIOD);
+        // Force full-tick interpolation so this reads the tick that just
+        // ran rather than easing from the previous one.
+        sim.clock_mut(|c| c.interp_alpha = 1.0);
+        let state = sim
+            .third_person_body_state()
+            .expect("third person is on");
+        let body_delta = wrap_degrees(state.body_yaw_deg - base_yaw);
+        let head_relative = wrap_degrees(state.anim.head_yaw_deg).abs();
+        if (body_delta - case.expected_body_delta).abs() > 1.0 {
+            mismatches.push(format!(
+                "{}: body yaw moved {body_delta:.2}°, want {:.2}°",
+                case.name, case.expected_body_delta
+            ));
+        }
+        if (head_relative - case.expected_head_relative).abs() > 1.0 {
+            mismatches.push(format!(
+                "{}: head relative to body {head_relative:.2}°, want {:.2}°",
+                case.name, case.expected_head_relative
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "body/head clamp mismatches: {mismatches:#?}"
+    );
+}
+
+/// The movement-direction clause `LivingEntity.tick` feeds `tickHeadTurn`'s
+/// candidate: while the feet are moving, the body eases toward the
+/// *walking* direction rather than the look direction. Strafing
+/// perpendicular to a fixed look yaw is the case that discriminates this
+/// from the head-clamp gate above, which never moves the feet: sustained
+/// strafing must turn the body away from the look yaw at all (rejecting
+/// "the body never turns from movement alone"), and — because the movement
+/// direction here is durably ~90° from the look yaw — the head-relative-to-
+/// body offset converges to *exactly* the clamp regardless of walk speed,
+/// the same fixed point the clamp gate's "beyond" arm measures directly.
+/// That convergence value is the clamp constant itself, not a guessed round
+/// number: it falls out of `tickHeadTurn`'s recursion once the pull toward
+/// the movement direction outpaces what the clamp allows each tick.
+#[test]
+fn body_yaw_eases_toward_the_movement_direction_while_strafing() {
+    let mut sim = Sim::new(test_config());
+    sim.cycle_camera_type();
+    let base_yaw = sim.player().yaw;
+    sim.input_mut(|i| i.set(lodestone_controller::Action::Left, true));
+
+    let mut moved = false;
+    for _ in 0..40 {
+        let before = sim.player().position;
+        sim.step(lodestone_ecs::TICK_PERIOD);
+        let after = sim.player().position;
+        if (after.x - before.x).abs() > 1.0e-6 || (after.z - before.z).abs() > 1.0e-6 {
+            moved = true;
+        }
+    }
+    assert!(
+        moved,
+        "precondition: strafing must actually move the player, or this gate \
+         measures nothing"
+    );
+    assert!(
+        (sim.player().yaw - base_yaw).abs() < 1.0e-6,
+        "precondition: no mouse input was fed, so the look yaw must not have \
+         drifted on its own"
+    );
+
+    sim.clock_mut(|c| c.interp_alpha = 1.0);
+    let state = sim
+        .third_person_body_state()
+        .expect("third person is on");
+    let body_delta = wrap_degrees(state.body_yaw_deg - base_yaw).abs();
+    assert!(
+        body_delta > 1.0,
+        "the body never turned toward the movement direction; it is still \
+         at the look yaw (body_delta {body_delta:.2}°) — this is the exact \
+         shape of feeding the body the raw look yaw every tick"
+    );
+    let head_relative = wrap_degrees(state.anim.head_yaw_deg).abs();
+    assert!(
+        (30.0..=55.0).contains(&head_relative),
+        "sustained strafing perpendicular to a fixed look direction must \
+         settle the head-relative-to-body offset near the 50° clamp \
+         (`Player.getMaxHeadRotationRelativeToBody`), got {head_relative:.2}°"
+    );
+}
+
+/// Rejects a snap-at-threshold implementation: a mid-frame sample of a tick
+/// that moved the body must land strictly *between* the tick's start and end
+/// body yaw, not jump straight to the endpoint early. Uses the clamp gate's
+/// own "beyond" arm (90° offset -> a real 40° body move) so there is a
+/// nonzero span to interpolate across.
+#[test]
+fn body_yaw_interpolates_between_ticks_rather_than_snapping() {
+    let mut sim = Sim::new(test_config());
+    sim.cycle_camera_type();
+    let base_yaw = sim.player().yaw;
+    sim.player_mut(|p| p.yaw = base_yaw + 90.0);
+    sim.step(lodestone_ecs::TICK_PERIOD);
+
+    sim.clock_mut(|c| c.interp_alpha = 0.0);
+    let start = sim
+        .third_person_body_state()
+        .expect("third person is on")
+        .body_yaw_deg;
+    sim.clock_mut(|c| c.interp_alpha = 1.0);
+    let end = sim
+        .third_person_body_state()
+        .expect("third person is on")
+        .body_yaw_deg;
+    sim.clock_mut(|c| c.interp_alpha = 0.5);
+    let mid = sim
+        .third_person_body_state()
+        .expect("third person is on")
+        .body_yaw_deg;
+
+    assert!(
+        (start - base_yaw).abs() < 1.0,
+        "start of tick should still read the pre-tick body yaw, got {start} \
+         (base {base_yaw})"
+    );
+    assert!(
+        (end - base_yaw - 40.0).abs() < 1.0,
+        "end of tick should read the new, clamped body yaw, got {end} (base \
+         {base_yaw})"
+    );
+    let (lo, hi) = (start.min(end), start.max(end));
+    assert!(
+        mid > lo + 1.0 && mid < hi - 1.0,
+        "a mid-frame sample must land strictly between the tick's start \
+         ({start}) and end ({end}) body yaw rather than snapping to either \
+         endpoint; got {mid}"
+    );
+}

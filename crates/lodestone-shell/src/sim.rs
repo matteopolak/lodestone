@@ -31,6 +31,7 @@ use lodestone_ecs::{
     ChunkWorld, ChunkWorldWrite, EcsHandle, Extract, FrameClock, GameTick, Update, VersionData,
 };
 use lodestone_entity::attribute::attribute_value;
+use lodestone_entity::interpolation::wrap_degrees;
 use lodestone_entity::pose::EntityPose;
 use lodestone_game::menu::Menu;
 use lodestone_game::mining::{BreakInputs, Mining};
