@@ -340,6 +340,28 @@ When a decoded packet reaches no pixels, grep its variant in *every* router befo
 producers** outside `crates/protocol/`, so the server kicked us with `multiplayer.disconnect.flying`.
 **Ask what *sends* a serverbound action, not only what consumes a clientbound one.** (§12.38)
 
+**And the reported layer is almost never the broken one — so trace the whole chain before fixing where you
+were told.** Six instances in a single day, each filed as one thing and actually another:
+
+| reported as | actually |
+|---|---|
+| tame wolf never reaches the wire | it *is* on the wire; **no ECS component folds it**, so the draw site cannot receive it |
+| leashing unimplemented | implemented and pulling the mob; **no `SET_ENTITY_LINK` encoder exists**, so the rope is invisible |
+| lightning absent | strike selection fine and the **client consumer already live**; zero server-side producer |
+| server login has no compression | the codec was correct and the server's `SetCompression` arm **existed but was unreachable** |
+| nine-slice measures the declared size | **fixed already**; the doc comment above it still described the bug |
+| Create New World misses the canvas stamp | it reaches the stamp; the screen had **no arm in the hover switch** |
+
+The pattern is that a chain of five or six hops is complete except for one, and whoever filed the issue
+inferred the broken hop from the symptom rather than walking it. Two consequences. **Write the task as
+"trace action → server → wire → pixels and say which link you verified", not as "implement X"** — the
+agents given that framing found the real hop; the ones given a layer went to the named layer. And
+**"the code exists" is never sufficient evidence to close a feature issue**: ask what *consumes* it, and if
+the answer is nothing, the issue is more accurately open than closed.
+
+The cheap mechanical tell is an **`#[allow(dead_code)]` nobody removed**. Treat removing one as the signal
+the island actually closed — and if the attribute is still needed afterwards, the wiring did not take.
+
 ### 2. Re-verify before routing around "X doesn't exist yet"
 
 Staleness is the most common defect in the written record — **seven instances in one session**. Every
