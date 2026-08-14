@@ -253,8 +253,8 @@ pub fn glint_texture_matrix(millis: f64, speed: f64, scale: Scale) -> glam::Mat4
 ///
 /// Vanilla is `enchantment_glint_override ?? item.isFoil(stack)`, where the
 /// default `Item.isFoil` is `!ENCHANTMENTS.isEmpty()` (`Item.java:346-348`,
-/// `ItemStack.java:999-1001`). We model `enchantments` and **not**
-/// `enchantment_glint_override`, so:
+/// `ItemStack.java:999-1001`). This function models only `enchantments` and
+/// **not** `enchantment_glint_override`, so:
 ///
 /// * an ordinary enchanted item glints correctly — the common case, and the one
 ///   an inventory is full of;
@@ -266,20 +266,91 @@ pub fn glint_texture_matrix(millis: f64, speed: f64, scale: Scale) -> glam::Mat4
 ///   `enchanted_book`, `end_crystal`, `debug_stick` (`Items.java:1122`, `:1471`,
 ///   `:1481`, `:1557`, `:1571`, `:1609`, `:1697`).
 ///
-/// That last group is not fixable by decoding harder: the override is a
-/// *prototype* component baked into `Item.Properties`, so a clientbound stack
-/// carries no mention of it at all, exactly like `max_stack_size`. It needs an
-/// item-prototype census behind the version seam, not new wire decode. Note also
-/// that `enchanted_book`'s enchantments live in `STORED_ENCHANTMENTS`, which
-/// vanilla's `isEnchanted` deliberately does not read, so it would not glint even
-/// with the override modelled by way of the enchantments list.
+/// **[`has_foil_for_item`] closes the baked-override half of this shortfall**
+/// for any caller that has the item's identifier alongside its components — the
+/// override is a *prototype* component baked into `Item.Properties`, so a
+/// clientbound stack carries no mention of it at all, exactly like
+/// `max_stack_size`, and the seven-item set is therefore a hand-authored
+/// census rather than something obtainable by decoding harder. Note also that
+/// `enchanted_book`'s enchantments live in `STORED_ENCHANTMENTS`, which
+/// vanilla's `isEnchanted` deliberately does not read, so it would not glint
+/// even with the override modelled by way of the enchantments list — the baked
+/// census is the *only* thing that makes an unenchanted book glint.
+///
+/// This function itself is unchanged and still enchantments-only, because it is
+/// called from a site that has no item identifier in hand; **use
+/// [`has_foil_for_item`] or [`has_foil_for_stack`] instead whenever the item id
+/// is available** — which is every call site except one bare `ItemComponents`
+/// consumer left to migrate.
+///
+/// The live per-stack component override — the direction that can *suppress* an
+/// enchanted item's glint, or force one onto a plain item a server chose to
+/// mark — is a separate, still-open gap: no vanilla item bakes
+/// `ENCHANTMENT_GLINT_OVERRIDE=false` into its prototype (checked against every
+/// `.component(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, …)` call in
+/// `Items.java`, all seven read `true`), so [`baked_glint_override`] only ever
+/// needs to answer the "on" direction. A *patch*-level override of either
+/// polarity is real (`ItemStack.java:969`'s `this.get(...)` reads the
+/// patch-merged value, not just the prototype default) but is not decoded by
+/// this build's protocol adapter — `lodestone_model::item::ItemComponents` has
+/// no field for it, symmetrically with why `max_stack_size`/`max_damage`/
+/// `equippable` are *effective* fields seeded from the prototype census before
+/// the patch is read rather than patch-only ones.
 ///
 /// `minecraft:compass` is the one item with a code-level override —
 /// `LODESTONE_TRACKER` present means foil (`CompassItem.java:29-31`) — and is
-/// likewise out of reach.
+/// likewise out of reach: it depends on a component this build does not decode.
 #[must_use]
 pub fn has_foil(components: &lodestone_model::item::ItemComponents) -> bool {
     has_foil_enchantments(&components.enchantments)
+}
+
+/// Vanilla's baked `ENCHANTMENT_GLINT_OVERRIDE` item-prototype flag, for the
+/// seven items whose `Item.Properties` sets
+/// `.component(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true)`
+/// (`Items.java:1122,1471,1481,1557,1571,1609,1697`).
+///
+/// `item` is the full identifier, e.g. `"minecraft:enchanted_book"`.
+///
+/// Returns `Some(true)` for exactly the seven baked items and `None` for every
+/// other item — **never** `Some(false)`. That asymmetry is measured, not a
+/// simplification: every `ENCHANTMENT_GLINT_OVERRIDE` registration in 26.2's
+/// `Items.java` reads `true`; nothing bakes `false`. `None` means "this table
+/// has no opinion, ask the enchantments list instead" — the honest answer for
+/// the other 1,530 items, which is why [`has_foil_for_item`] falls back to
+/// [`has_foil_enchantments`] rather than defaulting to `false` on a miss.
+#[must_use]
+pub fn baked_glint_override(item: &str) -> Option<bool> {
+    /// The seven baked-`true` items, in `Items.java` declaration order.
+    const BAKED_TRUE: [&str; 7] = [
+        "minecraft:enchanted_golden_apple",
+        "minecraft:experience_bottle",
+        "minecraft:written_book",
+        "minecraft:nether_star",
+        "minecraft:enchanted_book",
+        "minecraft:end_crystal",
+        "minecraft:debug_stick",
+    ];
+    BAKED_TRUE.contains(&item).then_some(true)
+}
+
+/// The full [`has_foil`] predicate for a caller that also has the stack's item
+/// identifier: the baked census wins outright when it has an opinion
+/// (`ItemStack.hasFoil`'s short-circuit — see [`has_foil`]'s doc for why a
+/// baked `true` cannot be reached any other way for `enchanted_book`), and
+/// [`has_foil_enchantments`] decides otherwise.
+#[must_use]
+pub fn has_foil_for_item(item: &str, enchantments: &[lodestone_model::item::ItemEnchantment]) -> bool {
+    baked_glint_override(item).unwrap_or_else(|| has_foil_enchantments(enchantments))
+}
+
+/// [`has_foil_for_item`] over a full [`lodestone_model::item::ItemComponents`],
+/// for a caller (a world-rendered held/dropped/equipped stack, for instance)
+/// that holds the model crate's own component struct rather than a borrowed
+/// enchantments slice.
+#[must_use]
+pub fn has_foil_for_stack(item: &str, components: &lodestone_model::item::ItemComponents) -> bool {
+    has_foil_for_item(item, &components.enchantments)
 }
 
 /// [`has_foil`] over a borrowed enchantment list, for a caller that holds the
@@ -824,6 +895,120 @@ mod tests {
                 level: 1,
             });
         assert!(has_foil(&enchanted));
+    }
+
+    /// The baked census: `Some(true)` for exactly the seven items, `None`
+    /// (never `Some(false)`) for everything else — asserted as a collection so
+    /// one mismatched item is visible rather than aborting the loop.
+    #[test]
+    fn baked_glint_override_covers_exactly_the_seven_items() {
+        let baked = [
+            "minecraft:enchanted_golden_apple",
+            "minecraft:experience_bottle",
+            "minecraft:written_book",
+            "minecraft:nether_star",
+            "minecraft:enchanted_book",
+            "minecraft:end_crystal",
+            "minecraft:debug_stick",
+        ];
+        let mismatches: Vec<_> = baked
+            .iter()
+            .filter(|item| baked_glint_override(item) != Some(true))
+            .collect();
+        assert!(mismatches.is_empty(), "baked items with no override: {mismatches:?}");
+
+        let not_baked = [
+            "minecraft:diamond_sword",
+            "minecraft:stick",
+            "minecraft:compass",
+            "minecraft:book",
+            "minecraft:golden_apple",
+        ];
+        let mismatches: Vec<_> = not_baked
+            .iter()
+            .filter(|item| baked_glint_override(item).is_some())
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "non-baked items reporting an override: {mismatches:?}"
+        );
+    }
+
+    /// The four-case discriminating gate for [`has_foil_for_item`]: an
+    /// enchanted item glints from content, an *unenchanted* enchanted book
+    /// glints from the baked override (the reported bug), a plain unenchanted
+    /// item does not glint, and the override — where it exists at all — wins
+    /// outright rather than merely tie-breaking against an empty list.
+    ///
+    /// There is no fourth real case ("an item whose baked override forces the
+    /// glint *off* despite enchantments"): [`baked_glint_override`]'s own doc
+    /// records that no item in 26.2's `Items.java` bakes `false`, only `true`.
+    /// A synthetic stand-in for that direction is included below so the
+    /// override's *unconditional* precedence (not just "wins on a tie") is
+    /// still exercised: a baked-`true` item with a *non-empty* enchantments
+    /// list must still resolve through the override path, not merely happen
+    /// to agree with it.
+    #[test]
+    fn has_foil_for_item_four_case_gate() {
+        use lodestone_model::item::ItemEnchantment;
+
+        let one_ench = [ItemEnchantment { id: 0, level: 1 }];
+        let none: [ItemEnchantment; 0] = [];
+
+        struct Case<'a> {
+            name: &'static str,
+            item: &'static str,
+            enchantments: &'a [ItemEnchantment],
+            expected: bool,
+        }
+        let cases = [
+            Case {
+                name: "enchanted item glints from content",
+                item: "minecraft:diamond_sword",
+                enchantments: &one_ench,
+                expected: true,
+            },
+            Case {
+                name: "unenchanted enchanted_book glints from the baked override",
+                item: "minecraft:enchanted_book",
+                enchantments: &none,
+                expected: true,
+            },
+            Case {
+                name: "plain unenchanted item does not glint",
+                item: "minecraft:stick",
+                enchantments: &none,
+                expected: false,
+            },
+            Case {
+                name: "baked override wins outright, not just on an empty-list tie",
+                item: "minecraft:enchanted_book",
+                enchantments: &one_ench,
+                expected: true,
+            },
+        ];
+
+        let mismatches: Vec<_> = cases
+            .iter()
+            .filter(|c| has_foil_for_item(c.item, c.enchantments) != c.expected)
+            .map(|c| c.name)
+            .collect();
+        assert!(mismatches.is_empty(), "failing cases: {mismatches:?}");
+    }
+
+    /// [`has_foil_for_stack`] delegates to [`has_foil_for_item`] over the real
+    /// component struct rather than re-spelling the predicate — the entry
+    /// point a world-render call site (held/dropped/equipped stacks) needs.
+    #[test]
+    fn has_foil_for_stack_delegates_to_has_foil_for_item() {
+        use lodestone_model::item::ItemComponents;
+
+        let plain = ItemComponents::default();
+        assert!(
+            has_foil_for_stack("minecraft:enchanted_book", &plain),
+            "the baked override must win even with a default (empty) component set"
+        );
+        assert!(!has_foil_for_stack("minecraft:stick", &plain));
     }
 
     /// The `GlintUniform` is `std140`-compatible for a uniform buffer: two mat4s

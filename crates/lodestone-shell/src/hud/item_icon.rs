@@ -143,37 +143,50 @@ pub struct ItemIcon {
 
 /// `ItemStack.hasFoil()` for a shell-side [`lodestone_game::item::ItemStack`],
 /// delegating the actual predicate to
-/// [`lodestone_render::glint::has_foil_enchantments`].
+/// [`lodestone_render::glint::has_foil_for_item`].
 ///
 /// # Why this adapter exists
 ///
-/// [`lodestone_render::glint::has_foil`] wants a
-/// `lodestone_model::item::ItemComponents` — a struct with an `enchantments`
-/// field. What the shell has in hand is `lodestone_game::item::ItemComponents`,
-/// an opaque `BTreeMap<Identifier, ComponentValue>`, so that call does not
-/// compile here and the two types are not interchangeable. This bridges them
-/// without re-spelling the predicate, so the render crate stays the single owner
-/// of *what foil means* and of the shortfalls documented there.
+/// [`lodestone_render::glint::has_foil_for_item`] wants a borrowed
+/// `&[lodestone_model::item::ItemEnchantment]` alongside the item id. What the
+/// shell has in hand is `lodestone_game::item::ItemComponents`, an opaque
+/// `BTreeMap<Identifier, ComponentValue>`, so pulling the enchantments list out
+/// needs this bridge — it does not re-spell the predicate itself, so the render
+/// crate stays the single owner of *what foil means* (enchantments content, and
+/// now also the seven-item baked-override census) and of the shortfalls
+/// documented there.
 ///
-/// # The invariant this leans on
+/// # Two sources feed the predicate now, not one
+///
+/// Until the baked-override census landed, this function read only the
+/// `minecraft:enchantments` component, which is why an unenchanted
+/// `minecraft:enchanted_book` never glinted: vanilla's own `isEnchanted` does
+/// not read `STORED_ENCHANTMENTS` either, so no amount of attaching
+/// enchantment content to the stack could have fixed it. `has_foil_for_item`
+/// checks the item id against the baked census first and only falls back to
+/// the enchantments list when the census has no opinion — see its doc, and
+/// [`lodestone_render::glint::has_foil`]'s, for the full rule and the
+/// remaining live per-stack-override gap.
+///
+/// # The invariant the enchantments half leans on
 ///
 /// The key is present **only when the list is non-empty** —
 /// `lodestone_game::item::ItemStack`'s `From<&lodestone_model::ItemStack>` inserts
 /// `minecraft:enchantments` under an `if !stack.components.enchantments.is_empty()`
 /// guard. So an absent key and a present-but-empty list mean the same thing here,
-/// and the `is_empty` check inside `has_foil_enchantments` is what makes this
-/// correct either way rather than dependent on that guard holding.
+/// and the `is_empty` check inside `has_foil_enchantments` (which
+/// `has_foil_for_item` falls back to) is what makes this correct either way
+/// rather than dependent on that guard holding.
 #[must_use]
 pub(crate) fn stack_has_foil(stack: &lodestone_game::item::ItemStack) -> bool {
-    match stack
+    let enchantments: &[lodestone_model::item::ItemEnchantment] = match stack
         .components()
         .get_str(lodestone_game::item::ENCHANTMENTS_COMPONENT)
     {
-        Some(lodestone_game::item::ComponentValue::Enchantments(list)) => {
-            lodestone_render::glint::has_foil_enchantments(list)
-        }
-        _ => false,
-    }
+        Some(lodestone_game::item::ComponentValue::Enchantments(list)) => list,
+        _ => &[],
+    };
+    lodestone_render::glint::has_foil_for_item(&stack.item().to_string(), enchantments)
 }
 
 /// The baked resources an icon resolves against. Both are optional and both
@@ -2555,6 +2568,37 @@ mod pop_tests {
                 "channel {i} of a white tint is {c}, not 1.0"
             );
         }
+    }
+
+    /// The reported case (issue #605's second half): an **unenchanted**
+    /// `minecraft:enchanted_book` still glints, because
+    /// `lodestone_render::glint::has_foil_for_item`'s baked census answers
+    /// before the (empty) enchantments list is ever consulted — content-based
+    /// glint was, and remains, structurally unable to fix this, since vanilla's
+    /// `enchanted_book` stores its enchantments under `STORED_ENCHANTMENTS`,
+    /// which `isEnchanted`/`isFoil` never read.
+    ///
+    /// A plain unenchanted item with no baked entry (`minecraft:stick`) is the
+    /// negative control in the same test, so a census that matched everything
+    /// would fail here rather than only being caught by omission.
+    #[test]
+    fn stack_has_foil_reads_the_baked_override_for_an_unenchanted_enchanted_book() {
+        use lodestone_game::item::ItemStack;
+
+        let book = ItemStack::new(
+            "minecraft:enchanted_book".parse().expect("static id parses"),
+            1,
+        );
+        assert!(
+            stack_has_foil(&book),
+            "an unenchanted enchanted_book must glint from the baked override"
+        );
+
+        let stick = ItemStack::new("minecraft:stick".parse().expect("static id parses"), 1);
+        assert!(
+            !stack_has_foil(&stick),
+            "a plain item with no baked override and no enchantments must not glint"
+        );
     }
 
     /// `stack_has_foil` reads the enchantments component, and reads it through the
