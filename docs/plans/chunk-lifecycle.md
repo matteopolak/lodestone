@@ -208,7 +208,7 @@ features write into neighbouring chunks. A separate `LOADING_PYRAMID` skips ever
 generation task for statuses restored from disk, running only `loadStructureStarts`,
 `initializeLight`, `light`, `full`.
 
-### #297's premise is false for 26.2
+### U7's premise is false for 26.2
 
 **26.2 has no permanent spawn-chunk ticket.** Three independent confirmations:
 
@@ -349,7 +349,7 @@ rewrite. Same for `tick.rs`, which has ~85 lines of in-flight redstone work in i
 
 ---
 
-### U1 — non-blocking generation (#293). First, and independently valuable.
+### U1 — non-blocking generation. First, and independently valuable.
 
 **Owns:** `crates/lodestone-server/src/chunk.rs`, `crates/lodestone-server/src/server.rs`.
 **Touches (broker):** `integrated.rs` (call sites), `lib.rs::server::serve_connection` (re-export).
@@ -424,7 +424,7 @@ or on a fresh local counter.** Prefer the local counter — it has no lifetime a
 
 ---
 
-### U2 — measure the retained-column cost (#87's missing RSS half). Parallel with U1.
+### U2 — measure the retained-column cost (the missing RSS half). Parallel with U1.
 
 **Owns:** `crates/lodestone-server/examples/bench_worldgen.rs`.
 
@@ -462,7 +462,7 @@ unit must come from `--release`.
 
 ---
 
-### U3 — `ChunkStore`: residency and a one-step status, no tickets yet (#289 part 1)
+### U3 — `ChunkStore`: residency and a one-step status, no tickets yet (part 1)
 
 **Owns:** `crates/lodestone-server/src/chunk_store.rs` (new).
 **Broker patches:** `lib.rs` (+1 `mod`, +1 `pub use`), `tick.rs` (two anchored edits), `server.rs`
@@ -521,7 +521,7 @@ known tick count. Do not read `TickClock` — it outlives the gate (see U1).
 
 ---
 
-### U4 — `TicketStore` and the level propagator (#289 part 2)
+### U4 — `TicketStore` and the level propagator (part 2)
 
 **Owns:** `crates/lodestone-server/src/ticket.rs` (new).
 **Broker patches:** `lib.rs` (+1 `mod`, +1 `pub use`), `tick.rs` (one anchored insertion),
@@ -575,7 +575,7 @@ absolute value is not, since another test's loop may have advanced it.
 
 ---
 
-### U5 — player tickets replace `ViewTracker`'s residency role (#289 part 3, the island-closer)
+### U5 — player tickets replace `ViewTracker`'s residency role (part 3, the island-closer)
 
 **Owns:** `crates/lodestone-server/src/server.rs`.
 
@@ -619,7 +619,7 @@ than skips.
 
 ---
 
-### U6 — unloading and the save-on-unload hook (#292)
+### U6 — unloading and the save-on-unload hook
 
 **Owns:** `crates/lodestone-server/src/chunk_store.rs` (U3's file; sequence after U3/U4).
 **Blocked on:** #437 for the save half only.
@@ -662,7 +662,7 @@ flat across a correct unload — that is U2's tool, on a different question.
 
 ---
 
-### U7 — the spawn ticket, re-specified for 26.2 (#297)
+### U7 — the spawn ticket, re-specified for 26.2
 
 **Owns:** `crates/lodestone-server/src/ticket.rs` (U4's file), plus the join path in `server.rs`.
 **Blocked on:** U4, and on `docs/plans/world-state.md`'s unit **P1** (#329, world spawn point) — you
@@ -749,42 +749,42 @@ U3 (#289a) ──→ U4 (#289b) ──→ U5 (#289c)      U5 is mandatory, not p
 
 **Real blockers, distinguished from sequencing preferences:**
 
-- **#437 blocks half of U6 and part of U7.** Genuine, external, and already unblocked on its own
-  dependencies (#298/#300 are closed). U6's drop half routes around it via the edited-column
-  refusal.
-- **`docs/plans/world-state.md`'s P1 (#329) blocks U7.** Genuine cross-plan dependency.
+- **The open persistence-wiring dependency blocks half of U6 and part of U7.** Genuine, external, and
+  already unblocked on its own dependencies (the anvil codec work is closed). U6's drop half routes
+  around it via the edited-column refusal.
+- **`docs/plans/world-state.md`'s P1 blocks U7.** Genuine cross-plan dependency.
 - **U5 blocks nothing but is blocked *by* nothing either** — and shipping U3+U4 without it produces
   an island. Treat U3–U5 as one deliverable with three commits.
-- **#281 blocks nothing here.** See the verdict below.
+- **The net-thread/game-thread split design task blocks nothing here.** See the verdict below.
 - **No bevy-migration phase blocks anything here.** See "Where the store lives".
 - ~~**LAN (`IntegratedServer::bind`, `integrated.rs`) spawns no tick loop**, so every unit that
   adds per-tick work is singleplayer-only until that is fixed.~~ **Fixed — #439 is closed.** `bind`
   now spawns exactly one loop per world. Per-tick work added by the units below reaches LAN as well
   as singleplayer.
 
-### #293 vs #281: not a dependency, in either direction
+### U1 and the net-thread/game-thread split design task: not a dependency, in either direction
 
-**Verdict: #293 can and should land before #281.** Evidence:
+**Verdict: U1 can and should land before that design task.** Evidence:
 
-1. **#281 asks for a design, not code.** Its own scope: *"design a net-thread/game-thread (or
-   async-task/tick) split for `lodestone-server` once multi-connection support is on the table — **no
-   code changes needed until then**"*. Its second half (bounding the shell's relay channel) is
-   client-side and touches nothing in this cluster. Note #281's own line-number citation for that channel
+1. **The design task asks for a design, not code.** Its own scope: *"design a net-thread/game-thread
+   (or async-task/tick) split for `lodestone-server` once multi-connection support is on the table —
+   **no code changes needed until then**"*. Its second half (bounding the shell's relay channel) is
+   client-side and touches nothing in this cluster. Note that task's own citation for that channel
    has **drifted** — those lines are now a doc comment about sky defaults; the
    unbounded `std::sync::mpsc::channel()` pair is in `connect_impl` (`crates/lodestone-shell/src/net.rs`). A
-   §2 instance in miniature, and a reason not to quote #281's line numbers forward.
-2. **The split #293 needs already exists.** `run_tick_loop` is its own tokio task
+   §2 instance in miniature, and a reason to name the current symbol rather than quote an old citation forward.
+2. **The split U1 needs already exists.** `run_tick_loop` is its own tokio task
    (`integrated.rs`) communicating with connections through `Arc<Mutex<…>>` feeds
-   (`BlockTickFeed`, `tick.rs`; `ExplosionFeed`, same file). What #281 is really about is that
+   (`BlockTickFeed`, `tick.rs`; `ExplosionFeed`, same file). What the design task is really about is that
    *packet apply* still happens inline on the connection task — documented independently in
    `docs/server-ecs.md`'s "The straddle already exists, with no ECS involved" section (`server.rs`).
    That is an adjudication concern, orthogonal to where generation runs.
 3. **U1's fix is `spawn_blocking` + a signature change, and needs no split.** `spawn_blocking` works
    on the current-thread runtime the shell actually builds (`net.rs`) because the blocking pool
    is separate from the core thread.
-4. **The dependency runs the other way, weakly.** #281's eventual thread split would be *easier*
+4. **The dependency runs the other way, weakly.** The eventual thread split would be *easier*
    after U1, because U1 removes the one place a connection task blocks the whole runtime.
-5. **Nothing #293 does becomes wrong under #281.** `spawn_blocking` is correct on both a
+5. **Nothing U1 does becomes wrong under that later split.** `spawn_blocking` is correct on both a
    current-thread and a multi-thread runtime; a later split does not invalidate it.
 
 The one honest cost of ordering U1 first: its *call-site arrangement* in `server.rs` is

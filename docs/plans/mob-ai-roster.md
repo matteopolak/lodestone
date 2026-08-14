@@ -105,7 +105,7 @@ instance of it across five issues at once.
 
 ### 1.2 Confirmed still-true islands
 
-- **#209 (Brain never ticked outside its crate) — TRUE at the time of writing.** All three greps
+- **Brain never ticked outside its crate — TRUE at the time of writing.** All three greps
   returned zero hits outside
   `crates/lodestone-entity/`: `brain::`, `BrainMob`, `Brain::`. `BrainMob`
   (`crates/lodestone-entity/src/brain/mob.rs`, 10 methods) had exactly one implementor,
@@ -118,7 +118,7 @@ instance of it across five issues at once.
   the time.** **Update:** `crates/lodestone-entity/src/ai/navigating_mob.rs` now has
   `impl BrainMob for NavigatingMob<'_>`, confirmed directly against the source — re-verify this
   island's status before planning C1 against this bullet.
-- **#222 (no natural spawn driver) — TRUE.** `MobSim::run_spawn_cycle`,
+- **No natural spawn driver — TRUE.** `MobSim::run_spawn_cycle`,
   `despawn_pass` and `census` (all in `crates/lodestone-server/src/mobs/mod.rs`) are called **only** from
   `crates/lodestone-server/tests/mob_spawn.rs`. `run_tick_loop`
   (`crates/lodestone-server/src/tick.rs`) calls, in order: overload resolution, sleep,
@@ -127,14 +127,14 @@ instance of it across five issues at once.
   empty**), `random_ticks.tick_chunk`, `clock.record_tick`. No spawn cycle, no despawn pass, no
   player-position feed. `seed_demo_mobs`'s own doc comment (`mobs/mod.rs`) says so itself. `impl SpawnCandidateSource` has exactly one
   implementor tree-wide: `AlwaysSpawns` in `tests/mob_spawn.rs`, a test mock.
-- **#221 (no spawn table) — TRUE, and stronger than filed.** `SpawnEnvironment`
+- **No spawn table — TRUE, and stronger than filed.** `SpawnEnvironment`
   (`crates/lodestone-entity/src/spawn.rs`) has **zero implementors anywhere, including tests**.
-- **#223 (regional difficulty unmodeled) — TRUE.** `RegionalDifficulty`, `regional_difficulty`,
+- **Regional difficulty unmodeled — TRUE.** `RegionalDifficulty`, `regional_difficulty`,
   `DifficultyInstance`, `effective_difficulty` all return **0 hits tree-wide**. All 64 `Difficulty::`
   hits are the wire/UI enum (create-world menu, `LOGIN`/`CHANGE_DIFFICULTY` encode, HUD). The only
   crossing into mob logic is `DespawnCtx.difficulty_peaceful` (`spawn.rs`), which has zero
   non-test users.
-- **#224 (no spawn eggs / spawners) — TRUE.** All 176 `spawn_egg` hits are rows in two generated
+- **No spawn eggs / spawners — TRUE.** All 176 `spawn_egg` hits are rows in two generated
   files (`lodestone-data/src/generated/{item_prototypes,items}.rs`); zero outside `generated/`.
   `SpawnEgg` and `SpawnData` are 0 hits. The spawner exists only as a renderable block state and a
   1.12→1.13 flattening rename. **Every mob in the running game comes from `seed_demo_mobs`

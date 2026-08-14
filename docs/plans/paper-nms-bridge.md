@@ -263,7 +263,7 @@ mutation (seam 11) — not a doctrine tension, a #156 design hole, and it stays 
 as it does for native plugins; (iii) plugins that spawn threads and touch the world — refused by
 throw, same as Paper.
 
-## Relationship to #433 and #77
+## Relationship to the server ECS migration and the wider plugin-API epic
 
 **#433 no longer offers options — it is decided, and #341 is strictly downstream of the
 decision.** The three-way choice (server ECS / bespoke hooks / defer to #341) resolved to the

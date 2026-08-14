@@ -89,21 +89,15 @@ it is not a worldgen question).
 **Existing GitHub issues that already scope adjacent work** (checked so this plan does not duplicate
 them — `HANDOFF.md`'s standing rule):
 
-- **#295** "Chunk lifecycle: wire carver and ore-feature placement into the served chunk pipeline"
-  (open, `tier-4`, `island`, parent #5) — already contains the precise diagnosis this plan would
-  otherwise re-derive: carver/feature modules exist and are proven, `OverworldGenerator` imports
-  neither, `grep` for their symbols outside their own modules is empty, and the wiring is "the single
-  cheapest, highest-visual-impact win in the whole persistence/chunk area." This plan's Phase 2
-  **is** #295; do not open a duplicate.
-- **#132** "Design: custom world generator hook for plugins" (open, `question`) — plugin-API surface
-  over the generator, not core fidelity. Relevant to §6 below (crate boundary) but a separate decision.
-- **#136** "Structure placement API for plugins" (open) — explicitly recorded as blocked on core
-  worldgen gaining any structure concept at all, and says "do not start implementation against this
-  issue." Confirms structures are unscoped anywhere in the tracker today.
-- **#134** "Custom dimension registration from a plugin" (open) — adjacent, not overlapping.
-- **#85/#86/#87** — worldgen bench issues (stage-cost split, parallel scaling, region throughput),
-  already filed, orthogonal to the correctness phases below.
-- No open or closed issue mentions multi-noise biome assignment specifically. That is a real gap in
+| issue | title | note |
+|---|---|---|
+| #295 | Chunk lifecycle: wire carver and ore-feature placement into the served chunk pipeline | open, `tier-4`, `island`, parent #5 — already contains the precise diagnosis this plan would otherwise re-derive: carver/feature modules exist and are proven, `OverworldGenerator` imports neither, `grep` for their symbols outside their own modules is empty, and the wiring is "the single cheapest, highest-visual-impact win in the whole persistence/chunk area." This plan's Phase 2 **is** this issue; do not open a duplicate. |
+| #132 | Design: custom world generator hook for plugins | open, `question` — plugin-API surface over the generator, not core fidelity. Relevant to §6 below (crate boundary) but a separate decision. |
+| #136 | Structure placement API for plugins | open — explicitly recorded as blocked on core worldgen gaining any structure concept at all, and says "do not start implementation against this issue." Confirms structures are unscoped anywhere in the tracker today. |
+| #134 | Custom dimension registration from a plugin | open — adjacent, not overlapping. |
+| #85/#86/#87 | worldgen bench issues (stage-cost split, parallel scaling, region throughput) | already filed, orthogonal to the correctness phases below. |
+
+No open or closed issue mentions multi-noise biome assignment specifically. That is a real gap in
   the tracker, addressed by the new issue in §9.
 
 ---
@@ -225,7 +219,7 @@ plains everywhere.
 **Cost note:** this is the phase §2's finding makes cheap. The search algorithm is ~50 lines; the data
 is one oracle dump.
 
-### Phase 2 — caves, real aquifer, ores (this is issue #295 — do not re-file)
+### Phase 2 — caves, real aquifer, ores (already filed — do not re-file)
 **Deliverable:** compose `carver::apply_carvers`, the real `aquifer::AquiferSystem` (replacing the
 sea-level approximation), and `feature::place_ore_feature` into `OverworldGenerator::column`, in
 vanilla's own order (`ChunkGenerator.applyCarvers` before decoration; `DESIGN.md`'s vanilla-order note
