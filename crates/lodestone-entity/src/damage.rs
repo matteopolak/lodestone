@@ -15,7 +15,7 @@
 //!     much* it hurts. Coordinate the impulse through the project owner rather
 //!     than growing a second model.
 //!
-//! # The damage-type table exists now (issue #263)
+//! # The damage-type table exists now
 //!
 //! This module's docs used to say that "which hits bypass armour, cooldown or
 //! resistance is registry data; a caller passes the relevant [`DamageFlags`]
@@ -28,10 +28,10 @@
 //! *reads* the table rather than embedding one. What changed is that callers no
 //! longer hand-derive flags. Use [`DamageFlags::for_damage_type`] instead of
 //! writing `bypasses_armor: true` next to a prose citation of
-//! `bypasses_armor.json` — that hand-derivation was the exact pattern #263
-//! existed to remove, and it had already appeared at four call sites.
+//! `bypasses_armor.json` — that hand-derivation is the exact pattern this
+//! table exists to remove, and it had already appeared at four call sites.
 //!
-//! # Issue #261 status: the formula is live-verified, the *feed* is not
+//! # Status: the formula is live-verified, the *feed* is not
 //!
 //! `apply_reductions`/`damage_after_armor`/`damage_after_protection` are
 //! cross-checked term-for-term against `CombatRules.getDamageAfterAbsorb`/
@@ -43,10 +43,10 @@
 //! RCON transcript) took **3.0** damage from a raw 10.0 hit, matching this
 //! module's formula and *not* a flat-percentage alternative. The pipeline is
 //! also a real, non-island consumer: `lodestone-server`'s
-//! `SimMob::apply_damage` (`crates/lodestone-server/src/mobs.rs:584`) calls
+//! `lodestone_server::mobs::SimMob::apply_damage` calls
 //! it for every landed melee hit and explosion.
 //!
-//! What #261 actually asked for beyond that, and does **not** exist anywhere
+//! What is still needed beyond that, and does **not** exist anywhere
 //! in this workspace yet (verified by a full-repo grep, not assumed):
 //!   * **Feeding `Defenses` from an entity's real equipped items.**
 //!     `crate::mobs::combat_defaults`-equivalent code only ever reads
@@ -66,14 +66,14 @@
 //!     resistance`/`ARMOR`/`ARMOR_TOUGHNESS` from equipped items would have
 //!     nothing to plug into yet.
 //!   * **Attack-cooldown-scaled damage and critical-hit/sweep bonus damage**
-//!     (also explicitly in #261's scope) — no attack-cooldown timer or hit
+//!     (also part of this scope) — no attack-cooldown timer or hit
 //!     classification exists server-side.
 //!
 //! None of this is started here — it is a materially larger prerequisite
 //! (an equipment/inventory model, which several other in-flight issues also
 //! depend on) than "wire an existing pipeline up," and inventing an
 //! unconsumed per-material armour table now would itself be the kind of
-//! island CLAUDE.md warns about. See issue #261 for the up-to-date status.
+//! island CLAUDE.md warns about.
 
 use lodestone_data::damage_types::{DamageType, DamageTypeTag};
 
@@ -98,22 +98,21 @@ pub struct DamageFlags {
 
 impl DamageFlags {
     /// Derives the per-hit flags from a real `minecraft:damage_type` and its
-    /// resolved tag memberships — the seam this struct was shaped for
-    /// (issue #263).
+    /// resolved tag memberships — the seam this struct was shaped for.
     ///
     /// Each field is one `DamageTypeTags` query, matching the vanilla checks
     /// one-for-one:
     ///
     /// | field | vanilla check |
     /// |---|---|
-    /// | `bypasses_armor` | `LivingEntity.java:1903` |
-    /// | `bypasses_effects` | `LivingEntity.java:1912` |
-    /// | `bypasses_resistance` | `LivingEntity.java:1916` |
-    /// | `bypasses_enchantments` | `LivingEntity.java:1936` |
-    /// | `bypasses_cooldown` | `LivingEntity.java:1217` |
+    /// | `bypasses_armor` | `LivingEntity.getDamageAfterArmorAbsorb` |
+    /// | `bypasses_effects` | `LivingEntity.getDamageAfterMagicAbsorb` |
+    /// | `bypasses_resistance` | `LivingEntity.getDamageAfterMagicAbsorb` |
+    /// | `bypasses_enchantments` | `LivingEntity.getDamageAfterMagicAbsorb` |
+    /// | `bypasses_cooldown` | `LivingEntity.hurtServer` |
     ///
     /// Note `bypasses_cooldown` is **empty** in vanilla 26.2 — the tag is
-    /// declared at `DamageTypeTags.java:12` and gates the i-frame window, but no
+    /// declared in `DamageTypeTags` and gates the i-frame window, but no
     /// damage type opts into it. So this always yields `bypasses_cooldown: false`
     /// for a vanilla type, which is correct rather than unimplemented. A caller
     /// that needs to force a hit past the i-frame gate (fall damage in
@@ -417,7 +416,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Issue #263: DamageFlags derived from the real damage-type table
+    // DamageFlags derived from the real damage-type table
     // -----------------------------------------------------------------------
 
     fn ty(name: &str) -> DamageType {
@@ -592,7 +591,7 @@ mod tests {
 
     /// Guards the citation in this module's docs: the table is reachable from
     /// here and carries the non-flag fields the loot/death-message consumers
-    /// (#272) will read, so those do not need a second table.
+    /// will read, so those do not need a second table.
     #[test]
     fn the_table_carries_more_than_flags() {
         assert_eq!(ty("mob_attack").message_id(), "mob");
