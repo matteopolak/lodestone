@@ -929,7 +929,7 @@ ClientAction::InteractEntity { interaction: Attack, .. }   (already sent in prod
      every connection tracking the mob
 ```
 
-**`MobHandle`** (`crates/lodestone-server/src/mobs.rs`) is the missing
+**`MobHandle`** (`crates/lodestone-server/src/mobs/mod.rs`) is the missing
 mutation handle, the exact `BlockEntityHandle` pattern
 (`Arc<Mutex<_>>` + a single funnel method, `with`) reused rather than
 reinvented. The one real wrinkle `BlockEntityRegistry` did not have:
@@ -1322,9 +1322,10 @@ death tip-over visible rather than one tick long.
   SWEEPING_DAMAGE_RATIO`) scaled by `attackStrengthScale`, applying its own
   separate `0.4F`-power knockback to
   every entity it hits. This is a real, structurally separate hit-multiple-
-  targets-in-one-swing mechanic, and `crates/lodestone-server/src/mobs.rs`
+  targets-in-one-swing mechanic, and `crates/lodestone-server/src/mobs/`
   has no code resembling it at all (confirmed by grep: zero hits for
-  `sweep`/`Sweep` anywhere combat-related in that crate). It needs the same
+  `sweep`/`Sweep` anywhere combat-related in that crate, across the
+  directory the `mobs.rs` file split turned it into). It needs the same
   attack-strength-ticker-server-side and sword-item-tag prerequisites the
   bullet above already names, so it belongs under #261 rather than as new
   scope here — recorded explicitly because the existing #261 body's

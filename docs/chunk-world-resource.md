@@ -5,7 +5,7 @@
 > in `lodestone-shell`. There is a second, unrelated `ChunkWorld` —
 > `lodestone_server::mobs::ChunkWorld` — the **server**-side `PathWorld`
 > adapter mob pathfinding runs over (see `docs/roadmap/server-entities.md`'s
-> #204 entry and `crates/lodestone-server/src/mobs.rs`). The two share a name
+> #204 entry and `crates/lodestone-server/src/mobs/world.rs`). The two share a name
 > and a general shape ("terrain storage as a value the reader borrows") but
 > are different types in different crates with no dependency between them;
 > nothing on this page describes the server one.
