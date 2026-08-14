@@ -407,6 +407,18 @@ pub enum MetadataField {
     /// variant for anything but a `minecraft:tnt` entity — see
     /// [`crate::mobs::MobSim::snapshots`]'s TNT loop, the only producer.
     TntFuse(i32),
+    /// `MinecartFurnace.DATA_ID_FUEL` — whether the furnace minecart is
+    /// currently lit (real remaining fuel), the field that drives the smoke
+    /// particle client-side.
+    ///
+    /// **Index 13**, shared with `MinecartCommandBlock.DATA_ID_COMMAND_NAME`
+    /// (a `STRING`) under a different serializer — the committed jar dump
+    /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`) lists
+    /// both. The two can never collide in practice: only
+    /// [`crate::mobs::MobSim::snapshots`]'s furnace-minecart arm ever builds
+    /// this variant, and it never fires for a command-block minecart (this
+    /// crate does not model that entity type).
+    MinecartFuel(bool),
 }
 
 /// One generated trade offer, ready for the wire (issue #245) —

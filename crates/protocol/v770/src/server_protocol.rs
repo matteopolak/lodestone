@@ -300,6 +300,12 @@ const METADATA_SER_VILLAGER_DATA: i32 = 18;
 /// `MetadataField::TntFuse`'s own doc for the full list.
 const METADATA_IDX_TNT_FUSE: u8 = 8;
 
+/// `MinecartFurnace.DATA_ID_FUEL` — index 13, serializer `BOOLEAN` (8). The
+/// jar dump's other index-13 claimant, `MinecartCommandBlock
+/// .DATA_ID_COMMAND_NAME`, is a `STRING`; see `MetadataField::MinecartFuel`'s
+/// own doc for why the producer alone disambiguates them.
+const METADATA_IDX_MINECART_FUEL: u8 = 13;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -4732,6 +4738,16 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(METADATA_SER_INT);
                     w.var_i32(*fuse);
                 }
+                MetadataField::MinecartFuel(lit) => {
+                    // `MinecartFurnace.DATA_ID_FUEL` — index 13; only
+                    // `MobSim::snapshots`' furnace-minecart arm ever builds
+                    // this variant. See its own doc comment for the
+                    // `MinecartCommandBlock` claimant this never collides
+                    // with in practice.
+                    w.u8(METADATA_IDX_MINECART_FUEL);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*lit);
+                }
             }
         }
         w.u8(METADATA_EOF);
@@ -7615,6 +7631,80 @@ mod index_eighteen_tests {
         assert_eq!(r.u8().expect("terminator"), 0xFF);
         assert!(r.ensure_empty().is_ok(), "no trailing bytes");
         byte
+    }
+}
+
+/// Index-13's two claimants, checked mechanically against the committed jar
+/// dump — the same shape [`index_eighteen_tests`] establishes: a producer
+/// disambiguation (here, "only the furnace-minecart loop ever builds
+/// `MetadataField::MinecartFuel`") is only as trustworthy as the premise that
+/// the two claimants really do carry different serializers, asserted here
+/// rather than assumed.
+#[cfg(test)]
+mod index_thirteen_tests {
+    use lodestone_core::Reader;
+    use lodestone_server::{MetadataField, ServerDirective, ServerProtocol};
+
+    use super::{METADATA_IDX_MINECART_FUEL, METADATA_SER_BOOLEAN, V770ServerProtocol};
+
+    const INDEX_DUMP: &str = include_str!("../tests/support/entity_data_index_jvm.txt");
+
+    fn dump_row(owner_field: &str) -> (u8, i32) {
+        for line in INDEX_DUMP.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut tok = line.split_whitespace();
+            let index: u8 = tok.next().expect("index column").parse().expect("u8");
+            let owner = tok.next().expect("owner.FIELD column");
+            let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
+            if owner == owner_field {
+                return (index, serializer);
+            }
+        }
+        panic!("{owner_field} is not in the jar dump — read the dump before changing the constant")
+    }
+
+    /// `METADATA_IDX_MINECART_FUEL` names the accessor the jar really puts at
+    /// index 13 with the `BOOLEAN` serializer this encoder writes.
+    #[test]
+    fn minecart_fuel_index_matches_the_jar_dump() {
+        let (index, serializer) = dump_row("MinecartFurnace.DATA_ID_FUEL");
+        assert_eq!(index, METADATA_IDX_MINECART_FUEL, "MinecartFurnace.DATA_ID_FUEL must be index 13");
+        assert_eq!(serializer, METADATA_SER_BOOLEAN, "MinecartFurnace.DATA_ID_FUEL must be a BOOLEAN");
+    }
+
+    /// **The premise the producer-based disambiguation depends on**: index
+    /// 13's other real claimant, `MinecartCommandBlock.DATA_ID_COMMAND_NAME`,
+    /// really is a *different* serializer (`STRING`, not `BOOLEAN`). If a
+    /// future jar ever made it a `BOOLEAN` too, this gate — not a silent wire
+    /// collision discovered later — is what would catch it.
+    #[test]
+    fn index_thirteens_other_claimant_is_a_different_serializer() {
+        let (index, serializer) = dump_row("MinecartCommandBlock.DATA_ID_COMMAND_NAME");
+        assert_eq!(index, METADATA_IDX_MINECART_FUEL, "both claimants share index 13");
+        assert_ne!(
+            serializer, METADATA_SER_BOOLEAN,
+            "MinecartCommandBlock.DATA_ID_COMMAND_NAME must not also be a BOOLEAN, or MinecartFuel is ambiguous on the wire"
+        );
+    }
+
+    /// The encoder actually writes index 13 with the `BOOLEAN` serializer id,
+    /// end to end through `encode_set_entity_data`.
+    #[test]
+    fn minecart_fuel_encodes_at_index_thirteen() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } = proto.encode_set_entity_data(9, &[MetadataField::MinecartFuel(true)]) else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().expect("entity id"), 9);
+        assert_eq!(r.u8().expect("metadata index"), METADATA_IDX_MINECART_FUEL);
+        assert_eq!(r.var_i32().expect("serializer id"), METADATA_SER_BOOLEAN);
+        assert!(r.bool().expect("fuel flag"));
+        assert_eq!(r.u8().expect("terminator"), 0xFF);
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
     }
 }
 
