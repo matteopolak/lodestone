@@ -152,7 +152,12 @@ impl BlockResources {
         // world's appearance from this session on. This is the block atlas' own
         // stack, not a shared one — see `selected_pack_sources`' doc.
         let manager = build_pack_stack(Box::new(zip));
-        let atlas = BlockAtlas::build(&manager, &registry)
+        // The live `mipmapLevels` video setting's actual consumer: `mipmap_levels()`
+        // returns the shipped default until a player drags the slider, at which
+        // point `set_mipmap_levels` has already bumped `PACK_GENERATION`, so the
+        // *next* call here (a live reload, not just the initial load) rebuilds at
+        // the new depth.
+        let atlas = BlockAtlas::build_with_mip_levels(&manager, &registry, mipmap_levels())
             .map_err(|e| format!("build atlas from the vanilla pack: {e}"))?;
         // Bake the per-state model geometry (cross-plants, slabs, stairs,
         // translucency) against the same registry and attach it, so the model
@@ -403,14 +408,19 @@ fn open_pack_source(path: &Path, kind: PackKind) -> Option<Box<dyn ResourceSourc
 /// [`selected_packs`] resolves on first use.
 static SELECTED_PACKS: std::sync::RwLock<Option<Vec<String>>> = std::sync::RwLock::new(None);
 
-/// Bumped by every [`set_selected_packs`] call — the trigger a live reload
-/// polls for, since the stack itself carries no cheap "did this change"
-/// signal of its own (two `Vec<String>`s are only comparable by a full
-/// equality check, and the poller already needs an `Ordering::Relaxed`
-/// atomic load to be cheap enough to run every frame, exactly like
-/// `TerrainMesh::set_cutout_leaves`'s own equality guard).
+/// Bumped by every [`set_selected_packs`] **or** [`set_mipmap_levels`] call —
+/// the trigger a live reload polls for, since neither the pack stack nor the
+/// mip depth carries a cheap "did this change" signal of its own (two
+/// `Vec<String>`s are only comparable by a full equality check, and the
+/// poller already needs an `Ordering::Relaxed` atomic load to be cheap enough
+/// to run every frame, exactly like `TerrainMesh::set_cutout_leaves`'s own
+/// equality guard).
 ///
-/// See `crate::sim::Sim::reload_resource_pack_atlas` for the consumer.
+/// One counter for both triggers rather than two: `Sim::reload_resource_pack_atlas`
+/// does not care *why* the atlas is stale, only *that* it is, and it rebuilds
+/// from whatever [`selected_packs`] and [`mipmap_levels`] currently say
+/// either way — a second counter would only be a second poll doing the same
+/// job. See that method for the consumer.
 static PACK_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Replaces the selected-pack order, highest priority first, and bumps
@@ -425,12 +435,77 @@ pub fn set_selected_packs(ids: Vec<String>) {
     PACK_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The current pack-selection generation. Changes exactly once per
-/// [`set_selected_packs`] call; never decreases; carries no meaning beyond
-/// (in)equality with a previously observed value.
+/// The current pack-selection-or-mip-depth generation. Changes exactly once
+/// per [`set_selected_packs`] or [`set_mipmap_levels`] call; never decreases;
+/// carries no meaning beyond (in)equality with a previously observed value.
 #[must_use]
 pub fn pack_generation() -> u64 {
     PACK_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The process-wide requested block-atlas mip depth (the live `mipmapLevels`
+/// video setting). `None` means "not read from `options.json` yet" — the same
+/// lazy-seed shape as [`SELECTED_PACKS`], resolved on first use by
+/// [`mipmap_levels`].
+static MIPMAP_LEVELS: std::sync::RwLock<Option<u32>> = std::sync::RwLock::new(None);
+
+/// Sets the requested block-atlas mip depth and bumps [`pack_generation`] —
+/// the mip-setting half of the trigger [`Sim::reload_resource_pack_atlas`]
+/// polls, [`set_selected_packs`]'s sibling. Called from
+/// `menu::nav::MenuNav`'s slider-drag and click-step writers for
+/// `mipmapLevels`, never from the render crate: this module is the one place
+/// that decides what depth the next atlas build asks for.
+///
+/// Clamped to `0..=`[`lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS`] — the
+/// same `IntRange(0, 4)` bound `menu::options::INT_RANGE_SLIDERS`'s
+/// `"mipmapLevels"` row places the handle with — so a caller cannot request a
+/// depth the slider itself cannot reach.
+///
+/// [`Sim::reload_resource_pack_atlas`]: crate::sim::Sim::reload_resource_pack_atlas
+pub fn set_mipmap_levels(levels: u32) {
+    let levels = levels.min(lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS);
+    if let Ok(mut guard) = MIPMAP_LEVELS.write() {
+        *guard = Some(levels);
+    }
+    PACK_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The current requested block-atlas mip depth, seeding itself from the
+/// persisted `options.json` value on first use — [`selected_packs`]'s lazy
+/// shape, for the same ordering reason: `Sim` (and the first atlas build) is
+/// built before anything else has a natural place to push the persisted
+/// setting in.
+///
+/// The seed call still bumps [`pack_generation`] like any other
+/// [`set_mipmap_levels`] call, which looks like a false "changed" signal on
+/// the very first read — it is not one in practice, because
+/// `Sim::build` reads `pack_generation()` **after** the initial
+/// [`BlockResources::load`] call (which is what triggers this seed), so the
+/// bump is folded into `last_pack_generation`'s own starting value rather
+/// than surfacing as a reload on the first frame. [`selected_packs`] already
+/// relies on the identical ordering.
+#[must_use]
+pub fn mipmap_levels() -> u32 {
+    if let Ok(guard) = MIPMAP_LEVELS.read() {
+        if let Some(levels) = *guard {
+            return levels;
+        }
+    }
+    let levels = load_persisted_mipmap_levels();
+    set_mipmap_levels(levels);
+    levels
+}
+
+/// The persisted mip depth. A `#[cfg(test)]` **fork**, [`load_persisted_selection`]'s
+/// reason: a unit test must never read the developer's real `options.json`.
+#[cfg(not(test))]
+fn load_persisted_mipmap_levels() -> u32 {
+    crate::config::Options::load().mipmap_levels
+}
+
+#[cfg(test)]
+fn load_persisted_mipmap_levels() -> u32 {
+    lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS
 }
 
 /// The current selected-pack order, highest priority first, seeding itself from
@@ -1343,6 +1418,47 @@ mod tests {
             after_two > after_one,
             "generation did not move on a second change: after_one={after_one}, \
              after_two={after_two}"
+        );
+    }
+
+    /// [`set_mipmap_levels`] must move [`pack_generation`] too — it is the
+    /// mip-setting half of the same trigger [`set_selected_packs`] drives, and a
+    /// generation that never moved would make `Sim::reload_resource_pack_atlas`
+    /// think nothing changed forever, the same silent-island shape
+    /// `pack_generation_strictly_increases_on_every_selection_change` guards for
+    /// pack selection.
+    #[test]
+    fn mipmap_level_changes_also_move_the_shared_generation() {
+        let before = pack_generation();
+        set_mipmap_levels(2);
+        let after = pack_generation();
+        assert!(
+            after > before,
+            "generation did not move on a mip-level change: before={before}, after={after}"
+        );
+    }
+
+    /// The getter must actually return whatever the setter just stored — a
+    /// generation bump alone is not evidence the *value* a live reload would
+    /// rebuild against moved too; that would be `pack_generation`'s own gate
+    /// passing while `mipmap_levels()` silently kept returning the old depth.
+    #[test]
+    fn mipmap_levels_reads_back_what_was_just_set() {
+        set_mipmap_levels(1);
+        assert_eq!(mipmap_levels(), 1);
+        set_mipmap_levels(3);
+        assert_eq!(mipmap_levels(), 3);
+    }
+
+    /// A depth above the shipped max must be clamped, not passed through — an
+    /// unclamped caller could otherwise request a level count the `mipmapLevels`
+    /// slider itself has no track position for.
+    #[test]
+    fn mipmap_levels_clamps_to_the_shipped_max() {
+        set_mipmap_levels(9);
+        assert_eq!(
+            mipmap_levels(),
+            lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS
         );
     }
 

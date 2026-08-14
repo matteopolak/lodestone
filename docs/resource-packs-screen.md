@@ -8,8 +8,10 @@ every pack in the user's `resourcepacks/` folder — directories *and* `.zip`
 archives — with its `pack.mcmeta` description and `pack.png` thumbnail;
 **Selected** on the right is the priority order, highest first. Clicking a row
 moves it between the columns, per-row buttons reorder it, and leaving the screen
-feeds the order into `ResourceManager`'s pack stack so the next atlas and model
-build see it.
+feeds the order into `ResourceManager`'s pack stack — which a live world session
+now picks up within a frame or two, not just on the next atlas/model build.
+See "How to change it" below for `resources::pack_generation` and
+`Sim::reload_resource_pack_atlas`, the live-reload chain.
 
 This landed in two passes. The first was a declared reduction (Available
 permanently empty, Selected permanently one non-removable entry, no transfer

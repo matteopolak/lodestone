@@ -283,6 +283,78 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
     eprintln!("stone={stone} grass_block={grass} oak_log[axis=y]={log}");
 }
 
+// --- Test A2: the live `mipmapLevels` setting reaches the built atlas (no GPU) --
+
+/// The live `mipmapLevels` video setting's whole point: changing it must
+/// rebuild the atlas at a different mip depth, not just move a slider handle
+/// nothing reads. `Atlas::mip_count` (level 0 plus every generated mip) is the
+/// discriminating measurement — a live reload that swapped the GPU bind
+/// groups but kept building at the frozen `BLOCK_ATLAS_MIP_LEVELS` would still
+/// report the default count here every time.
+///
+/// Requested `0` is the sharpest control: it is vanilla's own "no mips"
+/// setting, so `mip_count()` must come back to exactly `1` (level 0 alone) —
+/// not merely "fewer than the default", which a half-applied depth could also
+/// satisfy. The requested default, `BLOCK_ATLAS_MIP_LEVELS` (4), is the
+/// control proving the new parameter did not silently change the *existing*
+/// default path's behaviour (`BlockAtlas::build` delegates to it).
+///
+/// Collected into one assertion rather than an `assert!` inside the loop —
+/// `CLAUDE.md`'s own rule against a loop-internal assert hiding every
+/// mismatch but the first — so a regression that broke more than one depth
+/// reports all of them, not just whichever happened to be checked first.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
+fn the_live_mipmap_levels_setting_changes_the_built_atlas_mip_count() {
+    let manager = manager();
+    let registry = blocks_report();
+
+    // Real block textures are all 16x16 (or a power-of-two multiple for
+    // animated ones), so nothing in this corpus caps the requested depth —
+    // every one of these is expected to land exactly, not merely "close".
+    let cases: [(u32, u32); 3] = [
+        (0, 1),                                       // no mips requested
+        (2, 3),                                        // a mid setting
+        (lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS, 5), // the shipped default, 4
+    ];
+
+    let mut mismatches = Vec::new();
+    for (requested, expected_mip_count) in cases {
+        let atlas = BlockAtlas::build_with_mip_levels(&manager, &registry, requested)
+            .unwrap_or_else(|e| panic!("build atlas at mip_levels={requested}: {e}"));
+        let got = atlas.atlas().mip_count();
+        if got != expected_mip_count {
+            mismatches.push(format!(
+                "requested {requested} mip levels: expected mip_count()=\
+                 {expected_mip_count}, got {got} (mip_cap={:?})",
+                atlas.atlas().mip_cap()
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+
+    // The control: two different requested depths must not produce the same
+    // atlas — if they did, every assertion above could still pass under a
+    // constant-mip-count build that happened to hardcode 1/3/5 by coincidence
+    // (it cannot, since they are read from the real `Atlas`, but this is the
+    // cheap independent check that the parameter is not simply ignored).
+    let low = BlockAtlas::build_with_mip_levels(&manager, &registry, 0)
+        .expect("build atlas at mip_levels=0");
+    let high = BlockAtlas::build_with_mip_levels(
+        &manager,
+        &registry,
+        lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS,
+    )
+    .expect("build atlas at the shipped default");
+    assert_ne!(
+        low.atlas().mip_count(),
+        high.atlas().mip_count(),
+        "0 and the shipped default must produce different atlases"
+    );
+
+    eprintln!("=== MIPMAP LEVELS GATE PASSED ===");
+}
+
 // --- Test B: the real atlas reaches pixels (GPU, fail-closed) -----------------
 
 #[test]
