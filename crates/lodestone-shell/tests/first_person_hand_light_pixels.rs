@@ -244,7 +244,14 @@ fn the_first_person_held_item_dims_with_the_world_at_night() {
     state.set_entity_light_source(|_| Some(SKY_LIT_NO_BLOCK));
     // `false` is the glint flag: this gate measures lighting, and a glint
     // pass would add emission that the darken sweep below would read as light.
-    state.set_main_hand_source(move || Some((item.clone(), false)));
+    state.set_main_hand_source(move || {
+        Some(lodestone::gpu::MainHandItem {
+            item: item.clone(),
+            foil: false,
+            dyed_color: None,
+            potion_color: None,
+        })
+    });
     let cam = camera();
 
     let mut shoot = |darken: f32| -> Vec<u8> {

@@ -805,6 +805,8 @@ mod tests {
             block_state: None,
             count: 1,
             foil: false,
+            item_dyed_color: None,
+            item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
                 text: "Babe".to_owned(),
                 see_through: true,
@@ -880,6 +882,8 @@ mod tests {
             block_state: None,
             count: 1,
             foil: false,
+            item_dyed_color: None,
+            item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
                 text: "Babe".to_owned(),
                 see_through: true,
@@ -977,6 +981,8 @@ mod tests {
             block_state: None,
             count: 1,
             foil: false,
+            item_dyed_color: None,
+            item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
                 text: String::new(),
                 see_through: true,

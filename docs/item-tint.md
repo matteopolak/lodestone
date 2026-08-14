@@ -33,36 +33,66 @@ eight of vanilla's registrations (`ItemTintSources.bootstrap`):
 | `minecraft:custom_model_data` | `minecraft:custom_model_data` | `CustomModelDataSource` |
 
 **3. Bake** — `lodestone_render::block_models::item_layer_tint_slots` resolves each
-sprite layer's tint and interns the colour into `BlockModels::tint_palette`;
+sprite layer's tint (against no live stack — see "What is not implemented" below)
+and interns the colour into `BlockModels::tint_palette`;
 `extruded_sprite_geometry` stamps the resulting slot onto that layer's quads'
 `tint_index`. `model.wgsl` then multiplies `palette.colors[tint_idx]` into the
-sampled texel. No shader, pipeline, bind group or vertex format changed.
+sampled texel by default. No shader, pipeline, bind group or vertex format changed.
+
+**4. Re-resolve per instance, where a live stack exists.** The palette from step 3
+is one colour per slot for the whole frame, so it cannot hold a *dyed* leather
+item's or a *mixed* potion's real colour — only the definition's default. Two
+independent per-instance paths exist:
+
+- The flat 2-D GUI icon (`lodestone_shell::hud::item_icon::sprite_layer_tint`)
+  re-resolves each layer's `TintSource` against an `ItemTintContext` built from
+  that slot's own `ItemIcon::{dyed_color, potion_color}`, and writes the result
+  straight into the emitted sprite quad's vertex colour.
+- Every **3-D** item-model draw — a dropped item, a thrown splash/lingering
+  potion, an item in a mob's hand, and the first-person held item
+  (`lodestone_render::stamp_live_item_tint`, called from
+  `lodestone_shell::gpu::world_items` and `gpu::first_person`) — re-resolves
+  `ItemGeometry::live_tints` (the `(palette slot, TintSource)` pairs baked
+  alongside the geometry for exactly the sources this build can ever re-resolve
+  live: `dye` and `potion`) and stamps the live colour onto
+  `ModelVertex::tint_rgb_override`, the same per-vertex override field the block
+  mesher already uses for a biome's real, position-blended colour. A no-op for
+  every other item, which is the overwhelming majority — see that function's own
+  doc.
 
 ## What is *not* implemented, and why
 
-**Per-stack tints do not reach pixels, because the components they need are
-dropped at decode.** `ItemStack` here is a closed struct of known fields
-(`crates/lodestone-model/src/item.rs`, alongside `ItemComponents`) rather than an
-open component map, and a component this build does not model is not represented
-at all. Of the six component-reading tint sources, `ItemComponents` carries
-exactly one — `dyed_color`. So `potion_contents`, `map_color`,
-`firework_explosion` and `custom_model_data` cannot be read, and those four
-sources resolve to the item definition's own JSON `default`.
+**Four of the six component-reading tint sources still do not reach pixels,
+because the components they need are dropped at decode.** `ItemStack` here is a
+closed struct of known fields (`crates/lodestone-model/src/item.rs`, alongside
+`ItemComponents`) rather than an open component map, and a component this build
+does not model is not represented at all. `ItemComponents` carries `dyed_color`
+and `potion_color` (the latter pre-mixed at decode by `lodestone_data::potion`,
+not the raw `minecraft:potion_contents` patch) — so `map_color`,
+`firework_explosion` and `custom_model_data` still cannot be read, and those
+three sources resolve to the item definition's own JSON `default`. `team` is not
+a gap: an item icon has no holder, and vanilla itself takes the default in
+exactly that case.
 
 That is the correct colour for an uncustomised stack — it is vanilla's own
 fallback for an absent component — and therefore right for the overwhelming
 majority of what an inventory holds. It is wrong for a *customised* stack: a
-custom-colour potion, a filled map with a `map_color`, a dyed firework star.
+filled map with a real `map_color`, a dyed firework star.
 `TintProvenance::Unmodeled` records exactly this, so a caller can report on it
 rather than silently presenting a guess as a measurement.
 
-**Adding a per-stack tint is therefore not a render change.** It needs (a) the
-component modelled in `ItemComponents` and decoded in `crates/protocol/v770`, then
-(b) a per-*draw* channel, because a frame-shared palette slot cannot hold two
-different potions' colours at once. `ModelVertex::tint_rgb_override` (vertex
-location 4, `.a` as the override flag, read in `model.wgsl`'s `fs_main`) already
-exists for exactly this shape and is currently hardcoded inert for items in
-`crates/lodestone-render/src/models.rs`'s `mesh_item_quads`.
+**`dye` and `potion` reach every draw site now, including the 3-D ones.**
+`ModelVertex::tint_rgb_override` (vertex location 4, `.a` as the override flag,
+read in `model.wgsl`'s `fs_main`) is the per-*draw* channel a frame-shared
+palette slot cannot be — two different potions in the same frame cannot share
+one palette entry. It already existed for the block mesher's real,
+position-blended biome colour; `mesh_item_quads` itself still bakes it to
+`[0, 0, 0, 0]` unconditionally (a bake-time palette lookup has no live stack to
+read — see step 3 above), but `stamp_live_item_tint` now overrides it
+per-instance immediately afterwards wherever a live stack exists (step 4). Before
+that existed, a dyed leather item or a mixed potion drew the item definition's
+plain default everywhere **except** the 2-D GUI slot — on the ground, in a mob's
+hand, in flight as a thrown projectile, and in the local player's own hand.
 
 **Spawn-egg tints do not exist in 26.2 and there is nothing to implement.**
 `SpawnEggItem` has no colour fields — its whole record declaration is the entire class
@@ -110,15 +140,15 @@ multiply is in linear light. Note the consequence for gates: the headless gates 
 arithmetic. A pixel gate for a 2-D tint must use `Rgba8UnormSrgb` or it measures a
 different composite than the player sees.
 
-**What is still not live: a dyed stack.** `sprite_layer_tint` passes a default
-`ItemTintContext` (no components, no colormap). That is vanilla's own answer for an
-uncustomised stack — an undyed leather helmet's brown *is* the definition's `dye`
-default — and `constant`, the majority source, reads nothing at all. The gap is a
-wire-side one rather than a wiring one: `lodestone_game::item::ItemComponents`
-defines no `minecraft:dyed_color` member (no `DYED_COLOR_COMPONENT` exists in that
-crate), so the shell holds no live dye to pass. `grass` resolves to `None`
-(untinted) without a colormap, which `item_tint::resolve` documents as the honest
-degradation.
+**What is still not live: `grass`.** Every draw site above passes
+`grass_colormap: None`, so `minecraft:grass` always resolves to `None` (no tint
+applied, not vanilla's loud magenta out-of-range fallback) rather than sampling a
+real biome — nothing downstream of any of the four producers threads a pack
+colormap through to a live draw. All six vanilla `grass`-tinted item definitions
+name the plains climate anyway, so this is invisible against every stock pack.
+`dye` and `potion` are the two sources with a real per-stack signal, and both
+reach every draw site (step 4 above); `constant`, the majority source, reads no
+component at all and was never a gap.
 
 ## How to change it, and the gotchas
 
@@ -184,8 +214,17 @@ stack's `assets/<ns>/items/*.json` and `textures/colormap/grass.png`.
   block tint path.
 - `lodestone_model::item::ItemComponents` — the component seam; the reason most
   sources resolve to a default.
-- `lodestone_render::block_models` — the palette intern and the sprite bake.
-- `crates/lodestone-render/src/shaders/model.wgsl` — the gamma-space multiply.
+- `lodestone_render::block_models` — the palette intern, the sprite bake, and
+  `ItemGeometry::live_tints`/`stamp_live_item_tint` (the per-instance override).
+- `crates/lodestone-render/src/shaders/model.wgsl` — the gamma-space multiply and
+  the `tint_rgb_override` read.
+- `lodestone_shell::hud::item_icon` — the GUI-slot re-resolve (`sprite_layer_tint`)
+  and the `ItemIcon`/`HotbarSlot` fields it reads.
+- `lodestone_shell::{entities, gpu::world_items, gpu::first_person, gpu::sources,
+  app::redraw}` — the world-item chain: `ItemStack` components on the wire →
+  `EntityDraw::{item_dyed_color, item_potion_color}` (dropped items and thrown
+  projectiles, since both ride the same `DATA_ITEM_STACK` sync) /
+  `MainHandItem` (the local player's held item) → `stamp_live_item_tint`.
 
 ## Gates
 
@@ -206,4 +245,12 @@ cargo test -p lodestone-render --test item_tint_pixels -- --ignored --nocapture
   the gamma prediction and sit far from the linear one, per channel.
 
 Plus eleven unit gates in `crates/lodestone-assets/src/item_tint.rs`, including one
-asserting every jar-derived default against the decompiled integer.
+asserting every jar-derived default against the decompiled integer; six unit gates
+in `lodestone_shell::hud::item_icon`'s `tint_wiring_tests` proving the same fields
+reach the GUI slot's emitted quad colour, not just `TintProvenance::Component`;
+and, not `#[ignore]`d (no GPU or jar needed — synthetic quads, run by plain
+`cargo test -p lodestone-render`), `block_models::live_item_tint_tests` proving
+`stamp_live_item_tint` writes the real dye/potion colour onto the right vertices
+and leaves an untinted quad's override alone, with a water-bottle control, an
+undyed-leather control, and a neuter (`live_tints: &[]`, production's exact
+pre-fix state for every 3-D item draw) that must be — and is — a true no-op.

@@ -132,6 +132,16 @@ impl RenderState {
             ) {
                 continue;
             }
+            // This drop's real components — `Default` for every field but
+            // `dyed_color`/`potion_color`, the only two `item_tint::resolve` can
+            // ever read live (see `ItemGeometry::live_tints`'s doc). Built once
+            // per drop, outside the up-to-five-copy loop below: every copy of one
+            // stack shares one colour, the same way they share one light sample.
+            let live_components = lodestone_model::item::ItemComponents {
+                dyed_color: draw.item_dyed_color,
+                potion_color: draw.item_potion_color,
+                ..Default::default()
+            };
             // The item's **own** `display.ground`, now that the asset layer
             // carries every slot and not just `gui`. `ground_transform` falls
             // back to the `GuiLight`-keyed vanilla constants only for a model
@@ -157,7 +167,7 @@ impl RenderState {
                     offset.z = fan_step
                         * (copy as f32 - (amount.saturating_sub(1) as f32) / 2.0);
                 }
-                let mesh = dropped_item_mesh(
+                let mut mesh = dropped_item_mesh(
                     &geometry.quads,
                     geometry.gui_light,
                     &ground,
@@ -168,6 +178,16 @@ impl RenderState {
                     // `ItemEntityRenderer` reads `state.lightCoords` once and
                     // `submitMultipleFromCount` reuses it for all five.
                     entity_light(&self.entity_light, draw),
+                );
+                // A no-op for the overwhelming majority (`live_tints` empty) —
+                // real work only for a dyed leather drop or a mixed potion,
+                // which until this existed drew the item definition's plain
+                // default on the ground exactly as in a mob's hand.
+                lodestone_render::stamp_live_item_tint(
+                    &mut mesh,
+                    &geometry.quads,
+                    &geometry.live_tints,
+                    &live_components,
                 );
                 if draw.foil {
                     foil.merge(&mesh);
@@ -324,7 +344,7 @@ impl RenderState {
         // `ItemDisplayContext.GROUND`, the same context a drop uses — which is why
         // this is `ground_transform` and not a projectile-specific transform.
         let ground = ground_transform(&geometry.display, geometry.gui_light);
-        combined.merge(&thrown_item_mesh(
+        let mut mesh = thrown_item_mesh(
             &geometry.quads,
             geometry.gui_light,
             &ground,
@@ -332,7 +352,23 @@ impl RenderState {
             orientation,
             thrown.scale,
             light,
-        ));
+        );
+        // A splash/lingering potion's real mix, when the wire reported one
+        // (`draw.item` matched above rather than falling back to
+        // `thrown.item`) — a no-op for every other projectile in
+        // `thrown_item_for`'s table, none of which has a live-tinted layer.
+        let live_components = lodestone_model::item::ItemComponents {
+            dyed_color: draw.item_dyed_color,
+            potion_color: draw.item_potion_color,
+            ..Default::default()
+        };
+        lodestone_render::stamp_live_item_tint(
+            &mut mesh,
+            &geometry.quads,
+            &geometry.live_tints,
+            &live_components,
+        );
+        combined.merge(&mesh);
         stats.projectiles_drawn += 1;
     }
 
@@ -455,7 +491,7 @@ impl RenderState {
                 continue;
             };
             let transform = hand_transform(&geometry.display, arm, false);
-            combined.merge(&held_item_mesh(
+            let mut mesh = held_item_mesh(
                 &geometry.quads,
                 geometry.gui_light,
                 arm_transform,
@@ -463,7 +499,30 @@ impl RenderState {
                 baby,
                 &transform,
                 light,
-            ));
+            );
+            // A mob's dyed leather item — `equipment_dye` is the same per-slot
+            // fact `armour_layer_tint_with_dye` reads for the four armour
+            // slots, so a dyed item in a zombie's hand and a dyed helmet on its
+            // head come from one wire fact either way. No per-slot potion
+            // colour is tracked for equipment today (unlike a dropped or
+            // thrown stack), so a mob holding a potion still draws the
+            // definition's default — a real remaining gap, not silently
+            // patched over here.
+            let live_components = lodestone_model::item::ItemComponents {
+                dyed_color: draw
+                    .equipment_dye
+                    .iter()
+                    .find(|(s, _)| *s == *slot)
+                    .map(|(_, rgb)| *rgb),
+                ..Default::default()
+            };
+            lodestone_render::stamp_live_item_tint(
+                &mut mesh,
+                &geometry.quads,
+                &geometry.live_tints,
+                &live_components,
+            );
+            combined.merge(&mesh);
             stats.held_items_drawn += 1;
         }
     }

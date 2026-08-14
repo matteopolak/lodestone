@@ -183,6 +183,8 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         wool: None,
         count: 1,
         foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
         name_tag: None,
         item_use: None,
         creeper_swelling: 0.0,

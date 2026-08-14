@@ -403,8 +403,10 @@ struct EntityFacts {
     ///
     /// This is a [`ResourceLocation`], not a model `ItemStack`: the stack's
     /// `count` and data components are narrowed away in
-    /// [`resolve_entity_facts`] — see the note there, since count is visible in
-    /// vanilla and carried separately as [`Self::count`].
+    /// [`resolve_entity_facts`] and carried separately as sibling facts —
+    /// [`Self::count`], [`Self::foil`], [`Self::item_dyed_color`] and
+    /// [`Self::item_potion_color`] — the same additive pattern
+    /// [`Self::equipment_dye`] uses for equipment.
     item: Reported<ResourceLocation>,
     /// The entity's last-reported velocity in blocks per tick
     /// (`set_entity_motion`/`add_entity`), when the server has ever sent one.
@@ -490,6 +492,23 @@ struct EntityFacts {
     /// Whether the carried stack has the enchantment foil — `ItemStack.hasFoil`,
     /// narrowed from `DisplayItem`'s components the same way [`Self::count`] is.
     foil: bool,
+    /// The stack named by [`Self::item`]'s `minecraft:dyed_color`, narrowed from
+    /// `DisplayItem`'s components the same way [`Self::count`] is — additive
+    /// alongside `item` rather than folded into it, mirroring
+    /// [`Self::equipment_dye`]'s own reason. `None` for an undyed stack, or
+    /// whenever [`Self::item`] carries no stack.
+    ///
+    /// Without this a dropped dyed-leather item, and a thrown lingering/splash
+    /// potion — which reaches the world through this same field, since a
+    /// projectile's stack rides the identical `DATA_ITEM_STACK` sync a dropped
+    /// item uses — drew the item definition's plain default colour rather than
+    /// the real one.
+    item_dyed_color: Option<u32>,
+    /// The stack's already-mixed `minecraft:potion_contents` colour, mirroring
+    /// [`Self::item_dyed_color`] exactly — see
+    /// [`lodestone_model::item::ItemComponents::potion_color`]'s doc for why
+    /// this is the pre-mixed colour and not the raw patch.
+    item_potion_color: Option<u32>,
     /// This entity's resolved nametag (issue #100), or `None` when nothing
     /// should draw above it — a mob with no visible custom name, or a player
     /// entity with no matching tab-list entry. See [`NameTag`].
@@ -659,6 +678,21 @@ pub struct EntityDraw {
     /// pass (issue #452). `false` for every entity that is not a dropped item
     /// with a reported stack.
     pub foil: bool,
+    /// [`Self::item`]'s `minecraft:dyed_color`, mirroring
+    /// [`EntityFacts::item_dyed_color`] narrowed the same way [`Self::count`]
+    /// narrows `EntityFacts::count`. `None` for an undyed stack or when
+    /// [`Self::item`] is `None`.
+    ///
+    /// Fed into [`lodestone_render::stamp_live_item_tint`] by
+    /// `gpu::world_items`, alongside [`Self::item_potion_color`] — the pair
+    /// that resolves a dropped item's or a thrown projectile's real tint
+    /// instead of the item definition's plain default.
+    pub item_dyed_color: Option<u32>,
+    /// [`Self::item`]'s already-mixed `minecraft:potion_contents` colour,
+    /// mirroring [`Self::item_dyed_color`] exactly — see
+    /// [`lodestone_model::item::ItemComponents::potion_color`]'s doc for why
+    /// this is the pre-mixed colour and not the raw patch.
+    pub item_potion_color: Option<u32>,
     /// Interpolated feet position in world space.
     pub feet: Vec3,
     /// Interpolated body yaw in degrees.
@@ -1210,6 +1244,12 @@ struct TrackedStack {
     count: u32,
     /// Whether the stack is enchanted, so the drop draws the glint second pass.
     foil: bool,
+    /// Mirrors [`EntityFacts::item_dyed_color`] — carried through so a pickup
+    /// flight ([`PickupAnimation`]) keeps the real tint of the stack it froze,
+    /// instead of the item definition's plain default.
+    dyed_color: Option<u32>,
+    /// Mirrors [`EntityFacts::item_potion_color`].
+    potion_color: Option<u32>,
 }
 
 /// Which item (and how many) each dropped-item entity is carrying, keyed by
@@ -1297,6 +1337,11 @@ pub struct PickupAnimation {
     pub count: u32,
     /// Whether the collected stack was enchanted, so the flying copy glints too.
     pub foil: bool,
+    /// Mirrors [`TrackedStack::dyed_color`], captured at the same instant as
+    /// [`Self::foil`] so the flying copy's tint cannot disagree with its glint.
+    pub dyed_color: Option<u32>,
+    /// Mirrors [`TrackedStack::potion_color`].
+    pub potion_color: Option<u32>,
     /// The item's render scale at capture.
     pub scale: f32,
     /// Where the item was **drawn** when the pickup arrived — not its last
@@ -1407,6 +1452,8 @@ pub fn begin_item_pickup(world: &mut World, item_entity_id: i32, collector_id: i
             item: stack.id,
             count: stack.count,
             foil: stack.foil,
+            dyed_color: stack.dyed_color,
+            potion_color: stack.potion_color,
             scale,
             start,
             age_ticks,
@@ -1465,6 +1512,8 @@ pub fn extract_pickup_draws(
             item: Some(pickup.item.clone()),
             count: pickup.count,
             foil: pickup.foil,
+            item_dyed_color: pickup.dyed_color,
+            item_potion_color: pickup.potion_color,
             equipment: Vec::new(),
             equipment_dye: Vec::new(),
             equipment_trim: Vec::new(),
@@ -2209,6 +2258,8 @@ pub fn extract_entity_draws(
             item: stack.map(|s| s.id.clone()),
             count: stack.map_or(1, |s| s.count),
             foil: stack.is_some_and(|s| s.foil),
+            item_dyed_color: stack.and_then(|s| s.dyed_color),
+            item_potion_color: stack.and_then(|s| s.potion_color),
             equipment: equipment.0.clone(),
             equipment_dye: equipment_dye.0.clone(),
             equipment_trim: equipment_trim.0.clone(),
@@ -2377,6 +2428,17 @@ fn resolve_entity_facts(
         }
         _ => false,
     };
+    // Borrowed for the identical reason `count`/`foil` are: the wire's
+    // `ItemComponents` is what `item_tint::resolve` needs, and the match below
+    // consumes `display_item` converting the key to a bare id.
+    let item_dyed_color = match &display_item {
+        Reported::Reported(Some(stack)) => stack.components.dyed_color,
+        _ => None,
+    };
+    let item_potion_color = match &display_item {
+        Reported::Reported(Some(stack)) => stack.components.potion_color,
+        _ => None,
+    };
     // A failed conversion must collapse to `Unreported` ("nothing reported"),
     // never to `Reported(None)`, which downstream reads as the server
     // clearing the stack.
@@ -2492,6 +2554,8 @@ fn resolve_entity_facts(
         variant: entity.get::<Variant>().map(|variant| variant.0.clone()),
         count,
         foil,
+        item_dyed_color,
+        item_potion_color,
         name_tag,
         creeper_swell_dir: entity.get::<CreeperSwellDir>().map(|dir| dir.0),
         // The same `tab_list` the nametag above came out of — a player's skin
@@ -2572,6 +2636,8 @@ pub fn fold_entities(world: &mut World) {
                         id: item.clone(),
                         count: facts.count,
                         foil: facts.foil,
+                        dyed_color: facts.item_dyed_color,
+                        potion_color: facts.item_potion_color,
                     },
                 );
             }
@@ -2905,10 +2971,18 @@ pub fn tracked_entity_count(world: &World) -> usize {
 /// knows identity. [`fold_entities`] does not go through this function; it
 /// writes [`TrackedStack`] directly so it can carry the real reported count.
 pub fn set_item_stack_in(world: &mut World, entity_id: i32, item: ResourceLocation) {
-    world
-        .resource_mut::<ItemStacks>()
-        .0
-        .insert(entity_id, TrackedStack { id: item, count: 1, foil: false });
+    world.resource_mut::<ItemStacks>().0.insert(
+        entity_id,
+        TrackedStack {
+            id: item,
+            count: 1,
+            foil: false,
+            // Identity-only caller, no stack in hand to read a colour off —
+            // the same honest `None` `count`/`foil` already default to here.
+            dyed_color: None,
+            potion_color: None,
+        },
+    );
 }
 
 /// Tracks and interpolates every visible entity between server ticks.
@@ -3015,10 +3089,16 @@ impl EntityInterpolator {
     /// off the wire's `ItemStack::count` — no model dependency needed to widen
     /// this far, per `docs/dropped-items.md`.
     pub fn set_item_stack_with_count(&mut self, entity_id: i32, item: ResourceLocation, count: u32) {
-        self.world
-            .resource_mut::<ItemStacks>()
-            .0
-            .insert(entity_id, TrackedStack { id: item, count, foil: false });
+        self.world.resource_mut::<ItemStacks>().0.insert(
+            entity_id,
+            TrackedStack {
+                id: item,
+                count,
+                foil: false,
+                dyed_color: None,
+                potion_color: None,
+            },
+        );
     }
 
     /// Forget the item recorded for `entity_id`, so it draws as an empty stack.
@@ -3758,6 +3838,8 @@ mod tests {
                 block_state: None,
                 count: 1,
                 foil: false,
+                item_dyed_color: None,
+                item_potion_color: None,
                 feet: Vec3::ZERO,
                 yaw: 0.0,
                 head_yaw: 0.0,

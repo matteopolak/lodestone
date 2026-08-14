@@ -139,6 +139,8 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         wool: None,
         count: 1,
         foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
         name_tag: None,
         item_use: None,
         creeper_swelling: 0.0,

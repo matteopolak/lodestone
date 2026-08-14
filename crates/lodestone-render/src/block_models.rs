@@ -105,7 +105,7 @@ use lodestone_model::{BlockStateRegistry, Identifier};
 
 use crate::anim::{AnimFrame, AnimSlotUniform, SpriteAnimation};
 use crate::block_resolver::DefaultTints;
-use crate::models::{face_of_direction, quad_is_full_face};
+use crate::models::{ModelMesh, face_of_direction, quad_is_full_face};
 use crate::translucency::RenderLayer;
 
 /// Number of slots in the tint palette uploaded to the model shader. A baked
@@ -649,6 +649,21 @@ pub struct ItemGeometry {
     /// The GUI lighting mode: [`GuiLight::Side`] keeps the per-face directional
     /// constants, [`GuiLight::Front`] flattens them.
     pub gui_light: GuiLight,
+    /// `(palette slot, source)` for every baked layer whose tint this build can
+    /// re-resolve against a **live** stack — today that is `dye` and `potion`,
+    /// [`lodestone_assets::item_tint::resolve`]'s own "which of these can ever be
+    /// live" list. `quads` bakes every tint against `ItemTintContext::components:
+    /// None` (see [`item_layer_tint_slots`]), which is the *correct* colour for
+    /// the overwhelming majority of stacks and the *wrong* one for a dyed leather
+    /// item or a mixed potion — a caller drawing one **instance** of this
+    /// geometry re-resolves each pair here against that instance's real
+    /// components and stamps the result onto every vertex whose baked
+    /// `tint_index` equals the slot, via [`crate::models::ModelVertex::
+    /// tint_rgb_override`]. Empty for a real 3-D item model (`item_parts`, not
+    /// `sprite_parts`): those bake through [`vanilla_tint_kind`], the block
+    /// palette, never [`item_tint::resolve`], so there is nothing here to
+    /// re-resolve.
+    pub live_tints: Vec<(u8, lodestone_assets::TintSource)>,
 }
 
 /// **Every** baked form one item can take, plus the definition tree that chooses
@@ -1494,6 +1509,101 @@ fn item_layer_tint_slots(
         .collect()
 }
 
+/// Narrow [`item_layer_tint_slots`]'s output to [`ItemGeometry::live_tints`]:
+/// `(slot, source)` for the layers whose tint this build can re-resolve against
+/// a live stack.
+///
+/// Filtered to `dye`/`potion` rather than kept for every tinted layer so a
+/// caller iterating this per drawn instance does not pay for the ~1,400 items
+/// whose only tint is `constant` or another source with no live path — those
+/// would just re-resolve to the exact colour already baked into the palette,
+/// a correct but wasted `item_tint::resolve` call and vertex write per copy.
+/// See [`lodestone_assets::item_tint::resolve`]'s "which of these can ever be
+/// live here" doc for why exactly these two.
+fn live_tint_slots(layers: &[SpriteLayer], layer_slots: &[Option<u8>]) -> Vec<(u8, lodestone_assets::TintSource)> {
+    layers
+        .iter()
+        .zip(layer_slots)
+        .filter_map(|(layer, slot)| {
+            let source = layer.tint.as_ref()?;
+            let slot = (*slot)?;
+            let kind = source.kind.strip_prefix("minecraft:").unwrap_or(&source.kind);
+            matches!(kind, "dye" | "potion").then(|| (slot, source.clone()))
+        })
+        .collect()
+}
+
+/// Stamp [`ItemGeometry::live_tints`] onto one meshed **instance** with that
+/// instance's real components — the world-item counterpart of
+/// `lodestone_shell::hud::item_icon::sprite_layer_tint`, which already does this
+/// for the flat 2-D icon path. Dropped items, thrown-item projectiles, campfire
+/// items, held items (a mob's hand and the first-person hand alike) all mesh
+/// through [`crate::entity::dropped_item_mesh`] and its siblings, which bake
+/// every vertex's [`crate::models::ModelVertex::tint_rgb_override`] to
+/// `[0, 0, 0, 0]` unconditionally — correct for the majority of stacks (an
+/// uncustomised item's baked palette colour already **is** the right one) and
+/// wrong for a dyed leather item or a mixed potion, which drew the item
+/// definition's plain default in every one of those four call sites until this
+/// existed.
+///
+/// # Why this is a separate pass over `mesh.vertices` rather than a
+/// `components` parameter threaded into the mesher
+///
+/// The mesher (`mesh_item_quads`) is shared with the GUI-icon bake pass, which
+/// has no live stack at all (see [`item_layer_tint_slots`]'s `components: None`)
+/// — giving it a `components` parameter would make every caller either pass
+/// `None` or duplicate this same lookup. Overriding after the fact instead
+/// keeps the mesher itself stack-agnostic and lets every world-item caller
+/// share one small function.
+///
+/// # The vertex order this leans on
+///
+/// `quads` must be the **exact** slice `mesh` was built from —
+/// `mesh_item_quads` emits vertices in `quads`' own order, four per quad, with
+/// no reordering or culling in between (see its own source), so
+/// `mesh.vertices.chunks_mut(4)` zipped against `quads` pairs each quad with
+/// its four vertices correctly. A mesh built by merging several quad slices
+/// (`ModelMesh::merge`) must be stamped **before** merging, one slice at a
+/// time, or the pairing silently mismatches — which is why every call site
+/// stamps the single-item `mesh` returned by `dropped_item_mesh`/
+/// `held_item_mesh`/`thrown_item_mesh`/`campfire_item_mesh` rather than the
+/// `combined` buffer those results are merged into.
+///
+/// A no-op — no allocation past the one `Vec` — when `live_tints` is empty,
+/// which is every real 3-D item model and every flat sprite with no dye/potion
+/// layer, i.e. the overwhelming majority of calls. Safe to call unconditionally.
+pub fn stamp_live_item_tint(
+    mesh: &mut ModelMesh,
+    quads: &[BakedQuad],
+    live_tints: &[(u8, lodestone_assets::TintSource)],
+    components: &lodestone_model::item::ItemComponents,
+) {
+    if live_tints.is_empty() {
+        return;
+    }
+    let ctx = ItemTintContext {
+        components: Some(components),
+        // No colormap on this path — none of `live_tints`' two live kinds
+        // (`dye`, `potion`) reads one; see `live_tint_slots`.
+        grass_colormap: None,
+    };
+    for (slot, source) in live_tints {
+        let Some(resolved) = item_tint::resolve(source, &ctx) else {
+            continue;
+        };
+        let rgb = resolved.rgb();
+        let rgba = [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 0xFF];
+        for (quad, verts) in quads.iter().zip(mesh.vertices.chunks_mut(4)) {
+            if quad.tint_index != Some(i32::from(*slot)) {
+                continue;
+            }
+            for v in verts {
+                v.tint_rgb_override = rgba;
+            }
+        }
+    }
+}
+
 /// Discovers item ids by scanning for `assets/<ns>/items/<path>.json`, mirroring
 /// `lodestone_assets::item_atlas`'s private scan. Sorted and deduplicated so a
 /// given pack stack bakes a byte-identical item set.
@@ -1753,6 +1863,9 @@ impl BlockModels {
                     transform: part.transform,
                     display: part.display,
                     gui_light: part.gui_light,
+                    // A real 3-D item model's tints go through `vanilla_tint_kind`
+                    // above, never `item_tint::resolve` — see `live_tints`'s doc.
+                    live_tints: Vec::new(),
                 },
             );
         }
@@ -1802,6 +1915,7 @@ impl BlockModels {
                     // (translation [0, 2, 0], scale 0.5) instead of the block
                     // items' `[0, 3, 0]` / 0.25 — see `ground_transform_for`.
                     gui_light: GuiLight::Front,
+                    live_tints: live_tint_slots(&part.layers, &layer_slots),
                 },
             );
         }
@@ -2855,5 +2969,190 @@ mod special_form_tests {
             "the tree has both the seasonal and the plain special node; if this is 1 \
              the fallback test above proves nothing"
         );
+    }
+}
+
+/// The colour gate for [`stamp_live_item_tint`] — the world-item counterpart of
+/// `lodestone_shell::hud::item_icon`'s `tint_wiring_tests`. That module proved
+/// `ItemIcon`'s dyed/potion fields reach the **GUI** icon's emitted quad colour;
+/// this proves the same fields reach the **`ModelVertex::tint_rgb_override`**
+/// a dropped item, a thrown projectile and a held item all draw through — the
+/// gap named in `ItemGeometry::live_tints`'s own doc. No GPU and no atlas: the
+/// mechanism under test is a pure CPU-side vertex rewrite, so synthetic quads
+/// are enough — [`crate::models::mesh_item_quads`]'s naga compile and the
+/// existing biome `tint_rgb_override` pixel gates already prove the shader
+/// consumes this field correctly; this module's job is only "does the right
+/// live colour land in the right vertices".
+#[cfg(test)]
+mod live_item_tint_tests {
+    use super::*;
+    use crate::models::mesh_item_quads;
+    use glam::Mat4;
+    use lodestone_assets::Direction;
+    use lodestone_model::item::ItemComponents;
+
+    /// One degenerate but structurally valid quad at palette slot `tint_index`
+    /// (or untinted when `None`) — position/UV values are irrelevant to
+    /// [`stamp_live_item_tint`], which never reads them.
+    fn quad(tint_index: Option<i32>) -> BakedQuad {
+        BakedQuad {
+            positions: [[0.0, 0.0, 0.0]; 4],
+            uvs: [[0.0, 0.0]; 4],
+            direction: Direction::South,
+            cullface: None,
+            tint_index,
+            shade: false,
+            layer: 0,
+            anim: 0,
+        }
+    }
+
+    fn dye_source() -> lodestone_assets::TintSource {
+        lodestone_assets::TintSource {
+            kind: "minecraft:dye".to_string(),
+            // `DyedItemColor.LEATHER_COLOR`.
+            default: Some(-6_265_536),
+            grass: None,
+            index: 0,
+        }
+    }
+
+    fn potion_source() -> lodestone_assets::TintSource {
+        lodestone_assets::TintSource {
+            kind: "minecraft:potion".to_string(),
+            // `PotionContents.BASE_POTION_COLOR`.
+            default: Some(-13_083_194),
+            grass: None,
+            index: 0,
+        }
+    }
+
+    /// `0xRRGGBB` → the `[r, g, b, 0xFF]` [`crate::models::ModelVertex::
+    /// tint_rgb_override`] this module asserts against.
+    fn rgba(rgb: u32) -> [u8; 4] {
+        [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 0xFF]
+    }
+
+    /// Three quads — dye-tinted at slot 3, potion-tinted at slot 7, and
+    /// deliberately **untinted** (`tint_index: None`) — meshed once and stamped
+    /// once, so one call proves three things: the dye slot gets the dye colour,
+    /// the potion slot gets the potion colour (not swapped — the slots are
+    /// deliberately not `0`/`1` so a transposition bug could not hide behind a
+    /// coincidence), and the untinted quad's override is untouched.
+    ///
+    /// `0x33_EBFF` (swiftness) and `0xA9_656A` (strong_harming) are the same
+    /// pair `lodestone_shell::hud::item_icon`'s own colour gate uses — 118-149
+    /// apart per channel, so no rounding could make one read as the other.
+    #[test]
+    fn dye_and_potion_slots_get_their_real_colour_and_the_untinted_slot_is_untouched() {
+        let quads = vec![quad(Some(3)), quad(Some(7)), quad(None)];
+        let live_tints = vec![(3u8, dye_source()), (7u8, potion_source())];
+        let components = ItemComponents {
+            dyed_color: Some(0x11_2233),
+            potion_color: Some(0xFF33_EBFF),
+            ..ItemComponents::default()
+        };
+
+        let mut mesh = mesh_item_quads(&quads, Mat4::IDENTITY, GuiLight::Front);
+        stamp_live_item_tint(&mut mesh, &quads, &live_tints, &components);
+
+        let mut mismatches = Vec::new();
+        let expect = [
+            ("dye quad", 0usize, rgba(0x11_2233)),
+            ("potion quad", 1usize, rgba(0x33_EBFF)),
+            ("untinted quad", 2usize, [0, 0, 0, 0]),
+        ];
+        for (name, quad_index, want) in expect {
+            for vertex in &mesh.vertices[quad_index * 4..quad_index * 4 + 4] {
+                if vertex.tint_rgb_override != want {
+                    mismatches.push(format!(
+                        "{name}: got {:?}, want {want:?}",
+                        vertex.tint_rgb_override
+                    ));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} of 12 vertex checks failed:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+
+    /// The water-bottle control: no `potion_contents` at all still resolves to
+    /// `PotionContents.BASE_POTION_COLOR` — proving this isn't merely "not the
+    /// wrong colour", it pins the *specific* vanilla default, mirroring
+    /// `item_icon`'s own `water_bottle_control` case.
+    #[test]
+    fn a_potion_with_no_components_stamps_the_real_base_potion_color() {
+        let quads = vec![quad(Some(7))];
+        let live_tints = vec![(7u8, potion_source())];
+        let components = ItemComponents::default();
+
+        let mut mesh = mesh_item_quads(&quads, Mat4::IDENTITY, GuiLight::Front);
+        stamp_live_item_tint(&mut mesh, &quads, &live_tints, &components);
+
+        for vertex in &mesh.vertices {
+            assert_eq!(vertex.tint_rgb_override, rgba(0x38_5DC6));
+        }
+    }
+
+    /// The dye control: an undyed item resolves to `DyedItemColor.LEATHER_COLOR`
+    /// — vanilla's own definition default, not a zero/black placeholder.
+    #[test]
+    fn an_undyed_item_stamps_the_real_leather_default() {
+        let quads = vec![quad(Some(3))];
+        let live_tints = vec![(3u8, dye_source())];
+        let components = ItemComponents::default();
+
+        let mut mesh = mesh_item_quads(&quads, Mat4::IDENTITY, GuiLight::Front);
+        stamp_live_item_tint(&mut mesh, &quads, &live_tints, &components);
+
+        for vertex in &mesh.vertices {
+            assert_eq!(vertex.tint_rgb_override, rgba(0xA0_6540));
+        }
+    }
+
+    /// The neuter: `live_tints: &[]` is **exactly** production's pre-fix state
+    /// for every world-item call site — `ItemGeometry::live_tints` did not
+    /// exist, so nothing ever overrode `tint_rgb_override`, which
+    /// `mesh_item_quads`/`mesh_item_quads_with_light` always bake to
+    /// `[0, 0, 0, 0]`. Unlike the GUI-path fix, this one compiles and runs
+    /// cleanly on this tree, so the neuter is executed rather than described:
+    /// with an empty `live_tints`, a real dyed component makes no difference
+    /// to a single vertex, which is the defect this whole module exists to
+    /// catch reappearing.
+    #[test]
+    fn an_empty_live_tints_list_is_the_pre_fix_no_op() {
+        let quads = vec![quad(Some(3))];
+        let components = ItemComponents {
+            dyed_color: Some(0x11_2233),
+            ..ItemComponents::default()
+        };
+
+        let mut mesh = mesh_item_quads(&quads, Mat4::IDENTITY, GuiLight::Front);
+        stamp_live_item_tint(&mut mesh, &quads, &[], &components);
+
+        for vertex in &mesh.vertices {
+            assert_eq!(
+                vertex.tint_rgb_override,
+                [0, 0, 0, 0],
+                "an empty live_tints must be a true no-op — a real dyed_color leaking \
+                 through here would mean the emptiness check isn't actually gating anything"
+            );
+        }
+    }
+
+    /// Control for the first gate: swiftness/strong_harming really are more
+    /// than 60 apart on every channel, so that gate could not pass by
+    /// coincidence even with a badly wired slot lookup.
+    #[test]
+    fn the_discriminating_potion_pair_really_is_discriminating() {
+        let a = [0x33i32, 0xEB, 0xFF];
+        let b = [0xA9i32, 0x65, 0x6A];
+        for i in 0..3 {
+            assert!((a[i] - b[i]).abs() > 60, "channel {i} too close to discriminate");
+        }
     }
 }

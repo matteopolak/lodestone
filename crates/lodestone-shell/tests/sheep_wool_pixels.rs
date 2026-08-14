@@ -132,6 +132,8 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
         block_state: None,
         count: 1,
         foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
         name_tag: None,
         item_use: None,
         creeper_swelling: 0.0,
