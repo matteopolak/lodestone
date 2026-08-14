@@ -100,10 +100,46 @@ pub(crate) fn launch_singleplayer(
     ))
 }
 
+/// [`launch_singleplayer`]'s **`Created`-only** sibling: starts the world
+/// already open to LAN, on an OS-assigned port, with the real RSA/AES
+/// handshake and session-server ownership check running on every connection
+/// it accepts — `crate::menu::create_world::WorldCreationConfig::online_mode`
+/// (issue #273's shell-side control), the one field on that struct that is
+/// wired rather than decorative. See that field's own doc for why this is
+/// reachable only from **Create New World** and not **Play Selected World**.
+///
+/// [`NetClient::open_to_lan`] is otherwise [`NetClient::open_singleplayer`]
+/// with one more TCP listener bound before it returns, so this mirrors
+/// `launch_singleplayer` exactly: same registry lookup, same one failure
+/// mode. `port` is always `0` — the caller has not joined anyone in yet, this
+/// is "host this new world from the moment it exists", not a fixed address to
+/// remember.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn launch_open_to_lan_online(
+    protocol: i32,
+    view_radius: i32,
+    session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+    seed: i64,
+    world_dir: Option<std::path::PathBuf>,
+) -> Result<NetClient, LaunchError> {
+    let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
+        .ok_or(LaunchError::NoVersionFamily { protocol })?;
+    Ok(NetClient::open_to_lan(
+        server_protocol,
+        protocol,
+        seed,
+        view_radius,
+        session,
+        world_dir,
+        0,
+        true,
+    ))
+}
+
 /// Vanilla's own seed rule (that fix's queued patch) —
 /// `WorldOptions.parseSeed`/`randomSeed()`
 /// (`.cache/mc/26.2/client-src/net/minecraft/world/level/levelgen/
-/// WorldOptions.java:75-89`): trim, empty means a fresh random `i64`, a valid
+/// WorldOptions.java`): trim, empty means a fresh random `i64`, a valid
 /// `i64` literal is used verbatim, and anything else — vanilla accepts
 /// free-text seeds rather than rejecting them — falls back to Java's own
 /// `String.hashCode()` widened (sign-extended) to `i64`.

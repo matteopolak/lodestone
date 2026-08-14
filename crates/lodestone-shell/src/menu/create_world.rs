@@ -46,6 +46,14 @@
 //!   generate different real terrain at the same coordinate, and the same
 //!   seed reproduces byte-identically — not merely different `i64`s, which
 //!   would be the isolated-unit species of this gate.
+//! - **Wired since — Online Mode.** Not vanilla (no `CreateWorldScreen`
+//!   control ties online-mode to a per-world setting in the real game), and
+//!   the one field on this struct that is not merely collected: `true` makes
+//!   `begin_singleplayer` open the new world to LAN immediately, with the
+//!   real RSA/AES handshake and session-server ownership check
+//!   (`lodestone_server::OnlineModeConfig`) running on every connection —
+//!   see [`WorldCreationConfig::online_mode`]'s own doc for what it does and
+//!   does not cover.
 //! - **Decorative — game mode, difficulty, structures, bonus chest and
 //!   allow-cheats.** Collected in `WorldCreationConfig` and cycled/toggled for
 //!   real, but nothing downstream reads any of them: they need deeper
@@ -69,12 +77,12 @@ pub const NAME_LABEL: &str = "World Name";
 /// `selectWorld.newWorld` — the default value, not a hint.
 pub const DEFAULT_NAME: &str = "New World";
 /// `selectWorld.enterSeed` — the seed field's own visible label, drawn above
-/// it exactly like [`NAME_LABEL`] (`CreateWorldScreen.java:752,791`, via
+/// it exactly like [`NAME_LABEL`] (`CreateWorldScreen.java`, via
 /// `CommonLayouts.labeledElement`).
 pub const SEED_LABEL: &str = "Seed for the world generator";
 /// `selectWorld.seedInfo` — the seed field's `EditBox.hint` ghost text,
 /// shown only while the box is empty and unfocused
-/// (`CreateWorldScreen.java:753,788`). Not a second permanent label; see
+/// (`CreateWorldScreen.java`). Not a second permanent label; see
 /// [`frame`]'s own doc on the notice this constant used to also feed.
 pub const SEED_INFO: &str = "Leave blank for a random seed";
 /// `selectWorld.gameMode` / `selectWorld.mapFeatures` / `options.difficulty`
@@ -84,6 +92,11 @@ pub const DIFFICULTY_LABEL: &str = "Difficulty";
 pub const STRUCTURES_LABEL: &str = "Generate Structures";
 pub const BONUS_CHEST_LABEL: &str = "Bonus Chest";
 pub const ALLOW_CHEATS_LABEL: &str = "Allow Cheats";
+/// Not a vanilla caption — there is no vanilla `CreateWorldScreen` control for
+/// this, because real Minecraft ties online-mode to the account you are
+/// signed in with rather than to a per-world creation setting. See
+/// [`WorldCreationConfig::online_mode`] for what this actually does.
+pub const ONLINE_MODE_LABEL: &str = "Online Mode (Open to LAN)";
 /// `selectWorld.create`, reused verbatim for this screen's own submit button
 /// — vanilla uses the same string for both (`CreateWorldScreen.java`'s
 /// `createButton`, `:145-149`).
@@ -92,7 +105,7 @@ pub const CANCEL_LABEL: &str = "Cancel";
 
 /// `WorldCreationUiState.SelectedGameMode`, narrowed to the three a player
 /// actually picks from this button (`GameTab.java`'s own cycle — `DEBUG`,
-/// vanilla's fourth value, is not offered here; `SelectedGameMode.java:295`'s
+/// vanilla's fourth value, is not offered here; `SelectedGameMode.java`'s
 /// own caption for it is literally "spectator", which is not a serious
 /// creation-time choice and this button does not cycle to it, matching the
 /// real client).
@@ -167,6 +180,25 @@ pub struct WorldCreationConfig {
     pub generate_structures: bool,
     pub bonus_chest: bool,
     pub allow_cheats: bool,
+    /// **Wired, not decorative** (issue #273's shell-side control) — unlike
+    /// every other field on this struct: `true` makes `app.rs`'s
+    /// `begin_singleplayer` open this world to LAN on an OS-assigned port
+    /// *immediately*, with the real RSA/AES handshake and session-server
+    /// ownership check running on every connection it accepts (including the
+    /// host's own loopback join — see `net.rs`'s `open_lan_world` match arm on
+    /// `(None, Some(address))`), instead of the ordinary in-memory
+    /// singleplayer session `open_singleplayer` starts for every other world.
+    ///
+    /// `false` — the default — changes nothing: the world opens exactly as it
+    /// always has, with no listener and no network call.
+    ///
+    /// Only reachable from **Create New World**, not **Play Selected World**:
+    /// `SingleplayerLaunch::Open` carries no `WorldCreationConfig` to hold
+    /// this on. A world created without it can still be published later
+    /// through the pause menu's existing Open to LAN button, just not with
+    /// online mode — that path calls `IntegratedServer::publish`, which has
+    /// no online-mode parameter.
+    pub online_mode: bool,
 }
 
 impl Default for WorldCreationConfig {
@@ -175,15 +207,16 @@ impl Default for WorldCreationConfig {
             name: DEFAULT_NAME.to_string(),
             seed: String::new(),
             game_mode: WorldGameMode::default(),
-            // `Difficulty.NORMAL` — `WorldCreationUiState.java:33`.
+            // `Difficulty.NORMAL` — `WorldCreationUiState.java`.
             difficulty: WorldDifficulty::Normal,
             // `WorldOptions`' own defaults — `generateStructures` true,
-            // `generateBonusChest` false (`WorldCreationUiState.java:52-53`
+            // `generateBonusChest` false (`WorldCreationUiState.java`
             // reads these off `settings.options()`, whose defaults are
             // vanilla's `WorldOptions.defaultWithRandomSeed()`).
             generate_structures: true,
             bonus_chest: false,
             allow_cheats: false,
+            online_mode: false,
         }
     }
 }
@@ -197,9 +230,10 @@ pub const DIFFICULTY_ROW: usize = 3;
 pub const STRUCTURES_ROW: usize = 4;
 pub const BONUS_CHEST_ROW: usize = 5;
 pub const ALLOW_CHEATS_ROW: usize = 6;
-pub const CREATE_ROW: usize = 7;
-pub const CANCEL_ROW: usize = 8;
-const ROW_COUNT: usize = 9;
+pub const ONLINE_MODE_ROW: usize = 7;
+pub const CREATE_ROW: usize = 8;
+pub const CANCEL_ROW: usize = 9;
+const ROW_COUNT: usize = 10;
 
 const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
 
@@ -222,6 +256,7 @@ pub fn row_slot(row: usize) -> Slot {
         STRUCTURES_ROW => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP + ROW_H * 4.0 + 8.0, w: FIELD_W, h: super::render::EDIT_BOX_H },
         BONUS_CHEST_ROW => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP + ROW_H * 5.0 + 8.0, w: FIELD_W, h: super::render::EDIT_BOX_H },
         ALLOW_CHEATS_ROW => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP + ROW_H * 6.0 + 8.0, w: FIELD_W, h: super::render::EDIT_BOX_H },
+        ONLINE_MODE_ROW => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP + ROW_H * 7.0 + 8.0, w: FIELD_W, h: super::render::EDIT_BOX_H },
         CREATE_ROW => Slot {
             origin: Origin::Settings(super::options::Placement::Footer { index: 0, count: 2 }),
             dx: 0.0,
@@ -253,6 +288,7 @@ pub struct CreateWorldWidgets {
     pub structures: Widget,
     pub bonus_chest: Widget,
     pub allow_cheats: Widget,
+    pub online_mode: Widget,
     pub create: Widget,
     pub cancel: Widget,
 }
@@ -267,6 +303,7 @@ impl FocusChildren for CreateWorldWidgets {
             STRUCTURES_ROW => &self.structures as &dyn FocusTarget,
             BONUS_CHEST_ROW => &self.bonus_chest as &dyn FocusTarget,
             ALLOW_CHEATS_ROW => &self.allow_cheats as &dyn FocusTarget,
+            ONLINE_MODE_ROW => &self.online_mode as &dyn FocusTarget,
             CREATE_ROW => &self.create as &dyn FocusTarget,
             CANCEL_ROW => &self.cancel as &dyn FocusTarget,
             _ => return None,
@@ -282,6 +319,7 @@ impl FocusChildren for CreateWorldWidgets {
             STRUCTURES_ROW => &mut self.structures as &mut dyn FocusTarget,
             BONUS_CHEST_ROW => &mut self.bonus_chest as &mut dyn FocusTarget,
             ALLOW_CHEATS_ROW => &mut self.allow_cheats as &mut dyn FocusTarget,
+            ONLINE_MODE_ROW => &mut self.online_mode as &mut dyn FocusTarget,
             CREATE_ROW => &mut self.create as &mut dyn FocusTarget,
             CANCEL_ROW => &mut self.cancel as &mut dyn FocusTarget,
             _ => return None,
@@ -358,6 +396,7 @@ impl CreateWorldNav {
             structures: button(STRUCTURES_ROW, toggle_label(STRUCTURES_LABEL, config.generate_structures)),
             bonus_chest: button(BONUS_CHEST_ROW, toggle_label(BONUS_CHEST_LABEL, config.bonus_chest)),
             allow_cheats: button(ALLOW_CHEATS_ROW, toggle_label(ALLOW_CHEATS_LABEL, config.allow_cheats)),
+            online_mode: button(ONLINE_MODE_ROW, toggle_label(ONLINE_MODE_LABEL, config.online_mode)),
             create: button(CREATE_ROW, CREATE_LABEL),
             cancel: button(CANCEL_ROW, CANCEL_LABEL),
         };
@@ -397,7 +436,9 @@ impl CreateWorldNav {
         match row {
             NAME_FIELD | SEED_FIELD => {}
             GAME_MODE_ROW | DIFFICULTY_ROW | STRUCTURES_ROW | BONUS_CHEST_ROW
-            | ALLOW_CHEATS_ROW | CREATE_ROW | CANCEL_ROW => self.hovered = Some(row),
+            | ALLOW_CHEATS_ROW | ONLINE_MODE_ROW | CREATE_ROW | CANCEL_ROW => {
+                self.hovered = Some(row);
+            }
             _ => {}
         }
     }
@@ -426,6 +467,7 @@ impl CreateWorldNav {
         self.widgets.structures.message = toggle_label(STRUCTURES_LABEL, self.config.generate_structures);
         self.widgets.bonus_chest.message = toggle_label(BONUS_CHEST_LABEL, self.config.bonus_chest);
         self.widgets.allow_cheats.message = toggle_label(ALLOW_CHEATS_LABEL, self.config.allow_cheats);
+        self.widgets.online_mode.message = toggle_label(ONLINE_MODE_LABEL, self.config.online_mode);
         self.apply_hardcore_lock();
     }
 
@@ -455,6 +497,11 @@ impl CreateWorldNav {
             }
             ALLOW_CHEATS_ROW => {
                 self.config.allow_cheats = !self.config.allow_cheats;
+                self.refresh_labels();
+                CreateWorldOutcome::Handled
+            }
+            ONLINE_MODE_ROW => {
+                self.config.online_mode = !self.config.online_mode;
                 self.refresh_labels();
                 CreateWorldOutcome::Handled
             }
@@ -572,10 +619,11 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
         widget_row(&nav.widgets.structures, STRUCTURES_ROW),
         widget_row(&nav.widgets.bonus_chest, BONUS_CHEST_ROW),
         widget_row(&nav.widgets.allow_cheats, ALLOW_CHEATS_ROW),
+        widget_row(&nav.widgets.online_mode, ONLINE_MODE_ROW),
         widget_row(&nav.widgets.create, CREATE_ROW),
         widget_row(&nav.widgets.cancel, CANCEL_ROW),
     ];
-    // Every focus id used above (`NAME_FIELD == 0` through `CANCEL_ROW == 8`,
+    // Every focus id used above (`NAME_FIELD == 0` through `CANCEL_ROW == 9`,
     // see their own doc comments) is *also* its row's index in `rows`, so the
     // row cursor and the widget cursor are one number — no restated list to
     // drift from it. A field row's own highlight is its caret, drawn by
@@ -605,7 +653,7 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
                 scale: 1.0,
             },
             // `CommonLayouts.labeledElement` draws a real, visible label above
-            // each field in vanilla (`CreateWorldScreen.java:652,791`) — this is
+            // each field in vanilla (`CreateWorldScreen.java`) — this is
             // that label, not narration. `10.0` above the field's own `dy`
             // mirrors the offset already used for the name field below.
             MenuLabel {
@@ -635,7 +683,7 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
         ],
         // No `notice` here any more. Vanilla shows `SEED_INFO` in exactly one
         // place — `seedEdit.setHint(SEED_EMPTY_HINT)`
-        // (`CreateWorldScreen.java:788`), ghost text drawn only while the box
+        // (`CreateWorldScreen.java`), ghost text drawn only while the box
         // is empty and unfocused. `CreateWorldNav::new` already sets
         // `seed.hint`, so a permanent notice here was drawing the same string
         // vanilla only ever shows conditionally — a duplicate, not a second
@@ -658,6 +706,7 @@ mod tests {
         assert!(config.generate_structures);
         assert!(!config.bonus_chest);
         assert!(!config.allow_cheats);
+        assert!(!config.online_mode);
     }
 
     #[test]
@@ -745,6 +794,24 @@ mod tests {
         assert!(!nav.config().generate_structures, "still off from the first click");
     }
 
+    /// Same shape as `the_three_toggles_flip_independently`, kept separate
+    /// because `online_mode` is wired (see its own doc) rather than
+    /// decorative like the other three — this is the pair the toggle's own
+    /// gate needs: the default stays off, and clicking flips only this field.
+    #[test]
+    fn online_mode_defaults_off_and_toggles_independently() {
+        let mut nav = CreateWorldNav::new();
+        assert!(!nav.config().online_mode);
+        nav.click_row(ONLINE_MODE_ROW);
+        assert!(nav.config().online_mode);
+        assert!(!nav.config().allow_cheats, "neighbour untouched");
+        assert!(!nav.config().bonus_chest, "neighbour untouched");
+        assert!(nav.config().generate_structures, "neighbour untouched (default on)");
+
+        nav.click_row(ONLINE_MODE_ROW);
+        assert!(!nav.config().online_mode, "toggles back off");
+    }
+
     #[test]
     fn create_carries_the_typed_name_and_seed() {
         let mut nav = CreateWorldNav::new();
@@ -824,7 +891,7 @@ mod tests {
 
     #[test]
     fn both_fields_get_their_own_vanilla_label_and_the_seed_hint_is_not_duplicated() {
-        // `CreateWorldScreen.java:652,791` wraps each field in
+        // `CreateWorldScreen.java` wraps each field in
         // `CommonLayouts.labeledElement` — a real, drawn label, not
         // narration. Both must be present, in vanilla's own strings.
         let nav = CreateWorldNav::new();
@@ -870,7 +937,7 @@ mod tests {
     #[test]
     fn the_footer_buttons_do_not_overlap_the_content_rows() {
         let (w, h) = (854.0, 480.0);
-        let (_, content_bottom, _, _) = row_slot(ALLOW_CHEATS_ROW).resolve(w, h);
+        let (_, content_bottom, _, _) = row_slot(ONLINE_MODE_ROW).resolve(w, h);
         let (_, footer_y, _, _) = row_slot(CREATE_ROW).resolve(w, h);
         assert!(
             footer_y >= content_bottom,
@@ -945,6 +1012,7 @@ mod tests {
             STRUCTURES_ROW,
             BONUS_CHEST_ROW,
             ALLOW_CHEATS_ROW,
+            ONLINE_MODE_ROW,
             CREATE_ROW,
             CANCEL_ROW,
         ] {

@@ -166,7 +166,7 @@ pub type SharedLocalUuid = Arc<OnceLock<uuid::Uuid>>;
 /// # Why this is not a [`NetUpdate`]
 ///
 /// `GAME_EVENT`'s rain and thunder levels arrive **every tick** while the server
-/// ramps them (`ServerLevel.java:762-775` broadcasts on any change, and the
+/// ramps them (`ServerLevel.java` broadcasts on any change, and the
 /// change is ±0.01 per tick), and the consumer wants only the newest value. That
 /// is the same "latest wins, never queue" shape as [`SharedHandle`]: a channel
 /// would carry ~20 messages a second whose only purpose is to be superseded, and
@@ -1101,6 +1101,13 @@ enum Origin {
         /// persistence gaps that come with it.
         #[cfg(not(target_arch = "wasm32"))]
         lan_port: Option<u16>,
+        /// Run the real RSA/AES online-mode handshake on the LAN listener
+        /// `lan_port` opens (issue #273's shell-side control). Ignored when
+        /// `lan_port` is `None` — a purely in-memory singleplayer connection
+        /// never reads this field at all, so it cannot authenticate no matter
+        /// what this is set to. See [`open_lan_world`]'s `lan_online_mode`.
+        #[cfg(not(target_arch = "wasm32"))]
+        online_mode: bool,
     },
 }
 
@@ -1154,11 +1161,11 @@ const SINGLEPLAYER_ADDRESS: (&str, u16) = ("singleplayer", 0);
 /// before declaring the connection dead (issue #280).
 ///
 /// Vanilla arms the same bound at the socket with Netty's
-/// `ReadTimeoutHandler(30)` — `Connection.java:432` — a 30-second stall that
+/// `ReadTimeoutHandler(30)` — `Connection.java` — a 30-second stall that
 /// disconnects with `disconnect.timeout`. This mirrors it through the client
 /// library's `read_packet_timeout`, which is a **per-packet** window reset by
 /// every inbound packet. That is why 30 s is safely above the server's keep-alive
-/// cadence (15 s in `ServerCommonPacketListenerImpl.java:121`; our own
+/// cadence (15 s in `ServerCommonPacketListenerImpl.java`; our own
 /// `lodestone-server` sends on the same `KEEP_ALIVE_INTERVAL` of 15000 ms): a
 /// healthy session re-arms the window twice over, and only a server that has
 /// stopped sending entirely trips it. When it fires the driver task ends, the
@@ -1475,6 +1482,8 @@ impl NetClient {
                 world_dir,
                 #[cfg(not(target_arch = "wasm32"))]
                 lan_port: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                online_mode: false,
             },
             protocol,
             session,
@@ -1499,6 +1508,11 @@ impl NetClient {
     /// [`Self::publish_to_lan`] instead of coming back through here, which
     /// rebuilds the world from scratch. This constructor is still the right
     /// one for *starting* a session already in LAN mode.
+    ///
+    /// `online_mode` runs the real RSA/AES handshake and session-server
+    /// ownership check on every connection this listener accepts (issue
+    /// #273's shell-side control) — `false` matches every other constructor
+    /// here and keeps the listener exactly as offline as it has always been.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn open_to_lan(
@@ -1509,6 +1523,7 @@ impl NetClient {
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
         world_dir: Option<std::path::PathBuf>,
         port: u16,
+        online_mode: bool,
     ) -> Self {
         Self::connect_impl(
             Origin::Integrated {
@@ -1517,6 +1532,7 @@ impl NetClient {
                 view_radius,
                 world_dir,
                 lan_port: Some(port),
+                online_mode,
             },
             protocol,
             session,
@@ -1815,7 +1831,7 @@ impl NetClient {
     /// # This is half of a pair, and the other half is the caller's
     ///
     /// Call it immediately **before** `send_action(DropSelectedItem …)`, which is
-    /// vanilla's order (`LocalPlayer.java:316-317`: `removeFromSelected` then
+    /// vanilla's order (`LocalPlayer.java`: `removeFromSelected` then
     /// `connection.send`). The send is deliberately *not* folded in here so the
     /// spectator gate stays in one place — `App::drop_selected_action` already
     /// returns `None` for a spectator, and calling this inside that `if let`
@@ -1824,7 +1840,7 @@ impl NetClient {
     /// # Why the count is wrong without it
     ///
     /// `DROP_ITEM`/`DROP_ALL_ITEMS` are the one inventory change a vanilla server
-    /// applies **silently**: `ServerGamePacketListenerImpl.java:1303-1314` calls
+    /// applies **silently**: `ServerGamePacketListenerImpl.java` calls
     /// `player.drop(…)` and returns without any slot or content packet. So
     /// [`player_menu`](Self::player_menu) — which is what the HUD hotbar and the
     /// inventory screen both read — keeps reporting the pre-drop count forever
@@ -2181,6 +2197,8 @@ async fn run_async(
                 world_dir,
                 #[cfg(not(target_arch = "wasm32"))]
                 lan_port,
+                #[cfg(not(target_arch = "wasm32"))]
+                online_mode,
             } => {
                 // Issue #468: the world's **stored** seed wins over the
                 // requested one, so this has to be resolved before the
@@ -2273,7 +2291,7 @@ async fn run_async(
                 #[cfg(not(target_arch = "wasm32"))]
                 let (server, client_io, lan_address) = match lan_port {
                     Some(port) => {
-                        match open_lan_world(server_protocol, source, &world_dir, view_radius, port)
+                        match open_lan_world(server_protocol, source, &world_dir, view_radius, port, online_mode)
                             .await
                         {
                             Ok((server, address, save)) => {
@@ -2416,10 +2434,42 @@ async fn run_async(
                         )
                     }
                     // Open to LAN: there is a real socket, so the host dials it
-                    // over loopback exactly as a remote join would — but our own
-                    // integrated server answers `online_mode(false)` in its
-                    // status/login, so this stays offline too.
-                    (None, Some(address)) => (address, RemoteAuth::Offline, None),
+                    // over loopback exactly as a remote join would. With
+                    // `online_mode` off (the default, and every caller before
+                    // this field existed) our own integrated server answers
+                    // `online_mode(false)` in its status/login, so this stays
+                    // offline too. **With it on, the listener now demands the
+                    // real RSA/AES handshake from every connection it accepts —
+                    // including this loopback one** — so the host's own join
+                    // has to present a real Microsoft session or the listener
+                    // it just opened would refuse its own host.
+                    //
+                    // The inner `cfg` (rather than gating the whole arm) is
+                    // load-bearing on wasm32: `online_mode` and
+                    // `RemoteAuth::SelectedAccount` are both native-only, and
+                    // even though `lan_address` is unconditionally `None` on
+                    // wasm32 (this arm is unreachable there), an unreachable
+                    // match arm still has to *type-check* — `just wasm-check`
+                    // caught exactly this the first time this arm's body
+                    // referenced `online_mode` unconditionally.
+                    (None, Some(address)) => (
+                        address,
+                        {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                if online_mode {
+                                    RemoteAuth::SelectedAccount
+                                } else {
+                                    RemoteAuth::Offline
+                                }
+                            }
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                RemoteAuth::Offline
+                            }
+                        },
+                        None,
+                    ),
                     // Unreachable by construction — `open_lan_world` returns an
                     // address on success and this arm returns early on failure.
                     (None, None) => unreachable!("an integrated server with no transport"),
@@ -2844,6 +2894,27 @@ fn lan_motd(world_dir: Option<&std::path::Path>) -> String {
         .map_or_else(|| "Lodestone World".to_string(), |name| name.to_string_lossy().into_owned())
 }
 
+/// The `LanConfig::online_mode` a LAN-open should carry (issue #273's shell
+/// control): `None` when the host did not ask for it — the same `None` every
+/// caller here passed before this field existed, so a host who leaves the
+/// toggle off gets exactly the old offline behaviour and this makes no network
+/// call at all (`OnlineModeConfig::new` only builds an HTTP client and a
+/// closure; the session-server request happens per-connection, later, only if
+/// a client actually joins).
+///
+/// `lodestone_auth::install_crypto_provider` only runs on the `true` arm:
+/// `reqwest::Client::new()` panics with no rustls provider installed, and
+/// skipping the install alongside skipping the client keeps the `false` arm
+/// free of any of `Some`'s side effects, not merely of its network traffic.
+#[cfg(not(target_arch = "wasm32"))]
+fn lan_online_mode(enabled: bool) -> Option<lodestone_server::OnlineModeConfig> {
+    if !enabled {
+        return None;
+    }
+    lodestone_auth::install_crypto_provider();
+    Some(lodestone_server::OnlineModeConfig::new(reqwest::Client::new()))
+}
+
 /// Bind the world to a TCP port with `IntegratedServer::open_to_lan` (issue
 /// #535's scope 1), returning the handle, the address the host's own client
 /// should dial, and the save handle when there is a world on disk.
@@ -2863,6 +2934,7 @@ async fn open_lan_world(
     world_dir: &Option<std::path::PathBuf>,
     view_radius: i32,
     port: u16,
+    online_mode: bool,
 ) -> Result<
     (
         lodestone_server::IntegratedServer,
@@ -2878,6 +2950,7 @@ async fn open_lan_world(
         // never appears in anyone's server list and the address has to be read out
         // loud.
         discovery: Some(lodestone_server::LanDiscovery { motd }),
+        online_mode: lan_online_mode(online_mode),
         ..lodestone_server::LanConfig::default()
     };
     let motd = lan_motd(world_dir.as_deref());
@@ -3264,7 +3337,7 @@ fn forward(
             );
             return Ok(());
         }
-        // The lightning flash (`ClientLevel.java:264-268`). A bolt is an ordinary
+        // The lightning flash (`ClientLevel.java`). A bolt is an ordinary
         // entity on the wire, so this arm **observes** the spawn and returns
         // without producing a `NetUpdate`: entities already reach the shell
         // through the ECS ingest fold, and forwarding one here would put a second
@@ -3272,7 +3345,7 @@ fn forward(
         //
         // This is a spawn-only approximation. Vanilla re-flashes `rand(3) + 1`
         // times per bolt by resetting the entity's `life`
-        // (`LightningBolt.java:47`, `:131-134`), which needs the bolt's own
+        // (`LightningBolt.java`, `:131-134`), which needs the bolt's own
         // per-tick state; see `lodestone_render::weather::LIGHTNING_FLASH_TICKS`.
         ClientEvent::EntitySpawned { ref entity_type, .. }
             if entity_type.path() == "lightning_bolt" =>
@@ -3357,6 +3430,31 @@ mod tests {
     /// where an account happens to be selected — and every gate would share one
     /// premium player file. That is the shared-offline-name eviction hazard
     /// `connect_as` exists to avoid, so the two origins must differ.
+    /// The toggle's own discriminating pair (issue #273's shell-side
+    /// control, `WorldCreationConfig::online_mode`): the default must stay
+    /// offline — every caller before this field existed passed `false` here
+    /// — and the enabled path must actually construct an `OnlineModeConfig`,
+    /// not merely flip a bool nothing reads. A test that only exercised
+    /// `true` could not show the default is intact, and the default is what
+    /// every singleplayer session depends on to never authenticate.
+    ///
+    /// Neither arm makes a network call: `OnlineModeConfig::new` only builds
+    /// an HTTP client and a closure — the session-server request happens
+    /// per-connection, later, only if a client actually joins and the
+    /// listener is running.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn lan_online_mode_defaults_off_and_the_enabled_path_constructs_real_config() {
+        assert!(
+            lan_online_mode(false).is_none(),
+            "the default (every caller before this field existed) must stay offline"
+        );
+        assert!(
+            lan_online_mode(true).is_some(),
+            "the enabled path must actually construct an OnlineModeConfig"
+        );
+    }
+
     #[test]
     fn a_gate_join_never_consults_the_account_switcher() {
         let origin = NetClient::offline_origin("example.invalid".into(), 25565);
@@ -3731,8 +3829,8 @@ mod tests {
         // explosionParticle (ParticleOptions), explosionSound
         // (Holder<SoundEvent>). Packet id 36 is `minecraft:explode`'s
         // protocol-776 registration
-        // (`crates/protocol/v770/src/generated/packet_ids.rs:193,336`, itself
-        // generated from Mojang's `packets.json`). explosionSound holder id
+        // (`lodestone_protocol_v770::generated::packet_ids::play::clientbound::EXPLODE`,
+        // itself generated from Mojang's `packets.json`). explosionSound holder id
         // `700` (VarInt bytes `0xBC, 0x05`) references
         // `minecraft:sound_event` registry index `699`, verified against
         // `.cache/mc/26.2/generated/reports/registries.json`'s own
@@ -3823,12 +3921,12 @@ mod tests {
                 assert_eq!(
                     volume, 4.0,
                     "ClientPacketListener.handleExplosion's client-side constant \
-                     (`.cache/mc/26.2/client-src/.../ClientPacketListener.java:1368`)"
+                     (`.cache/mc/26.2/client-src/.../ClientPacketListener.java`)"
                 );
                 assert!(
                     (0.56..=0.84).contains(&pitch),
                     "pitch {pitch} outside vanilla's (1.0 +/- 0.2) * 0.7 band \
-                     (ClientPacketListener.java:1369)"
+                     (ClientPacketListener.java)"
                 );
             }
             other => panic!("expected NetUpdate::Sound, got {other:?}"),
@@ -3910,7 +4008,7 @@ mod tests {
 
         // The `START_RAINING` inversion reaches here intact (see
         // `lodestone_render::weather`'s module doc — this is vanilla's own
-        // polarity at ClientPacketListener.java:1543, not a bug on this side).
+        // polarity at ClientPacketListener.java, not a bug on this side).
         forward(
             &tx,
             &weather,
@@ -4113,7 +4211,7 @@ mod tests {
     /// from `.cache/mc/26.2/src/data/minecraft/worldgen/biome/{frozen_peaks,
     /// desert}.json`) must, once vanilla's own `getPrecipitationAt` predicate
     /// is applied, land on the correct side of the rain/snow line:
-    /// `Biome.java:176`, `return this.getTemperature(pos, seaLevel) >= 0.15F;`
+    /// `Biome.java`, `return this.getTemperature(pos, seaLevel) >= 0.15F;`
     /// (called from `getPrecipitationAt` at `:108`, gated on `hasPrecipitation()`
     /// at `:105-106`).
     ///
@@ -4141,7 +4239,7 @@ mod tests {
         // Vanilla's threshold, 0.15, applied at sea level (no height falloff
         // at y == sea_level, so `getHeightAdjustedTemperature` is a no-op —
         // this isolates the threshold itself from the height term).
-        const WARM_ENOUGH_TO_RAIN: f32 = 0.15; // Biome.java:176
+        const WARM_ENOUGH_TO_RAIN: f32 = 0.15; // Biome.java
         assert!(
             frozen_peaks.temperature.unwrap() < WARM_ENOUGH_TO_RAIN,
             "frozen_peaks' real temperature ({:?}) must be below vanilla's \
@@ -4159,7 +4257,7 @@ mod tests {
             Some(false),
             "desert has no precipitation regardless of temperature — the \
              `has_precipitation` gate must short-circuit before the \
-             threshold is even consulted (Biome.java:105-106)"
+             threshold is even consulted (Biome.java)"
         );
     }
 
