@@ -108,6 +108,26 @@ pub struct ItemComponents {
     /// **join-blocking** failure, not a cosmetic one, because that packet arrives
     /// during the initial world load.
     pub pot_decorations: Option<PotDecorations>,
+    /// **Effective** `minecraft:potion_contents` colour: the opaque ARGB a potion
+    /// item's `minecraft:potion` tint source resolves to (`Potion.calculate` /
+    /// `PotionContents.getColorOr`), already folded with the potion's own built-in
+    /// effect list and any `customEffects`/`customColor` the patch carried.
+    ///
+    /// `None` when the patch carries no `minecraft:potion_contents` at all (a
+    /// non-potion item, or a potion stack whose patch is otherwise empty) — the same
+    /// "absent means take the tint source's own JSON default" contract
+    /// [`dyed_color`](Self::dyed_color) uses, not a guessed colour. Decoded rather
+    /// than treated as unmodeled for the same reason as [`trim`](Self::trim) and
+    /// [`pot_decorations`](Self::pot_decorations): the clientbound component patch
+    /// cannot skip an unknown component, and `minecraft:potion_contents` used to
+    /// truncate the rest of the packet from a potion stack onward.
+    ///
+    /// This is an *effective* value (like [`max_stack_size`](Self::max_stack_size))
+    /// rather than the raw patch, because mixing needs the potion registry's own
+    /// effect census (`lodestone_data::potion`), which is version data this
+    /// version-free type does not own — evaluating at decode time is the same
+    /// tradeoff [`max_stack_size`] already makes.
+    pub potion_color: Option<u32>,
     /// What this stack's component *patch* said about `minecraft:tool`.
     ///
     /// Almost always [`ToolPatch::Inherited`] — see that type's docs; a plain

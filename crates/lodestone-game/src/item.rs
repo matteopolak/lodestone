@@ -64,6 +64,16 @@ pub const EQUIPPABLE_COMPONENT: &str = "minecraft:equippable";
 /// the raw wire int, low 24 bits RGB — see
 /// [`lodestone_model::ItemComponents::dyed_color`] for why it is not pre-split.
 pub const DYED_COLOR_COMPONENT: &str = "minecraft:dyed_color";
+/// Well-known component identifier for `minecraft:potion_contents`.
+///
+/// The value carried under this key is not the raw component — it is
+/// [`lodestone_model::ItemComponents::potion_color`]'s already-mixed opaque ARGB
+/// (`Potion.calculate`'s result), because nothing on this side of the crate boundary
+/// needs the potion id or effect list back out, only the colour a GUI icon or
+/// equipped-item render would tint by. Same crate-boundary gap `DYED_COLOR_COMPONENT`
+/// was added to close: without a branch here a potion's colour is silently dropped
+/// converting a decoded stack into this crate's shape.
+pub const POTION_COLOR_COMPONENT: &str = "minecraft:potion_contents";
 /// Well-known component identifier for `minecraft:custom_model_data`.
 ///
 /// Vanilla's own "make this item look different" channel, and half of how real
@@ -435,6 +445,25 @@ impl ItemStack {
         );
     }
 
+    /// The stack's mixed `minecraft:potion_contents` colour — opaque ARGB, or
+    /// `None` when the stack carries no potion contents at all (a non-potion item,
+    /// or one whose decode never modelled the component). See
+    /// [`POTION_COLOR_COMPONENT`] for why this is already-mixed rather than raw.
+    #[must_use]
+    pub fn potion_color(&self) -> Option<u32> {
+        self.components
+            .get_int(POTION_COLOR_COMPONENT)
+            .and_then(|v| u32::try_from(v).ok())
+    }
+
+    /// Sets or clears the mixed `minecraft:potion_contents` colour.
+    pub fn set_potion_color(&mut self, argb: Option<u32>) {
+        self.write_component(
+            POTION_COLOR_COMPONENT,
+            argb.map(|c| ComponentValue::Int(i64::from(c))),
+        );
+    }
+
     /// The stack's enchantments in wire order, or an empty slice when it has
     /// none.
     ///
@@ -645,6 +674,15 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Int(i64::from(rgb)));
         }
 
+        // Same crate-boundary loss as the dye above: without this branch a potion,
+        // splash potion, lingering potion or tipped arrow's mixed colour never
+        // reaches this crate's shape at all.
+        if let Some(argb) = stack.components.potion_color
+            && let Ok(key) = POTION_COLOR_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Int(i64::from(argb)));
+        }
+
         // Same crate-boundary loss as the dye above, and with the same symptom
         // seen from the other side: remote players, mobs and armour stands drew
         // their trims off the *model* stack while the local player — whose stack
@@ -738,6 +776,7 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             damage: stack.damage().and_then(|d| u32::try_from(d).ok()),
             enchantments: stack.enchantments().to_vec(),
             dyed_color: stack.dyed_color(),
+            potion_color: stack.potion_color(),
             trim: stack.trim(),
             map_id: stack.map_id(),
             // This crate's own component map has no `pot_decorations` slot — its
@@ -1127,6 +1166,7 @@ mod tests {
                 damage: Some(37),
                 enchantments: vec![ItemEnchantment { id: 12, level: 4 }],
                 dyed_color: Some(0x00_11_22_33),
+                potion_color: Some(0xFF_38_5D_C6),
                 trim: Some(ArmorTrim {
                     material: "netherite".to_string(),
                     pattern: "silence".to_string(),
