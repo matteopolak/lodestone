@@ -3092,6 +3092,12 @@ struct PlayPacketEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ClientboundArm {
     packet: String,
+    /// Adapter source file this arm's dispatch site lives in, relative to the
+    /// workspace root. A protocol family's adapter can be one flat
+    /// `src/adapter.rs` or a `src/adapter/` directory module (v770, since its
+    /// split) — see [`read_adapter_sources`] — so this is per-arm rather than
+    /// one path for the whole family.
+    file: String,
     line: usize,
     verdict: ClientboundVerdict,
 }
@@ -3137,7 +3143,6 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
         }
         let family_dir = entry.path();
         let packet_ids_path = family_dir.join("src/generated/packet_ids.rs");
-        let adapter_path = family_dir.join("src/adapter.rs");
         // Every protocol family is scanned — there is no per-family opt-out
         // here. A family missing either file cannot be measured, and that is
         // reported by name rather than silently dropped from the family
@@ -3158,35 +3163,61 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
             ));
             continue;
         }
-        if !adapter_path.exists() {
+        let adapter_sources = read_adapter_sources(&family_dir, workspace_root)?;
+        if adapter_sources.is_empty() {
             skipped.push((
                 family.clone(),
                 format!(
-                    "missing {}",
-                    adapter_path
+                    "missing {} or {}",
+                    family_dir
+                        .join("src/adapter.rs")
                         .strip_prefix(workspace_root)
-                        .unwrap_or(&adapter_path)
-                        .display()
+                        .unwrap_or(&family_dir.join("src/adapter.rs"))
+                        .display(),
+                    family_dir
+                        .join("src/adapter/mod.rs")
+                        .strip_prefix(workspace_root)
+                        .unwrap_or(&family_dir.join("src/adapter/mod.rs"))
+                        .display(),
                 ),
             ));
             continue;
         }
         let packet_ids_source = std::fs::read_to_string(&packet_ids_path)
             .with_context(|| format!("read {}", packet_ids_path.display()))?;
-        let adapter_source = std::fs::read_to_string(&adapter_path)
-            .with_context(|| format!("read {}", adapter_path.display()))?;
         let play_ids = parse_play_packet_id_summary(&packet_ids_source)
             .with_context(|| format!("parse {}", packet_ids_path.display()))?;
         let depth_cap = 4;
-        let arms = classify_clientbound_dispatch(&adapter_source, depth_cap)
-            .with_context(|| format!("classify {}", adapter_path.display()))?;
+        // The delegate-follow table is built across every file in the
+        // adapter module together, since a dispatch arm in one file (e.g.
+        // v770's `adapter/mod.rs`) can delegate to a helper defined in a
+        // sibling submodule (`adapter/chat.rs`). Arms themselves are scanned
+        // per file so each keeps its own correct `file`/`line`.
+        let mut functions: BTreeMap<String, FunctionBody<'_>> = BTreeMap::new();
+        for (_, content) in &adapter_sources {
+            functions.extend(extract_functions(content)?);
+        }
+        let mut arms: BTreeMap<String, ClientboundArm> = BTreeMap::new();
+        for (rel_path, content) in &adapter_sources {
+            let file_arms = classify_clientbound_dispatch(content, &functions, rel_path, depth_cap)
+                .with_context(|| format!("classify {rel_path}"))?;
+            for (packet, arm) in file_arms {
+                if let Some(previous) = arms.insert(packet.clone(), arm) {
+                    bail!(
+                        "duplicate play clientbound dispatch arm {packet} in {rel_path} \
+                         (already seen in {})",
+                        previous.file
+                    );
+                }
+            }
+        }
+        let combined_adapter_source = adapter_sources
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         let serverbound_encoded =
-            encoded_serverbound_packets(&adapter_source, &play_ids.serverbound);
-        let rel_adapter = adapter_path
-            .strip_prefix(workspace_root)
-            .unwrap_or(&adapter_path)
-            .display()
-            .to_string();
+            encoded_serverbound_packets(&combined_adapter_source, &play_ids.serverbound);
         let serverbound_decode =
             serverbound_decode_summary(workspace_root, &family_dir, &play_ids.serverbound)?;
 
@@ -3240,7 +3271,7 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
                         None => {
                             let unknown = ConnectednessUnknown {
                                 packet: arm.packet.clone(),
-                                file: rel_adapter.clone(),
+                                file: arm.file.clone(),
                                 line: arm.line,
                                 reason: reason.clone(),
                             };
@@ -3347,11 +3378,21 @@ fn parse_packet_entries(module_body: &str, label: &str) -> Result<Vec<PlayPacket
     Ok(entries)
 }
 
+/// Scans one adapter source file's text for `if packet_id ==
+/// play::clientbound::X { .. }` dispatch arms and classifies each.
+///
+/// `functions` is the delegate-lookup table `classify_body` follows through —
+/// callers pass one built across *every* file in the family's adapter module
+/// (see [`read_adapter_sources`]), not just this file, because a dispatch arm
+/// in one submodule can delegate to a helper defined in a sibling submodule
+/// (v770's `src/adapter/mod.rs` calling into `src/adapter/chat.rs`, etc.).
+/// `file` is the relative path recorded on each arm for reporting.
 fn classify_clientbound_dispatch(
     adapter_source: &str,
+    functions: &BTreeMap<String, FunctionBody<'_>>,
+    file: &str,
     depth_cap: usize,
 ) -> Result<BTreeMap<String, ClientboundArm>> {
-    let functions = extract_functions(adapter_source)?;
     let prefix = "if packet_id == play::clientbound::";
     let mut search_from = 0;
     let mut arms = BTreeMap::new();
@@ -3371,12 +3412,13 @@ fn classify_clientbound_dispatch(
             .ok_or_else(|| anyhow!("packet arm {packet} has an unclosed body"))?;
         let body = &adapter_source[open + 1..close];
         let line = line_number(adapter_source, start);
-        let verdict = classify_body(body, &functions, depth_cap, None);
+        let verdict = classify_body(body, functions, depth_cap, None);
         if arms
             .insert(
                 packet.clone(),
                 ClientboundArm {
                     packet,
+                    file: file.to_owned(),
                     line,
                     verdict,
                 },
@@ -3388,6 +3430,66 @@ fn classify_clientbound_dispatch(
         search_from = close + 1;
     }
     Ok(arms)
+}
+
+/// Resolves a protocol family's adapter source to a list of `(path relative
+/// to workspace root, file content)` pairs, in a deterministic order.
+///
+/// Two shapes are legal Rust module layouts and both are used in this repo:
+/// a flat `src/adapter.rs`, or a `src/adapter/` directory module rooted at
+/// `mod.rs` with any number of declared submodules (v770's shape, since its
+/// dispatch code grew past one file — `chat.rs`, `chunk.rs`, `connection.rs`,
+/// `entity.rs`, `inventory.rs`, `player.rs`, `scoreboard.rs`,
+/// `serverbound.rs`). A connectedness scan that only ever looked for the flat
+/// file silently skipped every family using the directory shape; this walks
+/// whichever shape is actually on disk instead of assuming one.
+///
+/// Returns an empty `Vec` if neither shape exists, which the caller treats
+/// the same as "missing adapter" for the skip report.
+fn read_adapter_sources(family_dir: &Path, workspace_root: &Path) -> Result<Vec<(String, String)>> {
+    let flat = family_dir.join("src/adapter.rs");
+    if flat.exists() {
+        let content = std::fs::read_to_string(&flat)
+            .with_context(|| format!("read {}", flat.display()))?;
+        let rel = flat
+            .strip_prefix(workspace_root)
+            .unwrap_or(&flat)
+            .display()
+            .to_string();
+        return Ok(vec![(rel, content)]);
+    }
+    let dir = family_dir.join("src/adapter");
+    if !dir.join("mod.rs").exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    collect_rs_files(&dir, &mut paths)?;
+    paths.sort();
+    let mut sources = Vec::with_capacity(paths.len());
+    for path in paths {
+        let content =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let rel = path
+            .strip_prefix(workspace_root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        sources.push((rel, content));
+    }
+    Ok(sources)
+}
+
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read dir {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_rs_files(&path, out)?;
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -5671,13 +5773,14 @@ pub fn run_conformance(
                 "-p",
                 package.as_str(),
                 "--all-targets",
+                "--no-deps",
                 "--",
                 "-D",
                 "warnings",
             ],
         )?;
         steps.push(ConformanceStep {
-            name: format!("cargo clippy -p {package} --all-targets -- -D warnings"),
+            name: format!("cargo clippy -p {package} --all-targets --no-deps -- -D warnings"),
             outcome: ConformanceOutcome::Passed,
         });
     }
@@ -10518,7 +10621,8 @@ fn handle_play(
 }
 "#;
 
-        let arms = classify_clientbound_dispatch(adapter, 4)?;
+        let functions = extract_functions(adapter)?;
+        let arms = classify_clientbound_dispatch(adapter, &functions, "src/adapter.rs", 4)?;
         assert_eq!(
             arms.get("SYSTEM_CHAT").map(|arm| &arm.verdict),
             Some(&ClientboundVerdict::Emits {
@@ -10701,6 +10805,95 @@ fn handle_play(
         );
         assert!(report.render().contains("SKIPPED"));
         assert!(report.render().contains("v5"));
+        Ok(())
+    }
+
+    /// Positive control for the `src/adapter/` directory-module shape
+    /// (v770's actual layout, split across `mod.rs` + submodules such as
+    /// `chat.rs`). Before this was handled, `connectedness_report` only ever
+    /// looked for a flat `src/adapter.rs`, so any family shaped like this —
+    /// v770 included, once its adapter grew past one file — was silently
+    /// SKIPPED rather than scanned: the tool's own stated purpose
+    /// ("Report v770 play packet reachability") was unmet by exactly the
+    /// family it exists to check. This fixture also exercises cross-file
+    /// delegate-following: `mod.rs`'s dispatch arm calls a helper defined in
+    /// a sibling submodule, which only resolves if the functions table is
+    /// built across every file in the module rather than one at a time.
+    #[test]
+    fn connectedness_scans_a_directory_module_adapter_and_follows_cross_file_delegates()
+    -> Result<()> {
+        let workspace = fresh_test_workspace("connectedness-dir-adapter")?;
+        let root = workspace.deref();
+        let family = root.join("crates/protocol/v771");
+        std::fs::create_dir_all(family.join("src/generated"))?;
+        std::fs::write(
+            family.join("src/generated/packet_ids.rs"),
+            r#"
+pub mod play {
+    pub mod clientbound {
+        pub const SYSTEM_CHAT: i32 = 0;
+        pub static ENTRIES: &[(&str, i32)] = &[("minecraft:system_chat", SYSTEM_CHAT)];
+    }
+    pub mod serverbound {
+        pub const CHAT: i32 = 0;
+        pub static ENTRIES: &[(&str, i32)] = &[("minecraft:chat", CHAT)];
+    }
+}
+"#,
+        )?;
+        std::fs::create_dir_all(family.join("src/adapter"))?;
+        // mod.rs's dispatch arm delegates to a helper it does not itself
+        // define -- `handle_system_chat` lives in the sibling `chat.rs`.
+        std::fs::write(
+            family.join("src/adapter/mod.rs"),
+            r#"
+mod chat;
+use chat::handle_system_chat;
+
+fn handle_play(
+    &self,
+    world: &mut dyn WorldSink,
+    packet_id: i32,
+    payload: &[u8],
+) -> Result<Vec<Directive>, AdapterError> {
+    if packet_id == play::clientbound::SYSTEM_CHAT {
+        return handle_system_chat(payload);
+    }
+    Ok(Vec::new())
+}
+"#,
+        )?;
+        std::fs::write(
+            family.join("src/adapter/chat.rs"),
+            r#"
+fn handle_system_chat(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    Ok(vec![Directive::Emit(ClientEvent::Chat { text: String::new() })])
+}
+"#,
+        )?;
+
+        let report = connectedness_report(&workspace)?;
+        assert!(
+            report.skipped.is_empty(),
+            "a directory-module adapter must not be skipped: {:?}",
+            report.skipped
+        );
+        let family_report = report
+            .families
+            .iter()
+            .find(|f| f.family == "v771")
+            .expect("v771 must appear in the scanned families, not be silently dropped");
+        assert_eq!(
+            family_report.play_clientbound_emits, 1,
+            "SYSTEM_CHAT's handler lives in a sibling submodule (chat.rs); if the functions \
+             table were built per-file instead of across the whole adapter module, the \
+             delegate-follow would fail to resolve it and this would be 0"
+        );
+        assert!(
+            family_report.unclassified.is_empty(),
+            "unclassified: {:?}",
+            family_report.unclassified
+        );
         Ok(())
     }
 
