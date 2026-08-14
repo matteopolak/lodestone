@@ -1,4 +1,4 @@
-//! Issue #170 — the plugin ABI's ordering anchors, as an **enforceable** gate
+//! The plugin ABI's ordering anchors, as an **enforceable** gate
 //! rather than prose.
 //!
 //! # What this is for
@@ -41,8 +41,8 @@
 //!
 //! It is blind to:
 //!
-//! - **A sixth anchor enum in a new file.** The scanned set is the four the issue
-//!   names plus `EventPriority`, hardcoded below. A new `SystemSet` enum
+//! - **A sixth anchor enum in a new file.** The scanned set is the four
+//!   documented anchors plus `EventPriority`, hardcoded below. A new `SystemSet` enum
 //!   published from, say, `session.rs` (`SessionSet` already exists and is
 //!   deliberately *not* in scope — it is not one of the four documented anchors)
 //!   would be invisible. This is the docs-index-gate failure mode exactly: that
@@ -52,9 +52,9 @@
 //!   passes. Only a name/order change is visible.
 //! - **Whether the changelog was actually updated.** The gate makes the reviewer
 //!   look; it cannot read `docs/plugin-api.md` and judge prose.
-//! - **`#[non_exhaustive]`.** Tracked separately on issue #170; see
-//!   `docs/plugin-api.md`'s note on why its value there is narrower than the
-//!   issue's framing suggests.
+//! - **`#[non_exhaustive]`.** Tracked separately; see
+//!   `docs/plugin-api.md`'s note on why its value there is narrower than a
+//!   first read suggests.
 
 use std::path::{Path, PathBuf};
 
@@ -97,8 +97,8 @@ const EXPECTED_COUNTS: &[(&str, usize)] = &[
 /// `docs/plugin-api.md`'s ordering-anchor changelog records `0d82ab4` as adding
 /// `TickSet::Intent` "between `Input` and `Physics`" and `ExtractSet::Debug`
 /// "between `Entities` and `Hud`". The **variants** landed and the changelog
-/// entry landed; `CorePlugin`'s two `configure_sets` calls were never updated
-/// (`plugin.rs:80-84` and `plugin.rs:108`).
+/// entry landed; two of `CorePlugin::build`'s `configure_sets` calls (for
+/// `GameTick` and `Extract`) were never updated to match.
 ///
 /// The consequence is not cosmetic. A plugin writing
 /// `.in_set(TickSet::Intent)` — which is exactly what

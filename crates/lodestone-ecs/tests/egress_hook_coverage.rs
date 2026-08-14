@@ -1,6 +1,6 @@
-//! Issue #157's *limit*, as a gate rather than a paragraph.
+//! The outbound egress hook's *limit*, as a gate rather than a paragraph.
 //!
-//! `EgressFilters` hooks `ActionQueue`, which `player.rs:755` calls "the one
+//! `EgressFilters` hooks `ActionQueue`, which `lodestone_ecs::player::ActionQueue`'s own doc calls "the one
 //! sanctioned egress". For anything a **plugin** queues, it is. It is **not**
 //! the only path to the socket: several call sites reach
 //! `NetClient::send_action` / `ClientHandle::send_action` directly, deliberately,
@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 /// An earlier draft of this list had four entries, guessed from a survey of the
 /// call sites; the gate's first run reported nine. That is worth recording,
 /// because the four-entry version would have shipped a confident and wrong claim
-/// about how much of the client's egress issue #157's hook covers — the gate
+/// about how much of the client's egress this hook covers — the gate
 /// caught its own author.
 const KNOWN_DIRECT_SEND_FILES: &[&str] = &[
     // --- not bypasses ---
@@ -52,12 +52,12 @@ const KNOWN_DIRECT_SEND_FILES: &[&str] = &[
     "lodestone-shell/src/sim/tests.rs",
     //
     // --- REAL BYPASSES: a filter cannot see any of these ---
-    // Issue #109's verbs 3 and 6 — attack, interact-entity, use-item:
+    // Verbs 3 and 6 of the cancelable-action wrapper — attack, interact-entity, use-item:
     // `Sim::attack_entity`, `Sim::interact_entity`, `Sim::use_item_generic`,
     // `Sim::use_item_live`. Deliberate, to control wire ordering for discrete
     // clicks.
     "lodestone-shell/src/sim/actions.rs",
-    // Issue #109's verb 4 — container clicks: `ClientHandle::menu_click`.
+    // Verb 4 of the cancelable-action wrapper — container clicks: `ClientHandle::menu_click`.
     "lodestone-client/src/handle.rs",
     // Container-screen clicks from the app layer (two sites).
     "lodestone-shell/src/app/container_input.rs",

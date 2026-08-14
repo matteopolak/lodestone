@@ -1,5 +1,5 @@
-//! The registry-driven gate for plugin command registration (#118), argument
-//! types and tab completion (#119), and per-node permission checks (#122).
+//! The registry-driven gate for plugin command registration, argument
+//! types and tab completion, and per-node permission checks.
 //!
 //! # Why this file exists rather than more unit tests
 //!
@@ -98,7 +98,7 @@ impl Plugin for TeleportPlugin {
         });
 
         // `/warp admin set <name> <amount>` — two argument types, one of them
-        // bounded, so the gate exercises #119's parsing rather than only
+        // bounded, so the gate exercises real argument parsing rather than only
         // literals.
         let set = command.literal(admin, "set");
         let name = command.argument(set, "name", Arc::new(StringArgument::word()));
@@ -143,7 +143,7 @@ fn app() -> App {
 }
 
 // ---------------------------------------------------------------------------
-// #118 — the registry actually dispatches
+// The registry actually dispatches
 // ---------------------------------------------------------------------------
 
 /// **The island gate.** A command registered through a plugin's `Plugin::build`
@@ -198,8 +198,8 @@ fn an_alias_dispatches_to_the_canonical_command() {
     assert_eq!(app.world().resource::<TeleportLog>().calls, 1);
 }
 
-/// Arguments reach the handler with their parsed values and types intact
-/// (#119). The console is used because this path is gated on `warp.admin`.
+/// Arguments reach the handler with their parsed values and types intact.
+/// The console is used because this path is gated on `warp.admin`.
 #[test]
 fn parsed_arguments_reach_the_handler_with_their_values() {
     let mut app = app();
@@ -247,7 +247,7 @@ fn an_out_of_range_argument_fails_dispatch_without_running_the_handler() {
 }
 
 // ---------------------------------------------------------------------------
-// #122 — per-node permission gating, both halves
+// Per-node permission gating, both halves
 // ---------------------------------------------------------------------------
 
 /// **The gating pair.** The identical input is refused before the grant and
@@ -313,8 +313,8 @@ fn a_wildcard_permission_grant_opens_a_gated_command_branch() {
     assert_eq!(app.world().resource::<TeleportLog>().calls, 1);
 }
 
-/// An op reaches a node declared `Op`, which is the op-level half of #127
-/// arriving through the command gate rather than through a direct
+/// An op reaches a node declared `Op`, which is the op-level half of
+/// permission gating arriving through the command gate rather than through a direct
 /// `Permissions::has` call.
 #[test]
 fn an_op_reaches_a_node_declared_op_through_the_command_gate() {
@@ -341,7 +341,7 @@ fn an_op_reaches_a_node_declared_op_through_the_command_gate() {
 }
 
 // ---------------------------------------------------------------------------
-// #122 — the suggestion half, which is silent where dispatch is loud
+// The suggestion half of permission gating, which is silent where dispatch is loud
 // ---------------------------------------------------------------------------
 
 /// A gated branch is **absent** from tab completion, and appears once granted.
@@ -527,7 +527,7 @@ fn suggest_on_a_bare_world_is_empty_rather_than_a_panic() {
 }
 
 // ---------------------------------------------------------------------------
-// #119 — live suggestions, driven through the real system
+// Live suggestions, driven through the real system
 // ---------------------------------------------------------------------------
 
 /// The player-name argument's suggestions come from the tab list, through the

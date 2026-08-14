@@ -1,4 +1,4 @@
-//! Issue #109's coverage, as a gate rather than a table in a doc comment.
+//! The cancelable-action wrapper's coverage, as a gate rather than a table in a doc comment.
 //!
 //! `CLAUDE.md`'s island rule: a mechanism nothing calls is a defect report, not
 //! a status update, and "individually built, individually tested, reaches zero
@@ -49,7 +49,7 @@ const WIRED: &[(&str, &str)] = &[
 ///
 /// - `InventoryClick` commits in `lodestone_client::handle::ClientHandle::menu_click`
 ///   → `SharedState::menu_click`, which builds the action while **holding a
-///   write guard** on the `World` (`state.rs:1048`). Asking there means reading
+///   write guard** on the `World`. Asking there means reading
 ///   the registry inside that guard, which is legal but wants its own care, and
 ///   the app-layer callers (`app/container_input.rs`) have no `World` access at
 ///   all.
