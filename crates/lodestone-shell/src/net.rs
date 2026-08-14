@@ -3015,8 +3015,15 @@ async fn open_lan_world(
         // same gotcha `open_persistent_with_mobs`' call site carries.
         Some(dir) => {
             let (min_y, height) = (source.min_y(), source.height());
+            // Singleplayer publish-to-LAN only ever opens the overworld's own
+            // region store — `source` here is an `OverworldChunkSource`, never
+            // the Nether or the End.
             let region = lodestone_server::region_source::RegionChunkSource::new(
-                source, dir, min_y, height,
+                source,
+                dir,
+                lodestone_server::dimension::Dimension::Overworld,
+                min_y,
+                height,
             )
             .map_err(|e| format!("cannot open {} for saving: {e}", dir.display()))?;
             let save = region.save_handle();
