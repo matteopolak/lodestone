@@ -453,27 +453,44 @@ impl V47Adapter {
             // is exactly why the confirmation lives in the version crate.
             //
             // The join teleport vanilla sends is absolute (flags = 0), so
-            // echoing the received coordinates confirms it exactly. Relative
-            // components would need the player's current position, which a pure
-            // adapter does not own — resolving those belongs to the physics
-            // layer, which re-sends its resolved position via
-            // `ClientAction::Move`.
-            let confirm = ServerboundPositionLook {
-                x: body.x,
-                y: body.y,
-                z: body.z,
-                yaw: body.yaw,
-                pitch: body.pitch,
-                on_ground: false,
-            };
-            return Ok(vec![
-                send(play::serverbound::POSITION_LOOK, &confirm)?,
-                Directive::Emit(ClientEvent::TeleportPlayer {
-                    pos: Vec3::new(body.x, body.y, body.z),
-                    rotation: Rotation::new(body.yaw, body.pitch),
-                    flags,
-                }),
-            ]);
+            // echoing the received coordinates confirms it exactly — that case
+            // sends the confirmation immediately, below.
+            //
+            // A **relative** component cannot be echoed this way: `body.x/y/z`
+            // are deltas in that case, not absolute coordinates, and a pure
+            // adapter does not own the player's current position needed to
+            // resolve them. Echoing the raw delta back as if it were absolute
+            // sends the server a bogus position, which it never recognises as
+            // matching the pending teleport — the server keeps holding movement,
+            // and every following packet re-triggers the same mismatch. That is
+            // exactly the "couldn't move at all, kept getting rubber-banded"
+            // failure shape. So a relative-flagged packet sends **no** immediate
+            // echo here; the physics layer resolves `ClientEvent::TeleportPlayer`
+            // (relative components against its own current position, same as
+            // every other family) into an absolute pose, and the very next
+            // `ClientAction::Move` this adapter encodes — which lowers to this
+            // same `POSITION_LOOK` packet id — carries that resolved absolute
+            // position. It arrives one tick later, but it is correct, and a
+            // wrong-but-immediate echo is worse than a correct-but-one-tick-late
+            // one.
+            let mut directives = Vec::with_capacity(2);
+            if body.flags == 0 {
+                let confirm = ServerboundPositionLook {
+                    x: body.x,
+                    y: body.y,
+                    z: body.z,
+                    yaw: body.yaw,
+                    pitch: body.pitch,
+                    on_ground: false,
+                };
+                directives.push(send(play::serverbound::POSITION_LOOK, &confirm)?);
+            }
+            directives.push(Directive::Emit(ClientEvent::TeleportPlayer {
+                pos: Vec3::new(body.x, body.y, body.z),
+                rotation: Rotation::new(body.yaw, body.pitch),
+                flags,
+            }));
+            return Ok(directives);
         }
         if packet_id == play::clientbound::SPAWN_ENTITY_LIVING {
             // Reuse the existing derived mob-spawn decoder (varint id, u8 type,
