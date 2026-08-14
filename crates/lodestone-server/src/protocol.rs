@@ -458,6 +458,23 @@ pub enum ServerBound {
     /// configuration-phase directives, mirroring
     /// `ServerboundLoginAcknowledgedPacket`.
     LoginAcknowledged,
+    /// The client's answer to a [`ServerDirective`]-carried encryption
+    /// request (issue #273): the RSA-encrypted shared secret and the
+    /// RSA-encrypted echo of the server's verify token, mirroring
+    /// `ServerboundKeyPacket`. Both fields are still ciphertext here — this
+    /// variant is produced by [`ServerProtocol::decode`] with no crypto of
+    /// its own, exactly like every other lift in this enum; the connection
+    /// loop is what owns a private key and can do anything with these bytes.
+    /// Only reachable in [`State::Login`], after the loop itself sent an
+    /// encryption request — see `crate::server`'s handling for the ordering
+    /// this depends on (the request and this response travel in the clear;
+    /// everything after this must not).
+    EncryptionResponse {
+        /// RSA-encrypted (PKCS#1 v1.5) 16-byte AES shared secret.
+        shared_secret: Vec<u8>,
+        /// RSA-encrypted echo of the verify token the server sent.
+        verify_token: Vec<u8>,
+    },
     /// The client acknowledged the end of configuration. This is the
     /// server-side signal to move the connection into [`State::Play`] and
     /// begin the join sequence, mirroring
@@ -1094,6 +1111,18 @@ pub enum ServerDirective {
     SetState(State),
     /// Enable or reconfigure zlib compression (negative disables).
     SetCompression(i32),
+    /// Enable the AES-128-CFB8 stream cipher on this connection using the
+    /// given 16-byte shared secret (issue #273), mirroring
+    /// `Connection::enable_encryption` on the client side of the same
+    /// handshake. **Ordering is load-bearing, the same hazard
+    /// `SetCompression` documents for itself**: the connection layer applies
+    /// directives strictly in order and reads the codec's encryption state at
+    /// the moment it writes, so this must be applied *after* any cleartext
+    /// send it follows and *before* anything meant to travel encrypted — in
+    /// practice, always immediately after nothing (there is nothing to send
+    /// in reply to `EncryptionResponse` itself; the very next directive is
+    /// whatever finishes login).
+    EnableEncryption(Vec<u8>),
     /// No side effect — the scalar analog of returning an empty directive list.
     /// Used by the default entity encoders so a protocol without entity support
     /// emits nothing rather than a bogus packet; the connection layer skips it.
@@ -1195,6 +1224,28 @@ pub trait ServerProtocol: Send + Sync {
     /// acknowledgement (lifted to [`ServerBound::LoginAcknowledged`]) is what
     /// drives the transition to [`State::Configuration`].
     fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective>;
+
+    /// Emits the online-mode encryption request (issue #273), mirroring
+    /// `ClientboundHelloPacket`: an empty server-id string, the DER-encoded
+    /// RSA public key, the verify-token challenge, and a fixed
+    /// `should_authenticate = true` (vanilla only ever constructs this packet
+    /// with `true` — there is no wire concept of "encrypt without also
+    /// verifying with the session server").
+    ///
+    /// Pure encode, no crypto and no I/O: the caller generates the keypair and
+    /// verify token and owns decrypting whatever `EncryptionResponse` comes
+    /// back. The default returns [`ServerDirective::None`], which the
+    /// connection loop reads as "this protocol has no online-mode wire
+    /// support" and falls back to an offline login rather than sending a
+    /// request no decoder on the other end would recognise.
+    fn encode_encryption_request(
+        &self,
+        public_key_der: &[u8],
+        verify_token: &[u8],
+    ) -> ServerDirective {
+        let _ = (public_key_der, verify_token);
+        ServerDirective::None
+    }
 
     /// Emits the directives sent once the connection has moved into
     /// [`State::Configuration`] (in reply to
@@ -2485,6 +2536,14 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective> {
         (**self).login_success(username, uuid)
+    }
+
+    fn encode_encryption_request(
+        &self,
+        public_key_der: &[u8],
+        verify_token: &[u8],
+    ) -> ServerDirective {
+        (**self).encode_encryption_request(public_key_der, verify_token)
     }
 
     fn begin_configuration(&self) -> Vec<ServerDirective> {

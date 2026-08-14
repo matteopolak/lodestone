@@ -124,7 +124,10 @@ use crate::packets::game::{
     UseItemOn,
 };
 use crate::packets::handshake::Intention;
-use crate::packets::login::{LoginCompression, LoginDisconnect, LoginFinished, LoginHello};
+use crate::packets::login::{
+    EncryptionRequest, EncryptionResponse, LoginCompression, LoginDisconnect, LoginFinished,
+    LoginHello,
+};
 
 /// The `sea_level` field both the join `login` packet and the post-death
 /// `respawn` packet carry.
@@ -2872,6 +2875,19 @@ impl ServerProtocol for V770ServerProtocol {
             State::Login if packet_id == login::serverbound::LOGIN_ACKNOWLEDGED => {
                 ServerBound::LoginAcknowledged
             }
+            // Issue #273: the client's answer to an online-mode
+            // `EncryptionRequest`. Pure lift, no crypto — both fields are
+            // still RSA ciphertext; `crate::server`'s connection loop owns
+            // decrypting them.
+            State::Login if packet_id == login::serverbound::KEY => {
+                match decode_full::<EncryptionResponse>(payload) {
+                    Some(key) => ServerBound::EncryptionResponse {
+                        shared_secret: key.shared_secret,
+                        verify_token: key.verify_token,
+                    },
+                    None => ServerBound::Ignored,
+                }
+            }
             State::Configuration
                 if packet_id == configuration::serverbound::FINISH_CONFIGURATION =>
             {
@@ -3732,6 +3748,28 @@ impl ServerProtocol for V770ServerProtocol {
             //   issue's own text already flags.
             _ => ServerBound::Ignored,
         }
+    }
+
+    // Issue #273: mirrors vanilla's own
+    // `this.connection.send(new ClientboundHelloPacket("", pubKey, challenge, true))`
+    // (`ServerLoginPacketListenerImpl.handleHello`) exactly — empty server-id,
+    // the caller's keypair/token, and `should_authenticate` fixed `true`
+    // (vanilla never constructs this packet with `false`; encryption without
+    // session-server verification is not a real wire state).
+    fn encode_encryption_request(
+        &self,
+        public_key_der: &[u8],
+        verify_token: &[u8],
+    ) -> ServerDirective {
+        send(
+            login::clientbound::HELLO,
+            &EncryptionRequest {
+                server_id: String::new(),
+                public_key: public_key_der.to_vec(),
+                challenge: verify_token.to_vec(),
+                should_authenticate: true,
+            },
+        )
     }
 
     fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective> {

@@ -89,19 +89,11 @@ enabled for every `V770ServerProtocol` login.
   `net.minecraft.server.network.ServerLoginPacketListenerImpl`,
   `net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket`.
 
-## Still open (issue #273's larger half)
+## Encryption and online-mode
 
-Encryption and online-mode are **not** implemented by this change and remain
-entirely out of scope here:
-
-- No `EncryptionRequest`/`hello` is ever sent; `login_success` still hardcodes
-  the informational `online_mode: false` field in `encode_game_login_rest`.
-- No RSA keypair, no AES-128-CFB8 handshake, no verify-token check.
-- No session-server ownership check (`POST
-  sessionserver.mojang.com/session/minecraft/hasJoined` or equivalent) — this
-  server cannot yet refuse a client presenting someone else's premium
-  username.
-
-`docs/accounts.md` documents the **client**-side mirror of this (already
-verified end to end against a real vanilla server), which is the reference
-implementation to port in reverse when someone picks this up.
+Issue #273's larger half — the RSA/AES-128-CFB8 handshake and the
+session-server ownership check — is implemented; see
+[`docs/server-online-mode.md`](./server-online-mode.md) for the sequence,
+what's tested, and the one thing still missing (a real dedicated/LAN host
+does not yet call the online-mode entry point — that wiring lives in
+`crate::integrated`, outside this change's ownership split).
