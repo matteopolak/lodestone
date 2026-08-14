@@ -359,6 +359,31 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
 pub struct ScheduledTickHandle {
     queues: Arc<Mutex<ScheduledTickQueues>>,
     game_tick: Arc<AtomicU64>,
+    /// Ticks read off a chunk that has not been merged into `queues` yet. See
+    /// [`ScheduledTickHandle::stage`] — this exists so a chunk load can hand
+    /// its ticks over **without taking `queues`**, because the thread doing
+    /// the load is very often the tick thread, already inside [`Self::with`].
+    staged: Arc<Mutex<Vec<StagedTick>>>,
+}
+
+/// One tick handed to [`ScheduledTickHandle::stage`] by a chunk load, waiting
+/// for the next [`ScheduledTickHandle::with`] to merge it into the live queues.
+///
+/// Carries an **absolute** `trigger_tick`, already rebased by the loader, so
+/// merging is a plain `schedule` call with no clock reading — the staging delay
+/// therefore cannot shift when a restored tick fires.
+#[derive(Debug, Clone)]
+pub struct StagedTick {
+    /// Block position, as `ScheduledTick::pos`.
+    pub pos: (i32, i32, i32),
+    /// The tick kind, as `ScheduledTick::kind`.
+    pub kind: String,
+    /// Absolute trigger tick, already rebased onto the loading session's clock.
+    pub trigger_tick: u64,
+    /// As `ScheduledTick::priority`.
+    pub priority: TickPriority,
+    /// `true` for `ServerLevel.fluidTicks`, `false` for `blockTicks`.
+    pub fluid: bool,
 }
 
 /// The pair of queues [`ScheduledTickHandle`] guards, mirroring
@@ -390,9 +415,62 @@ impl ScheduledTickHandle {
     ///
     /// Same shape as [`crate::BlockEntityHandle::with`], and a poisoned lock is
     /// a bug rather than a recoverable condition, for the same reason.
+    ///
+    /// **Merges [`stage`](Self::stage)d ticks first**, so nothing can observe
+    /// the queues in a state where a loaded chunk's ticks are staged but not
+    /// scheduled: every read of the queues in the crate goes through here.
     pub fn with<R>(&self, f: impl FnOnce(&mut ScheduledTickQueues) -> R) -> R {
         let mut guard = self.queues.lock().expect("scheduled tick lock poisoned");
+        // Lock order is always `queues` then `staged`, never the reverse —
+        // `stage` takes `staged` alone. Inverting it here would reintroduce a
+        // deadlock of a different shape.
+        let staged: Vec<StagedTick> = {
+            let mut pending = self.staged.lock().expect("staged tick lock poisoned");
+            if pending.is_empty() {
+                Vec::new()
+            } else {
+                std::mem::take(&mut *pending)
+            }
+        };
+        for tick in staged {
+            let queue = if tick.fluid {
+                &mut guard.fluid
+            } else {
+                &mut guard.block
+            };
+            queue.schedule(tick.pos, tick.kind, tick.trigger_tick, tick.priority);
+        }
         f(&mut guard)
+    }
+
+    /// Hands `ticks` over to the queues **without locking them**, returning how
+    /// many were staged. They become visible at the next [`Self::with`].
+    ///
+    /// # Why a chunk load may not simply take the lock
+    ///
+    /// `tick::run_tick_loop` holds the queues for its entire scheduled-tick and
+    /// random-tick section, and that section calls `world.column`,
+    /// `world.block_state` and `world.set_block`. On a persistent world any of
+    /// those can reach `region_source::RegionChunkSource::load`, which restores
+    /// the loaded chunk's saved ticks — so the tick thread would re-enter its
+    /// own [`Self::with`] and a `std::sync::Mutex` is not reentrant. That is a
+    /// **self**-deadlock: deterministic, total, and reached the moment the world
+    /// tick first touches a column that exists on disk. A world with no region
+    /// files never reaches it, which is why only *saved* worlds hung.
+    ///
+    /// Deferring rather than `try_lock`-ing is deliberate: a `try_lock` fast
+    /// path would make the merge point depend on lock contention, so the same
+    /// world would restore its ticks at a different moment from run to run.
+    pub fn stage(&self, ticks: Vec<StagedTick>) -> u64 {
+        if ticks.is_empty() {
+            return 0;
+        }
+        let count = ticks.len() as u64;
+        self.staged
+            .lock()
+            .expect("staged tick lock poisoned")
+            .extend(ticks);
+        count
     }
 
     /// Records the tick the queues' `trigger_tick`s are relative to.

@@ -592,38 +592,51 @@ impl ScheduledTickHandle {
         })
     }
 
-    /// Schedules a loaded chunk's saved ticks, rebasing each delay onto the
-    /// current game tick. Returns how many were actually scheduled.
+    /// Hands a loaded chunk's saved ticks to the queues, rebasing each delay
+    /// onto the current game tick. Returns how many were handed over.
     ///
     /// A delay so negative that `game_tick + delay` would go below zero
     /// saturates to `0`, i.e. "due immediately" — which is what an overdue tick
     /// means, and the only reading that cannot panic or wrap. `schedule`'s own
     /// `(pos, kind)` dedup then silently drops anything already pending, which
     /// is what makes reloading a chunk idempotent.
+    ///
+    /// The dedup now happens at *merge* time rather than here (see
+    /// [`ScheduledTickHandle::stage`]), so the returned count is "read off disk
+    /// and handed over", not "newly present in the queue". The two differ only
+    /// when the same `(pos, kind)` is already pending, which reloading a chunk
+    /// still absorbs — it just is not subtracted from this counter.
     fn restore(&self, block: &[chunk_nbt::SavedTick], fluid: &[chunk_nbt::SavedTick]) -> u64 {
         if block.is_empty() && fluid.is_empty() {
             return 0;
         }
         let now = i64::try_from(self.game_tick()).unwrap_or(i64::MAX);
-        self.with(|queues| {
-            let mut count = 0u64;
-            for (saved, is_block) in block
-                .iter()
-                .map(|t| (t, true))
-                .chain(fluid.iter().map(|t| (t, false)))
-            {
-                let trigger = (now + i64::from(saved.delay)).max(0) as u64;
-                let target = if is_block {
-                    &mut queues.block
-                } else {
-                    &mut queues.fluid
-                };
-                if target.schedule(saved.pos, saved.kind.clone(), trigger, saved.priority) {
-                    count += 1;
-                }
-            }
-            count
-        })
+        // **Staged, not scheduled directly**, and this is load-bearing rather
+        // than an optimisation. The caller is `RegionChunkSource::load`, which
+        // the tick thread reaches through `world.column`/`block_state`/
+        // `set_block` from *inside* `tick::run_tick_loop`'s own
+        // `ScheduledTickHandle::with` region — so taking the queue lock here is
+        // a self-deadlock on a non-reentrant `std::sync::Mutex`. It fired the
+        // first time a world tick touched a column that exists on disk, which
+        // is why a freshly generated world was fine and every *saved* world
+        // wedged mid-join with no error. See `ScheduledTickHandle::stage`.
+        //
+        // The rebase onto `now` still happens here, because this is the half
+        // that knows the delays are relative; `stage` carries absolute trigger
+        // ticks, so the deferral cannot move when a restored tick fires.
+        let staged: Vec<crate::scheduled_tick::StagedTick> = block
+            .iter()
+            .map(|t| (t, false))
+            .chain(fluid.iter().map(|t| (t, true)))
+            .map(|(saved, is_fluid)| crate::scheduled_tick::StagedTick {
+                pos: saved.pos,
+                kind: saved.kind.clone(),
+                trigger_tick: (now + i64::from(saved.delay)).max(0) as u64,
+                priority: saved.priority,
+                fluid: is_fluid,
+            })
+            .collect();
+        self.stage(staged)
     }
 }
 
