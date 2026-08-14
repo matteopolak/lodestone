@@ -192,12 +192,26 @@ pub fn build(
     // `Panorama` answers `false` here and takes `BG`: that quad is the
     // no-panorama fallback, and when the panorama really draws the renderer
     // skips these vertices altogether (see `MenuGeometry::backdrop_floats`).
-    let backdrop = if frame.backdrop.is_translucent() {
-        OVERLAY_BG
+    // `DeathGradient` is the one variant `is_translucent()` cannot fully
+    // decide from — it is translucent, but its quad carries two colours, not
+    // one, so it takes its own branch rather than a third flat constant.
+    if frame.backdrop == MenuBackdrop::DeathGradient {
+        b.rect_vgradient(
+            0.0,
+            0.0,
+            width,
+            height,
+            DEATH_GRADIENT_TOP,
+            DEATH_GRADIENT_BOTTOM,
+        );
     } else {
-        BG
-    };
-    b.rect(0.0, 0.0, width, height, backdrop);
+        let backdrop = if frame.backdrop.is_translucent() {
+            OVERLAY_BG
+        } else {
+            BG
+        };
+        b.rect(0.0, 0.0, width, height, backdrop);
+    }
     let backdrop_floats = b.verts.len();
 
     if frame.logo {
@@ -571,7 +585,12 @@ pub fn build(
                     let hovered = frame
                         .cursor
                         .is_some_and(|(mx, my)| mx >= x && mx <= x + w && my >= y && my <= y + h);
-                    draw_tab(&mut b, row, tab, x, y, w, h, hovered);
+                    // Whether this bar's selected tab should merge with a
+                    // content panel below it — only when this screen actually
+                    // has one (`chrome`, computed above from `frame.list`).
+                    // See `draw_tab`'s own doc for why this is a bool and not
+                    // the rect itself.
+                    draw_tab(&mut b, row, tab, x, y, w, h, width, chrome.is_some(), hovered);
                 }
                 continue;
             }
@@ -689,8 +708,22 @@ pub fn build(
     // footer bar dark-over-light — mirror images in the jar, and the mirroring is the
     // point: each bevel faces the content.
     if let Some((cx, cy, cw, ch)) = chrome {
-        b.rect(cx, cy - SEPARATOR_H, cw, 1.0, SEPARATOR_LIGHT);
-        b.rect(cx, cy - 1.0, cw, 1.0, SEPARATOR_DARK);
+        // The **header** bar is suppressed when a tab bar owns this boundary
+        // instead (issue #567's visual audit — a full-width bar here used to
+        // run underneath the *entire* tab row, including the selected tab,
+        // which is exactly what vanilla's own `MenuTabBar` does not do:
+        // `MenuTabBar.extractWidgetRenderState` blits `Screen.HEADER_SEPARATOR`
+        // only in the two margins **outside** the tab strip — see `draw_tab`'s
+        // own margin-separator arm — never under any tab, selected or not.
+        // Drawing both here made every tab, not just the selected one, read as
+        // "just another button in an undifferentiated row" rather than
+        // vanilla's slim strip with the current tab's own art doing the work.
+        // The **footer** bar is unaffected: nothing about a tab bar changes
+        // where the content-vs-footer boundary belongs.
+        if !frame.rows.iter().any(|r| r.tab.is_some()) {
+            b.rect(cx, cy - SEPARATOR_H, cw, 1.0, SEPARATOR_LIGHT);
+            b.rect(cx, cy - 1.0, cw, 1.0, SEPARATOR_DARK);
+        }
         b.rect(cx, cy + ch, cw, 1.0, SEPARATOR_DARK);
         b.rect(cx, cy + ch + 1.0, cw, 1.0, SEPARATOR_LIGHT);
     }
@@ -1691,17 +1724,43 @@ fn draw_widget(
 /// Draws one [`MenuRow::tab`] entry — vanilla's `MenuTabButton.
 /// extractWidgetRenderState` (`MenuTabBar.java`): a `widget/tab*`
 /// background keyed by `(selected, hoveredOrFocused)` (see [`widget::
-/// TAB_SPRITES`]'s own doc for why that is the right axis, not `active`), a
-/// label centred horizontally and dropped 3 px while unselected, and — only
-/// while selected — a 1 px underline under the label, tinted white while the
-/// tab is clickable and vanilla's grey while it is present-and-inactive.
+/// TAB_SPRITES`]'s own doc for why that is the right axis, not `active`),
+/// then — only while selected — the inset panel merge and the underline,
+/// then the label (vanilla's own order: `blitSprite`, then
+/// `if (isSelected()) { renderMenuBackground(); renderFocusUnderline(); }`,
+/// then `renderLabel()` unconditionally last — so the underline sits
+/// *beneath* the label z-order-wise, not drawn over it).
 ///
-/// **Not ported**: vanilla's `renderMenuBackground` (`MenuTabBar.java,
-/// 140-142`), an inset panel drawn behind a *selected* tab's label so it
-/// visually merges with the content panel below. Every tab this client draws
-/// selected sits directly above the `ListSpec` band's own chrome tint, which
-/// already reads as one surface without a second overlapping panel — see
-/// `stats.rs`'s module docs for what is and is not built on this screen.
+/// ## "Meshes with the border, and changes when selected" (issue #567)
+///
+/// Two vanilla behaviours this now ports, neither of which is a size choice —
+/// `MenuTabBar.HEIGHT`/`tab_bar_geometry` were already vanilla's own
+/// constants, so the visual gap was never the tab bar's *dimensions*:
+///
+/// - **The panel merge.** `MenuTabButton.renderMenuBackground` fills
+///   `(x+2, y+2)..(right-2, bottom)` — inset 2 px on the left/top only, flush
+///   with the bottom and right — with the same surface the content panel
+///   below is drawn on, so the selected tab's own bottom edge disappears into
+///   it. This client has no tiled `menu_background.png`-equivalent texture
+///   (`draw`'s own separator comment: these are loose `textures/gui/` PNGs
+///   outside the sprite atlas), so the merge fill reuses `LIST_BAND_TINT` —
+///   the *same* flat colour the content band immediately below a tab bar is
+///   already tinted with (see `merges_with_band`'s own doc), which is what
+///   makes the two literally the same fill rather than two colours that
+///   happen to look similar.
+/// - **The flanking separators, and *only* there.** `MenuTabBar.
+///   extractWidgetRenderState` blits `Screen.HEADER_SEPARATOR` in exactly two
+///   places — before the first tab and after the last — never under any tab,
+///   selected or not; the visual difference between tabs is carried entirely
+///   by their own sprite, not by a divider. Drawn once per bar (on
+///   `tab.index == 0` and `tab.index == tab.count - 1` respectively) rather
+///   than needing a third call site, and only here: `draw`'s own generic
+///   `ListSpec` chrome now suppresses its **header** separator whenever the
+///   frame has a tab bar at all, because that one used to run full-width
+///   under the entire strip — under the selected tab too, which is exactly
+///   what vanilla does not do, and is why every tab used to read as "just
+///   another button in a row" instead of one slim navigational strip with a
+///   merged current tab.
 fn draw_tab(
     b: &mut Quads<'_>,
     row: &MenuRow,
@@ -1710,6 +1769,14 @@ fn draw_tab(
     y: f32,
     w: f32,
     h: f32,
+    canvas_width: f32,
+    // Whether a content panel sits directly below this bar (i.e. this
+    // screen's `frame.list` produced band chrome) — Statistics does,
+    // Create New World does not (it has no scrolling band at all). Only the
+    // merge fill is gated on this; the flanking separators are this bar's
+    // own concern regardless, since they bound the tab row itself, not the
+    // panel beneath it.
+    merges_with_band: bool,
     hovered: bool,
 ) {
     let sprite = widget::TAB_SPRITES.get(tab.selected, hovered);
@@ -1722,10 +1789,27 @@ fn draw_tab(
         b.rect(x, y, w, h, fill);
     }
 
+    if tab.selected {
+        if merges_with_band {
+            b.rect(x + 2.0, y + 2.0, (w - 4.0).max(0.0), (h - 2.0).max(0.0), LIST_BAND_TINT);
+        }
+        let underline_w = b.text_width(&row.label, 1.0).min(w - widget::TAB_UNDERLINE_SIDE_MARGIN);
+        let ux = (x + (w - underline_w) * 0.5).floor();
+        let uy = y + h - widget::TAB_UNDERLINE_MARGIN_BOTTOM;
+        b.rect(
+            ux,
+            uy,
+            underline_w,
+            widget::TAB_UNDERLINE_H,
+            widget::tab_underline_colour(row.enabled),
+        );
+    }
+
     // `renderLabel`: centred in `[x + 1, x + w - 1]`, top dropped 3 px unless
     // selected (`widget::tab_label_dy`). Colour follows `active` — vanilla's
     // `WithInactiveMessage`, the same rule `Widget::message_colour` already
-    // applies everywhere else.
+    // applies everywhere else. Drawn last, matching vanilla's own order (see
+    // this function's own doc) — over the merge fill and the underline.
     let colour = if row.enabled {
         widget::ACTIVE_LABEL
     } else {
@@ -1737,17 +1821,17 @@ fn draw_tab(
     let ty = y + widget::tab_label_dy(tab.selected);
     b.text(&row.label, tx, ty, 1.0, colour);
 
-    if tab.selected {
-        let underline_w = tw.min(w - widget::TAB_UNDERLINE_SIDE_MARGIN);
-        let ux = (x + (w - underline_w) * 0.5).floor();
-        let uy = y + h - widget::TAB_UNDERLINE_MARGIN_BOTTOM;
-        b.rect(
-            ux,
-            uy,
-            underline_w,
-            widget::TAB_UNDERLINE_H,
-            widget::tab_underline_colour(row.enabled),
-        );
+    // The two flanking separators — `Screen.HEADER_SEPARATOR`, only in the
+    // margins outside the tab strip. See this function's own doc.
+    let sep_y = y + h - SEPARATOR_H;
+    if tab.index == 0 && x > 0.0 {
+        b.rect(0.0, sep_y, x, 1.0, SEPARATOR_LIGHT);
+        b.rect(0.0, sep_y + 1.0, x, 1.0, SEPARATOR_DARK);
+    }
+    if tab.index + 1 == tab.count && x + w < canvas_width {
+        let right_w = canvas_width - (x + w);
+        b.rect(x + w, sep_y, right_w, 1.0, SEPARATOR_LIGHT);
+        b.rect(x + w, sep_y + 1.0, right_w, 1.0, SEPARATOR_DARK);
     }
 }
 
@@ -2199,6 +2283,36 @@ impl Quads<'_> {
         v(x0, y0);
         v(x1, y1);
         v(x0, y1);
+    }
+
+    /// Like [`Self::rect`], but the top edge is `top` and the bottom edge is
+    /// `bottom`, interpolated per-vertex — the death screen's own
+    /// `fillGradient` (`DeathScreen.extractDeathBackground`), which a single
+    /// flat [`Self::rect`] call cannot reproduce. No clip-time colour
+    /// interpolation is needed: [`Self::clipped_rect`] only ever crops this
+    /// quad's edges to the whole canvas (the death screen draws it at
+    /// `(0, 0, width, height)` with no active clip), so cropping never moves a
+    /// vertex off the `y`/`y+h` edges the two colours are pinned to.
+    fn rect_vgradient(&mut self, x: f32, y: f32, w: f32, h: f32, top: [f32; 4], bottom: [f32; 4]) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let Some((x, y, w, h)) = self.clipped_rect(x, y, w, h) else {
+            return;
+        };
+        let to_ndc = |px: f32, py: f32| (2.0 * px / self.w - 1.0, 1.0 - 2.0 * py / self.h);
+        let (x0, y0) = to_ndc(x, y);
+        let (x1, y1) = to_ndc(x + w, y + h);
+        let mut v = |vx: f32, vy: f32, c: [f32; 4]| {
+            self.verts
+                .extend_from_slice(&[vx, vy, c[0], c[1], c[2], c[3]]);
+        };
+        v(x0, y0, top);
+        v(x1, y0, top);
+        v(x1, y1, bottom);
+        v(x0, y0, top);
+        v(x1, y1, bottom);
+        v(x0, y1, bottom);
     }
 
     /// Four thin rects forming a border just inside `(x, y, w, h)`.

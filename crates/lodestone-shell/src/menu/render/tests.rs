@@ -3163,8 +3163,9 @@ fn death_frame_builds_vanillas_two_widgets_in_order_and_tracks_the_highlight() {
     let f = death_frame(&nav, ui.death_message());
     assert_eq!(
         f.backdrop,
-        MenuBackdrop::Dim,
-        "the death screen must dim the live world it is drawn over"
+        MenuBackdrop::DeathGradient,
+        "the death screen must draw vanilla's own red gradient over the live world, \
+         not the flat Dim wash the pause screen uses"
     );
     assert!(f.vanilla, "and be laid out from vanilla's arithmetic");
     assert_eq!(f.rows.len(), 2, "vanilla's death screen has two widgets");
@@ -3195,6 +3196,74 @@ fn death_frame_builds_vanillas_two_widgets_in_order_and_tracks_the_highlight() {
     assert_eq!(no_message.labels.len(), 2);
     assert_eq!(no_message.labels[0].text, "You Died!");
     assert_eq!(no_message.labels[1].text, "Score: 0");
+}
+
+/// The discriminating gate for #574: vanilla's `DeathScreen.extractDeathBackground`
+/// draws a vertical gradient, not a flat wash, so the colour at the top and the
+/// bottom of the backdrop quad must differ — a gate sampling one point (or the
+/// vertex-*coverage* helpers elsewhere in this file, which count vertices
+/// *inside* a probe rect and so read a full-screen quad as zero coverage) would
+/// pass under the pre-fix flat `Dim` fill. This reads the quad's own two edge
+/// vertices straight out of the geometry instead.
+#[test]
+fn death_screen_backdrop_is_a_red_gradient_not_a_flat_dim() {
+    let mut nav = test_nav("death-gradient");
+    let mut ui = UiState::new();
+    ui.enter_dev_world();
+    ui.die(Some("was slain by a Skeleton".to_string()));
+    nav.hover(&ui, 0);
+
+    let f = death_frame(&nav, ui.death_message());
+    assert_eq!(f.backdrop, MenuBackdrop::DeathGradient);
+    let geo = build(&f, None, None, 480.0, 320.0);
+
+    // The backdrop is the very first quad `build` emits (see
+    // `MenuGeometry::backdrop_floats`): six vertices in
+    // `(top, top, bottom, top, bottom, bottom)` order — see
+    // `Quads::rect_vgradient`. Vertex 0 sits on the top edge (`y == 0`),
+    // vertex 2 on the bottom edge (`y == height`) — two different heights, not
+    // one sample point.
+    let vertex_colour = |i: usize| -> [f32; 4] {
+        let base = i * STRIDE;
+        [
+            geo.colour[base + 2],
+            geo.colour[base + 3],
+            geo.colour[base + 4],
+            geo.colour[base + 5],
+        ]
+    };
+    let top = vertex_colour(0);
+    let bottom = vertex_colour(2);
+
+    assert_eq!(
+        top, DEATH_GRADIENT_TOP,
+        "the top edge must be vanilla's decoded top colour (ARGB 96,80,0,0 from \
+         `fillGradient`'s first int, 1615855616), got {top:?}"
+    );
+    assert_eq!(
+        bottom, DEATH_GRADIENT_BOTTOM,
+        "the bottom edge must be vanilla's decoded bottom colour (ARGB \
+         160,128,48,48 from `fillGradient`'s second int, -1602211792), got {bottom:?}"
+    );
+    assert_ne!(
+        top, bottom,
+        "a flat fill (the pre-fix Dim backdrop) makes every vertex the same \
+         colour — exactly the regression this gate exists to catch"
+    );
+    // Both channels a real vertical gradient must move, not just alpha —
+    // guards against a fix that only varies alpha and leaves the colour grey.
+    assert!(
+        bottom[3] > top[3] + 0.1,
+        "alpha must rise noticeably toward the bottom: top {} bottom {}",
+        top[3],
+        bottom[3]
+    );
+    assert!(
+        bottom[0] > top[0] + 0.1,
+        "red must rise noticeably toward the bottom: top {} bottom {}",
+        top[0],
+        bottom[0]
+    );
 }
 
 #[test]
@@ -7140,7 +7209,7 @@ fn the_loading_screen_asks_for_the_panorama_and_the_in_world_screens_do_not() {
     if pause_frame(&nav).backdrop != MenuBackdrop::Dim {
         wrong.push(format!("pause_frame: {:?}", pause_frame(&nav).backdrop));
     }
-    if death_frame(&nav, None).backdrop != MenuBackdrop::Dim {
+    if death_frame(&nav, None).backdrop != MenuBackdrop::DeathGradient {
         wrong.push(format!("death_frame: {:?}", death_frame(&nav, None).backdrop));
     }
 

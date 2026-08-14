@@ -204,13 +204,17 @@ Respawn returns the new `MenuAction::Respawn`; `Enter` on Title Screen calls
   "The disconnect reason goes through the language table" section) but
   deliberately left this one alone — that fix's sweep for other pre-stringified
   `Text` found this exact gap and confirmed it is still open, not a new find.
-- **No gradient backdrop.** Vanilla's `DeathScreen.extractBackground` is a
-  reddish `fillGradient` (`DeathScreen.extractDeathBackground`); this screen draws with
-  `render::OVERLAY_BG`, the same flat 25%-black dim `Screen::Paused` uses,
-  because `menu/render.rs`'s `Quads::rect` takes one flat colour with no
-  per-vertex gradient. Reproducing the gradient means extending that
-  primitive for one screen; left for polish, same spirit as the title
-  screen's missing panorama (`docs/main-menu.md`).
+- **The gradient backdrop is real, not the flat dim.** Vanilla's
+  `DeathScreen.extractBackground` draws a reddish `fillGradient`
+  (`DeathScreen.extractDeathBackground`), and this screen now matches it:
+  `render::MenuBackdrop::DeathGradient` (distinct from the flat
+  `MenuBackdrop::Dim` `Screen::Paused` uses) drives
+  `menu::render::draw::Quads::rect_vgradient`, a per-vertex-colour quad
+  variant of the ordinary flat `Quads::rect`. The two ARGB endpoints are
+  decoded straight from `DeathScreen.extractDeathBackground`'s
+  `fillGradient(0, 0, width, height, 1615855616, -1602211792)` call — top
+  alpha 96/255 red 80/255, bottom alpha 160/255 red/green/blue
+  128/48/48 — not eyeballed.
 - **No 20-tick button-disable delay.** Vanilla's `DeathScreen.tick`
   disables both buttons for the first 20 ticks after the screen opens
   (`delayTicker`), so a stray Enter carried over from whatever the player was

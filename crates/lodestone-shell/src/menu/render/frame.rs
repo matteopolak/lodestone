@@ -300,29 +300,45 @@ pub struct PackEntryView {
     pub can_unselect: bool,
 }
 
-/// One Statistics tab-bar row's state (issue #564).
+/// One tab-bar row's state — the shared tab widget's own view type (issue
+/// #564), now with two consumers: Statistics's `TAB_LABELS` and Create New
+/// World's own (#567). Both build one of these per tab rather than reaching
+/// for a bespoke row type each, which is the whole point of building the
+/// widget once — see [`super::layout::tab_bar_row_rect`], the one geometry
+/// function [`super::render::row_rect`]'s `MenuRow::tab` arm resolves every
+/// tab from, regardless of which screen it belongs to.
 ///
 /// `label` and `enabled` are already [`MenuRow`] fields (the caption and
 /// vanilla's `active`), so this carries only what has nowhere else to live —
 /// [`WorldEntryView`]'s reason for its own two fields.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TabEntryView {
-    /// This tab's position in `stats::TAB_LABELS` — **not** its position in
-    /// [`MenuFrame::rows`], which also carries the Done button and so is one
-    /// higher for every tab. What [`super::stats::tab_row_rect`] places from,
-    /// the same split [`WorldEntryView::index`]/[`ServerEntryView`] already
-    /// make between "row position in the frame" and "position in the screen's
-    /// own list".
+    /// This tab's position in the screen's own tab-label list — **not** its
+    /// position in [`MenuFrame::rows`], which also carries the screen's other
+    /// rows (a Done button, form fields, a footer) and so is offset from this
+    /// by however many of those precede the tab bar. The same split
+    /// [`WorldEntryView::index`]/[`ServerEntryView`] already make between
+    /// "row position in the frame" and "position in the screen's own list".
     pub index: usize,
+    /// How many tabs this screen's bar has — [`super::layout::tab_bar_geometry`]'s
+    /// `tab_count`, carried on the row itself rather than read back off a
+    /// screen-specific constant, which is what lets [`super::render::row_rect`]
+    /// resolve a tab's rect without knowing which screen it came from. Every
+    /// tab row from the same bar carries the same value; a screen with three
+    /// tabs stamps `3` onto all three of its `TabEntryView`s.
+    pub count: usize,
     /// Whether this is the tab currently showing — `TabManager.getCurrentTab()
     /// == this.tab` (`TabButton.isSelected`, `TabButton.java`).
     ///
     /// A different question from [`MenuFrame::selected`], which on every other
-    /// screen carries the **keyboard-focused** row: this screen's tab bar has
-    /// no per-tab keyboard focus of its own yet (see `stats.rs`'s module docs
-    /// on what is and is not wired), so `selected` here is driven by which tab
-    /// is showing, the same split [`WorldEntryView::selected`] already argues
-    /// for on the save list.
+    /// screen carries the **keyboard-focused** row: Statistics's tab bar has no
+    /// per-tab keyboard focus of its own yet (see `stats.rs`'s module docs on
+    /// what is and is not wired), so `selected` here is driven by which tab is
+    /// showing, the same split [`WorldEntryView::selected`] already argues for
+    /// on the save list. Create New World's tab bar is fully clickable (its
+    /// three tabs all have real content, unlike Statistics's Items/Mobs), but
+    /// still carries no keyboard tab-order of its own — see `create_world.rs`'s
+    /// module doc on that scope cut.
     pub selected: bool,
 }
 
@@ -592,6 +608,17 @@ pub enum MenuBackdrop {
     /// world. Suppresses the panorama, which would cover the world it exists to
     /// leave visible.
     Dim,
+    /// [`Self::Dim`]'s vertical-gradient sibling, for the death screen alone.
+    /// Vanilla does not reuse `Screen`'s flat `extractTransparentBackground` for
+    /// `DeathScreen`: `extractDeathBackground` calls `fillGradient` with two
+    /// distinct ARGB endpoints (`DeathScreen.java`), so the screen reads as
+    /// "you died" rather than as a plain pause. Same translucent-over-world
+    /// contract as [`Self::Dim`] — it never wants the panorama either — the only
+    /// difference is the quad carries two colours instead of one; see
+    /// [`super::draw::Quads::rect_vgradient`] and
+    /// [`super::DEATH_GRADIENT_TOP`]/[`super::DEATH_GRADIENT_BOTTOM`] for the
+    /// decoded constants.
+    DeathGradient,
 }
 
 impl MenuBackdrop {
@@ -605,10 +632,14 @@ impl MenuBackdrop {
     /// Whether the full-screen colour quad should be translucent rather than
     /// opaque. [`Self::Panorama`] answers `false`: its quad is the no-panorama
     /// fallback and must be opaque, and when the panorama *is* up the quad is
-    /// skipped and this answer is never used.
+    /// skipped and this answer is never used. [`Self::DeathGradient`] answers
+    /// `true` for the same reason [`Self::Dim`] does — both endpoints of its
+    /// gradient carry alpha well short of 1.0 so the world stays visible
+    /// through it — even though [`super::draw::build`] takes a different branch
+    /// to emit it (a gradient, not this flat-colour choice).
     #[must_use]
     pub const fn is_translucent(self) -> bool {
-        matches!(self, Self::Dim)
+        matches!(self, Self::Dim | Self::DeathGradient)
     }
 }
 

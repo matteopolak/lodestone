@@ -111,12 +111,14 @@ const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 ///   button, rather than omitting the line and drawing a screen vanilla would
 ///   not recognise the shape of.
 ///
-/// The backdrop is [`OVERLAY_BG`] — the same flat dim [`pause_frame`] draws
-/// — rather than vanilla's own reddish `fillGradient`
-/// (`DeathScreen.java`): this pipeline's [`Quads::rect`] takes one
-/// flat colour with no per-vertex gradient, and reproducing the gradient
-/// would mean extending it for one screen. Left for polish, like the
-/// panorama/splash-text gaps `docs/main-menu.md` names for the title screen.
+/// The backdrop is [`MenuBackdrop::DeathGradient`], not the flat
+/// [`MenuBackdrop::Dim`] [`pause_frame`] draws: vanilla's own
+/// `DeathScreen.extractDeathBackground` calls `fillGradient` with two
+/// distinct ARGB endpoints, not `Screen`'s flat
+/// `extractTransparentBackground`, so the screen reads noticeably redder
+/// toward the bottom. See [`super::DEATH_GRADIENT_TOP`]/
+/// [`super::DEATH_GRADIENT_BOTTOM`] for the decoded constants and
+/// [`Quads::rect_vgradient`] for the per-vertex quad that draws them.
 #[must_use]
 pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFrame<'static> {
     use super::nav::DEATH_BUTTONS;
@@ -176,7 +178,7 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
             .collect(),
         selected: nav.death_index(),
         gui_scale: nav.gui_scale(),
-        backdrop: MenuBackdrop::Dim,
+        backdrop: MenuBackdrop::DeathGradient,
         vanilla: true,
         labels,
         ..Default::default()
