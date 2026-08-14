@@ -103,7 +103,9 @@ const CONFIRM_TIMEOUT_TICKS: usize = 300;
 #[derive(Clone, Copy, Debug)]
 struct TickSample {
     tick: usize,
+    x: f64,
     y: f64,
+    z: f64,
     on_ground: bool,
     dead: bool,
     /// Whether the player's own chunk column is loaded in the client's world
@@ -124,6 +126,13 @@ struct Outcome {
     /// else happens — an outside-of-the-respawn-path measurement of "real
     /// ground here", independent of the mechanism under test.
     join_settled_y: f64,
+    /// X/Z alongside `join_settled_y`, so a y discrepancy against the
+    /// respawn-settled position can be told apart from "different cell
+    /// entirely" (independent searches landing on different, both-valid
+    /// standable ground) versus "same cell, different height" (a real
+    /// mapping defect).
+    join_settled_x: f64,
+    join_settled_z: f64,
     /// Whether the spawn column was confirmed to have left the client's
     /// loaded set before the kill — the setup precondition. `false` here
     /// means the race was never forced and the trace proves nothing about
@@ -144,6 +153,11 @@ struct Outcome {
     /// Index into `samples` of the tick the respawn was confirmed
     /// (`is_dead() == false && respawn_count` increased).
     confirmed_at_tick: Option<usize>,
+    /// Index into `samples` of the tick the respawn *position* actually
+    /// landed — `confirmed_at_tick` plus however many ticks
+    /// `NetUpdate::Teleport` lagged `NetUpdate::Respawned` by. `respawn_teleport_y`
+    /// is read at this tick, not at `confirmed_at_tick`.
+    teleport_landed_tick: Option<usize>,
 }
 
 #[test]
@@ -293,18 +307,38 @@ fn respawn_far_from_the_loaded_area_lands_on_real_ground_not_inside_it() {
     );
     // Independent cross-check against the pre-death measurement: the world
     // spawn ground the player originally settled on before ever dying, read
-    // through the *join* path rather than the respawn path. A no-bed respawn
-    // returns to the same world spawn coordinates, so these two should agree
-    // regardless of which path measured them.
+    // through the *join* path rather than the respawn path. Both searches
+    // are handed the same RCON `setworldspawn` coordinate, but each is free
+    // to resolve to a different nearby standable cell — so this is only a
+    // real finding when the two land on essentially the *same* x/z and still
+    // disagree on y. A large x/z difference means "two independently valid
+    // cells", not a defect, and is reported rather than failed on.
+    let xz_dist = ((final_sample.x - live.join_settled_x).powi(2)
+        + (final_sample.z - live.join_settled_z).powi(2))
+    .sqrt();
     let vs_join = (final_sample.y - live.join_settled_y).abs();
-    assert!(
-        vs_join < 3.0,
-        "the respawn-settled y ({:.2}) disagrees with the join-settled y measured at the same \
-         world spawn before the player ever died ({:.2}) by {:.2} blocks — the respawn path \
-         is resolving a different ground than the join path did.",
-        final_sample.y,
+    eprintln!(
+        "[join vs respawn] join=({:.2}, {:.2}, {:.2}) respawn=({:.2}, {:.2}, {:.2}) \
+         xz_dist={xz_dist:.2} y_diff={vs_join:.2}",
+        live.join_settled_x,
         live.join_settled_y,
-        vs_join,
+        live.join_settled_z,
+        final_sample.x,
+        final_sample.y,
+        final_sample.z,
+    );
+    assert!(
+        xz_dist > 3.0 || vs_join < 3.0,
+        "the respawn-settled position ({:.2}, {:.2}, {:.2}) is within {xz_dist:.2} blocks (x/z) \
+         of the join-settled position ({:.2}, {:.2}, {:.2}) measured at the same world spawn \
+         before the player ever died, but the two disagree on y by {vs_join:.2} blocks — same \
+         ground, two different resolved heights.",
+        final_sample.x,
+        final_sample.y,
+        final_sample.z,
+        live.join_settled_x,
+        live.join_settled_y,
+        live.join_settled_z,
     );
 }
 
@@ -352,7 +386,9 @@ fn run_repro(rcon: &mut RconClient, collide_live: bool) -> Outcome {
         let _ = sim.drain_removals();
         std::thread::sleep(Duration::from_millis(20));
     }
-    let join_settled_y = sim.player().position.y;
+    let join_settled = sim.player().position;
+    let (join_settled_x, join_settled_y, join_settled_z) =
+        (join_settled.x, join_settled.y, join_settled.z);
 
     // Phase 2: teleport far away over RCON and drive ticks until the spawn
     // column has actually left the client's loaded set — the precondition
@@ -414,6 +450,18 @@ fn run_repro(rcon: &mut RconClient, collide_live: bool) -> Outcome {
     // wait*, so the very race this gate exists to observe happened entirely
     // inside the blind spot between "respawn requested" and "respawn
     // confirmed". Logging every tick of that window is the fix.
+    // Captured *before* the call: `NetUpdate::Respawned` (which flips
+    // `is_dead()` and bumps `respawn_count`) and the position-carrying
+    // `NetUpdate::Teleport` are two separate `NetUpdate`s and are **not**
+    // guaranteed to land in the same tick's `poll_net` batch — measured on
+    // the first run of this gate, where `is_dead()` went false a full tick
+    // before `player.position` moved off the death location. So
+    // "confirmed" (the death-screen signal) and "the server's respawn
+    // position actually landed" are tracked as two separate ticks below;
+    // conflating them is what produced a nonsense 100.00 "respawn y" the
+    // first time this ran (the far-away death altitude, not the real
+    // spawn).
+    let pre_respawn_y = sim.player().position.y;
     let respawns_before = sim.respawn_count();
     sim.respawn();
 
@@ -421,6 +469,7 @@ fn run_repro(rcon: &mut RconClient, collide_live: bool) -> Outcome {
     let mut first_loaded_tick = None;
     let mut respawn_teleport_y = None;
     let mut confirmed_at_tick = None;
+    let mut teleport_landed_tick = None;
     for tick in 0..(CONFIRM_TIMEOUT_TICKS + TRACE_TICKS) {
         sim.step(1.0 / 20.0);
         let _ = sim.drain_meshes();
@@ -452,47 +501,74 @@ fn run_repro(rcon: &mut RconClient, collide_live: bool) -> Outcome {
         }
         if confirmed_at_tick.is_none() && !dead && sim.respawn_count() > respawns_before {
             confirmed_at_tick = Some(tick);
+        }
+        // The server's respawn *position* landing: confirmed, and the
+        // position has actually moved off wherever we died (a real respawn
+        // in this gate's setup always relocates by tens of blocks, so a
+        // half-block threshold cannot mistake ordinary settle jitter for it).
+        if teleport_landed_tick.is_none()
+            && confirmed_at_tick.is_some()
+            && (player.position.y - pre_respawn_y).abs() > 0.5
+        {
+            teleport_landed_tick = Some(tick);
             respawn_teleport_y = Some(player.position.y);
         }
         samples.push(TickSample {
             tick,
+            x: player.position.x,
             y: player.position.y,
+            z: player.position.z,
             on_ground: player.on_ground,
             dead,
             chunk_loaded,
             block_at_feet,
             block_below_feet,
         });
-        // Once confirmed, keep tracing for TRACE_TICKS more and then stop —
-        // no reason to run the full budget if respawn took only a few ticks.
-        if let Some(confirmed) = confirmed_at_tick
-            && tick >= confirmed + TRACE_TICKS
+        // Once the respawn position has actually landed, keep tracing for
+        // TRACE_TICKS more and then stop — no reason to run the full budget
+        // if respawn took only a few ticks.
+        if let Some(landed) = teleport_landed_tick
+            && tick >= landed + TRACE_TICKS
         {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    // Dump the raw per-tick trace unconditionally, *before* the confirmation
-    // check can panic — a run that never confirms is exactly the run whose
+    // Dump the raw per-tick trace unconditionally, *before* either check
+    // below can panic — a run that never confirms is exactly the run whose
     // log matters most, and a panic before this point would have thrown the
     // whole trace away with it.
     dump_samples(&format!("[{username}] collide_live={collide_live}"), &samples);
-    let respawn_teleport_y = respawn_teleport_y.unwrap_or_else(|| {
+    if confirmed_at_tick.is_none() {
         panic!(
             "'{username}' respawn was never confirmed within {} ticks of calling \
              Sim::respawn() (respawn_count still {}). Full trace was logged above.",
             CONFIRM_TIMEOUT_TICKS,
             sim.respawn_count()
+        );
+    }
+    let respawn_teleport_y = respawn_teleport_y.unwrap_or_else(|| {
+        panic!(
+            "'{username}' respawn was confirmed at tick {:?} (dead cleared, respawn_count \
+             incremented) but the position never moved more than 0.5 blocks off the \
+             pre-respawn y ({pre_respawn_y:.2}) within {} ticks. Either the destination \
+             coincided with the death y (should not happen at this gate's far-teleport \
+             setup), or the placement teleport never arrived. Full trace was logged above.",
+            confirmed_at_tick,
+            CONFIRM_TIMEOUT_TICKS,
         )
     });
 
     Outcome {
+        join_settled_x,
         join_settled_y,
+        join_settled_z,
         spawn_column_unloaded_before_kill,
         respawn_teleport_y,
         samples,
         first_loaded_tick,
         confirmed_at_tick,
+        teleport_landed_tick,
     }
 }
 
@@ -503,12 +579,13 @@ fn print_trace(label: &str, outcome: &Outcome) {
     eprintln!(
         "\n=== [{label}] join_settled_y={:.2}, spawn_unloaded_before_kill={}, \
          respawn_teleport_y={:.2}, first_loaded_tick={:?}, confirmed_at_tick={:?}, \
-         samples={} ===",
+         teleport_landed_tick={:?}, samples={} ===",
         outcome.join_settled_y,
         outcome.spawn_column_unloaded_before_kill,
         outcome.respawn_teleport_y,
         outcome.first_loaded_tick,
         outcome.confirmed_at_tick,
+        outcome.teleport_landed_tick,
         outcome.samples.len(),
     );
 }
@@ -517,9 +594,17 @@ fn dump_samples(label: &str, samples: &[TickSample]) {
     eprintln!("\n--- per-tick trace: {label} ({} ticks) ---", samples.len());
     for s in samples {
         eprintln!(
-            "  tick={:3} y={:8.3} on_ground={:5} dead={:5} chunk_loaded={:5} \
+            "  tick={:3} x={:8.3} y={:8.3} z={:8.3} on_ground={:5} dead={:5} chunk_loaded={:5} \
              feet={:?} below={:?}",
-            s.tick, s.y, s.on_ground, s.dead, s.chunk_loaded, s.block_at_feet, s.block_below_feet,
+            s.tick,
+            s.x,
+            s.y,
+            s.z,
+            s.on_ground,
+            s.dead,
+            s.chunk_loaded,
+            s.block_at_feet,
+            s.block_below_feet,
         );
     }
 }
