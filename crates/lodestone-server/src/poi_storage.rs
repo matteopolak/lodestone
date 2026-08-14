@@ -111,21 +111,22 @@
 //!
 //! # What is *not* in scope, on purpose
 //!
-//! Nothing here populates a POI from a block scan (`PoiManager.checkConsistencyWithBlocks`),
-//! and nothing here calls [`PoiStorage::load_chunk`]/[`PoiStorage::save`] from
-//! world open or autosave — that wiring lives where
-//! [`crate::entity_storage::EntityStorage`]'s does, in `crate::integrated`,
-//! which this change does not touch. What *is* real: [`crate::portal`] already
-//! carries an in-memory stand-in for vanilla's POI manager
-//! ([`crate::portal::PortalIndex`]) whose own doc names "not persisted" as
-//! "the one real gap" — a portal lit in an earlier session is invisible after
-//! a restart. [`crate::portal::poi_records_for_index`] and
-//! [`crate::portal::restore_index_from_poi`] are the two conversion functions
-//! that make that index's cells and this module's [`PoiRecord`]s the same
-//! data, proven by `poi_persistence_round_trip.rs`'s
-//! `a_portal_index_round_trips_through_the_poi_store` gate. Calling them at
-//! world open/shutdown is the remaining wire, and it is a two-line follow-up
-//! once `crate::integrated` is available to edit.
+//! Nothing here populates a POI from a block scan
+//! (`PoiManager.checkConsistencyWithBlocks`) — nothing in this codebase
+//! re-derives POI from placed blocks yet, so [`PoiSection::valid`] is carried
+//! through rather than acted on. What *is* wired: [`crate::integrated`] now
+//! calls [`Self::load_all`] at world open (one store per dimension, restoring
+//! [`crate::portal::PortalIndex`] before the first connection is served) and
+//! [`Self::save`] on the same autosave interval and shutdown path
+//! `crate::entity_storage`'s own wiring uses — see that module's own doc for
+//! why "a two-line follow-up" undersold it: two dimensions need two stores,
+//! and a portal's position is unbounded, so the restore reads the whole store
+//! ([`Self::load_all`]) rather than one guessed range. [`crate::portal::poi_records_for_index`],
+//! [`crate::portal::restore_index_from_poi`] and
+//! [`crate::portal::poi_chunks_for_index`] are the three conversions, proven
+//! by `poi_persistence_round_trip.rs`'s
+//! `a_portal_index_round_trips_through_the_poi_store` gate and by
+//! `tests/portal_persistence_restart.rs`'s restart gate.
 //!
 //! # Dependencies
 //!
@@ -559,6 +560,88 @@ impl PoiStorage {
         PoiChunk::from_nbt(&nbt).map_err(Error::Anvil)
     }
 
+    /// The `(rx, rz)` of every `r.<rx>.<rz>.mca` already in the directory —
+    /// mirrors [`crate::entity_storage::EntityStorage`]'s own private helper of
+    /// the same name and shape.
+    fn existing_regions(&self) -> Result<Vec<(i32, i32)>, Error> {
+        let entries = match std::fs::read_dir(self.dir.as_path()) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(Error::Io {
+                    path: self.dir.as_path().to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(rest) = name.strip_prefix("r.") else {
+                continue;
+            };
+            let Some(rest) = rest.strip_suffix(".mca") else {
+                continue;
+            };
+            let mut parts = rest.split('.');
+            let (Some(rx), Some(rz), None) = (parts.next(), parts.next(), parts.next()) else {
+                continue;
+            };
+            if let (Ok(rx), Ok(rz)) = (rx.parse(), rz.parse()) {
+                out.push((rx, rz));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every section on disk, across every region file, regardless of chunk
+    /// coordinate.
+    ///
+    /// Unlike [`Self::load_area`], this takes no range: a portal may be lit
+    /// anywhere the player has walked, and [`crate::portal::PortalIndex`]'s own
+    /// doc names exactly the failure of guessing a radius instead — the first
+    /// return trip after a restart falls back to a small local scan and,
+    /// beyond it, builds a duplicate. Restoring the *whole* store at world open
+    /// (see `crate::integrated`) is what closes that gap rather than narrowing
+    /// it. Affordable because the record count is small — the oracle world's
+    /// own overworld set is 210 records across 124 chunks, nothing like the
+    /// scale `region_source`'s terrain reads.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] on a filesystem failure, or [`Error::Anvil`] if a region
+    /// file exists and will not parse, including an unreadable `DataVersion`.
+    pub fn load_all(&self) -> Result<Vec<PoiSection>, Error> {
+        let mut out = Vec::new();
+        for (rx, rz) in self.existing_regions()? {
+            let path = self.region_path(rx, rz);
+            let bytes = std::fs::read(&path).map_err(|source| Error::Io {
+                path: path.clone(),
+                source,
+            })?;
+            let region = RegionFile::parse(&bytes).map_err(Error::Anvil)?;
+            for local_z in 0..32u8 {
+                for local_x in 0..32u8 {
+                    let cx = rx * 32 + i32::from(local_x);
+                    let cz = rz * 32 + i32::from(local_z);
+                    let Some(raw) = region
+                        .read_chunk_nbt_bytes_resolving_external(local_x, local_z, cx, cz, &self.dir)
+                        .map_err(Error::Anvil)?
+                    else {
+                        continue;
+                    };
+                    let mut reader = Reader::new(&raw);
+                    let (_, nbt) = read_named_nbt(&mut reader)
+                        .map_err(|e| Error::Anvil(lodestone_anvil::Error::Nbt(e)))?;
+                    let chunk = PoiChunk::from_nbt(&nbt).map_err(Error::Anvil)?;
+                    out.extend(chunk.sections.into_values());
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Every populated chunk in the inclusive ranges `cx_range` × `cz_range`,
     /// keyed by chunk coordinate. A chunk with no saved POI is simply absent
     /// from the map (rather than present with an empty [`PoiChunk`]), so the
@@ -961,6 +1044,67 @@ mod tests {
             PoiChunk::from_nbt(&Nbt::Compound(fields)),
             Err(lodestone_anvil::Error::UnsupportedDataVersion { .. })
         ));
+    }
+
+    /// The property [`PoiStorage::load_all`] exists for: it must find records
+    /// **regardless of which region file they landed in**, not just the one a
+    /// caller happened to guess. Two chunks placed far enough apart to land in
+    /// different `.mca` region files (each region spans 32 chunks, so a gap
+    /// past 32 chunks guarantees a different region), so a version that only
+    /// scanned one region would silently miss the second.
+    #[test]
+    fn load_all_finds_records_across_multiple_region_files() {
+        let dir = tempdir("load-all");
+        let storage = PoiStorage::new(&dir, Dimension::Overworld).expect("create");
+
+        let mut near = PoiSection::new();
+        near.add(BlockPos::new(5, 70, 5), home_type());
+        let mut far = PoiSection::new();
+        far.add(BlockPos::new(4001, 71, -19), portal_type());
+
+        let mut near_chunk = PoiChunk::default();
+        near_chunk.sections.insert(4, near);
+        let mut far_chunk = PoiChunk::default();
+        far_chunk.sections.insert(4, far);
+
+        let mut to_save = HashMap::new();
+        // (0, 0) and (250, -1): region (0,0) vs region (7,-1) — genuinely
+        // different `.mca` files.
+        to_save.insert((0, 0), near_chunk);
+        to_save.insert((250, -1), far_chunk);
+        let written = storage.save(&to_save).expect("save");
+        assert_eq!(written, 2);
+
+        let all = storage.load_all().expect("load_all");
+        let total_records: usize = all.iter().map(|s| s.records.len()).sum();
+        assert_eq!(
+            total_records, 2,
+            "load_all must see records from every region file, not just one"
+        );
+        let types: Vec<&str> = {
+            let mut v: Vec<&str> = all
+                .iter()
+                .flat_map(|s| s.records.iter())
+                .map(|r| r.poi_type.path())
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(types, vec!["home", "nether_portal"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory that does not exist yet (a dimension never written to) is
+    /// an empty result, not an error — matching [`PoiStorage::load_chunk`]'s
+    /// own not-found handling.
+    #[test]
+    fn load_all_on_an_empty_store_is_empty_not_an_error() {
+        let dir = tempdir("load-all-empty");
+        let storage = PoiStorage::new(&dir, Dimension::Nether).expect("create");
+        let all = storage.load_all().expect("load_all on an empty store");
+        assert!(all.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

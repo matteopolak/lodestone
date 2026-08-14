@@ -17,7 +17,8 @@ comment in `portal.rs` noting that vanilla indexes nether portals through
 |---|---|---|
 | container | `crates/lodestone-anvil/src/region.rs` | the same generic region-file reader/writer `entity_storage.rs` and terrain use — a third *instance*, not new container code |
 | POI schema | `crates/lodestone-server/src/poi_storage.rs` | `PoiRecord`, `PoiSection`, `PoiChunk`, `PoiStorage`, `Occupancy` |
-| the one real consumer | `crates/lodestone-server/src/portal.rs` | `poi_records_for_index` / `restore_index_from_poi`, converting `PortalIndex` (vanilla's `PoiManager` stand-in for nether-portal lookup) to and from this module's records |
+| the one real consumer | `crates/lodestone-server/src/portal.rs` | `poi_records_for_index` / `restore_index_from_poi` / `poi_chunks_for_index`, converting `PortalIndex` (vanilla's `PoiManager` stand-in for nether-portal lookup) to and from this module's records |
+| the wiring | `crates/lodestone-server/src/integrated.rs` | `IntegratedServer::open_persistent_with_mobs` restores at open, its autosave task and `shutdown` write back |
 | version gate | `crates/lodestone-anvil/src/lib.rs` | `require_supported_data_version`, same as every other region set |
 
 ## How it works
@@ -86,22 +87,59 @@ therefore takes the caller's **complete** state for every chunk it names, and
 leaves every chunk it does not name untouched on disk. Simpler by
 construction, not by omission.
 
-### The one real consumer today, and the one wire still missing
+### The one real consumer, and how it is wired in
 
-`crate::portal::PortalIndex` already exists as an **in-memory** stand-in for
-`PoiManager`'s nether-portal lookup — its own doc names "not persisted" as
-"the one real gap": a portal lit in an earlier session vanishes from a fresh
-index, so the first return trip after a restart falls back to a bounded local
-scan and, beyond that scan's 16-block radius, builds a duplicate portal beside
-the original.
+`crate::portal::PortalIndex` is an **in-memory** stand-in for `PoiManager`'s
+nether-portal lookup. Before this wire landed, its own doc named "not
+persisted" as "the one real gap": a portal lit in an earlier session vanished
+from a fresh index, so the first return trip after a restart fell back to a
+bounded local scan and, beyond that scan's 8-block radius, built a duplicate
+portal beside the original.
 
-`poi_records_for_index` / `restore_index_from_poi` (both in `portal.rs`)
-convert a `PortalIndex`'s cells to and from this module's `PoiRecord`s, and
-`tests/poi_persistence_round_trip.rs` proves the conversion survives a real
-save/load through `PoiStorage` — not an in-memory shortcut. What is **not**
-wired yet is calling those two functions from world open and shutdown, which
-lives beside `entity_storage.rs`'s own wiring, in `IntegratedServer`'s
-constructor and autosave task. That is a two-line follow-up, not a redesign.
+`poi_records_for_index` / `restore_index_from_poi` / `poi_chunks_for_index`
+(all in `portal.rs`) convert a `PortalIndex`'s cells to and from this module's
+`PoiRecord`s. `tests/poi_persistence_round_trip.rs` proves the conversion
+survives a real save/load through `PoiStorage`; `tests/portal_persistence_restart.rs`
+proves the whole chain through the production entry point: light a portal in
+each dimension, shut down, reopen, and a distant return trip reuses each one
+rather than building a duplicate — with a control confirming that *without*
+the restore, the identical trip does build one.
+
+**This was estimated as "a two-line follow-up, not a redesign"; it measured
+at closer to 150 lines across three files, plus a pre-existing bug it exposed
+in passing.** Three things the estimate missed:
+
+- **Two dimensions means two `PoiStorage`s and one restore loop, not one call.**
+  `open_persistent_with_mobs` opens a `PoiStorage` per `Dimension::ALL` entry,
+  keeping them in a `HashMap<Dimension, PoiStorage>` field on `IntegratedServer`
+  rather than two named fields — the same reasoning `PoiStorage::new` already
+  gives for deriving its subdirectory from `Dimension::key`.
+- **A restore needs the *whole* store, not a range.** `entity_storage`'s own
+  restore is bounded to `mob_area` because a mob wanders back into view; a
+  portal does not, and can be built anywhere the player has walked. Restoring
+  only a range around spawn would silently reproduce the exact bug this
+  change closes for any portal built elsewhere. `PoiStorage::load_all` (new)
+  scans every region file in the directory instead — affordable because the
+  record count is tiny (210 in the oracle world's overworld set).
+- **The index has to exist *before* `with_nether` builds the `ChunkStore`
+  stack, not be spliced in after.** `with_nether` used to build its own empty
+  `PortalIndex` internally; it now takes one as a parameter, which meant
+  threading a `portals: PortalIndex` argument through `with_nether`'s three
+  call sites and through the private `open_in_memory_with_mobs_using`
+  (mirroring how `entities_on_disk` already reaches that function), plus a
+  new `IntegratedServer::portals()` accessor mirroring `mobs()`/`world_state()`.
+
+**The wiring also surfaced a real, if quiet, `wasm32` compile break already on
+`main`**: `poi_records_for_index`/`restore_index_from_poi` reference
+`crate::poi_storage::PoiRecord`/`PoiSection` unconditionally, but
+`crate::portal` (unlike `crate::poi_storage`) is not gated to native — it is
+also linked into the browser build, where portals work but `poi_storage`
+(a `std::fs` module) does not exist at all. `cargo check --target
+wasm32-unknown-unknown` failed with `E0433: cannot find poi_storage in
+crate` before this change added `#[cfg(not(target_arch = "wasm32"))]` to all
+three conversion functions; nothing in `just check`/`just health` builds for
+that target, so this was invisible until `just wasm-check` (or the raw
+`cargo check` invocation) ran.
 
 Nothing else in this codebase produces or consumes a POI record yet: no
 villager professions, no tracked bee nests, no registered bed respawn points.
@@ -134,7 +172,27 @@ scope note issue #303 always carried for this half.
   through rather than acted on.
 - **Two dimensions.** Forgetting to open a second `PoiStorage` for the Nether
   (a single overworld-only store, copy-pasted from `entity_storage.rs`'s
-  pattern) silently drops every Nether-side portal POI.
+  pattern) silently drops every Nether-side portal POI. `crate::integrated`
+  loops `Dimension::ALL` for exactly this reason — adding a third dimension
+  there someday needs no new field or call site, only a new `Dimension`
+  variant.
+- **`poi_chunks_for_index` uses `insert_record`, not `add`.** Every cell it
+  groups came from a live index or a previous reload, never a block "just
+  discovered", so its `free_tickets` (always `0` for a portal) must be kept
+  rather than reset to the type's full count. Using `add` here would compile
+  and round-trip cleanly and only go wrong the day this index ever tracks a
+  claimable POI type.
+- **`PoiStorage::load_all` is the restore path, not `load_area`.** A portal
+  may be anywhere the player has walked, so a range guessed around spawn or
+  around the loaded mob area is exactly the bug this whole change exists to
+  close, reproduced one level up. `load_all` scans every `r.*.*.mca` in the
+  directory instead — see that method's own doc for the cost argument.
+- **The autosave and shutdown writes go through the same `PortalIndex`
+  handle the connections read, not a snapshot taken at world open.** A save
+  that captured cells once at open and never again would silently stop
+  tracking every portal lit *during* the session — the field on
+  `IntegratedServer` is a live handle (an `Arc<Mutex<..>>` inside
+  `PortalIndex`), cloned, never copied.
 
 ## Configuration
 
@@ -146,7 +204,11 @@ None of its own. `PoiStorage::new` takes the world directory and a
 `lodestone-anvil::region` (the shared region-file container), `lodestone-core`
 (NBT), `lodestone-model` (`BlockPos`, `ResourceKey`), `std::fs`. Native only —
 gated `#[cfg(not(target_arch = "wasm32"))]` in `lib.rs`, same as
-`entity_storage`.
+`entity_storage`. `crate::integrated::IntegratedServer` is the one caller
+(`open_persistent_with_mobs`, its autosave task and `shutdown`); the three
+conversion functions it goes through (`crate::portal::poi_records_for_index`
+et al.) are gated the same way even though `crate::portal` itself is not,
+since portals also run in the browser build.
 
 ## Evidence
 
@@ -158,4 +220,6 @@ gated `#[cfg(not(target_arch = "wasm32"))]` in `lib.rs`, same as
 | a POI chunk round-trips through the real save path, and an unnamed chunk survives a save that does not mention it | `poi_storage.rs`'s own unit tests |
 | an occupied POI is excluded from an availability query, with a control proving the exclusion is the occupancy filter's doing | `poi_storage.rs`, `an_occupied_poi_is_excluded_from_a_has_space_query` |
 | `PortalIndex` round-trips through `PoiStorage` across both dimensions with no cross-contamination | `tests/poi_persistence_round_trip.rs` |
+| `poi_chunks_for_index` and `restore_index_from_poi` round-trip through a real store together, across chunk and section boundaries | `portal.rs`, `poi_chunks_for_index_round_trips_through_a_real_poi_store` |
 | an older `DataVersion` is refused | `poi_storage.rs`'s own unit tests |
+| a portal lit before shutdown is reused, not duplicated, after a real restart through `IntegratedServer` — in **both** dimensions — with a control showing the same trip *does* duplicate without the restore | `tests/portal_persistence_restart.rs` |
