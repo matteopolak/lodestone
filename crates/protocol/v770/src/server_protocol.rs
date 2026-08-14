@@ -2972,6 +2972,14 @@ impl ServerProtocol for V770ServerProtocol {
                             z: use_item.cursor_z,
                         },
                         sequence: use_item.sequence,
+                        // `use_item.hand` (already decoded off the wire, see
+                        // `packets::game::UseItemOn`) is not yet threaded through:
+                        // `lodestone_server::ServerBound::UseItemOn` has no `hand`
+                        // field to put it in yet, so a placement always reads the
+                        // selected hotbar slot regardless of which hand the client
+                        // used. Needs a field added to that enum (off-limits to this
+                        // crate) plus the consumer in `crate::server::apply_use_item_on`
+                        // reading it, before this arm can pass `hand` through.
                     },
                     None => ServerBound::Ignored,
                 }

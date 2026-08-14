@@ -200,6 +200,15 @@ const IDX_BABY: u8 = 16;
 // makes such a count checkable.
 const IDX_SHEEP_WOOL: u8 = 18;
 const IDX_HORSE_VARIANT: u8 = 19;
+/// Index 18's other `BYTE` claimants (besides [`IDX_SHEEP_WOOL`]'s Sheep and the
+/// creeper's `BOOLEAN` at the same index): `TamableAnimal.DATA_FLAGS_ID` and
+/// `AbstractHorse.DATA_ID_FLAGS`. The bit differs between the two —
+/// `TamableAnimal.isTame()` is `0x04`, `AbstractHorse.isTamed()` is `0x02` —
+/// which is why the decode arm below switches on [`MetadataClass::Tamable`]
+/// vs. [`MetadataClass::Horse`] rather than reading one shared "tamed" bit;
+/// see `crates/lodestone-server/src/protocol.rs`'s `MetadataField::TamableFlags`/
+/// `HorseFlags` doc comment for the server-side encode side of the same split.
+const IDX_TAMABLE_OR_HORSE_FLAGS: u8 = 18;
 
 /// `Creeper.DATA_SWELL_DIR` (`Creeper.java:46`), `Creeper`'s first `defineId`
 /// and therefore index 16 — `Monster` (its superclass) declares none of its
@@ -251,12 +260,33 @@ const IDX_CREEPER_IGNITED: u8 = 18;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataClass {
     Sheep,
+    /// Any `AbstractHorse` subclass — `Horse`, `Donkey`, `Mule`, `Llama`,
+    /// `TraderLlama`, `SkeletonHorse`, `ZombieHorse`, `Camel` — not just plain
+    /// `Horse`. It gates two unrelated `AbstractHorse`-family fields that
+    /// happen to sit at different indices:
+    ///
+    /// * index 19's `INT` (`Horse.DATA_ID_TYPE_VARIANT`, colour + markings) —
+    ///   only `Horse` itself ever emits an `INT` there, so the [`Value::Int`]
+    ///   pattern on that arm already excludes every other equine even though
+    ///   they share this class.
+    /// * index 18's `BYTE` (`AbstractHorse.DATA_ID_FLAGS`, `FLAG_TAME = 0x02`)
+    ///   — genuinely shared by the whole family, which is why the class covers
+    ///   all of it rather than just `Horse`.
     Horse,
     Creeper,
     /// Not a cosmetic variant either: `ExperienceOrb.DATA_VALUE` is an `INT` at
     /// index 8, an index five unrelated `INT` fields also claim. See
     /// [`IDX_EXPERIENCE_ORB_VALUE`].
     ExperienceOrb,
+    /// A `TamableAnimal` subclass — `Wolf`, `Cat`, `Parrot` (via
+    /// `ShoulderRidingEntity`), `Nautilus`/`ZombieNautilus` (via
+    /// `AbstractNautilus`) — the other `BYTE` claimant of index 18
+    /// (`TamableAnimal.DATA_FLAGS_ID`: `isTame` is `0x04`, `isInSittingPose`
+    /// is `0x01`). A **different** bit from [`Horse`](Self::Horse)'s
+    /// `FLAG_TAME = 0x02` at the same index — see [`IDX_TAMABLE_OR_HORSE_FLAGS`]
+    /// for why a single shared "tamed" field would misread one family or the
+    /// other.
+    Tamable,
 }
 
 /// Classifies a resolved entity-type identifier into the [`MetadataClass`] whose
@@ -265,9 +295,18 @@ pub enum MetadataClass {
 pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
     match entity_type {
         "minecraft:sheep" => Some(MetadataClass::Sheep),
-        "minecraft:horse" => Some(MetadataClass::Horse),
+        "minecraft:horse"
+        | "minecraft:donkey"
+        | "minecraft:mule"
+        | "minecraft:llama"
+        | "minecraft:trader_llama"
+        | "minecraft:skeleton_horse"
+        | "minecraft:zombie_horse"
+        | "minecraft:camel" => Some(MetadataClass::Horse),
         "minecraft:creeper" => Some(MetadataClass::Creeper),
         "minecraft:experience_orb" => Some(MetadataClass::ExperienceOrb),
+        "minecraft:wolf" | "minecraft:cat" | "minecraft:parrot" | "minecraft:nautilus"
+        | "minecraft:zombie_nautilus" => Some(MetadataClass::Tamable),
         _ => None,
     }
 }
@@ -681,6 +720,21 @@ pub fn read_entity_metadata(
             (IDX_CREEPER_IGNITED, Value::Bool(b)) if class == Some(MetadataClass::Creeper) => {
                 md.creeper_ignited = Some(b);
             }
+            // `TamableAnimal.DATA_FLAGS_ID`: `isTame` is `0x04`, `isInSittingPose`
+            // is `0x01`. Guarded on class because index 18's `BYTE` is also the
+            // sheep's wool byte and the horse family's own (differently-bitted)
+            // flags, just above and below.
+            (IDX_TAMABLE_OR_HORSE_FLAGS, Value::Byte(b)) if class == Some(MetadataClass::Tamable) => {
+                let byte = b as u8;
+                md.tamed = Some(byte & 0x04 != 0);
+                md.sitting = Some(byte & 0x01 != 0);
+            }
+            // `AbstractHorse.DATA_ID_FLAGS`, `FLAG_TAME = 0x02` — a *different*
+            // bit from the tamable-animal arm above, at the same index. See
+            // [`IDX_TAMABLE_OR_HORSE_FLAGS`].
+            (IDX_TAMABLE_OR_HORSE_FLAGS, Value::Byte(b)) if class == Some(MetadataClass::Horse) => {
+                md.tamed = Some((b as u8) & 0x02 != 0);
+            }
             // Registry-holder variants identify themselves by serializer, so the
             // index is irrelevant and no class context is needed.
             (_, Value::Keyed(key)) => md.variant = Some(EntityVariant::Keyed(key)),
@@ -814,6 +868,14 @@ mod tests {
     fn a_creeper() -> TrackedEntity {
         TrackedEntity {
             class: Some(MetadataClass::Creeper),
+            living: true,
+            mob: true,
+        }
+    }
+
+    fn a_tamable_animal() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::Tamable),
             living: true,
             mob: true,
         }
@@ -1541,10 +1603,20 @@ mod tests {
 
     /// VillagerData (serializer 18) decodes two registry holders and a level into
     /// the `Villager` variant.
+    ///
+    /// The index byte here is decorative — `read_entity_metadata`'s value-to-field
+    /// mapping matches `Value::Villager` by *serializer* alone, not by index (see
+    /// its `(_, Value::Villager { .. })` arm), so this test would pass at any
+    /// index. It is still set to the real one rather than an arbitrary value:
+    /// `Villager.DATA_VILLAGER_DATA` is index **19** per the committed
+    /// `EntityDataIndexOracle` dump (`tests/support/entity_data_index_jvm.txt`),
+    /// not 17 — a prior guess this fixture used to encode, now corrected so a
+    /// reader copying this test as a template for the server-side encode arm
+    /// does not propagate the wrong index.
     #[test]
     fn villager_data_raises_villager_variant() {
         let mut bytes = Vec::new();
-        bytes.push(17); // villager's data index
+        bytes.push(19); // Villager.DATA_VILLAGER_DATA (oracle-verified)
         bytes.extend(varint(SER_VILLAGER_DATA));
         bytes.extend(varint(4)); // type wire → id 3 → savanna
         bytes.extend(varint(6)); // profession wire → id 5 → farmer
@@ -1565,10 +1637,105 @@ mod tests {
         );
     }
 
+    /// `TamableAnimal.DATA_FLAGS_ID`'s two bits (`0x04` tame, `0x01` sitting) at
+    /// index 18, guarded on [`MetadataClass::Tamable`]. Pairwise-distinct byte
+    /// (`0x05` = both bits set, not the same as either alone) so a bit-position
+    /// transposition between `tamed`/`sitting` cannot survive.
+    #[test]
+    fn tamable_flags_byte_raises_tamed_and_sitting() {
+        let mut bytes = Vec::new();
+        bytes.push(18);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x05_i8 as u8); // tame (0x04) + sitting (0x01)
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_tamable_animal())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("empty");
+        assert_eq!(md.tamed, Some(true));
+        assert_eq!(md.sitting, Some(true));
+    }
+
+    /// A wolf that is tame but not sitting — the two bits set independently
+    /// rather than both true, so `tamed`/`sitting` can't coincidentally agree.
+    #[test]
+    fn tamable_flags_byte_distinguishes_tame_from_sitting() {
+        let mut bytes = Vec::new();
+        bytes.push(18);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x04); // tame, not sitting
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_tamable_animal())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("empty");
+        assert_eq!(md.tamed, Some(true));
+        assert_eq!(md.sitting, Some(false));
+    }
+
+    /// `AbstractHorse.DATA_ID_FLAGS`'s `FLAG_TAME = 0x02`, guarded on
+    /// [`MetadataClass::Horse`] — a **different** bit from the tamable-animal
+    /// arm above at the same index. `0x02` set alone (not `0x04`) is exactly
+    /// the byte that would read as "untamed" under a shared-bit
+    /// implementation, which is the failure this test exists to catch: if the
+    /// horse arm ever regresses to checking `0x04` instead of `0x02`, this
+    /// fails rather than passing on a coincidence.
+    #[test]
+    fn horse_flags_byte_uses_the_horse_tame_bit_not_the_tamable_bit() {
+        let mut bytes = Vec::new();
+        bytes.push(18);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x02); // AbstractHorse.FLAG_TAME
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_horse())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("empty");
+        assert_eq!(md.tamed, Some(true));
+        assert_eq!(md.sitting, None, "the horse family has no sitting bit here");
+    }
+
+    /// The same raw byte (`0x02`, horse-tame only) decoded under
+    /// [`MetadataClass::Tamable`] must **not** read as tamed — proving the two
+    /// arms really do gate on different bits rather than one shared "tamed"
+    /// reading that happens to pass the tests above.
+    #[test]
+    fn horse_tame_bit_does_not_leak_into_a_tamable_animals_reading() {
+        let mut bytes = Vec::new();
+        bytes.push(18);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x02); // set only the horse's tame bit
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_tamable_animal())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("empty");
+        assert_eq!(
+            md.tamed,
+            Some(false),
+            "0x02 is not TamableAnimal's tame bit (0x04)"
+        );
+        assert_eq!(md.sitting, Some(false));
+    }
+
     #[test]
     fn metadata_class_only_classifies_ambiguous_mobs() {
         assert_eq!(metadata_class("minecraft:sheep"), Some(MetadataClass::Sheep));
         assert_eq!(metadata_class("minecraft:horse"), Some(MetadataClass::Horse));
+        assert_eq!(metadata_class("minecraft:donkey"), Some(MetadataClass::Horse));
+        assert_eq!(metadata_class("minecraft:mule"), Some(MetadataClass::Horse));
+        assert_eq!(metadata_class("minecraft:llama"), Some(MetadataClass::Horse));
+        assert_eq!(metadata_class("minecraft:trader_llama"), Some(MetadataClass::Horse));
+        assert_eq!(metadata_class("minecraft:skeleton_horse"), Some(MetadataClass::Horse));
+        assert_eq!(metadata_class("minecraft:zombie_horse"), Some(MetadataClass::Horse));
+        assert_eq!(metadata_class("minecraft:camel"), Some(MetadataClass::Horse));
+        assert_eq!(metadata_class("minecraft:wolf"), Some(MetadataClass::Tamable));
+        assert_eq!(metadata_class("minecraft:cat"), Some(MetadataClass::Tamable));
+        assert_eq!(metadata_class("minecraft:parrot"), Some(MetadataClass::Tamable));
         assert_eq!(metadata_class("minecraft:cow"), None);
         assert_eq!(metadata_class("minecraft:villager"), None);
     }
@@ -1752,6 +1919,18 @@ mod tests {
                 "ExperienceOrb.DATA_VALUE",
                 SER_INT,
             ),
+            (
+                IDX_TAMABLE_OR_HORSE_FLAGS,
+                "IDX_TAMABLE_OR_HORSE_FLAGS",
+                "TamableAnimal.DATA_FLAGS_ID",
+                SER_BYTE,
+            ),
+            (
+                IDX_TAMABLE_OR_HORSE_FLAGS,
+                "IDX_TAMABLE_OR_HORSE_FLAGS",
+                "AbstractHorse.DATA_ID_FLAGS",
+                SER_BYTE,
+            ),
         ];
         assert!(!claims.is_empty(), "the claim table is empty, so this test proves nothing");
         for &(constant, name, owner_field, serializer) in claims {
@@ -1842,6 +2021,26 @@ mod tests {
             assert!(
                 at_18.contains(&(owner.to_owned(), SER_BOOLEAN)),
                 "index 18 does not claim {owner} as a BOOLEAN in the dump"
+            );
+        }
+
+        // The `Tamable`/`Horse` class guard's own premise: index 18's `BYTE` has
+        // *four* claimants (`Sheep.DATA_WOOL_ID` already covered above via the
+        // `Sheep` class), and the two the tame-flag arms exist for are
+        // `TamableAnimal.DATA_FLAGS_ID` and `AbstractHorse.DATA_ID_FLAGS` — a
+        // wolf and a horse never coexist as the same concrete type, so this is
+        // the same species-mutual-exclusion shape as the sheep/creeper pair
+        // above, not a real ambiguity once the class is known.
+        for owner in [
+            "Sheep.DATA_WOOL_ID",
+            "Shulker.DATA_COLOR_ID",
+            "TamableAnimal.DATA_FLAGS_ID",
+            "AbstractHorse.DATA_ID_FLAGS",
+        ] {
+            assert!(
+                at_18.contains(&(owner.to_owned(), SER_BYTE)),
+                "index 18 does not claim {owner} as a BYTE in the dump; the `Tamable`/`Horse` \
+                 class guard's premise is not what this test thinks it is"
             );
         }
 
