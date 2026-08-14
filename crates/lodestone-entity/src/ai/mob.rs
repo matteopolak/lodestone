@@ -315,13 +315,14 @@ pub trait MobController {
     /// [`find_nearest_target`](MobController::find_nearest_target) names for
     /// its own `hasLineOfSight`, omitted rather than faked, erring permissive.
     ///
-    /// Defaults to `false` (nobody staring). The only consumer is the
-    /// enderman's [`EndermanFreezeWhenLookedAt`](crate::ai::goals::EndermanFreezeWhenLookedAt),
-    /// and a host that never feeds this must agree with that goal on `false`
-    /// — a default of `true` would make every enderman react to every player
-    /// on sight. That goal now exists, but the **feed** (a real per-tick view
-    /// vector crossing from `lodestone_server`) does not yet: see that
-    /// crate's `PlayerPerception` for the current state.
+    /// Defaults to `false` (nobody staring). The two consumers are the
+    /// enderman's [`EndermanFreezeWhenLookedAt`](crate::ai::goals::EndermanFreezeWhenLookedAt)
+    /// and [`EndermanLookForPlayerGoal`](crate::ai::goals::EndermanLookForPlayerGoal),
+    /// and a host that never feeds this must agree with both on `false` — a
+    /// default of `true` would make every enderman react to every player on
+    /// sight. Both goals exist and the feed is live in production:
+    /// `lodestone_server::mobs::MobSim::tick_with_terrain` computes this every
+    /// tick from each connected player's real position and view direction.
     fn is_being_stared_at(&self) -> bool {
         false
     }

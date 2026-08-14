@@ -344,9 +344,10 @@ pub struct NavigatingMob<'w> {
     /// line-of-sight from real player view vectors and feeds the boolean —
     /// see that method and [`is_in_view_cone`](super::mob::is_in_view_cone).
     ///
-    /// Nothing feeds this in production yet (the enderman's gaze goals are not
-    /// registered), so it stays `false` — the value the trait default is
-    /// pinned to.
+    /// `lodestone_server::mobs::MobSim::tick_with_terrain` feeds this every
+    /// tick in production, from real connected-player positions and view
+    /// directions; a mob with no host feed at all stays `false`, the value
+    /// the trait default is pinned to.
     stared_at: bool,
     /// Host injection point, refreshed once per tick: the position of this
     /// mob's owner, or `None` when it has none. Drives
