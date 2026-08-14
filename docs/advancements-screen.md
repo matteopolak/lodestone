@@ -2,18 +2,19 @@
 
 ## What it is
 
-Vanilla's `AdvancementsScreen` (issue #167), reached from the pause menu's
-Advancements button: five tabs, the real 26.2 advancement tree, connector lines,
-frames, icons, a tiled per-tab background, panning, and the full hover tooltip.
-The tree *shape* comes off the data pack; the *progress* comes off the wire, so
+Vanilla's `AdvancementsScreen`, reached from the pause menu's Advancements
+button: five tabs, the real 26.2 advancement tree, connector lines, frames,
+icons, a tiled per-tab background, panning, and the full hover tooltip. The
+tree *shape* comes off the data pack; the *progress* comes off the wire, so
 completed advancements really do draw their obtained frames.
 
-Issue #565 fixed four owner-reported defects here: missing bottom/right edges on
-`window.png` and a tile background under a higher-resolution pack (a real/declared
-pixel-size mismatch, not a nine-slice one — see the Gotchas below), the hover
-tooltip drawing under widget icons, entries popping instead of clipping at the
-viewport edge, and the tiled background erasing `window.png`'s baked-in inner
-shadow.
+Several owner-reported defects were fixed here over time: missing
+bottom/right edges on `window.png` and a tile background under a
+higher-resolution pack (a real/declared pixel-size mismatch, not a
+nine-slice one — see the Gotchas below), the hover tooltip drawing under
+widget icons, entries popping instead of clipping at the viewport edge, the
+tiled background erasing `window.png`'s baked-in inner shadow, and the item
+icon inside each frame not being clipped at all.
 
 ## How it works
 
@@ -62,7 +63,7 @@ Not through `menu::render::MenuFrame`. This screen is sprite-and-item-icon work 
 arbitrary positions — item icons, a GUI sprite atlas, loose panel art, the dim
 gradient — which is exactly what the container path already has and what the
 row/label frame system does not. `ContainerRenderer::render_geometry_scaled` takes
-a prebuilt `ContainerGeometry`; the creative inventory screen (#158) uses the same
+a prebuilt `ContainerGeometry`; the creative inventory screen uses the same
 seam.
 
 Consequently `menu::render::owns_frame` deliberately **excludes**
@@ -131,20 +132,26 @@ frame while a wrong key draws the raw key.
 ## Gotchas
 
 - **There is no scissor, so `advancements_geometry` clips by hand — and every
-  piece of tree content is now clamped, not just the connector lines
-  (issue #565).** `advancements_layout` still drops a widget wholly outside
-  the viewport (`overlaps`, deliberately permissive so a click at the very
-  edge lands), but a widget that survives that test now has its **frame
-  sprite** clamped too (`push_sprite_clipped`/`clip_sprite_quad`, in
-  `advancements.rs`): the sprite's destination rect *and* its sampled UV rect
-  shrink in lock-step, so a partially-visible frame draws its real sliver
-  instead of either nothing or its full unclamped `26x26`. Before this fix a
-  widget crossing the boundary popped fully in and out rather than clipping —
-  the reported symptom. **The item icon inside each frame is still not
-  clipped** (`Builder::draw_stack` has no sub-rect clip primitive), so it
-  still pops; see the code comment on `advancements_geometry` for why that
-  residual gap reads as much smaller than the frame one did.
-- **The hover tooltip used to draw under every widget's icon (issue #565).**
+  piece of tree content is clamped.** `advancements_layout` still drops a
+  widget wholly outside the viewport (`overlaps`, deliberately permissive so
+  a click at the very edge lands), but a widget that survives that test has
+  its **frame sprite** clamped too
+  (`push_sprite_clipped`/`clip_sprite_quad`, in `advancements.rs`): the
+  sprite's destination rect *and* its sampled UV rect shrink in lock-step, so
+  a partially-visible frame draws its real sliver instead of either nothing
+  or its full unclamped `26x26` — a widget crossing the boundary used to pop
+  fully in and out rather than clip. **The item icon inside each frame is
+  clipped too** (`draw_stack_clipped`): `Builder::draw_stack` still has no
+  clip primitive of its own — it composites up to four streams (a flat
+  sprite plus its glint copy, a 3-D block-item mesh, a special-renderer
+  block-entity icon, and colour-stream chrome) — so the clip is applied
+  *after* the fact to whichever vertices one call just appended. The flat
+  sprite and the colour-stream chrome are shrunk through the same
+  `clip_sprite_quad`/`clamp_to` primitives the frame already uses; the two
+  3-D streams have no destination rect to shrink the same way, so an icon
+  that straddles the edge on either of those paths is dropped whole instead
+  — never more pixels than vanilla draws, only ever fewer.
+- **The hover tooltip used to draw under every widget's icon.**
   The renderer's four-pass order draws every background sprite before any
   item icon, so a tooltip panel pushed alongside the tree's own background
   sprites landed *behind* every icon on screen, not just the hovered one's.
@@ -155,7 +162,7 @@ frame while a wrong key draws the raw key.
   mechanism next to that one and the recipe book's `between_strata` hook.
   `advancements_geometry`'s own comments carry the full pass-by-pass account.
 - **The tiled background used to draw *after* `window.png`, which erased
-  vanilla's own inner shadow (issue #565).** `window.png` is not an opaque
+  vanilla's own inner shadow.** `window.png` is not an opaque
   frame around a transparent hole: measured on the real 26.2 asset, its
   pixels from the inner viewport's left edge inward carry a translucent black
   gradient (`(0,0,0,171)` fading to `(0,0,0,0)` over about 7 px) — vanilla's
@@ -168,9 +175,9 @@ frame while a wrong key draws the raw key.
   (it is fully opaque and outside the tile clip rect either way), but the
   shadow at the seam never did.
 - **`advancements_window_quad`/`advancements_tile_quad` used to sample a
-  fixed real-pixel span regardless of the sheet's real resolution (issue
-  #565's first defect — "the bottom and right side don't have UI on the
-  edges").** Neither `window.png` nor a tile background carries a `.mcmeta`
+  fixed real-pixel span regardless of the sheet's real resolution** (the
+  owner-reported symptom: "the bottom and right side don't have UI on the
+  edges"). Neither `window.png` nor a tile background carries a `.mcmeta`
   (loose `textures/gui/container/**`-style art, never reaching `GuiAtlas`'s
   `GuiScaling` system), so nothing declared their real size — the code
   assumed 252x140/16x16 *real pixels* unconditionally. A 2x-resolution pack
@@ -178,8 +185,8 @@ frame while a wrong key draws the raw key.
   quarter, cropping the window's own bottom and right edges off. Both
   functions in `container/background.rs` now scale their sample by the
   sprite's real placed size (`AtlasSprite::width`/`height`) against vanilla's
-  declared size — the same fraction-of-declared-size fix issue #561 landed
-  for `GuiScaling::geometry`'s nine-slice arm, applied here to this screen's
+  declared size — the same fraction-of-declared-size fix `GuiScaling::geometry`'s
+  nine-slice arm landed, applied here to this screen's
   own hand-rolled sub-rect blits instead, since neither ever reaches that
   code path.
 - **Vanilla's own frame rect and hit rect disagree by 3 px.** The frame blits at
