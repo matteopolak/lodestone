@@ -4766,7 +4766,20 @@ where
     // had exactly one caller, `apply_use_item_on`, so breaking a block beside dust
     // never recomputed the dust and breaking the block *under* anything never
     // destroyed it. Both are here now, shapes first, matching that order.
-    let collapsed = collapse_unsupported(source, pos);
+    let mut collapsed = collapse_unsupported(source, pos);
+    // Issue #579: `NetherPortalBlock.updateShape` is a *second* member of
+    // `updateNeighbourShapes`, alongside `block_support`'s survives table
+    // `collapse_unsupported` already runs above — a broken frame block must
+    // extinguish the portal cells it was holding up, which
+    // `collapse_unsupported` cannot see (a portal is not "supported by one
+    // specific neighbour"; it is re-validated against its whole frame). See
+    // `crate::portal::extinguish_broken_frames`'s own doc comment. Extends
+    // `collapsed` (same `(pos, state_before)` shape) rather than a second
+    // list, so the `block_update`/relight/fan-out code below needs no new
+    // branch to reach it.
+    if let Some(dimension) = source.dimension() {
+        collapsed.extend(crate::portal::extinguish_broken_frames(source, dimension, pos));
+    }
     // `Block.updateOrDestroy` → `Level.destroyBlock(pos, true)` → `dropResources`.
     //
     // **Gated on `cascade_drops`, not on `drop_loot`, and the difference is
