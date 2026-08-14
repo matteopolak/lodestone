@@ -1411,9 +1411,16 @@ impl WindowApp {
         {
             let label = crate::menu::loading::ConnectPhase::LoadingTerrain.label();
             let loading_frame = match self.sim.terrain_progress() {
-                Some(progress) => {
-                    crate::menu::render::loading_frame_with_progress(label, progress)
-                }
+                Some(progress) => crate::menu::render::loading_frame_with_progress_and_grid(
+                    label,
+                    progress,
+                    // Issue #568: vanilla's `LevelLoadingScreen` grid, one real
+                    // square per column in the current view. `None` until a
+                    // view radius is declared — the same precondition
+                    // `progress` above already gates on — so the grid can
+                    // never draw ahead of the bar it sits beside.
+                    self.sim.terrain_chunk_grid(),
+                ),
                 None => crate::menu::render::loading_frame(label),
             };
             menu.render_overlay(device, queue, frame.view(), &loading_frame, w, h);

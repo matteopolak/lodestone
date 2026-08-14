@@ -462,6 +462,11 @@ pub struct Sim {
     /// its view radius (`Sim::set_view_radius`). The progress bar's denominator;
     /// `None` means "no denominator, so no bar" rather than a guessed one.
     expected_view_columns: Option<usize>,
+    /// The raw view radius `Sim::set_view_radius` was called with — the same
+    /// value `expected_view_columns` was squared from, kept alongside it
+    /// because the chunk-status grid (issue #568) needs a side length, not an
+    /// area. `None` under the same condition `expected_view_columns` is.
+    expected_view_radius: Option<u32>,
     /// When the terrain-streaming phase began, for
     /// [`crate::menu::loading::CLIENT_WAIT_TIMEOUT`].
     ///

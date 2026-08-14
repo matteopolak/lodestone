@@ -239,6 +239,24 @@ pub fn build(
                 b.rect(bar_x, bar_y, filled, PROGRESS_BAR_H, PROGRESS_BAR_FG);
             }
         }
+        // The loading screen's chunk-status grid (issue #568): one real quad
+        // per column in the current view, coloured by
+        // `crate::menu::render::frame::chunk_cell_colour`. Drawn after the
+        // bar for the same "over the backdrop, under nothing" reason as the
+        // bar itself, and from the exact same `chunk_cell_origin` expression
+        // the layout gate predicts against, so the two cannot drift apart.
+        if let Some(view) = frame.chunk_grid.as_ref() {
+            let center_x = width * 0.5;
+            let center_y = (height * 0.5 + view.dy).floor();
+            let diameter = crate::menu::loading::TerrainChunkGrid::diameter(view.grid.radius);
+            for z in 0..diameter {
+                for x in 0..diameter {
+                    let status = view.grid.get(x, z);
+                    let (cx, cy) = chunk_cell_origin(center_x, center_y, diameter, x, z);
+                    b.rect(cx, cy, CHUNK_CELL_SIZE, CHUNK_CELL_SIZE, chunk_cell_colour(status));
+                }
+            }
+        }
     } else {
         // The row-stack screens' own centred title block.
         let tw = text_px(frame.title, TITLE_SCALE);

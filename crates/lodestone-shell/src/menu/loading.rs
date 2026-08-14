@@ -172,6 +172,67 @@ impl TerrainProgress {
 /// The most the progress bar will ever report. See [`TerrainProgress::fraction`].
 pub const MAX_FRACTION: f32 = 0.99;
 
+/// One chunk's status in the loading grid (issue #568) — vanilla's
+/// `LevelLoadingScreen` per-chunk squares, reduced to the two states this
+/// client can actually observe.
+///
+/// Vanilla colours each cell from `ChunkMap.getLatestStatus`, a **server-side
+/// generation stage** (`ChunkStatus.EMPTY` through `.FULL`, twelve of them),
+/// read in-process because vanilla's integrated server runs in the same JVM
+/// as the client (`MinecraftServer.createChunkLoadStatusView`). This client's
+/// server never models intermediate generation stages at all — a column comes
+/// out of `ChunkColumn::from_generated` in one step, with nothing in between
+/// to report — and the client only ever learns "not here yet" or "here", over
+/// the network, identically for singleplayer and real multiplayer (unlike
+/// vanilla, whose grid is singleplayer-only for exactly the in-process-read
+/// reason above). So this grid draws exactly two of vanilla's own per-status
+/// colours (`EMPTY` and `FULL`) rather than inventing intermediate ones: it is
+/// real spatial information — which of *these* columns has actually arrived,
+/// and in what pattern — just coarser than vanilla's twelve-stage view, and it
+/// never claims more than that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkCellStatus {
+    /// Not yet received by the client. Vanilla `ChunkStatus.EMPTY`'s colour,
+    /// `0x545454`.
+    Empty,
+    /// Received and applied to the client-owned world. Vanilla
+    /// `ChunkStatus.FULL`'s colour, white.
+    Full,
+}
+
+/// The loading screen's chunk-status grid: real per-column state for every
+/// column in the current view, meant to be centred on the chunk under the
+/// player — the same recentring `ChunkLoadStatusView::moveTo` does in
+/// vanilla.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerrainChunkGrid {
+    /// Half the grid's side length in chunks. The grid is [`Self::diameter`]
+    /// cells square — the same radius [`TerrainProgress::expected_for_radius`]
+    /// squares for the progress bar's denominator, so the two can never
+    /// disagree about the size of "the initial view".
+    pub radius: u32,
+    /// Row-major statuses, `x` fastest, [`Self::diameter`]`(radius)`² entries
+    /// — matches `LevelLoadingScreen.extractChunksForRendering`'s own
+    /// `for (x) { for (z) }` iteration order.
+    pub cells: Vec<ChunkCellStatus>,
+}
+
+impl TerrainChunkGrid {
+    /// Cells per side: `LevelLoadingScreen.extractChunksForRendering`'s
+    /// `diameter = statusView.radius() * 2 + 1`.
+    #[must_use]
+    pub const fn diameter(radius: u32) -> usize {
+        radius as usize * 2 + 1
+    }
+
+    /// The status at grid offset `(x, z)`, each `0..diameter(self.radius)`.
+    #[must_use]
+    pub fn get(&self, x: usize, z: usize) -> ChunkCellStatus {
+        let diameter = Self::diameter(self.radius);
+        self.cells[z * diameter + x]
+    }
+}
+
 /// How long the terrain screen may hold before it gives up and lets the player
 /// in anyway — vanilla's `LevelLoadTracker.CLIENT_WAIT_TIMEOUT_MS`, 30 s.
 ///
@@ -265,8 +326,8 @@ mod tests {
     use core::time::Duration;
 
     use super::{
-        CLIENT_WAIT_TIMEOUT, ConnectPhase, MAX_FRACTION, TerrainProgress, TerrainWait,
-        is_level_ready,
+        CLIENT_WAIT_TIMEOUT, ChunkCellStatus, ConnectPhase, MAX_FRACTION, TerrainChunkGrid,
+        TerrainProgress, TerrainWait, is_level_ready,
     };
 
     /// The state a healthy join is in the instant the terrain phase starts: alive,
@@ -417,5 +478,37 @@ mod tests {
             TerrainProgress { loaded: 37, expected: 441 }.detail(),
             "37 / 441 chunks"
         );
+    }
+
+    /// `diameter` matches vanilla's `radius * 2 + 1`, and `get` reads the
+    /// row-major `x`-fastest layout the doc promises — checked at two
+    /// distinct cells so a transposed `(x, z)` index would fail rather than
+    /// coincide.
+    #[test]
+    fn the_grid_is_radius_times_two_plus_one_square_and_row_major() {
+        assert_eq!(TerrainChunkGrid::diameter(0), 1);
+        assert_eq!(TerrainChunkGrid::diameter(2), 5);
+        assert_eq!(TerrainChunkGrid::diameter(11), 23);
+
+        // A 3x3 grid (radius 1) with only two distinct cells set, at offsets
+        // that would collide under a transposed index.
+        let grid = TerrainChunkGrid {
+            radius: 1,
+            cells: vec![
+                ChunkCellStatus::Full, // (0, 0)
+                ChunkCellStatus::Empty,
+                ChunkCellStatus::Empty,
+                ChunkCellStatus::Empty,
+                ChunkCellStatus::Empty,
+                ChunkCellStatus::Empty,
+                ChunkCellStatus::Empty,
+                ChunkCellStatus::Empty,
+                ChunkCellStatus::Full, // (2, 2)
+            ],
+        };
+        assert_eq!(grid.get(0, 0), ChunkCellStatus::Full);
+        assert_eq!(grid.get(2, 2), ChunkCellStatus::Full);
+        assert_eq!(grid.get(2, 0), ChunkCellStatus::Empty);
+        assert_eq!(grid.get(0, 2), ChunkCellStatus::Empty);
     }
 }

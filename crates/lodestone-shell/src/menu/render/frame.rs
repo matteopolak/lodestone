@@ -745,6 +745,11 @@ pub struct MenuFrame<'a> {
     /// The loading screen's progress bar, `None` on every other screen (issue
     /// #449) — see [`MenuProgress`] and [`loading_frame_with_progress`].
     pub progress: Option<MenuProgress>,
+    /// The loading screen's chunk-status grid, `None` on every other screen
+    /// and `None` on the loading screen itself until a view radius is known
+    /// (issue #568) — see [`ChunkGridView`] and
+    /// [`loading_frame_with_progress_and_grid`].
+    pub chunk_grid: Option<ChunkGridView>,
 }
 
 /// Vanilla's `LevelLoadingScreen` progress bar, as a frame primitive.
@@ -777,6 +782,80 @@ pub const PROGRESS_BAR_BG: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// The filled portion — `LevelLoadingScreen`'s `0xFF00FF00`.
 pub const PROGRESS_BAR_FG: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+
+/// Vanilla's `LevelLoadingScreen` chunk-status grid (issue #568), as a frame
+/// primitive — the [`crate::menu::loading::TerrainChunkGrid`] data plus the
+/// one thing that is a render decision rather than an observation: where its
+/// centre sits.
+///
+/// See [`crate::menu::loading::ChunkCellStatus`]'s doc for why this draws
+/// only two of vanilla's twelve status colours, and [`chunk_cell_colour`] for
+/// the colours themselves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkGridView {
+    /// The real per-column data.
+    pub grid: crate::menu::loading::TerrainChunkGrid,
+    /// The grid's vertical centre, in logical pixels from the screen centre —
+    /// same convention as [`MenuProgress::dy`].
+    pub dy: f32,
+}
+
+/// `LevelLoadingScreen.extractChunksForRendering`'s cell size — `size = 2` at
+/// its own call site (`margin` is `0` there too, so cells sit flush).
+pub const CHUNK_CELL_SIZE: f32 = 2.0;
+
+/// `ChunkStatus.EMPTY`'s colour, `0x545454` — vanilla's own `COLORS` map, not
+/// invented.
+pub const CHUNK_CELL_EMPTY: [f32; 4] = [84.0 / 255.0, 84.0 / 255.0, 84.0 / 255.0, 1.0];
+
+/// `ChunkStatus.FULL`'s colour — opaque white, vanilla's own `COLORS` map.
+pub const CHUNK_CELL_FULL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// The colour vanilla's `COLORS` map draws a cell of the given status.
+///
+/// Only two arms because [`crate::menu::loading::ChunkCellStatus`] only has
+/// two variants — see that type's doc for why this client cannot observe the
+/// other ten of vanilla's statuses, and does not pretend to.
+#[must_use]
+pub const fn chunk_cell_colour(status: crate::menu::loading::ChunkCellStatus) -> [f32; 4] {
+    match status {
+        crate::menu::loading::ChunkCellStatus::Empty => CHUNK_CELL_EMPTY,
+        crate::menu::loading::ChunkCellStatus::Full => CHUNK_CELL_FULL,
+    }
+}
+
+/// The top-left corner of cell `(x, z)`, `0..diameter` each, in a
+/// `diameter`-cells-square grid centred at `(center_x, center_y)` — logical
+/// pixels, floored the same way [`super::draw::build`]'s bar geometry is.
+///
+/// Transcribed from `LevelLoadingScreen.extractChunksForRendering` with
+/// `margin = 0` (its own call site's value):
+///
+/// ```text
+/// int totalWidth = diameter * width - margin;   // width == size here
+/// int xStart = xCenter - totalWidth / 2;
+/// int xCellStart = xStart + x * width;
+/// ```
+///
+/// A free function rather than inlined at its one call site so the layout
+/// gate can compute the same rect the draw does, instead of restating the
+/// arithmetic as a second, driftable copy.
+#[must_use]
+pub fn chunk_cell_origin(
+    center_x: f32,
+    center_y: f32,
+    diameter: usize,
+    x: usize,
+    z: usize,
+) -> (f32, f32) {
+    let total = diameter as f32 * CHUNK_CELL_SIZE;
+    let start_x = (center_x - total * 0.5).floor();
+    let start_y = (center_y - total * 0.5).floor();
+    (
+        start_x + x as f32 * CHUNK_CELL_SIZE,
+        start_y + z as f32 * CHUNK_CELL_SIZE,
+    )
+}
 
 /// Decoded favicon mosaics, keyed by the status cache's address key.
 ///
