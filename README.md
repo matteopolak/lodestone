@@ -32,7 +32,7 @@ Two different questions — which versions we can **join**, and which we can **h
 | `v770` | 776 | 26.2   | yes | yes | **141/141** | 67/69 |
 
 Hosting additionally needs the serverbound direction decoded: `v770` decodes **62/69** and
-connects **33/69** to real behaviour, with the remainder landing on an ignored arm.
+connects **34/69** to real behaviour, with the remainder landing on an ignored arm.
 
 Counts are produced by `cargo xtask connectedness`, which walks each family's packet-id
 tables — run it rather than trusting this table, which is a snapshot. Note `v735` speaks
