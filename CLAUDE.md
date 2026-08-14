@@ -157,6 +157,31 @@ form, including `-n`-then-`-f`).** In full, never any of these:
 To move to a newer commit, use a throwaway `git worktree add --detach`, which touches nothing here; prefer
 `git worktree remove` over leaving worktrees around.
 
+**A worktree is right for *verification* and wrong for *long work*, because its base goes stale fast enough
+to make the result unmergeable.** Measured: two agents each ran a crate-wide comment sweep in an isolated
+worktree; by the time they finished, `main` was **122 commits** ahead of their base, and one of them had been
+editing a flat `mobs.rs` that no longer exists on `main` at all — it had been split into `mobs/` hours
+earlier. Both reported a green build and a passing suite, honestly, *against their own stale tree*: one
+measured 1322 tests where `main` had 1466, and its single "pre-existing" failure passed on `main`, because
+the gate it tripped had been fixed by work its base predated. **A green worktree proves nothing about
+`main`**, and neither does a test count from one.
+
+The recovery that works, and is worth doing before discarding anything:
+
+```
+mb=$(git merge-base <branch> main)
+comm -23 <(git diff --name-only $mb..<branch> -- <dir> | sort) \
+         <(git diff --name-only $mb..main   -- <dir> | sort) > safe.txt
+git diff $mb..<branch> -- $(cat safe.txt) > recover.patch
+git apply --check recover.patch     # refuses rather than half-applying
+```
+
+Files the branch touched **and** `main` has since changed are the conflict set; everything else applies
+cleanly. That salvaged 132 of 172 files in one case (`--check` exit 0, then check/seam/suite all green
+before committing). Redo the overlap on current `main` rather than resolving it. And note the tell that the
+base is stale is not a conflict — it is a **file that exists on the branch and not on `main`**, which a
+merge would silently resurrect.
+
 **Commit with the pathspec form: `git commit -m "…" -- <your paths>`. This is the standard here, not a
 fallback.** It commits exactly those paths and **ignores the index entirely** — the only property that
 makes it safe — and leaves the index clean, so **do not run `git reset` after it.**
