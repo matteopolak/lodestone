@@ -33,6 +33,37 @@ boolean; the caller computes it from wall-clock time (see `app.rs`'s
 module owning a clock, matching how every other transient render flag reaches
 `HudFrame`.
 
+### The inline command-suggestion "ghost"
+
+`HudFrame::chat_suggestion_ghost` is the greyed-out preview of the top
+autocomplete candidate — `EditBox.extractRenderState`'s own `suggestion`
+field. Three things port from that method, in the order that matters:
+
+1. **Position is `cursorX - 1`, where `cursorX = font.width(value)` — the
+   typed text alone.** The caret contributes no advance of its own in
+   vanilla, because there it is a separately blinking overlay rectangle, not
+   part of the measured string. This shell's caret *is* part of the drawn
+   string (a literal appended `_`, see above), which makes it tempting to
+   measure the pen against `{input}_` — that was a real, shipped bug: it
+   landed the ghost one whole underscore-width too far right, permanently
+   (stable across the blink, but at the wrong x either way).
+2. **Draw order is text → suggestion → cursor**, so the caret composites on
+   top of the suggestion's leading glyph rather than the other way round.
+   Drawing `{input}{caret}` as one string before the suggestion gets this
+   backwards.
+3. **Gated on `!insert`**, where vanilla's `insert = cursorPos <
+   value.length() || value.length() >= maxLength`. This shell's `ChatInput`
+   only ever edits at the end of the line (the append-caret convention
+   above), so the first disjunct never applies here; the second does —
+   `ChatInput::push_char` caps a line at 256 — so a full line suppresses the
+   suggestion.
+
+The colour is vanilla's literal `0x808080` (`SUGGESTION_GHOST`); the draw
+itself takes no font-shadow parameter here (`Builder::text`'s fixed-advance
+fallback font is never shadowed, and the vanilla-font path shadows
+everything it draws uniformly, so there is no per-call flag to honour on
+either path this shell has, unlike `EditBox`'s own `textShadow` field).
+
 ### Up/Down: the sent-line history
 
 `ChatHistory` is vanilla's `ChatComponent.recentChat` — the deque of lines the

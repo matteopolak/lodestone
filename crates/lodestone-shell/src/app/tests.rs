@@ -956,6 +956,150 @@ fn capture_key_for_ignores_an_unidentified_key() {
     );
 }
 
+/// The owner-reported bug this section gates: pasting into a menu text field
+/// inserted a literal `v`, and Cmd+A inserted `a` instead of selecting. These
+/// gate the winit-to-`MenuKey` conversion itself: every existing edit-box test
+/// constructs its own already-modified `focus::KeyEvent`, so the whole suite
+/// downstream of `menu_key_for` passed while no *real* keystroke ever carried
+/// a modifier.
+mod menu_key_shortcut_conversion {
+    use super::*;
+    use crate::app::menus::shortcut_modifier_held;
+
+    /// **The macOS mapping specifically.** `shortcut_modifier_held` takes
+    /// `is_macos` as a parameter rather than reading `cfg!(target_os =
+    /// "macos")` inline precisely so this is assertable on any machine the
+    /// suite happens to run on — the bug the issue reports is invisible on
+    /// Linux/Windows by construction (Ctrl already worked there), so a test
+    /// that only ever exercised whichever OS runs CI would not have caught
+    /// it.
+    #[test]
+    fn macos_shortcut_modifier_is_cmd_not_ctrl() {
+        assert!(shortcut_modifier_held(ModifiersState::SUPER, true));
+        assert!(!shortcut_modifier_held(ModifiersState::CONTROL, true));
+    }
+
+    #[test]
+    fn non_macos_shortcut_modifier_is_ctrl_not_cmd() {
+        assert!(shortcut_modifier_held(ModifiersState::CONTROL, false));
+        assert!(!shortcut_modifier_held(ModifiersState::SUPER, false));
+    }
+
+    /// The literal reported symptom: with the shortcut modifier held, `A`
+    /// must produce `MenuKey::SelectAll`, never `MenuKey::Char('a')` — and
+    /// critically, `text` is non-empty here (winit still reports `Some("a")`
+    /// alongside the physical key), which is exactly what made the old
+    /// modifier-blind `menu_key_for` insert the letter.
+    #[test]
+    fn cmd_a_selects_all_and_never_types_a() {
+        let key = WindowApp::menu_key_for(
+            PhysicalKey::Code(KeyCode::KeyA),
+            Some("a"),
+            ModifiersState::SUPER,
+        );
+        assert_eq!(key, Some(MenuKey::SelectAll));
+        assert_ne!(key, Some(MenuKey::Char('a')));
+    }
+
+    /// Same shape for paste — "it just inserts a v".
+    #[test]
+    fn cmd_v_pastes_and_never_types_v() {
+        let key = WindowApp::menu_key_for(
+            PhysicalKey::Code(KeyCode::KeyV),
+            Some("v"),
+            ModifiersState::SUPER,
+        );
+        assert_eq!(key, Some(MenuKey::Paste));
+        assert_ne!(key, Some(MenuKey::Char('v')));
+    }
+
+    #[test]
+    fn cmd_c_copies_and_cmd_x_cuts() {
+        assert_eq!(
+            WindowApp::menu_key_for(
+                PhysicalKey::Code(KeyCode::KeyC),
+                Some("c"),
+                ModifiersState::SUPER
+            ),
+            Some(MenuKey::Copy)
+        );
+        assert_eq!(
+            WindowApp::menu_key_for(
+                PhysicalKey::Code(KeyCode::KeyX),
+                Some("x"),
+                ModifiersState::SUPER
+            ),
+            Some(MenuKey::Cut)
+        );
+    }
+
+    /// A plain, unmodified `a` must still type — the negative control proving
+    /// the suppression above is conditional on the modifier and not a
+    /// blanket regression that breaks ordinary typing.
+    #[test]
+    fn plain_a_still_types() {
+        assert_eq!(
+            WindowApp::menu_key_for(
+                PhysicalKey::Code(KeyCode::KeyA),
+                Some("a"),
+                ModifiersState::empty()
+            ),
+            Some(MenuKey::Char('a'))
+        );
+    }
+
+    /// Cmd+Shift+A is not select-all in vanilla either
+    /// (`InputWithModifiers.isSelectAll`'s `!hasShiftDown()` guard) — and must
+    /// not fall through to typing `a` alongside doing nothing, matching
+    /// `focus::KeyEvent::is_edit_shortcut`'s own guard.
+    #[test]
+    fn cmd_shift_a_is_neither_select_all_nor_text() {
+        let key = WindowApp::menu_key_for(
+            PhysicalKey::Code(KeyCode::KeyA),
+            Some("A"),
+            ModifiersState::SUPER | ModifiersState::SHIFT,
+        );
+        assert_eq!(key, None);
+    }
+
+    /// An unrecognised chord (the modifier held, but not one of A/C/X/V) must
+    /// still suppress the letter rather than falling through to it — the
+    /// "shipping only modifier tracking turns 'types a v' into 'does
+    /// nothing', which reads as a new bug" case the issue calls out, but for
+    /// a key with no dedicated shortcut this *is* the correct behaviour:
+    /// vanilla does not type `b` while Cmd is held either.
+    #[test]
+    fn unrecognised_cmd_chord_suppresses_the_letter() {
+        let key = WindowApp::menu_key_for(
+            PhysicalKey::Code(KeyCode::KeyB),
+            Some("b"),
+            ModifiersState::SUPER,
+        );
+        assert_eq!(key, None);
+    }
+
+    /// `from_menu_key` is the other half of the fix — the `MenuKey` produced
+    /// above has to reach `EditBox::handle_key` as a real
+    /// `is_select_all()`/`is_paste()` event, or select-all/paste would be
+    /// silently declined despite being detected correctly here.
+    #[test]
+    fn select_all_and_paste_reach_editbox_as_real_shortcut_events() {
+        use crate::menu::focus::KeyEvent;
+
+        let select_all = KeyEvent::from_menu_key(MenuKey::SelectAll).unwrap();
+        assert!(select_all.is_select_all());
+
+        let paste = KeyEvent::from_menu_key(MenuKey::Paste).unwrap();
+        assert!(paste.is_paste());
+
+        let copy = KeyEvent::from_menu_key(MenuKey::Copy).unwrap();
+        assert!(copy.is_copy());
+
+        let cut = KeyEvent::from_menu_key(MenuKey::Cut).unwrap();
+        assert!(cut.is_cut());
+    }
+}
+
 /// Every key the default table binds, with what it should resolve to while
 /// playing. Written out rather than derived from the table, so this is a
 /// second statement of intent and not a restatement of the implementation.

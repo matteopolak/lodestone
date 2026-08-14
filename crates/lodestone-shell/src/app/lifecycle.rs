@@ -86,6 +86,19 @@ impl ApplicationHandler for WindowApp {
             self.pacer.record_input(Instant::now());
         }
         match event {
+            // Winit reports modifier state as its own event rather than
+            // attaching it to every `KeyboardInput`, and nothing in this
+            // crate tracked it before now — every real `winit::event::KeyEvent`
+            // reaching `menu_key_for`/`handle_chat_key` therefore looked
+            // unmodified, so Cmd+A was indistinguishable from `a` (menu inputs
+            // typed the shortcut's letter instead of acting on it).
+            // `self.modifiers` is the one place that state now lives;
+            // `mods.state()` is winit's own post-`Modifiers` accessor (the
+            // struct also exposes a raw `ModifiersKeyState` per key, which
+            // nothing here needs).
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+            }
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if let (Some(gpu), Some(target), Some(render)) = (
@@ -683,7 +696,11 @@ impl ApplicationHandler for WindowApp {
                                 None => {}
                             }
                         } else if pressed
-                            && let Some(key) = Self::menu_key_for(&event)
+                            && let Some(key) = Self::menu_key_for(
+                                event.physical_key,
+                                event.text.as_deref(),
+                                self.modifiers,
+                            )
                         {
                             self.handle_menu_key(key);
                             // Entering the world grabs; leaving it releases.
