@@ -1728,6 +1728,21 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 continue;
             }
 
+            // `redstone_tripwire::TICK_TRIPWIRE_RECHECK` — `TripWireHookBlock
+            // .tick`'s periodic recheck. Handled here rather than through the
+            // `Option<String>` chain below for the same reason gravity is: one
+            // scan can rewrite the hook's own cell, a receiving hook, and every
+            // wire segment between them, not a single position — see
+            // `crate::random_tick::run_tripwire_recheck`'s own doc comment.
+            if due.kind == crate::redstone_tripwire::TICK_TRIPWIRE_RECHECK {
+                for event in crate::random_tick::run_tripwire_recheck(&mut column, min_x, min_z, BlockPos::new(x, y, z)) {
+                    let (ex, ey, ez) = event.pos;
+                    world.set_block(ex, ey, ez, &event.to);
+                    block_tick_out.publish(ex, ey, ez, event.to);
+                }
+                continue;
+            }
+
             let new_state = if due.kind == crate::redstone::TICK_TORCH {
                 let has_signal = crate::redstone_torch::has_neighbor_signal(&crate::redstone::make_lookup(&column, min_x, min_z), BlockPos::new(x, y, z), &state);
                 crate::redstone_torch::run_scheduled_tick(&state, has_signal)
@@ -1757,6 +1772,14 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     block_ticks.schedule((x, y, z), crate::redstone::TICK_OBSERVER.to_string(), game_tick + 2, TickPriority::Normal);
                 }
                 Some(new_state)
+            } else if due.kind == crate::redstone_target::TICK_TARGET_DECAY {
+                // `TargetBlock.tick` (`:85-89`) — decay the analog `power`
+                // back to 0. Nothing schedules this kind yet in production
+                // (see `crate::redstone_target`'s own module doc for why);
+                // wired here so the dispatch is ready the moment a projectile
+                // producer exists, the same "ready seam, no producer" shape
+                // `crate::redstone_target::apply_hit` itself already is.
+                crate::redstone_target::run_scheduled_tick(&state)
             } else if due.kind == crate::hand_use::TICK_BUTTON {
                 // Issue #532: a pressed button releasing itself after its
                 // `ticksToStayPressed`. The same shape as the redstone families

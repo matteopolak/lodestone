@@ -157,9 +157,13 @@ use crate::mob_spawn::SpawnRng;
 use crate::neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_ORDER};
 use crate::redstone;
 use crate::redstone_diode;
+use crate::redstone_dispenser;
+use crate::redstone_note_block;
 use crate::redstone_observer;
 use crate::redstone_openable;
+use crate::redstone_rail;
 use crate::redstone_torch;
+use crate::redstone_tripwire;
 use crate::redstone_wire;
 use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
 use lodestone_model::BlockPos;
@@ -1398,8 +1402,132 @@ pub(crate) fn react_at_placement(
                 }
             }
         }
+        // `BaseRailBlock.onPlace` -> `updateState` -> `level.neighborChanged(state,
+        // pos, this, ...)` (`BaseRailBlock.java:64-77`): a freshly placed
+        // powered/activator rail notifies **itself**, the same "placed block
+        // owes itself a reaction the neighbour pass cannot deliver" shape as the
+        // hopper arm above. `crate::redstone_rail`'s own module doc names why
+        // only `POWERED` (not `SHAPE`/connectivity) is modelled.
+        if redstone_rail::is_powered_rail_family(&state) {
+            let new_state = {
+                let lookup = redstone::make_lookup(column, min_x, min_z);
+                let has_signal = |p: BlockPos| redstone::best_neighbor_signal(&lookup, p, false) > 0;
+                redstone_rail::update_state(&lookup, &has_signal, pos, &state)
+            };
+            if let Some(new_state) = new_state {
+                column.set_block(tlx, y, tlz, &new_state);
+                own.push(RandomTickEvent { pos: (x, y, z), from: state.clone(), to: new_state });
+            }
+        }
+        // `TripWireHookBlock.setPlacedBy` (`:104-106`) calls `calculateState`
+        // directly on the just-placed hook, with no neighbour notification at
+        // all — see `crate::redstone_tripwire`'s own module doc for why this
+        // family lives in `react_at_placement` rather than
+        // `react_to_notification`.
+        if redstone::is_tripwire_hook(&state) {
+            let result = {
+                let lookup = redstone::make_lookup(column, min_x, min_z);
+                redstone_tripwire::calculate_state(&lookup, pos, &state, false, None)
+            };
+            apply_tripwire_result(column, min_x, min_z, &result, &mut own);
+        }
+        // `TripWireBlock.onPlace` (`:101-105`) calls `updateSource`, which
+        // scans south/west for a controlling hook and recalculates *that*
+        // hook's state with this wire cell as its `wireSource`.
+        if base_name(&state) == redstone_tripwire::TRIPWIRE {
+            let found = {
+                let lookup = redstone::make_lookup(column, min_x, min_z);
+                redstone_tripwire::find_controlling_hooks(&lookup, pos, &state)
+            };
+            for (hook_pos, source) in found {
+                let hook_state = redstone::make_lookup(column, min_x, min_z)(hook_pos);
+                if base_name(&hook_state) != redstone_tripwire::TRIPWIRE_HOOK {
+                    continue;
+                }
+                let result = {
+                    let lookup = redstone::make_lookup(column, min_x, min_z);
+                    redstone_tripwire::calculate_state(&lookup, hook_pos, &hook_state, false, Some(&source))
+                };
+                apply_tripwire_result(column, min_x, min_z, &result, &mut own);
+                if result.reschedule_recheck
+                    && !block_ticks.has_scheduled((hook_pos.x, hook_pos.y, hook_pos.z), &redstone_tripwire::TICK_TRIPWIRE_RECHECK.to_string())
+                {
+                    block_ticks.schedule(
+                        (hook_pos.x, hook_pos.y, hook_pos.z),
+                        redstone_tripwire::TICK_TRIPWIRE_RECHECK.to_string(),
+                        current_tick + u64::from(redstone_tripwire::RECHECK_DELAY),
+                        TickPriority::Normal,
+                    );
+                }
+            }
+        }
     }
     own.extend(propagate_and_react(column, min_x, min_z, x, y, z, block_ticks, current_tick));
+    own
+}
+
+/// Applies a [`redstone_tripwire::CalculatedState`]'s write plan to `column`,
+/// skipping any position outside it — the same "out of this column, so the
+/// write cannot happen" limit `react_to_notification`'s piston arm already
+/// accepts, since a tripwire run can span far more than one 16×16 column.
+fn apply_tripwire_result(
+    column: &mut crate::chunk::ChunkColumn,
+    min_x: i32,
+    min_z: i32,
+    result: &redstone_tripwire::CalculatedState,
+    own: &mut Vec<RandomTickEvent>,
+) {
+    let mut writes: Vec<(BlockPos, String)> = Vec::new();
+    if let Some(w) = &result.hook_write {
+        writes.push(w.clone());
+    }
+    if let Some(w) = &result.receiver_write {
+        writes.push(w.clone());
+    }
+    writes.extend(result.wire_writes.iter().cloned());
+
+    for (pos, new_state) in writes {
+        let lx = pos.x - min_x;
+        let lz = pos.z - min_z;
+        if !(0..16).contains(&lx) || !(0..16).contains(&lz) || pos.y < column.min_y || pos.y >= column.min_y + column.height {
+            continue;
+        }
+        let from = column.block_state(lx, pos.y, lz).to_string();
+        if from == new_state {
+            continue;
+        }
+        column.set_block(lx, pos.y, lz, &new_state);
+        own.push(RandomTickEvent {
+            pos: (pos.x, pos.y, pos.z),
+            from,
+            to: new_state,
+        });
+    }
+}
+
+/// The `redstone_tripwire::TICK_TRIPWIRE_RECHECK` scheduled-tick body —
+/// `TripWireHookBlock.tick` (`:196-199`), which re-runs `calculate_state` with
+/// no `wire_source`. `pub(crate)` for `crate::tick`'s scheduled-tick drain,
+/// the same shape [`settle_gravity_at`] already has for gravity's own
+/// specially-handled arm (a multi-position write plan, not a single
+/// replacement state, so it cannot go through the ordinary `Option<String>`
+/// dispatch chain every diode/torch/observer arm uses).
+pub(crate) fn run_tripwire_recheck(column: &mut crate::chunk::ChunkColumn, min_x: i32, min_z: i32, pos: BlockPos) -> Vec<RandomTickEvent> {
+    let tlx = pos.x - min_x;
+    let tlz = pos.z - min_z;
+    if !(0..16).contains(&tlx) || !(0..16).contains(&tlz) || pos.y < column.min_y || pos.y >= column.min_y + column.height {
+        return Vec::new();
+    }
+    let state = column.block_state(tlx, pos.y, tlz).to_string();
+    if base_name(&state) != redstone_tripwire::TRIPWIRE_HOOK {
+        return Vec::new();
+    }
+    let result = {
+        let lookup = redstone::make_lookup(column, min_x, min_z);
+        redstone_tripwire::calculate_state(&lookup, pos, &state, false, None)
+    };
+    let mut own = Vec::new();
+    apply_tripwire_result(column, min_x, min_z, &result, &mut own);
     own
 }
 
@@ -1827,6 +1955,88 @@ fn react_to_notification(
                             }
                         }
                     }
+                }
+            }
+            return Vec::new();
+        }
+
+        // 3f. Note blocks (issue #322's first fixture). `NoteBlock.neighborChanged`
+        // (`NoteBlock.java:87-99`) — immediate, like the hopper/openable arms
+        // above, not scheduled. See `crate::redstone_note_block`'s own module
+        // doc for the client-visible "pulse" half this crate cannot transport
+        // yet (`reaction.play_pulse` is computed correctly but not consumed
+        // here — there is nowhere in this event type to put it).
+        if base_name(&state) == redstone_note_block::NOTE_BLOCK {
+            let (has_signal, above_is_air) = {
+                let lookup = redstone::make_lookup(column, min_x, min_z);
+                let has_signal = redstone::best_neighbor_signal(&lookup, n.pos, false) > 0;
+                let above_state = lookup(Direction::Up.relative(n.pos));
+                (has_signal, is_air_variant(&above_state))
+            };
+            if let Some(reaction) = redstone_note_block::on_neighbor_changed(&state, has_signal, above_is_air) {
+                column.set_block(tlx, n.pos.y, tlz, &reaction.new_state);
+                events.push(RandomTickEvent {
+                    pos: (n.pos.x, n.pos.y, n.pos.z),
+                    from: state,
+                    to: reaction.new_state,
+                });
+            }
+            return Vec::new();
+        }
+
+        // 3g. Powered/activator rails (issue #318's rail half — detector
+        // rail's own producer is still unbuilt, see `crate::redstone_rail`'s
+        // module doc). `PoweredRailBlock.updateState`, reached through
+        // `BaseRailBlock.neighborChanged` (`:80-92`) since neither block
+        // overrides `neighborChanged` itself.
+        if redstone_rail::is_powered_rail_family(&state) {
+            let new_state = {
+                let lookup = redstone::make_lookup(column, min_x, min_z);
+                let has_signal = |p: BlockPos| redstone::best_neighbor_signal(&lookup, p, false) > 0;
+                redstone_rail::update_state(&lookup, &has_signal, n.pos, &state)
+            };
+            if let Some(new_state) = new_state {
+                column.set_block(tlx, n.pos.y, tlz, &new_state);
+                let shape = redstone_rail::shape_of(&new_state);
+                events.push(RandomTickEvent {
+                    pos: (n.pos.x, n.pos.y, n.pos.z),
+                    from: state,
+                    to: new_state,
+                });
+                if let Some(shape) = shape {
+                    return redstone_rail::extra_notifications(n.pos, shape);
+                }
+            }
+            return Vec::new();
+        }
+
+        // 3h. Dispensers/droppers (issue #320) — the `TRIGGERED` state
+        // machine only. `DispenserBlock.neighborChanged`
+        // (`DispenserBlock.java:127-139`); see `crate::redstone_dispenser`'s
+        // own module doc for exactly why the actual fire (the scheduled tick
+        // this arm schedules) has nothing to consume yet.
+        if redstone_dispenser::is_dispenser_family(&state) {
+            let should_trigger = {
+                let lookup = redstone::make_lookup(column, min_x, min_z);
+                redstone::best_neighbor_signal(&lookup, n.pos, false) > 0
+                    || redstone::best_neighbor_signal(&lookup, Direction::Up.relative(n.pos), false) > 0
+            };
+            if let Some(reaction) = redstone_dispenser::on_neighbor_changed(&state, should_trigger) {
+                column.set_block(tlx, n.pos.y, tlz, &reaction.new_state);
+                events.push(RandomTickEvent {
+                    pos: (n.pos.x, n.pos.y, n.pos.z),
+                    from: state,
+                    to: reaction.new_state,
+                });
+                if reaction.schedule_fire
+                    && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone_dispenser::TICK_DISPENSER_FIRE.to_string())
+                {
+                    block_ticks.schedule(
+                        (n.pos.x, n.pos.y, n.pos.z),
+                        redstone_dispenser::TICK_DISPENSER_FIRE.to_string(),
+                        current_tick + u64::from(redstone_dispenser::TRIGGER_DURATION),
+                        TickPriority::Normal,
+                    );
                 }
             }
             return Vec::new();
