@@ -488,6 +488,8 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
         damage: None,
         max_damage: None,
         enchanted: false,
+        dyed_color: None,
+        potion_color: None,
     }))
     .chain(std::iter::repeat_with(|| None).take(8))
     .collect();

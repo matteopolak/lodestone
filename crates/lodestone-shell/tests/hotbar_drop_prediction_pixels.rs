@@ -123,6 +123,8 @@ fn hotbar_records(menus: &Menus) -> Vec<Option<HotbarSlot>> {
                     damage,
                     max_damage,
                     enchanted: false,
+                    dyed_color: None,
+                    potion_color: None,
                 })
             })
         })

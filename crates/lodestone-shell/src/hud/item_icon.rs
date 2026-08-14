@@ -124,6 +124,21 @@ pub struct ItemIcon {
     /// [`stack_has_foil`] rather than by hand — it was hardcoded `false` at every
     /// producer until that fix, which is why nothing glinted.
     pub enchanted: bool,
+    /// The stack's `minecraft:dyed_color`, straight off
+    /// `lodestone_game::item::ItemStack::dyed_color`. `None` for an undyed
+    /// stack (or any non-dyeable item) — fed into [`sprite_layer_tint`]'s
+    /// [`ItemTintContext`](lodestone_assets::item_tint::ItemTintContext) so the
+    /// `dye` tint source resolves against the real stack instead of the
+    /// definition's brown default. A producer with no live stack in hand
+    /// (a recipe result, an advancement icon) leaves this `None`, which is the
+    /// honest answer for those, not a shortcut.
+    pub dyed_color: Option<u32>,
+    /// The stack's already-mixed `minecraft:potion_contents` colour, straight
+    /// off `lodestone_game::item::ItemStack::potion_color`. `None` for a
+    /// non-potion item or one with no potion contents at all — see
+    /// [`dyed_color`](Self::dyed_color)'s doc for the same "no live stack means
+    /// `None`" contract.
+    pub potion_color: Option<u32>,
 }
 
 /// `ItemStack.hasFoil()` for a shell-side [`lodestone_game::item::ItemStack`],
@@ -314,7 +329,7 @@ pub(crate) fn draw_item_icon_counted(
                                 uv_min: spr.uv_min,
                                 uv_max: spr.uv_max,
                             };
-                            push_sprite_quad(sink.sprite, vw, vh, quad, sprite_layer_tint(layer));
+                            push_sprite_quad(sink.sprite, vw, vh, quad, sprite_layer_tint(layer, slot));
                             if slot.enchanted {
                                 push_glint_quad(sink.glint, vw, vh, quad);
                             }
@@ -487,7 +502,7 @@ pub(crate) fn draw_item_icon_popped(
                                 uv_min: spr.uv_min,
                                 uv_max: spr.uv_max,
                             };
-                            push_sprite_quad(sink.sprite, vw, vh, quad, sprite_layer_tint(layer));
+                            push_sprite_quad(sink.sprite, vw, vh, quad, sprite_layer_tint(layer, slot));
                             if slot.enchanted {
                                 push_glint_quad(sink.glint, vw, vh, quad);
                             }
@@ -685,23 +700,38 @@ fn push_special_icon(
 ///   =>   m = t^2.2 = srgb_to_linear(t)          (texel cancels)
 /// ```
 ///
-/// # What is not live yet
+/// # What is live, and what still is not
 ///
-/// [`ItemTintContext`] is left at its default — no components, no colormap. That
-/// is not a stub for `constant` (the majority source, which reads nothing) and it
-/// is vanilla's own answer for an uncustomised stack: an undyed leather helmet's
-/// brown *is* the definition's `dye` default. The one real miss is a **dyed**
-/// stack, and it is a wire-side gap rather than a wiring one —
-/// `lodestone_game::item::ItemComponents` has no `minecraft:dyed_color` member at
-/// all (that crate defines no `DYED_COLOR_COMPONENT`), so the shell holds no live
-/// dye to pass. `grass` resolves to `None` without a colormap, which
-/// [`lodestone_assets::item_tint::resolve`] documents as the honest degradation.
-fn sprite_layer_tint(layer: &SpriteLayer) -> [f32; 4] {
+/// `slot.dyed_color`/`slot.potion_color` feed [`ItemTintContext::components`]
+/// with a `lodestone_model::item::ItemComponents` built just for this call —
+/// only those two fields are non-default, because `dye` and `potion` are the
+/// only two tint sources any producer of an [`ItemIcon`] can supply today (see
+/// each field's own doc for why a `None` there is honest rather than a stub).
+/// `map_color`, `firework_explosion` and `custom_model_data` still resolve to
+/// their definition's `default` regardless, because [`ItemIcon`] carries no
+/// component for any of them — that is
+/// [`TintProvenance::Unmodeled`](lodestone_assets::item_tint::TintProvenance::Unmodeled),
+/// not a wiring gap this function could close. `grass_colormap` is left `None`
+/// for the same reason it always was: nothing downstream of this call threads a
+/// pack colormap through, so `grass` resolves to `None` (no colormap) exactly as
+/// [`lodestone_assets::item_tint::resolve`] documents.
+fn sprite_layer_tint(layer: &SpriteLayer, slot: &ItemIcon) -> [f32; 4] {
     let Some(source) = layer.tint.as_ref() else {
         return [1.0, 1.0, 1.0, 1.0];
     };
-    let Some(resolved) = lodestone_assets::item_tint::resolve(source, &ItemTintContext::default())
-    else {
+    // Only `dyed_color`/`potion_color` are populated — the two live sources;
+    // every other field takes its `Default`, which is exactly the "component
+    // absent" state `resolve` expects for a source this build cannot supply.
+    let components = lodestone_model::item::ItemComponents {
+        dyed_color: slot.dyed_color,
+        potion_color: slot.potion_color,
+        ..Default::default()
+    };
+    let ctx = ItemTintContext {
+        components: Some(&components),
+        grass_colormap: None,
+    };
+    let Some(resolved) = lodestone_assets::item_tint::resolve(source, &ctx) else {
         return [1.0, 1.0, 1.0, 1.0];
     };
     // `rgb()` and not `argb`: item tints are opaque multipliers in every vanilla
@@ -2326,7 +2356,25 @@ impl IconRenderer {
 
 #[cfg(test)]
 mod pop_tests {
-    use super::{ResourceLocation, SpriteLayer, pop_squeeze_rect, sprite_layer_tint, stack_has_foil};
+    use super::{ItemIcon, ResourceLocation, SpriteLayer, pop_squeeze_rect, sprite_layer_tint, stack_has_foil};
+
+    /// A bare `ItemIcon` with no live stack behind it — `dyed_color` and
+    /// `potion_color` both `None`, i.e. every source falls back to the
+    /// definition's own default. What every test below wants: these gates are
+    /// about the gamma conversion, not the component lookup, and
+    /// [`super::item_tint_component_gates`] below is where the component side
+    /// is pinned.
+    fn blank_icon() -> ItemIcon {
+        ItemIcon {
+            item: ResourceLocation::parse("minecraft:stick").expect("static id parses"),
+            count: 1,
+            damage: None,
+            max_damage: None,
+            enchanted: false,
+            dyed_color: None,
+            potion_color: None,
+        }
+    }
 
     /// `pop <= 0.0` must reproduce the original square rect exactly — the
     /// "not animating" control for [`super::draw_item_icon_popped`]'s early
@@ -2431,7 +2479,7 @@ mod pop_tests {
     /// on visibly wrong numbers rather than merely on a different code path.
     #[test]
     fn a_constant_tint_is_converted_into_the_shaders_space_not_forwarded_raw() {
-        let tint = sprite_layer_tint(&constant_layer(0xFF71_C35C));
+        let tint = sprite_layer_tint(&constant_layer(0xFF71_C35C), &blank_icon());
 
         for (i, byte, name) in [(0usize, 0x71u32, "R"), (1, 0xC3, "G"), (2, 0x5C, "B")] {
             let t = f64::from(byte) / 255.0;
@@ -2491,7 +2539,7 @@ mod pop_tests {
             sprite: ResourceLocation::parse("minecraft:item/stick").expect("static id parses"),
             tint: None,
         };
-        assert_eq!(sprite_layer_tint(&layer), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(sprite_layer_tint(&layer, &blank_icon()), [1.0, 1.0, 1.0, 1.0]);
     }
 
     /// White (`0xFFFFFF`) is the conversion's fixed point, so a fully-bright
@@ -2500,7 +2548,7 @@ mod pop_tests {
     /// show up here, and nowhere else.
     #[test]
     fn a_white_constant_tint_is_the_conversions_fixed_point() {
-        let tint = sprite_layer_tint(&constant_layer(0xFFFF_FFFF));
+        let tint = sprite_layer_tint(&constant_layer(0xFFFF_FFFF), &blank_icon());
         for (i, c) in tint.iter().enumerate() {
             assert!(
                 (c - 1.0).abs() < 1e-6,
@@ -2553,6 +2601,240 @@ mod pop_tests {
         assert!(
             !stack_has_foil(&empty_list),
             "an empty enchantments list must not glint"
+        );
+    }
+}
+
+/// The colour gate for the potion/dye tint-wiring fix: `sprite_layer_tint`
+/// used to resolve every source against `ItemTintContext::default()`
+/// regardless of the `ItemIcon` it was handed, so a correct resolver still
+/// painted the wrong colour. These assert the **emitted quad's colour** —
+/// what actually reaches `push_sprite_quad`'s vertex stream — not
+/// `TintProvenance`; `TintProvenance::Component` already came back right
+/// before this fix and was never the missing link.
+#[cfg(test)]
+mod tint_wiring_tests {
+    use super::{ItemIcon, ItemTintContext, ResourceLocation, SpriteLayer, sprite_layer_tint};
+
+    /// The sRGB EOTF, independently re-derived from the published standard
+    /// (IEC 61966-2-1) rather than called from `lodestone_render::fog` — see
+    /// `pop_tests::srgb_eotf_from_spec`'s doc for why: asserting the function
+    /// under test against the very conversion it calls internally is
+    /// `decode(encode(x))`, satisfied by two symmetric misunderstandings.
+    fn srgb_eotf(c: f64) -> f64 {
+        if c <= 0.040_45 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// The linear-space quad colour `sprite_layer_tint` must emit for a
+    /// pre-blend sRGB `0xRRGGBB`, per channel, alpha fixed at `1.0` — item
+    /// tints are opaque multipliers in every vanilla case.
+    fn expect_linear(rgb: u32) -> [f64; 4] {
+        let ch = |shift: u32| srgb_eotf(f64::from((rgb >> shift) & 0xFF) / 255.0);
+        [ch(16), ch(8), ch(0), 1.0]
+    }
+
+    fn icon(dyed_color: Option<u32>, potion_color: Option<u32>) -> ItemIcon {
+        ItemIcon {
+            item: ResourceLocation::parse("minecraft:stick").expect("static id parses"),
+            count: 1,
+            damage: None,
+            max_damage: None,
+            enchanted: false,
+            dyed_color,
+            potion_color,
+        }
+    }
+
+    /// `minecraft:potion`'s tint source, `default` set to vanilla's
+    /// `PotionContents.BASE_POTION_COLOR` (`-13_083_194`) — the same default
+    /// every real `potion`/`splash_potion`/`lingering_potion`/`tipped_arrow`
+    /// item definition carries.
+    fn potion_layer() -> SpriteLayer {
+        SpriteLayer {
+            sprite: ResourceLocation::parse("minecraft:item/potion").expect("static id parses"),
+            tint: Some(lodestone_assets::TintSource {
+                kind: "minecraft:potion".to_string(),
+                default: Some(-13_083_194),
+                grass: None,
+                index: 0,
+            }),
+        }
+    }
+
+    /// `minecraft:dye`'s tint source, `default` set to vanilla's
+    /// `DyedItemColor.LEATHER_COLOR` (`-6_265_536`) — every vanilla `dye`
+    /// item definition's own default.
+    fn dye_layer() -> SpriteLayer {
+        SpriteLayer {
+            sprite: ResourceLocation::parse("minecraft:item/leather_helmet")
+                .expect("static id parses"),
+            tint: Some(lodestone_assets::TintSource {
+                kind: "minecraft:dye".to_string(),
+                default: Some(-6_265_536),
+                grass: None,
+                index: 0,
+            }),
+        }
+    }
+
+    /// The discriminating gate: six items whose expected pre-blend colour is
+    /// known from vanilla's own constants, run through the *actual* function
+    /// `draw_item_icon_counted`/`draw_item_icon_popped` call
+    /// (`sprite_layer_tint`) rather than through `item_tint::resolve`
+    /// directly — that already has its own coverage in `lodestone-assets` and
+    /// would prove nothing about whether `ItemIcon`'s fields actually reach
+    /// it. Mismatches are collected and asserted on together, never inside
+    /// the loop — an `assert!` there would abort at the first failure and
+    /// hide how many of the six sources were actually broken.
+    #[test]
+    fn potion_and_dye_components_reach_the_emitted_quad_colour() {
+        let cases: Vec<(&str, SpriteLayer, ItemIcon, u32)> = vec![
+            // `MobEffects.SPEED`'s particle colour. A single-effect potion's
+            // mixed colour is the effect's own colour regardless of
+            // amplifier (the weighted average has one term), so
+            // `potion_color` is set directly rather than re-deriving the
+            // mixing formula, which `lodestone-data`'s own tests already
+            // cover.
+            (
+                "swiftness",
+                potion_layer(),
+                icon(None, Some(0xFF33_EBFF)),
+                0x33_EBFF,
+            ),
+            // `MobEffects.INSTANT_DAMAGE`'s particle colour — more than 60
+            // apart from swiftness on every channel (118, 134, 149; see
+            // `potion_pair_is_discriminating_on_every_channel` below), so no
+            // pairwise-equal fixture value can hide a transposition.
+            (
+                "strong_harming",
+                potion_layer(),
+                icon(None, Some(0xFFA9_656A)),
+                0xA9_656A,
+            ),
+            // The control: no `potion_contents` at all resolves to
+            // `PotionContents.BASE_POTION_COLOR`, proving this gate is not
+            // merely "not the default" — it pins the *specific* default too.
+            (
+                "water_bottle_control",
+                potion_layer(),
+                icon(None, None),
+                0x38_5DC6,
+            ),
+            (
+                "dyed_leather_a",
+                dye_layer(),
+                icon(Some(0x11_2233), None),
+                0x11_2233,
+            ),
+            (
+                "dyed_leather_b",
+                dye_layer(),
+                icon(Some(0x88_99AA), None),
+                0x88_99AA,
+            ),
+            // The dye control: an undyed leather item resolves to
+            // `DyedItemColor.LEATHER_COLOR`, vanilla's own definition default.
+            (
+                "undyed_leather_default",
+                dye_layer(),
+                icon(None, None),
+                0xA0_6540,
+            ),
+        ];
+
+        let mut mismatches = Vec::new();
+        for (name, layer, slot, expected_rgb) in &cases {
+            let got = sprite_layer_tint(layer, slot);
+            let want = expect_linear(*expected_rgb);
+            for (i, w) in want.iter().enumerate().take(3) {
+                let d = (f64::from(got[i]) - w).abs();
+                if d >= 1e-4 {
+                    mismatches.push(format!(
+                        "{name} channel {i}: got {}, want {w} (expected rgb {expected_rgb:06X}), off by {d}",
+                        got[i]
+                    ));
+                }
+            }
+            if (got[3] - 1.0).abs() >= 1e-6 {
+                mismatches.push(format!("{name}: alpha is {}, not 1.0", got[3]));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} of {} channel checks failed:\n{}",
+            mismatches.len(),
+            cases.len() * 3,
+            mismatches.join("\n")
+        );
+    }
+
+    /// Control for the gate above: the swiftness/strong_harming pair really
+    /// is more than 60 apart on every channel, so the gate could not pass by
+    /// coincidence even with a badly wired context.
+    #[test]
+    fn potion_pair_is_discriminating_on_every_channel() {
+        let a = [0x33i32, 0xEB, 0xFF];
+        let b = [0xA9i32, 0x65, 0x6A];
+        for i in 0..3 {
+            let d = (a[i] - b[i]).abs();
+            assert!(
+                d > 60,
+                "channel {i}: swiftness/strong_harming are only {d} apart, \
+                 not enough to discriminate a wiring bug from coincidence"
+            );
+        }
+    }
+
+    /// The pre-fix behaviour, pinned as its own control: resolving every
+    /// source against `ItemTintContext::default()` — the bug this whole
+    /// module exists to catch — collapses all three potions and all three
+    /// dyed items in [`potion_and_dye_components_reach_the_emitted_quad_colour`]
+    /// down to the *same* default colour apiece, indistinguishable from one
+    /// another. If a future refactor reintroduces `ItemTintContext::default()`
+    /// at the call site, this is the assertion that proves the discriminating
+    /// gate above would have caught it — the detector fires here.
+    #[test]
+    fn default_context_collapses_every_case_the_real_context_discriminates() {
+        let default_ctx = ItemTintContext::default();
+        let potion_default = lodestone_assets::item_tint::resolve(
+            potion_layer().tint.as_ref().expect("layer carries a tint"),
+            &default_ctx,
+        )
+        .expect("a source with a default always resolves")
+        .rgb();
+        let dye_default = lodestone_assets::item_tint::resolve(
+            dye_layer().tint.as_ref().expect("layer carries a tint"),
+            &default_ctx,
+        )
+        .expect("a source with a default always resolves")
+        .rgb();
+
+        // Every potion case would have collapsed to the same default —
+        // including swiftness and strong_harming, which the real fix keeps
+        // 118-149 apart per channel.
+        assert_eq!(potion_default, 0x38_5DC6, "unneutered potion default drifted");
+        assert_ne!(
+            potion_default, 0x33_EBFF,
+            "swiftness must differ from the neutered default for the gate above to mean anything"
+        );
+        assert_ne!(
+            potion_default, 0xA9_656A,
+            "strong_harming must differ from the neutered default for the gate above to mean anything"
+        );
+
+        // Same shape for dye.
+        assert_eq!(dye_default, 0xA0_6540, "unneutered dye default drifted");
+        assert_ne!(
+            dye_default, 0x11_2233,
+            "dyed_leather_a must differ from the neutered default for the gate above to mean anything"
+        );
+        assert_ne!(
+            dye_default, 0x88_99AA,
+            "dyed_leather_b must differ from the neutered default for the gate above to mean anything"
         );
     }
 }

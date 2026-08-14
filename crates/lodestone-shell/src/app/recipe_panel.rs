@@ -382,6 +382,11 @@ fn toast_icon(id: &lodestone_model::Identifier) -> Option<HotbarSlot> {
         damage: None,
         max_damage: None,
         enchanted: false,
+        // Same gap as `enchanted` above: an id, not a stack, so there is no
+        // dye/potion component to read. `None` is the honest answer, not a
+        // shortcut — see `ItemIcon::dyed_color`'s doc.
+        dyed_color: None,
+        potion_color: None,
     })
 }
 
