@@ -81,3 +81,29 @@ naming this crate specifically (`lodestone-time instant-ban`,
 `lodestone-worldgen`) and the shell's `platform.rs`-allowlisted pair for
 `lodestone-shell`. See `docs/browser-shell-port.md` for the fuller wasm-hazard
 picture this is one piece of.
+
+### Crates that were audited and excused, not migrated
+
+Four crates carry a raw `std::time::Instant`/`SystemTime` call and were
+deliberately **left alone with a documented reason** rather than converted,
+because each is either dev-dependency-only or has its clock call sites
+structurally confined behind a gate that already keeps them out of a wasm
+build. Converting them would cost nothing at compile time, but the rule this
+repo follows is: a file that genuinely never reaches `wasm32` is named and
+excused, not converted for tidiness (`CLAUDE.md`). Each has its own
+`instant-ban`/`systemtime-ban` confinement-rule pair too, using the bare
+`Instant::now(`/`SystemTime::now(` spelling rather than the qualified
+`std::time::` path — none of the four depends on `lodestone-time`, so there is
+no legitimate `lodestone_time::Instant::now()` call in them to avoid catching,
+and their real call sites are a mix of qualified and unqualified spellings.
+
+| crate | file | why it is excused |
+|---|---|---|
+| `lodestone-auth` | `browser_login.rs`, `migrate.rs` | both modules are declared `#[cfg(not(target_arch = "wasm32"))]` at `lib.rs`, so neither ever compiles into a wasm32 build |
+| `lodestone-world` | `world.rs` | the one call site is inside `#[cfg(test)] mod tests` (a synthetic-fill timing print) — test code is never part of a `--lib` build, wasm or native |
+| `lodestone-testsupport` | `lib.rs` | the crate is a `[dev-dependencies]` entry of every one of its dependents (including `lodestone-shell`, deliberately — see that crate's own `Cargo.toml` comment), so its lib target is never linked into a production or wasm build at all |
+| `lodestone-allocbench` | `main.rs` | a native-only allocator-benchmark binary; nothing in the workspace depends on it, and it is already excluded from any `--all-features` sweep for its allocator mutual-exclusion |
+
+`lodestone-ecs`'s existing `async_task.rs` allowlist entry is the same shape:
+its only clock hits are inside a `#[cfg(not(target_arch = "wasm32"))] #[cfg(test)] mod
+tests`.
