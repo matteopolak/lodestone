@@ -12,7 +12,10 @@ use lodestone_client::{
     KeepAlivePolicy, LoginProfile, PlayerLoadedPolicy, RespawnPolicy, ServerAddress,
     SessionOutcome, VersionAdapter,
 };
-use lodestone_model::{AdapterError, GameMode, Identifier, Rotation, TeleportFlags, Text, Vec3};
+use lodestone_model::{
+    AdapterError, GameMode, Identifier, ResourcePackResponseKind, Rotation, TeleportFlags, Text,
+    Vec3,
+};
 use lodestone_net::{Connection, memory_pair};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -34,6 +37,7 @@ struct FakeAdapter {
     player_loaded_resp_id: Option<i32>,
     brand_resp_id: Option<i32>,
     pong_resp_id: Option<i32>,
+    resource_pack_resp_id: Option<i32>,
     calls: Arc<Mutex<Vec<(ConnectionState, i32)>>>,
     /// Chunk columns to write into the [`lodestone_model::WorldSink`] when a
     /// scripted `(state, packet_id)` arrives, as `(chunk_x, chunk_z)`.
@@ -50,6 +54,7 @@ const CHAT_ID: i32 = 0x06;
 const RESPAWN_RESP_ID: i32 = 0x0C;
 const CHAT_ACK_ID: i32 = 0x07;
 const PONG_RESP_ID: i32 = 0x0D;
+const RESOURCE_PACK_RESP_ID: i32 = 0x0E;
 
 fn state_code(state: ConnectionState) -> u8 {
     match state {
@@ -101,6 +106,14 @@ impl FakeAdapter {
     /// without this it stays unrepresentable (`Ok(None)`).
     fn pong_to(mut self, id: i32) -> Self {
         self.pong_resp_id = Some(id);
+        self
+    }
+
+    /// Makes `ResourcePackResponse` encode to an observable packet so the
+    /// driver's automatic answer to a server-pushed resource pack is visible
+    /// on the wire; without this it stays unrepresentable (`Ok(None)`).
+    fn resource_pack_response_to(mut self, id: i32) -> Self {
+        self.resource_pack_resp_id = Some(id);
         self
     }
 
@@ -230,6 +243,28 @@ impl VersionAdapter for FakeAdapter {
                 payload.extend_from_slice(&id.to_be_bytes());
                 (resp_id, payload)
             })),
+            // Observable only when a test opts in via `resource_pack_response_to`;
+            // the payload carries the encode-time state, the echoed pack id (the
+            // 16 bytes a real server keys its own task on) and a one-byte kind tag
+            // so a test can prove the id was not transposed with anything else in
+            // the action and which outcome the driver actually reported.
+            ClientAction::ResourcePackResponse { id, response } => {
+                Ok(self.resource_pack_resp_id.map(|resp_id| {
+                    let mut payload = vec![state_code(state)];
+                    payload.extend_from_slice(id.as_bytes());
+                    payload.push(match response {
+                        ResourcePackResponseKind::SuccessfullyLoaded => 0,
+                        ResourcePackResponseKind::Declined => 1,
+                        ResourcePackResponseKind::FailedDownload => 2,
+                        ResourcePackResponseKind::Accepted => 3,
+                        ResourcePackResponseKind::Downloaded => 4,
+                        ResourcePackResponseKind::InvalidUrl => 5,
+                        ResourcePackResponseKind::FailedReload => 6,
+                        ResourcePackResponseKind::Discarded => 7,
+                    });
+                    (resp_id, payload)
+                }))
+            }
             _ => Ok(None),
         }
     }
@@ -572,6 +607,96 @@ async fn ping_answered_regardless_of_keep_alive_policy() {
     assert_eq!(&payload[1..], &13i32.to_be_bytes());
 
     assert_eq!(events.recv().await, Some(ClientEvent::Ping { id: 13 }));
+
+    drop(handle);
+}
+
+/// A server-pushed resource pack is answered automatically, from the driver
+/// rather than from anything shell-side.
+///
+/// `route(&ClientEvent::ResourcePackPushed)` is `Route::NOWHERE` in
+/// `lodestone-model` — deliberately, per `docs/event-routing.md` and the doc
+/// on `Driver::emit`'s own `ResourcePackPushed` arm: the shell's event loop
+/// does not start until after login, so a shell-side producer would be
+/// correct-looking and permanently too late for a pack pushed during
+/// Configuration. A prior audit flagged `ClientAction::ResourcePackResponse`
+/// as an island on the strength of that `NOWHERE` routing alone — the same
+/// false-negative shape `docs/event-routing.md` already documents for `Ping`
+/// (also `Route::NOWHERE`, also answered here, also currently mis-flagged as
+/// unconsumed by that same doc's prose). This is the regression gate the
+/// existing wiring never had: the v770 round-trip test in
+/// `resource_pack_push.rs` sends the reply by calling `send_action` by hand,
+/// so it cannot tell an automatic answer from a manual one. This test never
+/// calls `send_action`.
+///
+/// Two different pack ids are pushed rather than one, so a driver that hands
+/// back a fixed id (or the wrong field) cannot pass by coincidence — the
+/// same pairwise-distinct-fixture reasoning as any other single-typed-field
+/// round trip.
+#[tokio::test]
+async fn resource_pack_push_is_auto_answered_and_surfaces() {
+    const PUSH_A: i32 = 0x53;
+    const PUSH_B: i32 = 0x54;
+    let id_a = Uuid::from_u128(0x1111_1111_1111_1111_1111_1111_1111_1111);
+    let id_b = Uuid::from_u128(0x2222_2222_2222_2222_2222_2222_2222_2222);
+    let adapter = FakeAdapter::new()
+        .resource_pack_response_to(RESOURCE_PACK_RESP_ID)
+        .on(
+            ConnectionState::Handshaking,
+            PUSH_A,
+            vec![Directive::Emit(ClientEvent::ResourcePackPushed {
+                id: id_a,
+                url: "https://example.invalid/a.zip".into(),
+                hash: String::new(),
+                required: true,
+                prompt: None,
+            })],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            PUSH_B,
+            vec![Directive::Emit(ClientEvent::ResourcePackPushed {
+                id: id_b,
+                url: "https://example.invalid/b.zip".into(),
+                hash: String::new(),
+                required: false,
+                prompt: None,
+            })],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+
+    peer.write_packet(PUSH_A, &[]).await.unwrap();
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, RESOURCE_PACK_RESP_ID);
+    assert_eq!(&payload[1..17], id_a.as_bytes(), "the reply must echo the pushed pack's own id");
+    assert_eq!(
+        payload[17], 2,
+        "FailedDownload (a terminal `Action`) is the honest answer for a client \
+         that applies no packs -- see `Driver::emit`'s own doc on why not `Declined`"
+    );
+    assert_eq!(
+        events.recv().await,
+        Some(ClientEvent::ResourcePackPushed {
+            id: id_a,
+            url: "https://example.invalid/a.zip".into(),
+            hash: String::new(),
+            required: true,
+            prompt: None,
+        }),
+        "the notification must still surface even though the driver already answered it"
+    );
+
+    // A second, distinct push must get its *own* id echoed back, not the
+    // first push's -- the control a single-push test cannot run.
+    peer.write_packet(PUSH_B, &[]).await.unwrap();
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, RESOURCE_PACK_RESP_ID);
+    assert_eq!(
+        &payload[1..17],
+        id_b.as_bytes(),
+        "a second push's reply must echo its own id, not the first push's"
+    );
 
     drop(handle);
 }
