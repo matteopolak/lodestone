@@ -184,12 +184,31 @@ per cell.
 
 Centred on the chunk under the player — the same column math
 `Sim::terrain_loading` uses, so the grid's centre cell and the screen's own
-dismissal predicate can never point at different columns. Radius is the same
-`Sim::set_view_radius` value the bar's denominator is squared from
-(`Sim::expected_view_radius`), so the two can never disagree about the size of
-"the initial view". `ChunkGridView` is the frame primitive (data plus a `dy`);
-`menu/render/draw.rs` draws one real quad per cell from `chunk_cell_origin`,
-vanilla's own `extractChunksForRendering` geometry (`size = 2`, `margin = 0`).
+dismissal predicate can never point at different columns. `ChunkGridView` is the
+frame primitive (data plus a `dy`); `menu/render/draw.rs` draws one real quad per
+cell from `chunk_cell_origin`, vanilla's own `extractChunksForRendering` geometry
+(`size = 2`, `margin = 0`).
+
+**The grid's radius is a constant, not the render distance** —
+`crate::menu::loading::MAX_GRID_RADIUS`, 17, taken with the view radius'
+minimum. That is vanilla's own number:
+`Minecraft.doWorldLoad` builds the view as
+`createChunkLoadStatusView(Math.max(5, 3) + ChunkLevel.RADIUS_AROUND_FULL_CHUNK + 1)`,
+and `RADIUS_AROUND_FULL_CHUNK` — the accumulated dependency radius of
+`ChunkPyramid.GENERATION_PYRAMID`'s step to `ChunkStatus.FULL` — is 11 for 26.2,
+so vanilla's grid is 35 cells and 70 logical pixels square **at every render
+distance**. Its status view describes the *server's* generation neighbourhood,
+which does not grow with what the client draws.
+
+This was a real bug, not a tidy-up. Sizing the grid from the view radius made it
+`(2r + 1) * 2` px tall with nothing fitting it to the canvas: 130 px at the
+owner-reported `render_distance = 32`, and growing. On the 320×240 canvas
+`config::calculate_gui_scale` treats as the floor, the grid's top edge landed at
+**y = -30** — off the top of the screen — against **y = 30** with the cap.
+`the_chunk_grid_fits_the_smallest_canvas_at_every_render_distance` evaluates both
+hypotheses and gates the fixed one; under a neuter that removes the cap it
+reports 3 of its 4 radii off-canvas (radius 8 fits under both, which is why it
+cannot be the gate's only input).
 
 **A full twelve-colour grid needs a server-side generation-stage feed this
 client does not have.** That is a real gap, not this issue's scope — it would
@@ -221,12 +240,17 @@ way vanilla's `ChunkMap` does, which nothing here currently models.
   with two colours in it" fabrication this feature was built to avoid. A
   full-fidelity grid needs `lodestone-server` to track and report per-column
   generation stages; nothing here does that yet.
-- **The grid and the bar share one radius and one centre column on purpose.**
-  `Sim::terrain_chunk_grid` reads the same `expected_view_radius` and the same
-  player-chunk math `Sim::terrain_loading` uses. A change to either column
+- **The grid and the bar share one centre column on purpose, and deliberately
+  do *not* share a radius.** `Sim::terrain_chunk_grid` reads the same
+  player-chunk math `Sim::terrain_loading` uses — a change to either column
   computation must change both call sites together, or the grid's centre cell
   and the screen's own dismissal predicate would silently point at different
-  chunks.
+  chunks. The *radius*, though, is `TerrainChunkGrid::view_radius`
+  (`min(expected_view_radius, MAX_GRID_RADIUS)`) rather than the bar's own
+  denominator radius: the bar must count the whole streamed square or it lies
+  about progress, while the grid must fit on screen. **Anything that derives a
+  screen size from a player-settable number needs a bound**, and this one had
+  none.
 - **`LEVEL_CHUNKS_LOAD_START` (game event 13) is still not decoded.**
   `V770Adapter::handle_play_chunk`'s (`crates/protocol/v770/src/adapter/chunk.rs`) game-event match drops it in its
   terminal arm, so there is no "the server is about to stream" edge and

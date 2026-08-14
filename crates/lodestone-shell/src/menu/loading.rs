@@ -217,7 +217,48 @@ pub struct TerrainChunkGrid {
     pub cells: Vec<ChunkCellStatus>,
 }
 
+/// The grid's own radius, in chunks — **a constant, not the render distance**.
+///
+/// This is vanilla's number, and reading it out of the jar is the whole of this
+/// constant's justification. `Minecraft.doWorldLoad` builds the view the
+/// loading screen draws as
+/// `createChunkLoadStatusView(Math.max(5, 3) + ChunkLevel.RADIUS_AROUND_FULL_CHUNK + 1)`,
+/// and `ChunkLevel.RADIUS_AROUND_FULL_CHUNK` is
+/// `ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.FULL).accumulatedDependencies().getRadius()`,
+/// which evaluates to **11** for 26.2's pyramid (the chain's widest accumulated
+/// dependency is `LIGHT`'s, `STRUCTURE_STARTS` at radius 8 pushed out by the
+/// `BIOMES`/`CARVERS`/`INITIALIZE_LIGHT` radius-1 steps above it). So vanilla's
+/// grid is 17, i.e. `2 * 17 + 1 = 35` cells and `35 * 2 = 70` logical pixels
+/// square, **for every render distance** — the status view is the *server's*
+/// generation neighbourhood, which does not grow with what the client draws.
+///
+/// # Why this is a cap here rather than a fixed size
+///
+/// This client has no server-side status view to size from; the grid is built
+/// from the client's own `NetClient::is_chunk_loaded` over the streamed square,
+/// so its natural radius is the view radius. Taking the **minimum** of the two
+/// keeps a small render distance showing its real, whole square (radius 8 draws
+/// 17×17, all of it meaningful) while pinning the large end to vanilla's own
+/// size instead of growing without bound.
+///
+/// Unbounded was the bug: at the owner's `render_distance = 32` the grid was
+/// 65 cells and 130 px square, which does not fit above the phase label on the
+/// 320×240 canvas `config::calculate_gui_scale` treats as the floor — it
+/// overflowed the top of the screen, and kept getting worse with distance.
+pub const MAX_GRID_RADIUS: u32 = 17;
+
 impl TerrainChunkGrid {
+    /// The radius to actually draw for a session streaming `view_radius`:
+    /// [`MAX_GRID_RADIUS`], or the whole view when it is smaller.
+    ///
+    /// A function rather than a `min` at the one call site so the layout gate
+    /// and the producer share one expression — the same reason
+    /// `menu::render::screens::chunk_grid_dy` is a free function.
+    #[must_use]
+    pub const fn view_radius(view_radius: u32) -> u32 {
+        if view_radius < MAX_GRID_RADIUS { view_radius } else { MAX_GRID_RADIUS }
+    }
+
     /// Cells per side: `LevelLoadingScreen.extractChunksForRendering`'s
     /// `diameter = statusView.radius() * 2 + 1`.
     #[must_use]
