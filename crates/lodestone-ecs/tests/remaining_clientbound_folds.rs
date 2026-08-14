@@ -1,4 +1,4 @@
-//! Issue #26's anti-island gate: each of the twenty-four new `ClientEvent`s must
+//! The anti-island gate: each of the twenty-four new `ClientEvent`s must
 //! reach a real fold through the **production** `SessionPlugin`, not through a
 //! hand-called `apply`.
 //!

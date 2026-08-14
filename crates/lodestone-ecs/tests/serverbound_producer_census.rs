@@ -1,4 +1,4 @@
-//! Issue #304's other half, as a gate: which serverbound actions the client can
+//! A gate for which serverbound actions the client can
 //! **encode** but never **produces**.
 //!
 //! # Why this exists
@@ -13,7 +13,7 @@
 //! | `ClientAction::SetFlying` | four adapters encoded it, **zero** producers; the server kicked us with `multiplayer.disconnect.flying` |
 //! | `ClientAction::ChangeGameMode` | zero producers until a game-mode switcher was added |
 //! | `ClientAction::PlaceRecipe` | zero producers; the shell synthesises three container clicks instead |
-//! | `PlayerCommand::StartFallFlying` | four adapter encoders, zero producers, until riptide (#208) added the first |
+//! | `PlayerCommand::StartFallFlying` | four adapter encoders, zero producers, until riptide added the first |
 //! | `ClientAction::MoveVehicle`, `ClientAction::PaddleBoat`, `PlayerCommand::StartRidingJump` | encoded byte-exactly by the v770 adapter with its own round-trip tests; nothing moved a ridden vehicle at all until `lodestone_ecs::vehicle` simulated one |
 //!
 //! So the set is **snapshotted**, and landing the first producer for something on
@@ -28,8 +28,8 @@
 //! variant **by name**". It is blind to:
 //!
 //! - **A producer behind an indirection.** `lodestone-shell/src/app/menus.rs`
-//!   produces `ClientAction::SignUpdate` through `submit.into_action()`
-//!   (`menu/command_block.rs:541`), and no name scanner can follow that. This is
+//!   produces `ClientAction::SetCommandBlock` through `submit.into_action()`
+//!   (`lodestone_shell::menu::command_block::CommandBlockSubmit::into_action`), and no name scanner can follow that. This is
 //!   why the list is hand-verified rather than swept.
 //! - **Whether the producer is reachable.** A construction inside a system nothing
 //!   schedules counts here. That is the island class `CLAUDE.md` §1 covers and this
@@ -39,9 +39,10 @@
 //!   is not, and that is a deliberate retreat rather than an oversight. The first
 //!   draft tracked `#[cfg(test)]` with a line scanner and it was wrong in the worst
 //!   direction: the flag was sticky, so it tripped on a comment mentioning
-//!   `#[cfg(test)]` at `lodestone-shell/src/sim/session.rs:111` and skipped the
+//!   `#[cfg(test)]` in `lodestone-shell/src/sim/session.rs` (a comment noting
+//!   `mut` is used only by the `#[cfg(test)]` `bind_session` below) and skipped the
 //!   remaining ~800 lines of that file — including the real
-//!   `ClientAction::ContainerClose` producer at line 899. The gate reported
+//!   `ClientAction::ContainerClose` producer in `Sim::close_open_menu`. The gate reported
 //!   **21 false gaps**. `CLAUDE.md` names exactly this ("a hand-rolled Rust lexer
 //!   will be wrong"), so the tracking is gone; over-reporting *produced* costs a
 //!   missed entry, and the alternative cost a snapshot nobody could trust.
@@ -66,8 +67,8 @@ use std::path::{Path, PathBuf};
 /// Adding an encoder for something no screen can trigger is fine — put it here
 /// with its blocker. Landing the producer means deleting the line.
 const KNOWN_UNPRODUCED: &[(&str, &str)] = &[
-    // --- issue #304: the operator/creative editor set -----------------------
-    // Encoders landed with #304; every one of these is gated on an editor screen
+    // --- the operator/creative editor set ------------------------------------
+    // These encoders were all landed together; every one of these is gated on an editor screen
     // that has not been built. Named individually rather than as a group so the
     // first one to get a screen is a one-line diff.
     ("ClientAction::SetStructureBlock", "structure block screen"),
@@ -271,9 +272,9 @@ fn produced(prefix: &str, variants: &BTreeSet<String>) -> BTreeSet<String> {
 ///
 /// **Deliberately not a whole-enum sweep.** The first draft swept every
 /// `ClientAction` variant and reported 18 further gaps — and at least one,
-/// `SignUpdate`, was a false positive: `lodestone-shell/src/app/menus.rs` produces
+/// `SetCommandBlock`, was a false positive: `lodestone-shell/src/app/menus.rs` produces
 /// it through `submit.into_action()`
-/// (`lodestone-shell/src/menu/command_block.rs:541`), an indirection no name
+/// (`lodestone_shell::menu::command_block::CommandBlockSubmit::into_action`), an indirection no name
 /// scanner can follow. A 35-entry snapshot with unverified members is the
 /// "confident and wrong claim" `CLAUDE.md`'s evidence section exists to forbid, so
 /// the list is the set that was checked **by hand**, and the sweep is not here.
