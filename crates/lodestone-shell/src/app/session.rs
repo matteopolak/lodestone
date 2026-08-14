@@ -73,6 +73,7 @@ impl WindowApp {
             advancement_feed: super::advancements_screen::AdvancementsFeed::default(),
             hosted_world: None,
             merchant_selected: 0,
+            anvil_rename: crate::container::AnvilRenameState::new(),
         }
     }
 
@@ -170,6 +171,28 @@ impl WindowApp {
         // session.
         if self.sim.has_won() && self.ui.screen() != crate::menu::Screen::Credits {
             self.ui.show_credits();
+        }
+        // The sign-editing screen: `Sim::take_pending_sign_edit` is the
+        // ground truth a real `NetUpdate::SignEditorOpened` sets, reconciled
+        // here every frame the same way `has_won`/`is_dead` are above. Unlike
+        // those two this is a one-shot **take**, not a latched flag — see
+        // `Sim::pending_sign_edit`'s own doc — so there is no "un-open"
+        // branch to reconcile on the other side; the screen closes itself
+        // through `MenuNav::close_sign_edit` when the player is done.
+        //
+        // `MenuNav::open_sign_edit` converts `Sim`'s menu-agnostic
+        // `PendingSignEdit` into `menu::sign_edit::SignEditOpen` and guards
+        // on `Screen::Playing`, matching `open_command_block`'s own two-step
+        // (widget state here, screen there).
+        if let Some(request) = self.sim.take_pending_sign_edit() {
+            self.nav.open_sign_edit(
+                &mut self.ui,
+                crate::menu::sign_edit::SignEditOpen {
+                    pos: request.pos,
+                    is_front_text: request.is_front_text,
+                    lines: request.lines,
+                },
+            );
         }
         // Issue #535's scope 2: the pause menu stops offering Open to LAN
         // once there is nothing left for it to do. `Sim::is_lan_published`

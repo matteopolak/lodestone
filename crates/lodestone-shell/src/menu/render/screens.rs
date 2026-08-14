@@ -418,6 +418,66 @@ pub fn command_block_frame(
     }
 }
 
+/// Builds the sign-editing screen's overlay frame: [`sign_edit::SignEditState`]'s
+/// four line fields plus its Done row. See [`sign_edit`]'s module doc for what
+/// this deliberately does not attempt (vanilla's pseudo-3D sign face).
+///
+/// Row indices match [`super::nav::sign_edit_row`]: the four lines, then
+/// [`super::nav::sign_edit_row::DONE`].
+pub fn sign_edit_frame(state: &sign_edit::SignEditState) -> MenuFrame<'static> {
+    let labels = vec![MenuLabel {
+        text: sign_edit::TITLE_TEXT.to_string(),
+        origin: Origin::ScreenTop,
+        dx: 0.0,
+        dy: sign_edit::TITLE_Y,
+        align: Align::Centre,
+        colour: LABEL,
+        scale: 1.0,
+    }];
+
+    let mut rows: Vec<MenuRow> = state
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| MenuRow {
+            field: true,
+            edit: Some(line.clone()),
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: sign_edit::LINE_DX,
+                dy: sign_edit::LINE_START_Y + i as f32 * sign_edit::LINE_SPACING,
+                w: sign_edit::LINE_W,
+                h: sign_edit::LINE_H,
+            }),
+            ..Default::default()
+        })
+        .collect();
+    debug_assert_eq!(rows.len(), nav::sign_edit_row::DONE);
+
+    rows.push(MenuRow {
+        label: "Done".to_string(),
+        enabled: true,
+        slot: Some(Slot {
+            origin: Origin::ScreenTop,
+            dx: sign_edit::DONE_DX,
+            dy: sign_edit::DONE_Y,
+            w: sign_edit::DONE_W,
+            h: sign_edit::DONE_H,
+        }),
+        ..Default::default()
+    });
+
+    MenuFrame {
+        rows,
+        selected: usize::MAX,
+        hovered: state.done_hovered.then_some(nav::sign_edit_row::DONE),
+        backdrop: MenuBackdrop::Dim,
+        vanilla: true,
+        labels,
+        ..Default::default()
+    }
+}
+
 /// Builds the loading screen's frame (issue #449): the panorama under
 /// `menu_background.png`'s wash, with one centred line of text — the current
 /// `ConnectPhase`'s own vanilla string

@@ -561,6 +561,15 @@ impl Sim {
         self.won
     }
 
+    /// Takes the pending sign-edit request, if `NetUpdate::SignEditorOpened`
+    /// arrived since the last call — the ground truth
+    /// `app::session::drive_ui_from_session` polls once per frame to open
+    /// [`crate::menu::Screen::SignEdit`]. See [`Self::pending_sign_edit`]'s
+    /// own field doc on why this *takes* rather than reads a latched flag.
+    pub fn take_pending_sign_edit(&mut self) -> Option<PendingSignEdit> {
+        self.pending_sign_edit.take()
+    }
+
     /// Whether `NetUpdate::LanOpened` has arrived this session (issue #535's
     /// scope 2) — the ground truth `app::session::drive_ui_from_session`
     /// reconciles into `MenuNav::set_lan_published`, the same shape
@@ -1692,6 +1701,43 @@ impl Sim {
             })
             .map_or(&lodestone_core::Nbt::End, |be| &be.nbt);
         crate::command_block_source::command_block_open(pos, state_id, nbt)
+    }
+
+    /// The sign at `pos`'s currently-synced text — `SignText::parse` on the
+    /// block entity's NBT if a record exists there, `SignText::default()`
+    /// (four blank lines, unwaxed) otherwise. Used to seed the sign-editing
+    /// screen when [`NetUpdate::SignEditorOpened`](crate::net::NetUpdate::
+    /// SignEditorOpened) names a position — see [`Self::poll_net`].
+    ///
+    /// Unlike [`Self::targeted_command_block`], this does **not** check the
+    /// block state names a sign: the server decides whether a player may
+    /// edit (the packet only arrives for a real sign it has already
+    /// authorised), so trusting the position it named is the honest choice —
+    /// there is no "not a sign" failure mode to guard here, only "no record
+    /// yet", which degrades exactly as vanilla's own `new SignText()` does.
+    #[must_use]
+    pub fn sign_text_at(&self, pos: lodestone_model::BlockPos) -> lodestone_world::SignText {
+        let store = self.read(|w| w.resource::<ChunkWorld>().clone());
+        let world = store.read();
+        let chunk_pos = lodestone_world::ChunkPos {
+            x: pos.x.div_euclid(16),
+            z: pos.z.div_euclid(16),
+        };
+        let Some(chunk) = world.get(chunk_pos) else {
+            return lodestone_world::SignText::default();
+        };
+        let rel_x = pos.x.rem_euclid(16) as usize;
+        let rel_z = pos.z.rem_euclid(16) as usize;
+        let nbt = chunk
+            .block_entities
+            .iter()
+            .find(|be| {
+                usize::from(be.rel_x) == rel_x
+                    && usize::from(be.rel_z) == rel_z
+                    && i32::from(be.y) == pos.y
+            })
+            .map_or(&lodestone_core::Nbt::End, |be| &be.nbt);
+        lodestone_world::SignText::parse(nbt)
     }
 
     /// `(distance_to_border, warning_distance, warning_strength)`, or `None`

@@ -67,6 +67,7 @@ use crate::menu::command_block;
 use crate::menu::edit_box::{self, EditBox};
 use crate::menu::layout;
 use crate::menu::nav::{MainButton, PauseButton};
+use crate::menu::sign_edit;
 use crate::menu::panorama::{self, PanoramaFaces, PanoramaRenderer};
 use crate::menu::widget::{self, LayoutElement, Widget};
 
@@ -114,7 +115,7 @@ pub use origin::{Origin, Slot};
 pub use renderer::MenuRenderer;
 pub use screens::{
     chunk_grid_dy, command_block_frame, death_frame, loading_frame, loading_frame_with_progress,
-    loading_frame_with_progress_and_grid, pause_frame,
+    loading_frame_with_progress_and_grid, pause_frame, sign_edit_frame,
 };
 pub use server_list::{
     SERVER_LIST_ITEM_H, server_entry_icon_rect, server_list_footer_slot, server_list_max_scroll,

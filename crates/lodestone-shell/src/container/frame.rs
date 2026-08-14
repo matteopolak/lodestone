@@ -160,12 +160,16 @@ pub struct ContainerFrame<'a> {
     /// text in the box, which is every existing caller and every non-anvil
     /// menu.
     ///
-    /// There is no keyboard wiring to this widget yet (no focus, no cursor,
-    /// no per-keystroke state), so this can only ever be what vanilla's own
-    /// `slotChanged` sets it to on a fresh input — the slot-0 item's own
-    /// hover name — never a value the player has typed over it. A caller
-    /// with nothing typed yet is indistinguishable from vanilla at this
-    /// stage; a caller mid-edit is not, and that gap is real. See
+    /// **Keyboard-wired since issue #603.** This used to say there was no
+    /// per-keystroke state anywhere in the crate, so the value could only
+    /// ever be `slotChanged`'s own default (the slot-0 item's hover name),
+    /// never anything the player had typed. `crate::container::AnvilRenameState`
+    /// is that state now — held on `WindowApp`, synced from the input slot
+    /// once per frame (vanilla's `slotChanged`) and edited per keystroke
+    /// (`KeyOutcome::AnvilRename` in `app/lifecycle.rs`), which is also what
+    /// produces `ClientAction::RenameItem`. This field is still just the
+    /// **value** to draw — this struct owns no widget state itself, the same
+    /// "per-frame input record" contract every other field here keeps. See
     /// [`with_anvil_name`](Self::with_anvil_name).
     pub anvil_name: Option<&'a str>,
 }

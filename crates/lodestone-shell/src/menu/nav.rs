@@ -32,6 +32,7 @@
 
 use super::command_block;
 use super::edit_box::EditBox;
+use super::sign_edit;
 use super::focus::{self, FocusChildren, FocusSet, FocusTarget, KeyEvent, KeyOutcome};
 use super::servers::{MAX_NAME_CHARS, ServerEntry, ServerList, servers_path};
 use super::widget;
@@ -208,6 +209,16 @@ pub enum MenuAction {
     /// half fixes is the *submit* path, which was the island: the Done button
     /// computed a fully-tested payload and dropped it on the floor.
     SetCommandBlock(command_block::CommandBlockSubmit),
+    /// The sign-editing screen closed — Done **or** Escape, both of which send
+    /// (see [`Screen::SignEdit`]'s own doc): `app.rs` must submit the
+    /// `ClientAction::SignUpdate` this payload rebuilds, the same division of
+    /// labour [`MenuAction::SetCommandBlock`] has.
+    ///
+    /// Carries a [`sign_edit::SignEditSubmit`] rather than a `ClientAction`
+    /// directly for the identical `Eq`-derive reason
+    /// [`MenuAction::SetCommandBlock`]'s own doc gives. `app.rs`'s arm calls
+    /// [`sign_edit::SignEditSubmit::into_action`] to cross back.
+    SignUpdate(sign_edit::SignEditSubmit),
     /// The pause menu's **Open to LAN** was activated (issue #535): the app must
     /// republish the world it is in on a TCP port so other machines can join.
     ///
@@ -242,6 +253,16 @@ impl Default for FormField {
 pub const NAME_FIELD: usize = 0;
 /// [`EditForm`]'s address field. See [`NAME_FIELD`].
 pub const ADDRESS_FIELD: usize = 1;
+
+/// Row indices [`crate::menu::render::screens::sign_edit_frame`] builds and
+/// this module's own hover/click routing agree on — the [`sign_edit`] screen's
+/// version of [`NAME_FIELD`]/[`ADDRESS_FIELD`] above.
+pub mod sign_edit_row {
+    /// The four line fields, top to bottom.
+    pub const LINES: std::ops::Range<usize> = 0..super::sign_edit::LINE_COUNT;
+    /// The Done button — the only other row this screen draws.
+    pub const DONE: usize = super::sign_edit::LINE_COUNT;
+}
 /// `ManageServerScreen`'s `manageServer.resourcePack` cycle button
 /// (`ManageServerScreen.java`). **Present and inactive**: `ServerEntry`
 /// has no `pack_status` field to cycle (see that struct's docs), so wiring
@@ -1246,6 +1267,12 @@ pub struct MenuNav {
     /// producer yet (see [`command_block`]'s module doc), so there is no
     /// non-empty default to construct eagerly.
     command_block: Option<command_block::CommandBlockState>,
+    /// The sign-editing screen's four line fields and active-line focus,
+    /// held for the same reason [`Self::command_block`] is. `None` whenever
+    /// [`Screen::SignEdit`] is not showing — this screen is server-driven
+    /// (see its own doc), so there is no non-empty default to construct
+    /// eagerly, exactly as for [`Self::command_block`].
+    sign_edit: Option<sign_edit::SignEditState>,
     /// The command tree the connected server sent (issue #471 step 2), pushed
     /// down by `app`'s right-click handler off `net::CommandTreeCell` — this
     /// module is pure and holds no client handle, so it cannot pull it.
@@ -1366,6 +1393,7 @@ impl MenuNav {
             double_click: super::focus::DoubleClickTracker::new(),
             click_clock: crate::platform::Instant::now(),
             command_block: None,
+            sign_edit: None,
             command_tree: None,
             lan_published: false,
         }
@@ -2111,6 +2139,13 @@ impl MenuNav {
         self.command_block.as_ref()
     }
 
+    /// The sign-editing screen's state, or `None` when [`Screen::SignEdit`] is
+    /// not showing — see [`Self::sign_edit`]'s own field doc.
+    #[must_use]
+    pub fn sign_edit(&self) -> Option<&sign_edit::SignEditState> {
+        self.sign_edit.as_ref()
+    }
+
     /// The server's command tree, for the screens that complete against it —
     /// see [`Self::command_tree`]'s own field doc. `None` means "offer no
     /// completions", never "an empty tree".
@@ -2182,6 +2217,31 @@ impl MenuNav {
     pub fn close_command_block(&mut self, ui: &mut UiState) {
         self.command_block = None;
         ui.close_command_block();
+    }
+
+    /// Opens the sign-editing screen with `open`'s data — read off the sign's
+    /// already-synced block-entity NBT by whatever consumes
+    /// `ClientEvent::SignEditorOpened` (see [`sign_edit`]'s module doc). Only
+    /// from [`Screen::Playing`], matching [`Self::open_command_block`]'s own
+    /// guard and driving both the widget state here and the screen there, in
+    /// that order.
+    pub fn open_sign_edit(&mut self, ui: &mut UiState, open: sign_edit::SignEditOpen) {
+        if ui.screen() == Screen::Playing {
+            self.sign_edit = Some(sign_edit::SignEditState::new(open));
+            ui.open_sign_edit();
+        }
+    }
+
+    /// Closes the sign-editing screen. **Callers must take
+    /// [`sign_edit::SignEditState::to_action`] before calling this** — it
+    /// drops the state — matching [`Self::activate_sign_edit_row`] and
+    /// [`Self::key_sign_edit`]'s own Escape arm, both of which do exactly
+    /// that. See [`Screen::SignEdit`]'s own doc on why, unlike
+    /// [`Self::close_command_block`], there is no "close without sending"
+    /// caller.
+    pub fn close_sign_edit(&mut self, ui: &mut UiState) {
+        self.sign_edit = None;
+        ui.close_sign_edit();
     }
 
     /// The last persistence failure, if any.
@@ -2314,6 +2374,15 @@ impl MenuNav {
             Screen::CommandBlockEdit => {
                 if let Some(state) = self.command_block.as_mut() {
                     state.hovered = Some(row);
+                }
+            }
+            // The sign-editing screen — same shape as `CommandBlockEdit`
+            // immediately above, narrower: its only hoverable row is Done
+            // (row index [`sign_edit_row::DONE`]), so anything else clears the
+            // highlight rather than recording a row that draws no hover state.
+            Screen::SignEdit => {
+                if let Some(state) = self.sign_edit.as_mut() {
+                    state.done_hovered = row == sign_edit_row::DONE;
                 }
             }
             _ => {}
@@ -2493,6 +2562,13 @@ impl MenuNav {
         // any other row is a button press, never routed through `Enter`.
         if ui.screen() == Screen::CommandBlockEdit {
             return self.activate_command_block_row(ui, row);
+        }
+        // The sign-editing screen — same #391 shape: a click on a line field
+        // is caret placement (`app.rs`'s to translate, like the command
+        // block's own field), a click on Done is activation, never routed
+        // through `Enter` (which this screen repurposes for line navigation).
+        if ui.screen() == Screen::SignEdit {
+            return self.activate_sign_edit_row(ui, row);
         }
         // Statistics (issue #188) — the newest instance of #391's shape, and it
         // became *necessary* rather than merely tidy when Enter there stopped
@@ -2743,6 +2819,11 @@ impl MenuNav {
             // keystroke routed to it, which the catch-all below (Escape only)
             // cannot do.
             Screen::CommandBlockEdit => self.key_command_block(ui, key),
+            // The sign-editing screen — its own arm for the same reason
+            // `Screen::CommandBlockEdit`'s is: every keystroke must reach one
+            // of its four line fields, which the catch-all below (Escape only)
+            // cannot do.
+            Screen::SignEdit => self.key_sign_edit(ui, key),
             // Escape is the only menu key that means anything on the world and
             // loading screens, and `UiState` already owns it.
             _ => {
@@ -3104,6 +3185,77 @@ impl MenuNav {
                 MenuAction::None
             }
         }
+    }
+
+    /// The sign-editing screen.
+    ///
+    /// Unlike [`Self::key_command_block`], Up/Down are **not** no-ops here —
+    /// vanilla's `AbstractSignEditScreen.keyPressed` uses them (plus Enter) to
+    /// switch which line is focused, and that is this screen's only keyboard
+    /// navigation: there is no suggestion popup, no toggle row, nothing Tab
+    /// would do. See [`sign_edit::SignEditState::next_line`]/[`previous_line`
+    /// ](sign_edit::SignEditState::previous_line).
+    fn key_sign_edit(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        let Some(state) = self.sign_edit.as_mut() else {
+            return MenuAction::None;
+        };
+        match key {
+            // `onClose()` → `onDone()` → `removed()`, which sends
+            // unconditionally (`AbstractSignEditScreen.java`) — see the module
+            // doc on why this screen has no Cancel that skips the send.
+            MenuKey::Escape => {
+                let submit = state.to_submit();
+                self.close_sign_edit(ui);
+                MenuAction::SignUpdate(submit)
+            }
+            // `event.isUp()`: the *previous* line, cursor parked at its end.
+            MenuKey::Up => {
+                state.previous_line();
+                MenuAction::None
+            }
+            // `event.isDown() || event.isConfirmation()`: Enter behaves exactly
+            // like Down here — it does **not** activate Done. Only a real click
+            // on the Done row (or Escape) closes this screen.
+            MenuKey::Down | MenuKey::Enter => {
+                state.next_line();
+                MenuAction::None
+            }
+            MenuKey::Char(ch) => {
+                state.handle_char(ch);
+                MenuAction::None
+            }
+            MenuKey::Backspace => {
+                state.handle_key(KeyEvent::new(focus::KEY_BACKSPACE));
+                MenuAction::None
+            }
+            MenuKey::Delete => {
+                state.handle_key(KeyEvent::new(focus::KEY_DELETE));
+                MenuAction::None
+            }
+            MenuKey::SelectAll | MenuKey::Copy | MenuKey::Cut | MenuKey::Paste => {
+                if let Some(event) = KeyEvent::from_menu_key(key) {
+                    state.handle_key(event);
+                }
+                MenuAction::None
+            }
+            MenuKey::Tab | MenuKey::Refresh => MenuAction::None,
+        }
+    }
+
+    /// What clicking the sign-editing screen's Done row does — the only
+    /// activation this screen has (a click on a line field is caret placement,
+    /// like [`CommandBlockRow::Command`] above, not something this method
+    /// expresses). Shared by [`Self::click`]'s `SignEdit` arm.
+    fn activate_sign_edit_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        if row != sign_edit_row::DONE {
+            return MenuAction::None;
+        }
+        let Some(state) = self.sign_edit.as_mut() else {
+            return MenuAction::None;
+        };
+        let submit = state.to_submit();
+        self.close_sign_edit(ui);
+        MenuAction::SignUpdate(submit)
     }
 
     /// The world-select screen (issue #397). **Every key goes through
@@ -4630,7 +4782,25 @@ pub fn on_screen_frame<'a>(
     if let Some(frame) = command_block_overlay_frame(ui, nav) {
         return Some(frame);
     }
+    // The fifth overlay screen, same shape as the fourth immediately above.
+    if let Some(frame) = sign_edit_overlay_frame(ui, nav) {
+        return Some(frame);
+    }
     super::render::frame_for(ui, nav, statuses, favicons)
+}
+
+/// The sign-editing screen's overlay frame, or `None` when that screen is not
+/// up — one expression with two consumers, exactly [`command_block_overlay_frame`]'s
+/// shape and for the same reason: [`on_screen_frame`] hit-tests a click
+/// against this, and `app/redraw.rs`'s overlay block draws it, so a second
+/// construction anywhere would be free to disagree with it.
+#[must_use]
+pub fn sign_edit_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::render::MenuFrame<'a>> {
+    if !ui.is_sign_edit_open() {
+        return None;
+    }
+    let state = nav.sign_edit()?;
+    Some(super::render::sign_edit_frame(state))
 }
 
 /// The **in-world** settings screen's overlay frame, or `None` when settings is not
@@ -4761,6 +4931,7 @@ pub fn routes_menu_input(ui: &UiState) -> bool {
         || ui.is_paused()
         || ui.is_death()
         || ui.is_command_block_open()
+        || ui.is_sign_edit_open()
         // Issue #167. Advancements is not `owns_frame` (it is an overlay drawn
         // through `ContainerRenderer`), but Escape has to close it, and the
         // `_` arm of `MenuNav::key` routes exactly that through
@@ -9210,6 +9381,13 @@ mod tests {
             ("CommandBlockEdit", |ui, nav| {
                 ui.enter_dev_world();
                 nav.open_command_block(ui, command_block::CommandBlockOpen::default());
+            }),
+            // Same shape and same reason: the frame is built from
+            // `MenuNav::sign_edit`, so a `UiState` on this screen with no
+            // widget state is not the production state either.
+            ("SignEdit", |ui, nav| {
+                ui.enter_dev_world();
+                nav.open_sign_edit(ui, sign_edit::SignEditOpen::default());
             }),
         ];
 

@@ -22,6 +22,19 @@ impl WindowApp {
         }
     }
 
+    /// Whether the anvil rename box has focus this instant — `AnvilScreen`'s
+    /// `setCanLoseFocus(false)` plus `slotChanged`'s `setEditable(!itemStack.
+    /// isEmpty())`, collapsed into one predicate since this box has no
+    /// separate focus flag to track (see [`KeyGate::anvil_rename_active`]'s
+    /// own doc): active exactly when the anvil screen is open and its input
+    /// slot (slot 0) is occupied.
+    pub(super) fn anvil_rename_active(&self) -> bool {
+        self.active_container_menu().is_some_and(|menu| {
+            menu.special_layout() == Some(lodestone_game::menu::SpecialLayout::Anvil)
+                && menu.slot_item(0).is_some()
+        })
+    }
+
     /// Predicts a container click against the live client state and submits
     /// it to the server.
     ///

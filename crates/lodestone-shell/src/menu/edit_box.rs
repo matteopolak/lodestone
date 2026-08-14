@@ -12,6 +12,31 @@
 //! [`super::nav::EditForm`] — converted, not added alongside. #396's world-select
 //! search box is next.
 //!
+//! ## There is no inline suggestion, on purpose
+//!
+//! Vanilla's `EditBox` carries a `suggestion` field — ghost text drawn after
+//! the caret, in *append* mode only — plus a fixed colour for it
+//! (`EditBox.java`: `graphics.text(.., -8355712, ..)`). This box used to carry
+//! both, and neither had a producer or a consumer: no screen in this shell
+//! ever set the field, [`EditBoxDraw`] carried no position to draw it at even
+//! if one had, and [`EditBox::draw_state_with`] never read it. That is the
+//! island in both directions at once — "ask what consumes this" alone would
+//! have found a dead field and stopped, but a field with no producer *and* no
+//! consumer usually means the feature was designed and abandoned rather than
+//! half-wired.
+//!
+//! Every screen that offers a real suggestion or completion in this shell —
+//! the chat box, the command-block console field — does it through its own
+//! **popup list** instead (`crate::chat`'s walker, `super::command_block`'s
+//! `Completion`), not an inline ghost run. Vanilla itself only ever supplies
+//! `EditBox::suggestion` from a handful of specific server-address/search
+//! contexts this shell's own screens do not reproduce, so wiring the field
+//! would be wiring a feature nothing here wants — deleted rather than
+//! half-implemented. If a future screen genuinely needs it, the port is
+//! `EditBox.extractWidgetRenderState`'s ordering (text → hint → suggestion,
+//! drawn at `cursorX - 1`, gated on `!insert`) — see the chat input's own
+//! (correctly wired) suggestion draw for the shape to copy.
+//!
 //! ## What vanilla does *not* have, which the written record got wrong
 //!
 //! - **There is no `setFilter`.** Input restriction is a fixed built-in:
@@ -239,10 +264,6 @@ pub const DEFAULT_TEXT_COLOR_ARGB: i32 = -2_039_584;
 /// `isEditable`, **not** on `active` — see the module docs.
 pub const TEXT_COLOR_UNEDITABLE_ARGB: i32 = -9_408_400;
 
-/// The suggestion text's colour, spelled inline in the jar
-/// (`EditBox.java`: `graphics.text(.., -8355712, ..)`).
-pub const SUGGESTION_COLOR_ARGB: i32 = -8_355_712;
-
 /// `EditBox.maxLength`'s initialiser (`EditBox.java`).
 pub const DEFAULT_MAX_LENGTH: usize = 32;
 
@@ -379,9 +400,6 @@ pub struct EditBox {
     /// `EditBox.displayPos`: the first visible character, i.e. the horizontal
     /// scroll offset in characters.
     display_pos: usize,
-    /// `EditBox.suggestion` — ghost text after the caret, drawn only when the
-    /// caret is in *append* mode.
-    pub suggestion: Option<String>,
     /// `EditBox.hint` — ghost text shown when the box is empty and unfocused.
     pub hint: Option<String>,
     /// Width of one character, in the units the text is drawn in. See
@@ -408,7 +426,6 @@ impl EditBox {
             cursor_pos: 0,
             highlight_pos: 0,
             display_pos: 0,
-            suggestion: None,
             hint: None,
             advance: MENU_TEXT_ADVANCE,
         }

@@ -24,7 +24,7 @@ use lodestone_ecs::player::{
     reset_local_player,
 };
 use lodestone_ecs::session::{
-    ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerDifficulty, ServerEntityId,
+    ActionBarOverlay, HudEffects, Phase, Riding, RespawnCount, ServerDifficulty, ServerEntityId,
     SessionBlockDestruction, SessionChat, TitleOverlay, Vitals, Xp,
 };
 use lodestone_ecs::{
@@ -786,6 +786,37 @@ pub struct Sim {
     /// before this field existed; it is reused rather than reimplemented for that
     /// reason.
     pickups: lodestone_game::mining::PickupFeed,
+
+    /// A sign-editing request the server just authorised
+    /// (`NetUpdate::SignEditorOpened`, folded here by [`Self::poll_net`]) that
+    /// [`Self::take_pending_sign_edit`] has not yet been called for.
+    ///
+    /// A plain field for the same reason [`Self::chest_lids`] is one: exactly
+    /// one consumer reads it (`app::session::drive_ui_from_session`, once per
+    /// frame) and nothing needs it to survive a session teardown. **Not**
+    /// polled idempotently the way [`Self::is_dead`]/`has_won` are — a sign
+    /// edit is a one-shot event, so the consumer *takes* it rather than
+    /// re-reading a latched flag, and a second `SignEditorOpened` before the
+    /// first is consumed simply overwrites it (the server would only send a
+    /// second one for a reason — re-opening after a rejected edit, say — so
+    /// the newer request is the one worth honouring).
+    ///
+    /// Deliberately a menu-agnostic record (`crate::menu::sign_edit` is not a
+    /// dependency of this module) — `app::session` is what already depends on
+    /// both `sim` and `menu` and does the conversion into
+    /// `crate::menu::sign_edit::SignEditOpen`.
+    pending_sign_edit: Option<PendingSignEdit>,
+}
+
+/// [`Sim::pending_sign_edit`]'s payload — see that field's own doc.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingSignEdit {
+    /// The sign's block position.
+    pub pos: lodestone_model::BlockPos,
+    /// Whether the front (vs. back) face is being edited.
+    pub is_front_text: bool,
+    /// The four lines currently stored on that face.
+    pub lines: [String; 4],
 }
 
 /// The live audio engine, promoted from a private `Sim` field to a bevy

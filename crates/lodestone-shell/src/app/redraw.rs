@@ -1149,20 +1149,31 @@ impl WindowApp {
             // `inventory_label` above; `ContainerFrame`'s own draw path is
             // what gates it on the screen actually being a merchant.
             let trades_label = crate::container::merchant_trades_label(self.sim.translator().as_ref());
-            // The anvil rename box's current value. Vanilla's `slotChanged`
-            // sets `EditBox::setValue` to the slot-0 item's own hover name
-            // whenever that slot changes; there is no keyboard wiring to this
-            // box yet (see `ContainerFrame::anvil_name`'s own doc comment), so
-            // this is always that default rather than anything the player
-            // typed over it. `None` off any non-anvil screen, matching every
-            // other special-layout-only field below.
+            // The anvil rename box's current value (issue #603).
+            // `AnvilRenameState::sync` is vanilla's `slotChanged`: it resets
+            // `self.anvil_rename` to the input slot's own hover name whenever
+            // that slot's identity changes, and otherwise leaves whatever the
+            // player has typed alone (`KeyOutcome::AnvilRename` in
+            // `app/lifecycle.rs` is what edits it) — see that module's own
+            // doc. `None` off any non-anvil screen, matching every other
+            // special-layout-only field below; the state itself is not
+            // cleared on leaving the screen, only its value stops being read
+            // (see `WindowApp::anvil_rename`'s own doc).
             let anvil_name = container_menu.and_then(|menu| {
                 if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Anvil) {
                     return None;
                 }
-                menu.slot_item(0).map(|stack| {
-                    lodestone_game::item::styled_hover_name(stack, self.sim.translator().as_ref())
-                })
+                let item = menu.slot_item(0).map(|stack| {
+                    (
+                        stack.custom_name().is_some(),
+                        lodestone_game::item::styled_hover_name(stack, self.sim.translator().as_ref()),
+                    )
+                });
+                self.anvil_rename.sync(
+                    item.as_ref()
+                        .map(|(has_custom_name, name)| (*has_custom_name, name.as_str())),
+                );
+                Some(self.anvil_rename.value.clone())
             });
             // Does the recipe-book panel own the pointer this frame? The *click*
             // path has consulted this predicate before the container's own hit
@@ -1510,6 +1521,18 @@ impl WindowApp {
             && let Some(menu) = self.menu.as_mut()
         {
             menu.render_overlay(device, queue, frame.view(), &command_block_frame, w, h);
+        }
+
+        // The sign-editing screen — the fifth overlay, same shape as the
+        // command block block immediately above and for the same reason:
+        // `menu::render::frame_for` has no arm for it (it is an overlay, not a
+        // full screen), so without a draw call here the screen would open,
+        // hit-test correctly (`nav::on_screen_frame` already calls
+        // `sign_edit_overlay_frame`), and render nothing.
+        if let Some(sign_edit_frame) = crate::menu::nav::sign_edit_overlay_frame(&self.ui, &self.nav)
+            && let Some(menu) = self.menu.as_mut()
+        {
+            menu.render_overlay(device, queue, frame.view(), &sign_edit_frame, w, h);
         }
 
         // `key.screenshot` (issue #16), and **this position is the whole

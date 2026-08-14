@@ -222,6 +222,18 @@ impl WindowApp {
                     net.send_action(submit.into_action());
                 }
             }
+            // The sign-editing screen's Done row **or** Escape — both send,
+            // see `Screen::SignEdit`'s own doc. `MenuNav::key_sign_edit`/
+            // `activate_sign_edit_row` both take `SignEditState::to_submit`
+            // before closing the screen, so by the time this arm runs the
+            // widget state is already gone and this payload is all that is
+            // left of it — the same shape as `MenuAction::SetCommandBlock`
+            // immediately above.
+            MenuAction::SignUpdate(submit) => {
+                if let Some(net) = self.sim.net() {
+                    net.send_action(submit.into_action());
+                }
+            }
             // The pause menu's Open to LAN (issue #535). Native only: there is no
             // TCP listener to bind in a browser, which is the same reason
             // `Origin::Integrated`'s `lan_port` is `cfg`'d out there.

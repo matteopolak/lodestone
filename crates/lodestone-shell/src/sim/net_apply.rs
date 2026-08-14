@@ -145,6 +145,21 @@ impl Sim {
                     // out, so a rung bell never opens a chest lid and vice versa.
                     self.bell_shakes.apply_block_event(pos, b0, b1);
                 }
+                NetUpdate::SignEditorOpened { pos, is_front_text } => {
+                    // Read the sign's already-synced text now, while `pos` is
+                    // known. `PendingSignEdit` is deliberately menu-agnostic
+                    // (see its own doc) — `app::session::drive_ui_from_session`
+                    // is what converts this into
+                    // `crate::menu::sign_edit::SignEditOpen` and opens the
+                    // screen, once per frame.
+                    let text = self.sign_text_at(pos);
+                    let side = if is_front_text { text.front } else { text.back };
+                    self.pending_sign_edit = Some(PendingSignEdit {
+                        pos,
+                        is_front_text,
+                        lines: side.lines,
+                    });
+                }
                 NetUpdate::ItemPickup(event) => {
                     // That fix. Accumulated, not acted on here: the drain at the
                     // end of this function needs a `&mut World` guard and there is

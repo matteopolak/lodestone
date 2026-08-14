@@ -674,6 +674,7 @@ impl ApplicationHandler for WindowApp {
                     // box focused would otherwise leave every key routed into an
                     // invisible field.
                     creative_search: self.creative_search_active(),
+                    anvil_rename_active: self.anvil_rename_active(),
                 };
                 let code = match event.physical_key {
                     PhysicalKey::Code(code) => Some(code),
@@ -838,6 +839,31 @@ impl ApplicationHandler for WindowApp {
                         } else if let Some(text) = event.text.as_deref() {
                             for ch in text.chars().filter(|c| !c.is_control()) {
                                 self.edit_creative_search(CreativeSearchEdit::Char(ch));
+                            }
+                        }
+                    }
+                    Some(KeyOutcome::AnvilRename) => {
+                        // Same shape as the two search boxes above, but this one
+                        // also has a *responder*: vanilla calls `onNameChanged`
+                        // after every edit (`EditBox::setResponder`), which is
+                        // what actually produces `ClientAction::RenameItem` —
+                        // this arm is issue #603's whole fix, closing the send
+                        // side of the island the issue names (`RenameItem` was
+                        // modelled, encoded and consumed server-side with zero
+                        // producers anywhere in `lodestone-shell`).
+                        let mut changed = false;
+                        if code == Some(KeyCode::Backspace) {
+                            self.anvil_rename.backspace();
+                            changed = true;
+                        } else if let Some(text) = event.text.as_deref() {
+                            for ch in text.chars().filter(|c| !c.is_control()) {
+                                self.anvil_rename.push_char(ch);
+                                changed = true;
+                            }
+                        }
+                        if changed && let Some(name) = self.anvil_rename.resolve_rename() {
+                            if let Some(net) = self.sim.net() {
+                                net.send_action(lodestone_model::ClientAction::RenameItem { name });
                             }
                         }
                     }

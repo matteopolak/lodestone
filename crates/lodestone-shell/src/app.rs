@@ -770,6 +770,17 @@ struct WindowApp {
     /// `container::merchant::hit_test_local`) indexes with `.get()`/a bounded
     /// loop, never a bare index.
     merchant_selected: usize,
+    /// The anvil rename box's persistent editable-text state — see
+    /// [`crate::container::AnvilRenameState`]'s own module doc for the whole
+    /// chain this closes (issue #603). Synced from the input slot once per
+    /// frame in `redraw`'s anvil-name computation, edited per keystroke by
+    /// `KeyOutcome::AnvilRename`, and read back by `ContainerFrame::with_anvil_name`.
+    ///
+    /// Not reset on close, matching [`creative`](Self::creative)'s own
+    /// precedent: [`crate::container::AnvilRenameState::sync`] re-seeds it
+    /// from whatever is in slot 0 the next time an anvil is open, so a stale
+    /// value between sessions is never visible.
+    anvil_rename: crate::container::AnvilRenameState,
 }
 
 #[cfg(test)]

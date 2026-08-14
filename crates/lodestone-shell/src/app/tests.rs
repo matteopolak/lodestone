@@ -664,6 +664,72 @@ fn an_unfocused_window_keeps_ticking_and_presents_at_thirty_fps() {
     );
 }
 
+/// Owner report: "the block animations seem too fast in general". A previous
+/// pass proved the animation *sampling* logic exact (`SpriteAnimation::sample`,
+/// the built `water_still`/`water_flow` timelines) and traced the tick source
+/// to `Sim::tick_count()`, which `RenderState::update_animation` is fed
+/// verbatim from both live call sites (`app/redraw.rs`, `app/runners.rs`). So
+/// the remaining question is a measurement, not a re-read: does
+/// `Sim::tick_count()` actually advance at 20/s under the **focused,
+/// uncapped** loop shape real play uses — `redraw()`'s own path, through
+/// [`FramePacer::begin_frame`] with `target_fps: None` — rather than only the
+/// unfocused/capped shape [`an_unfocused_window_keeps_ticking_and_presents_at_thirty_fps`]
+/// already covers.
+///
+/// Driven at 240 Hz (12x the tick rate — a real, uncapped display can run
+/// this fast) for 3 real seconds. **Two hypotheses, both computed from
+/// outside constants, not read back from the code under test:**
+/// - correct: real elapsed time drives the accumulator, so ticks ≈
+///   `3.0 * 20 = 60` regardless of loop rate.
+/// - wrong (a `dt` that tracked the loop's own iteration period instead of
+///   real elapsed time, or a `FrameClock` double-stepped by a second driver):
+///   would land far from 60 — e.g. exactly `720` if each of the 720
+///   iterations banked a full tick unconditionally, or `360` if a stray
+///   second `begin_frame`/`step` call doubled every real tick.
+///
+/// This is the discriminating input the `19..=20`-over-one-second unfocused
+/// gate cannot be, alone: that gate's loop (120 Hz) is *closer* to the tick
+/// rate, so a 2x-too-fast bug would still land inside its own tolerance band
+/// at the one-second horizon. Three seconds at 240 Hz separates "correct" (60)
+/// from "2x" (120) and from "6x, i.e. one tick per iteration at 240 Hz banked
+/// as if it were the loop's own 1/20 s" (720) by wide margins.
+#[test]
+fn a_focused_uncapped_loop_advances_ticks_at_twenty_per_second() {
+    let t0 = Instant::now();
+    let mut pacer = FramePacer::new(t0);
+    // Focused (the `FramePacer::new` default) and uncapped: `target_fps: None`.
+    let mut sim = pacing_sim();
+    let loop_hz = 240.0_f64;
+    let real_seconds = 3.0_f64;
+    let iterations = (loop_hz * real_seconds) as u32;
+    let mut ticks = 0u64;
+    for i in 1..=iterations {
+        let now = t0 + Duration::from_secs_f64(f64::from(i) / loop_hz);
+        let step = pacer.begin_frame(now, None);
+        ticks += ticks_for(&mut sim, step.dt);
+    }
+
+    let expected = (real_seconds * 20.0).round() as i64;
+    assert!(
+        ((expected - 1)..=(expected + 1)).contains(&(ticks as i64)),
+        "a focused, uncapped 240 Hz loop over {real_seconds} real seconds must \
+         advance ~{expected} ticks (20/s), not {ticks} — {:.2}x real time",
+        ticks as f64 / expected as f64,
+    );
+
+    // Control, computed and asserted rather than merely described: the wrong
+    // hypothesis this test would have to fail to catch. If `dt` had tracked
+    // the loop's own period instead of real elapsed time, every one of the
+    // `iterations` calls would bank a full `TICK_SECS` (240 Hz's own period
+    // exceeds one tick, so each iteration would look like a whole tick owed),
+    // landing near `iterations`, not `expected` — the two must be far apart
+    // for this input to mean anything.
+    assert!(
+        i64::from(iterations) - expected > 500,
+        "chosen input must separate the two hypotheses widely; iterations={iterations} expected={expected}"
+    );
+}
+
 /// Counts frames a naive "elapsed since the last presented frame" gate would
 /// deliver over `iters` iterations of a `loop_hz` loop. This is verbatim the
 /// implementation [`FramePacer`] used to have — including the `as_secs_f64()`
@@ -1729,6 +1795,7 @@ fn a_menu_screen_outranks_the_chat_prompt_and_everything_below_it() {
         debug_held: true,
         recipe_search: true,
         creative_search: true,
+        anvil_rename_active: true,
     };
     assert_eq!(resolve(both, KeyCode::KeyW, true), Some(KeyOutcome::Menu));
     assert_eq!(resolve(both, KeyCode::Escape, true), Some(KeyOutcome::Menu));
