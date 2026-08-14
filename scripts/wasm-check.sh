@@ -435,6 +435,21 @@ CONFINEMENT_RULES=(
   # and cannot do that.
   "lodestone-server instant-ban|crates/lodestone-server/src|std::time::Instant|"
   "lodestone-server systemtime-ban|crates/lodestone-server/src|std::time::SystemTime|"
+  # `tokio::time::Instant::now()` is a DIFFERENT literal than `std::time::Instant`,
+  # so the rule above cannot see it — and it traps identically:
+  # `server.rs`'s own `JoinStopwatch` doc says so ("it bottoms out in
+  # std::time::Instant::now() ... and panics identically"), which did not stop
+  # `serve_play`'s keep-alive/time-sync/vitals/container-sync interval setup (six
+  # unguarded `tokio::time::Instant::now()` calls) from shipping anyway. Measured
+  # live in the browser build: joining a singleplayer world panics at
+  # `library/std/src/sys/time/unsupported.rs:13:9` the instant the client reaches
+  # Play, and "Joining world..." spins forever because the connection task that
+  # died was the one about to send the rest of the view. `tick.rs` also names this
+  # symbol, but only inside `run_tick_loop`, which wasm32's `open_in_memory`
+  # deliberately never spawns (see `net.rs`'s own comment on that constructor) —
+  # a real, documented gap rather than a live trap, so it is allowlisted rather
+  # than making this rule impossible to turn green.
+  "lodestone-server tokio-instant-ban|crates/lodestone-server/src|tokio::time::Instant|tick.rs"
   "lodestone-worldgen instant-ban|crates/lodestone-worldgen/src|std::time::Instant|"
   "lodestone-worldgen systemtime-ban|crates/lodestone-worldgen/src|std::time::SystemTime|"
   "lodestone-particle instant-ban|crates/lodestone-particle/src|std::time::Instant|"
