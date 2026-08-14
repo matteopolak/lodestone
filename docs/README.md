@@ -1044,6 +1044,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   resolver trait a permissions *plugin* can use to take the whole decision over. One
   resource, `lodestone_ecs::permissions::Permissions`, answering one question: does
   this subject hold this permission?
+- [Pillager patrols](./pillager-patrols.md) — The server-side port of vanilla's
+  `PatrolSpawner`: a periodic, difficulty-scaled group of pillagers spawns near a
+  random connected player, one of them a *leader*, and the group marches across the
+  map together rather than standing still. It lives in `lodestone_server::mobs`
+  (`MobSim::run_patrol_spawn_cycle`) plus one new goal in
+  `lodestone_entity::ai::goals` (`LongDistancePatrolGoal`), registered on the
+  pillager's roster row in `lodestone_entity::ai::roster::ranged`.
 - [Player chat](./player-chat.md) — The inbound half of chat: a player types a
   message, our server decodes it, and every connected player sees it. Before #469 the
   two halves of chat were in opposite states — we could say things to a player
@@ -2219,6 +2226,18 @@ of these caught the *brief* being wrong rather than the code.
   `bdf93a28` (the interim palette-mask fix); every claim below was re-verified against
   the tree and the 26.2 jar, not inherited from the briefing — see "Corrections to
   the briefing" at the end.
+- [Redstone execution model: typed cells, kind-classified dispatch, and a bounded graph](./plans/redstone-execution-model.md) —
+  The plan for issue #548's rework of how redstone executes: replacing per-event
+  rediscovery (string-parsed block states, a fifteen-predicate dispatch chain, blind
+  neighbour visits) with a layered design — a typed cell representation,
+  palette-derived reaction classification, a cross-column world view, and, **only if
+  counters then justify it**, an incrementally-invalidated listener index. It is
+  written against the device set that landed first (`docs/redstone.md`'s "what each
+  device needs of the execution model" table) rather than against an imagined
+  redstone, and its first finding is that the issue's own premise needs correcting:
+  **there is no per-tick rescan to replace**. The expensive thing is the per-event
+  constant factor, and the missing thing is cross-chunk propagation — not
+  incrementality, which the current model already has.
 - [Plan: render performance — culling first, then submission](./plans/render-performance.md) —
   The sequenced plan for making terrain rendering scale from the shipped render
   distance 8 to 16 and 32: frustum culling, vanilla's circular view-membership
