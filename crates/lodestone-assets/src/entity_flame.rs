@@ -1,5 +1,5 @@
 //! The two textures vanilla's mob-fire billboard alternates between
-//! (`FlameFeatureRenderer.java:21-22`: `ModelBakery.FIRE_0`/`FIRE_1`, resolved
+//! (`FlameFeatureRenderer.buildGroup`: `ModelBakery.FIRE_0`/`FIRE_1`, resolved
 //! against the block atlas as `textures/block/fire_0.png` /
 //! `textures/block/fire_1.png`).
 //!
@@ -11,7 +11,7 @@
 //! bind group or plumbing a texture view across an unrelated module boundary.
 //! This module is independent of `screen_effects` (which only ever needed
 //! `fire_1`) because the mob billboard alternates *both* sprites per quad
-//! (`FlameFeatureRenderer.java:45`) and `screen_effects` should not gain a
+//! (`FlameFeatureRenderer.prepare`) and `screen_effects` should not gain a
 //! second texture just to feed a different render pass.
 
 use crate::error::EntityFlameAssetError;

@@ -2534,8 +2534,8 @@ fn item_atlas_whole_corpus_coverage() {
     );
 }
 
-/// **The last unproved step in issue #380's Y-flip question**, checked against
-/// Mojang's own PNG rather than argued.
+/// **The last unproved step in the arrow rig's Y-flip question**, checked
+/// against Mojang's own PNG rather than argued.
 ///
 /// `entity_models.rs`'s `a_y_flip_of_the_arrow_rig_moves_no_geometry` proves that a
 /// `scale(1, -1, 1)` on the arrow rig moves no vertex and changes no UV on the two
@@ -2654,7 +2654,7 @@ fn arrow_fletching_patch_is_fully_symmetric() {
     }
 }
 
-/// Issue #174's remaining gap: the real banner-pattern mask atlas, measured
+/// The real banner-pattern mask atlas, measured
 /// against the real jar rather than assumed from the module doc's own
 /// `client.jar` listing (`docs/banner-shield-patterns.md`'s "the jar ships
 /// individual sprite PNGs" section). Counts and cross-checks are exact —

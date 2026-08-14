@@ -13,8 +13,7 @@
 //!
 //! ## How it works
 //!
-//! `ArmorTrim.layerAssetId(layerAssetPrefix, equipmentAsset)`
-//! (`ArmorTrim.java:41-44`) is:
+//! `ArmorTrim.layerAssetId(layerAssetPrefix, equipmentAsset)` is:
 //!
 //! ```text
 //! suffix = material.assets().assetId(equipmentAsset).suffix()   // wearer-aware
@@ -23,8 +22,8 @@
 //! ```
 //!
 //! `layerAssetPrefix` is `"trims/entity/" + layerType.id` (`humanoid` or
-//! `humanoid_leggings`). The interesting part is `assetId(equipmentAsset)`
-//! (`MaterialAssetGroup.java:56-58`): a material's suffix is normally its own
+//! `humanoid_leggings`). The interesting part is `MaterialAssetGroup.assetId`:
+//! a material's suffix is normally its own
 //! id, but five materials declare a **wearer-keyed override**, each
 //! overriding exactly the armour material that matches their own name —
 //! `iron` trim on `iron` armour resolves to `iron_darker`, but `iron` trim on

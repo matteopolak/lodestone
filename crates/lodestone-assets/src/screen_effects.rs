@@ -81,14 +81,13 @@ pub fn fire_frame_count(image: &Image) -> u32 {
 }
 
 /// Loads `textures/misc/pumpkinblur.png`, the full-screen texture a worn
-/// carved pumpkin overlays (issue #185). Unlike underwater/fire, this is not
+/// carved pumpkin overlays. Unlike underwater/fire, this is not
 /// hardcoded in vanilla's renderer at all: it is the `camera_overlay` field of
 /// `carved_pumpkin`'s `minecraft:equippable` data component
 /// (`.cache/mc/26.2/generated/reports/minecraft/components/item/carved_pumpkin.json`,
 /// `"camera_overlay": "minecraft:misc/pumpkinblur"`), drawn generically for
 /// *any* equipped item that declares one by
-/// `Hud.extractCameraOverlays`/`extractTextureOverlay`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java:269-291`) —
+/// `Hud.extractCameraOverlays`/`extractTextureOverlay` —
 /// carved pumpkin is simply the only item that ships with the field set.
 /// Loaded here as its own standalone plain texture for the same reason
 /// underwater/fire are: this pass is deliberately kept off the model
@@ -109,8 +108,8 @@ pub fn load_pumpkin_overlay_texture(manager: &ResourceManager) -> Result<Image, 
 
 /// Loads `textures/misc/powder_snow_outline.png` (256x256 in vanilla), the
 /// freezing vignette `Hud.extractCameraOverlays` draws whenever
-/// `player.getTicksFrozen() > 0`, at alpha `player.getPercentFrozen()`
-/// (`Hud.java:293-295`). Issue #139.
+/// `player.getTicksFrozen() > 0`, at alpha `player.getPercentFrozen()`,
+/// via `Hud.extractTextureOverlay`.
 ///
 /// # Errors
 ///
@@ -126,7 +125,7 @@ pub fn load_freeze_overlay_texture(manager: &ResourceManager) -> Result<Image, S
 
 /// Loads `textures/misc/spyglass_scope.png` (256x256 in vanilla), the lens
 /// texture `Hud.extractSpyglassOverlay` blits at the screen centre while
-/// scoping (`Hud.java:1033-1048`). Issue #154. The four black letterbox bars
+/// scoping. The four black letterbox bars
 /// around it are not a texture at all in vanilla (`graphics.fill`, a flat
 /// colour) — see `spyglass_letterbox_triangles` in
 /// `crates/lodestone-render/src/screen_effects.rs`, which reuses the
@@ -147,8 +146,7 @@ pub fn load_spyglass_scope_texture(manager: &ResourceManager) -> Result<Image, S
 
 /// Loads `textures/misc/nausea.png` (256x256 in vanilla), the confusion
 /// overlay `Hud.extractConfusionOverlay` draws while the Nausea effect is
-/// active and the screen-effect-scale option is below `1.0`
-/// (`Hud.java:1109-1132`). Issue #144.
+/// active and the screen-effect-scale option is below `1.0`.
 ///
 /// # Errors
 ///
@@ -165,8 +163,7 @@ pub fn load_nausea_overlay_texture(manager: &ResourceManager) -> Result<Image, S
 /// Loads `textures/block/nether_portal.png` (16x512 in vanilla: 32 stacked
 /// 16x16 frames, `{"animation": {}}` — the exact same animated-strip shape as
 /// [`load_fire_texture`]/[`fire_frame_count`], see both docs), the sprite
-/// `Hud.extractPortalOverlay` draws while `Entity.portalEffectIntensity > 0`
-/// (`Hud.java:1097-1107`). Issue #149.
+/// `Hud.extractPortalOverlay` draws while `Entity.portalEffectIntensity > 0`.
 ///
 /// Vanilla reaches this texture through the *block-atlas particle material*
 /// for `Blocks.NETHER_PORTAL`

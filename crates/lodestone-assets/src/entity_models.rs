@@ -4899,10 +4899,9 @@ pub fn mooshroom_model() -> EntityModelDef {
 // Every other entry in this file is placed by `LivingEntityRenderer`'s pose
 // stack, which flips Y (`scale(-1, -1, 1)`) and lifts by `1.501` blocks. The
 // two entries below are not: `ArrowRenderer` and `ThrownTridentRenderer` both
-// `extend EntityRenderer` directly (`ArrowRenderer.java:14`,
-// `ThrownTridentRenderer.java:17`), which applies **neither** — read out of
-// `EntityRenderer.java`, which contains no `scale(` call at all, against
-// `LivingEntityRenderer.java:83-87`, which has both. So these meshes are
+// `extend EntityRenderer` directly, which applies **neither** — `EntityRenderer`
+// itself contains no `scale(` call at all, against `LivingEntityRenderer.render`,
+// which has both. So these meshes are
 // authored in the *world* orientation (+Y up), not the Y-down mob orientation,
 // and `lodestone_render::entity::projectile_model_matrix` places them.
 //
@@ -4938,7 +4937,7 @@ pub fn mooshroom_model() -> EntityModelDef {
 /// * The **whole mesh** is `0.9×`. `LayerDefinition.create(mesh.transformed(pose
 ///   -> pose.scaled(0.9F)), 32, 32)` looks like it scales every part, but
 ///   `PartDefinition.transformed` applies the function to *its own* pose and
-///   copies its children untouched (`PartDefinition.java:95-99`) — so it is the
+///   copies its children untouched — so it is the
 ///   **root** pose that carries the 0.9, and children inherit it through the
 ///   transform chain. Modelled here as a root [`PartPose::scale`], which is
 ///   exactly that.

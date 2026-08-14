@@ -374,8 +374,8 @@ fn corner(
 ///
 /// # Why source rects are rescaled and destination rects are not
 ///
-/// Vanilla (`GuiGraphicsExtractor.blitNineSlicedSprite`,
-/// `AbstractBoatRenderer` is unrelated — see `GuiGraphicsExtractor.java:512`)
+/// Vanilla (`GuiGraphicsExtractor.blitNineSlicedSprite` —
+/// `AbstractBoatRenderer` is unrelated)
 /// never computes an absolute source pixel offset. Every corner/edge call
 /// passes `nineSlice.width()`/`height()` as `spriteWidth`/`spriteHeight` and a
 /// *declared*-space offset as `textureX`/`textureY`, and the actual sample is

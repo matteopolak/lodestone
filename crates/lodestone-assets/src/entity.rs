@@ -839,14 +839,13 @@ pub fn player_model(slim: bool) -> EntityModelDef {
 
     // Arms differ between wide and slim — in **two** numbers, not one.
     //
-    // `PlayerModel.createMesh` (26.2,
-    // `.cache/mc/26.2/client-src/net/minecraft/client/model/player/PlayerModel.java:43-71`)
-    // replaces the arms wholesale rather than narrowing them in place:
+    // `PlayerModel.createMesh` (26.2) replaces the arms wholesale rather than
+    // narrowing them in place:
     //
     // ```text
     // slim  right_arm: addBox(-2, -2, -2, 3, 12, 4)   left_arm: addBox(-1, -2, -2, 3, 12, 4)
     // wide  right_arm: addBox(-3, -2, -2, 4, 12, 4)   left_arm: addBox(-1, -2, -2, 4, 12, 4)
-    //       ^ from HumanoidModel.createMesh:101
+    //       ^ from HumanoidModel.createMesh
     // ```
     //
     // The **left** arm keeps origin `-1` in both, so narrowing alone is right
@@ -855,7 +854,7 @@ pub fn player_model(slim: bool) -> EntityModelDef {
     // relative to the pivot in both cases) — and this port had `-3` for both,
     // which put the slim right arm a pixel out from the shoulder with a
     // one-pixel gap beside the body. It was invisible until the slim rig became
-    // reachable at all (#62): nothing in this workspace ever selected it.
+    // reachable at all: nothing in this workspace ever selected it.
     let arm_w = if slim { 3.0 } else { 4.0 };
     let right_arm_x = 1.0 - arm_w;
     let right_arm = PartDef::new(PartPose::offset(-5.0, 2.0, 0.0))
@@ -939,9 +938,8 @@ mod player_model_tests {
     }
 
     /// Every arm box in **both** rigs, against `PlayerModel.createMesh`'s own
-    /// literals (26.2,
-    /// `client-src/net/minecraft/client/model/player/PlayerModel.java:43-71`,
-    /// with the wide right arm coming from `HumanoidModel.createMesh:101`).
+    /// literals (26.2, with the wide right arm coming from
+    /// `HumanoidModel.createMesh`).
     ///
     /// The load-bearing row is the **slim right arm's origin, `-2` and not
     /// `-3`**: the left arm keeps origin `-1` in both rigs, so "slim just
