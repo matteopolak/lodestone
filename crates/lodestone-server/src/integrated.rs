@@ -361,7 +361,7 @@ fn start_sibling_tick_loop(
     dimension: Dimension,
     source: &Arc<dyn ChunkSource>,
     block_entities: BlockEntityHandle,
-    scheduled: crate::region_source::ScheduledTickHandle,
+    scheduled: crate::scheduled_tick::ScheduledTickHandle,
     ticking: &Option<crate::dimension_tick::DimensionTickContext>,
 ) {
     if let Some(ctx) = ticking {
@@ -384,7 +384,7 @@ fn start_sibling_tick_loop(
     _dimension: Dimension,
     _source: &Arc<dyn ChunkSource>,
     _block_entities: BlockEntityHandle,
-    _scheduled: crate::region_source::ScheduledTickHandle,
+    _scheduled: crate::scheduled_tick::ScheduledTickHandle,
     _ticking: &Option<crate::dimension_tick::DimensionTickContext>,
 ) {
 }
@@ -421,11 +421,25 @@ fn sibling_chunk_source<S>(
 ) -> (
     Arc<dyn ChunkSource>,
     BlockEntityHandle,
-    crate::region_source::ScheduledTickHandle,
+    // The portable path (`crate::scheduled_tick`), not the
+    // `region_source`-gated re-export — this function's own signature (unlike
+    // its `RegionChunkSource` branch below) has to compile on `wasm32`,
+    // because `with_nether` calls it from a closure `open_in_memory_with_entities`
+    // (which the browser build genuinely runs) can reach. Same trap and same
+    // fix as `crate::live_save::LiveSaveSlot`'s own doc comment names for
+    // exactly this shape.
+    crate::scheduled_tick::ScheduledTickHandle,
 )
 where
     S: ChunkSource + 'static,
 {
+    // `region_source` (and therefore `RegionChunkSource`) is native-only — a
+    // browser singleplayer world has no filesystem, see that module's own doc
+    // comment — so only this branch, not the function, is gated. `world_dir`
+    // is always `None` in practice on `wasm32` (nothing constructs a
+    // `PathBuf` to pass it there), but the `cfg` is what makes that a fact
+    // the compiler checks rather than one this comment merely asserts.
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(dir) = world_dir {
         match crate::region_source::RegionChunkSource::new(
             make_terrain(),
@@ -458,6 +472,8 @@ where
             }
         }
     }
+    #[cfg(target_arch = "wasm32")]
+    let _ = world_dir;
     let store = if uncapped {
         ChunkStore::for_integrated_view_radius(make_terrain(), view_radius)
     } else {
@@ -468,7 +484,7 @@ where
     (
         source,
         BlockEntityHandle::default(),
-        crate::region_source::ScheduledTickHandle::default(),
+        crate::scheduled_tick::ScheduledTickHandle::default(),
     )
 }
 
