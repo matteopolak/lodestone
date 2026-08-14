@@ -2,9 +2,17 @@
 //! cubes, and does that justify a separate packed-vertex fast path?
 //!
 //! This bakes every vanilla block state from a fetched `client.jar` (+ Mojang's
-//! `generated/reports/blocks.json`) and classifies each with the *same*
-//! [`lodestone_render::is_full_cube`] / [`is_packed_cube`] predicates the real
-//! renderer uses to route geometry. It is `#[ignore]`d so the default test run
+//! `generated/reports/blocks.json`) and classifies each with
+//! [`lodestone_render::is_full_cube`] / [`is_packed_cube`] — the predicates
+//! `lodestone-render`'s own packed/model split is designed around. **Not**,
+//! today, the predicates `lodestone-shell`'s live path actually routes
+//! through: `crates/lodestone-shell/src/mesher.rs`'s `mesh_one` sends every
+//! live (`ShellClassifier::Vanilla`) block through the wide per-quad model
+//! path regardless of cube-ness, so `is_packed_cube` currently has no
+//! production caller there — see `crates/lodestone-render/src/models.rs`'s
+//! module doc for the verified wiring status. This census still measures a
+//! real fact about the baked model set (see below), just not (yet) a fact
+//! about what the live game draws. It is `#[ignore]`d so the default test run
 //! stays hermetic; run it with `--ignored`.
 //!
 //! It reads only from `.cache/mc/<version>/`; it never writes assets and never
@@ -15,12 +23,12 @@ use std::path::Path;
 
 use lodestone_assets::tint::{TintKind, vanilla_tint_kind};
 use lodestone_assets::{
-    Atlas, AtlasBuilder, BlockBaker, BlockStates, DisplayTransform, FirstWeight, GuiItemContext,
-    GuiLight, IconPart, ItemIconBuilder, ModelResolver, ModelTransform, ResourceLocation,
-    ResourceManager, TextureBinding, ZipSource, bake_model,
+    Atlas, AtlasBuilder, BakedQuad, BlockBaker, BlockStates, DisplayTransform, FirstWeight,
+    GuiItemContext, GuiLight, IconPart, ItemIconBuilder, ModelResolver, ModelTransform,
+    ResourceLocation, ResourceManager, TextureBinding, ZipSource, bake_model,
 };
 use lodestone_model::{BlockStateRegistry, Identifier, ResolvedBlockState};
-use lodestone_render::{is_full_cube, is_packed_cube};
+use lodestone_render::{RenderLayer, is_full_cube, is_packed_cube};
 
 mod gate_harness;
 use gate_harness::{require_blocks_report, require_client_jar};
@@ -180,6 +188,47 @@ fn item_model_parts(manager: &ResourceManager) -> (Vec<ItemModelPart>, usize) {
     (parts, items)
 }
 
+/// A quad's `RenderLayer`, sampled directly from the stitched atlas's real
+/// per-texel alpha over the quad's UV footprint — the same rule
+/// `crate::translucency::RenderLayer::from_sprite_alpha` codifies and
+/// `lodestone-render`'s own `block_layer` uses to classify a baked state, kept
+/// independent here rather than imported so this census measures the *data*,
+/// not a shared helper that could itself be wrong.
+fn quad_layer(atlas: &Atlas, quad: &BakedQuad) -> RenderLayer {
+    let (mut umin, mut umax, mut vmin, mut vmax) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for uv in &quad.uvs {
+        umin = umin.min(uv[0]);
+        umax = umax.max(uv[0]);
+        vmin = vmin.min(uv[1]);
+        vmax = vmax.max(uv[1]);
+    }
+    let x0 = (umin * atlas.width as f32).floor().max(0.0) as u32;
+    let x1 = (umax * atlas.width as f32).ceil().min(atlas.width as f32) as u32;
+    let y0 = (vmin * atlas.height as f32).floor().max(0.0) as u32;
+    let y1 = (vmax * atlas.height as f32).ceil().min(atlas.height as f32) as u32;
+    let mut alphas = Vec::new();
+    for y in y0..y1.max(y0 + 1).min(atlas.height) {
+        for x in x0..x1.max(x0 + 1).min(atlas.width) {
+            let idx = ((y * atlas.width + x) * 4 + 3) as usize;
+            if let Some(&a) = atlas.rgba.get(idx) {
+                alphas.push(a);
+            }
+        }
+    }
+    RenderLayer::from_sprite_alpha(&alphas)
+}
+
+/// A baked state's `RenderLayer`: the most transparent layer across its quads
+/// (`Solid < Cutout < Translucent`), matching `block_layer`'s "any translucent
+/// face drags the whole block" rule.
+fn state_layer(atlas: &Atlas, quads: &[BakedQuad]) -> RenderLayer {
+    quads
+        .iter()
+        .map(|q| quad_layer(atlas, q))
+        .max()
+        .unwrap_or(RenderLayer::Solid)
+}
+
 #[test]
 #[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
 fn full_cube_fraction_over_all_baked_states() {
@@ -220,11 +269,15 @@ fn full_cube_fraction_over_all_baked_states() {
             empty += 1;
             continue;
         }
-        if is_packed_cube(&model.quads) {
+        let layer = state_layer(&atlas, &model.quads);
+        if is_packed_cube(&model.quads, layer) {
             packed_cube += 1;
             full_cube += 1;
             entry.0 += 1;
         } else if is_full_cube(&model.quads) {
+            // Full-cube geometry that still fails `is_packed_cube`: tinted
+            // (grass, leaves) or a real non-`Solid` layer (stained glass, ice,
+            // tinted glass, slime, honey) — both must take the wide path.
             full_cube += 1;
             tinted_cube += 1;
         } else {
@@ -249,7 +302,7 @@ fn full_cube_fraction_over_all_baked_states() {
         100.0 * full_cube as f64 / renderable as f64
     );
     eprintln!(
-        "      packed (untinted):   {packed_cube}  ({:.1}% of renderable)",
+        "      packed (untinted, Solid layer): {packed_cube}  ({:.1}% of renderable)",
         100.0 * packed_cube as f64 / renderable as f64
     );
     eprintln!("      tinted cube:         {tinted_cube}  (wide path)");

@@ -71,9 +71,9 @@ use lodestone_model::{
 };
 use lodestone_render::{
     Camera, DepthBuffer, GpuAtlas, GpuContext, GpuModelMesh, HeadlessTarget, ModelMesh,
-    ModelPipeline, ModelSectionView, RenderTarget, SECTION_SIZE, is_full_cube, is_packed_cube,
-    mesh_models, model_anim_buffer, model_palette_buffer, model_shared_camera_buffer,
-    section_origin_buffer,
+    ModelPipeline, ModelSectionView, RenderLayer, RenderTarget, SECTION_SIZE, is_full_cube,
+    is_packed_cube, mesh_models, model_anim_buffer, model_palette_buffer,
+    model_shared_camera_buffer, section_origin_buffer,
 };
 use uuid::Uuid;
 
@@ -560,6 +560,41 @@ fn live_gate_real_chunk_to_pixels() {
     eprintln!("average terrain colour: {avg:?}");
 }
 
+/// A baked state's `RenderLayer`, sampled from the stitched atlas's real
+/// per-texel alpha over each quad's UV footprint (the most-transparent layer
+/// across all quads, matching `lodestone-render`'s own `block_layer` rule).
+/// Independent of that private helper deliberately — this measures the atlas
+/// data directly rather than trusting a shared function to be right.
+fn live_gate_state_layer(atlas: &Atlas, quads: &[BakedQuad]) -> RenderLayer {
+    quads
+        .iter()
+        .map(|q| {
+            let (mut umin, mut umax, mut vmin, mut vmax) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+            for uv in &q.uvs {
+                umin = umin.min(uv[0]);
+                umax = umax.max(uv[0]);
+                vmin = vmin.min(uv[1]);
+                vmax = vmax.max(uv[1]);
+            }
+            let x0 = (umin * atlas.width as f32).floor().max(0.0) as u32;
+            let x1 = (umax * atlas.width as f32).ceil().min(atlas.width as f32) as u32;
+            let y0 = (vmin * atlas.height as f32).floor().max(0.0) as u32;
+            let y1 = (vmax * atlas.height as f32).ceil().min(atlas.height as f32) as u32;
+            let mut alphas = Vec::new();
+            for y in y0..y1.max(y0 + 1).min(atlas.height) {
+                for x in x0..x1.max(x0 + 1).min(atlas.width) {
+                    let idx = ((y * atlas.width + x) * 4 + 3) as usize;
+                    if let Some(&a) = atlas.rgba.get(idx) {
+                        alphas.push(a);
+                    }
+                }
+            }
+            RenderLayer::from_sprite_alpha(&alphas)
+        })
+        .max()
+        .unwrap_or(RenderLayer::Solid)
+}
+
 /// D1 datum on **real terrain**: what fraction of block *instances* bake to the
 /// packed 8-byte cube format vs. the wide float format? The model census already
 /// reports this by *distinct state* over the whole registry (~9% full cubes);
@@ -611,7 +646,15 @@ fn live_packed_wide_ratio() {
         *kind_of.entry(state).or_insert_with(|| {
             match baker.bake_state(&registry, state, &FirstWeight) {
                 Ok(m) if m.quads.is_empty() => Kind::Empty,
-                Ok(m) if is_packed_cube(&m.quads) => Kind::Packed,
+                // `is_packed_cube` now requires the state's real `RenderLayer`
+                // (measured from the stitched atlas's own alpha, not assumed)
+                // so a translucent or cutout full cube — unreachable on this
+                // flat bedrock/dirt/grass world, but not on a real one — counts
+                // as `Wide`, matching how `lodestone-render`'s packed/model
+                // split is designed to route it.
+                Ok(m) if is_packed_cube(&m.quads, live_gate_state_layer(&atlas, &m.quads)) => {
+                    Kind::Packed
+                }
                 Ok(_) => Kind::Wide,
                 Err(_) => Kind::Empty,
             }
