@@ -41,6 +41,7 @@ pub mod compose;
 pub mod dense_grid;
 pub mod end;
 pub mod feature;
+pub mod flat;
 pub mod interner;
 pub mod nether;
 pub mod overworld;
