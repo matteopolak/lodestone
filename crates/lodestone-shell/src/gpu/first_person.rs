@@ -928,8 +928,16 @@ impl RenderState {
         // both branches; see its own doc), but the held item's sky component
         // never darkening: at night, in the open, the item stayed lit as if
         // it were noon while the arm right next to it correctly dimmed.
+        //
+        // The dimension's ambient floor rides along too, for the same reason:
+        // `FogUniform::new`/`disabled` default it to the overworld's own
+        // grey, so without this the held item would stay overworld-lit while
+        // standing in the Nether even after `fog_with_clock` fixed terrain
+        // and the arm.
         let mut hand_fog = FogUniform::disabled();
         hand_fog.end_enabled[2] = self.sky_darken.value();
+        let ambient = self.ambient_light.value();
+        hand_fog.ambient_light = [ambient[0], ambient[1], ambient[2], 0.0];
         queue.write_buffer(
             &self.entities.hand_cam_buffer,
             0,

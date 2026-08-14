@@ -80,6 +80,16 @@ pub struct DimensionTypeInfo {
     /// Baseline light every block receives regardless of sky exposure — `0.0`
     /// overworld, `0.1` Nether, `0.25` End.
     pub ambient_light: f32,
+    /// `EnvironmentAttributes.AMBIENT_LIGHT_COLOR`, packed `0xRRGGBB` — the
+    /// colour the GPU lightmap seeds its accumulator with before either light
+    /// half is added, so an unlit surface is not pure black. **Not** the same
+    /// quantity as [`Self::ambient_light`] above (that one only ever blends a
+    /// *lerp fraction*; this is the actual seed colour the terrain/entity/fluid
+    /// shaders read). Grey in the overworld, warm brown in the Nether, sage in
+    /// the End — see `lodestone_render::light`. `None` when the source did not
+    /// resolve one; a version-free consumer should fall back to the
+    /// overworld's own value rather than invent a brighter one.
+    pub ambient_light_color: Option<u32>,
 }
 
 impl DimensionTypeInfo {

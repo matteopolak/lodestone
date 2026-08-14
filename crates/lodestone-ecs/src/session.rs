@@ -2044,6 +2044,11 @@ mod tests {
             height: if has_skylight { 384 } else { 256 },
             logical_height: if has_skylight { 384 } else { 128 },
             ambient_light: if has_skylight { 0.0 } else { 0.1 },
+            // Not this fixture's concern — these tests are about the
+            // dimension type reaching the ECS through the schedule, not about
+            // the colour itself. See `lodestone_render::light`'s tests for
+            // that.
+            ambient_light_color: None,
         }
     }
 

@@ -2,11 +2,14 @@
 // Camera plus this frame's distance fog (see the model shader); folded into
 // group 0 so the fluid shader stays within four bind groups. Shared by every
 // section this frame — written once per frame, not once per section.
+// `fog_ambient_light.rgb` is this frame's dimension `AMBIENT_LIGHT_COLOR` —
+// see `ambient_light()` below and the model shader's matching field comment.
 struct Camera {
     view_proj: mat4x4<f32>,
     fog_eye: vec4<f32>,
     fog_color_start: vec4<f32>,
     fog_end_enabled: vec4<f32>,
+    fog_ambient_light: vec4<f32>,
 };
 
 // A section's world-space origin (see the model shader's `Origin`); bound at
@@ -102,10 +105,12 @@ const FLUID_DEPTH_NUDGE: f32 = 4.76837158203125e-7;
 
 const BRIGHTNESS_FACTOR: f32 = 0.5;
 
-// The overworld's `AMBIENT_LIGHT_COLOR`, 0x0A0A0A. See the model shader for the
-// derivation; the two must move together or water and terrain disagree about
-// what an unlit surface looks like.
-const AMBIENT_LIGHT: f32 = 0.039215688;
+// This frame's dimension `AMBIENT_LIGHT_COLOR`. See the model shader's
+// `ambient_light()` for the derivation; the two must move together or water
+// and terrain disagree about what an unlit surface looks like.
+fn ambient_light() -> vec3<f32> {
+    return camera.fog_ambient_light.rgb;
+}
 
 // Byte-for-byte the model shader's `lightmap_color`/`sky_light_color`/
 // `parabolic_mix_factor`/`lerp_byte` -- see that shader's comments and
@@ -132,7 +137,7 @@ fn lightmap_color(sky_level: f32, block_level: f32) -> vec3<f32> {
     let block_brightness = light_brightness(block_level) * BLOCK_FACTOR;
     let block_mix = 0.9 * parabolic_mix_factor(block_level);
     let block_light_color = mix(BLOCK_LIGHT_TINT, vec3<f32>(1.0, 1.0, 1.0), block_mix);
-    var color = vec3<f32>(AMBIENT_LIGHT, AMBIENT_LIGHT, AMBIENT_LIGHT)
+    var color = ambient_light()
         + sky_light_color() * sky_brightness
         + block_light_color * block_brightness;
     color = clamp(color, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));

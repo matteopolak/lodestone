@@ -68,8 +68,8 @@ pub use occlusion::TerrainOcclusion;
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    BannerSource, BellSource, BlockEntitySource, CampfireSource, DecoratedPotSource,
-    EnchantingTableSource,
+    AmbientLightSource, BannerSource, BellSource, BlockEntitySource, CampfireSource,
+    DecoratedPotSource, EnchantingTableSource,
     EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
     MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource,
     SkullSource, SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
@@ -330,6 +330,10 @@ pub struct RenderState {
     /// How bright the sky is *right now*. Permanent noon until the shell wires a
     /// world clock in via [`RenderState::set_sky_darken_source`].
     sky_darken: SkyDarkenSource,
+    /// This frame's dimension `AMBIENT_LIGHT_COLOR`. The overworld's own grey
+    /// until the shell wires the current dimension in via
+    /// [`RenderState::set_ambient_light_source`].
+    ambient_light: AmbientLightSource,
     /// Where the local player's own third-person body comes from, if a
     /// caller has wired one in. Unset until the shell has both a
     /// third-person camera and a way to describe the local player's pose —

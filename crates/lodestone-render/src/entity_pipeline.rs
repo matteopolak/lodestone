@@ -1907,12 +1907,13 @@ mod tests {
     }
 
     /// The uniform the entity shader's `Camera` struct maps onto: 80 bytes of
-    /// camera (a `mat4x4` plus a `vec4`) then 48 of fog (three `vec4`s). If this
+    /// camera (a `mat4x4` plus a `vec4`) then 64 of fog (four `vec4`s, since
+    /// `FogUniform` grew a fourth for per-dimension `ambient_light`). If this
     /// ever stops matching the model pipeline's uniform, the two passes would fog
     /// differently and a mob would visibly detach from its background.
     #[test]
     fn camera_uniform_matches_the_model_pipelines_layout() {
-        assert_eq!(core::mem::size_of::<EntityCameraUniform>(), 128);
+        assert_eq!(core::mem::size_of::<EntityCameraUniform>(), 144);
         assert_eq!(
             core::mem::size_of::<EntityCameraUniform>(),
             core::mem::size_of::<crate::model_pipeline::ModelCameraUniform>()
@@ -1964,8 +1965,10 @@ mod tests {
         assert_eq!(dark.fog.end_enabled[0], base.fog.end_enabled[0]);
         assert_eq!(dark.fog.end_enabled[1], base.fog.end_enabled[1]);
         assert_eq!(dark.camera.view_proj, base.camera.view_proj);
-        // And the struct did not grow, so it still matches the model pipeline.
-        assert_eq!(core::mem::size_of::<EntityCameraUniform>(), 128);
+        // `with_sky_darken` itself did not grow the struct further — it still
+        // matches the model pipeline at `FogUniform`'s current (four-`vec4`)
+        // size.
+        assert_eq!(core::mem::size_of::<EntityCameraUniform>(), 144);
     }
 
     #[test]

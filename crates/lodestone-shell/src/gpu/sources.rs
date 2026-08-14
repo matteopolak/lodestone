@@ -104,6 +104,52 @@ impl std::fmt::Debug for SkyDarkenSource {
     }
 }
 
+/// Where this frame's per-dimension **ambient light colour** comes from:
+/// `EnvironmentAttributes.AMBIENT_LIGHT_COLOR`, the floor `lightmap.fsh` seeds
+/// its accumulator with before either light half is added — see
+/// `lodestone_render::light::light_color_from_levels`'s `ambient` parameter
+/// and `DimensionType::ambient_light_color` for the wire source.
+///
+/// Separate from [`SkyDarkenSource`] because it is a property of the current
+/// *dimension type*, not of the clock: it changes only on a portal trip, not
+/// every frame, and the server sends it once, during Configuration, in
+/// `registry_data` — there is nothing to poll beyond "which dimension is the
+/// player in right now".
+///
+/// Unset — the offline demo, a headless test, pre-login, or a dimension whose
+/// registry entry omitted the attribute — reads as the overworld's own colour
+/// ([`lodestone_render::light::OVERWORLD_AMBIENT_LIGHT`]), i.e. exactly the
+/// behaviour before per-dimension colour existed. That default never
+/// brightens a dimension that should be dimmer, only a genuinely-unknown one
+/// — the same "never invent light" rule `lodestone_data::light_props::emission`
+/// follows for an unresolved block-state id.
+#[derive(Default)]
+pub struct AmbientLightSource(pub(super) Option<Box<dyn Fn() -> Option<[f32; 3]> + Send + Sync>>);
+
+impl AmbientLightSource {
+    /// This frame's ambient colour, or the overworld's own when there is no
+    /// source or the current dimension is not known yet.
+    #[must_use]
+    pub(super) fn value(&self) -> [f32; 3] {
+        self.0
+            .as_ref()
+            .and_then(|f| f())
+            .unwrap_or(lodestone_render::light::OVERWORLD_AMBIENT_LIGHT)
+    }
+}
+
+impl std::fmt::Debug for AmbientLightSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AmbientLightSource")
+            .field(&if self.0.is_some() {
+                "set"
+            } else {
+                "overworld-default"
+            })
+            .finish()
+    }
+}
+
 /// Where the sky pass's **world clock** comes from: the raw `time_of_day`
 /// tick [`lodestone_render::SkyRenderer::render`] places the sun/moon from and
 /// phases the star/cloud animation with.

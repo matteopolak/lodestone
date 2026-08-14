@@ -129,7 +129,40 @@ pub const BRIGHTNESS_FACTOR: f32 = 0.5;
 /// It is grey in the overworld, which is the only reason the light term can stay
 /// a scalar. The Nether's `0x302821` and the End's `0x3F473F` are *not* grey and
 /// belong to the same per-dimension colour pass as the block-light tint.
+///
+/// Used only by [`light_term`]/[`light_term_from_levels`] (the scalar model)
+/// and as the fallback for [`light_color_from_levels`]'s `ambient` parameter
+/// when no per-dimension colour is known. It is **not** a universal floor:
+/// treating it as one is exactly the bug that under-lit the Nether — see
+/// [`OVERWORLD_AMBIENT_LIGHT`].
 pub const AMBIENT_LIGHT: f32 = 10.0 / 255.0;
+
+/// [`AMBIENT_LIGHT`] broadcast into all three channels — the overworld's own
+/// `AMBIENT_LIGHT_COLOR`, and the correct **default** for
+/// [`light_color_from_levels`]'s `ambient` parameter when a caller has no
+/// per-dimension colour yet (pre-login, an offline demo, a hermetic test).
+/// Never the right value for a *known* non-overworld dimension: the Nether's
+/// real floor is [`rgb24_to_channels`]`(0x302821)` and the End's is
+/// [`rgb24_to_channels`]`(0x3F473F)`, both markedly brighter than this grey —
+/// see `DimensionType::ambient_light_color`'s doc for the source and
+/// `nether_ambient_floor_reads_meaningfully_brighter_than_the_overworlds`
+/// below for the measured gap.
+pub const OVERWORLD_AMBIENT_LIGHT: [f32; 3] = [AMBIENT_LIGHT, AMBIENT_LIGHT, AMBIENT_LIGHT];
+
+/// Unpacks a `0xRRGGBB` colour — as decoded off the wire by
+/// `DimensionType::ambient_light_color` — into per-channel `0.0..=1.0` floats.
+/// Vanilla's `ARGB.vector3fFromRGB24`: a bare `byte / 255`, no linearisation
+/// (this module's whole convention — see `srgb_to_linear`'s doc elsewhere in
+/// this crate for why vanilla's lightmap constants are never gamma-corrected
+/// on the way in).
+#[must_use]
+pub fn rgb24_to_channels(packed: u32) -> [f32; 3] {
+    [
+        f32::from(((packed >> 16) & 0xFF) as u8) / 255.0,
+        f32::from(((packed >> 8) & 0xFF) as u8) / 255.0,
+        f32::from((packed & 0xFF) as u8) / 255.0,
+    ]
+}
 
 /// Vanilla's `get_brightness`: one lightmap axis' response to a `0.0..=1.0` light
 /// level (the wire nibble over 15).
@@ -304,7 +337,7 @@ fn parabolic_mix_factor(level: f32) -> f32 {
 /// ```text
 /// block_brightness = get_brightness(block_level) * BlockFactor
 /// sky_brightness   = get_brightness(sky_level)   * SkyFactor
-/// color  = AmbientColor                                    // grey, see AMBIENT_LIGHT
+/// color  = AmbientColor                                    // per-dimension, see `ambient`
 /// color += SkyLightColor * sky_brightness                  // see sky_light_color_from_darken
 /// BlockLightColor = mix(BlockLightTint, white, 0.9 * parabolic(block_level))
 /// color += BlockLightColor * block_brightness
@@ -312,12 +345,26 @@ fn parabolic_mix_factor(level: f32) -> f32 {
 /// color  = mix(color, notGamma(color), BrightnessFactor)
 /// ```
 ///
-/// `AmbientColor` is added once, not per-channel `max`ed with anything — same
-/// combine rule as the scalar model. The **sky/block combine changed from
-/// `max` to additive**, which [`light_term_from_levels`]'s doc already flags
-/// as the one deliberately unmodelled term; this function models it.
+/// `ambient` is `EnvironmentAttributes.AMBIENT_LIGHT_COLOR` for the *current*
+/// dimension — [`rgb24_to_channels`] of `DimensionType::ambient_light_color`,
+/// or [`OVERWORLD_AMBIENT_LIGHT`] as the safe default when no per-dimension
+/// colour is known yet. It is added once, not per-channel `max`ed with
+/// anything — same combine rule as the scalar model. The **sky/block combine
+/// changed from `max` to additive**, which [`light_term_from_levels`]'s doc
+/// already flags as the one deliberately unmodelled term; this function
+/// models it.
+///
+/// Passing [`OVERWORLD_AMBIENT_LIGHT`] for `ambient` reproduces this
+/// function's behaviour before per-dimension colour existed, byte for byte —
+/// see `daylight_vec3_reduces_to_the_existing_scalar_when_block_light_is_absent`
+/// and friends below, none of which changed when this parameter was added.
 #[must_use]
-pub fn light_color_from_levels(sky_level: f32, block_level: f32, sky_darken: f32) -> [f32; 3] {
+pub fn light_color_from_levels(
+    sky_level: f32,
+    block_level: f32,
+    sky_darken: f32,
+    ambient: [f32; 3],
+) -> [f32; 3] {
     let sky_brightness = brightness(sky_level) * sky_darken;
     let block_brightness = brightness(block_level) * BLOCK_FACTOR;
     let sky_light_color = sky_light_color_from_darken(sky_darken);
@@ -330,9 +377,9 @@ pub fn light_color_from_levels(sky_level: f32, block_level: f32, sky_darken: f32
     ];
 
     let mut color = [
-        AMBIENT_LIGHT + sky_light_color[0] * sky_brightness + block_light_color[0] * block_brightness,
-        AMBIENT_LIGHT + sky_light_color[1] * sky_brightness + block_light_color[1] * block_brightness,
-        AMBIENT_LIGHT + sky_light_color[2] * sky_brightness + block_light_color[2] * block_brightness,
+        ambient[0] + sky_light_color[0] * sky_brightness + block_light_color[0] * block_brightness,
+        ambient[1] + sky_light_color[1] * sky_brightness + block_light_color[1] * block_brightness,
+        ambient[2] + sky_light_color[2] * sky_brightness + block_light_color[2] * block_brightness,
     ];
     color = [color[0].clamp(0.0, 1.0), color[1].clamp(0.0, 1.0), color[2].clamp(0.0, 1.0)];
 
@@ -345,12 +392,14 @@ pub fn light_color_from_levels(sky_level: f32, block_level: f32, sky_darken: f32
 }
 
 /// [`light_color_from_levels`] from a packed `sky << 4 | block` byte, the
-/// vec3 twin of [`light_term`].
+/// vec3 twin of [`light_term`]. `ambient` is the current dimension's
+/// `AMBIENT_LIGHT_COLOR` — see that parameter's doc on
+/// [`light_color_from_levels`].
 #[must_use]
-pub fn light_color(packed_light: u8, sky_darken: f32) -> [f32; 3] {
+pub fn light_color(packed_light: u8, sky_darken: f32, ambient: [f32; 3]) -> [f32; 3] {
     let sky = f32::from((packed_light >> 4) & 0x0F) / 15.0;
     let block = f32::from(packed_light & 0x0F) / 15.0;
-    light_color_from_levels(sky, block, sky_darken)
+    light_color_from_levels(sky, block, sky_darken, ambient)
 }
 
 #[cfg(test)]
@@ -657,7 +706,7 @@ mod tests {
         for sky in 0..=15_u8 {
             let packed = sky << 4;
             let scalar = light_term(packed, 1.0);
-            let colour = light_color(packed, 1.0);
+            let colour = light_color(packed, 1.0, OVERWORLD_AMBIENT_LIGHT);
             for (i, c) in colour.iter().enumerate() {
                 assert!(
                     (c - scalar).abs() < 1e-5,
@@ -680,7 +729,7 @@ mod tests {
         for block in 1..15_u8 {
             let packed = block; // sky = 0
             let scalar = light_term(packed, 1.0);
-            let colour = light_color(packed, 1.0);
+            let colour = light_color(packed, 1.0, OVERWORLD_AMBIENT_LIGHT);
             assert!(
                 (colour[0] - scalar).abs() > 0.005,
                 "block {block}: colour {colour:?} must diverge from scalar {scalar} \
@@ -698,7 +747,7 @@ mod tests {
     fn midnight_blue_matches_the_old_scalar_gate_but_red_does_not() {
         let midnight = 0.24_f32;
         // sky level 15 (1.0), block 0 — open sky, unlit.
-        let colour = light_color_from_levels(1.0, 0.0, midnight);
+        let colour = light_color_from_levels(1.0, 0.0, midnight, OVERWORLD_AMBIENT_LIGHT);
         assert!((colour[2] - 0.504_652).abs() < 1e-4, "blue: {colour:?}");
         assert!((colour[0] - 0.278_367).abs() < 1e-4, "red: {colour:?}");
         assert_eq!(colour[0], colour[1], "red and green must agree: {colour:?}");
@@ -716,7 +765,7 @@ mod tests {
     /// the scalar model has no hue to lose.
     #[test]
     fn ratio_of_ratios_lands_on_vanillas_hue_not_grey() {
-        let noon = light_color_from_levels(1.0, 0.0, 1.0);
+        let noon = light_color_from_levels(1.0, 0.0, 1.0, OVERWORLD_AMBIENT_LIGHT);
         assert_eq!(noon[0], noon[2], "noon must be grey (SKY_LIGHT_COLOR is white)");
         let q_noon = noon[0] / noon[2];
         assert!((q_noon - 1.0).abs() < 1e-6);
@@ -725,7 +774,7 @@ mod tests {
             (18000_i64, 0.24_f32, 0.551_596_f32),
             (13000, crate::entity::sky_darken_for_time_of_day(13000), 0.570_359),
         ] {
-            let c = light_color_from_levels(1.0, 0.0, sky_darken);
+            let c = light_color_from_levels(1.0, 0.0, sky_darken, OVERWORLD_AMBIENT_LIGHT);
             let q = (c[0] / c[2]) / q_noon;
             assert!(
                 (q - expected_q).abs() < 1e-3,
@@ -755,15 +804,15 @@ mod tests {
         let midnight = 0.24_f32;
 
         // Open sky, unlit: blue.
-        let open_sky = light_color_from_levels(1.0, 0.0, midnight);
+        let open_sky = light_color_from_levels(1.0, 0.0, midnight, OVERWORLD_AMBIENT_LIGHT);
         assert!(open_sky[2] > open_sky[0] * 1.5, "open sky must read blue: {open_sky:?}");
 
         // Cave: sky level 0, block level 0. `AmbientColor` is a neutral
         // `#0a0a0a`, and at sky level 0 `SkyLightColor` contributes nothing
         // regardless of its own hue, so this must be exactly grey no matter
         // what tick it is measured at.
-        let cave_midnight = light_color_from_levels(0.0, 0.0, midnight);
-        let cave_noon = light_color_from_levels(0.0, 0.0, 1.0);
+        let cave_midnight = light_color_from_levels(0.0, 0.0, midnight, OVERWORLD_AMBIENT_LIGHT);
+        let cave_noon = light_color_from_levels(0.0, 0.0, 1.0, OVERWORLD_AMBIENT_LIGHT);
         for c in [cave_midnight, cave_noon] {
             assert!(
                 (c[0] - 0.093_545_4).abs() < 1e-5
@@ -777,8 +826,8 @@ mod tests {
         // dim at dusk), and warm — R/B = 1.664 in vanilla, where the retained
         // scalar model reads a neutral grey (R/B = 1.0).
         let block_level = 8.0 / 15.0;
-        let torch_midnight = light_color_from_levels(0.0, block_level, midnight);
-        let torch_noon = light_color_from_levels(0.0, block_level, 1.0);
+        let torch_midnight = light_color_from_levels(0.0, block_level, midnight, OVERWORLD_AMBIENT_LIGHT);
+        let torch_noon = light_color_from_levels(0.0, block_level, 1.0, OVERWORLD_AMBIENT_LIGHT);
         for (label, c) in [("midnight", torch_midnight), ("noon", torch_noon)] {
             assert!(
                 (c[0] - 0.586_090).abs() < 1e-3,
@@ -810,6 +859,82 @@ mod tests {
             "the scalar model's implicit q=1.0 must clearly miss vanilla's warm \
              torch ratio {vanilla_q}"
         );
+    }
+
+    /// [`rgb24_to_channels`] is a bare `byte / 255` per channel, no
+    /// linearisation — vanilla's `ARGB.vector3fFromRGB24`. Hand-derived, not
+    /// taken from the function.
+    #[test]
+    fn rgb24_to_channels_is_a_bare_byte_over_255_per_channel() {
+        assert_eq!(
+            rgb24_to_channels(0x302821),
+            [48.0 / 255.0, 40.0 / 255.0, 33.0 / 255.0]
+        );
+    }
+
+    /// **The bug this module's per-dimension `ambient` parameter exists to
+    /// fix.** A cave in the Nether must read vanilla's real ambient floor —
+    /// derived here from `#302821` by hand, the same `notGamma` mix
+    /// [`light_color_from_levels`] applies to `AMBIENT_LIGHT_COLOR` — and that
+    /// floor must be **measurably brighter** than the overworld's `#0a0a0a`
+    /// floor, not the same number. Passing [`OVERWORLD_AMBIENT_LIGHT`] for a
+    /// Nether cell (the bug: treating [`AMBIENT_LIGHT`] as a universal
+    /// constant) is the wrong hypothesis this test discriminates against.
+    #[test]
+    fn nether_ambient_floor_reads_meaningfully_brighter_than_the_overworlds() {
+        // `#302821` per channel, `notGamma`-mixed at `BRIGHTNESS_FACTOR` —
+        // written out by hand rather than calling `light_color_from_levels`.
+        // `notGamma` is **not** a per-channel operation on a non-grey triple:
+        // it scales every channel by the *maximum* channel's response
+        // (`not_gamma_vec3`'s doc), which is why this cannot reuse
+        // `an_unlit_surface_lands_on_vanillas_ambient_floor`'s per-channel
+        // arithmetic — that derivation is only exact when the three channels
+        // already agree, which the Nether's `#302821` does not.
+        let raw = [48.0_f32 / 255.0, 40.0 / 255.0, 33.0 / 255.0];
+        let max_component = raw[0].max(raw[1]).max(raw[2]);
+        let inv = 1.0 - max_component;
+        let max_scaled = 1.0 - inv * inv * inv * inv;
+        let ratio = max_scaled / max_component;
+        let expected_nether = [
+            raw[0] + (raw[0] * ratio - raw[0]) * 0.5,
+            raw[1] + (raw[1] * ratio - raw[1]) * 0.5,
+            raw[2] + (raw[2] * ratio - raw[2]) * 0.5,
+        ];
+        assert!(
+            (expected_nether[0] - 0.377_002).abs() < 1e-5
+                && (expected_nether[1] - 0.314_169).abs() < 1e-5
+                && (expected_nether[2] - 0.259_189).abs() < 1e-5,
+            "hand-derived Nether floor drifted: {expected_nether:?}"
+        );
+
+        let nether_ambient = rgb24_to_channels(0x302821);
+        // Sky level 0, block level 0: nothing but the ambient floor
+        // contributes, at any tick.
+        let ours = light_color_from_levels(0.0, 0.0, 0.24, nether_ambient);
+        for (i, (got, want)) in ours.iter().zip(expected_nether.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-5,
+                "channel {i}: got {got}, vanilla's Nether ambient floor is {want}"
+            );
+        }
+
+        // The wrong hypothesis: reusing the overworld's grey constant for a
+        // Nether cell, which is the exact bug report ("the entire Nether
+        // seems very dark"). Every channel must clearly miss it.
+        let wrong = light_color_from_levels(0.0, 0.0, 0.24, OVERWORLD_AMBIENT_LIGHT);
+        for (i, (right, wrong)) in ours.iter().zip(wrong.iter()).enumerate() {
+            assert!(
+                (right - wrong).abs() > 0.15,
+                "channel {i}: the Nether's real floor {right} must clearly miss the \
+                 overworld-constant hypothesis {wrong}, or this cannot discriminate \
+                 the bug from the fix"
+            );
+            assert!(
+                *right > *wrong,
+                "channel {i}: the Nether's real floor must be *brighter* than the \
+                 overworld's, not darker — got right={right} wrong={wrong}"
+            );
+        }
     }
 
     /// [`not_gamma_vec3`] must collapse to [`not_gamma`] when all three

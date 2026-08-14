@@ -648,6 +648,7 @@ fn dimension_type_info(name: &str, value: &DimensionType) -> Option<DimensionTyp
         height: value.height,
         logical_height: value.logical_height,
         ambient_light: value.ambient_light,
+        ambient_light_color: value.ambient_light_color,
     })
 }
 
