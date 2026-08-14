@@ -45,7 +45,7 @@
 //! is a *server-side* culling parameter (which players receive the packet at
 //! all). The driver therefore ignores `fixed_range` for attenuation and
 //! documents the field as carried-but-unused on the client audio path. See
-//! `SoundEngine.java:363-421` and `AbstractSoundInstance.java:79-85`.
+//! `SoundEngine.play` and `AbstractSoundInstance.getVolume`.
 
 mod driver;
 

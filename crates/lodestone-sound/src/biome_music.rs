@@ -43,8 +43,12 @@
 //! * **A biome absent from the table is not "no music"** — it is "no *biome*
 //!   music", and the caller should fall back to
 //!   [`BackgroundMusic::overworld`](crate::music::BackgroundMusic::overworld) in
-//!   the overworld exactly as vanilla's `baseBiome`/`biomeWithMobs` helpers do
-//!   (`OverworldBiomes.java:355`). `pale_garden` is the one biome that means
+//!   the overworld. A biome that sets no `BACKGROUND_MUSIC` attribute leaves
+//!   `EnvironmentAttributeMap.applyModifier`'s base value untouched, so vanilla's
+//!   layered attribute system falls through to the dimension's own value
+//!   (`BackgroundMusic.OVERWORLD`, set on the overworld dimension type in
+//!   `DimensionTypes.bootstrap`) rather than any per-biome helper.
+//!   `pale_garden` is the one biome that means
 //!   *genuinely* no music, and it says so with a present-but-empty entry, which
 //!   is why [`biome_music`] returns `Some(&EMPTY)` for it rather than `None`.
 //!   Collapsing those two cases silences 24 biomes.

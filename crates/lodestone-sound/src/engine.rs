@@ -92,7 +92,7 @@ impl AudioEngine {
     }
 
     /// The event's `subtitles` translation key, for the HUD's sound-subtitle
-    /// captions (issue #198). See [`SoundResolver::subtitle`].
+    /// captions. See [`SoundResolver::subtitle`].
     pub fn subtitle(&self, event_name: &str) -> Option<&str> {
         self.resolver.subtitle(event_name)
     }

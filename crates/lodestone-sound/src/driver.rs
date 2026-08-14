@@ -93,7 +93,7 @@ impl SoundResolver {
     }
 
     /// The event's `subtitles` translation key, for vanilla's sound-subtitle
-    /// captions (issue #198). `None` for an unknown event or one that declares no
+    /// captions. `None` for an unknown event or one that declares no
     /// subtitle — vanilla shows no caption in either case.
     ///
     /// Reads the event *before* weighted selection, deliberately: the subtitle is
