@@ -580,11 +580,17 @@ pub fn largest_rectangle_around<S: ChunkSource + ?Sized>(
 /// that because its POI manager is a persisted per-section index built as blocks
 /// are placed. This is the same idea, minus persistence.
 ///
-/// **Not persisted, and that is the one real gap.** A portal lit in an earlier
-/// session is not in the index, so the first trip after a restart falls back to the
-/// bounded local scan [`find_exit_portal`] also performs, and beyond its 16-block
-/// radius will build a second portal beside the first. Persisting this belongs with
-/// the block-entity registry's save path.
+/// **Not persisted across a restart by *this struct* — but the storage seam now
+/// exists.** A portal lit in an earlier session is not in a fresh index, so the
+/// first trip after a restart falls back to the bounded local scan
+/// [`find_exit_portal`] also performs, and beyond its 16-block radius will build a
+/// second portal beside the first. [`crate::poi_storage`] is vanilla's real fix for
+/// this (`PoiManager` persists exactly the `NETHER_PORTAL` type this index tracks),
+/// and [`poi_records_for_index`]/[`restore_index_from_poi`] below convert between
+/// the two — proven by a real round trip through [`crate::poi_storage::PoiStorage`]
+/// in `tests/poi_persistence_round_trip.rs`. What is **not** wired yet is calling
+/// them from world open/shutdown, which lives beside
+/// [`crate::entity_storage::EntityStorage`]'s own wiring in `crate::integrated`.
 #[derive(Debug, Clone, Default)]
 pub struct PortalIndex(Arc<Mutex<HashMap<Dimension, Vec<BlockPos>>>>);
 
@@ -636,6 +642,60 @@ impl PortalIndex {
     pub fn is_same_store(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
+}
+
+/// `PoiTypes.NETHER_PORTAL`'s resource key — the type every cell in
+/// [`PortalIndex`] persists as.
+pub const NETHER_PORTAL_POI_TYPE: &str = "minecraft:nether_portal";
+
+/// Every cell recorded for `dimension`, as `nether_portal` POI records ready for
+/// [`crate::poi_storage::PoiStorage::save`].
+///
+/// A fresh [`crate::poi_storage::PoiRecord`] for this type starts at
+/// `free_tickets: 0` (`PoiTypes.bootstrap` registers `NETHER_PORTAL` with
+/// `maxTickets 0`), matching vanilla exactly: a portal is indexed for lookup, never
+/// claimed the way a workstation is.
+#[must_use]
+pub fn poi_records_for_index(
+    index: &PortalIndex,
+    dimension: Dimension,
+) -> Vec<crate::poi_storage::PoiRecord> {
+    index
+        .cells(dimension)
+        .into_iter()
+        .map(|pos| {
+            crate::poi_storage::PoiRecord::new(
+                pos,
+                NETHER_PORTAL_POI_TYPE
+                    .parse()
+                    .expect("NETHER_PORTAL_POI_TYPE is a valid resource key"),
+            )
+        })
+        .collect()
+}
+
+/// Rebuilds a [`PortalIndex`] from persisted POI sections — the read half of the
+/// gap [`PortalIndex`]'s own doc names. `sections` is every [`crate::poi_storage::PoiSection`]
+/// covering the loaded area, for whichever dimension `sections` was read from;
+/// the caller (world open, once wired) is responsible for calling this once per
+/// dimension with that dimension's own POI store.
+///
+/// Only `nether_portal`-typed records are taken — a POI store may hold workstation
+/// or bed records too, none of which this index tracks.
+#[must_use]
+pub fn restore_index_from_poi<'a>(
+    dimension: Dimension,
+    sections: impl IntoIterator<Item = &'a crate::poi_storage::PoiSection>,
+) -> PortalIndex {
+    let index = PortalIndex::new();
+    for section in sections {
+        for record in &section.records {
+            if record.poi_type.path() == "nether_portal" {
+                index.insert(dimension, record.pos);
+            }
+        }
+    }
+    index
 }
 
 /// `PortalForcer.NETHER_PORTAL_RADIUS` — the search radius when arriving *in* the

@@ -204,20 +204,15 @@ path [`world-open-latency.md`](./world-open-latency.md) spent an issue removing.
 
 Named here rather than left to be rediscovered as a missing mob:
 
-- **Point-of-interest (`poi/`) storage is not implemented.** Deliberate: nothing in
-  this codebase produces a POI. There are no villagers with professions, no tracked
-  bee nests and no registered bed respawn points feeding one, so a POI store would
-  have **zero producers** — the island this repo's first rule forbids. Critically,
-  this is *not* silent data loss: we never write `poi/`, so a vanilla world's
-  existing POI files are untouched by our saves. The format is recorded below for
-  whoever lands the first producer.
-
-  ```text
-  DataVersion: Int
-  Sections: Compound { "<sectionY>": { Valid: Byte, Records: List<{pos: IntArray[3], type: String, free_tickets: Int?}> } }
-  ```
-
-  Note an entity chunk carries `Position` and a POI chunk carries none.
+- **Point-of-interest (`poi/`) storage now has a reader/writer** —
+  [`point-of-interest-storage.md`](./point-of-interest-storage.md) covers it in
+  full. `crate::portal::PortalIndex` (vanilla's in-memory `PoiManager` stand-in
+  for nether-portal lookup) is its one real consumer today, proven by a round
+  trip through the real save path in `tests/poi_persistence_round_trip.rs`; what
+  is still missing is calling that conversion from world open/shutdown, which
+  belongs beside this doc's own restore/autosave wiring. Villager professions,
+  tracked bee nests and registered bed respawn points remain unimplemented, so a
+  POI store still has no *AI* producer — only the portal one.
 
 - **Projectiles are not persisted.** `ProjectileMeta` holds a uuid and a type but
   the registry holds no owner, no pickup state and no damage, so writing one would
