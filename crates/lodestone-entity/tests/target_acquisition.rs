@@ -3,14 +3,15 @@
 //!
 //! # What it is
 //!
-//! The behavioural gate for issue #455. `NavigatingMob::find_nearest_target`
+//! The behavioural gate proving a hostile mob acquires a target it was never
+//! told about. `NavigatingMob::find_nearest_target`
 //! used to `return self.attack_target`, the field written by the only goal that
 //! calls it, so the loop could never bootstrap: **no mob in a running game ever
 //! attacked unprovoked**, while every test of the mechanism passed.
 //!
 //! # Why this file is not in `navigating_mob.rs`'s own `mod tests`
 //!
-//! Because of *how* #455 hid, which is the whole lesson. Three separate doubles
+//! Because of how this class of bug hides, which is the whole lesson. Three separate doubles
 //! — `ScriptMob` (`tests/mob_sim.rs`), `goals.rs`'s in-module fake, and
 //! `ai/roster/probe.rs` — each override `find_nearest_target` with a working
 //! implementation, so every existing test of `NearestAttackableTargetGoal` drove
@@ -24,17 +25,17 @@
 //!
 //! The numbers come from the jar, not from our tables:
 //!
-//! * `FOLLOW_RANGE` is `16.0` for every mob (`Mob.java:166-168`), raised to
-//!   `35.0` by the zombie family (`monster/zombie/Zombie.java:133`).
+//! * `FOLLOW_RANGE` is `16.0` for every mob (`Mob.createMobAttributes`), raised to
+//!   `35.0` by the zombie family (`Zombie.createAttributes`).
 //! * The cut is a full 3-D `distanceToSqr` against `max(range, 2.0)`
-//!   (`ai/targeting/TargetingConditions.java:81-88`).
+//!   (`TargetingConditions.test`).
 //! * A target that *leaves* follow range is dropped
-//!   (`ai/goal/target/TargetGoal.java:57-60`).
+//!   (`TargetGoal.canContinueToUse`).
 //!
 //! If you change a distance here, change it because the jar says so.
 //!
 //! Deliberately absent: line of sight. Vanilla checks it with an eye-to-eye ray
-//! (`TargetingConditions.java:90`), which is not a query this seam can answer;
+//! (`TargetingConditions.test`'s line-of-sight branch), which is not a query this seam can answer;
 //! see `NavigatingMob::find_nearest_target`'s doc. Every mob here has clear
 //! sight of its player, so no assertion depends on the omission.
 
@@ -47,11 +48,11 @@ use lodestone_entity::ai::{
 use lodestone_entity::pathfinding::{Aabb, MobShape, PathType, PathWorld};
 use lodestone_model::Vec3;
 
-/// Vanilla's zombie `FOLLOW_RANGE` (`monster/zombie/Zombie.java:133`,
+/// Vanilla's zombie `FOLLOW_RANGE` (`Zombie.createAttributes`,
 /// `.add(Attributes.FOLLOW_RANGE, 35.0)`).
 const ZOMBIE_FOLLOW_RANGE: f64 = 35.0;
 
-/// Vanilla's zombie `MOVEMENT_SPEED` (`monster/zombie/Zombie.java:132`,
+/// Vanilla's zombie `MOVEMENT_SPEED` (`Zombie.createAttributes`,
 /// `0.23F`) expressed as the blocks-per-tick figure `MobSim` feeds
 /// `NavigatingMob` as `step_per_tick`.
 const ZOMBIE_STEP: f64 = 0.23;
@@ -114,8 +115,8 @@ struct Run {
     ///
     /// Both are needed to *predict* how far the mob should then travel:
     /// `NearestAttackableTargetGoal` throttles its search to one tick in
-    /// `random_interval` (vanilla's `DEFAULT_RANDOM_INTERVAL = 10`,
-    /// `NearestAttackableTargetGoal.java:15`), so a fixed fraction of the whole
+    /// `random_interval` (vanilla's `NearestAttackableTargetGoal.DEFAULT_RANDOM_INTERVAL = 10`),
+    /// so a fixed fraction of the whole
     /// run is not a prediction, it is a guess with a tolerance.
     acquired_at: Option<(usize, f64)>,
     /// How many times a goal reached [`MobController::attack`].
@@ -126,7 +127,7 @@ struct Run {
 /// through the perception feed the server uses (`set_nearest_player`), and ticks
 /// `ticks` times.
 ///
-/// `set_attack_target` is never called. That is the point: before #455 the only
+/// `set_attack_target` is never called. That is the point: previously the only
 /// way a mob acquired anything was for the test to hand it a target, which is
 /// what every existing gate does.
 fn run(species: &str, follow_range: f64, step: f64, player: Vec3, ticks: usize) -> Run {
@@ -139,7 +140,7 @@ fn run(species: &str, follow_range: f64, step: f64, player: Vec3, ticks: usize) 
         start,
         step,
         // Vanilla's own budget: `floor(followRange * 16)`, the same expression
-        // `mobs.rs:1510` uses.
+        // `lodestone_server::mobs::MobSim::spawn_species` uses.
         (follow_range * 16.0).floor() as i32,
         0,
     );
@@ -273,8 +274,8 @@ fn a_player_just_outside_follow_range_is_not_acquired_and_one_just_inside_is() {
 /// bare target registration plus melee attack, so nothing else can move the
 /// mob, and an out-of-range mob's position must be bit-identical to its start.
 /// It also pins the `max(range, 2.0)` floor
-/// (`TargetingConditions.java:83`), which is invisible to any test using a
-/// normal follow range.
+/// (`TargetingConditions.test`'s `visibilityDistance` computation), which is
+/// invisible to any test using a normal follow range.
 #[test]
 fn the_range_cut_is_the_jars_and_not_a_rounded_guess() {
     let world = Flat::new();
@@ -305,9 +306,9 @@ fn the_range_cut_is_the_jars_and_not_a_rounded_guess() {
     }
 }
 
-/// Vanilla drops a target that walks out of follow range
-/// (`ai/goal/target/TargetGoal.java:57-60`) and re-writes the target's live
-/// position every tick it does not (`:70`). Ours did neither: it held the point
+/// Vanilla drops a target that walks out of follow range and re-writes the
+/// target's live position every tick it does not (both in
+/// `TargetGoal.canContinueToUse`). Ours did neither: it held the point
 /// it acquired, for ever.
 ///
 /// Both directions in one run, so a goal that clears the target unconditionally
@@ -377,7 +378,7 @@ fn a_pursued_player_is_tracked_while_in_range_and_released_when_it_leaves() {
 /// `find_nearest_target`, it is the **absence of the goal**. No passive table
 /// registers `NearestAttackableTargetGoal`, so a cow never asks.
 ///
-/// This is the control that catches the naive form of #455's fix — reading
+/// This is the control that catches the naive form of the target-acquisition fix — reading
 /// `nearest_player` in a host that every species shares, with the goal installed
 /// for everyone.
 #[test]
