@@ -45,7 +45,7 @@ fn var_i32(v: i32) -> Vec<u8> {
 /// a test" trap that made `oak_leaves` the wrong choice for the item-collision gates.
 #[test]
 fn the_take_encodes_item_then_collector_then_amount() {
-    let proto = V770ServerProtocol::default();
+    let proto = V770ServerProtocol;
 
     let mut expected = var_i32(11);
     expected.extend_from_slice(&var_i32(1));

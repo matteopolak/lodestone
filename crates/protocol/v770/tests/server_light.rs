@@ -221,7 +221,7 @@ fn neighbourhood_columns(
     out
 }
 
-fn centre_of<'a>(cols: &'a [(i32, i32, WorldColumn)]) -> &'a WorldColumn {
+fn centre_of(cols: &[(i32, i32, WorldColumn)]) -> &WorldColumn {
     &cols
         .iter()
         .find(|&&(dx, dz, _)| (dx, dz) == (0, 0))
@@ -283,16 +283,16 @@ fn expectations<'a>(
                 break;
             }
         }
-        if let Some(y) = open_y {
-            if y <= top {
-                out.push(Expectation {
-                    x,
-                    y,
-                    z,
-                    sky: 15,
-                    why: "first cell above the highest dampening block is open to the sky",
-                });
-            }
+        if let Some(y) = open_y
+            && y <= top
+        {
+            out.push(Expectation {
+                x,
+                y,
+                z,
+                sky: 15,
+                why: "first cell above the highest dampening block is open to the sky",
+            });
         }
     }
 

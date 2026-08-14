@@ -408,17 +408,14 @@ async fn an_unanswered_keep_alive_kicks_the_client_with_a_reason() {
     // Read everything the server sends from here on, but never answer a
     // keep-alive — a genuine stall, which is what vanilla kicks for.
     let mut disconnect_reason = None;
-    loop {
-        match tokio::time::timeout(Duration::from_secs(60), client.read_packet()).await {
-            Ok(Ok(Some((id, payload)))) => {
-                if id == play::clientbound::DISCONNECT {
-                    let nbt = read_network_nbt(&mut Reader::new(&payload))
-                        .expect("the kick reason is network NBT");
-                    disconnect_reason = Some(Text::from_nbt(&nbt));
-                    break;
-                }
-            }
-            _ => break,
+    while let Ok(Ok(Some((id, payload)))) =
+        tokio::time::timeout(Duration::from_secs(60), client.read_packet()).await
+    {
+        if id == play::clientbound::DISCONNECT {
+            let nbt = read_network_nbt(&mut Reader::new(&payload))
+                .expect("the kick reason is network NBT");
+            disconnect_reason = Some(Text::from_nbt(&nbt));
+            break;
         }
     }
 
@@ -602,11 +599,10 @@ async fn attempt_login(name: &str) -> (Vec<(i32, Vec<u8>)>, Result<(), ServerErr
         .expect("hello writes");
 
     let mut sent = Vec::new();
-    loop {
-        match tokio::time::timeout(Duration::from_millis(250), client.read_packet()).await {
-            Ok(Ok(Some(packet))) => sent.push(packet),
-            _ => break,
-        }
+    while let Ok(Ok(Some(packet))) =
+        tokio::time::timeout(Duration::from_millis(250), client.read_packet()).await
+    {
+        sent.push(packet);
     }
     drop(client);
     let outcome = server.await.expect("server task panicked");

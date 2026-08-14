@@ -56,7 +56,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{BlockPos, ClientBuilder, Hand, LoginProfile, ServerAddress};
-use lodestone_model::{BlockFace, ClientAction, ContainerClickType, ContainerSlotChange, GameMode, ItemStack, Vec3f};
+use lodestone_model::{BlockFace, ClientAction, GameMode, ItemStack, Vec3f};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, serve_connection,
@@ -108,9 +108,12 @@ const ORACLE_DUST_ATTENUATION: &[(i32, u8)] = &[
 /// would see an empty world, find no torch and no dust, and compute nothing.
 /// The gate would then fail for a reason that has nothing to do with #465,
 /// and (worse) a *passing* variant of it would prove nothing at all.
+/// `SharedWorld`'s edit log: `(x, y, z) -> block name`.
+type EditMap = Arc<Mutex<HashMap<(i32, i32, i32), String>>>;
+
 #[derive(Clone, Default)]
 struct SharedWorld {
-    edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>>,
+    edits: EditMap,
 }
 
 impl SharedWorld {

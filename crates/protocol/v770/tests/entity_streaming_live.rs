@@ -174,11 +174,11 @@ async fn a_real_client_observes_a_live_entity_spawn_then_move() {
     let mut observed = None;
     while std::time::Instant::now() < move_deadline {
         let _ = handle.chat("poke");
-        if let Some(view) = handle.entity(mob_id) {
-            if view.position != start_pos {
-                observed = Some(view.position);
-                break;
-            }
+        if let Some(view) = handle.entity(mob_id)
+            && view.position != start_pos
+        {
+            observed = Some(view.position);
+            break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

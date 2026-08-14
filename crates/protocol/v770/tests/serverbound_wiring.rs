@@ -173,17 +173,13 @@ fn blank_comments_and_literals(src: &str) -> String {
                 j += 1;
             }
             if j < b.len() && b[j] == '"' {
-                for _ in i..=j {
-                    out.push(' ');
-                }
+                out.extend(std::iter::repeat_n(' ', j - i + 1));
                 i = j + 1;
                 // Scan for the terminator: `"` followed by `hashes` `#`s.
                 while i < b.len() {
                     if b[i] == '"' && b[i + 1..].iter().take(hashes).filter(|c| **c == '#').count() == hashes
                     {
-                        for _ in 0..=hashes {
-                            out.push(' ');
-                        }
+                        out.extend(std::iter::repeat_n(' ', hashes + 1));
                         i += hashes + 1;
                         break;
                     }
@@ -215,14 +211,12 @@ fn blank_comments_and_literals(src: &str) -> String {
             continue;
         }
         // Char literal, or a lifetime (passed through).
-        if c == '\'' {
-            if let Some(end) = is_char_literal(i) {
-                for _ in i..end {
-                    out.push(' ');
-                }
-                i = end;
-                continue;
-            }
+        if c == '\''
+            && let Some(end) = is_char_literal(i)
+        {
+            out.extend(std::iter::repeat_n(' ', end - i));
+            i = end;
+            continue;
         }
         out.push(c);
         i += 1;

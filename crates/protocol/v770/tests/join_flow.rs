@@ -499,10 +499,12 @@ fn unknown_play_packet_is_ignored() {
     // went red. Any *real* packet id is a fixture with an expiry date, so this
     // uses one no version of this protocol can ever assign.
     const NOT_A_PACKET: i32 = 0x7FFF;
-    assert!(
-        NOT_A_PACKET > play::clientbound::AWARD_STATS,
-        "the sentinel must sit above every assigned play clientbound id"
-    );
+    const {
+        assert!(
+            NOT_A_PACKET > play::clientbound::AWARD_STATS,
+            "the sentinel must sit above every assigned play clientbound id"
+        );
+    }
     assert!(
         adapter()
             .handle_packet(

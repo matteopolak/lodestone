@@ -65,11 +65,16 @@ use lodestone_model::{
     SoundCategory, Text, TextContent, Vec3, Vec3f,
 };
 use lodestone_server::{
-    ABSOLUTE_MAX_SIZE, Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot,
-    HOTBAR_SIZE,
+    Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot, HOTBAR_SIZE,
     MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MetadataField, PlayerListing, ResourcePackPush, ServerBound,
     ServerDirective, ServerProtocol, WorldBorder, WorldgenScope,
 };
+// Test-only: `encode_initialize_border_wire_layout` asserts the wire byte
+// against this constant. Not imported above because the lib-only build (no
+// `#[cfg(test)]`) never references it, and `cargo clippy -- -D warnings`
+// treats that as an unused import.
+#[cfg(test)]
+use lodestone_server::ABSOLUTE_MAX_SIZE;
 use lodestone_server::{AdvancementUpdate, StatKey, StatType};
 use lodestone_server::crafting::{
     RecipeBookEntry as ServerRecipeBookEntry, RecipeDisplay as ServerRecipeDisplay,
@@ -1366,7 +1371,7 @@ fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
             w.var_i32(1);
             let has_min = *min != -f32::MAX;
             let has_max = *max != f32::MAX;
-            w.u8(u8::from(has_min) * HAS_MIN | u8::from(has_max) * HAS_MAX);
+            w.u8((u8::from(has_min) * HAS_MIN) | (u8::from(has_max) * HAS_MAX));
             if has_min {
                 w.f32(*min);
             }
@@ -1378,7 +1383,7 @@ fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
             w.var_i32(2);
             let has_min = *min != -f64::MAX;
             let has_max = *max != f64::MAX;
-            w.u8(u8::from(has_min) * HAS_MIN | u8::from(has_max) * HAS_MAX);
+            w.u8((u8::from(has_min) * HAS_MIN) | (u8::from(has_max) * HAS_MAX));
             if has_min {
                 w.f64(*min);
             }
@@ -1390,7 +1395,7 @@ fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
             w.var_i32(3);
             let has_min = *min != i32::MIN;
             let has_max = *max != i32::MAX;
-            w.u8(u8::from(has_min) * HAS_MIN | u8::from(has_max) * HAS_MAX);
+            w.u8((u8::from(has_min) * HAS_MIN) | (u8::from(has_max) * HAS_MAX));
             if has_min {
                 w.i32(*min);
             }
@@ -1402,7 +1407,7 @@ fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
             w.var_i32(4);
             let has_min = *min != i64::MIN;
             let has_max = *max != i64::MAX;
-            w.u8(u8::from(has_min) * HAS_MIN | u8::from(has_max) * HAS_MAX);
+            w.u8((u8::from(has_min) * HAS_MIN) | (u8::from(has_max) * HAS_MAX));
             if has_min {
                 w.i64(*min);
             }
@@ -1755,7 +1760,7 @@ fn text_to_json(text: &Text) -> serde_json::Value {
 /// uses `java.util.Base64.getEncoder()`, which is the `+`/`/` variant.
 fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         // Pack the (1..=3) input bytes left-aligned into 24 bits, then peel
         // off four 6-bit groups, emitting `=` for any group with no input
@@ -2267,7 +2272,7 @@ fn encode_column_body(
 /// block entity in a column, of which the overwhelming majority have zero, so a
 /// map would cost more to build than the scans it saves.
 fn resolve_block_entity_type_id(name: &str) -> Option<u32> {
-    (0..lodestone_data::block_entity_types::TYPE_COUNT as u32)
+    (0..lodestone_data::block_entity_types::TYPE_COUNT)
         .find(|&id| lodestone_data::block_entity_types::block_entity_type_name(id) == Some(name))
 }
 

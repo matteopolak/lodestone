@@ -207,13 +207,12 @@ where
     // which is worth recording because a hang is the one failure mode that looks
     // like neither a pass nor a fail.
     let mut sent = Vec::new();
-    loop {
-        match tokio::time::timeout(Duration::from_millis(250), client.read_packet()).await {
-            Ok(Ok(Some(packet))) => sent.push(packet),
-            // Closed, errored, or went quiet — either way there is nothing more
-            // coming, and every assertion is about what *did* arrive.
-            _ => break,
-        }
+    // Closed, errored, or went quiet — either way there is nothing more
+    // coming, and every assertion is about what *did* arrive.
+    while let Ok(Ok(Some(packet))) =
+        tokio::time::timeout(Duration::from_millis(250), client.read_packet()).await
+    {
+        sent.push(packet);
     }
     // Release the transport so a server still parked in `read_packet` (the
     // no-ping case) can observe the close and return, instead of the `await`

@@ -87,10 +87,10 @@ fn vanilla_tree() -> CommandTree {
 fn root_literal(tree: &CommandTree, name: &str) -> usize {
     let root = tree.node(tree.root()).expect("root");
     for &child in &root.children {
-        if let NodeKind::Literal { name: literal } = &tree.node(child).expect("child").kind {
-            if literal == name {
-                return child;
-            }
+        if let NodeKind::Literal { name: literal } = &tree.node(child).expect("child").kind
+            && literal == name
+        {
+            return child;
         }
     }
     panic!(
