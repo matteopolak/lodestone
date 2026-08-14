@@ -913,6 +913,26 @@ pub struct CreatedPortal {
 /// Returns `None` only when the destination dimension has no placeable band at all,
 /// vanilla's `Optional.empty()` "unable to create a portal".
 #[must_use]
+#[cfg(not(target_arch = "wasm32"))]
+fn columns_touched_by_the_site_search(origin: BlockPos) -> Vec<(i32, i32)> {
+    // Deterministic from `origin` alone: every `(dx, dz)` in the 33 x 33 offsets
+    // square below maps onto one of these, regardless of what the search finds —
+    // see `create_portal`'s own doc comment for why nothing here can be
+    // shortcut by an early exit.
+    let mut seen = std::collections::HashSet::with_capacity(16);
+    let mut out = Vec::with_capacity(16);
+    for dx in -16..=16 {
+        for dz in -16..=16 {
+            let chunk = ((origin.x + dx).div_euclid(16), (origin.z + dz).div_euclid(16));
+            if seen.insert(chunk) {
+                out.push(chunk);
+            }
+        }
+    }
+    out
+}
+
+#[must_use]
 pub fn create_portal<S: ChunkSource + ?Sized>(
     world: &S,
     dimension: Dimension,
@@ -930,6 +950,45 @@ pub fn create_portal<S: ChunkSource + ?Sized>(
         }
     }
     offsets.sort_by_key(|&(dx, dz)| (dx * dx + dz * dz, dx, dz));
+
+    // Warm every column the scan below is about to touch, **in parallel**,
+    // before walking them one `block_state` read at a time.
+    //
+    // The loop below visits every one of the 33 x 33 offsets unconditionally —
+    // vanilla's own `PortalForcer.createPortal` does too (see this function's
+    // doc comment: "both visit the same set of columns"), so there is no early
+    // exit to lose by prefetching everything up front. For a *destination*
+    // dimension nothing has looked at yet (the common case: a player's first
+    // trip into a fresh Nether), that footprint spans a handful of un-generated
+    // chunk columns, and `crate::chunk_store`'s own module doc measures a single
+    // fresh column at **~909 ms**. Touched serially, one `block_state` call at a
+    // time, a first trip was paying that cost N times over before any packet
+    // told the client it had arrived — the same "how much work sits inside one
+    // unserviced window" shape as the join-strip stall this crate already fixed
+    // once (`DESIGN.md` §12.165): offloading the caller to a blocking thread (see
+    // `server::travel_through_portal`) does not shorten a suspension point, only
+    // moving the work off the wall-clock the search actually spends does.
+    //
+    // `is_column_resident` is the cheap pre-check `crate::chunk::ChunkSource`
+    // already exists for exactly this reason (no generation on a hit), so a
+    // *warm* dimension — every return trip, and every outbound trip after the
+    // first — pays only that check and skips the parallel fan-out entirely.
+    // Native only: `generate_columns_parallel` fans out over
+    // `std::thread::scope`, which is `Builder::spawn`'s panic-on-`Err` call
+    // site on `wasm32-unknown-unknown` (no threads there at all) — see this
+    // crate's wasm hazard notes. Skipping it there costs nothing beyond the
+    // serial cost the scan already pays; it buys nothing either, since a
+    // browser singleplayer world has no second core to fan out to.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let stale: Vec<(i32, i32)> = columns_touched_by_the_site_search(origin)
+            .into_iter()
+            .filter(|&(cx, cz)| !world.is_column_resident(cx, cz))
+            .collect();
+        if !stale.is_empty() {
+            let _ = crate::chunk::generate_columns_parallel(world, &stale);
+        }
+    }
 
     let mut closest_full: Option<(i64, BlockPos)> = None;
     let mut closest_partial: Option<(i64, BlockPos)> = None;
@@ -2137,6 +2196,110 @@ mod tests {
             ignition.portal_fill.is_none(),
             "a ring of uniformly-rotated frames must not ignite: presence and eye state are not \
              enough, facing must point at the centre"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `create_portal`'s prefetch — the fix for "entering the Nether takes
+    // forever": a first trip into a fresh dimension touched a dozen never-
+    // generated columns one `block_state` read at a time, and this crate's
+    // own measurement puts a single fresh column at ~909 ms. The fix warms
+    // every column the site search is about to touch in parallel first.
+    // -----------------------------------------------------------------
+
+    /// A world with a real, standable floor (so the search's own scan is
+    /// realistic, not a contrived no-op), that records every `(cx, cz)`
+    /// [`ChunkSource::column`] was called with and which OS thread called it.
+    ///
+    /// `resident` is fixed at construction: `true` makes every chunk look
+    /// already warm (the control — nothing left to prefetch), `false` makes
+    /// every chunk look cold (every call site's realistic state on a player's
+    /// first trip into an empty dimension).
+    struct ParallelProbeWorld {
+        floor_top: i32,
+        resident: bool,
+        columns_touched: Mutex<std::collections::HashSet<(i32, i32)>>,
+        threads_seen: Mutex<std::collections::HashSet<std::thread::ThreadId>>,
+    }
+
+    impl ChunkSource for ParallelProbeWorld {
+        fn column(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
+            self.columns_touched.lock().unwrap().insert((cx, cz));
+            self.threads_seen.lock().unwrap().insert(std::thread::current().id());
+            crate::chunk::ChunkColumn::new(0, 256)
+        }
+        fn block_state(&self, _x: i32, y: i32, _z: i32) -> String {
+            if y <= self.floor_top {
+                "minecraft:netherrack".to_owned()
+            } else {
+                "minecraft:air".to_owned()
+            }
+        }
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn is_column_resident(&self, _cx: i32, _cz: i32) -> bool {
+            self.resident
+        }
+    }
+
+    /// **The fix, as a magnitude claim.** A cold dimension's site search must
+    /// warm more than one distinct chunk column — the geometric fact this
+    /// prefetch exists to exploit — and it must do so from more than one OS
+    /// thread, which is the difference between "parallel" and "still serial
+    /// but through a different function". Both numbers are predicted from the
+    /// search's own fixed 33 x 33 block footprint rather than merely asserted
+    /// non-zero: `origin = (0, _, 0)` spans chunk x/z each in `{-1, 0, 1}`
+    /// (`(-16).div_euclid(16) == -1`, `16.div_euclid(16) == 1`), so exactly
+    /// **9** distinct columns, never more and never fewer.
+    #[test]
+    fn a_cold_dimensions_site_search_warms_its_columns_in_parallel() {
+        let world = ParallelProbeWorld {
+            floor_top: 30,
+            resident: false,
+            columns_touched: Mutex::new(std::collections::HashSet::new()),
+            threads_seen: Mutex::new(std::collections::HashSet::new()),
+        };
+        let origin = BlockPos::new(0, 40, 0);
+        let _ = create_portal(&world, Dimension::Nether, origin, Axis::X);
+
+        assert_eq!(
+            world.columns_touched.lock().unwrap().len(),
+            9,
+            "the 33x33 footprint around a chunk-aligned-ish origin spans exactly 9 columns"
+        );
+        // The parallelism claim itself. `std::thread::available_parallelism`
+        // is the same query `generate_columns_parallel` sizes its own
+        // fan-out from, so a single-core sandbox is the only way this could
+        // fail honestly — everywhere else, more than one thread touching 9
+        // columns is exactly what "warmed in parallel" means.
+        let cores = std::thread::available_parallelism().map(std::num::NonZero::get).unwrap_or(1);
+        let threads = world.threads_seen.lock().unwrap().len();
+        assert!(
+            cores <= 1 || threads > 1,
+            "with {cores} cores available, a 9-column prefetch used only {threads} thread(s) — \
+             the fan-out did not engage"
+        );
+    }
+
+    /// **The control.** A world where every chunk already reports resident
+    /// must touch `.column()` **zero** times: `create_portal`'s own scan
+    /// reads `block_state`, never `column`, so any call at all can only have
+    /// come from the prefetch — and the prefetch's whole premise is that
+    /// there is nothing to warm.
+    #[test]
+    fn a_warm_dimensions_site_search_touches_no_columns_at_all() {
+        let world = ParallelProbeWorld {
+            floor_top: 30,
+            resident: true,
+            columns_touched: Mutex::new(std::collections::HashSet::new()),
+            threads_seen: Mutex::new(std::collections::HashSet::new()),
+        };
+        let origin = BlockPos::new(0, 40, 0);
+        let _ = create_portal(&world, Dimension::Nether, origin, Axis::X);
+
+        assert_eq!(
+            world.columns_touched.lock().unwrap().len(),
+            0,
+            "every chunk was already resident, so the prefetch must not call `column` at all"
         );
     }
 }

@@ -78,6 +78,46 @@ post-increment counter reaches the delay, and holds a 10-tick cooldown afterward
 5. rebuilds the `ViewTracker` and installs a fresh `JoinChunkStream::ringed` over the
    whole square.
 
+**The destination search warms its columns in parallel first.** `portal::create_portal`'s
+site search touches every column in a fixed 33 x 33 block square around the scaled
+arrival point, unconditionally — vanilla's own `PortalForcer.createPortal` does too (see
+that function's doc comment). For a dimension nothing has looked at yet, that footprint
+spans several never-generated chunk columns, and `crate::chunk_store`'s own module doc
+measures a single fresh column at ~909 ms; touched one `block_state` read at a time, a
+first trip could pay that cost several times over before any packet told the client it
+had arrived — the join-strip stall's shape (`DESIGN.md` §12.165) applied to a portal
+instead of a chunk-boundary crossing. `create_portal` now calls
+`crate::chunk::generate_columns_parallel` on whatever the search's footprint is *not*
+already `is_column_resident` for, before the search itself runs — a no-op on a warm
+dimension (every return trip, and every outbound trip after the first), and a real
+fan-out across `std::thread::available_parallelism` threads on a cold one. Native only:
+the fan-out is `std::thread::scope`, which panics on `wasm32-unknown-unknown`, so the
+prefetch is `#[cfg(not(target_arch = "wasm32"))]` and a browser singleplayer trip pays
+the serial cost unchanged — see `portal.rs`'s wasm hazard notes on that call.
+
+### Death away from home
+
+A death with no usable bed respawns at the world spawn in `minecraft:overworld` —
+`server::apply_client_command`'s `PERFORM_RESPAWN` arm, and `ServerProtocol::encode_respawn`
+always encodes that dimension, matching vanilla's own no-bed/no-anchor default. That
+packet alone is not enough when the player died **away from home** (mid-Nether-trip):
+the *server's* own dimension tracking — `travelled`, `view`, `join_stream` in
+`serve_play`'s loop — stays pointed at the dimension they died in, since nothing else
+in the respawn path touches it. The client would be correctly told "you are now in the
+overworld at (x, y, z)" and then never sent a single column for that position, because
+the join stream never re-centred and the connection kept reading terrain from the
+Nether.
+
+`apply_client_command` now takes an `away_from_home: bool` (`dispatch_play_packet`'s
+`ClientCommand` arm computes it from `matches!(source, SourceRef::Dimension(_))`) and an
+`&mut Option<Vec3>` out-parameter, `dimension_reset`, set to the resolved respawn
+position exactly when both are true. The native `serve_play` loop — the only one with
+`pending_travel` in scope; `wasm32` never leaves the dimension it joined in, so this is
+always `None` there — reads it back right after `dispatch_play_packet` returns and runs
+the same forget-chunk/recentre/rebuild-join-stream sequence `travel_through_portal`'s
+own tail runs, then parks `pending_travel = Some(None)` so the loop's `source` reverts
+to `home` starting the next iteration.
+
 ### Arrival, on the client
 
 The server half above puts a player in real Nether terrain. Making the trip *look*
@@ -300,11 +340,18 @@ exist, which is why the override is the whole difference.
 
 Honest list, so nothing here reads as finished:
 
-* **The packet sequence is untested.** `tests/nether_portal_round_trip.rs` drives
-  `portal::resolve_destination` — production's own function — and covers the scale,
-  the search and the index. It does not drive a live connection walking into a portal
-  for 81 ticks, so the `forget_chunk` sweep, the respawn framing and the re-stream are
-  verified by construction only.
+* **The packet sequence is untested end to end.** `tests/nether_portal_round_trip.rs`
+  drives `portal::resolve_destination` — production's own function — and covers the
+  scale, the search and the index. It does not drive a live connection walking into a
+  portal for 81 ticks, so the `forget_chunk` sweep, the respawn framing and the
+  re-stream are verified by construction only. Two of the pieces that sequence depends
+  on now have their own narrower, function-level gates instead: `portal::tests::
+  the_cooldown_re_arms_while_still_inside_a_portal` (`PortalTracker::tick`'s
+  re-arm, so a player who materialises inside the destination portal does not bounce
+  straight back), and `server::tests::a_death_away_from_home_asks_for_a_dimension_reset`
+  / `a_death_at_home_does_not_ask_for_a_dimension_reset` (the "die away from home"
+  dimension-reset signal, with its own control). Neither substitutes for the full
+  81-tick live drive; both were run against a deliberate neuter and observed to fail.
 * **Client-side teardown on arrival is complete.** The sky pass, the leftover entities,
   the meshed columns, the portal overlay and — since
   `Driver::forget_previous_dimension` — the decoded chunk store are all wired; see
