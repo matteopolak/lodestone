@@ -3,7 +3,7 @@
 //! actually calls every server tick for every pathing mob
 //! (`ai::navigating_mob`'s module doc: "the composition that closes the gap"
 //! between the goal scheduler and the pathfinder, "drivable by a
-//! `GoalSelector`"). Issue #78 epic, entities half — the sibling of
+//! `GoalSelector`"). This is the entities half of the goal-scheduler/pathfinder split, the sibling of
 //! `pathfinding_search.rs`'s raw `PathFinder::find_path` number: this is what
 //! a *tick loop* actually pays, which is not one number but two very
 //! different ones.

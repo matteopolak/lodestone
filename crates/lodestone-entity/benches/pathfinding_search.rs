@@ -1,10 +1,11 @@
 //! A* search throughput for [`PathFinder::find_path`] — the real per-search
 //! engine `NavigatingMob::move_to` calls (see `mob_tick.rs` in this same
-//! directory for the composed, per-tick view). Issue #78 epic, entities half.
+//! directory for the composed, per-tick view). This is the entities half of the
+//! goal-scheduler/pathfinder split.
 //!
 //! # Why four scenes, not one
 //!
-//! The epic's own brief names the trap directly: "a pathfinding bench over
+//! The trap this guards against is direct: "a pathfinding bench over
 //! open flat ground never exercises the search." A* over unobstructed terrain
 //! degenerates to walking a straight line, expanding barely more nodes than
 //! the path is long, regardless of whether the heap/heuristic/edge-cost code
@@ -141,8 +142,8 @@ fn serpentine_maze() -> Arena {
     Arena { walls }
 }
 
-/// Real 26.2 collision-shape census (issue #111's own ask: benchmark against
-/// real collision data, not a hand-picked constant). Read-only reuse of the
+/// Real 26.2 collision-shape census, so this benchmarks against real
+/// collision data rather than a hand-picked constant. Read-only reuse of the
 /// same fixture `lodestone-physics/tests/collision_shapes.rs` verifies the
 /// engine against — this file only parses it, it does not modify it.
 const CENSUS: &str = include_str!("../../lodestone-physics/tests/support/collision_shapes_jvm.txt");
@@ -356,7 +357,7 @@ fn bench_scenes(c: &mut Criterion) {
     }
 }
 
-/// Issue #111's real-collision-data scene: a corridor barrier built from the
+/// The real-collision-data scene: a corridor barrier built from the
 /// real 26.2 census (`minecraft:cobblestone_wall`'s real `1.5` top) with one
 /// designated gap cell reporting `minecraft:oak_stairs`' own real
 /// `collision_top` (`1.0` — see `StairGapArena`'s doc comment for why that is

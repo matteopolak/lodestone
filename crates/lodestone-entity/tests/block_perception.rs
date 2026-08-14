@@ -2,7 +2,7 @@
 //!
 //! # What it is
 //!
-//! The behavioural gate for issue #456. `MobController` declared 33 methods and
+//! The behavioural gate proving a goal can read a block. `MobController` declared 33 methods and
 //! **not one read a block**, so every vanilla goal whose predicate consults the
 //! world was inexpressible; a sheep that eats grass could not ask whether there
 //! was grass. This drives the seam that fixed it end to end: a real
@@ -23,8 +23,8 @@
 //!
 //! # Why not `ScriptMob` or `ai/roster/probe.rs`
 //!
-//! Both override perception wholesale, which is how #441's island and #455's
-//! stayed hidden. A block-perception gate written against a double that answers
+//! Both override perception wholesale, which is exactly how a block-perception
+//! island can stay hidden. A block-perception gate written against a double that answers
 //! `block_cues_*` from a field would pass with `NavigatingMob`'s override
 //! missing entirely.
 //!
@@ -144,7 +144,7 @@ impl GrassWorld {
     }
 
     /// What the brokered `MobSim::tick` drain owes each eaten block
-    /// (`ai/goal/EatBlockGoal.java:59-80`). `mobGriefing` is assumed on, which is
+    /// (`EatBlockGoal.tick`). `mobGriefing` is assumed on, which is
     /// vanilla's default.
     fn apply(&self, what: EatenBlock, x: i32, z: i32) {
         match what {
@@ -210,7 +210,7 @@ struct Graze {
     dirt: usize,
     /// The largest distance the mob moved on any single tick during the 18 ticks
     /// leading up to its first eat — vanilla stops the navigation for the whole
-    /// animation (`ai/goal/EatBlockGoal.java:41`).
+    /// animation (`EatBlockGoal.start`).
     max_step_while_eating: f64,
 }
 
@@ -328,8 +328,8 @@ fn a_sheep_on_grass_eats_and_the_block_becomes_dirt_a_sheep_on_stone_does_not() 
 
 /// The other branch of vanilla's predicate: an *edible* block at the mob's own
 /// position is destroyed in place rather than turning the floor to dirt
-/// (`ai/goal/EatBlockGoal.java:63-68` vs `:71-78`), and it takes priority over
-/// the block below.
+/// (`EatBlockGoal.tick`'s edible-at-feet branch vs its grass-to-dirt branch),
+/// and it takes priority over the block below.
 #[test]
 fn an_edible_block_at_the_mobs_feet_is_eaten_in_place_and_wins_over_the_floor() {
     // Grass floor *and* short grass at the mob's own column, so both branches
@@ -347,9 +347,9 @@ fn an_edible_block_at_the_mobs_feet_is_eaten_in_place_and_wins_over_the_floor() 
 }
 
 /// The sheep stands still while it eats. Vanilla stops the navigation in
-/// `start` (`ai/goal/EatBlockGoal.java:41`) and the goal claims MOVE, LOOK and
-/// JUMP (`:24`) so `WaterAvoidingRandomStrollGoal` at the next priority down
-/// cannot preempt it.
+/// `EatBlockGoal.start` and the goal claims MOVE, LOOK and JUMP in its
+/// constructor's `setFlags` call so `WaterAvoidingRandomStrollGoal` at the
+/// next priority down cannot preempt it.
 ///
 /// This is the assertion that would fail if the goal were given the wrong flag
 /// set — a mistake no multiset or coverage gate can see, because the row would
@@ -372,7 +372,7 @@ fn a_grazing_sheep_holds_still_for_the_whole_animation() {
 /// Vanilla's literals are `1000` and `50`, but neither is the number of ticks
 /// that elapses: `adjustedTickDelay` is `positiveCeilDiv(t, 2)` for a goal that
 /// does not override `requiresUpdateEveryTick`, and `EatBlockGoal` does not
-/// (`ai/goal/Goal.java:53-55`). So the real intervals are **500 and 25**.
+/// (`Goal.reducedTickDelay`). So the real intervals are **500 and 25**.
 ///
 /// Both hypotheses are computed from outside constants and the measurement must
 /// land on one. A grazing cycle costs `interval + EAT_ANIMATION_TICKS` ticks on
