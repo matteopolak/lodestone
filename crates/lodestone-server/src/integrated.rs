@@ -306,6 +306,23 @@ where
                 shared.clone(),
             )) as Arc<dyn ChunkSource>)
         }
+        Dimension::End => {
+            let seed = crate::worldgen_data::active_world_seed();
+            let terrain = crate::worldgen_data::end_chunk_source(seed);
+            let store = if uncapped {
+                ChunkStore::for_integrated_view_radius(terrain, view_radius)
+            } else {
+                ChunkStore::for_view_radius(terrain, view_radius)
+            };
+            // Same shape as the `Nether` arm above: `alone`, not `with_siblings`
+            // — the way home is the source the connection joined with, not a
+            // link the End itself carries.
+            Some(Arc::new(DimensionalSource::alone(
+                store,
+                Dimension::End,
+                shared.clone(),
+            )) as Arc<dyn ChunkSource>)
+        }
         Dimension::Overworld => None,
     });
     DimensionalSource::with_siblings(overworld, Dimension::Overworld, factory, portals)
