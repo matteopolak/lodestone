@@ -279,7 +279,7 @@ impl LightPatch {
 /// A sparse set of per-section biome-container overwrites applied to an
 /// already-loaded column by [`World::merge_biomes`].
 ///
-/// This is the `chunks_biomes` seam's payload (issue #26): the packet carries,
+/// This is the `chunks_biomes` seam's payload: the packet carries,
 /// per chunk, one full [`PalettedContainer`] biome replacement per section and
 /// **no block data whatsoever** — unlike [`ColumnPatch`], whose entries are
 /// whole [`ChunkSection`]s. A version crate decodes each section's biome
@@ -823,16 +823,16 @@ impl World {
     /// # Why this exists at all
     ///
     /// In vanilla, **setting a block state is what creates the block entity** —
-    /// no packet is involved (26.2 `LevelChunk.java:341`,
+    /// no packet is involved (26.2 `LevelChunk.setBlockState`,
     /// `blockEntity = ((EntityBlock)newBlock).newBlockEntity(pos, state)`), and
     /// `block_entity_data` only ever carries *data for an entity that already
     /// exists*. Lodestone had no equivalent: `block_update` wrote the state and
     /// nothing else, so a freshly placed chest had a state, no record, and drew
-    /// zero pixels while still opening — issue #374.
+    /// zero pixels while still opening.
     ///
     /// # The four outcomes, and why removal matters as much as creation
     ///
-    /// Following `LevelChunk.java:308-348`:
+    /// Following `LevelChunk.setBlockState`:
     ///
     /// * new state owns type `T`, no record here → **create** one with `T` and
     ///   [`Nbt::End`] (vanilla's `newBlockEntity` likewise starts with defaults;
@@ -847,8 +847,8 @@ impl World {
     ///   (vanilla logs "Found mismatched block entity", removes and recreates).
     /// * new state owns nothing → **remove** any record here. Without this half,
     ///   breaking a chest leaves a stale record and the renderer keeps drawing a
-    ///   chest in empty air, which is the same class of bug as #374 pointing the
-    ///   other way.
+    ///   chest in empty air, which is the same class of bug as the missing
+    ///   creation half, pointing the other way.
     ///
     /// A **no-op** — never a panic — when the owning chunk is not loaded, for the
     /// same reason as [`set_block`](World::set_block).
@@ -948,7 +948,7 @@ impl World {
     /// named sections' biome containers and leaving block state, light, and
     /// unnamed sections untouched.
     ///
-    /// This is the `chunks_biomes` seam (issue #26): unlike [`merge`](World::merge)
+    /// This is the `chunks_biomes` seam: unlike [`merge`](World::merge)
     /// its per-section payload carries *only* biomes, no block data at all, so it
     /// cannot go through [`ColumnPatch`] without inventing block states the
     /// packet never sent. Deliberately a **no-op** when the chunk is not loaded —
@@ -1139,8 +1139,8 @@ pub trait WorldSink {
     /// passing the `BLOCK_ENTITY_TYPE` registry id the new state owns (or `None`).
     /// It is what makes a placed chest exist client-side without a packet, exactly
     /// as vanilla's `LevelChunk.setBlockState` does — see
-    /// [`World::sync_block_entity`] for the full rule and issue #374 for what its
-    /// absence looked like.
+    /// [`World::sync_block_entity`] for the full rule and what this seam's
+    /// absence looked like without it.
     ///
     /// Required, with no default, for the same reason as
     /// [`set_block`](WorldSink::set_block): a silent default would let a sink go
@@ -1847,7 +1847,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // sync_block_entity: vanilla's LevelChunk.setBlockState tail (issue #374)
+    // sync_block_entity: vanilla's LevelChunk.setBlockState tail
     // -----------------------------------------------------------------------
 
     /// A block-entity type id standing in for `minecraft:chest` (1 in 26.2), and
@@ -2320,7 +2320,7 @@ mod tests {
         );
     }
 
-    // --- `merge_biomes`: the `chunks_biomes` write path (issue #26) ---
+    // --- `merge_biomes`: the `chunks_biomes` write path ---
 
     #[test]
     fn merge_biomes_overwrites_only_named_sections_and_leaves_blocks_untouched() {

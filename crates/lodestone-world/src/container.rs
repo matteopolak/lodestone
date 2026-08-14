@@ -441,7 +441,7 @@ impl PalettedContainer {
     /// Heap bytes owned by the palette `Vec<u32>` alone (`0` for [`Single`] and
     /// [`Direct`], which hold no palette).
     ///
-    /// Split out from [`heap_bytes`](Self::heap_bytes) for issue #362's
+    /// Split out from [`heap_bytes`](Self::heap_bytes) for the
     /// pool-footprint question: the palette is the allocation with **no length
     /// guard**, growing by ordinary `Vec` push-doubling and never shrinking on
     /// its own, unlike the packed array's fixed size classes (see
@@ -460,8 +460,8 @@ impl PalettedContainer {
     }
 
     /// Heap bytes owned by the packed index array alone (`0` for [`Single`],
-    /// which allocates none). This is the size-classed allocation issue #362's
-    /// pool would recycle; see [`palette_heap_bytes`](Self::palette_heap_bytes)
+    /// which allocates none). This is the size-classed allocation a pool
+    /// would recycle; see [`palette_heap_bytes`](Self::palette_heap_bytes)
     /// for the other half of [`heap_bytes`](Self::heap_bytes).
     ///
     /// [`Single`]: Storage::Single

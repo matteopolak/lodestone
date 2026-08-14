@@ -111,8 +111,8 @@ fn measure_dense_varied_column() {
 fn measure_realistic_terrain_column() {
     // A more life-like column: solid stone below the surface (single-valued or
     // tiny palette per section), a shallow varied surface band, air above.
-    // Issue #80's shared Tier 2 fixture (`seed = 0` reproduces this file's own
-    // former hand-rolled duplicate byte for byte -- see
+    // The shared Tier 2 fixture (`seed = 0` reproduces this file's own former
+    // hand-rolled duplicate byte for byte -- see
     // `bench_fixtures::synthetic_column`'s doc comment).
     let col = synthetic_overworld_column(0);
 

@@ -1,7 +1,8 @@
-//! Real-terrain memory measurement for issue #362 ("Chunk section data is
-//! allocated fresh every time — size-classed pool with handles").
+//! Real-terrain memory measurement for the chunk-section allocation pool
+//! question ("Chunk section data is allocated fresh every time —
+//! size-classed pool with handles").
 //!
-//! The issue is explicit that this is a **footprint** question, not a
+//! This is explicitly a **footprint** question, not a
 //! throughput one — `World::load` costs ~1.0-1.5 us per insert (see
 //! `benches/chunk_load.rs`), so allocation *time* is not the problem worth
 //! solving. What decides whether a size-classed buffer pool is worth building,
@@ -10,7 +11,7 @@
 //! 1. **The size-class histogram.** [`PackedArray`]'s backing `Vec<u64>` size
 //!    depends only on `bits_per_entry`, and `values_per_long = 64 / bits`
 //!    floors, so a 4096-entry block-state section collapses onto a small set of
-//!    byte sizes. The issue's own table claims 14 classes for a generic
+//!    byte sizes. The pool proposal's own table claims 14 classes for a generic
 //!    4096-entry array; this file re-derives that arithmetic at runtime from
 //!    [`PackedArray::long_count`] rather than trusting the table (see
 //!    `derive_size_classes` below), and separately establishes the *narrower*
@@ -29,7 +30,7 @@
 //!    measures how large palettes actually get on real terrain, via the new
 //!    [`PalettedContainer::palette_heap_bytes`] / `packed_heap_bytes` split
 //!    (added alongside this test — `heap_bytes()` did not previously separate
-//!    the two, which is exactly the accounting gap issue #362 asks about).
+//!    the two, which is exactly the accounting gap this measurement targets).
 //!
 //! # Why real terrain, not hand-built sections
 //!
@@ -217,8 +218,9 @@ impl LightProperties for GeneratorLightProps<'_> {
 
 /// Derives the byte-size classes a `PackedArray` of `entry_count` entries can
 /// take, for `bits` in `1..=32`, grouped by identical byte size — i.e.
-/// re-derives issue #362's 14-class table from [`PackedArray::long_count`]
-/// itself rather than trusting the number written in the issue. Returns
+/// re-derives the pool proposal's 14-class table from
+/// [`PackedArray::long_count`] itself rather than trusting the written
+/// number. Returns
 /// `(bytes, first_bits, last_bits)` in ascending byte order.
 fn derive_size_classes(entry_count: usize) -> Vec<(usize, u32, u32)> {
     let mut by_bytes: BTreeMap<usize, (u32, u32)> = BTreeMap::new();
@@ -291,7 +293,7 @@ fn measure_real_terrain_pool_footprint() {
     let biome_kind = PaletteKind::biomes();
 
     // --- Step 0: re-derive the size-class arithmetic and print it, rather
-    // than trusting issue #362's table. ---
+    // than trusting the pool proposal's table. ---
     let block_classes = derive_size_classes(block_kind.entry_count()); // 4096 entries
     let biome_classes = derive_size_classes(biome_kind.entry_count()); // 64 entries
 

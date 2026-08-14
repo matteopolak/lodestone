@@ -1,5 +1,5 @@
 //! Tracked-baseline layer for `lodestone-world`'s per-chunk/per-section
-//! memory footprint (issue #78 epic, sub-issue #155).
+//! memory footprint.
 //!
 //! `tests/memory.rs` already has five real, well-designed heap-byte
 //! measurements — `measure_flatworld_like_column`, `measure_dense_varied_
@@ -7,7 +7,7 @@
 //! column`, `measure_dense_light_column` — each gated only by a loose sanity
 //! ceiling (e.g. "under 10 KiB", "15x smaller than the naive baseline").
 //! Those ceilings are deliberately generous and stay exactly as they are:
-//! this file adds the second, *tracked* layer #155 asks for — the same five
+//! this file adds a second, *tracked* layer on top — the same five
 //! fixture shapes, rebuilt here with the identical public constructors
 //! (`ChunkColumn`/`ColumnLight`, `PaletteKind`, `synthetic_overworld_column`),
 //! feeding every byte count into `support::record` so a future PR is diffed

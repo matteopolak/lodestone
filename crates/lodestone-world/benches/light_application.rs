@@ -1,5 +1,5 @@
-//! Client-side light-*application* throughput (issue #78 epic, sub-issue
-//! #89): the cost of [`World::merge_light`], the `light_update` seam that
+//! Client-side light-*application* throughput: the cost of
+//! [`World::merge_light`], the `light_update` seam that
 //! writes a server-computed [`LightPatch`] onto an already-loaded
 //! [`ChunkColumn`]/[`ColumnLight`] — a different code path from
 //! `light_propagation.rs`'s [`compute_column_light`], which *derives* an
@@ -15,8 +15,8 @@
 //! looks up the target chunk (one `HashMap` lookup), then replaces only the
 //! light sections the patch names — no scan of other chunks, no
 //! recomputation, no allocation beyond what `LightData` already owns. That
-//! shape rules out the "accidentally quadratic in loaded columns" bug #75
-//! found in camera uniforms *by construction* (each call touches exactly one
+//! shape rules out the "accidentally quadratic in loaded columns" bug
+//! previously found in camera uniforms *by construction* (each call touches exactly one
 //! chunk's `HashMap` entry), but the epic's method rule is to measure, not
 //! assert, so this bench times a full render-distance-scale batch alongside
 //! the single-column number and reports the ratio against chunk count,
@@ -121,7 +121,8 @@ fn bench_single_column(c: &mut Criterion) {
 /// Applies the same shape of patch across a whole render-distance-scale
 /// loaded set, at two sizes, so a per-call cost that scales with the number
 /// of *other* loaded columns (rather than staying flat) shows up as a
-/// superlinear ratio — the batch-scale question #89 explicitly asks for.
+/// superlinear ratio, which is exactly the batch-scale question this bench
+/// exists to answer.
 fn bench_batch_scaling(c: &mut Criterion) {
     let small: Vec<ChunkPos> = (-2..=2)
         .flat_map(|cz| (-2..=2).map(move |cx| ChunkPos::new(cx, cz)))

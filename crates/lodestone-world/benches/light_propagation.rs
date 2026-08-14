@@ -12,7 +12,7 @@
 //! `measure_neighbour_light_cost`) — worth reading first, because it explains
 //! *why* neighbour light needed measuring at all: `CLAUDE.md` flags it as a
 //! cost that was "surprising" enough to earn a dedicated ratio gate. This bench
-//! is the criterion-instrumented companion for the harness (issue #78 epic):
+//! is the criterion-instrumented companion for the harness:
 //! `tests/memory.rs` keeps its own sanity-ceiling assertions (they belong in a
 //! `#[test]`, gating `cargo test`); nothing here asserts a ceiling — advisory
 //! only, matching every other bench in this harness. It does keep one
@@ -27,8 +27,8 @@
 //! exact trap in its own doc comment for [`light_exercises_propagation`] ("on a
 //! superflat world... sky light never spreads horizontally"), and ships the
 //! function to detect it. This bench's fixture is
-//! `lodestone_testsupport::bench_fixtures::synthetic_overworld_column` (issue
-//! #80's shared Tier 2 terrain fixture, consolidated from this file's and
+//! `lodestone_testsupport::bench_fixtures::synthetic_overworld_column` (the
+//! shared Tier 2 terrain fixture, consolidated from this file's and
 //! `tests/memory.rs`'s previously-separate `realistic_terrain_column`
 //! duplicates): a solid stone floor, a *varied* surface band forcing real
 //! per-cell opacity differences, open sky above — and each bench function
@@ -47,33 +47,32 @@
 //!
 //! Run with: `cargo bench -p lodestone-world --bench light_propagation`
 //!
-//! # Status of the three sub-issues this bench answers
+//! # Status of the throughput questions this bench answers
 //!
-//! - **#93** ("turn `measure_light_recompute_cost`/`measure_neighbour_light_
-//!   cost` into tracked baselines") is satisfied in substance, not literally:
-//!   this file calls the exact same production functions
+//! - **Turning `measure_light_recompute_cost`/`measure_neighbour_light_cost`
+//!   into tracked baselines** is satisfied in substance, not literally: this
+//!   file calls the exact same production functions
 //!   (`compute_column_light`/`compute_column_light_with_neighbours`) over an
 //!   equivalent realistic fixture and feeds every number into
-//!   `support::record`, which is the tracked-baseline layer that issue asks
+//!   `support::record`, which is the tracked-baseline layer that was asked
 //!   for, layered on top of — not replacing — `tests/memory.rs`'s own
-//!   sanity-ceiling assertions (left untouched, per that issue's explicit
-//!   instruction).
-//! - **#94** ("relight-after-block-change: incremental vs from-scratch") has
-//!   no incremental path to compare against: confirmed by grep, nothing in
+//!   sanity-ceiling assertions (deliberately left untouched).
+//! - **Relight-after-block-change: incremental vs from-scratch** has no
+//!   incremental path to compare against: confirmed by grep, nothing in
 //!   `lodestone-world/src/` implements boundary-only relight, only doc
 //!   comments describing it as future work (this file's own predecessor, and
-//!   `lighting.rs`'s `LightDiff` doc). Per that issue's documented fallback,
+//!   `lighting.rs`'s `LightDiff` doc). The documented fallback applies:
 //!   `bench_single_column` below reports the from-scratch cost translated
 //!   into ms/s at a mining rate (~5 edits/s) and a burst rate (~20 edits/s)
 //!   instead.
-//! - **#95** ("cross-chunk light propagation at real render-distance scale")
-//!   cannot be swept to 5×5/7×7/render-distance-scale neighbourhoods: `bench_
+//! - **Cross-chunk light propagation at real render-distance scale** cannot
+//!   be swept to 5×5/7×7/render-distance-scale neighbourhoods: `bench_
 //!   neighbourhood` below is stuck at 3×3 because [`Neighbourhood`] itself is
 //!   architecturally a fixed `[Option<&V>; 9]`
 //!   (`crates/lodestone-world/src/lighting.rs`), not a generic radius. That is
-//!   this issue's own documented negative-finding fallback, being exercised
-//!   rather than left unwritten: full-render-distance relight is architecturally
-//!   a repeated 3×3 walk (one `compute_column_light_with_neighbours` call per
+//!   the documented negative-finding fallback, being exercised rather than
+//!   left unwritten: full-render-distance relight is architecturally a
+//!   repeated 3×3 walk (one `compute_column_light_with_neighbours` call per
 //!   column touched by an edit), not one large sweep — there is no larger API
 //!   to benchmark until `Neighbourhood` itself changes shape.
 
@@ -147,10 +146,10 @@ fn bench_single_column(c: &mut Criterion) {
         unit: "ms",
     });
 
-    // Issue #94: no incremental (boundary-only) relight exists anywhere in
-    // this tree (confirmed by grep — `lighting.rs`'s own doc comment names it
-    // only as a future possibility, never implemented), so the issue's own
-    // documented fallback applies: report the from-scratch cost at realistic
+    // No incremental (boundary-only) relight exists anywhere in this tree
+    // (confirmed by grep — `lighting.rs`'s own doc comment names it only as a
+    // future possibility, never implemented), so the documented fallback
+    // applies: report the from-scratch cost at realistic
     // block-edit rates, the number that turns "a deferral" into "a deferral
     // we keep re-checking is still fine" (`tests/memory.rs`'s own framing for
     // the same measurement). Two rates: a mining player breaking roughly one
