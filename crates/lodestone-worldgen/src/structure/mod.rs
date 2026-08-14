@@ -79,21 +79,26 @@
 //! this), so its correctness rests on the decompiled record plus the
 //! self-consistency gates in `stronghold`'s own test module.
 //!
-//! **What genuinely remains**: `monument`
-//! (`OceanMonumentPieces.java` is ~2,000 lines of coded rooms), and
-//! `ruined_portal_nether` (the Nether-side setup of the *same* `type` id
-//! `ruined_portals` overworld already covers — refused wholesale, see
-//! [`StructureKind::parse`]). `ruined_portal`'s own frame is real but its
-//! `spreadNetherrack` terrain skirt is not — `coded:ruined_portal_terrain_skirt`
-//! on the ledger.
+//! **`monument` now has a real piece generator** — [`monument`], the fixed
+//! 58×23×58 building plus its `RoomDefinition` grid graph. The oracle world at
+//! `.cache/mc/survival` records only the two monument starts' chunk positions
+//! (`structures.starts` carries no piece layout — see `monument`'s own module
+//! doc), so its correctness rests on the decompiled record plus
+//! self-consistency, the same evidentiary footing as `stronghold`. A handful
+//! of room-interior decorations are deliberately left out — see `monument`'s
+//! own deviations list for exactly which and why.
+//!
+//! **What genuinely remains**: `ruined_portal_nether` (the Nether-side setup
+//! of the *same* `type` id `ruined_portals` overworld already covers —
+//! refused wholesale, see [`StructureKind::parse`]). `ruined_portal`'s own
+//! frame is real but its `spreadNetherrack` terrain skirt is not —
+//! `coded:ruined_portal_terrain_skirt` on the ledger.
 //!
 //! **S2 landed the template engine** ([`template`], [`processor`]): shipwreck,
 //! ocean ruin, igloo and (S8) ruined_portal build real piece lists out of the
 //! bundled `.nbt` templates and write blocks — see
 //! [`docs/worldgen-structure-templates.md`] for the whole path, including which
-//! vanilla behaviours are deliberately absent. `monument` still reports
-//! `pieces_complete: false`; its pieces are coded, not templated, and have not
-//! landed.
+//! vanilla behaviours are deliberately absent.
 //!
 //! [`docs/worldgen-structure-templates.md`]: ../../../../docs/worldgen-structure-templates.md
 //!
@@ -140,6 +145,7 @@ pub mod beardifier;
 pub mod coded;
 pub mod jigsaw;
 pub mod mineshaft;
+pub mod monument;
 pub mod placement;
 pub mod pool;
 pub mod processor;
@@ -1600,9 +1606,8 @@ impl StructureKind {
                 }])
             }
             Self::Stronghold => Some(stronghold::generate(cx, cz, seed, ctx)),
-            // `OceanMonumentPieces` is ~1,400 lines of coded pieces, not
-            // templates, so it is S5's and not S2's.
-            Self::OceanMonument { .. } | Self::Unsupported(_) => None,
+            Self::OceanMonument { .. } => Some(monument::generate(cx, cz, seed, ctx)),
+            Self::Unsupported(_) => None,
             // Handled above, before the match, because they consume `stub`.
             Self::Jigsaw(_)
             | Self::Mineshaft { .. }
@@ -1615,7 +1620,7 @@ impl StructureKind {
     /// `Unknown` for the kinds whose generators have not landed.
     fn validity(&self, pieces: &Option<Vec<StructurePiece>>) -> Validity {
         match self {
-            Self::Unsupported(_) | Self::OceanMonument { .. } => Validity::Unknown,
+            Self::Unsupported(_) => Validity::Unknown,
             // Every template-driven kind adds at least one piece, so biome-valid
             // implies start-valid — but an empty list means a template failed to
             // load, which is `Unknown` (named on the ledger), not `Invalid`.
@@ -1661,6 +1666,15 @@ impl StructureKind {
             // build, which cannot happen, so `Unknown` (ledgered) is the honest
             // answer rather than `Invalid`.
             Self::Mineshaft { .. } => match pieces {
+                Some(p) if !p.is_empty() => Validity::Valid,
+                _ => Validity::Unknown,
+            },
+            // `MonumentBuilding`'s constructor is unconditional — there is no
+            // failure path that produces an empty `childPieces`, so this is
+            // the same shape as `Mineshaft`/`Stronghold`: `Unknown` (ledgered)
+            // rather than `Invalid` if the generator itself somehow ran and
+            // produced nothing.
+            Self::OceanMonument { .. } => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Unknown,
             },
@@ -2645,20 +2659,6 @@ impl StructureRegistry {
                     kind = StructureKind::Unsupported(
                         doc["type"].as_str().unwrap_or("unknown").to_string(),
                     );
-                } else if matches!(kind, StructureKind::OceanMonument { .. }) {
-                    // `OceanMonument` is the one kind with a *real* start
-                    // predicate (the 29-block biome survey) and no piece
-                    // generator, so it falls through both branches around this one
-                    // and had no ledger row at all until this was added — the
-                    // island shape the ledger exists to prevent, hiding inside the
-                    // ledger's own construction.
-                    unsupported.insert(
-                        structure_id.clone(),
-                        "placement and start predicate are complete; \
-                         `OceanMonumentPieces` is ~2,000 lines of coded pieces and \
-                         has not landed, so the start carries no children"
-                            .into(),
-                    );
                 } else if let StructureKind::Unsupported(type_id) = &kind {
                     // `or_insert`, not `insert`: a demotion above this point
                     // already recorded *which* pool, template or processor was the
@@ -2783,10 +2783,24 @@ impl StructureRegistry {
                  chest **minecart** is not spawned (its rail is placed and its loot \
                  table plus vanilla's `nextLong()` roll seed travel on \
                  `StructurePiece::loot`, so only the entity is missing), a spider \
-                 corridor's `spawner` block is placed with no `SpawnData`, and the \
-                 stronghold portal room's silverfish `spawner` is the same gap — \
-                 nothing in worldgen can spawn an entity or build a spawner's payload \
-                 yet"
+                 corridor's `spawner` block is placed with no `SpawnData`, the \
+                 stronghold portal room's silverfish `spawner` is the same gap, and \
+                 the ocean monument's penthouse and design-0 wing room each skip an \
+                 elder guardian `spawnElder` call — nothing in worldgen can spawn an \
+                 entity or build a spawner's payload yet"
+                    .into(),
+            );
+            unsupported.insert(
+                "monument:postprocess_random_unseeded".into(),
+                "vanilla's `postProcess` random (`ChunkGenerator.applyBiomeDecoration`) \
+                 is seeded from `RandomSupport.generateUniqueSeed()` — real entropy, \
+                 unrelated to the world seed — so `OceanMonumentSimpleRoom`'s \
+                 `centerPillar` coin flip and `OceanMonumentSimpleTopRoom`'s sponge \
+                 scatter have no vanilla answer a fixed seed could reproduce. \
+                 `structure::monument` continues the same seeded `structure_random` \
+                 stream construction already used for the room graph, rather than \
+                 inventing an unseeded one, so the engine stays a pure function of \
+                 `(seed, chunk)` — the same shape as `coded:decoration_random`"
                     .into(),
             );
             unsupported.insert(
