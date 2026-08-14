@@ -115,7 +115,7 @@ impl ServerListPing {
         body.i64(nonce);
 
         #[cfg(not(target_arch = "wasm32"))]
-        let start = web_time::Instant::now();
+        let start = lodestone_time::Instant::now();
 
         conn.write_packet(ID_PING, body.as_slice()).await?;
 

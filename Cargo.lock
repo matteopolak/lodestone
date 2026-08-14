@@ -2761,10 +2761,10 @@ dependencies = [
  "lodestone-game",
  "lodestone-model",
  "lodestone-physics",
+ "lodestone-time",
  "lodestone-world",
  "parking_lot",
  "uuid",
- "web-time",
 ]
 
 [[package]]
@@ -2875,6 +2875,7 @@ dependencies = [
  "js-sys",
  "lodestone-core",
  "lodestone-model",
+ "lodestone-time",
  "rand 0.8.7",
  "rsa",
  "serde_json",
@@ -2886,7 +2887,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "web-time",
 ]
 
 [[package]]
@@ -2894,7 +2894,7 @@ name = "lodestone-particle"
 version = "0.1.0"
 dependencies = [
  "lodestone-physics",
- "web-time",
+ "lodestone-time",
 ]
 
 [[package]]
@@ -2903,6 +2903,20 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "serde_json",
+]
+
+[[package]]
+name = "lodestone-plugin-support"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "lodestone-auth",
+ "lodestone-ecs",
+ "lodestone-world",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3034,6 +3048,7 @@ dependencies = [
  "lodestone-server",
  "lodestone-sound",
  "lodestone-testsupport",
+ "lodestone-time",
  "lodestone-world",
  "lodestone-worldgen-core",
  "memory-stats",
@@ -3049,7 +3064,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "web-time",
  "wgpu",
  "winit",
 ]
@@ -3111,6 +3125,13 @@ dependencies = [
  "lodestone-worldgen",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "lodestone-time"
+version = "0.1.0"
+dependencies = [
+ "web-time",
 ]
 
 [[package]]
@@ -3224,6 +3245,16 @@ dependencies = [
  "memory-stats",
  "serde_json",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "lodestone-worldedit"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "lodestone-ecs",
+ "lodestone-world",
 ]
 
 [[package]]

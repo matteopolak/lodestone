@@ -115,6 +115,15 @@ they are not in a wasm `--lib` build. Cite symbols, not lines.
 | `tokio::time::{sleep,timeout}` | `menu/accounts.rs`, `net.rs` | **gated** with the sign-in workers |
 | blocking `Runtime::new` + `block_on` | `menu/accounts.rs`, `menu/status.rs`, `net.rs`, `remote_skins.rs` | **gated**: a browser main thread cannot block |
 
+**Update (issue #552): the seam now lives in its own crate.** `crate::platform::Instant`
+and `crate::platform::epoch_duration` are unchanged in name and behaviour, but
+`crate::platform` is now a two-line re-export of `lodestone-time`, which absorbed this
+module's clock content plus two improvised copies of the identical seam that had grown
+independently in `lodestone-net` and `lodestone-particle`. The reasoning below is kept
+as the historical record of *why* the seam looks the way it does — see
+`docs/portable-clock.md` and `crates/lodestone-time/src/lib.rs`'s crate docs for the
+current, crate-level source of truth.
+
 **A green wasm32 compile hid five of those `SystemTime::now()` sites, and that is the
 single most useful thing in this document.** `cargo check -p lodestone-shell
 --target wasm32-unknown-unknown` reached exit 0 while the chat-caret blink (which

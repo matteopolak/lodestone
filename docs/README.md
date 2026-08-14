@@ -1098,6 +1098,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   most-used non-event surface in the Java plugin ecosystem. A plugin schedules a
   closure to run on a future `GameTick`, once or on a period, instead of hand-rolling
   a countdown component plus a per-tick system that checks it. Issue #113.
+- [The portable clock (`lodestone-time`)](./portable-clock.md) — `lodestone-time` is
+  the workspace's one sanctioned way to read a clock. It wraps `web-time` —
+  `Instant` (monotonic) and `epoch_duration()` (wall-clock time since the Unix epoch)
+  — and every other crate that needs a clock depends on `lodestone-time` instead of
+  on `web-time` directly. It replaces three separate, independently-arrived-at copies
+  of the identical seam: `crates/lodestone-shell/src/platform.rs` (which was the
+  original, fullest version), plus an inline `web_time::Instant::now()` in
+  `lodestone-net`'s ping timer and a `web_time::{SystemTime, UNIX_EPOCH}` import in
+  `lodestone-particle`'s entropy-seeded RNG.
 - [Pose-dependent dimensions and the fit gate](./pose-dimensions.md) — The player's
   collision box is `0.6 × 1.8` standing, `0.6 × 1.5` crouching and `0.6 × 0.6`
   swimming or elytra-gliding — and *which* of those applies is decided by a

@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-// `web_time`, not `std::time`: identical types on native (its non-wasm arm is
+// `lodestone_time`, not `std::time`: identical types on native (its non-wasm arm is
 // `pub use std::time::*`), and a working clock in a browser, where `Instant::now()`
-// traps. See `docs/browser-shell-port.md`.
-use web_time::Instant;
+// traps. See `docs/browser-shell-port.md` and `lodestone_time`'s crate docs.
+use lodestone_time::Instant;
 
 use bevy_ecs::resource::Resource;
 use bevy_ecs::world::World;

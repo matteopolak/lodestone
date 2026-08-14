@@ -161,6 +161,11 @@ fi
 # Workspace crates that are expected to compile to wasm, with any features that
 # the browser configuration requires. Format: "<pkg>[|<extra cargo args>]".
 CRATES=(
+  # The portable clock seam (issue #552): nearly every crate below depends on
+  # this one, so a regression here would otherwise surface only transitively,
+  # attributed to whichever dependent happened to fail first. Listed first for
+  # the same reason lodestone-data is listed separately from v770.
+  "lodestone-time"
   "lodestone-core"
   "lodestone-model"
   "lodestone-world"
@@ -443,6 +448,19 @@ CONFINEMENT_RULES=(
   # `std::time::Instant::now()` in that same test module does not go red either.
   "lodestone-ecs instant-ban|crates/lodestone-ecs/src|std::time::Instant|async_task.rs"
   "lodestone-ecs systemtime-ban|crates/lodestone-ecs/src|std::time::SystemTime|async_task.rs"
+  # --- lodestone-time itself ---
+  #
+  # The whole point of issue #552 (this crate) is that it is the ONE place
+  # allowed to depend on `web-time`, so every other crate's confinement rule
+  # above can ban `std::time::{Instant,SystemTime}` with an empty allowlist.
+  # This crate is held to the identical rule, with an EMPTY allowlist too — it
+  # has no special exemption to spell `std::time` directly, because everything
+  # it re-exports comes from `web_time`, whose own non-wasm arm is `pub use
+  # std::time::*`. That happens inside the `web-time` dependency, not in this
+  # crate's source, so this crate's own `.rs` files never need to write the
+  # `std::time::` path at all.
+  "lodestone-time instant-ban|crates/lodestone-time/src|std::time::Instant|"
+  "lodestone-time systemtime-ban|crates/lodestone-time/src|std::time::SystemTime|"
 )
 
 confinement_ran=0
