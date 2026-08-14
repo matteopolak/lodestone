@@ -112,6 +112,82 @@ fn effective_levels_are_capped_by_the_smallest_sprite() {
     );
 }
 
+/// Issue #575 ("sprites bleed into each other at distance"): a GPU sampler
+/// minifying with `Linear` reads across a sprite boundary unless the atlas
+/// reserves a gutter, and that gutter has to be re-extruded (filled from the
+/// sprite's own edge) at *every* mip level, not just level 0 — `pad` itself
+/// halves with the level, and a level whose gutter is left at the backing
+/// buffer's zero-init value blends a sprite's edge toward transparent black
+/// instead of toward its own colour, which is the same visible seam a missing
+/// gutter produces. This checks a *deep* level (2, not just the base) so it
+/// cannot pass by accident of level-0-only extrusion.
+#[test]
+fn padded_mip_gutter_extrudes_the_sprites_own_edge_at_every_level() {
+    let mut b = AtlasBuilder::new().with_mip_levels(4).with_padding(16);
+    let red = [220, 20, 20, 255];
+    let blue = [20, 20, 220, 255];
+    b.add_texture(loc("minecraft:block/red"), solid(16, 16, red), None);
+    b.add_texture(loc("minecraft:block/blue"), solid(16, 16, blue), None);
+    let atlas = b.build().unwrap();
+
+    let level = 2;
+    let m = atlas.mip(level).unwrap();
+    for (name, color) in [("minecraft:block/red", red), ("minecraft:block/blue", blue)] {
+        let s = atlas.sprite(&loc(name)).unwrap();
+        let expect =
+            generate_mip_levels(&solid(16, 16, color), level, MipStrategy::Auto, 0.0)[level as usize]
+                .pixel(0, 0);
+        let (sx, sy) = (s.x >> level, s.y >> level);
+        let sw = s.width >> level;
+        // One texel past this sprite's own right edge at this level: exactly
+        // where a bilinear sample taken at the sprite's UV edge lands its
+        // second tap.
+        let outside_x = sx + sw;
+        let mid_y = sy + (s.height >> level) / 2;
+        let i = ((mid_y * m.width + outside_x) * 4) as usize;
+        let got = [m.rgba[i], m.rgba[i + 1], m.rgba[i + 2], m.rgba[i + 3]];
+        assert_eq!(
+            got, expect,
+            "sprite {name}'s gutter one texel past its own right edge at mip level {level} must \
+             be its own extruded colour, not zero-filled (transparent black) or the neighbour's"
+        );
+    }
+}
+
+/// The negative-control companion to the test above: with no padding
+/// requested (the historical, pre-fix production configuration), the
+/// identical probe position must read as the *neighbouring* sprite's colour —
+/// proving the assertion above is actually sensitive to the defect it guards,
+/// not merely satisfied by coincidence.
+#[test]
+fn unpadded_atlas_bleeds_the_neighbour_into_the_same_probe_position() {
+    let mut b = AtlasBuilder::new().with_mip_levels(4);
+    let red = [220, 20, 20, 255];
+    let blue = [20, 20, 220, 255];
+    b.add_texture(loc("minecraft:block/red"), solid(16, 16, red), None);
+    b.add_texture(loc("minecraft:block/blue"), solid(16, 16, blue), None);
+    let atlas = b.build().unwrap();
+
+    let level = 2;
+    let m = atlas.mip(level).unwrap();
+    let s = atlas.sprite(&loc("minecraft:block/red")).unwrap();
+    let (sx, sy) = (s.x >> level, s.y >> level);
+    let sw = s.width >> level;
+    let outside_x = sx + sw;
+    let mid_y = sy + (s.height >> level) / 2;
+    let i = ((mid_y * m.width + outside_x) * 4) as usize;
+    let got = [m.rgba[i], m.rgba[i + 1], m.rgba[i + 2], m.rgba[i + 3]];
+    let expect_blue =
+        generate_mip_levels(&solid(16, 16, blue), level, MipStrategy::Auto, 0.0)[level as usize]
+            .pixel(0, 0);
+    assert_eq!(
+        got, expect_blue,
+        "without padding, the red sprite's right-edge gutter at mip level {level} must read as \
+         the blue neighbour's own colour -- this is issue #575's bleed, reproduced here as the \
+         control proving the assertion in the padded test above means something"
+    );
+}
+
 #[test]
 fn mip_pyramid_is_deterministic() {
     let build = || {

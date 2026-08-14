@@ -2342,7 +2342,13 @@ fn build_complete_atlas(
         }
     }
 
-    let mut builder = AtlasBuilder::new().with_mip_levels(4);
+    // See `crate::texture::BLOCK_ATLAS_MIP_LEVELS`'s doc: padding is required
+    // independently of mip generation because this atlas is sampled with
+    // `min_filter: Linear`, which reads across a zero-gutter sprite boundary
+    // at minifying distances regardless of how the mip chain was built.
+    let mut builder = AtlasBuilder::new()
+        .with_mip_levels(crate::texture::BLOCK_ATLAS_MIP_LEVELS)
+        .with_padding(1 << crate::texture::BLOCK_ATLAS_MIP_LEVELS);
     for loc in &textures {
         // A missing texture is tolerated: the quad's UVs fall on whatever the
         // atlas packed, and a hard fault (below) aborts. Vanilla likewise renders

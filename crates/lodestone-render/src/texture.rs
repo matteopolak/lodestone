@@ -66,6 +66,23 @@ use crate::caps::GpuCapabilities;
 /// [`GUARANTEED_MAX_ARRAY_LAYERS_WEBGPU`].
 pub const MEASURED_MAX_ARRAY_LAYERS: u32 = 2048;
 
+/// Requested mip depth for the block/model atlases, matching vanilla's
+/// `mipmapLevels` default (`Options.java`: `IntRange(0, 4)`, default `4`).
+///
+/// This is the number every production `AtlasBuilder::with_mip_levels` call
+/// passes, and it is also the source of the padding those callers must
+/// request: vanilla's `Stitcher.padding = 1 << mipLevel << clamp(anisotropyBit
+/// - 1, 0, 4)`, and with no anisotropic filtering modelled here that reduces to
+/// `1 << levels` — see [`GpuAtlas`]'s sampler (`min_filter: Linear`, minifying)
+/// and [`lodestone_assets::AtlasBuilder::with_padding`]'s doc for why a
+/// `Linear`-sampled atlas needs a real gutter and not just isolated mip
+/// *generation*. Not yet wired to the live `mipmapLevels` video setting — that
+/// option exists in the menu's slider model but currently has no runtime
+/// consumer anywhere in the shell (its own `menu/nav.rs` names it as such), and
+/// the atlas is built in `lodestone-shell/src/resources.rs`, outside this
+/// crate.
+pub const BLOCK_ATLAS_MIP_LEVELS: u32 = 4;
+
 /// WebGPU's *guaranteed minimum* `maxTextureArrayLayers`. The spec's default
 /// limit is **256**, so a portable renderer must assume no more than this until
 /// it queries the real adapter. This is far below the 2048 we measured on Metal
