@@ -1059,6 +1059,40 @@ impl NaturalSpawner {
         }
         None
     }
+
+    /// Issue #518 part 2/4: re-validates the `SPAWN` stage's raw candidates
+    /// (`lodestone_worldgen::spawn_stage::GenerationSpawn` — a position/species
+    /// pair unconditioned on light or ground, see that module's own doc) against
+    /// the exact same [`SpawnRule`] table and light cache the tick-driven
+    /// cycle's own [`Self::permits`] already uses.
+    ///
+    /// Requires [`begin_cycle`](Self::begin_cycle) to have been called first with
+    /// the [`ChunkWorld`] the candidates were drawn from — the same requirement
+    /// [`Self::permits`] already has, just surfaced here rather than panicking
+    /// on a `None` deep inside it. A candidate for a species absent from
+    /// [`SPAWN_RULES`] (deliberately — see the module doc's "How to change it")
+    /// is dropped, exactly as [`Self::permits`] drops it for the tick cycle.
+    pub fn validate_generation_spawns(
+        &mut self,
+        candidates: Vec<lodestone_worldgen::spawn_stage::GenerationSpawn>,
+    ) -> Vec<SpawnCandidate> {
+        let mut out = Vec::new();
+        for c in candidates {
+            let Ok(key) = ResourceKey::from_str(&c.entity_type) else {
+                continue;
+            };
+            let Some(rule) = spawn_rule(key.path()) else {
+                continue;
+            };
+            if self.permits(rule, c.x, c.y, c.z) {
+                out.push(SpawnCandidate {
+                    pos: Vec3::new(f64::from(c.x) + 0.5, f64::from(c.y), f64::from(c.z) + 0.5),
+                    entity_type: key,
+                });
+            }
+        }
+        out
+    }
 }
 
 impl SpawnCandidateSource for NaturalSpawner {

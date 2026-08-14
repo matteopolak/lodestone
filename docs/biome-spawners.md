@@ -1,7 +1,9 @@
 # Biome mob-spawn settings: the `spawners` / `spawn_costs` parse
 
-Issue [#518](https://github.com/matteopolak/lodestone/issues/518) (part 1 of four
-only — there is still no `SPAWN` generation step, and that is deliberate).
+Issue [#518](https://github.com/matteopolak/lodestone/issues/518)'s part 1 — the parse this
+document describes. Parts 2-4 (the `SPAWN` generation stage itself, the light/ground
+re-validation, and the persistence decision) have since landed too — see
+[`docs/worldgen-mob-generation-spawn.md`](./worldgen-mob-generation-spawn.md).
 
 ## What it is
 

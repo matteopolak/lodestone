@@ -44,6 +44,7 @@ pub mod feature;
 pub mod interner;
 pub mod nether;
 pub mod overworld;
+pub mod spawn_stage;
 pub mod spawners;
 pub mod structure;
 pub mod surface;

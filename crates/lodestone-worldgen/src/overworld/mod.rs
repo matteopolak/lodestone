@@ -958,7 +958,7 @@ impl OverworldGenerator {
         // on a spruce canopy. Running it before vegetation would put snow at the
         // pre-tree surface and then bury it.
         let (world, _) = self.top_layer_stage(cx, cz, world, &cached.2);
-        self.intern_from_dense(world, cached.2.clone(), (*cached.3).clone(), block_entities)
+        self.intern_from_dense(cx, cz, world, cached.2.clone(), (*cached.3).clone(), block_entities)
     }
 
     /// Stages 1-4 (fill/aquifer, biome, surface, carve) for chunk `(cx, cz)` —
@@ -1151,7 +1151,7 @@ impl OverworldGenerator {
         // believed, and `docs/plans/worldgen-parity.md` §6 predicts <5% for it.
         let (world, _) = self.top_layer_stage(cx, cz, world, &biome_quarts);
         let t_intern_start = lodestone_time::Instant::now();
-        let col = self.intern_from_dense(world, biome_quarts, biome_cells, block_entities);
+        let col = self.intern_from_dense(cx, cz, world, biome_quarts, biome_cells, block_entities);
         let t_end = lodestone_time::Instant::now();
 
         (

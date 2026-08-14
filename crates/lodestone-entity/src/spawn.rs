@@ -51,6 +51,22 @@ pub enum MobCategory {
 }
 
 impl MobCategory {
+    /// The categories that participate in natural spawning, in vanilla order —
+    /// every category except [`Misc`](MobCategory::Misc), which never spawns
+    /// naturally and has no cap. Moved here from
+    /// `lodestone_server::mob_spawn` (issue #518's dedup) so the one
+    /// [`MobCategory`] the integrated server's spawn driver iterates lives
+    /// beside the category it names.
+    pub const SPAWNING: [MobCategory; 7] = [
+        MobCategory::Monster,
+        MobCategory::Creature,
+        MobCategory::Ambient,
+        MobCategory::Axolotls,
+        MobCategory::UndergroundWaterCreature,
+        MobCategory::WaterCreature,
+        MobCategory::WaterAmbient,
+    ];
+
     /// Maximum naturally-spawned instances per chunk before the cap formula
     /// applies. `Misc` returns `-1` (uncapped) exactly as vanilla does.
     #[must_use]
@@ -284,6 +300,9 @@ mod tests {
         assert_eq!(MobCategory::WaterAmbient.despawn_distance(), 64);
         assert_eq!(MobCategory::Monster.despawn_distance(), 128);
         assert_eq!(MobCategory::Monster.no_despawn_distance(), 32);
+        // `SPAWNING` excludes `Misc` (never spawns naturally) and nothing else.
+        assert!(!MobCategory::SPAWNING.contains(&MobCategory::Misc));
+        assert_eq!(MobCategory::SPAWNING.len(), 7);
     }
 
     #[test]

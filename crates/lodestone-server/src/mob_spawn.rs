@@ -91,95 +91,29 @@ fn attribute_value(attributes: &AttributeMap, key: &str, fallback: f64) -> f64 {
 }
 
 /// Vanilla's `NaturalSpawner.MAGIC_NUMBER`: `17² = 289`. The per-category global
-/// cap is `max_per_chunk * spawnable_chunks / MAGIC_NUMBER`, so a single player
+/// cap is `max_instances_per_chunk * spawnable_chunks / MAGIC_NUMBER`, so a single player
 /// with a full 8-chunk spawn radius (≈289 spawnable chunks) yields a cap equal
 /// to the per-chunk maximum.
 pub const MAGIC_NUMBER: i32 = 289;
 
-/// Vanilla mob spawn categories (26.2 `MobCategory`).
+/// Vanilla mob spawn categories (26.2 `MobCategory`) — [`lodestone_entity
+/// ::spawn::MobCategory`], not a second copy.
+///
+/// Issue #518's dedup: this crate and `lodestone-entity` used to each define
+/// their own 8-variant `MobCategory` with the identical vanilla constants
+/// (`mobs/species.rs` named the fork explicitly:
+/// "`MobCategory` is one of **two** independent types by that name in this
+/// workspace"). Re-exported rather than removed, so every existing
+/// `crate::mob_spawn::MobCategory` path in this crate keeps resolving — the
+/// variant names, count and order are identical between the two definitions,
+/// so this is a type-identity change only, no call site rewrite needed beyond
+/// the two below that named the old inherent methods directly.
 ///
 /// Every category except [`Misc`](MobCategory::Misc) participates in natural
 /// spawning; `Misc` (dropped items, projectiles, …) has no cap (`-1`) and is
-/// filtered out. Caps and distances are the exact 26.2 values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MobCategory {
-    /// Hostile mobs (zombies, skeletons, …). Cap 70.
-    Monster,
-    /// Passive land animals (pigs, cows, …). Cap 10; persistent.
-    Creature,
-    /// Ambient mobs (bats). Cap 15.
-    Ambient,
-    /// Axolotls. Cap 5.
-    Axolotls,
-    /// Underground water creatures (glow squid). Cap 5.
-    UndergroundWaterCreature,
-    /// Water creatures (squid, dolphins). Cap 5.
-    WaterCreature,
-    /// Water ambient (fish). Cap 20; instant-despawn at 64, not 128.
-    WaterAmbient,
-    /// Non-spawning miscellany (items, projectiles). No cap.
-    Misc,
-}
-
-impl MobCategory {
-    /// The categories that participate in natural spawning, in vanilla order.
-    /// `Misc` is excluded (it never spawns naturally).
-    pub const SPAWNING: [MobCategory; 7] = [
-        MobCategory::Monster,
-        MobCategory::Creature,
-        MobCategory::Ambient,
-        MobCategory::Axolotls,
-        MobCategory::UndergroundWaterCreature,
-        MobCategory::WaterCreature,
-        MobCategory::WaterAmbient,
-    ];
-
-    /// `getMaxInstancesPerChunk()`: the per-289-chunk cap numerator. `Misc` is
-    /// `-1` (uncapped / non-spawning).
-    #[must_use]
-    pub const fn max_per_chunk(self) -> i32 {
-        match self {
-            MobCategory::Monster => 70,
-            MobCategory::Creature => 10,
-            MobCategory::Ambient => 15,
-            MobCategory::Axolotls
-            | MobCategory::UndergroundWaterCreature
-            | MobCategory::WaterCreature => 5,
-            MobCategory::WaterAmbient => 20,
-            MobCategory::Misc => -1,
-        }
-    }
-
-    /// `getDespawnDistance()`: beyond this many blocks a mob is despawned
-    /// instantly (gate A). `64` for water-ambient, `128` for everything else.
-    #[must_use]
-    pub const fn despawn_distance(self) -> i32 {
-        match self {
-            MobCategory::WaterAmbient => 64,
-            _ => 128,
-        }
-    }
-
-    /// `getNoDespawnDistance()`: within this many blocks a mob is immune to the
-    /// random far-despawn and its age timer is reset. Always `32`.
-    #[must_use]
-    pub const fn no_despawn_distance(self) -> i32 {
-        32
-    }
-
-    /// Whether the category is friendly (spawns even with hostile spawning off).
-    #[must_use]
-    pub const fn is_friendly(self) -> bool {
-        !matches!(self, MobCategory::Monster)
-    }
-
-    /// Whether the category is persistent by default (`Creature`, `Misc`):
-    /// persistent mobs never naturally despawn.
-    #[must_use]
-    pub const fn is_persistent(self) -> bool {
-        matches!(self, MobCategory::Creature | MobCategory::Misc)
-    }
-}
+/// filtered out. Caps and distances are the exact 26.2 values — see
+/// `lodestone_entity::spawn`'s own doc for where they are defined now.
+pub use lodestone_entity::spawn::MobCategory;
 
 /// The entity types vanilla registers with `EntityType.Builder::notInPeaceful`,
 /// by registry path — the **38** types that may not exist on `Peaceful`.
@@ -317,11 +251,12 @@ impl SpawnState {
         Self::spawning_index(category).map_or(0, |i| self.counts[i])
     }
 
-    /// The global cap for `category`: `max_per_chunk * spawnable_chunks / 289`,
-    /// using vanilla's integer division. `Misc` and any negative cap yield `0`.
+    /// The global cap for `category`: `max_instances_per_chunk *
+    /// spawnable_chunks / 289`, using vanilla's integer division. `Misc` and
+    /// any negative cap yield `0`.
     #[must_use]
     pub fn global_cap(&self, category: MobCategory) -> i32 {
-        let max = category.max_per_chunk();
+        let max = category.max_instances_per_chunk();
         if max < 0 {
             return 0;
         }
@@ -385,6 +320,19 @@ impl DespawnOutcome {
 /// `rng_hit_800` is the result of vanilla's `random.nextInt(800) == 0`, passed in
 /// so the decision is pure and exactly testable; `remove_when_far_away` is the
 /// mob's own `removeWhenFarAway` override (default `true` for despawnable mobs).
+///
+/// Issue #518's dedup: delegates to [`lodestone_entity::spawn::check_despawn`]
+/// rather than re-deriving the same two distance gates a second time. That
+/// function's [`DespawnCtx`](lodestone_entity::spawn::DespawnCtx) additionally
+/// models peaceful eviction and the persistence short-circuit, neither of which
+/// this crate's callers need here (`mobs/mod.rs` applies peaceful eviction
+/// separately via `MobSim::remove_monsters`, and persistence is not yet wired
+/// into the live mob struct) — so those two fields are passed as their
+/// identity values (`difficulty_peaceful: false`, `persistence_required: false`,
+/// `requires_custom_persistence: false`), which reduces the shared function to
+/// exactly this one's two gates. A caller that later needs the fuller check
+/// should call the `lodestone_entity` function directly rather than widening
+/// this signature.
 #[must_use]
 pub fn check_despawn(
     category: MobCategory,
@@ -393,22 +341,21 @@ pub fn check_despawn(
     rng_hit_800: bool,
     remove_when_far_away: bool,
 ) -> DespawnOutcome {
-    let despawn = f64::from(category.despawn_distance());
-    if dist_sqr_to_player > despawn * despawn && remove_when_far_away {
-        return DespawnOutcome::DISCARD;
-    }
-    let immune = f64::from(category.no_despawn_distance());
-    let immune_sqr = immune * immune;
-    if no_action_time > 600
-        && rng_hit_800
-        && dist_sqr_to_player > immune_sqr
-        && remove_when_far_away
-    {
-        DespawnOutcome::DISCARD
-    } else if dist_sqr_to_player < immune_sqr {
-        DespawnOutcome::RESET
-    } else {
-        DespawnOutcome::KEEP
+    let ctx = lodestone_entity::spawn::DespawnCtx {
+        category,
+        difficulty_peaceful: false,
+        allowed_in_peaceful: true,
+        persistence_required: false,
+        requires_custom_persistence: false,
+        remove_when_far_away,
+        nearest_player_dist_sqr: Some(dist_sqr_to_player),
+        no_action_time: no_action_time.max(0) as u32,
+        random_800_is_zero: rng_hit_800,
+    };
+    match lodestone_entity::spawn::check_despawn(&ctx) {
+        lodestone_entity::spawn::DespawnDecision::Discard => DespawnOutcome::DISCARD,
+        lodestone_entity::spawn::DespawnDecision::ResetNoActionTime => DespawnOutcome::RESET,
+        lodestone_entity::spawn::DespawnDecision::Keep => DespawnOutcome::KEEP,
     }
 }
 
