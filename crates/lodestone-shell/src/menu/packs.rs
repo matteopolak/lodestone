@@ -80,8 +80,13 @@
 //!   canvas at [`crate::config::MIN_SCALED_HEIGHT`] shows four rows per column;
 //!   beyond that the cursor auto-scrolls and the wheel works, which is what
 //!   makes every row reachable.
-//! - **Filesystem watching.** Vanilla rescans when the folder changes; here the
-//!   scan happens on entering the screen ([`PacksNav::reset`]).
+//! - **A real filesystem watcher.** The scan happens on entering the screen
+//!   ([`PacksNav::reset`]) and again on every window-focus regain while this
+//!   screen is open ([`PacksNav::refresh_available`], driven from
+//!   `WindowEvent::Focused(true)`) — a coarser trigger than a `notify`-backed
+//!   watch (dropping a pack in *without* switching away misses it until the
+//!   next focus change), and [`PacksNav::refresh_available`]'s own doc records
+//!   why that trade was made deliberately rather than by omission.
 //!
 //! ## Geometry
 //!
@@ -888,9 +893,13 @@ impl PacksNav {
 ///
 /// Called from [`super::nav::MenuNav`]'s `apply_packs` on the way out, which is
 /// vanilla's cadence: `PackSelectionScreen.onClose` commits the model and calls
-/// `minecraft.reloadResourcePacks()`. This client has no live reload — see
-/// [`crate::resources::selected_packs`]' own doc for which consumer rebuilds
-/// when — so the visible effect lands on the next world join.
+/// `minecraft.reloadResourcePacks()`. `set_selected_packs` bumps
+/// `crate::resources::pack_generation`, which `Sim::reload_resource_pack_atlas`
+/// polls once per presented frame — so on a live world the atlas, the mesh
+/// worker pool and every loaded column's geometry catch up within a frame or
+/// two of leaving this screen, not on the next join. See that function's own
+/// doc for the full chain and for the cases (the demo world; a session with no
+/// vanilla atlas to begin with) that are still a next-join-only change.
 pub fn commit(nav: &PacksNav) {
     let ids = nav.selected_ids();
     crate::resources::set_selected_packs(ids.clone());

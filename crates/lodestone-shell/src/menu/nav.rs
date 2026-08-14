@@ -817,11 +817,25 @@ pub enum PauseButton {
     /// `PauseScreen.createPauseMenu`'s `hasSingleplayerServer()` branch adds
     /// (`PauseScreen.java`). Issue #535's scope 1.
     ///
-    /// **Present unconditionally, unlike vanilla.** Vanilla hides the whole
-    /// half-width row when the session is not a hosted world; this layout is
-    /// static, so the button is always there and [`MenuAction::OpenToLan`]'s
-    /// consumer reports honestly when there is no world to publish. That keeps
-    /// `enabled` a pure function of the variant, which every call site relies on.
+    /// **Conditionally present, since issue #535's scope 2 — but not for the
+    /// reason a first read of vanilla suggests.** `PauseScreen` in the 26.2
+    /// decompile (`PauseScreen.java`) shows this row whenever
+    /// `hasSingleplayerServer()` is true **regardless of publish state**: it
+    /// is vanilla's `MultiplayerOptionsScreen` behind the button that changes,
+    /// an on/off `CycleButton` seeded from `IntegratedServer.isPublished()`
+    /// (`MultiplayerOptionsScreen.java`) — vanilla never re-presses a "publish"
+    /// action against an already-published world because the same button
+    /// re-opens a form that can also *unpublish*. This client has no such
+    /// form — [`MenuAction::OpenToLan`]'s consumer is a single-shot publish
+    /// with no toggle-off — so once the world *is* published there is nothing
+    /// left for this row to honestly offer, and [`MenuNav::pause_buttons`]
+    /// omits it, matching the *shape* of vanilla's non-singleplayer branch
+    /// (`Options` alone, full width, `:160-164`) applied to a different
+    /// condition (published, not "no integrated server"). See
+    /// `crates/lodestone-shell/src/net.rs`'s `NetUpdate::LanPublishError` for
+    /// what happens if a stale render still sends a publish anyway — it must
+    /// never be able to disconnect the session, so the omission here is a
+    /// polish fix, not the only guard.
     ///
     /// Vanilla opens a `MultiplayerOptionsScreen` — a form with a LAN/online
     /// toggle, a port field, a game mode and allow-commands. This publishes
@@ -832,9 +846,13 @@ pub enum PauseButton {
     QuitToTitle,
 }
 
-/// Every pause-screen widget, in vanilla's display order. As with
-/// [`MAIN_BUTTONS`], these indices are the one index space keyboard selection,
-/// mouse hover, hit-testing and the renderer all share.
+/// Every pause-screen widget, in vanilla's display order, for a session that
+/// is not publishing anything. As with [`MAIN_BUTTONS`], these indices are
+/// the one index space keyboard selection, mouse hover, hit-testing and the
+/// renderer all share **while this is the active list** — see
+/// [`MenuNav::pause_buttons`], which is what every internal user of a pause
+/// row list actually calls; this constant and
+/// [`PAUSE_BUTTONS_PUBLISHED`] are its two possible answers.
 pub const PAUSE_BUTTONS: [PauseButton; 10] = [
     PauseButton::BackToGame,
     PauseButton::Advancements,
@@ -845,6 +863,23 @@ pub const PAUSE_BUTTONS: [PauseButton; 10] = [
     PauseButton::PlayerReporting,
     PauseButton::Options,
     PauseButton::OpenToLan,
+    PauseButton::QuitToTitle,
+];
+
+/// [`PAUSE_BUTTONS`], minus [`PauseButton::OpenToLan`] — the row list once
+/// the world is published (issue #535's scope 2). See that variant's own doc
+/// for why this is an *omission* rather than a disabled row: this client's
+/// Open to LAN has no unpublish/toggle form behind it, unlike vanilla's, so a
+/// published world has nothing left for the row to do.
+pub const PAUSE_BUTTONS_PUBLISHED: [PauseButton; 9] = [
+    PauseButton::BackToGame,
+    PauseButton::Advancements,
+    PauseButton::Statistics,
+    PauseButton::ReportBugs,
+    PauseButton::Feedback,
+    PauseButton::Friends,
+    PauseButton::PlayerReporting,
+    PauseButton::Options,
     PauseButton::QuitToTitle,
 ];
 
@@ -1220,6 +1255,15 @@ pub struct MenuNav {
     /// rather than as an empty tree. An `Arc` because a real 26.2 server's tree
     /// is ~2,000 nodes: this is a shared read, never a copy.
     command_tree: Option<std::sync::Arc<lodestone_model::command_tree::CommandTree>>,
+    /// Whether the hosted world is currently published to LAN (issue #535's
+    /// scope 2) — pushed in every frame from `Sim::is_lan_published` by
+    /// `app::session::drive_ui_from_session`, the same shape
+    /// [`Self::command_tree`] is pushed in from a live session. This module
+    /// is pure and holds no `Sim`, so it cannot poll the real state itself.
+    /// `false` off a hosted session too, which is what keeps a multiplayer
+    /// join's pause menu identical to a fresh singleplayer one's. See
+    /// [`Self::pause_buttons`], the one reader.
+    lan_published: bool,
 }
 
 impl Default for MenuNav {
@@ -1323,6 +1367,7 @@ impl MenuNav {
             click_clock: crate::platform::Instant::now(),
             command_block: None,
             command_tree: None,
+            lan_published: false,
         }
     }
 
@@ -2029,7 +2074,8 @@ impl MenuNav {
     /// The highlighted pause-menu button.
     #[must_use]
     pub fn pause_button(&self) -> PauseButton {
-        PAUSE_BUTTONS[self.paused.min(PAUSE_BUTTONS.len() - 1)]
+        let buttons = self.pause_buttons();
+        buttons[self.paused.min(buttons.len() - 1)]
     }
 
     /// Index of the highlighted pause-menu button.
@@ -2084,6 +2130,34 @@ impl MenuNav {
         tree: Option<std::sync::Arc<lodestone_model::command_tree::CommandTree>>,
     ) {
         self.command_tree = tree;
+    }
+
+    /// Pushes the session's real publish state in, from
+    /// `Sim::is_lan_published` — see [`Self::lan_published`]'s own field doc.
+    pub fn set_lan_published(&mut self, published: bool) {
+        self.lan_published = published;
+    }
+
+    /// The last-pushed publish state — what [`Self::pause_buttons`] keys its
+    /// row list on, and what `render::pause_frame` reads to pick the matching
+    /// grid arrangement for each row's rect.
+    #[must_use]
+    pub fn is_lan_published(&self) -> bool {
+        self.lan_published
+    }
+
+    /// The pause menu's active row list: [`PAUSE_BUTTONS_PUBLISHED`] once the
+    /// hosted world is published, [`PAUSE_BUTTONS`] otherwise. Every internal
+    /// user of a pause-screen row — [`Self::pause_button`], the hover/click
+    /// hit test, and the keyboard walk — reads through this rather than the
+    /// two constants directly, so they cannot drift onto different lists.
+    #[must_use]
+    pub fn pause_buttons(&self) -> &'static [PauseButton] {
+        if self.lan_published {
+            &PAUSE_BUTTONS_PUBLISHED
+        } else {
+            &PAUSE_BUTTONS
+        }
     }
 
     /// Opens the command block edit screen (issue #47) with `open`'s data —
@@ -2157,7 +2231,7 @@ impl MenuNav {
             // **nothing**. That is what lets a selected server stay outlined
             // while the cursor travels to Join — see `hover_list`.
             Screen::ServerList => self.hover_list(row),
-            Screen::Paused if row < PAUSE_BUTTONS.len() => self.paused = row,
+            Screen::Paused if row < self.pause_buttons().len() => self.paused = row,
             Screen::Death if row < DEATH_BUTTONS.len() => self.death = row,
             Screen::Accounts => self.accounts.hover(row),
             // The one screen where hover is **not** the row cursor: it records
@@ -2185,6 +2259,13 @@ impl MenuNav {
             // `render::frame_for`, so every canvas fact was present and only
             // `MenuFrame::hovered` stayed `None`, every frame.
             Screen::CreateWorld => self.create_world.hover_row(row),
+            // Statistics (issues #564/#567's audit): this screen's only real
+            // control is Done, and this arm's own absence was exactly the
+            // Create New World bug above, one screen over — `StatsNav::
+            // hover_row` records nothing for anything but `DONE_ROW`, since
+            // the tab bar's own hover is derived from `MenuFrame::cursor` at
+            // draw time (see `stats::hover_row`'s own doc).
+            Screen::Statistics => self.stats.hover_row(row),
             // The settings tree now *has* a cursor (issue #55), so hover moves
             // it — this arm's absence is what let #391 happen, because a screen
             // with no hover arm had to route a click through `Enter`. Row indices
@@ -3705,6 +3786,10 @@ impl MenuNav {
                 self.toggle_cutout_leaves();
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::MipmapLevels) => {
+                self.step_mipmap_levels(1);
+                MenuAction::None
+            }
         }
     }
 
@@ -3785,6 +3870,26 @@ impl MenuNav {
         let offset = (self.options.framerate_limit - MIN_FRAMERATE_LIMIT) / 10;
         let wrapped = (offset as i32 + delta).rem_euclid(buckets as i32) as u32;
         self.options.framerate_limit = MIN_FRAMERATE_LIMIT + wrapped * 10;
+        self.persist_options();
+    }
+
+    /// Steps `mipmapLevels` by one and wraps, then persists — vanilla's own
+    /// `IntRange(0, 4)` (`menu::options::INT_RANGE_SLIDERS`'s `"mipmapLevels"`
+    /// row), the same click-only wrap shape as [`Self::step_fov`]: a *drag*
+    /// goes through [`Self::set_live_slider`] instead, and a value parked at
+    /// the maximum has to be able to come back down through a click alone.
+    ///
+    /// Also pushes the new depth into `crate::resources::set_mipmap_levels`,
+    /// which is what actually rebuilds the atlas — this function only owns
+    /// the menu-side value and its wrap, exactly as
+    /// [`Self::set_live_slider`]'s own `MipmapLevels` arm does for a drag.
+    fn step_mipmap_levels(&mut self, delta: i32) {
+        let max = lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS as i32;
+        let span = max + 1;
+        let offset = self.options.mipmap_levels as i32;
+        let wrapped = (offset + delta).rem_euclid(span);
+        self.options.mipmap_levels = wrapped as u32;
+        crate::resources::set_mipmap_levels(self.options.mipmap_levels);
         self.persist_options();
     }
 
@@ -3977,7 +4082,18 @@ impl MenuNav {
                         crate::config::UNLIMITED_FRAMERATE_CUTOFF,
                     );
                 }
-                // `int_range` only answers for the four above; a fifth would
+                // `mipmapLevels`' bucket is the depth itself (`INT_RANGE_SLIDERS`'s
+                // own row is `IntRange(0, 4)` with no xmap), so unlike
+                // `FramerateLimit` above nothing has to be scaled back. Pushes the
+                // new depth into `crate::resources::set_mipmap_levels`, which is
+                // what actually rebuilds the atlas — see that function's doc.
+                LiveOption::MipmapLevels => {
+                    self.options.mipmap_levels = value
+                        .clamp(0, lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS as i32)
+                        as u32;
+                    crate::resources::set_mipmap_levels(self.options.mipmap_levels);
+                }
+                // `int_range` only answers for the five above; a sixth would
                 // have to add its own write here, and falling through to
                 // `false` is the honest result until it does.
                 _ => return false,
@@ -4049,14 +4165,16 @@ impl MenuNav {
     fn key_paused(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
-                self.paused = step_enabled(self.paused, PAUSE_BUTTONS.len(), false, &|i| {
-                    PAUSE_BUTTONS[i].enabled()
+                let buttons = self.pause_buttons();
+                self.paused = step_enabled(self.paused, buttons.len(), false, &|i| {
+                    buttons[i].enabled()
                 });
                 MenuAction::None
             }
             MenuKey::Down => {
-                self.paused = step_enabled(self.paused, PAUSE_BUTTONS.len(), true, &|i| {
-                    PAUSE_BUTTONS[i].enabled()
+                let buttons = self.pause_buttons();
+                self.paused = step_enabled(self.paused, buttons.len(), true, &|i| {
+                    buttons[i].enabled()
                 });
                 MenuAction::None
             }
@@ -6054,6 +6172,76 @@ mod tests {
         assert_eq!(nav.options_save_error(), None);
     }
 
+    /// The Video page's Mipmap Levels row moves `mipmap_levels`, wraps at the
+    /// maximum, lands its drag on vanilla's own bucket, persists, and — the
+    /// property this row exists to add over every other `IntRange` slider on
+    /// this tree — pushes the change into
+    /// `crate::resources::set_mipmap_levels`, the trigger the live atlas
+    /// reload polls. `pack_generation` and `mipmap_levels` are process-global
+    /// (see `crate::resources`' own `pack_generation_strictly_increases_on_every_selection_change`),
+    /// so this asserts the *change*, never an absolute value another test in
+    /// this binary could have already moved.
+    #[test]
+    fn the_mipmap_levels_row_moves_the_option_and_reaches_the_live_reload_trigger() {
+        let (mut nav, path) = self::nav("settings-mipmap-levels");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+
+        assert_eq!(
+            nav.options().mipmap_levels,
+            lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS,
+            "premise: vanilla's shipped default is the max, 4"
+        );
+
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Video);
+        let row = settings_row(&mut nav, &mut ui, is_option("mipmapLevels"));
+
+        // Parked at the maximum, so a click must wrap to 0 rather than sticking
+        // — the same departure `the_root_fov_row_moves_the_option_and_wraps_at_the_maximum`
+        // exercises, and the row this one starts on needs it immediately rather
+        // than after four more clicks.
+        let before_click = crate::resources::pack_generation();
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        assert_eq!(nav.options().mipmap_levels, 0, "4 + 1 wraps to 0, not 5");
+        assert!(
+            crate::resources::pack_generation() > before_click,
+            "the click must reach the live-reload trigger, not just the option"
+        );
+        assert_eq!(crate::resources::mipmap_levels(), 0);
+
+        // The drag path, through vanilla's bucket map: `(2 + 0.5 - 0) / (4 + 1
+        // - 0) = 0.5` is the fraction the handle draws at for 2.
+        let before_drag = crate::resources::pack_generation();
+        assert!(nav.drag_slider(&ui, row, 0.5));
+        assert_eq!(nav.options().mipmap_levels, 2);
+        assert!(crate::resources::pack_generation() > before_drag);
+        assert_eq!(crate::resources::mipmap_levels(), 2);
+
+        // Both ends of the track land exactly on the bounds rather than one past.
+        assert!(nav.drag_slider(&ui, row, 0.0));
+        assert_eq!(nav.options().mipmap_levels, 0);
+        assert!(nav.drag_slider(&ui, row, 1.0));
+        assert_eq!(
+            nav.options().mipmap_levels,
+            lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS
+        );
+
+        let saved = std::fs::read_to_string(&options_path).expect("options.json must exist");
+        assert!(
+            !saved.contains("\"mipmap_levels\""),
+            "back at the shipped default, the key must not be written: {saved}"
+        );
+        assert!(nav.drag_slider(&ui, row, 0.0));
+        let saved = std::fs::read_to_string(&options_path).expect("options.json must exist");
+        assert!(
+            saved.contains("\"mipmap_levels\""),
+            "away from the default, the value must reach disk: {saved}"
+        );
+        assert_eq!(crate::config::Options::load_from(&options_path).mipmap_levels, 0);
+        assert_eq!(nav.options_save_error(), None);
+    }
+
     /// The glint pair and the Clouds cycle.
     ///
     /// `glint::DEFAULT_SPEED`/`DEFAULT_STRENGTH` are vanilla's shipped `0.5`/`0.75`
@@ -6987,7 +7175,7 @@ mod tests {
     /// `Screen::Connecting`.
     #[test]
     fn creating_a_world_asks_the_app_to_start_singleplayer_with_the_typed_seed() {
-        use crate::menu::create_world::{CREATE_ROW, SEED_FIELD};
+        use crate::menu::create_world::{CREATE_ROW, SEED_FIELD, WORLD_TAB};
         use crate::menu::world_select::WorldSelectButton as B;
 
         let (mut nav, _) = self::nav("create-world-seed");
@@ -6997,14 +7185,25 @@ mod tests {
         assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
         assert_eq!(ui.screen(), Screen::CreateWorld, "premise: World Creation is open");
 
+        // Seed lives on the World tab (issue #567) — click the tab first, the
+        // same two clicks a player makes.
+        assert_eq!(nav.click(&mut ui, WORLD_TAB), MenuAction::None);
+        let seed_row = nav
+            .create_world()
+            .frame_row_for_focus_id(SEED_FIELD)
+            .expect("the Seed field is visible on the World tab");
         assert_eq!(
-            nav.click(&mut ui, SEED_FIELD),
+            nav.click(&mut ui, seed_row),
             MenuAction::None,
             "focusing the Seed field must not itself produce an action"
         );
         type_str(&mut nav, &mut ui, "777");
 
-        let action = nav.click(&mut ui, CREATE_ROW);
+        let create_row = nav
+            .create_world()
+            .frame_row_for_focus_id(CREATE_ROW)
+            .expect("Create is always visible, on every tab");
+        let action = nav.click(&mut ui, create_row);
         let MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, config }) = action
         else {
             panic!("expected MenuAction::Singleplayer(Created {{ .. }}), got {action:?}");
@@ -7298,13 +7497,22 @@ mod tests {
             assert_eq!(ui.screen(), Screen::WorldSelect, "premise: the list is open");
             assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
             assert_eq!(ui.screen(), Screen::CreateWorld);
-            // Clear the `New World` default and type a real name.
-            nav.click(&mut ui, crate::menu::create_world::NAME_FIELD);
+            // Clear the `New World` default and type a real name. Name lives
+            // on the Game tab, which is where a fresh screen already starts.
+            let name_row = nav
+                .create_world()
+                .frame_row_for_focus_id(crate::menu::create_world::NAME_FIELD)
+                .expect("Name is visible on the Game tab, the default");
+            nav.click(&mut ui, name_row);
             for _ in 0..NAME_LABEL.len() + crate::menu::create_world::DEFAULT_NAME.len() {
                 nav.key(&mut ui, MenuKey::Backspace);
             }
             type_str(&mut nav, &mut ui, name);
-            let action = nav.click(&mut ui, CREATE_ROW);
+            let create_row = nav
+                .create_world()
+                .frame_row_for_focus_id(CREATE_ROW)
+                .expect("Create is always visible, on every tab");
+            let action = nav.click(&mut ui, create_row);
             let MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, .. }) = action
             else {
                 panic!("expected Created, got {action:?}");
@@ -7392,7 +7600,11 @@ mod tests {
 
         // No click into the Seed field, no typing — Create is pressed with
         // the field exactly as `CreateWorldNav::new` left it.
-        let action = nav.click(&mut ui, CREATE_ROW);
+        let create_row = nav
+            .create_world()
+            .frame_row_for_focus_id(CREATE_ROW)
+            .expect("Create is always visible, on every tab");
+        let action = nav.click(&mut ui, create_row);
         let MenuAction::Singleplayer(SingleplayerLaunch::Created { config, .. }) = action else {
             panic!("expected MenuAction::Singleplayer(Created {{ .. }}), got {action:?}");
         };
@@ -7569,6 +7781,58 @@ mod tests {
         // branch of `createPauseMenu`.
         assert_eq!(nav.pause_button(), PauseButton::OpenToLan);
         nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
+    }
+
+    /// Issue #535's scope 2, the counterpart to
+    /// `pause_menu_selection_wraps_both_ways` above: once
+    /// `set_lan_published(true)` runs, Open to LAN is unreachable by keyboard
+    /// (it is not merely skipped as a disabled row — it is not in the list at
+    /// all, so `PAUSE_BUTTONS_PUBLISHED.len()` rows exist, not
+    /// `PAUSE_BUTTONS.len()`), and hover/click follow the same shorter list.
+    ///
+    /// Walked explicitly, one assert per `Down`, the same shape as the
+    /// unpublished walk above rather than a generic loop with hand-derived
+    /// modular arithmetic — that keeps a wrong stop visible immediately
+    /// instead of only in a final aggregate.
+    #[test]
+    fn once_published_the_pause_menu_skips_open_to_lan_entirely() {
+        let (mut nav, _) = nav("pause-published-skip");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        nav.set_lan_published(true);
+        assert_eq!(nav.pause_buttons(), PAUSE_BUTTONS_PUBLISHED.as_slice());
+        let __deliberate_type_error: u32 = "not a number";
+        assert_eq!(nav.pause_button(), PauseButton::BackToGame);
+
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.pause_button(), PauseButton::Advancements);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.pause_button(), PauseButton::Statistics);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.pause_button(), PauseButton::PlayerReporting);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.pause_button(), PauseButton::Options);
+        nav.key(&mut ui, MenuKey::Down);
+        // The discriminating step: the unpublished walk stops at Open to LAN
+        // here. Published, it is not in the list to stop at, so Down lands
+        // straight on Disconnect.
+        assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.pause_button(), PauseButton::BackToGame, "wraps");
+
+        // Hover follows the same shorter list: the old last-row index (9,
+        // `PAUSE_BUTTONS.len() - 1`) is out of range once published and must
+        // be ignored, and the new last index (8) is Disconnect.
+        let stale_last_index = PAUSE_BUTTONS.len() - 1;
+        nav.hover(&ui, stale_last_index);
+        assert_ne!(
+            nav.pause_index(),
+            stale_last_index,
+            "the unpublished list's last index is out of range once published"
+        );
+        nav.hover(&ui, PAUSE_BUTTONS_PUBLISHED.len() - 1);
         assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
     }
 

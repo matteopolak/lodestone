@@ -461,6 +461,21 @@ pub enum LiveOption {
     /// `options.cutoutLeaves` → [`crate::config::Options::cutout_leaves`]. A
     /// plain boolean; see that field's doc for the render-side consumer.
     CutoutLeaves,
+    /// `options.mipmapLevels` → [`crate::config::Options::mipmap_levels`].
+    ///
+    /// An **`IntRange(0, 4)`** (`Options.java`) like [`Self::RenderDistance`]
+    /// and [`Self::Fov`], so its handle comes from [`SliderRange`] and
+    /// [`Self::unit_double`] answers `None` for it.
+    ///
+    /// Its consumer was a real block-atlas island: the shell
+    /// always built the atlas at the frozen
+    /// `lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS`, and this row moved
+    /// a handle nothing read. It now reaches
+    /// `crate::resources::set_mipmap_levels` through
+    /// `MenuNav::set_live_slider`/`MenuNav::step_mipmap_levels`, which bumps
+    /// the same `pack_generation` counter a resource-pack selection change
+    /// does — one live-reload path, not two, for both triggers.
+    MipmapLevels,
 }
 
 impl LiveOption {
@@ -529,7 +544,11 @@ impl LiveOption {
             // A four-value `SliderableEnum`, placed by index — see
             // `graphics_preset_slider_fraction`, not this table.
             | LiveOption::GraphicsPreset
-            | LiveOption::CutoutLeaves => None,
+            | LiveOption::CutoutLeaves
+            // `MipmapLevels` is the fourth `IntRange`, `RenderDistance`'s
+            // reason again: its stored value is 0..=4 mip levels, so
+            // returning it here would pin every handle near the far left.
+            | LiveOption::MipmapLevels => None,
         }
     }
 
@@ -582,7 +601,11 @@ impl LiveOption {
             | LiveOption::EnableVsync
             | LiveOption::InactivityFpsLimit
             | LiveOption::GraphicsPreset
-            | LiveOption::CutoutLeaves => None,
+            | LiveOption::CutoutLeaves
+            // `MipmapLevels` is the fourth `IntRange`, `RenderDistance`'s
+            // reason again: its stored value is 0..=4 mip levels, so
+            // returning it here would pin every handle near the far left.
+            | LiveOption::MipmapLevels => None,
         }
     }
 
@@ -622,6 +645,7 @@ impl LiveOption {
             LiveOption::SprintWindow => "sprintWindow",
             LiveOption::Fov => "fov",
             LiveOption::FramerateLimit => "framerateLimit",
+            LiveOption::MipmapLevels => "mipmapLevels",
             _ => return None,
         };
         INT_RANGE_SLIDERS
@@ -857,6 +881,15 @@ impl Cell {
         // property of the cell, not of where it is placed.
         if spec.live == Some(LiveOption::Fov) {
             return Some(fov_slider_fraction(options.fov));
+        }
+        // `mipmapLevels`' `IntRange(0, 4)` — the fourth of the identical
+        // quartet (see `render_distance_slider_fraction`,
+        // `sprint_window_slider_fraction`, `fov_slider_fraction`). Without
+        // this arm the handle would stay parked at the frozen default even
+        // after a drag changed `options.mipmap_levels`, the same lie the
+        // other three IntRange rows told before their own arm existed.
+        if spec.live == Some(LiveOption::MipmapLevels) {
+            return Some(mipmap_levels_slider_fraction(options.mipmap_levels));
         }
         // A **live** `UnitDouble` option reads its handle position from the
         // real, persisted value; only an inactive one falls through to the
@@ -1342,6 +1375,21 @@ pub fn sprint_window_slider_fraction(ticks: u8) -> f32 {
     range.to_slider_value(i32::from(ticks))
 }
 
+/// `mipmapLevels`' slider fraction from the real, persisted mip depth.
+///
+/// Reuses the same [`INT_RANGE_SLIDERS`] row the inactive version used, so the
+/// live handle and the frozen-default handle are placed by one expression and
+/// cannot drift. Mirrors [`sprint_window_slider_fraction`] — same shape, same
+/// reasoning, an `IntRange(0, 4)` (`Options.java`) rather than the tick range.
+#[must_use]
+pub fn mipmap_levels_slider_fraction(levels: u32) -> f32 {
+    let range = INT_RANGE_SLIDERS
+        .iter()
+        .find(|(a, _, _)| *a == "mipmapLevels")
+        .map_or(SliderRange { min: 0, max: 4 }, |(_, r, _)| *r);
+    range.to_slider_value(i32::try_from(levels).unwrap_or(range.min))
+}
+
 /// `fov`'s slider fraction from the real, persisted degree count.
 ///
 /// The third of the identical trio (see [`render_distance_slider_fraction`] and
@@ -1707,6 +1755,10 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::CutoutLeaves => {
             if options.cutout_leaves { "ON" } else { "OFF" }.to_string()
         }
+        // `IntRange(0, 4)` (`Options.java`) with no special-case stringifier —
+        // unlike `Fov`'s "Normal"/"Quake Pro" pair, vanilla's mipmap slider has
+        // no named values, so the plain depth is the whole value half.
+        LiveOption::MipmapLevels => options.mipmap_levels.to_string(),
     }
 }
 
@@ -1887,7 +1939,9 @@ static VIDEO: &[Entry] = &[
     ),
     pair(
         cycle("particles", "Particles"),
-        slider("mipmapLevels", "Mipmap Levels"),
+        // Live: the block-atlas island `BLOCK_ATLAS_MIP_LEVELS`'s own doc used
+        // to name. See `LiveOption::MipmapLevels`.
+        live_slider("mipmapLevels", "Mipmap Levels", LiveOption::MipmapLevels),
     ),
     pair(
         cycle("entityShadows", "Entity Shadows"),
@@ -3892,6 +3946,11 @@ mod tests {
                 // three-state Clouds cycle, whose `SkyFrame::with_cloud_status`
                 // consumer had zero production callers.
                 LiveOption::CloudStatus,
+                // Also Video, in the `(particles, mipmapLevels)` pair, sorting
+                // between Clouds and See-Through Leaves: the block-atlas
+                // mip-depth slider, whose consumer used to be the frozen
+                // `BLOCK_ATLAS_MIP_LEVELS` constant.
+                LiveOption::MipmapLevels,
                 // The `(cutoutLeaves, improvedTransparency)` pair's first half —
                 // the leaves-render-pass fix's own row.
                 LiveOption::CutoutLeaves,
@@ -3963,13 +4022,14 @@ mod tests {
                 LiveOption::GlintStrength,
                 LiveOption::PanoramaSpeed,
             ],
-            "FOV on the root; GUI Scale, Render Distance and Clouds on Video; the \
-             four toggle rows and Auto-Jump/Sprint Window on Controls; look \
-             sensitivity, scroll sensitivity and both inverts on Mouse; the eleven \
-             volume buses and Closed Captions on Sound; the eight chat options on \
-             Chat with three of them repeated on Accessibility; Closed Captions \
-             again, View Bobbing, Damage Tilt, both glint sliders and Panorama \
-             Scroll Speed on Accessibility — and nothing else"
+            "FOV on the root; GUI Scale, Render Distance, Clouds and Mipmap Levels \
+             on Video; the four toggle rows and Auto-Jump/Sprint Window on \
+             Controls; look sensitivity, scroll sensitivity and both inverts on \
+             Mouse; the eleven volume buses and Closed Captions on Sound; the \
+             eight chat options on Chat with three of them repeated on \
+             Accessibility; Closed Captions again, View Bobbing, Damage Tilt, \
+             both glint sliders and Panorama Scroll Speed on Accessibility — and \
+             nothing else"
         );
         // The control: an option we do not persist must report itself inactive,
         // and the detector must be able to tell the difference.
@@ -4003,19 +4063,19 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 49 live option
-        // *rows* (45 distinct options, four of them placed twice — the three
+        // The count itself, not just the ratio's ingredients: 50 live option
+        // *rows* (46 distinct options, four of them placed twice — the three
         // Chat/Accessibility ones plus `showSubtitles` on Sound and
-        // Accessibility, so 49 - 4 == 45 — the video-settings/leaves session's
+        // Accessibility, so 50 - 4 == 46 — the video-settings/leaves session's
         // five, framerateLimit/enableVsync/inactivityFpsLimit/graphicsPreset/
-        // cutoutLeaves, are each placed once)
+        // cutoutLeaves, plus mipmapLevels, are each placed once)
         // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid,
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
         // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 71, "outside a world: {live:?}");
+        assert_eq!(live.len(), 72, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -4037,14 +4097,15 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        // 71, not 62: `showSubtitles` is live on **both** the pages vanilla places
+        // 72, not 62: `showSubtitles` is live on **both** the pages vanilla places
         // it on (Sound and Accessibility), and three chat options are on two pages
         // each. The kind A batch added fifteen — the eleven volume buses, the
-        // root's FOV, both glint sliders and Clouds — and the video-settings/
+        // root's FOV, both glint sliders and Clouds — the video-settings/
         // leaves session added five more: framerateLimit, enableVsync,
-        // inactivityFpsLimit, graphicsPreset, cutoutLeaves.
-        assert_eq!(outside.len(), 71);
-        assert_eq!(inside.len(), 70, "one fewer: the root's Online button");
+        // inactivityFpsLimit, graphicsPreset, cutoutLeaves — and the block-atlas
+        // mip-depth session added a sixth: mipmapLevels.
+        assert_eq!(outside.len(), 72);
+        assert_eq!(inside.len(), 71, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -4270,6 +4331,49 @@ mod tests {
             sens.slider_fraction(&o),
             Some(crate::config::DEFAULT_SENSITIVITY),
             "must not be parked at the frozen 0.5 default"
+        );
+    }
+
+    /// [`LiveOption::MipmapLevels`]'s handle and label must follow
+    /// `options.mipmap_levels`, not the table's frozen default of 4 — the
+    /// exact shape [`the_migrated_rows_follow_the_persisted_value_not_the_frozen_default`]
+    /// checks for `renderDistance`/`sensitivity`, applied to the row this
+    /// session made live. The frozen default is deliberately the wrong
+    /// hypothesis picked as the control, because it is also the shipped
+    /// default — a fraction test with no `assert_ne!` against it would pass
+    /// on a completely inert row that never read `options` at all.
+    #[test]
+    fn the_mipmap_levels_row_follows_the_persisted_value_not_the_frozen_default() {
+        let mut o = crate::config::Options::default();
+        let mips = live_slider("mipmapLevels", "Mipmap Levels", LiveOption::MipmapLevels);
+        let range = SliderRange { min: 0, max: 4 };
+
+        o.mipmap_levels = 1;
+        assert_eq!(
+            mips.slider_fraction(&o),
+            Some(range.to_slider_value(1)),
+            "the handle must follow the stored mip depth"
+        );
+        assert_ne!(
+            mips.slider_fraction(&o),
+            Some(range.to_slider_value(4)),
+            "1 and 4 must be distinguishable, or this proves nothing"
+        );
+        assert_eq!(live_value(LiveOption::MipmapLevels, &o), "1");
+
+        o.mipmap_levels = 0;
+        assert_eq!(mips.slider_fraction(&o), Some(0.0), "the min pins to the start");
+        o.mipmap_levels = 4;
+        assert_eq!(mips.slider_fraction(&o), Some(1.0), "the max pins to the end");
+
+        // The wrong hypothesis `unit_double` would apply: reading a raw 0..=4
+        // depth as a 0..1 fraction would clamp every value above 1 to the far
+        // end of the track, exactly as `renderDistance`'s equivalent check
+        // guards against.
+        assert_eq!(
+            LiveOption::MipmapLevels.unit_double(&o),
+            None,
+            "a mip depth must not be readable as a 0..1 fraction"
         );
     }
 
@@ -4900,6 +5004,10 @@ mod tests {
         LiveOption::InactivityFpsLimit,
         LiveOption::GraphicsPreset,
         LiveOption::CutoutLeaves,
+        // The block-atlas mip-depth row: its consumer used to be the frozen
+        // `BLOCK_ATLAS_MIP_LEVELS` constant, so this handle moved and nothing
+        // downstream ever read the new value.
+        LiveOption::MipmapLevels,
     ];
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
@@ -4968,13 +5076,14 @@ mod tests {
                 | LiveOption::EnableVsync
                 | LiveOption::InactivityFpsLimit
                 | LiveOption::GraphicsPreset
-                | LiveOption::CutoutLeaves => {}
+                | LiveOption::CutoutLeaves
+                | LiveOption::MipmapLevels => {}
             }
         }
         // 25 before the kind A batch, plus eleven sound buses, FOV, both glint
-        // parameters and Clouds, plus the five video-settings/leaves rows this
-        // session wired.
-        assert_eq!(ALL.len(), 45, "forty-five distinct live options");
+        // parameters and Clouds, plus the five video-settings/leaves rows that
+        // session wired, plus the block-atlas mip-depth row this one added.
+        assert_eq!(ALL.len(), 46, "forty-six distinct live options");
         // And the eleven indices are all of them, none repeated: `SoundVolume` is
         // a *payload* variant, so neither the compiler nor the match above can see
         // a missing or duplicated index, and a duplicate would silently leave one

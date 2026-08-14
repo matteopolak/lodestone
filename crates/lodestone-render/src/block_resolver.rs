@@ -152,7 +152,8 @@ struct Projected {
 }
 
 impl BlockAtlas {
-    /// Resolve every state in `registry` against the real assets in `manager`.
+    /// As [`Self::build`], at the shipped default mip depth
+    /// ([`crate::texture::BLOCK_ATLAS_MIP_LEVELS`]).
     ///
     /// `manager` is a resource manager over a vanilla resource pack (typically a
     /// `client.jar` opened with `ZipSource`); `registry` maps each `state_id` to
@@ -165,6 +166,20 @@ impl BlockAtlas {
     pub fn build<R: BlockStateRegistry + ?Sized>(
         manager: &ResourceManager,
         registry: &R,
+    ) -> Result<Self, BlockAtlasError> {
+        Self::build_with_mip_levels(manager, registry, crate::texture::BLOCK_ATLAS_MIP_LEVELS)
+    }
+
+    /// As [`Self::build`], with an explicit mip depth rather than the shipped
+    /// default — the live `mipmapLevels` video setting's consumer
+    /// (`crate::resources::mipmap_levels` in the shell) reaches here so
+    /// changing the setting rebuilds the atlas at the new level count, through
+    /// the same `pack_generation` hot-reload machinery a resource-pack
+    /// selection change already drives.
+    pub fn build_with_mip_levels<R: BlockStateRegistry + ?Sized>(
+        manager: &ResourceManager,
+        registry: &R,
+        mip_levels: u32,
     ) -> Result<Self, BlockAtlasError> {
         let resolver = ModelResolver::new(manager);
         let colormaps = DefaultTints::load(manager);
@@ -229,10 +244,13 @@ impl BlockAtlas {
         // a `Linear`-minified GPU sample at a sprite's edge reads straight into
         // the neighbouring sprite regardless of how cleanly each mip level was
         // generated in isolation (see `BLOCK_ATLAS_MIP_LEVELS`'s doc — this is
-        // the distance-dependent block-atlas seam).
+        // the distance-dependent block-atlas seam). `mip_levels` is the caller's
+        // requested depth (`Self::build` pins it to the shipped default; a live
+        // setting change passes whatever the player chose), and the padding must
+        // track it exactly as the default path always has.
         let mut builder = AtlasBuilder::new()
-            .with_mip_levels(crate::texture::BLOCK_ATLAS_MIP_LEVELS)
-            .with_padding(1 << crate::texture::BLOCK_ATLAS_MIP_LEVELS);
+            .with_mip_levels(mip_levels)
+            .with_padding(1 << mip_levels);
 
         for loc in &base_textures {
             // A missing texture is tolerated: the sprite lookup later falls back

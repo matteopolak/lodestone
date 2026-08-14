@@ -69,18 +69,25 @@ pub const MEASURED_MAX_ARRAY_LAYERS: u32 = 2048;
 /// Requested mip depth for the block/model atlases, matching vanilla's
 /// `mipmapLevels` default (`Options.java`: `IntRange(0, 4)`, default `4`).
 ///
-/// This is the number every production `AtlasBuilder::with_mip_levels` call
-/// passes, and it is also the source of the padding those callers must
-/// request: vanilla's `Stitcher.padding = 1 << mipLevel << clamp(anisotropyBit
-/// - 1, 0, 4)`, and with no anisotropic filtering modelled here that reduces to
-/// `1 << levels` — see [`GpuAtlas`]'s sampler (`min_filter: Linear`, minifying)
-/// and [`lodestone_assets::AtlasBuilder::with_padding`]'s doc for why a
+/// This is the depth `BlockAtlas::build` (this crate's `block_resolver`) uses
+/// for a session that has never touched the setting, and it is also the
+/// source of the padding that path requests: vanilla's `Stitcher.padding = 1
+/// << mipLevel << clamp(anisotropyBit - 1, 0, 4)`, and with no anisotropic
+/// filtering modelled here that reduces to `1 << levels` — see [`GpuAtlas`]'s
+/// sampler (`min_filter: Linear`, minifying) and
+/// [`lodestone_assets::AtlasBuilder::with_padding`]'s doc for why a
 /// `Linear`-sampled atlas needs a real gutter and not just isolated mip
-/// *generation*. Not yet wired to the live `mipmapLevels` video setting — that
-/// option exists in the menu's slider model but currently has no runtime
-/// consumer anywhere in the shell (its own `menu/nav.rs` names it as such), and
-/// the atlas is built in `lodestone-shell/src/resources.rs`, outside this
-/// crate.
+/// *generation*.
+///
+/// The live `mipmapLevels` video setting now has a real consumer:
+/// `crate::block_resolver::BlockAtlas::build_with_mip_levels` takes an
+/// explicit depth, and `lodestone-shell/src/resources.rs`'s `mipmap_levels`
+/// (seeded from this constant, then overridden by whatever the player last
+/// chose) is what the shell's atlas loader actually passes. Changing the
+/// setting bumps the same `pack_generation` counter a resource-pack selection
+/// change does, so it rebuilds the atlas, remeshes the world and swaps the GPU
+/// bind groups through the identical live-reload path — see that module's
+/// `set_mipmap_levels` for the trigger.
 pub const BLOCK_ATLAS_MIP_LEVELS: u32 = 4;
 
 /// WebGPU's *guaranteed minimum* `maxTextureArrayLayers`. The spec's default

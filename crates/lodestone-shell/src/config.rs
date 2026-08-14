@@ -719,6 +719,22 @@ pub struct Options {
     /// (`Sim::set_cutout_leaves`), matching vanilla's own
     /// `operateOnLevelExtractor(LevelExtractor::allChanged)`.
     pub cutout_leaves: bool,
+    /// Vanilla's **Mipmap Levels** option (`options.mipmapLevels`,
+    /// `Options.java`): `IntRange(0, 4)`, default
+    /// [`lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS`] — the same number
+    /// this field defaults to, so a fresh install's stored value and the
+    /// render crate's own fallback constant are one fact, not two.
+    ///
+    /// The block/model atlas's requested mip depth. Reaches
+    /// `crate::resources::set_mipmap_levels` from
+    /// `menu::nav::MenuNav`'s slider-drag and click-step writers, which bumps
+    /// the same `pack_generation` counter a resource-pack selection change
+    /// does — so dragging this slider rebuilds the atlas, remeshes every
+    /// loaded column and swaps the GPU bind groups through the identical
+    /// live-reload path a resource-pack selection change already built, not a
+    /// second one. See `crate::resources::mipmap_levels`'s doc for the read
+    /// side.
+    pub mipmap_levels: u32,
 }
 
 impl Default for Options {
@@ -763,6 +779,7 @@ impl Default for Options {
             inactivity_fps_limit: InactivityFpsLimit::default(),
             graphics_preset: GraphicsPreset::default(),
             cutout_leaves: true,
+            mipmap_levels: lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS,
         }
     }
 }
@@ -1004,6 +1021,17 @@ impl Options {
             .get("cutout_leaves")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
+        // Clamped to vanilla's own `IntRange(0, 4)` — the same bound
+        // `menu::options::INT_RANGE_SLIDERS`' `"mipmapLevels"` row places the
+        // handle with, and the same one `crate::resources::set_mipmap_levels`
+        // enforces on the live-write side. A hand-edited out-of-range value
+        // would otherwise reach `AtlasBuilder::with_mip_levels` directly.
+        let mipmap_levels = obj
+            .get("mipmap_levels")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v <= lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS)
+            .unwrap_or(lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS);
         Self {
             gui_scale,
             keybinds,
@@ -1042,6 +1070,7 @@ impl Options {
             inactivity_fps_limit,
             graphics_preset,
             cutout_leaves,
+            mipmap_levels,
         }
     }
 
@@ -1222,6 +1251,9 @@ impl Options {
         }
         if !self.cutout_leaves {
             obj.insert("cutout_leaves".into(), false.into());
+        }
+        if self.mipmap_levels != default.mipmap_levels {
+            obj.insert("mipmap_levels".into(), self.mipmap_levels.into());
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());
