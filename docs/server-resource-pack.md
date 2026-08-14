@@ -5,7 +5,7 @@
 How Lodestone's integrated server pushes a resource pack to a connected player —
 the download URL, SHA-1 hash, required flag, and optional prompt that a client
 shows on its accept/decline screen. The client-side **decode** of the packet
-landed first (issue #294); this issue is the server half: the version-free
+landed first; this issue is the server half: the version-free
 vocabulary struct, the `ServerProtocol` seam method, its `v770` encoder, and the
 feed a host publishes a push into. Part of the server-plumbing epic (#339).
 
@@ -25,10 +25,10 @@ The full wire path, in the order a push travels:
    play id 81) emits the frame.
 4. **Decode** — a real client turns it into
    `ClientEvent::ResourcePackPushed { id, url, hash, required, prompt }`
-   (`crates/lodestone-model/src/event.rs:1839`) and shows the accept/decline
+   (`crates/lodestone-model/src/event.rs`) and shows the accept/decline
    screen.
 5. **Reply** — the client sends `ClientAction::ResourcePackResponse { id,
-   response: ResourcePackResponseKind }` (`crates/lodestone-model/src/action.rs:202`).
+   response: ResourcePackResponseKind }` (`crates/lodestone-model/src/action.rs`).
    The server decode-then-drops it (`play::serverbound::RESOURCE_PACK` →
    `ServerBound::Ignored`, mirroring vanilla's `ServerPacketListenerImpl` which
    accepts any response), so a reply never drops the connection.
@@ -83,7 +83,7 @@ Everything server-side is version-free in `crates/lodestone-server`:
 `WeatherFeed` — and the same **single-consumer** caveat: exactly one connection
 task per feed instance (singleplayer spawns one task per feed). Vanilla's push is
 broadcast-shaped (every connection must receive it), so multi-connection
-broadcast needs a cursor-shaped feed like `PlayerRegistry::chat_since` (#469)
+broadcast needs a cursor-shaped feed like `PlayerRegistry::chat_since`
 rather than a drain.
 
 The plumbing is reachable through a **new** entry point,

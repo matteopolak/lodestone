@@ -34,11 +34,11 @@ loop.
 
 ### Scope: suppression and version-free replacement, never encoded bytes
 
-Issue #157 is explicit that encoded-packet mutation must not be attempted without re-opening #156's
-version-leak concern (still open). Nothing here goes near encoded bytes. The hook sees `ClientAction`,
+The originating issue is explicit that encoded-packet mutation must not be attempted without re-opening
+a separate, still-open version-leak concern. Nothing here goes near encoded bytes. The hook sees `ClientAction`,
 which is `lodestone-model`'s **version-free** vocabulary — no protocol id, no field order, no wire
 encoding — which is exactly why `Verdict::Replace` is safe to offer: handing a `ClientAction` back
-cannot leak a version into a shared crate. The concern #156 guards lives at the other layer, inside a
+cannot leak a version into a shared crate. The concern that other issue guards lives at the other layer, inside a
 version crate's `VersionAdapter`, and this hook cannot reach it.
 
 ### Why a callback and not a `Message`
@@ -51,8 +51,8 @@ drain.
 The callback receives only `&ClientAction`, **never the `World`**. The drain runs while the driver holds
 the `World` guard, so a callback handed a `World` would be one `hold_read` away from the reentrant
 deadlock `handle.rs`'s rule 1 exists to stop. A filter needing world state captures an `Arc` its own
-system keeps current; a veto that genuinely must consult the world is issue #109's problem, not this
-one's.
+system keeps current; a veto that genuinely must consult the world belongs to a separate,
+verb-level mechanism, not this one.
 
 ### Cost, as a count
 
@@ -72,23 +72,23 @@ the local client's own handful of queued actions.
 
 ### The gap: three verbs bypass this hook entirely
 
-`ActionQueue` is documented as "the one sanctioned egress" (`player.rs:755`), and for anything a
+`ActionQueue` is documented as "the one sanctioned egress" (`crates/lodestone-ecs/src/player.rs`), and for anything a
 *plugin* queues it is. It is **not** the only path to the socket. Measured, by
 `crates/lodestone-ecs/tests/egress_hook_coverage.rs`, five files reach `send_action` directly on
 user-visible paths:
 
 | file | what bypasses |
 |---|---|
-| `lodestone-shell/src/sim/actions.rs` | attack, interact-entity, use-item (#109's verbs 3 and 6) |
-| `lodestone-client/src/handle.rs` | container clicks via `ClientHandle::menu_click` (#109's verb 4) |
+| `lodestone-shell/src/sim/actions.rs` | attack, interact-entity, use-item (verbs 3 and 6 of the verb-level mechanism above) |
+| `lodestone-client/src/handle.rs` | container clicks via `ClientHandle::menu_click` (verb 4 of the same mechanism) |
 | `lodestone-shell/src/app/container_input.rs` | container-screen clicks from the app layer |
 | `lodestone-shell/src/app/menus.rs` | sign-edit / menu submission |
 | `lodestone-shell/src/sim/session.rs` | respawn, container-close, carried-item selection |
 
 Each is deliberate — discrete clicks control their own wire ordering — but the consequence is that **a
-filter cannot see an attack, a use-item or an inventory click**. That is a limit of the seam issue #157
-specifies, not an implementation shortfall, and it is why #109's veto is a separate mechanism at the
-verb level rather than a special case of this one.
+filter cannot see an attack, a use-item or an inventory click**. That is a limit of the seam this
+originating issue specifies, not an implementation shortfall, and it is why the verb-level veto is
+a separate mechanism rather than a special case of this one.
 
 ### This is the outbound half only — the inbound half is not wired
 
@@ -101,14 +101,14 @@ deliberate refusal to depend on `lodestone-ecs`, which is a larger architectural
 
 So: outbound actions can be inspected, replaced and suppressed (within the five-file limit above);
 inbound commands do not arrive at all yet. Different directions, different states, and the
-version-opaque `RawPacket` half of issue #104 is a third thing again, still unbuilt.
+version-opaque `RawPacket` half of that other proposal is a third thing again, still unbuilt.
 
 ## How to change it, and the gotchas
 
 - **Do not give a filter `&World`.** The drain runs inside the driver's write guard; a `hold_read` from
   a filter is the `accb993` hang (no panic, no error, no log line). If a filter needs state, push it
   into an `Arc` from a system.
-- **Do not extend this to encoded packets.** Re-open #156 first. The whole reason `Replace` is safe here
+- **Do not extend this to encoded packets.** Re-open the version-leak concern above first. The whole reason `Replace` is safe here
   is that `ClientAction` carries no version information.
 - **`the_set_of_direct_send_action_sites_has_not_changed` will fail when someone adds a new direct
   send.** That is the gate working. Prefer fixing the *gap* — route the new send through `ActionQueue`,

@@ -34,7 +34,7 @@ death screen's Respawn button (`MenuAction::Respawn` →
 `WindowApp::apply_menu_action` in `app.rs`).
 
 **`ClientAction::Respawn` already had an encoder before this change** —
-`crates/protocol/v770/src/adapter.rs`'s `ClientCommand { action: 0 }` (vanilla's
+`crates/protocol/v770/src/adapter/serverbound.rs::V770Adapter::encode_client_action`'s `ClientCommand { action: 0 }` (vanilla's
 `ServerboundClientCommandPacket.Action.PERFORM_RESPAWN`, ordinal 0) — and
 already had exactly one caller: the automatic policy's `auto_actions.push(...)`
 in `lodestone-client/src/driver.rs`. So this was not the "fully encoded, zero
@@ -55,7 +55,7 @@ server's respawn confirmation), never by a click alone — the button sends the
 request and waits, it does not jump the screen itself.
 
 **Escape does nothing here.** Vanilla's `DeathScreen.shouldCloseOnEsc()`
-returns `false` (`DeathScreen.java:64-66`); `UiState::on_escape`'s `Death` arm
+returns `false`; `UiState::on_escape`'s `Death` arm
 and `MenuNav::key_death`'s handling of `MenuKey::Escape` are both deliberate
 no-ops — every sibling screen in this file calls `ui.on_escape()` for Escape,
 this is the one that must not.
@@ -110,11 +110,11 @@ cited inline in `render.rs`:
 
 | element | vanilla expression | source |
 |---|---|---|
-| title | `middleLine / 2, 30`, scale ×2 | `:118-120` |
-| death message (if any) | `middleLine, 85`, scale ×1 | `:122-124` |
-| score | `middleLine, 100`, scale ×1, always drawn | `:126` |
-| Respawn button | `width/2-100, height/4+72, 200×20` | `:47-50` |
-| Title Screen button | `width/2-100, height/4+96, 200×20` | `:51-58` |
+| title | `middleLine / 2, 30`, scale ×2 | `DeathScreen.extractRenderState` |
+| death message (if any) | `middleLine, 85`, scale ×1 | `DeathScreen.extractRenderState` |
+| score | `middleLine, 100`, scale ×1, always drawn | `DeathScreen.extractRenderState` |
+| Respawn button | `width/2-100, height/4+72, 200×20` | `DeathScreen.init` |
+| Title Screen button | `width/2-100, height/4+96, 200×20` | `DeathScreen.init` |
 
 `middleLine = width / 2`, so the title is centred on **`width / 4`** — the
 screen's left quarter, not its centre — which is exactly what
@@ -131,7 +131,7 @@ screens lay out from `this.height / 4`.
 Every vanilla label before this drew at scale 1.0 implicitly
 (`render::build`'s `frame.vanilla` loop hardcoded it) — nothing needed
 anything else. The death screen's title needs ×2
-(`DeathScreen.java:23,119`), so `MenuLabel::scale` is now an explicit field
+(`DeathScreen.TITLE_SCALE`, read in `DeathScreen.extractRenderState`), so `MenuLabel::scale` is now an explicit field
 and `build` reads it instead of the constant. The three pre-existing call
 sites (`pause_frame`'s "Game Menu", the title screen's version/copyright
 corners) all set `scale: 1.0`, unchanged in effect.
@@ -162,9 +162,10 @@ Respawn returns the new `MenuAction::Respawn`; `Enter` on Title Screen calls
   (`Screen::Death`, `UiState::die`/`respawn_confirmed`, the `on_escape`/
   `session_failed`/`quit_to_title` arms).
 - **The respawn action and death state** —
-  `crates/lodestone-shell/src/{net.rs,sim.rs}`: `net::run`'s
-  `RespawnPolicy::Manual`, `NetUpdate::Death { message }`, `Sim::death_message`,
-  `Sim::respawn`.
+  `crates/lodestone-shell/src/net.rs` (`net::run`'s
+  `RespawnPolicy::Manual`, `NetUpdate::Death { message }`) and
+  `crates/lodestone-shell/src/sim/session.rs` (`Sim::death_message`,
+  `Sim::respawn`).
 - **Wiring** — `WindowApp::apply_menu_action`'s `MenuAction::Respawn` arm (in
   `app/menus.rs`) and `drive_ui_from_session`'s reconciliation block (in
   `app/session.rs`).
@@ -198,13 +199,13 @@ Respawn returns the new `MenuAction::Respawn`; `Enter` on Title Screen calls
   than resolved English. A generic-but-present message was judged good enough
   for this change; threading the death message through `Sim::translator()`
   (already used for chat/title/action-bar) the way those are is a small,
-  separate follow-up. **Still true after issue #68**, which fixed the identical
+  separate follow-up. **Still true after the disconnect-reason fix**, which fixed the identical
   bug for `NetUpdate::Disconnected`/`Screen::Error` (see `main-menu.md`'s
   "The disconnect reason goes through the language table" section) but
-  deliberately left this one alone — #68's sweep for other pre-stringified
+  deliberately left this one alone — that fix's sweep for other pre-stringified
   `Text` found this exact gap and confirmed it is still open, not a new find.
 - **No gradient backdrop.** Vanilla's `DeathScreen.extractBackground` is a
-  reddish `fillGradient` (`DeathScreen.java:134-136`); this screen draws with
+  reddish `fillGradient` (`DeathScreen.extractDeathBackground`); this screen draws with
   `render::OVERLAY_BG`, the same flat 25%-black dim `Screen::Paused` uses,
   because `menu/render.rs`'s `Quads::rect` takes one flat colour with no
   per-vertex gradient. Reproducing the gradient means extending that

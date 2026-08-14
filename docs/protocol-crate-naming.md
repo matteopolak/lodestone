@@ -30,7 +30,7 @@ against its folder name:
 `v47` and `v340` are named for the exact protocol number the crate implements. `v735` and
 `v770` are not — `crates/protocol/v735/src/adapter.rs` implements protocol **754** (its own
 doc comment says so: `"Version adapter implementing protocol 754 (Minecraft 1.16.5)"`), and
-`crates/protocol/v770/src/adapter.rs` implements protocol **776** (26.2, per `CLAUDE.md`
+`crates/protocol/v770/src/adapter/` implements protocol **776** (26.2, per `CLAUDE.md`
 and `DESIGN.md`).
 
 `DESIGN.md` §2 explains why, in an aspirational 17-family plan that was later cut to four
@@ -60,7 +60,7 @@ arguably — 1.12/1.12.1 were never implemented, so nothing forced the "lowest" 
 
 ## Why this matters for the next fifteen crates
 
-Epic #343's plan — one crate per major version's *latest patch*, sixteen discrete targets,
+This epic's plan — one crate per major version's *latest patch*, sixteen discrete targets,
 not families spanning several minors — removes the scenario the "lowest protocol in the
 family" rule was built for. Under a one-version-per-crate plan, "the family" *is* the one
 version, so "named for the family's lowest protocol" and "named for the version's own
@@ -136,7 +136,7 @@ rather than estimate it.
 ## What `v47`, `v340`, `v735` already are (factual survey, no refactor)
 
 All three are **already structured as translation layers**, not "sixteen parallel
-simulations" — this is the same shape epic #343 wants, just not yet extended to all
+simulations" — this is the same shape this epic wants, just not yet extended to all
 sixteen target versions and not yet complete in breadth. Concretely, each:
 
 - Depends on only `lodestone-core`, `lodestone-macros`, `lodestone-model`, and
@@ -155,7 +155,7 @@ sixteen target versions and not yet complete in breadth. Concretely, each:
   *client* joining a real vanilla server of that version is proven (each has a
   `#[ignore]`d live gate against a real server of its own version — see below); an
   old-version *client* joining Lodestone's own integrated server is not implemented for any
-  of the three. If epic #343's real end goal is old clients connecting to a Lodestone
+  of the three. If this epic's real end goal is old clients connecting to a Lodestone
   server (the more ViaVersion-like direction), that inbound half is unbuilt for all three
   and is exactly the gap a genuinely new translation layer would need to close first.
 - Is live-verified against a real server of its target version (`HANDOFF.md` §1, spot
@@ -176,7 +176,7 @@ sixteen target versions and not yet complete in breadth. Concretely, each:
   <family>` reports `v47` at 5 manifest lines, `v340` at 4, `v770` at 8 (`HANDOFF.md` §1).
   Not re-run for this survey; cited as an existing, reproducible measurement.
 
-**Which of the sixteen epic-#343 target versions do the existing three already cover?**
+**Which of the sixteen target versions do the existing three already cover?**
 All three, exactly: `v47` is 1.8.9, `v340` is 1.12.2, `v735` implements 1.16.5 — all three
 appear verbatim in `EPIC_343_VERSIONS`/the version table in `docs/version-table.md`. That
 is not a coincidence worth ignoring: three of the sixteen target versions already have a
@@ -193,8 +193,8 @@ all three, same as it would be for a brand-new crate.
 `docs/roadmap/protocol.md`'s "Multi-version: what it would cost" section and
 `HANDOFF.md` §1 cover the cost/risk analysis this doc's survey draws on (measured ~900
 irreducible hand-written lines per family, ~1 day each, concentrated in `adapter.rs`
-dispatch and `chunk.rs` decode) and were filed as issue #306, a design question the
-project's brief explicitly declined to answer at the time. Epic #343 reads as the
+dispatch and `chunk.rs` decode) and were filed as a design question the
+project's brief explicitly declined to answer at the time. This epic reads as the
 follow-on decision to that open question; this doc does not re-litigate the cost analysis,
 only the two questions in scope here (naming, and what already exists).
 

@@ -96,7 +96,7 @@ rate`.
 
 `SetTime::day_clock()` selects **the lowest holder id**, not the first on the wire,
 because the wire type is a Java `HashMap` and the join-time full sync's two entries
-can arrive in either order. **Since issue #288 that is the fallback, not the
+can arrive in either order. **That is now the fallback, not the
 answer**: the adapter resolves the current dimension type's `default_clock`
 (`minecraft:overworld` in the overworld, **`minecraft:the_end` in the End**, absent
 in the Nether) against the ingested `world_clock` registry and passes the resulting
@@ -228,15 +228,15 @@ the black-faces-at-the-frontier bug the bridge exists to prevent.
 
 ## How to change it
 
-* **The clock anchor** lives in `DayClock` in `crates/protocol/v770/src/adapter.rs`.
+* **The clock anchor** lives in `DayClock` in `crates/protocol/v770/src/adapter/mod.rs`.
   It still holds exactly **one** clock — the one the current dimension follows,
-  selected by `V770Adapter::clock_holder` and re-selected on every
+  selected by `V770Adapter::enter_dimension` and re-selected on every
   `login`/`respawn`. Surfacing two clocks *at once* would need it widened to a map
   keyed by `holder_id`; the constraint that makes that pointless today is
   `ClientEvent::TimeChanged`'s single `time_of_day` field, not the struct. (The
   older note here said selecting per dimension needed that widening. It did not —
   re-anchoring one slot on a dimension change was enough.)
-* **Resolving the clock by name** is done, as of issue #288: the crate ingests the
+* **Resolving the clock by name** is done: the crate ingests the
   `minecraft:world_clock` registry (`packets::registry::ClientRegistries`), the
   adapter resolves the current dimension type's `default_clock` to a holder id in
   `enter_dimension`, and `SetTime::clock_for` selects that clock. The old note
@@ -247,14 +247,14 @@ the black-faces-at-the-frontier bug the bridge exists to prevent.
   `default_clock`) still falls back to the lowest-id pick. That is deliberate and
   documented rather than fixed: `time_of_day`'s only consumer is the sky curve
   below, which does not yet gate on `has_fixed_time`, so reporting the overworld's
-  clock there is exactly the pre-#288 behaviour and no worse. Gating the curve on
+  clock there is exactly the pre-fix behaviour and no worse. Gating the curve on
   `has_fixed_time` — the field *is* decoded and carried on
   `DimensionTypeInfo` — is the real fix and is unclaimed.
 * **The curve** is `sky_darken_for_time_of_day` in
   `crates/lodestone-render/src/entity.rs`. It is a direct port of 26.2's
   `EnvironmentAttributes.SKY_LIGHT_FACTOR` timeline track
-  (`Timelines.OVERWORLD_DAY`, `.cache/mc/26.2/src/net/minecraft/world/timeline/Timelines.java:77-80`),
-  which **replaced** 1.21's `Level.getSkyDarken` entirely (issue #49, fixed).
+  (`Timelines.OVERWORLD_DAY`, `.cache/mc/26.2/src/net/minecraft/world/timeline/Timelines.java`),
+  which **replaced** 1.21's `Level.getSkyDarken` entirely (since fixed).
 
   **What the real track is, read from the jar rather than from the issue's
   own transcription** (which got one thing wrong — see below):
@@ -265,7 +265,7 @@ the black-faces-at-the-frontier bug the bridge exists to prevent.
     final factor. `0.24` is literally `Timelines.NIGHT_SKY_LIGHT_FACTOR`.
   * **The easing is linear, not cubic-bezier.** `KeyframeTrack.Builder`
     defaults to `EasingType.LINEAR`
-    (`.cache/mc/26.2/src/net/minecraft/util/KeyframeTrack.java:78`), and the
+    (`KeyframeTrack.Builder.easing`'s field initializer), and the
     `SKY_LIGHT_FACTOR` track never calls `.setEasing(...)` — only the
     neighbouring `SUN_ANGLE`/`MOON_ANGLE`/`STAR_ANGLE` tracks in the same file
     opt into `EasingType.symmetricCubicBezier(0.362, 0.241)`. The original
@@ -303,13 +303,13 @@ the black-faces-at-the-frontier bug the bridge exists to prevent.
 * **Adding a consumer**: install it off `RenderState::sky_darken()` rather than
   re-deriving from `world_time()`, so there stays exactly one clock on screen.
 
-## `SKY_LIGHT_COLOR`: what it is and why it was not ported (issue #49)
+## `SKY_LIGHT_COLOR`: what it is and why it was not ported
 
 Vanilla does not just scale the sky half of the lightmap at night — it **tints**
 it. Read from the jar rather than assumed:
 
 * Same track, `EnvironmentAttributes.SKY_LIGHT_COLOR`
-  (`Timelines.java:71-75`), keyframes `730 → -1 (white)`, `11270 → -1`,
+  (`Timelines.bootstrap`), keyframes `730 → -1 (white)`, `11270 → -1`,
   `13140 → NIGHT_SKY_LIGHT_COLOR`, `22860 → NIGHT_SKY_LIGHT_COLOR`, same
   segment/wraparound/linear-easing machinery as the factor track, applied via
   `ColorModifier.MULTIPLY_RGB` (`ARGB.multiply`, a no-op against the `-1`
@@ -393,7 +393,7 @@ different colour") re-examined the blocker and found it did not hold:
   lane would still be needed and dismissed that as not the real blocker
   anyway. What was missed: `SKY_LIGHT_COLOR` and `SKY_LIGHT_FACTOR`
   (`sky_darken`) share **identical keyframe ticks** — `730 / 11270 / 13140 /
-  22860` (`Timelines.java:71-80`) — and neither track calls
+  22860` (`Timelines.bootstrap`) — and neither track calls
   `.setEasing(...)`, so both interpolate linearly on the same parameter.
   The colour is therefore **algebraically recoverable from `sky_darken`
   alone**: `t = clamp((1 - sky_darken) / (1 - 0.24), 0, 1)`, then
@@ -438,13 +438,13 @@ hue_not_grey`) is the one CLAUDE.md specifies for this exact failure mode —
 see `docs/fog.md`'s twin fix (the fog colour's own day/night track) for the
 sibling investigation this one shipped alongside.
 
-## The ramp was linear where vanilla's is a curve (issues #383, #386 — fixed)
+## The ramp was linear where vanilla's is a curve (fixed)
 
 The retired `light_term` was `0.2 + 0.8 * level`, a **straight line** in the light
 level. Vanilla's is not. The full derivation, the two errors the record carried
 about it, and the re-derived gate expectations now live in
 [light-ramp.md](./light-ramp.md); the table below is kept because it is what the
-diagnosis of #383's third report was built on, and it is still the correct
+diagnosis of the third of this investigation's reports was built on, and it is still the correct
 comparison against the *bare* curve.
 
 | sky level | retired ramp (`0.2 + 0.8 * l`) | bare curve (`l / (4 - 3l)`) |
@@ -465,9 +465,9 @@ that `lightmap.fsh` then mixes `notGamma` in at the default gamma, which lifts t
 right-hand column (0.500 becomes 0.719 at sky 12); see light-ramp.md. That does not
 change the sign of the divergence, only its size.
 
-This matters for how #383's third report — *"standing under a tree in daylight
+This matters for how the third report — *"standing under a tree in daylight
 darkens the arm more than vanilla does"* — was diagnosed. The two hypotheses in
-the issue were that the arm's skylight was used without the day-of-time scaling,
+the report were that the arm's skylight was used without the day-of-time scaling,
 or sampled from the wrong cell. **Both are false:**
 
 * The scaling is applied. `entity_pipeline.rs`'s vertex shader computes
@@ -551,7 +551,7 @@ None. No flags, no env vars. Two things are worth knowing:
 ## Dependencies
 
 * `crates/protocol/v770/src/packets/time.rs` — `SetTime` / `ClockUpdate` decode.
-* `crates/protocol/v770/src/adapter.rs` — `DayClock`, the `SET_TIME` arm.
+* `crates/protocol/v770/src/adapter/mod.rs` — `DayClock`; the `SET_TIME` arm is in `crates/protocol/v770/src/adapter/chunk.rs`.
 * `crates/lodestone-ecs/src/resources.rs` — the `WorldTime` resource.
 * `crates/lodestone-render/src/entity.rs` — `sky_darken_for_time_of_day`.
 * `crates/lodestone-shell/src/gpu.rs` — `SkyDarkenSource`, `fog_with_clock`.

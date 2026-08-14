@@ -13,10 +13,10 @@ The chain, end to end, all of which exists:
 
 | stage | where |
 |---|---|
-| `SOUND` (117) / `SOUND_ENTITY` (116) decode | `crates/protocol/v770/src/adapter.rs:3405` |
-| `EXPLODE` (36, `minecraft:explode`) decode → `ClientEvent::Sound` | `adapter.rs`'s `decode_explode` — one packet's `explosionSound` field, no separate event type |
-| → `ClientEvent::Sound` / `EntitySound` | `adapter.rs:1340`, `:1362` |
-| → `NetUpdate::Sound` / `EntitySound` | `crates/lodestone-shell/src/net.rs:1212`, `:1228` |
+| `SOUND` (117) / `SOUND_ENTITY` (116) decode | `handle_play_chunk`, `crates/protocol/v770/src/adapter/chunk.rs` |
+| `EXPLODE` (36, `minecraft:explode`) decode → `ClientEvent::Sound` | `crates/protocol/v770/src/adapter/chunk.rs`'s `decode_explode` — one packet's `explosionSound` field, no separate event type |
+| → `ClientEvent::Sound` / `EntitySound` | `decode_sound`/`decode_sound_entity`, `crates/protocol/v770/src/adapter/chunk.rs` |
+| → `NetUpdate::Sound` / `EntitySound` | `forward`, `crates/lodestone-shell/src/net.rs` |
 | → `ShellAudio::play_sound` | `crates/lodestone-shell/src/audio.rs::ShellAudio::play_sound` |
 | event → `sounds.json` → weighted pick → decode → mixer | `crates/lodestone-sound/` |
 | decode / mix / spatialise | `crates/lodestone-audio/` |
@@ -96,7 +96,7 @@ would select one of them and resolve nothing.
 Most sounds lodestone plays are ones the **server sent** as `SOUND` or
 `SOUND_ENTITY`. Since the `SoundType` census landed
 ([block sound types](./block-sound-types.md)) there are also three
-*client-predicted* producers, all in `sim.rs`. Which sounds we get is not
+*client-predicted* producers, all in `sim/audio.rs`. Which sounds we get is not
 guesswork; it follows from whether vanilla's server passes an *excluded player* to
 `Level.playSound`, checked in 26.2's own source:
 
@@ -107,11 +107,11 @@ guesswork; it follows from whether vanilla's server passes an *excluded player* 
 | item and XP pickup, ambient loops, weather | server-broadcast | **plays** |
 | explosion (creeper, TNT, bed, respawn anchor) | `ClientboundExplodePacket.explosionSound`, a **dedicated packet** (id 36, `minecraft:explode`) — see below | **plays** (new) |
 | *another* player's placements | excluded player is *them*, so we get it | **plays** |
-| **cascading** block break (torch losing support, fire, explosion) | `Level.destroyBlock` → `levelEvent(2001, …)`, no exclusion (`Level.java:280-289`) | **plays** (new) |
-| **your own** block placement | `BlockItem.place` → `playSound(player, …)` (`BlockItem.java:87`) — predicted | **plays** (new) |
+| **cascading** block break (torch losing support, fire, explosion) | `Level.destroyBlock` → `levelEvent(2001, …)`, no exclusion (`Level.java`) | **plays** (new) |
+| **your own** block placement | `BlockItem.place` → `playSound(player, …)` (`BlockItem.java`) — predicted | **plays** (new) |
 | block break in the **offline demo world** | the same `case 2001` dispatched locally | **plays** (new) |
 | **your own** mined break | predicted; the emit lives in an ECS system with no audio handle — see below | silent |
-| **your own** footsteps | `Player.playSound` overrides to pass `this` (`Player.java:399`) — server broadcasts to everyone but you | silent |
+| **your own** footsteps | `Player.playSound` overrides to pass `this` (`Player.java`) — server broadcasts to everyone but you | silent |
 | *another* player's footsteps and mined breaks | never on the wire at all — see below | silent |
 | UI clicks | `SimpleSoundInstance.forUI`, never on the wire | silent |
 
@@ -122,9 +122,9 @@ Note that the first four rows are not a theoretical list: `lodestone-sound`'s
 ### The one that arrived and was thrown away — and the correction
 
 `Level.destroyBlock` fires `levelEvent(2001, pos, stateId)` with **no** excluded
-entity (`Level.java:280-289`), so the packet reaches every client in range. Vanilla's
-`LevelEventHandler` `case 2001` does *two* things with it
-(`LevelEventHandler.java:283-291`): `playLocalSound(soundType.getBreakSound())`
+entity, so the packet reaches every client in range. Vanilla's
+`LevelEventHandler.levelEvent` `case 2001` does *two* things with it:
+`playLocalSound(soundType.getBreakSound())`
 **and** `addDestroyBlockEffect`. Lodestone's `NetUpdate::BlockDestroyed` arm did only
 the second. Both halves are wired now: the arm calls
 `Sim::play_block_break_sound`, which reads
@@ -134,7 +134,7 @@ with vanilla's `(volume + 1) / 2` and `pitch * 0.8`.
 **But this page used to claim that fixed "every block break in the game — yours and
 everyone else's", and that was wrong.** A player's own dig never produces a `2001`
 packet at all: `ServerPlayerGameMode.destroyBlock`
-(`ServerPlayerGameMode.java:262-298`) calls `this.level.removeBlock(pos, false)` and
+calls `this.level.removeBlock(pos, false)` and
 contains **no** `levelEvent` or `playSound` anywhere in the method. `interact.rs`
 had already documented that asymmetry for the *particles* — the sound row was
 written without cross-referencing it. So `2001` covers cascading breaks and nothing
@@ -144,12 +144,12 @@ Vanilla makes your own break audible by *predicting* it: the client's
 `MultiPlayerGameMode.destroyBlock` runs `playerWillDestroy` →
 `Block.spawnDestroyParticles` → `level.levelEvent(player, 2001, pos, id)`, and
 `ClientLevel.levelEvent` **ignores the exclusion** and dispatches straight into the
-same `case 2001` locally (`ClientLevel.java:877-882`) — sound and debris together.
+same `case 2001` locally — sound and debris together.
 
 ### The explosion sound was not decoded at all — and it is not client-predicted
 
 Live player report: "the creeper has a hiss but no explosion sound." The hiss
-(`entity.creeper.primed`, `Creeper.java:135`, an ordinary `Entity.playSound`)
+(`entity.creeper.primed`, played from `Creeper.tick`, an ordinary `Entity.playSound`)
 was already audible — it is only the detonation that was silent, and the
 reason is structural, not a routing gap: `v770` never decoded packet id 36
 (`minecraft:explode`) at all before this change, so there was nothing for any
@@ -158,18 +158,18 @@ router to forward.
 This is **not** the block-break trap repeated. Block breaking's own defect was
 "vanilla predicts your own break client-side and sends nothing" — the sound
 genuinely never crosses the wire for the player's own dig. An explosion is the
-opposite case, verified the same way: `Creeper.explodeCreeper` (`Creeper.java:
-230-239`) calls `level.explode(...)`, which always resolves to `Level.java:
-1208`'s six-argument overload, which constructs a `ServerExplosion` and — after
+opposite case, verified the same way: `Creeper.explodeCreeper` calls
+`level.explode(...)`, which always resolves to `ServerLevel.explode`'s
+overload, which constructs a `ServerExplosion` and — after
 `explosion.explode()` runs — sends exactly one `ClientboundExplodePacket` per
 in-range client, carrying `center`, `radius`, `blockCount`, an optional player
 knockback, `explosionParticle`, `explosionSound` (a `Holder<SoundEvent>`,
 `GENERIC_EXPLODE` for a plain creeper) and a `blockParticles` list.
-`ClientPacketListener.handleExplosion` (`ClientPacketListener.java:1357`) does
+`ClientPacketListener.handleExplosion` does
 nothing but play exactly what the server sent — at a **client-rolled** pitch,
 since neither `volume` (a fixed `4.0F`) nor `pitch`
 (`(1.0F + (random.nextFloat() - random.nextFloat()) * 0.2F) * 0.7F`) is on the
-wire at all. `decode_explode` (`crates/protocol/v770/src/adapter.rs`) rolls the
+wire at all. `decode_explode` (`crates/protocol/v770/src/adapter/chunk.rs`) rolls the
 identical die rather than inventing a fixed pitch, which is why its emitted
 `ClientEvent::Sound` reaches `net.rs`'s existing `Sound` forwarding arm with no
 new routing needed — this is a decode gap closed entirely inside `v770`, not
@@ -188,7 +188,7 @@ whatever") plausibly includes these; only the sound is fixed here.
 
 **Correction:** neither registry id needs the shared `ParticleOptions` decoder —
 both are `SimpleParticleType` with no payload at all
-(`ParticleTypes.java:57-58`), which `docs/particle-catalogue.md` previously
+(`ParticleTypes.java`), which `docs/particle-catalogue.md` previously
 lumped in with `dust`/`firework` (which do carry a real payload). The missing
 piece is a render-side `emit::`/dispatch arm, not a decoder; see that doc's
 correction for detail. The genuinely-blocked field is `blockParticles` (a
@@ -235,7 +235,7 @@ accumulator and the surface pick, not a census.
   packet already reaches the mixer.
 * **Adding a block surface sound**: the data is
   [`lodestone_data::sound_types`](./block-sound-types.md) and the three shell
-  entry points are `sim.rs`'s `play_block_break_sound`,
+  entry points are `sim/audio.rs`'s `play_block_break_sound`,
   `play_block_place_sound` and the shared `play_block_surface_sound`. Do not
   retype `(volume + 1) / 2` or `pitch * 0.8` — they are
   `BlockSoundType::break_or_place_volume`/`_pitch`, because vanilla uses the

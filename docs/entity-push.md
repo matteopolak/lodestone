@@ -20,12 +20,12 @@ Everything here is **inert until the shell hands over a neighbour list** — see
 
 | | predicate | default on `Entity` | `LivingEntity` |
 |---|---|---|---|
-| push | `Entity.isPushable()` (`Entity.java:2031`) | `false` | **overridden** (`LivingEntity.java:3366`): `isAlive() && !isSpectator() && !onClimbable()` |
-| collide | `Entity.canBeCollidedWith(other)` (`Entity.java:2381`) | `false` | **not overridden** |
+| push | `Entity.isPushable()` | `false` | **overridden** (`LivingEntity.isPushable`): `isAlive() && !isSpectator() && !onClimbable()` |
+| collide | `Entity.canBeCollidedWith(other)` | `false` | **not overridden** |
 
 The exhaustive list of `canBeCollidedWith` overrides in 26.2 is **three classes**:
-`AbstractBoat` (`:119`, unconditional `true`), `Shulker` (`:470`, `isAlive()`) and
-`HappyGhast` (`:576-586`, a baby/vehicle/still-timeout state machine with a
+`AbstractBoat.canBeCollidedWith` (unconditional `true`), `Shulker.canBeCollidedWith` (`isAlive()`) and
+`HappyGhast.canBeCollidedWith` (a baby/vehicle/still-timeout state machine with a
 client-only clause admitting a player standing on its back).
 
 **So "players and mobs pass straight through each other" is vanilla, not a
@@ -36,7 +36,7 @@ The asymmetry runs both ways, which is why one boolean cannot serve both
 questions:
 
 * a **boat** is collidable *and* pushable, and additionally overrides
-  `canCollideWith` to `canVehicleCollide` (`AbstractBoat.java:114-116`), which
+  `canCollideWith` to `AbstractBoat.canVehicleCollide`, which
   admits a merely *pushable* entity as a collider — that is the "you stand on a
   boat" case;
 * a **shulker** is collidable and **not** pushable (it inherits
@@ -44,7 +44,7 @@ questions:
 
 ### Who moves: symmetric, gated twice
 
-`Entity.push(Entity)` (`Entity.java:1882-1911`) computes **one** horizontal vector
+`Entity.push(Entity)` computes **one** horizontal vector
 from the two positions, hands `-v` to `this` and `+v` to `entity`, and gates each
 side independently on `!isVehicle() && isPushable()`. A ridden entity absorbs the
 shove and passes it on to nobody. Y is never touched.
@@ -53,8 +53,9 @@ shove and passes it on to nobody. Y is never touched.
 
 Naive pairwise separation has a real order dependency. Vanilla's answer is not a
 rule for resolving it — it is that **positions are read and never written**. The
-push is added to `deltaMovement` (`:1919-1924`) and `pushEntities` runs at the
-*end* of `aiStep` (`LivingEntity.java:3163`), after `travel` (`:3130`) has already
+push is added to `deltaMovement` (`Entity.push(double, double, double)`, called from
+`Entity.push(Entity)`) and `pushEntities` runs at the
+*end* of `LivingEntity.aiStep`, after `travel`'s call in the same method has already
 moved everything this tick. The impulses one entity receives are therefore a set
 computed from a frozen position snapshot, and summing a set commutes. No
 relaxation loop, no penetration-depth solve, no entity-id ordering.
@@ -70,7 +71,7 @@ and adding once, so a crowd is at least *internally* consistent.
 ### There is no per-entity push cap
 
 Nothing limits how many entities push one entity per tick; `pushEntities` iterates
-the whole list. `MAX_ENTITY_CRAMMING` (`LivingEntity.java:3226-3239`) deals **6.0
+the whole list. `MAX_ENTITY_CRAMMING` (`LivingEntity.pushEntities`) deals **6.0
 cramming damage** on `ServerLevel` only, behind a `random.nextInt(4) == 0` gate —
 damage, not a movement clamp, and invisible to a client's physics. Crowd behaviour
 is limited by the per-pair magnitude and by drag.
@@ -105,7 +106,7 @@ dominant component is exactly `±1` and its length lies in `[1, √2]`.
 Three consequences, each contradicting the obvious reading:
 
 1. **The normaliser is `sqrt(absMax)`, not the vector length.** `Mth.absMax`
-   (`Mth.java:134-136`) is `max(|a|, |b|)`. For `(0.15, 0.08)` the two differ by
+   is `max(|a|, |b|)`. For `(0.15, 0.08)` the two differ by
    6% — on both axes, on every tick.
 2. **There is no distance falloff.** The magnitude rises with separation up to
    `m = 1` and is then **flat** at `0.05f` forever. Two entities one block apart
@@ -127,8 +128,7 @@ the two are not bit-identical (three roundings versus two, in a different order)
 
 ## Client versus server: the factor of two
 
-`EntitySelector.pushableBy` has a clause that reshapes the whole port
-(`EntitySelector.java:41`):
+`EntitySelector.pushableBy` has a clause that reshapes the whole port:
 
 ```java
 if (!entity.level().isClientSide() || input instanceof Player p && p.isLocalPlayer()) { … } else { return false; }
@@ -142,9 +142,9 @@ pushee is the local player.** Therefore:
   initiates a push;
 * every push the local player feels comes from some other entity's `aiStep`, which
   the client does run unconditionally for remote entities (`LivingEntity.tick` →
-  `aiStep`, `:2795`; the `travel` inside is gated on `isEffectiveAi()`,
+  `aiStep`; the `travel` inside is gated on `isEffectiveAi()`,
   `pushEntities` is not). `RemotePlayer` makes this unmistakable: its `aiStep`
-  override (`client-src/.../RemotePlayer.java:43-69`) throws away the entire
+  override (`client-src/.../RemotePlayer.java`) throws away the entire
   `LivingEntity` body and keeps interpolation, the swing/bob timers and
   **`this.pushEntities()`**. On the client, a remote player's whole physics
   contribution *is* shoving the local player;
@@ -216,8 +216,8 @@ takes (pushable, not collidable, no team, no passengers).
    a geometry table for rendering; scale-attribute folding happens before the box is
    built, exactly as for `EntityDimensions::PLAYER`.
 3. **`pushable` is per entity type and per state.** `LivingEntity` →
-   `isAlive() && !isSpectator() && !onClimbable()`; `ArmorStand` → `false`
-   (`ArmorStand.java:169`); the `Entity` base (items, arrows, XP orbs) → `false`;
+   `isAlive() && !isSpectator() && !onClimbable()`; `ArmorStand.isPushable` → `false`;
+   the `Entity` base (items, arrows, XP orbs) → `false`;
    boats → `true`. Getting this wrong in the permissive direction manufactures
    pushes from dropped items, which is very visible.
 4. **`collidable` is `false` for everything except boats, shulkers and happy
@@ -270,7 +270,7 @@ earlier investigation had concluded it did.
   lifetime and take `Copy` with it, and it already lost `Eq` when it gained an
   `f64`. `move_entity_among_entities` is a second entry point instead.
 * **Entity colliders are gathered once, from the *movement* box, and reused for the
-  step-up pass** even though `stepUpAABB` is strictly larger (`Entity.java:1158`).
+  step-up pass** even though `stepUpAABB` is strictly larger (`Entity.collide`).
   An entity overlapping only the taller step-up box is invisible to the step. Do
   not re-gather.
 * **Entity colliders go first in the collider list.** `collectCollidersIgnoringWorldBorder`
@@ -368,9 +368,9 @@ unchanged:
 
 1. **It must be the survival oracle** (`./scripts/live-oracles/survival.sh`, game
    `:25565`, RCON `:25566`). The rubber-band check is skipped for `isCreative()`
-   (`ServerGamePacketListenerImpl.java:1147-1152`), so `creative.sh` gives a
+   (`ServerGamePacketListenerImpl.handleMovePlayer`), so `creative.sh` gives a
    guaranteed vacuous pass.
-2. **Read `Sim::teleport_count`** (`crates/lodestone-shell/src/sim.rs:506`).
+2. **Read `Sim::teleport_count`** (`crates/lodestone-shell/src/sim.rs`).
 3. **Run the unpatched build first and confirm the counter *does* increment** while
    standing in a mob, or "no corrections" is the *duration* species of vacuous test.
    This is the one case where that control is likely to actually fire, because an
