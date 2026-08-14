@@ -700,8 +700,17 @@ impl Goal for EndermanLookForPlayerGoal {
             }
             self.teleport_time = 0;
         } else if distance_sqr(mob.position(), target) > 256.0 {
+            // Vanilla `this.teleportTime++ >= this.adjustedTickDelay(30)`: a
+            // Java post-increment compares the value *before* incrementing,
+            // then always increments — so the gate opens the tick
+            // `teleport_time` is read as `30`, one tick after it is first
+            // *set* to `30`, not the tick it reaches `30`. Rust has no
+            // post-increment operator, so the pre-increment value has to be
+            // captured explicitly or this silently becomes `>= 30` one tick
+            // early.
+            let before_increment = self.teleport_time;
             self.teleport_time += 1;
-            if self.teleport_time >= 30 {
+            if before_increment >= 30 {
                 // Vanilla `EnderMan::teleportTowards`: 16 blocks past the
                 // target, along the target -> enderman direction.
                 let pos = mob.position();
