@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn titles_resolve_translate_components_through_the_translator() {
         // A vanilla boss bar's title is the boss's display name — a `translate`
-        // node, not prose. Issue #52's defect class: flattening it without the
+        // node, not prose. That fix's defect class: flattening it without the
         // language table renders `entity.minecraft.ender_dragon`.
         let mut bars = BossBarSet::new();
         bars.add(

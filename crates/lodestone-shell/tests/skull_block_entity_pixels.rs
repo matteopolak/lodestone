@@ -1,6 +1,6 @@
 //! Pixel gate: a skull/head must **draw**, in its own screen rect, through the
 //! real [`RenderState::render`] path — the same call `app.rs`'s frame loop
-//! makes (issue #23, the second block-entity type after chest).
+//! makes (the second block-entity type after chest).
 //!
 //! # Why this gate is the whole point of the change
 //!

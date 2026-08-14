@@ -61,7 +61,7 @@ use lodestone_testsupport::{RconClient, unique_username};
 
 /// Translates a raw, version-free [`EntityView`] into the ingest components
 /// the live path itself reads (`entities.rs`'s `resolve_entity_facts`),
-/// upserting `view.entity_id`'s ingest entity in `world` — issue #36's
+/// upserting `view.entity_id`'s ingest entity in `world` — that fix's
 /// replacement for feeding a hand-built `EntitySnapshot` straight to a
 /// now-deleted `fold_entity_snapshots`. Identical to
 /// `live_entity_render.rs`'s own `apply_view` — see that copy's doc for why

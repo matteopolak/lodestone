@@ -1,5 +1,5 @@
 //! Pixel gate: the first-person **arm** and the first-person **held item**
-//! must both dim with the world at night (issue #74) — "walking into a cave
+//! must both dim with the world at night — "walking into a cave
 //! leaves your hand lit as if it were noon."
 //!
 //! # What was actually broken
@@ -242,7 +242,7 @@ fn the_first_person_held_item_dims_with_the_world_at_night() {
 
     let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
     state.set_entity_light_source(|_| Some(SKY_LIT_NO_BLOCK));
-    // `false` is the glint flag (#452): this gate measures lighting, and a glint
+    // `false` is the glint flag: this gate measures lighting, and a glint
     // pass would add emission that the darken sweep below would read as light.
     state.set_main_hand_source(move || Some((item.clone(), false)));
     let cam = camera();

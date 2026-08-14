@@ -26,25 +26,25 @@
 //! method on. `use_item_live`/`place_block` here call the free functions now.
 
 use super::*;
-// Issue #109's veto registry -- see `attack_entity`.
+// That fix's veto registry -- see `attack_entity`.
 use lodestone_ecs::player::{FireworkBoost, ItemUseTicks};
 use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
 
 /// `TridentItem.THROW_THRESHOLD_TIME` (`TridentItem.java:29`) — how long the use
-/// button must be held before a release does anything at all. Issue #208.
+/// button must be held before a release does anything at all. That fix.
 const RIPTIDE_MIN_HELD_TICKS: u32 = 10;
 
 /// The deterministic part of `FireworkRocketEntity`'s lifetime for a standard
 /// 1-gunpowder rocket: `10 * flightCount` with `flightCount = 1 +
 /// flightDuration = 2` (`FireworkRocketEntity.java:61-69`). See
 /// [`Sim::start_firework_boost_if_gliding`] for the two random terms this
-/// deliberately omits and why. Issue #206.
+/// deliberately omits and why. That fix.
 const FIREWORK_BOOST_TICKS: u32 = 20;
 
 /// `minecraft:riptide`'s holder id in the synced `minecraft:enchantment`
 /// registry, derived from the alphabetical position of
 /// `data/minecraft/enchantment/riptide.json` among 26.2's 43 built-in
-/// enchantments (33rd, so id `32`). Issue #208.
+/// enchantments (33rd, so id `32`). That fix.
 ///
 /// **No longer the primary resolution** — [`Sim::riptide_enchantment_id`] asks
 /// the server's own `minecraft:enchantment` registry order first. This is the
@@ -120,7 +120,7 @@ impl Sim {
     /// Before this fix, only the `BLOCK`-with-a-dig-that-actually-starts arm
     /// ever reached [`Self::swing_hand`] (through `drive_mining`'s own queued
     /// `SwingArm`, see `drain_action_queue`'s docs) — so punching air, an
-    /// entity, or empty space produced no animation at all (issue #72). This
+    /// entity, or empty space produced no animation at all. This
     /// method is the one place all three branches now funnel through.
     ///
     /// `case ENTITY` takes priority over `case BLOCK`: [`EntityRayTarget`] is
@@ -256,7 +256,7 @@ impl Sim {
     /// entity restarts the cooldown regardless of whether the server ends up
     /// applying any damage.
     fn attack_entity(&mut self, entity_id: i32) {
-        // Issue #109's entity-damage veto. This is one of the three verbs that
+        // That fix's entity-damage veto. This is one of the three verbs that
         // does NOT go through `ActionQueue` (it writes the socket directly, to
         // control wire order for a discrete click), so the outbound
         // `EgressFilters` hook cannot see it -- the veto has to be asked here.
@@ -532,7 +532,7 @@ impl Sim {
                 let mut using = w.resource_mut::<UsingItem>();
                 std::mem::replace(&mut using.0, false)
             };
-            // Issue #208: taken (not read) whether or not the release is
+            // Taken (not read) whether or not the release is
             // actionable, so a use that ends for any reason cannot leave a
             // duration behind for an unrelated later one to inherit.
             let held = w.resource_mut::<ItemUseTicks>().0.take();
@@ -541,7 +541,7 @@ impl Sim {
         if !was_using {
             return;
         }
-        // Issue #208. Before the send, because vanilla's own order is the same:
+        // That fix. Before the send, because vanilla's own order is the same:
         // `MultiPlayerGameMode.releaseUsingItem` runs the client's
         // `LivingEntity.releaseUsingItem` — which is what calls
         // `TridentItem.releaseUsing` and applies the launch locally — and the
@@ -562,7 +562,7 @@ impl Sim {
     const CHEST_ARMOUR_NATIVE_INDEX: usize = 38;
 
     /// Whether some equipment slot holds a glider, for
-    /// [`lodestone_physics::can_glide`] (issue #206).
+    /// [`lodestone_physics::can_glide`].
     ///
     /// Vanilla walks every `EquipmentSlot` looking for a
     /// `DataComponents.GLIDER` component (`LivingEntity.canGlideUsing`,
@@ -588,7 +588,7 @@ impl Sim {
     }
 
     /// Start a firework-rocket elytra boost if the held item is a rocket and we
-    /// are gliding (issue #206).
+    /// are gliding.
     ///
     /// # Duration, and the one part of it that cannot be predicted
     ///
@@ -629,7 +629,7 @@ impl Sim {
     }
 
     /// `TridentItem.releaseUsing`'s riptide branch (`TridentItem.java:61-110`),
-    /// issue #208 — the driver `lodestone_physics::apply_riptide` was written
+    /// That fix — the driver `lodestone_physics::apply_riptide` was written
     /// for and never had.
     ///
     /// All three gates vanilla checks before the impulse, evaluated here because
@@ -739,7 +739,7 @@ impl Sim {
             .map_or(0, |enchantment| enchantment.level)
     }
 
-    /// `Entity.isInWaterOrRain()` (`Entity.java:1614-1616`), issue #208.
+    /// `Entity.isInWaterOrRain()` (`Entity.java:1614-1616`), that fix.
     ///
     /// The water half is exact — the same [`lodestone_physics::FluidState`] the
     /// tick computed. The rain half is `Level.isRainingAt`, which is
@@ -768,7 +768,7 @@ impl Sim {
     }
 
     /// Lower a live right-click into the server's `use_item_on` action **and
-    /// predict the placement locally** (issue #381).
+    /// predict the placement locally**.
     ///
     /// The server stays authoritative: [`Placement::use_on`] returns the action to
     /// send in *every* branch, so the shell sends it unconditionally (with a
@@ -782,7 +782,7 @@ impl Sim {
     ///
     /// This method used to send and wait, so a placed block did not exist
     /// client-side until the server's `BLOCK_UPDATE` came back — one round trip of
-    /// hole. For a chest that is #374 reached through a different door: the state
+    /// hole. For a chest that is that fix reached through a different door: the state
     /// write is what creates the block entity, and with no local state write there
     /// was no local record and nothing to draw. The prediction now writes through
     /// [`write_predicted_block`], the same `set_block` + `sync_block_entity` pair
@@ -803,7 +803,7 @@ impl Sim {
     /// `pos` is `clicked` and `pos.relative(direction)` is the adjacent cell, and a
     /// prediction can only ever land on one of those two. So a refused placement is
     /// overwritten by the authoritative state within one round trip — and since
-    /// #374 that path calls `sync_block_entity`, which **removes** the block-entity
+    /// That fix that path calls `sync_block_entity`, which **removes** the block-entity
     /// record the prediction created (`BlockEntitySync::Removed`). The removal half
     /// is not a second mechanism to build; it is the same one, pointing the other
     /// way. `crates/lodestone-shell/tests/placed_chest_block_entity_pixels.rs`
@@ -825,14 +825,14 @@ impl Sim {
         // branches, and this client has no equivalent per-item hook to mark
         // it from.
         self.write(|w| w.resource_mut::<UsingItem>().0 = true);
-        // Issue #208: arm vanilla's `timeHeld`, which is what
+        // Arm vanilla's `timeHeld`, which is what
         // `TridentItem.releaseUsing` compares against its 10-tick threshold on
         // the release edge. Zero here and advanced by
         // `lodestone_ecs::player::tick_item_use`, so the count is in 20 Hz ticks
         // and not in frames — a 200 fps client must not reach the threshold ten
         // times sooner than a 20 fps one.
         self.write(|w| w.resource_mut::<ItemUseTicks>().0 = Some(0));
-        // Issue #206: a firework rocket used while gliding is the boost, and it
+        // A firework rocket used while gliding is the boost, and it
         // is not an interaction with anything the branches below resolve — so it
         // is decided here, before them, off the held stack alone.
         self.start_firework_boost_if_gliding();

@@ -27,7 +27,7 @@
 //! expression the draw uses rather than from a copied constant. So every
 //! assertion here is measured **against the held-item name**, which is the one
 //! text surface in `hud.rs` already known to be vanilla-correct at scale 1.0:
-//! it was fixed to exactly that under issue #126, and its draw site carries a
+//! it was fixed to exactly that under that fix, and its draw site carries a
 //! comment warning the next reader *not* to reintroduce `scale` there. Vanilla
 //! draws the held-item name and the action bar through the identical unscaled
 //! path, so their rendered heights must be **equal**, and the title must be
@@ -54,8 +54,8 @@
 //! multiplying by `scale`. It is the handover artefact for that patch.
 
 // The crate is `lodestone-shell` but its `[lib] name` is `lodestone`
-// (`Cargo.toml:10-12`) — the same import every other test in this directory
-// uses, e.g. `held_item_name_pixels.rs:46`.
+// (see the `[lib]` section of `Cargo.toml`) — the same `use lodestone::...`
+// import every other test in this directory uses.
 use lodestone::hud::{DebugStats, HudFrame, HudGeometry};
 use lodestone::menu::render::logical_canvas;
 use lodestone::overlay::plain_spans;
@@ -68,7 +68,7 @@ const FB_H: u32 = 720;
 
 /// `hud.rs`'s `FLOATS_PER_VERTEX` — position `(x, y)` in NDC plus RGBA. The
 /// constant itself is private to the crate; `ColourStream::rect`
-/// (`hud/item_icon.rs:677-691`) carries a `debug_assert_eq!(FLOATS_PER_VERTEX, 6)`
+/// carries a `debug_assert_eq!(FLOATS_PER_VERTEX, 6)`
 /// pinning this layout, and `vertex_layout_is_still_six_floats` below fails if
 /// the stride ever stops dividing the buffer.
 const STRIDE: usize = 6;
@@ -82,7 +82,7 @@ fn canvas() -> (f32, f32) {
 
 /// The ink bounding box of a frame's colour geometry, in **logical canvas
 /// pixels**, inverting `ColourStream::rect`'s NDC mapping
-/// (`hud/item_icon.rs:679`: `x_ndc = 2*px/w - 1`, `y_ndc = 1 - 2*py/h`).
+/// (`x_ndc = 2*px/w - 1`, `y_ndc = 1 - 2*py/h`).
 ///
 /// Returns `None` for a frame that paints nothing.
 fn ink_bbox(frame: &HudFrame<'_>) -> Option<(f32, f32, f32, f32)> {
@@ -139,7 +139,7 @@ fn ink_height(label: &str, frame: &HudFrame<'_>) -> f32 {
 
 /// A frame with the two always-on surfaces switched off, so the only geometry
 /// in the buffer belongs to whichever text surface a test sets. `HudFrame::new`
-/// defaults `show_debug` and `crosshair` to `true` (`hud.rs:484-485`).
+/// defaults `show_debug` and `crosshair` to `true`.
 fn quiet(stats: &DebugStats) -> HudFrame<'_> {
     let mut f = HudFrame::new(stats);
     f.show_debug = false;

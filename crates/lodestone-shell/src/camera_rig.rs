@@ -16,7 +16,7 @@
 //! while any non-standing pose was active, which is the kind of comment-shaped
 //! lie that costs someone an afternoon. Pass the eye height.
 //!
-//! # The eye height must be *smoothed*, not read raw (issue #59)
+//! # The eye height must be *smoothed*, not read raw
 //!
 //! A pose change (standing `1.62` ↔ swimming `0.4`) is a **snap** in
 //! [`PlayerState::eye_height`] — it is set once, atomically, by
@@ -62,9 +62,8 @@
 //! `Sim::step`): a `Sim`-owned `EyeHeightSmoother`, ticked once per physics
 //! tick from the *post-tick* pose's eye height, and read back through
 //! [`EyeHeightSmoother::lerp`] with the frame's interpolation alpha wherever
-//! `Sim::camera` currently reads `interp.eye_height` raw
-//! (`lodestone-shell/src/sim.rs:3429-3437`). That call site is out of this
-//! change's scope (`sim.rs` is held by another agent) — see `docs/swimming.md`
+//! `Sim::camera` currently reads `interp.eye_height` raw. That call site was out
+//! of this change's original scope — see `docs/swimming.md`
 //! for the exact patch to apply there.
 //!
 //! # Riding needs nothing here, and that is a measured claim
@@ -403,7 +402,7 @@ fn sign(v: f32) -> i32 {
 }
 
 /// `Camera`'s own `eyeHeight`/`eyeHeightOld` pair (`Camera.java:59-60,80-88`) —
-/// the fix for issue #59's entering/leaving-swim camera jerk.
+/// the fix for that fix's entering/leaving-swim camera jerk.
 ///
 /// This is deliberately **not** [`PlayerState::swim_amount`]; see the module
 /// docs for why the two must stay separate. Own one of these per camera (per
@@ -458,7 +457,7 @@ impl EyeHeightSmoother {
 }
 
 // ---------------------------------------------------------------------------
-// View bobbing (issue #58)
+// View bobbing
 // ---------------------------------------------------------------------------
 
 /// Vanilla's `hurtDuration`, set alongside `hurtTime` by both
@@ -467,7 +466,7 @@ impl EyeHeightSmoother {
 pub const HURT_DURATION_TICKS: f32 = 10.0;
 
 /// The walk-bob state vanilla spreads across `ClientAvatarState` and
-/// `LocalPlayer`, gathered into one per-camera value (issue #58).
+/// `LocalPlayer`, gathered into one per-camera value.
 ///
 /// # What this is, and the four fields that are really two pairs
 ///
@@ -1043,7 +1042,7 @@ fn clamp_fov(degrees: f32) -> f32 {
     }
 }
 
-/// Applies the spyglass FOV-zoom modifier (issue #154) to an already-built
+/// Applies the spyglass FOV-zoom modifier to an already-built
 /// camera — `AbstractClientPlayer.getFieldOfViewModifier`
 /// (`AbstractClientPlayer.java:92-114`) returns `0.1F` outright (overriding
 /// every other FOV modifier) when `firstPerson && isScoping()`, and
@@ -2008,7 +2007,7 @@ mod tests {
         assert_eq!(at(90.0), 90.0);
     }
 
-    // --- apply_spyglass_fov: issue #154's FOV-zoom half. ---
+    // --- apply_spyglass_fov: that fix's FOV-zoom half. ---
 
     #[test]
     fn apply_spyglass_fov_is_a_tenth_while_scoping() {

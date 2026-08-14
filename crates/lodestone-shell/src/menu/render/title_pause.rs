@@ -11,7 +11,7 @@ use super::*;
 ///
 /// **Vanilla's `TitleScreen` uses no layout class at all** — it hand-centres on
 /// `this.width / 2 - 100` and steps `topPos` by 24 (`TitleScreen.java:105-205`),
-/// and #392's plan is explicit that a hand-arithmetic screen is legitimate
+/// and that fix's plan is explicit that a hand-arithmetic screen is legitimate
 /// vanilla. What makes this re-expression faithful rather than invented is that
 /// the two are *numerically identical*, which is not a coincidence:
 ///
@@ -62,13 +62,13 @@ fn title_menu_column() -> layout::LinearLayout {
 ///
 /// `menu_padding_top` is `MENU_PADDING_TOP` (50) in production; it is a parameter
 /// only so `a_changed_cell_padding_moves_every_pause_rect` can run the negative
-/// control #394 asks for — change one `LayoutSettings` padding value and watch the
+/// control that fix asks for — change one `LayoutSettings` padding value and watch the
 /// rect assertions go red — against the real builder rather than a copy of it.
 ///
 /// The Options row takes vanilla's **`hasSingleplayerServer()`** branch
 /// (`:157-160`): two half-width buttons, Options and Open to LAN, rather than one
-/// full-width Options. This client does host its own worlds (issue #287), and
-/// since issue #535 the second button has something to do — the previous version
+/// full-width Options. This client does host its own worlds, and
+/// since that fix the second button has something to do — the previous version
 /// of this comment said "this client has no integrated server" and had been stale
 /// since singleplayer landed.
 ///
@@ -163,7 +163,7 @@ fn pause_block() -> &'static MenuBlock {
     static BLOCK: std::sync::OnceLock<MenuBlock> = std::sync::OnceLock::new();
     // Every one of `PAUSE_BUTTONS`, four of them inside the nested icon row.
     // Derived from the table rather than restated: the count moved from 9 to 10
-    // when Open to LAN landed (issue #535), and a literal here is a second place
+    // when Open to LAN landed, and a literal here is a second place
     // to forget.
     BLOCK.get_or_init(|| {
         MenuBlock::of(
@@ -285,7 +285,7 @@ pub fn pause_slot(button: PauseButton) -> Slot {
     }
 }
 
-/// Vanilla's rect for one death-screen button (issue #103):
+/// Vanilla's rect for one death-screen button:
 /// `this.width / 2 - 100, this.height / 4 + 72 | 96, 200, 20`
 /// (`DeathScreen.java:47-58`). Both buttons share `x`; only `y` differs.
 ///

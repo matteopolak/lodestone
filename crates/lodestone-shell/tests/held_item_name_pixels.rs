@@ -1,4 +1,4 @@
-//! Pixel gate: the held-item name highlight (issue #126) reaches the **real
+//! Pixel gate: the held-item name highlight reaches the **real
 //! HUD build**, not just `HudFrame::held_item`'s field existing.
 //!
 //! # Why this is the island shape CLAUDE.md names
@@ -21,14 +21,14 @@
 //! debug/chat text). The expected x is derived from the vanilla font's own
 //! measured string width, not restated as a constant.
 //!
-//! # Ties #126 to #117
+//! # Also proves italic shear reaches this same draw
 //!
 //! An item's custom name draws **italic** (`Hud.java:628-630`,
 //! `.withStyle(ChatFormatting.ITALIC)` when `has(DataComponents.CUSTOM_NAME)`)
 //! — [`a_custom_named_item_draws_narrower_when_forced_upright`] proves this
-//! specific consumer actually exercises #117's italic shear, by comparing the
+//! specific consumer actually exercises that fix's italic shear, by comparing the
 //! real (sheared) ink width against the width the *same* string would
-//! measure at if italic were silently dropped (the pre-#117 shape: shear
+//! measure at if italic were silently dropped (the pre-fix shape: shear
 //! costs zero width by construction, so a dropped-italic bug would pass a
 //! naive "some ink appeared" check and only show up as a magnitude
 //! difference here).
@@ -199,7 +199,7 @@ fn a_selected_items_name_draws_centred_at_vanillas_anchor() {
         "y must sit at guiHeight - 59 (Hud.java:634); want y0={want_y0:.1}, got {got}"
     );
     // Not scaled ×2 like the debug/chat text elsewhere in this file — the
-    // exact "XP number" defect (issue #256) on a second piece of HUD text.
+    // exact "XP number" defect on a second piece of HUD text.
     // At scale 1.0 the ink height for a one-line string is at most the
     // ascii cell height (8px) plus the 1px drop shadow; at the old (wrong)
     // ×2 scale it would be roughly double that.
@@ -210,7 +210,7 @@ fn a_selected_items_name_draws_centred_at_vanillas_anchor() {
     );
 }
 
-/// Ties #126 to #117: an item forced italic (custom name) must measure
+/// Proves italic shear reaches this same draw: an item forced italic (custom name) must measure
 /// **narrower** than the width vanilla's own advance table predicts for the
 /// same plain string would need if italic geometry were silently dropped —
 /// i.e. it must not be identical to an upright draw of the same characters at
@@ -260,7 +260,7 @@ fn a_custom_named_items_styled_name_draws_through_the_real_font() {
     // Both centred (same advance width in both cases — italic costs zero
     // advance), but italic's *ink* bbox is wider than plain's because the
     // sheared top/bottom rows spread the ink horizontally beyond the
-    // upright glyph's own columns. A silently-dropped italic (the pre-#117
+    // upright glyph's own columns. A silently-dropped italic (the pre-fix
     // shape) would make these two boxes identical.
     assert!(
         italic_box.x1 - italic_box.x0 > plain_box.x1 - plain_box.x0,

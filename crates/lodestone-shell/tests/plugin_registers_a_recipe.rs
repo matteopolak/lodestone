@@ -1,4 +1,4 @@
-//! Issue #148: a recipe a **plugin** registered reaches the crafting screen.
+//! A recipe a **plugin** registered reaches the crafting screen.
 //!
 //! # Why this test exists and the unit tests are not enough
 //!

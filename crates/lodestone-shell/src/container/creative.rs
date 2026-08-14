@@ -1,4 +1,4 @@
-//! The creative-inventory screen (issue #158): tab strip, item grid, scrollbar,
+//! The creative-inventory screen: tab strip, item grid, scrollbar,
 //! search.
 //!
 //! Vanilla's `CreativeModeInventoryScreen`, whose contents come from

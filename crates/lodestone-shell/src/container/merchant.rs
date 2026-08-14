@@ -1,5 +1,5 @@
 //! The merchant/trading screen's trade-list layout, prices and click
-//! hit-test (issue #245's UI half).
+//! hit-test (that fix's UI half).
 //!
 //! ## What it is
 //!

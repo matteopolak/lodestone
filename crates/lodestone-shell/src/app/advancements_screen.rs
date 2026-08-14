@@ -1,4 +1,4 @@
-//! The Advancements screen's wiring (issue #167): clicks, panning, and the
+//! The Advancements screen's wiring: clicks, panning, and the
 //! per-frame geometry call.
 //!
 //! The screen itself is [`crate::menu::advancements`]; this module is the half
@@ -218,7 +218,7 @@ pub(super) fn advancements_panel_geometry(
     ))
 }
 
-/// The HUD view for one completion toast (issue #167).
+/// The HUD view for one completion toast.
 ///
 /// A free function for [`advancements_panel_geometry`]'s reason: `redraw` holds
 /// `&mut` borrows across the frame, so this takes the `&'static Advancement` and

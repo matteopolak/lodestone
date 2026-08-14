@@ -93,7 +93,7 @@ impl Sim {
     pub fn apply_mouse(&mut self) {
         let (dx, dy) = self.input_mut(InputState::take_mouse);
         if dx != 0.0 || dy != 0.0 {
-            // Issue #443: the *pushed* option, not `self.config.sensitivity`.
+            // The *pushed* option, not `self.config.sensitivity`.
             // The latter is argv-derived and fixed for the process lifetime,
             // so reading it made the persisted slider apply only at the next
             // launch. See `Sim::sensitivity`'s own doc comment.
@@ -116,7 +116,7 @@ impl Sim {
     }
 
     /// Push vanilla's `invertMouseX`/`invertMouseY` options down from the menu
-    /// layer (issue #203), the same way [`Self::set_view_bobbing`] does for
+    /// layer, the same way [`Self::set_view_bobbing`] does for
     /// View Bobbing. Cheap and idempotent; `app.rs` calls it once per frame,
     /// before [`Self::step`] so the very tick the option changes already
     /// sees it.
@@ -126,7 +126,7 @@ impl Sim {
     }
 
     /// Push vanilla's `sensitivity` option down from the menu layer (issue
-    /// #443), the same way [`Self::set_mouse_invert`] does. Cheap and
+    /// That fix), the same way [`Self::set_mouse_invert`] does. Cheap and
     /// idempotent; `app/redraw.rs` calls it once per frame **before**
     /// [`Self::step`] so the very tick the slider moves already turns at the
     /// new rate — pushing it after `step` would apply each change one frame
@@ -136,7 +136,7 @@ impl Sim {
     }
 
     /// Push vanilla's `key.sneak`/`key.sprint`/`key.attack`/`key.use`
-    /// hold-vs-toggle options down from the menu layer (issues #202/#444).
+    /// hold-vs-toggle options down from the menu layer.
     /// Stored rather than applied directly because the actual
     /// [`InputState::set_toggle_modes`] call has to happen inside
     /// [`Self::step`] (see that field's doc) — `Sim` has no `MenuNav` to read
@@ -155,14 +155,14 @@ impl Sim {
     }
 
     /// Push vanilla's `options.autoJump` down from the menu layer (issue
-    /// #444), the same shape as [`Self::set_toggle_modes`] — stored here,
+    /// That fix), the same shape as [`Self::set_toggle_modes`] — stored here,
     /// applied inside [`Self::step`] where the physics world is readable.
     pub fn set_auto_jump(&mut self, auto_jump: bool) {
         self.auto_jump = auto_jump;
     }
 
     /// Push vanilla's `options.sprintWindow` down from the menu layer (issue
-    /// #444) — the double-tap-forward window in 20 Hz ticks. `0` disables
+    /// That fix) — the double-tap-forward window in 20 Hz ticks. `0` disables
     /// double-tap sprint. Pushed once per `step` by the shell, so a mid-session
     /// change from the settings screen applies on the very next tick.
     pub fn set_sprint_window_ticks(&mut self, ticks: u8) {
@@ -234,7 +234,7 @@ impl Sim {
             {
                 actions.push(ClientAction::EndClientTick);
             }
-            // Issue #157's outbound hook: a plugin's chance to inspect, replace
+            // That fix's outbound hook: a plugin's chance to inspect, replace
             // or suppress what another plugin queued, before any of it reaches
             // the socket. Inside the guard we already hold — the filters receive
             // only `&ClientAction`, never the `World`, so this cannot re-enter
@@ -333,7 +333,7 @@ impl Sim {
     /// confined to stalls).
     pub fn step(&mut self, dt: f64) {
         self.apply_mouse();
-        // Issues #202/#444: apply the hold-vs-toggle and sprint-window options
+        // Those fixes: apply the hold-vs-toggle and sprint-window options
         // to the live `InputState` before any `GameTick` schedule this call
         // runs reads it. One push per `step` call is enough — the option
         // cannot change mid-frame, and every catch-up tick inside this call
@@ -405,12 +405,12 @@ impl Sim {
                 )
             };
             let pre_dead = self.is_dead();
-            // Issue #201: vanilla's Auto-Jump option, pushed at the one place the
+            // Vanilla's Auto-Jump option, pushed at the one place the
             // real detector can read it. Inside the tick loop rather than before
             // it for no reason other than symmetry with the three resources
             // below — the value is frame-stable either way.
             let auto_jump = lodestone_ecs::player::AutoJump(self.auto_jump);
-            // Issue #206: the equipment half of `LivingEntity.canGlide`.
+            // The equipment half of `LivingEntity.canGlide`.
             let glider = lodestone_ecs::player::GliderEquipped(self.glider_equipped());
             self.write(|w| {
                 w.insert_resource(collision);
@@ -452,7 +452,7 @@ impl Sim {
             // input is the movement *achieved* after collision, which only exists
             // as the difference across the schedule run above.
             self.tick_footstep(pre_position, &p);
-            // **Auto-jump used to live here, and that was issue #201's defect.**
+            // **Auto-jump used to live here, and that was that fix's defect.**
             // `lodestone_physics::update_auto_jump` is a complete port of
             // `LocalPlayer.updateAutoJump` — swept look-ahead probe, headroom
             // raycast, the `-0.15` facing-vs-moving dot product and all — and it
@@ -489,7 +489,7 @@ impl Sim {
             // the player's bounding box overlap a portal cell" and that is a fact
             // about where the tick left them, not where it started.
             self.tick_portal_effect();
-            // Chest lids (issue #23), on the same fixed 20 Hz as everything else
+            // Chest lids, on the same fixed 20 Hz as everything else
             // here: `ChestLidController.tickLid()` ramps by ±0.1 per tick, so a
             // lid takes exactly 10 ticks to swing. Advancing it per *frame*
             // instead would open a chest in a third of a second at 60 fps and
@@ -584,7 +584,7 @@ impl Sim {
     /// an `||` chain: the geometry the collision tests exercise has to be the exact
     /// geometry the ray uses, or the gate proves nothing about the pick.
     ///
-    /// # Issue #375: boxes, not a boolean
+    /// # Boxes, not a boolean
     ///
     /// This used to pass `is_pickable` — a per-*cell* occupancy predicate — so
     /// every pickable block was a unit cube to the hit test while the selection
@@ -644,7 +644,7 @@ impl Sim {
     /// on a partial block — too *short* whenever the real box sits deeper in the
     /// cell than its near face, which hid an entity standing in front of a
     /// fence. The ray now reports its own entry distance, so there is nothing
-    /// left to approximate (issue #375).
+    /// left to approximate.
     ///
     /// Candidates come from the same `(Position, EntityKind)` query
     /// [`Self::tick_nearby_entities`] uses for pushers, resolved to a hitbox

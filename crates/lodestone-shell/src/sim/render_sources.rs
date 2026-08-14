@@ -76,8 +76,8 @@ impl Sim {
     /// unification. It was not: everything the closure needs was already `'static`
     /// and `Send + Sync` — `NetClient::shared_handle` is an
     /// `Arc<OnceLock<Arc<ClientHandle>>>`, `ClientHandle::block_at` is public, and
-    /// `VersionAdapter` is declared `Send + Sync + Debug` at
-    /// `lodestone-model/src/adapter.rs:391`. Capturing the *handle* rather than the
+    /// `VersionAdapter` is declared `Send + Sync + Debug` in its own trait bound.
+    /// Capturing the *handle* rather than the
     /// store is also what makes this installable before login, when there is no
     /// store to capture yet.
     ///
@@ -123,7 +123,7 @@ impl Sim {
         })
     }
 
-    /// This frame's block entities (chests, issue #23) as a `'static` closure for
+    /// This frame's block entities (chests, that fix) as a `'static` closure for
     /// [`RenderState::set_block_entity_source`].
     ///
     /// `None` without a live session — the offline demo world has no chests, and a
@@ -331,8 +331,7 @@ impl Sim {
     }
 
     /// This frame's filled-map picture, for
-    /// [`RenderState::set_map_source`](crate::gpu::RenderState::set_map_source)
-    /// (issue #184).
+    /// [`RenderState::set_map_source`](crate::gpu::RenderState::set_map_source).
     ///
     /// Takes an optional map id and yields that map's raw 128×128 packed colour
     /// grid, cloned out of [`SessionMaps`](lodestone_ecs::session::SessionMaps).
@@ -426,13 +425,13 @@ impl Sim {
         })
     }
 
-    /// Every crack overlay to draw this frame (issue #410): the local
+    /// Every crack overlay to draw this frame: the local
     /// player's own dig via [`Self::crack_target`], plus one
     /// [`crate::gpu::CrackTarget`] for every *other* player's active overlay
     /// in [`SessionBlockDestruction`], folded from `ClientEvent::BlockDestruction`
     /// by `lodestone_ecs::session::apply_block_destruction`.
     ///
-    /// This is the accessor the #410 report's own gate (`gathers_local_plus_
+    /// This is the accessor that fix's own gate (`gathers_local_plus_
     /// every_other_players_overlay` in `gpu/outline.rs`) proved the pipeline
     /// side of but that nothing in production called: `crate::gpu::
     /// gather_crack_targets` and `BlockDestructionOverlays::iter` both landed
@@ -478,7 +477,7 @@ impl Sim {
                 // `O(live particles)`, so the emitter comes out of the `World`
                 // first — the same reason `extract_particles` does it.
                 //
-                // The ambient scan (issue #178) rides the *same* snapshot rather
+                // The ambient scan rides the *same* snapshot rather
                 // than taking a second lock: it is a bounded number of block
                 // probes, and this is the one place per tick that already holds a
                 // block view with no `World` guard over it.
@@ -557,7 +556,7 @@ impl Sim {
                     }
                     // `sections_and_light_at` takes `lodestone_client::ChunkPos`,
                     // which is a *different type* from the `lodestone_world`
-                    // one imported at the top of this file (see mesher.rs:224).
+                    // one `mesher.rs` imports and uses throughout.
                     let pos = lodestone_client::ChunkPos {
                         x: x.div_euclid(16),
                         z: z.div_euclid(16),

@@ -1,5 +1,4 @@
-//! Filled-map drawing: the per-map 128×128 texture and the quads that sample it
-//! (issue #184).
+//! Filled-map drawing: the per-map 128×128 texture and the quads that sample it.
 //!
 //! # No map pipeline and no map shader
 //!
@@ -40,7 +39,7 @@ use super::RenderState;
 pub const FILLED_MAP_ITEM: &str = "filled_map";
 
 /// The two entity types that hang an item on a wall. Neither has a renderer of
-/// its own (both are `HangingEntity`, out of issue #23's block-entity scope), so
+/// its own (both are `HangingEntity`, out of that fix's block-entity scope), so
 /// a framed map draws its picture with no surrounding frame border — the picture
 /// is the part a player is looking at.
 pub const ITEM_FRAME_TYPES: [&str; 2] = ["item_frame", "glow_item_frame"];

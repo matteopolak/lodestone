@@ -34,7 +34,7 @@
 //! or none — is always visible rather than looking like a working system that
 //! quietly emits nothing.
 //!
-//! # The atlas a UV belongs to is part of the UV (issue #45)
+//! # The atlas a UV belongs to is part of the UV
 //!
 //! The sheet stitch and the block-model stitch are **different textures with
 //! different packings**, so a UV rect on its own does not identify a texel.
@@ -71,7 +71,7 @@ const LAVA_DRIP_COLOUR: [f32; 3] = [1.0, 0.2857, 0.083];
 /// without its atlas is meaningless and was for months exactly that: the
 /// renderer bound one texture — the block-model atlas — and every
 /// [`SpriteSource::Sheet`] particle sampled block texels at particle-sheet
-/// coordinates (issue #45). Making the pair inseparable is the point; a
+/// coordinates. Making the pair inseparable is the point; a
 /// future emitter cannot forget to say which atlas it meant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpriteAtlas {
@@ -163,7 +163,7 @@ pub struct ParticleFrame {
     /// the block-model atlas.
     ///
     /// This is an **anti-vacuity counter**, not a game value, and it exists
-    /// because of issue #45: the pre-fix renderer bound one texture, so
+    /// because the pre-fix renderer bound only one texture, so
     /// `unresolved == 0` was satisfied by flame/smoke/crit UVs that resolved
     /// perfectly and then sampled *block* texels. A gate on sheet particles
     /// has to be able to prove the sheet path was exercised at all —
@@ -520,7 +520,7 @@ impl Particles {
             "crit" => emit::crit(&mut self.engine, x, y, z, xa, ya, za),
             "splash" => emit::splash(&mut self.engine, x, y, z, xa, ya, za),
             "bubble" => emit::bubble(&mut self.engine, x, y, z, xa, ya, za),
-            // The sweep-attack particle (#12's split-out remainder — its own
+            // The sweep-attack particle (that fix's split-out remainder — its own
             // issue now). `xa` doubles as the constructor's `size` parameter
             // here, per `AttackSweepParticle`'s own signature; see
             // `emit::sweep_attack`'s docs for why the one real vanilla call
@@ -541,7 +541,7 @@ impl Particles {
             "happy_villager" => emit::happy_villager(&mut self.engine, x, y, z, xa, ya, za),
             "witch" => emit::witch(&mut self.engine, x, y, z, xa, ya, za),
             "totem_of_undying" => emit::totem_of_undying(&mut self.engine, x, y, z, xa, ya, za),
-            // `ParticleTypes.EXPLOSION_EMITTER`/`EXPLOSION` (issue #416).
+            // `ParticleTypes.EXPLOSION_EMITTER`/`EXPLOSION`.
             // Correction the doc for these two carried until this pass: they
             // are **not** blocked on the shared `ParticleOptions` decoder
             // (`docs/particle-catalogue.md`'s "explosion_emitter"/"explosion"
@@ -566,7 +566,7 @@ impl Particles {
                 emit::huge_explosion(&mut self.engine, x, y, z, size);
             }
 
-            // -- Ambient and environmental types (issue #178) ----------------
+            // -- Ambient and environmental types ----------------
             //
             // Every arm below is an argument-less `SimpleParticleType`, so the
             // three velocity words are exactly what the wire sent and nothing
@@ -745,7 +745,7 @@ impl Particles {
     /// The two are returned together on purpose. `state_uv` and `sheet_uv` are
     /// keyed into two independent stitches with different dimensions and
     /// different packings, so a rect alone does not identify a texel — which is
-    /// precisely how issue #45 happened: the renderer bound the block-model
+    /// precisely how that fix happened: the renderer bound the block-model
     /// atlas for both and flame drew fragments of arbitrary block textures
     /// while `ParticleFrame::unresolved` stayed at zero.
     fn sprite_rect(&self, sprite: SpriteSource) -> Option<([f32; 4], SpriteAtlas)> {
@@ -838,7 +838,7 @@ fn sheet_uv_table(atlas: &ParticleAtlas) -> HashMap<(Sheet, u16), [f32; 4]> {
 /// Group 1 binds **both** stitches — the block-model atlas the terrain samples
 /// *and* the stitched particle sheet — and each instance carries a
 /// [`SpriteAtlas`] selector saying which of them its UVs address. Before that
-/// (issue #45) this pass bound one texture and every sheet particle sampled
+/// this pass bound one texture and every sheet particle sampled
 /// block texels at particle-sheet coordinates: `/particle minecraft:flame`
 /// drew fragments of arbitrary block textures, and nothing observed it because
 /// the UVs *did* resolve.
@@ -873,7 +873,7 @@ pub struct ParticleRenderer {
     /// caller that never installed a sheet texture can *notice* it is
     /// submitting sheet instances instead of drawing nothing — see
     /// [`ParticleFrame::sheet_drawn`] for why that distinction is the whole
-    /// point of issue #45.
+    /// point of that fix.
     sheet_count: u32,
 }
 
@@ -1066,7 +1066,7 @@ impl ParticleRenderer {
     /// terrain fragment is textured from the same pixels as the block it came
     /// off. `sheet_*` is the stitched [`ParticleAtlas`] upload, which is a
     /// wholly separate texture with its own packing — passing the block atlas
-    /// twice is what the renderer effectively did before issue #45 was fixed,
+    /// twice is what the renderer effectively did before this was fixed,
     /// and it draws block texels for flame and smoke. See
     /// [`crate::gpu::RenderState::install_particle_sheet_atlas`] for the
     /// jar-less fallback, which binds a 1×1 transparent texture instead so an
@@ -1143,7 +1143,7 @@ impl ParticleRenderer {
         // an atlas-partitioned instance list for exactly the reason that a
         // future sort would silently undo it, and the same objection would apply
         // to a layer-partitioned one built upstream. `atlas` stays per-instance,
-        // so nothing about issue #45 depends on this ordering either.
+        // so nothing about that fix depends on this ordering either.
         self.ordered.clear();
         self.ordered
             .extend(instances.iter().filter(|i| i.translucent == 0));
@@ -1313,14 +1313,14 @@ mod tests {
         );
     }
 
-    /// The particle batch (#182/#178) plus the sweep-attack particle split
-    /// out of #12: proves each new `kind` string reaches its emitter through
+    /// The particle batch plus the sweep-attack particle split
+    /// out of that fix: proves each new `kind` string reaches its emitter through
     /// the *generic* dispatch (`spawn_particles` → `spawn_one`), the same
     /// path a `/particle` command or any datapack's `sendParticles` call
     /// uses — not merely that calling `emit::foo` directly produces a
     /// particle. Before this pass every one of these fell into `spawn_one`'s
     /// `other => debug!` catch-all and was silently dropped, exactly like the
-    /// ~119 types #178's issue body counted.
+    /// ~119 types that fix's issue body counted.
     #[test]
     fn every_newly_wired_kind_reaches_its_emitter_through_the_generic_dispatch() {
         let cases: &[(&str, [f32; 3])] = &[
@@ -1331,7 +1331,7 @@ mod tests {
             ("happy_villager", [0.0, 0.0, 0.0]),
             ("witch", [0.0, 0.0, 0.0]),
             ("totem_of_undying", [0.0, 0.2, 0.0]),
-            // `explosion` (issue #416). `count > 0` (every case in this loop
+            // `explosion`. `count > 0` (every case in this loop
             // uses `count == 1`) draws velocity from `gaussian() * max_speed`
             // with `max_speed == 0.0`, so `xa` (this dispatch arm's `size`
             // parameter) is always exactly `0.0` here regardless of `offset`
@@ -1380,7 +1380,7 @@ mod tests {
         );
     }
 
-    /// `explosion_emitter` (issue #416) is the one dispatch-reachable kind in
+    /// `explosion_emitter` is the one dispatch-reachable kind in
     /// this module that is invisible on its own — `HugeExplosionSeedParticle`
     /// is a `NoRenderParticle`, so `frame.drawn` must stay `0` immediately
     /// after dispatch even though the seed *is* live in the engine. Only
@@ -1433,7 +1433,7 @@ mod tests {
     }
 
     /// The atlas a resolved UV belongs to must reach the instance, and the two
-    /// sources must land on **different** selectors (issue #45).
+    /// sources must land on **different** selectors.
     ///
     /// This is the hermetic half of `tests/sheet_particle_atlas_pixels.rs`
     /// (which judges the same thing in pixels against the real stitches): the
@@ -1669,7 +1669,7 @@ mod tests {
         // the accumulator with `AmbientColor` — `0x0A0A0A` in the overworld, per
         // `DimensionTypes.java:36` — so an unlit particle is not black either: it
         // reads 0.0935 once `notGamma` is mixed in. The retired ramp floored it at
-        // 0.2, which is still the floor issue #386 named; the correct replacement
+        // 0.2, which is still the floor that fix named; the correct replacement
         // is a *smaller* floor, not none.
         //
         // This is also why the value below is worth asserting at all. Against a
@@ -1937,8 +1937,8 @@ mod tests {
         emit::flame(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.05, 0.0);
         emit::smoke(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0, 1.0);
         emit::crit(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
-        // The particle batch (#182/#178, plus the sweep-attack particle split
-        // out of #12): every one of these names a *new* `Sheet` variant, so
+        // The particle batch (several closed fixes, plus the sweep-attack particle split
+        // out of an earlier one): every one of these names a *new* `Sheet` variant, so
         // this is the only test in the tree that proves the `stem()` chosen
         // for each (`sweep`, `spell`, `angry`, `glint`) actually matches a
         // real file under `textures/particle/` in the jar, rather than a
@@ -1951,13 +1951,13 @@ mod tests {
         emit::happy_villager(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
         emit::witch(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
         emit::totem_of_undying(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.2, 0.0);
-        // `explosion` (issue #416): `Sheet::Explosion` is `explosion_0`
+        // `explosion`: `Sheet::Explosion` is `explosion_0`
         // through `explosion_15` — the one sheet in this whole list with a
         // 16-frame stem rather than the usual 8, so this is also the proof
         // that `frame_count()`'s per-frame `explosion_N` naming resolves
         // every one of those sixteen files, not just frame 0.
         emit::huge_explosion(p.engine_mut(), 0.5, 65.0, 0.5, 0.0);
-        // The ambient/environmental batch (issue #178). Ten more `Sheet`
+        // The ambient/environmental batch. Ten more `Sheet`
         // variants, and this is the only place that proves each names real files:
         // `soul` is 11 frames, `enchant` is alphabetic (`sga_a`…`sga_z`) rather
         // than numbered at all, `big_smoke` is 12, `sonic_boom` is 16, and the
@@ -2010,7 +2010,7 @@ const AMBIENT_RANGE: i32 = 8;
 
 impl Particles {
     /// Emit this tick's **client-predicted** ambient particles — vanilla's
-    /// `Block.animateTick`, which is not on the wire at all (issue #178).
+    /// `Block.animateTick`, which is not on the wire at all.
     ///
     /// # Why this cannot be a server-event consumer
     ///

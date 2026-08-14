@@ -1,4 +1,4 @@
-//! The creative-inventory screen's wiring (issue #158): when it shows, what a
+//! The creative-inventory screen's wiring: when it shows, what a
 //! click does, and the per-frame geometry call.
 //!
 //! The screen itself is [`crate::container::creative_geometry`]; this module is

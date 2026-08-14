@@ -21,7 +21,7 @@ pub(crate) struct KeyGate {
     /// `UiState::accepts_gameplay_input()` — i.e. `screen == Playing`.
     pub gameplay: bool,
     /// The debug modifier (F3) is currently held, so the next `B`/`G` is a
-    /// **chord** rather than a plain key — issue #197.
+    /// **chord** rather than a plain key — That fix.
     ///
     /// Vanilla models this as a second `KeyMapping`, `keyDebugModifier`, bound to
     /// the *same* keysym as `keyDebugOverlay` (`Options.java:698-725`), plus the
@@ -47,7 +47,7 @@ pub(crate) struct KeyGate {
     /// case and Escape falls through — to `InputAction::Pause`, which closes the
     /// screen, exactly as it did before this existed.
     pub recipe_search: bool,
-    /// The creative screen's search box has focus (issue #158) — the same
+    /// The creative screen's search box has focus — the same
     /// swallow-everything-but-Escape rule as [`recipe_search`](Self::recipe_search),
     /// and for the same vanilla reason: `CreativeModeInventoryScreen.keyPressed`
     /// (`:428`) returns `true` for any key while the box is focused and visible
@@ -75,7 +75,7 @@ pub(crate) enum KeyOutcome {
     Pause,
     CloseContainer,
     ToggleDebugOverlay,
-    /// The debug modifier (F3) went down (`true`) or up (`false`) — issue #197.
+    /// The debug modifier (F3) went down (`true`) or up (`false`) — That fix.
     ///
     /// The overlay toggle happens on the **release**, and only when no chord
     /// consumed the hold; the driver owns that bookkeeping because it is the
@@ -114,7 +114,7 @@ pub(crate) enum KeyOutcome {
     /// into an `AtomicBool` — see
     /// [`crate::config::Options::advanced_item_tooltips`].
     ToggleAdvancedTooltips,
-    /// `key.screenshot` (issue #16): capture the window's own frame to a PNG.
+    /// `key.screenshot`: capture the window's own frame to a PNG.
     ///
     /// **No payload**, and the two things it does not carry are deliberate,
     /// both recorded in `docs/keybindings.md`'s "Screenshot" section: vanilla's
@@ -156,7 +156,7 @@ pub(crate) enum KeyOutcome {
     /// with these keys before (it swallowed them), so a miss is not a
     /// regression.
     ContainerSwap { button: i32 },
-    /// `key.swapOffhand` pressed with **no screen open** (issue #385).
+    /// `key.swapOffhand` pressed with **no screen open**.
     ///
     /// A different mechanism from [`Self::ContainerSwap`], not a variation on
     /// it, and conflating the two is the trap this issue exists to avoid.
@@ -304,10 +304,10 @@ pub(crate) fn resolve_key(
         // `None`, not a fall-through, so no gameplay binding fires behind an open
         // inventory.
         //
-        // The number keys used to fall into that swallow, which is issue #378's
+        // The number keys used to fall into that swallow, which is that fix's
         // part 3: they neither selected a slot (correct) nor swapped (the gap).
         //
-        // The off-hand key is here too, as of issue #382: it was blocked purely
+        // The off-hand key is here too: it was blocked purely
         // by a keybind collision (`key.swapOffhand` defaults to `F`, which the
         // now-deleted `key.lodestone.toggleFly` squatted on), never by the click
         // path — `Click::offhand_swap` and `do_swap`'s `button == 40` arm were
@@ -344,7 +344,7 @@ pub(crate) fn resolve_key(
             None
         }
     } else if binds.is(InputAction::DebugOverlay, code) {
-        // **Both edges**, and the toggle has moved to the release — issue #197's
+        // **Both edges**, and the toggle has moved to the release — that fix's
         // chords. Vanilla's own rule is
         // `keyDebugModifier.setDown(!didDebugAction)` at
         // `KeyboardHandler.java:554-555`: releasing F3 toggles the overlay only
@@ -404,7 +404,7 @@ pub(crate) fn resolve_key(
     {
         Some(KeyOutcome::SelectSlot(slot))
     } else if binds.is(InputAction::SwapOffhand, code) && pressed && gate.gameplay {
-        // Issue #385: the *gameplay* half of `key.swapOffhand`. The container
+        // The *gameplay* half of `key.swapOffhand`. The container
         // half is up in the `gate.container_open` arm and is a different
         // mechanism — see [`KeyOutcome::SwapOffhand`].
         //
@@ -447,7 +447,7 @@ pub(crate) fn resolve_key(
     }
 }
 
-/// The action a gameplay off-hand-key press should send, or `None` (issue #385).
+/// The action a gameplay off-hand-key press should send, or `None`.
 ///
 /// Split out of the driver so the *decision* — which is entirely "is this player
 /// a spectator" — is a pure function a test can drive.
@@ -474,8 +474,8 @@ pub(crate) fn resolve_key(
 /// three-way exchange plus `stopUsingItem`), and the client learns the result
 /// from the ordinary inventory-sync packets that follow.
 ///
-/// This is why issue #385's round-trip worry does not apply here the way it does
-/// to #381's block placement: vanilla *does* predict a placement, so not
+/// This is why that fix's round-trip worry does not apply here the way it does
+/// to that fix's block placement: vanilla *does* predict a placement, so not
 /// predicting one is a divergence; vanilla does **not** predict this, so adding a
 /// local swap would be the divergence. Two consequences if you are tempted
 /// anyway: our prediction would have to guess `stopUsingItem`'s effect on an

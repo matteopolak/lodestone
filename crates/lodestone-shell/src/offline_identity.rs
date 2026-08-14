@@ -51,7 +51,7 @@
 //! own integrated server: `lodestone_server`'s login handler does
 //! `login_uuid = Some(uuid)` — it echoes back whatever the client presented and
 //! keys the player entity on it (`crates/lodestone-server/src/server.rs`, issue
-//! #438). So for singleplayer a stable *name* alone would not have fixed
+//! That fix). So for singleplayer a stable *name* alone would not have fixed
 //! anything; the random `new_v4` was the operative instability there. Both
 //! halves had to go.
 //!
@@ -60,7 +60,7 @@
 //! so `NetClient::local_uuid` keeps whatever we sent. Sending a random v4 meant
 //! the client's idea of its own identity disagreed with the server's for the
 //! whole session — which is a latent defect in anything keyed on "am I this
-//! player?", issue #189's roster exclusion included. Deriving the UUID the way
+//! player?", that fix's roster exclusion included. Deriving the UUID the way
 //! vanilla does makes the two agree by construction. Fixing the *discard* is a
 //! `crates/protocol/**` change and is not made here.
 //!

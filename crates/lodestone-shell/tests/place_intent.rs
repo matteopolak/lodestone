@@ -211,7 +211,7 @@ impl Harness {
         };
 
         let chunk_world = client.chunk_world();
-        // Issue #423: the write side, paired with the read handle on the same
+        // The write side, paired with the read handle on the same
         // `Arc`. The store's columns are loaded through *this*; `drive_placement`
         // then needs the matching resource installed (below).
         let chunk_world_write = client.chunk_world_write();

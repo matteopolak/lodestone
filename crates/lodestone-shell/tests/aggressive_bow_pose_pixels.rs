@@ -1,17 +1,17 @@
 //! Pixel gate: a **remote skeleton** must visibly draw its bow once the server
 //! reports it aggressive, and an otherwise-identical skeleton that never gets the
-//! flag must not move a pixel (issue #379).
+//! flag must not move a pixel.
 //!
-//! # Why this cannot be a unit test, and why #57's gate could not catch it
+//! # Why this cannot be a unit test, and why that fix's gate could not catch it
 //!
-//! #57 landed the whole bow-draw *pose* — `Skeleton::pose_arms_for_item`, the
+//! That fix landed the whole bow-draw *pose* — `Skeleton::pose_arms_for_item`, the
 //! `ArmPose` vocabulary, `AnimInput::arm_pose` — and proved it reaches pixels with
 //! `lodestone-render`'s `bow_draw_pose_pixels.rs`. That gate sets `arm_pose`
 //! **directly on `AnimInput`** and renders. It is a good gate and it is
 //! structurally blind to this bug: it starts *downstream* of the decision about
 //! which mobs get the pose.
 //!
-//! The decision was wrong for every mob. #57 selected the pose from
+//! The decision was wrong for every mob. That fix selected the pose from
 //! `LivingEntity`'s **using-item** bit, which is the mechanism a *player* uses.
 //! Vanilla's `AbstractSkeletonRenderer.getArmPose` reads `Mob.isAggressive()`
 //! instead (`AbstractSkeletonRenderer.java:38`), and a skeleton's ranged attack
@@ -41,9 +41,9 @@
 //! forward move almost entirely into the depth buffer and a *working* pose reads
 //! as a dead one.
 //!
-//! ## One bound that is deliberately not restated from #57
+//! ## One bound that is deliberately not restated from that fix
 //!
-//! #57's gate first asserted "nothing below the waist differs" and that assertion
+//! That fix's gate first asserted "nothing below the waist differs" and that assertion
 //! **failed on a working pose**: an arm is 12 texels long and hangs *downward*, so
 //! rotating it forward vacates every row it occupied, a full arm's length below
 //! the shoulder. The premise was false before the feature existed. Both vertical
@@ -114,7 +114,7 @@ const AGGRESSIVE_BIT: u8 = 0x04;
 
 /// Minimum extra silhouette width the draw must add, in pixels.
 ///
-/// Sized the same way #57's sibling gate sizes its own: two arms swinging from
+/// Sized the same way that fix's sibling gate sizes its own: two arms swinging from
 /// vertical to forward-horizontal each project about an arm's length (12 texels ≈
 /// 0.75 blocks), which at this camera is tens of pixels. Six is far above
 /// rasterisation jitter and far below the real effect — it separates "the pose
@@ -165,7 +165,7 @@ fn world_with_bow_carrying_mobs(feet: glam::Vec3) -> World {
                 rotation: Rotation::new(BODY_YAW, 0.0),
                 velocity: None,
             });
-        // The bow, through the real `SET_EQUIPMENT` ingest path (issue #36:
+        // The bow, through the real `SET_EQUIPMENT` ingest path (that fix:
         // there is no `EntitySnapshot` any more to hand this to directly —
         // `resolve_entity_facts` reads the `Equipment` component ingest wrote,
         // so the fixture has to write it the same way ingest does).
@@ -184,7 +184,7 @@ fn world_with_bow_carrying_mobs(feet: glam::Vec3) -> World {
         world.run_schedule(NetIngest);
     }
 
-    // Issue #36: the fold now reads `EntityKind`/`Position`/`Rotation`/
+    // The fold now reads `EntityKind`/`Position`/`Rotation`/
     // `HeadYaw`/`Equipment` directly off the ingest entities just spawned
     // above, rather than a hand-built `EntitySnapshot` — same as
     // `Sim::fold_entities` does live.
@@ -516,7 +516,7 @@ fn an_aggressive_skeleton_draws_its_bow_and_a_calm_one_does_not() {
 
     // (c) ...and it *begins* at the shoulders. Bounds derived from the measured
     //     silhouette, never from a restated waist constant — see the module docs
-    //     on #57's false premise. Only the box's TOP is bounded: an arm hangs
+    //     on that fix's false premise. Only the box's TOP is bounded: an arm hangs
     //     downward, so rotating it forward legitimately vacates rows a full arm's
     //     length below the shoulder.
     let midline = union_top + (union_bottom - union_top) / 2;

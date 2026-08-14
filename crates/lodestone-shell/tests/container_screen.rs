@@ -465,7 +465,7 @@ fn container_renderer_reaches_pixels_inside_widget_rect() {
 /// leading `skip_verts` vertices**.
 ///
 /// The skip exists because of a real trap this test walked into. The dim
-/// gradient (`extractTransparentBackground`, issue #51) is
+/// gradient (`extractTransparentBackground`, that fix) is
 /// `gradient_rect_px(0.0, 0.0, w, h)` — genuinely full-screen, and correct: it
 /// is what dims the HUD hotbar. But it is emitted *first*, so once it existed,
 /// "how many pixels are covered here" saturated at the rect's full area

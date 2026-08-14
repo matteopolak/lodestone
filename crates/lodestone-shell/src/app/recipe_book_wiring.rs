@@ -560,7 +560,7 @@ fn the_toast_expires_and_an_empty_queue_never_shows_one() {
     );
 }
 
-// -- the All/Craftable filter (issue #436) ----------------------------
+// -- the All/Craftable filter ----------------------------
 //
 // `SessionRecipeBookSettings` folded a `filtering` bit that had nothing to
 // land in: `RecipePanelState` had no such field, the cycle-button was

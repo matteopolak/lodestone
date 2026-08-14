@@ -1,6 +1,6 @@
 //! Pixel gate: a **remote** entity's arm must move on screen once it reports
 //! a `SwingMainHand` animation, and a second, otherwise-identical entity that
-//! never gets the report must not move at all (issue #10 /
+//! never gets the report must not move at all (
 //! `docs/arm-swing-animation.md`).
 //!
 //! # Why this cannot be a unit test
@@ -107,7 +107,7 @@ fn world_with_two_tracked_zombies(feet: glam::Vec3) -> World {
         world.run_schedule(NetIngest);
     }
 
-    // Issue #36: read the ingest components `apply_entity_spawn` already wrote
+    // Read the ingest components `apply_entity_spawn` already wrote
     // directly, rather than a hand-built `EntitySnapshot` — same as
     // `Sim::fold_entities` does live.
     fold_entities(&mut world);

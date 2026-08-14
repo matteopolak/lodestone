@@ -1,4 +1,4 @@
-//! Pixel gate: the walking bob (issue #58's `bobView`) **moves the world on
+//! Pixel gate: the walking bob (that fix's `bobView`) **moves the world on
 //! screen**, by the amount vanilla's constants predict and in the right
 //! direction.
 //!
@@ -55,7 +55,7 @@
 //! and asserts it is *unchanged* between the two frames. Every measurement in
 //! the world-bob test above is confined to the chest's projected rect.
 //!
-//! # The arm *does* bob once the shell feeds it one (issue #58's hand-side gap)
+//! # The arm *does* bob once the shell feeds it one (that fix's hand-side gap)
 //!
 //! Vanilla prefixes `bobHurt` and `bobView` onto `renderItemInHand`'s pose stack
 //! a **second, independent** time (`GameRenderer.java:344-346`), separate from
@@ -254,7 +254,7 @@ fn grow(rect: Option<Rect>, x: u32, y: u32) -> Rect {
 ///
 /// Restricted to a rect on purpose: an unrestricted bbox would swallow the
 /// first-person arm and report a box spanning most of the frame, which is
-/// precisely the failure `CLAUDE.md` records the #23 chest gate hitting.
+/// precisely the failure `CLAUDE.md` records that fix's chest gate hitting.
 fn non_sky_bbox_in(pixels: &[u8], within: Rect, sky: [u8; 3]) -> Option<(Rect, usize)> {
     let mut rect: Option<Rect> = None;
     let mut count = 0usize;

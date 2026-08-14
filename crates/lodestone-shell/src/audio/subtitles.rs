@@ -1,4 +1,4 @@
-//! Sound-subtitle captions (issue #198): vanilla's accessibility overlay that
+//! Sound-subtitle captions: vanilla's accessibility overlay that
 //! names each sound as it plays, bottom-right, with a `<`/`>` arrow when the
 //! source is behind you.
 //!

@@ -1,13 +1,13 @@
-//! `RenderState::render_inner`'s CPU submit cost (#133) and the terrain
-//! path's draw-call/bind-group counts (#128), for the packed/demo terrain
+//! `RenderState::render_inner`'s CPU submit cost and the terrain
+//! path's draw-call/bind-group counts, for the packed/demo terrain
 //! path — the one live GPU path this crate can stand up with no `client.jar`.
 //!
 //! # Why the demo path, and why that is a legitimate stand-in here
 //!
 //! `crates/lodestone-render/benches/render_submit.rs`'s own module doc names
 //! the exact seams this file exists to close: `RenderState::render_inner` is
-//! private and `RenderStats` has no bind-group field, so neither #128's
-//! bind-group half nor #133 could be built from `lodestone-render` — both are
+//! private and `RenderStats` has no bind-group field, so neither that fix's
+//! bind-group half nor that fix could be built from `lodestone-render` — both are
 //! `lodestone-shell` types. **The claim that `lodestone-shell` had no
 //! `benches/` directory was stale by the time it was checked**:
 //! `benches/entity_tick.rs` already existed. What was missing was a bench
@@ -19,7 +19,7 @@
 //! The demo/packed world (`crate::worldgen::generate`) needs no vanilla
 //! `client.jar`: every headless GPU test in `gpu/pixel_gates.rs` and
 //! `gpu/sections.rs` already builds against it for exactly that reason. It is
-//! also the path issue #76 most recently touched (the packed table's own
+//! also the path that fix most recently touched (the packed table's own
 //! shared camera + dynamic-offset arena), so it is a real regression surface,
 //! not a synthetic stand-in invented for this bench. The **live-vanilla model
 //! path** (`self.model`, built only when `RenderState::new` is given a real
@@ -31,7 +31,7 @@
 //! qualitatively (pixel readback), just not as a tracked count/duration.
 //!
 //! The demo world's own cap (`sim.rs`'s `MAX_WORLD_RADIUS = 6`, ~4056
-//! sections) lands within the same order of magnitude as issue #75's own
+//! sections) lands within the same order of magnitude as that fix's own
 //! profile (`sections=3880`, peaking near 5000) — see
 //! `docs/section-camera-uniform.md`'s `SectionOriginArena` doc for the
 //! arithmetic — so a radius-6 sweep point is not an arbitrary choice, it is
@@ -50,12 +50,12 @@
 //!   exactly and it was wrong: the first-person bare-arm draw fires on this
 //!   path too (needs no vanilla pack), so the honest claim is "the non-terrain
 //!   overhead is a per-frame constant", not "there is no overhead" — the
-//!   measured counterpart to #128's "bind-group count independent of section
+//!   measured counterpart to that fix's "bind-group count independent of section
 //!   count" ask, not a code-reading argument for it (`CLAUDE.md`'s own
-//!   example of the mistake #128 explicitly forbids).
+//!   example of the mistake that fix explicitly forbids).
 //! * CPU submit time is recorded via `support::record` as a provisional
 //!   baseline only, exactly like `render_submit.rs`'s existing timings, with
-//!   no pass/fail — #133 asks for the *shape* (flat-ish per-section
+//!   no pass/fail — That fix asks for the *shape* (flat-ish per-section
 //!   dispatch cost as section count grows), which the arena/bind-group count
 //!   gates above already certify; the millisecond figure is a secondary,
 //!   noise-affected number to watch over time.
@@ -133,9 +133,9 @@ fn camera_for(radius: i32) -> Camera {
     }
 }
 
-/// **Issues #128/#133** — terrain draw-call and camera-bind-group counts, plus
+/// **Those fixes** — terrain draw-call and camera-bind-group counts, plus
 /// a CPU submit-time baseline, swept across section counts spanning issue
-/// #75's own measured order of magnitude via the packed/demo path.
+/// that fix's own measured order of magnitude via the packed/demo path.
 fn bench_terrain_submit(c: &mut Criterion) {
     let Ok(ctx) = GpuContext::new_headless_blocking() else {
         println!(
@@ -171,7 +171,7 @@ fn bench_terrain_submit(c: &mut Criterion) {
         assert!(sections > 0, "radius={radius}: some sections must have meshed");
         let camera = camera_for(radius);
 
-        // Warm-up: the first frame pays one-time driver/allocator costs #75's
+        // Warm-up: the first frame pays one-time driver/allocator costs that fix's
         // profile was not measuring (a steady-state per-frame cost is).
         {
             let frame = target.acquire().expect("headless acquire");
@@ -192,7 +192,7 @@ fn bench_terrain_submit(c: &mut Criterion) {
         let median_us = times_us[times_us.len() / 2];
         let stats = last_stats.expect("at least one frame rendered above");
 
-        // The count gate the #75 shape actually claims: the *terrain* portion
+        // The count gate that fix's shape actually claims: the *terrain* portion
         // of `draw_calls` is one call per drawn section (the culled remainder
         // is the reduction, not a bind-group cost), plus a frame-constant
         // non-terrain overhead (the first-person arm — see the note above the
@@ -214,7 +214,7 @@ fn bench_terrain_submit(c: &mut Criterion) {
         // whole frame (see `RenderStats::terrain_camera_bind_group_switches`'s
         // doc). Only the packed path draws terrain here (`vanilla: None`), so
         // a value above 1 would mean the packed table stopped sharing
-        // `packed_cam_bind_group` — the exact reversal issue #76 fixed.
+        // `packed_cam_bind_group` — the exact reversal that fix fixed.
         assert!(
             stats.terrain_camera_bind_group_switches <= 1,
             "radius={radius}: {} terrain camera bind-group switches across {} sections drawn — \
@@ -226,7 +226,7 @@ fn bench_terrain_submit(c: &mut Criterion) {
         );
 
         // Arena headroom against `PACKED_ORIGIN_ARENA_SLOTS`'s fixed ceiling
-        // (issue #133's ceiling-approach ask) — `AllocStats` carries bytes and
+        // (that fix's ceiling-approach ask) — `AllocStats` carries bytes and
         // a live-allocation count, not the slot constant itself (`pub(super)`,
         // deliberately not widened further than the accessor this pass
         // added), so occupancy is reported as a percentage of byte capacity
@@ -286,7 +286,7 @@ fn bench_terrain_submit(c: &mut Criterion) {
         }
     }
 
-    // The actual #75/#128 shape gate for the non-terrain overhead identified
+    // The actual shape gate for the non-terrain overhead identified
     // above: whatever it is, it must be the **same number** at radius 1, 3
     // and 6 — a per-frame constant, not something that grows with the world.
     // If it ever started scaling with section count, this is where it would

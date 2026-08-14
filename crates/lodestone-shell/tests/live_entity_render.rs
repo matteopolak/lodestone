@@ -48,7 +48,7 @@ use lodestone_testsupport::{RconClient, unique_username};
 /// Translates a raw, version-free [`EntityView`] into the ingest components
 /// [`crate::entities::resolve_entity_facts`] (the live path's own reader)
 /// expects, upserting `view.entity_id`'s ingest entity in `world` — issue
-/// #36's replacement for feeding a hand-built `EntitySnapshot` straight to a
+/// That fix's replacement for feeding a hand-built `EntitySnapshot` straight to a
 /// now-deleted `fold_entity_snapshots`.
 ///
 /// This exists here, rather than reusing a shared helper, because the

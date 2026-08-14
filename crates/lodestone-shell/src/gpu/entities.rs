@@ -1,6 +1,5 @@
 //! GPU resources and texture loading for the entity render pass: mobs,
-//! humanoid armour layers, the sheep wool layer, and the mob-fire billboard
-//! (issue #434).
+//! humanoid armour layers, the sheep wool layer, and the mob-fire billboard.
 use std::collections::HashMap;
 
 use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
@@ -58,7 +57,7 @@ pub(super) struct EntityRenderer {
     pub(super) armour_models: ArmourModelSet,
     pub(super) armour_gpu: Vec<(ArmourSlot, GpuEntityModel)>,
     pub(super) armour_textures: HashMap<(&'static str, ArmourLayerType), wgpu::BindGroup>,
-    /// Smithing-table armour trims (issue #17): one texture bind group per
+    /// Smithing-table armour trims: one texture bind group per
     /// **trim sprite**, keyed by `lodestone_assets::trim::trim_sprite_id`'s
     /// output — `(pattern, material suffix, layer type)`, which is the granularity
     /// vanilla's palette swap actually produces.
@@ -72,14 +71,14 @@ pub(super) struct EntityRenderer {
     /// Empty without a vanilla pack, and trims then draw nothing — the same
     /// deliberate asymmetry [`Self::armour_textures`] documents.
     pub(super) trim_textures: HashMap<lodestone_assets::ResourceLocation, wgpu::BindGroup>,
-    /// The sheep wool layer (issue #53): the one baked mesh on the CPU (needed
+    /// The sheep wool layer: the one baked mesh on the CPU (needed
     /// per frame to pair each part with the wearer's own part index, the same
     /// as `armour_models`), its GPU upload, and its one texture bind group.
     ///
     /// Drawn through the **base** entity pipeline (`self.pipeline`) rather than
     /// `armour_pipeline` — wool has no second layer at the same inflation as
     /// itself, so there is no coplanar z-fighting to correct for the way
-    /// leather's dyeable base and overlay need. Since issue #21 the two
+    /// leather's dyeable base and overlay need. Since that fix the two
     /// pipelines are depth-identical anyway (both `LessEqual`, vanilla's
     /// `ENTITY_SNIPPET` value), so this choice is now about which pass the draw
     /// belongs to, not about which depth compare it gets. See
@@ -92,7 +91,7 @@ pub(super) struct EntityRenderer {
     pub(super) wool_models: SheepWoolModelSet,
     pub(super) wool_gpu: Option<GpuEntityModel>,
     pub(super) wool_texture: Option<wgpu::BindGroup>,
-    /// The mob-fire billboard (issue #434, player report: "mobs dont show
+    /// The mob-fire billboard (player report: "mobs dont show
     /// flames yet"): a fourth pipeline
     /// ([`EntityPipeline::flame_pipeline`]) drawn through the **base**
     /// pipeline's own camera bind group (flame needs no camera data the mob
@@ -235,7 +234,7 @@ impl EntityRenderer {
                     (*key, pipeline.texture_bind_group(device, &view, &sampler))
                 })
                 .collect();
-        // The trim sprites (issue #17). Palette-swapped per material by
+        // The trim sprites. Palette-swapped per material by
         // `TrimAtlas`, so this is one bind group per `(pattern, suffix, layer
         // type)` — 576 against the real jar, each a full-size sheet rather than a
         // sub-rect of a stitched atlas, which is why they key on a
@@ -258,7 +257,7 @@ impl EntityRenderer {
             pipeline.texture_bind_group(device, &view, &sampler)
         });
 
-        // The mob-fire billboard (issue #434). A fourth pipeline over this
+        // The mob-fire billboard. A fourth pipeline over this
         // pipeline's own two bind-group layouts — see
         // `EntityPipeline::flame_pipeline`'s doc for why this is not a fifth
         // bind group.
@@ -351,7 +350,7 @@ impl EntityRenderer {
         // disabled rather than shared: the arm sits ~0.7 blocks from the eye and
         // the nearest fog onset any preset produces is lava's 0 (and the sky
         // fog's is `render_distance * 16 - clamp(that / 10, 4, 64)`, i.e. 115.2
-        // blocks at the default render distance — issue #388 replaced a flat
+        // blocks at the default render distance — That fix replaced a flat
         // 0.75× fraction with vanilla's span, but either way the arm is orders of
         // magnitude nearer than the ramp), so a shared fog block could only ever
         // contribute rounding — and vanilla likewise does not fog the hand.
@@ -504,7 +503,7 @@ pub(super) fn load_humanoid_armour_textures()
 }
 
 /// Bake every armour-trim sprite out of the vanilla `client.jar`, keyed by
-/// `trim_sprite_id`'s `ResourceLocation` (issue #17).
+/// `trim_sprite_id`'s `ResourceLocation`.
 ///
 /// `TrimAtlas::load` does the real work — it reads `atlases/armor_trims.json`,
 /// palette-swaps each of the eighteen patterns into each of the eleven materials'

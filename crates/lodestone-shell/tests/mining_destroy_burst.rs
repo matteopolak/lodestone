@@ -1,4 +1,4 @@
-//! Issue #360: the debris burst at the moment a block finishes breaking.
+//! The debris burst at the moment a block finishes breaking.
 //!
 //! # What this is
 //!
@@ -18,7 +18,7 @@
 //! `MultiPlayerGameMode.destroyBlock` does the identical thing client-side,
 //! synchronously, without waiting for a server round trip.
 //!
-//! # Issue #387: the same emit, keyed on the wrong thing
+//! # The same emit, keyed on the wrong thing
 //!
 //! That fix keyed the emit on the predictor queueing
 //! `BlockAction { action: StopDestroy, .. }`. Reported from play afterwards:
@@ -131,7 +131,7 @@ const BURST_THRESHOLD: usize = 8;
 /// Carries the state id and hardness so the two tests can point the *same*
 /// harness, predictor and particle sink at a slow block and at a one-shot one.
 /// The hardness is the only thing that decides which of `Mining`'s two destroy
-/// branches runs, which is exactly what issue #387 is about.
+/// branches runs, which is exactly what that fix is about.
 #[derive(Debug, Clone, Copy)]
 struct OneBlockVersion {
     /// The one block-state id this adapter answers for.
@@ -405,7 +405,7 @@ fn column_with(pos: [i32; 3], id: u32) -> LoadedChunk {
     LoadedChunk::new(column, ColumnLight::new(16), Heightmaps::new(), Vec::new())
 }
 
-/// **The gate for the progressive path** (issue #360), and — since #387 re-keyed
+/// **The gate for the progressive path**, and — since that fix re-keyed
 /// the emit off `StopDestroy` — the control proving
 /// [`stop_destroy_queued`] actually detects something.
 ///
@@ -468,7 +468,7 @@ fn a_completed_dig_throws_a_debris_burst_on_the_tick_it_finishes() {
     );
 }
 
-/// **The gate for issue #387.** A genuinely one-shot block must throw its debris
+/// **The gate for that fix.** A genuinely one-shot block must throw its debris
 /// burst on the very first tick of the dig, on a tick where no `StopDestroy` is
 /// queued at all.
 ///

@@ -19,7 +19,7 @@ use crate::camera_rig::BobFrame;
 use super::{RenderState, RenderStats};
 
 // ---------------------------------------------------------------------------
-// The equip / swap animation (issue #366)
+// The equip / swap animation
 // ---------------------------------------------------------------------------
 
 /// One server tick, in seconds — the rate [`HeldItemEquip`] steps at.
@@ -74,7 +74,7 @@ const EQUIP_REST_HEIGHT: f32 = 1.0;
 /// # The fields are vanilla's, renamed once
 ///
 /// 26.2 calls them `mainHandItem` / `mainHandHeight` / `oMainHandHeight`. Older
-/// versions (and issue #366's own description) call the pair
+/// versions (and that fix's own description) call the pair
 /// `equippedProgress` / `oldEquippedProgress`; there is no field by either of those
 /// names in this jar, so grepping for them finds nothing and reads as "the
 /// mechanism is absent".
@@ -85,7 +85,7 @@ pub(super) struct HeldItemEquip {
     /// arm, so this field is also what decides the arm/item fork mid-swap: putting
     /// away a pickaxe lowers the pickaxe and *then* raises an arm.
     ///
-    /// The pair's `bool` is the enchantment-foil flag (issue #452), carried
+    /// The pair's `bool` is the enchantment-foil flag, carried
     /// because the glint second pass is gated on it and the flag must follow the
     /// *drawn* item — a swap that raises an enchanted sword glints the sword the
     /// moment it appears, not the stack the player selected two ticks ago.
@@ -248,7 +248,7 @@ impl HeldItemEquip {
     }
 
     /// The item to **draw** this frame — vanilla's `mainHandItem`, not the selected
-    /// one — plus its enchantment-foil flag (the glint gate, issue #452). `None`
+    /// one — plus its enchantment-foil flag (the glint gate, that fix). `None`
     /// draws the bare arm.
     pub(super) fn visible(&self) -> Option<&(ResourceLocation, bool)> {
         self.visible.as_ref()
@@ -256,7 +256,7 @@ impl HeldItemEquip {
 }
 
 // ---------------------------------------------------------------------------
-// The walk/hurt bob reaches the hand (issue #58 follow-up)
+// The walk/hurt bob reaches the hand (follow-up)
 // ---------------------------------------------------------------------------
 
 /// A `damage_tilt_strength` of zero, for the gates below that isolate a single
@@ -305,8 +305,8 @@ const NO_DAMAGE_TILT: f32 = 0.0;
 ///
 /// So: a fresh, independent copy of the same [`BobFrame`], not a value
 /// inherited from `camera`. That is *why* a source is needed at all — the
-/// value has to reach here from `Sim::bob_frame()`
-/// (`sim/camera.rs:320-325`), which nothing below the GPU boundary can read.
+/// value has to reach here from `Sim::bob_frame()`,
+/// which nothing below the GPU boundary can read.
 pub(super) struct HandBobSource(pub(super) Option<Box<dyn Fn() -> BobFrame + Send + Sync>>);
 
 impl HandBobSource {
@@ -365,10 +365,9 @@ pub(super) enum FirstPersonHand<'a> {
     /// The held item, meshed camera-space and drawn through the *model* pipeline
     /// with the model pass's own `hand_cam_bind_group`. The `bool` is the
     /// enchantment-foil flag: when `true`, [`RenderState::draw_first_person_hand`]
-    /// re-rasterises the same mesh through the glint pipeline in the same pass
-    /// (issue #452).
+    /// re-rasterises the same mesh through the glint pipeline in the same pass.
     Item(GpuModelMesh, bool),
-    /// A held **filled map** (issue #184): one quad drawn through the same model
+    /// A held **filled map**: one quad drawn through the same model
     /// pipeline as [`Self::Item`], with group 1 swapped from the block atlas to the
     /// map's own 128×128 texture. The bind group travels with the mesh because the
     /// two are meaningless apart — see `super::maps`.
@@ -482,7 +481,7 @@ impl RenderState {
     /// `set_hand_swing_source` looks exactly like a working rested arm. See
     /// `docs/arm-swing-animation.md`.
     ///
-    /// # The equip/swap dip (issue #366)
+    /// # The equip/swap dip
     ///
     /// [`HeldItemEquip`] is vanilla's `ItemInHandRenderer` swap state, advanced in
     /// [`RenderState::set_main_hand_source`] and read here for **both** branches.
@@ -492,7 +491,7 @@ impl RenderState {
     ///
     /// # The remaining fidelity gap, missing *shell state*, not code
     ///
-    /// * **`bobView` now reaches the hand (issue #58 follow-up, the player
+    /// * **`bobView` now reaches the hand (follow-up, the player
     ///   report that "the arm should bob too").** See [`HandBobSource`]'s doc
     ///   for the derivation — it is vanilla's own **second, independent**
     ///   application of the identical [`BobFrame`] the world's camera already
@@ -525,7 +524,7 @@ impl RenderState {
         // `write_hand_camera`'s return value.
         let view_proj = self.write_hand_camera(queue, camera);
 
-        // `inverseArmHeight` for both branches (issue #366) — vanilla's own single
+        // `inverseArmHeight` for both branches — vanilla's own single
         // scalar, read once so the arm and the item cannot disagree about how far
         // the hand is lowered on the frame a swap crosses between them.
         let inverse_arm_height = self.equip.inverse_arm_height();
@@ -554,7 +553,7 @@ impl RenderState {
         // `ARM.display_slot(true)` — the same expression `hand_transform` below
         // reads the pose from, so the resolved variant and its transform cannot
         // disagree about which slot this pass is.
-        // A filled map first (issue #184): vanilla forks *before* the ordinary
+        // A filled map first: vanilla forks *before* the ordinary
         // item pose too — `renderArmWithItem` tests `MapItem.isFilledMap` and
         // calls `renderMap`, which is a textured quad and not the item's baked
         // model. Falling through would draw `item/filled_map`'s flat blank sprite,
@@ -781,7 +780,7 @@ impl RenderState {
     /// So the hand is lit by exactly the same two-channel value every mob is, and
     /// this is the same call `entity_passes.rs` makes for them. The clock term
     /// rides the uniform rather than the byte — see `write_hand_camera`'s note on
-    /// issue #74, which was the last real defect here.
+    /// That fix, which was the last real defect here.
     ///
     /// The one measurable difference left from vanilla is that `camera.position`
     /// has the view bob folded into it (`camera_rig::bobbed_camera`), so the probe
@@ -863,7 +862,7 @@ impl RenderState {
         // camera_buffer` was called with a bare `FogUniform::disabled()`,
         // which leaves the spare lane at its `0.0`/"unwired" sentinel, and the
         // model shader's `sky_darken()` reads that sentinel as permanent
-        // noon. That was issue #74's actual bug — not a missing light sample
+        // noon. That was that fix's actual bug — not a missing light sample
         // (`hand_light` already samples real per-position world light for
         // both branches; see its own doc), but the held item's sky component
         // never darkening: at night, in the open, the item stayed lit as if

@@ -1,4 +1,4 @@
-//! Pixel gate: **the stack count sits where vanilla puts it** (issue #384).
+//! Pixel gate: **the stack count sits where vanilla puts it**.
 //!
 //! Reported from play as "the number should be lower and further left".
 //! `GuiGraphicsExtractor.itemCount` (`:947-952`, identical in

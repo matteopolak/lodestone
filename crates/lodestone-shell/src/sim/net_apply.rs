@@ -41,7 +41,7 @@ impl Sim {
     /// does is the fold. The item collision it used to pass by argument is the
     /// [`crate::entities::ItemCollision`] resource the tick loop inserts.
     ///
-    /// # `EntitySnapshot` deletion (issue #36)
+    /// # `EntitySnapshot` deletion
     ///
     /// [`crate::entities::fold_entities`] reads the ingest components directly
     /// inside its own write guard — there is no separate snapshot read to
@@ -76,7 +76,7 @@ impl Sim {
                     self.set_connect_phase(crate::menu::loading::ConnectPhase::Connecting);
                 }
                 NetUpdate::ConnectPhase(phase) => {
-                    // Issue #449: purely the loading screen's label. Kept out of
+                    // Purely the loading screen's label. Kept out of
                     // `SessionPhase` on purpose — that enum drives the menu
                     // state machine, and adding display-only steps to it would
                     // make every `match` on it care about them.
@@ -91,7 +91,7 @@ impl Sim {
                     // that is a human-readable string, not state.
                     self.status = format!("connected (entity {entity_id})");
                     self.set_phase(SessionPhase::Connected);
-                    // Issue #449: login done, so the screen is now naming the
+                    // Login done, so the screen is now naming the
                     // terrain stream rather than the connect handshake. On a
                     // brand-new singleplayer world this is also when generation
                     // happens — columns are generated lazily as they stream.
@@ -114,7 +114,7 @@ impl Sim {
                     self.on_column_arrived(x, z);
                 }
                 NetUpdate::ChunkUnloaded { x, z } => {
-                    // Issue #479's missing half. The column is already out of the
+                    // That fix's missing half. The column is already out of the
                     // store (the adapter unloads before it emits), so this drops
                     // only what the *renderer* still holds for it.
                     self.on_column_unloaded(x, z);
@@ -130,7 +130,7 @@ impl Sim {
                     self.remesh_changed_blocks(x, y, z, &blocks);
                 }
                 NetUpdate::BlockEvent { pos, b0, b1 } => {
-                    // Chest lids (issue #23). `ChestBlockEntity.triggerEvent`
+                    // Chest lids. `ChestBlockEntity.triggerEvent`
                     // takes `b0 == 1` and `b1 > 0` as "somebody is looking in
                     // this chest"; `ChestLids` owns both that rule and the
                     // per-tick ramp, so this arm forwards the raw bytes rather
@@ -138,7 +138,7 @@ impl Sim {
                     // some other block type (a note block's pitch, a piston's
                     // direction) and is dropped by `apply_block_event`.
                     self.chest_lids.apply_block_event(pos, b0, b1);
-                    // Bells share the same `b0 == 1` (issue #23) — see
+                    // Bells share the same `b0 == 1` — see
                     // `BellShakes::apply_block_event`. Both trackers are offered
                     // the event because the packet cannot tell them apart; the
                     // per-type gather is what reads only its own positions back
@@ -146,7 +146,7 @@ impl Sim {
                     self.bell_shakes.apply_block_event(pos, b0, b1);
                 }
                 NetUpdate::ItemPickup(event) => {
-                    // Issue #365. Accumulated, not acted on here: the drain at the
+                    // That fix. Accumulated, not acted on here: the drain at the
                     // end of this function needs a `&mut World` guard and there is
                     // no reason to take one per collected item.
                     self.pickups.apply(&event);
@@ -209,7 +209,7 @@ impl Sim {
                     self.teleport_count += 1;
                 }
                 NetUpdate::Chat { text, player, sender } => {
-                    // Issue #419: a player hidden on the Social Interactions
+                    // A player hidden on the Social Interactions
                     // screen must not reach the feed. Only a signed v770 player
                     // message carries a sender, so the set is re-read from the
                     // file the toggle wrote (the same eager-persistence rule the
@@ -328,7 +328,7 @@ impl Sim {
                 NetUpdate::Death { message } => {
                     // Death is a state the shell rides through, not the end of the
                     // session. `net::run` now builds the client with
-                    // `RespawnPolicy::Manual` (issue #103), so nothing respawns
+                    // `RespawnPolicy::Manual`, so nothing respawns
                     // automatically here: this arm marks the player dead (which
                     // freezes movement in `step`) and records the message for the
                     // death screen (`app.rs`'s `drive_ui_from_session` notices
@@ -380,7 +380,7 @@ impl Sim {
                     self.apply_respawn(dimension);
                 }
                 NetUpdate::WinGame => {
-                    // Issue #192: a pure latch. `app.rs`'s `drive_ui_from_session`
+                    // A pure latch. `app.rs`'s `drive_ui_from_session`
                     // notices `Sim::has_won()` the same way it notices
                     // `Sim::is_dead()` for the death screen, and opens the
                     // credits screen exactly once (guarded there on the
@@ -559,7 +559,7 @@ impl Sim {
             }
         }
 
-        // Start this frame's pickup animations (issue #365) — **inside `poll_net`,
+        // Start this frame's pickup animations — **inside `poll_net`,
         // ahead of `fold_entities`, and that ordering is the whole trick.**
         // `handleTakeItemEntity` removes the item entity in the same breath as it
         // spawns the animation, so by the time `Sim::step` reaches `fold_entities`
@@ -572,7 +572,7 @@ impl Sim {
                 for pickup in pickups {
                     // `false` is "the item was not tracked on the render side" —
                     // no stack ever reported, or the track already pruned. Nothing
-                    // to animate, and that is the pre-#365 behaviour rather than a
+                    // to animate, and that is the pre-fix behaviour rather than a
                     // failure worth logging every time somebody walks over an
                     // unreported drop.
                     let _ = crate::entities::begin_item_pickup(

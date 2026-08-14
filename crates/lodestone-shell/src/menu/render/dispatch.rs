@@ -14,7 +14,7 @@ use super::measure::{MANAGE_SERVER_TITLE_Y, manage_server_slot};
 use super::screens::{COPYRIGHT, credits_frame, error_frame, loading_frame, version_line};
 use super::server_list::SERVER_LIST_FOOTER_H;
 
-/// Builds vanilla's `JoinMultiplayerScreen` (#396): one row per saved server at
+/// Builds vanilla's `JoinMultiplayerScreen`: one row per saved server at
 /// `ServerSelectionList`'s geometry, then the seven footer buttons.
 ///
 /// ## What each row's state resolves to
@@ -31,7 +31,7 @@ use super::server_list::SERVER_LIST_FOOTER_H;
 /// row nothing has probed yet. Vanilla has no such state for longer than a frame,
 /// so it has no text for it; this shows the address, which is the only thing
 /// known about a server before it answers, and is what this screen showed for
-/// every row before #396.
+/// every row before that fix.
 ///
 /// ## Selection, and vanilla's null
 ///
@@ -54,7 +54,7 @@ fn server_list_frame(
     // One clock read for the whole frame, so every pinging row animates in step
     // (out of phase by index, which is `pinging_sprite`'s own doing).
     let millis = statuses.millis();
-    // #402: read once and stamp onto every entry — see `ServerEntryView::scroll`.
+    // That fix: read once and stamp onto every entry — see `ServerEntryView::scroll`.
     let scroll = nav.server_scroll();
 
     let mut rows: Vec<MenuRow> = entries
@@ -234,7 +234,7 @@ pub fn frame_for<'a>(
             ],
             ..Default::default()
         }),
-        // Vanilla's `JoinMultiplayerScreen` (#396): a `HeaderAndFooterLayout`
+        // Vanilla's `JoinMultiplayerScreen`: a `HeaderAndFooterLayout`
         // title, the `ServerSelectionList`'s 36 px rows, and seven footer buttons
         // three of which are inactive with nothing selected. Built in its own
         // function because the row content alone is thirty lines of state
@@ -242,7 +242,7 @@ pub fn frame_for<'a>(
         Screen::ServerList => Some(server_list_frame(nav, statuses, favicons)),
         // Vanilla's `ManageServerScreen` (the framework conversion this arm
         // used to lack entirely: no row here carried a `slot`, so every
-        // widget drew through the pre-#392 centred stack instead of a real
+        // widget drew through the pre-fix centred stack instead of a real
         // `widget/button*`/`widget/text_field` sprite). See
         // `manage_server_slot` for the five widgets' vanilla rects.
         Screen::ServerEdit => {
@@ -260,7 +260,7 @@ pub fn frame_for<'a>(
             use super::nav::{ADDRESS_FIELD, CANCEL_ROW, DONE_ROW, NAME_FIELD, RESOURCE_PACK_ROW};
             Some(MenuFrame {
                 // `edit` carries a **clone of the live widget**, which is how
-                // #395's persistent `EditBox` reaches a draw through a `&MenuNav`
+                // That fix's persistent `EditBox` reaches a draw through a `&MenuNav`
                 // frame builder: `build`'s `draw_edit_box` moves the clone into
                 // this frame's rect and asks it where the text, caret and
                 // selection go. `label` stays populated because it is what
@@ -340,7 +340,7 @@ pub fn frame_for<'a>(
                 ..Default::default()
             })
         }
-        // Vanilla's `SelectWorldScreen` (issues #397, #287, then #468's real save
+        // Vanilla's `SelectWorldScreen` (then that fix's real save
         // list): the title, the search box, the six footer buttons — three still
         // present and disabled — and **one row per world in `saves/`**. See
         // `super::world_select` for what is disabled and why, `world_select_slot`
@@ -351,7 +351,7 @@ pub fn frame_for<'a>(
         // index `rows` by focus id (`world_select`'s `SEARCH_FIELD`,
         // `FIRST_BUTTON_ROW`, `FIRST_WORLD_ROW`), so this pushes search → buttons →
         // worlds even though the worlds draw above the buttons. Getting it wrong is
-        // #391's shape at list scale: every click one control off.
+        // That fix's shape at list scale: every click one control off.
         Screen::WorldSelect => {
             use super::world_select::{FIRST_WORLD_ROW, WORLD_SELECT_BUTTONS};
             let ws = nav.world_select();
@@ -381,7 +381,7 @@ pub fn frame_for<'a>(
             // come off `WorldSummary` here rather than in the draw, so the draw
             // decides nothing except where (the same division `ServerEntryView`
             // documents).
-            // Read once and stamped onto every entry (#541) — see
+            // Read once and stamped onto every entry — see
             // `WorldEntryView::scroll`.
             let scroll = ws.scroll();
             for row in 0..ws.shown_len() {
@@ -427,7 +427,7 @@ pub fn frame_for<'a>(
                 ..Default::default()
             })
         }
-        // Vanilla's whole `OptionsScreen` tree (issue #55). This used to be two
+        // Vanilla's whole `OptionsScreen` tree. This used to be two
         // hand-written rows in a centred stack with a key-hint footer; it is now
         // nine pages of `OptionsList` geometry built from a table, with the
         // controls this client does not honour drawn inactive. Every decision —
@@ -463,7 +463,7 @@ pub fn frame_for<'a>(
             nav.options_save_error(),
         )),
         Screen::Settings => None,
-        // The account list (issue #66). `pump` is called here, on every
+        // The account list. `pump` is called here, on every
         // frame this screen is showing, rather than from an `app.rs` hook —
         // see `accounts.rs`'s module docs on why that module is written to
         // work through a shared `&AccountsNav` reference.
@@ -507,7 +507,7 @@ pub fn frame_for<'a>(
                 },
             })
         }
-        // The loading screen (issue #449): the connect phase name over a flat dark
+        // The loading screen: the connect phase name over a flat dark
         // backdrop while the handshake/configuration phase runs. Safe to take
         // the whole frame here — no chunk packets arrive until after login, so
         // nothing meshes or uploads behind the loading screen and the world
@@ -518,7 +518,7 @@ pub fn frame_for<'a>(
         // on the world path as an overlay in `app::redraw` (see its loading
         // block) rather than piling behind a full screen.
         // The label is the phase's own real vanilla string rather than a fixed
-        // literal (issue #449's item (a)): "Connecting to the server..." while
+        // literal (that fix's item (a)): "Connecting to the server..." while
         // the socket is dialled and the integrated server opened, then "Joining
         // world..." once the handle exists. No bar on this screen — there is
         // nothing real to count before login, and a synthesised bar is the one
@@ -529,14 +529,14 @@ pub fn frame_for<'a>(
         // frozen world on screen with no explanation. See `error_frame` for the
         // vanilla `DisconnectedScreen` this now reproduces.
         Screen::Error => Some(error_frame(ui.error())),
-        // The credits/end-poem screen (#192) — see `credits_frame`'s own doc
+        // The credits/end-poem screen — see `credits_frame`'s own doc
         // for why its content is a short placeholder rather than vanilla's
         // real auto-scrolling poem.
         Screen::Credits => Some(credits_frame()),
-        // Social Interactions (#189) — see `super::social::frame`'s own doc
+        // Social Interactions — see `super::social::frame`'s own doc
         // for the singleplayer/multiplayer fork.
         Screen::Social => Some(super::social::frame(nav.social(), ui.kind())),
-        // Statistics (#188). This used to pass `StatsSnapshot::default()` — a
+        // Statistics. This used to pass `StatsSnapshot::default()` — a
         // literal, unconditionally — with a comment explaining that an empty
         // table was the only data that had ever existed. `award_stats` is
         // decoded now, so the empty literal became an island: the numbers
@@ -546,11 +546,11 @@ pub fn frame_for<'a>(
         // `Screen::Social` reads its roster off `nav` — this dispatcher cannot
         // reach the session world.
         Screen::Statistics => Some(super::stats::frame(nav.stats(), nav.stats_snapshot())),
-        // World Creation (issue #190) — see `super::create_world`'s own doc
+        // World Creation — see `super::create_world`'s own doc
         // for why this is one flat hand-placed list rather than vanilla's
         // three tabs.
         Screen::CreateWorld => Some(super::create_world::frame(nav.create_world())),
-        // Vanilla's `ConfirmScreen` (issue #540) — the gate the world list's
+        // Vanilla's `ConfirmScreen` — the gate the world list's
         // Delete button passes through. See `super::confirm`'s module doc for why
         // it is a screen at all rather than a two-press mode on the list, and
         // `confirm::frame` for the one thing this arm must not do: default

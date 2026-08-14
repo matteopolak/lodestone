@@ -1,4 +1,4 @@
-//! Pixel gate: the attack-strength crosshair indicator (issue #121) reaches
+//! Pixel gate: the attack-strength crosshair indicator reaches
 //! the screen through the **shell's real HUD path**, not just
 //! `Sim::attack_strength_scale`'s pure model.
 //!
@@ -49,9 +49,9 @@
 //!    — asserting the indicator stays visible at `1.0` — is exactly the
 //!    "wrong vanilla rule outright" mistake `CLAUDE.md` warns
 //!    `air_bubble_pixels.rs`'s own history made once already.
-//! 3. **`attack_cooldown = None`, crosshair on** — the pre-#121 behaviour.
+//! 3. **`attack_cooldown = None`, crosshair on** — the pre-fix behaviour.
 //! 4. **`Some(0.5)`, crosshair off** — proves the indicator is nested inside
-//!    `frame.crosshair`'s own gate (issue #61's lesson: two questions must
+//!    `frame.crosshair`'s own gate (that fix's lesson: two questions must
 //!    not share one boolean, and here the indicator answers only one of
 //!    them).
 //!
@@ -251,7 +251,7 @@ fn the_attack_indicator_reaches_the_screen_through_the_real_hud_path() {
     // the indicator entirely here (no "ready"-icon variant implemented).
     let full_px = painted_in_rect(&shoot(&frame_with(true, Some(1.0))), W, rect, backdrop);
 
-    // Control 2, EXECUTED: no cooldown data at all — the pre-#121 behaviour.
+    // Control 2, EXECUTED: no cooldown data at all — the pre-fix behaviour.
     let none_px = painted_in_rect(&shoot(&frame_with(true, None)), W, rect, backdrop);
 
     // Control 3, EXECUTED: half-charged cooldown, crosshair OFF — proves the

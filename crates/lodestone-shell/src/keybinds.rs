@@ -7,7 +7,7 @@
 //! ("move forward", "open the inventory"). [`Binding`] is what they press to ask
 //! (a keyboard key, a mouse button, or nothing). [`Keybinds`] is the table
 //! joining the two, plus the queries the Controls menu's Key Binds screen
-//! needs (issue #15, `crate::menu::key_binds`): grouping by [`Category`], "is
+//! needs (`crate::menu::key_binds`): grouping by [`Category`], "is
 //! this the default?", and "what else is bound to this?".
 //!
 //! `app.rs` therefore dispatches on *actions*, not keys:
@@ -60,28 +60,28 @@
 //! 4. **`F` is [`InputAction::SwapOffhand`], and it took a deletion to get
 //!    there.** This table used to carry a Lodestone-only `key.lodestone.toggleFly`
 //!    on `F` — a free-cam/noclip developer affordance with no vanilla
-//!    counterpart. Issue #382 deleted it (vanilla's `/gamemode creative` plus
-//!    #191's real double-tap-jump flight cover it), which freed `F` for vanilla's
+//!    counterpart. That fix deleted it (vanilla's `/gamemode creative` plus
+//!    That fix's real double-tap-jump flight cover it), which freed `F` for vanilla's
 //!    actual binding: `key.swapOffhand`, `Options.java:663`, GLFW keysym 70.
 //!
 //!    That collision was a real blocker, not a tidiness complaint — adding
 //!    `SwapOffhand` on `F` alongside `ToggleFly` turned
 //!    `a_conflict_is_reported_for_both_actions_and_only_for_them` red, which is
-//!    that test doing its job, and #378's off-hand half was correctly reverted
+//!    that test doing its job, and that fix's off-hand half was correctly reverted
 //!    rather than forced past it.
 //!
 //!    **Vanilla's `F` means two different things depending on what is on
 //!    screen, and both halves now work.** They are separate mechanisms, not one
-//!    mechanism with a flag — conflating them is the trap issue #385 was filed
+//!    mechanism with a flag — conflating them is the trap that fix was filed
 //!    against:
 //!
-//!    * **container half** (#378 part 3 / #382). `ContainerInput::SWAP` with
+//!    * **container half** (part 3 / that fix). `ContainerInput::SWAP` with
 //!      button `40` against the hovered slot
 //!      (`AbstractContainerScreen.java:506-522`), reached through `app.rs`'s
 //!      `KeyOutcome::ContainerSwap` exactly like the number keys `1`–`9`.
 //!      `Click::offhand_swap` and `do_swap`'s `button == 40` arm were already in
 //!      place and tested; this binding is what finally reached them.
-//!    * **gameplay half** (#385). With no screen open, vanilla sends a bare
+//!    * **gameplay half**. With no screen open, vanilla sends a bare
 //!      `ServerboundPlayerActionPacket` / `SWAP_ITEM_WITH_OFFHAND`
 //!      (`Minecraft.java:1900-1905`) — **no slot, no hit test, no container**.
 //!      Reached through `KeyOutcome::SwapOffhand`, guarded on
@@ -248,7 +248,7 @@ pub enum InputAction {
     /// With a screen open it is a `ContainerInput::SWAP` with button `40` against
     /// the hovered slot; with no screen open it is a bare
     /// `ServerboundPlayerAction`/`SWAP_ITEM_WITH_OFFHAND` carrying no slot at all
-    /// (issue #385). `app.rs`'s `resolve_key` routes the two from different arms
+    /// `app.rs`'s `resolve_key` routes the two from different arms
     /// — see [`crate::app::KeyOutcome::SwapOffhand`] and the module docs.
     SwapOffhand,
     /// Vanilla's `key.drop` (`Options.java:664`). Drop one item, or — with
@@ -1372,8 +1372,8 @@ mod tests {
         // nine hotbar slots — all twelve of vanilla's `Category.INVENTORY`
         // mappings (`Options.java:662-664,683-693`).
         assert_eq!(Keybinds::in_category(Category::Inventory).count(), 12);
-        // Misc lost a member to #382 (`key.lodestone.toggleFly` is gone) and
-        // gained one back here (`key.screenshot`, issue #16): `key.screenshot`,
+        // Misc lost a member to that fix (`key.lodestone.toggleFly` is gone) and
+        // gained one back here (`key.screenshot`, that fix): `key.screenshot`,
         // `key.togglePerspective` and this client's non-vanilla pause entry.
         assert_eq!(Keybinds::in_category(Category::Misc).count(), 3);
     }

@@ -1,5 +1,5 @@
 //! Per-frame input to [`super::RenderState`]'s underwater/fire overlay pass
-//! (issues #108, #112) — see `docs/screen-overlays.md`.
+//! — see `docs/screen-overlays.md`.
 //!
 //! Unlike [`super::EntityLightSource`]/[`super::SkyDarkenSource`] and friends,
 //! this is **not** a source: those exist because `RenderState` has no way to
@@ -21,7 +21,7 @@ pub struct ScreenEffects {
     /// `docs/fluid-classification.md`). Drives the underwater overlay.
     pub eye_in_water: bool,
     /// The local player's on-fire shared-entity-flag bit. **Closed, issue
-    /// #112** — see `docs/screen-overlays.md`'s "The on-fire flag's route to
+    /// That fix** — see `docs/screen-overlays.md`'s "The on-fire flag's route to
     /// the shell" section: the byte decodes in `metadata.rs`, and
     /// `lodestone-ecs/src/ingest.rs::apply_local_player_on_fire` is a
     /// session-scoped fold (the local player is deliberately excluded from
@@ -39,7 +39,7 @@ pub struct ScreenEffects {
     /// already passed to `RenderState::update_animation` for the block atlas.
     pub tick: u64,
     /// Whether the local player's helmet slot holds a carved pumpkin (issue
-    /// #185). Vanilla derives this generically from *any* equipped item's
+    /// That fix). Vanilla derives this generically from *any* equipped item's
     /// `minecraft:equippable.camera_overlay` component
     /// (`Hud.extractCameraOverlays`,
     /// `.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java:269-291`)
@@ -48,14 +48,14 @@ pub struct ScreenEffects {
     /// modelling the general per-item lookup table that has exactly one
     /// entry today.
     pub wearing_pumpkin: bool,
-    /// Vanilla's `Entity.getPercentFrozen()`, `0.0..=1.0` (issue #139) —
+    /// Vanilla's `Entity.getPercentFrozen()`, `0.0..=1.0` —
     /// drives the freeze overlay's alpha. `0.0` (the default) means "not
     /// freezing", which is also the honest value while no live producer feeds
     /// this yet (`ScreenEffects` doc's own construction-site pattern; see
     /// `docs/screen-overlays.md`). **Unlike the four fields above, this is
     /// *not* first-person-gated** — see [`Self::any_active`]'s doc.
     pub freeze_percent: f32,
-    /// Whether the local player is scoping with a held spyglass (issue #154)
+    /// Whether the local player is scoping with a held spyglass
     /// — vanilla's `Player.isScoping()`:
     /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
     /// (`Player.java:1936-1938`). First-person-gated, like
@@ -64,16 +64,16 @@ pub struct ScreenEffects {
     /// block, `Hud.java:277-291`) — unlike freeze/nausea/portal below.
     pub scoping: bool,
     /// Vanilla's `LivingEntity.getEffectBlendFactor(MobEffects.NAUSEA,
-    /// partialTicks)`, `0.0..=1.0` (issue #144) — drives the confusion
+    /// partialTicks)`, `0.0..=1.0` — drives the confusion
     /// overlay's strength and (blended with [`Self::portal_intensity`]) the
     /// world-projection "spinning" warp (`Camera::view_projection_warped`).
     /// `0.0` (the default) is the honest value today: no potion-effect
     /// duration tracker exists anywhere in this codebase yet to feed it — see
     /// `docs/screen-overlays.md`'s "what does not reach the shell yet"
-    /// section for #144. **Not first-person-gated** — see
+    /// section for that fix. **Not first-person-gated** — see
     /// [`Self::any_active`]'s doc.
     pub nausea_intensity: f32,
-    /// Vanilla's `Entity.portalEffectIntensity`, `0.0..=1.0` (issue #149) —
+    /// Vanilla's `Entity.portalEffectIntensity`, `0.0..=1.0` —
     /// drives the portal overlay's alpha and (blended with
     /// [`Self::nausea_intensity`]) the same projection warp. Takes priority
     /// over nausea when both are positive

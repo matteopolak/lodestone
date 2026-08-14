@@ -1,6 +1,6 @@
 //! Pixel gate: sign text must **draw**, in a real projected screen area,
 //! through the real [`RenderState::render`] path — the same call `app.rs`'s
-//! frame loop makes (issue #23, the third block-entity family after chest
+//! frame loop makes (the third block-entity family after chest
 //! and skull, and the first that is *text* rather than a cuboid rig).
 //!
 //! # Why this gate looks different from `skull_block_entity_pixels.rs`

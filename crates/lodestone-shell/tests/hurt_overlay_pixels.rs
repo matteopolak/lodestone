@@ -1,6 +1,6 @@
 //! Pixel gate: a **remote** entity that reports a hurt animation must go red on
 //! screen, and a second, otherwise-identical entity that never gets the report
-//! must not change by a single byte (issue #98 / `docs/combat.md`).
+//! must not change by a single byte (`docs/combat.md`).
 //!
 //! # Why this exists, and why the existing gate could not replace it
 //!
@@ -31,7 +31,7 @@
 //!
 //! A frame average cannot tell a uniform-but-wrong frame from a localised blob,
 //! and this effect is *specifically* a localised blob — vanilla's overlay is a
-//! per-model blend, not the full-screen tint issue #98's title asked for (there
+//! per-model blend, not the full-screen tint that fix's title asked for (there
 //! is no such thing in the jar; see the issue's own comment thread). So every
 //! assertion here is a bounding box and a count over a **mask**, and failure
 //! output prints where, not what fraction.
@@ -149,7 +149,7 @@ fn world_with_two_tracked_zombies(feet: glam::Vec3) -> World {
         world.run_schedule(NetIngest);
     }
 
-    // Issue #36: the entities are already fully described by the ingest
+    // The entities are already fully described by the ingest
     // components `apply_entity_spawn` just wrote (`EntityKind`/`Position`/
     // `Rotation`/`HeadYaw`), so the fold reads those directly rather than a
     // hand-built `EntitySnapshot` — same as `Sim::fold_entities` does live.
@@ -448,7 +448,7 @@ fn a_hurt_remote_entity_reddens_and_an_undamaged_one_does_not() {
         reddened_px.bbox()
     );
 
-    // ---- magnitude, not just direction (issue #371) ----
+    // ---- magnitude, not just direction ----
     //
     // Everything above this point measures *whether* the overlay applied. None of
     // it can see *how much*, and that is how the swapped `mix` shipped: the gate
@@ -512,7 +512,7 @@ fn a_hurt_remote_entity_reddens_and_an_undamaged_one_does_not() {
          right order (fog contamination, a linear-space blend, or a changed alpha)"
     );
 
-    // A *model* overlay, not the full-screen tint issue #98's title asked for:
+    // A *model* overlay, not the full-screen tint that fix's title asked for:
     // nothing outside the mob's own silhouette may move at all.
     let leaked = Region::from(|i| {
         differs(&subject_rest_px, &subject_hurt_px, i) && !mask.contains(i)

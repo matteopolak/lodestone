@@ -32,11 +32,11 @@
 mod background;
 /// The shared GUI vertex builder — colour, item-sprite, glint, block-model and
 /// background streams. `pub(crate)` because it now has three consumers: the
-/// container screen, the creative screen (#158) and the Advancements screen
-/// (#167), all of which draw through `ContainerRenderer`'s passes.
+/// container screen, the creative screen and the Advancements screen
+/// all of which draw through `ContainerRenderer`'s passes.
 pub(crate) mod builder;
 mod creative;
-/// Vanilla's creative-inventory tab contents (issue #158) — a hand-transcription
+/// Vanilla's creative-inventory tab contents — a hand-transcription
 /// of the decompiled `CreativeModeTabs.java`, cross-checked against
 /// `lodestone-data`'s real item registry. Read by [`creative`], the screen that
 /// draws it.
@@ -46,7 +46,7 @@ mod geometry;
 mod input;
 mod layout;
 /// The merchant/trading screen's own trade-list layout, prices and click
-/// hit-test (issue #245's UI half) — see `docs/merchant-screen.md`.
+/// hit-test (that fix's UI half) — see `docs/merchant-screen.md`.
 pub mod merchant;
 /// The inventory avatar (the player standing in the panel, head tracking the
 /// cursor) — see `docs/inventory-player-preview.md`. The pose arithmetic lives in
@@ -120,7 +120,7 @@ const HIGHLIGHT: f32 = 24.0;
 /// cell origin.
 const HIGHLIGHT_INSET: f32 = 4.0;
 
-/// The furnace family's two progress sprites (issue #28), one pair per
+/// The furnace family's two progress sprites, one pair per
 /// texture — `AbstractFurnaceScreen.java:17-18` takes them as constructor
 /// parameters, and `FurnaceScreen`/`BlastFurnaceScreen`/`SmokerScreen` each
 /// supply their own rather than sharing one id.
@@ -131,13 +131,13 @@ const BLAST_FURNACE_BURN_PROGRESS: &str = "container/blast_furnace/burn_progress
 const SMOKER_LIT_PROGRESS: &str = "container/smoker/lit_progress";
 const SMOKER_BURN_PROGRESS: &str = "container/smoker/burn_progress";
 
-/// The brewing stand's three progress sprites (issue #28),
+/// The brewing stand's three progress sprites,
 /// `BrewingStandScreen.java:12-14`.
 const BREWING_FUEL_LENGTH: &str = "container/brewing_stand/fuel_length";
 const BREWING_BREW_PROGRESS: &str = "container/brewing_stand/brew_progress";
 const BREWING_BUBBLES: &str = "container/brewing_stand/bubbles";
 
-/// The merchant screen's own sprites (issue #245's UI half),
+/// The merchant screen's own sprites (that fix's UI half),
 /// `MerchantScreen.java:21-29`. The experience-bar trio and the scroller pair
 /// are not drawn yet — see `container::merchant`'s module doc for what is
 /// modelled and what is a named gap.
@@ -161,7 +161,7 @@ const GUI_SPRITES: &[&str] = &[
     lodestone_game::menu::EMPTY_ARMOR_SLOT_LEGGINGS,
     lodestone_game::menu::EMPTY_ARMOR_SLOT_BOOTS,
     lodestone_game::menu::EMPTY_ARMOR_SLOT_SHIELD,
-    // Furnace family + brewing stand progress widgets (issue #28) — real
+    // Furnace family + brewing stand progress widgets — real
     // container_set_data-driven bars, not slot placeholders, but they ride
     // the same atlas for the same reason the highlight pair does.
     FURNACE_LIT_PROGRESS,
@@ -180,7 +180,7 @@ const GUI_SPRITES: &[&str] = &[
 ];
 
 /// [`GUI_SPRITES`] plus the creative screen's 28 tab buttons and 2 scroller
-/// sprites (issue #158) — all `gui/sprites/container/creative_inventory/**`, so
+/// sprites — all `gui/sprites/container/creative_inventory/**`, so
 /// they belong in this atlas rather than needing one of their own. Kept as a
 /// separate concatenation only because `GUI_SPRITES` is indexed by nothing and
 /// this keeps the creative ids next to the module that names them.
@@ -190,7 +190,7 @@ fn all_gui_sprites() -> impl Iterator<Item = &'static str> {
         .copied()
         .chain(creative::CREATIVE_TAB_SPRITES)
         .chain(creative::CREATIVE_SCROLLER_SPRITES)
-        // The Advancements screen's 13 sprites (issue #167) — `advancements/**`,
+        // The Advancements screen's 13 sprites — `advancements/**`,
         // also `gui/sprites/**`, so they ride this atlas too.
         .chain(crate::menu::advancements::ADVANCEMENT_SPRITES)
 }

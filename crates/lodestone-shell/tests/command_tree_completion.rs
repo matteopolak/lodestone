@@ -1,5 +1,4 @@
-//! Tab completion driven by a **real vanilla 26.2 server's** command tree
-//! (issue #470).
+//! Tab completion driven by a **real vanilla 26.2 server's** command tree.
 //!
 //! ## Why this gate exists and why it lives here
 //!
@@ -309,10 +308,10 @@ fn a_shared_prefix_narrows_to_exactly_the_commands_that_share_it() {
     );
 }
 
-// --- The consumer: the tree reaching the line on screen (issue #471) --------
+// --- The consumer: the tree reaching the line on screen --------
 //
 // Everything above proves `complete()` walks a real tree correctly. That is
-// still not a pixel: until #471 steps 2 and 3 the *only* callers of `complete`
+// still not a pixel: until that fix steps 2 and 3 the *only* callers of `complete`
 // were tests and a `command_block_frame` argument every production caller
 // passed as `None`, which is this repo's island shape exactly. The gates below
 // drive the seams a keystroke actually reaches — `ChatInput::tab` (the chat
@@ -442,7 +441,7 @@ fn tab_after_a_trailing_space_splices_the_argument_domain_at_the_servers_start()
 
 /// The control, run rather than described: with the cell empty — exactly the
 /// state before `minecraft:commands` arrives, and the state every caller was
-/// stuck in before #471 — the identical keystroke must leave the line
+/// stuck in before that fix — the identical keystroke must leave the line
 /// untouched. Two hypotheses over the same input, so the gate above cannot be
 /// satisfied by a completer that ignores its tree.
 #[test]
@@ -612,7 +611,7 @@ fn the_replies_own_start_decides_where_the_text_lands() {
 }
 
 /// Step 2's seam: the command block edit screen's own Tab key, against the same
-/// real tree, plus the `None` control it degraded to before #471.
+/// real tree, plus the `None` control it degraded to before that fix.
 ///
 /// The command field holds a **slash-less** line, so this also covers
 /// `menu::command_block::complete`'s offset shift — a completion spliced one

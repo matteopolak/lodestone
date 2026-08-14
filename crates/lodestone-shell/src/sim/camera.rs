@@ -130,8 +130,7 @@ impl Sim {
     }
 
     /// The standing biome's `minecraft:visual/sky_color` in **linear** RGB, or
-    /// `None` when there is nothing better than the dimension default to draw
-    /// (issue #96).
+    /// `None` when there is nothing better than the dimension default to draw.
     ///
     /// # The chain, and the one hop that is not a lookup
     ///
@@ -158,7 +157,7 @@ impl Sim {
     /// has not told us*. Pre-login, a server that sent no biome registry, a
     /// column that has not streamed in, a biome with no `sky_color` (the ten
     /// Nether/End biomes) — each falls back to the dimension colour the caller
-    /// already computed, which is the same explicit-fallback shape #34 was filed
+    /// already computed, which is the same explicit-fallback shape that fix was filed
     /// over. Never a plausible-looking overworld blue.
     #[must_use]
     fn biome_sky_color(&self) -> Option<[f32; 3]> {
@@ -455,7 +454,7 @@ impl Sim {
         // whenever `optionsRenderState.bobView` is set, with no camera-type check
         // (`GameRenderer.java:534-536`), and `bobView` itself only tests
         // `isPlayer`. Older versions did suppress it in third person and issue
-        // #58's body says so; re-read against `.cache/mc/26.2/client-src`, that is
+        // That fix's body says so; re-read against `.cache/mc/26.2/client-src`, that is
         // no longer true.
         let eye = bobbed_camera(
             self.camera(aspect),
@@ -483,7 +482,7 @@ impl Sim {
         // path as the back view and differs only by the mirror inside
         // `third_person_camera`.
         if self.camera_type.is_first_person() {
-            // Issue #154: vanilla's FOV zoom is gated on `firstPerson &&
+            // Vanilla's FOV zoom is gated on `firstPerson &&
             // isScoping()` (`AbstractClientPlayer.getFieldOfViewModifier`,
             // `AbstractClientPlayer.java:92-114`) — a third-person camera
             // never zooms, so this composition only runs on the early
@@ -504,7 +503,7 @@ impl Sim {
         }
     }
 
-    /// Vanilla's `Player.isScoping()` (issue #154):
+    /// Vanilla's `Player.isScoping()`:
     /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
     /// (`Player.java:1936-1938`), computed entirely from `Sim`'s own state so
     /// [`Self::render_camera`] needs no new parameter — `app.rs` computes the
@@ -671,7 +670,7 @@ impl Sim {
             attack_anim: walk.attack_anim,
             age_ticks: walk.age,
             aggressive: false,
-            // **Not wired for the local player yet (issue #57).** Remote
+            // **Not wired for the local player yet.** Remote
             // entities get their bow/crossbow pose from
             // `entities::arm_pose_for`, driven by the `ItemUse` component that
             // `ingest::apply_entity_item_use` folds off the living-flags byte.

@@ -1,5 +1,5 @@
 //! Pixel gate: **the drag preview reaches pixels, only in painted cells, and the
-//! number it draws is the split the release will produce** (issue #378 part 2).
+//! number it draws is the split the release will produce** (part 2).
 //!
 //! While a paint-drag is held, vanilla shows the provisional result in each
 //! painted cell — a 50%-white wash and the stack that cell would receive. This

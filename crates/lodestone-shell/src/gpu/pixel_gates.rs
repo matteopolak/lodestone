@@ -995,7 +995,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #479: an unloaded column must stop reaching pixels
+// An unloaded column must stop reaching pixels
 // ---------------------------------------------------------------------------
 
 /// Which pixels of `pixels` differ from the empty-scene render `reference`.
@@ -1062,11 +1062,11 @@ fn coverage_within(
     (hit, total, bbox)
 }
 
-/// **The #479 pixel gate: a column the client no longer has must stop
+/// **That fix's pixel gate: a column the client no longer has must stop
 /// painting.**
 ///
 /// A count of resident sections cannot see this — a chunk can be meshed and not
-/// drawn, and (the actual #479 failure) *drawn and not meshed*. So this asserts
+/// drawn, and (the actual that fix failure) *drawn and not meshed*. So this asserts
 /// coverage inside one column's own screen rect, and the rect is **measured from
 /// the real draw** rather than restated as a constant: a first render with only
 /// the subject column uploaded gives its exact pixel footprint through the same
@@ -1101,7 +1101,7 @@ fn unloaded_column_stops_painting_its_screen_rect() {
 /// **The negative control for the gate above, and it fails that gate's
 /// assertion.**
 ///
-/// Identical sequence with `forget_column` omitted — i.e. the pre-#479 client,
+/// Identical sequence with `forget_column` omitted — i.e. the pre-fix client,
 /// whose store loses the column while the GPU keeps it. The subject's rect stays
 /// covered, which is the state that grows into an exhausted section-origin arena
 /// and the reported "collide with terrain you cannot see".
@@ -1209,7 +1209,7 @@ fn run_eviction_gate(evict: bool) {
             crate::worldgen::generate_column(cx, cz),
         );
     }
-    // Issue #423: the test edits the store (unload below), so it holds the write
+    // The test edits the store (unload below), so it holds the write
     // handle and hands the paired read handle to the mesher.
     let write = lodestone_ecs::ChunkWorldWrite::new(world);
     let store = write.read_handle();

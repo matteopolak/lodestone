@@ -104,7 +104,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
     EntityDraw {
         // A dropped item is not a living entity, so it never reddens — vanilla's
         // overlay is `LivingEntityRenderer`'s, and an item entity is drawn
-        // through the model pipeline instead (issue #98).
+        // through the model pipeline instead.
         hurt: false,
         block_state: None,
         id: DROP_ID,
@@ -136,7 +136,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         creeper_swelling: 0.0,
         death_time: 0.0,
         // A dropped item entity carries no `EntityFlags` lookup in this
-        // hand-built fixture (issue #434).
+        // hand-built fixture.
         on_fire: false,
         // Not a player, so no skin can apply.
         player_skin: None,

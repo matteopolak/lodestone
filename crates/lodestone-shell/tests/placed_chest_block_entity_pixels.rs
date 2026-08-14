@@ -1,21 +1,21 @@
 //! Pixel gate: a chest set through the **block-update path** must reach pixels,
-//! and removing it must make the draw disappear (issue #374) — and the same must
+//! and removing it must make the draw disappear — and the same must
 //! hold for a chest the client **predicts locally**, with no server packet at all,
-//! including when the server then refuses the placement (issue #381).
+//! including when the server then refuses the placement.
 //!
 //! Three gates live here, in the order the two issues arrived:
 //!
 //! | gate | route | control |
 //! |---|---|---|
-//! | [`a_chest_set_by_a_block_update_reaches_pixels_and_stops_when_removed`] | `BLOCK_UPDATE`'s `set_block` + `sync_block_entity` | the state write with no block-entity half, i.e. #374 itself |
-//! | [`a_locally_predicted_chest_reaches_pixels_with_no_server_packet`] | `lodestone::sim::write_predicted_block`, the production prediction | no local write at all, i.e. #381 itself |
+//! | [`a_chest_set_by_a_block_update_reaches_pixels_and_stops_when_removed`] | `BLOCK_UPDATE`'s `set_block` + `sync_block_entity` | the state write with no block-entity half, i.e. That fix itself |
+//! | [`a_locally_predicted_chest_reaches_pixels_with_no_server_packet`] | `lodestone::sim::write_predicted_block`, the production prediction | no local write at all, i.e. That fix itself |
 //! | [`a_refused_placement_loses_the_predicted_block_entity`] | predict, then the server's correction | a world that never had a chest |
 //!
 //! # What this gate covers that `chest_block_entity_pixels.rs` does not
 //!
 //! That gate hands `RenderState` a synthetic `ChestSpawn` closure. It proved the
-//! *render* half of #23 and is silent about where spawns come from — which is
-//! exactly where #374 lived: `block_update` wrote a block state and nothing else,
+//! *render* half of that fix and is silent about where spawns come from — which is
+//! exactly where that fix lived: `block_update` wrote a block state and nothing else,
 //! so a freshly placed chest had a state, **no block-entity record**, and
 //! `block_entities::chest_candidates`' `for be in &chunk.block_entities` loop
 //! never saw it. It drew zero pixels and still *opened*, because interaction
@@ -38,7 +38,7 @@
 //! | pre-fix control | `set_block(chest)` **only** | zero spawns, zero px in the rect |
 //! | removed | then `set_block(air)` + `sync_block_entity(None)` | back to zero px |
 //!
-//! The middle row is #374 itself, reproduced verbatim: the old adapter arm was
+//! The middle row is that fix itself, reproduced verbatim: the old adapter arm was
 //! `world.set_block(pos.x, pos.y, pos.z, state);` with no second call. It is kept
 //! as a permanent control rather than described, because "the chest reaches
 //! pixels" is only meaningful next to a run where it provably does not — and this
@@ -58,7 +58,7 @@
 //!
 //! `CLAUDE.md` records a control that asserted a frame "clears uniformly" and
 //! failed at 3.5% because of the unconditional **first-person bare arm**, and the
-//! #23 chest gate's first failure bbox landed on that same arm. So
+//! That fix chest gate's first failure bbox landed on that same arm. So
 //! [`the_first_person_arm_is_disjoint_from_the_chest_rect`] *locates* the arm and
 //! asserts disjointness rather than assuming the rect is clean. Failure output
 //! prints bounding boxes, never a bare percentage.
@@ -309,7 +309,7 @@ fn first_state_named(name: &str) -> u32 {
 /// One block-state write through the `WorldSink` seam, `sync` selecting whether
 /// the block-entity half runs.
 ///
-/// `sync == false` reproduces the pre-#374 adapter arm exactly: `set_block` and
+/// `sync == false` reproduces the pre-fix adapter arm exactly: `set_block` and
 /// nothing else.
 fn write_block(world: &mut World, block: [i32; 3], state: u32, sync: bool) -> Option<BlockEntitySync> {
     let sink: &mut dyn WorldSink = world;
@@ -325,7 +325,7 @@ fn write_block(world: &mut World, block: [i32; 3], state: u32, sync: bool) -> Op
 }
 
 /// The real shell gather: `chest_candidates` over the world, then `chest_spawn`
-/// per candidate. This is the code path #374 starved of input.
+/// per candidate. This is the code path that fix starved of input.
 fn gather(world: &World, pos: ChunkPos, eye: glam::Vec3) -> Vec<ChestSpawn> {
     let lids = ChestLids::new();
     chest_candidates(world, [pos], eye)
@@ -374,7 +374,7 @@ fn a_chest_set_by_a_block_update_reaches_pixels_and_stops_when_removed() {
         "the real shell gather must find exactly one chest, got {subject_spawns:?}"
     );
 
-    // --- The pre-#374 control: the same state write, block-entity half absent.
+    // --- The pre-fix control: the same state write, block-entity half absent.
     let (mut pre_fix_world, pre_fix_pos) = world_with_chunk();
     assert_eq!(write_block(&mut pre_fix_world, CHEST, chest_state, false), None);
     assert_eq!(
@@ -528,15 +528,15 @@ fn a_chest_set_by_a_block_update_reaches_pixels_and_stops_when_removed() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #381: the same thing, reached through the local prediction
+// The same thing, reached through the local prediction
 // ---------------------------------------------------------------------------
 
 /// The chest a right-click predicts must reach pixels with **no server packet at
 /// all**, and be pixel-identical to the same chest delivered by `BLOCK_UPDATE`.
 ///
-/// The gate above proves the *packet* route. #381 is the other one: `use_item_live`
+/// The gate above proves the *packet* route. That fix is the other one: `use_item_live`
 /// used to send `use_item_on` and wait, so between the click and the server's reply
-/// there was no local state write, therefore (since #374) no local block-entity
+/// there was no local state write, therefore (since that fix) no local block-entity
 /// record, therefore a hole where the chest should be. The fix is
 /// [`write_predicted_block`], and this drives **that production function** rather
 /// than re-spelling its two calls — a re-spelling would pass with the prediction
@@ -608,8 +608,8 @@ fn a_locally_predicted_chest_reaches_pixels_with_no_server_packet() {
         "the real shell gather must find the predicted chest, got {predicted_spawns:?}"
     );
 
-    // --- The pre-#381 control: the click sent, nothing written locally. --------
-    // This is not "the write with its second half removed" (that is #374, gated
+    // --- The pre-fix control: the click sent, nothing written locally. --------
+    // This is not "the write with its second half removed" (that is that fix, gated
     // above) — it is the whole prediction absent, which is what `use_item_live`
     // did. A world state, so it cannot rot.
     let (unpredicted_world, unpredicted_pos) = world_with_chunk();
@@ -721,11 +721,11 @@ fn a_locally_predicted_chest_reaches_pixels_with_no_server_packet() {
 /// A **refused** placement must lose its predicted block entity, not keep drawing
 /// a chest in empty air.
 ///
-/// #381 asks what happens when the server disagrees, and the answer is that no new
+/// That fix asks what happens when the server disagrees, and the answer is that no new
 /// mechanism is needed: vanilla's server sends a `ClientboundBlockUpdatePacket` for
 /// **both** the clicked position and the adjacent one after *every* `use_item_on`,
 /// whatever it decided (`ServerGamePacketListenerImpl.java:1397-1398`) — so the
-/// predicted cell is always overwritten within one round trip, and since #374 that
+/// predicted cell is always overwritten within one round trip, and since that fix that
 /// write calls `sync_block_entity`, which removes the record.
 ///
 /// This gate is the difference between believing that and knowing it. The record
@@ -867,7 +867,7 @@ fn a_refused_placement_loses_the_predicted_block_entity() {
 /// What else already paints here — **measured**, not assumed.
 ///
 /// `CLAUDE.md` records a control that asserted a frame "clears uniformly" and
-/// failed at 3.5% because of the unconditional first-person bare arm; the #23
+/// failed at 3.5% because of the unconditional first-person bare arm; that fix's
 /// chest gate's own first failure bbox landed on that arm too. This locates it
 /// and asserts it is disjoint from the rect the sibling gate measures, so that
 /// gate's clean-control premise is a measurement rather than a hope.

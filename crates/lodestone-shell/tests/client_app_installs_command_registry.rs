@@ -1,10 +1,10 @@
-//! Issue #467: the rendered client's `App` must actually install
+//! The rendered client's `App` must actually install
 //! `PluginCommandsPlugin`, or the entire command path is an island.
 //!
 //! # Why this gate exists at all
 //!
 //! Everything downstream of it was already correct and already tested when this
-//! was written. `CHAT_COMMAND` decodes (#464), crosses the host-installed
+//! was written. `CHAT_COMMAND` decodes, crosses the host-installed
 //! `CommandSink` seam, and reaches `dispatch` — with a four-test end-to-end wire
 //! gate in `crates/protocol/v770/tests/command_wire_path.rs` proving it, both of
 //! whose negative controls were observed failing.

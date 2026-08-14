@@ -16,7 +16,7 @@ use crate::mesher::SectionKey;
 
 /// One uploaded packed full-cube section (the demo/headless path).
 ///
-/// Carries **no camera buffer or bind group of its own** since issue #76:
+/// Carries **no camera buffer or bind group of its own** since that fix:
 /// `RenderState::packed_cam_bind_group` is shared by every packed section, and
 /// `origin_alloc` is only this section's *slot* within
 /// `RenderState::packed_origin_arena` — its offset is what selects this
@@ -62,7 +62,7 @@ pub(super) struct ModelSectionGpu {
 /// Almost always [`Arena`](Self::Arena): a span suballocated out of
 /// [`ModelMeshArena`]'s shared blocks, so the draw loop binds vertex and index
 /// buffers **once per block** instead of once per section — 4 encoder calls per
-/// draw down to 2, which is the whole point of issue #543's second half.
+/// draw down to 2, which is the whole point of that fix's second half.
 ///
 /// [`Dedicated`](Self::Dedicated) is the degrade path, not a second design: an
 /// arena that cannot place a mesh (one larger than a whole block, or a device that
@@ -160,7 +160,7 @@ pub(super) fn sort_back_to_front(draws: &mut [TerrainDraw<'_>]) {
 /// the sizing rationale.
 pub(super) const MODEL_ORIGIN_ARENA_SLOTS: u64 = 131_072;
 
-/// Capacity for the **packed** path's own [`SectionOriginArena`] (issue #76).
+/// Capacity for the **packed** path's own [`SectionOriginArena`].
 ///
 /// Two orders of magnitude smaller than [`MODEL_ORIGIN_ARENA_SLOTS`] on purpose:
 /// the packed pipeline only ever holds the offline demo world, whose extent is
@@ -173,8 +173,7 @@ pub(super) const PACKED_ORIGIN_ARENA_SLOTS: u64 = 8_192;
 
 /// Shared GPU storage for every live model section's world origin (group 0
 /// binding 1 of the model/fluid pipelines), addressed by a dynamic offset at
-/// draw time instead of one buffer + one bind group per section. This is the
-/// fix for issue #75: see the module doc and
+/// draw time instead of one buffer + one bind group per section. See the module doc and
 /// [`ModelSharedCameraUniform`](lodestone_render::ModelSharedCameraUniform)'s
 /// doc for the profile that motivated it.
 ///
@@ -274,7 +273,7 @@ impl SectionOriginArena {
     /// Slot occupancy against this arena's fixed capacity — used/free byte and
     /// allocation counts from the underlying [`ArenaBuffer`]. A narrow
     /// accessor rather than making [`SectionOriginArena`] itself `pub`: issue
-    /// #133/#160 want to watch how close realistic render distances get to
+    /// That fix/that fix want to watch how close realistic render distances get to
     /// [`MODEL_ORIGIN_ARENA_SLOTS`]'s fixed ceiling, and this is the seam a
     /// `lodestone-shell` bench uses for that (via
     /// [`RenderState::model_origin_arena_stats`]/
@@ -364,7 +363,7 @@ pub(super) struct ModelRenderer {
     /// The shared group-0 buffer (binding 0: view-projection + this frame's
     /// fog), written **once per frame** by `update_model_shared_camera_buffer`
     /// in [`RenderState::render_inner`] — replacing what used to be one
-    /// `queue.write_buffer` per *section*, per frame (issue #75).
+    /// `queue.write_buffer` per *section*, per frame.
     pub(super) shared_cam_buffer: wgpu::Buffer,
     /// The bind group over [`Self::shared_cam_buffer`] and
     /// [`Self::origin_arena`], built **once** at construction and shared by
@@ -380,7 +379,7 @@ pub(super) struct ModelRenderer {
     pub(super) origin_arena: SectionOriginArena,
     /// Shared vertex/index arena blocks backing every section's geometry, so the
     /// per-draw encoder cost is a bind + a draw rather than a bind + two buffer
-    /// binds + a draw (issue #543). See [`ResidentMesh`].
+    /// binds + a draw. See [`ResidentMesh`].
     pub(super) mesh_arena: ModelMeshArena,
     /// The **first-person held item** pass's own shared-camera buffer + bind
     /// group. Its `view_proj` is [`hand_projection`] *alone* (no view matrix)
@@ -466,7 +465,7 @@ mod tests {
 impl super::RenderState {
     /// Slot occupancy of the **model** path's per-section origin arena
     /// against its fixed [`MODEL_ORIGIN_ARENA_SLOTS`] ceiling — a `pub`
-    /// accessor so a `lodestone-shell` bench (issue #133) can watch how close
+    /// accessor so a `lodestone-shell` bench can watch how close
     /// realistic render distances get to a ceiling that
     /// `docs/section-camera-uniform.md` documents as silently dropping
     /// geometry, not panicking, when exhausted. `None` on the demo path,
@@ -476,7 +475,7 @@ impl super::RenderState {
         self.model.as_ref().map(|m| m.origin_arena.stats())
     }
 
-    /// Same, for the packed/demo path's own origin arena (issue #76),
+    /// Same, for the packed/demo path's own origin arena,
     /// against its much smaller [`PACKED_ORIGIN_ARENA_SLOTS`] ceiling.
     #[must_use]
     pub fn packed_origin_arena_stats(&self) -> lodestone_render::AllocStats {

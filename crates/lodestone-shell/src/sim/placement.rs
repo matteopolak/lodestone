@@ -1,4 +1,4 @@
-//! Local placement prediction (issue #381), split out of `sim.rs` into its
+//! Local placement prediction, split out of `sim.rs` into its
 //! own module for the same reason `sim/tests.rs` was: this is the most
 //! self-contained ~600-line block in the file — every item here is a pure
 //! function or a plain data type, none of it touches `Sim` state — so it is
@@ -30,11 +30,11 @@ use lodestone_physics::Aabb;
 use lodestone_world::{BlockEntitySync, WorldSink};
 
 // ---------------------------------------------------------------------------
-// Local placement prediction (issue #381)
+// Local placement prediction
 //
 // `use_item_live` used to send `use_item_on` and wait: `Placement` is a
 // *decision* machine and nothing wrote the world, so a placed block — a chest
-// especially, since #374 made a state write create its block entity — was a hole
+// especially, since that fix made a state write create its block entity — was a hole
 // for one server round trip. Everything below is what turns that decision into a
 // local write. See `docs/block-placement-prediction.md`.
 // ---------------------------------------------------------------------------
@@ -496,7 +496,7 @@ pub(crate) fn block_states_of(block: &str) -> Option<BlockStates> {
 ///
 /// Everything decidable from the property signature is decided from it; the two
 /// facing families that are *not* (see [`FACING_HORIZONTAL_OPPOSITE`]) come from
-/// a named list. Declining is always safe: it reproduces the pre-#381 behaviour
+/// a named list. Declining is always safe: it reproduces the pre-fix behaviour
 /// of sending `use_item_on` and waiting.
 pub(crate) fn orientation_for_placement(block: &str, states: &BlockStates) -> Option<OrientationKind> {
     let path = block.strip_prefix("minecraft:").unwrap_or(block);
@@ -663,8 +663,8 @@ pub(crate) fn half_property(half: Half) -> &'static str {
 /// **This is the local mirror of the v770 adapter's `BLOCK_UPDATE` arm**, and it
 /// is deliberately the same two calls in the same order:
 /// [`WorldSink::set_block`] then [`WorldSink::sync_block_entity`] with the new
-/// state's `BLOCK_ENTITY_TYPE` id. Writing the state alone is issue #374 — a
-/// chest with a state, no record, and zero pixels — and #381 is that same bug
+/// state's `BLOCK_ENTITY_TYPE` id. Writing the state alone is that fix — a
+/// chest with a state, no record, and zero pixels — and that fix is that same bug
 /// reached through the *prediction* rather than through a packet.
 ///
 /// A free function over `&mut dyn WorldSink` rather than a `Sim` method so a test

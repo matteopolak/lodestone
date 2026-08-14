@@ -1,4 +1,4 @@
-//! The Social Interactions screen (issue #189), reached from the pause
+//! The Social Interactions screen, reached from the pause
 //! menu's Player Reporting icon button — vanilla's `SocialInteractionsScreen`.
 //!
 //! ## What this is
@@ -9,7 +9,7 @@
 //! button that is present and permanently disabled, because the report flow
 //! needs secure chat signing (`ChatSession`/message signatures) and this
 //! client has none — `/usr/bin/grep -rn 'SecureChat\|ChatSession\|signed_chat'`
-//! over `crates/` turns up nothing. Issue #189's own scope is explicit that
+//! over `crates/` turns up nothing. Issue that fix's own scope is explicit that
 //! this is the real dependency, not a stub to fill in casually: "do not build
 //! a fake/unsigned report path".
 //!
@@ -17,7 +17,7 @@
 //! (`multiplayer.socialInteractions.not_available = "Social Interactions are
 //! only available in Multiplayer worlds"`, `SocialInteractionsScreen.java`'s
 //! own singleplayer branch) — this client's only "world" is the bundled
-//! singleplayer one (#287) today, so [`frame`]'s early-return "unavailable"
+//! singleplayer one today, so [`frame`]'s early-return "unavailable"
 //! branch (guarded by [`available_for`]) is the one a player reaches every
 //! time until real multiplayer sessions carry a populated
 //! [`lodestone_game::tablist::TabList`] here.
@@ -32,7 +32,7 @@
 //!   eager-persistence rule `docs/keybindings.md` documents for rebinding).
 //! - **Decorative**: the Report button, always inactive — the real dependency
 //!   named above, not filled in by this issue.
-//! - **Wired since this patch (issue #419) — Hide in Chat now has a consumer.**
+//! - **Wired since this patch — Hide in Chat now has a consumer.**
 //!   This section used to read "hiding a player has no consumer yet". A
 //!   `sender: Option<Uuid>` field now threads from `ClientEvent::Chat` through
 //!   `net.rs::forward`'s `NetUpdate::Chat` to the sim's chat arm, which
@@ -46,7 +46,7 @@
 //!   `TabList` needs a per-frame call from `app.rs`"; that patch has landed.
 //!   `app.rs`'s `drive_ui_from_session` now calls [`entries_from_tablist`]
 //!   off `Sim`'s own tab list every frame while connected and feeds the
-//!   result to `MenuNav::refresh_social` (`app.rs:1514-1529`), so the roster
+//!   result to `MenuNav::refresh_social`, so the roster
 //!   shown is the real, live tab list with the local player excluded. See
 //!   `docs/social-interactions.md`'s "Wired since" note for the full chain.
 //!
@@ -135,7 +135,7 @@ impl SocialControl {
 /// Where one [`SocialControl`] sits, mirroring [`super::key_binds::KeyPlacement`]'s
 /// shape: every content-list variant shares `{row, scroll}`, only the x differs.
 ///
-/// **`scroll` is pixels (issue #445), and this screen was the last to get there.**
+/// **`scroll` is pixels, and this screen was the last to get there.**
 /// This doc used to read: *"Still a row index... blocked on a `ListSpec` change,
 /// not on this screen: this list's rows are full-width and left-anchored, while
 /// `ListSpec::row_left` is `floor(width / 2) - floor(row_w / 2)` — a centred,
@@ -167,7 +167,7 @@ pub const ROW_H: f32 = options::WIDGET_H;
 pub const HIDE_BUTTON_W: f32 = 110.0;
 pub const REPORT_BUTTON_W: f32 = options::SMALL_BUTTON_WIDTH;
 const BUTTON_GAP: f32 = 5.0;
-/// The row's right gutter — **and since #445 it is the scrollbar's, not a
+/// The row's right gutter — **and since that fix it is the scrollbar's, not a
 /// decorative margin**.
 ///
 /// This was a flat `10.0`. [`super::widget::RowBand::Inset`] requires
@@ -197,7 +197,7 @@ pub fn visible_rows_len() -> usize {
     (LIST_WINDOW_PX / ROW_H).floor().max(1.0) as usize
 }
 
-/// This screen's list, as the generic [`super::widget::ListSpec`] (issue #445) —
+/// This screen's list, as the generic [`super::widget::ListSpec`] —
 /// **the first and only adopter of [`super::widget::RowBand::Inset`]**.
 ///
 /// The `row_w` argument to `uniform` is dead here: `spanning` replaces the whole
@@ -244,7 +244,7 @@ pub fn placement_anchor(placement: SocialPlacement, width: f32, _height: f32) ->
         | SocialPlacement::Hide { row, scroll }
         | SocialPlacement::Report { row, scroll } => (row, scroll),
     };
-    // Pixel scrolling (#445): the row's absolute offset minus the scroll, so no
+    // Pixel scrolling: the row's absolute offset minus the scroll, so no
     // `checked_sub` to underflow and no off-canvas sentinel — a row above the
     // band resolves above it and `render::draw` clips it. `scroll.floor()` is
     // vanilla's `(int)scrollAmount`.
@@ -265,7 +265,7 @@ pub fn available_for(kind: Option<super::SessionKind>) -> bool {
 }
 
 /// Whether a chat message from `sender` should be shown given the hidden set
-/// (issue #419) — the consumer this screen's Hide/Show toggle was missing.
+/// — the consumer this screen's Hide/Show toggle was missing.
 ///
 /// `None` is always shown: system and disguised chat, action-bar messages, and
 /// every legacy-family player message carry no sender on the wire, and vanilla's
@@ -292,7 +292,7 @@ pub fn should_show_message(
 pub struct SocialNav {
     entries: Vec<SocialEntry>,
     cursor: usize,
-    /// Scroll offset in **pixels** (issue #445), not a row index. `Eq` went with
+    /// Scroll offset in **pixels**, not a row index. `Eq` went with
     /// the change — see [`SocialPlacement`]'s doc.
     scroll: f32,
     hidden: crate::config::HiddenPlayers,
@@ -411,7 +411,7 @@ impl SocialNav {
     /// [`super::key_binds::controls`].
     #[must_use]
     pub fn visible(&self) -> Vec<(SocialControl, Slot)> {
-        // **Every** row, not a `visible_range()` window (issue #445): clipping to
+        // **Every** row, not a `visible_range()` window: clipping to
         // the band is `render::draw`'s job now, so a half-scrolled row draws its
         // visible half instead of vanishing. `selected_row` matches on the
         // control, not the index, so it is indifferent.
@@ -509,7 +509,7 @@ impl SocialNav {
         }
     }
 
-    /// Activates the control at visible row `row` — #391's shape, same
+    /// Activates the control at visible row `row` — That fix's shape, same
     /// resolve-the-row-directly rule every other list in this tree follows
     /// (see [`super::key_binds::KeyBindsNav::click_row`]'s own doc for why
     /// this does not route through Enter).
@@ -630,7 +630,7 @@ pub fn frame(nav: &SocialNav, kind: Option<super::SessionKind>) -> MenuFrame<'st
         })
         .collect();
 
-    // **`list_labels`, not `labels` (issue #445)** — the vector `render::draw`
+    // **`list_labels`, not `labels` ** — the vector `render::draw`
     // clips to the band. These player names are the only labels here that scroll;
     // a free text label has nowhere else to carry a clip rect, so in `labels` a
     // scrolled-away name would draw over the footer. The Hide/Report buttons are
@@ -733,7 +733,7 @@ mod tests {
         assert!(available_for(Some(super::super::SessionKind::Multiplayer)));
     }
 
-    // -- should_show_message (issue #419) ----------------------------------
+    // -- should_show_message ----------------------------------
 
     /// Hide-in-Chat must actually suppress the hidden player's messages once
     /// the toggle has been clicked — driven through the real toggle path
@@ -880,7 +880,7 @@ mod tests {
 
     #[test]
     fn a_click_acts_on_the_row_it_landed_on_and_nothing_else() {
-        // #391's shape, on this screen too.
+        // That fix's shape, on this screen too.
         let mut nav = with_three("click-precision");
         let visible = nav.visible();
         let bob_hide = visible
@@ -976,7 +976,7 @@ mod tests {
     }
 
     /// **The property no centred `row_w` could have, and the whole reason
-    /// `RowBand::Inset` exists** (issue #445): the band's right edge is exactly
+    /// `RowBand::Inset` exists**: the band's right edge is exactly
     /// where [`report_button_x`] hangs its button's right edge, **at every canvas
     /// width**.
     ///
@@ -1011,7 +1011,7 @@ mod tests {
         }
     }
 
-    /// **One notch is `floor(ROW_H / 2)` = `floor(20 / 2)` = 10 px** (issue #445),
+    /// **One notch is `floor(ROW_H / 2)` = `floor(20 / 2)` = 10 px**,
     /// and the offset must coincide with no row top.
     ///
     /// Hypotheses named and separated rather than a tolerance: the row-index

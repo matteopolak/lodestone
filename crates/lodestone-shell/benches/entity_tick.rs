@@ -1,10 +1,10 @@
-//! Entity tick throughput and interpolation cost (issues #97, #99).
+//! Entity tick throughput and interpolation cost.
 //!
 //! First `benches/` directory in `lodestone-shell`. CPU-only: no GPU adapter, no
 //! window, no server, no `client.jar`. Both subjects are the **production**
 //! systems — `EntityInterpPlugin`'s real `GameTick` set (`tick_item_physics`,
 //! `tick_walk_animation`, `tick_pickup_animations`, `tick_creeper_fuse`) and the
-//! real `EntityInterpolator` — not stand-ins, because #99 specifically warns
+//! real `EntityInterpolator` — not stand-ins, because that fix specifically warns
 //! that a simplified stand-in could drift from the `FrameSet::Interpolate`
 //! ordering the doc calls load-bearing.
 //!
@@ -26,9 +26,9 @@
 //! runs: it is far less load-sensitive than the absolute, because both the
 //! numerator and the entity count come from the same run.
 //!
-//! # One axis of #97 is deliberately not implemented, rather than faked
+//! # One axis of that fix is deliberately not implemented, rather than faked
 //!
-//! #97 asks to use `LockHolds`/`hold_read`/`hold_write` to attribute cost to
+//! That fix asks to use `LockHolds`/`hold_read`/`hold_write` to attribute cost to
 //! guard-hold time. This bench drives `world.run_schedule(GameTick)` directly,
 //! which involves **no guard at all** — `hold_read`/`hold_write` are what fold
 //! into `LockHolds`, and they live at the `EcsHandle` boundary that `Sim` uses,
@@ -57,8 +57,8 @@ use lodestone_ecs::ingest::{IngestPlugin, IngestQueue};
 use lodestone_ecs::{Extract, GameTick, NetIngest};
 use lodestone_model::{ClientEvent, Rotation as ModelRotation, Vec3 as ModelVec3};
 
-/// Entity counts #97 names, the last matching the ~5000 order of magnitude #75
-/// measured for sections.
+/// Entity counts the cost-scaling gate names, the last matching the ~5000 order of
+/// magnitude the section-profiling bench measured for sections.
 const COUNTS: [usize; 4] = [10, 100, 1000, 5000];
 
 /// A mix of entity types, so the tick exercises more than one system: `item`
@@ -71,7 +71,7 @@ const KINDS: [&str; 3] = ["minecraft:zombie", "minecraft:creeper", "item"];
 /// A world carrying the production ingest + interpolation plugins with `n`
 /// entities spawned through the **real** path: `ClientEvent::EntitySpawned` into
 /// `IngestQueue`, one `NetIngest` run, then `fold_entities`. Same chain
-/// `crates/lodestone-shell/tests/hurt_overlay_pixels.rs:135` uses.
+/// `hurt_overlay_pixels.rs`'s `world_with_two_tracked_zombies` uses.
 fn world_with_entities(n: usize) -> World {
     let mut app = App::new();
     app.add_plugins((IngestPlugin, EntityInterpPlugin));
@@ -100,10 +100,10 @@ fn world_with_entities(n: usize) -> World {
     world
 }
 
-/// **Issue #97** — cost of one production `GameTick` as entity count grows.
+/// Cost of one production `GameTick` as entity count grows.
 ///
 /// Reports µs/tick and µs/entity at N = 10/100/1000/5000 and records both. The
-/// scaling question #97 asks (linear, or superlinear from a system walking the
+/// scaling question that fix asks (linear, or superlinear from a system walking the
 /// whole entity set per entity) is answered by reading µs/entity across the
 /// sweep: flat means linear. It is **reported, not asserted** — the four arms are
 /// sequential timings and cannot be protected against a machine whose load
@@ -192,7 +192,7 @@ fn bench_entity_tick_scaling(c: &mut Criterion) {
 ///
 /// `EntityInterpolator::new()` installs `CorePlugin + EntityInterpPlugin` and
 /// **not** `IngestPlugin`, so its world has no `IngestQueue` to push through —
-/// verified in `entities.rs:2359` and `lodestone-ecs/src/plugin.rs`. The private
+/// verified in `EntityInterpolator::new`'s own body and `lodestone-ecs/src/plugin.rs`. The private
 /// `IngestSnap` test helper does this job inside the crate; a bench cannot reach
 /// it, so this is the same insertion open-coded from public components.
 fn spawn_direct(world: &mut World, id: i32, kind: &str, x: f32) {
@@ -209,18 +209,18 @@ fn spawn_direct(world: &mut World, id: i32, kind: &str, x: f32) {
     world.resource_mut::<EntityIndex>().insert(id, entity);
 }
 
-/// **Issue #99** — `EntityInterpolator::update_with_view`'s cost at realistic
+/// `EntityInterpolator::update_with_view`'s cost at realistic
 /// tracked-entity counts, and separately the cost of entities *entering and
-/// leaving* the tracked set, which #99 asks to distinguish because they are
+/// leaving* the tracked set, which that fix asks to distinguish because they are
 /// different code paths with different scaling risks.
 ///
-/// `fold_entity_snapshots`, which #99 names, **does not exist** — it was deleted
+/// `fold_entity_snapshots`, which that fix names, **does not exist** — it was deleted
 /// and the live replacement is `fold_entities` (the only references left are doc
 /// comments calling it "now-deleted"). So the two functions actually benched are
 /// `fold_entities` and `extracted_entity_draws`, reached through
 /// `EntityInterpolator::update`, which internally runs `Update`, the `GameTick`
 /// loop off the real `FrameClock`, `fold_entities` and then `Extract` — i.e. the
-/// whole frame, in the production order whose load-bearing-ness #99 flags.
+/// whole frame, in the production order whose load-bearing-ness that fix flags.
 fn bench_interpolation(c: &mut Criterion) {
     use lodestone::entities::EntityInterpolator;
 
@@ -281,7 +281,7 @@ fn bench_interpolation(c: &mut Criterion) {
         });
     }
 
-    // The churn arm #99 asks to separate: a fixed tracked-set size with a slice
+    // The churn arm that fix asks to separate: a fixed tracked-set size with a slice
     // of it despawned and respawned every frame, so the cost of *entering and
     // leaving* the tracked set is not folded into the steady-state number.
     {

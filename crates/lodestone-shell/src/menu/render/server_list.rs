@@ -36,7 +36,7 @@ const SERVER_LIST_LOWER_BUTTON_W: f32 = 74.0;
 /// The `itemHeight` the list is constructed with: the last argument of
 /// `new ServerSelectionList(…, 36)` (`:61-62`).
 ///
-/// **Public because `MenuNav::scroll_server_to_show` needs it** (issue #445):
+/// **Public because `MenuNav::scroll_server_to_show` needs it**:
 /// with the scroll offset in pixels, the keyboard scroll-into-view path has to
 /// turn a row index into a pixel top, and a second copy of `36.0` in `nav.rs`
 /// is exactly how the draw and the hit-test drift apart.
@@ -318,8 +318,8 @@ pub fn server_row_left(width: f32) -> f32 {
 /// The top of list row `index`: `getFirstEntryY() + index * itemHeight -
 /// scrollAmount` — `repositionEntries` (`AbstractSelectionList.java:993-996`).
 ///
-/// **`scroll` is pixels, not rows (issue #445).** It was a row count when this
-/// landed for #402, for a reason that was true then and is not now: the pipeline
+/// **`scroll` is pixels, not rows.** It was a row count when this
+/// landed for that fix, for a reason that was true then and is not now: the pipeline
 /// had no scissor, so a straddling row would have painted over the header or the
 /// footer instead of being cut. `draw_server_entry` is wrapped in
 /// [`Quads::with_clip`] against the list's band now, so a partial row is clipped
@@ -334,7 +334,7 @@ pub fn server_row_top(index: usize, scroll: f32) -> f32 {
 }
 
 /// The rect of list row `index` at a `width`-wide canvas, scrolled by `scroll`
-/// **pixels** (issues #402, #445).
+/// **pixels**.
 #[must_use]
 pub fn server_row_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
     (
@@ -370,7 +370,7 @@ pub fn server_row_content_rect(index: usize, width: f32, scroll: f32) -> (f32, f
 /// `docs/server-list.md`'s `hit_testing_matches_what_is_drawn_after_scrolling`
 /// for the executed control.
 ///
-/// **The `index < scroll` early reject is gone (issue #445), and its removal is
+/// **The `index < scroll` early reject is gone, and its removal is
 /// the point rather than a tidy-up.** With a row-quantized offset this function
 /// stood in for a scissor the pipeline did not have, so it rejected a row
 /// *partly* above the band outright rather than let it be half-drawn over the
@@ -410,7 +410,7 @@ pub fn server_list_window_rows() -> usize {
 /// one).
 ///
 /// **This is the single expression the whole screen's scrolling derives from**
-/// (issue #445), and that is its entire reason to exist. `MenuNav`'s wheel
+/// and that is its entire reason to exist. `MenuNav`'s wheel
 /// handler drives `mouse_scrolled`/`set_scroll` through it, so the 18 px notch
 /// rate and `setScrollAmount`'s clamp come from the primitive rather than being
 /// restated; [`server_scroll_list`] rebuilds it per frame for the scrollbar; and

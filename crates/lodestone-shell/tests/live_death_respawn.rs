@@ -1,7 +1,7 @@
 //! Live regression gate for death handling: when the server kills the local
 //! player, the shell must **survive, gate on the death screen's Respawn click,
 //! respawn, and resume streaming chunks** — not strand itself on a terminal
-//! death screen forever, and not (issue #103's actual behaviour change) ride
+//! death screen forever, and not (that fix's actual behaviour change) ride
 //! through death with no screen at all.
 //!
 //! ## The bug this reproduces
@@ -18,7 +18,7 @@
 //! does not unload chunks. The server holds the death screen, but the world the
 //! client already streamed stays put, and it streams again on respawn.
 //!
-//! ## Issue #103: manual respawn, not automatic
+//! ## Manual respawn, not automatic
 //!
 //! `crate::net::run` now builds the client with `RespawnPolicy::Manual`
 //! instead of the library's default `Automatic` — the whole point of a death
@@ -252,7 +252,7 @@ fn join_kill_and_watch(rcon: &mut RconClient, recover: bool) -> DeathOutcome {
     eprintln!("[kill] RCON `kill @a` -> {kill_reply:?}");
 
     // Phase 2: watch the death/respawn window. With `RespawnPolicy::Manual`
-    // (issue #103) nothing respawns on its own any more, so this stands in
+    // nothing respawns on its own any more, so this stands in
     // for the death screen's Respawn click: the first tick `is_dead()` is
     // observed, call `sim.respawn()` exactly once, then keep watching for the
     // server's confirmation. `respawn_sent` is only meaningful on the fixed

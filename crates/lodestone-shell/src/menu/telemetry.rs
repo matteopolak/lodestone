@@ -1,4 +1,4 @@
-//! The Telemetry Data screen (issue #415) — vanilla's `TelemetryInfoScreen`.
+//! The Telemetry Data screen — vanilla's `TelemetryInfoScreen`.
 //!
 //! ## Why this is a prose screen, honestly
 //!
@@ -21,7 +21,7 @@
 //! vanilla already has, permanently resolved one way.
 //!
 //! What is left after removing the two things this client structurally
-//! cannot have (the event log, the opt-in state) is exactly what issue #415
+//! cannot have (the event log, the opt-in state) is exactly what that fix
 //! called it: prose, plus the two buttons that are pure links with no data
 //! dependency at all (Privacy Statement, Give Feedback) — those *are* built,
 //! for real, because opening a URL needs nothing this client lacks. See
@@ -74,7 +74,7 @@
 //! ## Dependencies
 //!
 //! - `super::accounts::open_in_browser` — the OS-command URL opener,
-//!   `pub(crate)` since issue #415 for this module to reuse.
+//!   `pub(crate)` since that fix for this module to reuse.
 //! - `super::options` — [`super::options::FOOTER_HEIGHT`],
 //!   [`super::options::footer_rects`], [`super::options::Placement::Footer`]
 //!   — this screen's footer is geometrically identical to

@@ -49,7 +49,7 @@ pub struct SlotLayout {
 
 /// Computes the slot layout in local widget coordinates.
 ///
-/// [`Menu::special_layout`] is checked first (issues #253-#255): the anvil,
+/// [`Menu::special_layout`] is checked first: the anvil,
 /// grindstone, smithing table and enchanting table are all mechanically a
 /// plain [`MenuKind::Generic`] (see `lodestone_game::menu::Menu::item_combiner`'s
 /// doc comment) whose real screen is *not* [`generic_layout`]'s left-to-right

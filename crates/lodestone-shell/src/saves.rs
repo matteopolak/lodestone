@@ -5,23 +5,22 @@
 //! The shell's `LevelStorageSource`: it answers "which worlds exist?", "which
 //! directory is this one?", "where does a new one go?" and "delete that one".
 //! Persistence itself landed in issue
-//! [#437](https://github.com/matteopolak/lodestone/issues/437) and reached
+//!  and reached
 //! **zero players**, because `net.rs` opened every session through
 //! `IntegratedServer::open_in_memory_with_mobs` — the non-persistent
 //! constructor — and the persistent one needs a `world_dir` the shell had no
-//! concept of. Issue
-//! [#468](https://github.com/matteopolak/lodestone/issues/468).
+//! concept of.
 //!
 //! # The product decision, restated now that it has changed
 //!
-//! Issue #468 named two materially different readings:
+//! That fix named two materially different readings:
 //!
 //! 1. **One implicit default world** — every singleplayer session opens
 //!    [`default_world_dir`], and it persists.
 //! 2. **A save list** — create/select/delete, each world its own directory with
 //!    its own name and seed, which is what vanilla does.
 //!
-//! #468 shipped (1). **This module now implements (2), and (1) is gone as a
+//! That fix shipped (1). **This module now implements (2), and (1) is gone as a
 //! product behaviour.** The wart that forced the change was real and a player
 //! reported it: with one implicit world, *"Create New World" could not create a
 //! second one* — pressing it with a typed seed opened the existing world
@@ -86,7 +85,7 @@
 //!   [`available_dir_name`] is `FileUtil.findAvailableName`, including its
 //!   `" (N)"` counter. See each for the two places this deliberately differs.
 //! - **Deletion is [`delete_world_in`], and it exists because its screen does**
-//!   (issue [#540](https://github.com/matteopolak/lodestone/issues/540)). This
+//!   (issue ). This
 //!   section used to say deletion was deliberately absent, and the reasoning it
 //!   gave was right and is worth keeping: the destructive part of Delete is not
 //!   the four-line `remove_dir_all`, it is a *confirmation the player cannot fire
@@ -139,7 +138,7 @@ pub const SAVES_DIR: &str = "saves";
 
 /// The folder name a *dedicated* server uses (`level-name=world` in
 /// `server.properties`), and therefore the name of any world this client wrote
-/// while issue #468's "one implicit world" reading shipped.
+/// while that fix's "one implicit world" reading shipped.
 ///
 /// Only [`default_world_dir`] reads it now. It is **not** the default name a new
 /// world gets — that is [`DEFAULT_NEW_WORLD_NAME`], vanilla's own
@@ -827,7 +826,7 @@ impl std::error::Error for DeleteError {}
 
 /// Remove the world named `dir_name` from under `root` —
 /// `LevelStorageSource.LevelStorageAccess.deleteLevel`, and the destructive half
-/// of issue [#540](https://github.com/matteopolak/lodestone/issues/540).
+/// of issue.
 ///
 /// **There is deliberately no no-argument twin.** Every other operation here has
 /// one because production calls it with the real root; this one is only ever
@@ -1215,7 +1214,7 @@ mod tests {
 
         // The seed's file must NOT exist yet: `resolve_world_seed` creates it on
         // first open, and that is what makes the requested seed win for a new
-        // world. Writing one here would re-introduce #468's wart.
+        // world. Writing one here would re-introduce that fix's wart.
         assert!(
             !dir.join("data").join("minecraft").join("world_gen_settings.dat").exists(),
             "create must not write world_gen_settings.dat — `resolve_world_seed` \

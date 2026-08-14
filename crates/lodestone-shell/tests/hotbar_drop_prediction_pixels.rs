@@ -1,4 +1,4 @@
-//! Issue #436: the count the **HUD hotbar draws** must change when `Q` throws an
+//! The count the **HUD hotbar draws** must change when `Q` throws an
 //! item out.
 //!
 //! # Why this test exists separately from the model tests
@@ -15,10 +15,10 @@
 //! ```text
 //! Menus::drop_selected            (the prediction)
 //!   -> Menus::player()            (== Sim::player_menu())
-//!   -> player_native(0..9)        (app/redraw.rs:143-164, transcribed verbatim below)
+//!   -> player_native(0..9)        (WindowApp::redraw, transcribed verbatim below)
 //!   -> HudFrame::hotbar_items
 //!   -> HudGeometry::build         -> geo.verts, the colour stream
-//!   -> hud/item_icon.rs:357       `if slot.count > 1 { … sink.colour.text(&s, …) }`
+//!   -> draw_item_icon_counted     `if slot.count > 1 { … sink.colour.text(&s, …) }`
 //! ```
 //!
 //! `geo.verts` is not a proxy for the drawn frame — it *is* the buffer
@@ -96,7 +96,7 @@ fn session_with(count: u32) -> Menus {
 }
 
 /// The nine `HotbarSlot` draw records, built by the **same expression**
-/// `app/redraw.rs:143-164` uses.
+/// `WindowApp::redraw` uses.
 ///
 /// Transcribed rather than called because `app/redraw.rs` is `pub(crate)` inside
 /// the binary crate. That transcription is the one unproven link in this chain and
@@ -131,7 +131,7 @@ fn hotbar_records(menus: &Menus) -> Vec<Option<HotbarSlot>> {
 
 /// The colour-stream vertices the HUD would upload for `slots`.
 ///
-/// `hotbar: Some(0)` is what `app/redraw.rs:554` installs for a world frame, so
+/// `hotbar: Some(0)` is what `WindowApp::redraw` installs for a world frame, so
 /// the selection highlight and the procedural hotbar frame are present exactly as
 /// they are in play — the fixture is not a stripped-down special case.
 fn colour_stream(slots: &[Option<HotbarSlot>]) -> Vec<f32> {
@@ -179,7 +179,7 @@ fn plain_drop_changes_the_drawn_hotbar_count() {
 ///
 /// Measured while writing this: with no item atlas attached, a **one**-item cell
 /// and an **empty** cell produce byte-identical colour streams — the digits are
-/// suppressed at `count == 1` (`hud/item_icon.rs:357`) and the icon art lives in
+/// suppressed at `count == 1` (`draw_item_icon_counted`) and the icon art lives in
 /// `item_verts`, which is empty without an atlas. So the stream alone cannot tell
 /// "emptied" from "one left", and an assertion that only compared streams would
 /// be the *magnitude* species all over again.
@@ -217,7 +217,7 @@ fn ctrl_drop_draws_an_empty_cell() {
 
 /// Plain `Q` from a stack of two draws a cell with **no number at all** while the
 /// item stays put — vanilla suppresses the digits at `count == 1`
-/// (`hud/item_icon.rs:357`, `if slot.count > 1`).
+/// (`draw_item_icon_counted`'s `if slot.count > 1`).
 ///
 /// This is the boundary that separates the correct fix from one that *empties* the
 /// slot instead of decrementing it: both "lowered the count", and both draw no

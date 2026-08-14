@@ -1,6 +1,6 @@
 //! Gate: **a container screen's two labels say the right words, in the right
 //! typeface, at vanilla's own anchors — and the one screen that omits the second
-//! label omits it there and nowhere else** (issue #370).
+//! label omits it there and nowhere else**.
 //!
 //! # What is measured, and why by location
 //!
@@ -40,7 +40,7 @@
 //!   absence assertion at a *chest* screen fails with
 //!   `Some(Bbox { x0: 9.0, y0: 74.0, x1: 61.0, y1: 81.0 })`. "Returned `None`" is
 //!   therefore a measurement and not a detector that never fires.
-//! * **The pre-#370 draw fails five of these seven tests.** Restoring the old
+//! * **The pre-fix draw fails five of these seven tests.** Restoring the old
 //!   `b.text(&title.to_ascii_uppercase(), x + 8.0, y + 7.0, ..)` and deleting the
 //!   second label reproduces exactly the reported screen, and the boxes say so:
 //!   every title at `x 8.0..`, `y 7.0..14.0` regardless of screen (`Crafting`

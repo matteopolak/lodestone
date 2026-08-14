@@ -13,7 +13,7 @@ use super::*;
 /// normalised alignments. Keeping them as named origins is what lets one `Slot`
 /// be resolved against any canvas size — which the layout has to be, because the
 /// logical canvas is only known at draw time (see [`logical_canvas`]).
-// No longer `Eq`: `Origin::CommandBlockSuggestion` (issue #47) carries two
+// No longer `Eq`: `Origin::CommandBlockSuggestion` carries two
 // `f32`s, which cannot implement `Eq`. Nothing here relied on `Origin: Eq`
 // specifically — `Slot`, which wraps an `Origin`, was already `PartialEq`
 // only (never `Eq`) before this variant existed.
@@ -22,18 +22,18 @@ pub enum Origin {
     /// `(w / 2, 0)` — the top of the screen, for the logo band and the pause
     /// screen's title. `this.width` is `int` everywhere vanilla anchors off it
     /// (e.g. `this.width / 2 - 100` at `TitleScreen.java:144`), so `w / 2` is
-    /// Java integer division — hence the `floor` (issue #401).
+    /// Java integer division — hence the `floor`.
     ScreenTop,
     /// `(floor(w / 2), floor(h / 4) + 48)` — vanilla `TitleScreen.init`'s
     /// `topPos` (`TitleScreen.java:113`) for y, and the same `this.width / 2`
     /// as [`Origin::ScreenTop`] for x. Both are Java integer division, hence
-    /// both `floor`s (issue #401: only the y one used to be here).
+    /// both `floor`s (only the y one used to be here).
     TitleTop,
     /// The top-left of vanilla `PauseScreen`'s **arranged** `GridLayout`:
     /// `(floor((w - 212) / 2), floor((h - 166) / 4))`.
     ///
     /// That comes from `FrameLayout.alignInRectangle(grid, 0, 0, w, h, 0.5, 0.25)`
-    /// (`PauseScreen.java:181`), and since #394 it is *evaluated* rather than
+    /// (`PauseScreen.java:181`), and since that fix it is *evaluated* rather than
     /// restated: [`layout::align_in_dimension`] applied to
     /// [`pause_grid_size`], which is the arranged
     /// [`GridLayout`](layout::GridLayout)'s own output. The `floor`s in the
@@ -59,16 +59,16 @@ pub enum Origin {
     /// screen (Add Account / Select / Remove / Back) and the multiplayer
     /// screen's seven. Not vanilla-sourced like the others above: nothing in
     /// `TitleScreen`/`PauseScreen` anchors a widget row to the bottom edge. Since
-    /// #396 it is where both `HeaderAndFooterLayout` footers are pinned, which is
+    /// That fix it is where both `HeaderAndFooterLayout` footers are pinned, which is
     /// canvas-independent even though the arranged rects are not — see
     /// [`ACCOUNTS_REF_CANVAS`]. `floor`ed for the same reason as
-    /// [`Origin::ScreenTop`] (issue #401): every consumer of this origin is a
+    /// [`Origin::ScreenTop`]: every consumer of this origin is a
     /// `Slot` centred *about* this x, and an unfloored anchor at an odd width
     /// puts that centring a half-pixel off whole, which blurs the text drawn
     /// there.
     ScreenBottom,
     /// `(floor(w / 2), floor(h / 2))` — the canvas centre, for the loading
-    /// screen's one centred line (issue #449).
+    /// screen's one centred line.
     ///
     /// Not vanilla-sourced like the others above: nothing in `TitleScreen`/
     /// `PauseScreen` anchors a widget to the canvas centre (the loading screens
@@ -76,9 +76,9 @@ pub enum Origin {
     /// doc on why this client's is deliberately simpler). Added for the one
     /// screen whose text should sit at the middle of whatever canvas the
     /// window is, which no fixed-dy origin can express. Both terms `floor`ed
-    /// for the same reason as [`Origin::ScreenTop`] (issue #401).
+    /// for the same reason as [`Origin::ScreenTop`].
     Centre,
-    /// `(floor(w / 4), 0)` — the death screen's title anchor (issue #103).
+    /// `(floor(w / 4), 0)` — the death screen's title anchor.
     /// `DeathScreen.visitText` draws it at `middleLine / 2` where
     /// `middleLine = this.width / 2` (`DeathScreen.java:118-120`), i.e.
     /// **centred on the screen's left quarter, not the middle** — this is
@@ -86,11 +86,11 @@ pub enum Origin {
     /// deliberate design), reproduced faithfully rather than "corrected" to
     /// [`Origin::ScreenTop`]. Both are Java integer division —
     /// `floor(floor(w/2)/2) == floor(w/4)` for a non-negative `w`, so the two
-    /// chained truncations collapse to the one `floor` here — and #401's audit
+    /// chained truncations collapse to the one `floor` here — and that fix's audit
     /// of every unfloored `Origin::anchor` term caught this arm too, alongside
     /// [`Origin::ScreenTop`]/[`Origin::TitleTop`]/[`Origin::ScreenBottom`].
     DeathTitle,
-    /// A widget of the settings tree (issue #55), resolved by
+    /// A widget of the settings tree, resolved by
     /// [`super::options::placement_anchor`].
     ///
     /// The only [`Origin`] that carries data, and it has to: a settings row's
@@ -102,7 +102,7 @@ pub enum Origin {
     /// `OptionsSubScreen`'s footer band, and an `OptionsList` row; see
     /// [`super::options::Placement`].
     Settings(super::options::Placement),
-    /// A widget of the Key Binds screen (issue #15), resolved by
+    /// A widget of the Key Binds screen, resolved by
     /// [`super::key_binds::placement_anchor`].
     ///
     /// A second data-carrying variant for the same reason
@@ -113,30 +113,30 @@ pub enum Origin {
     /// (a flat 20 px row height, two right-anchored buttons per row) does not
     /// fit `OptionsList`'s shape.
     KeyBinds(super::key_binds::KeyPlacement),
-    /// A widget of the Social Interactions screen (issue #189), resolved by
+    /// A widget of the Social Interactions screen, resolved by
     /// [`super::social::placement_anchor`]. A third data-carrying variant for
     /// the same reason [`Origin::KeyBinds`] is one: this screen's rows are not
     /// `OptionsList` geometry either (a name label plus two right-anchored
     /// buttons, not `OptionsList`'s two-column captions).
     Social(super::social::SocialPlacement),
-    /// A widget of the Language screen (issue #415), resolved by
+    /// A widget of the Language screen, resolved by
     /// [`super::language::placement_anchor`]. A fourth data-carrying variant
     /// for the same reason [`Origin::Social`] is one — this screen's rows are
     /// a third geometry entirely (a single centred line per row, not
     /// `OptionsList`'s or `KeyBindsList`'s shapes).
     Language(super::language::LanguagePlacement),
-    /// A widget of the Telemetry screen's **header** (issue #415), resolved
+    /// A widget of the Telemetry screen's **header**, resolved
     /// by [`super::telemetry::placement_anchor`]. The footer reuses
     /// [`Origin::Settings`]`(`[`super::options::Placement::Footer`]`)`
     /// directly instead of a fifth variant — see
     /// [`super::telemetry::TelemetryPlacement`]'s own doc.
     Telemetry(super::telemetry::TelemetryPlacement),
-    /// A widget of the Resource Packs screen (issue #415), resolved by
+    /// A widget of the Resource Packs screen, resolved by
     /// [`super::packs::placement_anchor`]. The footer reuses
     /// [`Origin::Settings`]`(`[`super::options::Placement::Footer`]`)`
     /// directly, same as [`Origin::Telemetry`].
     Packs(super::packs::PacksPlacement),
-    /// A leaf of the confirmation screen's centred block (issue #540), resolved
+    /// A leaf of the confirmation screen's centred block, resolved
     /// by [`super::confirm::placement_anchor`].
     ///
     /// A data-carrying variant rather than a fixed offset from [`Origin::Centre`]
@@ -147,7 +147,7 @@ pub enum Origin {
     /// `centerInRectangle`s it (`ConfirmScreen.java:59-62`), so the canvas is an
     /// input and the tree has to be run.
     Confirm(super::confirm::ConfirmPlacement),
-    /// The command block edit screen's Done/Cancel row (issue #47):
+    /// The command block edit screen's Done/Cancel row:
     /// `(floor(w/2), floor(h/4) + 132)` —
     /// `AbstractCommandBlockEditScreen.java:71,74`'s
     /// `this.height / 4 + 120 + 12` for `y`, the same `width/2` x-anchor as
@@ -159,7 +159,7 @@ pub enum Origin {
     /// buttons too.
     CommandBlockFooter,
     /// One row of the command block screen's tab-completion popup (issue
-    /// #47): vanilla's `CommandSuggestions.SuggestionsList` — see
+    /// That fix): vanilla's `CommandSuggestions.SuggestionsList` — see
     /// [`command_block_frame`]'s own doc for why `dx`/`popup_w` are computed
     /// there rather than carried as a fixed offset like every other row on
     /// this screen.

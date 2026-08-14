@@ -1,6 +1,5 @@
 //! Pixel gate: two *other* players' block-crack overlays reach pixels through
-//! the real per-frame **gather**, not through a hand-built `Vec<CrackTarget>`
-//! (issue #410).
+//! the real per-frame **gather**, not through a hand-built `Vec<CrackTarget>`.
 //!
 //! # What this proves that `crack_multi_target_pixels.rs` does not
 //!
@@ -14,7 +13,7 @@
 //! probe with. `Sim::block_destruction_stage_at` (`91f19db`) was that same
 //! probe re-exposed on `Sim` and could not serve the loop either. So a
 //! pipeline that draws two hand-built targets fine can still, in the real
-//! client, only ever have zero or one target reach it — the exact gap #410
+//! client, only ever have zero or one target reach it — the exact gap that fix
 //! reports.
 //!
 //! This gate closes that gap end to end, using only production code:

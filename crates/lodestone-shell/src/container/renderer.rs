@@ -31,7 +31,7 @@ pub struct ContainerRenderer {
     /// [`HudRenderer`](crate::hud::HudRenderer)'s. `None` on a jar-less run,
     /// where stack counts draw with the fixed-advance debug font.
     font: Option<Arc<VanillaFont>>,
-    /// Vanilla's real `container/*.png` panel art (issue #51). Starts detached,
+    /// Vanilla's real `container/*.png` panel art. Starts detached,
     /// so [`render`](Self::render)/[`render_with_icons`](Self::render_with_icons)
     /// alone keep the pre-texture flat-fill behaviour — the jar-less path and
     /// the negative control the pixel gate leans on.
@@ -168,7 +168,7 @@ impl ContainerRenderer {
     /// Bind a real skin to the inventory avatar: a declared rig, and optionally
     /// the sheet to draw it with (`None` uses the pack's own sheet for that rig).
     ///
-    /// **This is the seam issue #62's fetch half lands against.** Nothing in this
+    /// **This is the seam that fix's fetch half lands against.** Nothing in this
     /// workspace fetches a skin yet — see `player_preview.rs`'s
     /// `local_skin_override`, which is what keeps the slim rig reachable in the
     /// meantime — so today's callers are that override and this method's own
@@ -193,7 +193,7 @@ impl ContainerRenderer {
         self.player_preview.as_ref().map(|p| p.skin_model())
     }
 
-    /// Attach vanilla's real `container/*.png` panel art (issue #51), so the
+    /// Attach vanilla's real `container/*.png` panel art, so the
     /// screen draws the real texture instead of the flat programmatic fill.
     /// Independent of [`attach_items`](Self::attach_items)/
     /// [`attach_item_models`](Self::attach_item_models) — an atlas-less run can
@@ -316,7 +316,7 @@ impl ContainerRenderer {
     }
 
     /// Whether the real vanilla `container/*.png` art is bound — the gate for
-    /// "this screen looks like vanilla" (issue #51) must assert this, exactly
+    /// "this screen looks like vanilla" must assert this, exactly
     /// as [`MenuRenderer::gui_attached`](crate::menu::render::MenuRenderer::gui_attached)
     /// gates the title/pause screens' buttons: without it a missing jar
     /// silently degrades to the flat-fill fallback and a coverage-only
@@ -329,7 +329,7 @@ impl ContainerRenderer {
     /// Whether the vanilla proportional font resolved — the second half of "this
     /// screen looks like vanilla". Without it the two container labels fall back
     /// to the fixed-advance 5×7 debug font, which is *legible* and therefore
-    /// invisible to a coverage assertion: exactly how issue #370's "wrong font"
+    /// invisible to a coverage assertion: exactly how that fix's "wrong font"
     /// survived. A gate asserting typeface must assert this first.
     #[must_use]
     pub fn font_attached(&self) -> bool {
@@ -339,7 +339,7 @@ impl ContainerRenderer {
     /// The attached vanilla proportional font, for a caller building its own
     /// [`ContainerGeometry`] to hand to
     /// [`render_geometry_scaled`](Self::render_geometry_scaled) — the creative
-    /// screen (issue #158). Reading it here rather than threading a second copy
+    /// screen. Reading it here rather than threading a second copy
     /// through `app.rs` is what keeps the two screens' text identical.
     #[must_use]
     pub fn font(&self) -> Option<&VanillaFont> {
@@ -378,7 +378,7 @@ impl ContainerRenderer {
     }
 
     /// Attach the 2-D GUI enchantment-glint pass, so an enchanted stack in a slot
-    /// or on the cursor shimmers (issue #452). Mirrors
+    /// or on the cursor shimmers. Mirrors
     /// [`HudRenderer::attach_glint`](crate::hud::HudRenderer::attach_glint), and
     /// like it must follow [`attach_items`](Self::attach_items).
     pub fn attach_glint(
@@ -627,7 +627,7 @@ impl ContainerRenderer {
     /// passes.
     ///
     /// Split out of [`render_with_icons_scaled`](Self::render_with_icons_scaled)
-    /// for the creative-inventory screen (issue #158), which builds its own
+    /// for the creative-inventory screen, which builds its own
     /// geometry from [`super::creative_geometry`] rather than from a
     /// [`ContainerFrame`] — vanilla's creative screen is backed by a client-only
     /// `ItemPickerMenu` with no `Menu` behind it, so it cannot go through
@@ -671,7 +671,7 @@ impl ContainerRenderer {
         height: u32,
         between_strata: impl FnOnce(),
     ) {
-        // A skin fetched after startup (issue #62) lands here, not at
+        // A skin fetched after startup lands here, not at
         // construction: `PlayerPreview` is built once during `app::lifecycle`'s
         // resume and never re-reads the cache, while sign-in happens later in the
         // same run. Draining on the frame is what makes the fetch reach pixels
@@ -761,7 +761,7 @@ impl ContainerRenderer {
         let vertex_count = geo.vertex_count() as u32;
         let chrome_count = (geo.chrome_vertex_count as u32).min(vertex_count);
         let dim_count = (geo.dim_vertex_count as u32).min(chrome_count);
-        // The three carried-stack splits (issue #377). Clamped against what
+        // The three carried-stack splits. Clamped against what
         // `upload` actually reported so a stream whose half is not attached (no
         // atlas, no depth) still yields an empty range rather than a bogus one.
         let slot_colour_count = (geo.slot_vertex_count as u32).clamp(chrome_count, vertex_count);

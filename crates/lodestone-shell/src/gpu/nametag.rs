@@ -1,4 +1,4 @@
-//! World-space entity/player nametags (issue #100): billboarded text above
+//! World-space entity/player nametags: billboarded text above
 //! every entity with a visible custom name, and above every other player
 //! (whose tag is always its tab-list display name — see
 //! `crate::net::entity_snapshot`'s doc for exactly which vanilla rule governs
@@ -191,7 +191,7 @@ pub(super) type InkLayout = std::sync::Arc<(Vec<LocalRect>, f32)>;
 /// changes per frame: only `(text, RasterFont)`. The anchor and the billboard
 /// basis are applied *after* it, by the caller. Without this cache every
 /// visible nametag and every sign line re-walked its texels every frame — issue
-/// #527 (b).
+/// That fix (b).
 ///
 /// ## How to change it
 ///
@@ -405,7 +405,7 @@ fn push_entity_quads(
     let anchor = draw.feet + Vec3::new(0.0, height + ATTACHMENT_PADDING, 0.0);
 
     // Cached: the walk depends only on `(text, font)`, and this is called once
-    // per visible named entity per frame (issue #527 (b)).
+    // per visible named entity per frame.
     let layout = ink.layout(raster, &tag.text);
     let (rects, total_width) = (&layout.0, layout.1);
     if rects.is_empty() {
@@ -473,7 +473,7 @@ pub(super) struct NameTagRenderer {
     /// every caller below already treats "no font" as "draw nothing" rather
     /// than panicking.
     font: Option<RasterFont>,
-    /// Ink-run layouts, persisted across frames (issue #527 (b)).
+    /// Ink-run layouts, persisted across frames.
     ink: InkLayoutCache,
 }
 

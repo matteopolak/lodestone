@@ -1,6 +1,6 @@
 //! Pixel gate: a named entity draws real glyph pixels above its head — driven
 //! through the real [`RenderState::render`] path, the same call `app.rs`'s
-//! frame loop makes (issue #100). Per `CLAUDE.md`'s dominant defect class — a
+//! frame loop makes. Per `CLAUDE.md`'s dominant defect class — a
 //! subsystem built, tested, and reaching zero pixels because nothing calls it
 //! — this exercises `gpu/nametag.rs` exactly as `render_inner` does, not a
 //! reimplementation.

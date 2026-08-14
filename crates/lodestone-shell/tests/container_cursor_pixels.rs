@@ -1,5 +1,4 @@
-//! Pixel gate: **the carried stack must draw on top of every slot item**
-//! (issue #377).
+//! Pixel gate: **the carried stack must draw on top of every slot item**.
 //!
 //! Reported from play: the stack held on the cursor rendered *under* the items in
 //! the inventory slots. It is the thing following the mouse; it has to be on top.

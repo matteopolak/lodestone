@@ -1,4 +1,4 @@
-//! The Controls menu's Key Binds screen (issue #15) — vanilla's
+//! The Controls menu's Key Binds screen — vanilla's
 //! `KeyBindsScreen`/`KeyBindsList`, over the rebindable layer
 //! [`crate::keybinds`] already built with no screen in front of it.
 //!
@@ -14,7 +14,7 @@
 //! label at the *left* edge. None of `options.rs`'s [`super::options::Cell`],
 //! [`super::options::Entry`] or [`super::options::Placement`] fit that shape
 //! without bending it, which is exactly what the settings-tree docs flag this
-//! screen for. So this module is the second list-widget kind #392's plan
+//! screen for. So this module is the second list-widget kind that fix's plan
 //! always said this tree would eventually need.
 //!
 //! ## What this module renders, and what it does not decide
@@ -256,7 +256,7 @@ pub fn row_of_action(action: InputAction) -> Option<usize> {
 }
 
 /// This screen's list, as the generic [`super::widget::ListSpec`] the scrollbar
-/// draw and the mouse wheel both go through (issue #445).
+/// draw and the mouse wheel both go through.
 ///
 /// `top` is the **un-inset** [`options::SUB_HEADER_HEIGHT`], not
 /// `SUB_HEADER_HEIGHT + LIST_TOP_INSET`, because
@@ -353,7 +353,7 @@ impl KeyControl {
 /// height; only the x differs per widget, and that is a `match` in
 /// [`placement_anchor`] rather than a fourth field.
 ///
-/// **`scroll` is pixels, not a row index (issue #445).** It was `first: u16`,
+/// **`scroll` is pixels, not a row index.** It was `first: u16`,
 /// the index of the row at the top of the window, which is the snap-to-row
 /// behaviour pixel scrolling exists to remove: a row-index offset is always a
 /// multiple of [`ROW_H`], so the list could only ever jump a whole 20 px at a
@@ -391,7 +391,7 @@ impl KeyPlacement {
 #[must_use]
 pub fn placement_anchor(placement: KeyPlacement, width: f32, _height: f32) -> (f32, f32) {
     let (row, scroll) = placement.row_scroll();
-    // Pixel scrolling (issue #445), so a row's y is its *absolute* offset in the
+    // Pixel scrolling, so a row's y is its *absolute* offset in the
     // list minus the scroll — no `checked_sub` sentinel any more. That guard
     // existed because a row above the window underflowed a `u16` subtraction;
     // here a row scrolled off the top simply resolves to a y above the band and
@@ -440,7 +440,7 @@ pub fn all_controls() -> Vec<KeyControl> {
 /// **Every** control on screen at scroll offset `scroll`, then the footer.
 /// Mirrors [`super::options::controls`].
 ///
-/// Emits every row rather than a `visible_rows(first)` window (issue #445). The
+/// Emits every row rather than a `visible_rows(first)` window. The
 /// window slice was the row-index model's other half: it had to skip any row
 /// that did not *wholly* fit, because a partially-visible row drawn in full
 /// would spill over the footer. Clipping to the band is now
@@ -536,7 +536,7 @@ pub enum KeyBindsOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct KeyBindsNav {
     cursor: usize,
-    /// Scroll offset in **pixels** (issue #445), not a row index. `Eq` went with
+    /// Scroll offset in **pixels**, not a row index. `Eq` went with
     /// the change — see [`KeyPlacement`]'s doc.
     scroll: f32,
     awaiting: Option<InputAction>,
@@ -622,7 +622,7 @@ impl KeyBindsNav {
 
     /// Bring the cursor's row into the band — vanilla's
     /// `AbstractSelectionList.ensureVisible`, through
-    /// [`super::widget::ScrollList::scroll_to_entry`] (issue #445).
+    /// [`super::widget::ScrollList::scroll_to_entry`].
     ///
     /// This used to be a hand-rolled `while !visible_rows(self.first).contains(
     /// &row) { self.first += 1 }` walk, which is where the snap-to-row behaviour
@@ -669,7 +669,7 @@ impl KeyBindsNav {
 
     /// Activates the control at visible row `row` — a click. Mirrors
     /// [`super::options::SettingsNav::click_row`]'s "resolve the row to its
-    /// own control, do not route through Enter" rule (issue #391's fix,
+    /// own control, do not route through Enter" rule (that fix's fix,
     /// which this page inherits by construction rather than by copying the
     /// guard).
     pub fn click_row(&mut self, row: usize, keybinds: &Keybinds) -> KeyBindsOutcome {
@@ -774,7 +774,7 @@ pub fn frame(nav: &KeyBindsNav, keybinds: &Keybinds) -> MenuFrame<'static> {
         colour: super::widget::ACTIVE_LABEL,
         scale: 1.0,
     }];
-    // **`list_labels`, not `labels` (issue #445).** These are the only labels on
+    // **`list_labels`, not `labels`.** These are the only labels on
     // this screen that scroll, and `render::draw` clips that vector to the band
     // `frame.list` declares. Putting them in `labels` — where the title, which
     // does *not* scroll, correctly lives — would draw a scrolled-away category
@@ -873,7 +873,7 @@ pub fn action_caption(action: InputAction) -> &'static str {
         InputAction::SwapOffhand => "Swap Item With Off Hand",
         InputAction::Drop => "Drop Selected Item",
         // `key.pickItem` and `key.screenshot`, verbatim from `en_us.json` like
-        // every caption above. Added with the verbs themselves (issue #16); this
+        // every caption above. Added with the verbs themselves; this
         // match is exhaustive on purpose, so a new `InputAction` cannot reach the
         // Key Binds screen without a real caption.
         InputAction::PickItem => "Pick Block",
@@ -935,7 +935,7 @@ mod tests {
                 Row::Category(_) => None,
             })
             .collect();
-        // 29 since issue #16 added Pick Block and Take Screenshot. Vanilla puts
+        // 29 since that fix added Pick Block and Take Screenshot. Vanilla puts
         // them in Gameplay and Misc respectively (`Options.java:669,675`), both
         // categories that were already non-empty — so the *category* list above
         // is unchanged and only the action count moves. Deriving this from
@@ -1052,7 +1052,7 @@ mod tests {
 
     #[test]
     fn a_click_acts_on_the_row_it_landed_on_and_nothing_else() {
-        // #391's shape, on this page too: clicking Forward's bind button
+        // That fix's shape, on this page too: clicking Forward's bind button
         // must not touch its neighbour's reset button.
         let kb = Keybinds::new();
         let mut nav = KeyBindsNav::default();
@@ -1269,7 +1269,7 @@ mod tests {
         }
     }
 
-    /// **One notch is `floor(ROW_H / 2)` = `floor(20 / 2)` = 10 px** (issue #445),
+    /// **One notch is `floor(ROW_H / 2)` = `floor(20 / 2)` = 10 px**,
     /// and the offset must land somewhere that is **not** a row top.
     ///
     /// The second half is the load-bearing one. "It scrolled" is satisfied by the

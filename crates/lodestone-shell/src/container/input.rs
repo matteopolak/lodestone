@@ -236,7 +236,7 @@ impl MenuInput {
     ///    && this.menu.canDragTo(slot);
     /// ```
     ///
-    /// # This filter is load-bearing, and its absence was issue #378 part 1
+    /// # This filter is load-bearing, and its absence was that fix part 1
     ///
     /// This used to record **every** slot the pointer crossed, on the argument
     /// that filtering belongs to `Menu::do_click`'s own `can_drag_place`, which
@@ -252,8 +252,8 @@ impl MenuInput {
     /// fails `mayPlace` — recorded the slot here, sent the drag sequence, and
     /// the machine then dropped the `ADD` at `can_drag_place` and committed
     /// nothing at `END`. The plain `PICKUP` that vanilla would have sent, and
-    /// with it `do_pickup`'s cursor-merge arm (`click.rs:303-314`, vanilla
-    /// `AbstractContainerMenu.java:459-465`), never went out. The reported
+    /// with it `Menu::do_pickup`'s cursor-merge arm (vanilla
+    /// `AbstractContainerMenu`'s matching arm), never went out. The reported
     /// symptom was "taking from a crafting output onto a matching cursor does
     /// nothing"; the arm that does the merge was present and correct the whole
     /// time, one layer below the one that was broken.
@@ -411,7 +411,7 @@ impl MenuInput {
     /// # This closed an island, not a missing branch
     ///
     /// `Click::drop_one`/`Click::drop_stack` (`click.rs`), `do_throw` and its
-    /// `can_drop` gate were all implemented and tested by the issue #27 audit —
+    /// `can_drop` gate were all implemented and tested by that fix's audit —
     /// and had **zero producers anywhere outside `crates/protocol/`**, the exact
     /// shape of `ClientAction::SetFlying`. `ContainerInput::Throw` was reachable
     /// only at [`OUTSIDE_SLOT`] (releasing a loaded cursor off the panel), which

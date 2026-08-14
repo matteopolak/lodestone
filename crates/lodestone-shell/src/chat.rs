@@ -17,13 +17,13 @@
 //! as movement, not a bespoke path: a leading `/` is a command, everything else
 //! is a chat message, matching vanilla. The shell never names a packet.
 //!
-//! ## Command-tree consumption (issue #46)
+//! ## Command-tree consumption
 //!
 //! [`highlight`] and [`complete`] are this crate's half of the Brigadier
 //! command-tree UX. Both walk a [`CommandTree`] (decoded upstream, from the
 //! `minecraft:commands` packet — see `lodestone_model::command_tree`'s own
-//! doc for the wire shape; that decode landed in `090f2ff`/#470 and the fold
-//! into `net::CommandTreeCell` in `8b0aede`/#471, so this doc's old "still
+//! doc for the wire shape; that decode landed in `090f2ff`/that fix and the fold
+//! into `net::CommandTreeCell` in `8b0aede`/that fix, so this doc's old "still
 //! has to be brokered into a protocol-crate decode arm" is done) against the
 //! *current* input line, which
 //! [`ChatInput`]'s own doc already establishes is always edited at its end —
@@ -36,14 +36,14 @@
 //! greedy phrase or `message` argument swallows the rest of the line; a
 //! quoted phrase reads to its closing `"`; everything else reads to the next
 //! space) and validated where a parser's grammar is simple enough to check
-//! locally — the Brigadier primitives via `lodestone-command` (issue #435,
+//! locally — the Brigadier primitives via `lodestone-command` (
 //! next paragraph), and the small fixed-domain Minecraft parsers via
 //! [`local_domain`]. The first token that fails to match anything —
 //! diverging from every viable child of the tree — ends the walk, and
 //! everything from there to the end of the line is
 //! [`HighlightKind::Unparsed`].
 //!
-//! **Argument validation delegates to `lodestone-command` (issue #435), not a
+//! **Argument validation delegates to `lodestone-command`, not a
 //! hand-rolled copy.** [`validate_simple`]'s numeric bounds, `bool`, and
 //! string-kind checks run the matching `lodestone_command` argument type
 //! (`IntegerArgument`/`LongArgument`/`FloatArgument`/`DoubleArgument`/
@@ -547,7 +547,7 @@ pub enum Completion {
 /// `lodestone-command` equivalent: a value for one of those types is only
 /// valid when it is a member of its domain, which is exactly the completion
 /// condition too. (The Brigadier primitives — `Bool` included — are validated
-/// by their `lodestone-command` argument type instead, issue #435; `Bool`
+/// by their `lodestone-command` argument type instead, that fix; `Bool`
 /// stays in this table because it also drives completion.)
 ///
 /// Each domain is sourced from that parser's own vanilla `listSuggestions`
@@ -627,7 +627,7 @@ fn char_index_to_byte(text: &str, char_offset: usize) -> usize {
 }
 
 /// Reads a Brigadier-style quoted string starting at `body[start] == b'"'`,
-/// delegating to `lodestone_command::StringReader::read_string` (issue #435)
+/// delegating to `lodestone_command::StringReader::read_string`
 /// rather than reimplementing `readQuotedString`'s `\"`/`\\` escape handling
 /// (Brigadier library behaviour — see [`StringKind`]'s doc for the "not
 /// sourced from `.cache/mc/26.2` this session" caveat). Returns `(end,
@@ -659,7 +659,7 @@ fn parse_ok(argument_type: &dyn ArgumentType, text: &str) -> bool {
 /// Whether `text` (already isolated as a single token) is a valid value for
 /// `parser`. The Brigadier primitives — numeric bounds, `bool`, and the
 /// three string kinds — delegate to the matching `lodestone-command` argument
-/// type via [`parse_ok`] (issue #435), and the small fixed-domain Minecraft
+/// type via [`parse_ok`], and the small fixed-domain Minecraft
 /// parsers check [`local_domain`] membership. Every other parser — opaque
 /// Minecraft types with no locally checkable grammar — is treated as always
 /// valid; see this module's own doc for why that is the deliberately safe
@@ -1785,7 +1785,7 @@ mod tests {
     }
 
     /// `/givedebug` was a bespoke wrapper that rewrote itself into the server's
-    /// real `/give @s <item> <amount>`; issue #382 deleted it. What replaced it
+    /// real `/give @s <item> <amount>`; that fix deleted it. What replaced it
     /// is nothing at all — a `/givedebug…` line is now just a command the
     /// server does not know, and it must reach the wire as one rather than
     /// being swallowed by a leftover parser.
@@ -1805,7 +1805,7 @@ mod tests {
         }
     }
 
-    /// Command-tree tab completion and syntax highlighting (issue #46).
+    /// Command-tree tab completion and syntax highlighting.
     // -- Up/Down chat history (`ChatScreen.moveInHistory`) --------------
 
     /// A chat box seeded with `sent`, already "reopened" — i.e. through `take`,

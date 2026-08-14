@@ -1,10 +1,9 @@
 //! Singleplayer worlds actually save — driven through the **shell's own**
-//! session path, not through `IntegratedServer` (issue
-//! [#468](https://github.com/matteopolak/lodestone/issues/468)).
+//! session path, not through `IntegratedServer`.
 //!
-//! # Why this exists when #437 already gates persistence
+//! # Why this exists when that fix already gates persistence
 //!
-//! Issue #437 built world save/load and evidenced it in both directions
+//! That fix built world save/load and evidenced it in both directions
 //! against a real Mojang 26.2 server. It reached **zero players**, because
 //! `net.rs` opened every session through the *non-persistent* constructor.
 //! That is this repo's dominant defect class — the island — one layer above
@@ -283,7 +282,7 @@ impl Drop for TempWorld {
 
 /// **Gate 1.** A block broken in one session is still broken in the next.
 ///
-/// The whole of issue #468 in one assertion, at the layer the issue is about:
+/// The whole of that fix in one assertion, at the layer the issue is about:
 /// no `IntegratedServer` is named here, only `NetClient`.
 #[test]
 fn a_block_broken_in_one_session_is_still_broken_in_the_next() {
@@ -438,7 +437,7 @@ fn the_stored_seed_governs_chunks_the_first_session_never_generated() {
 /// asserting only "fewer than nine" would be the *magnitude* species of
 /// vacuous test, satisfied by a save that wrote eight.
 ///
-/// This does not re-derive #437's "a tick that mutates nothing writes nothing",
+/// This does not re-derive that fix's "a tick that mutates nothing writes nothing",
 /// which is gated server-side. What it adds is that reaching the save path
 /// through the **shell** did not change the proportionality.
 ///
@@ -447,7 +446,7 @@ fn the_stored_seed_governs_chunks_the_first_session_never_generated() {
 /// Until now it asserted `region_files().len() == 1`, "every column of a
 /// radius-1 view is inside region (0,0)". **That is false**, and it made the
 /// gate fail on roughly two runs in five in a way that looked exactly like
-/// #473's harness race — which is the trap, because retrying or widening the
+/// That fix's harness race — which is the trap, because retrying or widening the
 /// bound would have made it green while measuring nothing.
 ///
 /// A region index is an **arithmetic shift**, `chunk >> 5`

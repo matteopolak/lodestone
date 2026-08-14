@@ -1,5 +1,5 @@
 //! GPU resources for the block-entity pass: the chest rigs vanilla's
-//! `BlockEntityRenderer`s draw and no block model covers (issue #23).
+//! `BlockEntityRenderer`s draw and no block model covers.
 //!
 //! # It reuses the entity pipeline on purpose
 //!
@@ -88,7 +88,7 @@ pub(super) struct BlockEntityRenderer {
     /// silently fine on others, which is the worst of the two.
     pub(super) hand_cam_buffer: wgpu::Buffer,
     pub(super) hand_cam_bind_group: wgpu::BindGroup,
-    /// The banner **pattern-layer** pass (issue #23/#174):
+    /// The banner **pattern-layer** pass:
     /// [`EntityPipeline::banner_layer_pipeline`] — alpha-blended, depth-test
     /// `LessEqual`, depth-**write off**, and `fs_main_no_cutout` so a mask's
     /// partially-transparent texels blend instead of being discarded.
@@ -181,7 +181,7 @@ impl BlockEntityRenderer {
         );
         let hand_cam_bind_group = pipeline.camera_bind_group(device, &hand_cam_buffer);
 
-        // The banner masks (issue #23). `BannerPatternAtlas` reads
+        // The banner masks. `BannerPatternAtlas` reads
         // `atlases/banner_patterns.json` and decodes one image per pattern; this
         // turns each into a bind group over the same texture layout every sheet
         // above uses. `base` is included — it is layer 0 of every banner's mask
@@ -240,7 +240,7 @@ pub(super) struct BlockEntityDrawBatch {
     pub(super) parts: Vec<Option<wgpu::Buffer>>,
 }
 
-/// One banner pattern layer, uploaded and ready to draw (issue #23).
+/// One banner pattern layer, uploaded and ready to draw.
 ///
 /// **The `Vec` these come in is strictly ordered and that order is the whole
 /// feature**: layer 0 is the base colour and each subsequent mask paints over it.

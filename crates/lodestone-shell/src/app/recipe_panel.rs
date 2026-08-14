@@ -1,10 +1,10 @@
-//! The recipe-book panel's layout, geometry and unlock toasts (issue #163).
+//! The recipe-book panel's layout, geometry and unlock toasts.
 //!
 //! Split out of `app.rs`; see that module's own header for the layout.
 
 use super::*;
 
-/// Persisted recipe-book panel UI state (issue #163) — see
+/// Persisted recipe-book panel UI state — see
 /// [`WindowApp::recipe_panel`].
 ///
 /// `tab` is an index into [`crate::container::RecipeBookPanelLayout::tabs`],
@@ -372,7 +372,7 @@ pub(super) fn recipe_panel_pointer_hit(
 /// [`Identifier`](lodestone_model::Identifier), never an `ItemStack`, and
 /// [`crate::hud::item_icon::stack_has_foil`] needs the stack's components. The recipe
 /// toast is built from `RecipeToastQueue::displayed_entry`, which hands over
-/// ids only, so there is no foil signal to thread here today — issue #452's
+/// ids only, so there is no foil signal to thread here today — that fix's
 /// container/hotbar surfaces are wired through `builder::icon_record`, and the
 /// toast is the one icon site with nothing to feed the predicate.
 fn toast_icon(id: &lodestone_model::Identifier) -> Option<HotbarSlot> {

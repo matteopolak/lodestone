@@ -1,7 +1,7 @@
-//! The Language screen (issue #415) — vanilla's `LanguageSelectScreen`, the
-//! first of the three settings sub-screens #392's plan always said would need
-//! a *different* list widget than `OptionsList` (#396/#397's own
-//! `ObjectSelectionList` note) or `KeyBindsList` (#15).
+//! The Language screen — vanilla's `LanguageSelectScreen`, the
+//! first of the three settings sub-screens the settings-branch plan always said would need
+//! a *different* list widget than `OptionsList` (per this screen's own
+//! `ObjectSelectionList` note) or `KeyBindsList`.
 //!
 //! ## Why this is the third list-widget kind, not a fold into an existing one
 //!
@@ -45,7 +45,7 @@
 //! is described in its own doc as "filters the list — of nothing, today",
 //! and this one is the same honest shape, one screen over. A list mechanism
 //! that already handles `N` entries correctly and is fed `N = 1` today is not
-//! a stub; it is what #415 asked for "at minimum" — see the issue's own
+//! a stub; it is what that fix asked for "at minimum" — see the issue's own
 //! scope note that Resource Packs' drag-between-lists and Telemetry's
 //! prose-only layout "can follow separately since they build on top of this
 //! shape rather than gating it".
@@ -75,7 +75,7 @@
 //!   faked to look otherwise.
 //! - **Present-and-inactive**: the footer's "Font Settings..." button
 //!   (`options.font`), vanilla's own next hop to `FontOptionsScreen` — out of
-//!   scope for this pass (see #415's own suggested split); it is the same
+//!   scope for this pass (see that fix's own suggested split); it is the same
 //!   `no_screen`-shaped placeholder every other unbuilt destination in
 //!   [`super::options::SettingsPage`] uses, one screen closer than before
 //!   rather than filed away again.
@@ -292,7 +292,7 @@ impl LanguageControl {
 
 /// Where one widget sits — [`Origin::Language`]'s whole body.
 ///
-/// **`Row::scroll` is pixels, not a row index (issue #445)** — see
+/// **`Row::scroll` is pixels, not a row index ** — see
 /// [`super::key_binds::KeyPlacement`]'s doc for the full argument. `Eq` went with
 /// the change, as it did there.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -316,7 +316,7 @@ pub enum LanguagePlacement {
 pub fn placement_anchor(placement: LanguagePlacement, width: f32, height: f32) -> (f32, f32) {
     match placement {
         LanguagePlacement::Row { row, scroll } => {
-            // Pixel scrolling (#445): a row's y is its absolute offset minus the
+            // Pixel scrolling: a row's y is its absolute offset minus the
             // scroll, so there is no `checked_sub` to underflow and no off-canvas
             // sentinel. A row above the band resolves above it and `render::draw`
             // clips it. `scroll.floor()` is vanilla's `(int)scrollAmount`.
@@ -349,7 +349,7 @@ pub fn visible_rows_len() -> usize {
 }
 
 /// This screen's list, as the generic [`super::widget::ListSpec`] the scrollbar
-/// draw and the mouse wheel both go through (issue #445).
+/// draw and the mouse wheel both go through.
 ///
 /// Note this screen uses **its own** [`HEADER_HEIGHT`] (36) and
 /// [`FOOTER_HEIGHT`] (53), not `options::SUB_HEADER_HEIGHT`/`FOOTER_HEIGHT`
@@ -386,7 +386,7 @@ pub struct LanguageNav {
     search: EditBox,
     /// Index into [`Self::visible`] (post-filter).
     cursor: usize,
-    /// Scroll offset in **pixels** (issue #445), not a row index.
+    /// Scroll offset in **pixels**, not a row index.
     scroll: f32,
 }
 
@@ -473,7 +473,7 @@ impl LanguageNav {
     /// then Font Settings and Done.
     #[must_use]
     pub fn visible(&self) -> Vec<LanguageControl> {
-        // **Every** row, not a `first..end` window (issue #445). The slice was
+        // **Every** row, not a `first..end` window. The slice was
         // the row-index model's other half; clipping to the band is
         // `render::draw`'s job now, so a half-scrolled row draws its visible half
         // instead of vanishing. `selected_row` matches on `Select(i)`'s absolute
@@ -520,7 +520,7 @@ impl LanguageNav {
     }
 
     /// Bring the cursor's row into the band — vanilla's `ensureVisible`, through
-    /// [`super::widget::ScrollList::scroll_to_entry`] (issue #445).
+    /// [`super::widget::ScrollList::scroll_to_entry`].
     ///
     /// Was a `while self.cursor >= self.first + visible_rows_len() { self.first
     /// += 1 }` walk, which stepped a whole [`ROW_H`] at a time; `scroll_to_entry`
@@ -554,7 +554,7 @@ impl LanguageNav {
     }
 
     /// Activates the control at visible row `row` — a click, resolved
-    /// directly to the row it hit rather than through Enter (issue #391's
+    /// directly to the row it hit rather than through Enter (that fix's
     /// rule, inherited by construction the same way every sibling screen
     /// added since has been).
     pub fn click_row(&mut self, row: usize) -> LanguageOutcome {
@@ -664,7 +664,7 @@ pub fn frame(nav: &LanguageNav) -> MenuFrame<'static> {
     // Every row pushed after this point is one past `selected_row`'s index
     // space because of the search row above.
     // Every row, clipped to the band by `render::draw` rather than sliced here
-    // (issue #445). These are `MenuRow`s, so they get the band's clip rect from
+    // These are `MenuRow`s, so they get the band's clip rect from
     // draw.rs's per-row `with_clip` and need no `list_labels` vector the way
     // `key_binds`'s free-text name labels do.
     for (row, entry) in entries.iter().enumerate() {
@@ -743,7 +743,7 @@ pub fn frame(nav: &LanguageNav) -> MenuFrame<'static> {
     }
 }
 
-/// `-4539718` decoded: ARGB(255, 186, 186, 186). `pub` since issue #415's
+/// `-4539718` decoded: ARGB(255, 186, 186, 186). `pub` since that fix's
 /// Telemetry screen (`super::telemetry`) draws the same vanilla grey for its
 /// own description text.
 pub const WARNING_COLOUR: [f32; 4] = [186.0 / 255.0, 186.0 / 255.0, 186.0 / 255.0, 1.0];
@@ -857,7 +857,7 @@ mod tests {
         );
     }
 
-    /// **One notch is `floor(ROW_H / 2)` = `floor(18 / 2)` = 9 px** (issue #445),
+    /// **One notch is `floor(ROW_H / 2)` = `floor(18 / 2)` = 9 px**,
     /// and the offset must coincide with no row top.
     ///
     /// # This screen's real table has ONE entry, so the length is synthetic
