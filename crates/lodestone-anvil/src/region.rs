@@ -187,6 +187,19 @@ impl RegionFile {
     /// than accepting it, so this is the one input this parser rejects
     /// outright instead of degrading gracefully.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
+        Self::parse_owned(bytes.to_vec())
+    }
+
+    /// As [`Self::parse`], but takes ownership of an already-owned buffer
+    /// instead of copying a borrowed one.
+    ///
+    /// This exists because [`Self::parse`]'s `bytes: &[u8]` forces every
+    /// caller through a copy at its `bytes.to_vec()` — fine for a borrowed
+    /// slice, but a caller that just did `std::fs::read` (issue #509) already
+    /// owns a `Vec<u8>` and was paying for a **second** full-file copy to
+    /// hand it in as a slice. `read_from_file` below is that caller; this is
+    /// the primitive that lets it stop.
+    pub fn parse_owned(bytes: Vec<u8>) -> Result<Self> {
         if bytes.is_empty() {
             return Ok(Self {
                 locations: [0; TABLE_ENTRIES],
@@ -203,10 +216,10 @@ impl RegionFile {
         let mut locations = [0u32; TABLE_ENTRIES];
         let mut timestamps = [0u32; TABLE_ENTRIES];
         for (i, slot) in locations.iter_mut().enumerate() {
-            *slot = read_be_u32(bytes, i * 4);
+            *slot = read_be_u32(&bytes, i * 4);
         }
         for (i, slot) in timestamps.iter_mut().enumerate() {
-            *slot = read_be_u32(bytes, SECTOR_BYTES + i * 4);
+            *slot = read_be_u32(&bytes, SECTOR_BYTES + i * 4);
         }
 
         // Mirror `RegionFile`'s own constructor-time sanitation
@@ -238,14 +251,18 @@ impl RegionFile {
         Ok(Self {
             locations,
             timestamps,
-            bytes: bytes.to_vec(),
+            bytes,
         })
     }
 
     /// Reads and parses `path` as a region file.
+    ///
+    /// Uses [`Self::parse_owned`] rather than [`Self::parse`] so the bytes
+    /// `std::fs::read` allocates are moved straight into the result instead
+    /// of being copied a second time.
     pub fn read_from_file(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path).map_err(Error::Io)?;
-        Self::parse(&bytes)
+        Self::parse_owned(bytes)
     }
 
     /// Whether the location table has a nonzero entry for this chunk.

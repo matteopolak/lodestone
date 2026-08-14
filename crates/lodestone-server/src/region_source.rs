@@ -99,7 +99,7 @@
 //! and `std::fs`. Target-gated to non-wasm by `lib.rs` — a browser world has
 //! no filesystem.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -416,6 +416,17 @@ pub struct PersistenceStats {
     pub scheduled_ticks_loaded: AtomicU64,
     /// Pending block and fluid ticks encoded into a chunk across all saves.
     pub scheduled_ticks_written: AtomicU64,
+    /// `std::fs::read` calls against a `.mca` file across all loads — one per
+    /// [`RegionCache`] miss, **not** one per column (issue #509). Compare
+    /// against [`Self::loaded_from_disk`]: before the region cache existed
+    /// the two were equal (a file read per column); with it, this stays
+    /// bounded by the number of *distinct* region files a session actually
+    /// touches.
+    pub region_files_read: AtomicU64,
+    /// Bytes read from disk across all [`Self::region_files_read`] reads.
+    /// The magnitude companion to that counter — see its own doc for why a
+    /// byte total is the one the OS page cache cannot make look healthy.
+    pub region_bytes_read: AtomicU64,
 }
 
 /// The state a save needs, shared between the source and its save handle.
@@ -451,6 +462,73 @@ struct WorldState {
     /// loop drains, not a copy. See [`ScheduledTickHandle`].
     scheduled: ScheduledTickHandle,
     stats: PersistenceStats,
+    /// Already-parsed region files, keyed by `(rx, rz)`. See [`RegionCache`]'s
+    /// own doc — this is the whole of issue #509's fix.
+    regions: Mutex<RegionCache>,
+}
+
+/// How many distinct region files [`RegionCache`] keeps parsed at once.
+///
+/// A join at the shipped default (`render_distance = 8`) spans exactly 4
+/// distinct files (issue #509's own count), so this is well above the
+/// working set of a session that is not actively crossing region
+/// boundaries, while still bounding memory for a long session that roams
+/// across many — each entry holds one whole `.mca`'s bytes, so this is not
+/// a "cache everything forever" design.
+const OPEN_REGION_CAPACITY: usize = 16;
+
+/// A small LRU of already-parsed [`RegionFile`]s.
+///
+/// # What it is
+///
+/// `RegionChunkSource::load` used to `std::fs::read` + `RegionFile::parse`
+/// **every single column**, even though `ChunkStore` streams hundreds of
+/// columns out of the same handful of region files (issue #509: 361 column
+/// loads against 4 distinct files on a cold join). This cache makes the
+/// second and every later column out of the same file free of disk I/O and
+/// of the header-parse/sanitation pass — only the first column touching a
+/// given `(rx, rz)` pays either.
+///
+/// # How to change it
+///
+/// - **Invalidate, don't mutate, on write.** [`RegionChunkSource::save_region`]
+///   calls [`Self::invalidate`] after it renames a new `.mca` into place,
+///   rather than patching the cached entry in place — the file on disk and
+///   the parsed struct must never be allowed to diverge silently.
+/// - **Recency order, not a hash map alone**, because eviction needs "least
+///   recently used", and [`OPEN_REGION_CAPACITY`] is small enough that a
+///   linear scan over it is cheaper than a real LRU's bookkeeping.
+/// - The entries are `Arc<RegionFile>` so a hit clones a pointer, not the
+///   file's bytes.
+#[derive(Debug, Default)]
+struct RegionCache {
+    /// Most-recently-used entry at the front.
+    entries: VecDeque<((i32, i32), Arc<RegionFile>)>,
+}
+
+impl RegionCache {
+    fn get(&mut self, key: (i32, i32)) -> Option<Arc<RegionFile>> {
+        let pos = self.entries.iter().position(|(k, _)| *k == key)?;
+        let entry = self.entries.remove(pos)?;
+        let file = Arc::clone(&entry.1);
+        self.entries.push_front(entry);
+        Some(file)
+    }
+
+    fn insert(&mut self, key: (i32, i32), file: Arc<RegionFile>) {
+        self.entries.retain(|(k, _)| *k != key);
+        self.entries.push_front((key, file));
+        while self.entries.len() > OPEN_REGION_CAPACITY {
+            self.entries.pop_back();
+        }
+    }
+
+    /// Drops a cached entry so the next [`Self::get`] misses and a fresh read
+    /// picks up whatever was just written. Called after every region-file
+    /// write; never patched in place (see the struct doc).
+    fn invalidate(&mut self, key: (i32, i32)) {
+        self.entries.retain(|(k, _)| *k != key);
+    }
 }
 
 /// The shared scheduled-tick queues, re-exported so every call site that
@@ -703,6 +781,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
                 block_entities: BlockEntityHandle::default(),
                 scheduled: ScheduledTickHandle::default(),
                 stats: PersistenceStats::default(),
+                regions: Mutex::new(RegionCache::default()),
             }),
         })
     }
@@ -757,6 +836,39 @@ impl<S: ChunkSource> RegionChunkSource<S> {
         }
     }
 
+    /// Returns the parsed region file at `(rx, rz)`, from [`RegionCache`] on
+    /// a hit or from disk on a miss. `None` only when the file is missing or
+    /// fails to parse — both legal (see [`Self::load`]'s own doc).
+    fn open_region(&self, rx: i32, rz: i32) -> Option<Arc<RegionFile>> {
+        if let Some(cached) = self
+            .state
+            .regions
+            .lock()
+            .expect("region cache lock poisoned")
+            .get((rx, rz))
+        {
+            return Some(cached);
+        }
+
+        let path = self.state.region_dir.join(format!("r.{rx}.{rz}.mca"));
+        let bytes = std::fs::read(&path).ok()?;
+        self.state
+            .stats
+            .region_files_read
+            .fetch_add(1, Ordering::Relaxed);
+        self.state
+            .stats
+            .region_bytes_read
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        let region = Arc::new(RegionFile::parse_owned(bytes).ok()?);
+        self.state
+            .regions
+            .lock()
+            .expect("region cache lock poisoned")
+            .insert((rx, rz), Arc::clone(&region));
+        Some(region)
+    }
+
     /// Reads the column at `(cx, cz)` off disk, or `None` if this world has
     /// never saved it.
     ///
@@ -764,11 +876,17 @@ impl<S: ChunkSource> RegionChunkSource<S> {
     /// itself treats "file doesn't exist yet" as a legal chunk-less region
     /// (see `lodestone_anvil::region::RegionFile::parse`), and a world's very
     /// first open has no files at all.
+    ///
+    /// Goes through [`RegionCache`] first (issue #509): `ChunkStore` streams
+    /// hundreds of columns out of a handful of region files, and this used to
+    /// `std::fs::read` + parse the whole file **per column**. A cache hit
+    /// costs an `Arc` clone; only a genuine miss touches disk, and every
+    /// touch is counted in [`PersistenceStats::region_files_read`] /
+    /// [`PersistenceStats::region_bytes_read`] so the fix is a counter
+    /// assertion, not a claim.
     fn load(&self, cx: i32, cz: i32) -> Option<LoadedChunk> {
         let (rx, rz, local_x, local_z) = region_and_local(cx, cz);
-        let path = self.state.region_dir.join(format!("r.{rx}.{rz}.mca"));
-        let bytes = std::fs::read(&path).ok()?;
-        let region = RegionFile::parse(&bytes).ok()?;
+        let region = self.open_region(rx, rz)?;
         let raw = region
             .read_chunk_nbt_bytes_resolving_external(
                 local_x,
@@ -1345,6 +1463,16 @@ impl WorldSaveHandle {
         let temp = self.state.region_dir.join(format!(".r.{rx}.{rz}.mca.tmp"));
         std::fs::write(&temp, &built.bytes).map_err(io(&temp))?;
         std::fs::rename(&temp, &path).map_err(io(&path))?;
+
+        // The bytes on disk just changed out from under `RegionCache` — drop
+        // the stale entry rather than patch it, so the next `load` re-reads
+        // instead of silently serving pre-save data (see `RegionCache`'s own
+        // doc for why this is invalidate-not-mutate).
+        self.state
+            .regions
+            .lock()
+            .expect("region cache lock poisoned")
+            .invalidate((rx, rz));
         Ok(count)
     }
 }
