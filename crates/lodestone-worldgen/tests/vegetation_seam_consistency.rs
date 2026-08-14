@@ -108,54 +108,95 @@ const EAST: (i32, i32) = (1, 0);
 
 /// Total truncated rows with the 5×5 read neighbourhood in place, summed over every
 /// bundled biome. **Measured, and the whole residual is the shared-overlay channel
-/// named in the module doc** — see [`EXPECTED`] for the split.
+/// named in the module doc (Cause 2: nine sources share one write overlay, order- and
+/// content-dependent, left open on purpose)** — see [`EXPECTED`] for the split.
 ///
-/// **Re-baselined twice in one session, and the second move is an improvement.**
-/// Issue #513 took it 44 → 77 (control 94 → 120); the `height_ocean_floor`
-/// motion-blocking predicate fix in the same batch then took it 77 → **64** while
-/// the control went 120 → **129**, i.e. the two arms moved *further apart*, which is
-/// the direction that says the 5×5 read neighbourhood still buys what it claims.
-/// `windswept_savanna` went to exactly zero and left [`EXPECTED`] entirely.
+/// **Re-baselined a third time — the biggest single move, and it is a budget moving,
+/// not a bug appearing.** Two landings on the same day drove it, and they are
+/// mechanically different:
 ///
-/// #513 widened the
-/// engine from 7 feature types and 10 placement modifiers to 30 and 15, so a
-/// `VEGETAL_DECORATION` step that previously dropped `height_range`,
-/// `environment_scan`, `count_on_every_layer`, `noise_based_count`,
-/// `surface_relative_threshold_filter` and `fixed_placement` now runs them — and
-/// each one draws. Every tree downstream of one in the same step therefore lands
-/// somewhere else, and this sweep is a count of *which* canopies happen to straddle
-/// the border. The number moving is the expected consequence; what would be a
-/// regression is the widened arm losing its margin over the narrow control, which
-/// `narrow_read_neighbourhood_is_what_truncates` still asserts directly.
-const MEASURED_TOTAL: usize = 64;
+/// 1. The mega-jungle/giant-spruce/jungle-bush trunk+foliage placers, then the fancy
+///    oak trunk+foliage placer and `FallenTreeFeature`, replaced several
+///    `ConfiguredFeature::Unsupported` stubs with real placers. A stub silently
+///    consumed zero RNG draws; a real placer draws and mutates the shared per-source
+///    overlay, so every feature *downstream of it in the same step* now lands
+///    somewhere else than it used to — exactly the mechanism `#513` exercised before
+///    it (see the paragraph below), just with a different set of newly-real feature
+///    types. Measured in isolation (`git worktree` at each commit, same fixture, same
+///    binary): before these two landings the total was the previous pin, 64; after
+///    the mega-tree placers alone it was 400; after the fancy-oak/fallen-tree placer
+///    landed on top it settled at **162**, where it stayed through the two
+///    unrelated commits between it and cherry/mangrove (a clock-seam sweep, a chunk
+///    SPAWN stage) — neither touches vegetation and neither moved the number, which
+///    is the expected negative control.
+/// 2. Cherry and mangrove trees then landed for real, and `cherry_grove` /
+///    `mangrove_swamp` are the *first* bundled biomes whose canopies genuinely
+///    straddle this seam — there was nothing to truncate there before because there
+///    was nothing placing. That is [`the_fixture_contains_seam_straddling_canopies`]'s
+///    own promise working as intended: a biome gaining seam-crossing structure is
+///    not evidence of anything wrong with the driver. Measured: 162 → **314** (wide),
+///    162's own narrow-arm counterpart 321 → **621** (see
+///    [`MEASURED_TOTAL_NARROW`]) — both entirely inside `cherry_grove` (5, 58) and
+///    `mangrove_swamp` (18, 71); no other biome's count moved between these two
+///    landings.
+///
+/// **What would legitimately move this number again**: (a) a
+/// `ConfiguredFeature::Unsupported`/`PlacementModifier` stub anywhere in the engine
+/// starting to place for real — it reshuffles the shared overlay's RNG stream for
+/// every biome that runs it in the same `VEGETAL_DECORATION` step, not only the
+/// biome the stub belonged to, so a biome with no visible connection to the change
+/// moving is expected, not suspicious; (b) a brand-new tree family (like cherry or
+/// mangrove here) landing and a previously-silent biome starting to show up in
+/// [`EXPECTED`] with a nonzero crossing count. What would **not** be legitimate: a
+/// change here with no placer, no feature type and no new tree family in the diff —
+/// that has no mechanism to move this number and should be treated as a real
+/// regression, not re-pinned.
+const MEASURED_TOTAL: usize = 314;
 
 /// Total truncated rows with the read neighbourhood narrowed back to 3×3 — the
 /// control. Must exceed [`MEASURED_TOTAL`] by a wide margin, or the widening bought
-/// nothing. Re-baselined alongside [`MEASURED_TOTAL`]; see its note.
-const MEASURED_TOTAL_NARROW: usize = 129;
+/// nothing. Re-baselined alongside [`MEASURED_TOTAL`]; see its note for the two
+/// landings responsible (162's narrow counterpart was 321; cherry/mangrove then took
+/// it to 621).
+const MEASURED_TOTAL_NARROW: usize = 621;
 
 /// Per-biome `(west-half-missing, east-half-missing)` at the fixed arm, for every
 /// biome that is not zero. Predicted values, not a band: a biome appearing here that
 /// should not, or a count moving, is a real change and should fail.
 ///
-/// Three biomes, down from four: `windswept_savanna` reached zero with the
-/// `blocks_motion` height fix and is no longer listed.
-///
-/// `jungle` is new as of #513 and is the clearest illustration of why: jungle's own
-/// trees are still `ConfiguredFeature::Unsupported` (`GiantTrunkPlacer`), so its 133
-/// border crossings come from features that only started placing in that issue —
-/// `vines` above all, which by construction reads its four horizontal neighbours and
-/// so is exactly the shape this sweep measures.
+/// Nine biomes, up from three. `flower_forest` is untouched by either landing named
+/// on [`MEASURED_TOTAL`] and did not move. `bamboo_jungle`, `forest`,
+/// `old_growth_pine_taiga` and `old_growth_birch_forest` are new here because a
+/// previously-`Unsupported` placer in their `VEGETAL_DECORATION` list now runs (the
+/// mega-tree/fancy-oak/fallen-tree landing) — see `old_growth_birch_forest`'s own
+/// note below, since it used to be a [`FIXED_TO_ZERO`] guarantee. `jungle` and
+/// `old_growth_spruce_taiga` were already here and moved for the same reason.
+/// `cherry_grove` and `mangrove_swamp` are new because cherry and mangrove trees are
+/// the first real placers either biome has ever had — nothing crossed this seam for
+/// them before because nothing placed.
 const EXPECTED: &[(&str, usize, usize)] = &[
+    ("minecraft:bamboo_jungle", 24, 1),
+    ("minecraft:cherry_grove", 5, 58),
     ("minecraft:flower_forest", 7, 8),
-    ("minecraft:jungle", 21, 7),
-    ("minecraft:old_growth_spruce_taiga", 11, 10),
+    ("minecraft:forest", 7, 0),
+    ("minecraft:jungle", 25, 23),
+    ("minecraft:mangrove_swamp", 18, 71),
+    ("minecraft:old_growth_birch_forest", 14, 0),
+    ("minecraft:old_growth_pine_taiga", 4, 24),
+    ("minecraft:old_growth_spruce_taiga", 25, 0),
 ];
 
 /// Biomes this landing takes to exactly zero, asserted individually. Under the
-/// narrow control both are non-zero (16/12 and 14/8 as measured), so this pair is
-/// the directional claim: the widened read neighbourhood removed *these*.
-const FIXED_TO_ZERO: &[&str] = &["minecraft:birch_forest", "minecraft:old_growth_birch_forest"];
+/// narrow control this biome is non-zero, so it is the directional claim: the widened
+/// read neighbourhood removed truncation here specifically.
+///
+/// **`old_growth_birch_forest` left this set** — it is not a regression of the fix
+/// this constant is asserting. That fix (the 5×5 read neighbourhood, Cause 1 in the
+/// module doc) is unchanged and still holds; what moved is Cause 2 — the shared
+/// write-overlay residual documented as open — now measuring nonzero here because
+/// the mega-tree/fancy-oak landing gave this biome a placer that previously never
+/// drew. It now lives in [`EXPECTED`] at `(14, 0)` instead.
+const FIXED_TO_ZERO: &[&str] = &["minecraft:birch_forest"];
 
 fn prod_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestone-server/assets/worldgen")
@@ -463,22 +504,21 @@ fn a_canopy_crossing_a_chunk_border_is_served_whole() {
             EAST.0 * 16,
         ));
     }
+    let mut mismatches = Vec::new();
     for &(biome, w, e) in EXPECTED {
         let seam = &rows
             .iter()
             .find(|(b, _)| b == biome)
             .unwrap_or_else(|| panic!("{biome} is no longer in the sweep"))
             .1;
-        assert_eq!(
-            (seam.west_missing, seam.east_missing),
-            (w, e),
-            "{biome}: predicted ({w}, {e}) truncated rows — the named shared-overlay \
-             residual, see the module doc — but measured ({}, {}). bbox={:?}. \
-             Re-measure and record the new number with the reason; do not widen it.",
-            seam.west_missing,
-            seam.east_missing,
-            seam.bbox,
-        );
+        if (seam.west_missing, seam.east_missing) != (w, e) {
+            mismatches.push(format!(
+                "{biome}: predicted ({w}, {e}) truncated rows — the named \
+                 shared-overlay residual, see the module doc — but measured ({}, \
+                 {}). bbox={:?}.",
+                seam.west_missing, seam.east_missing, seam.bbox,
+            ));
+        }
     }
     for &biome in FIXED_TO_ZERO {
         let seam = &rows
@@ -486,23 +526,29 @@ fn a_canopy_crossing_a_chunk_border_is_served_whole() {
             .find(|(b, _)| b == biome)
             .unwrap_or_else(|| panic!("{biome} is no longer in the sweep"))
             .1;
-        assert_eq!(
-            (seam.west_missing, seam.east_missing),
-            (0, 0),
-            "{biome} must serve every border-crossing canopy whole — this is the \
-             biome the 5×5 read neighbourhood was landed for, and the control \
-             measures it non-zero at 3×3. Got ({}, {}) of {} crossings, bbox={:?}",
-            seam.west_missing,
-            seam.east_missing,
-            seam.crossings,
-            seam.bbox,
-        );
+        if (seam.west_missing, seam.east_missing) != (0, 0) {
+            mismatches.push(format!(
+                "{biome} must serve every border-crossing canopy whole — this is \
+                 the biome the 5×5 read neighbourhood was landed for, and the \
+                 control measures it non-zero at 3×3. Got ({}, {}) of {} \
+                 crossings, bbox={:?}",
+                seam.west_missing, seam.east_missing, seam.crossings, seam.bbox,
+            ));
+        }
     }
-    assert_eq!(
-        total, MEASURED_TOTAL,
-        "total truncated seam rows moved from the measured {MEASURED_TOTAL} to \
-         {total} (the 3×3 control measures {MEASURED_TOTAL_NARROW}):\n{}",
-        report.join("\n")
+    if total != MEASURED_TOTAL {
+        mismatches.push(format!(
+            "total truncated seam rows moved from the measured {MEASURED_TOTAL} \
+             to {total} (the 3×3 control measures {MEASURED_TOTAL_NARROW})",
+        ));
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{} mismatch(es); re-measure and record the new number with the reason, \
+         do not widen blindly:\n{}\n\nfull per-biome report:\n{}",
+        mismatches.len(),
+        mismatches.join("\n"),
+        report.join("\n"),
     );
     println!("truncated seam rows: {total} (3x3 control: {MEASURED_TOTAL_NARROW})\n{}", report.join("\n"));
 }

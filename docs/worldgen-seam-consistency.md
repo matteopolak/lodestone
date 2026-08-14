@@ -20,8 +20,14 @@ The invariant the architecture needs is narrow and easy to state:
 > of undecorated terrain — never of which column happens to be the centre.**
 
 Vanilla does not need this invariant, because vanilla runs each chunk's FEATURES
-stage exactly **once** and persists the spill into its neighbours. We recompute, so
-we do need it. Two things violated it. Both were measured on a flat 5×5 synthetic
+stage exactly **once** and persists the spill into its neighbours. Confirmed by
+symbol: `ChunkPyramid`'s `FEATURE_PYRAMID` registers `ChunkStatus.FEATURES` with
+`blockStateWriteRadius(1)` and `ChunkStatusTasks.generateFeatures` as its task, so the
+single `WorldGenRegion` handed to that task spans the chunk plus its radius-1
+neighbours and a feature genuinely writes into them directly — there is no second
+computation to disagree with. We recompute per centre instead of writing once and
+persisting, so we do need the invariant above. Two things violated it. Both were
+measured on a flat 5×5 synthetic
 world across all 66 bundled biomes, counting *truncated seam rows* — rows where some
 drive placed one canopy across the border and the stitched served field lost a half
 (see [Gates](#gates)):
@@ -98,28 +104,45 @@ correct if it is order-*in*dependent. Pick one:
    the staged store, written once, read by every neighbour. Vanilla's own model, so
    both properties hold at once; much larger change, and it needs the store to hold a
    *writable* per-chunk product, which today's "one writer per chunk grid" rule forbids.
-3. **Leave it.** 44 truncated rows per 66-biome seam sweep, concentrated in
-   `flower_forest`, `old_growth_spruce_taiga` and `windswept_savanna`.
+3. **Leave it.** Chosen. The count moves every time a previously-`Unsupported`
+   placer starts drawing for real (each one reshuffles the shared overlay's RNG
+   stream for every biome sharing its decoration step) or a new tree family gains
+   its first seam-straddling canopy — both are legitimate, budget-moving events, not
+   regressions. Most recently: the mega-jungle/giant-spruce/jungle-bush and fancy-oak/
+   `FallenTreeFeature` placers landing took it from the prior pin to 162 with no new
+   seam-crossing structure involved, then cherry and mangrove trees landing (the
+   first real placers `cherry_grove` and `mangrove_swamp` have ever had) took it to
+   **314** truncated rows across **nine** biomes — up from three, concentrated in
+   `cherry_grove` and `mangrove_swamp` themselves (new), plus `bamboo_jungle`,
+   `forest`, `jungle`, `old_growth_birch_forest`, `old_growth_pine_taiga` and
+   `old_growth_spruce_taiga`. `old_growth_birch_forest` in particular moved off its
+   former zero guarantee for the first reason above, not the second — see
+   `vegetation_seam_consistency.rs`'s own `MEASURED_TOTAL`/`EXPECTED`/`FIXED_TO_ZERO`
+   doc comments for the full per-landing breakdown and the re-measurement method
+   (isolated `git worktree` checkouts, one commit at a time).
 
-`DESIGN.md` §12.118 carries the measurements.
+`DESIGN.md` §12.118 carries the original measurements; the re-baseline above is
+recorded in the test file itself per this repo's rule that a floor is a measurement,
+not a tolerance.
 
 ## Gates
 
 `crates/lodestone-worldgen/tests/vegetation_seam_consistency.rs`:
 
 - `the_fixture_contains_seam_straddling_canopies` — the hard precondition. The fixture
-  measures **1,777** border-crossing canopy rows across **19** biomes. This crate's own
+  measures **3,437** border-crossing canopy rows across **21** biomes (up from 1,777
+  across 19 as more tree families gained real placers). This crate's own
   `tests/support/worldgen_data` tree carries only `plains` and `savanna` and **both
   measure zero truncations at every arm**, so the gate reads the bundled production
   data at `crates/lodestone-server/assets/worldgen` (tracked repo state, read off disk
   — no dependency on `lodestone-server` the crate). A plains fixture here would be the
   *world* species of vacuous test: unreadable from the assertions.
 - `a_canopy_crossing_a_chunk_border_is_served_whole` — the claim. Predicts the exact
-  per-biome residual, asserts `birch_forest` and `old_growth_birch_forest` at exactly
-  zero, and prints a bounding box on failure.
+  per-biome residual for nine biomes, asserts `birch_forest` at exactly zero, and
+  prints a bounding box on failure.
 - `narrow_read_neighbourhood_is_what_truncates` — **the control, and it fires.** Same
   binary, same fixture, one variable: the 16 rim chunks are handed `None`, reproducing
-  the nine-slot read table. Measures 94 against the fixed arm's 44, and requires both
+  the nine-slot read table. Measures 621 against the fixed arm's 314, and requires
   `FIXED_TO_ZERO` biomes to be non-zero under it.
 - `region_view.rs`'s `wide_source_slot_routes_every_local_column_in_the_five_by_five`
   and `the_narrow_table_answers_air_where_the_wide_one_answers_a_rim_chunk` — the
