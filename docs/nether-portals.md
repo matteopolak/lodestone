@@ -10,6 +10,7 @@ nether portals. Three modules and one protocol method:
 | dimension identity + geometry + 8:1 scaling | `lodestone_server::dimension` | `DimensionType`, `DimensionTypes` |
 | frame detection, ignition, destination search, the per-player counter | `lodestone_server::portal` | `PortalShape`, `PortalForcer`, `NetherPortalBlock`, `PortalProcessor` |
 | the Nether's terrain source | `lodestone_server::NetherChunkSource` + `lodestone_server::nether_chunk_source` | `ServerLevel` for `Level.NETHER` |
+| the End's terrain source (generator exists; not yet reachable — see below) | `lodestone_server::EndChunkSource` + `lodestone_server::worldgen_data::end_chunk_source` | `ServerLevel` for `Level.END` |
 | the wire | `ServerProtocol::encode_dimension_change`, overridden in `lodestone_v770::server_protocol` | `ClientboundRespawnPacket` with `KEEP_ALL_DATA` |
 
 A player can light an obsidian frame with flint and steel, stand in it, and arrive in
@@ -152,11 +153,35 @@ next edits `lodestone-server`.
 
 ## How to change it
 
-* **Adding the End** is a `Dimension::End` variant, a source in `with_nether` (rename
-  it), and a `from_key` entry. Do **not** reuse the travel path: an End portal is not
-  a coordinate-scaled trip — it lands at a fixed obsidian platform — so the
-  destination search would put players in the void. `EndGenerator` already exists in
-  `lodestone-worldgen`.
+* **The End** (`Dimension::End`) is a real variant now, with real geometry
+  transcribed from `data/minecraft/dimension_type/the_end.json`, a real generator
+  (`worldgen_data::end_generator`/`end_chunk_source`) and a real
+  `EndChunkSource` (`chunk.rs`, `ChunkColumn::from_end` for the 128→256 pad,
+  mirroring `NetherChunkSource`/`from_nether`). `portal.rs` has
+  `end_platform_writes`/`ensure_end_platform` (vanilla's
+  `EndPlatformFeature.createEndPlatform`, ported field for field) and
+  `is_end_portal`/`END_PORTAL_BLOCK` for the block itself. **What is still
+  missing, precisely:**
+  * `crate::integrated`'s `with_nether` factory `match`es on `Dimension` with no
+    wildcard arm for `End` — it needs exactly one more arm (returning `Some` of
+    an `EndChunkSource`-backed `DimensionalSource::alone`, the same shape the
+    `Nether` arm already has) before any world can reach it. This is the one
+    remaining hop; everything behind it exists.
+  * No code triggers an End-portal ignition (`EndPortalFrameBlock`'s
+    eye-of-ender ring, `EnderEyeItem.useOn`) or a step-into-`end_portal`
+    teleport (`EndPortalBlock.entityInside`) — neither the frame-completion
+    detector nor `server.rs`'s per-tick trigger exist. Do **not** reuse
+    `travel_through_portal`/`PortalTracker`'s Nether-shaped mechanism wholesale:
+    an End portal is not a coordinate-scaled, paired-portal trip — every arrival
+    lands at the fixed obsidian platform (`Dimension::end_spawn_point`,
+    `portal::ensure_end_platform`), and the return trip goes to the overworld's
+    respawn point, not to a portal search.
+  * No stronghold generator exists to place a naturally-occurring
+    `end_portal_frame` ring anywhere, so even with ignition wired, the only way
+    to reach one today is hand-placing frame blocks (e.g. via a future
+    `/setblock`-equivalent).
+  See issue #330's tracking comment for the session that landed the generator
+  wiring and exactly what it left for the next one.
 * **A second player in the other dimension** already works for terrain (each
   connection has its own `travelled`), but entity streaming does not: `EntityStreamer`
   and `MobHandle` are world-scoped, so a mob in the overworld is still streamed to a
@@ -245,7 +270,14 @@ Honest list, so nothing here reads as finished:
 * **A portal is never extinguished.** Vanilla's `NetherPortalBlock.updateShape`
   removes a portal cell whose frame was broken; nothing here does, so mining a frame
   block leaves floating portal blocks.
-* **The End.** Its generator exists; nothing reaches it.
+* **The End.** `Dimension::End`, its generator, `EndChunkSource` and the obsidian
+  platform's own geometry (`portal::ensure_end_platform`) all exist and are unit
+  tested. **Still genuinely unreachable from a running server** — see "How to
+  change it" above for the exact remaining hops: `with_nether`'s factory match has
+  no `End` arm, there is no frame-ignition or step-into-`end_portal` trigger, and
+  there is no stronghold generator to place a frame naturally. Do not read the
+  presence of the generator and chunk source as "mostly done" — the trigger side is
+  entirely unbuilt.
 
 ## Dependencies
 

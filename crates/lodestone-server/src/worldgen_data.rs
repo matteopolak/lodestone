@@ -761,9 +761,115 @@ pub fn nether_chunk_source(seed: i64) -> crate::chunk::NetherChunkSource {
     crate::chunk::NetherChunkSource::new(nether_generator(seed))
 }
 
+/// The parsed End noise settings (parsed once, reused across seeds).
+fn end_settings() -> &'static Value {
+    static SETTINGS: OnceLock<Value> = OnceLock::new();
+    SETTINGS.get_or_init(|| {
+        let raw = EmbeddedResolver.raw("noise_settings/end");
+        serde_json::from_str(raw).expect("parsing embedded end noise settings")
+    })
+}
+
+/// Builds the bundled End generator for `seed`.
+///
+/// **Takes the plain [`EmbeddedResolver`]**, unlike [`nether_generator`]'s
+/// [`NetherResolver`]: `EndGenerator::new` never calls `Resolver::biome_parameters`
+/// at all (`EndBiomeSource` — see `lodestone_worldgen::end`'s module doc — is
+/// built from the seed alone, not from a multi-noise parameter table), so there is
+/// no method to override and nothing that could resolve to the wrong dimension's
+/// table the way an unoverridden Nether resolver would.
+///
+/// **Does not touch [`active_world_seed`]**, for the same reason
+/// [`nether_generator`] does not: that static answers "which world's slime
+/// chunks", a question only the overworld's spawner asks.
+#[must_use]
+pub fn end_generator(seed: i64) -> lodestone_worldgen::end::EndGenerator {
+    lodestone_worldgen::end::EndGenerator::new(seed, end_settings(), &EmbeddedResolver)
+}
+
+/// Builds the bundled End [`ChunkSource`](crate::ChunkSource) for `seed` — the
+/// terrain a player who steps through a completed end-portal-frame ring would be
+/// served, once something *triggers* that trip. `crate::integrated`'s
+/// `with_nether` already constructs one of these on demand for
+/// `Dimension::End`; see `crate::dimension`'s module doc for what still has no
+/// caller.
+#[must_use]
+pub fn end_chunk_source(seed: i64) -> crate::chunk::EndChunkSource {
+    crate::chunk::EndChunkSource::new(end_generator(seed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::ChunkSource;
+
+    /// The wiring-layer discriminator issue #330 asks for: at the same seed and
+    /// the same chunk coordinates, [`end_chunk_source`] must produce terrain that
+    /// actually differs from [`overworld_chunk_source`]'s — an implementation
+    /// that silently routed both through the same generator (or built
+    /// [`crate::chunk::EndChunkSource`] over the overworld's settings by mistake)
+    /// would still pass any test that merely asserted "chunks were generated".
+    ///
+    /// The expectation comes from each dimension's own `default_block` record
+    /// (`noise_settings/{overworld,end}.json`), read here rather than assumed, so
+    /// this is a claim about the data as well as about the generator: the
+    /// overworld's is `minecraft:stone` and must never place `end_stone`; the
+    /// End's is `minecraft:end_stone`, and per `lodestone_worldgen::end`'s module
+    /// doc the End has no water and no grass at all.
+    #[test]
+    fn end_terrain_differs_from_overworld_terrain_at_the_same_seed_and_coordinates() {
+        let seed: i64 = -195_764_831;
+        assert_eq!(settings_for(WorldType::Overworld)["default_block"]["Name"], "minecraft:stone");
+        assert_eq!(end_settings()["default_block"]["Name"], "minecraft:end_stone");
+
+        let overworld = overworld_chunk_source(seed);
+        let end = end_chunk_source(seed);
+
+        // All three chunks sit well inside the End's main island
+        // (chunkX^2 + chunkZ^2 <= 4096 = radius 64), so every one is guaranteed
+        // solid ground rather than open water between small islands.
+        //
+        // Each chunk is generated **once** per source via `column`, then read
+        // from the returned `ChunkColumn`'s own cheap local lookup — going
+        // through `ChunkSource::block_state` per cell instead would regenerate
+        // the whole column on every single call (see that trait method's own
+        // doc), turning this sweep into a multi-minute run for no reason.
+        let mut overworld_end_stone = 0usize;
+        let mut end_end_stone = 0usize;
+        let mut differing = 0usize;
+        let mut total = 0usize;
+        for &(cx, cz) in &[(0, 0), (5, -3), (-12, 20)] {
+            let ow_col = overworld.column(cx, cz);
+            let en_col = end.column(cx, cz);
+            for x in 0..16usize {
+                for z in 0..16usize {
+                    for y in 0..64i32 {
+                        let ow = ow_col.block_state(x as i32, y, z as i32);
+                        let en = en_col.block_state(x as i32, y, z as i32);
+                        if ow.starts_with("minecraft:end_stone") {
+                            overworld_end_stone += 1;
+                        }
+                        if en.starts_with("minecraft:end_stone") {
+                            end_end_stone += 1;
+                        }
+                        if ow != en {
+                            differing += 1;
+                        }
+                        total += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(overworld_end_stone, 0, "the overworld generator must never place end_stone");
+        assert!(end_end_stone > 0, "the End generator must place end_stone somewhere in this sweep");
+        assert!(
+            differing > total / 2,
+            "{differing}/{total} cells differ between the overworld and the End at the same \
+             seed and coordinates; a majority is required so a generator that silently fell \
+             back to producing overworld terrain cannot pass by coincidental agreement in a \
+             minority of cells"
+        );
+    }
 
     /// The island this resolver's `structure_template` closes: with the trait
     /// default, every template-driven structure lands on the ledger with a

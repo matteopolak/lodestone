@@ -27,11 +27,20 @@
 //!
 //! # How to change it
 //!
-//! * **Adding the End** is [`Dimension::End`] plus a source in
-//!   [`DimensionalSource`] plus an entry in [`Dimension::from_key`]. The travel
-//!   path deliberately does *not* generalise to it: an End portal is not a
-//!   coordinate-scaled trip (it lands at a fixed obsidian platform), so reusing
-//!   the Nether's destination search would put players inside the void.
+//! * **The End** ([`Dimension::End`]) has its geometry here, its generator in
+//!   `lodestone_worldgen::end`, its [`crate::chunk::ChunkSource`] in
+//!   [`crate::chunk::EndChunkSource`], and is now wired into
+//!   [`with_nether`](crate::integrated)'s sibling factory the same way the
+//!   Nether is — a world can `sibling(Dimension::End)` into real End terrain.
+//!   **What is still missing is the trigger**: no code anywhere ignites an
+//!   end-portal-frame ring or teleports a player who steps into an
+//!   `end_portal` block, so no player can reach it through play yet. The travel
+//!   path deliberately does *not* generalise `travel_through_portal` to the End:
+//!   an End portal is not a coordinate-scaled trip (it lands at a fixed
+//!   obsidian platform, [`Dimension::end_spawn_point`],
+//!   [`crate::portal::ensure_end_platform`]), so reusing the Nether's
+//!   destination search would put players inside the void. See issue #330's
+//!   tracking comment for the precise remaining diff.
 //! * **`coordinate_scale` is a ratio, never a constant.** `teleport_scale` is
 //!   `from / to`, so the overworld→Nether trip divides by 8 and the return trip
 //!   multiplies by 8 *through the same expression*. A "divide by 8" written at one
@@ -66,20 +75,29 @@ use crate::chunk::{ChunkColumn, ChunkSource};
 ///
 /// Deliberately **not** an open-ended registry: every variant here needs a
 /// generator, a chunk store, a wire holder id and a travel rule, so a variant with
-/// no source behind it would be an island with a plausible name. The End is absent
-/// for exactly that reason — its generator exists in `lodestone-worldgen`, and
-/// nothing here can yet put a player in it.
+/// no source behind it would be an island with a plausible name.
+///
+/// **The End's geometry is real** (transcribed from
+/// `data/minecraft/dimension_type/the_end.json`), its generator and
+/// [`crate::chunk::EndChunkSource`] exist, and `crate::integrated`'s
+/// `with_nether` now wires `Dimension::End` into a [`DimensionalSource`]'s
+/// sibling factory the same way it does the Nether. **A player still cannot
+/// reach it**: nothing anywhere ignites an end-portal-frame ring or teleports a
+/// player who steps into an `end_portal` block. See issue #330's tracking
+/// comment for exactly what remains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Dimension {
     /// `minecraft:overworld`.
     Overworld,
     /// `minecraft:the_nether`.
     Nether,
+    /// `minecraft:the_end`.
+    End,
 }
 
 impl Dimension {
     /// Every dimension, in holder order.
-    pub const ALL: [Dimension; 2] = [Dimension::Overworld, Dimension::Nether];
+    pub const ALL: [Dimension; 3] = [Dimension::Overworld, Dimension::Nether, Dimension::End];
 
     /// The level's resource key, as `login`/`respawn` spell it on the wire and as
     /// `player_data`'s `Dimension` NBT field stores it.
@@ -88,17 +106,17 @@ impl Dimension {
         match self {
             Self::Overworld => "minecraft:overworld",
             Self::Nether => "minecraft:the_nether",
+            Self::End => "minecraft:the_end",
         }
     }
 
-    /// Parses a level key. `None` for a dimension this server does not host —
-    /// including `minecraft:the_end`, which is *not* an error to see in a saved
-    /// player file, only something we cannot put anyone back into.
+    /// Parses a level key. `None` for a dimension this server does not host.
     #[must_use]
     pub fn from_key(key: &str) -> Option<Self> {
         match key {
             "minecraft:overworld" => Some(Self::Overworld),
             "minecraft:the_nether" => Some(Self::Nether),
+            "minecraft:the_end" => Some(Self::End),
             _ => None,
         }
     }
@@ -109,6 +127,7 @@ impl Dimension {
         match self {
             Self::Overworld => -64,
             Self::Nether => 0,
+            Self::End => 0,
         }
     }
 
@@ -119,17 +138,21 @@ impl Dimension {
         match self {
             Self::Overworld => 384,
             Self::Nether => 256,
+            Self::End => 256,
         }
     }
 
     /// The highest `y` anything may be placed at, exclusive of the offset —
     /// `DimensionType`'s `logicalHeight`. 128 in the Nether, which is what keeps
-    /// a generated portal below the bedrock roof.
+    /// a generated portal below the bedrock roof. The End's `logical_height`
+    /// equals its `height` (`the_end.json` has no ceiling to keep placement below),
+    /// unlike the Nether's.
     #[must_use]
     pub fn logical_height(self) -> i32 {
         match self {
             Self::Overworld => 384,
             Self::Nether => 128,
+            Self::End => 256,
         }
     }
 
@@ -140,33 +163,60 @@ impl Dimension {
     }
 
     /// `DimensionType`'s `coordinateScale` — 1.0 in the overworld, 8.0 in the
-    /// Nether. Only ever consumed as a *ratio*; see [`teleport_scale`].
+    /// Nether. Only ever consumed as a *ratio*; see [`teleport_scale`]. The End's
+    /// is 1.0, same as the overworld — its travel is not a coordinate-scaled trip
+    /// at all (see [`nether_portal_destination`](Self::nether_portal_destination)'s
+    /// doc), but the record states 1.0 regardless.
     #[must_use]
     pub fn coordinate_scale(self) -> f64 {
         match self {
             Self::Overworld => 1.0,
             Self::Nether => 8.0,
+            Self::End => 1.0,
         }
     }
 
     /// Whether this dimension has a sky-light source. False in the Nether, which
-    /// is what makes its ceiling a ceiling.
+    /// is what makes its ceiling a ceiling. **True in the End** —
+    /// `the_end.json`'s own `has_skylight` is `true` in this snapshot (26.2's
+    /// reworked lighting attributes carry the End's dark-purple ambient look
+    /// through `visual/sky_light_color` instead), which is easy to get backwards
+    /// from the pre-1.21 memory of "the End has no sky".
     #[must_use]
     pub fn has_skylight(self) -> bool {
-        matches!(self, Self::Overworld)
+        matches!(self, Self::Overworld | Self::End)
     }
 
     /// Where a nether portal in this dimension leads — vanilla's
     /// `NetherPortalBlock.getPortalDestination`, whose whole rule is
     /// `currentLevel.dimension() == Level.NETHER ? OVERWORLD : NETHER`. **Not a
     /// general "next dimension"**: it is specifically the nether portal's pairing,
-    /// which is why it is a two-cycle and why adding the End must not extend it.
+    /// a two-cycle that does not extend to the End.
+    ///
+    /// The `End` arm is unreachable in production: [`crate::portal::ignite`]
+    /// refuses to light a frame in the End (`inPortalDimension` excludes it, same
+    /// as vanilla), so no nether portal can exist there to ask this question of.
+    /// It returns `Overworld` rather than panicking because a exhaustive match is
+    /// cheaper to keep honest than a `match` with an `unreachable!` arm that a
+    /// future caller trips over in a test fixture that builds a nether portal by
+    /// hand.
     #[must_use]
     pub fn nether_portal_destination(self) -> Dimension {
         match self {
             Self::Overworld => Self::Nether,
             Self::Nether => Self::Overworld,
+            Self::End => Self::Overworld,
         }
+    }
+
+    /// The fixed arrival point for an End portal trip *into* the End —
+    /// `ServerLevel.END_SPAWN_POINT`. Not scaled, not searched: every arrival at
+    /// the End lands here (or, for the return trip, at the overworld's own respawn
+    /// point — a different mechanism entirely, see
+    /// `EndPortalBlock.getPortalDestination`'s `fromEnd` branch).
+    #[must_use]
+    pub fn end_spawn_point() -> (i32, i32, i32) {
+        (100, 50, 0)
     }
 
     /// The highest `y` `crate::portal`'s destination builder may place a block at
@@ -491,6 +541,31 @@ mod tests {
         // And the frame is four tall above the landing spot, so the whole portal
         // fits: `createPortal` requires `y + 4 <= maxPlaceableY`.
         assert!(landed + 4 <= Dimension::Nether.max_placeable_y());
+    }
+
+    /// The End's geometry, transcribed from
+    /// `data/minecraft/dimension_type/the_end.json` and checked field by field
+    /// rather than restated as a single literal — so a transposed `min_y`/`height`
+    /// fails here instead of surfacing as a wrong section count on the wire.
+    #[test]
+    fn the_end_geometry_matches_its_dimension_type_record() {
+        assert_eq!(Dimension::End.key(), "minecraft:the_end");
+        assert_eq!(Dimension::from_key("minecraft:the_end"), Some(Dimension::End));
+        assert_eq!(Dimension::End.min_y(), 0);
+        assert_eq!(Dimension::End.height(), 256);
+        assert_eq!(Dimension::End.logical_height(), 256, "the_end.json has no ceiling to cap placement below");
+        assert_eq!(Dimension::End.max_y(), 255);
+        assert_eq!(Dimension::End.coordinate_scale(), 1.0);
+        assert!(Dimension::End.has_skylight(), "the_end.json's has_skylight is true in this snapshot");
+        assert!(Dimension::ALL.contains(&Dimension::End));
+    }
+
+    /// The fixed arrival point is a record constant
+    /// (`ServerLevel.END_SPAWN_POINT`), not derived from anything — so this test
+    /// is a transcription check, not an invariant.
+    #[test]
+    fn the_end_spawn_point_is_the_vanilla_constant() {
+        assert_eq!(Dimension::end_spawn_point(), (100, 50, 0));
     }
 
     /// Issue #504's real production bug, reproduced directly: `is_column_resident`

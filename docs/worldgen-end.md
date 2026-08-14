@@ -245,11 +245,17 @@ rather than quietly fixed.
   *three* paths and only `end_gateway_return` (rarity 700 in `end_highlands`) is
   worldgen. Corroborating from data alone: `end_gateway_delayed` has a configured
   feature and **no placed feature**, because nothing in worldgen places it.
-* **Not reachable from the game.** `lodestone-server` has one chunk source and its
-  `EmbeddedResolver` hardcodes the Overworld documents, so `EndGenerator` exists,
-  is gated and is not selected by anything — the same server-side gap
-  `worldgen-nether.md` records. A per-dimension resolver plus an
-  `EndChunkSource`/`NetherChunkSource` is a `lodestone-server` change.
+* **Still not reachable from the game, but less of this gap than before.**
+  `lodestone_server::worldgen_data::end_generator`/`end_chunk_source` and
+  `lodestone_server::EndChunkSource` now exist (mirroring
+  `NetherChunkSource`/`ChunkColumn::from_end` for the generator's 128 rows padded
+  to the End dimension type's 256), and `Dimension::End` is a real
+  `lodestone_server::dimension::Dimension` variant with its geometry transcribed
+  from the record. What remains is entirely on the `lodestone-server` side of the
+  seam, not here: `crate::integrated`'s `with_nether` sibling factory has no `End`
+  arm yet, and there is no end-portal-frame ignition or step-into-`end_portal`
+  trigger. See [`nether-portals.md`](./nether-portals.md)'s "How to change it" for
+  the precise remaining diff.
 
 ## Configuration
 

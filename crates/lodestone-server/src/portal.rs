@@ -378,11 +378,15 @@ pub fn ignite<S: ChunkSource + ?Sized>(
     dimension: Dimension,
     pos: BlockPos,
 ) -> Option<Vec<(BlockPos, String)>> {
-    // `inPortalDimension`: both hosted dimensions qualify today, so this is a
-    // total match rather than a filter — written as one anyway so adding the End
-    // is a compile error here rather than a silently lightable End frame.
+    // `inPortalDimension`: only the overworld and the Nether qualify — vanilla's
+    // `BaseFireBlock.onPlace` guard, `Level.getRespawnData().dimension() ==
+    // Level.OVERWORLD || level.dimension() == Level.NETHER`. An End portal is a
+    // different mechanism entirely (`EndPortalFrameBlock`'s eye-of-ender ring, not
+    // fire), so this declines rather than searching for a frame that fire cannot
+    // light.
     match dimension {
         Dimension::Overworld | Dimension::Nether => {}
+        Dimension::End => return None,
     }
     let shape = find_empty_portal_shape(world, dimension, pos, Axis::X)?;
     Some(shape.fill())
@@ -767,6 +771,13 @@ pub fn search_radius(dimension: Dimension) -> i32 {
     match dimension {
         Dimension::Nether => NETHER_SEARCH_RADIUS,
         Dimension::Overworld => OVERWORLD_SEARCH_RADIUS,
+        // A paired-portal search never runs for the End: every arrival is the
+        // fixed obsidian platform at `Dimension::end_spawn_point`, not a nearby
+        // portal `find_exit_portal` looks for. Callers must not reach this arm —
+        // see `create_end_platform` for the End's actual arrival rule.
+        Dimension::End => unreachable!(
+            "the End does not use paired-portal search; see create_end_platform"
+        ),
     }
 }
 
@@ -1185,6 +1196,76 @@ pub fn resolve_destination<S: ChunkSource + ?Sized>(
     })
 }
 
+/// `minecraft:end_portal` — the block a completed end-portal-frame ring fills its
+/// 3×3 interior with, and the block stepping into which triggers a trip to the
+/// End (`EndPortalBlock.entityInside`).
+pub const END_PORTAL_BLOCK: &str = "minecraft:end_portal";
+
+/// `minecraft:end_portal_frame` — the block the stronghold portal room's 5×5 ring
+/// is built from (`EndPortalFrameBlock`). Its `eye` property is what
+/// `EnderEyeItem.useOn` flips true; this crate has no code that flips it (see
+/// this module's doc for exactly what is and is not implemented here).
+pub const END_PORTAL_FRAME_BLOCK: &str = "minecraft:end_portal_frame";
+
+/// Whether `state` is an `end_portal` block. Unlike [`is_portal`], the End's
+/// block has no `axis` (or any other) property, so this is a plain equality.
+#[must_use]
+pub fn is_end_portal(state: &str) -> bool {
+    state == END_PORTAL_BLOCK
+}
+
+/// The blocks [`ensure_end_platform`] writes for the fixed 5×5×4 obsidian
+/// platform every End arrival stands on — `EndPlatformFeature.createEndPlatform`,
+/// ported field for field rather than reasoned about, since a transposed loop
+/// bound here either strands the player over the void or buries them in
+/// obsidian.
+///
+/// `origin` is the platform's **obsidian layer**, not the spawn point itself:
+/// `EndPortalBlock.getPortalDestination` calls this with
+/// `BlockPos.containing(Vec3.atBottomCenterOf(END_SPAWN_POINT)).below()`, which
+/// for the integer constant `(100, 50, 0)` is `(100, 49, 0)` — one block *below*
+/// [`crate::dimension::Dimension::end_spawn_point`], not the point itself.
+///
+/// The loop is `dz`/`dx` in `-2..=2` (5×5) and `dy` in `-1..3` (4 tall): obsidian
+/// at `dy == -1`, air at `dy` 0, 1, 2. 100 cells total, always — this does not
+/// stop early on an already-correct cell, unlike vanilla's own `!is(block)` guard
+/// (see [`ensure_end_platform`] for the version that keeps it).
+#[must_use]
+pub fn end_platform_writes(origin: BlockPos) -> Vec<(BlockPos, &'static str)> {
+    let mut writes = Vec::with_capacity(5 * 5 * 4);
+    for dz in -2..=2 {
+        for dx in -2..=2 {
+            for dy in -1..3 {
+                let block = if dy == -1 { "minecraft:obsidian" } else { "minecraft:air" };
+                writes.push((BlockPos::new(origin.x + dx, origin.y + dy, origin.z + dz), block));
+            }
+        }
+    }
+    writes
+}
+
+/// Builds (or repairs) the End's fixed arrival platform through `world`,
+/// skipping any cell that already holds the target block — vanilla's own
+/// `!newLevel.getBlockState(blockPos).is(block)` guard on
+/// `EndPlatformFeature.createEndPlatform`, kept so a second arrival does not
+/// rewrite 100 already-correct cells (and, more importantly, does not
+/// re-destroy a floor a player has built on top of the platform since their
+/// first visit — vanilla's guard is precisely what makes that survive).
+///
+/// **Nothing calls this yet.** `Dimension::End` is now reachable through a
+/// [`crate::dimension::DimensionalSource`]'s sibling factory (`crate::integrated`'s
+/// `with_nether`), but the caller this function needs — an End-portal travel
+/// path, mirroring `travel_through_portal`'s role for the Nether — does not
+/// exist, because there is no end-portal-frame ignition or step-into-`end_portal`
+/// trigger anywhere in this crate yet. See `crate::dimension`'s module doc.
+pub fn ensure_end_platform<S: ChunkSource + ?Sized>(world: &S, origin: BlockPos) {
+    for (pos, block) in end_platform_writes(origin) {
+        if world.block_state(pos.x, pos.y, pos.z) != block {
+            world.set_block(pos.x, pos.y, pos.z, block);
+        }
+    }
+}
+
 /// The per-player portal transition counter — vanilla's `Entity.portalProcess`
 /// (`PortalProcessor`) plus `Entity.portalCooldown`, in one small value.
 ///
@@ -1581,5 +1662,105 @@ mod tests {
         assert_eq!(got, want);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `end_platform_writes`'s shape against the geometry read directly out of
+    /// `EndPlatformFeature.createEndPlatform` (`dz`/`dx` in `-2..=2`, `dy` in
+    /// `-1..3`): 100 cells, exactly 25 obsidian (the `dy == -1` layer) and 75 air
+    /// (three layers of 25), and the two corner cells that a transposed `dx`/`dz`
+    /// loop bound would put in the wrong place.
+    #[test]
+    fn the_end_platform_is_a_five_by_five_obsidian_slab_under_three_layers_of_air() {
+        let origin = BlockPos::new(100, 49, 0);
+        let writes = end_platform_writes(origin);
+        assert_eq!(writes.len(), 100, "5 * 5 * 4 cells");
+
+        let obsidian = writes.iter().filter(|(_, b)| *b == "minecraft:obsidian").count();
+        let air = writes.iter().filter(|(_, b)| *b == "minecraft:air").count();
+        assert_eq!(obsidian, 25, "one 5x5 layer of obsidian, at dy = -1");
+        assert_eq!(air, 75, "three 5x5 layers of air, at dy = 0, 1, 2");
+
+        // The obsidian layer's own y is origin.y - 1; the air above spans
+        // origin.y ..= origin.y + 1.
+        let obsidian_y: std::collections::BTreeSet<i32> = writes
+            .iter()
+            .filter(|(_, b)| *b == "minecraft:obsidian")
+            .map(|(p, _)| p.y)
+            .collect();
+        assert_eq!(obsidian_y, std::collections::BTreeSet::from([origin.y - 1]));
+        let air_y: std::collections::BTreeSet<i32> = writes
+            .iter()
+            .filter(|(_, b)| *b == "minecraft:air")
+            .map(|(p, _)| p.y)
+            .collect();
+        assert_eq!(air_y, std::collections::BTreeSet::from([origin.y, origin.y + 1, origin.y + 2]));
+
+        // The horizontal extent is exactly [-2, 2] on both axes — a corner and an
+        // edge-midpoint, pairwise-distinct so a transposed dx/dz cannot survive.
+        let has = |dx: i32, dz: i32| {
+            writes.iter().any(|(p, _)| p.x == origin.x + dx && p.z == origin.z + dz)
+        };
+        assert!(has(-2, -2) && has(2, 2), "the far corners must be present");
+        assert!(has(2, -1), "an edge cell distinct on both axes must be present");
+        assert!(!has(3, 0) && !has(0, 3), "one block past the edge must be absent");
+    }
+
+    /// `ensure_end_platform` actually writes through a [`ChunkSource`], and a
+    /// second call over an already-correct platform is a no-op — vanilla's
+    /// `!is(block)` guard, observed rather than assumed: every write in the
+    /// second pass is skipped because the state already matches.
+    #[test]
+    fn ensure_end_platform_writes_through_the_world_and_repeats_are_idempotent() {
+        let world = FlatWorld::new();
+        // `origin` is the platform's obsidian layer's y **plus one** — see
+        // `end_platform_writes`'s own doc: it is `Dimension::end_spawn_point`
+        // minus one block, i.e. the obsidian sits at `origin.y - 1`, not at
+        // `origin.y` itself.
+        let origin = BlockPos::new(100, 49, 0);
+        ensure_end_platform(&world, origin);
+
+        // Obsidian one block below the platform's own origin — the layer a
+        // player standing at the spawn point (100, 50, 0) has underfoot.
+        assert_eq!(world.block_state(100, 48, 0), "minecraft:obsidian");
+        // Air where a player would stand: origin.y itself, and one above.
+        assert_eq!(world.block_state(100, 49, 0), "minecraft:air");
+        assert_eq!(world.block_state(100, 50, 0), "minecraft:air");
+        // The platform's far corner, still obsidian, same layer as the centre.
+        assert_eq!(world.block_state(98, 48, -2), "minecraft:obsidian");
+        // One block outside the platform on every axis: untouched (still the
+        // world's own default, not written by this call).
+        assert_eq!(world.block_state(103, 48, 0), "minecraft:air");
+
+        // A player builds a torch on the platform...
+        world.put(100, 50, 0, "minecraft:torch");
+        // ...and a second arrival must not clear it: `ensure_end_platform` only
+        // rewrites a cell whose state does not already match the target, and
+        // torch != air is the one cell in this pass that legitimately does not
+        // match — asserting the *count* pins the guard rather than eyeballing it.
+        let mut world_writes = 0usize;
+        for (pos, block) in end_platform_writes(origin) {
+            if world.block_state(pos.x, pos.y, pos.z) != block {
+                world_writes += 1;
+            }
+        }
+        assert_eq!(world_writes, 1, "only the torched cell should differ before a repair pass");
+        ensure_end_platform(&world, origin);
+        assert_eq!(
+            world.block_state(100, 50, 0),
+            "minecraft:air",
+            "a repair pass does overwrite a non-matching cell — this is the platform's own \
+             guarantee, not a claim that ensure_end_platform preserves player builds inside its \
+             footprint"
+        );
+    }
+
+    /// `is_end_portal` is a plain equality (the block carries no properties),
+    /// unlike [`is_portal`]'s axis-aware prefix match.
+    #[test]
+    fn is_end_portal_matches_only_the_bare_state() {
+        assert!(is_end_portal("minecraft:end_portal"));
+        assert!(!is_end_portal("minecraft:end_portal_frame"));
+        assert!(!is_end_portal("minecraft:end_portal_frame[eye=true,facing=north]"));
+        assert!(!is_end_portal("minecraft:air"));
     }
 }

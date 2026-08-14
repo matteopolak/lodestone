@@ -161,7 +161,7 @@ fn linked_worlds() -> (DimensionalSource<SharedWorld>, SharedWorld, PortalIndex)
                 Dimension::Nether,
                 portals_for_factory.clone(),
             )) as Arc<dyn ChunkSource>),
-            Dimension::Overworld => None,
+            Dimension::Overworld | Dimension::End => None,
         });
 
     let linked = DimensionalSource::with_siblings(

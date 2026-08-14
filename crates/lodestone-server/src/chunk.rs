@@ -531,6 +531,32 @@ impl ChunkColumn {
         column
     }
 
+    /// Adopts a [`lodestone_worldgen::end::EndColumn`], padded up to
+    /// `window_height` rows of air — the End's counterpart to
+    /// [`from_nether`](Self::from_nether), for exactly the same reason: the End's
+    /// generator produces `noise_settings/end.json`'s `noise.height` (128) rows,
+    /// while `the_end`'s *dimension type* is `min_y 0, height 256, logical_height
+    /// 256` (`data/minecraft/dimension_type/the_end.json`). A client that resolved
+    /// `the_end`'s registry entry reads 16 sections; serving an 8-section column
+    /// is the same decode failure `from_nether`'s doc describes.
+    ///
+    /// Biomes broadcast across the padded window exactly as `from_nether`'s do,
+    /// for the same reason: the End's biome layout is y-invariant (see
+    /// `lodestone_worldgen::end`'s module doc — the erosion channel is
+    /// `cache_2d`), so this is exact rather than an approximation.
+    #[must_use]
+    pub fn from_end(column: lodestone_worldgen::end::EndColumn, window_height: i32) -> Self {
+        let (min_y, generated_height, palette, blocks, biome_quarts) = column.into_raw();
+        Self::from_raw_window(
+            min_y,
+            generated_height,
+            window_height,
+            palette,
+            &blocks,
+            biome_quarts.map(str::to_string),
+        )
+    }
+
     /// Biome id at local `(x, z)` in `0..16` — quart resolution, the column's
     /// **surface** answer, the same value for every `y` (issue #405).
     ///
@@ -1891,6 +1917,103 @@ impl ChunkSource for NetherChunkSource {
     }
 }
 
+/// The End's terrain source — [`NetherChunkSource`]'s counterpart for the third
+/// dimension this engine generates real terrain for.
+///
+/// Same retention rule as its siblings, for the same reason: `edits` is
+/// populated only by [`set_block`](Self::set_block), so an untouched column is
+/// regenerated on demand.
+///
+/// **Constructed, but not yet reachable by a player.** `crate::integrated`'s
+/// `with_nether` sibling factory now has an `End` arm that builds one of these
+/// (mirroring the `Nether` arm), so `DimensionalSource::sibling(Dimension::End)`
+/// answers `Some` — but nothing yet *triggers* a trip there: there is no
+/// end-portal-frame ignition and no step-into-`end_portal` teleport. See
+/// `crate::dimension`'s module doc and `docs/nether-portals.md`'s "How to change
+/// it" for the exact remaining hops.
+///
+/// # The window height is 256, not the generator's 128
+///
+/// Same shape as [`NetherChunkSource`]'s own gotcha: [`WINDOW_HEIGHT`](Self::WINDOW_HEIGHT)
+/// is the End dimension type's `height`, and [`ChunkColumn::from_end`] pads to
+/// it. See that constructor's doc.
+pub struct EndChunkSource {
+    generator: lodestone_worldgen::end::EndGenerator,
+    edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+}
+
+impl EndChunkSource {
+    /// The End dimension type's `min_y` (`data/minecraft/dimension_type/the_end.json`).
+    pub const MIN_Y: i32 = 0;
+    /// The End dimension type's `height` — **not** its `logical_height` (which, unlike
+    /// the Nether's, is the same 256), and not the generator's 128 either. See the
+    /// struct doc.
+    pub const WINDOW_HEIGHT: i32 = 256;
+
+    /// Wraps a pre-built End generator.
+    #[must_use]
+    pub fn new(generator: lodestone_worldgen::end::EndGenerator) -> Self {
+        Self {
+            generator,
+            edits: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The lowest world `y` this source's columns contain.
+    #[must_use]
+    pub fn min_y(&self) -> i32 {
+        Self::MIN_Y
+    }
+
+    /// How many `y` levels this source's columns contain — the dimension's, not
+    /// the generator's. See the struct doc.
+    #[must_use]
+    pub fn height(&self) -> i32 {
+        Self::WINDOW_HEIGHT
+    }
+
+    fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
+        ChunkColumn::from_end(self.generator.column(cx, cz), Self::WINDOW_HEIGHT)
+    }
+}
+
+impl std::fmt::Debug for EndChunkSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EndChunkSource").finish_non_exhaustive()
+    }
+}
+
+impl ChunkSource for EndChunkSource {
+    fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        if let Some(edited) = edits.get(&(cx, cz)) {
+            return edited.clone();
+        }
+        drop(edits);
+        self.generate(cx, cz)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        let mut edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        let column = edits
+            .entry((cx, cz))
+            .or_insert_with(|| self.generate(cx, cz));
+        column.set_block(lx, y, lz, name);
+    }
+}
+
 /// A solidity-only [`ChunkSource`] backed by a bare density node.
 ///
 /// **Not the real generator** — see the module docs. It point-samples
@@ -1995,6 +2118,40 @@ mod tests {
         assert!(!col.is_solid(5, 40, 9));
         // Every one of the 16×16 columns is solid for exactly y in [-64, -1].
         assert_eq!(col.solid_count(), 16 * 16 * 64);
+    }
+
+    /// [`EndChunkSource`] serves the *dimension's* 256-row window, not the
+    /// generator's own 128 — the same padding [`NetherChunkSource`] needs and for
+    /// the same reason (see [`ChunkColumn::from_end`]'s doc). A source that
+    /// forgot the pad would report a column whose `height()` disagrees with what
+    /// `the_end`'s registry entry promises the client, which is a decode failure
+    /// rather than a short world.
+    #[test]
+    fn end_chunk_source_pads_the_generators_128_rows_to_the_dimensions_256() {
+        let source = crate::worldgen_data::end_chunk_source(-195_764_831);
+        assert_eq!(source.height(), 256);
+        assert_eq!(source.min_y(), 0);
+
+        let column = source.column(0, 0);
+        assert_eq!(column.height, 256, "the served column must be the dimension's own height");
+        // Above the generator's own 128 rows, the padding must be air — checked
+        // at y = 200, well clear of both the generator's ceiling and any
+        // interpolation cell straddling it.
+        for x in 0..16 {
+            for z in 0..16 {
+                assert_eq!(
+                    column.block_state(x, 200, z),
+                    "minecraft:air",
+                    "padding above the generator's own 128 rows must be air at ({x},200,{z})"
+                );
+            }
+        }
+        // And the generator's own terrain is not lost in the pad: some cell in
+        // its native range is non-air, at the main island's centre chunk.
+        let solid = (0..16)
+            .flat_map(|x| (0..16).map(move |z| (x, z)))
+            .any(|(x, z)| (0..128).any(|y| column.block_state(x, y, z) != "minecraft:air"));
+        assert!(solid, "the generator's own 0..128 range must not be entirely air at the island's centre");
     }
 
     #[test]
