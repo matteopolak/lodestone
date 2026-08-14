@@ -82,9 +82,9 @@ use crate::schedules::{Extract, GameTick};
 use crate::sets::{ExtractSet, TickSet};
 
 /// Eye height of `Pose.SWIMMING` — `EntityDimensions.scalable(0.6F, 0.6F).withEyeHeight(0.4F)`
-/// (`Avatar.java:28`, shared with `FALL_FLYING` and `SPIN_ATTACK`).
+/// (`Avatar.POSES`, shared with `FALL_FLYING` and `SPIN_ATTACK`).
 pub const SWIMMING_EYE_HEIGHT: f32 = 0.4;
-/// Eye height of `Pose.CROUCHING` — `1.27F` (`Avatar.java:33`).
+/// Eye height of `Pose.CROUCHING` — `1.27F` (`Avatar.POSES`).
 pub const CROUCHING_EYE_HEIGHT: f32 = 1.27;
 /// Horizontal free-fly speed in blocks per tick (the raw sprint key doubles
 /// it). The physics engine models no creative/spectator flight, so free-fly is
@@ -319,7 +319,7 @@ pub enum BreakRejection {
     /// `drive_mining`'s own docs already apply to the mouse-driven path.
     UnknownBlockState,
     /// A registered [`crate::veto::ActionVetoes`] predicate denied
-    /// [`crate::veto::Verb::BlockBreak`] for this position (issue #109).
+    /// [`crate::veto::Verb::BlockBreak`] for this position.
     ///
     /// The one variant here that is **not** "something the shell would have
     /// refused from a mouse click too" — a veto applies to the human path
@@ -482,7 +482,7 @@ pub enum PlaceRejection {
     /// placement-legality rule, `lodestone_shell::sim::block_intersects_player`.
     IntersectsPlayer,
     /// A registered [`crate::veto::ActionVetoes`] predicate denied
-    /// [`crate::veto::Verb::BlockPlace`] for the clicked position (issue #109).
+    /// [`crate::veto::Verb::BlockPlace`] for the clicked position.
     ///
     /// The mirror of [`BreakRejection::Vetoed`], and the same caveat: this is a
     /// *plugin*-imposed refusal, not a legality one, so it is the one variant
@@ -560,16 +560,17 @@ pub struct PrevPosition(pub Vec3d);
 /// Whether the **developer free-fly (noclip) camera** is active instead of
 /// physics-walk.
 ///
-/// # Nothing writes this any more (issue #382)
+/// # Nothing writes this any more
 ///
 /// The only writer was `lodestone-shell`'s `Sim::toggle_fly`, driven by a
-/// Lodestone-only `key.lodestone.toggleFly` on `F`. Both were deleted: #191
-/// landed real creative flight (double-tap space, server-gated, collision on),
-/// `/gamemode creative` is the route in, and the binding was squatting on
-/// vanilla's `key.swapOffhand`. So this stays `false` for the whole session, and
-/// [`fly_step`] is unreachable in practice — deleting both is a follow-up rather
-/// than part of #382, which stopped at the shell boundary. `interact.rs`'s
-/// `send_sprint_command` still reads the component. See
+/// Lodestone-only `key.lodestone.toggleFly` on `F`. Both were deleted: real
+/// creative flight (double-tap space, server-gated, collision on) landed as
+/// its own separate work, `/gamemode creative` is the route in, and the
+/// binding was squatting on vanilla's `key.swapOffhand`. So this stays
+/// `false` for the whole session, and [`fly_step`] is unreachable in
+/// practice — deleting both is a follow-up rather than something that
+/// creative-flight work covered, since it stopped at the shell boundary.
+/// `interact.rs`'s `send_sprint_command` still reads the component. See
 /// `docs/creative-flight.md`.
 ///
 /// # This is not creative flight, and the two are deliberately separate
@@ -585,9 +586,10 @@ pub struct PrevPosition(pub Vec3d);
 /// Creative flight is *not* implemented by flipping this bit, and doing so would
 /// be wrong in both directions: it would noclip where vanilla collides, and it
 /// would run non-vanilla arithmetic that the server's movement check would
-/// eventually correct. Conflating them is specifically what issue #191 was told
-/// not to do. #191 kept this as a distinct developer affordance on purpose; #382
-/// then removed the way in, which is a different decision from merging the two.
+/// eventually correct. Conflating them is specifically the mistake the
+/// creative-flight work was written to avoid — it kept this as a distinct
+/// developer affordance on purpose; removing the toggle-fly binding then
+/// removed the way in, which is a different decision from merging the two.
 ///
 /// The name is kept (rather than renamed to `NoClip`) only because
 /// `lodestone-shell`'s `sim.rs` and `interact.rs` both read it and that file is
@@ -595,7 +597,7 @@ pub struct PrevPosition(pub Vec3d);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Flying(pub bool);
 
-/// `LocalPlayer.jumpTriggerTime` (`LocalPlayer.java:833-842`) — the double-tap
+/// `LocalPlayer.jumpTriggerTime`, in `LocalPlayer.aiStep` — the double-tap
 /// window for toggling creative flight.
 ///
 /// The first jump *press* while `mayfly` sets this to `7`; a second press while it
@@ -647,8 +649,7 @@ pub struct LastPlayerInput(pub Option<PlayerInput>);
 
 /// The last sprint state put on the wire as a
 /// `PlayerCommand::{StartSprinting, StopSprinting}`, mirroring vanilla's
-/// `wasSprinting` (`LocalPlayer.sendIsSprintingIfNeeded`,
-/// `LocalPlayer.java:303-312`).
+/// `wasSprinting` (`LocalPlayer.sendIsSprintingIfNeeded`).
 ///
 /// A **separate packet** from [`LastPlayerInput`] and both are needed:
 /// `ServerboundPlayerInputPacket` only stores its `sprint` bit as
@@ -680,7 +681,8 @@ pub struct LastSprintingSent(pub Option<bool>);
 /// `multiplayer.disconnect.flying`. The kick message is not a coincidence: it is
 /// literally the anti-cheat for this.
 ///
-/// `ClientAction::SetFlying` was itself an island before #191 — encoded by four
+/// `ClientAction::SetFlying` was itself an island before this component landed
+/// — encoded by four
 /// protocol adapters (`v47`, `v340`, `v735`, `v770`) with **zero** producers
 /// anywhere outside their own tests. This component and
 /// `lodestone_shell::interact::send_abilities` are its first consumer.
@@ -704,8 +706,7 @@ pub struct LastFlyingSent(pub Option<bool>);
 pub struct Dead;
 
 /// Ticks since the local player's last attack — vanilla's `attackStrengthTicker`
-/// (`Player.java:210` field, incremented at `Player.java:268`,
-/// `.cache/mc/26.2/src/net/minecraft/world/entity/player/Player.java`).
+/// (declared on `LivingEntity`, incremented in `Player.tick`).
 ///
 /// Counts up from `0`, uncapped: vanilla lets the raw field overshoot the
 /// weapon's delay indefinitely once the cooldown is long since full, and
@@ -812,7 +813,7 @@ pub struct NearbyEntities(pub Vec<NearbyEntity>);
 
 /// Vanilla's `Options.autoJump`, pushed down by the driver once per tick and
 /// carried into [`PlayerState::auto_jump_enabled`] by [`player_physics`] —
-/// **issue #201's actual defect**.
+/// **the actual defect behind auto-jump silently staying on**.
 ///
 /// # Why this resource exists at all
 ///
@@ -845,17 +846,17 @@ impl Default for AutoJump {
 /// Whether some equipment slot currently holds a glider (an elytra), pushed
 /// down by the driver once per tick — the one conjunct of
 /// [`lodestone_physics::can_glide`] that is equipment data rather than physics
-/// state (issue #206).
+/// state.
 ///
 /// Vanilla walks `EquipmentSlot.VALUES` looking for a `DataComponents.GLIDER`
-/// component (`LivingEntity.canGlideUsing`, `LivingEntity.java:4002`); the
+/// component (`LivingEntity.canGlideUsing`); the
 /// driver resolves that from whatever inventory model it has and hands the
 /// answer here. Default `false` — a harness that never pushes it simply never
 /// glides, which is the safe direction.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GliderEquipped(pub bool);
 
-/// Ticks of firework-rocket boost still owed to a gliding player (issue #206).
+/// Ticks of firework-rocket boost still owed to a gliding player.
 ///
 /// Set by the driver when the local player uses a firework rocket while
 /// gliding; spent one per tick by [`tick_firework_boost`], which calls
@@ -865,7 +866,7 @@ pub struct GliderEquipped(pub bool);
 /// # Why a countdown and not a tracked entity
 ///
 /// Vanilla's boost is applied by the `FireworkRocketEntity`'s own `tick`
-/// (`FireworkRocketEntity.java:122-137`) for as long as that entity is attached
+/// for as long as that entity is attached
 /// and alive, and the client learns the attachment from the rocket's
 /// `DATA_ATTACHED_TO_TARGET` entity data. This client does not decode that
 /// field, so the duration is predicted locally instead — see the driver's own
@@ -875,11 +876,11 @@ pub struct GliderEquipped(pub bool);
 pub struct FireworkBoost(pub u32);
 
 /// How many ticks the local player has been holding the use button *with an
-/// item in progress*, or `None` when nothing is being used (issue #208).
+/// item in progress*, or `None` when nothing is being used.
 ///
 /// This is `getUseDuration() - getUseItemRemainingTicks()` — vanilla's
 /// `timeHeld`, which `TridentItem.releaseUsing` compares against its `10`-tick
-/// `THROW_THRESHOLD_TIME` (`TridentItem.java:63-67`). The driver arms it at the
+/// `THROW_THRESHOLD_TIME`. The driver arms it at the
 /// press edge and reads it at the release edge; [`tick_item_use`] advances it.
 ///
 /// A **count of ticks, not a clock**: `Instant::now()` panics on wasm32 under
@@ -889,7 +890,7 @@ pub struct FireworkBoost(pub u32);
 pub struct ItemUseTicks(pub Option<u32>);
 
 /// Edge tracker for the glide start: last tick's jump input, as
-/// `LocalPlayer.aiStep` holds `wasJumping` (`LocalPlayer.java:850`).
+/// `LocalPlayer.aiStep` holds `wasJumping`.
 ///
 /// A **separate** latch from [`WasJumping`], which
 /// [`apply_creative_flight_input`] overwrites at the end of its own body — a
@@ -974,7 +975,7 @@ pub fn clear_debug_lines(mut lines: ResMut<DebugLines>) {
 }
 
 /// `Extract` / `ExtractSet::Debug`: one [`DebugLine`] per leashed mob, from the
-/// mob's own [`Position`] to its holder's — the last hop of issue #236's
+/// mob's own [`Position`] to its holder's — the last hop of the leashing
 /// chain, closed through the cheapest channel already wired to the screen
 /// every frame.
 ///
@@ -998,7 +999,7 @@ pub fn clear_debug_lines(mut lines: ResMut<DebugLines>) {
 /// eased render position by up to one tick. A future pass that wants
 /// vanilla's actual rope needs a real pipeline in `lodestone-render`/
 /// `lodestone_shell::gpu`, not this channel; this is what makes the leash
-/// **visible** rather than invisible, which is the gap issue #236 reported.
+/// **visible** rather than invisible, which was the reported gap.
 ///
 /// # Resolving the holder's position
 ///
@@ -1115,7 +1116,7 @@ fn fly_step(
     // view. Real submersion resumes the moment physics-walk does.
     *fluid = FluidState::NONE;
     // `Player.updateSwimming` forces `setSwimming(false)` while
-    // `abilities.flying` (`Player.java:1433-1439`). Free-fly never calls
+    // `abilities.flying`. Free-fly never calls
     // `lodestone_physics::tick`, so nothing would otherwise clear a swim pose
     // entered before taking off — the player would fly around with a 0.4 eye
     // height.
@@ -1193,7 +1194,7 @@ pub fn player_physics(
         let player = &mut state.0;
         let intent = intent.0;
 
-        // **The server-authoritative half of #191.** `Abilities` is folded from
+        // **The server-authoritative half of creative flight.** `Abilities` is folded from
         // `ClientEvent::AbilitiesChanged` by `crate::session::apply_local_player_state`;
         // this is the line that carries it into physics, and without it the whole
         // chain — decode, switch arm, component, fold — reaches zero pixels.
@@ -1206,7 +1207,7 @@ pub fn player_physics(
         let abilities = abilities.copied().unwrap_or_default();
         *player = player.with_flight(abilities.flying, abilities.flying_speed);
 
-        // **Issue #201's one real line.** Same shape as `with_flight` above, and
+        // **The auto-jump fix's one real line.** Same shape as `with_flight` above, and
         // for the same reason: the option lives outside physics, physics owns the
         // detector, and this is the seam. Pushed every tick rather than at spawn
         // so toggling Auto-Jump in the settings screen applies on the very next
@@ -1233,7 +1234,7 @@ pub fn player_physics(
             continue;
         }
 
-        // Issue #193. The walk speed is the server-reported
+        // The walk speed is the server-reported
         // `minecraft:movement_speed`, which is what makes Speed, Slowness, Soul
         // Speed and boot enchantments reach physics at all: vanilla folds every
         // one of them into this attribute **server-side**
@@ -1256,7 +1257,7 @@ pub fn player_physics(
             None => f64::from(profile.base_movement_speed),
         };
         // Vanilla has no sprint arithmetic in `travel`: `Player.aiStep` reads the
-        // folded attribute (`Player.java:456`) and `LivingEntity.setSprinting`
+        // folded attribute and `LivingEntity.setSprinting`
         // puts a transient `minecraft:sprinting` (+0.3 `ADD_MULTIPLIED_TOTAL`)
         // modifier on it. Our sprint is client-predicted from the local
         // double-tap, and the server's modifier only arrives a `PlayerCommand`
@@ -1323,8 +1324,7 @@ pub fn player_physics(
 }
 
 /// `TickSet::Physics`, **before** [`player_physics`]: the client half of creative
-/// flight — `LocalPlayer.aiStep`'s double-tap toggle and vertical impulse
-/// (`LocalPlayer.java:824-878`).
+/// flight — `LocalPlayer.aiStep`'s double-tap toggle and vertical impulse.
 ///
 /// # Order is load-bearing and matches vanilla exactly
 ///
@@ -1422,7 +1422,7 @@ pub fn apply_creative_flight_input(
 }
 
 /// `TickSet::Physics`, **after** [`player_physics`]: landing cancels creative
-/// flight (`LocalPlayer.aiStep`'s tail, `LocalPlayer.java:911-914`).
+/// flight (`LocalPlayer.aiStep`'s tail).
 ///
 /// ```text
 /// super.aiStep();
@@ -1461,19 +1461,18 @@ pub fn cancel_flight_on_landing(
 }
 
 /// `TickSet::Physics`, **before** [`player_physics`]: start an elytra glide on
-/// the jump-key rising edge, and end one whose preconditions have lapsed
-/// (issue #206).
+/// the jump-key rising edge, and end one whose preconditions have lapsed.
 ///
 /// Two halves of one vanilla pair, deliberately in one system because they must
 /// see the same `on_ground`:
 ///
 /// * the **start** is `LocalPlayer.aiStep`'s `if (input.jump() && !wasJumping &&
-///   !onClimbable() && tryToStartFallFlying())` (`LocalPlayer.java:850-852`),
+///   !onClimbable() && tryToStartFallFlying())`,
 ///   which is client-authoritative — the client sets the shared flag itself and
 ///   tells the server afterwards ([`send_fall_flying_command`] is that telling);
 /// * the **stop** is `LivingEntity.updateFallFlying`'s `!canGlide()` branch,
 ///   which vanilla runs server-side and syncs back. This client has no server
-///   that tracks glide state at all (issue #206's residue names that gap), so it
+///   that tracks glide state at all, so it
 ///   is predicted here. Without it a landing player keeps `fall_flying` set,
 ///   [`lodestone_physics::tick`] keeps routing to `tick_elytra`, and they can
 ///   never walk again.
@@ -1525,10 +1524,10 @@ pub fn update_fall_flying_state(
 }
 
 /// `TickSet::Physics`, **before** [`player_physics`]: spend one tick of
-/// firework-rocket boost (issue #206).
+/// firework-rocket boost.
 ///
 /// `FireworkRocketEntity.tick`'s attached branch is gated on
-/// `attachedToEntity.isFallFlying()` (`FireworkRocketEntity.java:122-123`) — a
+/// `attachedToEntity.isFallFlying()` — a
 /// rocket attached to a player who stops gliding stops boosting, but keeps
 /// ticking down, which is why the countdown is spent whether or not the impulse
 /// lands.
@@ -1555,15 +1554,15 @@ pub fn tick_firework_boost(
     }
 }
 
-/// `TickSet::Physics`: advance vanilla's `timeHeld` for an in-progress item use
-/// (issue #208). See [`ItemUseTicks`].
+/// `TickSet::Physics`: advance vanilla's `timeHeld` for an in-progress item use.
+/// See [`ItemUseTicks`].
 pub fn tick_item_use(mut ticks: ResMut<ItemUseTicks>) {
     if let Some(held) = &mut ticks.0 {
         *held = held.saturating_add(1);
     }
 }
 
-/// Tell the server a glide started, exactly once per glide (issue #206).
+/// Tell the server a glide started, exactly once per glide.
 ///
 /// Registered at the tail of the `TickSet::Physics` chain rather than in
 /// `TickSet::Send`, for two reasons the plugin's own comment carries: vanilla
@@ -1572,7 +1571,7 @@ pub fn tick_item_use(mut ticks: ResMut<ItemUseTicks>) {
 ///
 /// `LocalPlayer.aiStep` sends one `ServerboundPlayerCommandPacket(
 /// START_FALL_FLYING)` on the tick `tryToStartFallFlying()` returns true
-/// (`LocalPlayer.java:850-852`) and never resends it — the server owns the
+/// and never resends it — the server owns the
 /// shared flag from then on. [`FallFlyingSent`] is that once-per-glide latch,
 /// the same shape [`LastSprintingSent`] gives the sprint edge.
 ///
@@ -1617,19 +1616,17 @@ pub fn send_fall_flying_command(
 /// `TickSet::Physics`, **last in the chain**: while the local player is a
 /// passenger, snap them onto their seat and clear the state a walking player
 /// would have written — `Entity.rideTick` + `Entity.positionRider`
-/// (`Entity.java:2385-2403`) and `Player.tick`'s passenger override
-/// (`Player.java:232-236`).
+/// and `Player.tick`'s passenger override.
 ///
 /// # This is what makes riding reach pixels
 ///
 /// The camera is *not* separately taught about vehicles, and 26.2's own client
-/// does not teach it either: `Camera.alignWithEntity`
-/// (`client-src/net/minecraft/client/Camera.java:246-264`) has **no
+/// does not teach it either: `Camera.alignWithEntity` has **no
 /// `isPassenger()` branch** other than a lerp fix-up for new-behaviour minecarts,
 /// and riding changes neither the player's pose nor its eye height
-/// (`Player.updatePlayerPose`, `Player.java:343-357`, has no riding case, and
+/// (`Player.updatePlayerPose` has no riding case, and
 /// there is no `SITTING` pose — a mounted player keeps
-/// `Avatar.DEFAULT_EYE_HEIGHT = 1.62`, `Avatar.java:16`). So moving the *feet*
+/// `Avatar.DEFAULT_EYE_HEIGHT = 1.62`). So moving the *feet*
 /// here moves the eye, the block-target ray origin and the audio listener
 /// together, all three through `lodestone_shell::sim::Sim::camera`'s existing
 /// read of [`PhysicsState`]. Nothing downstream needed a new seam.
@@ -1638,12 +1635,11 @@ pub fn send_fall_flying_command(
 ///
 /// Vanilla runs the passenger's full tick — travel included, with the same
 /// `xxa`/`zza` the vehicle reads — and only then overwrites the position:
-/// `rideTick()` is `setDeltaMovement(ZERO); this.tick(); vehicle.positionRider(this)`
-/// (`Entity.java:2385-2390`), and `LivingEntity.aiStep` still reaches
-/// `travel(input)` for a passenger because `canSimulateMovement()` is
-/// `isLocalInstanceAuthoritative()`, true for the local player
-/// (`LivingEntity.java:3127-3131`, `Entity.java:3594-3609`,
-/// `Player.java:1281`). So a walking player's one tick of drift out of the seat
+/// `rideTick()` is `setDeltaMovement(ZERO); this.tick(); vehicle.positionRider(this)`,
+/// and `LivingEntity.aiStep` still reaches
+/// `travel(input)` for a passenger because `canSimulateMovement()` — which
+/// `Player.canSimulateMovement` overrides as `!isClientSide() ||
+/// isLocalPlayer()` — is true for the local player either way. So a walking player's one tick of drift out of the seat
 /// really does happen upstream and really is thrown away here. Suppressing
 /// `player_physics` instead would be a *different* engine, and it would also
 /// throw away the fluid-state computation the pose and fog read.
@@ -1657,7 +1653,7 @@ pub fn send_fall_flying_command(
 ///
 /// # `on_ground` is forced false — but *not* to avoid the flying kick
 ///
-/// `Player.java:234-236` is `if (isSpectator() || isPassenger()) setOnGround(false);`
+/// `Player.tick` has `if (isSpectator() || isPassenger()) setOnGround(false);`
 /// — unconditional, before anything else in `tick()`. This closes the
 /// `spectator_or_passenger_note` contract test in
 /// `lodestone-physics/tests/on_ground.rs`, which existed precisely because the
@@ -1668,9 +1664,9 @@ pub fn send_fall_flying_command(
 /// by the server's `aboveGroundTickCount` / `multiplayer.disconnect.flying`
 /// counter, which would make this a kick-avoidance necessity. It is not: the
 /// server's float check is explicitly `&& !this.player.isPassenger()`
-/// (`server/network/ServerGamePacketListenerImpl.java:323`), and its move handler
+/// (`ServerGamePacketListenerImpl`'s floating check), and its move handler
 /// **discards a passenger's reported position outright**, keeping only the
-/// rotation (`ServerGamePacketListenerImpl.java:1086-1088`:
+/// rotation (`ServerGamePacketListenerImpl`'s move handler:
 /// `absSnapTo(getX(), getY(), getZ(), targetYRot, targetXRot)`). So neither the
 /// position nor the flag we send while mounted can desync us.
 ///
@@ -1725,7 +1721,7 @@ pub fn pin_passenger_to_vehicle(
         let Some(vehicle_id) = riding.0 else {
             continue;
         };
-        // `Player.java:234-236`, and it applies the moment we know we are a
+        // `Player.tick`'s spectator-or-passenger guard, and it applies the moment we know we are a
         // passenger — before, and independently of, whether the seat itself can be
         // resolved. A tick that cannot find the vehicle still must not tell the
         // server we are standing on the boat's roof.
@@ -1741,11 +1737,11 @@ pub fn pin_passenger_to_vehicle(
         let Some(facts) = version.entity_facts(&kind.0) else {
             continue;
         };
-        // `Entity.java:2421`: `vehicle.getPassengers().indexOf(passenger)`. A
+        // `Entity.getDefaultPassengerAttachmentPoint`: `vehicle.getPassengers().indexOf(passenger)`. A
         // vehicle with no `Passengers` component yet, or a list that does not
         // mention us, reads as seat 0 — which is what `indexOf` returning `-1`
         // then feeding `Mth.clamp(index, 0, size - 1)` gives in vanilla
-        // (`EntityAttachments.java:74`), so the degenerate case agrees rather
+        // (`EntityAttachments::getClamped`), so the degenerate case agrees rather
         // than merely being harmless.
         let seat_index = own_id
             .0
@@ -1765,7 +1761,7 @@ pub fn pin_passenger_to_vehicle(
 
 /// `TickSet::Animate`: advance every [`LocalPlayer`]'s [`AttackStrengthTicker`]
 /// one tick, mirroring `Player.tick()`'s unconditional `this
-/// .attackStrengthTicker++` (`Player.java:268`). Same rate and same
+/// .attackStrengthTicker++`. Same rate and same
 /// "runs regardless of anything else this tick" contract as
 /// [`crate::ingest::tick_hurt_time`]/[`crate::ingest::tick_entity_swing`],
 /// which this is the local-player counterpart of — those age a *remote*
@@ -1829,7 +1825,7 @@ pub fn spawn_local_player(world: &mut World, state: PlayerState) -> Entity {
                 JumpTriggerTime(0),
                 WasJumping(false),
                 PlaceOutcome::default(),
-                // Issue #206. `WasJumpingGlide` starts cleared for the same
+                // `WasJumpingGlide` starts cleared for the same
                 // reason `WasJumping` does; `FallFlyingSent` starts cleared
                 // because no glide is in progress to have announced.
                 WasJumpingGlide(false),
@@ -1879,7 +1875,7 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
             JumpTriggerTime(0),
             WasJumping(false),
             PlaceOutcome::default(),
-            // Issue #206: a quit-to-title must not leave a glide announced
+            // A quit-to-title must not leave a glide announced
             // (the next session's server has never heard of it) or a stale
             // jump edge behind.
             WasJumpingGlide(false),
@@ -1927,7 +1923,7 @@ impl Plugin for LocalPlayerPlugin {
         app.init_resource::<PlayerCollision>();
         app.init_resource::<Profile>();
         app.init_resource::<NearbyEntities>();
-        // Issues #201/#206/#208. All four default to "as before this plugin
+        // All four default to "as before this plugin
         // gained them": auto-jump on (vanilla's default, and `PlayerState`'s),
         // no glider, no boost owed, nothing being used. A driver that pushes
         // none of them is bit-identical to one built before they existed.
@@ -1984,7 +1980,7 @@ impl Plugin for LocalPlayerPlugin {
                 .before(ExtractSet::Hud),
         );
         app.add_systems(Extract, clear_debug_lines.before(ExtractSet::Debug));
-        // Issue #236: the leash-rope substitute described on `push_leash_lines`'s
+        // The leash-rope substitute described on `push_leash_lines`'s
         // own doc. `.in_set(ExtractSet::Debug)`, not merely `.after` the clear —
         // same requirement every writer into `DebugLines` has, per that set's own
         // doc, so this system's push cannot land before the clear by luck of
@@ -2008,10 +2004,10 @@ impl Plugin for LocalPlayerPlugin {
             GameTick,
             (
                 apply_creative_flight_input,
-                // Issue #206, both **before** `player_physics` and in this
+                // Both **before** `player_physics` and in this
                 // order: the glide decision is `aiStep`'s (pre-`travel`) and
                 // the rocket impulse has to be on the velocity this tick's
-                // travel integrates. `tick_item_use` (issue #208) joins the
+                // travel integrates. `tick_item_use` joins the
                 // chain rather than floating so the use-duration a release
                 // edge reads is deterministic relative to the move.
                 update_fall_flying_state,
@@ -2031,9 +2027,9 @@ impl Plugin for LocalPlayerPlugin {
                 crate::vehicle::charge_riding_jump,
                 crate::vehicle::tick_controlled_vehicle,
                 pin_passenger_to_vehicle,
-                // Issue #206's outbound half, and **`TickSet::Physics` is where
+                // The glide report's outbound half, and **`TickSet::Physics` is where
                 // vanilla puts it**: `LocalPlayer.aiStep` sends
-                // START_FALL_FLYING inline (`LocalPlayer.java:851`), and
+                // START_FALL_FLYING inline, and
                 // `sendPosition()` runs afterwards from `LocalPlayer.tick` — so
                 // the command precedes the tick's movement packet on the wire,
                 // which queueing it here reproduces and queueing it in
@@ -2159,7 +2155,7 @@ mod tests {
         run_tick(app);
     }
 
-    /// **#191's end-to-end gate.** Not "the system works" — *the whole chain from
+    /// **Creative flight's end-to-end gate.** Not "the system works" — *the whole chain from
     /// the server's grant to the player leaving the ground*, driven through the real
     /// `GameTick` schedule. A hermetic call to either flight system passes whether
     /// or not it is registered, which is the island this repo has hit fourteen times.
@@ -2738,7 +2734,7 @@ mod tests {
         assert_eq!(lines[0].end, Vec3d::new(2.0, 0.0, 0.0));
     }
 
-    /// [`push_leash_lines`] (issue #236): a mob leashed to another indexed
+    /// [`push_leash_lines`]: a mob leashed to another indexed
     /// entity (a mob-to-mob lead, or any entity carrying [`Position`]) draws
     /// exactly one line, from the leashed mob's own position to the holder's.
     #[test]
@@ -2827,7 +2823,7 @@ mod tests {
     /// `lodestone_entity::attribute`'s own tests; the exact number is
     /// arbitrary, chosen only to be recognisably non-default and non-1.0 so a
     /// build that clamped or rounded would be caught.
-    /// **Issue #193, and the two traps that make it more than a one-line read.**
+    /// **The server-reported walk speed, and the two traps that make it more than a one-line read.**
     ///
     /// Pins three things a naive `attribute_value(&attrs.0, &movement_speed_key())`
     /// would each get wrong:
@@ -3135,8 +3131,8 @@ mod tests {
     /// constants rather than from our own arithmetic.**
     ///
     /// A minecart is `sized(0.98F, 0.7F)` with `passengerAttachments(0.1875F)`
-    /// (`EntityTypes.java:667`), and the player's own `VEHICLE` attachment is
-    /// `0.6` (`Avatar.java:17`). So a rider's feet sit at
+    /// (`EntityTypes.MINECART`), and the player's own `VEHICLE` attachment is
+    /// `0.6` (`Avatar.DEFAULT_VEHICLE_ATTACHMENT`). So a rider's feet sit at
     /// `cart.y + 0.1875 - 0.6 = cart.y - 0.4125`, i.e. **below** the cart's
     /// origin, and the camera then sits 1.62 above that.
     ///
@@ -3203,7 +3199,7 @@ mod tests {
         );
     }
 
-    /// `Player.tick():234-236` — `if (isSpectator() || isPassenger())
+    /// `Player.tick`'s `if (isSpectator() || isPassenger())
     /// setOnGround(false);`. This is the `spectator_or_passenger_note` contract in
     /// `lodestone-physics/tests/on_ground.rs`, made executable.
     ///
@@ -3278,7 +3274,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Issue #201: the Auto-Jump option actually reaching the detector
+    // The Auto-Jump option actually reaching the detector
     // -----------------------------------------------------------------------
 
     /// A floor at `y = 0` plus a full-height step at `z = 1`, `y = 1` — the
@@ -3336,7 +3332,7 @@ mod tests {
         peak
     }
 
-    /// **Issue #201's defect, at the layer that had it.** The option is the
+    /// **The auto-jump-un-disableable defect, at the layer that had it.** The option is the
     /// shell's; the detector is physics'; this resource is the only thing
     /// joining them, and before it existed the field sat at its `true` default
     /// for the whole session no matter what the settings screen said.
@@ -3367,7 +3363,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Issue #206: glide state and the firework boost
+    // Glide state and the firework boost
     // -----------------------------------------------------------------------
 
     /// An airborne player with no floor at all, so `on_ground` stays false and
@@ -3529,7 +3525,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Issue #208: the use-duration counter riptide's release edge reads
+    // The use-duration counter riptide's release edge reads
     // -----------------------------------------------------------------------
 
     #[test]
