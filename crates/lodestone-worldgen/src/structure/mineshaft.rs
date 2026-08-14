@@ -1314,6 +1314,7 @@ fn into_pieces<R: RandomSource>(
             // `terrain_adaptation` is `none` for both mineshaft structures, so the
             // rigid-box `else` branch of `Beardifier` is inert here.
             beard: None,
+            refine: None,
         });
     }
     out

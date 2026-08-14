@@ -137,6 +137,7 @@ fn synthetic_start(adjustment: TerrainAdjustment, box_: BoundingBox) -> Structur
                 ground_level_delta: 0,
                 junctions: Vec::new(),
             }),
+            refine: None,
         }],
         terrain_adaptation: adjustment,
         pieces_complete: true,
