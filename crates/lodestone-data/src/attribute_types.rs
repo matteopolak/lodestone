@@ -23,3 +23,20 @@ pub fn attribute_name(id: i32) -> Option<&'static str> {
         .ok()
         .and_then(|index| ATTRIBUTE_NAMES.get(index).copied())
 }
+
+/// Resolves a canonical `minecraft:*` identifier to its network attribute id
+/// — the reverse of [`attribute_name`]. Nothing needed this until an encoder
+/// existed on the server side (`update_attributes` was decode-only), so this
+/// is the first caller.
+///
+/// `name` must be the full namespaced identifier (`"minecraft:armor"`, not
+/// bare `"armor"`), matching what [`attribute_name`] returns. A linear scan
+/// over `ATTRIBUTE_COUNT` (40) entries rather than a generated reverse table:
+/// this is called once per attribute per packet, not per tick.
+#[must_use]
+pub fn attribute_id(name: &str) -> Option<i32> {
+    ATTRIBUTE_NAMES
+        .iter()
+        .position(|&candidate| candidate == name)
+        .and_then(|index| i32::try_from(index).ok())
+}

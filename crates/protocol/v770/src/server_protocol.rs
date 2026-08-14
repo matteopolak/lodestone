@@ -62,8 +62,8 @@ use lodestone_model::command_tree::{
     ArgumentParser, CommandTree as WireCommandTree, NodeKind, RawCommandNode, StringKind,
 };
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, GameMode, ItemStack, ResourceKey, Rotation,
-    SoundCategory, Text, TextContent, Vec3, Vec3f,
+    BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
+    ItemStack, ResourceKey, Rotation, SoundCategory, Text, TextContent, Vec3, Vec3f,
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot, HOTBAR_SIZE,
@@ -106,6 +106,7 @@ use crate::packets::common::{
 };
 use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, read_lp_vec3, write_lp_vec3};
+use crate::packets::metadata::write_update_attributes;
 use crate::packets::game::{
     AcceptTeleportation, Attack, BlockEntityTagQuery, ChangeDifficultyClientbound,
     ChangeDifficultyServerbound, ChangeGameMode, ChatCommand, ChatMessage, ChunkBatchReceived,
@@ -5086,6 +5087,22 @@ impl ServerProtocol for V770ServerProtocol {
                 saturation: saturation.clamp(0.0, 20.0),
             },
         )
+    }
+
+    /// `ClientboundUpdateAttributesPacket` for the local player. Hand-written
+    /// against [`write_update_attributes`], the mirror-side specification for
+    /// this crate's own decode (`V770Adapter::handle_play`'s
+    /// `UPDATE_ATTRIBUTES` arm) — the same "no derive macro" reasoning
+    /// `encode_set_experience`/`encode_air_supply_update` already document:
+    /// a modifier list is a variable-length nested structure the `Encode`
+    /// derive does not model.
+    fn encode_update_attributes(&self, attributes: &[EntityAttributeSnapshot]) -> ServerDirective {
+        let mut w = Writer::default();
+        write_update_attributes(&mut w, LOCAL_PLAYER_ENTITY_ID, attributes);
+        ServerDirective::Send {
+            packet_id: play::clientbound::UPDATE_ATTRIBUTES,
+            payload: w.into_vec(),
+        }
     }
 
     /// The death notification that raises the client's death screen — see

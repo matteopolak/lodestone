@@ -67,8 +67,8 @@ use lodestone_core::State;
 use lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE;
 use lodestone_entity::{DamageFlags, ItemLifecycle};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, GameMode, ItemStack, ResourceKey, Rotation, Text,
-    TextContent, Vec3, Vec3f,
+    BlockActionKind, BlockFace, BlockPos, EntityAttributeSnapshot, GameMode, ItemStack,
+    ResourceKey, Rotation, Text, TextContent, Vec3, Vec3f,
 };
 use lodestone_data::block_items;
 use lodestone_net::{Connection, NetError, Transport};
@@ -1988,6 +1988,7 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
+        &crate::player_data::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2037,6 +2038,15 @@ pub(crate) async fn serve_connection_with_mob_events_shared<T, P, S, E>(
     // Issues #327/#328/#323: the world's shared scalars, the *same* handle
     // `run_tick_loop` ticks. See `serve_connection_inner`'s parameter comment.
     world: &crate::world_state::WorldStateHandle,
+    // The player-save mirror `serve_play` publishes to every loop iteration —
+    // see `crate::player_data::LiveSaveSlot`'s own doc comment. `bind`'s
+    // per-connection LAN wrapper passes a fresh, connection-local
+    // `LiveSaveSlot::default()` (a shared one would mix different players'
+    // saves under concurrent LAN connections); `open_in_memory_with_mobs`'s
+    // singleplayer connection passes the one handle `IntegratedServer::
+    // shutdown` reads back, which is the whole point of threading this
+    // through rather than defaulting it like every other feed above.
+    live_save: &crate::player_data::LiveSaveSlot,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -2063,6 +2073,7 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
+        live_save,
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2129,6 +2140,7 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
+        &crate::player_data::LiveSaveSlot::default(),
         access,
         peer_ip,
         // Issue #273: this wrapper predates online mode; offline, same as
@@ -2223,6 +2235,7 @@ where
         resource_packs,
         plugin_channels,
         world,
+        &crate::player_data::LiveSaveSlot::default(),
         #[cfg(not(target_arch = "wasm32"))]
         access,
         #[cfg(not(target_arch = "wasm32"))]
@@ -2306,6 +2319,7 @@ where
         resource_packs,
         plugin_channels,
         world,
+        &crate::player_data::LiveSaveSlot::default(),
         access,
         peer_ip,
         Some(online_mode),
@@ -2369,6 +2383,7 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
+        &crate::player_data::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2456,6 +2471,7 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
+        &crate::player_data::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2534,6 +2550,7 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
+        &crate::player_data::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2612,6 +2629,7 @@ where
         resource_packs,
         &PluginChannelRegistry::default(),
         world,
+        &crate::player_data::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2690,6 +2708,7 @@ where
         &ResourcePackPushFeed::default(),
         plugin_channels,
         world,
+        &crate::player_data::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2793,6 +2812,14 @@ async fn serve_connection_inner<T, P, S, E>(
     // sharing is the whole point: a per-connection store is the bug both #327 and
     // #328 were reported for.
     world: &crate::world_state::WorldStateHandle,
+    // The continuously-refreshed player-save mirror `serve_play` publishes to
+    // every loop iteration — see [`crate::player_data::LiveSaveSlot`]'s own
+    // doc comment for the shutdown-cancellation race it exists to survive.
+    // Same compatibility shape as every feed above: each pre-existing entry
+    // point passes a fresh `LiveSaveSlot::default()`, which nothing reads;
+    // `serve_connection_with_mob_events_shared` (singleplayer) carries the
+    // one `IntegratedServer::shutdown` reads back.
+    live_save: &crate::player_data::LiveSaveSlot,
     // Issue #336. Ops, whitelist and the two ban lists, consulted once at
     // `LoginStart`. Same compatibility shape as every feed above: each
     // pre-existing entry point passes a fresh, empty `AccessHandle::default()`,
@@ -7413,6 +7440,52 @@ fn join_experience<P: ServerProtocol>(
     )
 }
 
+/// The local player's combat-relevant attributes as wire-shaped snapshots —
+/// [`PlayerInventory::combat_stats`]'s already-folded `AttributeMap`, one
+/// snapshot per attribute, each carrying its final value as `base` and an
+/// empty modifier list.
+///
+/// Empty modifiers rather than re-publishing the per-item ones
+/// [`lodestone_entity::equipment::apply_equipment`] built the fold from: the
+/// client's own fold (`instance_from_snapshot`/`AttributeInstance::value`,
+/// `crates/lodestone-entity/src/attribute.rs`) is a no-op over a bare base
+/// value with no modifiers, and re-deriving the exact same modifier ids and
+/// operations at the wire would be a second copy of
+/// `lodestone_entity::equipment`'s table to keep in step for no observable
+/// difference — the client never inspects an individual modifier, only the
+/// folded result (the shell's `Session::armour_value` and the attack-speed
+/// and water-efficiency readers documented alongside it).
+fn player_attribute_snapshots(inventory: &PlayerInventory) -> Vec<EntityAttributeSnapshot> {
+    inventory
+        .combat_stats()
+        .attributes
+        .iter()
+        .map(|(id, instance)| EntityAttributeSnapshot {
+            attribute: id.clone(),
+            base: instance.value(),
+            modifiers: Vec::new(),
+        })
+        .collect()
+}
+
+/// Sends [`player_attribute_snapshots`] as an `update_attributes` packet —
+/// the producer half of the armour bar. The client half
+/// (`Session::armour_value`, `lodestone_shell::hud`, the v770 adapter's
+/// `UPDATE_ATTRIBUTES` decode) was already complete; this crate had no
+/// encoder at all, so the HUD row read a permanent `None` no matter what was
+/// equipped.
+///
+/// Sent once at join (mirroring [`join_experience`]'s "no values at all
+/// without an explicit send" reasoning — vanilla's `AttributeMap` is
+/// synced on `addEntity`/`ServerPlayer` placement, so a client that never
+/// receives this packet has no armour attribute at all, not a zero one) and
+/// again after any player-inventory mutation that can change combat
+/// equipment (`ServerBound::ContainerClicked`, the right-click armour swap in
+/// [`apply_use_item_on`]).
+fn join_attributes<P: ServerProtocol>(proto: &P, inventory: &PlayerInventory) -> ServerDirective {
+    proto.encode_update_attributes(&player_attribute_snapshots(inventory))
+}
+
 /// Applies a `CONTAINER_CLICK` by **deriving** its result server-side
 /// (`ServerBound::ContainerClicked`).
 ///
@@ -9536,6 +9609,12 @@ where
                 (tracked.window_id == window_id && usize::try_from(slot).ok() == Some(inputs)).then_some(station)
             });
             let pre_click_cells = workstation_take.map(|_| inventory.workstation().map(<[_]>::to_vec).unwrap_or_default());
+            // Compared, not assumed dirty: a container click into the crafting
+            // grid or a non-equipment slot must not spam an unchanged
+            // `update_attributes`, and this is cheaper than working out from
+            // `changed_slots` alone whether one of them was an armour/off-hand
+            // native index.
+            let attrs_before_click = player_attribute_snapshots(inventory);
 
             let (correction, dropped) = apply_container_clicked(
                 proto,
@@ -9588,6 +9667,13 @@ where
 
             if let Some(correction) = correction {
                 apply(conn, state, correction).await?;
+            }
+            // The armour bar's own packet — see `join_attributes`. A container
+            // click is the other way equipment changes (drag/shift-click into
+            // the armour slots, not just the right-click swap
+            // `UseItemOutcome::Equipped` covers), so it needs the same resync.
+            if player_attribute_snapshots(inventory) != attrs_before_click {
+                apply(conn, state, join_attributes(proto, inventory)).await?;
             }
         }
         ServerBound::RecipePlaced {
@@ -10094,8 +10180,10 @@ where
                     // Every slot the swap touched, so the client's own prediction
                     // is corrected rather than left to drift. The armour slots are
                     // menu `5..=8` in window 0 (`window_zero_menu_slot`), which is
-                    // what makes the piece show up in the armour bar and on the
-                    // player model rather than only in the server's model.
+                    // what makes the piece show up in the player's own inventory
+                    // screen and on the player model. It does **not** touch the
+                    // armour *bar* — that reads `update_attributes`, sent
+                    // separately below.
                     let mut touched = vec![swap.equipment.0, swap.hand.0];
                     touched.extend(swap.inventory.iter().copied());
                     for native in touched {
@@ -10110,6 +10198,11 @@ where
                         )
                         .await?;
                     }
+                    // The armour bar's own packet — see `join_attributes`. A
+                    // right-click equip is exactly the mutation this resync
+                    // exists for: `swap.equipment` is always one of the four
+                    // armour slots or the off-hand.
+                    apply(conn, state, join_attributes(proto, inventory)).await?;
                     // `player.drop(swappedToInventory, false)` — the previously worn
                     // piece when the inventory was full.
                     if let Some(spilled) = swap.spilled {
@@ -10982,6 +11075,11 @@ where
     // every join because `lastSentExp` starts at `-99999999`. Without it the bar has
     // no values at all — see `join_experience`.
     apply(conn, &mut state, join_experience(proto, &experience)).await?;
+    // The first `update_attributes` — the armour bar's own packet, and the one
+    // this crate never sent at all until now (see `join_attributes`'s own doc
+    // comment). Without it `Session::armour_value` never leaves `None` and the
+    // row never draws, no matter what the player is wearing.
+    apply(conn, &mut state, join_attributes(proto, &inventory)).await?;
 
     // Portal travel state, in the same place as `take_xp_delay` and for the same
     // reason: it is a per-player per-tick counter and this loop is where those live.
@@ -12428,6 +12526,10 @@ where
     // sent anyway because the bar is drawn from the *last* values received and a
     // client that is never sent any has nothing to draw.
     apply(conn, &mut state, join_experience(proto, &experience)).await?;
+    // The armour bar's own packet — see the native `serve_play`'s identical
+    // send and `join_attributes`'s own doc comment. `inventory` is the same
+    // fresh-or-restored value the snapshot above already sent.
+    apply(conn, &mut state, join_attributes(proto, &inventory)).await?;
 
     // The deferred join view, inline — see this function's `join_stream`
     // parameter for why this target does not race it against anything.
@@ -12717,6 +12819,54 @@ mod tests {
     /// A parsed `minecraft:` item key for the tests above.
     fn item_key(path: &str) -> lodestone_model::ResourceKey {
         lodestone_model::ResourceKey::new("minecraft", path).expect("a static item key parses")
+    }
+
+    /// The packet-shaping function itself, not the equipment maths
+    /// [`worn_armour_reduces_an_incoming_hit_to_the_live_verified_value`]
+    /// already covers: a full diamond set's folded `minecraft:armor` and
+    /// `minecraft:armor_toughness` must reach [`player_attribute_snapshots`]'s
+    /// output as a bare `base` with **no** modifiers (see that function's own
+    /// doc for why empty modifiers are correct, not merely simpler — the
+    /// client's fold is a no-op over a bare base). This is a magnitude check
+    /// against the same 20.0/8.0 pair the live server produced for the
+    /// identical set, not a "some armour value exists" check.
+    #[test]
+    fn player_attribute_snapshots_carries_the_folded_armor_with_no_modifiers() {
+        let mut inv = PlayerInventory::new();
+        for (native, item) in [
+            (crate::inventory::HEAD_NATIVE, "diamond_helmet"),
+            (crate::inventory::CHEST_NATIVE, "diamond_chestplate"),
+            (crate::inventory::LEGS_NATIVE, "diamond_leggings"),
+            (crate::inventory::FEET_NATIVE, "diamond_boots"),
+        ] {
+            inv.set_native(native, Some(ItemStack::new(item_key(item), 1)));
+        }
+        let snapshots = player_attribute_snapshots(&inv);
+        let armor = snapshots
+            .iter()
+            .find(|s| s.attribute.to_string() == "minecraft:armor")
+            .expect("a fully-armoured player must publish minecraft:armor");
+        assert!((armor.base - 20.0).abs() < 1e-6, "armor {}", armor.base);
+        assert!(
+            armor.modifiers.is_empty(),
+            "the wire snapshot must fold equipment into base, not re-publish per-item modifiers"
+        );
+        let toughness = snapshots
+            .iter()
+            .find(|s| s.attribute.to_string() == "minecraft:armor_toughness")
+            .expect("a full diamond set must publish armor_toughness");
+        assert!((toughness.base - 8.0).abs() < 1e-6, "toughness {}", toughness.base);
+
+        // Control: an unarmoured player publishes no `minecraft:armor` snapshot
+        // at all (the attribute is never created in `AttributeMap` until
+        // something equips into it — see `lodestone_entity::equipment::
+        // apply_equipment`), so this test could not pass by accident with the
+        // fold broken and every snapshot coincidentally absent.
+        let bare = player_attribute_snapshots(&PlayerInventory::new());
+        assert!(
+            bare.iter().all(|s| s.attribute.to_string() != "minecraft:armor"),
+            "an unarmoured player must not publish minecraft:armor at all"
+        );
     }
 
     /// A protocol double whose entity encoders tag each directive with a
