@@ -987,6 +987,13 @@ mod tests {
     /// to force that kind of entry to be written down, not to auto-shrink.
     const KNOWN_VEGETATION_GAPS: &[(&str, &[&str])] = &[
         ("minecraft:badlands", &["multiface_growth"]),
+        // bamboo_jungle/jungle/sparse_jungle's `"tree: unsupported..."`
+        // entries REMAIN even after issue #428's `TrunkPlacerCfg::MegaJungle`/
+        // `FoliagePlacerCfg::MegaJungle` (mega_jungle_tree, 33.3% of
+        // trees_jungle) and `FoliagePlacerCfg::Bush` (jungle_bush, 50%): the
+        // 10%-weight `fancy_oak_checked` branch every jungle variant's
+        // RandomSelector also carries is still a `FancyTrunkPlacer`/
+        // `FancyFoliagePlacer` tree — unmodelled.
         ("minecraft:bamboo_jungle", &["bamboo", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:beach", &["multiface_growth"]),
         ("minecraft:birch_forest", &["fallen_tree", "multiface_growth"]),
@@ -1022,8 +1029,13 @@ mod tests {
         ("minecraft:mushroom_fields", &["huge_brown_mushroom", "huge_red_mushroom", "multiface_growth"]),
         ("minecraft:ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:old_growth_birch_forest", &["fallen_tree", "multiface_growth"]),
-        ("minecraft:old_growth_pine_taiga", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:old_growth_spruce_taiga", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        // old_growth_pine_taiga/old_growth_spruce_taiga's `mega_pine`/
+        // `mega_spruce` configured features use `giant_trunk_placer` +
+        // `mega_pine_foliage_placer` — issue #428's `TrunkPlacerCfg::Giant`/
+        // `FoliagePlacerCfg::MegaPine` close the "tree: unsupported..."
+        // entry for both; `fallen_tree` stays (still unimplemented).
+        ("minecraft:old_growth_pine_taiga", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:old_growth_spruce_taiga", &["fallen_tree", "multiface_growth"]),
         // pale_garden's `"tree: unsupported..."` entry closed with the same
         // issue #428 change — pale_oak/pale_oak_creaking reuse the dark oak
         // trunk/foliage placers with their own providers.

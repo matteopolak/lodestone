@@ -50,6 +50,23 @@ pub enum TrunkPlacerCfg {
         height_rand_a: i32,
         height_rand_b: i32,
     },
+    /// `GiantTrunkPlacer` — the redwood/giant-spruce trunk (issue #428): a
+    /// static 2×2 log column, no lean, no anchor gate. Also the base shape
+    /// [`Self::MegaJungle`] places via its own `super.placeTrunk` before
+    /// adding branches — see [`place_giant_trunk`] for the port.
+    Giant {
+        base_height: i32,
+        height_rand_a: i32,
+        height_rand_b: i32,
+    },
+    /// `MegaJungleTrunkPlacer` — mega jungle's real trunk (issue #428):
+    /// [`Self::Giant`]'s own 2×2 column, then a spiral of short radial
+    /// branches. See [`place_mega_jungle_trunk`] for the port.
+    MegaJungle {
+        base_height: i32,
+        height_rand_a: i32,
+        height_rand_b: i32,
+    },
 }
 
 impl TrunkPlacerCfg {
@@ -62,6 +79,8 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
             "straight_trunk_placer" => Some(Self::Straight { base_height, height_rand_a, height_rand_b }),
             "forking_trunk_placer" => Some(Self::Forking { base_height, height_rand_a, height_rand_b }),
             "dark_oak_trunk_placer" => Some(Self::DarkOak { base_height, height_rand_a, height_rand_b }),
+            "giant_trunk_placer" => Some(Self::Giant { base_height, height_rand_a, height_rand_b }),
+            "mega_jungle_trunk_placer" => Some(Self::MegaJungle { base_height, height_rand_a, height_rand_b }),
             _ => None,
         }
     }
@@ -70,7 +89,9 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
         match *self {
             Self::Straight { base_height, height_rand_a, height_rand_b }
             | Self::Forking { base_height, height_rand_a, height_rand_b }
-            | Self::DarkOak { base_height, height_rand_a, height_rand_b } => {
+            | Self::DarkOak { base_height, height_rand_a, height_rand_b }
+            | Self::Giant { base_height, height_rand_a, height_rand_b }
+            | Self::MegaJungle { base_height, height_rand_a, height_rand_b } => {
                 (base_height, height_rand_a, height_rand_b)
             }
         }
@@ -354,6 +375,175 @@ pub(super) fn place_dark_oak_trunk<R: RandomSource>(
     placed_any
 }
 
+/// `GiantTrunkPlacer.placeTrunk` — the redwood/giant-spruce trunk (issue
+/// #428), and the shared base [`place_mega_jungle_trunk`] calls via its own
+/// `super.placeTrunk`. A static 2×2 log column: four `placeBelowTrunkBlock`s
+/// at the origin's `(0,0)`, east, south, south+east base (the same order as
+/// [`place_dark_oak_trunk`]'s own base), then per level `0..tree_height` a
+/// `placeLogIfFree` at `(0,0)`, plus — only for every level EXCEPT the last
+/// (`hh < tree_height - 1`) — three more at `(1,0)`, `(1,1)`, `(0,1)`, so the
+/// column is a full 2×2 for every row but its very top.
+///
+/// No lean, and no `isAirOrLeaves` anchor gate the way [`place_dark_oak_trunk`]
+/// has one. `GiantTrunkPlacer.placeLogIfFree`'s own gate (`isFree` — real
+/// `validTreePos` OR "already a log") is provably equivalent here to gating
+/// purely on [`valid_tree_pos`]: `placeLogIfFree` calls `placeLog`
+/// unconditionally once `isFree` passes, and `placeLog` itself re-checks
+/// `validTreePos` before ever drawing from `trunk_provider` or writing — so
+/// the "OR already a log" half of `isFree` can only ever gate a call that
+/// then draws nothing and writes nothing. Neither half of the gate chain
+/// (`isFree` or `validTreePos`) consumes RNG on its own; only
+/// `trunk_provider.get_state_id` conditionally does, exactly as in every
+/// other trunk placer in this module.
+///
+/// Returns a single [`Attachment`] at `origin.above(tree_height)`,
+/// `double_trunk: true` — consumed by [`FoliagePlacerCfg::MegaJungle`] and
+/// [`FoliagePlacerCfg::MegaPine`], both of which read `radius_offset`/
+/// `double_trunk` off it exactly like [`place_dark_oak_trunk`]'s primary
+/// attachment.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn place_giant_trunk<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    tree_height: i32,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    trunk_provider: &BlockStateProvider,
+    below_trunk_provider: &Option<BlockStateProvider>,
+    attachments: &mut Vec<Attachment>,
+    trunk_positions: &mut Vec<BlockPos>,
+) -> bool {
+    for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        if let Some(below_provider) = below_trunk_provider {
+            let below_pos = BlockPos {
+                x: origin.x + dx,
+                y: origin.y - 1,
+                z: origin.z + dz,
+            };
+            if let Some(state) = below_provider.get_state_id(grid, tags, random, below_pos) {
+                grid.set_id_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
+                trunk_positions.push(below_pos);
+            }
+        }
+    }
+
+    let mut placed_any = false;
+    for hh in 0..tree_height {
+        let yy = origin.y + hh;
+        // `(0,0)` always fires; the other three cells of the 2×2 only fire
+        // for every level except the topmost — `GiantTrunkPlacer.placeTrunk`'s
+        // own `hh < treeHeight - 1` guard.
+        const WIDE: [(i32, i32); 4] = [(0, 0), (1, 0), (1, 1), (0, 1)];
+        let cells: &[(i32, i32)] = if hh < tree_height - 1 { &WIDE } else { &WIDE[..1] };
+        for &(dx, dz) in cells {
+            let pos = BlockPos { x: origin.x + dx, y: yy, z: origin.z + dz };
+            if valid_tree_pos(grid, tags, pos.x, pos.y, pos.z) {
+                if let Some(state) = trunk_provider.get_state_id(grid, tags, random, pos) {
+                    grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
+                    placed_any = true;
+                    trunk_positions.push(pos);
+                }
+            }
+        }
+    }
+
+    attachments.push(Attachment {
+        pos: BlockPos { x: origin.x, y: origin.y + tree_height, z: origin.z },
+        radius_offset: 0,
+        double_trunk: true,
+    });
+
+    placed_any
+}
+
+/// `MegaJungleTrunkPlacer.placeTrunk` — mega jungle's real trunk (issue
+/// #428): [`place_giant_trunk`]'s own 2×2 column (`super.placeTrunk` in real
+/// vanilla — `MegaJungleTrunkPlacer extends GiantTrunkPlacer`), then a spiral
+/// of short radial branches climbing the trunk's upper half.
+///
+/// RNG order, matching the real Java `for` loop's desugaring exactly (`init`
+/// once, then `while(cond) { body; update }`): `branch_height = tree_height -
+/// 2 - random.nextInt(4)` is drawn exactly once (the loop's `init` clause);
+/// `branch_height -= 2 + random.nextInt(4)` fires at the END of every
+/// iteration's body (the loop's `update` clause) — **including** the
+/// iteration whose resulting `branch_height` fails the next `>
+/// tree_height / 2` check and ends the loop, so that final draw is real and
+/// must not be skipped by restructuring this as a Rust `while let` that only
+/// draws when about to run the body again.
+///
+/// Each branch draws one `nextFloat` angle, then walks 5 steps outward along
+/// `(cos(angle), sin(angle))` — vanilla's own sine **table**
+/// ([`lodestone_worldgen_core::math::cos`]/`sin`), not `f32::cos`/`sin`: the
+/// two are not guaranteed to land on the same integer after the `(int)`
+/// truncation immediately below, and this is the first placer in this module
+/// where that distinction is load-bearing (every earlier trunk/foliage
+/// placer's geometry is integer arithmetic with no trig at all). Each step
+/// places via `placeLog` directly — no `isFree`/anchor gate at all, draws and
+/// places exactly when [`valid_tree_pos`], same as every other unconditional
+/// `placeLog` call in this module.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn place_mega_jungle_trunk<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    tree_height: i32,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    trunk_provider: &BlockStateProvider,
+    below_trunk_provider: &Option<BlockStateProvider>,
+    attachments: &mut Vec<Attachment>,
+    trunk_positions: &mut Vec<BlockPos>,
+) -> bool {
+    let mut placed_any = place_giant_trunk(
+        random,
+        origin,
+        tree_height,
+        grid,
+        tags,
+        trunk_provider,
+        below_trunk_provider,
+        attachments,
+        trunk_positions,
+    );
+
+    // `(float) (Math.PI * 2)`: the multiplication happens in `double`
+    // precision and is narrowed to `float` only at the end — narrowing first
+    // and multiplying second would round differently.
+    let two_pi = (2.0_f64 * std::f64::consts::PI) as f32;
+
+    let mut branch_height = tree_height - 2 - random.next_int_bounded(4);
+    while branch_height > tree_height / 2 {
+        let angle = random.next_float() * two_pi;
+        let mut bx = 0i32;
+        let mut bz = 0i32;
+        for b in 0..5i32 {
+            // `Mth.cos`/`Mth.sin` take `double` — `angle` (a `float`) widens
+            // exactly, matching Java's implicit widening at the call site.
+            bx = (1.5_f32 + lodestone_worldgen_core::math::cos(angle as f64) * b as f32) as i32;
+            bz = (1.5_f32 + lodestone_worldgen_core::math::sin(angle as f64) * b as f32) as i32;
+            let pos = BlockPos {
+                x: origin.x + bx,
+                y: origin.y + branch_height - 3 + b / 2,
+                z: origin.z + bz,
+            };
+            if valid_tree_pos(grid, tags, pos.x, pos.y, pos.z) {
+                if let Some(state) = trunk_provider.get_state_id(grid, tags, random, pos) {
+                    grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
+                    placed_any = true;
+                    trunk_positions.push(pos);
+                }
+            }
+        }
+        attachments.push(Attachment {
+            pos: BlockPos { x: origin.x + bx, y: origin.y + branch_height, z: origin.z + bz },
+            radius_offset: -2,
+            double_trunk: false,
+        });
+        branch_height -= 2 + random.next_int_bounded(4);
+    }
+
+    placed_any
+}
+
 /// `TreeFeature.updateLeaves` — the real post-processing pass vanilla runs
 /// after a tree's trunk, foliage AND decorators have all been placed: a
 /// multi-source BFS from every position in `trunk_positions` (bucket 0),
@@ -591,6 +781,38 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
+    /// `BushFoliagePlacer` — jungle_bush's real foliage (issue #428): a
+    /// `BlobFoliagePlacer` subclass (shares its `height` field, parsed the
+    /// same way) that overrides both `createFoliage` (a different per-row
+    /// radius formula, and no `/2` term) and `shouldSkipLocation` (an
+    /// unconditional corner coin flip, not `Blob`'s `coin || y == 0`). See
+    /// [`Self::create_foliage`]'s own `Bush` arm and
+    /// [`Self::should_skip_location`]'s own `Bush` arm.
+    Bush {
+        height: i32,
+        radius: IntProvider,
+        offset: IntProvider,
+    },
+    /// `MegaJungleFoliagePlacer` — mega jungle's real foliage (issue #428),
+    /// paired with [`TrunkPlacerCfg::MegaJungle`]. Registered in vanilla as
+    /// `"jungle_foliage_placer"` (not `"mega_jungle_foliage_placer"` — see
+    /// `FoliagePlacerType.MEGA_JUNGLE_FOLIAGE_PLACER`'s own registration
+    /// name). Carries its own `height` field like `Bush` above.
+    MegaJungle {
+        height: i32,
+        radius: IntProvider,
+        offset: IntProvider,
+    },
+    /// `MegaPineFoliagePlacer` — the redwood/giant-spruce foliage (issue
+    /// #428), paired with [`TrunkPlacerCfg::Giant`] directly (mega_spruce/
+    /// mega_pine use `giant_trunk_placer`, not `MegaJungleTrunkPlacer`).
+    /// `crown_height` replaces the other placers' constant/derived
+    /// `foliage_height` with its own sampled `IntProvider`.
+    MegaPine {
+        crown_height: IntProvider,
+        radius: IntProvider,
+        offset: IntProvider,
+    },
 }
 
 impl FoliagePlacerCfg {
@@ -616,6 +838,21 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
             }),
             "acacia_foliage_placer" => Some(FoliagePlacerCfg::Acacia { radius, offset }),
             "dark_oak_foliage_placer" => Some(FoliagePlacerCfg::DarkOak { radius, offset }),
+            "bush_foliage_placer" => Some(FoliagePlacerCfg::Bush {
+                height: v["height"].as_i64()? as i32,
+                radius,
+                offset,
+            }),
+            "jungle_foliage_placer" => Some(FoliagePlacerCfg::MegaJungle {
+                height: v["height"].as_i64()? as i32,
+                radius,
+                offset,
+            }),
+            "mega_pine_foliage_placer" => Some(FoliagePlacerCfg::MegaPine {
+                crown_height: try_parse_int_provider(&v["crown_height"])?,
+                radius,
+                offset,
+            }),
             _ => None,
         }
     }
@@ -633,6 +870,17 @@ pub(super)     fn foliage_height<R: RandomSource>(&self, random: &mut R, tree_he
             // `DarkOakFoliagePlacer.foliageHeight` returns the constant `4`
             // — no RNG draw.
             FoliagePlacerCfg::DarkOak { .. } => 4,
+            // `BushFoliagePlacer` doesn't override `foliageHeight` — it
+            // inherits `BlobFoliagePlacer`'s own constant `height` field, no
+            // RNG draw, same shape as `Blob` above.
+            FoliagePlacerCfg::Bush { height, .. } => *height,
+            // `MegaJungleFoliagePlacer.foliageHeight` returns its own
+            // constant `height` field — no RNG draw.
+            FoliagePlacerCfg::MegaJungle { height, .. } => *height,
+            // `MegaPineFoliagePlacer.foliageHeight` is the one override in
+            // this module that samples an `IntProvider` here rather than
+            // returning a config-literal constant.
+            FoliagePlacerCfg::MegaPine { crown_height, .. } => crown_height.sample(random),
         }
     }
 
@@ -641,7 +889,10 @@ pub(super)     fn foliage_radius<R: RandomSource>(&self, random: &mut R, trunk_l
             FoliagePlacerCfg::Blob { radius, .. }
             | FoliagePlacerCfg::Spruce { radius, .. }
             | FoliagePlacerCfg::Acacia { radius, .. }
-            | FoliagePlacerCfg::DarkOak { radius, .. } => radius.sample(random),
+            | FoliagePlacerCfg::DarkOak { radius, .. }
+            | FoliagePlacerCfg::Bush { radius, .. }
+            | FoliagePlacerCfg::MegaJungle { radius, .. }
+            | FoliagePlacerCfg::MegaPine { radius, .. } => radius.sample(random),
             FoliagePlacerCfg::Pine { radius, .. } => {
                 radius.sample(random) + random.next_int_bounded(trunk_len.max(0) + 1)
             }
@@ -654,7 +905,10 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
             | FoliagePlacerCfg::Spruce { offset, .. }
             | FoliagePlacerCfg::Pine { offset, .. }
             | FoliagePlacerCfg::Acacia { offset, .. }
-            | FoliagePlacerCfg::DarkOak { offset, .. } => offset.sample(random),
+            | FoliagePlacerCfg::DarkOak { offset, .. }
+            | FoliagePlacerCfg::Bush { offset, .. }
+            | FoliagePlacerCfg::MegaJungle { offset, .. }
+            | FoliagePlacerCfg::MegaPine { offset, .. } => offset.sample(random),
         }
     }
 
@@ -700,6 +954,18 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
             // Unreachable — [`Self::should_skip_location_signed`] handles
             // DarkOak entirely (see that method's own doc).
             FoliagePlacerCfg::DarkOak { .. } => false,
+            // `BushFoliagePlacer.shouldSkipLocation` — an UNCONDITIONAL
+            // corner coin flip (unlike `Blob`'s `coin || y == 0`, this has no
+            // `y`-based override — the draw's result alone decides).
+            FoliagePlacerCfg::Bush { .. } => {
+                dx == current_radius && dz == current_radius && random.next_int_bounded(2) == 0
+            }
+            // `MegaJungleFoliagePlacer.shouldSkipLocation` and
+            // `MegaPineFoliagePlacer.shouldSkipLocation` are textually
+            // identical in real vanilla — pure geometry, no RNG draw.
+            FoliagePlacerCfg::MegaJungle { .. } | FoliagePlacerCfg::MegaPine { .. } => {
+                dx + dz >= 7 || dx * dx + dz * dz > current_radius * current_radius
+            }
         }
     }
 
@@ -883,6 +1149,81 @@ pub(super)     fn create_foliage<R: RandomSource>(
                 } else {
                     place_leaves_row(random, pos, leaf_radius + 2, -1, grid, tags, self, provider, placed_any, false);
                     place_leaves_row(random, pos, leaf_radius + 1, 0, grid, tags, self, provider, placed_any, false);
+                }
+            }
+            // `BushFoliagePlacer.createFoliage` — same descending-row shape
+            // as `Blob`, but the radius formula has no `/2` term and adds
+            // `radius_offset` (always `0` here — jungle_bush's only trunk
+            // placer, `Straight`, never sets it nonzero, but it is threaded
+            // through for fidelity with the real formula).
+            FoliagePlacerCfg::Bush { .. } => {
+                for yo in (offset - foliage_height..=offset).rev() {
+                    let radius = leaf_radius + radius_offset - 1 - yo;
+                    place_leaves_row(
+                        random, attachment, radius, yo, grid, tags, self, provider, placed_any, false,
+                    );
+                }
+            }
+            // `MegaJungleFoliagePlacer.createFoliage` — `leafHeight` draws
+            // RNG only for a non-double-trunk (branch) attachment; the
+            // primary (`double_trunk: true`) attachment uses the constant
+            // `foliage_height` field instead, no draw. Rows descend from
+            // `offset` to `offset - leafHeight` inclusive.
+            FoliagePlacerCfg::MegaJungle { .. } => {
+                let leaf_height = if double_trunk {
+                    foliage_height
+                } else {
+                    1 + random.next_int_bounded(2)
+                };
+                let mut yo = offset;
+                while yo >= offset - leaf_height {
+                    let current_radius = leaf_radius + radius_offset + 1 - yo;
+                    place_leaves_row(
+                        random, attachment, current_radius, yo, grid, tags, self, provider, placed_any, double_trunk,
+                    );
+                    yo -= 1;
+                }
+            }
+            // `MegaPineFoliagePlacer.createFoliage` — the one placer in this
+            // module whose rows are addressed by ABSOLUTE Y (via a shifted
+            // row origin, `y = 0` every call) rather than a relative offset
+            // passed to `place_leaves_row`'s own `y` parameter, and whose
+            // radius is smoothed then "jagged" every other row. No RNG draw
+            // anywhere in this arithmetic — `Mth.floor` and the `(yy & 1)`
+            // parity check are pure. `yy % 2 == 0` is Rust's equivalent of
+            // Java's `(yy & 1) == 0` for this equality-to-zero check: both
+            // are zero exactly when `yy` is even, for either sign.
+            FoliagePlacerCfg::MegaPine { .. } => {
+                let mut prev_radius = 0;
+                let start_yy = attachment.y - foliage_height + offset;
+                let end_yy = attachment.y + offset;
+                let mut yy = start_yy;
+                while yy <= end_yy {
+                    let yo = attachment.y - yy;
+                    let smooth_radius = leaf_radius
+                        + radius_offset
+                        + lodestone_worldgen_core::math::floor(
+                            f64::from((yo as f32 / foliage_height as f32) * 3.5_f32),
+                        );
+                    let jagged_radius = if yo > 0 && smooth_radius == prev_radius && yy % 2 == 0 {
+                        smooth_radius + 1
+                    } else {
+                        smooth_radius
+                    };
+                    place_leaves_row(
+                        random,
+                        BlockPos { x: attachment.x, y: yy, z: attachment.z },
+                        jagged_radius,
+                        0,
+                        grid,
+                        tags,
+                        self,
+                        provider,
+                        placed_any,
+                        double_trunk,
+                    );
+                    prev_radius = smooth_radius;
+                    yy += 1;
                 }
             }
         }

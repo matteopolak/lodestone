@@ -83,9 +83,9 @@
 //! returning `None`. This matters beyond the three named species:
 //! [`super::compose::build_biome_vegetation`] (this module is reached from)
 //! resolves **every** biome's `VEGETAL_DECORATION` step at generator
-//! construction time, including biomes this issue never asked for (jungle's
-//! `GiantTrunkPlacer`/`JungleFoliagePlacer`, fancy oak's `FancyTrunkPlacer`,
-//! acacia's `RotatedBlockProvider` trunk, azalea's `EnvironmentScanPlacement`,
+//! construction time, including biomes this issue never asked for (mangrove's
+//! `UpwardsBranchingTrunkPlacer`, fancy oak's `FancyTrunkPlacer`,
+//! cherry's `CherryTrunkPlacer`, azalea's `EnvironmentScanPlacement`,
 //! `FallenTreeFeature`, and more) — a `panic!` on any one of those would
 //! break world generation for **every** biome table, not just the one that
 //! triggered it. So every parse path in this module returns `Option`/degrades
@@ -142,20 +142,48 @@
 //! argument, applied to the biome where the gap was loudest); it also
 //! carries pale oak for free — `pale_oak`/`pale_oak_creaking` reuse the same
 //! trunk/foliage placer types with their own providers, closing pale_garden's
-//! tree gap alongside. Jungle (`GiantTrunkPlacer`+`MegaJungleFoliagePlacer`),
-//! mangrove (`UpwardsBranchingTrunkPlacer` — has real above-water roots) and
-//! cherry (`CherryTrunkPlacer`+`CherryFoliagePlacer`) remain
-//! [`ConfiguredFeature::Unsupported`] — each is a structurally distinct
-//! trunk/foliage shape, not a small extension of `Straight`/`Forking`, and
-//! none was attempted this session; see
-//! `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS` for exactly
-//! which biomes still carry `"tree: unsupported trunk/foliage/size/provider"`
-//! because of them. `FallenTreeFeature` (a decorator-like feature reachable
-//! from MANY biomes' `RandomSelector`s at a small, consistent ~1-1.25%
-//! chance each — plains, birch, taiga, savanna, and more) is a different,
-//! separately-named gap (`"fallen_tree"`) for the same reason: a real,
-//! distinct feature type, not a variant of `ConfiguredFeature::Tree`, and
-//! also not attempted this session.
+//! tree gap alongside.
+//!
+//! Mega jungle (`TrunkPlacerCfg::MegaJungle`+`FoliagePlacerCfg::MegaJungle`,
+//! registered `"mega_jungle_trunk_placer"`/`"jungle_foliage_placer"`), the
+//! shared giant-trunk base it and mega spruce/pine both build on
+//! (`TrunkPlacerCfg::Giant`, `GiantTrunkPlacer` — a static 2×2 column, no
+//! lean), mega spruce/pine's own foliage (`FoliagePlacerCfg::MegaPine`,
+//! `"mega_pine_foliage_placer"`), and `jungle_bush`'s foliage
+//! (`FoliagePlacerCfg::Bush`, `"bush_foliage_placer"`, paired with the
+//! already-implemented `Straight` trunk) landed in a later pass of issue
+//! #428. `MegaJungleTrunkPlacer extends GiantTrunkPlacer` in real vanilla
+//! ([`place_mega_jungle_trunk`] literally calls [`place_giant_trunk`] first,
+//! then adds its own radial branches), so porting `Giant` bought
+//! old_growth_spruce_taiga/old_growth_pine_taiga's `mega_spruce`/`mega_pine`
+//! trees for free alongside jungle's own gap — the same "shared base, extra
+//! branches" shape `DarkOak` already established, not a coincidence.
+//! `trees_jungle`'s own `RandomSelector` is `jungle_bush` 50% +
+//! `mega_jungle_tree_checked` 33.3% + `fancy_oak_checked` 10% +
+//! `fallen_jungle_tree` 1.25% + the default `jungle_tree` branch (already
+//! `Straight`+`Blob`, supported since issue #406) — so this pass closes the
+//! 50%+33.3% majority of jungle/sparse_jungle/bamboo_jungle's own tree gap,
+//! leaving only `fancy_oak_checked` (10%, shared with every other biome's
+//! `"tree: unsupported..."` reason) and `fallen_jungle_tree` (1.25%,
+//! `"fallen_tree"`, separately tracked) — see
+//! `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`'s own comment on
+//! those three biomes for why the entry itself doesn't disappear.
+//!
+//! Fancy oak (`FancyTrunkPlacer`+`FancyFoliagePlacer` — the `fancy_oak_*`
+//! branch shared by oak, jungle, dark_forest and more), mangrove
+//! (`UpwardsBranchingTrunkPlacer` — has real above-water roots), cherry
+//! (`CherryTrunkPlacer`+`CherryFoliagePlacer`) and the bare-trunk "bending"
+//! placer (`BendingTrunkPlacer`) remain [`ConfiguredFeature::Unsupported`] —
+//! each is a structurally distinct trunk/foliage shape, not a small
+//! extension of an already-implemented one, and none was attempted this
+//! session; see `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS` for
+//! exactly which biomes still carry `"tree: unsupported
+//! trunk/foliage/size/provider"` because of them. `FallenTreeFeature` (a
+//! decorator-like feature reachable from MANY biomes' `RandomSelector`s at a
+//! small, consistent ~1-1.25% chance each — plains, birch, taiga, savanna,
+//! jungle, and more) is a different, separately-named gap (`"fallen_tree"`)
+//! for the same reason: a real, distinct feature type, not a variant of
+//! `ConfiguredFeature::Tree`, and also not attempted this session.
 //!
 //! # Approximations, named
 //!
@@ -1260,5 +1288,332 @@ mod tests {
             pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }),
             "water at offset (1,-1,0): must pass"
         );
+    }
+
+    /// `GiantTrunkPlacer`+`MegaPineFoliagePlacer` (mega_spruce/mega_pine's
+    /// real placers, issue #428) over flat open ground: the base level
+    /// (dy=0) must be a full 2×2 log footprint, the TOP level (dy=height-1,
+    /// `hh < treeHeight - 1` false) must be a single log — the shape
+    /// `Straight`/`Forking` cannot produce and [`place_dark_oak_trunk`]'s own
+    /// test already covers for `DarkOak` — and the canopy must reach at
+    /// least one leaf.
+    #[test]
+    fn giant_trunk_places_a_full_two_by_two_base_and_a_single_top_log() {
+        let cfg = TreeConfig {
+            below_trunk_provider: None,
+            trunk_provider: BlockStateProvider::Simple("minecraft:spruce_log[axis=y]".to_string()),
+            foliage_provider: BlockStateProvider::Simple(
+                "minecraft:spruce_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            ),
+            trunk_placer: TrunkPlacerCfg::Giant {
+                base_height: 6,
+                height_rand_a: 0,
+                height_rand_b: 0,
+            },
+            foliage_placer: FoliagePlacerCfg::MegaPine {
+                crown_height: IntProvider::Constant(4),
+                radius: IntProvider::Constant(1),
+                offset: IntProvider::Constant(0),
+            },
+            feature_size: FeatureSizeCfg::TwoLayers { limit: 1, lower_size: 1, upper_size: 2 },
+            decorators: Vec::new(),
+        };
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = VegTags::default();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(11));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        let mut base_logs = 0;
+        let mut top_logs = 0;
+        for dx in 0..2 {
+            for dz in 0..2 {
+                if base_id(grid.get(8 + dx, 70, 8 + dz)) == "minecraft:spruce_log" {
+                    base_logs += 1;
+                }
+                if base_id(grid.get(8 + dx, 75, 8 + dz)) == "minecraft:spruce_log" {
+                    top_logs += 1;
+                }
+            }
+        }
+        assert_eq!(base_logs, 4, "dy=0 must be a full 2×2 log footprint");
+        assert_eq!(top_logs, 1, "the topmost level (hh == tree_height - 1) must be a single log, not 2×2");
+
+        let mut leaf_count = 0;
+        for y in 70..90 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    if base_id(grid.get(x, y, z)) == "minecraft:spruce_leaves" {
+                        leaf_count += 1;
+                    }
+                }
+            }
+        }
+        assert!(leaf_count > 0, "a placed giant/mega-pine trunk must carry at least one leaf block");
+    }
+
+    /// `MegaJungleTrunkPlacer`+`MegaJungleFoliagePlacer` (mega_jungle_tree's
+    /// real placers, issue #428): the shared `Giant` 2×2 base must still
+    /// place, AND — with a tree tall enough that `branch_height = tree_height
+    /// - 2 - nextInt(4)` is guaranteed `> tree_height / 2` on its first draw
+    /// (worst case `nextInt(4) == 3`: `20 - 2 - 3 = 15 > 10`) — at least one
+    /// radial branch must fire, giving the tree more than one foliage
+    /// attachment (the base 2×2 alone produces exactly one).
+    #[test]
+    fn mega_jungle_trunk_places_giant_base_and_at_least_one_branch() {
+        let cfg = TreeConfig {
+            below_trunk_provider: None,
+            trunk_provider: BlockStateProvider::Simple("minecraft:jungle_log[axis=y]".to_string()),
+            foliage_provider: BlockStateProvider::Simple(
+                "minecraft:jungle_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            ),
+            trunk_placer: TrunkPlacerCfg::MegaJungle {
+                base_height: 20,
+                height_rand_a: 0,
+                height_rand_b: 0,
+            },
+            foliage_placer: FoliagePlacerCfg::MegaJungle {
+                height: 2,
+                radius: IntProvider::Constant(2),
+                offset: IntProvider::Constant(0),
+            },
+            feature_size: FeatureSizeCfg::TwoLayers { limit: 1, lower_size: 1, upper_size: 2 },
+            decorators: Vec::new(),
+        };
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = VegTags::default();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(2));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        let mut base_logs = 0;
+        for dx in 0..2 {
+            for dz in 0..2 {
+                if base_id(grid.get(8 + dx, 70, 8 + dz)) == "minecraft:jungle_log" {
+                    base_logs += 1;
+                }
+            }
+        }
+        assert_eq!(base_logs, 4, "the shared Giant 2×2 base must still place under MegaJungle");
+
+        // A branch log lands off the 2×2 footprint (dx or dz outside 0..2)
+        // above the base — the base loop only ever writes inside that
+        // footprint, so any log outside it is branch evidence.
+        let mut branch_log_found = false;
+        'search: for y in 70..90 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    if (x < 8 || x > 9 || z < 8 || z > 9)
+                        && base_id(grid.get(x, y, z)) == "minecraft:jungle_log"
+                    {
+                        branch_log_found = true;
+                        break 'search;
+                    }
+                }
+            }
+        }
+        assert!(branch_log_found, "a 20-tall mega jungle tree must place at least one branch log outside the 2×2 base");
+    }
+
+    /// `BushFoliagePlacer` (jungle_bush's real foliage, issue #428) paired
+    /// with the plain `Straight` trunk placer jungle_bush actually uses
+    /// (`base_height: 1, height_rand_a: 0, height_rand_b: 0` — a 1-tall
+    /// "trunk"). Must still reach at least one leaf.
+    #[test]
+    fn bush_foliage_places_leaves_around_a_straight_trunk() {
+        let cfg = TreeConfig {
+            below_trunk_provider: None,
+            trunk_provider: BlockStateProvider::Simple("minecraft:jungle_log[axis=y]".to_string()),
+            foliage_provider: BlockStateProvider::Simple(
+                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            ),
+            trunk_placer: TrunkPlacerCfg::Straight {
+                base_height: 1,
+                height_rand_a: 0,
+                height_rand_b: 0,
+            },
+            foliage_placer: FoliagePlacerCfg::Bush {
+                height: 2,
+                radius: IntProvider::Constant(2),
+                offset: IntProvider::Constant(1),
+            },
+            feature_size: FeatureSizeCfg::TwoLayers { limit: 0, lower_size: 0, upper_size: 0 },
+            decorators: Vec::new(),
+        };
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = VegTags::default();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(3));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        let mut leaf_count = 0;
+        for y in 68..76 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    if base_id(grid.get(x, y, z)) == "minecraft:oak_leaves" {
+                        leaf_count += 1;
+                    }
+                }
+            }
+        }
+        assert!(leaf_count > 0, "a placed jungle bush must carry at least one leaf block");
+    }
+
+    /// The real `configured_feature/mega_jungle_tree.json` (`crates
+    /// /lodestone-server/assets/worldgen/configured_feature
+    /// /mega_jungle_tree.json`, transcribed here) must parse to
+    /// [`ConfiguredFeature::Tree`], not [`ConfiguredFeature::Unsupported`] —
+    /// before this increment, `mega_jungle_trunk_placer`/
+    /// `jungle_foliage_placer` were both unmodelled, leaving the 33.3%-weight
+    /// branch of `trees_jungle`/`trees_bamboo_jungle` a silent no-op.
+    #[test]
+    fn real_mega_jungle_tree_configured_feature_parses_as_tree() {
+        struct EmptyResolver;
+        impl Resolver for EmptyResolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                unimplemented!()
+            }
+        }
+        let doc = serde_json::json!({
+            "type": "minecraft:tree",
+            "config": {
+                "below_trunk_provider": {
+                    "type": "minecraft:rule_based_state_provider",
+                    "rules": [{
+                        "if_true": {
+                            "type": "minecraft:not",
+                            "predicate": {"type": "minecraft:matching_block_tag", "tag": "minecraft:cannot_replace_below_tree_trunk"}
+                        },
+                        "then": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:dirt"}}
+                    }]
+                },
+                "decorators": [
+                    {"type": "minecraft:trunk_vine"},
+                    {"type": "minecraft:leave_vine", "probability": 0.25}
+                ],
+                "foliage_placer": {"type": "minecraft:jungle_foliage_placer", "height": 2, "offset": 0, "radius": 2},
+                "foliage_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {"Name": "minecraft:jungle_leaves", "Properties": {"distance": "7", "persistent": "false", "waterlogged": "false"}}
+                },
+                "ignore_vines": false,
+                "minimum_size": {"type": "minecraft:two_layers_feature_size", "lower_size": 1, "upper_size": 2},
+                "trunk_placer": {"type": "minecraft:mega_jungle_trunk_placer", "base_height": 10, "height_rand_a": 2, "height_rand_b": 19},
+                "trunk_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {"Name": "minecraft:jungle_log", "Properties": {"axis": "y"}}
+                }
+            }
+        });
+        let feature = parse_configured_feature_doc(&EmptyResolver, &doc);
+        assert!(matches!(feature, ConfiguredFeature::Tree(_)), "expected Tree, got {feature:?}");
+    }
+
+    /// The real `configured_feature/jungle_bush.json` — same regression-
+    /// control shape as the mega jungle test above, for `bush_foliage_placer`.
+    #[test]
+    fn real_jungle_bush_configured_feature_parses_as_tree() {
+        struct EmptyResolver;
+        impl Resolver for EmptyResolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                unimplemented!()
+            }
+        }
+        let doc = serde_json::json!({
+            "type": "minecraft:tree",
+            "config": {
+                "below_trunk_provider": {
+                    "type": "minecraft:rule_based_state_provider",
+                    "rules": [{
+                        "if_true": {
+                            "type": "minecraft:not",
+                            "predicate": {"type": "minecraft:matching_block_tag", "tag": "minecraft:cannot_replace_below_tree_trunk"}
+                        },
+                        "then": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:dirt"}}
+                    }]
+                },
+                "decorators": [],
+                "foliage_placer": {"type": "minecraft:bush_foliage_placer", "height": 2, "offset": 1, "radius": 2},
+                "foliage_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {"Name": "minecraft:oak_leaves", "Properties": {"distance": "7", "persistent": "false", "waterlogged": "false"}}
+                },
+                "ignore_vines": false,
+                "minimum_size": {"type": "minecraft:two_layers_feature_size", "limit": 0, "upper_size": 0},
+                "trunk_placer": {"type": "minecraft:straight_trunk_placer", "base_height": 1, "height_rand_a": 0, "height_rand_b": 0},
+                "trunk_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {"Name": "minecraft:jungle_log", "Properties": {"axis": "y"}}
+                }
+            }
+        });
+        let feature = parse_configured_feature_doc(&EmptyResolver, &doc);
+        assert!(matches!(feature, ConfiguredFeature::Tree(_)), "expected Tree, got {feature:?}");
+    }
+
+    /// The real `configured_feature/mega_spruce.json` (`giant_trunk_placer`+
+    /// `mega_pine_foliage_placer`) — same regression-control shape, closing
+    /// old_growth_spruce_taiga/old_growth_pine_taiga's tree gap.
+    #[test]
+    fn real_mega_spruce_configured_feature_parses_as_tree() {
+        struct EmptyResolver;
+        impl Resolver for EmptyResolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                unimplemented!()
+            }
+        }
+        let doc = serde_json::json!({
+            "type": "minecraft:tree",
+            "config": {
+                "below_trunk_provider": {
+                    "type": "minecraft:rule_based_state_provider",
+                    "rules": [{
+                        "if_true": {
+                            "type": "minecraft:not",
+                            "predicate": {"type": "minecraft:matching_block_tag", "tag": "minecraft:cannot_replace_below_tree_trunk"}
+                        },
+                        "then": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:dirt"}}
+                    }]
+                },
+                "decorators": [{
+                    "type": "minecraft:alter_ground",
+                    "provider": {
+                        "type": "minecraft:rule_based_state_provider",
+                        "rules": [{
+                            "if_true": {"type": "minecraft:matching_block_tag", "tag": "minecraft:beneath_tree_podzol_replaceable"},
+                            "then": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:podzol", "Properties": {"snowy": "false"}}}
+                        }]
+                    }
+                }],
+                "foliage_placer": {
+                    "type": "minecraft:mega_pine_foliage_placer",
+                    "crown_height": {"type": "minecraft:uniform", "max_inclusive": 17, "min_inclusive": 13},
+                    "offset": 0,
+                    "radius": 0
+                },
+                "foliage_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {"Name": "minecraft:spruce_leaves", "Properties": {"distance": "7", "persistent": "false", "waterlogged": "false"}}
+                },
+                "ignore_vines": false,
+                "minimum_size": {"type": "minecraft:two_layers_feature_size", "lower_size": 1, "upper_size": 2},
+                "trunk_placer": {"type": "minecraft:giant_trunk_placer", "base_height": 13, "height_rand_a": 2, "height_rand_b": 14},
+                "trunk_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {"Name": "minecraft:spruce_log", "Properties": {"axis": "y"}}
+                }
+            }
+        });
+        let feature = parse_configured_feature_doc(&EmptyResolver, &doc);
+        assert!(matches!(feature, ConfiguredFeature::Tree(_)), "expected Tree, got {feature:?}");
     }
 }
