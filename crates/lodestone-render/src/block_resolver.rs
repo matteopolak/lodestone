@@ -225,7 +225,14 @@ impl BlockAtlas {
         }
 
         // --- Build the atlas. ------------------------------------------------
-        let mut builder = AtlasBuilder::new().with_mip_levels(4);
+        // Padding matters independently of mip *generation*: without a gutter,
+        // a `Linear`-minified GPU sample at a sprite's edge reads straight into
+        // the neighbouring sprite regardless of how cleanly each mip level was
+        // generated in isolation (see `BLOCK_ATLAS_MIP_LEVELS`'s doc — this is
+        // the distance-dependent block-atlas seam).
+        let mut builder = AtlasBuilder::new()
+            .with_mip_levels(crate::texture::BLOCK_ATLAS_MIP_LEVELS)
+            .with_padding(1 << crate::texture::BLOCK_ATLAS_MIP_LEVELS);
 
         for loc in &base_textures {
             // A missing texture is tolerated: the sprite lookup later falls back

@@ -488,9 +488,17 @@ impl AtlasBuilder {
     /// `2^level`), and sprite cells are aligned so `(x >> L, y >> L)` lands each
     /// sprite's own downsample with no neighbour mixing.
     ///
-    /// Requesting mips also forces a padding of at least `1 << levels` so the
-    /// aligned layout has room; a larger [`with_padding`](Self::with_padding)
-    /// value is respected.
+    /// **Does not imply padding.** This only aligns sprite origins to `2^level`
+    /// so `(x >> L, y >> L)` lands each sprite's own downsample exactly; it does
+    /// *not* reserve any gutter around a sprite, so a bare `with_mip_levels`
+    /// still packs sprites edge-to-edge. That is enough to keep mip
+    /// *generation* isolated (each level is built by downsampling a sprite's own
+    /// image, never the stitched atlas), but a GPU sampler minifying with
+    /// `Linear` still reads straight across a zero-gutter sprite boundary at
+    /// *sample* time, which is a second, independent source of bleed that
+    /// generation-time isolation cannot fix. Call
+    /// [`with_padding`](Self::with_padding) (vanilla uses `1 << levels`, see its
+    /// doc) whenever the renderer's minification filter is not `Nearest`.
     pub fn with_mip_levels(mut self, levels: u32) -> Self {
         self.mip_levels = levels;
         self
@@ -775,6 +783,20 @@ impl AtlasBuilder {
         // Each sprite's full region (the whole animation strip for animated
         // sprites) is mipped independently with vanilla's algorithm and blitted
         // at `(origin >> level)`, so a level never averages across sprites.
+        //
+        // The gutter is re-extruded at *every* level, not just level 0: `pad`
+        // itself halves with the level (`pad >> level`), and unless that
+        // shrunken gutter is refilled from this level's own sprite edge, it is
+        // left at the buffer's zero-init value — transparent black. A GPU
+        // bilinear sample landing in that gap (exactly the case a minified,
+        // linear-filtered atlas produces) then blends the sprite's edge texel
+        // toward black rather than toward its own replicated colour, which is
+        // the same visible seam padding exists to prevent, just recurring one
+        // level deeper each time. Vanilla avoids this because its atlas upload
+        // is a GPU blit per mip level sampling each sprite's own scratch
+        // texture with `CLAMP_TO_EDGE`, which extrudes automatically at every
+        // level (`TextureAtlas.uploadInitialContents`); this CPU path has to
+        // extrude explicitly instead.
         let mips = if effective_levels > 0 {
             let chains: Vec<Vec<Image>> = placements
                 .iter()
@@ -795,7 +817,12 @@ impl AtlasBuilder {
                 for (p, &(_, cell_x, cell_y)) in placements.iter().enumerate() {
                     let sx = (cell_x + pad) >> level;
                     let sy = (cell_y + pad) >> level;
-                    blit(&mut buf, lw, &chains[p][level as usize], sx, sy);
+                    let sprite_mip = &chains[p][level as usize];
+                    blit(&mut buf, lw, sprite_mip, sx, sy);
+                    let level_pad = pad >> level;
+                    if level_pad > 0 {
+                        extrude_border(&mut buf, lw, sprite_mip, sx, sy, level_pad);
+                    }
                 }
                 levels.push(MipLevel {
                     width: lw,
