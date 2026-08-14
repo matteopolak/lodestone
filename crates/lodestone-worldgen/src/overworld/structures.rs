@@ -235,6 +235,104 @@ impl StartContext for StartSampler<'_> {
     }
 }
 
+/// `BuriedTreasurePieces.BuriedTreasurePiece.postProcess` — walk a cursor down
+/// from the ocean-floor height at `(origin.x, origin.z)` until the block
+/// *below* it is one of the five stone-family materials, fill the walk
+/// position's six air/liquid neighbours (stone-family straight down, the
+/// pre-walk block or sand everywhere else) and place an empty chest.
+///
+/// Runs against the **real** per-chunk grid at placement time (see
+/// [`crate::structure::PieceRefinement::BuriedTreasureChest`]'s own doc for
+/// why this cannot be an eager, start-time list like every other coded piece).
+/// Draws no random: vanilla's own `random` argument is spent only inside
+/// `createChest` on the loot-table roll seed, which is out of scope here the
+/// same way every other structure's container loot is (see the
+/// `template:block_entity_nbt`/`coded:chests` ledger rows) — the **block** is
+/// what this places.
+fn place_buried_treasure_chest(world: &mut crate::dense_grid::DenseBlockGrid, origin: [i32; 3]) {
+    let (min_x, min_y, _min_z, size_x, size_y, _size_z) = world.bounds();
+    let (x, z) = (origin[0], origin[2]);
+    if x < min_x || x >= min_x + size_x {
+        // The piece's own column is always inside its origin chunk
+        // (`chunkBlockX(9)`), so this never fires in practice — a defensive
+        // bound rather than a reachable one.
+        return;
+    }
+    let top = min_y + size_y - 1;
+    // `level.getHeight(OCEAN_FLOOR_WG, x, z)`: one above the topmost block that
+    // is neither air nor a fluid, scanned against the *real* grid — sand,
+    // sandstone and every surface-rule product are visible here, unlike at
+    // structure-start time.
+    let Some(ground) = (min_y..=top).rev().find(|&y| !is_air_or_liquid(world.get(x, y, z))) else {
+        return;
+    };
+    let mut y = ground + 1;
+    while y > min_y {
+        let below = world.get(x, y - 1, z).to_string();
+        if is_stone_family(base_name(&below)) {
+            let current = world.get(x, y, z);
+            let soft = if !is_air_or_liquid(current) {
+                current.to_string()
+            } else {
+                "minecraft:sand".to_string()
+            };
+            const NEIGHBOURS: [[i32; 3]; 6] = [
+                [0, -1, 0],
+                [0, 1, 0],
+                [0, 0, -1],
+                [0, 0, 1],
+                [-1, 0, 0],
+                [1, 0, 0],
+            ];
+            for delta in NEIGHBOURS {
+                let rel = [x + delta[0], y + delta[1], z + delta[2]];
+                if !is_air_or_liquid(world.get(rel[0], rel[1], rel[2])) {
+                    continue;
+                }
+                let below_rel = world.get(rel[0], rel[1] - 1, rel[2]);
+                let is_up = delta == [0, 1, 0];
+                if is_air_or_liquid(below_rel) && !is_up {
+                    world.set(rel[0], rel[1], rel[2], &below);
+                } else {
+                    world.set(rel[0], rel[1], rel[2], &soft);
+                }
+            }
+            // `StructurePiece.reorient` picks the facing from the four
+            // horizontal neighbours' render-solidity *as just written above*;
+            // every one of them is now solid by construction (each was either
+            // already solid or just filled), so vanilla's own fallback branch
+            // always fires here and lands on a fixed facing — see
+            // `coded:chest_reorient` on the ledger, the same simplification
+            // every other coded chest in this crate already makes.
+            world.set(x, y, z, "minecraft:chest[facing=north,type=single,waterlogged=false]");
+            return;
+        }
+        y -= 1;
+    }
+}
+
+fn base_name(state: &str) -> &str {
+    state.split('[').next().unwrap_or(state)
+}
+
+fn is_air_or_liquid(state: &str) -> bool {
+    let name = base_name(state);
+    name == "minecraft:air" || name == "minecraft:water" || name == "minecraft:lava"
+}
+
+/// `belowState.is(SANDSTONE) || .is(STONE) || .is(ANDESITE) || .is(GRANITE) ||
+/// .is(DIORITE)`.
+fn is_stone_family(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:sandstone"
+            | "minecraft:stone"
+            | "minecraft:andesite"
+            | "minecraft:granite"
+            | "minecraft:diorite"
+    )
+}
+
 impl OverworldGenerator {
     /// Stage 0a: this chunk's structure starts, memoised.
     ///
@@ -441,6 +539,14 @@ impl OverworldGenerator {
                         world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
                     }
                 }
+                // A placement-time refinement reads and writes the *real* grid —
+                // the one point in this pipeline a structure sees post-surface,
+                // post-carve material. Runs before the `placement`/`extra_placements`
+                // early-continue below, because a refined piece (buried treasure)
+                // carries neither.
+                if piece.refine == Some(crate::structure::PieceRefinement::BuriedTreasureChest) {
+                    place_buried_treasure_chest(&mut world, piece.bounding_box.min);
+                }
                 let Some(placement) = &piece.placement else {
                     continue;
                 };
@@ -550,5 +656,92 @@ impl OverworldGenerator {
             .as_ref()
             .map(|r| r.unsupported().clone())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// A column with `depth` blocks of sand over stone, air above — the shape
+    /// that makes the walk actually walk (a beach/ocean-floor surface rule
+    /// stacking sand over the real stone), rather than terminating on its
+    /// first iteration.
+    fn sandy_column(depth: i32) -> crate::dense_grid::DenseBlockGrid {
+        let mut map = HashMap::new();
+        // Stone from -64 up to (but not including) the sand layer.
+        let stone_top = 60 - depth;
+        for y in -64..=stone_top {
+            map.insert((8, y, 8), "minecraft:stone".to_string());
+        }
+        for y in (stone_top + 1)..=60 {
+            map.insert((8, y, 8), "minecraft:sand".to_string());
+        }
+        crate::dense_grid::DenseBlockGrid::from_hashmap(0, -64, 0, 16, 384, 16, &map)
+    }
+
+    /// The chest lands exactly one block above the first **stone-family**
+    /// block, not the first solid block — a beach column with sand on top must
+    /// be walked *through*, matching vanilla's own multi-layer descent.
+    #[test]
+    fn the_chest_lands_on_stone_under_a_sand_beach() {
+        let mut world = sandy_column(3);
+        place_buried_treasure_chest(&mut world, [8, 90, 8]);
+        // Stone top is at 60 - 3 = 57, so the chest sits at 58.
+        assert_eq!(world.get(8, 58, 8), "minecraft:chest[facing=north,type=single,waterlogged=false]");
+        // Nothing was placed at the sand layer or below the stone surface.
+        assert_ne!(world.get(8, 60, 8), "minecraft:chest[facing=north,type=single,waterlogged=false]");
+    }
+
+    /// A column with **no** sand at all (stone straight to the surface) places
+    /// the chest one above bare stone — the degenerate case of the same walk.
+    #[test]
+    fn the_chest_lands_directly_on_bare_stone() {
+        let mut world = sandy_column(0);
+        place_buried_treasure_chest(&mut world, [8, 90, 8]);
+        assert_eq!(world.get(8, 61, 8), "minecraft:chest[facing=north,type=single,waterlogged=false]");
+    }
+
+    /// Every air/liquid neighbour of the chest is filled — straight down with
+    /// the stone-family block the walk found, everywhere else with the
+    /// pre-existing block (here, air, so it falls back to sand).
+    #[test]
+    fn every_air_neighbour_of_the_chest_is_filled() {
+        let mut world = sandy_column(0);
+        place_buried_treasure_chest(&mut world, [8, 90, 8]);
+        // Chest at (8, 61, 8), stone at (8, 60, 8) and below.
+        assert_eq!(world.get(8, 60, 8), "minecraft:stone", "the ground itself is untouched");
+        // The four horizontal neighbours and the one above were air; each
+        // must now be something solid (sand, since there was nothing else to
+        // reuse) rather than air.
+        for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (0, 1, 0)] {
+            let state = world.get(8 + dx, 61 + dy, 8 + dz);
+            assert_ne!(state, "minecraft:air", "neighbour ({dx},{dy},{dz}) was left air");
+        }
+    }
+
+    /// `base_name` strips a bracketed property list; `is_air_or_liquid` and
+    /// `is_stone_family` read the five- and three-member sets vanilla's own
+    /// `postProcess` names, and nothing else.
+    #[test]
+    fn the_material_predicates_match_exactly_vanillas_named_sets() {
+        assert_eq!(base_name("minecraft:water[level=0]"), "minecraft:water");
+        assert!(is_air_or_liquid("minecraft:air"));
+        assert!(is_air_or_liquid("minecraft:water[level=3]"));
+        assert!(is_air_or_liquid("minecraft:lava"));
+        assert!(!is_air_or_liquid("minecraft:stone"));
+        for name in [
+            "minecraft:sandstone",
+            "minecraft:stone",
+            "minecraft:andesite",
+            "minecraft:granite",
+            "minecraft:diorite",
+        ] {
+            assert!(is_stone_family(name), "{name} should be stone-family");
+        }
+        for name in ["minecraft:dirt", "minecraft:gravel", "minecraft:sand", "minecraft:deepslate"] {
+            assert!(!is_stone_family(name), "{name} should not be stone-family");
+        }
     }
 }

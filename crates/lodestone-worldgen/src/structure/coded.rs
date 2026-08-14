@@ -512,6 +512,7 @@ impl Builder {
             // with `groundLevelDelta` 0 and no junctions. Inert for both structures
             // here, whose `terrain_adaptation` is `none`.
             beard: None,
+            refine: None,
         }
     }
 }

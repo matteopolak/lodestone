@@ -466,6 +466,7 @@ mod tests {
             blocks: None,
             loot: Vec::new(),
             beard: None,
+            refine: None,
         }
     }
 

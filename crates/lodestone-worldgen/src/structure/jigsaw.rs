@@ -1219,6 +1219,7 @@ impl Placer<'_> {
                 blocks: None,
                 loot: Vec::new(),
                 beard,
+                refine: None,
             });
         }
         out
@@ -1593,6 +1594,7 @@ mod tests {
             blocks: None,
             loot: Vec::new(),
             beard: None,
+            refine: None,
         };
         let pieces = vec![
             piece([10, 60, -20], [19, 70, -11]),
