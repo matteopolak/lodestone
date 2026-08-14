@@ -425,6 +425,47 @@ fn accumulate_scroll_resets_the_carry_on_direction_reversal() {
     );
 }
 
+/// Issue #597: vanilla's `getNextScrollWheelSelection` collapses the whole-notch
+/// count to its **sign** before it becomes a hotbar-slot step, discarding any
+/// magnitude beyond one rather than queuing it for a later event.
+///
+/// A single large delta cannot by itself prove this — six notches producing a
+/// step of six (the wrong hypothesis) and six notches producing a step of one
+/// (vanilla) are the two things this test exists to tell apart, so the
+/// assertion has to compare against the actual six, not merely check the step
+/// is "smaller than something". Six is not a rounded-up guess: it is what a
+/// real macOS trackpad flick produces through this shell's own pipeline —
+/// `wheel_notches`' `PixelDelta` arm is `p.y * PRECISE_SCROLL_SCALE` (`0.1`),
+/// so a 60-point single-event `PixelDelta` (an ordinary flick, well under
+/// what a hard fling reports) already yields six notches at the default
+/// `mouseWheelSensitivity` of `1.0` — the exact shape of the owner's report.
+#[test]
+fn hotbar_scroll_step_collapses_accumulated_magnitude_to_sign() {
+    let flick_notches = 60.0 * PRECISE_SCROLL_SCALE;
+    assert_eq!(flick_notches, 6.0, "premise: a 60pt flick really is six notches");
+    let scaled = scale_scroll(flick_notches, false, 1.0);
+    let mut accum = 0.0;
+    let whole = accumulate_scroll(&mut accum, scaled);
+    assert_eq!(
+        whole, 6,
+        "premise: the accumulator itself must still report the full six-notch \
+         magnitude — this test is not about accumulate_scroll, which is correct \
+         and already gated elsewhere"
+    );
+
+    assert_eq!(
+        hotbar_scroll_step(whole),
+        1,
+        "vanilla advances the hotbar by exactly one slot per scroll event, \
+         never by the event's whole-notch magnitude; the wrong hypothesis \
+         (passing `whole` straight through) would give 6 here"
+    );
+    assert_eq!(hotbar_scroll_step(-whole), -1, "direction must survive the collapse");
+    assert_eq!(hotbar_scroll_step(1), 1, "an ordinary single-notch event is unaffected");
+    assert_eq!(hotbar_scroll_step(-1), -1);
+    assert_eq!(hotbar_scroll_step(0), 0, "no whole notch, no step");
+}
+
 /// Issue #61: the hotbar belongs to the world, not to active play.
 ///
 /// Oracle is vanilla, not our own reasoning — see `hud_follows_world`'s docs

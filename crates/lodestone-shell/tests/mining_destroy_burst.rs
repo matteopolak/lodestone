@@ -79,6 +79,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use lodestone::interact::{Attacking, MiningPredictor, NetHandle, ParticleSim, RayTarget};
+use lodestone::mesher::{MeshScheduler, TerrainMesh};
 use lodestone::particles::Particles;
 use lodestone::raycast::RayHit;
 use lodestone_client::{
@@ -92,7 +93,7 @@ use lodestone_ecs::{EcsHandle, GameTick, LockHolds, VersionData};
 use lodestone_game::mining::BreakInputs;
 use lodestone_model::{AdapterError, BlockHardness, ClientAction, ItemStack, ToolMining};
 use lodestone_world::{
-    ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, WorldSink,
+    BlockVolume, ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, WorldSink,
 };
 
 /// The progressive fixture's block state id. Any non-air id works — the dig
@@ -343,6 +344,14 @@ impl Harness {
             column_with(TARGET, version.state),
         );
 
+        // The chunk store's read/write halves, named from the *client's* `Arc`
+        // so a write through one and a read through the other see each
+        // other — `drive_mining` now takes both, for the local block-edit
+        // prediction (issue #596), the same pair `place_intent.rs`'s
+        // harness already installs for `drive_placement`.
+        let chunk_world = client.chunk_world();
+        let chunk_world_write = client.chunk_world_write();
+
         let shared: lodestone::net::SharedHandle = Arc::new(OnceLock::new());
         shared
             .set(Arc::clone(&client))
@@ -350,6 +359,8 @@ impl Harness {
         {
             let mut world = ecs.write();
             world.insert_resource(NetHandle(Some(shared)));
+            world.insert_resource(chunk_world);
+            world.insert_resource(chunk_world_write);
             let mut schedule = Schedule::new(GameTick);
             schedule.add_systems(lodestone::interact::drive_mining);
             world.add_schedule(schedule);
@@ -360,6 +371,25 @@ impl Harness {
             _runtime: runtime,
             _server_io: server_io,
         }
+    }
+
+    /// Read a block straight out of the same [`lodestone_ecs::ChunkWorld`]
+    /// `drive_mining`'s local prediction (issue #596) writes through —
+    /// `place_intent.rs`'s identical helper for `drive_placement`'s own
+    /// predicted write.
+    fn block_at(&self, pos: [i32; 3]) -> u32 {
+        let mut world = self.ecs.write();
+        let store = world.resource_mut::<lodestone_ecs::ChunkWorld>().clone();
+        let column = store.read();
+        let chunk = column
+            .get(ChunkPos::new(pos[0].div_euclid(16), pos[2].div_euclid(16)))
+            .expect("fixture column must be loaded");
+        BlockVolume::block(
+            &chunk.column,
+            pos[0].rem_euclid(16) as usize,
+            pos[1],
+            pos[2].rem_euclid(16) as usize,
+        )
     }
 }
 
@@ -374,6 +404,13 @@ fn build_resources(world: &mut EcsWorld, version: OneBlockVersion) {
     world.insert_resource(ParticleSim(Particles::new(None)));
     world.insert_resource(ActionQueue::default());
     world.insert_resource(VersionData(Some(Box::new(version))));
+    // `drive_mining`'s local block-edit prediction (issue #596) needs a mesh
+    // scheduler to re-mesh through; a `Demo` classifier is the same
+    // GPU-free choice `place_intent.rs`'s harness makes for `drive_placement`.
+    world.insert_resource(TerrainMesh::new(MeshScheduler::new(
+        1,
+        lodestone::blocks::ShellClassifier::Demo(lodestone::blocks::DemoClassifier),
+    )));
 }
 
 fn spawn_player(world: &mut EcsWorld) -> lodestone_ecs::ecs::entity::Entity {
@@ -546,5 +583,94 @@ fn an_instant_break_throws_a_debris_burst_on_its_very_first_tick() {
          while stone did.",
         version.state,
         version.hardness,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #596: the local block-edit prediction
+// ---------------------------------------------------------------------------
+
+/// **The gate for issue #596.** The local chunk store must show air on the
+/// exact tick a block is predicted destroyed, with **no server round trip
+/// involved at all**: this harness's `_server_io` end is never read from or
+/// written to after construction, so there is no ack this test could
+/// possibly be observing. If the fix regressed to waiting on the server's
+/// `BLOCK_UPDATE`, this assertion would fail outright rather than merely
+/// landing one tick late — the discriminating property this file's docs ask
+/// for, since a round-trip-shaped gate ("eventually reads air") would pass
+/// either way.
+#[test]
+fn an_instant_break_predicts_air_locally_with_no_server_round_trip() {
+    let version = instant_break_fixture();
+    let harness = Harness::build(version);
+
+    assert_eq!(
+        harness.block_at(TARGET),
+        version.state,
+        "precondition: the fixture block must still be its real (non-air) \
+         state before the dig runs, or the assertion below cannot tell a \
+         predicted edit from a fixture that was already air"
+    );
+
+    {
+        let mut world = harness.ecs.write();
+        world.run_schedule(GameTick);
+    }
+
+    assert_eq!(
+        harness.block_at(TARGET),
+        lodestone::blocks::id::AIR,
+        "the local chunk store must show air on the very tick the instant \
+         break is predicted — this is issue #596: without the local write, a \
+         laggy connection shows the break animation/burst and then the block \
+         only vanishing once the server's ack arrives"
+    );
+}
+
+/// The progressive-dig half of the same gate: air must appear on the exact
+/// tick `STOP_DESTROY_BLOCK` is queued, not on some later tick waiting for a
+/// server response — again with no server ever driven on the other end of
+/// `_server_io`.
+#[test]
+fn a_completed_dig_predicts_air_locally_on_the_finishing_tick() {
+    let harness = Harness::build(progressive_fixture());
+
+    assert_eq!(
+        harness.block_at(TARGET),
+        STONE,
+        "precondition: the progressive fixture must still be its real state \
+         before the dig starts"
+    );
+
+    let mut stop_tick = None;
+    for tick in 0..MAX_TICKS {
+        let actions = {
+            let mut world = harness.ecs.write();
+            world.run_schedule(GameTick);
+            std::mem::take(&mut world.resource_mut::<ActionQueue>().0)
+        };
+        if stop_destroy_queued(&actions) {
+            stop_tick = Some(tick);
+            break;
+        }
+        assert_eq!(
+            harness.block_at(TARGET),
+            STONE,
+            "tick {tick}: the block must not disappear before the dig actually \
+             finishes"
+        );
+    }
+
+    assert!(
+        stop_tick.is_some(),
+        "the dig never completed within {MAX_TICKS} ticks; this harness needs \
+         updating before the gate below can run at all"
+    );
+    assert_eq!(
+        harness.block_at(TARGET),
+        lodestone::blocks::id::AIR,
+        "the local chunk store must already show air on the tick StopDestroy \
+         was queued — issue #596's local block-edit prediction, mirrored from \
+         `MultiPlayerGameMode.destroyBlock`'s synchronous local `setBlock`"
     );
 }

@@ -416,6 +416,37 @@ fn accumulate_scroll(accum: &mut f64, scaled: f64) -> i32 {
     whole as i32
 }
 
+/// Vanilla's `ScrollWheelHandler.getNextScrollWheelSelection` (issue #597):
+/// collapses the whole-notch count [`accumulate_scroll`] returns to its
+/// **sign** before it becomes a hotbar-slot step —
+///
+/// ```java
+/// public static int getNextScrollWheelSelection(final double wheel, int currentSelected, final int limit) {
+///    int step = (int)Math.signum(wheel);
+///    currentSelected -= step;
+///    ...
+/// ```
+///
+/// [`accumulate_scroll`] can legitimately return a magnitude greater than one:
+/// a high `mouseWheelSensitivity`, or — the common case on a trackpad — a
+/// single `PixelDelta` event large enough that its scaled offset crosses
+/// several whole notches at once. Vanilla never turns that magnitude into
+/// several slots; the hotbar always advances by exactly one slot per scroll
+/// *event*, discarding the rest of that event's whole-notch count rather than
+/// queuing it for a later one. Passing the raw magnitude straight to
+/// [`crate::sim::Sim::cycle_slot`] instead is the owner's "scroll a bit,
+/// nothing happens; scroll more, it jumps like six slots" report: small
+/// deltas sit in [`accumulate_scroll`]'s fractional carry exactly as vanilla's
+/// dead zone does (correct), and then a brisk flick's single large event
+/// jumps several slots at once (the bug this function closes).
+///
+/// Free function for [`scale_scroll`]'s reason: testable without a window,
+/// and its own thing to get right independent of the accumulator or the
+/// scale.
+fn hotbar_scroll_step(whole: i32) -> i32 {
+    whole.signum()
+}
+
 /// What one raw physical key means while a Controls-menu bind button is
 /// mid-capture (issue #15's last hop) — extracted as a pure function so the
 /// decision is unit-testable without a window, the same reason

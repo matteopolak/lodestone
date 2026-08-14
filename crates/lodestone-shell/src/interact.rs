@@ -95,8 +95,12 @@
 //! `lodestone_game::{mining, placement}` for the two predictors (plain state
 //! machines the systems call — §8: verified logic stays a library),
 //! `lodestone_ecs` for the sets/resources/components, `crate::particles` for the
-//! emitter, and `crate::net::SharedHandle` for every read of the client-owned
-//! world.
+//! emitter, `crate::net::SharedHandle` for every read of the client-owned
+//! world, and — since issue #596 gave [`drive_mining`] its own local
+//! block-edit prediction, the same as [`drive_placement`] already had —
+//! `crate::mesher::TerrainMesh` plus [`lodestone_ecs::ChunkWorld`]/
+//! [`lodestone_ecs::ChunkWorldWrite`] for the write and the re-mesh it makes
+//! visible.
 
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::ecs::prelude::{Commands, Entity, Query, Res, ResMut, With};
@@ -570,6 +574,14 @@ pub fn drive_mining(
     target: Res<RayTarget>,
     net: Res<NetHandle>,
     version: Res<VersionData>,
+    // The chunk store's two halves, for the local block-edit prediction (issue
+    // #596) — the same pair [`drive_placement`] already takes, for the same
+    // reason: the read handle for the re-mesh, the write handle because only
+    // the store's legitimate writers may hold one (see [`ChunkWorldWrite`]'s
+    // own docs).
+    chunk_world: Res<ChunkWorld>,
+    write: Res<ChunkWorldWrite>,
+    mut terrain: ResMut<TerrainMesh>,
     mut mining: ResMut<MiningPredictor>,
     mut particles: ResMut<ParticleSim>,
     mut queue: ResMut<ActionQueue>,
@@ -794,33 +806,56 @@ pub fn drive_mining(
     // than it already is for the progressive mining chips a few lines above,
     // which predict exactly as eagerly.
     //
-    // # Known divergence: a one-shot break can burst more than once
+    // # The local block-edit prediction (issue #596)
     //
-    // Vanilla's guard against re-breaking the same cell is the *local* block
-    // edit `destroyBlock` performs (`level.setBlock(pos, .., 11)`), after which
-    // its own `oldState.isAir()` early-return fires. This shell predicts no
-    // block edit, so between the `StartDestroy` going out and the server's
-    // `BLOCK_UPDATE` coming back, `net.block_at(pos)` still reports the plant
-    // and a held button re-latches a destruction each tick. The progressive
-    // path is shielded from this by `Mining`'s 5-tick `destroyDelay`; vanilla
-    // deliberately sets no such delay on the survival instant-break branch,
-    // relying on the local edit instead. Bounded by the round trip (one or two
-    // ticks) and self-limiting — `Sim::update_target` stops reporting a hit once
-    // the cell is air, which aborts the dig — so it reads as a slightly heavier
-    // puff rather than a stream. Predicting the block edit is the real fix and
-    // is the same missing piece the mispredicted-break gap above names.
-    if mining.0.take_destroyed().is_some() {
+    // Vanilla's `destroyBlock` does not just spawn debris — it first sets the
+    // block to air *locally, synchronously*
+    // (`level.setBlock(pos, fluidState.createLegacyBlock(), 11)`,
+    // `MultiPlayerGameMode.java`), before any server round trip. This shell
+    // used to predict only the particle burst and leave the actual block-state
+    // write to the server's `BLOCK_UPDATE` ack: on a laggy connection that
+    // showed the normal break animation completing and then the block vanishing
+    // only once the ack landed, rather than disappearing on the same tick a
+    // real client would. Writing the state here — through the same
+    // [`write_predicted_block`] + [`crate::mesher::TerrainMesh::remesh_around`]
+    // pair [`drive_placement`] uses for its own predicted edit — closes that
+    // gap: the cell reads as air, and the mesh reflects it, on the exact tick
+    // [`Mining::take_destroyed`] fires, with no wait for the server.
+    //
+    // A stray re-latch on the *same* target the very next tick cannot happen
+    // regardless of this write: both destroy paths in [`Mining`] arm its 5-tick
+    // `delay` immediately (`start`'s instant-break branch and `continue_`'s
+    // progress-reached-`1.0` branch both do), and `continue_` checks that
+    // cooldown **before** it ever reads the target's block state — see
+    // `Mining::continue_`'s own docs. This write's job is narrower: making the
+    // *visible* result agree with the server's eventual one immediately,
+    // rather than only once the ack round trip completes. A mispredicted break
+    // (the server rejects the dig) still has no rollback — the same accepted
+    // gap [`drive_placement`]'s predicted write carries, and no worse here.
+    if let Some(destroyed) = mining.0.take_destroyed() {
+        // `hit.block` rather than the latched `destroyed` position: they are
+        // the same cell (`pos` is built from `hit.block` above and is what
+        // both predictor entry points were handed) — asserted rather than
+        // silently assumed, since a mismatch here would write the wrong cell.
+        debug_assert_eq!(
+            destroyed,
+            pos,
+            "Mining::take_destroyed must name the cell drive_mining just aimed \
+             at, or this write lands on the wrong block"
+        );
+        {
+            let mut world = write.write();
+            write_predicted_block(&mut *world, hit.block, id::AIR);
+        }
+        terrain.remesh_around(&chunk_world, hit.block);
         // Full-cube shape and untinted white, for the same reason as the
         // mining-chip particle a few lines up: the shell does not carry a
         // block's outline shape, and `destroy_block` itself resolves the
         // real per-state tint (see its own docs) — `[1.0; 3]` is the
         // multiplier, not a placeholder colour.
         //
-        // `hit.block`/`id_value` rather than the latched position: they are the
-        // same cell (`pos` is built from `hit.block` above and is what both
-        // predictor entry points were handed), and taking both the position and
-        // the state id from the one `net.block_at` lookup keeps them from ever
-        // describing different blocks.
+        // `id_value`, not `id::AIR`: the burst must show the block that *was*
+        // there, not the air it just became.
         particles.0.destroy_block(hit.block, id_value, [1.0; 3]);
     }
     queue.0.extend(actions);
