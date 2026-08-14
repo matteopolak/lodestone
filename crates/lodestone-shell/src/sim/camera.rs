@@ -636,7 +636,17 @@ impl Sim {
         }
         Some(ThirdPersonBodyState {
             feet,
-            body_yaw_deg: interp.yaw,
+            // `walk.body_yaw` — `EntityPose::render`'s interpolated body yaw —
+            // not `interp.yaw` (the raw look yaw). This used to be `interp.yaw`
+            // directly, which is the mesh-orientation half of the "body always
+            // faces exactly where the camera does" bug: `Sim::step` already
+            // feeds `body_pose` a properly eased, clamped body yaw (see its own
+            // doc), but this accessor was reading straight past it to the raw
+            // look yaw instead, so the fix in `step.rs` alone was invisible on
+            // screen. `walk` was already computed above for `anim`'s walk-cycle
+            // fields; this reuses it rather than re-deriving `body_pose.render`
+            // a second time at a different partial tick.
+            body_yaw_deg: walk.body_yaw,
             anim: self.body_anim(&interp, &walk),
             scale: 1.0,
             slim: crate::skin_fetch::current_model().is_slim(),
@@ -656,7 +666,16 @@ impl Sim {
         walk: &lodestone_entity::pose::RenderPose,
     ) -> AnimInput {
         AnimInput {
-            head_yaw_deg: 0.0,
+            // `walk.head_yaw` is `EntityPose::render`'s `relative_head_yaw_lerp`
+            // — the look yaw already clamped to and expressed relative to the
+            // eased body yaw `Sim::step` now feeds `EntityPose::tick`. This
+            // used to be a bare `0.0`: `EntityPose::tick` was fed the raw look
+            // yaw for *both* its `body_yaw` and `head_yaw` parameters, which
+            // makes the body always equal the head (`Sim::step`'s own doc on
+            // that call explains why), so this field being unread there was
+            // no loss — reading it back now that the body actually lags is
+            // what makes the head turn independently of the body at all.
+            head_yaw_deg: walk.head_yaw,
             head_pitch_deg: interp.pitch,
             limb_swing: walk.limb_swing,
             limb_swing_amount: walk.limb_swing_amount,
