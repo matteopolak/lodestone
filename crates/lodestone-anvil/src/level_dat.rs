@@ -2,22 +2,20 @@
 //!
 //! Cited against `.cache/mc/26.2/src/`:
 //!
-//! - `net/minecraft/nbt/NbtIo.java`: `readCompressed`/`writeCompressed`
-//!   (`NbtIo.java:32-34,68-76`) wrap the payload in gzip
-//!   (`createDecompressorStream`/`createCompressorStream`,
-//!   `NbtIo.java:38-44`: `GZIPInputStream`/`GZIPOutputStream`) — **not**
-//!   zlib, unlike the *default* region-chunk scheme. This is the trap issue
-//!   #300 itself calls out: don't reuse `region.rs`'s container for this
-//!   file, only the shared NBT codec.
-//! - `net/minecraft/world/level/storage/LevelStorageSource.java:598`:
+//! - `net/minecraft/nbt/NbtIo.java`: `readCompressed`/`writeCompressed` wrap
+//!   the payload in gzip (`createDecompressorStream`/`createCompressorStream`
+//!   use `GZIPInputStream`/`GZIPOutputStream`) — **not** zlib, unlike the
+//!   *default* region-chunk scheme. This is the trap this crate's own
+//!   `level_dat` module exists to avoid: don't reuse `region.rs`'s container
+//!   for this file, only the shared NBT codec.
+//! - `LevelStorageSource.LevelStorageAccess.saveLevelData`'s
 //!   `NbtIo.writeCompressed(root, dataFile);` is the real level.dat write
-//!   call (distinct from the generic `writeSavedData` at
-//!   `LevelStorageSource.java:196-204`, which is for the unrelated per-type
-//!   `.dat` files under a world's `data/` folder, e.g. saved game rules —
-//!   easy to conflate at a skim, since both call `NbtUtils.addCurrentDataVersion`
-//!   then `NbtIo.writeCompressed`).
-//! - `net/minecraft/world/level/storage/LevelStorageSource.java:276-277`:
-//!   `readLevelDataTagRaw` — `NbtIo.readCompressed(dataFile,
+//!   call (distinct from the generic `LevelStorageSource.writeSavedData`,
+//!   which is for the unrelated per-type `.dat` files under a world's
+//!   `data/` folder, e.g. saved game rules — easy to conflate at a skim,
+//!   since both call `NbtUtils.addCurrentDataVersion` then
+//!   `NbtIo.writeCompressed`).
+//! - `LevelStorageSource.readLevelDataTagRaw` — `NbtIo.readCompressed(dataFile,
 //!   NbtAccounter.uncompressedQuota())` is the read side.
 //!
 //! # The `Data`/`DataVersion` structure, verified against a real file
@@ -34,8 +32,7 @@
 //!   length 0) root `Compound` tag, exactly the "named NBT with an empty
 //!   root name" form [`lodestone_core::read_named_nbt`] already implements.
 //! - Its first field is `0a 0004 "Data"` — a `Compound` named `"Data"`,
-//!   matching `LevelStorageSource.TAG_DATA = "Data"`
-//!   (`LevelStorageSource.java:93`).
+//!   matching the constant `LevelStorageSource.TAG_DATA = "Data"`.
 //! - Nested inside `"Data"`, at byte offset 368, is a field named
 //!   `"DataVersion"` (an 11-character UTF-8 name, tag byte `0x03` = `Int`)
 //!   with value **4903** — this oracle's world was created with the 26.2
@@ -68,8 +65,8 @@
 //! | `allowCommands` | `Byte` | |
 //! | `initialized` | `Byte` | |
 //!
-//! **There is no seed**, in any field, in any of the six files. Issues #437
-//! and #468 both stated there was one and both were wrong; it lives in
+//! **There is no seed**, in any field, in any of the six files, despite
+//! earlier reports to the contrary; it lives in
 //! `<world>/data/minecraft/world_gen_settings.dat`, modelled by
 //! [`crate::world_gen_settings`]. See that module.
 //!
@@ -119,9 +116,10 @@ pub const ANVIL_VERSION: i32 = 19133;
 ///
 /// Unlike [`crate::world_gen_settings::path_in`] this one is flat: `level.dat`
 /// is *not* under `data/`, because it is written by
-/// `LevelStorageSource.java:598`'s direct `NbtIo.writeCompressed(root,
-/// dataFile)` rather than by the generic `writeSavedData` path that resolves
-/// a `ResourceLocation` against `data/`. Conflating the two is exactly the
+/// `LevelStorageSource.LevelStorageAccess.saveLevelData`'s direct
+/// `NbtIo.writeCompressed(root, dataFile)` rather than by the generic
+/// `LevelStorageSource.writeSavedData` path that resolves a
+/// `ResourceLocation` against `data/`. Conflating the two is exactly the
 /// trap this module's header warns about.
 #[must_use]
 pub fn path_in(world_dir: &Path) -> PathBuf {
@@ -666,8 +664,8 @@ mod tests {
         assert_eq!((spawn.yaw, spawn.pitch), (0.0, 0.0));
     }
 
-    /// The correction issues #437 and #468 both got wrong, pinned as a gate so
-    /// it cannot be re-asserted by a future reader: a 26.2 `level.dat` carries
+    /// A correction pinned as a gate so it cannot be re-asserted by a future
+    /// reader: a 26.2 `level.dat` carries
     /// **no seed**, under any spelling. The seed is in
     /// `data/minecraft/world_gen_settings.dat` — see [`crate::world_gen_settings`].
     #[test]

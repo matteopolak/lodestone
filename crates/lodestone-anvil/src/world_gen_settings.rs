@@ -6,8 +6,7 @@
 //! Without it, chunks the player never visited are regenerated from a
 //! different seed on the next open, and the world is self-inconsistent at the
 //! edges of wherever the player had been — a defect no blocks-only save gate
-//! can see, because every block such a gate checks was saved. Issue
-//! [#468](https://github.com/matteopolak/lodestone/issues/468).
+//! can see, because every block such a gate checks was saved.
 //!
 //! # It is **not** in `level.dat`, and that is the trap
 //!
@@ -34,21 +33,20 @@
 //!
 //! Where it moved, cited against `.cache/mc/26.2/src/`:
 //!
-//! - `LevelStorageSource.writeWorldGenSettings`
-//!   (`LevelStorageSource.java:191-193`) calls the generic
+//! - `LevelStorageSource.writeWorldGenSettings` calls the generic
 //!   `writeSavedData(worldFolder, ops, WorldGenSettings.TYPE,
 //!   WorldGenSettings.CODEC, …)`.
-//! - `writeSavedData` (`LevelStorageSource.java:196-204`) wraps the codec
+//! - `LevelStorageSource.writeSavedData` wraps the codec
 //!   output as `fullTag.put("data", encoded)`, adds `DataVersion`, and writes
 //!   it with `NbtIo.writeCompressed` (gzip, like `level.dat`) to
 //!   `type.id().withSuffix(".dat").resolveAgainst(worldFolder.resolve("data"))`
 //!   — i.e. **`<world>/data/minecraft/world_gen_settings.dat`**, confirmed
 //!   present on disk in all three 26.2 oracle worlds above.
-//! - The read side is `readExistingSavedData(…, WorldGenSettings.TYPE)`
-//!   (`LevelStorageSource.java:154-163`), and **vanilla's own fallback when
-//!   that file is unreadable is exactly issue #468's bug**: it logs "Unable to
-//!   read or access the world gen settings file! Falling back to the default
-//!   settings with a random world seed" and builds
+//! - The read side is `LevelStorageSource.readExistingSavedData(…,
+//!   WorldGenSettings.TYPE)`, and **vanilla's own fallback when that file is
+//!   unreadable regenerates the world with a fresh random seed**: it logs
+//!   "Unable to read or access the world gen settings file! Falling back to
+//!   the default settings with a random world seed" and builds
 //!   `WorldOptions.defaultWithRandomSeed()`.
 //!
 //! # The layout, verified byte-by-byte
@@ -99,10 +97,12 @@ use lodestone_core::Nbt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// The `"data"` wrapper `writeSavedData` puts the codec output under —
-/// lowercase, unlike `level.dat`'s `"Data"` (`LevelStorageSource.java:198`).
+/// The `"data"` wrapper `LevelStorageSource.writeSavedData` puts the codec
+/// output under — lowercase, unlike `level.dat`'s `"Data"`
+/// (`LevelStorageSource.TAG_DATA`).
 const DATA_FIELD: &str = "data";
-/// `NbtUtils.addCurrentDataVersion` (`LevelStorageSource.java:200`).
+/// Set by `NbtUtils.addCurrentDataVersion`, called from
+/// `LevelStorageSource.writeSavedData`.
 const DATA_VERSION_FIELD: &str = "DataVersion";
 /// `WorldOptions.CODEC`'s seed field.
 const SEED_FIELD: &str = "seed";
@@ -323,9 +323,10 @@ pub fn write(settings: &WorldGenSettings) -> Result<Vec<u8>> {
 }
 
 /// Encodes and writes `settings` to `path`, creating parent directories —
-/// vanilla's own `FileUtil.createDirectoriesSafe(path.getParent())`
-/// (`LevelStorageSource.java:202`), needed because `<world>/data/minecraft/`
-/// does not exist in a world folder this code has only ever written regions to.
+/// vanilla's own `FileUtil.createDirectoriesSafe(path.getParent())`, called
+/// from `LevelStorageSource.writeSavedData`, needed because
+/// `<world>/data/minecraft/` does not exist in a world folder this code has
+/// only ever written regions to.
 ///
 /// # Errors
 ///

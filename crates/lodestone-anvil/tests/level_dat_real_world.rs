@@ -1,5 +1,5 @@
 //! Reads real `level.dat` files this crate did not write, across every one
-//! of this repo's 26.2 oracle worlds — the direct evidence for issue #300's
+//! of this repo's 26.2 oracle worlds — the direct evidence for this crate's
 //! own verification bar ("round-trip against a `level.dat` produced by a
 //! real 26.2 server").
 //!
@@ -71,7 +71,7 @@ fn survival_oracle_level_dat_has_the_real_data_version() {
 #[test]
 #[ignore = "requires .cache/mc/creative/world/level.dat, a real file this crate did not write"]
 fn modifying_a_real_level_dat_and_writing_it_back_preserves_every_other_field() {
-    // The part of issue #300's verification bar this crate CAN clear without
+    // The part of this crate's own verification bar it CAN clear without
     // a live server round trip: read a real file, change exactly the field
     // this crate models (DataVersion), write it back out, and confirm
     // nothing else moved. This does not prove "the real server still opens

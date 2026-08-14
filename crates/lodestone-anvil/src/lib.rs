@@ -3,11 +3,8 @@
 //! ## What it is
 //!
 //! A version-free reader/writer for Minecraft's on-disk world persistence
-//! formats: the Anvil region file (`.mca`, issue
-//! [#298](https://github.com/matteopolak/lodestone/issues/298)) and
-//! `level.dat` world metadata (issue
-//! [#300](https://github.com/matteopolak/lodestone/issues/300)). It is the
-//! first thing in this repo that can save or load a world at all — before
+//! formats: the Anvil region file (`.mca`) and `level.dat` world metadata.
+//! It is the first thing in this repo that can save or load a world at all — before
 //! this crate, `grep -rln 'RegionFile\|\.mca\b|region_file|Anvil\b'` across
 //! every `.rs` file in the workspace returned nothing.
 //!
@@ -28,10 +25,10 @@
 //! - [`level_dat`]: `level.dat`'s container — an un-chunked, gzip-wrapped
 //!   NBT file, and the `DataVersion` field inside it. Everything else in
 //!   `LevelData` (seed, spawn, gamerules, weather, ...) is explicitly
-//!   *not* modelled yet — issue #300's own text says to sequence that
-//!   against whichever issue settles each field's in-memory representation
-//!   first, rather than guess a schema here that would need a second pass
-//!   per subsystem landed afterward.
+//!   *not* modelled yet — deliberately sequenced behind whichever future
+//!   work settles each field's in-memory representation first, rather than
+//!   guess a schema here that would need a second pass per subsystem landed
+//!   afterward.
 //! - [`compression`]: the compression-scheme byte shared by both formats
 //!   (gzip/zlib/none/lz4 for region chunks; always gzip for `level.dat`).
 //! - [`nbt_diff`]: canonical, path-reporting structural comparison of two NBT
@@ -48,22 +45,20 @@
 //!
 //! - **This crate is deliberately not wired into `lodestone-server`.**
 //!   Nothing in the workspace calls into it yet — a declared island, per
-//!   `HANDOFF.md`'s standing-ledger convention and tracked on
-//!   [#436](https://github.com/matteopolak/lodestone/issues/436). The
-//!   wiring itself — hooking chunk load/save into whatever chunk source
-//!   `lodestone-server` currently has, deciding the in-memory chunk schema
-//!   a `Nbt` tree maps to/from, and `level.dat` load/save on world open —
-//!   is issue [#437](https://github.com/matteopolak/lodestone/issues/437).
-//!   Land that wiring there, not here; this crate should stay usable
-//!   without depending on `lodestone-server`, `lodestone-world`, or any
+//!   `HANDOFF.md`'s standing-ledger convention. The wiring itself — hooking
+//!   chunk load/save into whatever chunk source `lodestone-server`
+//!   currently has, deciding the in-memory chunk schema a `Nbt` tree maps
+//!   to/from, and `level.dat` load/save on world open — belongs in a
+//!   separate server-wiring effort. Land it there, not here; this crate
+//!   should stay usable without depending on `lodestone-server`, `lodestone-world`, or any
 //!   protocol crate (verified: `cargo tree -p lodestone-anvil` pulls in
 //!   only `lodestone-core`, `flate2`, `thiserror`, `lz4_flex`,
 //!   `xxhash-rust`, and their own transitive dependencies).
 //! - **The container format and the chunk NBT schema are two different
-//!   problems** (issue #298's own stated trap). Don't grow `region` a
-//!   dependency on chunk internals to "make reading more convenient" —
-//!   that dependency belongs in #437's wiring code, operating on the
-//!   [`lodestone_core::Nbt`] tree this crate hands back.
+//!   problems.** Don't grow `region` a dependency on chunk internals to
+//!   "make reading more convenient" — that dependency belongs in the future
+//!   server-wiring code, operating on the [`lodestone_core::Nbt`] tree this
+//!   crate hands back.
 //! - **Zero-length input and short-but-nonzero input are different
 //!   errors**, and mixing them up regresses a real vanilla behaviour: an
 //!   empty/nonexistent region file is a legal, chunk-less region (vanilla
@@ -104,8 +99,7 @@ pub mod world_gen_settings;
 
 pub use compression::CompressionScheme;
 
-/// Refuses an on-disk `DataVersion` this build cannot read correctly (issue
-/// [#305](https://github.com/matteopolak/lodestone/issues/305)).
+/// Refuses an on-disk `DataVersion` this build cannot read correctly.
 ///
 /// # Why this refuses instead of upgrading
 ///
@@ -192,8 +186,8 @@ pub enum Error {
     },
     /// A chunk's location entry was nonzero but its declared stream length
     /// was 0 — present in the table, but with no data
-    /// (`RegionFile.java:131-134`'s "Chunk is allocated, but stream is
-    /// missing").
+    /// (`RegionFile.getChunkDataInputStream`'s "Chunk is allocated, but
+    /// stream is missing").
     #[error("chunk ({local_x}, {local_z}) is allocated but its stream is missing")]
     ChunkStreamMissing {
         /// Region-local X.
@@ -312,8 +306,8 @@ pub enum Error {
     MissingDataField,
     /// A [`world_gen_settings`] file carried no numeric `"seed"`. For a world
     /// this code wrote, that means the seed is unrecoverable and reopening
-    /// would silently regenerate unexplored chunks from a different one —
-    /// issue #468's whole subject, so it is an error rather than a default.
+    /// would silently regenerate unexplored chunks from a different one, so
+    /// this is an error rather than a default.
     #[error(r#"world_gen_settings.dat has no numeric "seed" field"#)]
     MissingSeed,
 
@@ -340,8 +334,8 @@ mod data_version_tests {
     #[test]
     fn accepts_only_the_version_we_write() {
         require_supported_data_version(Some(level_dat::DATA_VERSION_26_2)).expect("current");
-        // Both directions, and absent. The older arm is the one #305 is about;
-        // the newer arm is the one an "upgrade only" reading of it would miss.
+        // Both directions, and absent. The older arm is a stale-DataVersion
+        // refusal; the newer arm is the one an "upgrade only" reading would miss.
         for found in [None, Some(0), Some(3955), Some(4902), Some(4904), Some(i32::MAX)] {
             assert!(
                 matches!(
