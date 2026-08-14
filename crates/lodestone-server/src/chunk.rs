@@ -1286,6 +1286,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).block_entity(x, y, z)
     }
 
+    fn is_column_resident(&self, cx: i32, cz: i32) -> bool {
+        (**self).is_column_resident(cx, cz)
+    }
+
     fn unload(&self, cx: i32, cz: i32) {
         (**self).unload(cx, cz);
     }
