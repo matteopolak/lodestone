@@ -448,6 +448,81 @@ impl PlayerDataStore {
     }
 }
 
+/// A continuously-refreshed, in-memory mirror of the most recent
+/// [`PlayerData`] a connection would save, read back by
+/// [`crate::IntegratedServer::shutdown`] to persist a player who never
+/// reaches either of `crate::server`'s two deliberate save points.
+///
+/// # Why this exists
+///
+/// Singleplayer's own shutdown is not a socket close. `IntegratedServer::
+/// shutdown` fires a signal that **races** the connection task's whole
+/// serving future in a `tokio::select!` (`crate::integrated`'s connection
+/// task), and on an ordinary "leave world" the signal wins essentially every
+/// time: the serving future — including its own stack-local `player_pos`,
+/// `player_rot`, `game_mode` and `inventory` — is dropped mid-`.await`, not
+/// returned from. `crate::server`'s disconnect-save arm (the branch where
+/// `conn.read_packet()` resolves to `Ok(None)`) is therefore structurally
+/// unreachable on that path: it exists for a *real* peer socket closing,
+/// which singleplayer's in-process `DuplexStream` never does on its own.
+/// That leaves only the periodic ~30-second `vitals_tick` save able to
+/// survive a quit, so a `/gamemode`, a move or a pickup inside that window
+/// — or before the first tick ever fires — was silently discarded on
+/// rejoin, while block edits (flushed by the unrelated world-autosave path)
+/// were not.
+///
+/// # How this fixes it
+///
+/// `crate::server`'s own `serve_play` calls [`Self::publish`] once per
+/// iteration of its own `select!` loop — a cheap in-memory clone, no disk
+/// I/O — so the slot always holds a snapshot at most one packet or timer
+/// tick stale, regardless of whether the future that built it is later
+/// cancelled. [`IntegratedServer::shutdown`] reads it with [`Self::take`]
+/// **after** joining the connection task (the same ordering the final
+/// region flush already uses, and for the same reason: nothing can produce
+/// a newer snapshot once that task is known to have stopped) and persists
+/// it directly — independent of whether the connection future that built it
+/// is still alive to run its own cleanup.
+///
+/// # How to change it
+///
+/// The slot carries the resolved [`PlayerDataStore`] and [`Uuid`] alongside
+/// the [`PlayerData`] itself (rather than `IntegratedServer` re-deriving a
+/// store from its own chunk source at shutdown) so this stays a pure
+/// read-what-was-last-published operation with no second source of truth to
+/// keep in step. [`Self::publish`] is a no-op for a `None` store — the
+/// in-memory/browser case, where there is nothing to persist — matching
+/// `crate::server::persist_player`'s own behaviour for the same input.
+#[derive(Debug, Clone, Default)]
+pub struct LiveSaveSlot(std::sync::Arc<std::sync::Mutex<Option<(PlayerDataStore, uuid::Uuid, PlayerData)>>>);
+
+impl LiveSaveSlot {
+    /// A fresh, empty slot — the compatibility value every entry point other
+    /// than the singleplayer one passes, mirroring `BlockTickFeed::default()`
+    /// and its siblings in `crate::server`: nothing reads a slot the
+    /// singleplayer path did not wire a real consumer for.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publishes the latest snapshot, replacing whatever was there. A `None`
+    /// `store` is a no-op — there is nothing to persist into.
+    pub fn publish(&self, store: Option<PlayerDataStore>, uuid: uuid::Uuid, data: PlayerData) {
+        let Some(store) = store else {
+            return;
+        };
+        *self.0.lock().expect("live save slot lock poisoned") = Some((store, uuid, data));
+    }
+
+    /// Takes the latest snapshot, if [`Self::publish`] was ever called with a
+    /// real store.
+    #[must_use]
+    pub fn take(&self) -> Option<(PlayerDataStore, uuid::Uuid, PlayerData)> {
+        self.0.lock().expect("live save slot lock poisoned").take()
+    }
+}
+
 fn field<'a>(nbt: &'a Nbt, key: &str) -> Option<&'a Nbt> {
     match nbt {
         Nbt::Compound(fields) => fields

@@ -11,8 +11,8 @@
 use lodestone_core::State;
 use lodestone_model::command_tree::CommandTree;
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, GameMode, ItemStack, ResourceKey, Rotation,
-    SoundCategory, Text, Vec3, Vec3f,
+    BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
+    ItemStack, ResourceKey, Rotation, SoundCategory, Text, Vec3, Vec3f,
 };
 use uuid::Uuid;
 
@@ -2178,6 +2178,28 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes an attribute update for the local player (vanilla
+    /// `ClientboundUpdateAttributesPacket`).
+    ///
+    /// **The client half already existed and the server never fed it**: the
+    /// HUD's armour row (`lodestone_shell::hud`), `Session::armour_value` and
+    /// the v770 adapter's `UPDATE_ATTRIBUTES` decode were all in place, but
+    /// this crate had no encoder at all — the armour bar read a permanent
+    /// `None` in singleplayer no matter what was equipped. This is the
+    /// island bug running in the *send* direction: a complete consumer chain
+    /// with nothing at the other end producing the packet.
+    ///
+    /// `attributes` is whatever the caller has already folded — in practice
+    /// `PlayerInventory::combat_stats().attributes`, so equipment maths lives
+    /// in one place (`lodestone_entity::equipment`) rather than being
+    /// re-derived at the wire. The default emits nothing, so a protocol
+    /// without attribute support behaves exactly as it did before this
+    /// method existed and the HUD row simply never appears.
+    fn encode_update_attributes(&self, attributes: &[EntityAttributeSnapshot]) -> ServerDirective {
+        let _ = attributes;
+        ServerDirective::None
+    }
+
     /// Encodes the death notification (vanilla `ClientboundPlayerCombatKillPacket`,
     /// wire id `player_combat_kill`) — **the packet that raises the death screen**.
     ///
@@ -2856,6 +2878,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_set_health(health, food, saturation)
     }
 
+    fn encode_update_attributes(&self, attributes: &[EntityAttributeSnapshot]) -> ServerDirective {
+        (**self).encode_update_attributes(attributes)
+    }
+
     fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
         (**self).encode_change_difficulty(difficulty, locked)
     }
@@ -3182,6 +3208,9 @@ mod tests {
             let _ = saturation;
             send(health as i32 * 100 + food)
         }
+        fn encode_update_attributes(&self, attributes: &[EntityAttributeSnapshot]) -> ServerDirective {
+            send(1950 + attributes.len() as i32)
+        }
         fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
             send(difficulty as i32 * 10 + i32::from(locked))
         }
@@ -3385,6 +3414,15 @@ mod tests {
         assert_eq!(
             boxed.encode_set_health(4.0, 20, 5.0),
             direct.encode_set_health(4.0, 20, 5.0)
+        );
+        let armor_snapshot = [EntityAttributeSnapshot {
+            attribute: "minecraft:armor".parse().expect("valid identifier"),
+            base: 6.0,
+            modifiers: Vec::new(),
+        }];
+        assert_eq!(
+            boxed.encode_update_attributes(&armor_snapshot),
+            direct.encode_update_attributes(&armor_snapshot)
         );
         assert_eq!(
             boxed.encode_change_difficulty(Difficulty::Hard, true),

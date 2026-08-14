@@ -569,6 +569,18 @@ pub struct IntegratedServer {
     /// The **same** handle the tick loop advances and every connection reads; kept
     /// here so the persistence path can load it at open and stamp it on save.
     world_state: crate::world_state::WorldStateHandle,
+    /// Issue #302's shutdown-cancellation gap: the connection task's own
+    /// `select!` in this file (below) races the whole serving future against
+    /// `shutdown`, and on an ordinary quit the signal wins — the serving
+    /// future is dropped mid-`.await`, never returned from, so its
+    /// disconnect-save arm (`crate::server::persist_player`'s
+    /// `conn.read_packet()`-returns-`None` branch) never runs. This mirror is
+    /// what [`shutdown`](Self::shutdown) persists from instead: `serve_play`
+    /// publishes to it every loop iteration, so it survives the cancellation
+    /// that would otherwise drop the only copy of the session's last
+    /// position, rotation and game mode. See
+    /// [`crate::player_data::LiveSaveSlot`]'s own doc comment.
+    live_save: crate::player_data::LiveSaveSlot,
     /// The RCON listener task (issue #331), `Some` once
     /// [`start_rcon`](Self::start_rcon) has been called.
     ///
@@ -848,6 +860,14 @@ impl IntegratedServer {
                 poi_storage: None,
                 // No tick loop here, so there is nothing to share a store *with*.
                 world_state: crate::world_state::WorldStateHandle::default(),
+                // This constructor's own connection goes through
+                // `serve_connection_shared`, not the singleplayer
+                // `_with_mob_events_shared` entry point that threads a real
+                // handle, so there is nothing publishing to this one and
+                // `shutdown` reading it back is a no-op — matching every
+                // other `None`/`default()` field above for a constructor with
+                // no `PlayerDataStore` reachable in the first place.
+                live_save: crate::player_data::LiveSaveSlot::default(),
                 // No RCON listener (issue #331) unless the caller starts one
                 // explicitly with `start_rcon` — a listener needs a password
                 // and a command dispatch, which these constructors do not take.
@@ -1324,6 +1344,15 @@ impl IntegratedServer {
         // A third clone for the returned handle, so a caller (the persistence path,
         // a gate) reads and stamps the *same* store the loop advances.
         let world_state_for_handle = world_state.clone();
+        // Issue #302's shutdown-cancellation gap — see the field's own doc
+        // comment on `IntegratedServer`. `conn_live_save` is what
+        // `serve_play` publishes a fresh snapshot to every loop iteration;
+        // `live_save` is the clone kept for the returned handle, exactly the
+        // `world_state`/`world_state_for_handle` split just above, and for
+        // the same reason (a clone made inside the `async move` below would
+        // move the original out of the handle's reach).
+        let live_save = crate::player_data::LiveSaveSlot::new();
+        let conn_live_save = live_save.clone();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
             tokio::select! {
@@ -1354,6 +1383,7 @@ impl IntegratedServer {
                     &conn_sleep_vote,
                     &conn_sleep_feed,
                     &conn_world_state,
+                    &conn_live_save,
                 ) => {}
             }
             // Issue #562: lets the relay task above drop this connection's
@@ -1498,6 +1528,7 @@ impl IntegratedServer {
                 #[cfg(not(target_arch = "wasm32"))]
                 poi_storage: None,
                 world_state: world_state_for_handle,
+                live_save,
                 #[cfg(not(target_arch = "wasm32"))]
                 rcon_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2442,6 +2473,12 @@ impl IntegratedServer {
             #[cfg(not(target_arch = "wasm32"))]
             poi_storage: None,
             world_state: handle_world_state,
+            // LAN worlds are not persistent yet (see `save: None` above), and
+            // each accepted connection is a different player besides — a
+            // single shared slot would mix their saves. `shutdown` reading
+            // this back is therefore a no-op here, same as every other
+            // persistence field on this constructor.
+            live_save: crate::player_data::LiveSaveSlot::default(),
             // Set by the `start_rcon` call just below when the caller asked for
             // one (issue #331). It needs a password, so it stays opt-in.
             #[cfg(not(target_arch = "wasm32"))]

@@ -72,13 +72,15 @@
 //! item identity that was already decoded, which is precisely the fail-closed
 //! behaviour this seam exists to remove.
 
-use lodestone_core::{Error, Reader, Result, plain_text_from_nbt_component, read_network_nbt};
+use lodestone_core::{
+    Error, Reader, Result, Writer, plain_text_from_nbt_component, read_network_nbt,
+};
 use lodestone_model::{
     EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate, EntityPose,
     EntityVariant, Identifier, ItemStack, Reported,
 };
 
-use lodestone_data::attribute_types::attribute_name;
+use lodestone_data::attribute_types::{attribute_id, attribute_name};
 use crate::entity_variants;
 
 /// Sentinel index terminating a metadata list.
@@ -825,6 +827,42 @@ pub fn read_update_attributes(
         });
     }
     Ok((entity_id, attributes))
+}
+
+/// Encodes an `update_attributes` packet — the inverse of
+/// [`read_update_attributes`], and the wire producer that packet never had
+/// (the decoder existed for a real vanilla server's own `update_attributes`;
+/// nothing in this workspace built the byte string until the integrated
+/// server needed to send one for the armour bar).
+///
+/// Each snapshot's canonical attribute id is resolved back to its network id
+/// through [`attribute_id`]; a snapshot naming an attribute this crate's
+/// table does not know is skipped rather than failing the whole packet, and
+/// the written count reflects what was actually written, not `attributes.len()`.
+///
+/// A caller that has already folded equipment into one number (as
+/// `lodestone-server`'s attribute sync does — see that crate's
+/// `player_attribute_snapshots`) passes an empty modifier list per snapshot;
+/// the client's own fold (`instance_from_snapshot`/`AttributeInstance::value`)
+/// is a no-op over a bare base value with no modifiers, so it lands on the
+/// same number the server already computed.
+pub fn write_update_attributes(w: &mut Writer, entity_id: i32, attributes: &[EntityAttributeSnapshot]) {
+    let resolved: Vec<(i32, &EntityAttributeSnapshot)> = attributes
+        .iter()
+        .filter_map(|snapshot| attribute_id(&snapshot.attribute.to_string()).map(|id| (id, snapshot)))
+        .collect();
+    w.var_i32(entity_id);
+    w.var_i32(resolved.len() as i32);
+    for (attribute_network_id, snapshot) in resolved {
+        w.var_i32(attribute_network_id);
+        w.f64(snapshot.base);
+        w.var_i32(snapshot.modifiers.len() as i32);
+        for modifier in &snapshot.modifiers {
+            w.string(&modifier.id.to_string());
+            w.f64(modifier.amount);
+            w.var_i32(i32::from(modifier.operation));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1778,6 +1816,70 @@ mod tests {
         assert_eq!(attrs[0].modifiers[0].id.to_string(), mod_id);
         assert!((attrs[0].modifiers[0].amount - 0.3).abs() < 1e-12);
         assert_eq!(attrs[0].modifiers[0].operation, 2);
+    }
+
+    /// A known-answer encode: builds the exact byte string by hand (the same
+    /// expectation shape as [`decodes_update_attributes`]'s fixture, not a
+    /// `decode(encode(x)) == x` round trip, which cannot distinguish a
+    /// correct encoder from a decoder and encoder that share one
+    /// misunderstanding) and asserts [`write_update_attributes`] reproduces
+    /// it byte-for-byte, including the modifier-free `minecraft:armor` case
+    /// `lodestone-server`'s attribute sync actually sends.
+    #[test]
+    fn encodes_update_attributes_to_the_known_bytes() {
+        let mut expected = Vec::new();
+        expected.extend(varint(1)); // entity id (LOCAL_PLAYER_ENTITY_ID)
+        expected.extend(varint(1)); // one attribute
+        expected.extend(varint(1)); // `minecraft:armor` registry id
+        expected.extend(11.0f64.to_be_bytes()); // folded base, no modifiers
+        expected.extend(varint(0)); // zero modifiers
+
+        let snapshot = EntityAttributeSnapshot {
+            attribute: "minecraft:armor".parse().expect("valid identifier"),
+            base: 11.0,
+            modifiers: Vec::new(),
+        };
+        let mut w = Writer::default();
+        write_update_attributes(&mut w, 1, std::slice::from_ref(&snapshot));
+        assert_eq!(w.into_vec(), expected);
+
+        // Control: decoding what was just built reaches the same fields the
+        // encoder was given, so the two are not both wrong the same way.
+        let mut w2 = Writer::default();
+        write_update_attributes(&mut w2, 1, std::slice::from_ref(&snapshot));
+        let bytes2 = w2.into_vec();
+        let mut reader = Reader::new(&bytes2);
+        let (entity_id, attrs) = read_update_attributes(&mut reader).expect("decode");
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(entity_id, 1);
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].attribute.to_string(), "minecraft:armor");
+        assert!((attrs[0].base - 11.0).abs() < 1e-12);
+        assert!(attrs[0].modifiers.is_empty());
+    }
+
+    /// An attribute id this crate's table does not know is dropped rather than
+    /// failing the whole encode, and the written count reflects that.
+    #[test]
+    fn encode_skips_an_unresolvable_attribute_and_keeps_the_count_honest() {
+        let known = EntityAttributeSnapshot {
+            attribute: "minecraft:armor".parse().expect("valid identifier"),
+            base: 4.0,
+            modifiers: Vec::new(),
+        };
+        let unknown = EntityAttributeSnapshot {
+            attribute: "minecraft:not_a_real_attribute".parse().expect("valid identifier"),
+            base: 9.0,
+            modifiers: Vec::new(),
+        };
+        let mut w = Writer::default();
+        write_update_attributes(&mut w, 1, &[unknown, known]);
+        let bytes = w.into_vec();
+        let mut reader = Reader::new(&bytes);
+        let (_, attrs) = read_update_attributes(&mut reader).expect("decode");
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(attrs.len(), 1, "the unresolvable attribute must be dropped, not the whole packet");
+        assert_eq!(attrs[0].attribute.to_string(), "minecraft:armor");
     }
 
     /// An unknown attribute id fails loudly rather than resolving to a wrong name.
