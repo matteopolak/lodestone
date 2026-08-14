@@ -12,8 +12,9 @@
 //!
 //! This implements the minimum sequence needed for a client to reach
 //! [`State::Play`] and receive a rendered view: handshake, login, the
-//! configuration phase (the `dimension_type`/`world_clock` registries via
-//! [`ServerProtocol::encode_registry_data`], then the finish signal), the
+//! configuration phase (`select_known_packs`, all 29 synchronized registries,
+//! and `update_tags` via [`ServerProtocol::encode_registry_data`], then the
+//! finish signal), the
 //! play join sequence (join game, default spawn, initial teleport,
 //! chunk-cache center), `level_chunk_with_light`
 //! for every column in the initial view, a post-join welcome chat, entity
@@ -122,7 +123,7 @@ use crate::packets::game::{
     SetJigsawBlock, SetStructureBlock, SetTestBlock, SignUpdate, Swing, UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
-use crate::packets::login::{LoginDisconnect, LoginFinished, LoginHello};
+use crate::packets::login::{LoginCompression, LoginDisconnect, LoginFinished, LoginHello};
 
 /// The `sea_level` field both the join `login` packet and the post-death
 /// `respawn` packet carry.
@@ -429,17 +430,16 @@ fn simple_particle_registry_id(name: &str) -> Option<i32> {
 ///
 /// Real vanilla assigns biome wire ids by **registration order** in a
 /// `minecraft:worldgen/biome` dynamic-registry sync sent during the
-/// configuration phase. Issue #275 made this server send real registry data
-/// during Configuration — but the two registries it ships
-/// ([`ServerProtocol::encode_registry_data`]) are `dimension_type` and
-/// `world_clock`; `worldgen/biome` is deliberately **not** among them yet (a
-/// real biome sync is tens of kilobytes of deep compounds, and nothing on the
-/// client reads a biome by wire id today — `lodestone-shell` still has no
-/// `impl BiomeTint`; checked directly, zero implementors in
-/// `crates/lodestone-shell/src`). So there is still no *biome* id space this
-/// table needs to agree with, and no consumer on the client side to agree
-/// with it either: the `ChunkSection::biomes()` container this now populates
-/// reaches the wire and nothing downstream reads it back into a name. Any
+/// configuration phase. Issue #275 made this server send that sync too, now
+/// (relayed as captured vanilla bytes — see `registry_data_fixtures`'s module
+/// docs), but it is still relayed **opaquely**: nothing in this crate parses
+/// entries back out of it, and nothing on the client reads a biome by wire id
+/// today — `lodestone-shell` still has no `impl BiomeTint`; checked directly,
+/// zero implementors in `crates/lodestone-shell/src`. So there is still no
+/// *biome* id space this table needs to agree with, and no consumer on the
+/// client side to agree with it either: the `ChunkSection::biomes()`
+/// container this now populates reaches the wire and nothing downstream
+/// reads it back into a name. Any
 /// stable, reproducible convention is therefore safe **for now**; alphabetical
 /// is the simplest one that needs no extra bookkeeping. **This is provisional**
 /// — once a real `worldgen/biome` sync exists (or a render-layers agent needs
@@ -2803,6 +2803,15 @@ impl ChunkEncoder for V770ServerProtocol {
     }
 }
 
+/// The zlib compression threshold this server enables during login (issue
+/// #273), matching vanilla's own default
+/// (`network-compression-threshold=256` — measured identical across every
+/// `server.properties` under `.cache/mc/`). Packets whose uncompressed body
+/// is at least this many bytes are zlib-framed; smaller ones go out through
+/// compressed framing uncompressed (`packets::login::LoginCompression`'s own
+/// doc comment, `lodestone-net`'s `Codec`).
+const COMPRESSION_THRESHOLD: i32 = 256;
+
 impl ServerProtocol for V770ServerProtocol {
     fn decode(&self, state: lodestone_core::State, packet_id: i32, payload: &[u8]) -> ServerBound {
         use lodestone_core::State;
@@ -3718,7 +3727,37 @@ impl ServerProtocol for V770ServerProtocol {
             properties: Vec::new(),
             session_id: uuid,
         };
-        vec![send(login::clientbound::LOGIN_FINISHED, &finished)]
+        // Issue #273: enable packet compression before the login-success
+        // reply. Vanilla's own default (`network-compression-threshold=256`
+        // in every `server.properties` under `.cache/mc/`) — packets whose
+        // *uncompressed* body is at least this many bytes get zlib framing;
+        // smaller ones are sent through compressed framing uncompressed
+        // (`LoginCompression`'s own doc comment).
+        //
+        // Ordering is load-bearing, mirroring
+        // `Connection::enable_encryption`'s own doc comment for the same
+        // hazard: `LOGIN_COMPRESSION` itself must go out **before**
+        // compression is active (the client cannot decompress a packet that
+        // tells it compression is starting), and every packet after —
+        // starting with this very `LOGIN_FINISHED` — must go out
+        // **compressed**, or the two sides frame disagreeing on which layer
+        // came first. `crate::server`'s `apply` executes directives strictly
+        // in order and each `Send` reads the codec's compression state at
+        // the moment it writes, so `[Send(LOGIN_COMPRESSION),
+        // SetCompression(threshold), Send(LOGIN_FINISHED)]` is the ordering
+        // that gets this right — the same shape vanilla's own
+        // `ServerLoginPacketListenerImpl` uses (send, then
+        // `connection.setupCompression`).
+        vec![
+            send(
+                login::clientbound::LOGIN_COMPRESSION,
+                &LoginCompression {
+                    threshold: COMPRESSION_THRESHOLD,
+                },
+            ),
+            ServerDirective::SetCompression(COMPRESSION_THRESHOLD),
+            send(login::clientbound::LOGIN_FINISHED, &finished),
+        ]
     }
 
     fn encode_status_response(
@@ -3787,25 +3826,42 @@ impl ServerProtocol for V770ServerProtocol {
     }
 
     fn encode_registry_data(&self) -> Vec<ServerDirective> {
-        // Issue #275: the registries a real client must resolve before
-        // Configuration can finish — `login`'s `dimension_type` holder id and
-        // `set_time`'s `world_clock` keys are bare integers otherwise. These
-        // two are the ones this server's own join sequence depends on; the NBT
-        // bodies are byte-for-byte what a real vanilla 26.2 server sent on the
-        // creative oracle (`tests/fixtures/registry_data_*.hex`, captured by
-        // the `live-registry` gate), so the client reads its own wire format.
-        vec![
+        // Issue #275: the full Configuration-phase registry burst a real
+        // vanilla client expects, in vanilla's own wire order
+        // (`SynchronizeRegistriesTask`): `select_known_packs` (requesting
+        // zero packs — this server ships no datapacks), then one
+        // `registry_data` per synchronized registry (all 29 —
+        // `RegistryDataLoader.SYNCHRONIZED_REGISTRIES`, read off the
+        // decompiled source rather than `registries.json`, which omits
+        // `dimension_type`/`world_clock` entirely because both are
+        // data-pack-loaded), then `update_tags`. The server loop sends
+        // `begin_configuration`'s `FINISH_CONFIGURATION` right after this
+        // return, so the ordering here is the whole ordering.
+        //
+        // `minecraft:dimension_type` and `minecraft:world_clock` are the two
+        // registries this crate resolves *holder ids* out of elsewhere
+        // (`login`'s dimension type, `set_time`'s clock keys), so they stay
+        // hand-built structured tables. Every other registry is relayed as
+        // captured vanilla bytes — see
+        // `registry_data_fixtures`'s module docs for why that is both safe
+        // and sufficient, and for why this server does not wait for the
+        // client's own `select_known_packs` reply before sending them.
+        let mut directives = vec![crate::registry_data_fixtures::select_known_packs_directive()];
+        directives.push(
             // From `DIMENSION_TYPE_REGISTRY`, not an inline literal: the order *is*
             // the holder-id mapping `encode_dimension_change` resolves against.
             encode_registry_data_packet("minecraft:dimension_type", &DIMENSION_TYPE_REGISTRY),
-            encode_registry_data_packet(
-                "minecraft:world_clock",
-                &[
-                    ("minecraft:overworld", WORLD_CLOCK_OVERWORLD_NBT),
-                    ("minecraft:the_end", WORLD_CLOCK_END_NBT),
-                ],
-            ),
-        ]
+        );
+        directives.push(encode_registry_data_packet(
+            "minecraft:world_clock",
+            &[
+                ("minecraft:overworld", WORLD_CLOCK_OVERWORLD_NBT),
+                ("minecraft:the_end", WORLD_CLOCK_END_NBT),
+            ],
+        ));
+        directives.extend(crate::registry_data_fixtures::passthrough_registry_directives());
+        directives.push(crate::registry_data_fixtures::update_tags_directive());
+        directives
     }
 
     fn begin_configuration(&self) -> Vec<ServerDirective> {
@@ -7285,6 +7341,108 @@ mod index_eighteen_tests {
         assert_eq!(r.u8().expect("terminator"), 0xFF);
         assert!(r.ensure_empty().is_ok(), "no trailing bytes");
         byte
+    }
+}
+
+/// Index-16's `BOOLEAN` baby claimants, checked mechanically against the
+/// committed jar dump — the wire-level twin of the species switch in
+/// `lodestone_server::mobs::SimMob::snapshot`, which decides *which* species
+/// this crate ever builds a `MetadataField::Baby` for.
+#[cfg(test)]
+mod index_sixteen_tests {
+    use lodestone_core::Reader;
+    use lodestone_server::{MetadataField, ServerDirective, ServerProtocol};
+
+    use super::{
+        METADATA_IDX_BABY, METADATA_IDX_CREEPER_SWELL_DIR, METADATA_SER_BOOLEAN, METADATA_SER_INT,
+        V770ServerProtocol,
+    };
+
+    /// `EntityDataIndexOracle`'s output, committed so this gate does not need a JVM.
+    const INDEX_DUMP: &str = include_str!("../tests/support/entity_data_index_jvm.txt");
+
+    /// `(index, serializer)` for `Owner.FIELD`, or a panic naming the miss.
+    fn dump_row(owner_field: &str) -> (u8, i32) {
+        for line in INDEX_DUMP.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut tok = line.split_whitespace();
+            let index: u8 = tok.next().expect("index column").parse().expect("u8");
+            let owner = tok.next().expect("owner.FIELD column");
+            let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
+            if owner == owner_field {
+                return (index, serializer);
+            }
+        }
+        panic!("{owner_field} is not in the jar dump — read the dump before changing the constant")
+    }
+
+    /// The three real baby accessors the producer-side species switch relies
+    /// on — `AgeableMob` for the breedable-animal family, and `Zombie`
+    /// (inherited by husk/zombie_villager/drowned/zombified_piglin) and
+    /// `Zoglin` declaring their own — all land at [`METADATA_IDX_BABY`] under
+    /// the `BOOLEAN` serializer. Collected rather than asserted per-row so a
+    /// failure names every wrong one, not just the first.
+    #[test]
+    fn every_real_baby_accessor_matches_the_jar_dump() {
+        let mut wrong: Vec<String> = Vec::new();
+        for accessor in [
+            "AgeableMob.DATA_BABY_ID",
+            "Zombie.DATA_BABY_ID",
+            "Zoglin.DATA_BABY_ID",
+        ] {
+            let (index, serializer) = dump_row(accessor);
+            if index != METADATA_IDX_BABY || serializer != METADATA_SER_BOOLEAN {
+                wrong.push(format!(
+                    "{accessor} is ({index}, ser {serializer}) in the jar, expected \
+                     ({METADATA_IDX_BABY}, ser {METADATA_SER_BOOLEAN})"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// **The collision that makes the producer-side species switch load-bearing,
+    /// asserted rather than described.** `Creeper.DATA_SWELL_DIR` shares index 16
+    /// with the baby accessors above but is an `INT`, not a `BOOLEAN` — so a
+    /// `MetadataField::Baby` built for a creeper would put a boolean where the
+    /// swell direction belongs, and `MobSim::snapshot` never emitting `Baby` for
+    /// `"creeper"` is the only thing preventing that.
+    #[test]
+    fn the_shared_index_really_is_a_different_serializer_for_the_creeper() {
+        let (index, serializer) = dump_row("Creeper.DATA_SWELL_DIR");
+        assert_eq!(index, METADATA_IDX_CREEPER_SWELL_DIR);
+        assert_eq!(index, METADATA_IDX_BABY, "the whole point is that these collide");
+        assert_eq!(serializer, METADATA_SER_INT);
+        assert_ne!(
+            serializer, METADATA_SER_BOOLEAN,
+            "if the creeper's swell direction ever became a BOOLEAN, index 16 would no \
+             longer distinguish it from Baby and the producer-side guard would need \
+             re-checking"
+        );
+    }
+
+    /// Byte-accurate encode: index, serializer id, the boolean itself, then the
+    /// `0xFF` terminator, with no trailing bytes.
+    #[test]
+    fn baby_encodes_to_the_exact_index_and_serializer() {
+        let proto = V770ServerProtocol;
+        for value in [true, false] {
+            let ServerDirective::Send { payload, .. } =
+                proto.encode_set_entity_data(7, &[MetadataField::Baby(value)])
+            else {
+                panic!("encode_set_entity_data must emit a Send");
+            };
+            let mut r = Reader::new(&payload);
+            assert_eq!(r.var_i32().expect("entity id"), 7);
+            assert_eq!(r.u8().expect("metadata index"), METADATA_IDX_BABY);
+            assert_eq!(r.var_i32().expect("serializer id"), METADATA_SER_BOOLEAN);
+            assert_eq!(r.bool().expect("baby bool"), value);
+            assert_eq!(r.u8().expect("terminator"), 0xFF);
+            assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+        }
     }
 }
 

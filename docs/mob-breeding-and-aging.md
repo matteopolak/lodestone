@@ -107,21 +107,34 @@ every baby/adult boundary crossing:**
   species with its own literal (cat, ocelot, the horse family, chicken's
   `#chicken_food` cousins not yet tameable here) will read slightly wrong
   until someone adds a row.
-- **The server authoritatively uses the corrected shape and speed today —
-  server-side pathfinding, collision and movement all read `SimMob::shape()`/
-  `step_per_tick()` directly — but the wire has no way to tell a client to
-  *render* a baby small.** Checked: `crate::protocol::MetadataField` has no
-  `Baby`/`Age` variant at all (unlike `TamableFlags`/`HorseFlags`, which
-  exist for taming), so `SimMob::snapshot` cannot populate one, and no
-  `v770` encoder arm exists either. Vanilla's own client derives the small
-  hitbox from a synced `AgeableMob.DATA_BABY_ID` boolean rather than the
-  server sending literal dimensions, so closing this needs a new metadata
-  field plus its encoder — real work, not a one-line hookup, and outside
-  `lodestone-server/src/protocol.rs`/`crates/protocol/v770`'s ownership this
-  pass. A baby zombie today has the *correct* small hitbox for every
-  server-side purpose (does it fit through a gap, does it path around an
-  obstacle, does it move at 1.5× speed) and still renders at adult size on a
-  connected client.
+- **The server authoritatively uses the corrected shape and speed, and the
+  wire now tells a client to *render* a baby small too.**
+  `crate::protocol::MetadataField::Baby` and its `v770` `encode_set_entity_data`
+  arm existed for a time with **zero producers** — declared, encoded, decoded,
+  documented, and never once constructed — so every baby mob still reached the
+  client as an adult despite the server-side hitbox/speed fix above. Closed by
+  a species switch in `SimMob::snapshot`, following the same pattern
+  `TamableFlags`/`HorseFlags` already use for their own shared metadata index:
+  index 16 collides with `Creeper.DATA_SWELL_DIR` (an `INT`), so the guard has
+  to live in the producer, not the encoder.
+  `MetadataField::Baby` is pushed unconditionally (not only while `is_baby()`
+  is true) for exactly the species this doc already scopes ageing to — the
+  breedable-animal family (cow, mooshroom, sheep, pig, chicken, rabbit, wolf)
+  and the zombie family (zombie, husk, zombie_villager, drowned,
+  zombified_piglin) — confirmed against `.cache/mc/26.2/src/` to descend from
+  `AgeableMob` or `Zombie`, the two vanilla classes whose own `DATA_BABY_ID`
+  resolves to that index. Unconditional matters because a baby **grows up**:
+  an encoder that only sent `Baby(true)` on arrival would leave a matured mob
+  stuck at baby size on every already-connected client, the same "absence
+  cannot mean false" argument `CreeperSwellDir` already makes for its own
+  retreat-to-default case.
+  `crates/lodestone-server/src/mobs/mod.rs`'s `baby_metadata_tests` module
+  covers both directions: every eligible species emits `Baby(false)` as an
+  adult, `creeper`/`ghast`/`phantom` (index 16's other real claimants) emit no
+  `Baby` field at all, and a baby zombie that grows up reports `Baby(false)`
+  rather than dropping the field. `crates/protocol/v770/src/server_protocol.rs`'s
+  `index_sixteen_tests` module checks the wire encoding and the index/serializer
+  claims against the committed `EntityDataIndexOracle` dump.
 
 `crates/lodestone-server/src/mobs.rs`'s `baby_shape_tests` module predicts
 the exact baby zombie box against the halved-adult wrong hypothesis, the

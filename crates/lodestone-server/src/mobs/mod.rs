@@ -1514,10 +1514,10 @@ impl<'w> SimMob<'w> {
     /// build spawn/move/remove packets; the server holds the previous snapshot
     /// per connection so the protocol can stay stateless.
     ///
-    /// Issue #425: `metadata` is the per-species entity-metadata field list —
+    /// `metadata` is the per-species entity-metadata field list —
     /// general across mobs (see [`MetadataField`]'s own doc comment), not a
-    /// creeper-only mechanism, even though a creeper is the only producer
-    /// today. [`crate::server::EntityStreamer::sync`] diffs this exactly like
+    /// creeper-only mechanism, even though a creeper was the only producer
+    /// for a long time. [`crate::server::EntityStreamer::sync`] diffs this exactly like
     /// every other field here, so a change reaches [`ServerProtocol::encode_set_entity_data`]
     /// through the same spawn/update path `position`/`rotation` already use —
     /// no second wiring for the next mob that needs a metadata field.
@@ -1530,6 +1530,14 @@ impl<'w> SimMob<'w> {
     /// `1` did — a client that keeps whatever `swell_dir` it was last sent
     /// would integrate the fuse in the wrong direction forever if a
     /// retreat-to-`-1` were ever skipped as "just the default".
+    ///
+    /// `MetadataField::Baby` is the same shape as `CreeperSwellDir`, not as
+    /// `CreeperIgnited`: a mob **grows up**, so absence cannot safely mean
+    /// "still a baby" the way it can mean "still not ignited". It is pushed
+    /// unconditionally for every species eligible for it (see the species
+    /// switch below), carrying the current `is_baby()` value whether that is
+    /// `true` or `false`, so the adult transition reaches the client the same
+    /// way the arrival as a baby did.
     #[must_use]
     pub fn snapshot(&self) -> EntitySnapshot {
         let mut metadata = Vec::new();
@@ -1567,6 +1575,29 @@ impl<'w> SimMob<'w> {
                 }
                 _ => {}
             }
+        }
+        // Index 16's boolean, shared by `AgeableMob.DATA_BABY_ID`,
+        // `Zombie.DATA_BABY_ID` and `Zoglin.DATA_BABY_ID`
+        // (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`)
+        // — but also by `Creeper.DATA_SWELL_DIR`, an `INT`, which is why the
+        // species switch has to live here rather than in a shared "is baby"
+        // encoder: a `MetadataField::Baby` emitted for a creeper would write
+        // a boolean where the swell direction belongs. Scoped to exactly the
+        // species this sim tracks age for — [`baby_dimensions`] and
+        // [`baby_speed_multiplier`]'s own species lists — which are also the
+        // only species mechanically confirmed (via `.cache/mc/26.2/src/`) to
+        // descend from `AgeableMob` or `Zombie`, the two classes whose own
+        // `DATA_BABY_ID` resolves to this index.
+        //
+        // Pushed unconditionally rather than only while `is_baby()` is true:
+        // see this method's own doc comment for why the grown-up transition
+        // needs the same treatment as the arrival.
+        match self.entity_type.path() {
+            "cow" | "mooshroom" | "sheep" | "pig" | "chicken" | "rabbit" | "wolf" | "zombie"
+            | "husk" | "zombie_villager" | "drowned" | "zombified_piglin" => {
+                metadata.push(MetadataField::Baby(self.is_baby()));
+            }
+            _ => {}
         }
         EntitySnapshot {
             id: self.id,
@@ -5113,7 +5144,15 @@ impl MobHandle {
     /// Takes `&self`, like every other accessor here, because the sim lives
     /// behind the handle's own `Mutex` — so this is safe to call from a
     /// background task while the connection task holds a clone.
-    pub fn reseed(&self, world: ChunkWorld, center_x: i32, center_z: i32, mob_count: usize) {
+    pub fn reseed(&self, mut world: ChunkWorld, center_x: i32, center_z: i32, mob_count: usize) {
+        // Issue #518 part 2/4: drained while `world` is still an owned local,
+        // before it leaks to `'static` below. Non-empty only the first time
+        // these chunks are ever generated — see `ChunkWorld`'s own field doc
+        // (`pending_generation_spawns`) for why that is what keeps a fresh
+        // world's `SPAWN`-stage animals from duplicating across a restart: a
+        // reload of an existing world loads these same chunks from disk, which
+        // never populates this list.
+        let pending_generation_spawns = world.take_pending_generation_spawns();
         // Leaked for the same reason `new` leaks: `MobSim` borrows its world for
         // `'static`. See the struct's own doc comment — one bounded snapshot per
         // reseed, and production reseeds exactly once per world.
@@ -5125,6 +5164,25 @@ impl MobHandle {
             sim.set_next_id(1000);
             // Exactly `mob_count`, including zero — see [`seed_demo_mobs`].
             seed_demo_mobs(sim, center_x, center_z, mob_count);
+            // Issue #518: place the `SPAWN` stage's proposed animals as real
+            // mobs, re-validated against the real per-species placement rule
+            // and this world's own light through the exact gate the
+            // tick-driven cycle uses — see
+            // `NaturalSpawner::validate_generation_spawns`'s doc for why this
+            // reuses rather than re-implements it.
+            if !pending_generation_spawns.is_empty() {
+                let mut spawner = crate::natural_spawn::NaturalSpawner::new(
+                    crate::worldgen_data::bundled_biome_spawners().clone(),
+                    0,
+                )
+                .with_world_seed(crate::worldgen_data::active_world_seed());
+                spawner.begin_cycle(std::sync::Arc::new(world.clone()), 0, Vec::new());
+                for candidate in spawner.validate_generation_spawns(pending_generation_spawns) {
+                    let mob = sim.spawn_species(candidate.entity_type, candidate.pos);
+                    mob.set_category(MobCategory::Creature)
+                        .set_persistent(MobCategory::Creature.is_persistent());
+                }
+            }
         });
     }
 
@@ -6310,6 +6368,131 @@ mod baby_shape_tests {
             child.shape().width,
             0.45,
             "the bred calf's shape must already be the baby literal, not the adult default"
+        );
+    }
+}
+
+/// `MetadataField::Baby`'s producer-side species switch in
+/// [`SimMob::snapshot`] — the eligible species must match exactly the union
+/// [`baby_dimensions`]/[`baby_speed_multiplier`] already scope "grows a
+/// baby" to, and the ineligible species (index 16's other claimants) must
+/// never see the field at all.
+#[cfg(test)]
+mod baby_metadata_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for z in 0..16 {
+            for x in 0..16 {
+                world.set_block(x, 0, z, "minecraft:stone");
+            }
+        }
+        world
+    }
+
+    fn above_floor() -> Vec3 {
+        Vec3::new(8.0, 1.0, 8.0)
+    }
+
+    fn baby_field(metadata: &[MetadataField]) -> Option<bool> {
+        metadata.iter().find_map(|f| match f {
+            MetadataField::Baby(b) => Some(*b),
+            _ => None,
+        })
+    }
+
+    /// **Positive arm**: every species this sim scopes ageing to
+    /// (`AgeableMob`'s breedable-animal set plus the `Zombie` family — see
+    /// `SimMob::snapshot`'s own comment for the mechanical derivation off
+    /// `.cache/mc/26.2/src/`) must push `MetadataField::Baby(false)` as a
+    /// freshly-spawned adult.
+    ///
+    /// **Negative control**: index 16's other real claimants — `creeper`
+    /// (`Creeper.DATA_SWELL_DIR`, an `INT`, already the producer for a
+    /// different variant at this same index), `ghast`
+    /// (`Ghast.DATA_IS_CHARGING`) and `phantom` (`Phantom.ID_SIZE`) — must
+    /// push no `Baby` field at all. These are exactly the entities a shared
+    /// "is baby" encoder would corrupt: a ghast told `Baby(false)` reads to
+    /// a real client as "not charging", and a phantom's size becomes `0`.
+    ///
+    /// Collected rather than asserted per-iteration so one run reports every
+    /// wrong species, not just the first.
+    #[test]
+    fn eligible_species_emit_baby_and_only_those_do() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let mut wrong: Vec<String> = Vec::new();
+
+        for species in [
+            "cow",
+            "mooshroom",
+            "sheep",
+            "pig",
+            "chicken",
+            "rabbit",
+            "wolf",
+            "zombie",
+            "husk",
+            "zombie_villager",
+            "drowned",
+            "zombified_piglin",
+        ] {
+            let key = format!("minecraft:{species}").parse().expect("valid key");
+            let id = sim.spawn_species(key, above_floor()).id();
+            let metadata = sim.get(id).expect("spawned").snapshot().metadata;
+            if baby_field(&metadata) != Some(false) {
+                wrong.push(format!(
+                    "{species}: expected Baby(false), metadata was {metadata:?}"
+                ));
+            }
+        }
+
+        for species in ["creeper", "ghast", "phantom"] {
+            let key = format!("minecraft:{species}").parse().expect("valid key");
+            let id = sim.spawn_species(key, above_floor()).id();
+            let metadata = sim.get(id).expect("spawned").snapshot().metadata;
+            if baby_field(&metadata).is_some() {
+                wrong.push(format!(
+                    "{species}: must emit no Baby field at all, metadata was {metadata:?}"
+                ));
+            }
+        }
+
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// **The grown-up transition.** A baby that matures must produce a
+    /// snapshot whose `Baby` is `Some(false)`, not absent — an absent field
+    /// leaves the client holding whatever `Baby(true)` it was sent on
+    /// arrival, so the mob would stay a baby on screen forever. See
+    /// `SimMob::snapshot`'s own doc comment for why this variant is pushed
+    /// unconditionally rather than only while `is_baby()` is true.
+    #[test]
+    fn a_grown_up_baby_reports_baby_false_not_absent() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:zombie".parse().expect("valid key"), above_floor())
+            .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE)
+            .id();
+        let baby_metadata = sim.get(id).expect("spawned").snapshot().metadata;
+        assert_eq!(
+            baby_field(&baby_metadata),
+            Some(true),
+            "a freshly spawned baby zombie must report Baby(true), got {baby_metadata:?}"
+        );
+
+        sim.get_mut(id).expect("spawned").set_age(0);
+        let adult_metadata = sim.get(id).expect("still spawned").snapshot().metadata;
+        assert!(
+            adult_metadata.iter().any(|f| matches!(f, MetadataField::Baby(_))),
+            "the grown-up snapshot must still carry a Baby field, not omit it: {adult_metadata:?}"
+        );
+        assert_eq!(
+            baby_field(&adult_metadata),
+            Some(false),
+            "after growing up the field must flip to Baby(false), got {adult_metadata:?}"
         );
     }
 }
