@@ -1,5 +1,5 @@
 //! Spawns a background world-tick loop for a dimension the player may not be
-//! standing in — issue #579's "no cross-dimension ticking" gap.
+//! standing in — the fix for a real cross-dimension ticking gap.
 //!
 //! # What it is
 //!
@@ -38,10 +38,10 @@
 //! # What is deliberately *not* wired here
 //!
 //! - **Mobs.** A fresh, empty [`crate::mobs::MobHandle`] — natural spawning
-//!   and mob AI for the Nether/End are issue #579's own explicitly-deferred
-//!   item ("Entities/mobs are world-scoped, not dimension-scoped"), tracked
-//!   separately. This loop still runs the mob-tick machinery (it is part of
-//!   the unified loop body), it just has nothing in its `MobSim` to move.
+//!   and mob AI for the Nether/End are a separately-tracked, explicitly
+//!   deferred item ("entities/mobs are world-scoped, not dimension-scoped").
+//!   This loop still runs the mob-tick machinery (it is part of the unified
+//!   loop body), it just has nothing in its `MobSim` to move.
 //! - **Block-entity placement routing.** [`crate::server`]'s connection loop
 //!   threads one fixed `&BlockEntityHandle`/`&BlockTickFeed` pair through the
 //!   whole of `serve_play`, taken from the dimension the player *joined*

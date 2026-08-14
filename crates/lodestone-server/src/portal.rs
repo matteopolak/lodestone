@@ -1897,7 +1897,7 @@ mod tests {
         assert_eq!(shape.portal_blocks(), 6);
     }
 
-    /// Issue #579. Directly exercises [`should_extinguish`]'s `wrongAxis`
+    /// Directly exercises [`should_extinguish`]'s `wrongAxis`
     /// clause against a fixture that is **genuinely** broken (a frame block
     /// removed by hand, independent of [`extinguish_broken_frames`] entirely)
     /// — so the same-axis and perpendicular answers on the *identical* input
@@ -1935,7 +1935,7 @@ mod tests {
         );
     }
 
-    /// Issue #579. [`should_extinguish`]'s second clause: a neighbour that is
+    /// [`should_extinguish`]'s second clause: a neighbour that is
     /// itself a portal cell must decline, even reaching a genuinely broken
     /// frame — paired against the non-portal neighbour case on the identical
     /// fixture so the two answers must disagree.
@@ -1965,7 +1965,7 @@ mod tests {
         );
     }
 
-    /// Issue #579, the end-to-end shape: mining a single frame block clears
+    /// The end-to-end shape: mining a single frame block clears
     /// every interior cell of the portal it supported, not just the one cell
     /// touching the break -- vanilla's `setBlock` re-triggers `updateShape`
     /// on the cell it just changed, cascading through the whole rectangle.
