@@ -279,7 +279,7 @@ id 0 (`minecraft:air`) is alphabetical index 19; registry id 1
 to an unrelated block.
 
 **Live blast radius:** `block_event` decoding
-(`crates/protocol/v770/src/adapter.rs`, around the `block_type_name(block_id)`
+(`crates/protocol/v770/src/adapter/chunk.rs`, around the `block_type_name(block_id)`
 call) — every note block, chest, piston, and end gateway event named the
 wrong block. A real note block (registry id 109) decoded as
 `minecraft:blue_glazed_terracotta`.
@@ -325,7 +325,7 @@ external source (here, the registry-order dump) disagrees.
   inversion) is `crates/lodestone-data/src/tool.rs`, entered through
   `pub fn mining` and exposed version-free via
   `VersionAdapter::tool_mining` (`crates/lodestone-model/src/adapter.rs`,
-  implemented in `crates/protocol/v770/src/adapter.rs`).
+  implemented in `crates/protocol/v770/src/adapter/mod.rs`).
 - **Known gap — datapack-retagged blocks**: block tags are synced by the
   `update_tags` packet, which this build does not decode. `block_tag_members`
   (`crates/lodestone-data/src/tool.rs`) therefore always answers from the

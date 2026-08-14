@@ -141,7 +141,7 @@ Checked, not assumed, before changing this:
     holds; no separate change was needed for it to become correct.
 - **`is_solid`/`solid_count`** (`crates/lodestone-server/src/chunk.rs`) remain
   used directly by server-side mob pathing
-  (`crates/lodestone-server/src/mobs.rs`'s `ChunkWorld::is_solid`), which reads
+  (`crates/lodestone-server/src/mobs/world.rs`'s `ChunkWorld::is_solid`), which reads
   the source `ChunkColumn` itself, never the wire-encoded copy this module
   produces — unaffected by this change in either direction.
 

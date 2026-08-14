@@ -129,7 +129,7 @@ second, narrower one; flagged rather than special-cased, per the brief for this 
 *not* in this bucket.** Both are `SimpleParticleType`
 (`.cache/mc/26.2/client-src/net/minecraft/core/particles/ParticleTypes.java`), whose own
 stream codec reads no further bytes — there is no payload to decode, so nothing here is
-blocked on the shared `ParticleOptions` codec. `crates/protocol/v770/src/adapter.rs`'s
+blocked on the shared `ParticleOptions` codec. `crates/protocol/v770/src/adapter/chunk.rs`'s
 `decode_explode` already distinguishes the two registry ids (29/30) for exactly this reason.
 (The real blocker in the `explode` packet is `blockParticles`, a
 `WeightedList<ExplosionParticleInfo>` whose *entries* do each carry a real particle-options
@@ -177,7 +177,7 @@ have a `Behaviour`, an `emit::` function and a `spawn_one` dispatch arm:
   the jar's own `explosion.json` declares, not merely the one frame any single particle here
   happens to sample).
 - **Still not wired to the real wire path.** `decode_explode`
-  (`crates/protocol/v770/src/adapter.rs`) recognises `explosionParticle`'s registry id only to
+  (`crates/protocol/v770/src/adapter/chunk.rs`) recognises `explosionParticle`'s registry id only to
   stay byte-aligned and returns a single `Directive::Emit(ClientEvent::Sound { .. })` — it
   never also emits a `ClientEvent::Particles` directive the way `decode_full::<LevelParticles>`'s
   `LEVEL_PARTICLES` handler does. That decode is outside `lodestone-particle`'s and
