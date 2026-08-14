@@ -22,7 +22,7 @@
 //!
 //! It answers `Some`/`true` for everything by design, which is exactly what makes
 //! it useless for asking whether a goal *should* run. Do not gate `can_use` on
-//! it; that is what `ScriptMob` already does and what hid issue #441's island.
+//! it; that is what `ScriptMob` already does and what has previously hidden islands.
 //! Use it only to read arguments back.
 
 use lodestone_model::Vec3;
@@ -116,7 +116,7 @@ impl MobController for SpeedProbe {
         true
     }
     // `FollowParentGoal` returns early unless the mob is a baby with a parent in
-    // range (`ai/goal/FollowParentGoal.java:23`, `getAge() >= 0` → no goal).
+    // range (`FollowParentGoal.canUse`, `getAge() >= 0` → no goal).
     fn is_baby(&self) -> bool {
         true
     }
