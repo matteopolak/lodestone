@@ -66,6 +66,7 @@
 
 pub mod block;
 pub mod entity;
+pub mod entity_type;
 pub mod game_mode;
 pub mod item;
 pub mod position;
@@ -75,6 +76,7 @@ pub use block::{BlockArg, BlockInput};
 pub use entity::{
     Bounds, EntityArg, EntitySelector, SelectorOrder, SelectorPosition, SelectorPredicate,
 };
+pub use entity_type::{EntityTypeArg, EntityTypeInput};
 pub use game_mode::GameModeArg;
 pub use item::{ItemArg, ItemInput};
 pub use position::{BlockPosArg, Coordinate, Coordinates, Vec3Arg};
