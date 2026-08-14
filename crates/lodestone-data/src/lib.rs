@@ -56,6 +56,8 @@ pub(crate) mod generated_collision_shapes;
 pub(crate) mod generated_damage_types;
 #[path = "generated/data_component_types.rs"]
 pub(crate) mod generated_data_component_types;
+#[path = "generated/enchantments.rs"]
+pub(crate) mod generated_enchantments;
 #[path = "generated/entity_census.rs"]
 pub(crate) mod generated_entity_census;
 #[path = "generated/entity_dimensions.rs"]
@@ -76,6 +78,8 @@ pub(crate) mod generated_items;
 pub(crate) mod generated_light_props;
 #[path = "generated/menus.rs"]
 pub(crate) mod generated_menus;
+#[path = "generated/mob_effect_colors.rs"]
+pub(crate) mod generated_mob_effect_colors;
 #[path = "generated/mob_effects.rs"]
 pub(crate) mod generated_mob_effects;
 #[path = "generated/outline_shapes.rs"]
@@ -84,6 +88,10 @@ pub(crate) mod generated_outline_shapes;
 pub(crate) mod generated_particle_types;
 #[path = "generated/path_types.rs"]
 pub(crate) mod generated_path_types;
+#[path = "generated/potion_effects.rs"]
+pub(crate) mod generated_potion_effects;
+#[path = "generated/potions.rs"]
+pub(crate) mod generated_potions;
 #[path = "generated/shade_brightness.rs"]
 pub(crate) mod generated_shade_brightness;
 #[path = "generated/snow_support.rs"]
@@ -105,6 +113,7 @@ pub mod block_states;
 pub mod collision_shapes;
 pub mod damage_types;
 pub mod data_component_types;
+pub mod enchantment;
 pub mod entity_census;
 pub mod entity_disguise;
 pub mod entity_dimensions;
@@ -120,6 +129,7 @@ pub mod mob_effects;
 pub mod outline_shapes;
 pub mod particle_types;
 pub mod path_types;
+pub mod potion;
 pub mod shade_brightness;
 pub mod snow_support;
 pub mod sound_events;
