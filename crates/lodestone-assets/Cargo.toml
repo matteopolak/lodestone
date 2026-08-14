@@ -13,6 +13,7 @@ thiserror.workspace = true
 serde_json.workspace = true
 zip.workspace = true
 png.workspace = true
+fontdue.workspace = true
 
 [dev-dependencies]
 lodestone-model.workspace = true
@@ -22,3 +23,8 @@ serde_json.workspace = true
 # The unihex gates build a `hex_file` archive in memory, the same way the PNG
 # sheet gates encode their sheets with `png`.
 zip.workspace = true
+# The TTF gates hand-build a minimal valid sfnt in memory (see
+# `tests/font_ttf.rs`) and cross-check `fontdue`'s output against
+# `ttf-parser`'s independent table reads, so the expected value never comes
+# from the code under test.
+ttf-parser = "0.25"

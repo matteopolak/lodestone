@@ -659,23 +659,27 @@ fn a_unihex_glyph_rasters_at_half_a_logical_pixel_per_texel() {
 }
 
 /// Every glyph kind reports an advance, and the census says how many of each the
-/// fixture produced — so a future fourth provider kind has one obvious place that
+/// fixture produced — so a fifth provider kind has one obvious place that
 /// names what changed.
 #[test]
 fn the_glyph_census_accounts_for_every_covered_codepoint() {
     let font = load(true);
-    let mut kinds = (0usize, 0usize, 0usize);
+    let mut kinds = (0usize, 0usize, 0usize, 0usize);
     for cp in font.codepoints().collect::<Vec<_>>() {
         match font.glyph(cp).expect("codepoints() only yields covered ones") {
             Glyph::Bitmap(_) => kinds.0 += 1,
             Glyph::Unihex(_) => kinds.1 += 1,
             Glyph::Space { .. } => kinds.2 += 1,
+            Glyph::Ttf(_) => kinds.3 += 1,
         }
     }
     assert_eq!(
         kinds,
-        (2, UNIHEX_WON, 2),
-        "2 sheet cells, {UNIHEX_WON} unihex, 2 space advances"
+        (2, UNIHEX_WON, 2, 0),
+        "2 sheet cells, {UNIHEX_WON} unihex, 2 space advances, 0 ttf (this fixture declares none)"
     );
-    assert_eq!(kinds.0 + kinds.1 + kinds.2, font.codepoint_count());
+    assert_eq!(
+        kinds.0 + kinds.1 + kinds.2 + kinds.3,
+        font.codepoint_count()
+    );
 }

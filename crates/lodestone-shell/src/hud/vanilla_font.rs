@@ -755,6 +755,11 @@ impl VanillaFont {
     ) {
         let texel = r.texel_size() * scale;
         let top = y + r.top() * scale;
+        // `GlyphBitmap.getLeft()` / `BakedSheetGlyph`'s `x0 = x + this.left`:
+        // zero for a bitmap-sheet or unihex cell (neither overrides the
+        // default), but a `ttf` glyph's outline is not generally flush with
+        // its advance box, so it carries a real left bearing here.
+        let x = x + r.left() * scale;
         for ty in 0..r.cell_height() {
             let mut tx = 0;
             while tx < r.cell_width() {

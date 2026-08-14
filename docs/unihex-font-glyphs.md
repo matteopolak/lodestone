@@ -145,10 +145,11 @@ this change.
 - **The glyph type is `font.rs`'s `UnihexGlyph`; the reader is `read_hex_entries`.**
   The reader is a faithful port with two relaxations, both documented on it: a
   trailing `\r` is dropped and a blank line is skipped, where vanilla would throw.
-- **`Glyph` is a three-variant public enum.** Adding a fourth kind means teaching
+- **`Glyph` is a public enum** (`Bitmap`, `Unihex`, `Ttf`, `Space` — see
+  `docs/ttf-font-glyphs.md` for the fourth). Adding another kind means teaching
   `GlyphRaster`'s `RasterKind`, `Glyph::advance`/`bold_offset`/`shadow_offset` and
-  the census gate in `tests/font_unihex.rs` about it. The compiler finds the first
-  three; the census names what changed.
+  the census gate in `tests/font_unihex.rs` about it. The compiler finds the
+  exhaustive matches; the census names what changed.
 - **Do not add a fourth `ResourceManager` for fonts.** `jar_manager` is the one
   place the store is stacked; a second stack would drift.
 - **The shadow offset is now applied per glyph.** `VanillaFont::draw_resolved`
