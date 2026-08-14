@@ -31,7 +31,7 @@ adapters are constructed *with* the negotiated protocol — see the seam section
 |---|---|---|---|---|
 | v47 | 47 | 1.8.9 | 3,856 | **Yes since `fa75f38` (U3)** — chunk decode now maps `(blockId << 4) \| meta` through `lodestone-canonical`; the reverted-fix measurement (stone→spruce_planks, bedrock→**lava**) is in `docs/protocol-47-canonicalisation.md`. The 2-D→3-D biome fabrication seam remains |
 | v340 | 340 | 1.12.2 | 14,128 | **Yes** — `flattening.rs` + `canonical.rs` |
-| v735 | 754 | 1.16.5 | 4,237 | **No** — `packets/chunk.rs:17` stores "a single flat block-state id" in **1.16.5's** id space; zero references to `canonical` or `flattening` in the crate |
+| v735 | 754 | 1.16.5 | 4,237 | **Yes since `f8c96d4` (U4)** — chunk decode now maps 1.16.5's own flat state ids through a generated `crate::canonical` table into 26.2's; the reverted-fix measurement (bedrock→**birch_sapling**, diamond_block→**warped_shelf**) is in `docs/protocol-735-canonicalisation.md` |
 | v770 | 776 | 26.2 | 16,290 | native (it *is* the canonical space) |
 
 **Connectedness, measured this revision** (`cargo xtask connectedness` on the working
@@ -91,7 +91,8 @@ OPEN — per the standing rule, check the log before dispatching any child):
 - #349 (1.12.2): `35d4401` decode arms; `714209b` `block_change`/`multi_block_change`
   decoded *into canonical states* via the flattening bridge.
 - #353 (1.16.5): partial outbound via `0a3e00f`; the issue's "v735 may be 1.16.1" caveat
-  is resolved — `supports` says 754, which is 1.16.5.
+  is resolved — `supports` says 754, which is 1.16.5. `f8c96d4` (U4) closed the remaining
+  canonicalisation-retrofit scope: chunk decode now lands *canonical 26.2* states.
 
 **Assets on disk.** `.cache/mc/` holds 12 of the 16 target versions — missing only
 **1.7.10, 1.9.4, 1.10.2, 1.11.2** (`xtask version-table --fetch-missing` exists to fetch
@@ -254,7 +255,7 @@ Evidence, not preference:
 | v340 | 340 | 1.12.2 | #349 | exists; donated the canonical bridge to `lodestone-canonical` (U1) |
 | v404 | 404 | 1.13.2 | #350 | new — the Flattening-boundary anchor |
 | v498 | 498, 578 | 1.14.4, 1.15.2 | #351–#352 | new, one crate (1.15 chunk-biome branch) |
-| v735 | 754 | 1.16.5 | #353 | exists; needs canonicalisation retrofit (U4); rename to v754 optional (U12) |
+| v735 | 754 | 1.16.5 | #353 | exists; canonicalisation retrofit landed (U4, `f8c96d4`); rename to v754 optional (U12) |
 | v756 | 756, 758 | 1.17.1, 1.18.2 | #354–#355 | new, one crate (1.18 section-biome branch — the riskiest grouping, split if the chunk paths stop sharing) |
 | v762 | 762 | 1.19.4 | #356 | new — chat-signing state machine |
 | v766 | 766 | 1.20.6 | #357 | new — configuration phase + item components; **fix #294 first** |
@@ -302,10 +303,11 @@ producers.
 Epic #343 already decided the architecture: one canonical internal version (26.2), a
 translation layer per protocol. The survey's largest finding — **legacy families skipping
 the translation while their suites stay green** — is now down from two live instances to
-one: v47 was fixed by U3 (`fa75f38`; it had been parking raw `(id << 4) | meta` in the
-palette, and its bottom bedrock layer meshed as lava), while **v735 still parks
-1.16.5-space flat ids** feeding a mesher and collision that consume 26.2 ids. Any plan
-that adds families before U4 lands replicates the defect seven more times.
+**zero**: v47 was fixed by U3 (`fa75f38`; it had been parking raw `(id << 4) | meta` in the
+palette, and its bottom bedrock layer meshed as lava), and v735 was fixed by U4
+(`f8c96d4`; it had been parking 1.16.5-space flat ids straight into a mesher and collision
+that consume 26.2 ids — bedrock meshed as birch sapling). Any plan that adds a new family
+should still canonicalise from day one rather than repeat this defect an eighth time.
 
 **What exists (extracted to `crates/lodestone-canonical` by U1, `3ba959a`; v340 was the
 donor and re-exports through it):** `flattening.rs` (API) over `generated/flattening.rs`
@@ -461,14 +463,26 @@ at lower cost than a live container. The reverted-fix measurement (the gate's ow
 output): 1.8 stone `1:0` had been decoding as `minecraft:spruce_planks`, bedrock `7:0` as
 **lava**. Full record: `docs/protocol-47-canonicalisation.md`.
 
-**U4 — v735 canonicalisation retrofit.** Same shape as U3, different mechanism: 1.16.5
-state ids → 26.2 via the DFU-walk table (first consumer of the post-1.13 mapping oracle).
-Owns: `crates/protocol/v735/src/` chunk/block paths, the 1.16.5 mapping table + its
-`oracle-java/` dump program. Gate/control: as U3's *original* two-armed shape, against
-the 1.16.5 install already in `.cache/mc/` (or a real 1.16.5-written save, the cheaper
-variant U3 validated). Establishes the pattern U6–U11 reuse. Blocked by: nothing — **with
-U1–U3 landed, this is the front of the queue** and the last live instance of the
-wrong-id-space defect.
+**U4 — LANDED (`f8c96d4`, doc `docs/protocol-735-canonicalisation.md`): v735
+canonicalisation retrofit.** Same shape as U3, different mechanism than originally
+planned: this landed as a **direct name/properties bridge**, not the DFU-walk-against-the-
+26.2-jar oracle this entry originally specified. Both sides' `(name, properties)` come
+straight from Mojang's own data generator (`net.minecraft.data.Main --reports`) — the
+1.16.5 side run fresh against `.cache/mc/1.16.5/server.jar` under Apple `container`
+(`tests/support/blocks_1_16_5_jar.json`, committed), the 26.2 side already available via
+`lodestone_data::block_states` — matched through a reverse index exactly like
+`lodestone-canonical::canonical`'s pre-Flattening bridge: direct match, then a 3-entry
+rename table, then two generic single-property fallbacks (`waterlogged=false`,
+`powered=false`, each confirmed against the decompiled 26.2 source) and a cauldron
+identity split. Zero unmapped states across the full 17,112-state corpus — no DFU/NBT walk
+was needed because 1.16.5's report already gives real names/properties per state, unlike
+the pre-1.13 `id:meta` table this pattern was modelled on. **A real DFU-walk oracle
+remains unbuilt**; whether it is ever needed depends on whether a future post-1.13 family
+(U6–U11) hits a rename this direct-bridge technique cannot resolve — try the cheaper
+direct-bridge pattern first and only reach for a DFU walk if that leaves unmapped states.
+The reverted-fix measurement (the gate's own failure output): 1.16.5 bedrock (wire state
+33) had been decoding as `minecraft:birch_sapling`, `minecraft:diamond_block` (wire state
+3355) as `minecraft:warped_shelf`.
 
 **U5 — item canonicalisation, both regimes.** Pre-1.13 item flattening (the unbuilt
 ~300-entry reflective dump, same pattern as blocks) + legacy-NBT → component mapping for
@@ -605,10 +619,12 @@ stall. Blocked by: H0, H2, H3 (for its light), and the server-ECS migration sett
 ```
 phase 1 (join):
 DONE: U1 (canonical crate, 3ba959a)  U2 (multi-protocol seam, 02b8053)  U3 (v47, fa75f38)
+      U4 (v735 retrofit, f8c96d4 — direct name/properties bridge, not the DFU-walk
+          originally planned; see U4's own entry above)
 open now, disjoint files, dispatchable in parallel:
-U0 (evidence debt — smallest)   U4 (v735 retrofit + DFU-walk pattern)   U5 (items)
+U0 (evidence debt — smallest)   U5 (items)
 then:
-U4 ─ U7 (v404: 1.13.2) ─ U8 (v498) ─ U9 (v756)
+U7 (v404: 1.13.2) ─ U8 (v498) ─ U9 (v756)
      U10 (v762)   U11 (v766 needs U5 + #294; v774)
 U6 (v110: 1.9–1.11) — needs oracle script + jar fetch, nothing else now
 U13 (v5: 1.7.10) — last, depends on nothing, nothing depends on it
@@ -620,18 +636,18 @@ H3 (light fabricator) ───────────────────�
 then per-family: server_protocol.rs + SERVER_FAMILIES entry each
 ```
 
-Open and parallelizable now: U0, U4, U5 (disjoint files). The registry 2-liners and
+Open and parallelizable now: U0, U5 (disjoint files; U4 landed, see above). The registry 2-liners and
 the workspace-member lines are the only cross-unit file contention; broker them. H0
 contends with the live `lodestone-server` agents and is scheduled by the orchestrator,
 not grabbed.
 
 ## Risks
 
-1. **The existing families are quietly wrong, and the pattern is contagious — half
-   retired.** v47 is fixed (U3, `fa75f38`; its bottom layer had been lava). **v735 is the
-   one live instance left** and stays the imitation hazard until U4 lands; every family
-   unit's briefing still names canonical-output as the acceptance bar with the raw-value
-   negative control.
+1. **The existing families are quietly wrong, and the pattern is contagious — retired.**
+   v47 is fixed (U3, `fa75f38`; its bottom layer had been lava). v735 is fixed too (U4,
+   `f8c96d4`; bedrock had been reading as birch_sapling) — **every family that can join
+   today now canonicalises**, and every family unit's briefing still names
+   canonical-output as the acceptance bar with the raw-value negative control.
 2. **The seam change (U2) — retired.** Landed at `02b8053` with `check-seam` green and
    the drift-guard in place. Residual: a new family bypassing `adapter_for` / restating
    its protocol list in the registry would reopen it; the drift-guard test is the
