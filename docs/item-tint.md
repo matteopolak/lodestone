@@ -19,19 +19,18 @@ pack's colormap) are runtime state the parser does not own.
 
 **2. Evaluate** — `lodestone_assets::item_tint::resolve` maps one `TintSource`
 plus an `ItemTintContext` to a `ResolvedTint { argb, provenance }`. It covers all
-eight of vanilla's registrations (`ItemTintSources.bootstrap`,
-`ItemTintSources.java:12-21`):
+eight of vanilla's registrations (`ItemTintSources.bootstrap`):
 
-| JSON `type` | reads | jar |
+| JSON `type` | reads | jar (`net.minecraft.client.color.item`) |
 |---|---|---|
-| `minecraft:constant` | nothing | `Constant.java:22` |
-| `minecraft:dye` | `minecraft:dyed_color` | `Dye.java:18` |
-| `minecraft:grass` | the pack's `colormap/grass.png` | `GrassColorSource.java:26` |
-| `minecraft:firework` | `minecraft:firework_explosion` | `Firework.java:25` |
-| `minecraft:potion` | `minecraft:potion_contents` | `Potion.java:24` |
-| `minecraft:map_color` | `minecraft:map_color` | `MapColor.java:24` |
-| `minecraft:team` | the holder's team | `TeamColor.java:20` |
-| `minecraft:custom_model_data` | `minecraft:custom_model_data` | `CustomModelDataSource.java:24` |
+| `minecraft:constant` | nothing | `Constant` |
+| `minecraft:dye` | `minecraft:dyed_color` | `Dye` |
+| `minecraft:grass` | the pack's `colormap/grass.png` | `GrassColorSource` |
+| `minecraft:firework` | `minecraft:firework_explosion` | `Firework` |
+| `minecraft:potion` | `minecraft:potion_contents` | `Potion` |
+| `minecraft:map_color` | `minecraft:map_color` | `MapColor` (not `world.level.material.MapColor`, an unrelated homonym) |
+| `minecraft:team` | the holder's team | `TeamColor` (not `world.scores.TeamColor`, an unrelated homonym) |
+| `minecraft:custom_model_data` | `minecraft:custom_model_data` | `CustomModelDataSource` |
 
 **3. Bake** — `lodestone_render::block_models::item_layer_tint_slots` resolves each
 sprite layer's tint and interns the colour into `BlockModels::tint_palette`;
@@ -43,7 +42,7 @@ sampled texel. No shader, pipeline, bind group or vertex format changed.
 
 **Per-stack tints do not reach pixels, because the components they need are
 dropped at decode.** `ItemStack` here is a closed struct of known fields
-(`crates/lodestone-model/src/item.rs:14`, `ItemComponents` at `:60`) rather than an
+(`crates/lodestone-model/src/item.rs`, alongside `ItemComponents`) rather than an
 open component map, and a component this build does not model is not represented
 at all. Of the six component-reading tint sources, `ItemComponents` carries
 exactly one — `dyed_color`. So `potion_contents`, `map_color`,
@@ -61,19 +60,19 @@ rather than silently presenting a guess as a measurement.
 component modelled in `ItemComponents` and decoded in `crates/protocol/v770`, then
 (b) a per-*draw* channel, because a frame-shared palette slot cannot hold two
 different potions' colours at once. `ModelVertex::tint_rgb_override` (vertex
-location 4, `.a` as the override flag, read at `model.wgsl:283-284`) already
-exists for exactly this shape and is currently hardcoded inert for items at
-`crates/lodestone-render/src/models.rs:965`.
+location 4, `.a` as the override flag, read in `model.wgsl`'s `fs_main`) already
+exists for exactly this shape and is currently hardcoded inert for items in
+`crates/lodestone-render/src/models.rs`'s `mesh_item_quads`.
 
 **Spawn-egg tints do not exist in 26.2 and there is nothing to implement.**
-`SpawnEggItem` has no colour fields — `SpawnEggItem.java:36-39` is the entire class
+`SpawnEggItem` has no colour fields — its whole record declaration is the entire class
 body — and `assets/minecraft/items/creeper_spawn_egg.json` carries no `tints` array.
 The two historical background/highlight integers are gone from Java, from
 `assets/**.json` and from `data/`; the colours are now pixels in per-mob textures
 (`textures/item/creeper_spawn_egg.png`). Spawn eggs need no special handling
 beyond ordinary untinted sprite rendering.
 
-**The 2-D GUI slot path is wired as of issue #452** — it was not, for long enough
+**The 2-D GUI slot path is wired now** — it was not, for long enough
 that a white lily pad and white leaves were the shipped appearance. Both call
 sites (`crates/lodestone-shell/src/hud/item_icon.rs`, in `draw_item_icon_counted`
 and `draw_item_icon_popped`) now take their multiplier from `sprite_layer_tint`
@@ -125,14 +124,14 @@ degradation.
 
 **The colour multiply is in gamma space.** `srgb_to_linear(linear_to_srgb(rgb) *
 tint * shade)`. Doing it in linear pulls every factor toward `1.0` and washes the
-item out. `model.wgsl:288-296` already does this correctly and needed no change;
-`fog::multiply_gamma` (`crates/lodestone-render/src/fog.rs:430`) is the CPU-side
+item out. `model.wgsl`'s `fs_main` already does this correctly and needed no change;
+`fog::multiply_gamma` (`crates/lodestone-render/src/fog.rs`) is the CPU-side
 equivalent. Measured on a real adapter over six channels of two items: the gamma
 prediction sits **0.15–0.3/255** from the rendered byte and the linear prediction
 **16–34/255** away.
 
 **`minecraft:constant` spells its colour `value`, not `default`.** Seven of the
-eight sources use `default`; `constant` alone uses `value` (`Constant.java:22`).
+eight sources use `default`; `constant` alone uses `value` (`Constant`'s `MAP_CODEC`).
 `parse_tint` read only `default`, so every constant item tint in the game parsed to
 `None` and was discarded — the six leaves items, `vine`, `lily_pad`,
 `filled_map`'s layer 0, `firework_star`'s layer 0, `wolf_armor`. Nothing failed:
@@ -140,7 +139,7 @@ a greyscale sprite rendered with the multiplicative identity is indistinguishabl
 from a sprite with no tint authored, which is why a white lily pad survived.
 
 **Do not substitute the block tint table for the item tint list.** Vanilla's item
-renderer never calls `BlockColors`; `CuboidItemModelWrapper.java:89` evaluates the
+renderer never calls `BlockColors`; `CuboidItemModelWrapper.update` evaluates the
 item definition's own list. The two agree for leaves (`0x48B518` either way) and
 for `grass_block`, and **disagree** for `lily_pad` — item `0x71C35C` vs block
 `LILY_PAD_IN_WORLD` `0x208030`. The agreement in the common cases is exactly why
