@@ -178,6 +178,16 @@ pub enum AuthError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("keychain error: {0}")]
     Keychain(#[from] keyring::Error),
+
+    /// A `/player/certificates` 2xx body did not decode into a usable RSA
+    /// chat-signing key pair: malformed PEM framing, private-key bytes that
+    /// are not PKCS#8 DER, a public key that is not X.509 SPKI DER, a
+    /// `publicKeySignatureV2` that is not valid base64 or is empty, or an
+    /// `expiresAt`/`refreshedAfter` that does not parse as an instant. See
+    /// [`crate::chat_session`].
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("chat session key pair response was malformed: {0}")]
+    ChatSessionKeyMalformed(String),
 }
 
 /// Convenience result alias for this crate.

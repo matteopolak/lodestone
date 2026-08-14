@@ -47,8 +47,22 @@ rustls = { workspace = true }
 # base64url, and both the verifier and the CSRF `state` need a CSPRNG. Native-only
 # for the same reason as `reqwest` above — the flow binds a `127.0.0.1` listener
 # and launches the platform's browser, neither of which a wasm build can do.
-sha2 = { workspace = true }
+#
+# `features = ["oid"]` is for `chat_session`'s `Pkcs1v15Sign::new::<Sha256>()`,
+# which needs `Sha256: AssociatedOid` — off by default (see `sha2`'s own
+# `Cargo.toml`: `oid = ["digest/oid"]`).
+sha2 = { workspace = true, features = ["oid"] }
 rand = { workspace = true }
+# The Mojang-issued RSA-2048 chat-signing key pair (`chat_session`):
+# `RsaPrivateKey`/`RsaPublicKey` PKCS#8/X.509 DER parsing and
+# `SHA256withRSA`/PKCS#1 v1.5 signing. Native-only for the same reason
+# `lodestone-net`'s handshake RSA is: `rsa` 0.9 pins `rand_core` 0.6, a
+# different major than the rest of the tree's `getrandom` 0.4, and online-mode
+# chat signing needs the native-only key-fetch above anyway, so there is
+# nothing gained by making this compile for wasm32 yet. Signing itself needs
+# no RNG (PKCS#1 v1.5 signature padding is deterministic, unlike PSS/OAEP), so
+# this is not pulling in randomness the browser build would need to source.
+rsa = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

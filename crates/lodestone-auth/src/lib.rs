@@ -53,6 +53,13 @@ pub use hash::server_hash;
 pub mod browser_login;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cache;
+/// Secure chat: fetching the Mojang-issued RSA chat-session key pair and
+/// signing outgoing messages with it. Native-only for the same reason
+/// [`flow`] is — it makes an HTTPS call to `api.minecraftservices.com` — see
+/// that module's doc comment for the full citation of what was and was not
+/// possible to verify against an outside source.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod chat_session;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod flow;
 #[cfg(not(target_arch = "wasm32"))]
@@ -93,6 +100,12 @@ pub mod tls;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use tls::install_crypto_provider;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use chat_session::{
+    ChatKeyPair, ChatSession, LAST_SEEN_MAX_LEN, SIGNATURE_BYTES, SignedMessageLink,
+    build_signature_payload, fetch_key_pair, verify_signature,
+};
 
 pub use error::XstsErrorKind;
 #[cfg(not(target_arch = "wasm32"))]
