@@ -125,6 +125,7 @@ impl RenderState {
             SectionGeometry::Model {
                 opaque,
                 water,
+                translucent_blocks,
                 visibility,
             } => {
                 // The occlusion graph (U3), recorded **before** the early
@@ -142,6 +143,8 @@ impl RenderState {
                 let origin_f = [origin[0] as f32, origin[1] as f32, origin[2] as f32];
                 let opaque_gpu = upload_resident(&mut model.mesh_arena, device, queue, opaque);
                 let water_gpu = upload_resident(&mut model.mesh_arena, device, queue, water);
+                let translucent_gpu =
+                    upload_resident(&mut model.mesh_arena, device, queue, translucent_blocks);
                 // A remesh of an already-resident coord (the dirty-propagation
                 // case) reuses that coord's origin slot rather than leaking it —
                 // the origin is a pure function of `key`, so it never actually
@@ -153,11 +156,13 @@ impl RenderState {
                 if let Some(old) = &existing {
                     free_resident(&mut model.mesh_arena, old.mesh.as_ref());
                     free_resident(&mut model.mesh_arena, old.water.as_ref());
+                    free_resident(&mut model.mesh_arena, old.translucent.as_ref());
                 }
                 // A section may carry only opaque terrain, only water (an ocean
-                // surface section with no solid blocks), or both. Drop it only
-                // when neither has geometry.
-                if opaque_gpu.is_none() && water_gpu.is_none() {
+                // surface section with no solid blocks), only translucent blocks
+                // (a lone nether portal frame), or any combination. Drop it only
+                // when none has geometry.
+                if opaque_gpu.is_none() && water_gpu.is_none() && translucent_gpu.is_none() {
                     if let Some(old) = existing {
                         model.origin_arena.free(old.origin_alloc);
                     }
@@ -187,6 +192,8 @@ impl RenderState {
                         quad_count: opaque.quad_count(),
                         water: water_gpu,
                         water_quad_count: water.quad_count(),
+                        translucent: translucent_gpu,
+                        translucent_quad_count: translucent_blocks.quad_count(),
                         origin_alloc,
                     },
                 );
@@ -264,6 +271,7 @@ impl RenderState {
         {
             free_resident(&mut model.mesh_arena, old.mesh.as_ref());
             free_resident(&mut model.mesh_arena, old.water.as_ref());
+            free_resident(&mut model.mesh_arena, old.translucent.as_ref());
             model.origin_arena.free(old.origin_alloc);
         }
     }
@@ -361,7 +369,7 @@ impl RenderState {
             let dedicated: u64 = m
                 .sections
                 .values()
-                .flat_map(|s| [s.mesh.as_ref(), s.water.as_ref()])
+                .flat_map(|s| [s.mesh.as_ref(), s.water.as_ref(), s.translucent.as_ref()])
                 .flatten()
                 .map(dedicated_bytes)
                 .sum();
@@ -396,7 +404,7 @@ impl RenderState {
             let dedicated: u64 = m
                 .sections
                 .values()
-                .flat_map(|s| [s.mesh.as_ref(), s.water.as_ref()])
+                .flat_map(|s| [s.mesh.as_ref(), s.water.as_ref(), s.translucent.as_ref()])
                 .flatten()
                 .map(dedicated_bytes)
                 .sum();

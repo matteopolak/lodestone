@@ -855,6 +855,7 @@ fn measure_draw_submission(
                 &SectionGeometry::Model {
                     opaque,
                     water,
+                    translucent_blocks: lodestone_render::ModelMesh::default(),
                     visibility: lodestone::mesher::snapshot_visibility(&snap, models),
                 },
             );

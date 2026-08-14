@@ -51,6 +51,13 @@ pub(super) struct ModelSectionGpu {
     /// fluid pass after all opaque geometry so the sea floor shows through.
     pub(super) water: Option<ResidentMesh>,
     pub(super) water_quad_count: usize,
+    /// Translucent **block** geometry for this section, if any — stained
+    /// glass, ice, the nether portal swirl, anything `BlockModels::layer`
+    /// classifies `Translucent` from real per-texel alpha. Drawn on its own
+    /// pass (`ModelRenderer::translucent_pipeline`), after opaque geometry and
+    /// alongside water, each independently sorted back-to-front.
+    pub(super) translucent: Option<ResidentMesh>,
+    pub(super) translucent_quad_count: usize,
     /// This section's slot in [`ModelRenderer::origin_arena`], written once at
     /// upload. Freed (via [`SectionOriginArena::free`]) when the section is
     /// removed or remeshed away to nothing.
@@ -296,6 +303,20 @@ pub(super) struct ModelRenderer {
     /// blend, depth-test on / depth-write off). Shares the model camera and
     /// atlas bind groups.
     pub(super) water_pipeline: ModelPipeline,
+    /// The translucent **block** pipeline
+    /// (`ModelPipeline::for_layer(.., RenderLayer::Translucent)`): the same
+    /// `MODEL_WGSL` shader and palette/tint machinery as [`Self::pipeline`]
+    /// (the opaque/cutout pass), just built with alpha blending, no depth
+    /// write and no back-face culling. Distinct from [`Self::water_pipeline`]
+    /// on purpose — the fluid shader has no palette bind group and always
+    /// applies the water tint to an untinted quad, which is wrong for a
+    /// palette-tinted translucent block. Shares the opaque pass's camera,
+    /// atlas, palette and animation bind groups (their bind-group *layouts*
+    /// are built identically — both pipelines come from the same
+    /// `ModelPipeline::build` with `with_palette: true` — so the objects are
+    /// interchangeable across the two pipelines, exactly like
+    /// `water_pipeline` already reuses `atlas_bind_group`).
+    pub(super) translucent_pipeline: ModelPipeline,
     #[allow(dead_code)]
     pub(super) atlas: GpuAtlas,
     pub(super) atlas_bind_group: wgpu::BindGroup,

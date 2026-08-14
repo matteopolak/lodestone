@@ -606,6 +606,30 @@ pub trait ModelSectionView {
         false
     }
 
+    /// Whether the block at section-local `(x, y, z)` is on the
+    /// [`RenderLayer::Translucent`](crate::translucency::RenderLayer::Translucent)
+    /// pass — a genuinely partial-alpha block (stained glass, ice, the nether
+    /// portal swirl) whose quads [`mesh_models`] routes to a **second** mesh
+    /// drawn with real alpha blending and back-to-front order, instead of
+    /// folding them into the opaque/cutout mesh the single-alpha-test shader
+    /// draws. Owner report: "the nether portal swirly block is missing is
+    /// opaque when it isnt supposed to be" — `BlockModels` already classified
+    /// nether_portal's sprite as `Translucent` correctly (every texel of the
+    /// real `block/nether_portal.png` has partial alpha), but nothing read
+    /// that classification when routing quads into a mesh, so every block
+    /// (`Solid`, `Cutout` and `Translucent` alike) landed in the one bucket
+    /// the opaque pipeline draws with cutout-discard and no blending.
+    ///
+    /// Defaults to `false` — everything stays on the opaque/cutout mesh — so
+    /// an existing [`ModelSectionView`] implementation (a test fixture, the
+    /// GUI item baker) keeps its previous behaviour exactly; only a view
+    /// backed by a real [`BlockModels`](crate::BlockModels) registry
+    /// (`SnapshotModelView` in `lodestone-shell`) overrides it.
+    fn is_translucent_at(&self, x: usize, y: usize, z: usize) -> bool {
+        let _ = (x, y, z);
+        false
+    }
+
     /// The **real**, position-resolved colour for a biome-dependent quad at
     /// section-local `(x, y, z)`, or `None` to fall back to the frame-shared
     /// palette's plains-default colour at that `slot` — exactly today's
@@ -779,9 +803,37 @@ fn quad_corner_sample(
 /// (vanilla's anisotropy fix), matching `crate::mesh::emit_quad`.
 ///
 /// The fluid path ([`mesh_fluids`]) stays flat by design — see its own docs.
+///
+/// Merges [`mesh_models_layers`]'s two outputs into one — the shape this
+/// function had before block-level [`RenderLayer`](crate::translucency::RenderLayer)
+/// routing existed, kept for callers (tests, benches) that only want the
+/// combined geometry and do not draw the translucent half through its own
+/// blended pass.
 #[must_use]
 pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
+    let (mut mesh, translucent) = mesh_models_layers(view);
+    mesh.merge(&translucent);
+    mesh
+}
+
+/// Like [`mesh_models`], but keeps a block on the
+/// [`RenderLayer::Translucent`](crate::translucency::RenderLayer::Translucent)
+/// pass ([`ModelSectionView::is_translucent_at`]) in a **second** mesh instead
+/// of folding it into the first.
+///
+/// The split exists because the two meshes are drawn through different
+/// pipelines: the first (`Solid` + `Cutout`) is depth-written and uses a
+/// single alpha-test/discard shader; the second needs real alpha blending,
+/// no depth write and back-to-front ordering — see
+/// `lodestone-shell`'s `gpu/frame.rs` translucent-block draw pass. Splitting
+/// at **block** granularity (not per-quad) matches how the layer itself is
+/// derived ([`crate::block_models::BlockModels::layer`] is one value per
+/// state) and how vanilla assigns exactly one `ChunkSectionLayer` per block's
+/// baked material.
+#[must_use]
+pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh) {
     let mut mesh = ModelMesh::default();
+    let mut translucent_mesh = ModelMesh::default();
     let n = SECTION_SIZE;
     for y in 0..n {
         for z in 0..n {
@@ -790,6 +842,11 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                 if quads.is_empty() {
                     continue;
                 }
+                let target: &mut ModelMesh = if view.is_translucent_at(x, y, z) {
+                    &mut translucent_mesh
+                } else {
+                    &mut mesh
+                };
                 // Per *block*, matching vanilla: `tesselateBlock` picks AO or
                 // flat once per block (`parts.getFirst().useAmbientOcclusion()`),
                 // not per quad, so every quad of a `"ambientocclusion": false`
@@ -867,7 +924,7 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                     let tint = quad.tint_index.map_or(255u8, |t| t as u8);
                     let tint_rgb_override = view.biome_tint_at(x, y, z, tint);
                     emit_baked_quad(
-                        &mut mesh,
+                        target,
                         quad,
                         [x as f32, y as f32, z as f32],
                         corners,
@@ -878,7 +935,7 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
             }
         }
     }
-    mesh
+    (mesh, translucent_mesh)
 }
 
 /// Directional shading, matching vanilla's constant per-face factors so a shaded
@@ -1605,6 +1662,81 @@ mod tests {
                 None => false,
             }
         }
+    }
+
+    /// A block at `(8, 8, 8)` returning `quads_a`, and one at `(9, 8, 8)`
+    /// returning `quads_b`, with `(9, 8, 8)`'s [`is_translucent_at`] answer
+    /// fixed by `b_translucent`.
+    ///
+    /// [`is_translucent_at`]: ModelSectionView::is_translucent_at
+    struct TwoBlocks {
+        quads_a: Vec<BakedQuad>,
+        quads_b: Vec<BakedQuad>,
+        b_translucent: bool,
+    }
+    impl ModelSectionView for TwoBlocks {
+        fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+            match (x, y, z) {
+                (8, 8, 8) => &self.quads_a,
+                (9, 8, 8) => &self.quads_b,
+                _ => &[],
+            }
+        }
+        fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+            false
+        }
+        fn is_translucent_at(&self, x: usize, y: usize, z: usize) -> bool {
+            (x, y, z) == (9, 8, 8) && self.b_translucent
+        }
+    }
+
+    /// The regression gate for the portal-opacity fix: `mesh_models_layers`
+    /// must keep a [`ModelSectionView::is_translucent_at`] block's quads out
+    /// of the first (opaque/cutout) mesh and put them in the second, while an
+    /// ordinary block's quads stay in the first — and `mesh_models` (the
+    /// merged form existing callers use) must still carry both blocks'
+    /// geometry either way, so this split cannot silently drop a quad.
+    #[test]
+    fn mesh_models_layers_routes_translucent_blocks_to_the_second_mesh() {
+        let view = TwoBlocks {
+            quads_a: vec![cube_face(Direction::Up, None)],
+            quads_b: vec![cube_face(Direction::Up, None)],
+            b_translucent: true,
+        };
+        let (opaque, translucent) = mesh_models_layers(&view);
+        assert_eq!(
+            opaque.quad_count(),
+            1,
+            "the non-translucent block's quad must be the only one in the opaque mesh"
+        );
+        assert_eq!(
+            translucent.quad_count(),
+            1,
+            "the translucent block's quad must land in the second mesh, not be dropped"
+        );
+
+        // Control: with both blocks non-translucent, every quad stays in the
+        // first mesh and the second is empty — proving the split is driven by
+        // `is_translucent_at`, not by something incidental to having two
+        // blocks.
+        let both_opaque_view = TwoBlocks {
+            quads_a: vec![cube_face(Direction::Up, None)],
+            quads_b: vec![cube_face(Direction::Up, None)],
+            b_translucent: false,
+        };
+        let (opaque2, translucent2) = mesh_models_layers(&both_opaque_view);
+        assert_eq!(opaque2.quad_count(), 2);
+        assert_eq!(translucent2.quad_count(), 0);
+
+        // `mesh_models` (the merged, backward-compatible form) must carry
+        // every quad from both blocks regardless of the split — a caller that
+        // only wants combined geometry must see no change.
+        let merged = mesh_models(&view);
+        assert_eq!(
+            merged.quad_count(),
+            2,
+            "mesh_models must merge both meshes, dropping nothing"
+        );
     }
 
     /// [`mesh_models`] must ask for light **per quad**, keyed on that quad's

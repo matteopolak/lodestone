@@ -38,7 +38,8 @@ use super::terrain::{
     anim_slots_at,
 };
 use super::{
-    BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource, CampfireSource,
+    AmbientLightSource, BannerSource, BellSource, BlockEntityRenderer, BlockEntitySource,
+    CampfireSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, EntityLightSource, EntityRenderer,
     HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource, MovingPistonSource,
@@ -118,6 +119,14 @@ impl RenderState {
         let model = vanilla.and_then(BlockAtlas::models).map(|models| {
             let pipeline = ModelPipeline::new(device, color_format);
             let water_pipeline = ModelPipeline::for_fluid(device, color_format);
+            // Translucent **block** geometry (stained glass, ice, the nether
+            // portal swirl): the same MODEL_WGSL shader and palette as
+            // `pipeline`, alpha-blended instead of cutout-discarded. Distinct
+            // from `water_pipeline`, whose `FLUID_WGSL` shader has no palette
+            // and always applies the water tint — wrong for a palette-tinted
+            // translucent block.
+            let translucent_pipeline =
+                ModelPipeline::for_layer(device, color_format, lodestone_render::RenderLayer::Translucent);
             let atlas = GpuAtlas::from_atlas(device, queue, models.atlas());
             let atlas_bind_group = pipeline.atlas_bind_group(device, &atlas);
             let palette_buffer =
@@ -187,6 +196,7 @@ impl RenderState {
             ModelRenderer {
                 pipeline,
                 water_pipeline,
+                translucent_pipeline,
                 atlas,
                 atlas_bind_group,
                 palette_bind_group,
@@ -263,6 +273,9 @@ impl RenderState {
             // Permanent noon until the shell installs a world clock; see
             // `set_sky_darken_source`.
             sky_darken: SkyDarkenSource::default(),
+            // The overworld's own ambient colour until the shell installs the
+            // current dimension; see `set_ambient_light_source`.
+            ambient_light: AmbientLightSource::default(),
             // No third-person camera exists yet; see
             // `set_third_person_body_source`.
             third_person_body: ThirdPersonBodySource::default(),
@@ -503,9 +516,13 @@ impl RenderState {
     /// paint the disc's horizon. Pre-multiplying the stored base here or in
     /// `set_fog` would double-apply the track to the sky disc.
     pub(super) fn fog_with_clock(&self, eye: glam::Vec3) -> FogUniform {
-        Self::fog_uniform_for(&self.fog, self.time_of_day.value(), self.sky_darken.value(), [
-            eye.x, eye.y, eye.z,
-        ])
+        Self::fog_uniform_for(
+            &self.fog,
+            self.time_of_day.value(),
+            self.sky_darken.value(),
+            self.ambient_light.value(),
+            [eye.x, eye.y, eye.z],
+        )
     }
 
     /// Pure core of [`fog_with_clock`](Self::fog_with_clock), taking the
@@ -517,12 +534,14 @@ impl RenderState {
         fog: &FogSettings,
         time_of_day: i64,
         sky_darken: f32,
+        ambient_light: [f32; 3],
         eye: [f32; 3],
     ) -> FogUniform {
         let mut settings = *fog;
         settings.color = lodestone_render::fog_color_for_time_of_day(time_of_day, fog.color);
         let mut u = FogUniform::new(&settings, eye);
         u.end_enabled[2] = sky_darken;
+        u.ambient_light = [ambient_light[0], ambient_light[1], ambient_light[2], 0.0];
         u
     }
 
@@ -563,6 +582,44 @@ impl RenderState {
     #[must_use]
     pub fn sky_darken(&self) -> f32 {
         self.sky_darken.value()
+    }
+
+    /// Install the current dimension's ambient light colour (see
+    /// [`AmbientLightSource`]). Install once, at connect time, next to
+    /// [`set_sky_darken_source`](Self::set_sky_darken_source) — `f` is polled
+    /// once per frame and may return `None` until the dimension type is known,
+    /// so there is nothing to wait for.
+    ///
+    /// `f` returns `EnvironmentAttributes.AMBIENT_LIGHT_COLOR` for the
+    /// dimension the local player is currently in, as `0.0..=1.0` per-channel
+    /// floats — `lodestone_render::light::rgb24_to_channels` of
+    /// `DimensionType::ambient_light_color`:
+    ///
+    /// ```no_run
+    /// # use std::sync::{Arc, OnceLock};
+    /// # fn wire(render: &mut lodestone::gpu::RenderState, net: &lodestone::net::NetClient) {
+    /// use lodestone_render::light::{OVERWORLD_AMBIENT_LIGHT, rgb24_to_channels};
+    ///
+    /// let handle = net.shared_handle();
+    /// render.set_ambient_light_source(move || {
+    ///     let dim = handle.get()?.player().dimension_type?;
+    ///     Some(match dim.ambient_light_color {
+    ///         Some(packed) => rgb24_to_channels(packed),
+    ///         None => OVERWORLD_AMBIENT_LIGHT,
+    ///     })
+    /// });
+    /// # }
+    /// ```
+    ///
+    /// Without this, every dimension renders the overworld's own grey
+    /// ambient floor: the reported "the entire Nether seems very dark
+    /// compared to vanilla", since the Nether's real floor
+    /// (`#302821`) is markedly brighter than the overworld's (`#0a0a0a`).
+    pub fn set_ambient_light_source(
+        &mut self,
+        f: impl Fn() -> Option<[f32; 3]> + Send + Sync + 'static,
+    ) {
+        self.ambient_light = AmbientLightSource(Some(Box::new(f)));
     }
 
     /// Install the sky pass, built once by the caller (typically
