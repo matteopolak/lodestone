@@ -144,6 +144,11 @@ mod command_block;
 /// it was an island, which is part of how the island survived.
 pub mod commands;
 mod composter;
+/// The ender dragon fight — phase state machine, crystal healing and the
+/// `EndDragonFight` controller (`docs/dragon-fight.md`). Public so a future
+/// production wiring pass (spawning a live dragon/crystal pair from
+/// `mobs::MobSim`) can reach it from outside this crate's own tests.
+pub mod dragon;
 /// The dimensions this server hosts and their geometry (`docs/nether-portals.md`).
 /// Public because [`ChunkSource::sibling`] and [`ChunkSource::dimension`] name
 /// [`dimension::Dimension`], and because a host building a multi-dimension world
@@ -486,10 +491,24 @@ pub use worldgen_data::{
     overworld_chunk_source, overworld_chunk_source_of_type, overworld_generator,
     overworld_generator_of_type, BUNDLED_WORLDGEN_SCOPE, WorldType,
 };
+// Issue #519's remaining three presets (`single_biome_surface`, `flat`/
+// `flat_all_dimensions`, `debug_all_block_states`): re-exported so a
+// world-creation UI outside this crate can select them the same way it
+// already can `WorldType` above — see `docs/worldgen-world-type-selection.md`
+// for the full preset-to-entry-point table.
+pub use worldgen_data::{
+    DebugChunkSource, FlatChunkSource, debug_chunk_source, debug_generator,
+    flat_chunk_source, flat_generator, flat_level_generator_preset_settings,
+    single_biome_chunk_source, single_biome_generator,
+    world_preset_flat_settings, world_preset_single_biome_default_biome,
+};
 
 // Re-exported so a caller (e.g. the shell's local world) can name the generator
 // and its output without depending on `lodestone-worldgen` directly.
 pub use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
+// Same reason, for issue #519's `flat`/`debug_all_block_states` presets.
+pub use lodestone_worldgen::debug::DebugLevelSource;
+pub use lodestone_worldgen::flat::{FlatLayer, FlatLevelGeneratorSettings, FlatLevelSource, StructureOverrides};
 
 /// `Heightmap.Types.MOTION_BLOCKING`'s registry id, re-exported for the same
 /// reason (issue #516): `lodestone-worldgen` is only a *dev*-dependency of
