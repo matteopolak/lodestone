@@ -85,10 +85,15 @@ fn chat_ack_not_encoded_outside_play() {
 
 /// A signed player-chat body: content string, 8-byte timestamp, 8-byte salt,
 /// then an empty last-seen collection (VarInt `0`).
+///
+/// Timestamp and salt are **pairwise-distinct** non-zero values, not `0` —
+/// `CLAUDE.md`'s own trap: two adjacent same-typed fields (both `i64` on the
+/// wire here) transpose without a trace when a fixture sets them equal, and
+/// `0` for both would hide exactly that.
 fn signed_body(content: &str) -> Vec<u8> {
     let mut out = mc_string(content);
-    out.extend_from_slice(&0i64.to_be_bytes()); // timestamp
-    out.extend_from_slice(&0i64.to_be_bytes()); // salt
+    out.extend_from_slice(&1_700_000_000_123i64.to_be_bytes()); // timestamp (millis)
+    out.extend_from_slice(&99_887_766i64.to_be_bytes()); // salt
     out.extend_from_slice(&var_i32(0)); // last-seen count
     out
 }
@@ -98,7 +103,10 @@ fn signed_body(content: &str) -> Vec<u8> {
 /// `signature` present -> a 256-byte signature block preceded by its presence
 /// flag; `unsigned` present -> a trusted NBT component preceded by its flag;
 /// `filter_ordinal` selects the FilterMask (0 = pass-through, 1 = fully
-/// filtered, 2 = partially filtered which appends an empty bitset).
+/// filtered, 2 = partially filtered which appends an empty bitset). The
+/// chain index is fixed at `3` (distinct from the timestamp/salt/global_index
+/// values used around it) so `player_chat_signed_surfaces_ack_info` can pin
+/// it as a real, non-zero field rather than an untested `0`.
 fn player_chat(
     global_index: i32,
     signature: Option<[u8; 256]>,
@@ -108,7 +116,7 @@ fn player_chat(
 ) -> Vec<u8> {
     let mut out = var_i32(global_index);
     out.extend_from_slice(&[0u8; 16]); // sender UUID — nil, pinned in the decode test below
-    out.extend_from_slice(&var_i32(0)); // index
+    out.extend_from_slice(&var_i32(3)); // index (SignedMessageLink.index)
     match signature {
         Some(sig) => {
             out.push(0x01);
@@ -163,10 +171,29 @@ fn player_chat_signed_surfaces_ack_info() {
                 signature,
                 global_index,
                 was_shown,
+                message_index,
+                timestamp_millis,
+                salt,
+                raw_content,
+                last_seen,
+                verified,
             } = ack.as_ref().expect("signed chat carries ack info");
             assert_eq!(signature.as_slice(), &sig[..]);
             assert_eq!(*global_index, 7);
             assert!(*was_shown, "pass-through filter is shown");
+            // The fields this fix stopped discarding — each pinned to the
+            // exact (pairwise-distinct) value `player_chat`/`signed_body`
+            // wrote, not merely asserted non-zero.
+            assert_eq!(*message_index, 3, "SignedMessageLink.index");
+            assert_eq!(*timestamp_millis, 1_700_000_000_123);
+            assert_eq!(*salt, 99_887_766);
+            assert_eq!(raw_content, "hello world", "the signed body's raw content");
+            assert!(last_seen.is_empty(), "this fixture's last-seen list is empty");
+            assert!(
+                !*verified,
+                "the adapter never verifies — only the driver can, once it \
+                 has the sender's public key"
+            );
         }
         other => panic!("expected one signed chat event, got {other:?}"),
     }

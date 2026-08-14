@@ -1596,6 +1596,7 @@ mod tests {
                     display_name: None,
                     listed: Some(true),
                     properties: None,
+                    chat_session: None,
                 }],
             },
         );
