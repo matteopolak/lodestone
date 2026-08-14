@@ -106,6 +106,34 @@ pub enum MenuKind {
     },
     /// `CraftingMenu` — a crafting table's 3×3.
     CraftingTable,
+    /// `ItemCombinerMenu`'s three positionless-scratch shapes (workstation
+    /// economy, issues #253-#255): `inputs` grid cells then one take-only
+    /// result, exactly `ItemCombinerMenu`'s own
+    /// `getInventorySlotStart() == resultSlot + 1` (`docs/container-cost-screens.md`
+    /// already documents this for the client-side layout; this is the same
+    /// shape for the server's own slot algebra).
+    ItemCombiner {
+        /// `2` for the anvil/grindstone, `3` for the smithing table.
+        inputs: usize,
+        /// Which station's `may_place`/quick-move/take rules apply.
+        station: Station,
+    },
+    /// `EnchantmentMenu`'s two slots: item (any, capped to a stack of one) and
+    /// lapis. **No result slot** — unlike the other three, nothing is *taken*
+    /// here; the item slot is enchanted in place. Positionless scratch space,
+    /// same story as [`ItemCombiner`](Self::ItemCombiner).
+    Enchanting,
+}
+
+/// Which workstation an [`MenuKind::ItemCombiner`] is — the anvil and
+/// grindstone share an `inputs: 2` shape but differ in every rule that
+/// matters (`may_place`, and — in [`take_result`] — how a take consumes the
+/// input cells), so the shape alone cannot tell them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Station {
+    Anvil,
+    Grindstone,
+    Smithing,
 }
 
 /// The menu-index → [`SlotKind`] table for one open menu.
@@ -161,6 +189,42 @@ impl MenuLayout {
         }
     }
 
+    /// One `ItemCombinerMenu` shape: `station`'s own input-cell count grid
+    /// cells (`Anvil`/`Grindstone` 2, `Smithing` 3), then one take-only
+    /// result, then the standard 27+9 player tail
+    /// (`addStandardInventorySlots(inventory, 8, 84)`, identical for all
+    /// three — the anvil/grindstone/smithing/enchanting screens all place the
+    /// player section at the same `y = 84`, per `docs/container-cost-screens.md`).
+    #[must_use]
+    pub fn item_combiner(station: Station) -> Self {
+        let inputs = match station {
+            Station::Anvil | Station::Grindstone => 2,
+            Station::Smithing => 3,
+        };
+        let mut slots: Vec<SlotKind> = (0..inputs).map(SlotKind::Grid).collect();
+        slots.push(SlotKind::Result);
+        slots.extend((9..36).map(SlotKind::Player));
+        slots.extend((0..9).map(SlotKind::Player));
+        Self {
+            kind: MenuKind::ItemCombiner { inputs, station },
+            slots,
+        }
+    }
+
+    /// `EnchantmentMenu`'s two slots (`15,47` item, `35,47` lapis) then the
+    /// standard 27+9 player tail. See [`MenuKind::Enchanting`]'s own doc for
+    /// why there is no result slot.
+    #[must_use]
+    pub fn enchanting_table() -> Self {
+        let mut slots = vec![SlotKind::Grid(0), SlotKind::Grid(1)];
+        slots.extend((9..36).map(SlotKind::Player));
+        slots.extend((0..9).map(SlotKind::Player));
+        Self {
+            kind: MenuKind::Enchanting,
+            slots,
+        }
+    }
+
     /// Total menu slots.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -197,7 +261,13 @@ impl MenuLayout {
                 Some(slot) => equip_slot_of(item) == Some(slot),
                 None => true,
             },
-            Some(SlotKind::Grid(_) | SlotKind::Container(_)) => true,
+            Some(SlotKind::Grid(cell)) => match self.kind {
+                MenuKind::ItemCombiner { station, .. } => item_combiner_may_place(station, cell, item),
+                // `EnchantmentMenu`'s lapis slot: `itemStack.is(Items.LAPIS_LAZULI)`.
+                MenuKind::Enchanting if cell == 1 => item.item.to_string() == "minecraft:lapis_lazuli",
+                _ => true,
+            },
+            Some(SlotKind::Container(_)) => true,
         }
     }
 
@@ -208,7 +278,13 @@ impl MenuLayout {
     /// has none; the *brewing* stand does) is not modelled: no menu this crate
     /// opens narrows it.
     #[must_use]
-    fn max_stack_size(&self, _index: usize, item: &ItemStack) -> u32 {
+    fn max_stack_size(&self, index: usize, item: &ItemStack) -> u32 {
+        // `EnchantmentMenu`'s item slot overrides `getMaxStackSize()` to `1`
+        // regardless of the item's own cap — the table only ever enchants one
+        // item at a time.
+        if self.kind == MenuKind::Enchanting && self.kind_of(index) == Some(SlotKind::Grid(0)) {
+            return 1;
+        }
         max_stack_size(item)
     }
 
@@ -271,8 +347,75 @@ impl MenuLayout {
                 }
                 vec![(10, 46, false)]
             }
+            // `ItemCombinerMenu.quickMoveStack`: result shifts out backwards into
+            // the player tail, a grid cell shifts forward into the tail, and a
+            // tail slot tries the input cells first (`canMoveIntoInputSlots`,
+            // approximated as always-attempted — the real gate is still
+            // `may_place` at the destination, so an ineligible item simply fails
+            // to move rather than skipping the attempt) before falling back to
+            // the usual storage<->hotbar shuffle.
+            MenuKind::ItemCombiner { inputs, .. } => {
+                let result = inputs;
+                let tail_start = inputs + 1;
+                let tail_end = self.slots.len();
+                if index == result {
+                    return vec![(tail_start, tail_end, true)];
+                }
+                if index < result {
+                    return vec![(tail_start, tail_end, false)];
+                }
+                let hotbar_start = tail_end - 9;
+                if index < hotbar_start {
+                    vec![(0, result, false), (hotbar_start, tail_end, false)]
+                } else {
+                    vec![(0, result, false), (tail_start, hotbar_start, false)]
+                }
+            }
+            // `EnchantmentMenu.quickMoveStack`: either input slot shifts out
+            // backwards into the tail; lapis from the tail goes straight to slot
+            // 1; anything else tries slot 0 first (capped to one item by
+            // `max_stack_size`'s own override above).
+            MenuKind::Enchanting => {
+                if index < 2 {
+                    return vec![(2, self.slots.len(), true)];
+                }
+                if item.item.to_string() == "minecraft:lapis_lazuli" {
+                    return vec![(1, 2, false)];
+                }
+                vec![(0, 1, false), (2, self.slots.len(), false)]
+            }
         }
     }
+}
+
+/// `Slot.mayPlace` for one of [`MenuKind::ItemCombiner`]'s input cells —
+/// [`AnvilMenu`], [`GrindstoneMenu`] and [`SmithingMenu`]'s own
+/// `createInputSlotDefinitions`/anonymous `Slot` overrides.
+fn item_combiner_may_place(station: Station, cell: usize, item: &ItemStack) -> bool {
+    match station {
+        // `AnvilMenu.createInputSlotDefinitions`: both slots accept anything.
+        Station::Anvil => true,
+        // `GrindstoneMenu`'s two anonymous slots:
+        // `itemStack.isDamageableItem() || EnchantmentHelper.hasAnyEnchantments(itemStack)`.
+        Station::Grindstone => is_damageable(item) || !item.components.enchantments.is_empty(),
+        // `SmithingMenu.createInputSlotDefinitions`: one `RecipePropertySet` test
+        // per slot index.
+        Station::Smithing => {
+            let name = item.item.to_string();
+            match cell {
+                0 => crate::smithing::is_template(&name),
+                1 => crate::smithing::is_base(&name),
+                _ => crate::smithing::is_addition(&name),
+            }
+        }
+    }
+}
+
+/// `ItemStack.isDamageableItem()` — has a `minecraft:max_damage` prototype,
+/// via the same census [`max_stack_size`] already reads.
+fn is_damageable(item: &ItemStack) -> bool {
+    item.components.max_damage.is_some()
+        || lodestone_data::item_prototypes::prototype(&item.item.to_string()).is_some_and(|p| p.max_damage.is_some())
 }
 
 /// The armour [`EquipmentSlot`] a player native index is, if any.
@@ -772,26 +915,77 @@ fn take_from(
     Some(out)
 }
 
-/// `ResultSlot.onTake` — one craft consumes one of every non-empty grid cell, then
+/// `ResultSlot.onTake` — how much of each input cell one take consumes, then
 /// the result slot is re-derived from what is left (`slotsChanged`).
 ///
 /// The re-derivation is *here* rather than only at the end of the click because
 /// [`quick_move`]'s repeat loop reads it: the refilled result is what tells it to
 /// craft again.
+///
+/// Three shapes, one per family: crafting/smithing consume exactly one of
+/// every grid cell (`CraftingMenu`'s own grid, `SmithingMenu.onTake`'s three
+/// `shrinkStackInSlot` calls); the grindstone always fully clears both input
+/// cells regardless of what was consumed (`GrindstoneMenu`'s result slot
+/// `onTake`, unconditional `setItem(0/1, EMPTY)`); the anvil is the one
+/// genuinely bespoke case — cell 0 (input) is always cleared, cell 1
+/// (addition) is either partially shrunk by `repairItemCountCost`, cleared, or
+/// left untouched for a pure rename (`AnvilMenu.onTake`). The anvil branch
+/// re-derives that shape from [`crate::anvil::compute`] with `creative: true`
+/// purely to read its consumption fields — safe because creative can only
+/// ever *widen* which combination produces a result, so a result that reached
+/// this take (however it was gated) is reproduced identically.
 fn take_result(
     layout: &MenuLayout,
     slots: &mut [Option<ItemStack>],
     recipe: Option<ResultRecipe<'_>>,
 ) {
-    for (index, kind) in layout.slots.iter().copied().enumerate() {
-        if !matches!(kind, SlotKind::Grid(_)) {
-            continue;
+    match layout.kind {
+        MenuKind::ItemCombiner { station: Station::Grindstone, .. } => {
+            for (index, kind) in layout.slots.iter().copied().enumerate() {
+                if matches!(kind, SlotKind::Grid(_)) {
+                    slots[index] = None;
+                }
+            }
         }
-        let Some(cell) = slots[index].as_mut() else { continue };
-        if cell.count <= 1 {
-            slots[index] = None;
-        } else {
-            cell.count -= 1;
+        MenuKind::ItemCombiner { station: Station::Anvil, .. } => {
+            let cells = grid_cells(layout, slots);
+            let input = cells.first().and_then(Option::as_ref);
+            let addition = cells.get(1).and_then(Option::as_ref);
+            let outcome = crate::anvil::compute(input, addition, None, true);
+            for (index, kind) in layout.slots.iter().copied().enumerate() {
+                let SlotKind::Grid(cell) = kind else { continue };
+                match cell {
+                    0 => slots[index] = None,
+                    1 => {
+                        if outcome.repair_item_count_cost > 0 {
+                            match slots[index].as_mut() {
+                                Some(stack) if stack.count > outcome.repair_item_count_cost => {
+                                    stack.count -= outcome.repair_item_count_cost;
+                                }
+                                _ => slots[index] = None,
+                            }
+                        } else if !outcome.only_renaming {
+                            slots[index] = None;
+                        }
+                        // Pure rename with nothing consumed: addition slot (if any)
+                        // is left exactly as it was, matching vanilla.
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {
+            for (index, kind) in layout.slots.iter().copied().enumerate() {
+                if !matches!(kind, SlotKind::Grid(_)) {
+                    continue;
+                }
+                let Some(cell) = slots[index].as_mut() else { continue };
+                if cell.count <= 1 {
+                    slots[index] = None;
+                } else {
+                    cell.count -= 1;
+                }
+            }
         }
     }
     resync_result(layout, slots, recipe);

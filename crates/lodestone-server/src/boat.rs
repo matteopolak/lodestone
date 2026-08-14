@@ -92,11 +92,15 @@
 //!   which this crate has no world-wide entity query for at this seam — a boat can
 //!   therefore be placed overlapping a mob. Documented, small, and visible only as
 //!   two things briefly sharing a cell.
-//! * **The client half is not here.** Our shell's `Sim::use_item_live` sends
-//!   `USE_ITEM_ON` for a block-target right-click and does **not** fall through to
-//!   the generic `USE_ITEM` the way vanilla's `Minecraft.startUseItem` does, so a
-//!   boat aimed at *land* never reaches this module today. Aimed at water past
-//!   block reach it does, because the crosshair ray ignores fluids and misses.
+//! * **The client half is here.** Our shell's `Sim::use_item_live` now falls
+//!   through from a missed/fluid-only crosshair ray to the generic `USE_ITEM`,
+//!   the way vanilla's `Minecraft.startUseItem` does — the client-side gap this
+//!   note used to describe (a boat aimed at land never reaching this module) is
+//!   closed. `ServerBound::UseItemOn` (a block-target right-click) still carries
+//!   no boat handling of its own; every placement, land or water, goes through
+//!   `ServerBound::UseItem` → [`apply_boat_item`], because the crosshair ray
+//!   ignores fluids and treats land beyond the clicked block's face the same
+//!   way vanilla's own `getPlayerPOVHitResult` does for this item.
 //!
 //! # Dependencies
 //!

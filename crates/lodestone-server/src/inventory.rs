@@ -93,6 +93,16 @@ pub struct PlayerInventory {
     /// what makes "is this window a crafting table" answerable without a second
     /// registry: the grid exists exactly while the menu does.
     table_crafting: Option<CraftingState>,
+    /// The open anvil/grindstone/smithing-table's input cells (issues #253-#255),
+    /// if one is open — the same "positionless scratch space" story as
+    /// `table_crafting` above: none of these three stations is a
+    /// [`crate::block_entities::BlockEntity`] in vanilla either (`AnvilMenu`'s
+    /// `inputSlots`, `GrindstoneMenu`'s `repairSlots` and `SmithingMenu`'s
+    /// `inputSlots` are all menu-owned `SimpleContainer`s thrown away on close),
+    /// so there is nowhere else for these 2-3 cells to live between clicks. Sized
+    /// to the open station (`2` for the anvil/grindstone, `3` for smithing) by
+    /// [`open_workstation`](Self::open_workstation).
+    workstation: Option<Vec<Option<ItemStack>>>,
 }
 
 impl Default for PlayerInventory {
@@ -103,6 +113,7 @@ impl Default for PlayerInventory {
             crafting: CraftingState::player(),
             click_state: crate::container_click::ClickState::default(),
             table_crafting: None,
+            workstation: None,
         }
     }
 }
@@ -297,6 +308,33 @@ impl PlayerInventory {
         self.table_crafting
             .take()
             .map(|grid| grid.inputs().iter().flatten().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The open anvil/grindstone/smithing-table's input cells, if one is open.
+    #[must_use]
+    pub fn workstation(&self) -> Option<&[Option<ItemStack>]> {
+        self.workstation.as_deref()
+    }
+
+    /// Mutable access to the open station's input cells.
+    pub fn workstation_mut(&mut self) -> Option<&mut Vec<Option<ItemStack>>> {
+        self.workstation.as_mut()
+    }
+
+    /// Opens a fresh, empty workstation with `inputs` cells — called when an
+    /// anvil/grindstone/smithing-table menu opens.
+    pub fn open_workstation(&mut self, inputs: usize) {
+        self.workstation = Some(vec![None; inputs]);
+    }
+
+    /// Closes the open workstation and returns whatever was in it, so the
+    /// caller can give it back to the player — same "do not silently delete
+    /// items on close" story as [`take_table_crafting`](Self::take_table_crafting).
+    pub fn take_workstation(&mut self) -> Vec<ItemStack> {
+        self.workstation
+            .take()
+            .map(|cells| cells.into_iter().flatten().collect())
             .unwrap_or_default()
     }
 
