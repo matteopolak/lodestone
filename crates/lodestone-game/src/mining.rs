@@ -356,8 +356,16 @@ impl Mining {
                 // progressive finish in `continue_` reaches. Latching it is what
                 // makes the effect keyed on destruction rather than on the
                 // `StopDestroy` packet a one-shot never sends (issue #387).
+                //
+                // **Also arms the same 5-tick cooldown `continue_`'s progressive
+                // finish sets.** Without it, holding the button in creative (whose
+                // `progress_per_tick()` is always `>= 1.0`) breaks a block, clears
+                // `state`, and reaches `start` again on the very next tick with
+                // nothing to stop it doing the same thing again — a block broken
+                // every tick instead of once per click.
                 self.state = None;
                 self.destroyed = Some(pos);
+                self.delay = 5;
                 out.push(block_action(BlockActionKind::StartDestroy, pos, face, seq));
             } else {
                 self.state = Some(Active {
@@ -894,6 +902,39 @@ mod tests {
              instant-break branch calls the same `destroyBlock` funnel the \
              progressive finish does"
         );
+    }
+
+    /// Holding the button through an instant break (creative, or any
+    /// `progress_per_tick() >= 1.0` input) must not break a second block on the
+    /// very next tick. Before `Mining::start`'s instant-break branch armed the
+    /// same 5-tick cooldown `continue_`'s progressive finish does, `state` was
+    /// left `None` with no delay, so the next `continue_` call (still `!same_target`
+    /// since there is no active dig) fell straight through to `start` again —
+    /// a block destroyed every single tick the button stayed down.
+    ///
+    /// Predicts the exact tick count rather than merely "eventually stops":
+    /// one destroy, then exactly five cooldown ticks reporting nothing, matching
+    /// the same `self.delay = 5` the progressive-finish path already used.
+    #[test]
+    fn holding_through_an_instant_break_does_not_break_a_block_every_tick() {
+        let mut m = Mining::new();
+        let p = pos(0, 70, 0);
+        let inputs = BreakInputs {
+            hardness: 0.0,
+            ..BreakInputs::default()
+        };
+
+        m.start(p, BlockFace::Up, &inputs, None);
+        assert_eq!(m.take_destroyed(), Some(p), "the first tick must destroy the block");
+
+        for tick in 0..5 {
+            m.continue_(p, BlockFace::Up, &inputs, None);
+            assert_eq!(
+                m.take_destroyed(),
+                None,
+                "tick {tick} of the 5-tick cooldown must not destroy another block"
+            );
+        }
     }
 
     /// Both destroy paths report through the one latch, and nothing else does.
