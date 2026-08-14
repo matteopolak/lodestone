@@ -649,6 +649,24 @@ pub enum NetUpdate {
         /// Second parameter byte — the event's payload.
         b1: u8,
     },
+    /// The server authorised the local player to edit a sign (vanilla's
+    /// `ClientboundOpenSignEditorPacket`, decoded as
+    /// `ClientEvent::SignEditorOpened`).
+    ///
+    /// Same shape as [`NetUpdate::BlockEvent`] immediately above: the decode
+    /// (`v770`'s `OPEN_SIGN_EDITOR`) and the screen
+    /// (`crate::menu::sign_edit::SignEditState`) were both real and both
+    /// tested, and this event had **zero consumers** between them — it fell
+    /// through [`forward`]'s terminal `_ =>` arm. `Sim::poll_net` is the one
+    /// consumer that can read the sign's already-synced block-entity text to
+    /// seed the screen with, which is why this crosses raw rather than
+    /// pre-resolved.
+    SignEditorOpened {
+        /// The sign's block position.
+        pos: lodestone_model::BlockPos,
+        /// Whether the front (vs. back) face is being edited.
+        is_front_text: bool,
+    },
     /// The server reported a block being destroyed at `pos`, carrying the state
     /// id it had **before** breaking.
     ///
@@ -3261,6 +3279,9 @@ fn forward(
             b0,
             b1,
         },
+        ClientEvent::SignEditorOpened { pos, is_front_text } => {
+            NetUpdate::SignEditorOpened { pos, is_front_text }
+        }
         // The item-pickup fly-to-collector animation (issue #365), forwarded
         // **raw** for the same reason `TitleEvent` is: the one consumer is a
         // `lodestone-game` fold that already takes a `&ClientEvent`

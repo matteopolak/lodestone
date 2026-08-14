@@ -102,47 +102,82 @@ without the response is silence and the response without the request is dead cod
 The same is true of `show_dialog` → `CustomClickAction`. When a serverbound packet
 looks unmotivated, check whether it is the request half of something clientbound.
 
-### The eighteen that are *not* verified
+### The eighteen that are *not* verified — now individually audited
 
 A whole-enum sweep of `ClientAction` reported eighteen further variants with no
 producer found by name. **Two of the eighteen — `MoveVehicle` and `PaddleBoat` — have
 since gained producers** in `lodestone_ecs::vehicle::send_vehicle_actions`, which is a
 data point about the list rather than only about riding: they were sitting here
 *unverified* while being genuine islands of exactly the `SetFlying` shape, so an
-unverified entry is a real lead and not noise. The sixteen that remain:
-`ContainerButtonClick`, `EditBook`, `EndClientTick`,
-`PingRequest`, `RecipeBookSeenRecipe`, `RenameItem`,
-`ResourcePackResponse`, `SeenAdvancements`, `SelectBundleItem`, `SelectTrade`,
-`SetBeaconEffects`, `SetContainerSlotState`, `SignUpdate`, `SpectatorAction`,
-`Stab`, `TeleportToEntity`.
+unverified entry is a real lead and not noise.
 
-**That list is not trustworthy and is deliberately not in the gate** — but the
-example this paragraph used to give was itself wrong, in the direction that
-matters. It claimed `SignUpdate` was a false positive, produced through
-`submit.into_action()` in `lodestone-shell/src/app/menus.rs`. That call resolves to
+**The remaining sixteen have now been read one at a time, per the call-path rule
+below, and the doc's own worked example was itself wrong.** It claimed
+`SignUpdate` was a false positive, produced through `submit.into_action()` in
+`lodestone-shell/src/app/menus.rs`. That call resolves to
 `CommandBlockSubmit::into_action`, which returns `ClientAction::SetCommandBlock` —
-a *different* variant. `SignUpdate` has **no producer anywhere outside
-`crates/protocol/` and `lodestone-model`'s own dispatch**, so it is a genuine
-island: sign text can be encoded by every adapter and nothing in the shell can ever
-send it.
+a *different* variant. `SignUpdate` had **no producer anywhere outside
+`crates/protocol/` and `lodestone-model`'s own dispatch** at the time that claim was
+written: sign text could be encoded by every adapter and nothing in the shell could
+ever send it.
 
 The lesson is the reverse of the one originally drawn here. An indirection no name
 scanner can follow does not mean the scanner is wrong — it means nobody checked,
-and "the code exists" is not evidence a variant is produced. Audit the remaining
-entries one at a time by **reading the call path to its terminal `ClientAction`**,
-not by finding an indirection and assuming it lands where the name suggests.
+and "the code exists" is not evidence a variant is produced. Audit each entry by
+**reading the call path to its terminal `ClientAction`**, not by finding an
+indirection and assuming it lands where the name suggests, and not by grepping the
+variant name alone (a real producer can sit behind a `*Submit::into_action()`-shaped
+type, as `SetCommandBlock` and now `SignUpdate`/`RenameItem` do).
 
-Two of them are worth auditing first because they are **not** screen-blocked and
-both have a live failure mode:
+**Four of the sixteen turned out to already have real producers** — two were
+already fixed since this doc was last written, and two were fixed as part of that
+audit:
 
-* **`EndClientTick`** — vanilla sends `client_tick_end` every tick. The only
-  construction found is in `lodestone-shell/tests/live_container_render.rs`, i.e. a
-  test. If production really never sends it, that is a protocol-conformance gap
-  rather than a missing feature.
-* **`ResourcePackResponse`** — no construction found anywhere. A server with a
-  `required` resource pack disconnects a client that never answers, which is
-  exactly the `SetFlying` failure mode: correct-looking encoder, no producer, remote
-  kick.
+* **`EndClientTick`** — **has a producer.** `lodestone-shell/src/sim/step.rs`
+  pushes it every tick, gated on `Egress::in_world`, with a comment recording that
+  this was itself once "encoded with no producer outside a test" and got fixed.
+  The stale claim below ("only found in a test") was true when written and is not
+  now — see `CLAUDE.md`'s note on stale status annotations being the highest-decay
+  content in this repo.
+* **`SelectTrade`** — **has a producer.** `Sim::send_select_trade`
+  (`lodestone-shell/src/sim/session.rs`) is called from
+  `app/container_input.rs`'s merchant-screen row click.
+* **`SignUpdate`** — **fixed.** The sign-editing screen
+  (`crate::menu::sign_edit::SignEditState`) now exists, is opened from a real
+  server-driven trigger (`ClientEvent::SignEditorOpened` → `Sim::poll_net` →
+  `app::session::drive_ui_from_session` → `MenuNav::open_sign_edit`), and sends on
+  every exit (Done or Escape) via `MenuAction::SignUpdate`.
+* **`RenameItem`** — **fixed.** The anvil's rename box
+  (`crate::container::AnvilRenameState`) now has real keyboard focus and a
+  responder that sends `ClientAction::RenameItem` on every edit, including
+  vanilla's "identical to the item's own unmodified name normalises to empty
+  string" rule.
+
+**Twelve are confirmed genuine islands — zero hits for the bare variant name
+anywhere in `lodestone-shell` or `lodestone-controller`, in any form**:
+`ContainerButtonClick`, `EditBook`, `PingRequest`, `RecipeBookSeenRecipe`,
+`ResourcePackResponse`, `SeenAdvancements`, `SelectBundleItem`, `SetBeaconEffects`,
+`SetContainerSlotState`, `SpectatorAction`, `Stab`, `TeleportToEntity`. Each is
+screen- or input-blocked in the same shape as the seventeen in `KNOWN_UNPRODUCED`
+above (an editor/UI that does not exist yet, or a keybind that is not wired), with
+one exception worth flagging ahead of the others:
+
+* **`ResourcePackResponse`** is **not** screen-blocked — there is nothing to build,
+  only a response to send. `crates/lodestone-model/src/event.rs` already decodes
+  `ClientboundResourcePackPushPacket`/`Pop` into `ClientEvent::ResourcePackPushed`/
+  `Popped` and classifies both `Route::NOWHERE` (i.e. known-unrouted, not merely
+  unaudited) — `lodestone-shell` has zero consumers for either event and zero
+  producers of the response. A server with a `required` resource pack disconnects a
+  client that never answers, which is exactly the `SetFlying` failure mode:
+  correct-looking encoder, no producer, remote kick. Filed as its own tracked gap
+  rather than folded into the general "twelve islands" bucket, because closing it
+  needs no screen — an auto-decline response the moment the push arrives would be
+  a legitimate, if minimal, fix.
+
+Filed as one narrow follow-up rather than twelve separate issues, per the pattern
+this doc's own "How to change it" section already sets: each needs its own
+screen or input binding designed, none is a one-line fix, and grouping them keeps
+the tracker from drowning in near-duplicate "no producer" reports.
 
 ## How to change it
 

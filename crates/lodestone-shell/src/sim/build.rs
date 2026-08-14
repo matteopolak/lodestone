@@ -454,6 +454,7 @@ impl Sim {
             // same projection `build_camera` used to hardcode.
             fov_y_degrees: crate::camera_rig::FOV_Y_DEGREES,
             pickups: lodestone_game::mining::PickupFeed::new(),
+            pending_sign_edit: None,
         };
         sim.refresh_mesh_policy();
         sim

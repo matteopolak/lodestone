@@ -29,6 +29,9 @@
 //! was an atlas to draw from, so a jar-less run still shows *something* in an
 //! occupied slot.
 
+/// The anvil rename box's persistent editable-text state — see its own
+/// module doc for why it lives here rather than as an [`crate::menu::edit_box::EditBox`].
+mod anvil_rename;
 mod background;
 /// The shared GUI vertex builder — colour, item-sprite, glint, block-model and
 /// background streams. `pub(crate)` because it now has three consumers: the
@@ -56,6 +59,7 @@ mod recipe_book;
 mod renderer;
 mod tooltip;
 
+pub use anvil_rename::AnvilRenameState;
 pub use background::ContainerBackground;
 pub use creative::{
     CREATIVE_COLS, CREATIVE_DEFAULT_TAB, CREATIVE_PAGE, CREATIVE_PANEL_H, CREATIVE_PANEL_W,

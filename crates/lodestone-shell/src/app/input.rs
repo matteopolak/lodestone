@@ -58,6 +58,22 @@ pub(crate) struct KeyGate {
     /// cannot be unfocused by clicking elsewhere. `CreativeState::select_tab`
     /// mirrors that.
     pub creative_search: bool,
+    /// The anvil's rename box has focus — the same swallow-everything-but-
+    /// the-container-close rule [`recipe_search`](Self::recipe_search)/
+    /// [`creative_search`](Self::creative_search) have, and for the same
+    /// vanilla reason: `AnvilScreen.keyPressed` routes every key to
+    /// `this.name` first and only falls to `super.keyPressed` (the ordinary
+    /// container swallow) when the box itself declines
+    /// (`!this.name.keyPressed(event) && !this.name.canConsumeInput()`).
+    ///
+    /// `setCanLoseFocus(false)` (`AnvilScreen.subInit`) is vanilla's version
+    /// of the same "always focused while relevant" property
+    /// [`creative_search`](Self::creative_search)'s doc names — this box is
+    /// active whenever the anvil screen is open **and** its input slot (slot
+    /// 0) is occupied, with no separate focus flag to track. See
+    /// [`crate::container::AnvilRenameState`]'s own module doc for the whole
+    /// chain (issue #603).
+    pub anvil_rename_active: bool,
 }
 
 /// The single thing a key event means, once precedence has been applied.
@@ -96,6 +112,10 @@ pub(crate) enum KeyOutcome {
     /// [`KeyGate::creative_search`]. Payload-free for the same reason
     /// [`Self::RecipeSearch`] is.
     CreativeSearch,
+    /// A key aimed at the anvil's rename box — see
+    /// [`KeyGate::anvil_rename_active`]. Payload-free for the same reason
+    /// [`Self::RecipeSearch`] is.
+    AnvilRename,
     /// F3+N — vanilla's `key.debug.spectate` (keysym 78): in and out of spectator.
     ///
     /// The first producer of `ClientAction::ChangeGameMode` outside
@@ -296,6 +316,13 @@ pub(crate) fn resolve_key(
         // `Pause` so Escape still closes the screen, before the container
         // swallow so the box sees any key at all.
         Some(KeyOutcome::CreativeSearch)
+    } else if gate.anvil_rename_active && pressed {
+        // Same position and the same reason as the two boxes above —
+        // matches `AnvilScreen.keyPressed`'s own order exactly: `isEscape()`
+        // (→ `Pause`, above) is checked before the box, and every other key
+        // reaches `this.name` before the ordinary container swallow gets a
+        // chance to drop it.
+        Some(KeyOutcome::AnvilRename)
     } else if gate.container_open && pressed {
         // Vanilla's order, from `AbstractContainerScreen.keyPressed`
         // (`AbstractContainerScreen.java`): the inventory binding closes

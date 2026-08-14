@@ -64,6 +64,7 @@ pub mod packs;
 pub mod panorama;
 pub mod render;
 pub mod servers;
+pub mod sign_edit;
 pub mod social;
 pub mod stats;
 pub mod status;
@@ -179,6 +180,25 @@ pub enum Screen {
     /// waits on the `COMMANDS` (16) decode, which does not exist in any
     /// family.
     CommandBlockEdit,
+    /// The sign-editing screen: vanilla's `SignEditScreen`/`HangingSignEditScreen`
+    /// — pointer released and gameplay input frozen over the still-rendering
+    /// world, the same overlay shape as [`Screen::CommandBlockEdit`].
+    ///
+    /// Unlike `CommandBlockEdit`, this screen is **server-authorised**: it opens
+    /// from `ClientboundOpenSignEditorPacket`
+    /// ([`lodestone_model::event::ClientEvent::SignEditorOpened`]), not from a
+    /// client-local right-click, because the server alone decides whether the
+    /// player may edit this sign right now (waxed, another player already
+    /// editing, non-plain-text content). See [`crate::menu::sign_edit`]'s
+    /// module doc for the full chain and what it deliberately simplifies.
+    ///
+    /// Opened by [`open_sign_edit`](Self::open_sign_edit); closed by
+    /// [`close_sign_edit`](Self::close_sign_edit) from the screen's own Done
+    /// row **or** Escape — both send
+    /// [`crate::menu::sign_edit::SignEditState::to_action`], matching
+    /// vanilla's `removed()`, which is unconditional. There is no Cancel that
+    /// skips the send.
+    SignEdit,
     /// Paused overlay: pointer released, player input frozen. The world behind
     /// keeps rendering and — on a live server — keeps ticking; pausing is a
     /// *local* UI state, not a world stop. Reachable from [`Screen::Playing`]
@@ -346,7 +366,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 20] = [
+    pub const ALL: [Screen; 21] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -358,6 +378,7 @@ impl Screen {
         Screen::Chat,
         Screen::Container,
         Screen::CommandBlockEdit,
+        Screen::SignEdit,
         Screen::Paused,
         Screen::Death,
         Screen::Error,
@@ -494,6 +515,12 @@ impl UiState {
     #[must_use]
     pub fn is_command_block_open(&self) -> bool {
         self.screen == Screen::CommandBlockEdit
+    }
+
+    /// Whether the sign-editing screen is open over the world.
+    #[must_use]
+    pub fn is_sign_edit_open(&self) -> bool {
+        self.screen == Screen::SignEdit
     }
 
     /// Whether a session is currently being established.
@@ -659,6 +686,11 @@ impl UiState {
                     | Screen::Chat
                     | Screen::Container
                     | Screen::CommandBlockEdit
+                    // Same reasoning as `Screen::CommandBlockEdit` immediately
+                    // above: a disconnect while this screen is up must not
+                    // silently strand the player on a screen backed by a
+                    // session that no longer exists.
+                    | Screen::SignEdit
                     | Screen::Paused
                     | Screen::Death
                     | Screen::Error
@@ -970,6 +1002,31 @@ impl UiState {
         }
     }
 
+    /// Open the sign-editing screen over the world. Only from
+    /// [`Screen::Playing`], matching [`open_command_block`](Self::open_command_block)'s
+    /// own guard — the server's `ClientboundOpenSignEditorPacket` only makes
+    /// sense to act on while actually playing.
+    ///
+    /// This method only moves the screen — the widget state (the four line
+    /// fields, which one has focus) is [`nav::MenuNav`]'s to build and hold,
+    /// the same split [`open_command_block`](Self::open_command_block) makes.
+    /// See [`sign_edit`]'s module doc for the full chain.
+    pub fn open_sign_edit(&mut self) {
+        if self.screen == Screen::Playing {
+            self.screen = Screen::SignEdit;
+        }
+    }
+
+    /// Close the sign-editing screen back to the world. **Every** caller sends
+    /// [`sign_edit::SignEditState::to_action`] first — see [`Screen::SignEdit`]'s
+    /// own doc on why this screen, unlike [`Screen::CommandBlockEdit`], has no
+    /// Cancel path that skips the send.
+    pub fn close_sign_edit(&mut self) {
+        if self.screen == Screen::SignEdit {
+            self.screen = Screen::Playing;
+        }
+    }
+
     /// Escape, interpreted by screen:
     /// - Playing → Paused, Paused → Playing
     /// - Chat → Playing (cancel the line)
@@ -997,6 +1054,13 @@ impl UiState {
             // `close_command_block` directly rather than through `on_escape`,
             // but both land on `Screen::Playing`).
             Screen::CommandBlockEdit => self.close_command_block(),
+            // Kept exhaustive for the same reason `Screen::CommandBlockEdit`'s
+            // arm is: `MenuNav::key_sign_edit` intercepts Escape before this
+            // is ever reached in production and sends the sign's text first
+            // (see `Screen::SignEdit`'s own doc — every exit sends, unlike the
+            // command block's Cancel), so this bare `close_sign_edit()` is a
+            // belt-and-braces fallback, not the send path.
+            Screen::SignEdit => self.close_sign_edit(),
             Screen::Error => self.dismiss_error(),
             Screen::ServerEdit => self.screen = Screen::ServerList,
             Screen::ServerList => self.screen = Screen::MainMenu,
@@ -1062,7 +1126,11 @@ impl UiState {
     pub fn pause(&mut self) {
         if matches!(
             self.screen,
-            Screen::Playing | Screen::Chat | Screen::Container | Screen::CommandBlockEdit
+            Screen::Playing
+                | Screen::Chat
+                | Screen::Container
+                | Screen::CommandBlockEdit
+                | Screen::SignEdit
         ) {
             self.screen = Screen::Paused;
         }
@@ -1117,6 +1185,7 @@ impl UiState {
                 | Screen::Chat
                 | Screen::Container
                 | Screen::CommandBlockEdit
+                | Screen::SignEdit
                 | Screen::Paused
         ) {
             self.screen = Screen::Credits;
@@ -1144,6 +1213,7 @@ impl UiState {
                 | Screen::Chat
                 | Screen::Container
                 | Screen::CommandBlockEdit
+                | Screen::SignEdit
                 | Screen::Paused
         ) {
             self.death_message = message;
