@@ -66,7 +66,7 @@ impl Plugin for CorePlugin {
             NetIngest,
             (IngestSet::Drain, IngestSet::Apply, IngestSet::Index).chain(),
         );
-        // Issue #105: the same `EventPriority` chain, anchored here too, so a
+        // The same `EventPriority` chain, anchored here too, so a
         // plugin's `GameEvent` observer ordered inside `NetIngest` still gets
         // a cross-plugin order against other plugins' observers in the same
         // schedule. See `EventPriority`'s own doc for why this is repeated
