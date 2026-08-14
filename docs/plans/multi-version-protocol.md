@@ -177,20 +177,17 @@ revision's verification pass.
 3. **v770's own hosting is only 21/69 connected** (the two-file join above). Widening that
    is per-packet work on the existing family, orthogonal to this epic's units, but any
    "host version X" claim inherits whatever the shared `server.rs` loop actually consumes.
-4. **`resource_pack_push/pop` is handled in Play state only, not Configuration.**
-   Re-verified at `e2508e3`, still open: the v770 adapter's Configuration-state
-   clientbound arms (`V770Adapter::handle_configuration` in
-   `crates/protocol/v770/src/adapter/connection.rs`) cover ten packet ids with no
-   `RESOURCE_PACK_PUSH/POP`; the
-   Play arms exist in `V770Adapter::handle_play_connection` (same directory), and the
-   serverbound *response* encoder is already state-aware
-   (`V770Adapter::encode_client_action` in
-   `crates/protocol/v770/src/adapter/serverbound.rs` picks
-   `configuration::serverbound::RESOURCE_PACK`). So this is a decode-side gap in the
-   **join** direction against real 26.2 servers, and it matters here because v766's
-   configuration-phase machinery (U11) will be built by imitating v770's — fix it first
-   or the copy inherits the hole. The patch belongs to this gap, not this epic: add the two
-   Configuration-state decode arms delegating to the same handlers Play uses.
+4. **CLOSED — `resource_pack_push/pop` is now handled in both Configuration and Play.**
+   Re-verified 2026-08-14 against the tree at `386889f9`: `V770Adapter::handle_configuration`
+   (`crates/protocol/v770/src/adapter/connection.rs`) has decode arms for both
+   `configuration::clientbound::RESOURCE_PACK_PUSH` and `RESOURCE_PACK_POP`, each carrying a
+   comment citing issue #294 (*"vanilla servers commonly push a required resource pack during
+   Configuration ... the fall-through below dropped it silently"*), alongside the pre-existing
+   Play-state arms. Both decode into `ClientEvent::ResourcePackPushed`/`Popped` the same as the
+   Play arms, and the serverbound response encoder was already state-aware. This blocker is
+   gone: v766's configuration-phase machinery (U11) can imitate v770's without inheriting the
+   hole. Grep `RESOURCE_PACK` in `connection.rs` to re-confirm — four arms (two Configuration,
+   two Play) is the signal this stays closed.
 
 ### Per-version split
 
