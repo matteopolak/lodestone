@@ -975,6 +975,15 @@ pub fn creative_geometry(
         model_verts: b.model_verts,
         special: b.special,
         bg_verts: b.bg_verts,
+        // Only `menu::advancements` fills the "mid" tier (frame-then-icon,
+        // under the hover-dim) — see `ContainerGeometry::mid_bg_verts`'s doc.
+        // The creative screen has no equivalent sandwich, so these stay empty
+        // and the renderer's new pass is a no-op here.
+        mid_bg_verts: Vec::new(),
+        mid_verts: Vec::new(),
+        mid_item_verts: Vec::new(),
+        mid_glint_verts: Vec::new(),
+        dim2_verts: Vec::new(),
         widget_rect: Some(layout.panel),
         // The avatar, on the inventory tab only.
         //
