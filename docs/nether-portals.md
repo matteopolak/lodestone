@@ -10,12 +10,21 @@ nether portals. Three modules and one protocol method:
 | dimension identity + geometry + 8:1 scaling | `lodestone_server::dimension` | `DimensionType`, `DimensionTypes` |
 | frame detection, ignition, destination search, the per-player counter | `lodestone_server::portal` | `PortalShape`, `PortalForcer`, `NetherPortalBlock`, `PortalProcessor` |
 | the Nether's terrain source | `lodestone_server::NetherChunkSource` + `lodestone_server::nether_chunk_source` | `ServerLevel` for `Level.NETHER` |
-| the End's terrain source (generator exists; not yet reachable — see below) | `lodestone_server::EndChunkSource` + `lodestone_server::worldgen_data::end_chunk_source` | `ServerLevel` for `Level.END` |
+| the End's terrain source, reachable via `with_nether`'s sibling factory | `lodestone_server::EndChunkSource` + `lodestone_server::worldgen_data::end_chunk_source` | `ServerLevel` for `Level.END` |
+| End-portal-frame ignition, ring detection, the fixed arrival | `lodestone_server::portal::{ignite_end_portal_frame, end_portal_arrival}` | `EnderEyeItem.useOn`, `EndPortalFrameBlock`, `EndPortalBlock.getPortalDestination` |
 | the wire | `ServerProtocol::encode_dimension_change`, overridden in `lodestone_v770::server_protocol` | `ClientboundRespawnPacket` with `KEEP_ALL_DATA` |
 
 A player can light an obsidian frame with flint and steel, stand in it, and arrive in
 the Nether with their inventory, XP and health intact; walking back into the portal
 they arrived at returns them to the portal they left.
+
+A player can also place an eye of ender into each of a 12-frame `end_portal_frame`
+ring (each frame facing the ring's centre); the twelfth eye fills the ring's 3×3
+interior with `end_portal` blocks, and stepping into one of those teleports the
+player to the End's fixed obsidian arrival platform. There is no stronghold
+generator, so nothing places such a ring naturally yet — reaching one today means
+hand-placing the frames (e.g. in creative), which is a legitimate way to play, not a
+workaround.
 
 ## How it works
 
@@ -137,6 +146,60 @@ death-respawn, portal trip, and a second death in the destination — and both n
 (dropping the comparison; never clearing) were run and observed to fail, in opposite
 directions.
 
+### End portal ignition and the fixed arrival
+
+`server::apply_use_item_on` has a second arm, alongside flint-and-steel and ahead of
+the placement branch: holding `minecraft:ender_eye` and right-clicking an unfired
+(`eye=false`) `end_portal_frame` calls `portal::ignite_end_portal_frame` at the
+clicked cell (vanilla clicks the frame itself, not a relative cell — unlike
+flint-and-steel). It always returns the frame's own `eye=true` write; when that eye
+is the ring's twelfth it also returns the 3×3 interior `end_portal` fill. The call
+site writes both, sends a `block_update` per cell, and consumes one eye
+(`consume_one`, the same creative-mode no-op every other item-consuming arm uses).
+
+**The ring check is not a port of vanilla's `BlockPattern`.** `EndPortalFrameBlock`
+builds a general, reusable multi-block matcher (also used for the iron golem and the
+wither) and searches a rotated, translated window for it; porting that generic engine
+for one fixed pattern would be infrastructure this crate has no other user for.
+`ignite_end_portal_frame`'s own doc comment derives the *result* of applying it to
+this one pattern instead: every one of the 12 rim frames must be eyed and must face
+the ring's centre (north edge → `facing=south`, south edge → `facing=north`, west
+edge → `facing=east`, east edge → `facing=west` — the familiar "arrow points inward"
+rule every vanilla stronghold portal room shows). The clicked frame's own facing pins
+which edge it can be on, so the search only tries the three lateral offsets along
+that edge rather than a full rotation sweep.
+
+Travel reuses `portal::PortalTracker` — the same per-tick counter the Nether uses —
+because vanilla's own cooldown and counter (`Entity.portalProcess`/`portalCooldown`)
+are generic across portal types, not Nether-specific. What differs is the delay:
+`Portal.getPortalTransitionTime`'s default is 0, and `EndPortalBlock` does not
+override it, so an end portal fires on the very first tick standing in it — the
+Nether's gamerule-configurable delay is `NetherPortalBlock`'s own override of that
+default, not the shared behaviour. `serve_play`'s `vitals_tick` arm reads which block
+type the fired counter's entry cell holds and dispatches to
+`travel_through_portal` or the new `travel_through_end_portal` accordingly, so the
+two portal types share one counter and one cooldown but two different destination
+resolutions.
+
+`server::travel_through_end_portal` is deliberately **not** a generalisation of
+`travel_through_portal`: an End portal has no coordinate scale and no linked-position
+search. `portal::end_portal_arrival` names the fixed arrival point —
+`Dimension::end_spawn_point` (100, 50, 0), with the `ServerPlayer`-only one-block drop
+`EndPortalBlock.getPortalDestination` applies (`spawnPos.subtract(0.0, 1.0, 0.0)`), so
+the player actually lands standing on the obsidian floor rather than floating above
+it — and `portal::ensure_end_platform` builds (or repairs) the platform there before
+the packet sequence below runs. The packet sequence itself (forget every loaded
+column, the dimension-change pair, the new cache centre, the rebuilt view and join
+stream) is identical to the Nether's, because it is the same client-side contract
+regardless of which portal type triggered it.
+
+**The return trip (`fromEnd == true` in `EndPortalBlock.getPortalDestination`) is not
+implemented.** It needs the stronghold's exit portal and the dragon fight, neither of
+which exists in this crate. `serve_play`'s dispatch guards this explicitly: an end
+portal reached while already in `Dimension::End` is inert (no travel, no error)
+rather than sending the player anywhere — the same "correct degradation"
+`travel_through_portal` itself falls back to for a world with no sibling wired.
+
 ### Is the `forget_chunk` sweep redundant now?
 
 **No.** The sweep is *protocol*, not client bookkeeping: it is what a real vanilla
@@ -153,35 +216,29 @@ next edits `lodestone-server`.
 
 ## How to change it
 
-* **The End** (`Dimension::End`) is a real variant now, with real geometry
-  transcribed from `data/minecraft/dimension_type/the_end.json`, a real generator
-  (`worldgen_data::end_generator`/`end_chunk_source`) and a real
-  `EndChunkSource` (`chunk.rs`, `ChunkColumn::from_end` for the 128→256 pad,
-  mirroring `NetherChunkSource`/`from_nether`). `portal.rs` has
-  `end_platform_writes`/`ensure_end_platform` (vanilla's
-  `EndPlatformFeature.createEndPlatform`, ported field for field) and
-  `is_end_portal`/`END_PORTAL_BLOCK` for the block itself. **What is still
-  missing, precisely:**
-  * `crate::integrated`'s `with_nether` factory `match`es on `Dimension` with no
-    wildcard arm for `End` — it needs exactly one more arm (returning `Some` of
-    an `EndChunkSource`-backed `DimensionalSource::alone`, the same shape the
-    `Nether` arm already has) before any world can reach it. This is the one
-    remaining hop; everything behind it exists.
-  * No code triggers an End-portal ignition (`EndPortalFrameBlock`'s
-    eye-of-ender ring, `EnderEyeItem.useOn`) or a step-into-`end_portal`
-    teleport (`EndPortalBlock.entityInside`) — neither the frame-completion
-    detector nor `server.rs`'s per-tick trigger exist. Do **not** reuse
-    `travel_through_portal`/`PortalTracker`'s Nether-shaped mechanism wholesale:
-    an End portal is not a coordinate-scaled, paired-portal trip — every arrival
-    lands at the fixed obsidian platform (`Dimension::end_spawn_point`,
-    `portal::ensure_end_platform`), and the return trip goes to the overworld's
-    respawn point, not to a portal search.
+* **The End** (`Dimension::End`) is a real variant, with real geometry transcribed
+  from `data/minecraft/dimension_type/the_end.json`, a real generator
+  (`worldgen_data::end_generator`/`end_chunk_source`), a real `EndChunkSource`
+  (`chunk.rs`, `ChunkColumn::from_end` for the 128→256 pad, mirroring
+  `NetherChunkSource`/`from_nether`), and is wired into `crate::integrated`'s
+  `with_nether` sibling factory the same way the Nether is — a world can
+  `sibling(Dimension::End)` into real terrain. Ignition
+  (`portal::ignite_end_portal_frame`), the fixed arrival
+  (`portal::end_portal_arrival`, `ensure_end_platform`) and the travel path
+  (`server::travel_through_end_portal`, dispatched from the shared `PortalTracker`
+  in `vitals_tick`) are all wired — see "End portal ignition and the fixed arrival"
+  above for the chain. **What is still missing:**
   * No stronghold generator exists to place a naturally-occurring
-    `end_portal_frame` ring anywhere, so even with ignition wired, the only way
-    to reach one today is hand-placing frame blocks (e.g. via a future
-    `/setblock`-equivalent).
+    `end_portal_frame` ring anywhere, so the only way to reach one today is
+    hand-placing frame blocks — a legitimate creative-mode path, not a stopgap.
+  * The return trip (stepping into an `end_portal` block *while already in the
+    End*) is unimplemented — it needs the stronghold's exit portal and the dragon
+    fight. `serve_play` guards this to a no-op rather than a wrong destination.
+  * The dragon fight and the exit-portal/return-gateway mechanism are unbuilt
+    entirely; they are separate pieces of work from the entry path this session
+    landed.
   See issue #330's tracking comment for the session that landed the generator
-  wiring and exactly what it left for the next one.
+  wiring and the session that landed ignition and travel.
 * **A second player in the other dimension** already works for terrain (each
   connection has its own `travelled`), but entity streaming does not: `EntityStreamer`
   and `MobHandle` are world-scoped, so a mob in the overworld is still streamed to a
@@ -270,14 +327,16 @@ Honest list, so nothing here reads as finished:
 * **A portal is never extinguished.** Vanilla's `NetherPortalBlock.updateShape`
   removes a portal cell whose frame was broken; nothing here does, so mining a frame
   block leaves floating portal blocks.
-* **The End.** `Dimension::End`, its generator, `EndChunkSource` and the obsidian
-  platform's own geometry (`portal::ensure_end_platform`) all exist and are unit
-  tested. **Still genuinely unreachable from a running server** — see "How to
-  change it" above for the exact remaining hops: `with_nether`'s factory match has
-  no `End` arm, there is no frame-ignition or step-into-`end_portal` trigger, and
-  there is no stronghold generator to place a frame naturally. Do not read the
-  presence of the generator and chunk source as "mostly done" — the trigger side is
-  entirely unbuilt.
+* **The End is reachable from a running server**, entry-only: `Dimension::End`, its
+  generator, `EndChunkSource`, the obsidian platform's geometry
+  (`portal::ensure_end_platform`), frame ignition
+  (`portal::ignite_end_portal_frame`) and travel (`server::travel_through_end_portal`)
+  all exist and are wired. A creative player can build a 12-frame ring by hand, place
+  the final eye, and step through to real End terrain. **What remains**: no
+  stronghold generator places a ring naturally (see "How to change it" above), and
+  the return trip — stepping into an `end_portal` block from *inside* the End —
+  is a deliberate no-op pending the stronghold's exit portal and the dragon fight,
+  neither of which this crate builds.
 
 ## Dependencies
 
