@@ -4536,6 +4536,40 @@ fn the_third_person_body_swings_off_the_same_clock_as_the_arm() {
     );
 }
 
+/// The discriminating gate for "the in-world player always draws the wide
+/// (Steve) rig": a slim-declaring skin and a wide-declaring one must produce
+/// two *different* `ThirdPersonBodyState::slim` values. A gate that only
+/// checks "some rig was chosen" cannot see the bug this guards, because
+/// `player_wide` was always the rig chosen — `slim` was hardcoded `false`
+/// regardless of the fetched skin.
+#[test]
+fn the_third_person_body_rig_follows_the_fetched_skin_model() {
+    fn sheet() -> lodestone_assets::Image {
+        lodestone_assets::Image {
+            width: 64,
+            height: 64,
+            rgba: vec![0u8; 64 * 64 * 4],
+        }
+    }
+
+    let mut sim = Sim::new(test_config());
+    sim.cycle_camera_type();
+
+    crate::skin_fetch::publish(lodestone_assets::PlayerModelType::Slim, sheet());
+    let slim = sim
+        .third_person_body_state()
+        .expect("third person is on")
+        .slim;
+    assert!(slim, "a slim-declaring profile must draw the slim rig");
+
+    crate::skin_fetch::publish(lodestone_assets::PlayerModelType::Wide, sheet());
+    let wide = sim
+        .third_person_body_state()
+        .expect("third person is on")
+        .slim;
+    assert!(!wide, "a wide-declaring profile must draw the wide rig");
+}
+
 #[test]
 fn chunk_dirty_signal_reschedules_a_loaded_column() {
     // A `ChunkLoaded`/`NetUpdate::Chunk { x, z }` signal must re-mesh the
