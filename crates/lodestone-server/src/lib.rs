@@ -444,8 +444,8 @@ pub use plugin_channels::{
     UNREGISTER_CHANNEL,
 };
 pub use protocol::{
-    Abilities, ChunkEncoder, EntitySnapshot, MetadataField, PlayerListing, ResourcePackPush,
-    ServerBound, ServerDirective, ServerProtocol, WorldgenScope,
+    Abilities, ChunkEncoder, EntitySnapshot, MerchantOfferOut, MetadataField, PlayerListing,
+    ResourcePackPush, ServerBound, ServerDirective, ServerProtocol, WorldgenScope,
 };
 /// The `EntityEvent` status bytes [`ServerProtocol::encode_entity_event`] carries.
 ///
