@@ -1,5 +1,4 @@
-//! Plugin-defined entity types, and the vanilla type each one **streams as** —
-//! issue #140.
+//! Plugin-defined entity types, and the vanilla type each one **streams as**.
 //!
 //! # What this is
 //!
@@ -17,7 +16,7 @@
 //! 158-entry table. There is no room in the protocol for a novel type, and vanilla
 //! itself has no such mechanism — which is why real Paper servers implement custom
 //! mobs as a vanilla entity with custom NBT, a custom name and custom AI, not as a
-//! new registry entry. Issue #140's own scope says exactly this. So a custom
+//! new registry entry. So a custom
 //! entity kind is a *logical* identity on the server plus a vanilla type on the
 //! wire, and this module is the mapping between them.
 //!
@@ -224,7 +223,7 @@ impl EntityDisguises {
     /// The canonical vanilla type name `name` streams as, under the same
     /// resolution order as [`Self::resolve_wire_id`].
     ///
-    /// For the **client** half of issue #140: a client-only cosmetic entity needs
+    /// For the **client** half of the disguise mapping: a client-only cosmetic entity needs
     /// a vanilla key to pick a mesh, texture and `setupAnim` for, because every
     /// render-side lookup is keyed off the closed vanilla set.
     #[must_use]

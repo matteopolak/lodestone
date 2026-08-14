@@ -323,7 +323,7 @@ fn plain_terrain_owns_no_block_entity() {
     }
 }
 
-/// The chest family, which is what issue #374 was reported against.
+/// The chest family, which is what motivated this census in the first place.
 ///
 /// Asserted through the *name* rather than a remembered id, and asserted that
 /// chest and trapped chest are **different** types while the copper variants

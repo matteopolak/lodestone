@@ -32,8 +32,8 @@
 //!
 //! # `bypasses_cooldown` is real, and empty
 //!
-//! `DamageTypeTags.java:12` declares `BYPASSES_COOLDOWN` and
-//! `LivingEntity.java:1217` gates the whole i-frame window on it —
+//! `DamageTypeTags.BYPASSES_COOLDOWN` declares the tag and
+//! `LivingEntity.hurtServer` gates the whole i-frame window on it —
 //! `if (this.invulnerableTime > 10.0F && !source.is(DamageTypeTags.BYPASSES_COOLDOWN))`
 //! — but **no data file for it exists in the jar**. It is a genuinely empty tag
 //! in vanilla 26.2: the mechanism exists and nothing opts into it. So this table
@@ -106,7 +106,7 @@ impl DamageScaling {
 /// The hurt animation/sound family a type plays (`DamageEffects.java`).
 ///
 /// `effects` is `optionalFieldOf("effects", DamageEffects.HURT)` in
-/// `DamageType.java:19`, so the 39 types with no `effects` key are
+/// `DamageType.DIRECT_CODEC`, so the 39 types with no `effects` key are
 /// [`DamageEffects::Hurt`] — a real value, not a missing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DamageEffects {
@@ -153,7 +153,7 @@ impl DamageEffects {
 /// Which death-message form a type uses (`DeathMessageType.java`).
 ///
 /// Also `optionalFieldOf`, defaulting to [`DeathMessageType::Default`]
-/// (`DamageType.java:20`): only `fall`/`ender_pearl`/`stalagmite`-style
+/// (`DamageType`'s codec): only `fall`/`ender_pearl`/`stalagmite`-style
 /// fall variants and `bad_respawn_point` differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeathMessageType {
@@ -208,20 +208,20 @@ pub enum DamageTypeTag {
     BurnFromStepping = 5,
     /// Sets an armour stand on fire.
     BurnsArmorStands = 6,
-    /// Skips the armour-absorb stage (`LivingEntity.java:1903`).
+    /// Skips the armour-absorb stage (`LivingEntity.getDamageAfterArmorAbsorb`).
     BypassesArmor = 7,
-    /// Ignores the i-frame window (`LivingEntity.java:1217`).
+    /// Ignores the i-frame window (`LivingEntity.hurtServer`).
     ///
     /// **Empty in vanilla 26.2** — a code constant with no data file. See the
     /// module docs; the emptiness is asserted by the test suite.
     BypassesCooldown = 8,
-    /// Skips both Resistance and enchantment protection (`LivingEntity.java:1912`).
+    /// Skips both Resistance and enchantment protection (`LivingEntity.getDamageAfterMagicAbsorb`).
     BypassesEffects = 9,
-    /// Skips only enchantment protection (`LivingEntity.java:1936`).
+    /// Skips only enchantment protection (`LivingEntity.getDamageAfterMagicAbsorb`).
     BypassesEnchantments = 10,
-    /// Hurts an entity flagged invulnerable (`Entity.java:3023`).
+    /// Hurts an entity flagged invulnerable (`Entity.isInvulnerableToBase`).
     BypassesInvulnerability = 11,
-    /// Skips only the Resistance effect (`LivingEntity.java:1916`).
+    /// Skips only the Resistance effect (`LivingEntity.getDamageAfterMagicAbsorb`).
     BypassesResistance = 12,
     /// Cannot be blocked with a shield.
     BypassesShield = 13,
@@ -356,7 +356,7 @@ impl DamageType {
     ///
     /// Returns `None` for an unknown name so a datapack-added or future-version
     /// type surfaces as an explicit miss rather than a wrong default — the
-    /// #34-class bug this crate keeps hitting.
+    /// silent-wrong-default bug shape this crate keeps hitting.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         let path = name.strip_prefix("minecraft:").unwrap_or(name);

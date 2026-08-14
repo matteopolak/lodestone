@@ -14,24 +14,24 @@
 //!
 //! That is a conjunction of three vanilla facts, all read from the 26.2 tree:
 //!
-//! 1. `LivingEntity.aiStep` (`LivingEntity.java:3163`) is the only caller of
+//! 1. `LivingEntity.aiStep` is the only caller of
 //!    `pushEntities()` anywhere in the source. A non-`LivingEntity` therefore
 //!    never runs the crowd pass at all.
 //! 2. `pushEntities()` must not have been overridden into something that cannot
 //!    reach the player. `Bat` overrides it to an empty body
-//!    (`Bat.java:95`); `ArmorStand` overrides it to iterate only
-//!    `RIDABLE_MINECARTS` (`ArmorStand.java:178`).
+//!    (`Bat.pushEntities`); `ArmorStand` overrides it to iterate only
+//!    `RIDABLE_MINECARTS` (`ArmorStand.pushEntities`).
 //! 3. `doPush(Entity)` must reach `entity.push(this)` for a `Player` argument.
 //!    `Parrot` overrides it to skip players outright — `if (!(entity instanceof
-//!    Player)) super.doPush(entity);` (`Parrot.java:390`). `Bat` and
-//!    `ArmorStand` also empty it out. `IronGolem` (`IronGolem.java:106`),
-//!    `SulfurCube` (`SulfurCube.java:731`) and `Warden` (`Warden.java:529`)
+//!    Player)) super.doPush(entity);` (`Parrot.doPush`). `Bat` and
+//!    `ArmorStand` also empty it out. `IronGolem` (`IronGolem.doPush`),
+//!    `SulfurCube` (`SulfurCube.doPush`) and `Warden` (`Warden.doPush`)
 //!    add side effects and then call `super.doPush`, so they do push.
 //!
 //! # Why this is default-**deny**
 //!
-//! `Entity.isPushable()` returns `false` (`Entity.java:2031`) and only
-//! `LivingEntity` overrides it to `true` (`LivingEntity.java:3366`), and only
+//! `Entity.isPushable()` returns `false` and only
+//! `LivingEntity` overrides it to `true` (`LivingEntity.isPushable`), and only
 //! `LivingEntity` runs the crowd pass. So "not a pusher" is vanilla's default
 //! and must be this table's too: an unrecognised or future entity type is
 //! reported as **not** a pusher. The inverse — a denylist of known-inert types
@@ -45,11 +45,11 @@
 //! tick-side passes rather than `LivingEntity.pushEntities`:
 //!
 //! * `AbstractBoat` seats or pushes everything in an inflated query box
-//!   (`AbstractBoat.java:289`), and its `push(Entity)` override adds a
+//!   (`AbstractBoat.tick`), and its `push(Entity)` override adds a
 //!   Y-ordering condition — `entity.getBoundingBox().minY <=
-//!   this.getBoundingBox().minY` (`AbstractBoat.java:181`).
-//! * `NewMinecartBehavior.pushEntities(AABB)` (`NewMinecartBehavior.java:537`)
-//!   runs only `if (this.minecart.isRideable())` and queries a box inflated by
+//!   this.getBoundingBox().minY` (`AbstractBoat.push`).
+//! * `NewMinecartBehavior.pushEntities(AABB)` runs only
+//!   `if (this.minecart.isRideable())` and queries a box inflated by
 //!   `1.0E-7`, then pushes anything that `instanceof Player`.
 //!
 //! Neither can be folded into this census without also changing the gate:
@@ -94,7 +94,7 @@ pub use crate::generated_entity_census::TYPE_COUNT;
 /// # Why a consumer wants it: metadata index 8 is ambiguous
 ///
 /// `LivingEntity.DATA_LIVING_ENTITY_FLAGS` (the using-item bitfield behind a bow
-/// draw, issue #57) is assigned metadata index 8 by `SynchedEntityData.defineId`'s
+/// draw) is assigned metadata index 8 by `SynchedEntityData.defineId`'s
 /// declaration-order counter — and `AbstractArrow`'s own flags byte lands at the
 /// same index on a non-living entity. Both are `EntityDataSerializers.BYTE`, so
 /// the wire cannot tell them apart and a decoder that surfaced every index-8 byte
@@ -119,7 +119,8 @@ pub fn is_living(id: i32) -> Option<bool> {
 ///
 /// `Mob` is where `DATA_MOB_FLAGS_ID` is declared — metadata index **15**,
 /// `BYTE`, carrying no-AI `0x01` / left-handed `0x02` / **aggressive `0x04`**
-/// (`Mob.java:100,1313-1336`). Index 15 has three claimants in 26.2, all `BYTE`:
+/// (`Mob.DATA_MOB_FLAGS_ID`, read and set by `Mob.setNoAi`/`Mob.setLeftHanded`/`Mob.setAggressive`
+/// and their getters). Index 15 has three claimants in 26.2, all `BYTE`:
 ///
 /// | owner | field | `0x04` means |
 /// |---|---|---|
@@ -127,11 +128,11 @@ pub fn is_living(id: i32) -> Option<bool> {
 /// | `ArmorStand` | `DATA_CLIENT_FLAGS` | show arms |
 /// | `Display` | `DATA_BILLBOARD_RENDER_CONSTRAINTS_ID` | (an enum ordinal) |
 ///
-/// This is the same shape of hazard as index 8 (issue #57) with one extra twist:
+/// This is the same shape of hazard as index 8 with one extra twist:
 /// **`ArmorStand` is a `LivingEntity`**, so [`is_living`] does *not* resolve it.
 /// An armour stand with arms shown — the common decorative case — would report
 /// itself as an aggressive mob and, holding a bow, draw it. Hence a third column
-/// rather than a reuse of the second (issue #379).
+/// rather than a reuse of the second.
 ///
 /// The collision was read off the jar, not reasoned about: see
 /// `crates/protocol/v770/tests/support/entity_data_index_jvm.txt`, which dumps
@@ -166,7 +167,7 @@ pub fn pushes_players(id: i32) -> Option<bool> {
 }
 
 /// The widest and tallest base hitbox among entity types that can push the
-/// player (issue #19).
+/// player.
 ///
 /// A consumer sizing a coarse "is this candidate even close enough to check"
 /// filter — e.g. `lodestone_shell::sim`'s `NEARBY_ENTITY_RADIUS` — needs the
@@ -265,9 +266,9 @@ mod tests {
     #[test]
     fn the_three_living_types_that_cannot_reach_a_player_do_not_push() {
         // Read from the 26.2 tree, not inferred from this table: `Bat` empties
-        // `pushEntities()` (Bat.java:95), `ArmorStand` narrows it to ridable
-        // minecarts (ArmorStand.java:178), and `Parrot.doPush` skips `Player`
-        // outright (Parrot.java:390). All three are `LivingEntity` subclasses, so
+        // `pushEntities()` (`Bat.pushEntities`), `ArmorStand` narrows it to ridable
+        // minecarts (`ArmorStand.pushEntities`), and `Parrot.doPush` skips `Player`
+        // outright. All three are `LivingEntity` subclasses, so
         // an "is it living" census alone would get all three wrong.
         for name in ["minecraft:bat", "minecraft:armor_stand", "minecraft:parrot"] {
             assert!(!by_name(name), "{name} must not push the player");

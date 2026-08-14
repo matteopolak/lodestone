@@ -35,7 +35,7 @@
 //! items) still overrides the prototype — [`ToolPatch::Set`] — and is evaluated
 //! by exactly the same code path, so the two cannot drift.
 //!
-//! # Datapack-retagged blocks (issue #296)
+//! # Datapack-retagged blocks
 //!
 //! Block tags are *synced* to the client (`update_tags`), decoded in
 //! `crates/protocol/v770/src/adapter.rs` (`decode_update_tags`) for both the
@@ -127,8 +127,8 @@ pub fn block_registry_id(state_id: u32) -> Option<u16> {
         .copied()
 }
 
-/// The process-wide `update_tags` override for [`block_tag_members`]
-/// (issue #296). `None` — the initial state — means no `update_tags` for the
+/// The process-wide `update_tags` override for [`block_tag_members`].
+/// `None` — the initial state — means no `update_tags` for the
 /// `minecraft:block` registry has been decoded yet, so every lookup answers
 /// from the vanilla census exactly as before this existed.
 static BLOCK_TAG_OVERRIDES: OnceLock<RwLock<Option<HashMap<String, Vec<u16>>>>> = OnceLock::new();

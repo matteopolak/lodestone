@@ -3,8 +3,8 @@
 //! `level_particles` carries the particle as a `minecraft:particle_type`
 //! registry id (a VarInt) before any per-particle payload data. The id→name
 //! mapping is generated from Mojang's own `registries.json` for 26.2, the one
-//! canonical internal version (#343), so it lives here in this data crate
-//! rather than in `lodestone-v770` (issue #361) — it is a game-data census,
+//! canonical internal version, so it lives here in this data crate
+//! rather than in `lodestone-v770` — it is a game-data census,
 //! not wire-format code.
 
 pub use crate::generated_particle_types::PARTICLE_TYPE_COUNT;
