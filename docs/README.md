@@ -1286,7 +1286,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   archives — with its `pack.mcmeta` description and `pack.png` thumbnail;
   **Selected** on the right is the priority order, highest first. Clicking a row moves
   it between the columns, per-row buttons reorder it, and leaving the screen feeds the
-  order into `ResourceManager`'s pack stack so the next atlas and model build see it.
+  order into `ResourceManager`'s pack stack — which a live world session now picks
+  up within a frame or two, not just on the next atlas/model build. See "How to change
+  it" below for `resources::pack_generation` and `Sim::reload_resource_pack_atlas`,
+  the live-reload chain.
 - [Riding](./riding.md) — `ClientboundSetPassengersPacket` tells the client which
   entities are riding which. Before this change it was a **complete island**: decoded
   at `crates/protocol/v770/src/adapter/entity.rs`'s `SET_PASSENGERS` arm,
@@ -1301,6 +1304,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   and the **triggers** — item use, held duration, the wet gate, the enchantment
   level, the glide flag, the rocket's duration — live in the shell and
   `lodestone-ecs`, because none of them is physics state.
+- [Scoreboard sidebar](./scoreboard-sidebar.md) — The right-edge panel that lists a
+  scoreboard objective's scores — `Hud.displayScoreboardSidebar`, ported into
+  `HudGeometry::build_inner` (`crates/lodestone-shell/src/hud.rs`) from the folded
+  state `crate::scoreboard::sidebar_from` (`crates/lodestone-shell/src/scoreboard.rs`)
+  builds out of `lodestone_game::scoreboard::Scoreboard`.
 - [The screen overlays: underwater, fire, pumpkin, freeze, spyglass, confusion, portal](./screen-overlays.md) —
   Seven full-screen (or near-full-screen) post-hand-pass effects: a blue-ish tint plus
   a scrolling `misc/underwater.png` texture when the camera's eye is submerged, a

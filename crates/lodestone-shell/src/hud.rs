@@ -171,6 +171,55 @@ pub(crate) const TAB_LINE_H: f32 = 9.0;
 /// The tab overlay's text scale — vanilla metrics, so `1.0`. See [`TAB_LINE_H`].
 pub(crate) const TAB_TEXT_SCALE: f32 = 1.0;
 
+/// The scoreboard sidebar's line pitch — `Hud.displayScoreboardSidebar`'s
+/// literal `9` (`int height = entriesCount * 9;`, and each row's `y` advances
+/// by that same `9` walking backwards from `bottom`).
+///
+/// **Not [`hud_line_h`], and not at [`HUD_TEXT_SCALE`].** Exactly the same
+/// exemption as [`TAB_LINE_H`]: this draws in the `gui_scale`-divided logical
+/// canvas at vanilla's own font metrics, not through the HUD's 2× pitch —
+/// which is what made the sidebar panel twice vanilla's size.
+pub(crate) const SIDEBAR_LINE_H: f32 = 9.0;
+
+/// The sidebar's text scale — vanilla metrics, so `1.0`. See [`SIDEBAR_LINE_H`].
+pub(crate) const SIDEBAR_TEXT_SCALE: f32 = 1.0;
+
+/// The sidebar's edge inset — `Hud.displayScoreboardSidebar`'s literal `3` in
+/// `int left = guiWidth() - width - 3;` and `int right = guiWidth() - 3 + 2;`.
+const SIDEBAR_EDGE_MARGIN: f32 = 3.0;
+
+/// `Options.getBackgroundColor(0.3F)`'s body-plate alpha, with
+/// `backgroundForChatOnly` at its default (so the passed `0.3F` default is what
+/// renders, not the user's chat background opacity option).
+const SIDEBAR_BODY_BG_ALPHA: f32 = 0.3;
+
+/// `Options.getBackgroundColor(0.4F)`'s header-plate alpha — see
+/// [`SIDEBAR_BODY_BG_ALPHA`].
+const SIDEBAR_HEADER_BG_ALPHA: f32 = 0.4;
+
+/// `ChatFormatting.RED` (`0xFF5555`) — `StyledFormat.SIDEBAR_DEFAULT`'s colour,
+/// the score column's default when a server sends no per-entry
+/// [`lodestone_game::scoreboard::NumberFormat::Styled`] override.
+const SIDEBAR_SCORE_DEFAULT: [f32; 3] = [1.0, 0x55 as f32 / 255.0, 0x55 as f32 / 255.0];
+
+/// `BossHealthOverlay.BAR_WIDTH`/`BAR_HEIGHT` — every boss bar is this fixed
+/// native size, never a fraction of the canvas width.
+const BOSS_BAR_WIDTH: f32 = 182.0;
+const BOSS_BAR_HEIGHT: f32 = 5.0;
+
+/// `BossHealthOverlay.extractRenderState`'s `int yOffset = 12;` — the first
+/// bar's top.
+const BOSS_BAR_TOP: f32 = 12.0;
+
+/// `BossHealthOverlay.extractRenderState`'s per-bar stride: `yOffset += 10 +
+/// 9;` — 10 for the bar's own row pitch, 9 for the title above it.
+const BOSS_BAR_STEP: f32 = 19.0;
+
+/// The boss bar title's text scale — vanilla's `graphics.text(font, msg, x,
+/// y, -1)` takes no pose scale at all, exactly like the action bar and the
+/// held-item name (see `docs/hud-text-scale.md`).
+const BOSS_BAR_TEXT_SCALE: f32 = 1.0;
+
 /// `PlayerTabOverlay.MAX_ROWS_PER_COL`.
 pub(crate) const TAB_MAX_ROWS_PER_COL: usize = 20;
 
@@ -2020,10 +2069,12 @@ impl HudGeometry {
         let (w, h) = crate::menu::render::logical_canvas(gui_scale, width, height);
         let mut b = Builder::new(w, h, gui, items, models, font);
 
+        // `scale` is now only `chat_pose_scale`'s baseline — every other
+        // element in this function has been ported off the ambient pitch
+        // (see `docs/hud-text-scale.md` for the one remaining site).
         let scale = HUD_TEXT_SCALE;
         let margin = HUD_MARGIN;
         let glyph_h = font::GLYPH_H as f32;
-        let line_h = hud_line_h();
 
         // The F3 overlay, in vanilla's **two columns**: player and world on the
         // left, engine internals on the right, each line sitting on its own
@@ -2507,13 +2558,19 @@ impl HudGeometry {
                     b.rect_px(bx, by, fill, bar_h, [0.47, 0.82, 0.16, 1.0]);
                 }
                 if level > 0 {
+                    // Vanilla metrics, not this function's ambient `scale`/
+                    // `line_h` — the same fix [`sprite_vitals`]'s own copy of
+                    // this number already documents: `scale` here made it
+                    // twice vanilla's size, and `line_h` is this HUD's 5×7
+                    // debug-font stride, not `ContextualBar`'s real `6px` gap
+                    // above the bar's top (`by - 6.0`).
                     let s = level.to_string();
-                    let tw = b.text_width(&s, scale);
+                    let tw = b.text_width(&s, 1.0);
                     b.text(
                         &s,
                         cx - tw * 0.5,
-                        by - line_h,
-                        scale,
+                        by - 6.0,
+                        1.0,
                         [0.44, 0.92, 0.20, 1.0],
                     );
                 }
@@ -2673,60 +2730,93 @@ impl HudGeometry {
             }
         }
 
-        // Boss bars: stacked title-over-bar at the top-centre. The fill is
-        // tinted by the bar's colour and clamped progress; an empty slice draws
-        // nothing, so this costs zero verts off a server that sends none.
+        // Boss bars: stacked title-over-bar at the top-centre —
+        // `BossHealthOverlay.extractRenderState`/`extractBar`, ported at
+        // vanilla's own fixed 182×5 native size and `BOSS_BAR_TEXT_SCALE`
+        // (`1.0`) rather than this function's ambient `scale`/`line_h`, the
+        // same exemption as [`SIDEBAR_LINE_H`]. The fill is tinted by the
+        // bar's colour and clamped progress; an empty slice draws nothing, so
+        // this costs zero verts off a server that sends none. Not ported:
+        // vanilla's per-colour/overlay sprite art (`BAR_BACKGROUND_SPRITES`
+        // etc.) — this still draws a flat tinted rect, which is a separate,
+        // pre-existing simplification from the sizing bug this fixes.
         if !frame.boss_bars.is_empty() {
-            let bar_w = b.w * 0.4;
-            let bar_h = 6.0;
-            let bx = (b.w - bar_w) * 0.5;
-            for (i, bb) in frame.boss_bars.iter().enumerate() {
-                let top = margin + i as f32 * (line_h + bar_h + 6.0);
-                // Spans, for the reason `BossBarView::title` documents: a boss
-                // bar title is often a plugin-coloured component and hex has no
-                // legacy code to smuggle it through a `String`.
-                let tw = b.spans_width(&bb.title, scale);
+            let bscale = BOSS_BAR_TEXT_SCALE;
+            let bar_x = b.w * 0.5 - BOSS_BAR_WIDTH * 0.5;
+            let mut y_offset = BOSS_BAR_TOP;
+            for bb in frame.boss_bars {
+                let yo = y_offset;
+                let tw = b.spans_width(&bb.title, bscale);
                 b.text_spans(
                     &bb.title,
-                    (b.w - tw) * 0.5,
-                    top,
-                    scale,
+                    b.w * 0.5 - tw * 0.5,
+                    yo - 9.0,
+                    bscale,
                     [1.0, 1.0, 1.0],
                     1.0,
                 );
-                let bar_y = top + line_h;
-                b.rect_px(bx, bar_y, bar_w, bar_h, [0.08, 0.08, 0.10, 0.75]);
-                let fill = bar_w * bb.progress.clamp(0.0, 1.0);
-                let c = bb.color;
-                b.rect_px(bx, bar_y, fill, bar_h, [c[0], c[1], c[2], 0.95]);
+                b.rect_px(bar_x, yo, BOSS_BAR_WIDTH, BOSS_BAR_HEIGHT, [0.08, 0.08, 0.10, 0.75]);
+                let fill = BOSS_BAR_WIDTH * bb.progress.clamp(0.0, 1.0);
+                if fill > 0.0 {
+                    let c = bb.color;
+                    b.rect_px(bar_x, yo, fill, BOSS_BAR_HEIGHT, [c[0], c[1], c[2], 0.95]);
+                }
+                y_offset += BOSS_BAR_STEP;
+                if y_offset >= b.h / 3.0 {
+                    break;
+                }
             }
         }
 
-        // Scoreboard sidebar: a right-edge, vertically-centred panel. The title
-        // is centred; each row puts its label at the left and the score in red,
-        // right-aligned — vanilla's layout. Absent when nothing is displayed.
+        // Scoreboard sidebar — `Hud.displayScoreboardSidebar`, ported at vanilla's
+        // own metrics (`SIDEBAR_LINE_H`/`SIDEBAR_TEXT_SCALE`) rather than this
+        // function's ambient `scale`/`line_h`, exactly the exemption
+        // [`TAB_LINE_H`] documents for the tab list. `width` is the widest of the
+        // title and every `name [+ ": " + score]` row (the spacer only counts
+        // when the row actually has a score — vanilla's
+        // `scoreWidth > 0 ? spacerWidth + scoreWidth : 0`); `bottom` sits at
+        // `guiHeight() / 2 + height / 3`, which is a deliberate top bias, not a
+        // symmetric centring — porting it as `h/2` would silently "fix" a
+        // vanilla quirk. Absent when nothing is displayed.
         if let Some(side) = frame.sidebar {
-            let pad = 4.0;
-            let mut content_w = b.spans_width(&side.title, scale);
+            let sscale = SIDEBAR_TEXT_SCALE;
+            let spacer_w = b.text_width(": ", sscale);
+            let title_w = b.spans_width(&side.title, sscale);
+            let mut width = title_w;
             for l in &side.lines {
-                content_w = content_w
-                    .max(b.spans_width(&l.label, scale) + 12.0 + b.spans_width(&l.score, scale));
+                let score_w = b.spans_width(&l.score, sscale);
+                let extra = if score_w > 0.0 { spacer_w + score_w } else { 0.0 };
+                width = width.max(b.spans_width(&l.label, sscale) + extra);
             }
-            let panel_w = content_w + pad * 2.0;
-            let panel_h = (side.lines.len() as f32 + 1.0) * line_h + pad * 2.0;
-            let px = b.w - panel_w - margin;
-            let py = ((b.h - panel_h) * 0.5).max(margin);
-            b.rect_px(px, py, panel_w, panel_h, [0.0, 0.0, 0.0, 0.55]);
-            // These three colours were the *only* colours the sidebar could ever
-            // show; they are now **base** colours, used for a run the server left
-            // uncoloured and overridden per span wherever it did colour one.
-            let title_x = px + (panel_w - b.spans_width(&side.title, scale)) * 0.5;
-            b.text_spans(&side.title, title_x, py + pad, scale, [1.0, 1.0, 1.0], 1.0);
+            let entries = side.lines.len() as f32;
+            let height = entries * SIDEBAR_LINE_H;
+            let bottom = b.h / 2.0 + height / 3.0;
+            let left = b.w - width - SIDEBAR_EDGE_MARGIN;
+            let right = b.w - SIDEBAR_EDGE_MARGIN + 2.0;
+            let header_y = bottom - height;
+            let plate_x = left - 2.0;
+            let plate_w = right - plate_x;
+            b.rect_px(
+                plate_x,
+                header_y - 10.0,
+                plate_w,
+                9.0,
+                [0.0, 0.0, 0.0, SIDEBAR_HEADER_BG_ALPHA],
+            );
+            b.rect_px(
+                plate_x,
+                header_y - 1.0,
+                plate_w,
+                bottom - (header_y - 1.0),
+                [0.0, 0.0, 0.0, SIDEBAR_BODY_BG_ALPHA],
+            );
+            let title_x = left + width / 2.0 - title_w / 2.0;
+            b.text_spans(&side.title, title_x, header_y - 9.0, sscale, [1.0, 1.0, 1.0], 1.0);
             for (i, l) in side.lines.iter().enumerate() {
-                let y = py + pad + (i as f32 + 1.0) * line_h;
-                b.text_spans(&l.label, px + pad, y, scale, [0.85, 0.90, 1.0], 1.0);
-                let sx = px + panel_w - pad - b.spans_width(&l.score, scale);
-                b.text_spans(&l.score, sx, y, scale, [0.95, 0.35, 0.35], 1.0);
+                let y = bottom - (entries - i as f32) * SIDEBAR_LINE_H;
+                b.text_spans(&l.label, left, y, sscale, [1.0, 1.0, 1.0], 1.0);
+                let score_w = b.spans_width(&l.score, sscale);
+                b.text_spans(&l.score, right - score_w, y, sscale, SIDEBAR_SCORE_DEFAULT, 1.0);
             }
         }
 
@@ -7872,6 +7962,158 @@ mod tests {
             pos_frac - neg_frac > 0.40,
             "vanilla vs fallback delta too small to prove the atlas is what reaches pixels: \
              vanilla={pos_frac:.2} fallback={neg_frac:.2}"
+        );
+    }
+
+    /// The scoreboard sidebar's two background plates, predicted from
+    /// `Hud.displayScoreboardSidebar` (`.cache/mc/26.2/client-src`) rather than
+    /// eyeballed — the *magnitude* species this repo warns against otherwise.
+    /// Content is chosen so the 1x/2x hypotheses diverge everywhere (title
+    /// 30px vs 60px; row widths 54/36 vs 108/72, never coinciding after a
+    /// clamp) and so the two rows' label/score lengths are pairwise-distinct,
+    /// which a transposed measurement could not survive.
+    #[test]
+    fn sidebar_panel_lands_on_vanillas_own_geometry_not_a_2x_pitch() {
+        let plain = |s: &str| {
+            vec![TextSpan {
+                text: s.to_string(),
+                style: lodestone_model::text::TextStyle::default(),
+            }]
+        };
+        let line = |label: &str, score: &str| crate::overlay::SidebarLine {
+            label: plain(label),
+            score: plain(score),
+        };
+        let sidebar = Sidebar {
+            title: plain("Kills"),
+            lines: vec![line("Alice", "11"), line("Bob", "7")],
+        };
+        let stats = DebugStats::default();
+        let frame = HudFrame {
+            show_debug: false,
+            crosshair: false,
+            sidebar: Some(&sidebar),
+            ..HudFrame::new(&stats)
+        };
+        let (w, h) = (640u32, 480u32);
+        let geo = HudGeometry::build(&frame, w, h);
+        let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
+
+        // Independently hand-derived from `Hud.displayScoreboardSidebar` and
+        // the shell's fixed-advance jar-less font (`(GLYPH_W + 1) * scale` per
+        // visible char, `GLYPH_W == 5`) — not by calling the code under test.
+        let str_w = |s: &str| s.chars().count() as f32 * (font::GLYPH_W as f32 + 1.0);
+        let spacer_w = str_w(": ");
+        let title_w = str_w("Kills");
+        let row0_w = str_w("Alice") + spacer_w + str_w("11");
+        let row1_w = str_w("Bob") + spacer_w + str_w("7");
+        let width = title_w.max(row0_w).max(row1_w);
+        assert!(
+            (width - 54.0).abs() < f32::EPSILON,
+            "hand check: expected width 54.0, derived {width} \
+             (title {title_w}, row0 {row0_w}, row1 {row1_w})"
+        );
+        let height = 2.0 * 9.0;
+        let bottom = ch / 2.0 + height / 3.0;
+        let left = cw - width - 3.0;
+        let right = cw - 3.0 + 2.0;
+        let header_y = bottom - height;
+        let plate_x = left - 2.0;
+        let plate_w = right - plate_x;
+
+        let px = |x: f32| (x + 1.0) * 0.5 * cw;
+        let py = |y: f32| (1.0 - y) * 0.5 * ch;
+        let mut header_bounds: Option<(f32, f32, f32, f32)> = None;
+        let mut body_bounds: Option<(f32, f32, f32, f32)> = None;
+        for chunk in geo.verts.chunks(FLOATS_PER_VERTEX) {
+            let (x, y) = (px(chunk[0]), py(chunk[1]));
+            let (r, g, b, a) = (chunk[2], chunk[3], chunk[4], chunk[5]);
+            if r == 0.0 && g == 0.0 && b == 0.0 && (a - SIDEBAR_HEADER_BG_ALPHA).abs() < 1e-4 {
+                let e = header_bounds.get_or_insert((x, y, x, y));
+                *e = (e.0.min(x), e.1.min(y), e.2.max(x), e.3.max(y));
+            } else if r == 0.0 && g == 0.0 && b == 0.0 && (a - SIDEBAR_BODY_BG_ALPHA).abs() < 1e-4 {
+                let e = body_bounds.get_or_insert((x, y, x, y));
+                *e = (e.0.min(x), e.1.min(y), e.2.max(x), e.3.max(y));
+            }
+        }
+        let header = header_bounds
+            .expect("the header plate must draw at exactly SIDEBAR_HEADER_BG_ALPHA");
+        let body = body_bounds.expect("the body plate must draw at exactly SIDEBAR_BODY_BG_ALPHA");
+
+        let mut mismatches = Vec::new();
+        let mut check = |name: &str, got: f32, want: f32| {
+            if (got - want).abs() > 0.5 {
+                mismatches.push(format!("{name}: got {got:.2}, want {want:.2}"));
+            }
+        };
+        check("header x0", header.0, plate_x);
+        check("header x1", header.2, plate_x + plate_w);
+        check("header y0", header.1, header_y - 10.0);
+        check("header y1", header.3, header_y - 1.0);
+        check("body x0", body.0, plate_x);
+        check("body x1", body.2, plate_x + plate_w);
+        check("body y0", body.1, header_y - 1.0);
+        check("body y1", body.3, bottom);
+        assert!(
+            mismatches.is_empty(),
+            "sidebar panel diverged from vanilla's own geometry: {mismatches:?}"
+        );
+    }
+
+    /// The boss bar's fixed native rect —
+    /// `BossHealthOverlay.BAR_WIDTH`/`BAR_HEIGHT` (182×5,
+    /// `.cache/mc/26.2/client-src`) and `extractRenderState`'s `yOffset`
+    /// arithmetic — not a canvas-relative width or this HUD's ambient 2×
+    /// text pitch.
+    #[test]
+    fn boss_bar_lands_on_vanillas_fixed_182x5_rect_not_a_canvas_fraction() {
+        let bars = vec![BossBarView {
+            title: vec![TextSpan {
+                text: "Boss".to_string(),
+                style: lodestone_model::text::TextStyle::default(),
+            }],
+            progress: 0.5,
+            color: [1.0, 0.0, 0.0],
+        }];
+        let stats = DebugStats::default();
+        let frame = HudFrame {
+            show_debug: false,
+            crosshair: false,
+            boss_bars: &bars,
+            ..HudFrame::new(&stats)
+        };
+        let (w, h) = (640u32, 480u32);
+        let geo = HudGeometry::build(&frame, w, h);
+        let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
+
+        let bar_x = cw * 0.5 - BOSS_BAR_WIDTH * 0.5;
+        let yo = BOSS_BAR_TOP;
+
+        let px = |x: f32| (x + 1.0) * 0.5 * cw;
+        let py = |y: f32| (1.0 - y) * 0.5 * ch;
+        let mut bg_bounds: Option<(f32, f32, f32, f32)> = None;
+        for chunk in geo.verts.chunks(FLOATS_PER_VERTEX) {
+            let (x, y) = (px(chunk[0]), py(chunk[1]));
+            let (r, g, b) = (chunk[2], chunk[3], chunk[4]);
+            if (r - 0.08).abs() < 1e-3 && (g - 0.08).abs() < 1e-3 && (b - 0.10).abs() < 1e-3 {
+                let e = bg_bounds.get_or_insert((x, y, x, y));
+                *e = (e.0.min(x), e.1.min(y), e.2.max(x), e.3.max(y));
+            }
+        }
+        let bg = bg_bounds.expect("the boss bar background plate must draw");
+        let mut mismatches = Vec::new();
+        let mut check = |name: &str, got: f32, want: f32| {
+            if (got - want).abs() > 0.5 {
+                mismatches.push(format!("{name}: got {got:.2}, want {want:.2}"));
+            }
+        };
+        check("bar x0", bg.0, bar_x);
+        check("bar x1", bg.2, bar_x + BOSS_BAR_WIDTH);
+        check("bar y0", bg.1, yo);
+        check("bar y1", bg.3, yo + BOSS_BAR_HEIGHT);
+        assert!(
+            mismatches.is_empty(),
+            "boss bar diverged from vanilla's fixed 182x5 rect: {mismatches:?}"
         );
     }
 }
