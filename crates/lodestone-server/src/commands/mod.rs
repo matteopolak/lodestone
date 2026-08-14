@@ -117,6 +117,7 @@
 mod block_commands;
 mod chat_commands;
 mod clear;
+mod default_gamemode;
 mod difficulty;
 pub mod effect;
 /// `/effect give` and `/effect clear` — the producer that makes
@@ -131,7 +132,10 @@ mod kill;
 pub mod registrar;
 mod seed;
 pub mod source;
+mod summon;
+mod teleport;
 mod time;
+mod weather;
 pub mod wire;
 mod world_spawn_commands;
 
@@ -224,6 +228,10 @@ impl ServerCommands {
         clear::register(&mut registrar);
         block_commands::register(&mut registrar);
         chat_commands::register(&mut registrar);
+        teleport::register(&mut registrar);
+        summon::register(&mut registrar);
+        weather::register(&mut registrar);
+        default_gamemode::register(&mut registrar);
         help::register(&mut registrar);
         Self::from_registrar(registrar)
     }

@@ -70,7 +70,8 @@ fn run(
     text: &str,
 ) -> Option<lodestone_server::CommandOutcome> {
     let state = lodestone_server::world_state::WorldStateHandle::new();
-    let world = CommandWorld { rules: rules as &(dyn RuleStore + Sync), players, state: &state };
+    let world =
+        CommandWorld { rules: rules as &(dyn RuleStore + Sync), players, state: &state, mobs: None };
     commands.run(&world, source, text)
 }
 
@@ -564,6 +565,7 @@ fn gamerule_writes_the_store_it_is_handed_including_the_production_world_state()
         rules: &world_state as &(dyn RuleStore + Sync),
         players: &players,
         state: &world_state,
+        mobs: None,
     };
     let outcome = commands
         .run(&command_world, &alice, "gamerule random_tick_speed 6")
@@ -700,7 +702,7 @@ fn run_stateful(
     source: &CommandSource,
     text: &str,
 ) -> Option<lodestone_server::CommandOutcome> {
-    let world = CommandWorld { rules: state, players, state };
+    let world = CommandWorld { rules: state, players, state, mobs: None };
     commands.run(&world, source, text)
 }
 
@@ -1014,4 +1016,250 @@ fn spawnpoint_sets_a_respawn_point_effect_not_a_teleport() {
         directed.effect,
         Effect::SetRespawnPoint { pos: lodestone_model::BlockPos::new(2, 67, 9) }
     );
+}
+
+// ---------------------------------------------------------------------------
+// /tp, /summon, /weather, /defaultgamemode
+// ---------------------------------------------------------------------------
+
+/// A source at a non-axis-aligned-with-the-fixture yaw, so `~` and `^`
+/// genuinely diverge for the *same* three numbers — an origin-facing-north
+/// source (this file's `source()` helper) is exactly the coincidence
+/// `CLAUDE.md` warns a whole corpus can share, because at yaw 0 the local
+/// basis (left, up, forward) lines up with the world axes (x, y, z) and a
+/// `^`-implemented-as-`~` bug would be invisible. Yaw `-90` faces `+X`
+/// (`lodestone_command_mc::position`'s own basis test derives and pins
+/// this), so the two dialects land on different absolute positions here.
+fn rotated_source(uuid_n: u128, name: &str, pos: Vec3) -> CommandSource {
+    CommandSource::player(
+        uuid(uuid_n),
+        1000 + uuid_n as i32,
+        name,
+        pos,
+        Rotation { yaw: -90.0, pitch: 0.0 },
+        overworld_dimension(),
+        4,
+    )
+}
+
+/// `~`-relative and `^`-local coordinates resolve to genuinely different
+/// absolute positions from the same three numbers, at a source whose facing
+/// is not axis-coincident — see [`rotated_source`]'s own doc for why that
+/// matters. The three deltas are pairwise-distinct so a transposed x/y/z
+/// would be visible in either form.
+#[test]
+fn tp_relative_and_local_coordinates_diverge_at_a_non_coincident_rotation() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let alice = rotated_source(1, "alice", Vec3::new(100.0, 64.0, -8.0));
+    let players = roster();
+
+    // `~4 ~6 ~11` is plain per-axis addition, independent of rotation.
+    let relative = run(&commands, &GameRulesHandle::new(), &players, &alice, "tp ~4 ~6 ~11")
+        .expect("root matched");
+    assert_eq!(
+        relative.effects,
+        [DirectedEffect::new(
+            uuid(1),
+            Effect::Teleport { x: 104.0, y: 70.0, z: 3.0, yaw: None, pitch: None }
+        )]
+    );
+
+    // `^4 ^6 ^11` at yaw -90 (facing +X): left = (0,0,-1), up = (0,1,0),
+    // forward = (1,0,0) (per `lodestone_command_mc::position`'s own basis
+    // test), so the result is `origin + left*4 + up*6 + forward*11` =
+    // (100+11, 64+6, -8-4) = (111, 70, -12) — different from the `~` case
+    // above in x and z, identical only in y (which both dialects treat as
+    // world-up when pitch is 0, not a masked bug).
+    let local = run(&commands, &GameRulesHandle::new(), &players, &alice, "tp ^4 ^6 ^11")
+        .expect("root matched");
+    assert_eq!(
+        local.effects,
+        [DirectedEffect::new(
+            uuid(1),
+            Effect::Teleport { x: 111.0, y: 70.0, z: -12.0, yaw: None, pitch: None }
+        )]
+    );
+}
+
+/// `/tp <targets> <location>` resolves the location against the **command
+/// source**, never the target — vanilla's own `Vec3Argument.getCoordinates`
+/// takes the `CommandSourceStack`, not the entity being moved. Bob (at
+/// `x = 5` per [`roster`]) is teleported relative to Alice's position, not
+/// his own, which is the surprising-in-English but correct behaviour this
+/// test pins. The optional `<yaw> <pitch>` pair is carried through as
+/// `Some`, distinct from the bare form's `None`.
+#[test]
+fn tp_targets_location_resolves_against_the_source_never_the_target() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    // Alice at (50, 70, 20), facing +Z (yaw 0) — bob's own position (roster's
+    // `x = 5.0, y = 64.0, z = 0.0`) must play no part in the resolved point.
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let outcome = run(&commands, &GameRulesHandle::new(), &players, &alice, "tp bob ~11 ~1 ~4")
+        .expect("root matched");
+    assert_eq!(
+        outcome.effects,
+        [DirectedEffect::new(
+            uuid(2),
+            // Alice is at (0, 64, 0) per `source()`; bob's own (5, 64, 0) is
+            // untouched by the resolution.
+            Effect::Teleport { x: 11.0, y: 65.0, z: 4.0, yaw: None, pitch: None }
+        )],
+        "the offset must resolve against alice's position, not bob's"
+    );
+
+    // Written with explicit decimal points so `Vec3Arg`'s centre correction
+    // (an absolute `x`/`z` with no decimal point gains `+0.5`, `y` never does
+    // — see `lodestone_command_mc::position`'s own module doc) does not shift
+    // the expected value away from a literal reading.
+    let with_rotation =
+        run(&commands, &GameRulesHandle::new(), &players, &alice, "tp bob 1.0 2.0 3.0 45 -30")
+            .expect("root matched");
+    assert_eq!(
+        with_rotation.effects,
+        [DirectedEffect::new(
+            uuid(2),
+            Effect::Teleport { x: 1.0, y: 2.0, z: 3.0, yaw: Some(45.0), pitch: Some(-30.0) }
+        )]
+    );
+}
+
+/// `/tp <destination>` (self) and `/tp <targets> <destination>` both resolve
+/// to the destination's live *position*, never a fixed literal — carol and
+/// dave sit at different `x` per [`roster`], so a stale/transposed lookup
+/// would be visible immediately.
+#[test]
+fn tp_to_an_entity_resolves_its_current_position() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let self_to_carol =
+        run(&commands, &GameRulesHandle::new(), &players, &alice, "tp carol").expect("root matched");
+    assert_eq!(
+        self_to_carol.effects,
+        [DirectedEffect::new(
+            uuid(1),
+            Effect::Teleport { x: 12.0, y: 64.0, z: 0.0, yaw: None, pitch: None }
+        )]
+    );
+
+    let bob_to_dave = run(&commands, &GameRulesHandle::new(), &players, &alice, "tp bob dave")
+        .expect("root matched");
+    assert_eq!(
+        bob_to_dave.effects,
+        [DirectedEffect::new(
+            uuid(2),
+            Effect::Teleport { x: 30.0, y: 64.0, z: 0.0, yaw: None, pitch: None }
+        )]
+    );
+}
+
+/// `/summon` reaches the **same** shared `MobHandle` the world tick loop's
+/// mob population lives behind — the property that keeps a summoned mob from
+/// being an island (see the command's own module doc). Verified by reading
+/// the handle back through [`lodestone_server::EntitySource::snapshots`], the
+/// exact surface `EntityStreamer` diffs to decide what a client is told about
+/// — not a private field of the sim.
+#[test]
+fn summon_spawns_into_the_shared_mob_handle_at_the_resolved_position() {
+    use lodestone_server::{EntitySource, MobHandle};
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+    let mobs = MobHandle::default();
+
+    assert!(mobs.snapshots().is_empty(), "nothing spawned yet");
+
+    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs) };
+    let outcome =
+        commands.run(&world, &alice, "summon minecraft:cow ~11 ~1 ~4").expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+
+    let snapshots = mobs.snapshots();
+    let [cow] = snapshots.as_slice() else {
+        panic!("expected exactly one spawned entity, got {snapshots:?}")
+    };
+    assert_eq!(cow.entity_type, "minecraft:cow".parse().unwrap());
+    // Alice is at (0, 64, 0) per `source()`.
+    assert_eq!(cow.position, Vec3::new(11.0, 65.0, 4.0));
+}
+
+/// `/summon` refuses an unknown entity type at **parse** time — the tree
+/// itself, not the executor — because [`lodestone_command_mc::EntityTypeArg`]
+/// validates against the real entity-type census.
+#[test]
+fn summon_refuses_an_unknown_entity_type_at_parse_time() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+    let mobs = lodestone_server::MobHandle::default();
+
+    let world = CommandWorld { rules: &state, players: &players, state: &state, mobs: Some(&mobs) };
+    let outcome =
+        commands.run(&world, &alice, "summon minecraft:not_a_real_mob").expect("root matched");
+    assert!(!outcome.response.is_ran(), "{outcome:?}");
+    assert!(lodestone_server::EntitySource::snapshots(&mobs).is_empty());
+}
+
+/// `/weather clear|rain|thunder [duration]` queues a
+/// [`lodestone_server::world_state::WeatherRequest`] for the tick loop to
+/// apply on its own next pass — the exact split
+/// `crate::sleep::SleepVote`/`SleepState` established, so this test asserts
+/// the *queued request*, not a `WeatherState` this crate cannot reach from a
+/// command executor at all (see the command's own module doc for why).
+#[test]
+fn weather_queues_a_request_the_tick_loop_will_apply() {
+    use lodestone_server::world_state::WeatherRequest;
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    assert_eq!(state.take_weather_request(), None, "nothing queued before the command runs");
+
+    let outcome = run_stateful(&commands, &state, &players, &alice, "weather rain 100")
+        .expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+    assert_eq!(state.take_weather_request(), Some(WeatherRequest::Rain { duration: 100 }));
+
+    run_stateful(&commands, &state, &players, &alice, "weather thunder 250").expect("root matched");
+    assert_eq!(state.take_weather_request(), Some(WeatherRequest::Thunder { duration: 250 }));
+
+    run_stateful(&commands, &state, &players, &alice, "weather clear 1").expect("root matched");
+    assert_eq!(state.take_weather_request(), Some(WeatherRequest::Clear { duration: 1 }));
+
+    // The bare, no-duration form queues a request too, just with the
+    // documented stand-in constant rather than a sampled one.
+    run_stateful(&commands, &state, &players, &alice, "weather rain").expect("root matched");
+    assert!(matches!(state.take_weather_request(), Some(WeatherRequest::Rain { duration }) if duration > 0));
+}
+
+/// `/defaultgamemode` writes `WorldStateHandle::default_game_mode`, read back
+/// through the same handle a real join reads — a store that only ever agreed
+/// with whatever it was last told would pass a self-referential check, so
+/// this compares against the predicted vanilla default (`Survival`) first.
+#[test]
+fn defaultgamemode_writes_the_store_a_new_join_reads() {
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    assert_eq!(state.default_game_mode(), GameMode::Survival, "vanilla's own default");
+
+    let outcome = run_stateful(&commands, &state, &players, &alice, "defaultgamemode creative")
+        .expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+    assert_eq!(state.default_game_mode(), GameMode::Creative);
+
+    run_stateful(&commands, &state, &players, &alice, "defaultgamemode spectator")
+        .expect("root matched");
+    assert_eq!(state.default_game_mode(), GameMode::Spectator);
 }

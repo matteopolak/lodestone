@@ -278,14 +278,91 @@ is legal syntax that correctly matches zero candidates, the same narrowing
 spec), `/gamemode`, `/give` and `/effect` were the original four; `/time`,
 `/difficulty`, `/seed`, `/setworldspawn`, `/spawnpoint` (self-only), `/kill`,
 `/experience` (`/xp`), `/clear`, `/setblock`, `/fill`, `/say`, `/me`, `/msg`
-(`/tell`/`/w`) and `/help` (root listing only) followed. Each reads off the
+(`/tell`/`/w`) and `/help` (root listing only) followed next, then `/tp`
+(`/teleport`), `/summon`, `/weather` and `/defaultgamemode` — the four this
+document's own "Known gaps" section named as blocked on a missing mechanism,
+each now built (see "The four mechanisms" below). Each reads off the
 decompiled 26.2 source rather than from memory where a real tree exists to
 check against, and each has one execution test in
 `crates/lodestone-server/tests/builtin_commands.rs` per the registrar's own
 stated bar (its own doc names the three residual runtime panics that fire on a
-command's *first* execution, which is exactly what that bar catches). Four
-new argument types back them: `lodestone_command_mc::{TimeArg, BlockArg}` and
-the pre-existing `Vec3Arg`/`BlockPosArg` for `~`/`^` coordinates.
+command's *first* execution, which is exactly what that bar catches). New
+argument types back them: `lodestone_command_mc::{TimeArg, BlockArg,
+EntityTypeArg}`, plus the pre-existing `Vec3Arg`/`BlockPosArg` for `~`/`^`
+coordinates, reused by `/tp` and `/summon`.
+
+#### The four mechanisms
+
+Each of `/tp`, `/summon`, `/weather` and `/defaultgamemode` was blocked on one
+named missing mechanism, not on tree-building work. All four are now built and
+the commands registered on top of them.
+
+* **`/tp`/`/teleport` — a generic post-join teleport encoder.**
+  `ServerProtocol::encode_teleport` is a new trait method (default: emit
+  nothing), implemented in `crates/protocol/v770/src/server_protocol.rs` by
+  reusing the same `encode_player_position_teleport` free function the join
+  sequence and `ServerProtocol::encode_respawn` already call — all three stay
+  byte-identical for the same inputs by construction. Delivery is an ordinary
+  directed `Effect::Teleport`, exactly like `/kill`'s `Effect::Kill`: a
+  self-teleport is applied inline by the `ChatCommand` arm, a teleport aimed at
+  another player is queued on the `PlayerRegistry` and applied by that
+  player's own connection loop. `yaw`/`pitch` are `Option<f32>` — `None` means
+  "keep the target's current facing", resolved from that connection's own
+  `player_rot` at *application* time (in `apply_own_effect`, now threaded
+  `player_pos`/`player_rot` for exactly this), because a command executor has
+  no way to read a target's rotation: `PlayerCandidate` carries a position but
+  not one. `<location>` resolves `~`/`^` against the **command source**'s own
+  position, never a target's — vanilla's `Vec3Argument.getCoordinates(source)`,
+  confirmed against `TeleportCommand.java`. `<rotation>` is two plain
+  `brigadier:float` nodes rather than `minecraft:rotation` (no `RotationArg`
+  parser exists yet), the same documented approximation
+  `world_spawn_commands`'s `/spawnpoint` angle already makes. `/tp` and
+  `/teleport` are two independently-built trees rather than a `redirect` —
+  `Registrar::redirect` has no production caller yet and this was not the
+  place to be the first.
+* **`/summon` — no new mob-sim capability, an API-shape gap.**
+  `crate::mobs::MobHandle::with` and `crate::mobs::MobSim::spawn_species`
+  were already `pub`; what was missing was a way for a command executor to
+  reach the handle at all. `CommandWorld` gained an `Option<&MobHandle>`
+  field (`Option` because RCON has none — see `rcon.rs`'s own doc), and
+  `crate::server`'s `ChatCommand` arm passes the same shared handle
+  `dispatch_play_packet` already holds — the same one the world tick loop's
+  `run_mob_tick_loop` republishes into `LiveMobSource`, so a summoned mob is
+  picked up by the very next publish with no second wire built. `<entity>` is
+  validated at *parse* time by a new `lodestone_command_mc::EntityTypeArg`
+  against `lodestone_data::entity_types::entity_type_id` (protocol 776's real
+  census), wired as `minecraft:resource` (registry `minecraft:entity_type`).
+  No SNBT (`<nbt>`) and no build-height bounds check — documented gaps, not
+  silent ones.
+* **`/weather` — a request queue on `WorldStateHandle`, not a new lock.**
+  `crate::weather::WeatherState` is still owned by the world tick loop with no
+  lock — that has not changed. What changed is
+  `WorldStateHandle::request_weather`/`take_weather_request`, a
+  `WeatherRequest` slot mirroring `crate::sleep::SleepVote`'s split exactly:
+  a caller-side request the loop consults once per pass
+  (`run_tick_loop_with_weather`'s own hunk, right before its existing
+  `weather.tick(...)` call) and applies **directly** to `WeatherState`'s
+  `pub(crate)` fields — mirroring vanilla's own
+  `MinecraftServer.setWeatherParameters`, which also writes the booleans and
+  timers immediately rather than waiting for a countdown. Applying it before
+  `weather.tick` runs is what makes the transition (and its
+  `StartRaining`/`StopRaining` broadcast) land on the very next tick instead of
+  never — `weather.tick`'s own flip-detection compares against whatever the
+  booleans already are when it starts, so a value already set going in would
+  never register as a change. `<duration>` uses vanilla's own `TimeArgument.
+  time(1)` (no sampled default; a documented fixed stand-in — see
+  `crate::commands::weather`'s module doc).
+* **`/defaultgamemode` — a store, nothing more.**
+  `WorldStateHandle::default_game_mode`/`set_default_game_mode`, defaulting
+  to `Survival` (`LevelSettings.DEFAULT`). Wired at the one read site that
+  needed it: `crate::server::serve_connection_inner`'s
+  `let mut game_mode = GameMode::Survival;` (a brand-new player's starting
+  mode) now reads `world.default_game_mode()` instead — a **returning**
+  player's saved mode still wins over it a few lines later, unchanged, exactly
+  matching vanilla's own "this only affects future joins" semantics. No
+  `forceGameMode` enforcement of already-connected players — this crate models
+  no such rule and has no cross-connection game-mode push wired to this
+  command.
 
 Per-command wire parity for the original four is asserted against
 `crates/protocol/v770/tests/fixtures/command_tree_creative.hex` — 30,248 bytes and
@@ -467,29 +544,6 @@ Still open, and each is now additive rather than blocked:
   subcommand tree itself. `SET_COMMAND_BLOCK`/`SET_COMMAND_MINECART` still
   decode into `ServerBound::Ignored`, so a command block's NBT cannot be set
   over the wire, let alone tick. None of this was started.
-* **`/tp`/`/teleport`.** Not registered at all. `ServerProtocol` has no
-  generic post-join teleport/position-sync encoder — the one free function
-  that builds that packet (`encode_player_position_teleport` in
-  `crates/protocol/v770/src/server_protocol.rs`) is used only by the join
-  sequence and is not exposed through the trait, so `dispatch_play_packet`
-  (which is generic over `P: ServerProtocol`) cannot call it. Adding one means
-  a new trait method plus a `V770ServerProtocol` implementation, in the one
-  file this repo's own contention notes flag as heavily contended; deliberately
-  left for a pass that can own that file.
-* **`/weather`.** Not registered. `crate::weather::WeatherState` is owned by
-  the world tick loop with no lock and no shared handle — unlike
-  `WorldStateHandle`'s difficulty/clock, there is nothing a command executor
-  can reach to force a transition. Wiring it needs a channel shaped like
-  `crate::sleep::SleepVote` (a caller-side request the tick loop consults each
-  pass), not a one-line store-and-read.
-* **`/summon`.** Not registered. There is no synchronous "spawn one mob now"
-  entry point reachable from a command executor — natural spawning is driven
-  entirely by the tick loop's own passes (`crate::mob_spawn`,
-  `crate::natural_spawn`), with no callable single-spawn seam a command could
-  use instead.
-* **`/defaultgamemode`.** Not registered. No store exists for "the game mode a
-  *new* player joins in" — only the per-connection `game_mode` local a joined
-  player already has.
 * **`/publish`** (the Open-to-LAN port command) is a separate, LAN-specific
   issue and was not attempted here.
 * **`/xp query`** parses and resolves its target, then refuses rather than
