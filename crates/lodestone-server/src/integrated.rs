@@ -817,6 +817,17 @@ impl IntegratedServer {
         let (client_end, server_end) = memory_pair();
         let shutdown = ShutdownSignal::new();
         let live_mobs = LiveMobSource::default();
+        // The local player's own roster, so the tab list is not empty: without
+        // this, `entities.players()` (the bare `LiveMobSource` below has no
+        // override) answers `None`, `stream_pass`'s tab-list branch never
+        // runs, and no `player_info_update` ever reaches this connection —
+        // not even one naming itself. Vanilla always lists you in your own
+        // tab list; a real player registry, wrapped around `live_mobs` below
+        // via `PlayerAwareSource`, is what makes `PlayerRegistry::join` (in
+        // `crate::server`'s join sequence) actually register this connection
+        // instead of being skipped. Same shape as the LAN-relay path's
+        // `relay_players` further down this file.
+        let player_registry = PlayerRegistry::new();
         // Issues #307/#308: shared with the tick task the same way
         // `block_entities` is, above — see [`BlockTickFeed`]'s own doc
         // comment for why this is safe with exactly one connection (this
@@ -835,10 +846,12 @@ impl IntegratedServer {
         // `container_sync_tick`; the tick task's loop computes the vote and
         // publishes any `SkippedNight` back through the feed the connection
         // drains. One inner handle each, cloned twice — see [`SleepVote`]'s
-        // own doc comment. A fresh vote and feed are the singleplayer shape:
-        // no `PlayerRegistry`, so the voter count stays 0 and
-        // `SleepState::sleepers_needed`'s `max(1, …)` floor demands exactly
-        // one sleeper.
+        // own doc comment. A fresh vote and feed are the singleplayer shape;
+        // with `player_registry` above carrying exactly the one local player
+        // once they join, the voter count reaches 1 and
+        // `SleepState::sleepers_needed`'s `max(1, …)` floor still demands
+        // exactly one sleeper — the same outcome the pre-registry singleplayer
+        // shape got from the floor alone, now reached by the real count too.
         let sleep_vote = SleepVote::new();
         let sleep_feed = SleepFeed::default();
         // Issue #12: the *handle* is still built synchronously here, before any
@@ -1013,7 +1026,14 @@ impl IntegratedServer {
         });
 
         let conn_signal = shutdown.clone();
-        let conn_entities = live_mobs.clone();
+        // `PlayerAwareSource` rather than a bare `live_mobs.clone()`: see
+        // `player_registry`'s own doc comment above for why the tab list
+        // needs this. `snapshots()` still comes from `live_mobs` alone —
+        // `PlayerAwareSource` never folds the registry into it, so the
+        // connection's own player entity remains excluded from its own
+        // entity diff, exactly as `crate::players::PlayerRegistry::view`'s
+        // `viewer` parameter already ensures for the roster/tab-list side.
+        let conn_entities = PlayerAwareSource::new(live_mobs.clone(), player_registry.clone());
         let conn_block_entities = block_entities.clone();
         let conn_mobs = mob_handle.clone();
         let conn_source = Arc::clone(&source);

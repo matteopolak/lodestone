@@ -7890,6 +7890,14 @@ async fn publish_health<T, P>(
     state: &mut State,
     proto: &P,
     vitals: &PlayerVitals,
+    // Every caller passes `LOCAL_PLAYER_ENTITY_ID`, never a `PlayerRegistry`
+    // ticket id: every packet built from this reaches `conn` directly, this
+    // connection's own socket, and the client only recognises itself under
+    // the constant its own `GameLogin.entity_id` (`begin_play_at`) claimed —
+    // see the call sites' own comments. Kept as a plain parameter rather than
+    // inlining the constant here so a future caller broadcasting to *other*
+    // connections is not tempted to reuse this function for that; it never
+    // varies today, and that is the point.
     player_entity_id: i32,
     username: &str,
     cause: crate::vitals::DeathCause,
@@ -7991,7 +7999,6 @@ async fn fall_status_sample<T, P, S>(
     player_pos: &Option<(f64, f64, f64)>,
     fall: &mut FallTracker,
     vitals: &mut PlayerVitals,
-    player_entity_id: i32,
     username: &str,
     on_ground: bool,
     // `Abilities.invulnerable` — creative and spectator. `fall` is not in
@@ -8023,7 +8030,13 @@ where
             state,
             proto,
             vitals,
-            player_entity_id,
+            // Always `LOCAL_PLAYER_ENTITY_ID`, never the registry ticket's id:
+            // this packet goes straight to `conn`, this player's own socket,
+            // and `GameLogin.entity_id` (`begin_play_at`) always claims that
+            // constant regardless of whether a `PlayerRegistry` exists — see
+            // `LOCAL_PLAYER_ENTITY_ID`'s own doc comment. The ticket's real id
+            // is for *other* connections' view of this player, never this one.
+            LOCAL_PLAYER_ENTITY_ID,
             username,
             crate::vitals::DeathCause::Fall,
             advancements,
@@ -8356,7 +8369,8 @@ where
                     state,
                     proto,
                     vitals,
-                    player_entity_id,
+                    // Self-facing, per `fall_status_sample`'s own call site comment.
+                    LOCAL_PLAYER_ENTITY_ID,
                     username,
                     crate::vitals::DeathCause::Fall,
                     advancements,
@@ -8388,7 +8402,6 @@ where
                 player_pos,
                 fall,
                 vitals,
-                player_entity_id,
                 username,
                 on_ground,
                 Abilities::for_mode(*game_mode).invulnerable,
@@ -8411,7 +8424,6 @@ where
                 player_pos,
                 fall,
                 vitals,
-                player_entity_id,
                 username,
                 on_ground,
                 Abilities::for_mode(*game_mode).invulnerable,
@@ -8796,10 +8808,19 @@ where
                         // has no way to know it is aboard and
                         // `lodestone_ecs::vehicle::tick_controlled_vehicle` never
                         // engages, so the boat is placeable and unusable.
+                        //
+                        // `LOCAL_PLAYER_ENTITY_ID`, not `player_entity_id`: this goes
+                        // straight to `conn`, this connection's own socket, and the
+                        // client only recognises itself among the passengers under
+                        // the constant its own `GameLogin.entity_id` claimed — see
+                        // `publish_health`'s call sites for the same rule.
+                        // `sim.mount_vehicle` above still records the real
+                        // `player_entity_id`, which is what a *future* multi-connection
+                        // broadcast of this vehicle's passengers would need.
                         apply(
                             conn,
                             state,
-                            proto.encode_set_passengers(entity_id, &[player_entity_id]),
+                            proto.encode_set_passengers(entity_id, &[LOCAL_PLAYER_ENTITY_ID]),
                         )
                         .await?;
                     }
@@ -9967,7 +9988,10 @@ where
                             &mut state,
                             proto.encode_take_item_entity(
                                 take.item_entity_id,
-                                player_entity_id,
+                                // Self-facing (sent only to `conn`): the collector
+                                // must be `LOCAL_PLAYER_ENTITY_ID`, matching this
+                                // rule's other call sites — see `publish_health`'s.
+                                LOCAL_PLAYER_ENTITY_ID,
                                 take.amount,
                             ),
                         )
@@ -10012,7 +10036,8 @@ where
                             &mut state,
                             proto.encode_take_item_entity(
                                 absorbed.orb_entity_id,
-                                player_entity_id,
+                                // Self-facing, per the item-pickup call site above.
+                                LOCAL_PLAYER_ENTITY_ID,
                                 1,
                             ),
                         )
@@ -10369,7 +10394,8 @@ where
                                 &mut state,
                                 proto,
                                 &vitals,
-                                player_entity_id,
+                                // Self-facing, per `publish_health`'s own call sites.
+                                LOCAL_PLAYER_ENTITY_ID,
                                 &username,
                                 crate::vitals::DeathCause::OutsideBorder,
                                 &mut advancements,
@@ -10400,7 +10426,8 @@ where
                             &mut state,
                             proto,
                             &vitals,
-                            player_entity_id,
+                            // Self-facing, per `publish_health`'s own call sites.
+                            LOCAL_PLAYER_ENTITY_ID,
                             &username,
                             crate::vitals::DeathCause::Drown,
                             &mut advancements,
@@ -10467,7 +10494,8 @@ where
                             &mut state,
                             proto,
                             &vitals,
-                            player_entity_id,
+                            // Self-facing, per `publish_health`'s own call sites.
+                            LOCAL_PLAYER_ENTITY_ID,
                             &username,
                             crate::vitals::DeathCause::OnFire,
                             &mut advancements,
@@ -10525,7 +10553,8 @@ where
                             &mut state,
                             proto,
                             &vitals,
-                            player_entity_id,
+                            // Self-facing, per `publish_health`'s own call sites.
+                            LOCAL_PLAYER_ENTITY_ID,
                             &username,
                             crate::vitals::DeathCause::Wither,
                             &mut advancements,
@@ -10560,7 +10589,8 @@ where
                             &mut state,
                             proto,
                             &vitals,
-                            player_entity_id,
+                            // Self-facing, per `publish_health`'s own call sites.
+                            LOCAL_PLAYER_ENTITY_ID,
                             &username,
                             crate::vitals::DeathCause::Starve,
                             &mut advancements,
@@ -11236,7 +11266,8 @@ where
                     &mut state,
                     proto.encode_take_item_entity(
                         take.item_entity_id,
-                        player_entity_id,
+                        // Self-facing, per the earlier native-loop call site.
+                        LOCAL_PLAYER_ENTITY_ID,
                         take.amount,
                     ),
                 )
@@ -11262,7 +11293,8 @@ where
                 apply(
                     conn,
                     &mut state,
-                    proto.encode_take_item_entity(absorbed.orb_entity_id, player_entity_id, 1),
+                    // Self-facing, per the earlier native-loop call site.
+                    proto.encode_take_item_entity(absorbed.orb_entity_id, LOCAL_PLAYER_ENTITY_ID, 1),
                 )
                 .await?;
                 apply(
