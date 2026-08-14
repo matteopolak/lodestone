@@ -16,7 +16,7 @@ use lodestone_render::{
 
 use crate::camera_rig::BobFrame;
 
-use super::{RenderState, RenderStats};
+use super::{MainHandItem, RenderState, RenderStats};
 
 // ---------------------------------------------------------------------------
 // The equip / swap animation
@@ -90,6 +90,18 @@ pub(super) struct HeldItemEquip {
     /// *drawn* item — a swap that raises an enchanted sword glints the sword the
     /// moment it appears, not the stack the player selected two ticks ago.
     visible: Option<(ResourceLocation, bool)>,
+    /// [`Self::visible`]'s stack's `minecraft:dyed_color`, tracked alongside it
+    /// rather than folded into the tuple — deliberately **not** part of the
+    /// swap-trigger comparison in [`Self::step`], the same reason `foil` *is*
+    /// part of it is inverted here: a dye/potion change is not one of the two
+    /// triggers `step`'s doc already says this simplification drops (count,
+    /// durability), so keeping the comparison unchanged is the conservative
+    /// choice — this pair exists only to feed
+    /// [`RenderState::prepare_first_person_hand`]'s tint resolve, not to decide
+    /// *when* the hand dips.
+    visible_dyed_color: Option<u32>,
+    /// Mirrors [`Self::visible_dyed_color`] for `minecraft:potion_contents`.
+    visible_potion_color: Option<u32>,
     /// Vanilla's `mainHandHeight`, `0.0` (fully lowered) to `1.0` (fully raised).
     height: f32,
     /// Vanilla's `oMainHandHeight` — last tick's value, for the partial-tick lerp.
@@ -121,6 +133,8 @@ impl Default for HeldItemEquip {
     fn default() -> Self {
         Self {
             visible: None,
+            visible_dyed_color: None,
+            visible_potion_color: None,
             height: EQUIP_REST_HEIGHT,
             previous: EQUIP_REST_HEIGHT,
             accumulator: 0.0,
@@ -140,17 +154,27 @@ impl HeldItemEquip {
     /// animation takes the same wall time at 30 fps as at 240 — the
     /// frame-rate-dependence trap `Sim::step`'s note on `chest_lids.tick()`
     /// records, avoided the same way.
-    pub(super) fn advance(&mut self, expected: Option<&(ResourceLocation, bool)>) {
+    pub(super) fn advance(&mut self, expected: Option<&MainHandItem>) {
         let now = crate::platform::Instant::now();
         let Some(last) = self.last.replace(now) else {
             // First observation: adopt, fully equipped. See `last`'s doc.
-            self.visible = expected.cloned();
+            self.adopt(expected);
             self.height = EQUIP_REST_HEIGHT;
             self.previous = EQUIP_REST_HEIGHT;
             self.accumulator = 0.0;
             return;
         };
         self.advance_by(now.saturating_duration_since(last).as_secs_f32(), expected);
+    }
+
+    /// Write `expected` into [`Self::visible`] and its dye/potion pair in one
+    /// place, so the three fields can never fall out of sync — every caller
+    /// that used to write `self.visible = expected.cloned()` goes through this
+    /// instead.
+    fn adopt(&mut self, expected: Option<&MainHandItem>) {
+        self.visible = expected.map(|item| (item.item.clone(), item.foil));
+        self.visible_dyed_color = expected.and_then(|item| item.dyed_color);
+        self.visible_potion_color = expected.and_then(|item| item.potion_color);
     }
 
     /// [`Self::advance`] with the elapsed time supplied rather than read from the
@@ -161,7 +185,7 @@ impl HeldItemEquip {
     /// and magnitude is the whole question here (a gate that accepts any nonzero
     /// rate is satisfied by a rate that is wrong by 2×, which is how a 70%-vs-30%
     /// shader bug shipped in this repo).
-    fn advance_by(&mut self, dt: f32, expected: Option<&(ResourceLocation, bool)>) {
+    fn advance_by(&mut self, dt: f32, expected: Option<&MainHandItem>) {
         self.accumulator += dt;
         // A bounded catch-up. A tab-out, a breakpoint, a menu the shell returns from
         // or a slow first frame after a resource load can hand us an arbitrarily
@@ -185,7 +209,7 @@ impl HeldItemEquip {
     /// (that is what `oMainHandHeight` is for), and the visible-item exchange is
     /// checked **after** the ramp, so the item swaps on the tick the height reaches
     /// the bottom rather than the tick after.
-    fn step(&mut self, expected: Option<&(ResourceLocation, bool)>) {
+    fn step(&mut self, expected: Option<&MainHandItem>) {
         self.previous = self.height;
         // `shouldInstantlyReplaceVisibleItem`: vanilla's `matchesIgnoringComponents`
         // plus the item model's `handAnimationOnSwap` opt-out.
@@ -201,17 +225,24 @@ impl HeldItemEquip {
         // direction: over-triggering would dip the hand on every durability tick
         // while mining.
         //
+        // **Deliberately still just (id, foil), even though `expected` now carries
+        // dye/potion too.** Re-dyeing a leather item or mixing a different potion
+        // without ever putting the stack down is not one of the triggers vanilla's
+        // real comparison would add either — see [`Self::visible_dyed_color`]'s
+        // doc — so this comparison is unchanged from before that pair existed.
+        //
         // The `handAnimationOnSwap` opt-out (`ItemModelResolver::shouldPlaySwapAnimation`,
         // default `true`, overridden per item-model definition) is likewise not
         // reachable from an item id alone, so every item animates.
-        if self.visible.as_ref() == expected {
+        let expected_key = expected.map(|item| (&item.item, item.foil));
+        if self.visible.as_ref().map(|(id, foil)| (id, *foil)) == expected_key {
             let target = EQUIP_REST_HEIGHT;
             self.height += (target - self.height).clamp(-EQUIP_RATE_PER_TICK, EQUIP_RATE_PER_TICK);
         } else {
             // `mainHandItem != nextMainHand` ⇒ target 0: lower what is on screen.
             self.height += (0.0 - self.height).clamp(-EQUIP_RATE_PER_TICK, EQUIP_RATE_PER_TICK);
             if self.height < EQUIP_SWAP_BELOW {
-                self.visible = expected.cloned();
+                self.adopt(expected);
             }
         }
     }
@@ -252,6 +283,14 @@ impl HeldItemEquip {
     /// draws the bare arm.
     pub(super) fn visible(&self) -> Option<&(ResourceLocation, bool)> {
         self.visible.as_ref()
+    }
+
+    /// [`Self::visible`]'s dye/potion pair, for
+    /// [`RenderState::prepare_first_person_hand`]'s tint resolve. `(None, None)`
+    /// alongside `visible == None` is the honest "bare arm" case; alongside
+    /// `Some` it means "this drawn stack has neither component".
+    pub(super) fn visible_tint(&self) -> (Option<u32>, Option<u32>) {
+        (self.visible_dyed_color, self.visible_potion_color)
     }
 }
 
@@ -580,7 +619,7 @@ impl RenderState {
             // `player.isUsingItem()` branch never reaches `swingArm`, so the swing
             // value below is genuinely unused while consuming rather than being
             // added on top. `None` is the ordinary held-item pose.
-            let mesh = first_person_item_mesh_with_use(
+            let mut mesh = first_person_item_mesh_with_use(
                 &geometry.quads,
                 geometry.gui_light,
                 ARM,
@@ -589,6 +628,23 @@ impl RenderState {
                 &transform,
                 u8::try_from(self.hand_light(camera)).unwrap_or(u8::MAX),
                 self.item_use.sample(),
+            );
+            // The held item's real dye/potion tint — a no-op unless this item is
+            // a dyed leather piece or a mixed potion (`ItemGeometry::live_tints`
+            // is empty for everything else), which until this existed drew the
+            // item definition's plain default in the hand even though the exact
+            // same stack's GUI slot showed the real colour.
+            let (dyed_color, potion_color) = self.equip.visible_tint();
+            let live_components = lodestone_model::item::ItemComponents {
+                dyed_color,
+                potion_color,
+                ..Default::default()
+            };
+            lodestone_render::stamp_live_item_tint(
+                &mut mesh,
+                &geometry.quads,
+                &geometry.live_tints,
+                &live_components,
             );
             if let Some(gpu) = GpuModelMesh::upload(device, &mesh) {
                 // An enchanted held item gets the glint second pass. The uniform
@@ -1061,6 +1117,21 @@ mod tests {
         ResourceLocation::new("minecraft", path).unwrap()
     }
 
+    /// Lift one of this module's `(ResourceLocation, bool)` swap-identity pairs
+    /// into the [`MainHandItem`] `advance`/`advance_by` now take, with no
+    /// dye/potion — every gate in this file is about the swap ramp, not the
+    /// tint, and `(id, foil)` is still exactly what [`HeldItemEquip::visible`]
+    /// stays comparable against (see [`HeldItemEquip::step`]'s doc), so the
+    /// existing `equip.visible() == Some(&pickaxe)` assertions are untouched.
+    fn mh(pair: &(ResourceLocation, bool)) -> MainHandItem {
+        MainHandItem {
+            item: pair.0.clone(),
+            foil: pair.1,
+            dyed_color: None,
+            potion_color: None,
+        }
+    }
+
     /// The state a `RenderState` that nobody ever gave a main-hand source must be
     /// in: **no dip at all**.
     ///
@@ -1082,7 +1153,7 @@ mod tests {
     fn the_first_observation_seeds_at_rest() {
         let pickaxe = (item("diamond_pickaxe"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&mh(&pickaxe)));
         assert_eq!(equip.visible(), Some(&pickaxe));
         assert_eq!(equip.inverse_arm_height(), 0.0);
     }
@@ -1106,9 +1177,9 @@ mod tests {
         let pickaxe = (item("diamond_pickaxe"), false);
         let sword = (item("diamond_sword"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&mh(&pickaxe)));
 
-        equip.advance_by(TICK, Some(&sword));
+        equip.advance_by(TICK, Some(&mh(&sword)));
         assert!(
             (equip.height - 0.6).abs() < 1e-6,
             "one tick in, height must be 0.6; got {}",
@@ -1117,7 +1188,7 @@ mod tests {
         // Still the *old* item on screen: the exchange happens at the bottom.
         assert_eq!(equip.visible(), Some(&pickaxe));
 
-        equip.advance_by(TICK, Some(&sword));
+        equip.advance_by(TICK, Some(&mh(&sword)));
         assert!(
             (equip.height - 0.2).abs() < 1e-6,
             "two ticks in, height must be 0.2 — not the 0.36 a proportional ramp \
@@ -1139,12 +1210,12 @@ mod tests {
         let pickaxe = (item("diamond_pickaxe"), false);
         let sword = (item("diamond_sword"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&mh(&pickaxe)));
 
         let mut heights = Vec::new();
         let mut swap_tick = None;
         for tick in 0..8 {
-            equip.advance_by(TICK, Some(&sword));
+            equip.advance_by(TICK, Some(&mh(&sword)));
             heights.push(equip.height);
             if swap_tick.is_none() && equip.visible() == Some(&sword) {
                 swap_tick = Some(tick);
@@ -1177,9 +1248,9 @@ mod tests {
     fn holding_the_same_item_never_dips() {
         let pickaxe = (item("diamond_pickaxe"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&mh(&pickaxe)));
         for _ in 0..40 {
-            equip.advance_by(TICK, Some(&pickaxe));
+            equip.advance_by(TICK, Some(&mh(&pickaxe)));
             assert_eq!(equip.inverse_arm_height(), 0.0);
         }
     }
@@ -1209,16 +1280,16 @@ mod tests {
         let pickaxe = (item("diamond_pickaxe"), false);
         let sword = (item("diamond_sword"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&mh(&pickaxe)));
 
-        equip.advance_by(TICK, Some(&sword));
+        equip.advance_by(TICK, Some(&mh(&sword)));
         assert!(
             equip.inverse_arm_height().abs() < 1e-6,
             "at the tick boundary the drawn hand is still at last tick's rest, so \
              the dip must be 0.0; got {}",
             equip.inverse_arm_height()
         );
-        equip.advance_by(TICK * 0.25, Some(&sword));
+        equip.advance_by(TICK * 0.25, Some(&mh(&sword)));
         assert!(
             (equip.inverse_arm_height() - 0.1).abs() < 1e-6,
             "a quarter tick into the first step the dip must be 0.1 (drawn height \
@@ -1234,7 +1305,7 @@ mod tests {
     fn putting_an_item_away_lowers_it_before_the_arm_appears() {
         let pickaxe = (item("diamond_pickaxe"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
+        equip.advance(Some(&mh(&pickaxe)));
 
         equip.advance_by(TICK, None);
         assert_eq!(
@@ -1259,8 +1330,8 @@ mod tests {
         let pickaxe = (item("diamond_pickaxe"), false);
         let sword = (item("diamond_sword"), false);
         let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&pickaxe));
-        equip.advance_by(5.0, Some(&sword));
+        equip.advance(Some(&mh(&pickaxe)));
+        equip.advance_by(5.0, Some(&mh(&sword)));
         assert_eq!(equip.visible(), Some(&sword));
         assert_eq!(equip.inverse_arm_height(), 0.0);
     }

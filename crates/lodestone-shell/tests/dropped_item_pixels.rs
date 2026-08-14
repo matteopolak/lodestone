@@ -130,6 +130,8 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         wool: None,
         count: 1,
         foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
         name_tag: None,
         // An item entity is not a living one; nothing can be using it.
         item_use: None,
@@ -476,6 +478,8 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         wool: None,
         count: 1,
         foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
         name_tag: None,
         item_use: None,
         creeper_swelling: 0.0,

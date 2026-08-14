@@ -1721,6 +1721,8 @@ mod tests {
             block_state: None,
             count: 1,
             foil: false,
+            item_dyed_color: None,
+            item_potion_color: None,
             feet: glam::Vec3::new(0.5, feet_y, 0.5),
             yaw: 0.0,
             head_yaw: 0.0,

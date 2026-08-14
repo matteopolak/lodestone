@@ -264,6 +264,11 @@ impl ThirdPersonBodyState {
             // `item` is `None`.
             wool: None,
             block_state: None,
+            // Meaningless for the same reason `count` is just above: `item` is
+            // always `None` for the local player's own body draw, which never
+            // represents a dropped item or a thrown projectile.
+            item_dyed_color: None,
+            item_potion_color: None,
             // The local player is not an experience orb either — `None` is what
             // stops `prepare_orbs` claiming our own body as one.
             experience_orb_value: None,
@@ -444,6 +449,32 @@ impl std::fmt::Debug for ItemUseSource {
     }
 }
 
+/// What the local player is holding in the main hand, for
+/// [`MainHandSource`]/[`super::first_person::HeldItemEquip`].
+///
+/// A named struct rather than growing the old `(ResourceLocation, bool)` tuple
+/// to four elements — [`Self::dyed_color`]/[`Self::potion_color`] are the same
+/// pair `lodestone_shell::hud::HotbarSlot` already carries (see that type's
+/// doc), threaded here so the first-person hand can resolve a dyed leather
+/// item's or a mixed potion's real tint instead of the item definition's plain
+/// default — the gap `lodestone_render::stamp_live_item_tint`'s own doc names
+/// as the first-person half of the fix `sprite_layer_tint` landed for the GUI.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MainHandItem {
+    /// The held item's id.
+    pub item: lodestone_assets::ResourceLocation,
+    /// Whether the stack is enchanted — the glint second-pass gate.
+    pub foil: bool,
+    /// The stack's `minecraft:dyed_color`, straight off
+    /// `lodestone_game::item::ItemStack::dyed_color`. `None` for an undyed
+    /// stack or any non-dyeable item.
+    pub dyed_color: Option<u32>,
+    /// The stack's already-mixed `minecraft:potion_contents` colour, straight
+    /// off `lodestone_game::item::ItemStack::potion_color`. `None` for a
+    /// non-potion item or one with no potion contents.
+    pub potion_color: Option<u32>,
+}
+
 /// Where the **local player's main-hand item** comes from, polled once per frame
 /// like [`HandSwingSource`].
 ///
@@ -457,10 +488,11 @@ impl std::fmt::Debug for ItemUseSource {
 /// landed. The **only** missing link was that nothing told the renderer what the
 /// player was holding.
 ///
-/// The value is the item id **plus the enchantment-foil flag**: the
-/// held item's glint second pass is gated on it, so the source has to carry it
-/// from the hotbar record that already computed it (`app/redraw.rs` builds it
-/// from `stack_has_foil`), rather than re-derive it here where there is no stack.
+/// The value is a [`MainHandItem`]: the item id, the enchantment-foil flag (the
+/// held item's glint second pass is gated on it), and its dye/potion colour —
+/// all four sourced from the hotbar record that already computed them
+/// (`app/redraw.rs` builds it from the same `HotbarSlot` the HUD draws),
+/// rather than re-derived here where there is no stack.
 ///
 /// Unset — the default, the offline demo, every headless test that does not opt in
 /// — yields `None`, which draws the bare arm: exactly vanilla's empty-hand branch
@@ -469,12 +501,12 @@ impl std::fmt::Debug for ItemUseSource {
 pub struct MainHandSource(
     #[allow(clippy::type_complexity)]
     pub(super)
-    Option<Box<dyn Fn() -> Option<(lodestone_assets::ResourceLocation, bool)> + Send + Sync>>,
+    Option<Box<dyn Fn() -> Option<MainHandItem> + Send + Sync>>,
 );
 
 impl MainHandSource {
     #[must_use]
-    pub(super) fn value(&self) -> Option<(lodestone_assets::ResourceLocation, bool)> {
+    pub(super) fn value(&self) -> Option<MainHandItem> {
         self.0.as_ref().and_then(|f| f())
     }
 }

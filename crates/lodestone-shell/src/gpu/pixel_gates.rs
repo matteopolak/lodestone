@@ -659,6 +659,8 @@ fn entity_renders_to_pixels_through_shell_path() {
             block_state: None,
             count: 1,
             foil: false,
+            item_dyed_color: None,
+            item_potion_color: None,
             name_tag: None,
             item_use: None,
             // Not a creeper: only a creeper ever swells.
@@ -696,6 +698,8 @@ fn entity_renders_to_pixels_through_shell_path() {
             block_state: None,
             count: 1,
             foil: false,
+            item_dyed_color: None,
+            item_potion_color: None,
             name_tag: None,
             item_use: None,
             // Not a creeper: only a creeper ever swells.
@@ -886,6 +890,8 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         block_state: None,
         count: 1,
         foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
         name_tag: None,
         item_use: None,
         // Not a creeper: only a creeper ever swells.
@@ -1459,6 +1465,8 @@ fn orb_draw(value: i32) -> EntityDraw {
         block_state: None,
         count: 1,
         foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
         name_tag: None,
         hurt: false,
         item_use: None,

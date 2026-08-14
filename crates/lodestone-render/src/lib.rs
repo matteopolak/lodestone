@@ -137,6 +137,7 @@ pub use block_models::{
     BlockModels, BlockModelsError, CRACK_STAGE_COUNT, DRY_FOLIAGE_TINT_SLOT, FOLIAGE_TINT_SLOT,
     FluidCell, FluidKind, FluidSprites, GRASS_TINT_SLOT, ItemGeometry, ItemVariants,
     SpecialItemForm, StateModel, WATER_TINT_SLOT, biome_tint_kind_for_slot, biome_tint_slot,
+    stamp_live_item_tint,
 };
 pub use block_resolver::{BlockAtlas, BlockAtlasError, MAX_SPRITES};
 pub use blocks_json::{BlocksJsonError, BlocksJsonRegistry};

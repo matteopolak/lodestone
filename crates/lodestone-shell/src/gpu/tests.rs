@@ -438,6 +438,8 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         block_state: None,
         count: 1,
         foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
         name_tag: None,
         item_use: None,
         // Not a creeper: only a creeper ever swells.

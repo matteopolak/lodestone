@@ -70,9 +70,9 @@ pub use screen_effects::ScreenEffects;
 pub use sources::{
     BannerSource, BellSource, BlockEntitySource, CampfireSource, DecoratedPotSource,
     EnchantingTableSource,
-    EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandSource, MapSource,
-    MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource, SkullSource,
-    SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
+    EntityLightSource, HandSwingSource, ItemUseSource, LecternSource, MainHandItem,
+    MainHandSource, MapSource, MovingPistonSource, OutlineShapeSource, ShulkerSource, SignSource,
+    SkullSource, SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
 };
 pub use stats::RenderStats;
 

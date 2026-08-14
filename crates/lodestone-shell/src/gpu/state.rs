@@ -1133,8 +1133,9 @@ impl RenderState {
     /// ```no_run
     /// # fn wire(render: &mut lodestone::gpu::RenderState, sim: &lodestone::sim::Sim) {
     /// // `Sim::selected_slot()` indexes the hotbar records `app.rs` already
-    /// // builds for the HUD; take that record's item id and `enchanted` flag.
-    /// let held: Option<(lodestone_assets::ResourceLocation, bool)> = None; // = hotbar[selected]
+    /// // builds for the HUD; take that record's item id, `enchanted` flag and
+    /// // dye/potion colour.
+    /// let held: Option<lodestone::gpu::MainHandItem> = None; // = hotbar[selected]
     /// render.set_main_hand_source(move || held.clone());
     /// # }
     /// ```
@@ -1164,7 +1165,7 @@ impl RenderState {
     /// already is for every caller.
     pub fn set_main_hand_source(
         &mut self,
-        f: impl Fn() -> Option<(lodestone_assets::ResourceLocation, bool)> + Send + Sync + 'static,
+        f: impl Fn() -> Option<super::MainHandItem> + Send + Sync + 'static,
     ) {
         self.main_hand = MainHandSource(Some(Box::new(f)));
         let selected = self.main_hand.value();
