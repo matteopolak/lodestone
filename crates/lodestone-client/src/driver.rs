@@ -1282,7 +1282,13 @@ mod tests {
 
         assert_eq!(text, "hello");
         assert_eq!(last_seen_offset, 1, "one prior message was pending");
-        assert_eq!(acknowledged[0] & 0b1, 1, "the one tracked slot is acknowledged");
+        // Exactly one bit set across the 3-byte ack window — not asserting
+        // *which* bit, since `generate_and_apply_update` walks the ring
+        // starting at `tail` (oldest-first), so a single tracked slot's bit
+        // position depends on how many entries have been added, not on
+        // being bit 0.
+        let set_bits: u32 = acknowledged.iter().map(|b| b.count_ones()).sum();
+        assert_eq!(set_bits, 1, "exactly the one tracked slot is acknowledged: {acknowledged:?}");
         assert_ne!(checksum, 0, "a non-empty last-seen window has a real checksum");
 
         // Wire unit is epoch millis, and it is a plausible "now" — re-derived
