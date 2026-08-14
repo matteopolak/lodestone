@@ -1319,6 +1319,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   answer, for every slot of that neighbourhood, *what is there?* — and when the
   answer is "nothing", it has to answer a second question that used to be conflated
   with the first: **is nothing the truth, or have I just not been told yet?**
+- [Secure chat: session keys and per-message signatures](./secure-chat.md) — The
+  client-side half of vanilla's secure chat: fetching the Mojang-issued RSA
+  chat-signing key pair ([`lodestone_auth::fetch_key_pair`]) and signing outgoing chat
+  messages with it ([`lodestone_auth::ChatSession`]), plus the wire shapes needed to
+  carry a session announcement and a signed message ( [`ChatSessionUpdate`],
+  [`ChatCommandSigned`] in `crates/protocol/v770/src/packets/game.rs`) and to keep
+  (rather than discard) another player's announced session ( [`RemoteChatSessionData`]
+  in `crates/protocol/v770/src/packets/player_info.rs`).
 - [Served session liveness: keep-alive, time-of-day, and view streaming](./served-session-liveness.md) —
   The three things that make a served session (singleplayer over `memory_pair`, or
   open-to-LAN over TCP) survive, keep time, and follow the player, instead of being a
