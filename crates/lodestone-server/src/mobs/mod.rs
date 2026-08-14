@@ -3156,6 +3156,7 @@ impl<'w> MobSim<'w> {
                 self_damage.push((m.id, amount));
             }
         }
+        self.push_entities();
         self.pending_grazes.extend(grazes);
         for (shooter, launch) in launches {
             use lodestone_entity::ai::roster::ranged::{integrates_as_arrow, projectile_entity_type};
@@ -3293,6 +3294,105 @@ impl<'w> MobSim<'w> {
         self.tick_villager_professions();
 
         self.tick_count += 1;
+    }
+
+    /// Shoves apart entities whose bodies overlap — vanilla `Entity::push`,
+    /// invoked once per tick for every pushable neighbour by
+    /// `LivingEntity::pushEntities` (`this.level().getPushableEntities(...)`
+    /// then `this.doPush(entity)` per neighbour), called near the end of
+    /// `LivingEntity::baseTick`, after that tick's own movement has already
+    /// been applied — the same ordering `tick_with_terrain` gives this call,
+    /// right after the per-mob loop that runs `m.mob.tick(...)`.
+    ///
+    /// # The formula lives in `lodestone-physics`, not here
+    ///
+    /// [`push_impulse`] delegates to [`lodestone_physics::pair_push_vector`],
+    /// which already carries the full citation of `Entity::push(Entity)` —
+    /// see `docs/entity-push.md` for the derivation, including the
+    /// genuinely-non-obvious `sqrt(max(|dx|,|dz|))` Chebyshev normaliser
+    /// (not `sqrt(dx²+dz²)`) and the widened `0.01f`/`0.05f` literals. That
+    /// module is otherwise **unwired** — `docs/entity-push.md`'s own "Wiring"
+    /// section says nothing in `lodestone-shell`, `lodestone-ecs` or
+    /// `lodestone-client` calls it yet, because its documented use case is
+    /// the *client-authoritative local player* feeling a push from nearby
+    /// entities, which is a different half of vanilla's symmetric rule from
+    /// this one: a *server-authoritative mob* being shoved by a player or
+    /// another mob. This call site is the first production consumer.
+    ///
+    /// # What this port narrows, disclosed
+    ///
+    /// * **Overlap is a horizontal-distance-under-combined-half-width test**,
+    ///   not vanilla's real AABB intersection
+    ///   (`Level::getEntities`/`getPushableEntities`), which also accounts for
+    ///   height overlap. Two mobs stacked exactly on top of one another with
+    ///   no horizontal offset therefore push in this port and would not
+    ///   collide in vanilla (their Y ranges might not overlap) — an edge case
+    ///   this seam's `PathWorld`/`SimMob` do not carry enough geometry to
+    ///   resolve exactly.
+    /// * **Applied once per pair per tick**, not vanilla's twice (each side's
+    ///   own `pushEntities()` call invokes `doPush` against the other, so a
+    ///   living pair receives the impulse from *both* directions every tick).
+    ///   The formula itself is unchanged; this halves the net closing-speed
+    ///   reduction relative to vanilla's double application, a scope cut
+    ///   rather than a transcription error.
+    /// * **Player recoil is not applied.** A player's own position/velocity
+    ///   in this codebase is client-authoritative (the client sends
+    ///   `move_player_pos`; the server does not own a player's velocity the
+    ///   way it owns a mob's), so shoving a player back needs a clientbound
+    ///   self-velocity packet the client applies to its own physics —
+    ///   `crates/protocol/**` and `crates/lodestone-shell/**`, both outside
+    ///   this crate. This pass pushes the **mob** away from an intersecting
+    ///   player (the reported "I can't push pigs" symptom: the pig now moves
+    ///   out of the way), but the player itself is not nudged.
+    /// * **`isPushable()`/vehicle/passenger exclusions are not modelled** —
+    ///   every [`SimMob`] is treated as pushable, matching vanilla's default
+    ///   for a plain `LivingEntity` with nothing riding it.
+    /// * **Mount cramming damage is not modelled** — vanilla's
+    ///   `maxEntityCramming` gamerule check in the same method.
+    fn push_entities(&mut self) {
+        let n = self.mobs.len();
+        if n == 0 {
+            return;
+        }
+        let positions: Vec<Vec3> = self.mobs.iter().map(SimMob::position).collect();
+        let widths: Vec<f64> = self
+            .mobs
+            .iter()
+            .map(|m| f64::from(m.shape().width))
+            .collect();
+        let mut impulses = vec![Vec3::default(); n];
+
+        // Mob-mob pairs.
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let touch = (widths[i] + widths[j]) / 2.0;
+                if let Some((a, b)) = push_impulse(positions[i], positions[j], touch) {
+                    impulses[i].x += a.x;
+                    impulses[i].z += a.z;
+                    impulses[j].x += b.x;
+                    impulses[j].z += b.z;
+                }
+            }
+        }
+
+        // Player-mob pairs: only the mob side is pushed — see this method's
+        // own doc comment for why player recoil needs a different seam.
+        const PLAYER_WIDTH: f64 = 0.6; // `Player::createLivingAttributes` has no override; the default `Entity` bounding box is 0.6 wide.
+        for i in 0..n {
+            for p in &self.players {
+                let touch = (widths[i] + PLAYER_WIDTH) / 2.0;
+                if let Some((mob_impulse, _)) = push_impulse(positions[i], p.perception.position, touch) {
+                    impulses[i].x += mob_impulse.x;
+                    impulses[i].z += mob_impulse.z;
+                }
+            }
+        }
+
+        for (mob, impulse) in self.mobs.iter_mut().zip(impulses) {
+            if impulse.x != 0.0 || impulse.z != 0.0 {
+                mob.apply_knockback(impulse);
+            }
+        }
     }
 
     /// Per-tick leash physics: pull leashed mobs toward their holder, and
@@ -5818,6 +5918,40 @@ fn dist_sqr(a: Vec3, b: Vec3) -> f64 {
     dx * dx + dy * dy + dz * dz
 }
 
+/// Vanilla `Entity::push(Entity)`'s horizontal impulse pair for two
+/// overlapping entities at `p_i`/`p_j` — see [`MobSim::push_entities`]'s own
+/// doc comment for the overlap test this assumes has already passed.
+///
+/// Delegates the actual formula to
+/// [`lodestone_physics::pair_push_vector`] rather than re-transcribing it: that
+/// function already carries `docs/entity-push.md`'s full citation (the
+/// Chebyshev-not-Euclidean normaliser, the widened `0.01f`/`0.05f` literals,
+/// the `NaN`-rejecting `!(dd >= …)` form) and 150 passing tests including
+/// golden traces against an independent Python oracle. Keeping one
+/// implementation in the crate that already proved it, rather than a second
+/// hand-rolled copy here, is what keeps the two from silently drifting apart.
+///
+/// Returns `None` when the pair is not within `touch` blocks horizontally
+/// (this port's overlap test — see the doc comment on the caller for how it
+/// narrows vanilla's real AABB intersection) or when `pair_push_vector`'s own
+/// dead zone rejects a near-coincident pair. Otherwise returns
+/// `(impulse_for_p_i, impulse_for_p_j)`.
+fn push_impulse(p_i: Vec3, p_j: Vec3, touch: f64) -> Option<(Vec3, Vec3)> {
+    let overlap_dx = p_i.x - p_j.x;
+    let overlap_dz = p_i.z - p_j.z;
+    if (overlap_dx * overlap_dx + overlap_dz * overlap_dz).sqrt() > touch {
+        return None;
+    }
+    let to_physics = |v: Vec3| lodestone_physics::Vec3d { x: v.x, y: v.y, z: v.z };
+    // `pair_push_vector(self, other)` returns the vector FROM `self` TOWARD
+    // `other`; vanilla's own `this.push(-xa,0,-za)` / `entity.push(xa,0,za)`
+    // negates it for the near side and keeps it for the far side — see that
+    // function's own doc comment for why the caller, not the function, does
+    // the negation.
+    let v = lodestone_physics::pair_push_vector(to_physics(p_i), to_physics(p_j))?;
+    Some((Vec3::new(-v.x, 0.0, -v.z), Vec3::new(v.x, 0.0, v.z)))
+}
+
 /// The position of the nearest `accept`ed item to `from`, optionally restricted
 /// to an axis-aligned box of `(horizontal, vertical)` half-extents.
 ///
@@ -6396,6 +6530,151 @@ mod follow_range_tests {
             }
         }
         false
+    }
+
+    /// `push_impulse`'s exact vanilla formula, at an off-axis input chosen so
+    /// two plausible implementations diverge: Chebyshev normalisation
+    /// (`sqrt(max(|dx|, |dz|))`, what `Entity::push` actually does) against
+    /// the more obvious Euclidean one (`sqrt(dx² + dz²)`, what a port that
+    /// "corrected" the formula would produce). `dx=0.3, dz=0.4` was chosen
+    /// precisely because `max(0.3, 0.4) = 0.4 != dx² + dz² = 0.25`, so the
+    /// two hypotheses give different numbers and this input can actually
+    /// tell them apart — a symmetric or on-axis pair could not.
+    #[test]
+    fn push_impulse_matches_a_hand_computed_off_axis_example_not_the_euclidean_alternative() {
+        let p_i = Vec3::new(0.0, 0.0, 0.0);
+        let p_j = Vec3::new(0.3, 0.0, 0.4);
+
+        // Hand-computed from `Entity::push`'s own arithmetic, independent of
+        // `push_impulse`'s implementation:
+        //   dd = max(0.3, 0.4) = 0.4; dd = sqrt(0.4) = 0.632455532...
+        //   xa = 0.3 / dd = 0.474341649...; za = 0.4 / dd = 0.632455532...
+        //   pow = min(1.0, 1.0 / dd) = 1.0 (1/dd ≈ 1.581 > 1)
+        //   xa *= 0.05 = 0.023717082...; za *= 0.05 = 0.031622777...
+        let dd = 0.4f64.sqrt();
+        let expected_xa = (0.3 / dd) * 0.05;
+        let expected_za = (0.4 / dd) * 0.05;
+
+        // The wrong hypothesis, evaluated first: Euclidean normalisation
+        // (dist = sqrt(0.3² + 0.4²) = 0.5) gives a different pair of numbers.
+        let euclid_dist = (0.3f64 * 0.3 + 0.4 * 0.4).sqrt();
+        let wrong_xa = (0.3 / euclid_dist) * 0.05;
+        let wrong_za = (0.4 / euclid_dist) * 0.05;
+        assert!(
+            (expected_xa - wrong_xa).abs() > 1.0e-4 && (expected_za - wrong_za).abs() > 1.0e-4,
+            "precondition: the chosen input must actually separate the two \
+             hypotheses, got chebyshev=({expected_xa}, {expected_za}) \
+             euclidean=({wrong_xa}, {wrong_za})"
+        );
+
+        let (impulse_i, impulse_j) =
+            push_impulse(p_i, p_j, 1.0).expect("well within the touch threshold");
+        assert!(
+            (impulse_i.x - -expected_xa).abs() < 1.0e-9 && (impulse_i.z - -expected_za).abs() < 1.0e-9,
+            "p_i must be pushed away from p_j by the Chebyshev-derived amount, \
+             expected ({}, {}), got ({}, {})",
+            -expected_xa,
+            -expected_za,
+            impulse_i.x,
+            impulse_i.z
+        );
+        assert!(
+            (impulse_j.x - expected_xa).abs() < 1.0e-9 && (impulse_j.z - expected_za).abs() < 1.0e-9,
+            "p_j must be pushed away from p_i by the same magnitude, opposite \
+             sign, expected ({expected_xa}, {expected_za}), got ({}, {})",
+            impulse_j.x,
+            impulse_j.z
+        );
+        assert!(
+            (impulse_i.x - wrong_xa).abs() > 1.0e-4,
+            "the Euclidean hypothesis must NOT match — if it does, the \
+             normalisation silently changed to the wrong formula"
+        );
+    }
+
+    /// The control an absence assertion needs: a pair separated just beyond
+    /// the touch threshold must produce no impulse at all, proving the
+    /// detector (the overlap test) actually fires rather than being
+    /// unconditionally permissive.
+    #[test]
+    fn push_impulse_is_none_just_outside_the_touch_threshold() {
+        let p_i = Vec3::new(0.0, 0.0, 0.0);
+        let p_j = Vec3::new(0.61, 0.0, 0.0);
+        assert!(
+            push_impulse(p_i, p_j, 0.6).is_none(),
+            "0.61 blocks apart must not touch at a 0.6 threshold"
+        );
+        // And the positive control, one hair inside: proves 0.6 is not simply
+        // always None.
+        let p_k = Vec3::new(0.59, 0.0, 0.0);
+        assert!(
+            push_impulse(p_i, p_k, 0.6).is_some(),
+            "0.59 blocks apart must touch at a 0.6 threshold"
+        );
+    }
+
+    /// Wires `push_impulse` into the real per-tick sim: two overlapping mobs
+    /// must actually separate over real ticks, and a third mob spawned well
+    /// outside touch range is the control that must not move at all — an
+    /// absence assertion (mob-mob pushing is un-wired) needs a detector
+    /// proven to fire, which the near pair provides.
+    #[test]
+    fn overlapping_mobs_separate_over_real_ticks_and_a_distant_one_does_not_move() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:pig").expect("valid key");
+        let near_a = sim.spawn_species(key.clone(), Vec3::new(0.0, 0.0, 0.0)).id();
+        let near_b = sim.spawn_species(key.clone(), Vec3::new(0.3, 0.0, 0.0)).id();
+        let far = sim.spawn_species(key, Vec3::new(50.0, 0.0, 0.0)).id();
+
+        for _ in 0..20 {
+            sim.tick();
+        }
+
+        let gap = (sim.get(near_a).expect("alive").position()
+            - sim.get(near_b).expect("alive").position())
+        .x
+        .abs();
+        assert!(
+            gap > 0.3,
+            "two overlapping pigs must separate over 20 ticks of pushing, \
+             gap only grew to {gap}"
+        );
+        assert_eq!(
+            sim.get(far).expect("alive").position(),
+            Vec3::new(50.0, 0.0, 0.0),
+            "control: a pig with nothing nearby must not be displaced by the \
+             push pass at all"
+        );
+    }
+
+    /// The primary reported symptom ("I can't push entities like pigs"): a
+    /// player walking into a mob must shove it out of the way. Player recoil
+    /// is deliberately not asserted — see `MobSim::push_entities`'s own doc
+    /// comment for why that half needs a different seam.
+    #[test]
+    fn a_player_overlapping_a_mob_pushes_the_mob_away() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:pig").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.set_players(vec![PlayerPerception {
+            position: Vec3::new(0.2, 0.0, 0.0),
+            held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, 1.0),
+        }]);
+
+        for _ in 0..10 {
+            sim.tick();
+        }
+
+        let moved = sim.get(id).expect("alive").position();
+        assert!(
+            moved.x < 0.0,
+            "a player standing at +x inside the pig's body must push the pig \
+             toward -x; pig ended at x={}",
+            moved.x
+        );
     }
 
     /// A killed mob drops its loot table's items (issue #272).
