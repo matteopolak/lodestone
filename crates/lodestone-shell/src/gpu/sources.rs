@@ -189,11 +189,13 @@ pub struct ThirdPersonBodyState {
     /// Uniform render scale. `1.0` for a normal adult.
     pub scale: f32,
     /// Which rig to draw: `true` for `player_slim` ("Alex" arms), `false` for
-    /// `player_wide` ("Steve" arms) — see [`player_model_name`]. Nothing in
-    /// this codebase decodes real skin-model data yet (the same gap
-    /// [`RenderState::prepare_first_person_arm`] already notes for the arm),
-    /// so every caller has to pick a value today; `false` reproduces the
-    /// arm's existing default.
+    /// `player_wide` ("Steve" arms) — see [`player_model_name`].
+    /// `sim/camera.rs::third_person_body_state` fills this from
+    /// `crate::skin_fetch::current_model`, the same signed-in-profile fetch
+    /// the inventory avatar already draws. The first-person arm
+    /// (`RenderState::prepare_first_person_hand`, in `gpu/first_person.rs`)
+    /// is a separate pass and still draws `player_wide` unconditionally —
+    /// see that method's own doc.
     pub slim: bool,
     /// What the local player is holding/wearing, in the shape
     /// [`EntityDraw::equipment`] carries: main hand, off hand, and all four

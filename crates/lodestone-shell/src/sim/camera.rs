@@ -542,9 +542,14 @@ impl Sim {
     ///   `0`): vanilla's independent head-turn-then-body-catches-up
     ///   (`LivingEntity.tickHeadTurn`) is not modelled for the local player
     ///   anywhere in this engine.
-    /// * **`slim`/skin data**: [`ThirdPersonBodyState::slim`]'s own doc
-    ///   already records that no real skin-model bit exists yet; `false`
-    ///   reproduces the first-person arm's existing default.
+    /// * **`slim`/skin data**: the rig comes from
+    ///   [`crate::skin_fetch::current_model`] — the same signed-in-profile
+    ///   fetch that already reaches the inventory avatar
+    ///   (`container::player_preview`), read here instead of drained from
+    ///   its one-shot pending slot so this body sees it on every frame, not
+    ///   only the one after a container last opened. The **texture** is a
+    ///   separate, still-open gap (`player_skin: None` below;
+    ///   `docs/player-skins.md`) — only the rig shape is fixed here.
     /// * **Equipment covers main hand, off hand, and all four armour
     ///   slots.** Main hand is the selected hotbar slot; off hand is native
     ///   inventory index `40`; the armour slots are native indices
@@ -634,7 +639,7 @@ impl Sim {
             body_yaw_deg: interp.yaw,
             anim: self.body_anim(&interp, &walk),
             scale: 1.0,
-            slim: false,
+            slim: crate::skin_fetch::current_model().is_slim(),
             equipment,
         })
     }

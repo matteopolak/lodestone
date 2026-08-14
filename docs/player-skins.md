@@ -4,10 +4,11 @@
 
 The `textures` profile property — base64 → JSON → a URL plus a **wide/slim rig
 declaration** — the host-restricted fetch that turns it into a sheet, and the
-render halves that draw the declared rig on the inventory avatar and on other
-players' bodies in the world. All three are landed for both our own account and
-for remote players; what is left is capes, the first-person arm and the local
-third-person body, named under [What is missing](#what-is-missing).
+render halves that draw the declared rig on the inventory avatar, on other
+players' bodies in the world, and (rig only, not yet the texture) on the local
+player's own third-person body. What is left is capes, the first-person arm
+and the local third-person body's *texture*, named under
+[What is missing](#what-is-missing).
 
 ## How it works
 
@@ -213,6 +214,26 @@ because only the newest skin matters.
 Every failure inside the fetch is a `warn!` and a `false`, including the refused
 host: a dead texture CDN must not fail an otherwise-successful login.
 
+### `current_model` versus `take_pending`
+
+`skin_fetch::publish` now writes **two** statics, not one: `PENDING` (a
+one-shot slot, unchanged) and `CURRENT` (a last-known cache that is never
+drained). `PENDING` exists for a *sheet* consumer that only runs while a
+container is open (`ContainerRenderer::render_geometry_scaled`); `CURRENT`
+exists for `current_model()`, a *rig-only* reader for a consumer that has no
+such gate — `sim/camera.rs::third_person_body_state` runs every third-person
+frame, container open or not, and a container that had already drained
+`PENDING` would otherwise leave it with nothing to read. `current_model()`
+falls back to the on-disk `skin.model` marker (the same file
+`local_skin_override` reads) when `CURRENT` is empty, so a rig fetched in an
+*earlier* session is honoured before this session's sign-in — or a
+signed-out launch — has published anything.
+
+A future URL-threading fix for the local third-person body's texture should
+follow the same shape rather than draining `PENDING` a second time: add the
+image alongside `CURRENT`'s model (or a second small cache) rather than
+routing the body through the inventory avatar's one-shot slot.
+
 ## Remote players
 
 `lodestone-shell/src/remote_skins.rs`. The properties already survived the wire
@@ -316,13 +337,21 @@ Not built, each deliberately:
 
 * **Capes and the elytra texture.** Decoded (`ProfileTextures::cape`/`elytra`)
   and unconsumed — there is no cape rig in the entity corpus.
-* **Our own first-person arm and third-person body.** Remote players now honour
-  their sheets and our own inventory avatar honours ours, but the local player's
-  own body and arm still resolve `player_wide` through `gpu/entities.rs`' cache.
-  The seam is now much shorter than it was: `ThirdPersonBodyState` already picks
-  the right *rig* (`type_path` is `player_model_name(self.slim)`), so what it needs
-  is the URL, and `EntityDrawBatch::skin` will carry it the rest of the way with
-  no new plumbing. The arm is a separate pass with its own instance path.
+* **Our own third-person body's *texture*, and the first-person arm
+  entirely.** The **rig** is fixed: `sim/camera.rs::third_person_body_state`
+  fills `ThirdPersonBodyState::slim` from `skin_fetch::current_model` (added
+  alongside the existing one-shot `PENDING` slot the inventory avatar
+  drains, because the body needs the same answer on every frame rather than
+  only the one frame after a container last opened), so `type_path` —
+  `player_model_name(self.slim)` — now draws the fetched Alex/Steve rig
+  rather than always Steve. The **sheet** is still the pack's default for
+  that rig: `ThirdPersonBodyState::into_draw` sets `player_skin: None` by
+  construction (see that field's own doc), so what remains is threading the
+  URL the same way, and `EntityDrawBatch::skin` will carry it the rest of
+  the way with no new plumbing. The first-person arm
+  (`RenderState::prepare_first_person_hand`, `gpu/first_person.rs`) is a
+  separate pass with its own instance path and still draws `player_wide`
+  unconditionally — rig and sheet both.
 * **`DefaultPlayerSkin`'s UUID hash.** Vanilla picks one of eight built-in
   sheets from the profile UUID for a skinless account; this reports "no skin
   declared" and draws the pack's `steve`. `ProfileTextures::skin` is an `Option`

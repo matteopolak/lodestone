@@ -82,8 +82,19 @@ use lodestone_assets::{Image, PlayerModelType};
 /// the renderer from drawing.
 static PENDING: Mutex<Option<(PlayerModelType, Image)>> = Mutex::new(None);
 
+/// The last model [`publish`] handed out, kept **in addition to** [`PENDING`]
+/// and never drained — [`PENDING`] is a one-shot slot the inventory avatar
+/// consumes, so a rig this session already fetched would otherwise be
+/// unreadable to any other consumer the moment a container first opens. See
+/// [`current_model`], the reader this exists for.
+static CURRENT: Mutex<Option<PlayerModelType>> = Mutex::new(None);
+
 /// Hand a decoded sheet to the renderer. Replaces any undrained earlier one.
 pub(crate) fn publish(model: PlayerModelType, image: Image) {
+    match CURRENT.lock() {
+        Ok(mut slot) => *slot = Some(model),
+        Err(poisoned) => *poisoned.into_inner() = Some(model),
+    }
     match PENDING.lock() {
         Ok(mut slot) => *slot = Some((model, image)),
         Err(poisoned) => *poisoned.into_inner() = Some((model, image)),
@@ -98,6 +109,31 @@ pub(crate) fn take_pending() -> Option<(PlayerModelType, Image)> {
         Ok(mut slot) => slot.take(),
         Err(poisoned) => poisoned.into_inner().take(),
     }
+}
+
+/// The local player's currently-known skin rig, for a consumer that is not
+/// the inventory avatar — namely `sim/camera.rs::third_person_body_state`,
+/// which needs the same rig every frame rather than a one-shot value that
+/// [`take_pending`] has usually already consumed.
+///
+/// Prefers this session's freshest fetch ([`CURRENT`]), then falls back to
+/// the on-disk marker `write_cache`/`container::player_preview::local_skin_override`
+/// already share — so a rig fetched in an *earlier* session is honoured
+/// before this session's own sign-in (or a signed-out launch) has published
+/// anything. [`PlayerModelType::Wide`] is the last resort, matching
+/// `by_legacy_services_name`'s own default for an absent marker.
+#[must_use]
+pub(crate) fn current_model() -> PlayerModelType {
+    let cached = match CURRENT.lock() {
+        Ok(slot) => *slot,
+        Err(poisoned) => *poisoned.into_inner(),
+    };
+    if let Some(model) = cached {
+        return model;
+    }
+    let dir = lodestone_auth::paths::data_dir();
+    let declared = std::fs::read_to_string(dir.join("skin.model")).ok();
+    PlayerModelType::by_legacy_services_name(declared.as_deref().map(str::trim))
 }
 
 /// Write the fetched sheet into the same cache `local_skin_override` reads, so
@@ -233,6 +269,33 @@ mod tests {
         assert_eq!(
             lodestone_auth::SkinVariant::Classic.legacy_services_id(),
             "default"
+        );
+    }
+
+    /// The discriminator for the always-Steve bug (`sim/camera.rs`'s
+    /// `third_person_body_state` used to hardcode `slim: false`): a wide
+    /// publish and a slim publish must read back as two *different* models
+    /// through [`current_model`], not merely "a model was returned". Also
+    /// covers `publish`'s own contract that [`CURRENT`] — unlike [`PENDING`]
+    /// — is never drained, so a container opening and taking the pending
+    /// sheet must not blind a later `current_model()` read.
+    #[test]
+    fn current_model_distinguishes_wide_from_slim_and_survives_a_pending_drain() {
+        publish(PlayerModelType::Wide, sheet(64, 64));
+        assert_eq!(current_model(), PlayerModelType::Wide);
+        publish(PlayerModelType::Slim, sheet(64, 64));
+        assert_eq!(
+            current_model(),
+            PlayerModelType::Slim,
+            "a slim publish must read back as slim, not the wide default"
+        );
+        // Draining `PENDING` (what the inventory-avatar draw does every
+        // container frame) must not reset `current_model`'s answer.
+        let _ = take_pending();
+        assert_eq!(
+            current_model(),
+            PlayerModelType::Slim,
+            "current_model must survive a PENDING drain"
         );
     }
 
