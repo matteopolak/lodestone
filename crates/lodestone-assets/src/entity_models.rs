@@ -2453,10 +2453,14 @@ pub fn chest_raft_model() -> EntityModelDef {
 }
 
 /// `MinecartModel.createBodyLayer`: bottom + 4 walls, flat root. Vanilla's
-/// chest/hopper/tnt/command-block/spawner minecarts all reuse this exact
-/// geometry class (they differ only by a separate block-overlay render layer,
-/// out of scope here), so a single `"minecart"` entry covers them. Sheet
-/// 64×32.
+/// chest/hopper/tnt/furnace/command-block/spawner minecarts all reuse this
+/// exact geometry class (they differ only by a separate block-overlay render
+/// layer), so a single `"minecart"` entry covers them —
+/// `lodestone_render::entity::canonical_model_name` aliases every
+/// server-simulated subtype onto this rig. The overlay itself is not part of
+/// this corpus entry: it is a block model, not a second cuboid rig, and draws
+/// through `crates/lodestone-shell/src/gpu/moving_blocks.rs`'s
+/// `merge_minecart_contents` instead. Sheet 64×32.
 pub fn minecart_model() -> EntityModelDef {
     let root = PartDef::new(PartPose::ZERO)
         .with_child(

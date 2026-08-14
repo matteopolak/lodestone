@@ -9,6 +9,8 @@
 //! |---|---|---|
 //! | `FallingBlockRenderer` | the falling sand/gravel entity | **yes** |
 //! | `PistonHeadRenderer` | the piston head and the block it pushes | **yes** |
+//! | `TntRenderer` | primed TNT's block model | **yes** |
+//! | `AbstractMinecartRenderer`'s `displayBlockModel` branch | a minecart's contents (chest/furnace/TNT/hopper) | **yes** |
 //!
 //! Both renderers have the same shape and it is not the shape the rest of the
 //! entity pass has: **no `bakeLayer` call in the constructor**, so they own no
@@ -193,6 +195,76 @@ fn piston_head_pose(cell: [i32; 3], direction: [i32; 3], progress: f32, extendin
     glam::Mat4::from_translation(corner + step * extended)
 }
 
+/// `AbstractMinecart.getDefaultDisplayBlockState()`/`getDefaultDisplayOffset()`
+/// for the four `MinecartKind` variants whose default cart contents are
+/// non-air, keyed by [`EntityDraw::type_path`]. `minecraft:minecart` itself
+/// (`AbstractMinecart`'s own default, `Blocks.AIR`) carries no entry, which is
+/// exactly "the plain cart draws nothing inside" — the caller's `None` arm
+/// skips [`merge_moving_block`] rather than needing an air special case.
+///
+/// **Only the default state, never `getCustomDisplayBlockState()`.** That field
+/// is entity data set by `/data merge` on a placed minecart NBT, and nothing on
+/// this side of the wire decodes it (`crates/protocol/v770/src/packets/
+/// metadata.rs` has no `AbstractMinecart` arm) — every survival-obtained cart
+/// never sets it, so the default is the overwhelming common case, not a
+/// placeholder standing in for a real decode.
+///
+/// `furnace_minecart`'s `lit` is vanilla's `hasFuel()`, which is server-tick
+/// fuel state with the same no-decoder gap, so it is pinned to `false` — the
+/// vanilla *unfuelled* default, not a guess — matching how [`merge_primed_tnt`]
+/// already omits the fuse-driven swell/flash for the identical reason.
+#[must_use]
+fn default_minecart_contents(type_path: &str) -> Option<(&'static str, i32)> {
+    match type_path {
+        // `MinecartChest.getDefaultDisplayBlockState`/`getDefaultDisplayOffset`.
+        "chest_minecart" => Some(("minecraft:chest[facing=north]", 8)),
+        // `MinecartFurnace.getDefaultDisplayBlockState`; `getDefaultDisplayOffset`
+        // is not overridden, so `AbstractMinecart`'s base `6` applies.
+        "furnace_minecart" => Some(("minecraft:furnace[facing=north,lit=false]", 6)),
+        // `MinecartTNT.getDefaultDisplayBlockState`; offset not overridden (`6`).
+        "tnt_minecart" => Some(("minecraft:tnt", 6)),
+        // `MinecartHopper.getDefaultDisplayBlockState`/`getDefaultDisplayOffset`.
+        "hopper_minecart" => Some(("minecraft:hopper", 1)),
+        _ => None,
+    }
+}
+
+/// `AbstractMinecartRenderer.submit`'s content-block pose.
+///
+/// Transcribed from `submit` in composition order: the same bob+yaw term the
+/// cart frame itself gets via `non_living_vehicle_matrix` — see that
+/// function's own doc for why this port substitutes `180 - yaw` for vanilla's
+/// bare `rotationDegrees(state.yRot)` throughout, a substitution applied
+/// consistently here so the content sits aligned with the frame this engine
+/// actually draws, not with vanilla's — followed by vanilla's own
+/// `scale(0.75) → translate(-0.5, (displayOffset-8)/16, 0.5) →
+/// rotateY(90)` chain.
+///
+/// **Deliberately excludes the frame's `scale(-1, -1, 1)` flip.** In
+/// `submit`, the content block is pushed and popped *before* that flip is
+/// applied (the flip sits between the popped content push and
+/// `submitModel(this.model, …)`), so unlike the cart frame the content block
+/// keeps ordinary winding. Folding the flip in here would mirror the chest
+/// through its own middle.
+///
+/// Not ported: the sub-millimetre per-entity jitter (`offsetX/Y/Z`, keyed off
+/// `entity.getId()`, amplitude `0.004` blocks) and the hurt-time wobble — both
+/// genuinely invisible at any camera distance that matters, unlike the
+/// `0.375` bob or the `(displayOffset-8)/16` term, which move the content by
+/// up to a quarter block and are exactly the "still looks plausible" class
+/// this file's other pose functions guard against.
+#[must_use]
+fn minecart_content_pose(feet: glam::Vec3, yaw_deg: f32, display_offset: i32) -> glam::Mat4 {
+    let translate_feet = glam::Mat4::from_translation(feet);
+    let bob = glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.375, 0.0));
+    let rotate = glam::Mat4::from_rotation_y((180.0 - yaw_deg).to_radians());
+    let scale = glam::Mat4::from_scale(glam::Vec3::splat(0.75));
+    let offset_y = (display_offset - 8) as f32 / 16.0;
+    let translate = glam::Mat4::from_translation(glam::Vec3::new(-0.5, offset_y, 0.5));
+    let spin = glam::Mat4::from_rotation_y(90.0f32.to_radians());
+    translate_feet * bob * rotate * scale * translate * spin
+}
+
 /// One block-model draw request: which state, where, and how lit.
 ///
 /// The whole vocabulary of this seam. A producer that can fill this in gets block
@@ -243,6 +315,11 @@ impl RenderState {
         // block model posed by hand. See `merge_primed_tnt`'s own doc for why
         // primed TNT belongs here rather than in the entity pass.
         self.merge_primed_tnt(model, entities, &frustum, &mut combined, stats);
+        // A fourth producer of the same shape: no rig, a block model posed by
+        // hand. `merge_primed_tnt`'s block draws at the *entity's* pose; this
+        // one draws at the *cart's* pose, nested one level deeper (see
+        // `minecart_content_pose`'s own doc).
+        self.merge_minecart_contents(model, entities, &frustum, &mut combined, stats);
         // The second producer, sharing this buffer for the same reason the campfire
         // shares the item one — the placement is in the vertices, so there is
         // nothing to batch on.
@@ -428,6 +505,66 @@ impl RenderState {
                 MovingBlock {
                     state_id,
                     transform: primed_tnt_pose(draw.feet),
+                    light,
+                },
+                combined,
+            ) {
+                stats.moving_blocks_drawn += 1;
+            }
+        }
+    }
+
+    /// Merge every minecart's displayed contents — vanilla's
+    /// `AbstractMinecartRenderer.submit`'s `displayBlockModel` branch.
+    ///
+    /// # Why this belongs beside [`merge_primed_tnt`] and not in the entity pass
+    ///
+    /// The cart **frame** does go through the ordinary cuboid-rig entity pass
+    /// (`gpu/entity_passes.rs`'s `prepare_entities`, via
+    /// `lodestone_render::entity::model_for_type`'s `"minecart"` corpus entry) —
+    /// unlike primed TNT, a minecart genuinely has a baked rig. But the
+    /// **contents** are a block model, not a second rig, so drawing them wants
+    /// this seam's block-model machinery exactly as the falling-block and
+    /// primed-TNT producers do, not a second corpus entry.
+    ///
+    /// # Which subtypes draw something
+    ///
+    /// [`default_minecart_contents`] is `None` for `minecraft:minecart` itself
+    /// (`AbstractMinecart`'s own default display state is `Blocks.AIR`), so a
+    /// plain cart contributes nothing here — matching vanilla's "the plain cart
+    /// draws nothing inside" exactly, with no separate air-state special case.
+    fn merge_minecart_contents(
+        &self,
+        model: &ModelRenderer,
+        entities: &[EntityDraw],
+        frustum: &Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        for draw in entities {
+            let Some((block, display_offset)) = default_minecart_contents(&draw.type_path) else {
+                continue;
+            };
+            let Some(state_id) = lodestone_data::block_states::state_id(block) else {
+                continue;
+            };
+            if !frustum.intersects_aabb(
+                draw.feet - glam::Vec3::splat(1.0),
+                draw.feet + glam::Vec3::splat(1.0),
+            ) {
+                continue;
+            }
+            // Same reasoning as `merge_primed_tnt`'s probe: sample above the
+            // feet, at roughly the content block's own height, not at the feet
+            // themselves.
+            let light = self
+                .entity_light
+                .sample(draw.feet + glam::Vec3::new(0.0, 0.5, 0.0));
+            if self.merge_moving_block(
+                model,
+                MovingBlock {
+                    state_id,
+                    transform: minecart_content_pose(draw.feet, draw.yaw, display_offset),
                     light,
                 },
                 combined,
@@ -854,6 +991,199 @@ mod tests {
         assert_ne!(
             FALLING_BLOCK_TYPE_PATH, "minecraft:falling_block",
             "the namespaced form would match nothing, every frame"
+        );
+    }
+
+    /// `minecart_content_pose`'s bob+yaw prefix: the vertical component comes
+    /// only from the `0.375` bob and the `(displayOffset-8)/16` term, both
+    /// `Y`-only, so rotating about `Y` must never move it — and the rotation
+    /// genuinely has to happen, or the content would sit dead centre in every
+    /// cart regardless of heading.
+    #[test]
+    fn the_minecart_content_pose_keeps_the_bob_height_across_yaw_and_actually_rotates() {
+        let feet = glam::Vec3::new(4.0, 70.0, -9.0);
+        // Chest minecart: displayOffset 8, so `(8 - 8) / 16 == 0` — the bob
+        // alone decides the height, with no offset term to obscure the check.
+        let offset = 8;
+        let expected_y = feet.y + 0.375;
+
+        let mut xz_points = Vec::new();
+        for yaw in [0.0_f32, 37.0, 90.0, 180.0, -55.0] {
+            let p = minecart_content_pose(feet, yaw, offset).transform_point3(glam::Vec3::ZERO);
+            assert!(
+                (p.y - expected_y).abs() < 1e-4,
+                "yaw {yaw}: content height was {}, expected {expected_y} (feet.y + 0.375) — \
+                 rotation about Y must not move the vertical component",
+                p.y
+            );
+            xz_points.push(glam::Vec2::new(p.x, p.z));
+        }
+        // And it does actually rotate: not every yaw can land on the same x/z,
+        // or the `rotate(180 - yaw_deg)` term above is not being applied.
+        let distinct = xz_points
+            .windows(2)
+            .any(|w| (w[0] - w[1]).length() > 1e-3);
+        assert!(
+            distinct,
+            "content pose's x/z did not change across yaw values {xz_points:?} — the \
+             rotate(180 - yaw) term is not firing"
+        );
+    }
+
+    /// The `(displayOffset - 8) / 16` term, re-derived independently for each
+    /// subtype's real default offset (chest 8, furnace/TNT 6, hopper 1) and
+    /// checked against the pose's own output — not merely "some offset was
+    /// applied", but the exact vanilla arithmetic.
+    #[test]
+    fn the_display_offset_term_matches_vanillas_displayoffset_minus_8_over_16() {
+        let feet = glam::Vec3::ZERO;
+        let y_for = |offset: i32| minecart_content_pose(feet, 0.0, offset).transform_point3(glam::Vec3::ZERO).y;
+        let chest_y = y_for(8);
+        let hopper_y = y_for(1);
+        let furnace_y = y_for(6);
+
+        assert!(
+            (chest_y - 0.375).abs() < 1e-5,
+            "chest (offset 8): expected bob-only 0.375, got {chest_y}"
+        );
+        assert!(
+            (hopper_y - (0.375 + (1.0 - 8.0) / 16.0)).abs() < 1e-5,
+            "hopper (offset 1): got {hopper_y}, expected {}",
+            0.375 + (1.0 - 8.0) / 16.0
+        );
+        assert!(
+            (furnace_y - (0.375 + (6.0 - 8.0) / 16.0)).abs() < 1e-5,
+            "furnace/TNT (offset 6): got {furnace_y}, expected {}",
+            0.375 + (6.0 - 8.0) / 16.0
+        );
+        // Distinct, not coincidentally equal — the offset term genuinely has to
+        // vary the height, or this whole gate is measuring the bob alone.
+        assert_ne!(chest_y, hopper_y);
+        assert_ne!(chest_y, furnace_y);
+        assert_ne!(hopper_y, furnace_y);
+    }
+
+    /// A synthetic top-face quad, block-local `0..1` space — the same shape
+    /// `crack_resolver.rs`'s own `cube_top()` fixture uses. Not a fetched
+    /// `client.jar`'s real geometry (`block_models_gate.rs`'s job): this test
+    /// exists to prove the minecart-contents *wiring* reaches real
+    /// world-space quads, not that a chest looks like a chest.
+    fn synthetic_top_quad() -> lodestone_assets::BakedQuad {
+        lodestone_assets::BakedQuad {
+            positions: [
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [1.0, 1.0, 0.0],
+            ],
+            uvs: [[0.0; 2]; 4],
+            direction: lodestone_assets::Direction::Up,
+            cullface: None,
+            tint_index: None,
+            shade: true,
+            layer: 0,
+            anim: 0,
+        }
+    }
+
+    /// The island this agent closed, at the geometry level: every
+    /// content-bearing minecart subtype reaches real, bounded world-space
+    /// quads through the production pipeline
+    /// (`default_minecart_contents` → `lodestone_data::block_states::state_id`
+    /// → `CrackResolver::state_quads` → `minecart_content_pose` →
+    /// `mesh_moving_block_quads`) — and the plain `minecraft:minecart` is the
+    /// **negative control**, run through the exact same code, producing none.
+    ///
+    /// Before this change `default_minecart_contents` did not exist at all, so
+    /// every subtype (plain included) took this file's `None` arm — the
+    /// assertions below would have failed identically for chest/furnace/
+    /// tnt/hopper, which is what makes the plain-cart control meaningful
+    /// rather than vacuously true: it is not "nothing here draws", it is
+    /// "these four draw and this one specifically does not".
+    #[test]
+    fn minecart_contents_reach_quads_and_the_plain_cart_does_not() {
+        let subtypes: [(&str, &str, i32); 4] = [
+            ("chest_minecart", "minecraft:chest[facing=north]", 8),
+            (
+                "furnace_minecart",
+                "minecraft:furnace[facing=north,lit=false]",
+                6,
+            ),
+            ("tnt_minecart", "minecraft:tnt", 6),
+            ("hopper_minecart", "minecraft:hopper", 1),
+        ];
+
+        let ids: Vec<u32> = subtypes
+            .iter()
+            .map(|(_, block, _)| {
+                lodestone_data::block_states::state_id(block)
+                    .unwrap_or_else(|| panic!("{block} must resolve to a real state id"))
+            })
+            .collect();
+        let mut quads = vec![Vec::new(); ids.iter().copied().max().unwrap() as usize + 1];
+        for &id in &ids {
+            quads[id as usize] = vec![synthetic_top_quad()];
+        }
+        let resolver = lodestone_render::crack_resolver::CrackResolver::new(
+            quads,
+            [[0.0; 4]; lodestone_render::CRACK_STAGE_COUNT],
+        );
+
+        let feet = glam::Vec3::new(4.0, 70.0, -9.0);
+        let yaw = 35.0;
+        let expected_min = feet - glam::Vec3::splat(1.0);
+        let expected_max = feet + glam::Vec3::splat(2.0);
+
+        let mut bad = Vec::new();
+        for (type_path, block, offset) in subtypes {
+            let (mapped_block, mapped_offset) = default_minecart_contents(type_path)
+                .unwrap_or_else(|| panic!("{type_path} must resolve to a default content block"));
+            if mapped_block != block || mapped_offset != offset {
+                bad.push(format!(
+                    "{type_path}: mapped to ({mapped_block}, {mapped_offset}), expected \
+                     ({block}, {offset})"
+                ));
+                continue;
+            }
+
+            let state_id = lodestone_data::block_states::state_id(mapped_block).unwrap();
+            let src_quads = resolver.state_quads(state_id);
+            let pose = minecart_content_pose(feet, yaw, mapped_offset);
+            let mesh = mesh_moving_block_quads(src_quads, pose, 0xF0);
+            if mesh.vertices.is_empty() {
+                bad.push(format!("{type_path}: produced zero vertices — the island reopened"));
+                continue;
+            }
+            let mut min = glam::Vec3::splat(f32::INFINITY);
+            let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+            for v in &mesh.vertices {
+                let p = glam::Vec3::from(v.position);
+                min = min.min(p);
+                max = max.max(p);
+            }
+            if min.cmplt(expected_min).any() || max.cmpgt(expected_max).any() {
+                bad.push(format!(
+                    "{type_path}: content quad bounds [{min}, {max}] fall outside the \
+                     expected box [{expected_min}, {expected_max}] around feet {feet} — \
+                     the pose put the content somewhere implausible, not just \"off\""
+                ));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} of {} minecart contents are wrong: {bad:#?}",
+            bad.len(),
+            subtypes.len()
+        );
+
+        // The negative control: the plain cart's own type path maps to no
+        // content block at all, so it never even reaches `state_id` or the
+        // pose function. If this returned `Some`, the corpus-alias fix in
+        // `entity.rs` would be drawing a block inside a cart vanilla renders
+        // empty.
+        assert!(
+            default_minecart_contents("minecart").is_none(),
+            "the plain cart must not resolve to any content block"
         );
     }
 }
