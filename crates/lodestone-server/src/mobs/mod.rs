@@ -175,6 +175,15 @@ mod vehicles;
 // `tnt::TNT_LAUNCH_SEED`.
 pub(crate) mod tnt;
 
+// `pub(crate)`, the same shape `tnt` is above: `crate::redstone_dispenser`,
+// `crate::item_use` and `crate::server` all need
+// `minecart::{MinecartKind, is_rail_block, rail_shape, placement_position}`
+// to recognise a rail and derive a spawn position from outside this crate's
+// mob simulation. Every `impl MobSim` method here was already `pub`;
+// `MinecartCollision` stays private, used only within this file's own
+// `tick_minecarts`.
+pub(crate) mod minecart;
+
 // No re-export: `LiveBolt` is `pub(super)`, visible within `mobs` and its
 // descendants, and every `impl MobSim` method here is either `pub` already or
 // `pub(super)` because only `crate::tick` (through `MobHandle::with`) and this
@@ -2017,6 +2026,10 @@ pub struct MobSim<'w> {
     /// why this is a plain map beside [`vehicles`](Self::vehicles) rather than
     /// a [`SimMob`].
     tnt: HashMap<i32, TrackedTnt>,
+    /// Live minecarts — every `AbstractMinecart` subclass, keyed by network
+    /// entity id. See [`TrackedMinecart`] for the shape and `mobs::minecart`'s
+    /// own module doc for the physics.
+    minecarts: HashMap<i32, TrackedMinecart>,
     /// The `random.nextDouble()` draw a fresh `PrimedTnt`'s launch direction
     /// makes (`PrimedTnt`'s three-argument constructor), on its own stream for
     /// [`orb_rng`](Self::orb_rng)'s reason: priming TNT must not shift which
@@ -2139,6 +2152,46 @@ struct TrackedTnt {
     fuse: i32,
 }
 
+/// One live `AbstractMinecart` — wire identity, kind, rail-following motion,
+/// riding, and the per-kind extras (a container's slots, a furnace's fuel and
+/// push, a TNT cart's fuse). See `mobs::minecart`'s own module doc for the
+/// physics this drives and everything deliberately simplified.
+///
+/// A plain map for the same reason [`TrackedVehicle`]/[`TrackedTnt`] are:
+/// no `SimMob` goal machinery, because a minecart has no AI beyond
+/// rail-following.
+#[derive(Debug, Clone)]
+struct TrackedMinecart {
+    uuid: Uuid,
+    kind: minecart::MinecartKind,
+    motion: lodestone_physics::EntityMotion,
+    /// `AbstractMinecart`'s own `yRot`, computed from the direction of travel
+    /// each tick `OldMinecartBehavior.tick` moves it — never set by a
+    /// placer, unlike a boat's.
+    yaw: f32,
+    /// `Entity.yRotO` — the previous tick's yaw, read by the flip-detection
+    /// comparison alone.
+    yaw_o: f32,
+    /// `AbstractMinecart.flipped` — `FlippedRotation`: when the travel
+    /// direction reverses near a dead stop, the sprite's *heading* flips
+    /// 180° instead of visibly spinning through it.
+    flipped: bool,
+    /// The **player entity id** riding this cart, or `None`. Only
+    /// [`minecart::MinecartKind::is_rideable`] kinds are ever `Some`.
+    rider: Option<i32>,
+    /// A container kind's own inventory (`MinecartKind::container_size`
+    /// slots; empty for every non-container kind). See `mobs::minecart`'s
+    /// own module doc for why nothing yet opens a menu against this.
+    slots: Vec<Option<lodestone_model::ItemStack>>,
+    /// `MinecartFurnace.fuel` — ticks of burn time remaining.
+    fuel: i32,
+    /// `MinecartFurnace.push` — the constant self-propulsion vector while
+    /// fuelled (`y` always `0.0`).
+    push: lodestone_physics::Vec3d,
+    /// `MinecartTNT.fuse` — `-1` unprimed, counts down to `0` (detonate).
+    fuse: i32,
+}
+
 /// One per-entity animation cue a hit produced, for
 /// [`take_entity_animations`](MobSim::take_entity_animations) to hand a driver.
 ///
@@ -2251,6 +2304,7 @@ impl<'w> MobSim<'w> {
             mob_drops: true,
             vehicles: HashMap::new(),
             tnt: HashMap::new(),
+            minecarts: HashMap::new(),
             tnt_rng: SpawnRng::new(tnt::TNT_LAUNCH_SEED),
             // Vanilla's own field default (`private int nextTick;`, never
             // explicitly initialised, so Java's `0`) — the very first call
@@ -5297,6 +5351,42 @@ impl<'w> MobSim<'w> {
                 // class-guarded on decode.
                 metadata: vec![MetadataField::TntFuse(t.fuse)],
                 // `PrimedTnt` does not override `getAddEntityPacket`.
+                object_data: 0,
+                // Never a `Leashable`.
+                leash_link: None,
+            });
+        }
+        // Minecarts. Sorted ids, for the same reason every other sidecar loop
+        // in this method is.
+        let mut minecart_ids: Vec<i32> = self.minecarts.keys().copied().collect();
+        minecart_ids.sort_unstable();
+        for id in minecart_ids {
+            let Some(cart) = self.minecarts.get(&id) else {
+                continue;
+            };
+            // `MinecartFurnace.DATA_ID_FUEL` — index 13, shared with
+            // `MinecartCommandBlock.DATA_ID_COMMAND_NAME` (a `STRING`) under a
+            // different serializer; this is the only producer of a
+            // `MinecartFuel` field and it only ever fires from the furnace
+            // loop, so the two can never collide the way `MetadataField::Item`'s
+            // own doc describes for index 8.
+            let metadata = if cart.kind.is_furnace() {
+                vec![MetadataField::MinecartFuel(cart.fuel > 0)]
+            } else {
+                Vec::new()
+            };
+            out.push(EntitySnapshot {
+                id,
+                uuid: cart.uuid,
+                entity_type: cart.kind.entity_type(),
+                position: Vec3::new(cart.motion.position.x, cart.motion.position.y, cart.motion.position.z),
+                rotation: Rotation::new(cart.yaw, 0.0),
+                // `AbstractMinecart` is not a `LivingEntity`; no separate head
+                // rotation packet is ever sent for one.
+                head_yaw: 0.0,
+                velocity: Vec3::new(cart.motion.velocity.x, cart.motion.velocity.y, cart.motion.velocity.z),
+                metadata,
+                // `AbstractMinecart` does not override `getAddEntityPacket`.
                 object_data: 0,
                 // Never a `Leashable`.
                 leash_link: None,
