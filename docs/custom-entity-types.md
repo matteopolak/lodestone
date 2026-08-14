@@ -3,16 +3,15 @@
 ## What it is
 
 A registry mapping a plugin's own entity kind (`myplugin:sentry`) to the vanilla entity type
-it is **disguised as on the wire** (`minecraft:armor_stand`) — issue
-[#140](https://github.com/matteopolak/lodestone/issues/140).
+it is **disguised as on the wire** (`minecraft:armor_stand`).
 
 ## Why disguises, and not a new wire type
 
 `add_entity` carries the entity type as a network **registry index** into a 158-entry table.
 There is no room in the protocol for a novel type, and *vanilla itself has no such
 mechanism* — which is why real Paper servers implement custom mobs as a vanilla entity with
-custom NBT, a custom name and custom AI, not as a new registry entry. Issue #140's scope says
-exactly this and it is correct.
+custom NBT, a custom name and custom AI, not as a new registry entry. That framing is
+correct.
 
 So a custom entity kind is a **logical identity** on the server plus a **vanilla type** on
 the wire, and `lodestone_data::entity_disguise` is the mapping between them.
@@ -164,8 +163,8 @@ fn encode_add_entity(&self, entity: &EntitySnapshot) -> ServerDirective {
 
 ### 2. `crates/lodestone-server` — resolve before the snapshot leaves
 
-`EntitySnapshot::entity_type` (`protocol.rs:37`) is the whole channel, and nothing between
-`SimMob::snapshot` (`mobs.rs`) and the encoder validates it. A disguise must be applied
+`EntitySnapshot::entity_type` (`protocol.rs`) is the whole channel, and nothing between
+`SimMob::snapshot` (`mobs/mod.rs`) and the encoder validates it. A disguise must be applied
 **before** the snapshot leaves the server, in `MobSim::snapshots`, so the wire only ever sees
 vanilla keys:
 
@@ -179,9 +178,9 @@ for snapshot in &mut out {
 ```
 
 with `MobSim` gaining a `disguises: EntityDisguises` field and a
-`set_disguises`/`disguises_mut` accessor. `SimMob::set_entity_type` (`mobs.rs`) already
+`set_disguises`/`disguises_mut` accessor. `SimMob::set_entity_type` (`mobs/mod.rs`) already
 exists, so a per-entity override is available today as a cruder alternative.
 
 **Until both land, a plugin can define and validate a custom entity type but cannot spawn
-one** — which is also blocked on #138's server-side spawn API not existing (there is no
+one** — which is also blocked on the server-side spawn API not existing (there is no
 `MobSim::remove_mob` and `IntegratedServer` hands out no `MobHandle`).

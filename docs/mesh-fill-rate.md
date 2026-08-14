@@ -46,15 +46,15 @@ the tick thread** (3,939 of 4,034 samples) in that one predicate. Measured cost:
 
 * **2.108 ms per column** (24 sections × 4096 = 98,304 predicate calls at 21.45 ns)
 * the random-tick loop iterates **`tick_area`, not the streamed view**.
-  `tick_area` is `mob_area` (`integrated.rs:520`) at radius
-  `view_radius.clamp(1, 3)` (`net.rs:1773`) — a 7×7 square, **49 columns**, as
-  `integrated.rs:538` states independently. So **103 ms of scanning per 50 ms
-  tick, 2.07× over budget**; the headroom is `50 / 2.108 = 23.7` columns and 49
-  exceeds it.
+  `tick_area` is `mob_area` (`integrated.rs`'s `open_in_memory_with_mobs_using`)
+  at radius `view_radius.clamp(1, 3)` (`net.rs`'s `run_async`) — a 7×7 square,
+  **49 columns**, as `open_in_memory_with_mobs_using` states independently. So
+  **103 ms of scanning per 50 ms tick, 2.07× over budget**; the headroom is
+  `50 / 2.108 = 23.7` columns and 49 exceeds it.
 * the palette prefilter is **38.7 µs per column, 54× cheaper**; 49 columns is
   then 1.9 ms, which fits
 
-> **Correction (issue #507 follow-up).** This document and `bdf93a28`'s commit
+> **Correction.** This document and `bdf93a28`'s commit
 > message previously multiplied 2.108 ms by the **361 resident columns of the
 > streamed view** and reported **761 ms / 15.2× over budget**. That is the wrong
 > multiplier — the random-tick loop never iterates the view — and those two

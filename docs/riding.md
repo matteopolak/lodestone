@@ -15,7 +15,7 @@ table, the per-instance mount animations, and the horse inventory screen. See
 ## What it is
 
 `ClientboundSetPassengersPacket` tells the client which entities are riding which. Before this
-change it was a **complete island**: decoded at `crates/protocol/v770/src/adapter.rs`'s
+change it was a **complete island**: decoded at `crates/protocol/v770/src/adapter/entity.rs`'s
 `SET_PASSENGERS` arm, round-tripped by `crates/protocol/v770/tests/entity_events.rs`, and a
 tree-wide grep for `EntityPassengersChanged` returned exactly **four** hits — the decode, those
 two tests, and the `ClientEvent` variant. Zero consumers, no arm in either `handles_event`
@@ -75,42 +75,41 @@ passenger.pos = vehicle.position()
               - VEHICLE attachment of the passenger, rotated by its own yaw
 ```
 
-`Entity.positionRider` (`Entity.java:2399-2403`), `getPassengerRidingPosition` (`:2412-2414`),
-`getDefaultPassengerAttachmentPoint` (`:2420-2423`), `getVehicleAttachmentPoint` (`:2408-2410`),
-rotation at `EntityAttachments.java:78-80` (`point.yRot(-rotY * π/180)`, i.e. `Vec3.yRot`,
-`world/phys/Vec3.java:241-248`).
+`Entity.positionRider`, `getPassengerRidingPosition`,
+`getDefaultPassengerAttachmentPoint`, `getVehicleAttachmentPoint`,
+rotation in `EntityAttachments.transformPoint` (`point.yRot(-rotY * π/180)`, i.e. `Vec3.yRot`).
 
 Two constants worth stating because the plausible neighbour is wrong:
 
 - **The `PASSENGER` fallback is `(0, height, 0)` — `height × 1.0`**, the top of the vehicle's box
-  (`EntityAttachment.java:7` `PASSENGER(Fallback.AT_HEIGHT)`, `:25`). The tempting `× 0.85` is a
-  *different* quantity, `EntityDimensions.defaultEyeHeight` (`EntityDimensions.java:11-13`).
+  (`EntityAttachment.PASSENGER`'s `Fallback.AT_HEIGHT`). The tempting `× 0.85` is a
+  *different* quantity, `EntityDimensions.defaultEyeHeight`.
 - **The player's `VEHICLE` attachment is not zero.** `Avatar.DEFAULT_VEHICLE_ATTACHMENT =
-  Vec3(0.0, 0.6, 0.0)` (`Avatar.java:17`, wired at `EntityTypes.java:1143`) and it is
+  Vec3(0.0, 0.6, 0.0)`, wired at `EntityTypes.PLAYER`'s builder, and it is
   *subtracted*, lowering the rider 0.6 below the seat point. Dropping it floats the player above
   every saddle — the single largest error available in this function.
 
 Declared per-type points, cited in the source: minecart family `0.1875`
-(`EntityTypes.java:667`, repeated verbatim for chest/furnace/hopper/tnt/spawner/command-block),
-horse `1.44375` (`:531`), donkey `1.1125` (`:338`), mule `1.2125` (`:675`), skeleton/zombie horse
-`1.31875` (`:852`, `:1104`), pig `0.86875` (`:754`), llama `(0, 1.37, -0.3)` (`:620`, `:973`).
+(`EntityTypes.MINECART`, repeated verbatim for chest/furnace/hopper/tnt/spawner/command-block),
+horse `1.44375` (`EntityTypes.HORSE`), donkey `1.1125` (`EntityTypes.DONKEY`), mule `1.2125` (`EntityTypes.MULE`), skeleton/zombie horse
+`1.31875` (`EntityTypes.SKELETON_HORSE`, `EntityTypes.ZOMBIE_HORSE`), pig `0.86875` (`EntityTypes.PIG`), llama `(0, 1.37, -0.3)` (`EntityTypes.LLAMA`, `EntityTypes.TRADER_LLAMA`).
 
-**The boat family bypasses the attachment table entirely.** `AbstractBoat`
-(`vehicle/boat/AbstractBoat.java:135-152`) builds the point from `rideHeight(dimensions)` and a
-**Z** offset. `rideHeight` is `height / 3` for boats and chest boats (`Boat.java:16`,
-`ChestBoat.java:16`) and `height × 0.8888889` for rafts (`Raft.java:16`, `ChestRaft.java:16`) —
+**The boat family bypasses the attachment table entirely.** `AbstractBoat.getPassengerAttachmentPoint`
+builds the point from `rideHeight(dimensions)` and a
+**Z** offset. `rideHeight` is `height / 3` for boats and chest boats (`Boat.rideHeight`,
+`ChestBoat.rideHeight`) and `height × 0.8888889` for rafts (`Raft.rideHeight`, `ChestRaft.rideHeight`) —
 `0.1875` vs `0.5` at the shared `sized(1.375, 0.5625)` box, nearly a factor of three, so one rule
-for both is visible. The Z offset is `0.0` (`:613`), `0.15` for chest boats
-(`AbstractChestBoat.java:44`), `-0.6` for any seat past the first (`:143`). Note vanilla names the
+for both is visible. The Z offset is `0.0` (`AbstractBoat.getSinglePassengerXOffset`), `0.15` for chest boats
+(`AbstractChestBoat.getSinglePassengerXOffset`), `-0.6` for any seat past the first (`AbstractBoat.getPassengerAttachmentPoint`). Note vanilla names the
 field `getSinglePassengerXOffset` and applies it to Z; the name is kept so the citation matches.
 
 ### The camera, which needed no code
 
-26.2's `Camera.alignWithEntity` (`client-src/net/minecraft/client/Camera.java:246-264`) has **no
-`isPassenger()` branch** except a lerp fix-up for new-behaviour minecarts (`:247-256`), and riding
-changes neither the pose nor the eye height (`Player.updatePlayerPose`, `Player.java:343-357`, has
+26.2's `Camera.alignWithEntity` has **no
+`isPassenger()` branch** except a lerp fix-up for new-behaviour minecarts, and riding
+changes neither the pose nor the eye height (`Player.updatePlayerPose` has
 no riding case; there is no `SITTING` pose, so a mounted player keeps
-`Avatar.DEFAULT_EYE_HEIGHT = 1.62`, `Avatar.java:16`).
+`Avatar.DEFAULT_EYE_HEIGHT = 1.62`).
 
 So the whole mechanism is `pin_passenger_to_vehicle` moving the player's **feet**.
 `Sim::camera` reads `PhysicsState` exactly as it does for a walking player, and the eye, the
@@ -124,26 +123,27 @@ cancel_flight_on_landing → pin_passenger_to_vehicle`.
 
 Vanilla runs a passenger's whole tick — travel included, with the same `xxa`/`zza` the vehicle
 reads — and only then overwrites the position: `rideTick()` is
-`setDeltaMovement(ZERO); this.tick(); vehicle.positionRider(this)` (`Entity.java:2385-2390`), and
+`setDeltaMovement(ZERO); this.tick(); vehicle.positionRider(this)`, and
 `LivingEntity.aiStep` still reaches `travel(input)` for a passenger because
 `canSimulateMovement()` is `isLocalInstanceAuthoritative()`, true for the local player
-(`LivingEntity.java:3127-3131`, `Entity.java:3594-3609`, `Player.java:1281`). So a mounted
+(`Entity.isLocalInstanceAuthoritative`/`Entity.canSimulateMovement`, overridden by
+`Player.canSimulateMovement`). So a mounted
 player's one tick of drift out of the seat really does happen and really is thrown away. The one
 divergence: velocity is zeroed at the *end* rather than the top, which differs only on the first
 tick after mounting and is discarded by that same tick's snap.
 
 ### `on_ground` while riding — and the reason usually given for it is wrong
 
-`Player.java:232-236` forces `onGround = false` for a spectator or passenger, unconditionally,
+`Player.tick` forces `onGround = false` for a spectator or passenger, unconditionally,
 before anything else in `tick()`. This closes the `spectator_or_passenger_note` contract that had
 sat in `lodestone-physics/tests/on_ground.rs` since before riding existed.
 
 `PlayerState::on_ground`'s docs frame the flag as a wire contract policed by the server's
 `aboveGroundTickCount` / `multiplayer.disconnect.flying` counter, which would make this
 kick-avoidance. **It is not, and the check was worth running:** the server's float check is
-explicitly `&& !this.player.isPassenger()` (`ServerGamePacketListenerImpl.java:323`), and its
-move handler discards a passenger's reported position outright, keeping only the rotation
-(`:1086-1088`). A mounted client cannot be kicked over this flag. The override is for the
+explicitly `&& !this.player.isPassenger()` (`ServerGamePacketListenerImpl.tickPlayer`), and its
+move handler (`ServerGamePacketListenerImpl.handleMovePlayer`) discards a passenger's reported
+position outright, keeping only the rotation. A mounted client cannot be kicked over this flag. The override is for the
 **local** readers — pose, view bob, jump, flight cancel — which would otherwise treat a seated
 player as standing on something.
 
@@ -174,12 +174,10 @@ closer than the block.
 
 There is **no dismount packet and no `STOP_RIDING` action**. `ServerboundPlayerCommandPacket`'s
 complete enum is `STOP_SLEEPING, START_SPRINTING, STOP_SPRINTING, START_RIDING_JUMP,
-STOP_RIDING_JUMP, OPEN_INVENTORY, START_FALL_FLYING`
-(`ServerboundPlayerCommandPacket.java:60-68`). Dismount is inferred server-side from the sneak
-bit of `ServerboundPlayerInputPacket`: `handlePlayerInput` → `setShiftKeyDown`
-(`ServerGamePacketListenerImpl.java:421-428`), then `Player.rideTick`'s
-`if (!isClientSide() && wantsToStopRiding() && isPassenger()) stopRiding()`
-(`Player.java:432-439`), with `wantsToStopRiding()` = `isShiftKeyDown()` (`:296-298`).
+STOP_RIDING_JUMP, OPEN_INVENTORY, START_FALL_FLYING`. Dismount is inferred server-side from the sneak
+bit of `ServerboundPlayerInputPacket`: `handlePlayerInput` → `setShiftKeyDown`, then `Player.rideTick`'s
+`if (!isClientSide() && wantsToStopRiding() && isPassenger()) stopRiding()`, with
+`wantsToStopRiding()` = `isShiftKeyDown()`.
 
 `lodestone_controller::ecs::send_player_input` already sends that bit, edge-triggered, and is
 unconditional on ride state — so dismount works with no new code, and the vanilla client likewise

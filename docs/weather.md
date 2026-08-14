@@ -41,8 +41,8 @@ lightning sequence number; `WeatherTracker` turns a change in that number into a
 
 ### Why the wire state does not travel `NetUpdate`
 
-`ServerLevel.tickWeather` ramps the rain level by ±0.01 **per tick** and broadcasts
-`RAIN_LEVEL_CHANGE` on every change (`ServerLevel.java:762-775`), so a channel would
+`ServerLevel.advanceWeatherCycle` ramps the rain level by ±0.01 **per tick** and broadcasts
+`RAIN_LEVEL_CHANGE` on every change, so a channel would
 carry ~20 messages a second whose only purpose is to be superseded. The cell is the
 same "latest wins, never queue" shape as `net::SharedHandle`, and it keeps the read
 out of `Sim` — nothing in the simulation acts on rain level, only the renderer and
@@ -68,34 +68,34 @@ load-bearing ones:
 
 | quantity | value | source |
 |---|---|---|
-| perpendicular-offset table | 32 × 32, centred at 16 | `client-src/.../WeatherEffectRenderer.java:43-60` |
-| rain column speed | `3.0 + rand` | `:168` |
-| rain texture scroll | `-(ticks + offset + partial) / 32 * speed`, wrapped at 32 | `:169-170` |
-| snow V drift | `-((ticks & 511) + partial) / 512` | `:181` |
-| per-column seed | `x*x*3121 + x*45238971 ^ z*z*418711 + z*13761` | `:80` |
-| rain / snow max alpha | `1.0` / `0.8` | `:133-134` |
-| distance fade | `lerp(min(d²/r², 1), max_alpha, 0.5) * intensity` | `:201` |
-| V from world height | `y * 0.25 + v_offset` | `:214-215` |
-| rain→snow threshold | height-adjusted temperature `>= 0.15` is rain | `.../biome/Biome.java:175-176` |
-| `getThunderLevel` | raw thunder **× rain** | `.../level/Level.java:918-920` |
-| `isRaining` / `isThundering` | `rain > 0.2` / `thunder > 0.9` | `Level.java:947`, `:943` |
-| sky rain darken | `×(1 − r·0.5, 1 − r·0.5, 1 − r·0.4)` | `.../fog/environment/AtmosphericFogEnvironment.java:51-54` |
-| sky thunder darken | `×(1 − t·0.5)`, all three channels | `:57-59` |
-| `SKY_LIGHT_FACTOR` floor | `0.24`; alpha `0.3125` rain, `0.52734375` thunder | `.../attribute/WeatherAttributes.java:19`, `:30` |
-| weather layer split | `thunder = t`, `rain = r − t` | `WeatherAttributes.java:49-50` |
-| lightning flash | lerp `0.22` toward `(204, 204, 255)`; `SKY_LIGHT_FACTOR` forced to `1.0` | `.../multiplayer/ClientLevel.java:264-268` |
-| flash lifetime | `skyFlashTime = 2` refreshed while `life >= 0`, `life` starts at 2 | `.../entity/LightningBolt.java:45`, `:139-141` |
-| rain sound cadence | `rand(3) < rainSoundTime++` | `ClientLevel.java:384` |
-| rain sound volumes | `0.2 @ 1.0` near, `0.1 @ 0.5` from above | `ClientLevel.java:388-390` |
-| blend / cull / depth | `TRANSLUCENT`, no cull, `GREATER_THAN_OR_EQUAL` no-write | `.../RenderPipelines.java:141-143`, `:635-640` |
+| perpendicular-offset table | 32 × 32, centred at 16 | `WeatherEffectRenderer`'s constructor |
+| rain column speed | `3.0 + rand` | `WeatherEffectRenderer.createRainColumnInstance` |
+| rain texture scroll | `-(ticks + offset + partial) / 32 * speed`, wrapped at 32 | `WeatherEffectRenderer.createRainColumnInstance` |
+| snow V drift | `-((ticks & 511) + partial) / 512` | `WeatherEffectRenderer.createSnowColumnInstance` |
+| per-column seed | `x*x*3121 + x*45238971 ^ z*z*418711 + z*13761` | `WeatherEffectRenderer.extractRenderState` |
+| rain / snow max alpha | `1.0` / `0.8` | `WeatherEffectRenderer.render` |
+| distance fade | `lerp(min(d²/r², 1), max_alpha, 0.5) * intensity` | `WeatherEffectRenderer.renderInstances` |
+| V from world height | `y * 0.25 + v_offset` | `WeatherEffectRenderer.renderInstances` |
+| rain→snow threshold | height-adjusted temperature `>= 0.15` is rain | `Biome.warmEnoughToRain` |
+| `getThunderLevel` | raw thunder **× rain** | `Level.getThunderLevel` |
+| `isRaining` / `isThundering` | `rain > 0.2` / `thunder > 0.9` | `Level.isRaining` / `Level.isThundering` |
+| sky rain darken | `×(1 − r·0.5, 1 − r·0.5, 1 − r·0.4)` | `AtmosphericFogEnvironment.applyWeatherDarken` |
+| sky thunder darken | `×(1 − t·0.5)`, all three channels | `AtmosphericFogEnvironment.applyWeatherDarken` |
+| `SKY_LIGHT_FACTOR` floor | `0.24`; alpha `0.3125` rain, `0.52734375` thunder | `WeatherAttributes.RAIN` / `WeatherAttributes.THUNDER` |
+| weather layer split | `thunder = t`, `rain = r − t` | `WeatherAttributes.addLayer` |
+| lightning flash | lerp `0.22` toward `(204, 204, 255)`; `SKY_LIGHT_FACTOR` forced to `1.0` | `ClientLevel.addEnvironmentAttributeLayers` |
+| flash lifetime | `skyFlashTime = 2` refreshed while `life >= 0`, `life` starts at 2 | `LightningBolt`'s constructor and `LightningBolt.tick` |
+| rain sound cadence | `rand(3) < rainSoundTime++` | `ClientLevel.tickWeatherEffects` |
+| rain sound volumes | `0.2 @ 1.0` near, `0.1 @ 0.5` from above | `ClientLevel.tickWeatherEffects` |
+| blend / cull / depth | `TRANSLUCENT`, no cull, `GREATER_THAN_OR_EQUAL` no-write | `RenderPipelines.WEATHER_DEPTH_WRITE` / `WEATHER_NO_DEPTH_WRITE` |
 
 ## The three things that will bite you
 
 ### 1. `START_RAINING` sets the rain level to `0.0`, and `STOP_RAINING` sets it to `1.0`
 
-That is vanilla's own inversion at `ClientPacketListener.java:1542-1545`, and
+That is vanilla's own inversion in `ClientPacketListener.handleGameEvent`, and
 `WeatherState::apply_raining` reproduces it deliberately. It is invisible in practice
-because `ServerLevel.java:783-791` sends a `RAIN_LEVEL_CHANGE` carrying the true
+because `ServerLevel.advanceWeatherCycle` sends a `RAIN_LEVEL_CHANGE` carrying the true
 level immediately after every start/stop, plus one per tick while the level ramps.
 
 Do not "fix" it to the intuitive polarity without deciding what should happen on a
@@ -109,12 +109,12 @@ fail loudly and send you here.
 `WeatherState::thunder_level()` is the composed value; `raw_thunder_level()` is the
 wire field. Reading the raw one into a darkening term blacks out a clear sky the
 moment a server sends a stale non-zero thunder level — which it does on **every
-join**, because `PlayerList.java:654-656` sends all three unconditionally.
+join**, because `PlayerList.sendLevelInfo` sends all three unconditionally.
 
 ### 3. Every colour operation here is in gamma space
 
 Vanilla is not colour-managed: `ARGB.scaleRGB` multiplies 0–255 byte channels
-(`ARGB.java:108-115`) and `ARGB.srgbLerp` interpolates them (`:155-161`).
+and `ARGB.srgbLerp` interpolates them.
 `FogSettings`' colours are **linear**, so use `weather_darken_linear` /
 `lightning_flash_linear`, which own the round-trip. Doing it in linear light pulls
 both scale factors toward 1.0; measured at linear 0.2, the correct answer is 0.0466
@@ -133,8 +133,8 @@ Reaching pixels from the wire, end to end:
   section_at` + `ChunkSection::biome_at_block`) and looks its climate up in
   `net::BiomeClimateCell`, folded from `ClientEvent::BiomeClimates` at `Login`
   exactly as `WeatherCell` folds `WeatherChanged`; vanilla's own threshold decides
-  the split (`Biome.java:176`, height-adjusted temperature `>= 0.15` is rain, below
-  is snow). See "Snow: closed" below for the exact hop and its live gate.
+  the split (`Biome.warmEnoughToRain`, height-adjusted temperature `>= 0.15` is rain,
+  below is snow). See "Snow: closed" below for the exact hop and its live gate.
 * **Sky, horizon, terrain fog and the below-horizon clear colour**, darkened by both
   rain and thunder — one composition, so the four can never disagree.
 * **The lightmap**, via the existing `sky_darken` lane, so terrain, mobs *and* the
@@ -162,7 +162,7 @@ now reaches the client too:
 [`ClientRegistries::biome_climates`](../crates/protocol/v770/src/packets/registry.rs)
 decodes `has_precipitation`/`temperature`/`downfall` off the same `registry_data` entry
 `biome_sky_colors` already reads (top-level fields, siblings of `attributes` — see
-`Biome.ClimateSettings.CODEC`, `Biome.java:358-368`, **not** nested under `attributes`
+`Biome.ClimateSettings.CODEC`, **not** nested under `attributes`
 the way `sky_color` is), and `ClientEvent::BiomeClimates` carries it out of the adapter
 at the same `Login`-time point `BiomeVisuals` does.
 
@@ -192,7 +192,7 @@ back to `Rain`, matching `sky_visible`'s own "absent data reads as open sky" rul
 
 Gated three ways: `net::tests::forward_folds_biome_climates_into_the_cell_without_using_the_channel`
 (the fold, hermetic), `net::tests::a_real_frozen_biome_crosses_vanillas_own_rain_snow_threshold_and_a_dry_one_does_not`
-(vanilla's own `0.15` threshold — `Biome.java:176` — against real frozen_peaks/desert values
+(vanilla's own `0.15` threshold — `Biome.warmEnoughToRain` — against real frozen_peaks/desert values
 copied from `.cache/mc/26.2/src/data/minecraft/worldgen/biome/`, hermetic), and
 `app::tests::live_precipitation_matches_vanillas_own_threshold_for_real_biomes` (`#[ignore]`d,
 against the survival oracle: connects through `ClientBuilder` directly, captures the real
@@ -205,8 +205,8 @@ spawn biome 40 (temperature 0.8) answers `Rain`; biome 52 (temperature 0.2, heig
 <details><summary>Original plan (superseded by the field-vs-variant finding above)</summary>
 
 Both fields are already on the wire and already in the hermetic fixture —
-`crates/protocol/v770/tests/registry_data.rs:227-228` asserts
-`has_precipitation: Byte(1)` and `temperature: Float(0.8)` in a real entry. Closing
+`registry_data.rs`'s `biome_sky_colours_resolve_by_holder_id` test's `biome` fixture
+carries `has_precipitation: Byte(1)` and `temperature: Float(0.8)` in a real entry. Closing
 it is a `biome_climates()` table alongside `biome_sky_colors()`, one new
 `ClientEvent::BiomeVisuals` field, and a `ShellWeatherProbe::precipitation` that
 consults it. **Not** a new packet and **not** a proxy.
@@ -252,7 +252,7 @@ Gotchas beyond the three above:
   water crossing. Intended: the ramp is ±0.01/tick over ~100 ticks, and a
   change-detected upload that ignored it would render a storm at clear-sky colours.
 * **`ShellWeatherProbe` must be built per frame, and its doc used to claim a design
-  it did not implement.** The probe answers 441 columns; issue #25's per-column biome
+  it did not implement.** The probe answers 441 columns; the per-column biome
   lookup made each of those three world-lock acquisitions (`world_dimensions`,
   `section_at`, the climate mutex) while the doc still said the probe was answered
   from a single sample — ~1,300 locks a frame, contended against chunk streaming.
@@ -273,8 +273,8 @@ Gotchas beyond the three above:
   else in this doc combined and shares no code with any existing pass. Scoped out
   deliberately rather than half-built.
 * **Repeat flashes per bolt.** Vanilla re-flashes `rand(3) + 1` times by resetting the
-  entity's `life` (`LightningBolt.java:47`, `:131-134`). We see only the spawn, so one
-  flash per bolt. `LIGHTNING_FLASH_TICKS` documents this.
+  entity's `life` (`LightningBolt`'s constructor and `LightningBolt.tick`). We see only
+  the spawn, so one flash per bolt. `LIGHTNING_FLASH_TICKS` documents this.
 * **Rain ambience.** The cadence is written and tested
   (`lodestone_render::RainAmbience`, vanilla's `rainSoundTime` including the
   above/below split); it has no producer. One `pub fn play_local_sound` on
@@ -288,7 +288,7 @@ Gotchas beyond the three above:
 
 * `lodestone_render::DEFAULT_WEATHER_RADIUS` (10 columns each way = 441 columns).
   Vanilla's `weatherRadius` option, already present in this shell's options menu as
-  "Weather Effect Radius" (`menu/options.rs:496`) but not yet read by this pass. Must
+  "Weather Effect Radius" (`menu/options.rs`'s `VIDEO` table) but not yet read by this pass. Must
   stay below `HALF_RAIN_TABLE_SIZE` or a column indexes outside the offset table;
   `extract_columns` clamps rather than panicking.
 * `textures/environment/rain.png` and `snow.png` from `client.jar`. Absent — a

@@ -3,11 +3,8 @@
 ## What it is
 
 The wiring that makes mobs, dropped items and the player's own inventory survive
-quitting a Lodestone world. Issues
-[#302](https://github.com/matteopolak/lodestone/issues/302) (per-player `.dat`),
-[#303](https://github.com/matteopolak/lodestone/issues/303) (per-chunk entity
-storage) and [#305](https://github.com/matteopolak/lodestone/issues/305) (the
-`DataVersion` decision). It sits alongside
+quitting a Lodestone world: per-player `.dat` storage, per-chunk entity storage
+and the `DataVersion` decision. It sits alongside
 [`world-save-load.md`](./world-save-load.md), which covers terrain, block entities
 and scheduled ticks — everything *except* the things that move.
 
@@ -20,7 +17,7 @@ the chunks streamed, and the animals were gone.
 | player container | `crates/lodestone-anvil/src/player_dat.rs` | the gzip `.dat` file, its path, the crash-safe write |
 | player schema | `crates/lodestone-server/src/player_data.rs` | which NBT field means what; `PlayerDataStore` |
 | entity storage | `crates/lodestone-server/src/entity_storage.rs` | the `entities/` region set, `SavedEntity`, stale clearing |
-| sim bridge | `crates/lodestone-server/src/mobs.rs` | `MobSim::saved_entities` / `restore_saved` |
+| sim bridge | `crates/lodestone-server/src/mobs/mod.rs` | `MobSim::saved_entities` / `restore_saved` |
 | version gate | `crates/lodestone-anvil/src/lib.rs` | `require_supported_data_version` |
 | lifecycle | `IntegratedServer::open_persistent_with_mobs` | the restore, the autosave, the shutdown flush |
 
@@ -102,7 +99,7 @@ and `serve_play` are at ~30 parameters between them across **eleven** wrapper ca
 sites, and the source is already threaded everywhere both need one. Riding the
 accessor a persistent source already answers also makes it structurally impossible
 for a persistent world to be served by a connection that cannot see its player
-files — the island shape #468 was for block entities.
+files — the same island shape block entities already had.
 
 ### When each thing is saved
 
@@ -121,7 +118,7 @@ The restore is in the seeding task **after** the reseed because
 `MobHandle::reseed` replaces the whole `MobSim`. Restoring before it would delete
 every saved mob with a completely green tree.
 
-## The `DataVersion` decision (#305)
+## The `DataVersion` decision
 
 **An on-disk `DataVersion` that is not exactly 4903 is refused, loudly. There is
 no upgrade path and there deliberately is not one.**

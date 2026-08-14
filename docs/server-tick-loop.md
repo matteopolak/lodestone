@@ -1,9 +1,7 @@
 # The server tick clock: MSPT/TPS accounting and overrun handling
 
-Issues [#284](https://github.com/matteopolak/lodestone/issues/284) (a real
-20Hz tick loop, independent of client traffic) and
-[#285](https://github.com/matteopolak/lodestone/issues/285) (MSPT/TPS
-accounting and tick-overrun handling).
+This covers a real 20Hz tick loop, independent of client traffic, plus
+MSPT/TPS accounting and tick-overrun handling.
 
 ## What it is
 
@@ -12,7 +10,7 @@ accounting and tick-overrun handling).
 mob simulation and every registered block entity) at vanilla's 20Hz, whether
 or not a client is connected. It replaces two separate background loops
 (`mobs::run_mob_tick_loop`, `block_entities::run_block_entity_tick_loop`) that
-used to be spawned side-by-side, and adds the accounting #285 asked for:
+used to be spawned side-by-side, and adds MSPT/TPS accounting:
 ticks-run, most-recent and rolling-average tick duration (MSPT), a derived
 TPS figure, and an overrun counter for when the loop falls behind schedule.
 
@@ -22,14 +20,14 @@ An earlier analysis of this codebase undercounted the timers already in
 `crates/lodestone-server/`. The real list, found by grepping
 `Instant|Duration|interval|sleep|elapsed` across the crate:
 
-| timer | file:line (pre-#284) | cadence | scope |
+| timer | file (before this work) | cadence | scope |
 |---|---|---|---|
-| `MOB_TICK_INTERVAL` | `mobs.rs:1783` (`run_mob_tick_loop`) | 50ms | world (background) |
-| `BLOCK_ENTITY_TICK_INTERVAL` | `block_entities.rs:407` (`run_block_entity_tick_loop`) | 50ms | world (background) |
-| `KEEP_ALIVE_INTERVAL` | `server.rs:40` | 15,000ms | per-connection |
-| `TIME_SYNC_INTERVAL` | `server.rs:54` | 1,000ms | per-connection |
-| `VITALS_TICK_INTERVAL` | `server.rs:107` | 50ms | per-connection |
-| `CONTAINER_SYNC_INTERVAL` | `server.rs:553` | 50ms | per-connection |
+| `MOB_TICK_INTERVAL` | `mobs/mod.rs` (`run_mob_tick_loop`) | 50ms | world (background) |
+| `BLOCK_ENTITY_TICK_INTERVAL` | `block_entities.rs` (`run_block_entity_tick_loop`) | 50ms | world (background) |
+| `KEEP_ALIVE_INTERVAL` | `server.rs` | 15,000ms | per-connection |
+| `TIME_SYNC_INTERVAL` | `server.rs` | 1,000ms | per-connection |
+| `VITALS_TICK_INTERVAL` | `server.rs` | 50ms | per-connection |
+| `CONTAINER_SYNC_INTERVAL` | `server.rs` | 50ms | per-connection |
 
 Only the first two were *world* clocks running independently of any one
 client — those are the two this work unifies. The other four are
@@ -48,8 +46,7 @@ timers" as "delete the other four" from a shorter brief later.
 architectural findings it encoded: the server owns its clock, and the server never runs inside the
 client's schedule.**
 
-The owner has decided to adopt `bevy_ecs` in `lodestone-server` (issue
-[#433](https://github.com/matteopolak/lodestone/issues/433)), so that server-side plugins get the
+The owner has decided to adopt `bevy_ecs` in `lodestone-server`, so that server-side plugins get the
 same five-clause intent doctrine [`docs/plugin-api.md`](./plugin-api.md) already gives client-side
 plugins — matching Bukkit/Spigot's own precedent of implementing core server functionality through
 the plugin surface itself, rather than beside it. A read-only architecture review designed the
@@ -70,7 +67,7 @@ analysis:
    loop and its clock remain the sole driver; nothing about that changes.
 
    The *first* horn does not hold, checked directly rather than assumed: `bevy_app`/`bevy_ecs` are
-   pinned **without** `multi_threaded` on every target, workspace-wide (root `Cargo.toml:91-92`:
+   pinned **without** `multi_threaded` on every target, workspace-wide (root `Cargo.toml`:
    `bevy_app = { version = "0.19", default-features = false, features = ["std"] }` /
    `bevy_ecs = { version = "0.19", default-features = false, features = ["std"] }`).
    `crates/lodestone-ecs/Cargo.toml`'s own comment on the same two lines: "`multi_threaded` does not
@@ -81,18 +78,18 @@ analysis:
 
    `crates/lodestone-ecs/src/runner.rs`'s `Runner::Headless` variant already demonstrates exactly
    this, and has since before this decision. `Runner::Headless { tick_hz, max_catch_up_ticks }`
-   (`runner.rs:36-43`) and its `run_headless` method (`runner.rs:58-98`) are a hand-rolled `while`
+   and its `run_headless` method are a hand-rolled `while`
    loop built on `std::time::Instant`/`std::thread::sleep` — no tokio, no executor — that calls
-   `app.world_mut().run_schedule(GameTick)` directly at `runner.rs:80`. The server's tick loop takes
+   `app.world_mut().run_schedule(GameTick)` directly. The server's tick loop takes
    the identical shape: `tokio::time::sleep_until` drives the wake-up (unchanged from today), and the
    schedule run itself is one more synchronous call on the tick task, exactly like `mobs.tick()` and
    `block_entities.tick_all()` are today.
 3. **`run_tick_loop` is a plain spawned function — unchanged, and it remains the driver.**
    `crate::tick::run_tick_loop` is still `pub(crate) async fn`
-   (`crates/lodestone-server/src/tick.rs:477`), still its own `loop { ... sleep_until ... }`, and
+   (`crates/lodestone-server/src/tick.rs`), still its own `loop { ... sleep_until ... }`, and
    still reached from exactly one call site — `spawn_tick_task`
-   (`crates/lodestone-server/src/integrated.rs:85-96`), a plain wrapper around `tokio::spawn` +
-   a shutdown `tokio::select!`, invoked at `integrated.rs:326-338`. Adopting `bevy_ecs` changes what
+   (`crates/lodestone-server/src/integrated.rs`), a plain wrapper around `tokio::spawn` +
+   a shutdown `tokio::select!`, invoked from `open_in_memory_with_mobs_using`. Adopting `bevy_ecs` changes what
    runs *inside* one iteration of that loop — `world.run_schedule(GameTick)` in place of calling
    `MobSim::tick`/`BlockEntityRegistry::tick_all` directly — not who calls the loop or how often.
 
@@ -161,8 +158,8 @@ brief specifically asked to *verify rather than assume* ("does not try to
 catch up indefinitely") is the "not indefinitely" half, not a claim that no
 catch-up happens at all. `nextTickTimeNanos += thisTickNanos` runs
 *unconditionally*, every iteration, whether or not the server is behind
-(`MinecraftServer.java:752`), and `waitUntilNextTick`/`haveTime`
-(`:846-863`) does not park at all once real time has already reached
+(`MinecraftServer.runServer`), and `waitUntilNextTick`/`haveTime`
+does not park at all once real time has already reached
 `nextTickTimeNanos`. So while only mildly behind, iterations run back-to-back
 at full speed with zero artificial delay between them — that *is* the
 catch-up, and `run_tick_loop` gets it for free from `tokio::time::sleep_until`
@@ -201,7 +198,7 @@ pins it).
 - `tick_count` — real (never-skipped) ticks run.
 - `last_mspt_micros` — the most recently completed tick's own duration.
 - a 100-sample ring buffer (matching vanilla's own `tickTimesNanos` array,
-  `MinecraftServer.java:248`) for the rolling average.
+  `MinecraftServer`'s field of the same name) for the rolling average.
 - `overrun_count` — how many times the loop has forgiven a backlog.
 
 [`TickStats`] (returned by [`TickClock::stats`], and by
@@ -215,7 +212,7 @@ derivation.
 
 - **`run_mob_tick_loop`/`run_block_entity_tick_loop` still exist.** They are
   no longer what `IntegratedServer::open_in_memory_with_mobs` spawns, but
-  each still has its own direct unit test (`mobs.rs`,
+  each still has its own direct unit test (`mobs/mod.rs`,
   `block_entities.rs`), so they are marked `#[allow(dead_code)]` rather than
   deleted — deleting them would also delete real regression coverage on
   `MobSim::tick`/`LiveMobSource::publish` and `BlockEntityRegistry::tick_all`
@@ -243,7 +240,7 @@ derivation.
 Per CLAUDE.md's "nothing is done until something on screen changes":
 `run_tick_loop` is spawned from two constructors — see
 [One loop per world, not per connection](#one-loop-per-world-not-per-connection)
-below for the LAN one (issue #439), which is newer than the rest of this
+below for the LAN one, which is newer than the rest of this
 section. The singleplayer chain is
 `IntegratedServer::open_in_memory_with_mobs`
 (`crates/lodestone-server/src/integrated.rs`), which is the constructor
@@ -267,7 +264,7 @@ net.rs::run() (shell, unchanged)
 
 `TickStats` itself is consumed through
 [`IntegratedServer::tick_stats`] — `Some` for `open_in_memory_with_mobs` and
-(since #439) `bind`, `None` for the remaining in-memory constructors. No shell
+(since the LAN world-tick addition) `bind`, `None` for the remaining in-memory constructors. No shell
 UI reads it yet (out of
 this task's scope: the shell files this task touches are `net.rs`, and no
 debug HUD/command surface exists in this crate to plug it into today); the
@@ -280,7 +277,7 @@ gate for this crate is `tick.rs`'s own test module plus
 `open_in_memory_with_mobs` continuing to prove the mob/block-entity wiring
 end to end.
 
-### One loop per world, not per connection (issue #439)
+### One loop per world, not per connection
 
 For a long time `run_tick_loop` had exactly **one** caller,
 `open_in_memory_with_mobs`. `IntegratedServer::bind` — the open-to-LAN path —
@@ -323,10 +320,11 @@ Observed, `--release`:
 
 The 3.11 is 1 world loop + 2 connection loops, exactly as predicted.
 
-**The achieved rate is an environment property, not a #439 one — and the
-first version of this note blamed the wrong variable.** Because `run_tick_loop`
+**The achieved rate is an environment property, not one specific to this
+addition — and the first version of this note blamed the wrong variable.**
+Because `run_tick_loop`
 re-generates every column in its area from the source on *every* tick (the
-documented #289 gap), it is sensitive to whatever else the machine is doing:
+documented chunk-lifecycle gap), it is sensitive to whatever else the machine is doing:
 
 | run | probe visits/s | nominal |
 |---|---|---|
@@ -349,7 +347,7 @@ immune to both variables.
 (a 5×5 chunk square around the origin), because this crate still has no
 loaded-chunk registry to derive one from. That is conservative rather than
 arbitrary: singleplayer already passes `view_radius.clamp(1, 3)`, i.e. up to
-7×7, with the *real* generator. `docs/plans/chunk-lifecycle.md` (#289) is what
+7×7, with the *real* generator. `docs/plans/chunk-lifecycle.md` is what
 replaces it with a ticket-driven set. `bind`'s public signature deliberately did
 not grow a parameter for it.
 

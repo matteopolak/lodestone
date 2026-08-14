@@ -1,7 +1,7 @@
 # Armour trim decoding, and the component-patch decode cliff
 
-Issue [#17](https://github.com/matteopolak/lodestone/issues/17) (partial — the wire
-half; the renderer half is shell work and still outstanding).
+This is partial — the wire half is done; the renderer half is shell work and still
+outstanding.
 
 ## What it is
 
@@ -15,19 +15,20 @@ The more important half is why it had to be *modeled* rather than skipped.
 
 ## The decode cliff, and why skipping is impossible
 
-`read_component_patch` (`crates/protocol/v770/src/adapter.rs`) has an `other =>`
+`read_component_patch` (`crates/protocol/v770/src/adapter/inventory.rs`) has an `other =>`
 arm that sets `has_unmodeled` and **stops reading the rest of the packet**. That
 looks like a wart worth fixing generically — skip the unknown component's payload
 and continue — and it is not fixable, verified against the jar rather than assumed:
 
-26.2 ships **two** patch codecs (`DataComponentPatch.java:62-76`):
+26.2 ships **two** patch codecs, `DataComponentPatch`'s `STREAM_CODEC` and
+`DELIMITED_STREAM_CODEC` fields:
 
 | codec | payloads | used by |
 |---|---|---|
 | `STREAM_CODEC` | written **raw**, no length | `ItemStack.OPTIONAL_STREAM_CODEC` — **clientbound** |
 | `DELIMITED_STREAM_CODEC` | `registryFriendlyLengthPrefixed` | `OPTIONAL_UNTRUSTED_STREAM_CODEC` — serverbound |
 
-`ItemStack.java:124-126` is the join: clientbound stacks are built on the
+`ItemStack`'s `OPTIONAL_STREAM_CODEC` field is the join: clientbound stacks are built on the
 **undelimited** one. So there is no length to skip and no self-describing framing
 to walk, and the delimited variant exists precisely so a *server* can safely skip a
 hostile client's junk — the asymmetry is deliberate.
@@ -39,7 +40,7 @@ not merely a lost field, and it is the reason `minecraft:max_stack_size` and
 
 ## How it works
 
-`read_armor_trim` mirrors `ArmorTrim.STREAM_CODEC` (`ArmorTrim.java:26-28`): a
+`read_armor_trim` mirrors `ArmorTrim`'s `STREAM_CODEC` field: a
 `Holder<TrimMaterial>` then a `Holder<TrimPattern>`. Each holder is a VarInt where
 `0` introduces an **inline** definition and any positive value references the
 registry at `value - 1`. Both forms are read, because both must be — consuming the
@@ -134,8 +135,8 @@ not at the adapter.
 * **`Registries.TRIM_MATERIAL` and `TRIM_PATTERN` are dynamic registries.** Their
   ids come from the Configuration-phase `registry_data` sync, and this client keeps
   no dynamic-registry store — so a reference-form holder has nothing to resolve
-  against. `adapter.rs`'s `TRIM_MATERIAL_IDS`/`TRIM_PATTERN_IDS` are the vanilla
-  **bootstrap order** (`TrimMaterials.java:25-35`, `TrimPatterns.java:31-48`), which
+  against. `adapter/inventory.rs`'s `TRIM_MATERIAL_IDS`/`TRIM_PATTERN_IDS` are the vanilla
+  **bootstrap order** (`TrimMaterials.bootstrap`, `TrimPatterns.bootstrap`), which
   is what a server without a trim datapack assigns. Exact for vanilla,
   **provisional** for a modded server — the same posture and caveat as
   `server_protocol.rs`'s `BIOME_NAMES`. An out-of-range id yields an empty string

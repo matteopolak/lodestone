@@ -200,7 +200,7 @@ The breakdown that makes this *cycle accounting* rather than a single ratio:
 ## Guard fix that must land with the instrument
 
 `benches/support.rs`'s counters-poisoning guard **fails open**:
-`timing_is_poisoned_by_counters` (support.rs:104–115) refuses only units listed in
+`timing_is_poisoned_by_counters` (`benches/support.rs`) refuses only units listed in
 `ABSOLUTE_TIME_UNITS`, so a metric recorded in a *new* unit — including
 `"instructions"` and `"cycles"` — records under `gen-counters` silently. That is the
 same class as the four premise-false controls this drive caught: it reads as coverage.

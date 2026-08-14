@@ -790,7 +790,7 @@ state is — will shift every number here run to run.
 
 ### The just-recipe conversion's first CI run (`30946172105`)
 
-Item 3 of the `just` design (#432) landed: the four health-check jobs now
+Item 3 of the `just` design landed: the four health-check jobs now
 install a pinned `just` (`extractions/setup-just`, commit SHA, not a floating
 tag) and run `just check`/`check-all`/`check-seam`/`test` instead of a
 hand-copied `cargo` line. Read from the run itself, not assumed:
@@ -825,7 +825,7 @@ file's edits:**
   shared-crate-depends-on-a-version-crate violation that check exists to
   catch. Real, and not caused by anything in this change.
 - `test` failed on a single test, `measure_light_recompute_cost`
-  (`crates/lodestone-world/tests/memory.rs:286`), a wall-clock-bound
+  (`crates/lodestone-world/tests/memory.rs`), a wall-clock-bound
   performance assertion (`column light recompute unexpectedly slow: 54.899
   ms`) — the same species of timing-sensitive test as the
   `sim::tests::extract_particles_…` flake logged above. It failed identically

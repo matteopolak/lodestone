@@ -1,6 +1,6 @@
 # Creative flight
 
-Issue #191. Vanilla's creative/spectator-style flight: the double-tap-space toggle, the
+Vanilla's creative/spectator-style flight: the double-tap-space toggle, the
 `Abilities` record that grants it, the physics modifications it applies, and the outbound echo
 that keeps the server in agreement.
 
@@ -9,18 +9,18 @@ that keeps the server in agreement.
 Two things, and separating them was the whole design:
 
 1. **Creative flight** — `Abilities.flying`. Server-granted, **collides with blocks**, runs
-   vanilla's ordinary `travelInAir` arithmetic with three modifications. This is what #191 added,
-   and it is the only flight the client has now.
+   vanilla's ordinary `travelInAir` arithmetic with three modifications, and it is the only
+   flight the client has now.
 2. **Free-fly / noclip** — `lodestone_ecs::player::Flying`. A *developer* camera: local, no
-   collision, `position += dir * speed` with no velocity or drag. It predated #191, which
-   deliberately kept it as a separate affordance — and **issue #382 then deleted the way in.**
+   collision, `position += dir * speed` with no velocity or drag. It predated creative flight,
+   which deliberately kept it as a separate affordance — and **was later deleted as a way in.**
 
-### #382: the free-cam has no route from the shell any more
+### The free-cam has no route from the shell any more
 
-The user's call, and it supersedes #191's decision to keep it: *"delete all of the nonstandard
-debug things we added. we can accomplish that stuff with the real cheat commands."* Between #191's
+The user's call, and it supersedes the earlier decision to keep it: *"delete all of the nonstandard
+debug things we added. we can accomplish that stuff with the real cheat commands."* Between the
 real double-tap-space flight and `/gamemode creative`, the free-cam was redundant twice over, and
-it was squatting on `F` — vanilla's `key.swapOffhand` — which blocked #378.
+it was squatting on `F` — vanilla's `key.swapOffhand` — which blocked another feature.
 
 Deleted: `InputAction::ToggleFly` / `key.lodestone.toggleFly`, its `resolve_key` arm and
 `KeyOutcome::ToggleFly`, `Sim::flying`/`Sim::toggle_fly`, and the F3 overlay's `MODE FLY/WALK`
@@ -35,8 +35,8 @@ correct.
 
 ## The bug this closed first
 
-`ClientEvent::AbilitiesChanged` was a **complete island**. It was decoded correctly at
-`crates/protocol/v770/src/adapter.rs:3301`, unit-tested at the protocol layer, and round-tripped
+`ClientEvent::AbilitiesChanged` was a **complete island**. It was decoded correctly in
+`crates/protocol/v770/src/adapter/player.rs`'s `V770Adapter::handle_play_player`, unit-tested at the protocol layer, and round-tripped
 in `lodestone-model`'s own tests — and consumed **nowhere**. `grep -c AbilitiesChanged` returned
 `0` in both `lodestone-ecs/src/ingest.rs` and `lodestone-shell/src/sim.rs`.
 
@@ -85,7 +85,7 @@ that calls the fold directly passes either way, which is why
 ### Flight is a wrapper, not a fourth travel mode
 
 The issue body proposed `tick_fly` alongside `tick_air`/`tick_water`/`tick_elytra`. **That shape
-cannot reproduce vanilla.** `Player.travel` (`Player.java:1416-1424`) *wraps*
+cannot reproduce vanilla.** `Player.travel` *wraps*
 `super.travel(input)`:
 
 ```java
@@ -103,7 +103,7 @@ So flight is three modifications to machinery that already existed, all in
 
 | # | what | where |
 |---|---|---|
-| 1 | **dispatch suppressor** — `isAffectedByFluids()` is `!flying` (`Player.java:875`), so a flying player never takes the fluid branch | `travel_and_check_inside_blocks` |
+| 1 | **dispatch suppressor** — `isAffectedByFluids()` is `!flying`, so a flying player never takes the fluid branch | `travel_and_check_inside_blocks` |
 | 2 | **speed substitution** — `getFrictionInfluencedSpeed` returns `getFlyingSpeed()` when airborne | `player_flying_speed` → `AirTravelContext::flying_speed` |
 | 3 | **post-travel Y overwrite** — the *pre*-travel Y × `0.6` **replaces** the post-travel Y | `travel_and_check_inside_blocks` |
 
@@ -122,7 +122,7 @@ trace.
 
 ### `getFlyingSpeed()` has four arms, and two of them are not about flight
 
-`Player.getFlyingSpeed()` (`Player.java:1974-1980`):
+`Player.getFlyingSpeed()`:
 
 ```java
 if (this.abilities.flying && !this.isPassenger()) {
@@ -150,24 +150,24 @@ bits.
 
 ### The `!flying` conjuncts
 
-Thirteen sites, each applied where vanilla applies it. Twelve were tabulated in #191's research
-comment; **the first one below was not, and it is the one that matters most at ground level.**
+Thirteen sites, each applied where vanilla applies it. Twelve were tabulated in the original
+research comment; **the first one below was not, and it is the one that matters most at ground level.**
 
 | behaviour while flying | source | where |
 |---|---|---|
-| **no `jumpFromGround` at all** — the whole aiStep jump block is gated on `isAffectedByFluids()` | `LivingEntity.java:3089` | `tick_air` |
-| fluid travel branch suppressed | `Player.java:875` | `travel_and_check_inside_blocks` |
-| `resetFallDistance()` every tick, **pre**-travel | `Player.java:449` | `travel_and_check_inside_blocks` |
-| `getBlockSpeedFactor()` → `1.0F` (also while gliding) | `Player.java:1855` | `MoveContext::suppress_block_speed_factor` |
-| `onClimbable()` → `false` | `Player.java:2025` | `on_climbable`, `AirTravelContext::suppress_climbable` |
-| `updateSwimming()` → `setSwimming(false)` | `Player.java:1433` | `travel_and_check_inside_blocks` |
-| no crouch pose (shift is *descend*) | `Player.java:369` | `pose::desired_pose` |
-| `maybeBackOffFromEdge` → identity | `Player.java:882` | `AirTravelContext::edge_back_off` |
-| `makeStuckInBlock` skipped | `Player.java:1514` | `travel_and_check_inside_blocks` |
-| bubble-column impulse skipped | `Player.java:309-321` | `travel_and_check_inside_blocks` |
-| `isPushedByFluid()` → `false` | `Player.java:1695` | covered by the suppressor (see gotchas) |
-| `canGlide()` → `false` | `Player.java:1429` | driver: not modelled, see divergences |
-| landing cancels flight | `LocalPlayer.java:911` | `cancel_flight_on_landing` |
+| **no `jumpFromGround` at all** — the whole aiStep jump block is gated on `isAffectedByFluids()` | `LivingEntity.aiStep` | `tick_air` |
+| fluid travel branch suppressed | `Player.isAffectedByFluids` | `travel_and_check_inside_blocks` |
+| `resetFallDistance()` every tick, **pre**-travel | `Player.aiStep` | `travel_and_check_inside_blocks` |
+| `getBlockSpeedFactor()` → `1.0F` (also while gliding) | `Player.getBlockSpeedFactor` | `MoveContext::suppress_block_speed_factor` |
+| `onClimbable()` → `false` | `Player.onClimbable` | `on_climbable`, `AirTravelContext::suppress_climbable` |
+| `updateSwimming()` → `setSwimming(false)` | `Player.updateSwimming` | `travel_and_check_inside_blocks` |
+| no crouch pose (shift is *descend*) | `Player.getDesiredPose` | `pose::desired_pose` |
+| `maybeBackOffFromEdge` → identity | `Player.maybeBackOffFromEdge` | `AirTravelContext::edge_back_off` |
+| `makeStuckInBlock` skipped | `Player.makeStuckInBlock` | `travel_and_check_inside_blocks` |
+| bubble-column impulse skipped | `Player.onAboveBubbleColumn` / `Player.onInsideBubbleColumn` | `travel_and_check_inside_blocks` |
+| `isPushedByFluid()` → `false` | `Player.isPushedByFluid` | covered by the suppressor (see gotchas) |
+| `canGlide()` → `false` | `Player.canGlide` | driver: not modelled, see divergences |
+| landing cancels flight | `LocalPlayer.aiStep` | `cancel_flight_on_landing` |
 
 The edge back-off one is worth noting: `EdgeBackOff`'s doc used to record `!abilities.flying` as
 "satisfied by construction — this crate does not model creative flight at all". **That argument
@@ -233,7 +233,7 @@ apply_creative_flight_input   →  player_physics  →  cancel_flight_on_landing
 Each is pinned by a test, so it fails loudly if the assumption changes.
 
 * **Spectator mode is deferred, not half-modelled.** `Player.tick` sets
-  `this.noPhysics = this.isSpectator()` (`Player.java:233`), which makes `Entity.move` skip
+  `this.noPhysics = this.isSpectator()`, which makes `Entity.move` skip
   collision resolution entirely; spectators also cannot interact with blocks and are not pickable.
   **None of that is modelled.** The only spectator-aware line in the whole change is the
   `!isSpectator()` conjunct in `cancel_flight_on_landing`, so a spectator keeps flying instead of
@@ -243,20 +243,20 @@ Each is pinned by a test, so it fails loudly if the assumption changes.
   suppression in the shell. Stating the gap beats a partial model that looks finished — the ruling
   `docs/edge-back-off.md` records for its own sibling case.
 * **The one-shot hop on engaging flight while standing is not modelled.** Vanilla does
-  `if (abilities.flying && this.onGround()) this.jumpFromGround();` on the toggle edge
-  (`LocalPlayer.java:840`). `jump_from_ground` is private to `lodestone-physics` and needs a
+  `if (abilities.flying && this.onGround()) this.jumpFromGround();` on the toggle edge, in
+  `LocalPlayer.aiStep`. `jump_from_ground` is private to `lodestone-physics` and needs a
   `CollisionView` for `getBlockJumpFactor`, which `apply_creative_flight_input` does not hold. Cost:
   a slightly less snappy takeoff (a one-tick `+0.42` Y). Flight itself is unaffected.
 * **`canGlide()`'s `!flying` conjunct is not modelled**, because nothing in this repo starts an
   elytra glide from the client yet (`tryToStartFallFlying` has no port). `fall_flying` arrives as
   server entity data, and the travel dispatch honours it exactly as vanilla's does if both bits are
   somehow set.
-* **`getMovementEmission()`'s `flying` arm** (`Player.java:1643`) is sound, not physics.
+* **`getMovementEmission()`'s `flying` arm** (`Player.getMovementEmission`) is sound, not physics.
 * **`isControlledCamera()`** is vacuously true — this engine has no camera possession.
 
 ## The oracle agreed with the bug
 
-`tests/gen_golden.py` is this crate's Python oracle. At line 869 it read
+`tests/gen_golden.py` is this crate's Python oracle. Its `tick_air` function read
 `speed = P.flying_speed` — the **same** defect as the Rust, with no sprint term. So the two ports
 agreed with each other and both disagreed with the jar, and `GOLDEN_SPRINT_JUMP` encoded the wrong
 airborne acceleration for as long as it had existed.
@@ -297,9 +297,9 @@ Nothing tunable. Everything is server-supplied or a vanilla constant.
 | `Abilities.mayfly` | `false` | server — **the gate** |
 | `PhysicsProfile::flying_speed` | `0.02F` | non-flying airborne, not flight |
 | `PhysicsProfile::airborne_sprint_speed` | `0.025999999F` | non-flying airborne, sprinting |
-| the Y overwrite | `0.6` | `Player.java:1420` |
-| `jumpTriggerTime` window | `7` ticks | `LocalPlayer.java:834` |
-| vertical impulse | `flyingSpeed * 3.0F` | `LocalPlayer.java:877` |
+| the Y overwrite | `0.6` | `Player.travel` |
+| `jumpTriggerTime` window | `7` ticks | `LocalPlayer.aiStep` |
+| vertical impulse | `flyingSpeed * 3.0F` | `LocalPlayer.aiStep` |
 
 The developer free-fly camera's speed is `lodestone_ecs::player::FLY_SPEED`, unrelated.
 

@@ -43,11 +43,11 @@ can be re-run.
 
 The single production path is `OverworldGenerator::column`
 (`crates/lodestone-worldgen/src/overworld/mod.rs`), built by
-`overworld_generator(seed)` at `crates/lodestone-server/src/worldgen_data.rs:365`, wrapped
-as `OverworldChunkSource`, and encoded by `encode_column_body` at
-`crates/protocol/v770/src/server_protocol.rs:1460` — the only `ServerProtocol` impl. The
+`overworld_generator(seed)` in `crates/lodestone-server/src/worldgen_data.rs`, wrapped
+as `OverworldChunkSource`, and encoded by `encode_column_body` in
+`crates/protocol/v770/src/server_protocol.rs` — the only `ServerProtocol` impl. The
 shell also calls the generator directly for singleplayer
-(`crates/lodestone-shell/src/worldgen.rs:78`). Anything not reached from one of those two
+(`crates/lodestone-shell/src/worldgen.rs`'s `generator` function). Anything not reached from one of those two
 is orphaned.
 
 ---
@@ -62,17 +62,17 @@ Vanilla source of truth: `net/minecraft/world/level/levelgen/NoiseGeneratorSetti
 | Overworld terrain generator | **reached** | `OverworldGenerator::column_timed` runs 10 stages: aquifer, shape, biome, surface, materialize, carve, ore, vegetation, top-layer, intern (`overworld/mod.rs`, `column_timed`) |
 | Nether generator | **absent** | `grep -rni nether crates/lodestone-worldgen crates/lodestone-worldgen-core --include=*.rs` → **0 hits**. There is exactly one generator type in the tree |
 | End generator | **absent** | same grep; no `TheEndBiomeSource`, no `end_islands` |
-| `minecraft:end_islands` density type | **absent** | not a `Density` variant (`lodestone-worldgen-core/src/density/mod.rs`, enum `Density`); `density/mod.rs:916` `panic!("unhandled density-function type…")`. Used by bundled `noise_settings/end.json` **and** `density_function/end/sloped_cheese.json` — two uses, so loading End data panics today |
+| `minecraft:end_islands` density type | **absent** | not a `Density` variant (`lodestone-worldgen-core/src/density/mod.rs`, enum `Density`); its `build_object` method's `panic!("unhandled density-function type…")` arm. Used by bundled `noise_settings/end.json` **and** `density_function/end/sloped_cheese.json` — two uses, so loading End data panics today |
 | non-overworld `noise_settings` | **partly reached** | all 7 bundled (`assets/worldgen/noise_settings/{overworld,nether,end,amplified,caves,floating_islands,large_biomes}.json`); issue #519 made `amplified` and `large_biomes` selectable (`worldgen_data::WorldType`, `overworld_generator_of_type`/`overworld_chunk_source_of_type`). `nether`/`end` are read by their own dedicated generators (see below); `caves`/`floating_islands` are custom-dimension `noise_settings`, not overworld presets, and remain orphaned — referenced only from `crates/lodestone-data/tests/worldgen_dimension_data.rs` |
 | `legacy_random_source` (Nether/End gate) | **absent** | 3 tree-wide hits, all in `crates/lodestone-data/tests/worldgen_dimension_data.rs`. Both non-overworld settings set it `true`; `overworld.json` sets it `false`. Tracked as **#486** |
-| `world_preset/*.json` documents (7) + flat presets (9) | **orphaned (data)** | still true literally — no code parses a `world_preset/*.json` document itself. `worldgen_structure_corpus.rs:73,84` still the only Rust reference. **Note the distinction**: `amplified`/`large_biomes` are now reachable (row below), but via a hand-written `WorldType` enum naming the `noise_settings` id directly, not by resolving `world_preset/amplified.json`'s own `generator.settings` field — so even those two presets' *own* JSON documents remain unread |
+| `world_preset/*.json` documents (7) + flat presets (9) | **orphaned (data)** | still true literally — no code parses a `world_preset/*.json` document itself. `worldgen_structure_corpus.rs`'s `EXPECTED_COUNTS` table is still the only Rust reference. **Note the distinction**: `amplified`/`large_biomes` are now reachable (row below), but via a hand-written `WorldType` enum naming the `noise_settings` id directly, not by resolving `world_preset/amplified.json`'s own `generator.settings` field — so even those two presets' *own* JSON documents remain unread |
 | amplified / large_biomes | **reached** (issue #519) | `worldgen_data::WorldType::{Amplified,LargeBiomes}` selects the already-bundled `noise_settings/{amplified,large_biomes}.json` and their `density_function/overworld_{amplified,large_biomes}/*` documents through `overworld_generator_of_type`/`overworld_chunk_source_of_type`. Verified, not merely wired: at seed 4242, chunk `(0,0)` local `(0,0)`, `Overworld` yields top-non-air `y=64` and `Amplified` yields `y=130` — a 66-block divergence at the identical input (`crates/lodestone-server/tests/world_type_selection.rs`). `LargeBiomes`' climate noise is measurably coarser: over a 120-chunk strip at the same seed, `Overworld` crosses a biome boundary 20 times across 12 distinct biomes and `LargeBiomes` crosses once across 2. Both presets select `biome_source.preset: "minecraft:overworld"` in their own `world_preset/*.json`, so the existing `biome_parameters/overworld` table is correct for them — no `Resolver::biome_parameters` widening was needed, contrary to this doc's earlier "also found" note below (that widening is still needed for a *Nether* biome source, just not for these two) |
 | superflat generator | **absent** | no `FlatLevelSource` analogue; grep `flat_level_generator\|superflat` in `crates/**/src` → hits are only light-propagation prose. #519 deliberately did not add a `WorldType` variant for it — one would either need this generator behind it or would silently serve ordinary overworld terrain under a "Flat" label, which is worse than the preset being absent |
 | debug-world generator | **absent** | no implementation. Same deliberate omission as superflat, for the same reason |
 | `FixedBiomeSource` / `CheckerboardColumnBiomeSource` | **absent** | grep → 0 hits. Needed by single-biome and debug presets |
-| server multi-dimension plumbing | **absent** | Anvil paths hardcode `dimensions/minecraft/overworld` (`lodestone-server/src/region_source.rs:91,400`); tracked as **#330** |
+| server multi-dimension plumbing | **absent** | Anvil paths hardcode `dimensions/minecraft/overworld` (`lodestone-server/src/region_source.rs`); tracked as **#330** |
 
-**Also found:** `Resolver::biome_parameters(&self)` (`density/mod.rs:228`) takes **no
+**Also found:** `Resolver::biome_parameters(&self)` (`density/mod.rs`'s `Resolver` trait) takes **no
 dimension argument**, so `assets/worldgen/biome_parameters/nether.json` — which cost a
 bespoke JVM oracle to produce — is structurally unreachable: `EmbeddedResolver`'s override
 hardcodes `biome_parameters/overworld`. A Nether biome source needs this trait method
@@ -80,7 +80,7 @@ widened, which #485 does not mention.
 
 **Also found:** vanilla registers **three** carvers; we implement two (below). The missing
 one is `nether_cave`, which `CarverConfig::parse` handles by
-`panic!("unsupported carver type")` (`carver/mod.rs:234`). #485's engine list does not
+`panic!("unsupported carver type")`. #485's engine list does not
 name it.
 
 ---
@@ -92,31 +92,31 @@ Vanilla source of truth: `level/biome/{Climate,MultiNoiseBiomeSource}.java`,
 
 | item | verdict | evidence |
 |---|---|---|
-| Multi-noise climate sampling (7 channels) | **reached** | `crates/lodestone-worldgen/src/biome/mod.rs`, driven from `overworld/biome.rs:41` `biome_stage` |
+| Multi-noise climate sampling (7 channels) | **reached** | `crates/lodestone-worldgen/src/biome/mod.rs`, driven from `overworld/biome.rs`'s `biome_stage` |
 | `Climate.RTree` search | **reached** | `biome/tree.rs` (717 lines, literal port); landed `7ff942dd` / `71dd8b22`. Issue **#491 is stale-open** |
 | per-source-chunk biome memo | **reached** | `biome/memo.rs` |
 | **3-D biome sampling (4×4×4 quart cells)** | **reached** (#512, generator `0ccb2e5d` + consumer `a617454d`) | `biome_cells_stage` builds a `BiomeCells` of 16 × (height/4) cells and `biome_stage`'s 16-entry surface array is now *read out of* it rather than sampled separately. `ChunkColumn` carries the grid, the v770 encoder resolves the column's small biome palette once and indexes per cell, and `chunk_nbt` reads and writes every section's own container. Measured over 576 generated columns: 503 carry a biome the surface array does not, across `lush_caves`, `dripstone_caves` and `sulfur_caves`. The prior verdict was **absent**, with the consequence that no cave biome could appear at any depth |
-| biome-specific surface rules | **reached** | `Cond::Biome` at `surface/mod.rs:1016`, driven per column |
+| biome-specific surface rules | **reached** | `Cond::BiomeIs` in `surface/mod.rs`, driven per column |
 | `TheEndBiomeSource` / `FixedBiomeSource` / `CheckerboardColumnBiomeSource` | **absent** | see §1 |
-| biome wire ids | **partial, known-divergent** | `server_protocol.rs:233-256` uses a *sorted* 55-entry local id space, not vanilla's registration order, because `worldgen/biome` is not in the configuration-phase registry sync (**#275**). Documented in place, not a hidden gap |
+| biome wire ids | **partial, known-divergent** | `server_protocol.rs`'s `BIOME_NAMES` const and `resolve_biome_id` use a *sorted* 55-entry local id space, not vanilla's registration order, because `worldgen/biome` is not in the configuration-phase registry sync (**#275**). Documented in place, not a hidden gap |
 
 ---
 
 ## 3. Surface rules
 
-Vanilla source of truth: `level/levelgen/SurfaceRules.java:265-275` (conditions) and
-`:650-653` (rule sources).
+Vanilla source of truth: `SurfaceRules.ConditionSource`/`SurfaceRules.Condition` (conditions) and
+`SurfaceRules.RuleSource` (rule sources).
 
 **Type coverage is complete — 11/11 conditions, 4/4 rules.** Measured as a set difference,
 not eyeballed:
 
 | | vanilla | ours |
 |---|---|---|
-| rule sources | `bandlands`, `block`, `sequence`, `condition` | all 4 — `surface/mod.rs:945,949,957,961` |
-| conditions | `biome`, `noise_threshold`, `vertical_gradient`, `y_above`, `water`, `temperature`, `steep`, `not`, `hole`, `above_preliminary_surface`, `stone_depth` | all 11 — `surface/mod.rs:1015-1073` |
+| rule sources | `bandlands`, `block`, `sequence`, `condition` | all 4 — `surface/mod.rs`'s `RuleParser::rule` |
+| conditions | `biome`, `noise_threshold`, `vertical_gradient`, `y_above`, `water`, `temperature`, `steep`, `not`, `hole`, `above_preliminary_surface`, `stone_depth` | all 11 — `surface/mod.rs`'s `RuleParser::cond` |
 
 Verdict: **reached**, and the only surface-rule axis in this census with no gap. Unknown
-types panic loudly rather than degrading (`surface/mod.rs:962,1081`), which is the right
+types panic loudly rather than degrading (`RuleParser::rule`/`RuleParser::cond`'s `other =>` arms), which is the right
 failure mode. Per-dimension surface rules therefore need **no new condition type** — the
 Nether's rules are a strict subset (independently confirmed in #485).
 
@@ -124,16 +124,16 @@ Nether's rules are a strict subset (independently confirmed in #485).
 
 ## 4. Carvers
 
-Vanilla source of truth: `level/levelgen/carver/WorldCarver.java:32-34`.
+Vanilla source of truth: `WorldCarver.CAVE`/`NETHER_CAVE`/`CANYON`.
 
 | carver | verdict | evidence |
 |---|---|---|
-| `cave` | **reached** | `carver/mod.rs:202`, `CaveConfig::carve` at `:482`, driven from `carve_stage` |
-| `canyon` | **reached** | `carver/mod.rs:213`, `CanyonConfig` at `:696` |
-| `nether_cave` | **absent** | `carver/mod.rs:234` `panic!("unsupported carver type")`. `configured_carver/nether_cave.json` is bundled (4/4 configured carvers) and unreferenced by any overworld biome, so the panic is latent, not live |
+| `cave` | **reached** | `CarverConfig::Cave` (`carver/mod.rs`), `CaveConfig::carve`, driven from `carve_stage` |
+| `canyon` | **reached** | `CarverConfig::Canyon` (`carver/mod.rs`), `CanyonConfig::carve` |
+| `nether_cave` | **absent** | `carver/mod.rs`'s `CarverConfig::parse` `panic!("unsupported carver type")` arm. `configured_carver/nether_cave.json` is bundled (4/4 configured carvers) and unreferenced by any overworld biome, so the panic is latent, not live |
 
 All 4 `configured_carver` documents are bundled; carver composition is per-biome through
-`compose.rs:65` `build_biome_carvers`, in the biome JSON's own array order (which
+`compose.rs`'s `build_biome_carvers`, in the biome JSON's own array order (which
 `set_large_feature_seed`'s index depends on).
 
 ---
@@ -145,10 +145,10 @@ Vanilla source of truth: `level/levelgen/feature/OreFeature.java`,
 
 | item | verdict | evidence |
 |---|---|---|
-| `minecraft:ore` feature | **reached** | `feature/mod.rs:553` `parse_ore_config`, driven by `ore_stage` over the real 3×3 neighbourhood |
-| per-biome ore lists from step 6 | **reached** | `compose.rs:88` `build_biome_ores`, index-preserving |
+| `minecraft:ore` feature | **reached** | `feature/mod.rs`'s `parse_ore_config`, driven by `ore_stage` over the real 3×3 neighbourhood |
+| per-biome ore lists from step 6 | **reached** | `compose.rs`'s `build_biome_ores`, index-preserving |
 | `minecraft:scattered_ore` | **absent** | `build_biome_ores` skips any configured feature whose `type != "minecraft:ore"` (`compose.rs`, the `continue` on the type check). 2 bundled files (Nether gold/quartz-shaped placement) |
-| **`OreVeinifier` (large copper/iron veins)** | **absent — live Overworld parity defect** | `grep -rn "vein_toggle\|vein_ridged\|vein_gap\|OreVein\|ore_vein\|veinif" --include=*.rs crates/` → **1 hit**, in `crates/lodestone-data/tests/worldgen_dimension_data.rs:311`. Bundled `noise_settings/overworld.json` has `ore_veins_enabled: true` and all three router channels plus the `vein_a`/`vein_b` noises. Tracked as **#496** (half one) |
+| **`OreVeinifier` (large copper/iron veins)** | **absent — live Overworld parity defect** | `grep -rn "vein_toggle\|vein_ridged\|vein_gap\|OreVein\|ore_vein\|veinif" --include=*.rs crates/` → **1 hit**, in `crates/lodestone-data/tests/worldgen_dimension_data.rs`. Bundled `noise_settings/overworld.json` has `ore_veins_enabled: true` and all three router channels plus the `vein_a`/`vein_b` noises. Tracked as **#496** (half one) |
 
 **#496's second half already landed** (`a27cbb98`, plus U17/U18 `d50feba7`/`22982b99`
 addressing the same hashing/allocation costs). The issue title bundles both halves, so it
@@ -172,23 +172,23 @@ indices 0–10.
 | 3 | `UNDERGROUND_STRUCTURES` | absent (mineshafts, dungeons, fossils) |
 | 4 | `SURFACE_STRUCTURES` | absent |
 | 5 | `STRONGHOLDS` | absent |
-| 6 | `UNDERGROUND_ORES` | **reached** — `feature/mod.rs:82` |
+| 6 | `UNDERGROUND_ORES` | **reached** — `feature/mod.rs`'s `STEP_UNDERGROUND_ORES` |
 | 7 | `UNDERGROUND_DECORATION` | absent (glow lichen, sculk) |
 | 8 | `FLUID_SPRINGS` | absent (water/lava springs) |
-| 9 | `VEGETAL_DECORATION` | **reached** — `feature/mod.rs:92` |
-| 10 | `TOP_LAYER_MODIFICATION` | **reached** — `feature/top_layer.rs:113` |
+| 9 | `VEGETAL_DECORATION` | **reached** — `feature/mod.rs`'s `STEP_VEGETAL_DECORATION` |
+| 10 | `TOP_LAYER_MODIFICATION` | **reached** — `feature/top_layer.rs`'s `STEP_TOP_LAYER_MODIFICATION` |
 
 **Feature-type coverage, measured against the bundle rather than recalled.** The 226
 bundled `configured_feature` documents use **55 distinct types**. The engine implements:
 
-- `ore` (`feature/mod.rs:553`) — 30 of the 226 files
+- `ore` (`feature/mod.rs`'s `parse_ore_config`) — 30 of the 226 files
 - `freeze_top_layer` (`feature/top_layer.rs`) — 1
 - `simple_block`, `tree`, `block_column`, `random_selector`, `simple_random_selector`
-  (`feature/vegetation/config.rs:1018-1068`) — 32 + 39 + 4 + 21 + 5
+  (`feature/vegetation/config.rs`'s `ConfiguredFeature` parsing) — 32 + 39 + 4 + 21 + 5
 
 **Everything else — 48 of 55 types — falls to `ConfiguredFeature::Unsupported`
-(`config.rs:1068`) and silently places nothing.** That silence is deliberately made
-*legible* rather than hidden: `collect_unsupported` (`config.rs:1085`) walks the resolved
+and silently places nothing.** That silence is deliberately made
+*legible* rather than hidden: `collect_unsupported` (`feature/vegetation/config.rs`) walks the resolved
 tree and `worldgen_data.rs`'s `vegetation_placer_gaps_are_named_not_silent` diffs it
 against an allow-list. So this is a measured gap with a live instrument, not a blind spot.
 
@@ -197,8 +197,8 @@ across two independent engines that share no instances:
 
 | engine | modifiers |
 |---|---|
-| ore (`feature/mod.rs:352`) | `count`, `rarity_filter`, `in_square`, `height_range`, `biome` — unknown types `panic!` at `:371` |
-| vegetation (`feature/vegetation/config.rs:511`) | `count`, `in_square`, `heightmap`, `biome`, `rarity_filter`, `surface_water_depth_filter`, `noise_threshold_count`, `random_offset`, `block_predicate_filter` — unknown types return `None` |
+| ore (`feature/mod.rs`'s `Placement::parse`) | `count`, `rarity_filter`, `in_square`, `height_range`, `biome` — unknown types `panic!` |
+| vegetation (`feature/vegetation/config.rs`'s `VegPlacement::try_parse`) | `count`, `in_square`, `heightmap`, `biome`, `rarity_filter`, `surface_water_depth_filter`, `noise_threshold_count`, `random_offset`, `block_predicate_filter` — unknown types return `None` |
 
 Absent from both: `count_on_every_layer`, `environment_scan`, `fixed_placement`,
 `noise_based_count`, `surface_relative_threshold_filter`.
@@ -218,20 +218,20 @@ Vanilla source of truth: `level/levelgen/structure/`, `structure/pools/`,
 | structure **data** corpus | **orphaned (data)** | 34 structures, 20 structure sets, 188 template pools, 40 processor lists, 1212 `.nbt` templates, 92 worldgen tags — all bundled and byte-identical to the jar (`docs/worldgen-structure-corpus.md`; landed `6c6c0e10` under **#484**, which is **stale-open**). The **only** Rust reader is the drift gate `crates/lodestone-server/tests/worldgen_structure_corpus.rs` |
 | structure placement / `/locate` (S1) | **absent** | no `structure` module in `crates/lodestone-worldgen/src`; `lib.rs`'s module list is aquifer, biome, carver, compose, dense_grid, feature, interner, overworld, surface |
 | template placement + processors (S2) | **absent** | nothing reads `assets/structure/**.nbt` |
-| **beardifier (S3)** | **partial — a constant-zero leaf** | `Density::Beardifier` parses (`density/mod.rs:826`) and evaluates to `0.0` (`density/mod.rs:599`). So the density graph has the seam and no terrain adaptation: structures would sit on unmodified terrain |
+| **beardifier (S3)** | **partial — a constant-zero leaf** | `Density::Beardifier` parses (`density/mod.rs`'s `Density` enum) and evaluates to `0.0` (`density/mod.rs`'s density-evaluation match). So the density graph has the seam and no terrain adaptation: structures would sit on unmodified terrain |
 | jigsaw (S4) | **absent** | — |
-| `WorldgenRandom.setLargeFeatureWithSalt` | **absent** | `grep large_feature_with_salt --include=*.rs crates/` → 0 hits. Vanilla `WorldgenRandom.java:66`; it is how `RandomSpreadStructurePlacement` salts per-structure-set placement, so S1 needs it |
+| `WorldgenRandom.setLargeFeatureWithSalt` | **absent** | `grep large_feature_with_salt --include=*.rs crates/` → 0 hits. Vanilla `WorldgenRandom.setLargeFeatureWithSalt`; it is how `RandomSpreadStructurePlacement` salts per-structure-set placement, so S1 needs it |
 | ChunkStatus pipeline (S0 prerequisite) | **absent** | no `ChunkStatus` type anywhere; generation is one `column()` call with bare integer step constants. Vanilla's order (`ChunkStatus.java`) runs `STRUCTURE_STARTS` **before** `NOISE` so the beardifier can consult it. Adjacent open issue: **#289** |
 
-The generator's own module doc still says so: `overworld/mod.rs:80` — "**Still not
+The generator's own module doc still said so at the time: `overworld/mod.rs` — "**Still not
 composed:** structures (unbuilt anywhere in this repo)".
 
 ---
 
 ## 8. Slime chunks
 
-Vanilla source of truth: `WorldgenRandom.seedSlimeChunk` (`WorldgenRandom.java:71`) and
-`entity/monster/cubemob/Slime.java:93`:
+Vanilla source of truth: `WorldgenRandom.seedSlimeChunk` and
+`Slime.checkSlimeSpawnRules`:
 
 ```java
 boolean slimeChunk = WorldgenRandom.seedSlimeChunk(
@@ -248,11 +248,11 @@ both in `.cache/mc/26.2/{src,client-src}/…/Slime.java`** — i.e. only the dec
 `grep -rni slime --include=*.rs crates/` → 150 hits, and **none** is a slime chunk: every
 one is `slime_block` physics/rendering/brewing or the slime *entity* model. Nor does
 `WorldgenRandom` carry the derivation (`lodestone-worldgen-core/src/rng/mod.rs` has
-`set_decoration_seed:124`, `set_feature_seed:136`, `set_large_feature_seed:144` and nothing
+`set_decoration_seed`, `set_feature_seed`, `set_large_feature_seed` and nothing
 else).
 
 This one is worth naming as cheap: it is a **pure function of `(chunk_x, chunk_z, seed)`**
-over primitives we already have (`LegacyRandomSource` at `rng/legacy.rs:16`), so it is
+over primitives we already have (`LegacyRandomSource` in `rng/legacy.rs`), so it is
 *exactly checkable* against a JVM oracle — bit-exact or wrong, no tolerance discussion
 available. Its consumer (slime spawning) is blocked on the spawning gaps in §9, but the
 predicate itself is not blocked on anything.
@@ -262,15 +262,15 @@ predicate itself is not blocked on anything.
 ## 9. Mob spawning
 
 Vanilla sources of truth: `chunk/status/ChunkStatus.java` (`SPAWN`),
-`chunk/status/ChunkStatusTasks.java:170`, `NaturalSpawner.java:362`
-(`spawnMobsForChunkGeneration`), `entity/SpawnPlacements.java`.
+`ChunkStatusTasks.generateSpawn`, `NaturalSpawner.spawnMobsForChunkGeneration`,
+`entity/SpawnPlacements.java`.
 
 | item | verdict | evidence |
 |---|---|---|
-| worldgen-time `SPAWN` step (initial animal population) | **absent** | zero occurrences of `spawners`, `spawn_costs`, `SpawnPlacement`, `MobCategory`-from-biome anywhere in `crates/**/src`. The data **is** bundled and unread: `assets/worldgen/biome/forest.json` carries `spawners` (sheep/pig/chicken/cow with weight/min/max) and `spawn_costs`; `EmbeddedResolver::biome_document` (`worldgen_data.rs:179`) is consumed only for `carvers` and `features[6]`/`features[9]` (`compose.rs:70,93,147`) |
-| runtime natural spawning | **orphaned** | `crates/lodestone-server/src/mob_spawn.rs` (660 lines) is a faithful cap/despawn engine — `MAGIC_NUMBER = 289` at `:97`, caps `70/10/15/5/5/5/20` at `:105`, `check_despawn` at `:303`. The only `impl SpawnCandidateSource` is a test mock (`tests/mob_spawn.rs:32`); `run_spawn_cycle` (`mobs.rs:2640`) and `despawn_pass` (`mobs.rs:2594`) have **zero production callers**; `crates/lodestone-server/src/tick.rs`'s `run_tick_loop` (`:711`) never calls them. Tracked as **#221** / **#222** |
-| second, independent orphan | **orphaned** | `crates/lodestone-entity/src/spawn.rs` (442 lines) duplicates the same engine *plus* `SpawnConditions::permits` (`:220`) — the nearest thing to `SpawnPlacements.checkSpawnRules`. `grep DespawnCtx\|SpawnConditions\|SpawnSample\|mob_cap` outside `crates/lodestone-entity/` → 0 hits |
-| what actually puts mobs in the world | **reached (a demo roster)** | `seed_demo_mobs` (`mobs.rs:3097`) places `mob_count = 6` mobs in a radius-6 ring around `(8,8)`, one per `DEMO_SPECIES` entry (`mobs.rs:3177`), called once from `MobHandle::reseed` (`mobs.rs:3035`) at `integrated.rs:611`. No `/summon` (every production `CommandDispatch` is `::none()`), no spawn eggs, no spawner blocks (**#224**), no entity persistence, no mobs at all on LAN or wasm |
+| worldgen-time `SPAWN` step (initial animal population) | **absent** | zero occurrences of `spawners`, `spawn_costs`, `SpawnPlacement`, `MobCategory`-from-biome anywhere in `crates/**/src`. The data **is** bundled and unread: `assets/worldgen/biome/forest.json` carries `spawners` (sheep/pig/chicken/cow with weight/min/max) and `spawn_costs`; `EmbeddedResolver::biome_document` (`worldgen_data.rs`) is consumed only for `carvers` and `features[6]`/`features[9]` (`compose.rs`) |
+| runtime natural spawning | **orphaned** | `crates/lodestone-server/src/mob_spawn.rs` (660 lines) is a faithful cap/despawn engine — `MAGIC_NUMBER = 289`, caps `70/10/15/5/5/5/20`, `check_despawn`. The only `impl SpawnCandidateSource` is a test mock (`tests/mob_spawn.rs`); `run_spawn_cycle` (`mobs/mod.rs`) and `despawn_pass` (`mobs/mod.rs`) have **zero production callers**; `crates/lodestone-server/src/tick.rs`'s `run_tick_loop` never calls them. Tracked as **#221** / **#222** |
+| second, independent orphan | **orphaned** | `crates/lodestone-entity/src/spawn.rs` (442 lines) duplicates the same engine *plus* `SpawnConditions::permits` — the nearest thing to `SpawnPlacements.checkSpawnRules`. `grep DespawnCtx\|SpawnConditions\|SpawnSample\|mob_cap` outside `crates/lodestone-entity/` → 0 hits |
+| what actually puts mobs in the world | **reached (a demo roster)** | `seed_demo_mobs` (`mobs/mod.rs`) places `mob_count = 6` mobs in a radius-6 ring around `(8,8)`, one per `DEMO_SPECIES` entry (`mobs/mod.rs`), called once from `MobHandle::reseed` (`mobs/mod.rs`) inside `integrated.rs`. No `/summon` (every production `CommandDispatch` is `::none()`), no spawn eggs, no spawner blocks (**#224**), no entity persistence, no mobs at all on LAN or wasm |
 
 ---
 
@@ -281,30 +281,30 @@ persisted and sent.
 
 **Verdict: partial, and a parity defect in something we ship.**
 
-- **On the wire: empty.** `server_protocol.rs:1465` encodes `Heightmaps::new()` — a default,
-  zero-entry `Vec<(u32, Heightmap)>` (`crates/lodestone-world/src/heightmap.rs:110`). Valid
-  framing, no data. The function's own doc says so at `server_protocol.rs:1454`.
-- **Not persisted.** `crates/lodestone-server/src/chunk_nbt.rs:43` — deliberately omitted,
+- **On the wire: empty.** `server_protocol.rs`'s `encode_column_body` encodes `Heightmaps::new()` — a default,
+  zero-entry `Vec<(u32, Heightmap)>` (`crates/lodestone-world/src/heightmap.rs`'s `Heightmaps` struct). Valid
+  framing, no data. The function's own doc says so.
+- **Not persisted.** `crates/lodestone-server/src/chunk_nbt.rs` — deliberately omitted,
   relying on vanilla's `Heightmap.primeHeightmaps`. A reasoned decision.
-- **No storage.** `GeneratedColumn` (`overworld/output.rs:134`) and server-side
-  `ChunkColumn` (`lodestone-server/src/chunk.rs:94`) have **no heightmap field**, so nothing
+- **No storage.** `GeneratedColumn` (`overworld/output.rs`) and server-side
+  `ChunkColumn` (`lodestone-server/src/chunk.rs`) have **no heightmap field**, so nothing
   could survive the generator → server → wire hop even if computed.
 - **Four internal scans exist**, all consumed inside the generator only:
-  `heights_from_field` (`overworld/fill.rs:127`, serving as *both* `WORLD_SURFACE_WG` and
-  `OCEAN_FLOOR_WG`), `VegGrid::height_world_surface` (`feature/vegetation/grid.rs:408`),
-  `VegGrid::height_ocean_floor` (`grid.rs:441`), and `motion_blocking_first_free`
-  (`feature/top_layer.rs:586`, a real per-state predicate).
+  `heights_from_field` (`overworld/fill.rs`, serving as *both* `WORLD_SURFACE_WG` and
+  `OCEAN_FLOOR_WG`), `VegGrid::height_world_surface` (`feature/vegetation/grid.rs`),
+  `VegGrid::height_ocean_floor` (`grid.rs`), and `motion_blocking_first_free`
+  (`feature/top_layer.rs`, a real per-state predicate).
 - **`MOTION_BLOCKING_NO_LEAVES` is collapsed onto `MOTION_BLOCKING`**
-  (`feature/vegetation/config.rs:41`) with no leaf/log exclusion.
-- **The island shape is explicit:** `GeneratedColumn::top_non_air_y` (`output.rs:173`),
+  (`feature/vegetation/config.rs`) with no leaf/log exclusion.
+- **The island shape is explicit:** `GeneratedColumn::top_non_air_y` (`output.rs`),
   documented as matching `WORLD_SURFACE_WG`, has **no production caller** — only
-  `worldgen_data.rs:422,1152,1969` inside `#[cfg(test)]`. And
-  `motion_blocking_heightmap_matches_vanilla_per_column` (`worldgen_data.rs:2362`) proves a
+  `worldgen_data.rs` inside `#[cfg(test)]`. And
+  `motion_blocking_heightmap_matches_vanilla_per_column` (`worldgen_data.rs`) proves a
   `MOTION_BLOCKING` against a JVM oracle that no shipped byte ever carries.
 
 Incremental-vs-snapshot, since vegetation cost candidate 3 in the rewrite plan depends on
 it: the veg-grid pair are **live rescans per query** against the already-mutated grid
-(`grid.rs:402`), observationally equivalent to vanilla's incremental maintenance for in-pass
+(`grid.rs`), observationally equivalent to vanilla's incremental maintenance for in-pass
 reads; `motion_blocking_first_free` is a one-shot post-decoration scan; `heights_from_field`
 is a shape-stage snapshot never updated by decoration. **No stored heightmap is maintained
 incrementally, because no heightmap is stored.**
@@ -319,22 +319,22 @@ and `ChunkStatus.INITIALIZE_LIGHT` / `LIGHT`.
 **Verdict: orphaned relative to the server output path — a parity defect in something we
 ship.**
 
-- **The server sends nothing real.** `server_protocol.rs:1496` encodes
+- **The server sends nothing real.** `server_protocol.rs`'s `compute_column_light` method encodes
   `ColumnLight::new(section_count)`, which is `vec![LightData::Missing; section_count + 2]`
-  for both sky and block (`crates/lodestone-world/src/light.rs:305`).
+  for both sky and block (`crates/lodestone-world/src/light.rs`'s `ColumnLight`/`LightData`).
   `grep "sky_light\|block_light\|LightEngine" crates/lodestone-server/src` → **0 hits**.
   `LIGHT_UPDATE` (packet 48) exists only as a client *decode* arm
-  (`crates/protocol/v770/src/adapter.rs:3718`); nothing encodes it.
-- **No worldgen light stage.** The generator relies on this: `feature/top_layer.rs:77` —
-  "Block light is not modelled, and does not need to be… `initialize_light` runs strictly
-  after `features`" — and the block-light gate is hard-true at `top_layer.rs:677`. That
+  (`crates/protocol/v770/src/adapter/chunk.rs`); nothing encodes it.
+- **No worldgen light stage.** The generator relies on this: `feature/top_layer.rs`'s
+  own doc comment — "Block light is not modelled, and does not need to be… `initialize_light` runs strictly
+  after `features`" — and the block-light gate is hard-true in the same file. That
   argument is sound *for the top-layer stage* and says nothing about the served chunk.
 - **A real engine exists and is a genuine port**: `crates/lodestone-world/src/lighting.rs`
   (1,105 lines) — descending-level 15-bucket propagation, `opacity = max(1, lightDampening)`,
   sky seeded per `ChunkSkyLightSources.isEdgeOccluded`, exposing `compute_column_light`,
   `compute_column_light_with_neighbours` and `diff_column_light`.
 - **Its only production caller is the client's local world**, not the server:
-  `crates/lodestone-shell/src/worldgen.rs:261`. So singleplayer-direct is lit and the
+  `crates/lodestone-shell/src/worldgen.rs`'s `generate_column` function. So singleplayer-direct is lit and the
   integrated-server path is not.
 - **Do not conflate with `docs/light-ramp.md`**, which documents the per-vertex *lightmap
   curve* in `crates/lodestone-render/src/light.rs` — client rendering of an
@@ -363,7 +363,7 @@ still absent for every other producer, because no other feature makes one.
   absent for the reason §7 gives — no piece generator, so no structure blocks at
   all, let alone their block entities.
 - **The one shipped defect on this axis, now fixed**, was honest and in-source:
-  `place_beehive_decorator` (`feature/vegetation/place.rs:375`) writes
+  `place_beehive_decorator` (`feature/vegetation/place.rs`) writes
   `minecraft:bee_nest[facing=south,honey_level=0]` (`:425`) and then at `:428`:
   *"Bee-entity storage (2-3 bees) is not modelled"* — `let _bee_count = 2 +
   random.next_int_bounded(2);`. The draw is consumed (so the RNG stream stays aligned, which
@@ -383,15 +383,15 @@ Vanilla source of truth: `level/levelgen/WorldgenRandom.java`, `RandomState.java
 
 | derivation | verdict | evidence |
 |---|---|---|
-| `WorldgenRandom.next(bits)` legacy-shape wrapping | **reached** | `rng/mod.rs:95-108` — reproduces vanilla's "all draws use the legacy `BitRandomSource` structure even when the wrapped source is xoroshiro", which is load-bearing (naive delegation diverged, and did) |
-| `setDecorationSeed` | **reached** | `rng/mod.rs:124` |
-| `setFeatureSeed` | **reached** | `rng/mod.rs:136` — per-feature stream isolation, which is why adding a feature cannot desync its neighbours |
-| `setLargeFeatureSeed` | **reached** | `rng/mod.rs:144` — carvers |
+| `WorldgenRandom.next(bits)` legacy-shape wrapping | **reached** | `rng/mod.rs`'s `WorldgenRandom` struct — reproduces vanilla's "all draws use the legacy `BitRandomSource` structure even when the wrapped source is xoroshiro", which is load-bearing (naive delegation diverged, and did) |
+| `setDecorationSeed` | **reached** | `WorldgenRandom::set_decoration_seed` (`rng/mod.rs`) |
+| `setFeatureSeed` | **reached** | `WorldgenRandom::set_feature_seed` (`rng/mod.rs`) — per-feature stream isolation, which is why adding a feature cannot desync its neighbours |
+| `setLargeFeatureSeed` | **reached** | `WorldgenRandom::set_large_feature_seed` (`rng/mod.rs`) — carvers |
 | `setLargeFeatureWithSalt` | **reached** (#514 S1) | `set_large_feature_with_salt`, consumed by structure-set placement (§7) |
 | `seedSlimeChunk` | **absent** | 0 hits (§8) |
-| `RandomState`'s algorithm switch on `legacy_random_source` | **absent** | `density/mod.rs:708` hardcodes the Xoroshiro branch; **#486** |
+| `RandomState`'s algorithm switch on `legacy_random_source` | **absent** | `density/mod.rs`'s `Builder::new` hardcodes the Xoroshiro branch; **#486** |
 | `NormalNoise.createLegacyNetherBiome` (raw-seed, non-positional) | **absent** | `PerlinNoise::new_legacy` is private and blended-noise-only; no `NormalNoise` legacy-init path (recorded in #485/#486) |
-| positional forks for noise / aquifer / ore RNG | **reached** | `Builder::positional_factory` (`density/mod.rs:750`), consumed by the noise instantiation and the carve/ore drivers |
+| positional forks for noise / aquifer / ore RNG | **reached** | `Builder::positional_factory` (`density/mod.rs`), consumed by the noise instantiation and the carve/ore drivers |
 
 ---
 
@@ -470,14 +470,52 @@ the ore stage's hash-lookup cost" — the hash-lookup half landed (`a27cbb98`, w
 and does say "two things at once".
 
 **#485's engine list is incomplete**, not wrong: it enumerates seven engine items for
-Nether/End and omits (a) the `nether_cave` carver, which `carver/mod.rs:234` panics on, and
-(b) that `Resolver::biome_parameters(&self)` (`density/mod.rs:228`) has no dimension
-argument, so the Nether parameter list it landed is structurally unreachable until the trait
-widens.
+Nether/End and omits (a) the `nether_cave` carver, which `CarverConfig::parse` panicked on
+at the time this was written, and (b) that `Resolver::biome_parameters(&self)`
+(`density/mod.rs`'s `Resolver` trait) has no dimension argument, so the Nether parameter
+list it landed is structurally unreachable until the trait widens.
+
+**Found stale during this citation-cleanup pass, itself, and left for a content
+re-audit rather than silently corrected:** claim (a) above, and the matching "also found"
+paragraph and §4 Carvers table row earlier in this doc, no longer hold —
+`CarverConfig::parse` in `crates/lodestone-worldgen/src/carver/mod.rs` now matches
+`"minecraft:cave" | "minecraft:nether_cave"` explicitly (with a `nether` flag threaded onto
+`CaveConfig`) instead of panicking on `nether_cave`. More broadly, `crates/lodestone-worldgen/src`
+now contains `nether/mod.rs` (980 lines) and `end/mod.rs` (637 lines), which directly
+contradicts §1's "Nether generator: absent" / "End generator: absent" verdicts as measured
+by this document's own `grep -rni nether` check. This document's substantive verdicts —
+not just its citations — appear to have drifted significantly since the `98433351` measurement
+and warrant a dedicated re-audit; this pass only touched citation format and did not
+re-verify verdicts.
+
+**A second confirmed-stale verdict found the same way:** §5's `OreVeinifier` row
+(**absent — live Overworld parity defect**) no longer matches the tree either.
+`crates/lodestone-worldgen/src/overworld/veins.rs` (227 lines) is a real port —
+`VeinPrograms::build`, all three router channels, `OreVeinifier.create`'s block-state
+filler — and `overworld/mod.rs` wires it in (`mod veins;`, a `veins: Option<veins::VeinPrograms>`
+field, built at construction from `veins::VeinPrograms::build`). That is a production call
+site, not just a test, so the "absent" verdict and the "1 hit, test-only" grep evidence both
+read as stale. Not corrected here for the same reason as the carver finding above: verdict
+correctness is a content-audit question, not a citation-format one.
+
+**A third, larger confirmed-stale area: §7 Structures.** `crates/lodestone-worldgen/src`
+now has a `structure/` module (`beardifier.rs`, `coded.rs`, `jigsaw.rs`, `mineshaft.rs`,
+`mod.rs`, `placement.rs`, `pool.rs`, `processor.rs`, `template.rs` — over 13,000 lines
+combined) plus `overworld/structures.rs` (554 lines), and `overworld/mod.rs` carries a
+`structure_starts: store::StageSlot<...>` field and a `structures: Option<StructureRegistry>`
+field built from `crate::structure::StructureRegistry::new` at construction — a production
+call site. §7's "structure placement / `/locate` (S1): absent", "template placement +
+processors (S2): absent" and "jigsaw (S4): absent" rows, and the §"Ranked by player-visible
+impact" table's #2 entry ("No structure *blocks*"), read as stale against this. `spawners.rs`
+(427 lines) and `spawn_stage.rs` (339 lines) also exist and may bear on §9's mob-spawning
+verdicts, not independently confirmed here. **Recommendation: this document needs a full
+content re-audit, not just the citation-format pass this session performed** — the gap
+between what it claims and what the tree now contains looks large enough that most of its
+"absent"/"orphaned" verdicts should be re-measured from scratch rather than trusted.
 
 **`docs/live-mob-sim.md`** has a stale architecture diagram (lines 23–30): it puts
 `ChunkWorld::from_source` and `seed_demo_mobs` inside `run_tick_loop` and calls the world a
-"second, independent snapshot". At HEAD, seeding is its own task (`integrated.rs:599-629`)
+"second, independent snapshot". At HEAD, seeding is its own task (`open_in_memory_with_mobs_using`'s `seed_task` in `integrated.rs`)
 off a **shared** `ChunkStore` since #454. Its two most important claims — no natural
 spawning, no despawn pass — are **confirmed** true.
 
@@ -497,14 +535,15 @@ all 7 noise settings landed. `docs/worldgen-dimensions.md` and
 
 Labelled rather than guessed.
 
-- **Whether `heights_from_field`'s `.max(sea_level - 1)` clamp (`overworld/fill.rs:137`) is
+- **Whether `heights_from_field`'s `.max(sea_level - 1)` clamp (`overworld/fill.rs`) is
   faithful to `OCEAN_FLOOR_WG`** as well as to the oracle's `solidTop`. One array serves two
-  vanilla types (`surface/mod.rs:14` vs `overworld/decorate.rs:232`) and the `OCEAN_FLOOR_WG`
+  vanilla types (`surface/mod.rs`'s module doc, on `WORLD_SURFACE_WG`, vs `overworld/decorate.rs`'s
+  `stitch_heights`, on `OCEAN_FLOOR_WG`) and the `OCEAN_FLOOR_WG`
   role has no JVM fixture.
 - **What the client renders on receiving all-`Missing` light** — full-bright or
   dimension-default. Not traced, and it decides how visible §11 actually is.
 - **Whether `ChunkWorld` can expose block light at all**, which bounds how large a real
-  `SpawnCandidateSource` would be. `grep light` in `mobs.rs` returns nothing, so the sim has
+  `SpawnCandidateSource` would be. `grep light` in `mobs/mod.rs` returns nothing, so the sim has
   no light on hand; whether the API could supply it was not audited.
 - **Whether any crate under `crates/plugins/` registers a mob-spawning command.** Moot for
   the shipped singleplayer path (every production `CommandDispatch` is `::none()`), but not

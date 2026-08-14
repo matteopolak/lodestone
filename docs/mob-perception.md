@@ -3,8 +3,8 @@
 ## What it is
 
 The seam that lets a goal ask questions about the world — *am I in water, who hurt me, where is the
-nearest player, is there a threat nearby* — and the server-side feed that answers them. Before issue
-[#441](https://github.com/matteopolak/lodestone/issues/441) this seam existed but was **unfilled**:
+nearest player, is there a threat nearby* — and the server-side feed that answers them. Before this
+work, this seam existed but was **unfilled**:
 `NavigatingMob`'s `impl MobController` left eight perception methods at their trait defaults, so six
 goals had a `can_use` that was constant-`false` in the running game and two more read fields nothing
 ever wrote. Eight of thirteen implemented goals could not act, and every one of them had a *green*
@@ -54,16 +54,16 @@ now drained and resolved into a real child spawn.
 ### Two records, not one
 
 `note_hurt(attacker)` writes **both** of vanilla's damage records, because one `hurt` call does:
-`lastDamageSource` (`LivingEntity.java:1268-1269`), which is what `PanicGoal.shouldPanic` reads
-(`ai/goal/PanicGoal.java:61-63`), and `lastHurtByMob` (`LivingEntity.java:1358`), which is what
-`HurtByTargetGoal` reads (`ai/goal/target/HurtByTargetGoal.java:34-36`).
+`lastDamageSource` (`LivingEntity.hurtServer`), which is what `PanicGoal.shouldPanic` reads, and
+`lastHurtByMob` (`LivingEntity.resolveMobResponsibleForDamage`), which is what
+`HurtByTargetGoal.canUse` reads.
 
 They expire on **different** timers, and that is behaviour, not trivia:
 
 | record | ticks | vanilla cite |
 |---|---|---|
-| panic (`is_panicking`) | 40 | `LivingEntity.java:1420-1421` |
-| retaliation (`last_hurt_by`) | 100 | `LivingEntity.java:493` |
+| panic (`is_panicking`) | 40 | `LivingEntity.getLastDamageSource` |
+| retaliation (`last_hurt_by`) | 100 | `LivingEntity.baseTick` |
 
 So a mob stops fleeing 60 ticks before it stops hunting. Collapsing them into one timer is a silent
 behaviour change; `panic_expires_on_its_own_shorter_window_while_retaliation_persists` is the
@@ -86,7 +86,7 @@ Load-bearing, in this order:
 5. `resolve_breeding()`.
 
 Step 1 is before step 2 because that is vanilla's own order: `Mob.serverAiStep()` opens with
-`this.noActionTime++` and only then ticks the selectors (`Mob.java:715-717`), so a goal sees the
+`this.noActionTime++` and only then ticks the selectors, so a goal sees the
 already-incremented value. **This was implemented backwards first** and cost exactly one tick of idle
 time — invisible to any `cargo check`, and caught only because
 `no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record` asserts the sim record and the
@@ -106,14 +106,14 @@ and applied under a mutable one.
   doc exists about — and it produces no warning of any kind.
 - **Range gates: decide whether the range is vanilla's *mob attribute* or the *goal's* constructor
   argument, and put it in the matching place.** `TEMPT_RANGE` is an attribute
-  (`ai/attributes/Attributes.java:107`, default `10.0`) so the **feed** applies it.
+  (`Attributes.TEMPT_RANGE`, default `10.0`) so the **feed** applies it.
   `LookAtPlayerGoal`'s `lookDistance` is a constructor argument (6.0F/8.0F per species) so the feed
   passes `nearest_player` **uncut** and the goal decides. Applying a range in both places silently
   takes the minimum of the two and makes the goal's own parameter a lie.
 - **Search shape.** Vanilla filters by an axis-aligned **box** (`getBoundingBox().inflate(dx, dy, dz)`)
   and only then picks the nearest by squared distance. `nearest_by` keeps both steps. Collapsing to a
   single radius is wrong in the corners — most visibly for `AVOID_RANGE_Y`, where vanilla's vertical
-  extent is a flat `3.0` regardless of the horizontal one (`ai/goal/AvoidEntityGoal.java:72`).
+  extent is a flat `3.0` regardless of the horizontal one (`AvoidEntityGoal.canUse`).
 - **`avoided_species` is perception data, not a goal set.** It answers "is that a threat to me".
   Assembling goals per species is the roster's job. Extend the table when a roster unit adds a species
   with an `AvoidEntityGoal`; an unknown species returns an empty slice so the goal stays correctly
@@ -125,12 +125,12 @@ and applied under a mutable one.
   sets water cannot tell it from `in_water()` alone — one arm can be dead and green. Drive each arm
   separately.
 - **`no_action_time`'s default `0` is wrong in the *permissive* direction.** Stroll was always
-  eligible where vanilla suppresses it at `>= 100` (`ai/goal/RandomStrollGoal.java:43`). Nothing warns
+  eligible where vanilla suppresses it at `>= 100` (`RandomStrollGoal.canUse`). Nothing warns
   about a default that merely makes a goal too eager.
 - **Identifying a breeding partner after the fact.** By the time `take_bred()` is drained, `breed()`
   has already cleared the breeder's love state, so "the other mob still in love" is not a usable key.
   `resolve_breeding` uses proximity instead — vanilla only breeds within `distanceToSqr < 9.0`
-  (`ai/goal/BreedGoal.java:57`), so the nearest same-species adult inside that radius *is* the partner.
+  (`BreedGoal.tick`), so the nearest same-species adult inside that radius *is* the partner.
 - **Both animals of a pair can call `breed()` on the same tick**, each holding the other as its
   candidate. Without the `consumed` guard in `resolve_breeding`, one mating produces two children and
   the population doubles every time.
@@ -193,7 +193,7 @@ nothing else. If you are changing this subsystem, that is the test to keep alive
 No env vars or flags. Every constant is a cited vanilla value: `LAST_HURT_BY_TICKS` and
 `PANIC_DAMAGE_TICKS` in `ai/navigating_mob.rs`; `TEMPT_RANGE`, `AVOID_RANGE`, `AVOID_RANGE_Y`,
 `BREED_RANGE`, `BREED_DISTANCE_SQR`, `FOLLOW_PARENT_RANGE`, `FOLLOW_PARENT_RANGE_Y` in
-`lodestone-server/src/mobs.rs`.
+`lodestone-server/src/mobs/mod.rs`.
 
 ## Dependencies
 
@@ -207,6 +207,5 @@ No env vars or flags. Every constant is a cited vanilla value: `LAST_HURT_BY_TIC
 ## Related
 
 - [`mob-ai-roster.md`](./plans/mob-ai-roster.md) — the epic plan this is unit A1/A2 of.
-- Issues [#234](https://github.com/matteopolak/lodestone/issues/234) (breeding) and
-  [#237](https://github.com/matteopolak/lodestone/issues/237) (aging): the half landed in `7bf2873`
+- Breeding and aging: the half landed in `7bf2873`
   was itself an island; the resolution is here.
