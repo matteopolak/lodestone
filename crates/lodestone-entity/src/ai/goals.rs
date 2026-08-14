@@ -293,22 +293,22 @@ impl Goal for MeleeAttackGoal {
 /// Swells toward detonation near its target, or backs off and shrinks
 /// otherwise.
 ///
-/// Vanilla `SwellGoal` (flag MOVE, `requiresUpdateEveryTick`); `Creeper.java:66`
+/// Vanilla `SwellGoal` (flag MOVE, `requiresUpdateEveryTick`); `Creeper.registerGoals`
 /// registers it at priority 2 — one below `MeleeAttackGoal`'s own priority 4 —
 /// so once eligible it preempts melee on their shared MOVE flag through
 /// [`GoalSelector`]'s ordinary priority preemption, no special case needed. A
-/// creeper keeps *both* goals (`Creeper.java:65-74` also registers
+/// creeper keeps *both* goals (`Creeper.registerGoals` also registers
 /// `MeleeAttackGoal` at priority 4); this is "alongside", not "instead of".
 ///
-/// `can_use` (`SwellGoal.java:18-21`): eligible while already swelling
+/// `SwellGoal.canUse`: eligible while already swelling
 /// (`mob.swell_dir() > 0` — true whenever [`is_ignited`](MobController::is_ignited)
 /// forced it, even with no target at all) or while a target exists within
-/// `distanceToSqr < 9.0` (3 blocks). `tick` (`SwellGoal.java:40-52`): while a
+/// `distanceToSqr < 9.0` (3 blocks). `SwellGoal.tick`: while a
 /// target remains, sets the direction to shrink (`-1`) once `distanceToSqr >
 /// 49.0` (7 blocks), otherwise to climb (`1`); with no target, always shrinks.
 ///
 /// Vanilla's `tick` also drops the fuse on lost line of sight
-/// (`SwellGoal.java:44`, `!hasLineOfSight`); this seam has no raycast
+/// (`SwellGoal.tick`'s `!hasLineOfSight` branch); this seam has no raycast
 /// primitive (see [`MobController`]'s own doc comment on why movement/
 /// perception specifics are delegated to the host), so that check is
 /// deliberately omitted — the same disclosed simplification
@@ -320,10 +320,10 @@ pub struct SwellGoal;
 
 impl SwellGoal {
     /// Vanilla's proximity-squared threshold that starts the fuse
-    /// (`SwellGoal.java:20`, `distanceToSqr(target) < 9.0` — 3 blocks).
+    /// (`SwellGoal.canUse`'s `distanceToSqr(target) < 9.0` — 3 blocks).
     const START_RANGE_SQR: f64 = 9.0;
     /// Vanilla's retreat-squared threshold that reverses it
-    /// (`SwellGoal.java:42`, `distanceToSqr(target) > 49.0` — 7 blocks).
+    /// (`SwellGoal.tick`'s `distanceToSqr(target) > 49.0` — 7 blocks).
     const STOP_RANGE_SQR: f64 = 49.0;
 
     /// Creates the goal.
@@ -470,8 +470,7 @@ impl Goal for PanicGoal {
 
 /// Stops an enderman dead and stares back while its current target watches it.
 ///
-/// Vanilla `EnderMan.EndermanFreezeWhenLookedAt` (flags `{JUMP, MOVE}`,
-/// `monster/EnderMan.java:401-430`):
+/// Vanilla `EnderMan.EndermanFreezeWhenLookedAt` (flags `{JUMP, MOVE}`):
 ///
 /// ```text
 /// canUse():  target = enderman.getTarget()
@@ -584,7 +583,7 @@ impl NearestAttackableTargetGoal {
     /// without it a predicate-free registration makes piglins, wolves and bees
     /// attack on sight — which was invisible for as long as
     /// `NavigatingMob::find_nearest_target` returned its own `attack_target` and
-    /// never searched (issue #455). The neutral family's three anger-gated rows
+    /// never searched. The neutral family's three anger-gated rows
     /// are `Coverage::Missing` and must stay that way until a host feeds
     /// `set_angry_target`; `roster::neutral`'s
     /// `no_anger_gated_target_row_is_modelled` enforces it, and this constructor
@@ -628,21 +627,20 @@ impl Goal for NearestAttackableTargetGoal {
         self.target.is_some()
     }
 
-    /// Vanilla `TargetGoal.canContinueToUse`
-    /// (`ai/goal/target/TargetGoal.java:36-71`), which does three things this
+    /// Vanilla `TargetGoal.canContinueToUse`, which does three things this
     /// used to skip entirely — it held only `attack_target().is_some()`:
     ///
-    /// 1. **Releases a target that left follow range** (`:57-60`,
-    ///    `if (this.mob.distanceToSqr(target) > within * within) return false;`).
+    /// 1. **Releases a target that left follow range**
+    ///    (`if (this.mob.distanceToSqr(target) > within * within) return false;`).
     ///    Without it the acquisition cut is a one-way door: acquire at 16
     ///    blocks, then chase across the world forever.
-    /// 2. **Re-writes the target every tick** (`:70`, `this.mob.setTarget(target)`).
+    /// 2. **Re-writes the target every tick** (`this.mob.setTarget(target)`).
     ///    Vanilla's target is a *live entity reference*, so its position is
     ///    always current; ours is a `Vec3` frozen at acquisition, which means a
     ///    mob pursued a **moving player to where that player used to be** and
     ///    stopped. Refreshing from the same feed acquisition used is how a
     ///    position-valued seam reproduces a reference-valued one.
-    /// 3. Releases when the candidate disappears (`:43-45`, `target == null`).
+    /// 3. Releases when the candidate disappears (`target == null`).
     ///
     /// The one divergence worth stating: vanilla keeps the *specific* entity it
     /// acquired, while our feed answers "the nearest player", so if a second
@@ -651,10 +649,10 @@ impl Goal for NearestAttackableTargetGoal {
     /// identity — with one player in range the two agree exactly, and the
     /// alternative (a frozen point) is wrong every time the player moves.
     ///
-    /// Vanilla's `mustSee`/`unseenMemoryTicks` half (`:62-68`) is not modelled —
-    /// it needs the line of sight `NavigatingMob::find_nearest_target` explains
-    /// is a ray query this seam cannot answer. `canAttack` and the team check
-    /// (`:47-55`) have no analogue here either.
+    /// Vanilla's `mustSee`/`unseenMemoryTicks` half of `TargetGoal.canContinueToUse`
+    /// is not modelled — it needs the line of sight `NavigatingMob::find_nearest_target`
+    /// explains is a ray query this seam cannot answer. `canAttack` and the team
+    /// check, also part of that method, have no analogue here either.
     fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
         if mob.attack_target().is_none() {
             return false;
@@ -671,8 +669,9 @@ impl Goal for NearestAttackableTargetGoal {
             return false;
         };
         // `angry_target` carries no range cut of its own (a grudge is not
-        // bounded by follow range in the feed), so vanilla's own `:57-60` test
-        // still has to run here rather than being left to the filter.
+        // bounded by follow range in the feed), so `TargetGoal.canContinueToUse`'s
+        // own follow-range test still has to run here rather than being left
+        // to the filter.
         let within = mob.follow_range();
         if distance_sqr(mob.position(), target) > within * within {
             return false;
@@ -1131,46 +1130,47 @@ impl Goal for FollowOwnerGoal {
 /// or under the mob's feet.
 ///
 /// Vanilla `EatBlockGoal` (flags MOVE + LOOK + JUMP —
-/// `ai/goal/EatBlockGoal.java:24`), registered by the sheep at goal-priority 5
+/// `EatBlockGoal`'s constructor), registered by the sheep at goal-priority 5
 /// (`animal/sheep/Sheep.java`). **The first goal in this module whose predicate
-/// reads the world**, which is why it could not exist before issue #456 put
-/// [`MobController::block_cues_below`] on the seam.
+/// reads the world**, which is why it could not exist before
+/// [`MobController::block_cues_below`] was put on the seam.
 ///
-/// Two blocks, two behaviours, and vanilla checks them in this order
-/// (`:33-34`, and again at `:62-78`): the block the mob is standing *in* if it
-/// is `#edible_for_sheep`, otherwise the `grass_block` it is standing *on*.
-/// Which one it was decides the host's mutation, so the goal reports it as an
-/// [`EatenBlock`].
+/// Two blocks, two behaviours, and vanilla checks them in this order, in
+/// `EatBlockGoal.canUse` and again in `EatBlockGoal.tick`: the block the mob
+/// is standing *in* if it is `#edible_for_sheep`, otherwise the `grass_block`
+/// it is standing *on*. Which one it was decides the host's mutation, so the
+/// goal reports it as an [`EatenBlock`].
 ///
 /// # Timing, and why every constant here is halved
 ///
-/// `Goal.adjustedTickDelay` is `reducedTickDelay` — `Mth.positiveCeilDiv(t, 2)` —
+/// `Goal.adjustedTickDelay` is `Goal.reducedTickDelay` — `Mth.positiveCeilDiv(t, 2)` —
 /// for any goal that does not override `requiresUpdateEveryTick`, and this one
-/// does not (`ai/goal/Goal.java:53-55`). So the jar's `1000`, `50`, `40` and `4`
+/// does not. So the jar's `1000`, `50`, `40` and `4`
 /// are **500, 25, 20 and 2** ticks in practice. Transcribing the unhalved
 /// numbers would make a sheep graze half as often and hold the animation twice
 /// as long, which no test asserting only "it eventually ate" would catch.
 #[derive(Debug, Default)]
 pub struct EatBlockGoal {
     /// Counts down from [`EAT_ANIMATION_TICKS`](Self::EAT_ANIMATION_TICKS);
-    /// `> 0` is "still eating" (`ai/goal/EatBlockGoal.java:19`, `:50-52`).
+    /// `> 0` is "still eating" (the `eatAnimationTick` field and
+    /// `EatBlockGoal.canContinueToUse`).
     eat_animation_tick: i32,
 }
 
 impl EatBlockGoal {
     /// `adjustedTickDelay(40)` — the eat animation's length in ticks
-    /// (`ai/goal/EatBlockGoal.java:15`, `:39`).
+    /// (`EatBlockGoal.EAT_ANIMATION_TICKS` and `EatBlockGoal.start`).
     pub const EAT_ANIMATION_TICKS: i32 = 20;
 
     /// `adjustedTickDelay(1000)` — an adult's mean interval between grazing
-    /// attempts (`ai/goal/EatBlockGoal.java:29`).
+    /// attempts (`EatBlockGoal.canUse`).
     pub const ADULT_INTERVAL: i32 = 500;
 
     /// `adjustedTickDelay(50)` — a baby's, which grazes 20× as often.
     pub const BABY_INTERVAL: i32 = 25;
 
     /// `adjustedTickDelay(4)` — the tick *within* the animation on which the
-    /// block is actually consumed (`ai/goal/EatBlockGoal.java:61`). Note this is
+    /// block is actually consumed (`EatBlockGoal.tick`). Note this is
     /// near the animation's **end**, so a goal interrupted early eats nothing.
     pub const CONSUME_AT: i32 = 2;
 
@@ -1180,10 +1180,10 @@ impl EatBlockGoal {
         Self::default()
     }
 
-    /// Ticks left in the eat animation (vanilla's `getEatAnimationTick`,
-    /// `ai/goal/EatBlockGoal.java:54-56`). Vanilla drives the head-down pose
-    /// from this, broadcast as entity event `10` (`:40`) — a wire concern this
-    /// crate cannot reach, so a host that wants the animation reads it here.
+    /// Ticks left in the eat animation (vanilla's `EatBlockGoal.getEatAnimationTick`).
+    /// Vanilla drives the head-down pose from this, broadcast as entity event
+    /// `10` in `EatBlockGoal.start` — a wire concern this crate cannot reach,
+    /// so a host that wants the animation reads it here.
     #[must_use]
     pub fn eat_animation_tick(&self) -> i32 {
         self.eat_animation_tick
@@ -1204,8 +1204,8 @@ impl Goal for EatBlockGoal {
         if mob.next_i32(interval) != 0 {
             return false;
         }
-        // `IS_EDIBLE.test(getBlockState(pos)) ? true : getBlockState(pos.below())
-        // .is(GRASS_BLOCK)` (`ai/goal/EatBlockGoal.java:34`).
+        // `EatBlockGoal.canUse`: `IS_EDIBLE.test(getBlockState(pos)) ? true :
+        // getBlockState(pos.below()).is(GRASS_BLOCK)`.
         mob.block_cues_at_feet().edible_for_sheep || mob.block_cues_below().grass_block
     }
 
@@ -1227,8 +1227,8 @@ impl Goal for EatBlockGoal {
         if self.eat_animation_tick != Self::CONSUME_AT {
             return;
         }
-        // Re-read rather than trusting `can_use`'s answer: vanilla re-tests both
-        // blocks here (`:63`, `:71`) because the mob has been standing on them
+        // Re-read rather than trusting `can_use`'s answer: `EatBlockGoal.tick`
+        // re-tests both blocks here because the mob has been standing on them
         // for 20 ticks and something else may have changed them.
         if mob.block_cues_at_feet().edible_for_sheep {
             mob.ate(EatenBlock::AtFeet);
@@ -1241,18 +1241,18 @@ impl Goal for EatBlockGoal {
 /// Steers a pillager patrol across the map, leader and followers alike.
 ///
 /// Vanilla `PatrollingMonster.LongDistancePatrolGoal` (flag MOVE), registered
-/// at goal priority 4 for every `PatrollingMonster`
-/// (`monster/PatrollingMonster.java:40`) — the pillager only, today.
+/// at goal priority 4 for every `PatrollingMonster` in
+/// `PatrollingMonster.registerGoals` — the pillager only, today.
 ///
 /// # What is ported, and what is not
 ///
 /// * **The leader's own long-distance steering** is ported faithfully: the
-///   lateral-offset waypoint formula (`:181-187`) and the "close enough, pick
-///   a new far-off target" repick (`:178-179`) are both pure position
-///   arithmetic this seam can already answer through
+///   lateral-offset waypoint formula and the "close enough, pick
+///   a new far-off target" repick, both in `LongDistancePatrolGoal.tick`, are
+///   pure position arithmetic this seam can already answer through
 ///   [`MobController::position`]/[`MobController::move_to`].
 /// * **The companion census is not, and cannot be without a new seam
-///   primitive.** Vanilla's own `findPatrolCompanions` (`:200-204`) is a
+///   primitive.** Vanilla's own `LongDistancePatrolGoal.findPatrolCompanions` is a
 ///   `getEntitiesOfClass` query with no analogue on [`MobController`] — the
 ///   trait hands goals answers about *this* mob, never a population (see
 ///   `roster`'s own module doc, "not perception data"). So a **follower**
@@ -1267,8 +1267,8 @@ impl Goal for EatBlockGoal {
 ///   they leave its search radius; these track the leader's *long-distance*
 ///   target continuously, which is the more forgiving direction to diverge
 ///   in — a straggler still knows where the patrol is headed.
-/// * **`moveRandomly`'s fallback** (`:206-212`) is ported, using this seam's
-///   own random draw in place of vanilla's `RandomSource`.
+/// * **`LongDistancePatrolGoal.moveRandomly`'s fallback** is ported, using
+///   this seam's own random draw in place of vanilla's `RandomSource`.
 /// * **Vanilla's `hasControllingPassenger()` clause is not modelled** — no
 ///   passenger state crosses this seam (see `docs/pillager-patrols.md`).
 #[derive(Debug)]
@@ -1297,7 +1297,7 @@ impl LongDistancePatrolGoal {
 
     /// Creates the goal with `(follower_speed, leader_speed)` — vanilla's own
     /// constructor order is `(speedModifier, leaderSpeedModifier)`
-    /// (`PatrollingMonster.java:40`'s `new LongDistancePatrolGoal<>(this, 0.7,
+    /// (`PatrollingMonster.registerGoals` calls `new LongDistancePatrolGoal<>(this, 0.7,
     /// 0.595)`), and `speedModifier` is what `tick` uses whenever `!patrolLeader`
     /// — a follower. Worth naming explicitly because it reads backwards at a
     /// glance: **the leader is the slower of the two** (`0.595` against a
@@ -1735,7 +1735,7 @@ mod tests {
 
     #[test]
     fn freeze_ignores_a_staring_target_beyond_sixteen_blocks() {
-        // `EnderMan.EndermanFreezeWhenLookedAt.canUse` (`:414-415`): the
+        // `EnderMan.EndermanFreezeWhenLookedAt.canUse`: the
         // `distanceToSqr(target) > 256.0` branch returns `false` before even
         // consulting `isBeingStaredBy`, so a stare from far away never freezes
         // the goal — a control on the 16-block gate, independent of the gaze
