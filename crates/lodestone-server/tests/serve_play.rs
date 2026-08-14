@@ -3186,6 +3186,125 @@ async fn breaking_stone_drops_exactly_one_cobblestone_item_entity() {
     let _ = server.await.expect("server task panicked");
 }
 
+/// A [`ChunkSource`] like [`StoneSource`] but with **one persisted cell**: every
+/// other block is stone (discarded on write, exactly as [`StoneSource`]), while
+/// [`BREAK_POS`] alone remembers whatever it was last set to. Issue #550's
+/// fixture needs a real write to survive the break so the test can read back
+/// *what* replaced the broken block, not merely that something did.
+#[derive(Clone)]
+struct SingleBlockSource {
+    at_break_pos: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+impl SingleBlockSource {
+    fn new(initial: &str) -> Self {
+        Self {
+            at_break_pos: std::sync::Arc::new(std::sync::Mutex::new(initial.to_string())),
+        }
+    }
+
+    fn current(&self) -> String {
+        self.at_break_pos.lock().expect("lock").clone()
+    }
+}
+
+impl ChunkSource for SingleBlockSource {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        let mut col = ChunkColumn::new(0, 16);
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..16 {
+                    col.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        col.set_block(BREAK_POS.x, BREAK_POS.y, BREAK_POS.z, &self.current());
+        col
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        if (x, y, z) == (BREAK_POS.x, BREAK_POS.y, BREAK_POS.z) {
+            return self.current();
+        }
+        "minecraft:stone".to_string()
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        if (x, y, z) == (BREAK_POS.x, BREAK_POS.y, BREAK_POS.z) {
+            *self.at_break_pos.lock().expect("lock") = name.to_string();
+        }
+        // Everything else discarded, matching `StoneSource`.
+    }
+}
+
+/// **Issue #550's discriminating pair, through the real `serve_connection`
+/// path**: breaking a waterlogged block leaves its water source behind, and
+/// breaking the identical block *without* `waterlogged` leaves air.
+///
+/// Either arm alone passes under a wrong rule — the dry arm passes under
+/// "always keep the fluid" too (a dry block's fluid state is `None`, so both
+/// rules answer air), and the wet arm alone would pass under a bug that always
+/// wrote a water source. Only running both against the same break sequence
+/// separates `Level.removeBlock`'s real rule
+/// (`fluidState.createLegacyBlock()`) from "write air unconditionally".
+///
+/// `oak_slab` rather than a plain waterlogged block because a slab drops loot
+/// (exercising the same `destroy_block` path the cobblestone gate above does)
+/// and is a real vanilla `waterlogged`-carrying block, not a synthetic one.
+#[tokio::test(start_paused = true)]
+async fn breaking_a_waterlogged_block_leaves_water_and_a_dry_one_leaves_air() {
+    async fn break_and_read(initial_state: &str) -> String {
+        let source = SingleBlockSource::new(initial_state);
+        let (client_end, server_end) = memory_pair();
+        let mobs = MobHandle::default();
+        let mobs_for_server = mobs.clone();
+        let source_for_server = source.clone();
+        let server = tokio::spawn(async move {
+            let mut conn = Connection::new(server_end);
+            serve_connection(
+                &mut conn,
+                &FakeProtocol,
+                &source_for_server,
+                &NoEntities,
+                0,
+                &BlockEntityHandle::default(),
+                &mobs_for_server,
+            )
+            .await
+        });
+
+        let mut client = Connection::new(client_end);
+        drive_login_and_join(&mut client, "WaterlogBreaker", 1).await;
+        // Creative rather than `break_with_a_pickaxe`: a pickaxe is the
+        // *wrong* tool for a wood slab (an axe is correct), so a survival dig
+        // needs `divider = 100` and ~140 ticks to clear `STOP_DESTROY_PROGRESS`
+        // — far more than `drain_available`'s single 50ms idle window lets
+        // through. Creative's `StartDestroy` breaks synchronously
+        // (`apply_block_action`'s `creative` branch), and this fix is about
+        // *what replaces the cell*, not about drops or dig timing, so
+        // creative exercises the exact same `destroy_block` write path with
+        // none of that noise.
+        send_game_mode(&mut client, 1).await;
+        send_block_action(&mut client, 0, BREAK_POS).await;
+        let _ = drain_available(&mut client).await;
+
+        drop(client);
+        let _ = server.await.expect("server task panicked");
+        source.current()
+    }
+
+    let dry = break_and_read("minecraft:oak_slab[type=bottom,waterlogged=false]").await;
+    assert_eq!(dry, "minecraft:air", "a dry block's cell must become air");
+
+    let wet = break_and_read("minecraft:oak_slab[type=bottom,waterlogged=true]").await;
+    assert_eq!(
+        wet, "minecraft:water[level=0]",
+        "a waterlogged block's cell must keep its water source, not go to air \
+         — `level=0` is `FlowingFluid.getLegacyLevel`'s own encoding for a \
+         source, matching `fluidState.createLegacyBlock()`"
+    );
+}
+
 /// Stone everywhere except one column of dirt at [`DIRT_POS`], for issue #539's
 /// correct-tool gate.
 ///
