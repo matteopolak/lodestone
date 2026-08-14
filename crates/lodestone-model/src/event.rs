@@ -521,6 +521,37 @@ pub struct EntityMetadataUpdate {
     /// [`tamed`](Self::tamed): `None` means "not known to be a tamable animal",
     /// not "not sitting".
     pub sitting: Option<bool>,
+    /// `EnderDragon.DATA_PHASE` (`Phase::id`), when present and the entity is
+    /// known to be an ender dragon.
+    ///
+    /// # Why this can be absent on a packet that carried the value
+    ///
+    /// Same shape as [`experience_orb_value`](Self::experience_orb_value): the
+    /// value is an `INT` at an index five *other* entity types also put an
+    /// unrelated `INT` at (a creeper's swell direction, a display entity's
+    /// brightness override, a phantom's size, a warden's anger level, a
+    /// wither's target). `None` means "not known to be a dragon phase", which
+    /// a consumer must treat as "no phase-specific pose", never as a cleared
+    /// value.
+    pub dragon_phase: Option<i32>,
+    /// `EndCrystal.DATA_BEAM_TARGET` — where the crystal's beam points, when
+    /// present. [`Reported::Reported(None)`](Reported::Reported) is "no beam"
+    /// (vanilla's own default); [`Reported::Reported(Some(pos))`](Reported::Reported)
+    /// is a beam aimed at `pos`. Self-identifying by `(index, serializer)`
+    /// pair at the wire — see the version adapter's own decode-side doc for
+    /// why the serializer alone is not enough (`OPTIONAL_BLOCK_POS` is reused
+    /// at two other indices for unrelated fields).
+    pub crystal_beam_target: Reported<BlockPos>,
+    /// `EndCrystal.DATA_SHOW_BOTTOM` — whether the crystal draws its bedrock
+    /// base, when present and the entity is known to be an end crystal.
+    ///
+    /// # Why this can be absent on a packet that carried the byte
+    ///
+    /// Same shape as [`tamed`](Self::tamed): index 9's `BOOLEAN` is also
+    /// `AreaEffectCloud.DATA_WAITING` and `FishingHook.DATA_BITING`. `None`
+    /// means "not known to be an end crystal", which a consumer must treat as
+    /// "draw the base" (vanilla's own default), never as a cleared flag.
+    pub crystal_show_bottom: Option<bool>,
 }
 
 impl EntityMetadataUpdate {
@@ -544,6 +575,9 @@ impl EntityMetadataUpdate {
             && self.experience_orb_value.is_none()
             && self.tamed.is_none()
             && self.sitting.is_none()
+            && self.dragon_phase.is_none()
+            && !self.crystal_beam_target.is_reported()
+            && self.crystal_show_bottom.is_none()
     }
 }
 

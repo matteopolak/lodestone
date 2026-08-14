@@ -76,7 +76,7 @@ use lodestone_core::{
     Error, Reader, Result, Writer, plain_text_from_nbt_component, read_network_nbt,
 };
 use lodestone_model::{
-    EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate, EntityPose,
+    BlockPos, EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate, EntityPose,
     EntityVariant, Identifier, ItemStack, Reported,
 };
 
@@ -240,6 +240,29 @@ const IDX_CREEPER_POWERED: u8 = 17;
 /// close and then backs off before detonation, since that path only ever
 /// touches `DATA_SWELL_DIR`.
 const IDX_CREEPER_IGNITED: u8 = 18;
+
+/// `EnderDragon.DATA_PHASE` (`EnderDragon.java`), `EnderDragon`'s first
+/// `defineId` and therefore index 16 by the same class-hierarchy count as
+/// [`IDX_CREEPER_SWELL_DIR`] (`Entity`(0-7) → `LivingEntity`(8-14) →
+/// `Mob`(15) → `EnderDragon`(16), no `AgeableMob`). An `INT`: the current
+/// vanilla `EnderDragonPhase` id (holding pattern / strafing / sitting /
+/// dying / …) — see `tests/support/entity_data_index_jvm.txt` for the five
+/// other `INT` claimants at this index this module's own
+/// [`MetadataClass::Dragon`] guard exists to exclude.
+const IDX_DRAGON_PHASE: u8 = 16;
+/// `EndCrystal.DATA_BEAM_TARGET` (`EndCrystal.java`), index 8 — an
+/// `OPTIONAL_BLOCK_POS`. Self-identifying **at this index** (no other index-8
+/// claimant in the jar dump is `OPTIONAL_BLOCK_POS`), but the serializer is
+/// **not** globally self-identifying: the same serializer is also
+/// `LivingEntity.SLEEPING_POS_ID` at index 14 and `Creaking.HOME_POS` at
+/// index 19, so the decode arm below still keys on this index rather than the
+/// bare `Value::OptBlockPos` shape.
+const IDX_CRYSTAL_BEAM_TARGET: u8 = 8;
+/// `EndCrystal.DATA_SHOW_BOTTOM` (`EndCrystal.java`), index 9 — a `BOOLEAN`,
+/// one of three claimants at that index (`AreaEffectCloud.DATA_WAITING`,
+/// `FishingHook.DATA_BITING` are the other two), hence the
+/// [`MetadataClass::EndCrystal`] guard.
+const IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
 // Both of index 18's claimants share nothing (`BYTE` vs `BOOLEAN`), so the
 // serializer alone tells them apart at decode time — but see the module's
 // `decode_value` for why the *index* still needs a class guard: a mob this
@@ -293,6 +316,16 @@ pub enum MetadataClass {
     /// for why a single shared "tamed" field would misread one family or the
     /// other.
     Tamable,
+    /// `EnderDragon` — gates index 16's `INT` against the five other unrelated
+    /// `INT` claimants at that index. See [`IDX_DRAGON_PHASE`].
+    Dragon,
+    /// `EndCrystal` — gates index 9's `BOOLEAN` against
+    /// `AreaEffectCloud.DATA_WAITING`/`FishingHook.DATA_BITING`, the other two
+    /// claimants at that index. See [`IDX_CRYSTAL_SHOW_BOTTOM`]. (Index 8's
+    /// `OPTIONAL_BLOCK_POS` beam target does not need this class — see
+    /// [`IDX_CRYSTAL_BEAM_TARGET`]'s own doc for why the index alone already
+    /// disambiguates it.)
+    EndCrystal,
 }
 
 /// Classifies a resolved entity-type identifier into the [`MetadataClass`] whose
@@ -313,6 +346,8 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         "minecraft:experience_orb" => Some(MetadataClass::ExperienceOrb),
         "minecraft:wolf" | "minecraft:cat" | "minecraft:parrot" | "minecraft:nautilus"
         | "minecraft:zombie_nautilus" => Some(MetadataClass::Tamable),
+        "minecraft:ender_dragon" => Some(MetadataClass::Dragon),
+        "minecraft:end_crystal" => Some(MetadataClass::EndCrystal),
         _ => None,
     }
 }
@@ -415,6 +450,13 @@ enum Value {
     OptText(Option<String>),
     /// A pose enum id.
     Pose(u32),
+    /// A decoded `OPTIONAL_BLOCK_POS` value — `None` for vanilla's own
+    /// "cleared"/absent sentinel. Surfaced for [`IDX_CRYSTAL_BEAM_TARGET`]
+    /// alone; the other two claimants of this serializer
+    /// (`LivingEntity.SLEEPING_POS_ID`, `Creaking.HOME_POS`) decode to this
+    /// same shape but are filtered out by index at the call site, not here —
+    /// see that constant's own doc for why the serializer alone cannot do it.
+    OptBlockPos(Option<BlockPos>),
     /// A resolved registry-holder appearance variant (cat, cow, wolf, …).
     Keyed(Identifier),
     /// A resolved villager type/profession/level composite.
@@ -474,6 +516,19 @@ fn pose_from_id(id: u32) -> EntityPose {
     }
 }
 
+/// Unpacks a vanilla `BlockPos.asLong` value into canonical block coordinates:
+/// `x` in the high 26 bits, `z` in the middle 26 bits, `y` in the low 12
+/// bits, each two's-complement. A local duplicate of `adapter::unpack_block_pos`/
+/// `server_protocol::unpack_block_pos` — both are private to their own
+/// modules, and this one is small enough that sharing it is not worth a
+/// public seam across three call sites.
+fn unpack_block_pos(packed: i64) -> BlockPos {
+    let x = (packed >> 38) as i32;
+    let y = ((packed << 52) >> 52) as i32;
+    let z = ((packed << 26) >> 38) as i32;
+    BlockPos::new(x, y, z)
+}
+
 fn unknown_serializer(id: i32) -> Error {
     Error::InvalidEnumVariant {
         name: "v770 entity-data serializer",
@@ -526,9 +581,10 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
         }
         SER_OPTIONAL_BLOCK_POS => {
             if reader.bool()? {
-                reader.i64()?;
+                Value::OptBlockPos(Some(unpack_block_pos(reader.i64()?)))
+            } else {
+                Value::OptBlockPos(None)
             }
-            Value::Consumed
         }
         SER_DIRECTION
         | SER_BLOCK_STATE
@@ -745,6 +801,23 @@ pub fn read_entity_metadata(
             // [`IDX_TAMABLE_OR_HORSE_FLAGS`].
             (IDX_TAMABLE_OR_HORSE_FLAGS, Value::Byte(b)) if class == Some(MetadataClass::Horse) => {
                 md.tamed = Some((b as u8) & 0x02 != 0);
+            }
+            // `EnderDragon.DATA_PHASE`. Guarded on class: index 16 is an `INT`
+            // on five other unrelated mobs too — see [`IDX_DRAGON_PHASE`].
+            (IDX_DRAGON_PHASE, Value::Int(v)) if class == Some(MetadataClass::Dragon) => {
+                md.dragon_phase = Some(v);
+            }
+            // `EndCrystal.DATA_SHOW_BOTTOM`. Guarded on class: index 9 is a
+            // `BOOLEAN` on two other unrelated entities too — see
+            // [`IDX_CRYSTAL_SHOW_BOTTOM`].
+            (IDX_CRYSTAL_SHOW_BOTTOM, Value::Bool(b)) if class == Some(MetadataClass::EndCrystal) => {
+                md.crystal_show_bottom = Some(b);
+            }
+            // `EndCrystal.DATA_BEAM_TARGET`. No class guard: the index already
+            // disambiguates (see [`IDX_CRYSTAL_BEAM_TARGET`]'s own doc for why
+            // the bare serializer could not).
+            (IDX_CRYSTAL_BEAM_TARGET, Value::OptBlockPos(pos)) => {
+                md.crystal_beam_target = Reported::Reported(pos);
             }
             // Registry-holder variants identify themselves by serializer, so the
             // index is irrelevant and no class context is needed.
