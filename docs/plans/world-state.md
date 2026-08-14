@@ -9,54 +9,91 @@ tree-wide, and three children turned out substantially landed since their issues
 
 ## Verified current state (read this before trusting any issue body)
 
-Staleness corrections, each confirmed against the tree — the issue bodies predate them:
+**Rewritten 2026-08-14 against the tree at `386889f9`.** The section below as written on
+2026-08-04 had gone stale in the *opposite* direction of the usual failure mode here: it understated
+five of the eight children (T1, R1, R2, W1, B1, S1, P1, P2, D1 all moved substantially since), because
+each landed as a byproduct of other work and nobody came back to re-verdict this plan. `docs/world-state.md`
+now exists as the landed-state doc for the R1/R2/T1 trio (`3d9e9fd9`) and is the one to read for their
+internals; what follows is this plan's own re-verdict of every unit, so a reader trusting this file does
+not inherit the old picture.
 
-- **T1's time work is substantially landed.** The server sends `SET_TIME` once at join
-  (`encode_set_time(0, Some(0))`, `serve_connection_inner` in `crates/lodestone-server/src/server.rs`)
-  and every second (`serve_play`'s `time_sync_tick` arm in `server.rs`, monotonic game time with an
-  empty day-clock map — the correct 26.2 shape). What remains is exactly three things: the
-  `game_time` on the wire is **wall-clock-since-join, per connection** (same `time_sync_tick` arm)
-  rather than the tick loop's own counter — `tick::run_tick_loop_with_weather`'s `game_tick` never
-  reaches the wire, rule 1's island in its purest form; there is no `advance_time` gamerule gate;
-  and nothing persists world age (the open persistence-wiring dependency's hook).
-- **R1's storage half landed** (`34725eb`): `WorldAdminState.game_rules:
-  HashMap<String, String>` (`crate::server::WorldAdminState`, `server.rs`), serverbound
-  `SET_GAME_RULE` decoded (the `SET_GAME_RULE` arm of `ServerProtocol::decode` in
-  `crates/protocol/v770/src/server_protocol.rs`), applied (`apply_game_rule_changed` in
-  `server.rs`), confirmed via `encode_game_rule_values` (`ServerProtocol::encode_game_rule_values`
-  in `crates/lodestone-server/src/protocol.rs`), gated by
-  `a_set_game_rule_is_validated_and_a_renamed_key_is_refused` in
-  `crates/lodestone-server/tests/serve_play.rs`.
-- **The difficulty half of R2's storage + wire round-trip landed** (`34725eb`, `eb05ebe`):
-  `CHANGE_DIFFICULTY`/`LOCK_DIFFICULTY` decoded (the corresponding arms of `ServerProtocol::decode`
-  in `server_protocol.rs`), applied into `WorldAdminState` (`apply_difficulty_change` in
-  `server.rs`).
-- **But `WorldAdminState` is per-connection** — constructed fresh per serve (each
-  `serve_connection*` wrapper in `server.rs`). Two LAN clients each get their own difficulty and
-  game rules. This is a shipped violation of `docs/server-ecs.md`'s never-straddle invariant, and
-  it is R1/R2's problem to fix, not inherit.
-- **`IntegratedServer::bind` (LAN) spawns no tick loop at all** — only `open_in_memory_with_mobs`
-  spawns `run_tick_loop`. World state would be frozen for LAN.
-- **Persistence: the anvil codec work is CLOSED** — `lodestone-anvil` landed with working `.mca`
-  and `level.dat` codecs (`129f0bb`, `bbf27af`). **Wiring it into the server's save/load path is
-  the open dependency with zero commits.** Every persistence hook below cites that dependency, and
-  this plan does not design the format.
-- **The server sends zero registry data** (`begin_configuration` sends only
-  FINISH_CONFIGURATION) and **`lodestone-worldgen` has zero Nether/End code**
-  (grep for `nether|the_end|end_islands` over `crates/lodestone-worldgen/src` is empty). Both
-  block D1.
-- **Spawn is hardcoded `(8, 100, 8)`** inline in `V770ServerProtocol::begin_play`
-  (`crates/protocol/v770/src/server_protocol.rs`), mirrored by the shell
-  (`crates/lodestone-shell/src/net.rs`); `GameLogin` is all literals (seed 0, game_type 0).
-- **Client-side wire coverage** (per-packet audit): time, weather, game-mode and difficulty
-  events are all consumed. **Five decode paths route to nowhere**: all six world-border events,
-  `GameRulesChanged`, and `SpawnPositionChanged` are decoded and dropped —
-  `event.rs`'s `route()` function (`crates/lodestone-model/src/event.rs`) is the authoritative fork
-  (ingest / session / shell stream), and its own doc warns: never flip a route without landing
-  the consumer in the same commit.
-- **`DESIGN.md` §12.88's write-only-events list is stale** — `WeatherChanged` now folds into the
-  shell's `WeatherCell` (`forward`'s `WeatherChanged` arm in `net.rs`, read in
-  `app.rs::WindowApp::redraw`).
+- **R1 (typed game-rule registry) is landed and consumed, not merely stored.** `game_rules.rs`
+  (896 lines) is a real typed registry — every 26.2 rule, jar-checked defaults, dozens of typed
+  accessors (`GameRules::advance_time`, `::mob_griefing`, `::random_tick_speed`, etc.) — reachable
+  through `crate::commands::gamerule` (`crates/lodestone-server/src/commands/gamerule.rs`). It replaced
+  the old unvalidated per-connection `HashMap<String, String>` this plan was written against.
+- **R2's straddle is fixed.** `WorldAdminState` no longer exists (`grep -rn "struct WorldAdminState"
+  crates/lodestone-server/src` is empty). It was replaced by `WorldStateHandle`
+  (`crate::world_state::WorldStateHandle`, `world_state.rs`, 893 lines) — a cheap-clone shared handle,
+  the same shape as `BlockEntityHandle`, with **no per-connection copy**: `open_in_memory_with_mobs_using`
+  constructs one `WorldStateHandle` and clones it into the connection task, the tick loop, and the host.
+  Two LAN clients now share one difficulty and one game-rule set.
+- **T1's remaining island is closed.** The periodic broadcast sends
+  `encode_set_time(game_time, Some(day_time))` reading `WorldStateHandle::tick_time`'s real counters,
+  not wall-clock-since-join. `day_time` advances only when `advance_time` is on, `game_time`
+  unconditionally — the vanilla asymmetry the old text called out as missing is implemented
+  (`WorldStateHandle::tick_time`, `world_state.rs`).
+- **`IntegratedServer::bind` (LAN) spawns a tick loop now.** Issue #439 fixed exactly the gap this
+  section used to name: `bind` delegates to `open_to_lan` (`integrated.rs`), which spawns the same
+  single `run_tick_loop` singleplayer uses (see that function's own comment, in the past tense: *"LAN
+  worlds had no world tick at all"*). Also landed since: `IntegratedServer::open_to_lan` lets a running
+  singleplayer world publish in place (issue #535) instead of restarting, which is what the pause
+  menu's Open to LAN item calls.
+- **W1 (weather) is landed with a real consumer.** `weather.rs` (539 lines) ports
+  `ServerLevel.advanceWeatherCycle`'s exact four `UniformInt` ranges and ±0.01F/tick interpolation, and
+  a `WeatherFeed` carries transitions into `serve_play`'s sync arm exactly like `BlockTickFeed`. Client
+  side, `WeatherChanged` still folds into `WeatherCell` (`net.rs`, read in `app.rs::WindowApp::redraw`)
+  — that part of the 2026-08-04 note was accurate and remains so.
+- **B1 (world border, server half) is landed for state and enforcement, still static for resize.**
+  `border.rs` (742 lines) is a faithful `WorldBorder` port — centre, lerp, damage, warning fields — sent
+  on join via `encode_initialize_border` and enforced via `PlayerVitals::apply_border_damage`
+  (`max(1, floor(-dist * damage_per_block))`, matching `LivingEntity.baseTick`). **What is still true
+  from the old note:** `border.rs`'s own doc comment says the tick-loop's `WorldBorder` is "a static
+  default today because nothing calls `WorldBorder::lerp_size_between` yet" — every call site of that
+  method today is inside `border.rs`'s own test module (`grep -n lerp_size_between
+  crates/lodestone-server/src/border.rs`), and there is no `/worldborder` command
+  (`ls crates/lodestone-server/src/commands/` has no `worldborder.rs`). So B1's *state and enforcement*
+  landed; the *resize* entry point is real code with zero production callers — an island by this repo's
+  own definition, not a landing, until a command or plugin surface calls it.
+- **B2 (border client consumer) is partially landed**, exactly as the file's own "stale as of a recent
+  island sweep" callout already said — that callout in the unit section below is itself still accurate
+  and was re-verified: the six border events route to SESSION (`event.rs`'s `route()`), fold into
+  `SessionWorldBorder`, and reach the debug overlay (`sim::session::border_warning`,
+  commit `090d00de`). The vignette pixel consumer (`misc/vignette.png` + a multiply blend state) is
+  still unbuilt.
+- **S1 (sleep) is landed, including the wake packet this plan flagged as discarded.** `sleep.rs`
+  (479 lines) implements the world-global vote (`SleepVote`) and the tick-owned skip arithmetic
+  (`SleepState`), and `ServerBound::PlayerCommand`'s `STOP_SLEEPING` arm (action 0) is handled, not
+  `Ignored` — see that arm's own comment citing issue #325.
+- **P1 (world spawn) is landed.** `world_spawn.rs` (1290 lines) replaces the hardcoded `(8, y, 8)` this
+  plan was written against with vanilla's real 121-iteration spiral search
+  (`find_initial_spawn`, mirroring `MinecraftServer.setInitialSpawn`), stored in `WorldStateHandle` and
+  persisted to `level.dat`'s `spawn` compound, not re-derived per connection. `SpawnPositionChanged`
+  routes to SESSION and reaches the debug overlay alongside the border fold (commit `090d00de`).
+- **P2 (per-player respawn) is landed for the read half this plan called out as blocking.** Commit
+  `869774eb` added `resolve_bed_respawn` (vanilla's `findRespawnAndUseSpawnBlock` bed branch,
+  walking `BedBlock`'s twelve stand-up offsets in vanilla's order) — `PERFORM_RESPAWN` now consults the
+  stored `RespawnPoint` instead of using the world spawn unconditionally. The `respawn_radius` scatter
+  and the async chunk-ticket search remain open, same as before, and still need shape B.
+- **D1's blockers are mostly cleared; the End is the one still genuinely missing.** The server now
+  sends real Configuration-phase registry data — all 29 of `RegistryDataLoader.SYNCHRONIZED_REGISTRIES`
+  (`docs/registry-data-ingest.md`), not zero. `lodestone-worldgen` has a real Nether generator
+  (`crates/lodestone-worldgen/src/nether/`) wired into the server (`worldgen_data::nether_generator`,
+  consumed by `chunk.rs`'s Nether column adoption), and `crates/lodestone-server/src/dimension.rs` plus
+  `portal.rs` (1585 lines) implement multi-dimension chunk sources, 8:1 coordinate scaling, and portal
+  travel — commit `dc98cb9a`. `encode_respawn` now exists server-side
+  (`crates/lodestone-server/src/protocol.rs`, `crates/protocol/v770/src/server_protocol.rs`), so that
+  blocker is also gone. **What is still an island:** `lodestone-worldgen` has a real `end/` module
+  (`EndBiomeSource`, `EndGenerator`) but `dimension.rs`'s own doc comment says adding the End is still
+  future work — `grep -rn "worldgen::end" crates/lodestone-server/src` has zero production hits. The End
+  generator exists and the dimension plumbing that would consume it exists; nothing connects them yet.
+- **Client-side wire coverage has changed since the old audit.** The old claim that all six
+  world-border events, `GameRulesChanged`, and `SpawnPositionChanged` decode to nowhere is stale: all
+  of them route to SESSION today (`event.rs`'s `route()`) and fold into `SessionWorldBorder`/
+  `SessionGameRules`/`SessionSpawnPoint`, reaching the debug overlay and (for `doImmediateRespawn`) real
+  behaviour — `drive_ui_from_session` now skips the death screen entirely when the rule is off, per
+  commit `090d00de`. `DESIGN.md` §12.88's write-only-events list was already noted stale for
+  `WeatherChanged` on 2026-08-04; that note still holds.
 
 ## The 26.2 rework: constants and mechanics (all cites into `.cache/mc/26.2/src/`)
 
@@ -272,6 +309,13 @@ T1/W1/B1/R1/R2's state **plugin-visible by construction** for native server plug
   here.
 
 ## Units
+
+**Read "Verified current state" above first.** The per-unit sections below are the original
+2026-08-04 plan text and describe R1, T1, W1, R2, B1, B2, S1, P1, P2 and D1 as work to be started;
+all ten have since landed to varying degrees (R1/R2/T1/W1/S1/P1/P2 substantially, B1's state and
+enforcement but not its resize, B2 partially, D1 for the Nether but not the End). The sections below
+still carry accurate 26.2 mechanics, file-touch lists and gate designs for whatever remains — do not
+delete them — but their framing of "not yet built" is superseded by the corrected section above.
 
 Conventions: every unit names its consumer and its gate's negative control. New server modules
 each need exactly one `mod` line in `crates/lodestone-server/src/lib.rs` (choke point — broker
