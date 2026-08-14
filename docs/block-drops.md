@@ -154,6 +154,20 @@ as the exact inverse of the existing menu→native table rather than by restatin
   shrink. `MobSim::set_item_count` does this as a remove-and-respawn at the same id (preserving `age`, so a
   full player brushing past cannot reset the despawn clock), because `ItemEntityRegistry` in
   `lodestone-entity` exposes no count setter.
+* **A break does not write `AIR` unconditionally — it writes the cell's fluid state's legacy block**
+  (issue #550). Vanilla's `Level.removeBlock` (what `ServerPlayerGameMode.destroyBlock` actually calls,
+  despite the name) and `Level.destroyBlock` both read `getFluidState(pos)` first and write
+  `fluidState.createLegacyBlock()`, not `Blocks.AIR`: for a dry block the fluid state is empty and this is
+  air, but for a **waterlogged** block it is `minecraft:water[level=0]` — a real source is left behind,
+  exactly as breaking a waterlogged slab in real Minecraft does. `server.rs`'s `destroy_block` (the
+  player-break path) and `collapse_unsupported` (a support cascade, vanilla's `Block.updateOrDestroy` →
+  `Level.destroyBlock`) both compute this via `crate::fluid::fluid_state_of(&broken).map(FluidState::block_state)`.
+  **This is not the rule everywhere a block disappears** — an explosion's `BlockBehaviour.onExplosionHit`
+  writes `Blocks.AIR` unconditionally regardless of fluid content (confirmed in the decompiled source, not
+  assumed), and a piston's structural move (`PistonBaseBlock.moveBlocks`'s `deleteAfterMove`/`toDestroy`)
+  does too — both are real vanilla divergences from the break/collapse rule, not bugs to "fix" the same way.
+  The pair that would have caught the original bug: a waterlogged and a dry block, broken the same way —
+  either alone passes under both the correct rule and "always write air".
 
 ## The correct-tool gate is not a loot condition (#539)
 

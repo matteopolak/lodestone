@@ -339,3 +339,49 @@ fn the_collapse_bound_truncates_a_runaway_column_and_nothing_shorter() {
         removed.len()
     );
 }
+
+/// **The discriminating pair for a support collapse's own write**: a dry rail's
+/// cell becomes air, a waterlogged rail's keeps its water source. Either half
+/// alone passes under both "always write air" and the correct rule — a rail
+/// carries a real `waterlogged` property and a real `SupportKind::Below`
+/// dependency, so one block family gives a clean pair with nothing else
+/// changing between the two arms.
+///
+/// `Block.updateOrDestroy` reaches `Level.destroyBlock`, which — exactly like
+/// `Level.removeBlock` behind a player's break — writes
+/// `fluidState.createLegacyBlock()`, not `Blocks.AIR` unconditionally. Before
+/// this fix `collapse_unsupported` wrote literal air for both arms below, so a
+/// waterlogged sign or rail whose support vanished silently lost its water too.
+#[test]
+fn a_collapsed_waterlogged_block_keeps_its_water_source_while_a_dry_one_goes_to_air() {
+    let world = RigWorld::new();
+
+    let dry_base = BlockPos::new(2, FLOOR_Y, 2);
+    let dry_rail = BlockPos::new(2, FLOOR_Y + 1, 2);
+    world.put(dry_rail, "minecraft:rail[shape=north_south,waterlogged=false]");
+    world.put(dry_base, crate::chunk::AIR);
+
+    let wet_base = BlockPos::new(9, FLOOR_Y, 9);
+    let wet_rail = BlockPos::new(9, FLOOR_Y + 1, 9);
+    world.put(wet_rail, "minecraft:rail[shape=north_south,waterlogged=true]");
+    world.put(wet_base, crate::chunk::AIR);
+
+    let dry_removed = collapse_unsupported(&world, dry_base);
+    let wet_removed = collapse_unsupported(&world, wet_base);
+
+    assert_eq!(dry_removed.len(), 1, "the dry rail must still collapse");
+    assert_eq!(wet_removed.len(), 1, "the waterlogged rail must still collapse");
+
+    assert_eq!(
+        world.at(dry_rail),
+        "minecraft:air",
+        "a dry block's cell must become air"
+    );
+    assert_eq!(
+        world.at(wet_rail),
+        "minecraft:water[level=0]",
+        "a waterlogged block's cell must keep its water source, not go to air \
+         — the level=0 legacy encoding is `FlowingFluid.getLegacyLevel`'s own \
+         value for a source"
+    );
+}
