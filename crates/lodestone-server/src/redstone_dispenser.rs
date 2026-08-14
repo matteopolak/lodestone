@@ -2,16 +2,28 @@
 //!
 //! # What it is
 //!
-//! `DispenserBlock`/`DropperBlock` share everything except **one** method:
-//! `getDispenseMethod`. A dropper hardcodes `DefaultDispenseItemBehavior` —
-//! always a plain toss, full stop. A dispenser looks the held item's `Item`
-//! up in `DISPENSER_REGISTRY` (populated once, in `DispenseItemBehavior
-//! .bootStrap`) and falls back to the same plain toss only when nothing is
-//! registered for it. Getting this boundary backwards (a dropper that
-//! consults a behaviour table, or a dispenser that never does) is invisible
-//! in the overwhelmingly common case — a stack of cobblestone dispenses
-//! identically either way — and only shows up the moment someone loads an
-//! arrow.
+//! `DispenserBlock`/`DropperBlock` differ in **two** methods, not the one a
+//! surface read of `getDispenseMethod` suggests. A dispenser's
+//! `getDispenseMethod` looks the held item's `Item` up in
+//! `DISPENSER_REGISTRY` (populated once, in `DispenseItemBehavior.bootStrap`)
+//! and falls back to a plain toss only when nothing is registered for it —
+//! that half is modelled here ([`plain_toss`], the fallback). A dropper
+//! hardcodes the plain-toss behaviour for `getDispenseMethod`, **but also
+//! overrides `dispenseFrom` itself** (`DropperBlock.java:47-79`, not just the
+//! method-selection hook `DispenserBlock.java:108` names) to check the block
+//! directly ahead of it first: if that cell is a real container
+//! (`HopperBlockEntity.getContainerAt`), the randomly-picked item is pushed
+//! into it via `HopperBlockEntity.addItem` and **never becomes an item
+//! entity at all** — only when there is no container ahead does a dropper
+//! fall through to the same plain toss a dispenser's fallback uses. **This
+//! module does not model that container-push check** (see the gap list
+//! below); every dropper dispense here is a plain toss regardless of what is
+//! in front of it, which is wrong the moment a dropper faces a chest.
+//! Getting the *toss* boundary backwards (a dropper that consults the
+//! dispenser's item-behaviour table, or a dispenser that never does) is
+//! invisible in the overwhelmingly common case — a stack of cobblestone
+//! dispenses identically either way — and only shows up the moment someone
+//! loads an arrow or points a dropper at a chest.
 //!
 //! # The behaviour table, derived from the registrations
 //!
@@ -72,6 +84,24 @@
 //!   unmodelled — every dispensed item takes the plain-toss row regardless of
 //!   what it is, which is wrong for an arrow, a bucket or TNT and
 //!   indistinguishable from correct for a plain stack.
+//! * **A dropper's container-push check is also not wired** — see this
+//!   module's own doc comment above for why that is a `dispenseFrom`
+//!   override, not a `getDispenseMethod` one. `crate::hopper::try_move_one_item`
+//!   is the closest existing mechanism (moves one item between two flat slot
+//!   arrays, landing in the first empty slot or merging into a matching one)
+//!   but is not a drop-in reuse: it scans its own `from` array in slot order
+//!   to *choose* the source item, while a dropper's source slot is already
+//!   fixed by [`random_slot`] before the container check ever runs. Wiring
+//!   this needs the destination-placement half of that logic driven by an
+//!   externally-chosen source item, plus resolving "is the block ahead a
+//!   real container" (`crate::block_entities::container_type_for_block`
+//!   covers chest/trapped_chest/barrel/dispenser/dropper; vanilla's own
+//!   `getContainerAt` also reaches a furnace's three slots and a hopper's
+//!   five, neither of which this crate's `container_type_for_block` names).
+//!   Landing it as a plain toss regardless of what is ahead is the same
+//!   "indistinguishable from correct for the common case, wrong the moment
+//!   someone points a dropper at a chest" shape as the dispenser behaviour
+//!   table above.
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property, with_property};
