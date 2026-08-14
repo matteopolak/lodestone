@@ -289,6 +289,10 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         // are its named deviations, the same "absent -> present with deviations"
         // transition as the mineshaft pair above.
         "minecraft:stronghold",
+        // `OceanMonumentPieces` places real blocks now, the last item on issue
+        // #514; `coded:worldgen_entities` and `monument:postprocess_random_unseeded`
+        // below are its named deviations.
+        "minecraft:monument",
     ] {
         assert!(
             !ledger.contains_key(id),
@@ -297,7 +301,6 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         );
     }
     for id in [
-        "minecraft:monument",
         // The Nether-side variant only — the six overworld `ruined_portal*`
         // ids came off the ledger once the structure's own generator landed.
         "minecraft:ruined_portal_nether",
