@@ -1636,7 +1636,13 @@ impl IntegratedServer {
         S: ChunkSource + 'static,
     {
         let persistent =
-            crate::region_source::RegionChunkSource::new(source, world_dir, min_y, height)?;
+            crate::region_source::RegionChunkSource::new(
+                source,
+                world_dir,
+                Dimension::Overworld,
+                min_y,
+                height,
+            )?;
         let save = persistent.save_handle();
         // Read out before `persistent` is moved into the constructor below.
         let persistent_scheduled = persistent.scheduled_ticks();
@@ -3403,6 +3409,7 @@ mod tests {
         let region = crate::region_source::RegionChunkSource::new(
             CountingSource::new(&calls),
             &dir,
+            crate::dimension::Dimension::Overworld,
             -64,
             384,
         )
