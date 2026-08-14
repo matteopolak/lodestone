@@ -14,10 +14,15 @@
 //!
 //! # How 1.16.5 differs from the pre-1.13 families (v47/v340)
 //!
-//! * **Post-flattening, flat state ids.** A palette entry is a single flat
-//!   block-state id, *not* the legacy `(blockId << 4) | meta`. That flat id is
-//!   the version-free id space this crate feeds the world store (the same space
-//!   the modern v770 crate uses).
+//! * **Post-flattening, flat state ids — but not *26.2*'s flat state ids.**
+//!   A palette entry is a single flat block-state id, not the legacy
+//!   `(blockId << 4) | meta`, but it is still **1.16.5's own** global-palette
+//!   numbering: 26.2 has inserted thousands of blocks since, so the same
+//!   numeric id now names a different block. Every value decoded by
+//!   [`PalettedContainer::decode`] is translated through
+//!   [`crate::canonical::resolve_or_air`] before it reaches
+//!   [`PalettedContainer::from_values`] — see that module's docs for why and
+//!   `tests/canonicalisation.rs` for the generated mapping's provenance.
 //! * **Non-straddling (padded) long packing.** 1.16 packs each section's index
 //!   array so a value **never** spans two 64-bit longs; unused high bits of each
 //!   long are padding. This is exactly what [`PalettedContainer::decode`]
@@ -48,6 +53,8 @@ use lodestone_world::{
     PalettedContainer, Result,
 };
 
+use crate::canonical::{self, FallbackTally};
+
 /// Number of block sections in a 1.16.5 column (fixed world height 0..256).
 const SECTION_COUNT: usize = 16;
 /// Biome cells per section (4×4×4).
@@ -67,7 +74,12 @@ pub struct ChunkShape {
     pub block_kind: PaletteKind,
     /// Palette configuration for the 3-D biome containers.
     pub biome_kind: PaletteKind,
-    /// Block-state id treated as air (flat state id 0).
+    /// Block-state id treated as air — the **canonical 26.2**
+    /// [`canonical::air_state_id`], not 1.16.5's own flat state 0. Every
+    /// block this crate stores has already been translated by
+    /// [`canonical::resolve_or_air`] by the time it reaches a
+    /// [`PalettedContainer`] (see [`decode_sections`]), so this must match
+    /// that id space, not the wire's.
     pub air_id: u32,
     /// Default biome id for sections/columns without biome data.
     pub biome_id: u32,
@@ -81,7 +93,7 @@ impl ChunkShape {
         Self {
             block_kind: PaletteKind::block_states().with_framing(LongArrayFraming::Prefixed),
             biome_kind: PaletteKind::biomes().with_framing(LongArrayFraming::Prefixed),
-            air_id: 0,
+            air_id: canonical::air_state_id(),
             biome_id: 0,
         }
     }
@@ -114,6 +126,13 @@ pub struct ChunkData {
     pub column: ChunkColumn,
     /// Empty column light (1.16 light travels separately).
     pub light: ColumnLight,
+    /// How many blocks in this column had a wire state id outside 1.16.5's
+    /// own state range while bridging to a canonical 26.2 state — see
+    /// [`canonical::resolve_or_air`]. Zero for every real-world column;
+    /// surfaced here (and logged, see [`MapChunk::decode`]) rather than
+    /// silently absorbed so a wrong mapping stays traceable per CLAUDE.md's
+    /// evidence standards.
+    pub fallback: FallbackTally,
 }
 
 /// The `minecraft:map_chunk` packet (clientbound play).
@@ -187,7 +206,8 @@ impl MapChunk {
         let blob_len =
             usize::try_from(raw_len).map_err(|_| lodestone_core::Error::NegativeLength(raw_len))?;
         let mut blob = r.take_reader(blob_len)?;
-        let column = decode_sections(&mut blob, shape, biomes.as_deref(), bitmask)?;
+        let mut fallback = FallbackTally::default();
+        let column = decode_sections(&mut blob, shape, biomes.as_deref(), bitmask, &mut fallback)?;
         // The declared chunkData length must exactly match the section geometry;
         // any slack is a misparse.
         blob.ensure_empty()?;
@@ -202,12 +222,25 @@ impl MapChunk {
             let _ = read_named_nbt(r)?;
         }
 
+        if !fallback.is_empty() {
+            tracing::warn!(
+                target: "v735::chunk",
+                x,
+                z,
+                out_of_range = fallback.out_of_range,
+                "substituted air for {} block(s) whose 1.16.5 wire state id could not be \
+                 resolved to a canonical 26.2 state",
+                fallback.out_of_range,
+            );
+        }
+
         Ok(ChunkData {
             x,
             z,
             ground_up,
             column,
             light: ColumnLight::new(SECTION_COUNT),
+            fallback,
         })
     }
 }
@@ -221,6 +254,7 @@ fn decode_sections(
     shape: &ChunkShape,
     biomes: Option<&[u32]>,
     bitmask: u32,
+    fallback: &mut FallbackTally,
 ) -> Result<ChunkColumn> {
     let mut column = ChunkColumn::new(
         0,
@@ -238,7 +272,19 @@ fn decode_sections(
         // Non-air block count: advisory, validated non-negative but otherwise
         // unused (the container carries the authoritative contents).
         let _block_count = blob.i16()?;
-        let blocks = PalettedContainer::decode(shape.block_kind, blob)?;
+        // `PalettedContainer::decode` yields 1.16.5's *own* flat state ids
+        // (the framing this crate hand-rolls nothing for — see the module
+        // docs). Translate every cell into the canonical 26.2 space before
+        // it reaches version-free storage: per cell rather than per palette
+        // entry, same tradeoff `lodestone_v47`'s chunk decode documents —
+        // `resolve_or_air` is a plain array index, not a hot-path problem,
+        // and per-cell is what makes the tally count *blocks* substituted.
+        let raw_blocks = PalettedContainer::decode(shape.block_kind, blob)?;
+        let translated: Vec<u32> = raw_blocks
+            .iter()
+            .map(|state_id| canonical::resolve_or_air(state_id, fallback))
+            .collect();
+        let blocks = PalettedContainer::from_values(shape.block_kind, &translated);
 
         let biome_container = match biomes {
             Some(all) => {

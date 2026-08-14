@@ -1190,6 +1190,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   ([`plans/multi-version-protocol.md`](./plans/multi-version-protocol.md)). Before it,
   every 1.8.9 world this client joined was meshed and collided as the wrong blocks,
   with a fully green test suite.
+- [Protocol 754 (1.16.5) block canonicalisation](./protocol-735-canonicalisation.md) —
+  The retrofit that made `lodestone-v735`'s chunk decoder emit **canonical 26.2**
+  block-state ids instead of 1.16.5's own flat wire state ids — unit U4 of epic
+  #343's dispatch plan
+  ([`plans/multi-version-protocol.md`](./plans/multi-version-protocol.md)). Before it,
+  every 1.16.5 world this client joined was meshed and collided as the wrong blocks,
+  with a fully green test suite: `v47` and `v340` had already received the equivalent
+  fix (see [`protocol-47-canonicalisation.md`](./protocol-47-canonicalisation.md) and
+  [`canonical-block-states.md`](./canonical-block-states.md)), and `v735` was the last
+  live instance of the defect.
 - [The version-free part of each adapter's helper prologue](./protocol-adapter-prologue.md) —
   `crates/lodestone-core/src/lib.rs` now exports `encode_body`, `decode_body`,
   `decode_body_exact`, and `unpack_degrees` — the substance of four small helpers
