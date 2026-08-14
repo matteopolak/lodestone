@@ -3866,14 +3866,27 @@ where
     P: ServerProtocol,
     S: ChunkSource + ?Sized,
 {
-    // Issue #337: read the block *before* it becomes air. This is
+    // Issue #337: read the block *before* it is replaced. This is
     // the whole reason the drop has to happen here rather than in a
     // later tick — once `set_block` has run, what was broken is
-    // unrecoverable, and vanilla's own `destroyBlock` likewise
-    // captures the state first (`Level.destroyBlock` reads
-    // `getBlockState(pos)`, calls `dropResources` with it, and only
-    // then `setBlock(pos, AIR)`).
+    // unrecoverable, and vanilla's own `removeBlock` likewise
+    // captures the fluid state first (`Level.removeBlock` reads
+    // `getFluidState(pos)`, and only then `setBlock(pos,
+    // fluidState.createLegacyBlock())` — **not** air unconditionally,
+    // see `new_state` below).
     let broken = source.block_state(pos.x, pos.y, pos.z);
+    // `Level.removeBlock`'s own write, which is what `ServerPlayerGameMode
+    // .destroyBlock` actually calls (not `Level.destroyBlock`, despite the
+    // name): the cell's *fluid* state survives a break. For a dry block
+    // `fluid_state_of` is `None` and this is plain air, which is why every
+    // existing break gate — all of them dry blocks — could not see the
+    // difference. A waterlogged block's fluid state is a water source
+    // (`fluid_state_of` reports `amount: 8, falling: false`), so its
+    // `block_state()` is `minecraft:water[level=0]` — the source vanilla
+    // leaves behind.
+    let new_state = crate::fluid::fluid_state_of(&broken)
+        .map(crate::fluid::FluidState::block_state)
+        .unwrap_or_else(|| AIR.to_owned());
     // The base name, not the state string: `minecraft:mined` is keyed by *block*,
     // so `minecraft:oak_log[axis=y]` and `minecraft:oak_log` must be one counter
     // rather than two. Every other per-block table in this crate strips the suffix
@@ -3892,7 +3905,7 @@ where
     if let Some(effect) = crate::effects::block_destroyed(pos, &broken) {
         block_ticks.publish_effect_except(breaker, effect);
     }
-    source.set_block(pos.x, pos.y, pos.z, AIR);
+    source.set_block(pos.x, pos.y, pos.z, &new_state);
     debug_assert!(
         !broken.is_empty(),
         "`ChunkSource::block_state` returns a state name, never an empty string"
@@ -3996,12 +4009,14 @@ where
     // several gates assert on exactly. This is its own request against the same
     // feed, and `run_tick_loop`'s rebase loop routes it to the fluid queue.
     block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(pos));
-    let directive = proto.encode_block_update(pos.x, pos.y, pos.z, AIR);
+    let directive = proto.encode_block_update(pos.x, pos.y, pos.z, &new_state);
     apply(conn, state, directive).await?;
     // Breaking a light source has to darken the column, and the `BLOCK_UPDATE`
     // above carries no light. See `crate::light` for why this is a column resend
-    // rather than a `LIGHT_UPDATE`.
-    resend_column_for_light(conn, proto, source, state, &broken, AIR, pos).await?;
+    // rather than a `LIGHT_UPDATE`. `new_state` rather than a hardcoded `AIR`
+    // for the same reason as the write above: a broken waterlogged block keeps
+    // a light-dampening fluid in the cell, not empty air.
+    resend_column_for_light(conn, proto, source, state, &broken, &new_state, pos).await?;
 
     // Vanilla's `setBlock(pos, AIR, UPDATE_ALL)` runs two passes the break above
     // did not: `updateNeighbourShapes` (every neighbour's `updateShape`, which is
@@ -4078,9 +4093,12 @@ where
     }
     // A popped torch or lantern has to darken its column too. `should_relight`
     // compares the two states' emission and dampening, so a collapsed flower
-    // costs nothing here.
+    // costs nothing here. Re-read rather than assume `AIR`: `collapse_unsupported`
+    // may have left a fluid's legacy block behind, which dampens light
+    // differently than empty air.
     for (cell, was) in &collapsed {
-        resend_column_for_light(conn, proto, source, state, was, AIR, *cell).await?;
+        let now = source.block_state(cell.x, cell.y, cell.z);
+        resend_column_for_light(conn, proto, source, state, was, &now, *cell).await?;
     }
     Ok(())
 }
@@ -4132,7 +4150,15 @@ where
         }) {
             continue;
         }
-        source.set_block(cell.x, cell.y, cell.z, AIR);
+        // `Block.updateOrDestroy` reaches `Level.destroyBlock`, which — like
+        // `removeBlock` above in this file — writes `fluidState
+        // .createLegacyBlock()`, not literal air: a waterlogged sign whose
+        // support block collapses leaves its water source behind. See
+        // `crate::server::destroy_block`'s `new_state` for the identical rule.
+        let new_state = crate::fluid::fluid_state_of(&was)
+            .map(crate::fluid::FluidState::block_state)
+            .unwrap_or_else(|| AIR.to_owned());
+        source.set_block(cell.x, cell.y, cell.z, &new_state);
         removed.push((cell, was));
         // The removed cell's own neighbours: this is what makes a stack of sugar
         // cane collapse all the way up, and a door's upper half follow its lower.
@@ -4587,6 +4613,16 @@ async fn apply_own_effect<T, P>(
     // Issue #259. This player's live status effects — the store `/effect give` and
     // `/effect clear` write through.
     effects: &mut crate::mob_effects::ActiveEffects,
+    // `/kill`'s health write and the `publish_health` death sequence it
+    // triggers.
+    vitals: &mut PlayerVitals,
+    // `/xp`'s read/write surface.
+    experience: &mut crate::experience::PlayerExperience,
+    // `publish_health`'s own parameters, for the `Kill` arm — see that
+    // function's doc for why they are not derivable from anything else
+    // already passed here.
+    player_entity_id: i32,
+    username: &str,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -4674,6 +4710,111 @@ where
         crate::commands::Effect::Message(line) => {
             apply(conn, state, proto.encode_system_chat(&line)).await?;
         }
+        crate::commands::Effect::Kill => {
+            // `Entity.kill()`: straight to zero, no armour/defenses consulted —
+            // vanilla's `genericKill` damage type is what `/kill` always deals.
+            vitals.kill();
+            publish_health(
+                conn,
+                state,
+                proto,
+                vitals,
+                player_entity_id,
+                username,
+                crate::vitals::DeathCause::GenericKill,
+                advancements,
+                player_uuid,
+                None,
+            )
+            .await?;
+        }
+        crate::commands::Effect::GiveExperience { levels, amount } => {
+            if levels {
+                // `take_levels` is a level *subtraction*; negating the delta is
+                // exactly `giveExperienceLevels`'s own addition.
+                experience.take_levels(-amount);
+            } else {
+                experience.give_points(amount);
+            }
+            apply(
+                conn,
+                state,
+                proto.encode_set_experience(experience.progress(), experience.level(), experience.total()),
+            )
+            .await?;
+        }
+        crate::commands::Effect::SetExperience { levels, amount } => {
+            // Zeroed first — see `crate::commands::experience`'s module doc for
+            // why this is an approximation of vanilla's absolute setters rather
+            // than a byte-exact port of them.
+            *experience = crate::experience::PlayerExperience::default();
+            if levels {
+                experience.take_levels(-amount);
+            } else {
+                experience.give_points(amount);
+            }
+            apply(
+                conn,
+                state,
+                proto.encode_set_experience(experience.progress(), experience.level(), experience.total()),
+            )
+            .await?;
+        }
+        crate::commands::Effect::ClearInventory { item, max_count } => {
+            let mut remaining = max_count.map(|n| u32::try_from(n).unwrap_or(0));
+            let mut cleared: u32 = 0;
+            for index in 0..crate::inventory::PLAYER_NATIVE_SIZE {
+                if matches!(remaining, Some(0)) {
+                    break;
+                }
+                let Some(stack) = inventory.native(index) else { continue };
+                if let Some(filter) = &item {
+                    if &stack.item.to_string() != filter {
+                        continue;
+                    }
+                }
+                let count = stack.count;
+                let take = remaining.map_or(count, |cap| count.min(cap));
+                if take == 0 {
+                    continue;
+                }
+                if take >= count {
+                    inventory.set_native(index, None);
+                } else {
+                    let mut left = stack.clone();
+                    left.count -= take;
+                    inventory.set_native(index, Some(left));
+                }
+                cleared += take;
+                if let Some(cap) = remaining.as_mut() {
+                    *cap -= take;
+                }
+                if let Some(menu_slot) = crate::inventory::window_zero_menu_slot(index) {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_container_slot(0, 0, menu_slot, inventory.native(index)),
+                    )
+                    .await?;
+                }
+            }
+            if cleared == 0 {
+                apply(conn, state, proto.encode_system_chat("No items were found on the player")).await?;
+            }
+        }
+        // World/broadcast/connection-local effects. Always self-targeted by the
+        // executors that produce them (see `crate::commands::Effect`'s own doc)
+        // and applied inline by the `ChatCommand` arm *before* it reaches this
+        // function — that arm has `chunk_source`/`block_ticks`/the player
+        // registry/`respawn`, none of which this function receives. A directed
+        // effect of this kind reaching a *different* connection's drain would be
+        // a registration bug in whichever executor produced it (every one of
+        // them resolves `ctx.source.uuid()`, never a selector target); no-op
+        // rather than panic, because a connection task must not go down for it.
+        crate::commands::Effect::SetBlock { .. }
+        | crate::commands::Effect::Fill { .. }
+        | crate::commands::Effect::Broadcast { .. }
+        | crate::commands::Effect::SetRespawnPoint { .. } => {}
     }
     Ok(())
 }
@@ -5822,6 +5963,29 @@ where
             for (p, s) in &extra {
                 source.set_block(p.x, p.y, p.z, s);
                 changed.push((*p, s.clone()));
+            }
+            // Issue #239: a placed carved pumpkin or jack o'lantern may
+            // complete a snow- or iron-golem block pattern — vanilla
+            // `CarvedPumpkinBlock.setPlacedBy` → `trySpawnGolem`.
+            // `MobSim::try_construct_golem` is a pure detection query with no
+            // block-write authority of its own (see its own doc comment), so
+            // this is the caller that owns clearing the consumed pattern
+            // cells to air, exactly as `CarvedPumpkinBlock.clearPatternBlocks`
+            // does.
+            if block_name == "minecraft:carved_pumpkin" || block_name == "minecraft:jack_o_lantern"
+            {
+                let construction = mobs.with(|sim| {
+                    sim.try_construct_golem(
+                        &|x, y, z| source.block_state(x, y, z).to_owned(),
+                        (target.x, target.y, target.z),
+                    )
+                });
+                if let Some(construction) = construction {
+                    for cell in &construction.consumed {
+                        source.set_block(cell.x, cell.y, cell.z, "minecraft:air");
+                        changed.push((*cell, "minecraft:air".to_string()));
+                    }
+                }
             }
             // Issue #465: placing a block is a mutation like any other, so it
             // owes its neighbours the same fan-out a random tick or a drained
@@ -8848,16 +9012,65 @@ where
                     return Ok(());
                 }
                 let held = inventory.selected_item().map(|stack| stack.item.clone());
-                let outcome = mobs.with(|sim| {
-                    sim.interact(
+                // Issue #236: vanilla `Mob.interact` runs
+                // `checkAndHandleImportantInteractions` then `super.interact`
+                // (`Entity.interact`'s two leash branches — detach-if-mine,
+                // attach-if-holding-a-lead) **before** `mobInteract`'s taming
+                // chain, and a consuming leash branch short-circuits the rest
+                // (`Mob.interact`: `if (superReaction != PASS) return
+                // superReaction;`). `MobSim::try_leash` is checked first here
+                // for the same reason — a lead in hand must attach rather
+                // than roll a taming/feed/breed interaction against it.
+                let leash_outcome = mobs.with(|sim| {
+                    sim.try_leash(
                         entity_id,
-                        PlayerIdentity {
-                            uuid: player_uuid,
-                            entity_id: player_entity_id,
-                        },
-                        held.as_ref(),
+                        player_uuid,
+                        held.as_deref() == Some("minecraft:lead"),
+                        *game_mode == GameMode::Creative,
                     )
                 });
+                let outcome = match leash_outcome {
+                    crate::mobs::LeashOutcome::Attached => {
+                        // vanilla `itemStack.shrink(1)`, through the same
+                        // `consume_one`/window-0 sync every other consuming
+                        // interaction below uses.
+                        let native = usize::from(inventory.selected_hotbar_slot());
+                        if consume_one(inventory, native, *game_mode) {
+                            let hotbar_slot = i32::from(inventory.selected_hotbar_slot())
+                                + WINDOW_ZERO_HOTBAR_FIRST;
+                            apply(
+                                conn,
+                                state,
+                                proto.encode_container_slot(
+                                    0,
+                                    0,
+                                    hotbar_slot,
+                                    inventory.native(native),
+                                ),
+                            )
+                            .await?;
+                        }
+                        None
+                    }
+                    // `MobSim::try_leash` already spawned the dropped lead
+                    // item itself when appropriate (mirroring `tick_leashes`'
+                    // own snap branch) — nothing left for this arm to do.
+                    crate::mobs::LeashOutcome::Detached { .. } => None,
+                    // Not leashable, no lead in hand, out of range, or already
+                    // someone else's: vanilla's `Entity.interact` returns
+                    // `PASS` here and falls through to `mobInteract`, so this
+                    // does too — the taming chain below, unchanged.
+                    crate::mobs::LeashOutcome::Refused => Some(mobs.with(|sim| {
+                        sim.interact(
+                            entity_id,
+                            PlayerIdentity {
+                                uuid: player_uuid,
+                                entity_id: player_entity_id,
+                            },
+                            held.as_ref(),
+                        )
+                    })),
+                };
                 // Vanilla consumes through `usePlayerItem`, a no-op in creative
                 // (`Player.hasInfiniteMaterials`). A sit toggle is
                 // `InteractionResult.SUCCESS.withoutItem()` and consumes nothing,
@@ -8869,7 +9082,9 @@ where
                 // and client disagree about the stack count, which is a worse bug
                 // than not consuming at all (the next click sends a stale count and
                 // the item appears to come back).
-                if outcome.consumes_item() {
+                if let Some(outcome) = outcome
+                    && outcome.consumes_item()
+                {
                     let native = usize::from(inventory.selected_hotbar_slot());
                     if consume_one(inventory, native, *game_mode) {
                         let hotbar_slot =
@@ -9167,6 +9382,11 @@ where
         // property `dispatch_refuses_rather_than_ungates_when_permissions_are_missing`
         // holds one layer in.
         ServerBound::ChatCommand { command } => {
+            // Captured before the `source` binding below shadows the chunk
+            // source with the command's own `CommandSource` — `Effect::SetBlock`/
+            // `Fill` need the former and nothing else in this arm has a name for
+            // it once the shadow takes effect.
+            let chunk_source = source;
             // The roster the command's selectors resolve against.
             //
             // With no registry — singleplayer, where `open_in_memory` builds no
@@ -9196,27 +9416,74 @@ where
                 commands.permission_level,
             );
             let command_world =
-                crate::commands::CommandWorld { rules: world, players: &candidates };
+                crate::commands::CommandWorld { rules: world, players: &candidates, state: world };
             match commands.builtins.run(&command_world, &source, &command) {
                 Some(outcome) => {
                     for directed in outcome.effects {
-                        if directed.target == player_uuid {
-                            apply_own_effect(
-                                conn,
-                                proto,
-                                state,
-                                game_mode,
-                                inventory,
-                                players,
-                                player_uuid,
-                                directed.effect,
-                                advancements,
-                                world,
-                                effects,
-                            )
-                            .await?;
-                        } else if let Some(registry) = players {
-                            registry.push_effect(directed.target, directed.effect);
+                        if directed.target != player_uuid {
+                            if let Some(registry) = players {
+                                registry.push_effect(directed.target, directed.effect);
+                            }
+                            continue;
+                        }
+                        // World/broadcast effects are always self-targeted for
+                        // delivery only (see `crate::commands::Effect`'s own doc)
+                        // and applied here, inline, because this is the only
+                        // place with `chunk_source`/`block_ticks`/the player
+                        // registry/`respawn` all in scope. Everything else is a
+                        // genuine per-player effect and goes through
+                        // `apply_own_effect`, exactly as before.
+                        match directed.effect {
+                            crate::commands::Effect::SetBlock { pos: (x, y, z), block } => {
+                                chunk_source.get().set_block(x, y, z, &block);
+                                block_ticks.publish(x, y, z, block);
+                            }
+                            crate::commands::Effect::Fill { positions, block } => {
+                                for (x, y, z) in positions {
+                                    chunk_source.get().set_block(x, y, z, &block);
+                                    block_ticks.publish(x, y, z, block.clone());
+                                }
+                            }
+                            crate::commands::Effect::Broadcast { sender, message } => {
+                                if let Some(registry) = players {
+                                    registry.say(&sender, &message);
+                                } else {
+                                    // Singleplayer builds no registry at all —
+                                    // the same fallback the `@s`-synthesis above
+                                    // uses. Rendered identically to
+                                    // `ChatLine::rendered` so a `/say` reads no
+                                    // differently than ordinary chat would.
+                                    apply(
+                                        conn,
+                                        state,
+                                        proto.encode_system_chat(&format!("<{sender}> {message}")),
+                                    )
+                                    .await?;
+                                }
+                            }
+                            crate::commands::Effect::SetRespawnPoint { pos } => {
+                                *respawn = Some(RespawnPoint { pos });
+                            }
+                            other => {
+                                apply_own_effect(
+                                    conn,
+                                    proto,
+                                    state,
+                                    game_mode,
+                                    inventory,
+                                    players,
+                                    player_uuid,
+                                    other,
+                                    advancements,
+                                    world,
+                                    effects,
+                                    vitals,
+                                    experience,
+                                    player_entity_id,
+                                    username,
+                                )
+                                .await?;
+                            }
                         }
                     }
                     for line in outcome.response.lines() {
@@ -10913,6 +11180,10 @@ where
                             &mut advancements,
                             world,
                             &mut effects,
+                            &mut vitals,
+                            &mut experience,
+                            player_entity_id,
+                            &username,
                         )
                         .await?;
                     }

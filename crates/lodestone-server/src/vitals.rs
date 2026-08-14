@@ -153,6 +153,12 @@ pub enum DeathCause {
     /// reason [`Self::Wither`] covers two: they differ only in the death message, and
     /// the amounts are already distinguished by [`crate::burning::BurnSource`].
     OnFire,
+    /// [`PlayerVitals::kill`] — `/kill`'s damage type
+    /// (`DamageTypes.GENERIC_KILL`, `generic_kill.json`'s `"message_id":
+    /// "genericKill"` — camelCase, like its `outside_border` neighbour; see
+    /// [`Self::message_id`]'s own doc for why that is measured rather than
+    /// derived from the file name).
+    GenericKill,
 }
 
 impl DeathCause {
@@ -179,6 +185,7 @@ impl DeathCause {
             Self::Starve => "starve",
             Self::Wither => "wither",
             Self::OnFire => "onFire",
+            Self::GenericKill => "genericKill",
         }
     }
 
@@ -666,6 +673,15 @@ impl PlayerVitals {
             return;
         }
         self.health = (self.health + amount).min(MAX_HEALTH);
+    }
+
+    /// `/kill` — `Entity.kill()` → `hurtServer(damageSources().genericKill(),
+    /// Float.MAX_VALUE)`. Straight to zero, unconditionally: no defenses
+    /// reduction and no hurt-cooldown gate, because vanilla's kill command is
+    /// meant to work through invulnerability and creative alike — unlike
+    /// [`Self::apply_damage`], which both of those legitimately block.
+    pub fn kill(&mut self) {
+        self.health = 0.0;
     }
 
     /// Applies a status effect's periodic damage — poison's `magic` or wither's

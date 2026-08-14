@@ -72,6 +72,70 @@ pub enum Effect {
     ClearEffects {
         effect: Option<String>,
     },
+    /// Set health to zero and run the death sequence — `/kill`
+    /// (`Entity.kill()` → `hurtServer(damageSources().genericKill(), MAX_VALUE)`).
+    Kill,
+    /// `/experience add` — vanilla's `giveExperiencePoints`/`giveExperienceLevels`,
+    /// `levels` selecting which.
+    GiveExperience {
+        levels: bool,
+        amount: i32,
+    },
+    /// `/experience set` — an *absolute* value, applied by zeroing the target's
+    /// experience first rather than by diffing against its current value, so the
+    /// result does not depend on read-then-write ordering across two commands aimed
+    /// at the same tick.
+    SetExperience {
+        levels: bool,
+        amount: i32,
+    },
+    /// `/clear` — remove items from the target's own inventory (hotbar, main
+    /// storage, armour and the off-hand — `Inventory.clearOrCountMatchingItems`'s
+    /// own scope). `item` is a canonical id filter (`None` clears everything);
+    /// `max_count` caps how many stacks' worth are removed (`None` is vanilla's
+    /// "no cap" `-1`).
+    ClearInventory {
+        item: Option<String>,
+        max_count: Option<i32>,
+    },
+    /// `/setblock` — **always self-targeted** (the executor that produces this
+    /// always resolves `ctx.source.uuid()`, never a selector's target), because
+    /// delivery needs the chunk source and block-tick feed that only the acting
+    /// connection's own `ChatCommand` arm has. Never meaningfully reaches a
+    /// *different* connection's queue; see `crate::server`'s handling of this
+    /// variant for where it is actually applied, and [`super::registrar`]'s
+    /// `apply_own_effect`-equivalent arm for why a stray one there is a no-op
+    /// rather than a panic.
+    SetBlock {
+        pos: (i32, i32, i32),
+        block: String,
+    },
+    /// `/fill` — same self-targeted delivery constraint as [`Self::SetBlock`], one
+    /// block id over every position in the (already volume-capped) region.
+    Fill {
+        positions: Vec<(i32, i32, i32)>,
+        block: String,
+    },
+    /// `/say`, `/me` — a line every connected player should see. Self-targeted for
+    /// delivery, like `SetBlock`: it needs the player registry's broadcast, which
+    /// no per-uuid effect can express, so it is applied inline by the issuing
+    /// connection's own `ChatCommand` arm rather than drained by a target.
+    ///
+    /// `sender`/`message` rather than one pre-joined line, so delivery can reuse
+    /// `PlayerRegistry::say`'s own `<sender> message` rendering
+    /// ([`crate::players::ChatLine::rendered`]) instead of inventing a second,
+    /// slightly different chat format for commands.
+    Broadcast {
+        sender: String,
+        message: String,
+    },
+    /// `/spawnpoint` (self form only — see `crate::commands::world_spawn_commands`'s
+    /// module doc for why there is no `<targets>` form yet). Self-targeted for
+    /// delivery: the connection's own `respawn: &mut Option<RespawnPoint>` local is
+    /// reachable only from the issuing connection's own `ChatCommand` arm.
+    SetRespawnPoint {
+        pos: lodestone_model::BlockPos,
+    },
 }
 
 /// An [`Effect`] plus who it is for.
