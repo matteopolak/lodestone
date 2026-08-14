@@ -258,9 +258,9 @@ pub use strategy::{
 pub use suballoc::{AllocStats, Region, SuballocError, Suballocator};
 pub use target::{AcquiredFrame, HeadlessTarget, RenderTarget, SurfaceTarget, TargetError};
 pub use texture::{
-    AtlasBindingModel, AtlasStats, GUARANTEED_MAX_ARRAY_LAYERS_WEBGPU, GpuAtlas,
+    AtlasBindingModel, AtlasOccupancy, AtlasStats, GUARANTEED_MAX_ARRAY_LAYERS_WEBGPU, GpuAtlas,
     MEASURED_MAX_ARRAY_LAYERS, MipLevel, SpriteRect, TextureLayout, atlas_mip_levels,
-    generate_isolated_mips, recommend_layout, select_binding_model,
+    atlas_occupancy, generate_isolated_mips, recommend_layout, select_binding_model,
 };
 pub use translucency::{RenderLayer, SortViewpoint, TranslucentMesh};
 pub use vertex::{BYTES_PER_VERTEX, PackedVertex, VertexFields};

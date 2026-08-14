@@ -1,5 +1,5 @@
-//! Per-frame **counts** for the render-submit path, plus mesh-arena occupancy
-//! (issues #106, #128, #160).
+//! Per-frame **counts** for the render-submit path, plus mesh-arena and
+//! texture-atlas occupancy (issues #106, #128, #160).
 //!
 //! # Why this file is mostly counts and barely any timings
 //!
@@ -13,40 +13,46 @@
 //!   assumed from reading the #75 fix.
 //! * **#106** wants entity render planning gated on "draw-call count staying
 //!   flat as entity count grows", explicitly in preference to a raw timing.
-//! * **#160** wants arena occupancy, which is bytes and allocation counts.
+//! * **#160** wants arena and atlas occupancy, which is bytes and allocation
+//!   counts.
 //!
 //! So the assertions here are all counts and the few durations are recorded
 //! advisory baselines, labelled provisional.
 //!
-//! # What #128 asks for that this file cannot supply, and the exact seam
+//! # What #128 asks for that this crate cannot supply, and the exact seam
 //!
 //! #128 asks for per-frame **draw-call** *and* **bind-group-bind** counts, for
 //! three paths (model/fluid terrain, packed/demo, entity). Verified state of the
 //! tree, not assumed:
 //!
-//! * **Draw calls are already counted**, but on the shell side:
-//!   `RenderStats::draw_calls` (`crates/lodestone-shell/src/gpu/stats.rs:11`),
-//!   incremented at 12 call sites in `gpu/frame.rs` and `gpu/first_person.rs`.
-//! * **Bind-group binds are counted nowhere.** There are 179 `set_bind_group`
-//!   call sites in the workspace and no wrapper, no counter and no
-//!   `RenderStats` field. Neither are `write_buffer` calls — which is notable,
-//!   because a `write_buffer`-per-section was the actual #75 defect.
-//! * `RenderState::render_inner` (#133) is a **private** fn in
-//!   `crates/lodestone-shell/src/gpu/frame.rs:147`, and `lodestone-shell` has no
-//!   `benches/` directory. `MODEL_ORIGIN_ARENA_SLOTS` (#133/#160) is
-//!   `pub(super)` at `crates/lodestone-shell/src/gpu/terrain.rs:62`, so its
-//!   occupancy is unreachable from any test or bench in either crate.
+//! * **Draw calls are already counted**, on the shell side:
+//!   `RenderStats::draw_calls`, incremented at every real `draw_indexed` call
+//!   in `gpu/frame.rs` and `gpu/first_person.rs`.
+//! * **Bind-group binds** are now counted too, but only on the shell side —
+//!   `RenderStats::terrain_camera_bind_group_switches`
+//!   (`crates/lodestone-shell/src/gpu/stats.rs`), added alongside a
+//!   `lodestone-shell` bench (`crates/lodestone-shell/benches/render_submit.rs`)
+//!   that exercises it. This crate cannot reach either: `RenderState` and
+//!   `RenderStats` are `lodestone-shell` types, not `lodestone-render` ones.
+//! * `RenderState::render_inner` (#133) was a **private** fn in
+//!   `crates/lodestone-shell/src/gpu/frame.rs`. **`lodestone-shell` does now
+//!   have a `benches/` directory** (`entity_tick.rs` predates this pass) — an
+//!   earlier note here claiming otherwise was stale by the time it was read;
+//!   see the shell bench above for what it measures through the public
+//!   `render`/`render_with_crack_and_effects` wrappers instead.
 //!
-//! Closing those halves needs three shell-side seams that do not exist:
-//! `RenderStats::bind_group_binds`, `RenderStats::buffer_writes`, and an
-//! accessor for `SectionOriginArena`'s used slots. That is a `lodestone-shell`
-//! `src/gpu/` change, deliberately out of scope for this pass. What *is* here is
-//! the whole draw-call side of the terrain path, measured CPU-only through the
-//! same `WorldScene::plan_frame` the real frame builds its draw list from.
+//! So this file supplies the whole draw-call side of the terrain path (measured
+//! CPU-only through the same `WorldScene::plan_frame` the real frame builds its
+//! draw list from), mesh-arena occupancy (needs a GPU adapter), and — new in
+//! this pass — texture-atlas packing occupancy (CPU-only, via
+//! [`lodestone_render::atlas_occupancy`]). The bind-group and per-frame
+//! submit-time halves live in the `lodestone-shell` bench named above, because
+//! that is the only crate that can see the types involved.
 //!
 //! Run with `cargo bench -p lodestone-render --bench render_submit`. The
-//! occupancy bench needs a GPU adapter and says so loudly when there is none;
-//! everything else is hermetic.
+//! mesh-arena occupancy bench needs a GPU adapter and says so loudly when there
+//! is none; everything else, including the new atlas-occupancy bench, is
+//! hermetic.
 
 mod support;
 
@@ -57,10 +63,11 @@ use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use glam::{Mat4, Vec3};
+use lodestone_assets::{AtlasBuilder, Image, ResourceLocation};
 use lodestone_render::mesher::SectionSource;
 use lodestone_render::{
-    BlockClassifier, Camera, Cell, DrawRegion, EntityInstance, GpuContext, SectionVisibility,
-    SpriteId, WorldMesher, WorldScene, section_of,
+    AtlasStats, BlockClassifier, Camera, Cell, DrawRegion, EntityInstance, GpuContext,
+    SectionVisibility, SpriteId, WorldMesher, WorldScene, atlas_occupancy, section_of,
 };
 use lodestone_render::entity::plan_entities;
 use lodestone_testsupport::bench_fixtures::{MODERN_SECTIONS, synthetic_overworld_column};
@@ -471,15 +478,10 @@ fn map_world(rd: i32) -> MapWorld {
 /// Skips with a loud message otherwise, and says explicitly which gates did not
 /// run — a silent skip is the "precondition species" of vacuous test.
 ///
-/// **Texture-atlas occupancy is not measured here, and cannot be.** Verified:
-/// nothing in `lodestone-render` or `lodestone-assets` exposes atlas occupancy.
-/// `AtlasStats` (`src/texture.rs:93`) reports sprite/frame *population*
-/// (`total_sprites`, `static_16`, `total_frames`, `wide_sprites`), and `GpuAtlas`
-/// exposes only `width`/`height` — there is no used/free/slot accessor to read,
-/// so an occupancy figure would have to be derived from summed sprite rects,
-/// which is a new accessor on someone else's crate rather than a measurement.
-/// That half of #160 stays open; the seam is a `used_area`/`slot_occupancy`
-/// method on `Atlas` or `GpuAtlas`.
+/// **Texture-atlas occupancy is a separate bench, [`bench_atlas_occupancy`]
+/// below** — it needs no GPU adapter at all (`Atlas` is a CPU-side build
+/// product), so folding it into this GPU-gated function would make it skip on
+/// every machine without one, for no reason.
 fn bench_arena_occupancy(c: &mut Criterion) {
     let Ok(ctx) = GpuContext::new_headless_blocking() else {
         println!(
@@ -571,10 +573,103 @@ fn bench_arena_occupancy(c: &mut Criterion) {
     c.bench_function("render_submit/arena_occupancy_measured", |b| b.iter(|| black_box(1u8)));
 }
 
+/// Build a synthetic atlas of `n` sprites, matching the real vanilla
+/// population's **dimension mix** described in `src/texture.rs`'s own module
+/// doc (~93% exactly 16×16, the rest mostly 16-wide animation-style strips) —
+/// not its content (solid colours here, not real block textures) and not its
+/// count (vanilla has ~1233 sprites; `n` sweeps well below and up to that
+/// order of magnitude). Packing occupancy is a pure function of the
+/// rectangle-size distribution the builder is fed, so this measures the same
+/// packer behaviour a real atlas would without needing a `client.jar`.
+fn synthetic_atlas(n: usize) -> lodestone_assets::Atlas {
+    let mut builder = AtlasBuilder::new();
+    for i in 0..n {
+        // Roughly vanilla's ~42/1233 (3.4%) wide-sprite share; every 29th
+        // sprite here is a 32-wide strip, the rest plain 16x16.
+        let (w, h) = if i % 29 == 0 { (32u32, 16u32) } else { (16u32, 16u32) };
+        let v = ((i * 37) % 256) as u8;
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..(w * h) {
+            rgba.extend_from_slice(&[v, 255u8.wrapping_sub(v), 128, 255]);
+        }
+        let location = ResourceLocation::parse(&format!("lodestone:bench/sprite_{i}"))
+            .expect("synthetic sprite location parses");
+        builder.add_texture(location, Image { width: w, height: h, rgba }, None);
+    }
+    builder.build().expect("synthetic atlas builds")
+}
+
+/// **Issue #160 (atlas half)** — texture-atlas packing occupancy as a function
+/// of loaded block variety, via the [`lodestone_render::atlas_occupancy`]
+/// accessor this pass adds (the exact seam this file's module doc used to
+/// name as missing: `AtlasStats` reported sprite *population* and `GpuAtlas`
+/// only `width`/`height`, with no used/free measure between them).
+///
+/// CPU-only — `Atlas` is the asset-pipeline's own build product, no
+/// `wgpu::Device` involved — so unlike [`bench_arena_occupancy`] this runs
+/// unconditionally, on every machine, hermetically. See [`synthetic_atlas`]
+/// for why a synthetic sprite corpus is a legitimate stand-in for the real
+/// vanilla one here specifically (packing occupancy depends on the rectangle
+/// *sizes* fed in, not on their pixel content or their real-world names).
+fn bench_atlas_occupancy(c: &mut Criterion) {
+    for n in [16usize, 64, 256, 1024] {
+        let atlas = synthetic_atlas(n);
+        let occ = atlas_occupancy(&atlas);
+        let stats = AtlasStats::from_atlas(&atlas);
+
+        assert_eq!(stats.total_sprites, n as u32, "n={n}: builder dropped or merged sprites");
+        assert!(occ.used_pixels > 0, "n={n}: zero used pixels — the builder produced nothing");
+        assert!(
+            occ.fraction > 0.0 && occ.fraction <= 1.0,
+            "n={n}: occupancy fraction {} is out of the only physically possible range (0, 1]",
+            occ.fraction
+        );
+        // The control that proves this is measuring real packing rather than a
+        // formula that always reports full: total_pixels must exceed
+        // used_pixels by *some* real margin, because the builder pads and
+        // squares its layout (`next_pow2`) rather than packing perfectly.
+        assert!(
+            occ.total_pixels >= occ.used_pixels,
+            "n={n}: used {} exceeds total {} — sprites overlapping or the atlas undersized",
+            occ.used_pixels,
+            occ.total_pixels
+        );
+
+        println!(
+            "atlas occupancy: n={n} sprites={} static16={} wide={} used={}px total={}px \
+             ({}x{}) occupancy={:.1}%",
+            stats.total_sprites, stats.static_16, stats.wide_sprites,
+            occ.used_pixels, occ.total_pixels, atlas.width, atlas.height, occ.fraction * 100.0,
+        );
+
+        let scene = format!("synthetic n={n} (~93% 16x16, ~3% 32x16 strips)");
+        for (metric, value, unit) in [
+            ("atlas_used_pixels", occ.used_pixels as f64, "px"),
+            ("atlas_total_pixels", occ.total_pixels as f64, "px"),
+            ("atlas_occupancy_fraction", occ.fraction, "fraction"),
+            ("atlas_sprite_count", f64::from(stats.total_sprites), "sprites"),
+        ] {
+            support::record(support::Record {
+                bench: "render_submit",
+                metric,
+                scene: &scene,
+                value,
+                unit,
+            });
+        }
+    }
+
+    let atlas256 = synthetic_atlas(256);
+    c.bench_function("render_submit/atlas_occupancy_256", |b| {
+        b.iter(|| black_box(atlas_occupancy(black_box(&atlas256))))
+    });
+}
+
 criterion_group!(
     benches,
     bench_terrain_draw_calls,
     bench_entity_render_planning,
-    bench_arena_occupancy
+    bench_arena_occupancy,
+    bench_atlas_occupancy
 );
 criterion_main!(benches);

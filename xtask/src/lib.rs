@@ -8369,6 +8369,15 @@ pub struct WasmCrate {
 /// default.
 pub fn wasm_crates() -> Vec<WasmCrate> {
     vec![
+        // The portable clock seam: nearly every crate below depends on this
+        // one, so a regression here would otherwise surface only
+        // transitively, attributed to whichever dependent happened to fail
+        // first. Listed first for the same reason lodestone-data is listed
+        // separately from v770.
+        WasmCrate {
+            name: "lodestone-time",
+            extra_args: &[],
+        },
         WasmCrate {
             name: "lodestone-core",
             extra_args: &[],
@@ -8689,6 +8698,26 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
             src_dir: "crates/lodestone-ecs/src",
             banned: "std::time::SystemTime",
             allowlist: &["async_task.rs"],
+        },
+        // lodestone-time itself: the ONE place allowed to depend on
+        // `web-time`, so every other crate's rule above can ban
+        // `std::time::{Instant,SystemTime}` with an empty allowlist. This
+        // crate is held to the identical rule, with an EMPTY allowlist too —
+        // it has no special exemption to spell `std::time` directly, because
+        // everything it re-exports comes from `web_time`, whose own non-wasm
+        // arm is `pub use std::time::*` — that happens inside the `web-time`
+        // dependency, not in this crate's own source.
+        ConfinementRule {
+            label: "lodestone-time instant-ban",
+            src_dir: "crates/lodestone-time/src",
+            banned: "std::time::Instant",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-time systemtime-ban",
+            src_dir: "crates/lodestone-time/src",
+            banned: "std::time::SystemTime",
+            allowlist: &[],
         },
     ]
 }

@@ -3,19 +3,23 @@
 ## What it is
 
 The criterion-based benchmark harness for epic [#78](https://github.com/matteopolak/lodestone/issues/78),
-implemented for five crates so far: `lodestone-worldgen` (chunk generation,
+implemented for six crates so far: `lodestone-worldgen` (chunk generation,
 sub-issues #84/#85), `lodestone-v770` (protocol decode throughput,
 sub-issues #137/#142/#146/#88), `lodestone-world` (client-side chunk loading —
 store insertion, heightmap decode, light propagation, light *application*,
-memory footprint), `lodestone-entity` (mob simulation and pathfinding) and
+memory footprint), `lodestone-entity` (mob simulation and pathfinding),
 `lodestone-physics` (movement integration, collision sweep, pose fit gate,
-crowd push — sub-issues #115/#120/#124/#102). It is the concrete
-implementation of the design recorded in
+crowd push — sub-issues #115/#120/#124/#102) and `lodestone-render` +
+`lodestone-shell` together (render-submit counts and durations — sub-issues
+#106/#128/#133/#160, see
+["The render/entity batch"](#the-renderentity-batch-87-90-91-92-97-99-106-128-151-160)
+below for the split between the two crates and what closed in the most recent
+pass). It is the concrete implementation of the design recorded in
 [`docs/roadmap/benchmarks.md`](./roadmap/benchmarks.md) — that doc is the
 *argument* for the shape; this one is *how it actually works* and how to
 extend it.
 
-Sixteen bench binaries exist today:
+Eighteen bench binaries exist today:
 
 | crate | bench | what it measures |
 |---|---|---|
@@ -35,6 +39,8 @@ Sixteen bench binaries exist today:
 | `lodestone-physics` | `collision_sweep` | `collide` swept against open air / simple cube / real complex-shape census |
 | `lodestone-physics` | `pose_fit_gate` | `can_player_fit_within_blocks_when`, succeeding vs. repeatedly-failing transition |
 | `lodestone-physics` | `crowd_push` | `entity_push_impulse` pair-test cost at N = 10/50/200/1000 nearby entities |
+| `lodestone-render` | `render_submit` | terrain draw-list sizes (#128), entity-planning batch counts (#106), mesh-arena occupancy under load (#160), texture-atlas packing occupancy (#160) |
+| `lodestone-shell` | `render_submit` | `RenderState::render`'s terrain draw-call/camera-bind-group-switch counts (#128) and CPU submit-time baseline (#133), swept by resident section count over the packed/demo path |
 
 Run any of them with `cargo bench -p <crate> --bench <name>`.
 
@@ -535,7 +541,11 @@ rule, checked against the actual code rather than a prior comment's summary:
 
 Three new bench sites — `lodestone-render/benches/{meshing,render_submit}.rs`,
 `lodestone-world/benches/session_rss.rs`, `lodestone-shell/benches/entity_tick.rs`
-— all CPU-only except one adapter-gated occupancy bench.
+— all CPU-only except one adapter-gated occupancy bench. A later pass added a
+fifth, `lodestone-shell/benches/render_submit.rs`, and two new `lodestone-render`
+seams (`atlas_occupancy`, and `lodestone-shell`'s own
+`RenderStats::terrain_camera_bind_group_switches`) — see the corrected note
+below the table.
 
 **The design rule this batch settled: prefer counts, and say so when you can't.**
 Measured on this machine, two runs of the *identical* release binary minutes
@@ -549,10 +559,13 @@ across both runs. So:
 | #90/#91 | greedy ≤ simple quads, uniform-surface merge control, culling-ran check | count |
 | #92 | job count for one arriving column identical in a 9×9 and a 21×21 world | count |
 | #106 | 3 batches and 3 instance buffers at n = 10…5000 | count |
-| #128 | draw-list sizes; `regions.len() == drawable`, `visible == drawn` | count |
+| #128 (`lodestone-render` half) | draw-list sizes; `regions.len() == drawable`, `visible == drawn` | count |
+| #128 (`lodestone-shell` half) | `draw_calls == sections_drawn`; `terrain_camera_bind_group_switches <= 1` at radius 1/3/6 | count |
+| #133 | draw-call/bind-group-switch counts above are the shape gate; CPU submit-time is a recorded baseline | count + duration (baseline) |
 | #151 | healthy churn growth vs a deliberate-leak control | count (bytes) |
-| #160 | `live_allocations == resident_len()`, `used == 0` after unload | count |
-| #87/#97/#99/#133 | — | duration, recorded baseline only |
+| #160 (mesh arena) | `live_allocations == resident_len()`, `used == 0` after unload | count |
+| #160 (texture atlas) | `used_pixels > 0`, `fraction ∈ (0, 1]`, `total_pixels >= used_pixels` at n = 16/64/256/1024 sprites | count |
+| #87/#97/#99 | — | duration, recorded baseline only |
 
 **Which mesher is which** (#90 vs #91 are different meshers and a bench aimed at
 the wrong one measures nothing): `--headless`/demo → `mesh_simple`, live terrain →
@@ -568,20 +581,59 @@ touch interior sections; `dirty_jobs` deliberately does not have that property
 fall in the 9 columns). Asserting it would report a defect where there is a
 design choice, so the gate is the count-identity above instead.
 
-**Still open, with the seams named.** Bind-group binds and `write_buffer` calls
-are counted **nowhere** (179 `set_bind_group` sites, no wrapper, no `RenderStats`
-field), so #128's bind-group half needs `RenderStats::bind_group_binds` /
-`buffer_writes` in `crates/lodestone-shell/src/gpu/`. Texture-atlas occupancy
-(#160's other half) has no accessor at all — `AtlasStats` reports sprite
-*population*, `GpuAtlas` only width/height — so it needs a `used_area` /
-`slot_occupancy` method on `Atlas` or `GpuAtlas`. **#133 is not built**:
-`RenderState::render_inner` is private (`gpu/frame.rs:147`) and
-`MODEL_ORIGIN_ARENA_SLOTS` is `pub(super)` (`gpu/terrain.rs:62`). Its four public
-wrappers (`render_with_crack_and_effects`, …) and `RenderState::new` *are* public
-and shell tests already stand one up on a headless adapter, so the practical
-route is a `lodestone-shell` bench asserting `RenderStats::draw_calls ==
-sections_drawn` at two very different section counts — a count gate for the #75
-shape — with submit time recorded as a provisional baseline.
+**Closed by a later pass**, and worth recording exactly what closed since the
+note above was wrong by the time it was re-read (`CLAUDE.md`'s "re-verify
+before routing around 'X doesn't exist yet'" — `lodestone-shell` already had a
+`benches/` directory, `entity_tick.rs`, so "no `benches/` directory" was stale
+the moment it was checked, not merely optimistic):
+
+- **Bind-group switches** are now counted:
+  `RenderStats::terrain_camera_bind_group_switches`
+  (`crates/lodestone-shell/src/gpu/stats.rs`), incremented by a small
+  `bind_terrain_camera` helper (`gpu/frame.rs`) at every terrain group-0 bind
+  site (the packed loop, `emit_terrain_draws` — called for both the opaque and
+  water passes — and the moving-block/item/framed-map draws), by **pointer
+  identity** rather than call count: a run of draws that all reuse the same
+  `&wgpu::BindGroup` (differing only in dynamic offset, the cheap and expected
+  case) contributes exactly one. This is deliberately narrower than "every
+  `set_bind_group` call" (179 sites workspace-wide, most of them unrelated
+  bind groups — entity camera, armour, block entities, …): #128 asks about the
+  *terrain* camera bind group specifically, the exact thing #75/#76 fixed.
+  `write_buffer` calls were **not** separately counted — the shared-uniform
+  write is already exactly one per frame per path by construction
+  (`update_model_shared_camera_buffer`), so a call-count gate there would
+  measure a constant the code already asserts by its own shape, the code-reading
+  substitution #128 explicitly forbids; the *bind-group* count is the one that
+  can actually regress silently.
+- **Texture-atlas occupancy**: `lodestone_render::atlas_occupancy` /
+  `AtlasOccupancy` (`crates/lodestone-render/src/texture.rs`) — CPU-only,
+  computed from `Atlas::width`/`height` and the same `sprite_rects` helper
+  `GpuAtlas::from_rgba` already uses for mip isolation, so no GPU-side
+  `used_area`/`slot_occupancy` accessor on `GpuAtlas` was needed after all: the
+  CPU-side `Atlas` already carries everything the computation needs, and
+  `GpuAtlas` is built from it at identical dimensions.
+- **#133** is now built as `crates/lodestone-shell/benches/render_submit.rs`,
+  through the four public wrappers (`RenderState::render`,
+  `render_with_crack_and_effects`, …) exactly as this note originally
+  proposed: `draw_calls == sections_drawn` and
+  `terrain_camera_bind_group_switches <= 1` at radius 1/3/6 over the
+  packed/demo path (up to ~4056 sections at radius 6, the same order of
+  magnitude as issue #75's own `sections=3880` profile), with CPU submit time
+  recorded as a provisional baseline. `MODEL_ORIGIN_ARENA_SLOTS` stays
+  `pub(super)` — not widened — because the ceiling-headroom ask is answered by
+  two new narrow accessors instead: `RenderState::model_origin_arena_stats`/
+  `packed_origin_arena_stats`, returning the arena's own `AllocStats` (bytes
+  used/capacity, live allocation count) without exposing the arena type or the
+  constant itself.
+- **The live-vanilla model path stayed out of scope.** All three of the above
+  exercise the **packed/demo** path only (`RenderState::new(.., vanilla:
+  None)`), which needs no `client.jar`. The model path needs
+  `crate::resources::BlockResources::load(true)`, which degrades to `None`
+  without one rather than failing — so a bench built against it would run
+  differently in CI than on a machine with `.cache/mc/26.2` present. The
+  packed path is not a stand-in invented for this gap either: it is the same
+  path issue #76 most recently fixed, so a reversal there is exactly what
+  these gates are positioned to catch.
 
 **#97's `LockHolds` axis is deliberately absent rather than faked.** Driving
 `world.run_schedule(GameTick)` directly involves no guard, so a
