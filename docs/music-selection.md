@@ -18,12 +18,12 @@ Three types and one state machine, all transcribed from decompiled 26.2.
 
 | our type | vanilla | cite |
 |---|---|---|
-| `music::Music` | `Music` record | `Music.java:8` |
-| `music::musics::*` | `Musics` constants | `Musics.java:11-21` |
-| `music::BackgroundMusic` | `BackgroundMusic` record | `BackgroundMusic.java:11` |
-| `music::MusicFrequency` | `MusicManager.MusicFrequency` | `MusicManager.java:158-196` |
-| `music::MusicSituation` | `Minecraft.getSituationalMusic` inputs | `Minecraft.java:2601-2621` |
-| `music::MusicManager` | `MusicManager` | `MusicManager.java:18-156` |
+| `music::Music` | `Music` record | `Music` |
+| `music::musics::*` | `Musics` constants | `Musics` |
+| `music::BackgroundMusic` | `BackgroundMusic` record | `BackgroundMusic` |
+| `music::MusicFrequency` | `MusicManager.MusicFrequency` | `MusicManager.MusicFrequency` |
+| `music::MusicSituation` | `Minecraft.getSituationalMusic` inputs | `Minecraft.getSituationalMusic` |
+| `music::MusicManager` | `MusicManager` | `MusicManager` |
 
 ### 26.2 does not read music off the biome
 
@@ -31,21 +31,21 @@ This is the restructure most likely to be got wrong from memory, and older
 tutorials describe the old shape. There is no `biome.getBackgroundMusic()`.
 `Minecraft.getSituationalMusic` asks the camera's **environment-attribute probe**
 for `EnvironmentAttributes.BACKGROUND_MUSIC`, registered as
-`audio/background_music` (`EnvironmentAttributes.java:94-95`), and a biome
+`audio/background_music`, and a biome
 contributes music by *setting that attribute*. Selection order:
 
 1. The open screen's own `getBackgroundMusic()`, if any — wins outright, and also
-   forces music volume to `1.0` (`Minecraft.java:2624-2626`).
+   forces music volume to `1.0` (`Minecraft.getMusicVolume`).
 2. Otherwise, with a player: `END_BOSS` if the dimension is the End *and* the boss
    overlay wants music; else the probed `BackgroundMusic.select(creative, underwater)`,
    which may be `None`.
 3. Otherwise (no player — the title screen): `MENU`.
 
-`creative` is **`instabuild && mayfly`** (`Minecraft.java:2615`), not
+`creative` is **`instabuild && mayfly`** (`Minecraft.getSituationalMusic`), not
 `gamemode == creative`. A gamemode check gives spectators the creative track.
 
-`BackgroundMusic::select` precedence is **underwater, then creative, then default**
-(`BackgroundMusic.java:35-41`), and a specific slot falls back to `default` only
+`BackgroundMusic::select` precedence is **underwater, then creative, then default**,
+and a specific slot falls back to `default` only
 when *absent*. Both halves are easy to invert and the symptom is narrow — the wrong
 track while swimming in creative.
 
@@ -56,28 +56,28 @@ play. Every one is asserted in `tests/music_selection.rs`.
 
 | music | min | max | replaces | cite |
 |---|---|---|---|---|
-| `MENU` | 20 | 600 | yes | `Musics.java:11` |
-| `CREATIVE` | 12000 | 24000 | no | `Musics.java:12` |
-| `CREDITS` | 0 | 0 | yes | `Musics.java:13` |
-| `END_BOSS` | 0 | 0 | yes | `Musics.java:14` |
-| `END` | 6000 | 24000 | yes | `Musics.java:15` |
-| `UNDER_WATER` | 12000 | 24000 | no | `Musics.java:16` + `:19-21` |
-| `GAME` | 12000 | 24000 | no | `Musics.java:17` + `:19-21` |
+| `MENU` | 20 | 600 | yes | `Musics.MENU` |
+| `CREATIVE` | 12000 | 24000 | no | `Musics.CREATIVE` |
+| `CREDITS` | 0 | 0 | yes | `Musics.CREDITS` |
+| `END_BOSS` | 0 | 0 | yes | `Musics.END_BOSS` |
+| `END` | 6000 | 24000 | yes | `Musics.END` |
+| `UNDER_WATER` | 12000 | 24000 | no | `Musics.UNDER_WATER` + `Musics.createGameMusic` |
+| `GAME` | 12000 | 24000 | no | `Musics.GAME` + `Musics.createGameMusic` |
 
 Note `END`'s min is `FIVE_MINUTES`, not the game tracks' `TEN_MINUTES`; and
-`END_BOSS`'s event is `music.dragon` (`SoundEvents.java:1040`), not
+`END_BOSS`'s event is `music.dragon` (`SoundEvents.MUSIC_DRAGON`), not
 `music.end_boss`.
 
 `MusicFrequency` converts minutes to ticks as `minutes * 1200`
-(`MusicManager.java:170`) → 24000 / 12000 / 0, then
-`getNextSongDelay` (`:174-186`) has three distinct behaviours, two of which are
+(`MusicManager.MusicFrequency`'s constructor) → 24000 / 12000 / 0, then
+`getNextSongDelay` has three distinct behaviours, two of which are
 easy to lose:
 
 - `music == None` → the raw cap, **unrandomised**.
 - `Constant` → a flat `STARTING_DELAY` (100), **ignoring** its own cap of 0. Reading
   "0 minutes" literally restarts music every tick.
 - otherwise → `Mth.nextInt(rng, min(min_delay, cap), min(max_delay, cap))`,
-  **inclusive at both ends** (`Mth.java:146-148`).
+  **inclusive at both ends** (`Mth.nextInt`).
 
 A consequence worth knowing: at `Frequent` a game track's range collapses to
 `12000..=12000`, so the delay is exactly 12000 and **no random draw is consumed**.
@@ -87,14 +87,15 @@ A consequence worth knowing: at `Frequent` a game track's range collapses to
 Both are faithful and both are pinned by gates.
 
 1. **A replacing selection consumes two draws and takes the smaller.** Vanilla stops
-   the old track and sets `nextSongDelay = nextInt(0, min_delay/2)` (`:49`), but does
-   **not** clear `currentMusic`; the next `if` (`:52-55`) therefore sees an inactive
+   the old track and sets `nextSongDelay = nextInt(0, min_delay/2)` (in `MusicManager.tick`),
+   but does
+   **not** clear `currentMusic`; the next `if`, also in `MusicManager.tick`, therefore sees an inactive
    track and `min`s the delay again with `getNextSongDelay`. Both land in one tick.
    Reordering changes the timing *and* the random stream.
 2. **While a track plays, the countdown parks at `max_delay`, not `i32::MAX`.**
-   `startPlaying` sets `i32::MAX` (`:81`), but the clamp at `:58` is *outside* the
+   `startPlaying` sets `i32::MAX`, but the clamp in `MusicManager.tick` is *outside* the
    `currentMusic != null` block, so from the very next tick it is `min(MAX, max_delay)`.
-   It then holds there because the decrement at `:59` is guarded on nothing playing.
+   It then holds there because the decrement, also in `MusicManager.tick`, is guarded on nothing playing.
    An `assert_eq!(delay, i32::MAX)` a tick later fails against real vanilla — that is
    how this was found.
 
@@ -107,8 +108,8 @@ Both are faithful and both are pinned by gates.
 objects present. So every track this layer can choose is usually absent.
 
 The degradation is vanilla's own, not a bespoke path. `MusicManager.startPlaying`
-assigns `currentMusic` *before* playing and switches on the result
-(`MusicManager.java:69-82`): `STARTED_SILENTLY` simply skips the toast. Next tick the
+assigns `currentMusic` *before* playing and switches on the result:
+`STARTED_SILENTLY` simply skips the toast. Next tick the
 `!isActive` branch clears it and re-arms a normal 12000..=24000 countdown. So
 `MusicStart::Silent` recovers through the ordinary "track finished" path — no panic,
 no `unwrap`, no blocking wait, and **no busy loop**.
@@ -160,7 +161,8 @@ outside itself.
 **`None` and `Some(EMPTY)` mean different things.** A biome absent from the table adds
 nothing and should fall back to `BackgroundMusic::overworld()` (helper:
 `overworld_music_for`). `pale_garden` is present-but-empty and means *genuinely no
-music* (`OverworldBiomes.java:596`). Collapsing them gives pale garden the overworld
+music* (`OverworldBiomes.darkForest`, which builds the pale garden variant too).
+Collapsing them gives pale garden the overworld
 track and silences 24 biomes.
 
 ### Nothing in this layer can make a sound
@@ -179,7 +181,7 @@ every `cargo test -p lodestone-shell` run.
 ## Configuration
 
 - `MusicFrequency` — the "Music Frequency" option. The row already exists in
-  `crates/lodestone-shell/src/menu/options.rs:985` but is **inert** (`live: None`),
+  `crates/lodestone-shell/src/menu/options.rs`'s `SOUND` table but is **inert** (`live: None`),
   as are all eleven `soundSource.*` volume sliders; `config::Options` has no volume
   field at all. Wiring them is not part of this.
 - `minecraft:audio/music_volume` — per-biome, default 1.0. Only `pale_garden` sets it
@@ -197,7 +199,7 @@ every `cargo test -p lodestone-shell` run.
 
 ## What is still open
 
-- ~~**No caller yet.**~~ **Wired by issue #451.** Both call sites now exist:
+- ~~**No caller yet.**~~ **Wired.** Both call sites now exist:
   `crates/lodestone-shell/src/audio/music.rs` owns `ShellMusic` (the `MusicManager`,
   its `JavaRandom`, and the sink's sticky flag), inserted as the `MusicState`
   resource beside `AudioEngine` in `sim/build.rs` and ticked through
@@ -256,6 +258,6 @@ every `cargo test -p lodestone-shell` run.
   streams, so nothing here waits on a streaming voice.
 - **Biome attributes over the wire.** On a real vanilla server the attribute is
   `syncable()` and arrives in the biome registry NBT, which
-  `protocol/v770/.../registry.rs:531`'s `biome_sky_color` already demonstrates how to
+  `crates/protocol/v770/src/packets/registry.rs`'s `biome_sky_color` already demonstrates how to
   read. That would let a datapack override music; the generated table would remain the
   singleplayer fallback, since the integrated server sends no registry data at all.
