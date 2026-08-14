@@ -175,6 +175,31 @@ refactors. `sets.rs`'s own doc comment states this as policy.
 [`docs/entity-components.md`](./entity-components.md) for the three-state `Reported<T>` encoding
 that governs when a component should be absent versus present-with-`None`.
 
+**`Attributes` is the one component in this list whose write does not behave like `Position`'s, and
+issue #141 asked for exactly this to be verified rather than assumed.** Re-checked directly: the only
+write site anywhere in the tree is `ingest.rs`'s `IngestSet::Apply` fold of
+`ClientEvent::EntityAttributesUpdated` (`Query<&mut Attributes>`); nothing else writes it, and nothing
+reads it back into anything that reaches `ActionQueue` or the wire. This is not a gap to close —
+vanilla itself has no client→server attribute-set packet at all (`Attributable.setBaseValue` is a
+*server*-side Bukkit API mutating authoritative simulation state; a Java plugin does not write
+attributes from the client either). A client plugin writing `Attributes` today would move the local
+render/prediction value for one tick until the next server update overwrites it, with no effect on
+what the server or any other player sees — the capability the issue asks about belongs on the
+*server* side of the client/server split `docs/server-ecs.md` (issue #433) now documents, not here.
+It is not designed yet even there: attribute modification would need a server-`World` component a
+plugin system can write, and the server-ECS migration's phases (`docs/server-ecs.md`) have not
+reached mob/attribute state.
+
+**AI-goal manipulation (issue #141's other half) is blocked the same way, for a different reason.**
+`crates/lodestone-entity/src/ai/{goal,goals}.rs` plus `roster/*` is a real, jar-verified goal-selector
+system (`docs/mob-goal-roster.md`), so "no AI exists at all" is no longer the blocker — but it is
+internal, non-ECS state consumed by `MobSim` on the server, with no component or resource any plugin
+(client or server) can reach. Blocked on the same X as the attribute half: a server-side plugin
+surface exposing `MobSim`'s goal roster as writable ECS state, which `docs/server-ecs.md`'s migration
+has not phased in yet. A disguise/anti-cheat plugin that wants a fake mob with scripted movement is
+portable *today*, but only by driving position/rotation directly every tick — not through a goal
+selector, because none is plugin-reachable.
+
 **Resources:** `WorldTime { age, time_of_day }` (`crates/lodestone-ecs/src/resources.rs`) is the only
 one Stage 0 delivered. Everything else a plugin will eventually want — the local player, the chunk
 world, HUD/session state — is still off-ECS, in `lodestone-shell::Sim` and
@@ -199,6 +224,44 @@ does not model — remains **unbuilt** (`grep -rn RawPacket crates` is still emp
 deliberately not a substitute for it: it carries the same already-decoded, version-*free* vocabulary
 `IngestSet::Apply` folds into components, not raw bytes. A plugin that needs the wire form still has
 no route but depending on a version crate directly (§3, at the cost of version-locking).
+
+**Decided (issue #156): the packet-interception shape is observation-only, permanently, for both
+directions — a `PacketFilter`-style mutate/cancel/inject-at-the-wire trait is rejected outright, not
+deferred.** The issue asked to pick between a `RawPacket`-observation-only tier and a heavier
+`PacketFilter` trait invoked from inside `handle_packet`. The heavier option cannot be built without
+breaking one of two invariants this epic has already spent real cost making load-bearing elsewhere:
+
+- **Inbound.** The net thread applies each event **inline**, under the `World`'s write guard
+  (`docs/world-unification.md`'s "Can ingest stall the frame" section). An interceptor that needs
+  `&mut World` to decide whether to cancel a packet would be running *inside* that same guard — the
+  exact reentrancy shape issue #177 exists to make unrepresentable, not a case to carve an exception
+  for. `RawPacket`, once built, must stay observation-only (no verdict, no mutation) for the same
+  reason `GameEvent` already is: an observer needs no second guard.
+- **Outbound.** Mutating the *encoded* bytes only exists inside a version crate's `VersionAdapter`.
+  Offering that as a hook to every plugin would mean the *host* handing a version-typed capability to
+  a version-free plugin surface — exactly what `docs/bevy-migration.md` §5 forecloses for shared
+  crates (a plugin *depending on* a version crate directly is a different, already-legal thing; the
+  host *offering* one to everybody is not). `EgressFilters` (issue #157,
+  [`docs/outbound-action-hook.md`](./outbound-action-hook.md)) is therefore the ceiling on the
+  outbound side too: version-free `ClientAction` inspect/replace/suppress, never encoded bytes.
+
+**What this actually costs, named per archetype rather than left abstract:** a protection plugin,
+economy plugin, minigame manager, world editor and client-side HUD mod need none of this — they are
+served by `ActionVetoes` (issue #109, [`docs/cancelable-actions.md`](./cancelable-actions.md), a
+pre-check gate at the *verb* level, before the effect commits) and `EgressFilters`, neither of which
+needs wire access. **Anti-cheat and server-visible disguise plugins are the honest exception**, and
+stay only *partially* portable even once every other issue in this epic lands: real anti-cheat depends
+on outbound packet mutation (faking a rubber-band) and low-latency bidirectional raw-byte visibility,
+which this decision puts permanently out of reach. A **client-side-only** hologram/disguise (visible
+to the local player only, via a local fake entity plus `Extract`-time drawing — issues #138/#140/#161)
+stays achievable; a disguise visible to *other real players* needs server-side outbound injection,
+which is the same rejected shape. `docs/roadmap/plugin-framework.md`'s port-feasibility table already
+carries this finding; this paragraph is what makes it the settled answer rather than an open audit
+note.
+
+**Remaining implementation work, now unambiguous in shape:** build `RawPacket` as
+observation-only, inbound, off by default (mirroring `GameEventBus`'s opt-in cost model) — the one
+piece of #104's original scope `GameEvent` did not close. No further design decision blocks it.
 
 **How a plugin injects intent:** also not yet built, and this is the motivating case named in this
 document's brief — a plugin driving the player. `docs/bevy-migration.md` §6 specifies
@@ -230,17 +293,41 @@ assumed from the stage numbering:
   or `LookIntent` component exists") was half true when this correction was
   first written — **it is now fully closed**, `LookIntent` included; see that
   item, updated below, rather than this bullet.
-- **The sanctioned egress exists, as a resource rather than a message.**
+- **The sanctioned egress exists, as a resource rather than a message — and this
+  is now the settled shape, not an open question (issue #181, closed).**
   `player.rs`'s `ActionQueue(pub Vec<ClientAction>)` is `app.init_resource`'d
   (`player.rs:530`) and drained every tick by the driver
   (`sim.rs::Sim::drain_action_queue`, `resource_mut::<ActionQueue>()`). A plugin
   system can push a `ClientAction` onto it via `ResMut<ActionQueue>` today — the
   capability `docs/bevy-migration.md` §6 asked for (`MessageWriter<SendAction>`)
-  exists under a different shape (a plain `Vec` resource, not a bevy `Message`),
-  which is close enough that "no egress reachable from inside a system" is no
-  longer accurate. Whether that shape is the one to keep, or whether it should
-  still become a `Message` for the ordering/observability a `MessageWriter` gives
-  for free, is open.
+  exists under a different shape (a plain `Vec` resource, not a bevy `Message`).
+  **`ActionQueue` wins; `SendAction` will not be built.** The migration was
+  weighed against the one concrete case that motivated it — the outbound
+  interception hook (issue #157) — and lost on that case's own terms, not on
+  cost alone: `EgressFilters` (`crates/lodestone-ecs/src/egress.rs`) needed
+  synchronous suppression at drain time, and a `MessageWriter<SendAction>`
+  structurally cannot deliver that, because a system reading a buffered
+  `Message` runs on the next tick's schedule pass — by which point
+  `drain_action_queue` has already sent the action (`docs/outbound-action-hook.md`:
+  "A `Message` cannot work here... Suppression must be synchronous"). So the
+  ordering/observability a `Message` was chosen for turned out to be
+  unavailable from a `Message` for this egress shape regardless, which removes
+  the one reason migrating was ever worth its cost (every existing consumer and
+  test, plus riding a fast-moving bevy API — `docs/bevy-migration.md` §9.2's own
+  churn warning). `EgressFilters` gets the same ordering (`priority`, first
+  non-`Allow` wins) and the same observability (`names`/`stats`) directly on the
+  `Vec`, with no migration. See [`docs/outbound-action-hook.md`](./outbound-action-hook.md)
+  and [`docs/cancelable-actions.md`](./cancelable-actions.md) (issue #109) for
+  the sibling pre-check veto layer, which answers the same "how does a plugin
+  stop an action" question one level earlier, at the verb rather than the
+  queue.
+
+  **Still open, and deliberately not resolved by this decision:** `ActionQueue`
+  still accepts a raw `ClientAction::UseItemOn`/`::BlockAction` with a
+  fabricated `sequence` — the "second door" a plugin could still fork the
+  block-prediction counter through. That is a distinct decision (a narrower
+  checked enum of plugin-sendable actions, or a separate egress) tracked on its
+  own rather than folded into the shape question this section answers.
 - **Session/HUD state is components too.** `crates/lodestone-ecs/src/session.rs`
   holds the scoreboard/tab-list/boss-bar/menu/health/food/experience/phase fold,
   with the `ambiguity_detection: LogLevel::Error` gate `docs/bevy-migration.md`
@@ -459,7 +546,28 @@ around:
   gets an `Extract`-time channel to append to (§4.6 below, itself a gap today), never a
   `wgpu::Device`. The 4-bind-group floor and the winding-sign invariant
   (`CLAUDE.md`'s rendering constraints) are constraints a plugin author cannot be expected to satisfy
-  correctly, so they stay behind the renderer's own API on purpose.
+  correctly, so they stay behind the renderer's own API on purpose. **This is a permanent ceiling, not
+  a gap — decided on issue #165.** A Fabric-class mod that replaces whole rendering stages (Sodium/
+  Iris-class) is not portable to the native-plugin tier as designed, and will not become portable
+  without abandoning the safety net entirely; that is stated here as the settled answer, not an open
+  question.
+
+  **Texture/model *substitution* for existing draws is a separate question from GPU access, and it is
+  already fully solved — by the resource-pack mechanism, not a new seam (issue #165's second
+  sub-question, also settled).** `crates/lodestone-assets::ResourceManager` is a real, ordered
+  override stack (vanilla's own semantics) over `client.jar`, and every `load_*` call in
+  `crates/lodestone-shell/src/resources.rs` goes through it — see
+  [`docs/resource-packs-screen.md`](./resource-packs-screen.md). A locally-installed pack in
+  `resourcepacks/` already swaps block, item, GUI and sky textures, no plugin API required. More to
+  the point for a *server*-side plugin (economy shop cosmetics, a custom-look minigame, a "reskin"
+  plugin): [`docs/server-resource-pack.md`](./server-resource-pack.md) (issue #334) is a real,
+  already-shipped server → client push (`ResourcePackPushFeed::publish`, encoded as vanilla's own
+  `ClientboundResourcePackPushPacket`) that directs a connected client to download and apply a pack by
+  URL and SHA-1 hash — exactly vanilla's own mechanism, and exactly how a real Bukkit/Paper "custom
+  texture" plugin does this too (Java plugins do not swap textures through a rendering API either;
+  they push a resource pack). So this needs no rendering-architecture work at all: once a server-side
+  plugin surface exists (`docs/server-ecs.md`, issue #433), the remaining piece is calling
+  `ResourcePackPushFeed::publish` from a plugin system — mechanical wiring, not a design question.
 
 **By policy, nothing is off-limits**, and that is the tension worth naming plainly rather than
 softening: **a compiled-in bevy plugin is fully trusted code with no sandbox.** `add_plugins` is
@@ -473,6 +581,43 @@ power, and native code has always had all of that. `docs/bevy-migration.md` §6.
 something without touching the build." A bevy plugin is `impl Plugin` compiled into the binary.
 "Install a plugin" means "add a `Cargo.toml` dependency and rebuild." If what is actually wanted is
 users dropping a `.so`/`.wasm` file into a folder, this tier does not deliver that at all — see §6.
+
+### Custom world generation: not a verification-model conflict, but blocked on two other gaps (issue #132)
+
+`lodestone-worldgen` is deliberately **not** a system — `docs/bevy-migration.md` §8 keeps it a plain
+library precisely because it is a version-free interpreter verified block-for-block against real
+server chunks, and putting a scheduler between the oracle and the code it validates would compromise
+that verification. Issue #132 asked whether a plugin-supplied generator is even compatible with that
+rule at all.
+
+**It is, in principle, and the tension the issue raised does not actually exist.** `OverworldGenerator`
+and `NetherGenerator` (`crates/lodestone-worldgen/src/{overworld,nether}/mod.rs`) are already called as
+plain functions from `crates/lodestone-server/src/worldgen_data.rs`, never installed as a bevy
+`System`. A `dyn ChunkGenerator` seam that both the vanilla interpreter (verified) and a plugin
+(unverified — exactly Bukkit's own contract for a custom `ChunkGenerator`) implement would preserve
+that shape as long as whatever calls it does so imperatively, the same way `worldgen_data.rs` calls
+the vanilla generators today. §8's rule is about the ECS never owning verified math as *scheduled*
+state; a plain trait object called from a plain function violates nothing.
+
+**It is nonetheless not buildable today, for reasons that have nothing to do with that tension —
+named so this is not rediscovered as a confused plugin-author bug report:**
+
+1. **No `ChunkGenerator` trait exists at all.** Confirmed by grep — `OverworldGenerator`/
+   `NetherGenerator` are concrete structs with no shared trait, so there is no dispatch point a plugin
+   could register into yet.
+2. **No per-world generator *selection* mechanism exists.** Which generator runs is hardcoded per
+   dimension kind (overworld/nether/end); custom dimension registration — the thing a skyblock/void
+   world would need to exist as a selectable target at all — is issue #134, itself an open gap.
+3. **No plugin-reachable block *write* API exists** (issue #129, open) for a hand-rolled generator to
+   place blocks through, even once it could be selected and invoked.
+
+**Decision: out of scope for v1, blocked on #134 and #129 specifically, not on the ECS-verification
+question, which is resolved.** When those two land, the shape to build is a `dyn ChunkGenerator` trait
+implemented by both the vanilla interpreter and a plugin, dispatched imperatively (never as a
+`System`) from whichever component ends up selecting a generator per world/dimension — preserving
+`docs/bevy-migration.md` §8's rule by construction rather than by convention. Leaving issue #132 open
+against those two blockers rather than closing it, since the decision names dependencies that do not
+exist yet rather than settling something implementable now.
 
 ### The four concrete gaps, verified against the current tree
 
@@ -728,7 +873,7 @@ cheaper substitute for the other is the mistake `docs/bevy-migration.md` warns a
 | health/hunger/effects/inventory/tab-list/scoreboard as components | Stage 3 | **done** — landed as `b2baf02`, after this row was written; see the correction note above and [`docs/session-components.md`](./session-components.md) |
 | exactly-one-writer ambiguity gate (`ambiguity_detection: Error`) | Stage 3 | **done** — `crates/lodestone-ecs/src/session.rs:681` |
 | chunk world as a `Resource` with batched snapshot reads | Stage 4 | **done** — `lodestone_ecs::ChunkWorld` (`crates/lodestone-ecs/src/chunks.rs`), a `Clone`-able handle over one shared `lodestone_world::World`; `crates/plugins/lodestone-autopilot` reads it via `Res<ChunkWorld>` to snapshot a `lodestone_nav::SnapshotView` for search |
-| `SendAction` message / `MessageWriter<SendAction>` egress | unassigned | **closed under a different shape** — `player.rs`'s `ActionQueue(Vec<ClientAction>)` resource landed with Stage 2 and is reachable from a plugin system via `ResMut<ActionQueue>`; see the correction note above. Not a bevy `Message`, so the ordering/observability a `MessageWriter` gives for free is still absent — recorded here as a design question, not a completeness gap |
+| `SendAction` message / `MessageWriter<SendAction>` egress | unassigned | **decided (issue #181, closed): `ActionQueue` wins, `SendAction` will not be built** — `player.rs`'s `ActionQueue(Vec<ClientAction>)` resource landed with Stage 2 and is reachable from a plugin system via `ResMut<ActionQueue>`; see the correction note above. The ordering/observability a `MessageWriter` would have given for free turned out to be unavailable from a buffered `Message` for this specific egress anyway (synchronous suppression needs a drain-time hook, not a next-tick reader), so `EgressFilters` (#157) delivers the same properties directly on the `Vec` instead |
 | raw-packet observation (`RawPacket` message) | unassigned | **gap — re-verified: `grep -rn RawPacket crates` is still empty** |
 | version-free event observation (`GameEvent` message, mirroring `ClientEvent`) | issue #104 | **done, gated off by default** — `lodestone_ecs::GameEvent`/`GameEventBus`/`GameEventBusPlugin`; see "The plugin event bus and cross-plugin priority ordering" above. Not a substitute for the `RawPacket` row above it — version-free and already-decoded, not version-opaque wire bytes |
 | cross-plugin event-priority ordering (`EventPriority::{Lowest..Monitor}`) | issue #105 | **done** — `lodestone_ecs::sets::EventPriority`, chained and configured into all four public schedules by `CorePlugin` |
@@ -760,7 +905,9 @@ instead, twice: two of these three closures shipped in one commit (`0d82ab4`, 20
 message named this document by name as what it was closing, and this document was not updated for six
 days until issue #180 forced a pass (this one) — the fix landing is not the same event as the record
 catching up to it, and closing a gap in the tree does not automatically close it in a doc that was
-written when it was open.
+written when it was open. (Update: the `SendAction`/`ActionQueue` design question itself is now also
+closed — issue #181, see the correction note and stage-map row above — so nothing in this paragraph's
+"still missing" list remains a design question, only `RawPacket` as an implementation gap.)
 
 ### Two Stage-1 constraints that shape the API, both verified rather than assumed
 
@@ -787,6 +934,63 @@ constrains code that lives in this repository, not third-party plugin crates. Wo
 alongside §"what stays privileged" above: the deny lint is why the Stage-4 dependency is real
 *internally*, not evidence that a plugin is somehow prevented from doing unsafe things generally — it
 is not.
+
+### Settled: `EcsHandle` reentrancy is unrepresentable for the sanctioned plugin surface (issue #177)
+
+`lodestone_ecs::EcsHandle` (`Arc<parking_lot::RwLock<World>>`) is not reentrant — `write()` then
+`read()` on the same thread deadlocks with no panic and no log line
+(`docs/world-unification.md`'s "Rule 1 broke the client" record). Issue #177 asked whether a plugin
+`System`'s shape could be made *structurally incapable* of expressing that deadlock, rather than
+merely warned against it. **Re-checked directly against the tree for this pass: the answer is
+already largely yes, by omission rather than by a new wrapper type**, and the remaining gap is
+exactly the one already tracked on issue #20.
+
+**A plugin depending only on `lodestone-ecs` — the doctrine-sanctioned dependency — has no route to
+an `EcsHandle` at all.** Confirmed by grep: nothing in this crate does `insert_resource::<EcsHandle>`,
+and there is no `Res<EcsHandle>`/`ResMut<EcsHandle>` anywhere. `EcsHandle` is re-exported from
+`lodestone_ecs` (so host code — the driver, `lodestone-shell::Sim` — can name the type), but a
+plugin's ordinary entry point, `impl Plugin::build(&self, app: &mut App)`, is never handed one, and
+an ordinary `System` receives `&World`/`&mut World` as a parameter from the schedule runner itself —
+not through a second `parking_lot` guard a plugin could misuse. This is candidate (1) from the issue
+body, and it did not need building: it is the consequence of `EcsHandle` simply never being placed on
+the ECS surface a plugin depends on.
+
+**The one place a plugin legitimately needs to reach across a tick boundary — off-tick work — closes
+the same way, at the type level rather than by omission.** `AsyncTaskPool::spawn`/`spawn_with_handback`
+(`crates/lodestone-ecs/src/async_task.rs`, issue #114,
+[`docs/plugin-async-tasks.md`](./plugin-async-tasks.md)) take an off-tick closure of type
+`FnOnce() -> T + Send` — no `&World`, no `&mut World`, no `EcsHandle` parameter — so the closure has
+no argument through which to reach the `World` at all. The hand-back closure gets `&mut World`, but
+only inside `drain_completed_tasks`, on the tick thread, at a schedule point. This is the same
+reasoning `docs/cancelable-actions.md` uses for `VetoFn` (issue #109/#101): give the plugin-facing
+closure no parameter capable of reaching the lock, and reentrancy stops being a discipline problem.
+
+**The residual gap is real, is exactly issue #20's scope, and is not closed by this decision.** A
+plugin can still opt out of the sanctioned dependency graph — depend on `lodestone-shell` directly
+(legal, the same version-locking-style escape hatch as depending on a version crate per §5) — and
+obtain a real `EcsHandle` (e.g. `Sim::ecs()`). For that path, and for every internal call site, the
+backstop is candidate (3): `hold_read`/`hold_write` keep a thread-local ledger and **panic on
+reentrancy instead of hanging**. That backstop is *not* total — `EcsHandle` is a type alias for
+`Arc<RwLock<World>>`, so `handle.read()`/`handle.write()` are `parking_lot`'s own inherent methods and
+**cannot be intercepted**; a caller that reaches for those directly instead of `hold_read`/`hold_write`
+still hangs. Closing that (routing every remaining direct call site through `hold_read`/`hold_write`)
+is issue #20's job, tracked there rather than duplicated here. `AsyncTaskPool` additionally marks
+every worker thread so a captured `EcsHandle` called from *inside pool work* panics rather than hangs
+even off the tick thread — the one case general to "a plugin captured a handle somewhere it
+shouldn't have," covered because the pool is the one sanctioned place off-tick work can originate.
+
+**Decision:** combine (1) and (3), as already built — never place `EcsHandle` on the ECS-only plugin
+surface (making the deadlock unrepresentable for the sanctioned graph, `lodestone-ecs`-only
+dependents), and keep the panic-based ledger as the backstop for the explicit, version-locking escape
+hatch (`lodestone-shell` direct dependency), with issue #20 as the named remaining work to make that
+backstop cover every call site rather than only `hold_read`/`hold_write`'s. Candidate (2) — a
+plugin-prelude wrapper type exposing only `hold_read`/`hold_write` — is not needed on top of this: it
+would only matter for a plugin that already has an `EcsHandle` in hand, which per the above should not
+happen for a plugin following the doctrine at all. Issue #179's reusable reentrancy test harness
+should exercise this shape directly: build a plugin `App` with only `lodestone-ecs` as a dependency
+and assert (by construction, e.g. a compile-fail/trybuild-style check or a grep of the plugin's own
+manifest) that no `EcsHandle`-typed value is reachable from a system, rather than only re-running
+`mining_deadlock.rs`'s one historical shape.
 
 ## How to change it, and the gotchas
 

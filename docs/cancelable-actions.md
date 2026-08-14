@@ -99,6 +99,40 @@ Two different layers, deliberately:
 is precisely why the veto is a separate mechanism at the verb level rather than a special case of the
 hook.
 
+### Closing out issue #101's remaining questions
+
+Issue #101 ("Design: event cancellation semantics in an ECS schedule") named four open questions.
+This mechanism answers the first two by construction (a pre-check gate, and "cancelled" is
+absence-of-effect rather than a `bool` a plugin sets or a `Commands`-deferred undo — see "Why a
+synchronous predicate" above). The remaining two:
+
+**(3) Monitor-priority interaction with a pre-check gate.** These are not in tension, because they
+operate at different points in the pipeline rather than competing for the same one. `ActionVetoes`
+runs *before* a verb's effect commits, inside the engine method that would otherwise commit it, and
+sees a typed `VerbContext` — never the `World`. `EventPriority::Monitor`
+(`docs/plugin-api.md`'s "plugin event bus" section) is a read-only tier over `GameEvent`, which is
+pushed from `SharedState::apply` *after* the effect (or non-effect) already happened, from the
+`ClientEvent` the server or the ingest fold actually produced. So a `Monitor` observer never sees "the
+veto decision" as an event of its own — it sees whatever the verb's outcome was: no `EntityDamaged`
+event exists for damage a veto stopped, because the veto ran before `Sim::attack_entity` produced one.
+A `Monitor`-tier plugin logging "what happened" and a veto-tier plugin deciding "should this happen"
+are answering different questions at different times by construction, the same separation Bukkit's
+own `MONITOR` priority keeps from `LOWEST`..`HIGHEST`'s cancellation-capable tiers — the two were never
+going to need to coordinate directly.
+
+**(4) A generic `Cancelable<T>` wrapper, versus a bespoke gate per verb.** Built and shipped as the
+*second* option, and it turned out to generalize better than a generic wrapper type would have: one
+`Verb` enum, one `VerbContext` (a per-verb payload enum), one `Verdict`, one `ActionVetoes` registry —
+uniform across all six verbs despite their commitment sites having genuinely different shapes (some
+inside a `System`, some inside a plain `impl Sim` method already holding a guard). A generic
+`Cancelable<T>` wrapping each verb's own event/component type would have needed one instantiation per
+verb *and* would not by itself have solved the reentrancy constraint that motivated the whole design —
+the constraint lives in what the predicate is handed, not in how the wrapper is spelled. Verb-keyed
+dispatch was the cheaper generalization for the actual hard part.
+
+**Closed.** Both remaining questions have answers now on record; issue #101 itself is closed
+referencing this document.
+
 ## How to change it, and the gotchas
 
 - **Never hand a veto predicate a `World`, an `EcsHandle`, or anything reaching either.** The whole
