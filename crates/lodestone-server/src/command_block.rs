@@ -17,36 +17,40 @@
 //! logic reduce to, each cited against and unit-tested against the decompiled
 //! source.
 //!
-//! **Two hops remain before a command block actually runs in production, and
-//! both are outside this file's reach:**
+//! **Both hops named above are now wired**, and a third, narrower gap is
+//! disclosed below in its place:
 //!
-//! 1. **The wire decode.** `SET_COMMAND_BLOCK`/`SET_COMMAND_MINECART` still
-//!    decode into a discarded value in `crates/protocol/v770` — that crate is
-//!    outside this unit's file ownership entirely, so a real client's command
-//!    block GUI has nowhere to write yet. Nothing this module does changes
-//!    that; a `CommandBlock` entity can only be constructed today by
-//!    *placing* one (a fresh, empty-command default — see
-//!    [`crate::block_entities::block_entity_for_item`]) or through a test
-//!    calling [`CommandBlockData`]'s own API directly.
-//! 2. **Scheduling into the tick loop.** `tick.rs` already has the exact
-//!    precedent this needs — `crate::redstone_dispenser`'s `TICK_DISPENSER_FIRE`
-//!    scheduled-tick kind, drained with the live `block_entities`/`mobs`
-//!    handles already in scope there (see that module's own doc). Wiring a
-//!    `command:tick` kind the same way, plus a `ServerCommands`/`CommandWorld`
-//!    threaded into that drain function so a command block can actually call
-//!    [`crate::commands::ServerCommands::run`], is real, bounded, *additive*
-//!    work — deliberately not attempted in this pass alongside `/execute`
-//!    (issue #48's other, higher-value half) to keep `tick.rs`'s shared-file
-//!    surface small. `on_power_changed`/`tick`/`next_chain_position` below are
-//!    written so that wiring is exactly "drain the schedule, call these three
-//!    functions, apply their answer" with no further design work.
+//! 1. **The wire decode.** `SET_COMMAND_BLOCK` now decodes into
+//!    `ServerBound::SetCommandBlock` (`crates/protocol/v770/src/server_protocol.rs`)
+//!    and `crate::server`'s handler applies it: swaps the block's own type to
+//!    match the requested mode (preserving `FACING`), writes `conditional`,
+//!    updates the entity's command/track-output/"Always Active" fields, and —
+//!    matching `CommandBlockEntity.setAutomatic`'s own inline scheduling —
+//!    schedules an immediate run via [`on_automatic_changed`] when turning
+//!    "Always Active" on while unpowered. `SET_COMMAND_MINECART` is still
+//!    decode-only; no command-block-minecart entity exists to write into.
+//! 2. **Scheduling into the tick loop.** `tick.rs`'s due-tick drain now has a
+//!    [`TICK_COMMAND_BLOCK`] arm, the same shape as
+//!    `crate::redstone_dispenser`'s `TICK_DISPENSER_FIRE` arm it was written
+//!    to precede: it calls [`tick`], runs the command through a fresh
+//!    `crate::commands::ServerCommands` when the decision says to, folds
+//!    `condition_met`/`success_count`/`last_execution` back into the entity,
+//!    walks any chain behind it via [`next_chain_position`]/
+//!    [`chain_link_present`]/[`chain_link_should_run`], and reschedules for
+//!    `Auto` mode exactly as [`tick`]'s own `reschedule` field says to.
 //!
-//! So: **the data model and tick math are real and tested against vanilla;
-//! nothing yet calls them from a running server.** Treat this file as
-//! substrate in the same sense `crate::commands::registrar`'s modifier/fork
-//! machinery was substrate before `/execute` used it — the difference is that
-//! nothing in *this* session closes the loop for command blocks, and that gap
-//! is disclosed here rather than left to be discovered.
+//! **What is still open, and is a different hop from the two above:**
+//! nothing yet calls [`on_power_changed`] from a real redstone signal.
+//! `CommandBlock.neighborChanged` would need to reach into `block_entities`
+//! from `crate::random_tick::propagate_and_react`, which today only rewrites
+//! the block-*state* string (see that function's own dispenser arm) and has
+//! no block-entity handle in scope at all — threading one through is real
+//! work in its own right, not a leftover of this pass. So today a command
+//! block runs from **"Always Active"** (wired, and the path this module's
+//! own tests exercise end to end) or from a `ServerCommands`/RCON caller
+//! setting it up directly; an ordinary redstone pulse into an impulse
+//! (`minecraft:command_block`) or repeating-but-not-automatic block does
+//! nothing yet, because nothing yet calls [`on_power_changed`] in production.
 //!
 //! # Two field names collide with a Rust keyword's neighbour, on purpose
 //!
@@ -61,9 +65,11 @@
 //! reason.
 
 use lodestone_model::BlockPos;
+use uuid::Uuid;
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{base_name, direction_from_str, get_bool_property, get_str_property};
+use crate::redstone::{base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property};
+use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
 
 pub const COMMAND_BLOCK: &str = "minecraft:command_block";
 pub const CHAIN_COMMAND_BLOCK: &str = "minecraft:chain_command_block";
@@ -343,6 +349,71 @@ pub fn chain_link_should_run(powered: bool, always_active: bool) -> bool {
     powered || always_active
 }
 
+/// The wire ordinal `SET_COMMAND_BLOCK`'s `mode` field carries
+/// (`CommandBlockEntity.Mode`'s declaration order — `SEQUENCE=0, AUTO=1,
+/// REDSTONE=2`, matched by `ServerGamePacketListenerImpl
+/// .handleSetCommandBlock`'s own `switch`) to the block base name the
+/// packet's handler swaps in, preserving `FACING`. Falls back to
+/// [`COMMAND_BLOCK`] for any other ordinal, matching that `switch`'s own
+/// `default` arm.
+#[must_use]
+pub fn base_name_for_mode_ordinal(mode: i32) -> &'static str {
+    match mode {
+        0 => CHAIN_COMMAND_BLOCK,
+        1 => REPEATING_COMMAND_BLOCK,
+        _ => COMMAND_BLOCK,
+    }
+}
+
+/// Builds a command block's block-state string from its two properties —
+/// `CommandBlock.createBlockStateDefinition`'s only two (`FACING`,
+/// `CONDITIONAL`). Property order is not significant to this crate's state
+/// resolver (`crate::redstone::with_property`'s own doc comment); this order
+/// matches this module's own test fixtures.
+#[must_use]
+pub fn state_with(base: &str, facing: Direction, conditional: bool) -> String {
+    format!("{base}[conditional={conditional},facing={}]", direction_to_str(facing))
+}
+
+/// One [`TICK_COMMAND_BLOCK`] entry at delay `1` —
+/// `CommandBlockEntity::scheduleTick`'s own `level.scheduleTick(pos, block,
+/// 1)`, called from `setAutomatic`/`onModeSwitch`. Built through a real queue
+/// rather than a struct literal because `ScheduledTick::sub_tick_order` is
+/// private — the same idiom `crate::fluid::ticks_after_edit`/
+/// `crate::gravity_tick::ticks_after_place` already use, for the same reason.
+#[must_use]
+pub fn ticks_after_schedule(pos: BlockPos) -> Vec<ScheduledTick<String>> {
+    let mut pending: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    pending.schedule((pos.x, pos.y, pos.z), TICK_COMMAND_BLOCK.to_owned(), 1, TickPriority::Normal);
+    pending.drain_due(u64::MAX, usize::MAX)
+}
+
+/// `Direction.toYRot()` — the yaw a command block's `CommandSourceStack`
+/// faces, for `^`-relative coordinates in its own command. Vertical
+/// directions have no vanilla y-rotation (`Direction.java`'s own
+/// `IllegalStateException`); `0.0` is a documented fallback rather than a
+/// port of that panic, since a command block can legally face up or down and
+/// this crate's source construction must stay total.
+#[must_use]
+pub fn yaw_for_facing(facing: Direction) -> f32 {
+    match facing {
+        Direction::North => 180.0,
+        Direction::South => 0.0,
+        Direction::West => 90.0,
+        Direction::East => -90.0,
+        Direction::Up | Direction::Down => 0.0,
+    }
+}
+
+/// The synthetic [`crate::commands::CommandSource`] identity every command
+/// block runs as — `CommandBlockEntity`'s own source has no real player
+/// behind it (vanilla's `CommandSource.NULL`/a closeable console source), and
+/// [`crate::commands::Effect::SetBlock`]/`Fill` still need *some* uuid to
+/// self-target (see `crate::commands::block_commands`' own doc comment on
+/// why). The nil uuid can never collide with a real player's, which always
+/// comes from `lodestone-auth`'s offline/online resolution.
+pub const COMMAND_BLOCK_SOURCE_UUID: Uuid = Uuid::nil();
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,5 +601,38 @@ mod tests {
         assert!(chain_link_should_run(true, false));
         assert!(chain_link_should_run(false, true));
         assert!(!chain_link_should_run(false, false));
+    }
+
+    #[test]
+    fn base_name_for_mode_ordinal_matches_command_block_entity_mode_declaration_order() {
+        assert_eq!(base_name_for_mode_ordinal(0), CHAIN_COMMAND_BLOCK, "0 is SEQUENCE");
+        assert_eq!(base_name_for_mode_ordinal(1), REPEATING_COMMAND_BLOCK, "1 is AUTO");
+        assert_eq!(base_name_for_mode_ordinal(2), COMMAND_BLOCK, "2 is REDSTONE");
+        assert_eq!(base_name_for_mode_ordinal(99), COMMAND_BLOCK, "an unknown ordinal falls back like the switch's default");
+    }
+
+    #[test]
+    fn state_with_round_trips_through_this_modules_own_readers() {
+        let built = state_with(REPEATING_COMMAND_BLOCK, Direction::West, true);
+        assert_eq!(mode_for_block(&built), CommandBlockMode::Auto);
+        assert_eq!(facing(&built), Direction::West);
+        assert!(is_conditional(&built));
+    }
+
+    #[test]
+    fn ticks_after_schedule_is_one_entry_at_delay_one() {
+        let ticks = ticks_after_schedule(BlockPos::new(4, 70, -2));
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].pos, (4, 70, -2));
+        assert_eq!(ticks[0].kind, TICK_COMMAND_BLOCK);
+        assert_eq!(ticks[0].trigger_tick, 1);
+    }
+
+    #[test]
+    fn yaw_for_facing_matches_directions_own_to_y_rot() {
+        assert_eq!(yaw_for_facing(Direction::North), 180.0);
+        assert_eq!(yaw_for_facing(Direction::South), 0.0);
+        assert_eq!(yaw_for_facing(Direction::West), 90.0);
+        assert_eq!(yaw_for_facing(Direction::East), -90.0);
     }
 }

@@ -120,6 +120,7 @@ use crate::packets::game::{
     RecipeBookSeenRecipe, RenameItem, Respawn, SERVERBOUND_ABILITY_FLAG_FLYING, SelectBundleItem,
     SelectTrade, ServerboundPlayerAbilities, SetBorderCenter, SetBorderLerpSize,
     SetBorderSize, SetBorderWarningDelay, SetBorderWarningDistance, SetCarriedItem,
+    COMMAND_BLOCK_FLAG_AUTOMATIC, COMMAND_BLOCK_FLAG_CONDITIONAL, COMMAND_BLOCK_FLAG_TRACK_OUTPUT,
     SetCommandBlock, SetCommandMinecart, SetDefaultSpawnPosition, SetGameRule, SetHealth,
     SetHeldSlot, SetJigsawBlock, SetStructureBlock, SetTestBlock, SignUpdate, Swing, UseItem,
     UseItemOn,
@@ -291,6 +292,13 @@ const METADATA_IDX_BABY: u8 = 16;
 /// the other direction.
 const METADATA_IDX_VILLAGER_DATA: u8 = 19;
 const METADATA_SER_VILLAGER_DATA: i32 = 18;
+
+/// `PrimedTnt.DATA_FUSE_ID` — index 8, serializer `INT` (1). Off the same jar
+/// dump line the decode side's `IDX_EXPERIENCE_ORB_VALUE` doc cites
+/// (`tests/support/entity_data_index_jvm.txt`: `8 PrimedTnt.DATA_FUSE_ID 1
+/// INT`), one of index 8's five `INT`/`ITEM_STACK` claimants — see
+/// `MetadataField::TntFuse`'s own doc for the full list.
+const METADATA_IDX_TNT_FUSE: u8 = 8;
 
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
@@ -3564,21 +3572,24 @@ impl ServerProtocol for V770ServerProtocol {
             // undecoded, reasoning they are "deep features, not decode
             // gaps" (command-block/jigsaw/structure/game-test state, none
             // of which this crate models). That reasoning about the
-            // *feature* stands — nothing here builds command blocks,
-            // jigsaw structures, or the game-test framework. What changed:
-            // this pass decodes the wire shape anyway, straight against
-            // `.cache/mc/26.2/src`'s decompiled packet classes (the
-            // independent source `CLAUDE.md`'s evidence standard calls for
-            // when no client encoder exists to cross-check against, which
-            // is the case for all seven), and maps to `Ignored` — the same
-            // "examined, no consumer" bucket `cargo xtask connectedness`
-            // already tracks separately from "never examined" for
-            // `PLAYER_ACTION`'s item-action ordinals. This is additive
-            // measurement/documentation, not a claim that any of these
-            // features now exist.
+            // *feature* stands for the remaining six — nothing here builds
+            // jigsaw structures or the game-test framework. Command blocks
+            // are the exception now: issue #48's remainder gave this crate a
+            // real `BlockEntity::CommandBlock` and a `crate::server` consumer
+            // (see `crate::command_block`'s own module doc), so this arm
+            // decodes for real instead of mapping to `Ignored`.
             State::Play if packet_id == play::serverbound::SET_COMMAND_BLOCK => {
-                let _ = decode_full::<SetCommandBlock>(payload);
-                ServerBound::Ignored
+                match decode_full::<SetCommandBlock>(payload) {
+                    Some(SetCommandBlock { pos, command, mode, flags }) => ServerBound::SetCommandBlock {
+                        pos: unpack_block_pos(pos),
+                        command,
+                        mode,
+                        track_output: flags & COMMAND_BLOCK_FLAG_TRACK_OUTPUT != 0,
+                        conditional: flags & COMMAND_BLOCK_FLAG_CONDITIONAL != 0,
+                        automatic: flags & COMMAND_BLOCK_FLAG_AUTOMATIC != 0,
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::SET_COMMAND_MINECART => {
                 let _ = decode_full::<SetCommandMinecart>(payload);
@@ -4708,6 +4719,18 @@ impl ServerProtocol for V770ServerProtocol {
                         &profession.to_string(),
                     ));
                     w.var_i32(*level);
+                }
+                MetadataField::TntFuse(fuse) => {
+                    // `PrimedTnt.DATA_FUSE_ID` — index 8 again, and the
+                    // *producer* is what disambiguates it from `Item`'s
+                    // `ITEM_STACK` and `ExperienceOrbValue`'s own `INT` at the
+                    // same index: only `MobSim::snapshots`' TNT loop ever
+                    // builds this variant. See its own doc comment
+                    // (`lodestone_server::MetadataField::TntFuse`) for the
+                    // full five-claimant list from the jar dump.
+                    w.u8(METADATA_IDX_TNT_FUSE);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(*fuse);
                 }
             }
         }

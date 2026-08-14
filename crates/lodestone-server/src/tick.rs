@@ -789,6 +789,79 @@ pub struct TickStats {
     pub overrun_count: u64,
 }
 
+/// `GameRules.MAX_COMMAND_SEQUENCE_LENGTH`'s default (`65536`) — this crate
+/// has no gamerule store for it yet, so the `TICK_COMMAND_BLOCK` arm below
+/// uses vanilla's own default as a plain bound rather than reading a rule
+/// that does not exist, matching `CommandBlock.executeChain`'s own overflow
+/// guard in spirit if not in configurability.
+const MAX_COMMAND_CHAIN_LENGTH: u32 = 65_536;
+
+/// Runs one command block's `command` as its own synthetic
+/// [`crate::commands::CommandSource`] (`crate::command_block
+/// ::COMMAND_BLOCK_SOURCE_UUID`, permission level 2 — `Commands
+/// .LEVEL_GAMEMASTERS`, matching `LevelBasedPermissionSet.GAMEMASTER` in
+/// `CommandBlockEntity`'s own `createCommandSourceStack`) and returns whether
+/// it ran (`CommandResponse::is_ran`) — the `TICK_COMMAND_BLOCK` arm below
+/// folds that into [`crate::command_block::CommandBlockData::success_count`].
+///
+/// [`crate::commands::Effect::SetBlock`]/`Fill` are applied inline against
+/// `world`, exactly like `crate::server`'s `ChatCommand` arm applies its own
+/// caller's self-targeted effects — a command block has the same shape of
+/// "self" as that arm's player does, just with no connection to send a
+/// directive down. Every other effect kind (aimed at a *different* uuid, via
+/// a selector) is dropped rather than queued: this loop has no
+/// `PlayerRegistry` in scope to queue it on, the same honest gap
+/// `crate::rcon`'s console source already accepts for the same reason.
+fn run_command_block_command<W: ChunkSource + ?Sized>(
+    commands: &crate::commands::ServerCommands,
+    world_state: &crate::world_state::WorldStateHandle,
+    mobs: &MobHandle,
+    world: &W,
+    block_tick_out: &BlockTickFeed,
+    pos: BlockPos,
+    facing: crate::neighbor_update::Direction,
+    command: &str,
+) -> bool {
+    let source_uuid = crate::command_block::COMMAND_BLOCK_SOURCE_UUID;
+    let source = crate::commands::CommandSource::player(
+        source_uuid,
+        -1,
+        "@",
+        lodestone_model::Vec3::new(f64::from(pos.x) + 0.5, f64::from(pos.y) + 0.5, f64::from(pos.z) + 0.5),
+        lodestone_model::Rotation { yaw: crate::command_block::yaw_for_facing(facing), pitch: 0.0 },
+        crate::commands::overworld_dimension(),
+        2,
+    );
+    let command_world = crate::commands::CommandWorld {
+        rules: world_state,
+        players: &[],
+        state: world_state,
+        mobs: Some(mobs),
+    };
+    let Some(outcome) = commands.run(&command_world, &source, command) else {
+        return false;
+    };
+    for directed in outcome.effects {
+        if directed.target != source_uuid {
+            continue;
+        }
+        match directed.effect {
+            crate::commands::Effect::SetBlock { pos: (x, y, z), block } => {
+                world.set_block(x, y, z, &block);
+                block_tick_out.publish(x, y, z, block);
+            }
+            crate::commands::Effect::Fill { positions, block } => {
+                for (x, y, z) in positions {
+                    world.set_block(x, y, z, &block);
+                    block_tick_out.publish(x, y, z, block.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    outcome.response.is_ran()
+}
+
 /// The unified 20 Hz world-tick loop (issue #284): ticks the live [`MobSim`]
 /// and every registered block entity once per [`TICK_PERIOD`], forever,
 /// independently of whether any client is connected — replacing the two
@@ -1091,6 +1164,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     let mut fire_rng = crate::mob_spawn::SpawnRng::new(crate::fire::FIRE_BEHAVIOR_SEED);
     let mut fire_env: Option<(i32, i32)> = None;
     let mut fire_changes: Vec<(BlockPos, String)> = Vec::new();
+    let mut fire_primed_tnt: Vec<BlockPos> = Vec::new();
     // `crate::explosion_blocks`' behaviour stream, drawn once per ray of a blast
     // (1,352 rays) plus one per `createFire` candidate. Separate from `fire_rng`
     // so a blast cannot shift the fire stream, and from `random_ticks`' own
@@ -1110,6 +1184,12 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // `DefaultDispenseItemBehavior.execute` draw from the same generator.
     let mut dispenser_rng =
         crate::mob_spawn::SpawnRng::new(crate::redstone_dispenser::DISPENSER_BEHAVIOR_SEED);
+    // The built-in tree a `TICK_COMMAND_BLOCK` drain runs a command block's
+    // own command through — see that arm's own comment below. Built once per
+    // loop, the same convention `crate::server`'s per-connection `CommandSession`
+    // already uses for its own `ServerCommands::new()` rather than sharing one
+    // built-in tree across every caller.
+    let command_tree = crate::commands::ServerCommands::new();
     let (tick_cx_range, tick_cz_range) = tick_area;
     // **The columns this loop simulates, and they now follow the players.**
     //
@@ -1426,7 +1506,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 (detonation.centre.z.floor() as i32).div_euclid(16),
             );
             let env = crate::explosion_blocks::BlastEnv::in_column(probe.min_y, probe.height);
-            let (changes, popped) = crate::block_drops::drop_explosion_loot_in_blast(
+            let (changes, popped, primed_tnt) = crate::block_drops::drop_explosion_loot_in_blast(
                 &*world,
                 env,
                 detonation.centre,
@@ -1451,6 +1531,21 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                                 lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
                             ),
                         );
+                    }
+                });
+            }
+            // `TntBlock::wasExploded` — chain reaction. Gated on `TNT_EXPLODES`
+            // the same way `crate::fire`'s TNT arm below is, matching vanilla's
+            // own `if (level.getGameRules().get(GameRules.TNT_EXPLODES))` guard
+            // in `TntBlock::prime`.
+            if world_state.tnt_explodes() {
+                mobs.with(|sim| {
+                    for pos in primed_tnt {
+                        sim.spawn_tnt_short_fuse(lodestone_model::Vec3::new(
+                            f64::from(pos.x) + 0.5,
+                            f64::from(pos.y),
+                            f64::from(pos.z) + 0.5,
+                        ));
                     }
                 });
             }
@@ -1798,6 +1893,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     weather.raining,
                 );
                 fire_changes.clear();
+                fire_primed_tnt.clear();
                 crate::fire::run_scheduled_tick(
                     &*world,
                     env,
@@ -1806,9 +1902,29 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     game_tick,
                     &mut fire_rng,
                     &mut fire_changes,
+                    &mut fire_primed_tnt,
                 );
                 for (at, new_state) in fire_changes.drain(..) {
                     block_tick_out.publish(at.x, at.y, at.z, new_state);
+                }
+                // `TntBlock::prime`, the fire-consumption arm — see
+                // `crate::fire::check_burn_out`'s own doc for why this is
+                // reported rather than spawned inline.
+                if world_state.tnt_explodes() {
+                    mobs.with(|sim| {
+                        for pos in fire_primed_tnt.drain(..) {
+                            sim.spawn_tnt(
+                                lodestone_model::Vec3::new(
+                                    f64::from(pos.x) + 0.5,
+                                    f64::from(pos.y),
+                                    f64::from(pos.z) + 0.5,
+                                ),
+                                crate::mobs::tnt::DEFAULT_FUSE_TIME,
+                            );
+                        }
+                    });
+                } else {
+                    fire_primed_tnt.clear();
                 }
                 continue;
             }
@@ -2005,6 +2121,16 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                                 }
                                 crate::redstone_dispenser::BoatDispense::Fallback => toss = true,
                             }
+                        } else if item_str == "minecraft:tnt" {
+                            // `TntDispenseItemBehavior` — spawns a primed TNT
+                            // entity just outside the dispenser's own face,
+                            // reusing the exact position formula the spawn-egg
+                            // and boat arms above already use for the same
+                            // "outside this face" placement.
+                            let position = crate::redstone_dispenser::spawn_egg_position(origin, face, &lookup);
+                            mobs.with(|sim| {
+                                sim.spawn_tnt(position, crate::mobs::tnt::DEFAULT_FUSE_TIME);
+                            });
                         } else if item_str == crate::bone_meal::BONE_MEAL {
                             let target = face.relative(origin);
                             let target_state = lookup(target);
@@ -2082,6 +2208,172 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                                     },
                                 );
                             });
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // `crate::mobs::tnt::TICK_TNT_PRIME` — the redstone-signal ignition
+            // arm (`TntBlock::onPlace`/`neighborChanged`) schedules this at
+            // `current_tick` itself; see `crate::random_tick`'s TNT arm for why
+            // it cannot spawn the entity directly. Handled here, with its own
+            // `continue`, for the reason every other entity-spawning arm in
+            // this drain is: it needs `mobs`, which the `Option<String>` chain
+            // below has no access to.
+            //
+            // Re-checked against the *live* block (`crate::mobs::tnt::is_tnt_block`)
+            // rather than trusting the scheduling arm's premise: a block that
+            // changed again before this tick fires (mined, replaced) must not
+            // spawn a phantom TNT entity where nothing is left.
+            if due.kind == crate::mobs::tnt::TICK_TNT_PRIME {
+                if crate::mobs::tnt::is_tnt_block(&state) && world_state.tnt_explodes() {
+                    let origin = BlockPos::new(x, y, z);
+                    world.set_block(x, y, z, crate::chunk::AIR);
+                    block_tick_out.publish(x, y, z, crate::chunk::AIR.to_owned());
+                    mobs.with(|sim| {
+                        sim.spawn_tnt(
+                            lodestone_model::Vec3::new(f64::from(origin.x) + 0.5, f64::from(origin.y), f64::from(origin.z) + 0.5),
+                            crate::mobs::tnt::DEFAULT_FUSE_TIME,
+                        );
+                    });
+                }
+                continue;
+            }
+
+            // `crate::command_block::TICK_COMMAND_BLOCK` — issue #48's
+            // remainder, second hop. Same shape as the dispenser-fire arm
+            // just above and for the same reason: this needs the live
+            // `block_entities` container, plus (new here) a real command
+            // dispatcher, neither of which the `Option<String>` chain below
+            // has in scope. See `crate::command_block`'s own module doc for
+            // exactly how a command block gets scheduled here in the first
+            // place (today: "Always Active", not yet a live redstone pulse).
+            if due.kind == crate::command_block::TICK_COMMAND_BLOCK {
+                if crate::command_block::is_command_block_family(&state) {
+                    let origin = BlockPos::new(x, y, z);
+                    let mode = crate::command_block::mode_for_block(&state);
+                    let conditional = crate::command_block::is_conditional(&state);
+                    let facing = crate::command_block::facing(&state);
+                    let snapshot = block_entities.with(|reg| match reg.get(origin) {
+                        Some(crate::block_entities::BlockEntity::CommandBlock(d)) => Some(d.clone()),
+                        _ => None,
+                    });
+                    if let Some(mut data) = snapshot {
+                        // `markConditionMet`'s predecessor read — see the
+                        // `SetCommandBlock` handler in `crate::server` for
+                        // the identical read, done there for the same reason
+                        // (never nest a second `.with` inside a first).
+                        let predecessor_succeeded = conditional.then(|| {
+                            let behind = facing.opposite().relative(origin);
+                            let behind_state = world.block_state(behind.x, behind.y, behind.z);
+                            crate::command_block::is_command_block_family(&behind_state)
+                                && block_entities.with(|reg| {
+                                    matches!(
+                                        reg.get(behind),
+                                        Some(crate::block_entities::BlockEntity::CommandBlock(d))
+                                            if d.success_count > 0
+                                    )
+                                })
+                        });
+                        let decision = crate::command_block::tick(
+                            mode, data.condition_met, conditional, predecessor_succeeded, data.powered, data.auto,
+                        );
+                        data.condition_met = decision.condition_met;
+                        if decision.zero_success_if_conditional {
+                            data.success_count = 0;
+                        }
+                        if decision.run && !data.already_ran_this_tick(game_tick as i64) {
+                            // `CommandBlock.execute`'s own `commandSet` gate —
+                            // an empty command still zeroes the success count
+                            // rather than attempting to run anything.
+                            if data.command.is_empty() {
+                                data.success_count = 0;
+                            } else {
+                                let ran = run_command_block_command(
+                                    &command_tree, &world_state, &mobs, &*world, &block_tick_out, origin, facing,
+                                    &data.command,
+                                );
+                                data.success_count = i32::from(ran);
+                            }
+                            data.record_executed(game_tick as i64);
+                        }
+                        if decision.reschedule {
+                            block_ticks.schedule(
+                                (x, y, z),
+                                crate::command_block::TICK_COMMAND_BLOCK.to_owned(),
+                                game_tick + 1,
+                                TickPriority::Normal,
+                            );
+                        }
+                        let mut final_success = data.success_count;
+                        block_entities.with(|reg| {
+                            if let Some(crate::block_entities::BlockEntity::CommandBlock(d)) = reg.get_mut(origin) {
+                                *d = data.clone();
+                            }
+                        });
+                        // `CommandBlock.executeChain`, walked only on the tick
+                        // this origin actually ran something — `Sequence`
+                        // mode never reaches here at all, since `tick`'s own
+                        // `Sequence` branch always answers `run: false`.
+                        if decision.run {
+                            let mut prev_pos = origin;
+                            let mut walk_facing = facing;
+                            for _ in 0..MAX_COMMAND_CHAIN_LENGTH {
+                                let next_pos = crate::command_block::next_chain_position(prev_pos, walk_facing);
+                                let next_state = world.block_state(next_pos.x, next_pos.y, next_pos.z);
+                                if !crate::command_block::chain_link_present(&next_state) {
+                                    break;
+                                }
+                                let link_snapshot = block_entities.with(|reg| match reg.get(next_pos) {
+                                    Some(crate::block_entities::BlockEntity::CommandBlock(d)) => Some(d.clone()),
+                                    _ => None,
+                                });
+                                let Some(mut link) = link_snapshot else { break };
+                                walk_facing = crate::command_block::facing(&next_state);
+                                let mut should_break = false;
+                                if crate::command_block::chain_link_should_run(link.powered, link.auto) {
+                                    let link_conditional = crate::command_block::is_conditional(&next_state);
+                                    let met = crate::command_block::mark_condition_met(
+                                        link_conditional,
+                                        Some(final_success > 0),
+                                    );
+                                    link.condition_met = met;
+                                    if met {
+                                        if link.already_ran_this_tick(game_tick as i64) {
+                                            // `performCommand`'s same-tick dedup
+                                            // returning `false` — `executeChain`
+                                            // stops the walk right here.
+                                            should_break = true;
+                                        } else {
+                                            if link.command.is_empty() {
+                                                link.success_count = 0;
+                                            } else {
+                                                let ran = run_command_block_command(
+                                                    &command_tree, &world_state, &mobs, &*world, &block_tick_out,
+                                                    next_pos, walk_facing, &link.command,
+                                                );
+                                                link.success_count = i32::from(ran);
+                                            }
+                                            link.record_executed(game_tick as i64);
+                                        }
+                                    } else if link_conditional {
+                                        link.success_count = 0;
+                                    }
+                                }
+                                final_success = link.success_count;
+                                block_entities.with(|reg| {
+                                    if let Some(crate::block_entities::BlockEntity::CommandBlock(d)) =
+                                        reg.get_mut(next_pos)
+                                    {
+                                        *d = link.clone();
+                                    }
+                                });
+                                if should_break {
+                                    break;
+                                }
+                                prev_pos = next_pos;
+                            }
                         }
                     }
                 }
@@ -2311,6 +2603,17 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // No effects to forward: a boat's new position rides the ordinary
         // `snapshots()` diff exactly as an airborne falling block's does.
         mobs.with(|sim| sim.tick_vehicles(&|x, y, z| world.block_state(x, y, z)));
+
+        // Every live primed TNT, one tick — gravity, collision/bounce and the
+        // fuse countdown (`crate::mobs::tnt`'s own module doc). Beside
+        // `tick_vehicles` for the same reason that call is beside
+        // `tick_falling_blocks`: this scope already holds the live world the
+        // collision shapes come from. A detonation this tick queues into
+        // `MobSim::pending_detonations` exactly as a creeper's does, so it
+        // reaches the `take_detonations` drain above on the tick after this
+        // one — the same one-tick latency `tick_vehicles`/`tick_falling_blocks`
+        // already accept for their own effects.
+        mobs.with(|sim| sim.tick_tnt(&|x, y, z| world.block_state(x, y, z)));
         });
 
         clock.record_tick(tick_start.elapsed());
