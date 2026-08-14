@@ -12,6 +12,7 @@ lodestone-core = { workspace = true }
 lodestone-macros = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-world = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true }
 
 [features]
@@ -41,6 +42,12 @@ live-entity = []
 live-interaction = []
 
 [dev-dependencies]
+# Test-only: the canonical 26.2 block-state census, used by the
+# `tests/canonicalisation.rs` generator to build the (name, properties) ->
+# 26.2 state-id reverse index the 1.16.5 -> 26.2 table is baked from. Not a
+# runtime dependency — the compiled crate only ever indexes the generated
+# `u32` table, so this does not affect `cargo xtask check-deletable`.
+lodestone-data = { workspace = true }
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true }
 tokio = { workspace = true }

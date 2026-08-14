@@ -34,7 +34,17 @@ pub mod packet_ids;
 #[path = "generated/entity_types.rs"]
 pub(crate) mod generated_entity_types;
 
+/// Generated 1.16.5 (protocol 754) -> canonical 26.2 block-state id table.
+///
+/// `pub` (unlike `generated_entity_types`) because `tests/canonicalisation.rs`
+/// asserts directly against it from outside the crate. See
+/// [`canonical`]'s module docs for why this table exists and
+/// `tests/canonicalisation.rs` for the generator.
+#[path = "generated/canonical.rs"]
+pub mod generated_canonical;
+
 pub mod adapter;
+pub mod canonical;
 pub mod entity_types;
 pub mod packets;
 

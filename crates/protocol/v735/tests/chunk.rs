@@ -25,10 +25,29 @@ use lodestone_core::{Reader, Writer};
 use lodestone_v735::packets::chunk::{ChunkShape, MapChunk, UpdateLight};
 use lodestone_world::{LongArrayFraming, PaletteKind, PalettedContainer};
 
-// Flat 1.16 block-state ids (post-flattening: no `(blockId << 4) | meta`).
-const AIR: u32 = 0;
-const BEDROCK: u32 = 33; // bedrock's default flat state id in 1.16
-const STONE: u32 = 1;
+// Flat 1.16.5 *wire* block-state ids (post-flattening: no `(blockId << 4) |
+// meta`) — 1.16.5's own global-palette numbering, used to build fixtures
+// exactly as a real server would encode them. Decoded output no longer
+// carries these ids unchanged: `MapChunk::decode` now translates every cell
+// through `canonical::resolve_or_air` into the canonical **26.2** id space
+// (see `src/canonical.rs`), so assertions on decoded blocks below compare
+// against the `_CANONICAL` constants instead.
+const AIR_WIRE: u32 = 0;
+const BEDROCK_WIRE: u32 = 33; // bedrock's default flat state id in 1.16.5
+const STONE_WIRE: u32 = 1;
+
+// The canonical 26.2 ids those wire values decode to. Anchored outside this
+// crate's own table: derived independently from the jar-generated
+// `tests/support/blocks_1_16_5_jar.json` (1.16.5 side) and
+// `.cache/mc/26.2/generated/reports/blocks.json` (26.2 side) — see
+// `tests/canonicalisation.rs`'s discriminating-state test for the same
+// anchoring method applied to blocks whose ids actually differ. Air and
+// stone happen to keep the same low id in both versions (both are among the
+// first few blocks ever registered); bedrock does not, which is exactly
+// what makes it worth asserting here.
+const AIR_CANONICAL: u32 = 0;
+const BEDROCK_CANONICAL: u32 = 85;
+const STONE_CANONICAL: u32 = 1;
 
 /// A minimal but real named-NBT compound (`TAG_Compound "" { TAG_End }`) — the
 /// shape 1.16 uses for the `heightmaps` field. The decoder consumes it.
@@ -51,7 +70,7 @@ fn section_body(value_at: impl Fn(usize, usize, usize) -> u32) -> Vec<u8> {
             for x in 0..16 {
                 let v = value_at(x, y, z);
                 values[idx(x, y, z)] = v;
-                if v != AIR {
+                if v != AIR_WIRE {
                     non_air += 1;
                 }
             }
@@ -94,7 +113,7 @@ fn build_map_chunk(
 
 #[test]
 fn decodes_full_chunk_zero_trailing_bytes() {
-    let section = section_body(|_, y, _| if y == 0 { BEDROCK } else { AIR });
+    let section = section_body(|_, y, _| if y == 0 { BEDROCK_WIRE } else { AIR_WIRE });
     let body = build_map_chunk(3, -5, &section, 1, 0);
 
     let mut r = Reader::new(&body);
@@ -114,9 +133,9 @@ fn decodes_full_chunk_zero_trailing_bytes() {
 fn flattening_and_non_straddling_land_flat_ids_at_known_y() {
     // Bedrock at y=0, stone at y=1, air above — flat state ids, non-straddling.
     let section = section_body(|_, y, _| match y {
-        0 => BEDROCK,
-        1 => STONE,
-        _ => AIR,
+        0 => BEDROCK_WIRE,
+        1 => STONE_WIRE,
+        _ => AIR_WIRE,
     });
     let body = build_map_chunk(0, 0, &section, 1, 0);
 
@@ -127,9 +146,9 @@ fn flattening_and_non_straddling_land_flat_ids_at_known_y() {
     let col = &chunk.column;
     for x in [0usize, 7, 15] {
         for z in [0usize, 9, 15] {
-            assert_eq!(col.get_block(x, 0, z), BEDROCK, "bedrock at y=0 ({x},{z})");
-            assert_eq!(col.get_block(x, 1, z), STONE, "stone at y=1 ({x},{z})");
-            assert_eq!(col.get_block(x, 2, z), AIR, "air at y=2 ({x},{z})");
+            assert_eq!(col.get_block(x, 0, z), BEDROCK_CANONICAL, "bedrock at y=0 ({x},{z})");
+            assert_eq!(col.get_block(x, 1, z), STONE_CANONICAL, "stone at y=1 ({x},{z})");
+            assert_eq!(col.get_block(x, 2, z), AIR_CANONICAL, "air at y=2 ({x},{z})");
         }
     }
 }
@@ -138,7 +157,7 @@ fn flattening_and_non_straddling_land_flat_ids_at_known_y() {
 fn three_dimensional_biomes_decode() {
     // biome id 4 in every one of the 1024 cells; the shape default is 0, so a
     // no-op decode would read 0 here.
-    let section = section_body(|_, y, _| if y == 0 { BEDROCK } else { AIR });
+    let section = section_body(|_, y, _| if y == 0 { BEDROCK_WIRE } else { AIR_WIRE });
     let body = build_map_chunk(0, 0, &section, 4, 0);
 
     let mut r = Reader::new(&body);
@@ -153,7 +172,7 @@ fn three_dimensional_biomes_decode() {
 #[test]
 fn partial_update_carries_no_biomes() {
     // A non-full ("groundUp = false") column omits the 1024-cell biome array.
-    let section = section_body(|_, y, _| if y == 0 { BEDROCK } else { AIR });
+    let section = section_body(|_, y, _| if y == 0 { BEDROCK_WIRE } else { AIR_WIRE });
     let mut w = Writer::default();
     w.i32(0);
     w.i32(0);
@@ -172,7 +191,7 @@ fn partial_update_carries_no_biomes() {
         .expect("partial-update geometry consumes the whole packet");
 
     assert!(!chunk.ground_up);
-    assert_eq!(chunk.column.get_block(0, 0, 0), BEDROCK);
+    assert_eq!(chunk.column.get_block(0, 0, 0), BEDROCK_CANONICAL);
 }
 
 // ---- update_light: light left map_chunk in 1.14. ----
@@ -237,7 +256,7 @@ fn truncated_blob_errors_cleanly() {
 fn extra_trailing_bytes_rejected() {
     // A valid section padded with stray bytes decodes the geometry but must fail
     // the zero-trailing-bytes detector inside the bounded chunkData sub-reader.
-    let section = section_body(|_, y, _| if y == 0 { BEDROCK } else { AIR });
+    let section = section_body(|_, y, _| if y == 0 { BEDROCK_WIRE } else { AIR_WIRE });
     let mut blob = section;
     blob.extend_from_slice(&[0u8; 8]); // 8 stray trailing bytes
 

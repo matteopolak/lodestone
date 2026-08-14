@@ -3209,6 +3209,7 @@ name = "lodestone-v735"
 version = "0.1.0"
 dependencies = [
  "lodestone-core",
+ "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3216,6 +3217,7 @@ dependencies = [
  "lodestone-world",
  "serde_json",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
