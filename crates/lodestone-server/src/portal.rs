@@ -580,17 +580,25 @@ pub fn largest_rectangle_around<S: ChunkSource + ?Sized>(
 /// that because its POI manager is a persisted per-section index built as blocks
 /// are placed. This is the same idea, minus persistence.
 ///
-/// **Not persisted across a restart by *this struct* — but the storage seam now
-/// exists.** A portal lit in an earlier session is not in a fresh index, so the
-/// first trip after a restart falls back to the bounded local scan
-/// [`find_exit_portal`] also performs, and beyond its 16-block radius will build a
-/// second portal beside the first. [`crate::poi_storage`] is vanilla's real fix for
-/// this (`PoiManager` persists exactly the `NETHER_PORTAL` type this index tracks),
-/// and [`poi_records_for_index`]/[`restore_index_from_poi`] below convert between
-/// the two — proven by a real round trip through [`crate::poi_storage::PoiStorage`]
-/// in `tests/poi_persistence_round_trip.rs`. What is **not** wired yet is calling
-/// them from world open/shutdown, which lives beside
-/// [`crate::entity_storage::EntityStorage`]'s own wiring in `crate::integrated`.
+/// **Persisted across a restart now.**
+/// [`crate::integrated::IntegratedServer::open_persistent_with_mobs`] restores
+/// this index at world open from [`crate::poi_storage::PoiStorage::load_all`]
+/// for every dimension, and its autosave task and shutdown path write it back
+/// through [`poi_chunks_for_index`] on the same schedule
+/// [`crate::entity_storage::EntityStorage`]'s own wiring uses — see that
+/// constructor for the exact sequence. [`poi_records_for_index`],
+/// [`restore_index_from_poi`] and [`poi_chunks_for_index`] are the three
+/// conversions, proven by a real round trip through
+/// [`crate::poi_storage::PoiStorage`] in `tests/poi_persistence_round_trip.rs`
+/// and by a full restart in `tests/portal_persistence_restart.rs`. All three
+/// are native-only (`#[cfg(not(target_arch = "wasm32"))]`), matching
+/// [`crate::poi_storage`] itself, which does not exist on `wasm32` at all —
+/// this module is *not* gated (portals work in a browser singleplayer world
+/// too), so leaving these three ungated was a real, if quiet, wasm32 compile
+/// break: `crate::poi_storage::PoiRecord`/`PoiSection` are configured out of
+/// that target entirely, and nothing in `just check`/`just health` builds for
+/// it — only `just wasm-check` (or `cargo check --target wasm32-unknown-unknown`)
+/// would have caught it.
 #[derive(Debug, Clone, Default)]
 pub struct PortalIndex(Arc<Mutex<HashMap<Dimension, Vec<BlockPos>>>>);
 
@@ -655,6 +663,9 @@ pub const NETHER_PORTAL_POI_TYPE: &str = "minecraft:nether_portal";
 /// `free_tickets: 0` (`PoiTypes.bootstrap` registers `NETHER_PORTAL` with
 /// `maxTickets 0`), matching vanilla exactly: a portal is indexed for lookup, never
 /// claimed the way a workstation is.
+///
+/// Native only — see [`PortalIndex`]'s own doc for why.
+#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn poi_records_for_index(
     index: &PortalIndex,
@@ -682,6 +693,9 @@ pub fn poi_records_for_index(
 ///
 /// Only `nether_portal`-typed records are taken — a POI store may hold workstation
 /// or bed records too, none of which this index tracks.
+///
+/// Native only — see [`PortalIndex`]'s own doc for why.
+#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn restore_index_from_poi<'a>(
     dimension: Dimension,
@@ -696,6 +710,40 @@ pub fn restore_index_from_poi<'a>(
         }
     }
     index
+}
+
+/// Groups [`poi_records_for_index`]'s output into the `(chunk_x, chunk_z)` →
+/// [`crate::poi_storage::PoiChunk`] map [`crate::poi_storage::PoiStorage::save`]
+/// wants — the write half of the wire [`restore_index_from_poi`] is the read
+/// half of.
+///
+/// [`insert_record`](crate::poi_storage::PoiSection::insert_record), not
+/// [`add`](crate::poi_storage::PoiSection::add): every cell here came from a
+/// live index or a previous reload, not a block just discovered, so its
+/// `free_tickets` (always `0` for a portal — see [`poi_records_for_index`])
+/// must be kept rather than reset. Using `add` here would compile, save, and
+/// reload cleanly, and still be wrong the moment this index ever tracks a
+/// claimable type.
+///
+/// Native only — see [`PortalIndex`]'s own doc for why.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn poi_chunks_for_index(
+    index: &PortalIndex,
+    dimension: Dimension,
+) -> HashMap<(i32, i32), crate::poi_storage::PoiChunk> {
+    let mut out: HashMap<(i32, i32), crate::poi_storage::PoiChunk> = HashMap::new();
+    for record in poi_records_for_index(index, dimension) {
+        let chunk_pos = record.pos.chunk_pos();
+        let section_y = record.pos.section_pos().y;
+        let chunk = out.entry((chunk_pos.x, chunk_pos.z)).or_default();
+        chunk
+            .sections
+            .entry(section_y)
+            .or_insert_with(crate::poi_storage::PoiSection::new)
+            .insert_record(record);
+    }
+    out
 }
 
 /// `PortalForcer.NETHER_PORTAL_RADIUS` — the search radius when arriving *in* the
@@ -1478,5 +1526,60 @@ mod tests {
             Some(portal),
             "a stale entry falls through to the scan rather than teleporting into rock"
         );
+    }
+
+    /// [`poi_chunks_for_index`] is the write half of the wire
+    /// [`restore_index_from_poi`] is the read half of — this proves the pair
+    /// round-trips through a real [`crate::poi_storage::PoiStorage`], not
+    /// just through each other in memory.
+    ///
+    /// Pairwise-distinct positions across chunk **and** section boundaries
+    /// (same standard `poi_storage.rs`'s own chunk-round-trip test holds
+    /// itself to), so a transposition of chunk-x/chunk-z or section-y cannot
+    /// survive unnoticed.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn poi_chunks_for_index_round_trips_through_a_real_poi_store() {
+        let dir = std::env::temp_dir().join("lodestone-portal-poi-chunks-b2w7");
+        let _ = std::fs::remove_dir_all(&dir);
+        let storage =
+            crate::poi_storage::PoiStorage::new(&dir, Dimension::Overworld).expect("create");
+
+        let index = PortalIndex::new();
+        let cells = [
+            BlockPos::new(4001, -40, -19),
+            BlockPos::new(-385, 71, -897),
+        ];
+        index.extend(Dimension::Overworld, cells);
+
+        let chunks = poi_chunks_for_index(&index, Dimension::Overworld);
+        assert_eq!(
+            chunks
+                .values()
+                .map(|c| c.sections.values().map(|s| s.records.len()).sum::<usize>())
+                .sum::<usize>(),
+            cells.len()
+        );
+        let written = storage.save(&chunks).expect("save");
+        assert_eq!(written, cells.len());
+
+        let (cx0, cz0) = (cells[0].x >> 4, cells[0].z >> 4);
+        let (cx1, cz1) = (cells[1].x >> 4, cells[1].z >> 4);
+        let loaded0 = storage.load_chunk(cx0, cz0).expect("load first chunk");
+        let loaded1 = storage.load_chunk(cx1, cz1).expect("load second chunk");
+        let rebuilt = restore_index_from_poi(
+            Dimension::Overworld,
+            loaded0
+                .sections
+                .values()
+                .chain(loaded1.sections.values()),
+        );
+        let mut got = rebuilt.cells(Dimension::Overworld);
+        got.sort_by_key(|p| (p.x, p.y, p.z));
+        let mut want = cells.to_vec();
+        want.sort_by_key(|p| (p.x, p.y, p.z));
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
