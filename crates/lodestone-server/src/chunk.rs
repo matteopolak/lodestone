@@ -1106,6 +1106,29 @@ pub trait ChunkSource: Send + Sync {
             .map(|(_, entity)| entity.clone())
     }
 
+    /// Whether `(cx, cz)` is already resident — answerable with **no**
+    /// generation, unlike [`column`](Self::column) or
+    /// [`block_state`](Self::block_state) on a miss.
+    ///
+    /// This exists for [`crate::block_entities::BlockEntityRegistry::tick_all_with_hopper_lock`]
+    /// (issue #504): vanilla only ticks a block entity whose *chunk* is
+    /// loaded, and answering that question by calling `block_state` would be
+    /// exactly the bug being fixed — a 20 Hz probe that generates a whole
+    /// column just to find out the answer was "not loaded".
+    ///
+    /// The default is `true` — "assume resident" — which is the honest
+    /// answer for every implementor with no bounded cache to miss (an
+    /// unbounded edit map, or a bare generator): there is no eviction to ask
+    /// about, so refusing would be inventing an answer, not reporting one.
+    /// [`crate::chunk_store::ChunkStore`] is the one implementor with a real
+    /// capacity to check against, and it is the only override — production's
+    /// `world` in `tick.rs` is `Arc<ChunkStore<..>>`, so that override is the
+    /// one that matters.
+    fn is_column_resident(&self, cx: i32, cz: i32) -> bool {
+        let _ = (cx, cz);
+        true
+    }
+
     /// Tells the source that the column at `(cx, cz)` is no longer resident in
     /// whatever cache sits above it, so a layer that retains state per column
     /// may release it.

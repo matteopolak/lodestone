@@ -453,11 +453,12 @@ impl BlockEntityRegistry {
     /// [`BlockEntityHandle`]), so this is a complete, order-independent pass
     /// over exactly what existed when the tick started.
     pub fn tick_all(&mut self) {
-        self.tick_all_with_hopper_lock(&|_| true);
+        self.tick_all_with_hopper_lock(&|_| true, &|_| true);
     }
 
     /// [`tick_all`](Self::tick_all), with each hopper's redstone lock supplied
-    /// by the caller (issue #321).
+    /// by the caller (issue #321) **and the scan bounded by chunk residency**
+    /// (issue #504).
     ///
     /// `enabled` receives a hopper's position and answers whether it may
     /// transfer this tick — `false` while redstone-powered. The caller reads it
@@ -465,15 +466,43 @@ impl BlockEntityRegistry {
     /// (`HopperBlock.ENABLED`, maintained by `checkPoweredState`); this registry
     /// has no world access and deliberately does not compute it.
     ///
-    /// `tick_all` remains as the unlocked shorthand for the several tests and
-    /// call sites that hold no world, so this is an addition rather than a
-    /// signature change. **`crate::tick::run_tick_loop` is the one production
-    /// caller that must use this one** — it is the only place holding both a
-    /// `ChunkSource` and this registry, and a hopper ticked through the
-    /// shorthand can never be locked.
-    pub fn tick_all_with_hopper_lock(&mut self, enabled: &dyn Fn(BlockPos) -> bool) {
+    /// `is_loaded` receives every entity's position (not only a hopper's) and
+    /// answers whether its *chunk* is currently loaded. A position it rejects
+    /// is skipped entirely — `enabled` is never called for it, and neither is
+    /// [`BlockEntity::tick_non_hopper`]. **This is a deliberate behavioural
+    /// choice, not merely a cost optimisation**: vanilla ticks block entities
+    /// from each loaded chunk's own tick list, not from one registry that
+    /// remembers every position a player has ever visited
+    /// (`BlockEntityRegistry` has no eviction — see the module doc). Before
+    /// this, `is_loaded` did not exist and every registered entity ticked
+    /// forever regardless of whether anyone was near it; the measured cost of
+    /// that was up to 610 synchronous column *generations* per tick once the
+    /// registry outgrew `ChunkStore`'s capacity (`chunk_store.rs`'s own test
+    /// module has the counters). The correct fix is to stop asking the
+    /// question for a position nothing has loaded, not to make asking it
+    /// cheaper — a `false`-returning `is_loaded` reproduces vanilla exactly (a
+    /// furnace far from every player does not advance), whereas a
+    /// residency-aware-but-still-polled read would leave a hopper's `enabled`
+    /// flag stuck at whatever it last observed, which is not a state vanilla
+    /// ever has a hopper sit in.
+    ///
+    /// `tick_all` remains as the unlocked, always-loaded shorthand for the
+    /// several tests and call sites that hold no world, so this is an
+    /// addition rather than a signature change beyond adding `is_loaded`.
+    /// **`crate::tick::run_tick_loop` is the one production caller that must
+    /// use this one** — it is the only place holding both a `ChunkSource` and
+    /// this registry, and a hopper ticked through the shorthand can never be
+    /// locked or bounded.
+    pub fn tick_all_with_hopper_lock(
+        &mut self,
+        is_loaded: &dyn Fn(BlockPos) -> bool,
+        enabled: &dyn Fn(BlockPos) -> bool,
+    ) {
         let positions: Vec<BlockPos> = self.entities.keys().copied().collect();
         for pos in positions {
+            if !is_loaded(pos) {
+                continue;
+            }
             let is_hopper = matches!(self.entities.get(&pos), Some(BlockEntity::Hopper(_)));
             if is_hopper {
                 self.tick_hopper(pos, enabled(pos));
@@ -871,6 +900,89 @@ mod tests {
             panic!("above hopper must still be registered");
         };
         assert_eq!(above.slots()[0], Some(stack("minecraft:diamond", 1)));
+    }
+
+    /// Issue #504's fix, isolated from any world/store machinery: a position
+    /// `is_loaded` rejects must not tick at all — not the hopper path, not
+    /// the plain `tick_non_hopper` path.
+    #[test]
+    fn tick_all_with_hopper_lock_skips_a_position_the_loaded_predicate_rejects() {
+        let mut reg = BlockEntityRegistry::new();
+        let pos = BlockPos::new(0, 70, 0);
+        let mut furnace = Furnace::new(FurnaceKind::Furnace);
+        furnace.set_fuel(Some(stack("minecraft:coal", 1)));
+        furnace.set_input(Some(stack("minecraft:iron_ore", 1)));
+        reg.insert(pos, BlockEntity::Furnace(furnace));
+
+        reg.tick_all_with_hopper_lock(&|_| false, &|_| true);
+
+        let Some(BlockEntity::Furnace(f)) = reg.get(pos) else {
+            panic!("furnace must still be registered — `is_loaded` skips the tick, not the entity");
+        };
+        assert!(
+            !f.is_lit(),
+            "a furnace whose chunk `is_loaded` reports unloaded must not advance — this is \
+             the vanilla behaviour the fix chooses (see `tick_all_with_hopper_lock`'s own doc \
+             comment): a block entity outside every loaded chunk simply does not tick."
+        );
+
+        // Control: the same furnace, same fuel and ore, with the predicate
+        // flipped to `true` — proves the furnace above was skipped *because*
+        // of the predicate, not because it can never light (which would make
+        // the assertion above vacuous).
+        let mut reg = BlockEntityRegistry::new();
+        let mut furnace = Furnace::new(FurnaceKind::Furnace);
+        furnace.set_fuel(Some(stack("minecraft:coal", 1)));
+        furnace.set_input(Some(stack("minecraft:iron_ore", 1)));
+        reg.insert(pos, BlockEntity::Furnace(furnace));
+        reg.tick_all_with_hopper_lock(&|_| true, &|_| true);
+        let Some(BlockEntity::Furnace(f)) = reg.get(pos) else {
+            panic!("furnace must still be registered");
+        };
+        assert!(f.is_lit(), "control: the identical furnace must light when `is_loaded` says yes");
+    }
+
+    /// The other half of issue #504: for a hopper specifically, `enabled` —
+    /// the closure that in production reaches `world.block_state` and is what
+    /// used to generate a whole column per probe — must never even be
+    /// *called* for a position `is_loaded` rejects. This is the control that
+    /// the fix bounds the expensive call itself, not just its visible effect:
+    /// counting invocations rather than inferring "did it tick" from state.
+    #[test]
+    fn tick_all_with_hopper_lock_never_calls_enabled_for_an_unloaded_hopper() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let mut reg = BlockEntityRegistry::new();
+        let pos = BlockPos::new(5, 10, 5);
+        reg.insert(pos, BlockEntity::Hopper(Hopper::new()));
+
+        let enabled_calls = AtomicU64::new(0);
+        reg.tick_all_with_hopper_lock(&|_| false, &|_| {
+            enabled_calls.fetch_add(1, Ordering::Relaxed);
+            true
+        });
+        assert_eq!(
+            enabled_calls.load(Ordering::Relaxed),
+            0,
+            "`enabled` — production's `world.block_state` probe — must not be called at all \
+             for a position `is_loaded` rejects. A nonzero count here is exactly issue #504's \
+             defect: a per-hopper world read on every tick regardless of residency."
+        );
+
+        // Control: flip `is_loaded` to `true` and confirm the same closure
+        // now *is* called exactly once — proving the zero above is the gate
+        // firing, not a hopper that was never going to call it anyway (e.g.
+        // if the position were somehow not recognised as a hopper).
+        let enabled_calls = AtomicU64::new(0);
+        reg.tick_all_with_hopper_lock(&|_| true, &|_| {
+            enabled_calls.fetch_add(1, Ordering::Relaxed);
+            true
+        });
+        assert_eq!(
+            enabled_calls.load(Ordering::Relaxed),
+            1,
+            "control: a loaded hopper must still have its `enabled` closure called exactly once"
+        );
     }
 
     /// **Control**: a hopper with nothing above and nothing below must not

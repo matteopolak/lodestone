@@ -918,6 +918,20 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             .unwrap_or_else(|| self.source.block_entity(x, y, z))
     }
 
+    /// The one real override of [`ChunkSource::is_column_resident`] (issue
+    /// #504) — a plain map lookup, no generation, and no `last_used` bump.
+    ///
+    /// Deliberately does **not** touch recency: this exists to be probed at
+    /// 20 Hz by a caller that must not itself influence what stays resident
+    /// (see `an_over_capacity_store_makes_the_polled_column_cold_every_pass`'s
+    /// own doc for the "polling pins a column" argument this module already
+    /// found and rejected once — `read`/`ensure` bump the stamp because a hit
+    /// there is real work being reused; a residency *check* is not, and must
+    /// not buy the column another lap of LRU life it did not earn).
+    fn is_column_resident(&self, cx: i32, cz: i32) -> bool {
+        self.lock().columns.contains_key(&(cx, cz))
+    }
+
     /// Re-derives the capacity for `view_radius` under this store's
     /// [`CapacityPolicy`], evicting down to it if it shrank — issue #551's
     /// second half.
@@ -1398,6 +1412,44 @@ mod tests {
             "{PROBES} probes of the same block must cost exactly one generation"
         );
         assert_eq!(store.len(), 1, "one column touched, one column resident");
+    }
+
+    /// [`ChunkSource::is_column_resident`] (issue #504): reports real
+    /// residency with no generation at all, in both directions.
+    #[test]
+    fn is_column_resident_reports_true_only_for_a_cached_column_and_never_generates() {
+        let counting = CountingSource::new();
+        let calls = Arc::clone(&counting.calls);
+        let store = ChunkStore::new(counting);
+
+        assert!(
+            !store.is_column_resident(0, 0),
+            "a column nothing has touched must report not-resident"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "checking residency must not generate anything — this is the whole point of the \
+             primitive: it exists to be asked instead of `block_state`, which would generate \
+             on exactly this miss"
+        );
+
+        let _ = store.column(0, 0);
+        assert!(
+            store.is_column_resident(0, 0),
+            "a column just generated and cached must report resident"
+        );
+        assert!(
+            !store.is_column_resident(5, 5),
+            "a distinct, untouched column must still report not-resident — the true positive \
+             above must not be a constant `true`"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "the residency checks themselves must not have generated anything beyond the one \
+             explicit `column()` call"
+        );
     }
 
     /// Edits survive the store, in both directions that can lose them.
@@ -2059,32 +2111,31 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// **The subject.** A hopper whose column the player has walked away from
-    /// costs **one** column generation in total, not one per tick.
+    /// **The subject, re-measured after issue #504's fix.** A hopper whose
+    /// column the player has walked away from now costs **zero** column
+    /// generations, not one and not [`TICKS`].
     ///
-    /// # The two hypotheses, both computed outside the measurement
+    /// # What changed from the pre-fix measurement
     ///
-    /// `tick.rs`'s block-entity arm really does call `world.block_state` per
-    /// hopper, every tick, and `ChunkStore::block_state` really does regenerate
-    /// a whole column on a miss (`ensure` → `source.column`). Issue #503's lead
-    /// reads those two facts together and predicts **[`TICKS`]** generations of
-    /// the remote column — one per tick, ~50 ms each against a 50 ms budget.
+    /// Before #504, `tick.rs`'s block-entity arm called `world.block_state`
+    /// per hopper every tick unconditionally, and `ChunkStore::block_state`
+    /// regenerates a whole column on a miss — so a hopper 1,600 blocks out
+    /// (never inside [`shell_tick_area`], never in any view) cost exactly
+    /// **1** generation (the store's own pinning-once-resident behaviour;
+    /// see this test's history for the two-hypotheses argument that used to
+    /// live here). The fix does not make that read cheaper — it stops the
+    /// read from happening at all: `tick_all_with_hopper_lock` now takes an
+    /// `is_loaded` predicate and skips a hopper's tick (and therefore its
+    /// `enabled` closure, and therefore `world.block_state`) entirely when
+    /// its chunk is not resident. A never-loaded remote hopper now touches
+    /// the store **zero** times over its whole life, matching vanilla: a
+    /// block entity outside every loaded chunk does not tick.
     ///
-    /// The competing prediction is **1**, and the reason is the line the lead
-    /// does not account for: *the miss is self-healing*. `ensure` inserts with
-    /// the newest stamp and `read` refreshes `last_used` on every hit, so a
-    /// position polled at 20 Hz is permanently among the most-recently-used
-    /// entries. `evict_down_to` takes the **minimum** stamp, so evicting this
-    /// column would require [`DEFAULT_CAPACITY`] *other* distinct columns to be
-    /// touched inside one 50 ms tick period. The 20 Hz scan does not merely fail
-    /// to evict the column — it **pins** it.
-    ///
-    /// So the two hypotheses are 1 and 52, a factor of [`TICKS`] apart, and this
-    /// gate lands on one of them. `without_retention_a_remote_hopper_is_a_cold_
-    /// column_every_single_tick` below is the same rig landing on the other, so
-    /// the instrument is known to be able to report 52.
+    /// `a_hopper_inside_the_tick_area_still_transfers_once_the_chunk_is_loaded`
+    /// below is the control that `is_loaded` is a real gate and not a
+    /// constant `false` that would make this `0` vacuous.
     #[tokio::test(start_paused = true)]
-    async fn a_walked_away_hopper_costs_one_column_generation_not_one_per_tick() {
+    async fn a_walked_away_hopper_never_reaches_the_store() {
         let counting = CountingSource::full_height();
         let calls = Arc::clone(&counting.calls);
         let per_chunk = Arc::clone(&counting.per_chunk);
@@ -2100,79 +2151,103 @@ mod tests {
 
         assert!(
             clock.tick_count() >= u64::from(TICKS) - 1,
-            "precondition: the loop only advanced {} ticks of {TICKS}, so \"one generation\" \
+            "precondition: the loop only advanced {} ticks of {TICKS}, so \"zero generations\" \
              would be trivially true",
             clock.tick_count()
         );
 
         let remote = generations_for(&per_chunk, REMOTE_CHUNK);
         assert_eq!(
-            remote, 1,
+            remote, 0,
             "the remote hopper's column {REMOTE_CHUNK:?} was generated {remote} times over \
-             {TICKS} ticks. 0 would mean the block-entity scan never reached the world at all \
-             and this gate measures nothing; {TICKS} is issue #503's lead — one cold column per \
-             tick; 1 is the store pinning the column it just polled."
+             {TICKS} ticks. Pre-#504 this was 1 (the store pinning a column it had already \
+             probed); {TICKS} was issue #503's lead (one cold column per tick, no pinning at \
+             all). 0 is the fix: a hopper whose chunk is never loaded is never probed."
         );
         assert_eq!(
             calls.load(Ordering::Relaxed),
-            EXPECTED_TICK_AREA_COLUMNS as u64 + 1,
-            "the whole session should cost the {EXPECTED_TICK_AREA_COLUMNS}-column tick area \
-             plus exactly one remote column"
+            EXPECTED_TICK_AREA_COLUMNS as u64,
+            "the whole session should cost exactly the {EXPECTED_TICK_AREA_COLUMNS}-column \
+             tick area and nothing else — the remote hopper must contribute zero, not one"
         );
         assert_eq!(
             store.evicted(),
             0,
-            "precondition on the mechanism: 49 tick-area columns + 1 remote is far under \
-             {DEFAULT_CAPACITY}, so nothing should be evicted. If this is ever non-zero the \
-             pinning argument above needs re-deriving, not the assertion relaxing."
+            "precondition on the mechanism: the tick area alone is far under \
+             {DEFAULT_CAPACITY}, so nothing should be evicted"
         );
     }
 
-    /// **The negative control, and it lands on the lead's own number.**
+    /// **The positive control the subject above needs.** `is_loaded` is a
+    /// real gate, not a constant `false` that would make
+    /// `a_walked_away_hopper_never_reaches_the_store`'s `0` vacuous: two
+    /// hoppers stacked inside [`shell_tick_area`] (chunk `(0, 0)`, which the
+    /// random-tick pass visits every tick and therefore keeps resident) must
+    /// still transfer an item, exactly as
+    /// `crate::block_entities`'s own
+    /// `tick_all_moves_two_items_between_a_stacked_hopper_pair_on_the_first_tick`
+    /// proves for the unlocked shorthand.
     ///
-    /// `with_capacity(source, 0)` retains nothing, so every poll of the remote
-    /// hopper is a cold column — exactly the failure issue #503's lead
-    /// describes, reproduced as a real *configuration* of the shipped type
-    /// rather than a temporary neuter. Predicted **[`TICKS`]** (the
-    /// block-entity scan runs on every tick, unlike the random-tick pass, which
-    /// `INITIAL_RANDOM_TICK_DEFERRAL_TICKS` holds off), and that is what makes
-    /// the subject's `1` a measurement rather than an absence.
-    ///
-    /// Without this arm the subject is the *assertion* species of vacuity: a
-    /// registry that was never scanned, a hopper that was never ticked and a
-    /// closure that was never called would all also report a low number.
+    /// Without this arm the fix could be "skip everything" and every gate in
+    /// this module would still be green — the same *assertion* species of
+    /// vacuity the pre-fix test module already guarded against, now aimed at
+    /// the new gate instead of the old absence of one.
     #[tokio::test(start_paused = true)]
-    async fn without_retention_a_remote_hopper_is_a_cold_column_every_single_tick() {
+    async fn a_hopper_inside_the_tick_area_still_transfers_once_the_chunk_is_loaded() {
+        let below_pos = remote_pos((0, 0));
+        let above_pos = BlockPos::new(below_pos.x, below_pos.y + 1, below_pos.z);
+
+        let handle = BlockEntityHandle::new();
+        handle.with(|registry| {
+            let mut above = crate::hopper::Hopper::new();
+            above.set_slot(
+                0,
+                Some(lodestone_model::ItemStack::new(
+                    "minecraft:diamond".parse().expect("valid resource key"),
+                    3,
+                )),
+            );
+            registry.insert(below_pos, crate::block_entities::BlockEntity::Hopper(crate::hopper::Hopper::new()));
+            registry.insert(above_pos, crate::block_entities::BlockEntity::Hopper(above));
+        });
+
         let counting = CountingSource::full_height();
-        let per_chunk = Arc::clone(&counting.per_chunk);
-        let store = Arc::new(ChunkStore::with_capacity(counting, 0));
+        let store = Arc::new(ChunkStore::new(counting));
 
-        drive_tick_loop_with_block_entities(
-            Arc::clone(&store),
-            shell_tick_area(),
-            TICKS,
-            registry_with_one_hopper(REMOTE_CHUNK),
-        )
-        .await;
+        drive_tick_loop_with_block_entities(Arc::clone(&store), shell_tick_area(), TICKS, handle.clone())
+            .await;
 
-        let remote = generations_for(&per_chunk, REMOTE_CHUNK);
-        assert_eq!(
-            remote,
-            u64::from(TICKS),
-            "control: with retention off the remote hopper's column must be regenerated on \
-             every one of {TICKS} ticks, got {remote}. If this ever reports 1, retention has \
-             leaked into the control and the subject above is no longer measuring anything."
+        assert!(
+            store.is_column_resident(0, 0),
+            "precondition: chunk (0, 0) must actually be resident by the end of the run, or \
+             this control proves nothing about the loaded path"
+        );
+
+        let Some(crate::block_entities::BlockEntity::Hopper(below)) =
+            handle.with(|registry| registry.get(below_pos).cloned())
+        else {
+            panic!("the below hopper must still be registered");
+        };
+        assert!(
+            below.slots().iter().any(Option::is_some),
+            "a hopper inside a chunk the tick area loads must still receive an item once the \
+             chunk becomes resident. If this is empty, `is_loaded` is suppressing every hopper \
+             regardless of residency, not just the unloaded ones."
         );
     }
 
-    /// **The curve, in counter form: flat in distance.**
+    /// **The curve, in counter form: flat in distance, at zero.**
     ///
     /// The claim under test is that walking away introduces a term that grows
-    /// with distance. `world.block_state`'s cost has no coordinate in it — the
-    /// store is a `HashMap<(i32, i32), _>` and the LRU stamp is a counter — so
-    /// the prediction is the *same* number at every band, including one a
+    /// with distance. `is_column_resident`'s cost has no coordinate in it
+    /// either — it is the same `HashMap<(i32, i32), _>` lookup the old
+    /// `block_state` miss path used, just without the generation on a miss —
+    /// so the prediction is the *same* number at every band, including one a
     /// million blocks out, matching `docs/worldgen-store-distance-leak.md`'s
-    /// finding that per-column cost is itself flat to 1,048,576 blocks.
+    /// finding that per-column cost is itself flat to 1,048,576 blocks. Pre-#504
+    /// that flat number was **1** (see `a_walked_away_hopper_never_reaches_the_
+    /// store`'s history); post-fix it is **0**, because none of these bands are
+    /// ever loaded at all.
     ///
     /// The bands double as the control the walk investigation used (nine runs at
     /// one distance gave a 1.01× spread): here the arms differ *only* in the
@@ -2200,64 +2275,34 @@ mod tests {
 
             assert_eq!(
                 generations_for(&per_chunk, chunk),
-                1,
-                "band {chunk:?} ({} blocks out): the remote column must be generated exactly \
-                 once, as at every other band. A band-dependent count here is the \
-                 distance-dependent CPU term issue #503's lead predicts.",
+                0,
+                "band {chunk:?} ({} blocks out): the remote column must never be generated at \
+                 all — a nonzero, band-dependent count here would be the distance-dependent CPU \
+                 term issue #503's lead predicted, now supposedly fixed.",
                 chunk.0 * 16
             );
             assert_eq!(
                 calls.load(Ordering::Relaxed),
-                EXPECTED_TICK_AREA_COLUMNS as u64 + 1,
-                "band {chunk:?}: total generations must be the tick area plus one, identically \
-                 at every distance"
+                EXPECTED_TICK_AREA_COLUMNS as u64,
+                "band {chunk:?}: total generations must be exactly the tick area, identically \
+                 at every distance — the remote hopper must contribute nothing"
             );
         }
     }
 
-    /// **The arm that isolates the mechanism, and the one that says the lead is
-    /// real.** Once the store is over its ceiling, the 20 Hz-polled remote
-    /// column becomes a cold generation **once per random-tick pass** — on the
-    /// tick thread, against a 50 ms budget.
-    ///
-    /// # Why this arm exists
-    ///
-    /// Without it the subject above has a second, much weaker explanation: at
-    /// the default render distance the working set (361-column view + 49-column
-    /// tick area = 410) never reaches [`DEFAULT_CAPACITY`] at all, so "no
-    /// eviction" could be pure headroom rather than any property of the polling.
-    /// (This read **289** until issue #505. 289 is `(2 × 8 + 1)²`, i.e. the view
-    /// for a *view radius* of 8 — but 8 is the `render_distance`, and the shell
-    /// serves `render_distance + 1`. The conclusion held with room to spare either
-    /// way, which is exactly why the arithmetic slipped through twice in one
-    /// file.)
-    /// `with_capacity(source, EXPECTED_TICK_AREA_COLUMNS)` removes the headroom:
-    /// 49 tick-area columns plus one remote is 50 against a ceiling of 49.
-    ///
-    /// # A wrong prediction, kept
-    ///
-    /// This arm was written predicting **1**, on the argument that
-    /// `ChunkStore::read` refreshes `last_used` on every hit and `ensure`
-    /// inserts with the newest stamp, so a position polled at 20 Hz is
-    /// permanently among the most-recently-used entries and `evict_down_to`
-    /// (which takes the **minimum**) would always prefer a stale tick-area
-    /// column. It measured **12** and the argument is wrong, for a reason worth
-    /// keeping: the block-entity scan runs *once* per tick and the random-tick
-    /// pass then touches 49 columns *after* it, so by the end of a pass the
-    /// remote column's stamp is the oldest in the map, not the newest. Being
-    /// polled at 20 Hz does not pin a column when something else touches 49
-    /// columns in the same 50 ms. The pin only ever came from headroom.
-    ///
-    /// # The prediction, derived
-    ///
-    /// One cold generation on the first poll, then one per random-tick pass
-    /// thereafter — except the final pass's eviction has no following poll
-    /// inside the window, so `1 + (RANDOM_TICK_PASSES - 1)` =
-    /// [`RANDOM_TICK_PASSES`]. The three candidate values are therefore 1 (the
-    /// headroom regime the subject measures), 12 (this regime) and [`TICKS`]
-    /// (no retention at all), and this arm lands on the middle one.
+    /// **Re-measured after #504: capacity pressure from the registry scan is
+    /// gone, by construction.** Pre-fix, a remote hopper's column competed
+    /// for the store's capacity like any other resident column, so pinching
+    /// the ceiling down to exactly the tick area's size (`with_capacity(source,
+    /// EXPECTED_TICK_AREA_COLUMNS)`) forced an eviction and turned the "self
+    /// heals to 1" result into "cold once per random-tick pass" (measured 12
+    /// at the time — see the git history on this test for the full argument).
+    /// Post-fix there is nothing left to evict: `is_loaded` means the remote
+    /// hopper's column is **never generated in the first place**, so it never
+    /// enters the cache and never competes with the tick area for room, no
+    /// matter how tight the ceiling.
     #[tokio::test(start_paused = true)]
-    async fn an_over_capacity_store_makes_the_polled_column_cold_every_pass() {
+    async fn a_tight_capacity_no_longer_makes_the_remote_hopper_cold() {
         let counting = CountingSource::full_height();
         let per_chunk = Arc::clone(&counting.per_chunk);
         let store = Arc::new(ChunkStore::with_capacity(
@@ -2273,88 +2318,63 @@ mod tests {
         )
         .await;
 
-        assert!(
-            store.evicted() > 0,
-            "precondition: a capacity of {EXPECTED_TICK_AREA_COLUMNS} against a \
-             {EXPECTED_TICK_AREA_COLUMNS}-column tick area plus one remote column must actually \
-             evict, or this arm is the same measurement as the subject and proves nothing"
-        );
         let remote = generations_for(&per_chunk, REMOTE_CHUNK);
         assert_eq!(
-            remote,
-            u64::from(RANDOM_TICK_PASSES),
-            "over capacity, the remote hopper's column must be cold once per random-tick pass \
-             ({RANDOM_TICK_PASSES}), got {remote}. 1 would mean the polling pins it (it does \
-             not — see this test's doc comment); {TICKS} would mean retention had stopped \
-             working entirely."
+            remote, 0,
+            "with the scan bounded by residency, a remote hopper must cost zero generations \
+             regardless of how tight the capacity is — pre-#504 this was 12 (see the doc \
+             comment's history); a nonzero count here means the fix stopped bounding the scan \
+             and capacity pressure is back."
+        );
+        assert_eq!(
+            store.evicted(),
+            0,
+            "the tick area (exactly {EXPECTED_TICK_AREA_COLUMNS} columns) fits its own \
+             capacity with nothing left over to evict, because the remote hopper never enters \
+             the cache at all"
         );
     }
 
     /// **The curve, and the threshold it turns on.** Cold generations per tick
     /// are ~0 while the accumulated block-entity columns fit under
     /// [`DEFAULT_CAPACITY`] alongside the tick area, and **one per entity per
-    /// tick** the moment they do not.
+    /// tick** the moment they do not — **that was the pre-#504 shape.**
     ///
-    /// This is the term issue #503's lead is really about, once the arms above
-    /// have located it. `BlockEntityRegistry` has no unload path, so the set of
-    /// positions the 20 Hz scan probes only ever grows with exploration. Each
-    /// probed position holds one column resident. So exploration does not make
-    /// any single call slower — it walks the *working set* across the store's
-    /// fixed ceiling, and the miss rate goes from 0 to 1 over a narrow band.
+    /// This is the exact scenario issue #503's lead was really about: a
+    /// `BlockEntityRegistry` that only ever grows (no unload path) walked at
+    /// 20 Hz by an unfiltered scan, past the store's fixed ceiling. Pre-fix,
+    /// each probed position held one column resident, so exploration alone
+    /// turned the registry into a cyclic scan through an LRU smaller than it
+    /// — LRU's worst case, where the miss rate goes from 0 to 1 over a narrow
+    /// band (measured at the time: 400 entities → 400 remote generations
+    /// total; 600 entities → 31,739, matching the predicted `600 × TICKS` =
+    /// 31,200 to 1.7%).
     ///
-    /// # Both hypotheses computed from constants, and the boundary is exact
-    ///
-    /// The rig's resident set is `EXPECTED_TICK_AREA_COLUMNS + entities`. Below
-    /// the ceiling every column is generated exactly **once** for the whole
-    /// session, so remote generations total `entities`. Above it the access
-    /// pattern is a **cyclic** scan of `entities` positions through an LRU of
-    /// [`DEFAULT_CAPACITY`], which is LRU's worst case — by the time the scan
-    /// returns to a position it has touched every other one, so **every** probe
-    /// misses and the total is `entities × TICKS`.
-    ///
-    /// At `entities = UNDER` those are 400 and 20,800; at `entities = OVER` they
-    /// are 600 and 31,200. Four numbers, no fitting, and the two regimes are a
-    /// factor of [`TICKS`] apart rather than "more" and "less".
-    ///
-    /// Production's own threshold is lower than this rig's, because production
-    /// also holds a streamed view — at the default `render_distance` 8 that is
-    /// `view_radius` 9 and so **361** columns, leaving `512 - 361 - 49` = **102**
-    /// distinct hopper-bearing *chunks*, since only `BlockEntity::Hopper` probes
-    /// the world at all (see
-    /// `sixteen_hundred_opaque_block_entities_never_reach_the_store`) and hoppers
-    /// sharing a chunk share one column.
-    ///
-    /// This read `512 - 289 - 49 = 174` until issue #505; 289 is the square of a
-    /// *view radius* of 8, and 8 is the `render_distance`, which the shell serves
-    /// plus one. **Treat 102 as a conservative floor rather than the threshold**:
-    /// it assumes the view competes with the 20 Hz scans for residency, and in
-    /// steady state it does not — the view is touched once per column while the
-    /// tick area and the registry are touched every 50 ms, so LRU's minimum stamp
-    /// always falls on a view column. What the view really costs is that the store
-    /// sits permanently at its ceiling, permanently evicting, once
-    /// `view_columns(view_radius)` alone exceeds it. That is issue #505, and
-    /// `tests/view_radius_store_capacity.rs` is where the view side is measured
-    /// rather than derived.
-    ///
-    /// # This arm characterises a defect, it does not bless it
-    ///
-    /// The over-capacity band is **not** desired behaviour — it is issue #503's
-    /// block-entity lead, measured. If a fix lands (vanilla ticks block entities
-    /// per *loaded chunk*, so the scan should be bounded by the view rather than
-    /// by everything the registry ever saw) this band goes red, and the right
-    /// response is to rewrite it against the new bound, not to relax it. See
-    /// `docs/block-entity-tick-distance.md`.
+    /// **Issue #504's fix removes the mechanism entirely, not just its cost.**
+    /// None of these entities' chunks are ever loaded (they sit at
+    /// `(2_000 + i, 2_000 + i)`, far outside [`shell_tick_area`] and touched by
+    /// nothing else in this rig), so `is_loaded` rejects every one of them
+    /// before `enabled` — and therefore `world.block_state` — is ever called.
+    /// The registry can hold 400, 600, or 400,000 hoppers with identical
+    /// result: **zero** remote generations and **zero** evictions, at both
+    /// bands, because nothing about an unloaded hopper ever reaches the store.
+    /// This is the arm this module's own history said would go red "by
+    /// design" once the fix landed — it did, and this is the rewrite against
+    /// the new bound, not a relaxation of the old assertion.
     #[tokio::test(start_paused = true)]
-    async fn the_miss_rate_crosses_from_zero_to_one_when_the_registry_outgrows_the_store() {
-        /// Comfortably under the ceiling: `49 + 400 = 449 <= 512`.
+    async fn the_registry_outgrowing_the_store_no_longer_moves_the_miss_rate() {
+        /// Comfortably under the pre-fix ceiling: `49 + 400 = 449 <= 512`.
         const UNDER: i32 = 400;
-        /// Over it: `49 + 600 = 649 > 512`.
+        /// Over the pre-fix ceiling: `49 + 600 = 649 > 512`. Both bands are
+        /// kept from the pre-#504 version of this test specifically so the
+        /// "no longer depends on which side of the ceiling you're on" claim
+        /// is checked at both of the values that used to disagree.
         const OVER: i32 = 600;
 
         const _: () = assert!(EXPECTED_TICK_AREA_COLUMNS + UNDER as usize <= DEFAULT_CAPACITY);
         const _: () = assert!(EXPECTED_TICK_AREA_COLUMNS + OVER as usize > DEFAULT_CAPACITY);
 
-        for (entities, over_capacity) in [(UNDER, false), (OVER, true)] {
+        for entities in [UNDER, OVER] {
             let handle = BlockEntityHandle::new();
             handle.with(|registry| {
                 for i in 0..entities {
@@ -2365,10 +2385,6 @@ mod tests {
                 }
             });
 
-            // A shorter column than `full_height` for this arm alone: the
-            // over-capacity band generates ~31,200 columns, and even packed
-            // that is allocation churn the measurement does not need. The count
-            // is what is under test, not the column's size.
             let counting = CountingSource::sized(0, 128);
             let calls = Arc::clone(&counting.calls);
             let store = Arc::new(ChunkStore::new(counting));
@@ -2383,45 +2399,23 @@ mod tests {
 
             let total = calls.load(Ordering::Relaxed);
             let remote = total - EXPECTED_TICK_AREA_COLUMNS as u64;
-            // Printed as well as asserted: the doc quotes these, and a curve is
-            // more use to the next reader than a bare pass.
             eprintln!(
-                "entities {entities:>4}  resident-set {:>4}  ceiling {DEFAULT_CAPACITY}  \
-                 remote generations {remote:>6}  evictions {:>6}  per tick {:>6.1}",
-                EXPECTED_TICK_AREA_COLUMNS + entities as usize,
-                store.evicted(),
-                remote as f64 / f64::from(TICKS)
+                "entities {entities:>4}  remote generations {remote:>6}  evictions {:>6}",
+                store.evicted()
             );
-            if over_capacity {
-                let predicted = u64::from(entities as u32) * u64::from(TICKS);
-                assert!(
-                    remote >= predicted * 9 / 10,
-                    "over capacity ({entities} entities + \
-                     {EXPECTED_TICK_AREA_COLUMNS} tick area > {DEFAULT_CAPACITY}): a cyclic scan \
-                     through a smaller LRU must miss on essentially every probe, so remote \
-                     generations should approach {entities} × {TICKS} = {predicted}; got \
-                     {remote}. {entities} would mean the store was still absorbing them."
-                );
-                assert!(
-                    store.evicted() > 0,
-                    "precondition: the over-capacity band must actually evict"
-                );
-            } else {
-                assert_eq!(
-                    remote,
-                    u64::from(entities as u32),
-                    "under capacity ({entities} entities + {EXPECTED_TICK_AREA_COLUMNS} tick \
-                     area <= {DEFAULT_CAPACITY}): each column must be generated exactly once for \
-                     the whole session, so {entities} total. {} would be one per tick.",
-                    u64::from(entities as u32) * u64::from(TICKS)
-                );
-                assert_eq!(
-                    store.evicted(),
-                    0,
-                    "precondition: the under-capacity band must not evict, or it is not the \
-                     regime it claims to be"
-                );
-            }
+            assert_eq!(
+                remote, 0,
+                "{entities} unloaded hoppers must cost zero remote generations regardless of \
+                 whether they fit under {DEFAULT_CAPACITY} alongside the tick area. Pre-#504 \
+                 this was {entities} under capacity and ~{} over it.",
+                u64::from(entities as u32) * u64::from(TICKS)
+            );
+            assert_eq!(
+                store.evicted(),
+                0,
+                "nothing should be evicted: the tick area alone is far under {DEFAULT_CAPACITY}, \
+                 and none of the {entities} hoppers ever enter the cache to compete for room"
+            );
         }
     }
 
