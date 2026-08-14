@@ -119,9 +119,16 @@ builds a `MetadataField::TntFuse`.
 
 ## What remains
 
-Minecarts (`minecraft:minecart`, `chest_minecart`, `hopper_minecart`,
-`furnace_minecart`, `tnt_minecart`) do not exist as entities and have no rail-
-following physics — see `docs/backlog.md`/`crate::redstone_rail`'s own module
-doc, which already names the gap. Vanilla's current minecart model
-(`NewMinecartBehavior.java`) is a real, separate physics system and was out of
-scope for the work that added TNT.
+~~Minecarts do not exist as entities and have no rail-following physics.~~
+**Landed** — see [`docs/minecart.md`](./minecart.md): all five
+`AbstractMinecart` subclasses, `OldMinecartBehavior`'s rail-following
+physics (straight, sloped and curved rails, powered-rail boost/brake),
+riding, and a TNT minecart's own detonation, which reuses this module's
+`MobSim::explode`/`pending_detonations` pipeline exactly as this doc's own
+"reusing the explosion machinery" section describes. Nothing renders a
+minecart yet, for the identical reason primed TNT itself does not:
+`lodestone-render`'s `entity.rs` has no `"minecart"` (or `"tnt"`) entry in
+its `entity_models()` corpus, so `model_for_type` returns `None` for either
+and the renderer skips both outright — a render-corpus gap, not a wire or
+physics one. See [`docs/minecart.md`](./minecart.md)'s own "what does not
+draw yet" section.
