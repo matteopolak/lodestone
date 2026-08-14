@@ -74,6 +74,34 @@ loses the strength.
 An infinite duration (`-1`) is longer than everything, which is why
 `isShorterDurationThan` is not a plain comparison.
 
+### A splash/lingering potion's impact burst
+
+`mob_effects::potion_splash_effects` ports `ThrownSplashPotion.onHitAsPotion`: every
+effect in the potion's built-in list (`lodestone_data::potion::potion_built_in_effects`)
+is scaled by `splash_scale(distance_sq) = 1.0 - sqrt(distance_sq) / 4.0` (`1.0` on a
+direct hit, `0.0` at the four-block edge of the blast) and split in two:
+
+* An **instantaneous** effect (`instant_health`/`instant_damage` — the only two a
+  potion's own list can carry) scales the *amount*:
+  `splash_instant_amount = floor(scale * base_amount + 0.5)`.
+* A **timed** effect scales the *duration*:
+  `splash_timed_duration = floor(scale * base_duration * duration_scale + 0.5)`, then
+  dropped outright (not applied at a token duration) if that leaves it
+  `endsWithin(20)` ticks (`splash_would_be_dropped`).
+
+`crate::mobs::projectiles::resolve_potion_splash` is the consumer: for every
+splash/lingering impact (block **or** entity — vanilla's own search is the whole blast
+AABB, not just whatever the collision sweep named as the target) it finds every living
+mob within `SPLASH_RANGE_SQ` (16.0, i.e. 4 blocks) of the impact point and applies the
+result — health for an instant effect, `SimMob::apply_effect` (this same module's
+stacking rule) for a timed one.
+
+`duration_scale` is always `1.0`: this build's `ItemComponents` does not model
+`minecraft:potion_duration_scale`, so every splash uses the potion's unscaled base
+duration. And `customEffects` (a `/give`-authored custom effect on a splash potion) is
+silently absent for the same reason — `ItemComponents` carries only the potion's own
+built-in `minecraft:potion_contents` `potion` id, not its patch's custom-effects list.
+
 ## How to change it
 
 * **Another periodic effect**: add it to `periodic_effect`. The interval and the amount
@@ -82,6 +110,12 @@ An infinite duration (`-1`) is longer than everything, which is why
   your own copy. That is the whole reason this is one store.
 * **Another producer**: `Effect::ApplyEffect` / `Effect::ClearEffects` in
   `crate::commands::effect`, applied by `server.rs`'s `apply_own_effect`.
+* **The splash formula**: `mob_effects::potion_splash_effects` is the one entry point
+  a caller needs; its pieces (`splash_scale`, `splash_instant_amount`,
+  `splash_timed_duration`, `splash_would_be_dropped`) are separated because each is
+  independently testable against `AbstractThrownPotion`'s own named constant or
+  `MobEffectInstance` method. The entity search that calls it is
+  `crate::mobs::projectiles::resolve_potion_splash`.
 
 ### Gotchas
 
@@ -104,16 +138,26 @@ An infinite duration (`-1`) is longer than everything, which is why
 * **Attribute-modifier effects** (`speed`, `slowness`, `health_boost`, `absorption`).
   These need an attribute system. `lodestone_physics::effect` already classifies the
   movement ones; the store is here for it to read.
-* **Area-effect clouds and lingering-potion colour mixing.** Needs a cloud entity with
-  a radius and a per-tick membership test.
+* **A lingering potion's own `AreaEffectCloud` entity.** Real vanilla behaviour is a
+  cloud with a radius, a radius-per-tick shrink, a duration and a reapplication delay,
+  so the burst lands repeatedly over up to 30 seconds. That entity does not exist here,
+  so `resolve_potion_splash` applies a lingering potion's burst exactly **once**, at
+  impact — the same as a splash potion — rather than lingering. Tracked as a follow-up.
 * **The `update_mob_effect` / `remove_mob_effect` packets.** Nothing encodes them, so a
   client's own effect HUD does not light up — the *consequences* (damage, healing,
-  exhaustion) reach the player, the icon does not.
+  exhaustion) reach the player, the icon does not. A mob's own splash-applied effects
+  ([`SimMob::effects`]) are even less visible: nothing renders a mob's status icons at
+  all, and nothing yet ticks a mob's periodic poison/wither/regeneration — a splash
+  lands the *instance*, but only a player's own vitals timer currently advances one.
 * **`ambient` / `visible` / `showIcon`** and the blend state — purely presentational,
   and `/effect`'s `hideParticles` node is omitted rather than parsed-and-discarded.
 * **Drinking a potion.** `crate::brewing` produces potion *items*; no item-use path
-  turns one into an effect.
-* **Mob effects.** `MobSim` holds no effect state, so `/effect` targets players only.
+  turns one into an effect. (A **thrown** splash/lingering potion's impact-time burst
+  is covered above — that path is separate from drinking.)
+* **`/effect` targeting a mob.** `MobSim` now holds per-mob effect state
+  ([`SimMob::effects`], populated by a splash/lingering impact), but the `/effect`
+  *command* itself still only resolves player targets — a mob can carry an effect a
+  splash gave it, but nothing can `/effect give`/`/effect clear` one directly yet.
 
 ## Dependencies
 
