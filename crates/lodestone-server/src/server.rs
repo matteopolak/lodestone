@@ -6067,6 +6067,52 @@ fn apply_composter_use(
 /// belongs in a brewing stand is routed into the matching slot and consumed;
 /// an unrelated held item still falls through to the placement logic below
 /// exactly as before this change.
+///
+/// Whether writing `state` at `target` would intersect the placer's own
+/// bounding box — vanilla's `BlockItem.canPlace` refusing when
+/// `Level.isUnobstructed(state, pos, CollisionContext.empty())` is false
+/// (`Level.java`), narrowed to the one entity this server can currently name
+/// at a placement site: the placer, from `player_pos`. A full
+/// `isUnobstructed` tests *every* entity's bounding box in the cell and
+/// excludes spectators; this crate has no per-connection entity-bounding-box
+/// registry to query the rest of, so another player or a mob standing in the
+/// target cell is not yet refused — see `docs/block-edit.md`.
+///
+/// A state with an **empty** collision shape (a torch, a rail, a pressure
+/// plate, redstone dust…) is never obstructed, matching vanilla's own
+/// `Shapes.empty()` never intersecting anything — placing one at your own
+/// feet is legal in vanilla and stays legal here.
+///
+/// The placer's box is vanilla's `EntityType.PLAYER` (`0.6 x 1.8`, centred
+/// horizontally on `feet`, `feet.y..feet.y + 1.8` vertically) —
+/// `isUnobstructed` reads `Entity.getBoundingBox()` at click time, which does
+/// not shrink for the sneaking pose (`1.5`), so this does not model pose
+/// either.
+fn placement_obstructs_placer(target: BlockPos, state: &str, feet: Vec3) -> bool {
+    let Some(id) = lodestone_data::block_states::state_id(state) else {
+        return false;
+    };
+    let Some(boxes) = lodestone_data::collision_shapes::collision_boxes(id) else {
+        return false;
+    };
+    let (px0, px1) = (feet.x - 0.3, feet.x + 0.3);
+    let (py0, py1) = (feet.y, feet.y + 1.8);
+    let (pz0, pz1) = (feet.z - 0.3, feet.z + 0.3);
+    boxes.iter().any(|b| {
+        let bx0 = f64::from(target.x) + f64::from(b.min[0]);
+        let bx1 = f64::from(target.x) + f64::from(b.max[0]);
+        let by0 = f64::from(target.y) + f64::from(b.min[1]);
+        let by1 = f64::from(target.y) + f64::from(b.max[1]);
+        let bz0 = f64::from(target.z) + f64::from(b.min[2]);
+        let bz1 = f64::from(target.z) + f64::from(b.max[2]);
+        // Strict inequalities: two boxes that only share a face are touching,
+        // not intersecting — the same convention
+        // `lodestone_shell::sim::placement::block_intersects_player` uses for
+        // the client's own (coarser, full-cell) prediction of this same rule.
+        bx1 > px0 && bx0 < px1 && by1 > py0 && by0 < py1 && bz1 > pz0 && bz0 < pz1
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn apply_use_item_on<T, P, S>(
     conn: &mut Connection<T>,
@@ -6818,6 +6864,37 @@ where
     let mut placement_remainder: Option<Option<ItemStack>> = None;
     if is_air_or_fluid(&target_state) || doubling_slab {
         if let Some((item, block_name)) = placed {
+            // `placed_block_state` applies the block's own
+            // `getStateForPlacement` convention (`crate::block_placement`);
+            // a block with no convention keeps the census's bare default
+            // state, which `resolve_state_id` resolves faithfully. Resolved
+            // ahead of the block-entity registration below (moved up from
+            // its original position after it) because the obstruction check
+            // needs the real placed *state* — a wall-mounted variant's
+            // collision box is not a free-standing one's — and nothing may be
+            // registered or written until that check passes.
+            let ctx = crate::block_placement::PlaceContext {
+                target,
+                face,
+                cursor,
+                yaw: player_yaw,
+                pitch: player_pitch,
+            };
+            let (state, extra) =
+                match placed_block_state(block_name, &ctx, |p| source.block_state(p.x, p.y, p.z)) {
+                    Some(placed) => (placed.state, placed.extra),
+                    None => (block_name.to_string(), Vec::new()),
+                };
+            // `BlockItem.canPlace` → `Level.isUnobstructed`: a placement that
+            // would collide with the placer's own body is refused, not
+            // written — see `placement_obstructs_placer`'s own doc for what
+            // this does and does not cover yet. `player_pos` is `None` until
+            // the first movement packet arrives; skipped rather than refused
+            // in that case, the same conservative-elsewhere-but-permissive-
+            // here direction `is_legal_bed_respawn` documents for the same
+            // gap.
+            let obstructed = player_pos.is_some_and(|feet| placement_obstructs_placer(target, &state, feet));
+            if !obstructed {
             if let Some((entity_block, entity)) = block_entity_for_item(item) {
                 // The two sources must agree on the block name, or we would
                 // register a furnace at a position holding some other block.
@@ -6831,22 +6908,6 @@ where
                 );
                 block_entities.with(|registry| registry.insert(target, entity));
             }
-            // `placed_block_state` applies the block's own
-            // `getStateForPlacement` convention (`crate::block_placement`);
-            // a block with no convention keeps the census's bare default
-            // state, which `resolve_state_id` resolves faithfully.
-            let ctx = crate::block_placement::PlaceContext {
-                target,
-                face,
-                cursor,
-                yaw: player_yaw,
-                pitch: player_pitch,
-            };
-            let (state, extra) =
-                match placed_block_state(block_name, &ctx, |p| source.block_state(p.x, p.y, p.z)) {
-                    Some(placed) => (placed.state, placed.extra),
-                    None => (block_name.to_string(), Vec::new()),
-                };
             source.set_block(target.x, target.y, target.z, &state);
             // `BlockItem.place`'s own `level.playSound(player, …)`
             // (`BlockItem.java:87`) — the placer is vanilla's `except` argument,
@@ -6942,6 +7003,7 @@ where
                     placement_remainder = Some(inventory.native(native).cloned());
                 }
             }
+            } // !obstructed
         }
     }
     // Tell the client's window-0 hotbar slot what the server thinks is left —
@@ -7299,6 +7361,25 @@ async fn apply_client_command<T, P, S>(
     advancements: &mut AdvancementManager,
     player_uuid: uuid::Uuid,
     action: i32,
+    // Whether `source` above is a portal-travelled dimension rather than the
+    // connection's home one — `matches!(source_ref, SourceRef::Dimension(_))`,
+    // computed by the caller because only it holds the `SourceRef` this `&S` was
+    // unwrapped from. `encode_respawn` always tells the client
+    // `minecraft:overworld` (this crate's join dimension), so a death away from
+    // home leaves the *server's* own `travelled`/`view`/`join_stream` still
+    // pointed at the dimension the player died in — no chunk stream is ever
+    // re-centred on the respawn position, so the client (correctly told it is
+    // home) receives no terrain there at all. `dimension_reset` is how this
+    // function asks its caller to run that reset; see its own doc.
+    away_from_home: bool,
+    // Set to the resolved respawn position when a respawn just happened *and*
+    // `away_from_home` was true — the signal `dispatch_play_packet`'s caller
+    // (`serve_play`, the only one with `home`/`pending_travel` in scope) uses to
+    // run the same forget-chunk/recentre/rebuild-join-stream sequence
+    // `travel_through_portal` runs for an outbound trip, then park a trip home.
+    // `None` on entry and left `None` for every other action or a same-dimension
+    // respawn, so a caller that never checks it loses nothing.
+    dimension_reset: &mut Option<Vec3>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -7337,6 +7418,17 @@ where
             // death at y=70 respawning at y=64 would otherwise bank 6 blocks of
             // phantom fall distance against the next landing.
             fall.reset();
+            // `encode_respawn` above already told the client it is in
+            // `minecraft:overworld` — this crate's one respawn dimension,
+            // matching vanilla's no-bed/no-anchor default. If the player died
+            // away from home, the *server's* own dimension tracking (`travelled`,
+            // `view`, `join_stream`) is still pointed at the dimension they died
+            // in, and nothing above touches it — so ask the caller to run the
+            // same reset a portal trip home runs, or the client sits at a
+            // correctly-labelled position with no terrain ever streamed to it.
+            if away_from_home {
+                *dimension_reset = Some(target);
+            }
         }
         1 => {
             let snapshot = advancements.stats_snapshot(player_uuid);
@@ -9397,6 +9489,13 @@ async fn dispatch_play_packet<T, P, S>(
     // `completeUsingItem` itself, and the client sends nothing at all when a
     // steak finishes. `serve_play`'s per-tick arm is what finishes it here.
     item_in_use: &mut Option<ItemInUse>,
+    // Set when a `ClientCommand`'s `PERFORM_RESPAWN` just fired *and* `source`
+    // above was a portal-travelled dimension — see `apply_client_command`'s own
+    // parameter comment. Only the native `serve_play` (the one with `home` and
+    // `pending_travel` in scope) reads this back; `wasm32`'s never leaves the
+    // dimension it joined in, so `source` is never the `Dimension` arm there and
+    // this is left `None` on every call, a pure no-op passthrough.
+    dimension_reset: &mut Option<Vec3>,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -10465,6 +10564,10 @@ where
             apply_creative_mode_slot_set(inventory, slot, item, *game_mode == GameMode::Creative);
         }
         ServerBound::ClientCommand { action } => {
+            // `source` is this call's own `SourceRef` — the `Dimension` arm is
+            // only ever reached via a portal trip (see that variant's own doc),
+            // so this is exactly "away from the dimension we joined in".
+            let away_from_home = matches!(source, SourceRef::Dimension(_));
             apply_client_command(
                 conn,
                 proto,
@@ -10478,6 +10581,8 @@ where
                 advancements,
                 player_uuid,
                 action,
+                away_from_home,
+                dimension_reset,
             )
             .await?;
         }
@@ -11303,6 +11408,10 @@ where
     // they differ by one layer, and the return trip is the one that reads as success
     // in a screenshot when it silently does nothing.
     let mut pending_travel: Option<Option<Arc<dyn ChunkSource>>> = None;
+    // Out-parameter for `dispatch_play_packet`'s `ClientCommand` arm — see
+    // `apply_client_command`'s `dimension_reset` doc. Read and cleared
+    // immediately after every `dispatch_play_packet` call in this loop.
+    let mut dimension_reset: Option<Vec3> = None;
 
     loop {
         if let Some(next) = pending_travel.take() {
@@ -11430,10 +11539,50 @@ where
                     Some(u64::try_from(ticks_since(play_start)).unwrap_or(0)),
                     &mut bow_draw,
                     &mut item_in_use,
+                    &mut dimension_reset,
                     packet_id,
                     &payload,
                 )
                 .await?;
+                // A death respawn that just sent the player home from a portal
+                // trip — see `apply_client_command`'s `dimension_reset` parameter
+                // comment for why the client's own dimension label is not
+                // enough. Mirrors `travel_through_portal`'s own tail: forget
+                // every column this dimension's view believes is loaded,
+                // recentre on the respawn position, rebuild the join stream, and
+                // park the trip home for the next loop iteration to promote —
+                // the same `pending_travel` a portal trip itself uses.
+                if let Some(target) = dimension_reset.take() {
+                    for &(cx, cz) in &view.loaded {
+                        apply(conn, &mut state, proto.encode_forget_chunk(cx, cz)).await?;
+                    }
+                    let centre_cx = (target.x / 16.0).floor() as i32;
+                    let centre_cz = (target.z / 16.0).floor() as i32;
+                    apply(
+                        conn,
+                        &mut state,
+                        proto.encode_chunk_cache_center(centre_cx, centre_cz),
+                    )
+                    .await?;
+                    let radius = view.radius;
+                    let max_radius = view.max_radius;
+                    view = ViewTracker::new((centre_cx, centre_cz), radius, max_radius);
+                    let rings: Vec<Vec<(i32, i32)>> = join_view_rings(radius)
+                        .into_iter()
+                        .map(|ring| {
+                            ring.into_iter()
+                                .map(|(dx, dz)| (centre_cx + dx, centre_cz + dz))
+                                .collect()
+                        })
+                        .collect();
+                    join_stream = crate::join_scheduler::JoinChunkStream::ringed(rings);
+                    if join_batch_open {
+                        apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
+                        join_batch_open = false;
+                        join_batch_size = 0;
+                    }
+                    pending_travel = Some(None);
+                }
                 // Issue #338: drain the advancement flush for anything the
                 // packet just granted. Vanilla flushes every server tick
                 // (`ServerPlayer.tick()` → `advancements.flushDirty(player,
@@ -12838,6 +12987,12 @@ where
             None,
             &mut bow_draw,
             &mut item_in_use,
+            // This target has no portal travel (see `serve_play`'s own doc
+            // comment: no `select!`, no `home`, no `pending_travel`), so `source`
+            // is never `SourceRef::Dimension` here and this out-parameter can
+            // never come back `Some` — a throwaway local rather than a signal
+            // anything reads.
+            &mut None,
             packet_id,
             &payload,
         )
@@ -15182,5 +15337,252 @@ mod tests {
         // And no yaw reported yet keeps the bare name for the directional
         // families too.
         assert_eq!(state("minecraft:repeater", None), None);
+    }
+
+    // -----------------------------------------------------------------
+    // `placement_obstructs_placer` — the server-side half of
+    // `BlockItem.canPlace` → `Level.isUnobstructed`. `apply_use_item_on` had
+    // no obstruction test of any kind before this: the only legality gate was
+    // "is the target cell air or a fluid", so a full block could be placed
+    // through a standing player. These test the pure geometry directly rather
+    // than driving the whole `apply_use_item_on` pipeline, which needs a live
+    // `ChunkSource`/`BlockEntityHandle`/`MobHandle` fixture this predicate
+    // does not touch.
+    // -----------------------------------------------------------------
+
+    /// The reported bug, most directly: a full block at the target cell the
+    /// player is standing in must be refused.
+    #[test]
+    fn placement_obstructs_placer_refuses_a_full_block_at_the_players_feet() {
+        let target = BlockPos::new(0, 64, 0);
+        let feet = Vec3::new(0.5, 64.0, 0.5);
+        assert!(placement_obstructs_placer(target, "minecraft:stone", feet));
+    }
+
+    /// The discriminating arm: a state with an **empty** collision shape must
+    /// never be refused, even at the player's own feet — otherwise this is a
+    /// blanket "nothing inside the player" rule rather than a real
+    /// obstruction test, and vanilla legitimately lets you plant a torch (or a
+    /// rail, a pressure plate, redstone dust…) where you stand.
+    #[test]
+    fn placement_obstructs_placer_allows_an_empty_shape_at_the_players_feet() {
+        let target = BlockPos::new(0, 64, 0);
+        let feet = Vec3::new(0.5, 64.0, 0.5);
+        assert!(
+            lodestone_data::collision_shapes::collision_boxes(
+                lodestone_data::block_states::state_id("minecraft:torch").unwrap()
+            )
+            .is_some_and(<[_]>::is_empty),
+            "this test's premise: a torch has no collision boxes"
+        );
+        assert!(!placement_obstructs_placer(target, "minecraft:torch", feet));
+    }
+
+    /// Control: the same full block, far from the player, must not be
+    /// refused — proves the detector is a real geometric test and not an
+    /// unconditional `true`.
+    #[test]
+    fn placement_obstructs_placer_allows_a_full_block_far_from_the_player() {
+        let target = BlockPos::new(50, 64, 50);
+        let feet = Vec3::new(0.5, 64.0, 0.5);
+        assert!(!placement_obstructs_placer(target, "minecraft:stone", feet));
+    }
+
+    /// Boundary control: a full block exactly adjacent to the player (sharing
+    /// only a face) must not be refused — two boxes that only touch are not
+    /// intersecting, the same strict-inequality convention
+    /// `lodestone_shell::sim::placement::block_intersects_player` uses for
+    /// the client's own prediction of this rule.
+    #[test]
+    fn placement_obstructs_placer_allows_a_full_block_touching_but_not_overlapping() {
+        let target = BlockPos::new(1, 64, 0);
+        // Feet at x=0.5, half-width 0.3: the player's box is x in
+        // [0.2, 0.8], which shares the x=1.0 boundary with `target` (x in
+        // [1.0, 2.0]) without entering it.
+        let feet = Vec3::new(0.5, 64.0, 0.5);
+        assert!(!placement_obstructs_placer(target, "minecraft:stone", feet));
+    }
+
+    /// The state-shaped case a full-cube approximation gets wrong: a top
+    /// slab occupies only the *upper* half of its cell, so a player whose own
+    /// box just clears that upper half is not obstructed by it — while an
+    /// (otherwise identically positioned) full block still would be. The
+    /// slab's real bottom edge is read from the live collision-shape table
+    /// rather than assumed, and the player's feet are derived from it
+    /// algebraically so the test holds regardless of the shape's exact
+    /// height.
+    #[test]
+    fn placement_obstructs_placer_lets_a_top_slab_clear_the_players_head_where_a_full_block_would_not()
+    {
+        let target = BlockPos::new(0, 66, 0);
+        let top_slab = "minecraft:oak_slab[type=top,waterlogged=false]";
+        let id = lodestone_data::block_states::state_id(top_slab)
+            .expect("minecraft:oak_slab[type=top,waterlogged=false] is a real 26.2 state");
+        let boxes = lodestone_data::collision_shapes::collision_boxes(id)
+            .filter(|b| !b.is_empty())
+            .expect("a top slab has real collision geometry");
+        let box_min_y = boxes
+            .iter()
+            .map(|b| b.min[1])
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            box_min_y > 0.1,
+            "a top slab must not fill the bottom half of its cell, got {box_min_y}"
+        );
+        // Stand so the player's own box top lands just under the slab's real
+        // bottom edge (clears the slab) but still inside the target cell
+        // (so an equivalently placed full block, whose bottom edge is the
+        // cell floor, still hits the player).
+        let feet_y = f64::from(target.y) + f64::from(box_min_y) - 1.8 - 0.05;
+        let feet = Vec3::new(0.5, feet_y, 0.5);
+        assert!(
+            !placement_obstructs_placer(target, top_slab, feet),
+            "a top slab should clear the player's head here"
+        );
+        assert!(
+            placement_obstructs_placer(target, "minecraft:stone", feet),
+            "a full block at the same position should still hit the player's head"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `apply_client_command`'s `dimension_reset` out-parameter — the fix for
+    // "die in the Nether, respawn to nothing": `encode_respawn` always tells
+    // the client `minecraft:overworld` (this crate's one respawn dimension),
+    // but nothing reset the *server's* own dimension tracking, so the client
+    // was correctly labelled and never sent any terrain for where it landed.
+    // -----------------------------------------------------------------
+
+    /// A `ChunkSource` fixture that reports whichever [`crate::dimension::Dimension`]
+    /// it was built with — the only thing `apply_client_command` reads off
+    /// `source` here (`respawn` is `None`, so the bed branch never runs).
+    struct DimensionOnly(crate::dimension::Dimension);
+
+    impl ChunkSource for DimensionOnly {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 256)
+        }
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            "minecraft:air".to_string()
+        }
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn dimension(&self) -> Option<crate::dimension::Dimension> {
+            Some(self.0)
+        }
+    }
+
+    /// A protocol double carrying only what `apply_client_command`'s
+    /// `action == 0` arm calls — `encode_respawn`, `encode_set_health`,
+    /// `encode_air_supply_update` — everything else `unimplemented!()`, so a
+    /// call to a method this test does not expect is a panic, not a silent gap.
+    struct RespawnOnlyProto;
+
+    impl ServerProtocol for RespawnOnlyProto {
+        fn decode(&self, _s: State, _id: i32, _p: &[u8]) -> ServerBound {
+            unimplemented!("this test drives the function directly, never through decode")
+        }
+        fn login_success(&self, _u: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+            unimplemented!()
+        }
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            unimplemented!()
+        }
+        fn begin_play(&self, _r: i32) -> Vec<ServerDirective> {
+            unimplemented!()
+        }
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            unimplemented!()
+        }
+        fn encode_chunk(&self, _cx: i32, _cz: i32, _c: &ChunkColumn) -> ServerDirective {
+            unimplemented!()
+        }
+        fn end_chunk_batch(&self, _n: i32) -> ServerDirective {
+            unimplemented!()
+        }
+        fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
+            let _ = spawn;
+            vec![ServerDirective::None]
+        }
+        fn encode_set_health(&self, _health: f32, _food: i32, _saturation: f32) -> ServerDirective {
+            ServerDirective::None
+        }
+        fn encode_air_supply_update(&self, _air: i32) -> ServerDirective {
+            ServerDirective::None
+        }
+    }
+
+    /// Drives `apply_client_command`'s `PERFORM_RESPAWN` arm directly (it is
+    /// private to this module, so an integration test cannot reach it) and
+    /// returns what `dimension_reset` ended up holding.
+    async fn drive_respawn(away_from_home: bool) -> Option<Vec3> {
+        let (client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut state = State::Play;
+        let mut vitals = PlayerVitals::default();
+        // The precondition every existing respawn test pins too: no health, no
+        // air, matching `PlayerVitals::respawn`'s own before-state.
+        vitals.kill();
+        let mut fall = FallTracker::default();
+        let world_spawn = Vec3::new(11.0, 71.0, -4.0);
+        let source = DimensionOnly(if away_from_home {
+            crate::dimension::Dimension::Nether
+        } else {
+            crate::dimension::Dimension::Overworld
+        });
+        let world = crate::world_state::WorldStateHandle::default();
+        let mut advancements =
+            AdvancementManager::new(Vec::new()).expect("an empty advancement tree is valid");
+        let mut dimension_reset: Option<Vec3> = None;
+
+        apply_client_command(
+            &mut conn,
+            &RespawnOnlyProto,
+            &mut state,
+            &mut vitals,
+            &mut fall,
+            world_spawn,
+            None,
+            &source,
+            &world,
+            &mut advancements,
+            Uuid::nil(),
+            0, // PERFORM_RESPAWN
+            away_from_home,
+            &mut dimension_reset,
+        )
+        .await
+        .expect("the fixture protocol never errors");
+
+        drop(client_end);
+        dimension_reset
+    }
+
+    /// **The fix.** A death away from home must ask the caller to run the same
+    /// dimension reset a portal trip home runs — carrying the resolved respawn
+    /// position (here the world spawn, since no bed is set), or the connection
+    /// loop never re-centres `view`/`join_stream` and the client sits at a
+    /// correctly-labelled position with no terrain ever streamed to it.
+    #[tokio::test]
+    async fn a_death_away_from_home_asks_for_a_dimension_reset() {
+        let reset = drive_respawn(true).await;
+        assert_eq!(
+            reset,
+            Some(Vec3::new(11.0, 71.0, -4.0)),
+            "a death in the Nether must signal a reset carrying the resolved respawn position"
+        );
+    }
+
+    /// **The control.** An ordinary death *at* home must not trip the same
+    /// signal, or every respawn would pay the forget-chunk/rebuild-join-stream
+    /// cost this exists to avoid on the common path. Without the
+    /// `away_from_home` gate this assertion fails identically to the one above
+    /// passing — proving the gate is load-bearing, not decorative.
+    #[tokio::test]
+    async fn a_death_at_home_does_not_ask_for_a_dimension_reset() {
+        let reset = drive_respawn(false).await;
+        assert_eq!(
+            reset, None,
+            "a same-dimension death must not signal a reset"
+        );
     }
 }
