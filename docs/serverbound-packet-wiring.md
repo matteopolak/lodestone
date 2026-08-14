@@ -18,26 +18,29 @@ hand-derived coverage numbers that were wrong in four different ways).
 | axis | measured | meaning |
 |---|---|---|
 | serverbound **decoded** | **62/69** | `decode` has a real arm and reads the wire |
-| serverbound **connected** | **29/69** | that arm produces a `ServerBound` variant a consumer acts on |
-| decodes-to-`Ignored`-only | **33** | examined, understood, reaching nothing |
+| serverbound **connected** | **34/69** | that arm produces a `ServerBound` variant a consumer acts on |
+| decodes-to-`Ignored`-only | **28** | examined, understood, reaching nothing |
 | never examined | **7** | no arm at all |
 
-Reading taken at `e577b4bd`. **Watch the arithmetic when comparing to an older
-copy of this table**, because the two counts move independently and a naive
-subtraction misreads what happened, and because **the tool itself was briefly
-unable to run at all**: `cargo xtask connectedness` bailed with "duplicate play
-serverbound decode arm" until this pass fixed it. The cause was a genuine dead
-arm, not a scanner bug — `USE_ITEM` had two `State::Play if packet_id ==
-play::serverbound::USE_ITEM` match arms in `server_protocol.rs`. A commit
-wiring the right-click-in-air projectile trigger added a real, connected arm
-constructing `ServerBound::UseItem` *earlier* in the match than an older stub
-that decoded to `Ignored`; Rust picks the first satisfied guard, so the stub
-was dead code, functionally harmless but invisible to the connectedness
-scanner, which has no notion of "unreachable" and just saw one packet id
-claimed twice. Removed here. **If this bails again with the same message,
-grep for `if packet_id == play::serverbound::` and diff the packet names for
-a duplicate** — the scanner does not (and should not) try to prove
-reachability itself.
+Reading taken at `c7029614` (`cargo xtask connectedness` re-run directly, not
+copied from an older pass — see `CLAUDE.md`'s standing instruction to always
+re-run this rather than carry a number forward). **Watch the arithmetic when
+comparing to an older copy of this table**, because the two counts move
+independently and a naive subtraction misreads what happened. Five packets
+moved from `Ignored` to connected since the `e577b4bd` reading this table
+previously carried (29 → 34): `RENAME_ITEM` and `CONTAINER_BUTTON_CLICK`
+(the anvil rename field and the enchanting table's offer button), then
+`PICK_ITEM_FROM_BLOCK`/`PICK_ITEM_FROM_ENTITY` (vanilla's `tryPickItem`
+three-way split) and `SET_COMMAND_BLOCK` (issue #48's remainder). None of
+that pass's audit found a fresh duplicate-arm hazard, but the instrument
+**was** briefly unable to run at all in an earlier pass: `cargo xtask
+connectedness` bailed with "duplicate play serverbound decode arm" until that
+pass fixed a genuine dead arm — `USE_ITEM` had two `State::Play if packet_id
+== play::serverbound::USE_ITEM` match arms in `server_protocol.rs`, an older
+`Ignored` stub shadowed by a real one added later and never deleted. **If
+this bails again with the same message, grep for `if packet_id ==
+play::serverbound::` and diff the packet names for a duplicate** — the
+scanner does not (and should not) try to prove reachability itself.
 
 Past that fix, one packet moved from `Ignored` to connected this pass:
 `PING_REQUEST` (play-state). Its decode arm already parsed the frame but
@@ -168,7 +171,7 @@ through `game_mode: &mut GameMode` in `dispatch_play_packet`'s own parameter lis
 | position-sync-dependent | `ACCEPT_TELEPORTATION`, `SPECTATOR_ACTION`, `TELEPORT_TO_ENTITY` | **there is no clientbound position-sync/teleport encode anywhere in this crate** — checked this pass by grepping `protocol.rs` for a `fn encode_*` naming `position`/`teleport`: zero hits. Vanilla's spectator-teleport handler (`ServerGamePacketListenerImpl.handleTeleportToEntityPacket`) calls `Entity.teleportTo`, which server-authoritatively repositions the player and is exactly what a real `ClientboundPlayerPositionPacket` (with a teleport id `ACCEPT_TELEPORTATION` would confirm) does not exist to send. Building that send path is the subsystem, not a per-packet consumer — out of scope here. |
 | pick-item | `PICK_ITEM_FROM_BLOCK`, `PICK_ITEM_FROM_ENTITY` | vanilla's `tryPickItem` (`ServerGamePacketListenerImpl`) needs a block-state→item lookup (`BlockState.getCloneItemStack`) and an entity-type→item lookup (`Entity.getPickResult`, spawn eggs for most mobs). `lodestone_data::block_items` only has the *reverse* direction (`block_for_item`, used for placement) — no `item_for_block`/pick-result table exists to decode into. |
 | interaction / combat remainder | `SWING`, `PADDLE_BOAT`, `PLAYER_COMMAND`'s non-`STOP_SLEEPING` ordinals | no *push* path for one connection's transient action to reach another connection's client. `crate::players::PlayerRegistry`'s own doc explains why this crate has no broadcast channel at all: entity **position** rides the existing pull-diff (`EntityStreamer` compares snapshots each pass), but an arm-swing or a boat's paddle animation is not state anything snapshots — it is an instant. Wiring it needs a small queue on `PlayerRegistry` (or an `EntitySnapshot` field) that a swing/paddle push appends to and the next diff pass drains, which is a real, scoped addition — just not one this pass could make without touching `players.rs`, owned elsewhere during this session. |
-| container remainder | `CONTAINER_BUTTON_CLICK`, `CONTAINER_SLOT_STATE_CHANGED`, `PLACE_RECIPE`, `RECIPE_BOOK_*`, `SELECT_TRADE`, `SET_BEACON`, `EDIT_BOOK`, `SIGN_UPDATE`, `RENAME_ITEM`, `BUNDLE_ITEM_SELECTED` | `PlayerInventory` models window 0's 41 native slots and nothing else: no recipe book, beacon, anvil, bundle, book or trade state, so there is no `AnvilMenu`/`BeaconMenu`/`CrafterBlockEntity` to apply `handleRenameItem`/`handleSetBeaconPacket`/`handleContainerSlotStateChanged` against. `SIGN_UPDATE` is miscategorised in the packet's originating issue — sign text (`lodestone_world::SignText`) is modelled, but nothing in `lodestone-server` keeps a position-keyed sign store the way `crate::block_entities::BlockEntityRegistry` does for composter/furnace/hopper/brewing, so there is nowhere to write the new lines into and no clientbound resync to send afterward. |
+| container remainder | `CONTAINER_SLOT_STATE_CHANGED`, `RECIPE_BOOK_CHANGE_SETTINGS`, `RECIPE_BOOK_SEEN_RECIPE`, `SELECT_TRADE`, `SET_BEACON`, `EDIT_BOOK`, `SIGN_UPDATE`, `BUNDLE_ITEM_SELECTED` | Re-verified against `.cache/mc/26.2/src`'s `ServerGamePacketListenerImpl` while auditing issue #266 (`CONTAINER_BUTTON_CLICK`, `RENAME_ITEM` and `PLACE_RECIPE` moved out of this row since the last pass — see "Measured state" above). `CONTAINER_SLOT_STATE_CHANGED` needs `CrafterBlockEntity`, which `crate::block_entities::BlockEntity` has no variant for (the enum's own `Composter`/`Furnace`/`Hopper`/`BrewingStand`/`Container`/`Opaque`/`CommandBlock` list has no `Crafter`). `SET_BEACON` needs `BeaconMenu`'s effect state, which `PlayerInventory` does not model at all (no beacon-adjacent field alongside its existing `workstation`/`pending_rename`/`enchant_seed`). `EDIT_BOOK` needs `minecraft:writable_book_content`/`written_book_content` on `ItemComponents` (`crates/lodestone-model/src/item.rs`), which is not one of the modelled components. `SIGN_UPDATE` needs a position-keyed sign store the way `BlockEntityRegistry` has for composter/furnace/hopper/brewing — sign text (`lodestone_world::SignText`) is modelled but nothing keeps one *placed*, so there is nowhere to write the new lines into. `BUNDLE_ITEM_SELECTED` needs `minecraft:bundle_contents` on `ItemComponents`, also absent. `RECIPE_BOOK_CHANGE_SETTINGS`/`RECIPE_BOOK_SEEN_RECIPE` are the `PONG` shape, not a modelling gap: `handleRecipeBookChangeSettingsPacket`/`handleRecipeBookSeenRecipePacket` only ever write `player.getRecipeBook()`'s GUI-only open/filter/highlight state, which nothing server-side reads back and vanilla itself never syncs to another client — tracking it here would be a write nothing consumes. `SELECT_TRADE` is the one with a real, scoped subsystem gap rather than a missing component: `MerchantMenu.tryMoveItems`/`moveFromInventoryToPaymentSlot` auto-fill two payment slots from the player's inventory against the selected `MerchantOffer`'s cost, and the actual purchase happens on a later `CONTAINER_CLICK` take of `MerchantResultSlot` (an `ItemCombinerMenu`-shaped 2-input+1-result window this crate's `container_click::MenuKind::ItemCombiner` could plausibly grow a `Station::Merchant` arm for) — `crate::server::open_merchant_screen`'s own doc comment already discloses "trade purchase is not wired" for the same reason. |
 | world/block admin | `SET_COMMAND_BLOCK`, `SET_COMMAND_MINECART`, `SET_JIGSAW_BLOCK`, `JIGSAW_GENERATE`, `SET_STRUCTURE_BLOCK`, `SET_TEST_BLOCK`, `CUSTOM_CLICK_ACTION` | no command blocks, no jigsaw generation, no structure blocks, no game-test framework, no data-driven custom-UI dispatch. **And no permission model of any kind** — see below. |
 | lifecycle/telemetry remainder | `PONG`, `CUSTOM_PAYLOAD`'s unregistered channels, `RESOURCE_PACK`, `SEEN_ADVANCEMENTS`, `ENTITY_TAG_QUERY`, `BLOCK_ENTITY_TAG_QUERY`, `CONFIGURATION_ACKNOWLEDGED` | `PONG`: checked against `ServerCommonPacketListenerImpl.handlePong` this pass — it is a genuine **empty method** in vanilla itself, so staying `Ignored` matches vanilla's own behaviour rather than stranding something vanilla acts on; this is not a gap. The rest need a resource-pack push to respond *to* (none is ever sent), an `AdvancementManager` mutator for tab selection (cosmetic-only even in vanilla — `setSelectedTab` has no gameplay effect), an NBT debug-query responder, and a mid-session reconfigure this server never initiates. |
 
@@ -184,14 +187,36 @@ shape — the alternative is a fake permission check that reads as security and 
 Anything in the world/block-admin family should decode and say so rather than grow a
 half-built permission subsystem underneath it.
 
-### `apply_container_clicked` trusts the client, deliberately and visibly
+### `apply_container_clicked` now re-runs `doClick` server-side — a stale claim corrected 2026-08-14
 
-`apply_container_clicked` applies the client's own predicted per-slot diff rather than
-re-running vanilla's `AbstractContainerMenu.doClick` state machine server-side. That is a
-real limitation, disclosed on the function's own doc comment, and **wiring more container
-packets must not quietly entrench it** — a server-authoritative `doClick` is the correct
-eventual shape, and `docs/container-clicks.md` is the best available specification for it,
-since our client already predicts against that same machine.
+This section used to say `apply_container_clicked` trusted the client's own predicted
+per-slot diff, with a server-authoritative `doClick` port as the eventual shape. That is no
+longer true and was verified stale while auditing issue #266, not merely reworded:
+`crate::container_click` (`crates/lodestone-server/src/container_click.rs`) is a full port of
+vanilla's `AbstractContainerMenu.doClick` over a flat, menu-ordered slot vector — all seven
+`ContainerInput` modes (pickup, quick-move, swap, clone, throw, quick-craft/drag, pickup-all),
+per-menu `quickMoveStack`/`mayPlace` rules for the player screen, block-entity containers,
+the crafting table, the three `ItemCombinerMenu` stations (anvil/grindstone/smithing) and the
+enchanting table. `apply_container_clicked` re-derives the result from the click itself and
+only consults the client's `changed_slots` map to decide whether a correcting
+`container_set_content` is worth sending, per that function's own doc comment. The mint-
+anything hole this section used to describe is closed (see `container_click`'s own module doc
+for the issue history).
+
+**What is still genuinely unmodelled**, verified directly against that module's own doc
+comment while auditing this issue: `tryItemClickBehaviourOverride` (bundle-specific click
+behaviour), `canDropItems`, the tutorial hooks, and — found and left as a follow-up rather
+than fixed in this pass — `Slot.mayPickup`. Every take in `container_click` succeeds
+unconditionally; vanilla's own use of the gate is per-slot rather than uniform, and the one
+this crate's anvil economy already half-relies on is `AnvilMenu.mayPickup`:
+`(player.hasInfiniteMaterials() || player.experienceLevel >= this.cost.get()) &&
+this.cost.get() > 0`. `crate::server`'s `ContainerClicked` arm charges XP levels via
+`PlayerExperience::take_levels` **after** the take has already happened rather than gating the
+take on having enough levels first, so a survival player with no XP can currently take a
+repaired/renamed item off an anvil for free. Fixing it needs an economy-aware
+`may_pickup(index, item) -> bool` hook threaded through `container_click` (the same shape
+`ResultRecipe` already is for the result slot) — more than a connectivity pass, and
+`container_click`'s own module doc now carries the same disclosure at the code site.
 
 ## How to change it
 

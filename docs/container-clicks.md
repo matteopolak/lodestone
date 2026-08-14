@@ -510,6 +510,18 @@ someone remembering `THROW` needs the loop too.
 > holds for `lodestone-game`: this crate's `Menu` has no corpus at click time, its
 > predicted loop still exits after one craft, and the server's extra crafts arrive
 > as an ordinary correction. `do_throw`'s missing loop stays inert *here*.
+>
+> **Correction (2026-08-14, while auditing issue #266): the server's own `THROW`
+> arm had this exact gap until now.** The claim above that the server side "really
+> does craft repeatedly" was verified for `QUICK_MOVE` but not for `THROW` —
+> `do_click_with`'s `THROW` arm called `take_from` exactly once regardless of
+> `click.button`, so a ctrl-Q on a crafting/smithing/anvil/grindstone result
+> dropped one craft and silently discarded the rest of the consumed grid. Fixed in
+> `container_click.rs` (a real repeat loop, gated on `same_item` — vanilla's
+> `ItemStack.isSameItem`, item type only — matching `QUICK_MOVE`'s own loop, which
+> was separately found using the *stricter* `isSameItemSameComponents` check and
+> corrected to match). So the reasoning in this note was right about the client
+> and incomplete about the server; both are now consistent with vanilla.
 
 ### Not a gap: `PICKUP_ALL`'s reverse-scan direction
 
