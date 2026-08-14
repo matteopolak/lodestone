@@ -11,8 +11,29 @@ decompiled client — not inherited from the briefing, whose errors are listed a
 
 ## Verified baseline
 
-**The no-cull claim is true, verbatim.** `crates/lodestone-shell/src/gpu/frame.rs` has three
-loops that iterate **every resident section, one draw call each, with no frustum, distance or
+**Superseded 2026-08-14 — U1/U2/U3 have since landed and are wired into production.** Everything
+below this note described the tree at `297706a1` on 2026-08-07. Commit `5cd65646` ("the section
+occlusion graph reaches the draw loop, and translucent water is ordered back to front (U3, U5)")
+changed the picture: `crates/lodestone-shell/src/gpu/frame.rs`'s `render_inner` now calls
+`TerrainCull::classify` per section and increments real `RenderStats` counters —
+`sections_drawn`, `sections_culled_distance`, `sections_culled_frustum`,
+`sections_culled_occlusion`, `water_sections_drawn`, `water_sections_culled` — and
+`crates/lodestone-shell/src/gpu/occlusion.rs` (new file, 195 lines) is the camera-walk consumer
+side of U3, with its own `TerrainOcclusion` mode enum and cache. So the "no-cull claim" and the
+"zero production consumers" framing immediately below are **no longer true for U1/U2/U3** — grep
+`TerrainCull::classify` in `frame.rs` to re-confirm. **What is still accurate:** U5's *intra*-
+section resort (`SortViewpoint`/`TranslucentMesh`) is still deliberately unwired — `frame.rs`'s
+own comment at the water-draw site says so and explains why (water quads within one section are
+near-coplanar, so the cross-section order was the part worth landing first) — so those two types
+still have zero production callers outside their own tests. **U4 (draw-submission batching via
+`section_arena`/`arena`/`driver`) is also still unlanded** — `grep -rn SectionArena
+crates/lodestone-shell/src` outside test/bench code is empty. The rest of this document (unit
+designs, constants, the units below) is otherwise still a reasonable read for U4 and U5's
+remaining half; re-verify unit-by-unit before trusting a "not yet built" framing anywhere else in
+it, per this repo's rule that status claims are the highest-decay content here.
+
+**The no-cull claim was true, verbatim, as of 2026-08-07.** `crates/lodestone-shell/src/gpu/frame.rs` had three
+loops that iterated **every resident section, one draw call each, with no frustum, distance or
 occlusion test**:
 
 | loop | pass |
@@ -56,8 +77,15 @@ on it either way.
 
 ## What already exists — this is mostly a wiring plan, not a build plan
 
-`lodestone-render` already contains a complete, tested, benched culling-and-submission stack
-with **zero production consumers** — the repo's island defect class, at architectural scale:
+**Re-verified 2026-08-14 — three of these five bullets are stale in the direction of
+understating progress; the "zero production consumers" framing is now wrong for the first three
+items.** `visibility.rs`, `camera.rs`'s `Frustum` and `scene.rs`'s cull-classification shape are
+consumed in production today through `gpu/frame.rs`'s `TerrainCull` and `gpu/occlusion.rs`
+(commit `5cd65646`) — not necessarily by calling `WorldScene::plan_frame` itself (that
+orchestration type may still be test/bench-only; `frame.rs` reimplements the wiring at the call
+site rather than calling it directly, so re-grep `WorldScene::plan_frame` in `gpu/` before citing
+it as the production entry point). `strategy.rs` and the arena/translucency items are unaffected
+by that landing:
 
 * **`crates/lodestone-render/src/visibility.rs`** — `compute_visibility` is vanilla's
   `VisGraph` (verified line-against-line with
@@ -65,35 +93,50 @@ with **zero production consumers** — the repo's island defect class, at archit
   `< 256`-opaque sparse shortcut, the fully-solid shortcut, flood-fill face connectivity;
   our union-find over open cells computes the same face-pair relation as vanilla's
   edge-seeded flood). `walk_visible` is the camera BFS with the never-reverse-axis rule.
-  Unit-tested, no GPU. **Consumed only by its own tests and `scene.rs`.**
+  Unit-tested, no GPU. **Landed and consumed in production since `5cd65646`** — the
+  per-section reachability this computes backs `gpu/occlusion.rs`'s camera walk, which
+  `TerrainCull::classify` reads every frame in `gpu/frame.rs`'s `render_inner`.
 * **`crates/lodestone-render/src/camera.rs`** — `Camera::frustum()` →
   `Frustum::section_visible(coord)`, Gribb–Hartmann planes for the `[0,1]` depth
   convention, conservative AABB test. `Camera::far_for_render_distance` (= `rd·16·4`) is
   already used by the live camera (`camera_rig.rs`) — the far plane tracks rd but at 4×
   the view distance it culls nothing resident; distance culling must come from U2, not the
-  far plane.
+  far plane. **U2 has since landed**: `RenderStats::sections_culled_distance` is a real
+  counter incremented in `frame.rs`.
 * **`crates/lodestone-render/src/scene.rs`** — `WorldScene::plan_frame` composes frustum ∩
   occlusion walk and returns `CullStats` whose invariant
   `drawable == drawn + culled_frustum + culled_occlusion` and `is_meaningful()`
   (drew something *and* culled something) are exactly the anti-vacuity shape the gates
-  below reuse. **Consumed only by tests/benches.**
+  below reuse. **As of 2026-08-14, `plan_frame` itself still had no confirmed production
+  caller** (re-grep before trusting this) — but the *behaviour* it composes (frustum ∩
+  occlusion, culled/drawn counters) is now live in `frame.rs` via `TerrainCull`, whether or
+  not that specific function is the call path. Do not read "this type is untested-in-prod"
+  as "this capability is unwired" — they diverged here.
 * **`crates/lodestone-render/src/strategy.rs`** — the answer to "what does wgpu on Metal
   actually support", already measured: wgpu 30 exposes **no** public
   `MULTI_DRAW_INDIRECT` feature; base `multi_draw_indexed_indirect` is gated on the
   `INDIRECT_EXECUTION` downlevel flag and **CPU-emulated as a per-draw loop on Metal,
   WebGPU and GL**; the only honest native-multi-draw signal is
   `MULTI_DRAW_INDIRECT_COUNT`, absent on this M5. `select_strategy` therefore returns
-  `PerDraw` on Metal. This kills several "modern" candidates below.
+  `PerDraw` on Metal. This kills several "modern" candidates below. **Still accurate** — U4
+  is unaffected by the U1/U2/U3/U5-half landing.
 * **`crates/lodestone-render/src/section_arena.rs` + `arena.rs` + `driver.rs`** — shared
   vertex/index arena suballocation producing `DrawRegion`s (`first_index`, `index_count`,
   `base_vertex`), eviction with coalescing, and a full `WorldMesher` driver. Built against
-  the **packed** (demo) mesh path, not the production `ModelMesh` path.
+  the **packed** (demo) mesh path, not the production `ModelMesh` path. **Still true, re-verified**:
+  `grep -rn SectionArena crates/lodestone-shell/src` outside tests/benches is empty. U4
+  (draw-submission batching) is the one unit in this plan that has not moved.
 * **`crates/lodestone-render/src/translucency.rs`** — `SortViewpoint` (vanilla's
   `TranslucencyPointOfView` octant quantization, verified against the 26.2 source) and
-  `TranslucentMesh` (centroid back-to-front resort). **Consumed only by
-  `tests/gpu.rs`.** Production water (`render_inner`'s water loop) draws each section's static index
-  order, in **HashMap iteration order across sections** — both halves of vanilla's
-  translucent ordering are currently absent from the live path.
+  `TranslucentMesh` (centroid back-to-front resort). **Still consumed only by
+  `tests/gpu.rs`, re-verified** — but only for the *intra*-section resort. The
+  *cross*-section half of vanilla's translucent ordering (sorting sections back-to-front
+  by distance) landed in the same `5cd65646` commit, directly in `frame.rs`'s water loop
+  (`sort_back_to_front`, not via this module) — see that commit's own comment for why the
+  intra-section resort was deliberately left for later (near-coplanar water quads make the
+  cross-section order the one that produces the visible artefact). So this bullet's
+  "both halves ... currently absent" is now half-stale: cross-section order is live,
+  intra-section order is not.
 
 So the plan is: carry these into the production model path in `gpu/frame.rs` /
 `gpu/terrain.rs` / `mesher.rs`, in an order where every intermediate step is consumed on
@@ -125,6 +168,9 @@ come after U3.
 ---
 
 ### U1 — Frustum culling, CPU per section, inside `render_inner`
+
+**Landed (`5cd65646`), re-verified 2026-08-14** — `RenderStats::sections_culled_frustum` is a
+live counter in `gpu/frame.rs`. The design below is now a record of how, not a proposal.
 
 **Where.** `gpu/frame.rs`: compute `camera.frustum()` once per frame (the machinery exists;
 `prepare_entities` already frustum-culls entities — terrain is the only unculled geometry).
@@ -182,6 +228,9 @@ else). (b) The straddle fixture above is the known failure mode pinned as a perm
 ---
 
 ### U2 — Distance culling: vanilla's circular view membership
+
+**Landed (`5cd65646`), re-verified 2026-08-14** — `RenderStats::sections_culled_distance` is a
+live counter in `gpu/frame.rs`.
 
 **What the free cull actually is.** Not the fog bound the briefing proposed (see
 Corrections). Vanilla does not render the streamed square: section membership is gated by
@@ -244,6 +293,13 @@ membership of a fixed far column flips exactly when the predicate says) covers i
 ---
 
 ### U3 — The section occlusion graph (the big one), in three landable steps
+
+**Landed (`5cd65646`), re-verified 2026-08-14** — `crates/lodestone-shell/src/gpu/occlusion.rs`
+(new file) is the camera-walk consumer, with `RenderStats::sections_culled_occlusion`,
+`occlusion_active`, `occlusion_graph_sections` and `occlusion_walks` all live counters read from
+`gpu/frame.rs`. Check which of the three landable steps below (Off/Shadow/On, per
+`occlusion.rs`'s `TerrainOcclusion` enum) is the live default before assuming full landing —
+the module supports a soak mode deliberately.
 
 This is what makes caves cheap: standing on the surface, the frustum still contains the
 entire underground column; only connectivity reachability removes it. Vanilla's shape,
@@ -412,7 +468,14 @@ gate inherits the culling gates' fixtures).
 
 ### U5 — Translucency ordering (correctness the culling work exposes and bounds)
 
-Verified current state: `SortViewpoint`/`TranslucentMesh` are implemented and match
+**Half landed (`5cd65646`), re-verified 2026-08-14** — the cross-section back-to-front order
+below is live in `render_inner`'s water loop (`sort_back_to_front` over `TerrainDraw::sort_dist2`,
+not `HashMap` order anymore). The intra-section resort
+(`SortViewpoint`/`TranslucentMesh`) described next is still unwired, deliberately — see that
+commit's comment on why the cross-section half was judged the one producing the visible artefact.
+
+Verified current state as of 2026-08-07 (the cross-section half below is now stale, see above):
+`SortViewpoint`/`TranslucentMesh` are implemented and match
 vanilla's `TranslucencyPointOfView`, but production water never resorts (static index
 order from mesh time) and cross-section draw order is **HashMap iteration order**
 (in `render_inner`'s water loop) — both halves of vanilla's ordering are absent, which is a live visual
