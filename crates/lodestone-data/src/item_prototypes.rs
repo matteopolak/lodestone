@@ -99,6 +99,27 @@ pub fn prototype(item: &str) -> Option<&'static ItemPrototypeDef> {
     prototype_by_id(crate::items::item_id(item)?)
 }
 
+/// The typed sibling of [`prototype_by_id`], for a caller already holding a
+/// [`crate::item::Item`] — the one real consumer `docs/registry-types.md`'s
+/// Stage 1 asks for.
+///
+/// Infallible: an [`crate::item::Item`] and this table's `0..ITEM_COUNT` are
+/// the same `minecraft:item` registry (both generated from
+/// `tests/support/item_prototype_jvm.txt`), so every valid `Item` indexes a
+/// real row. The `.expect()` documents that invariant instead of pushing an
+/// `Option` the caller has no way to hit onto every call site — the pattern
+/// `docs/registry-types.md` calls out for `Identifier::new(..).expect(..)`
+/// call sites once a registry has a typed, infallible id.
+#[must_use]
+pub fn prototype_for(item: crate::item::Item) -> &'static ItemPrototypeDef {
+    prototype_by_id(i32::from(item.registry_id())).unwrap_or_else(|| {
+        panic!(
+            "Item::{item:?} (registry id {}) has no row in the generated item-prototype table",
+            item.registry_id()
+        )
+    })
+}
+
 /// The version-free view of `item`'s prototype, for
 /// `VersionAdapter::item_prototype`.
 #[must_use]

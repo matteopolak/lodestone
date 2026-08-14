@@ -60,7 +60,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use lodestone_model::EquipmentSlot;
-use lodestone_data::{item_prototypes, items};
+use lodestone_data::{item, item_prototypes, items};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -324,6 +324,23 @@ fn dump_ids_and_names_match_the_registries_json_table() {
             Some(row.name.as_str()),
             "registries.json and the JVM dump disagree at item id {}",
             row.id
+        );
+    }
+}
+
+/// `prototype_for`'s whole reason to exist: the typed accessor must agree
+/// with the id-keyed one for every item, not just a spot check.
+#[test]
+fn prototype_for_agrees_with_the_id_form_for_every_item() {
+    for typed in item::Item::all() {
+        let by_id = item_prototypes::prototype_by_id(i32::from(typed.registry_id()))
+            .expect("every generated Item has a row");
+        let by_type = item_prototypes::prototype_for(typed);
+        assert_eq!(
+            (by_type.max_stack_size, by_type.max_damage, by_type.equip_slot),
+            (by_id.max_stack_size, by_id.max_damage, by_id.equip_slot),
+            "prototype_for disagrees with prototype_by_id for {}",
+            typed.name()
         );
     }
 }

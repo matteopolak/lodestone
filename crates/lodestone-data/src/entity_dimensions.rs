@@ -58,6 +58,26 @@ pub fn base_dimensions(id: i32) -> Option<EntityBaseDimensions> {
         .map(|(width, height)| EntityBaseDimensions { width, height })
 }
 
+/// The typed sibling of [`base_dimensions`], for a caller already holding a
+/// [`crate::entity_type::EntityType`] — the one real consumer
+/// `docs/registry-types.md`'s Stage 1 asks for.
+///
+/// Infallible: an [`crate::entity_type::EntityType`] and this table's
+/// `0..TYPE_COUNT` are the same `minecraft:entity_type` registry (both
+/// generated from `tests/support/entity_census_jvm.txt`), so every valid
+/// `EntityType` indexes a real row — the `Option` moves to one construction
+/// site instead of sitting at every call site.
+#[must_use]
+pub fn base_dimensions_for(entity_type: crate::entity_type::EntityType) -> EntityBaseDimensions {
+    base_dimensions(i32::from(entity_type.registry_id())).unwrap_or_else(|| {
+        panic!(
+            "EntityType::{entity_type:?} (registry id {}) has no row in the generated \
+             entity-dimensions table",
+            entity_type.registry_id()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +110,16 @@ mod tests {
                 "id {id} has an invalid height {}",
                 dims.height
             );
+        }
+    }
+
+    #[test]
+    fn base_dimensions_for_agrees_with_the_id_form_for_every_type() {
+        use crate::entity_type::EntityType;
+        for entity_type in EntityType::all() {
+            let by_id = base_dimensions(i32::from(entity_type.registry_id()))
+                .expect("every generated EntityType has a row");
+            assert_eq!(base_dimensions_for(entity_type), by_id);
         }
     }
 
