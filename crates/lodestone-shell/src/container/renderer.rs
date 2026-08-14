@@ -707,8 +707,25 @@ impl ContainerRenderer {
             between_strata();
             return;
         }
-        if geo.verts.len() > self.capacity_floats {
-            self.capacity_floats = geo.verts.len().next_power_of_two();
+        // `geo.mid_verts`/`geo.mid_bg_verts`/`geo.mid_item_verts`/
+        // `geo.mid_glint_verts`/`geo.dim2_verts` are the "mid" tier — see
+        // `ContainerGeometry::mid_bg_verts`'s doc. Every existing caller leaves
+        // all five empty, so each `Cow::Borrowed` below is the *only* branch
+        // that ever runs for them: no extra allocation, no extra bytes
+        // uploaded, and the four `orig_*_count` markers below equal the plain
+        // `geo.*.len()` they always did. Only `menu::advancements` populates
+        // any of the five, and only then does the `Cow::Owned` branch run.
+        let verts_upload: std::borrow::Cow<'_, [f32]> =
+            if geo.mid_verts.is_empty() && geo.dim2_verts.is_empty() {
+                std::borrow::Cow::Borrowed(&geo.verts[..])
+            } else {
+                let mut combined = geo.verts.clone();
+                combined.extend_from_slice(&geo.mid_verts);
+                combined.extend_from_slice(&geo.dim2_verts);
+                std::borrow::Cow::Owned(combined)
+            };
+        if verts_upload.len() > self.capacity_floats {
+            self.capacity_floats = verts_upload.len().next_power_of_two();
             self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("container-verts"),
                 size: (self.capacity_floats * 4) as wgpu::BufferAddress,
@@ -716,14 +733,34 @@ impl ContainerRenderer {
                 mapped_at_creation: false,
             });
         }
-        if !geo.verts.is_empty() {
-            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&geo.verts));
+        if !verts_upload.is_empty() {
+            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&verts_upload));
         }
+        // The colour stream's "mid" tier lengths. `geo.vertex_count()` (bound
+        // below to `vertex_count`) is unaffected by the append above — it is
+        // computed from `geo.verts.len()` directly, not from what actually got
+        // uploaded — so it is still the right "end of the original `verts`"
+        // boundary for every existing `chrome_count`/`slot_colour_count`/
+        // carried-range computation.
+        let mid_vertex_count = (geo.mid_verts.len() / FLOATS_PER_VERTEX) as u32;
+        let dim2_vertex_count = (geo.dim2_verts.len() / FLOATS_PER_VERTEX) as u32;
+
         // The background pass's own dynamic buffer, grown the same way as the
-        // chrome one above.
+        // chrome one above. `bg_orig_count` is the boundary between the
+        // existing back/front ranges (unchanged data, unchanged meaning) and
+        // the newly-appended "mid" tier (a widget's own frame sprite, when
+        // Advancements populates `mid_bg_verts`).
+        let bg_orig_count = (geo.bg_verts.len() / BG_FLOATS_PER_VERTEX) as u32;
         let bg_count = if let Some(bg) = self.background.as_mut() {
-            if geo.bg_verts.len() > bg.capacity_floats {
-                bg.capacity_floats = geo.bg_verts.len().next_power_of_two();
+            let bg_upload: std::borrow::Cow<'_, [f32]> = if geo.mid_bg_verts.is_empty() {
+                std::borrow::Cow::Borrowed(&geo.bg_verts[..])
+            } else {
+                let mut combined = geo.bg_verts.clone();
+                combined.extend_from_slice(&geo.mid_bg_verts);
+                std::borrow::Cow::Owned(combined)
+            };
+            if bg_upload.len() > bg.capacity_floats {
+                bg.capacity_floats = bg_upload.len().next_power_of_two();
                 bg.buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("container-bg-verts"),
                     size: (bg.capacity_floats * 4) as wgpu::BufferAddress,
@@ -731,10 +768,10 @@ impl ContainerRenderer {
                     mapped_at_creation: false,
                 });
             }
-            if !geo.bg_verts.is_empty() {
-                queue.write_buffer(&bg.buffer, 0, bytemuck::cast_slice(&geo.bg_verts));
+            if !bg_upload.is_empty() {
+                queue.write_buffer(&bg.buffer, 0, bytemuck::cast_slice(&bg_upload));
             }
-            (geo.bg_verts.len() / BG_FLOATS_PER_VERTEX) as u32
+            (bg_upload.len() / BG_FLOATS_PER_VERTEX) as u32
         } else {
             0
         };
@@ -743,10 +780,24 @@ impl ContainerRenderer {
         // `ContainerGeometry::build_inner` posed the 3-D block-item vertices
         // into above, not the raw physical framebuffer.
         let (logical_w, logical_h) = crate::menu::render::logical_canvas(gui_scale, width, height);
+        // `orig_item_count`/`orig_glint_count`: the pre-"mid" boundary on
+        // each stream, same reasoning as `orig_vertex_count` above. There is
+        // deliberately no `mid_model_vertex_count`/`mid_special` sibling —
+        // `IconStratum` has only `Slots`/`Carried` and lives outside this
+        // mechanism's file ownership (`crate::hud::item_icon`) — so
+        // `model_verts`/`special` are uploaded exactly as before, unaffected.
+        let orig_item_count = (geo.item_verts.len() / crate::hud::SPRITE_FLOATS_PER_VERTEX) as u32;
+        let item_upload: std::borrow::Cow<'_, [f32]> = if geo.mid_item_verts.is_empty() {
+            std::borrow::Cow::Borrowed(&geo.item_verts[..])
+        } else {
+            let mut combined = geo.item_verts.clone();
+            combined.extend_from_slice(&geo.mid_item_verts);
+            std::borrow::Cow::Owned(combined)
+        };
         let (item_count, model_count) = self.icons.upload(
             device,
             queue,
-            &geo.item_verts,
+            &item_upload,
             &geo.model_verts,
             &geo.special,
             geo.slot_special_count,
@@ -754,9 +805,17 @@ impl ContainerRenderer {
             logical_h.max(1.0) as u32,
             "container-item-verts",
         );
+        let orig_glint_count = (geo.glint_verts.len() / crate::hud::SPRITE_FLOATS_PER_VERTEX) as u32;
+        let glint_upload: std::borrow::Cow<'_, [f32]> = if geo.mid_glint_verts.is_empty() {
+            std::borrow::Cow::Borrowed(&geo.glint_verts[..])
+        } else {
+            let mut combined = geo.glint_verts.clone();
+            combined.extend_from_slice(&geo.mid_glint_verts);
+            std::borrow::Cow::Owned(combined)
+        };
         let glint_count =
             self.icons
-                .upload_glint(device, queue, &geo.glint_verts, "container-glint-verts");
+                .upload_glint(device, queue, &glint_upload, "container-glint-verts");
 
         let vertex_count = geo.vertex_count() as u32;
         let chrome_count = (geo.chrome_vertex_count as u32).min(vertex_count);
@@ -882,11 +941,89 @@ impl ContainerRenderer {
             }
         }
 
+        // ---- the "mid" tier: frame, then icon, then the hover-dim ----------
+        //
+        // Three passes that exist only for `geo.mid_bg_verts`/`mid_item_verts`/
+        // `mid_glint_verts`/`mid_verts`/`dim2_verts` — every one of the five
+        // `if`/range guards below is `false` for every caller but
+        // Advancements, so this whole block is a verified no-op for the
+        // container screens, the creative menu and the recipe panel: none of
+        // them ever grows `bg_mid_count`/`item_count`/`glint_count` past
+        // `bg_orig_count`/`orig_item_count`/`orig_glint_count`, and
+        // `mid_vertex_count`/`dim2_vertex_count` stay `0`. Positioned after
+        // the "chrome"/"item" passes above (so a widget's frame still draws
+        // over the connector lines that cross it — see
+        // `menu::advancements`'s module doc) and before the *unchanged*
+        // `container-bg-front-pass` below, so the hover-dim reaches a
+        // widget's own frame and flat-sprite icon without reaching the hover
+        // tooltip, which draws later still (in `container-bg-front-pass` and
+        // the carried tier, both now positioned strictly after this block).
+        //
+        // A widget icon backed by a 3-D block model or a special-renderer
+        // icon (a chest) has no pass here — see `mid_item_verts`'s doc for
+        // why — and stays undimmed in the ordinary carried tier below,
+        // unaffected by this block.
+        if bg_count > bg_orig_count
+            && let Some(bg) = self.background.as_ref()
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("container-mid-frame-pass"),
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&bg.pipeline);
+            pass.set_bind_group(0, &bg.bind_group, &[]);
+            pass.set_vertex_buffer(0, bg.buffer.slice(..));
+            pass.draw(bg_orig_count..bg_count, 0..1);
+        }
+        let mid_colour_start = vertex_count;
+        let mid_colour_end = mid_colour_start + mid_vertex_count;
+        if item_count > orig_item_count || glint_count > orig_glint_count || mid_vertex_count > 0 {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("container-mid-item-pass"),
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.icons
+                .draw_sprites_range(&mut pass, orig_item_count..item_count);
+            self.icons
+                .draw_glint_range(&mut pass, orig_glint_count..glint_count);
+            if mid_vertex_count > 0 {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_vertex_buffer(0, self.buffer.slice(..));
+                pass.draw(mid_colour_start..mid_colour_end, 0..1);
+            }
+        }
+        if dim2_vertex_count > 0 {
+            let dim2_start = mid_colour_end;
+            let dim2_end = dim2_start + dim2_vertex_count;
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("container-dim2-pass"),
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_vertex_buffer(0, self.buffer.slice(..));
+            pass.draw(dim2_start..dim2_end, 0..1);
+        }
+
         // `extractSlotHighlightFront` (`AbstractContainerScreen.java`):
         // the second highlight sprite, over the hovered slot's item and under the
         // carried stack's stratum — exactly where vanilla calls it, between
-        // `extractSlots` and `extractCarriedItem`.
-        if bg_count > bg_slot_count
+        // `extractSlots` and `extractCarriedItem`. Ranges against
+        // `bg_orig_count`, not the (possibly "mid"-inflated) `bg_count` — see
+        // the "mid" tier block above, which already drew `bg_orig_count..
+        // bg_count` (a widget's own frame, when Advancements populates it).
+        if bg_orig_count > bg_slot_count
             && let Some(bg) = self.background.as_ref()
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -900,7 +1037,7 @@ impl ContainerRenderer {
             pass.set_pipeline(&bg.pipeline);
             pass.set_bind_group(0, &bg.bind_group, &[]);
             pass.set_vertex_buffer(0, bg.buffer.slice(..));
-            pass.draw(bg_slot_count..bg_count, 0..1);
+            pass.draw(bg_slot_count..bg_orig_count, 0..1);
         }
 
         // ---- vanilla's first `nextStratum()` -------------------------------
@@ -935,8 +1072,14 @@ impl ContainerRenderer {
             item_icon::IconStratum::Carried,
             "container-carried-model-pass",
         );
-        if item_count > slot_item_count
-            || glint_count > slot_glint_count
+        // Ranges against `orig_item_count`/`orig_glint_count`, not the
+        // (possibly "mid"-inflated) `item_count`/`glint_count` — the "mid"
+        // tier block above already drew `orig_item_count..item_count`/
+        // `orig_glint_count..glint_count` (a widget's own flat-sprite icon,
+        // when Advancements populates `mid_item_verts`/`mid_glint_verts`);
+        // drawing them again here, after the dim2 pass, would undo it.
+        if orig_item_count > slot_item_count
+            || orig_glint_count > slot_glint_count
             || vertex_count > slot_colour_count
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -948,9 +1091,9 @@ impl ContainerRenderer {
                 multiview_mask: None,
             });
             self.icons
-                .draw_sprites_range(&mut pass, slot_item_count..item_count);
+                .draw_sprites_range(&mut pass, slot_item_count..orig_item_count);
             self.icons
-                .draw_glint_range(&mut pass, slot_glint_count..glint_count);
+                .draw_glint_range(&mut pass, slot_glint_count..orig_glint_count);
             if vertex_count > slot_colour_count {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_vertex_buffer(0, self.buffer.slice(..));

@@ -112,6 +112,57 @@ pub struct ContainerGeometry {
     /// this stream would otherwise draw are suppressed in favour of the real
     /// art's own baked-in slot wells.
     pub bg_verts: Vec<f32>,
+    /// A **third**, independent tier of textured `bg_verts`-shaped content —
+    /// same `[x, y, u, v, r, g, b, a]` layout, same atlas — that draws in its
+    /// own pass strictly between [`bg_verts`](Self::bg_verts)'s existing
+    /// two-pass sequence and the carried tier: after the "chrome" colour pass,
+    /// after this same pass's own [`mid_item_verts`](Self::mid_item_verts)/
+    /// [`mid_verts`](Self::mid_verts) sibling, and before both
+    /// [`bg_verts`](Self::bg_verts)'s "front" range and
+    /// [`dim2_verts`](Self::dim2_verts). Advancements' widget frames are the
+    /// one populated caller — see `menu::advancements`'s module doc for why a
+    /// widget's frame has to draw later than every existing tier lets it, and
+    /// why that is not physically the same constraint as
+    /// [`bg_slot_vertex_count`](Self::bg_slot_vertex_count)'s split. Always
+    /// empty for every other caller, which is what keeps the renderer's new
+    /// pass a verified no-op for the container screens, the creative menu and
+    /// the recipe panel.
+    pub mid_bg_verts: Vec<f32>,
+    /// [`mid_bg_verts`](Self::mid_bg_verts)'s plain-colour analogue: flat
+    /// `[x, y, r, g, b, a]` vertices, drawn through the same untextured
+    /// pipeline [`verts`](Self::verts) uses, in the same new pass as
+    /// [`mid_bg_verts`](Self::mid_bg_verts) — the jar-less fallback for a
+    /// widget's frame (no [`ContainerBackground`] attached) and a widget's own
+    /// atlas-less icon swatch both land here. Always empty for every other
+    /// caller.
+    pub mid_verts: Vec<f32>,
+    /// [`mid_bg_verts`](Self::mid_bg_verts)'s analogue on the flat **item**
+    /// sprite stream ([`item_verts`](Self::item_verts)'s own atlas): a
+    /// widget's own icon, when it resolves to a flat sprite. Always empty for
+    /// every other caller. There is deliberately **no** `mid_model_verts` or
+    /// `mid_special` sibling — [`IconStratum`](crate::hud::item_icon::IconStratum)
+    /// has exactly two variants, `Slots` and `Carried`, and lives outside this
+    /// mechanism's file ownership, so a widget icon backed by a 3-D block
+    /// model or a special-renderer icon (a chest) has nowhere to move and
+    /// stays in the ordinary carried tier — undimmed by the hover-dim, a
+    /// documented, narrower gap than the one this field closes.
+    pub mid_item_verts: Vec<f32>,
+    /// [`mid_item_verts`](Self::mid_item_verts)'s enchantment-glint copy,
+    /// mirroring [`glint_verts`](Self::glint_verts). Always empty for every
+    /// other caller.
+    pub mid_glint_verts: Vec<f32>,
+    /// Plain `[x, y, r, g, b, a]` vertices for a translucent overlay drawn in
+    /// its **own** pass, positioned strictly after
+    /// [`mid_bg_verts`](Self::mid_bg_verts)/[`mid_verts`](Self::mid_verts)/
+    /// [`mid_item_verts`](Self::mid_item_verts)/
+    /// [`mid_glint_verts`](Self::mid_glint_verts) and before
+    /// [`bg_verts`](Self::bg_verts)'s "front" range and the carried tier —
+    /// Advancements' hover-dim (`AdvancementsView::fade`), which needs
+    /// somewhere to land that darkens a widget's own frame and icon without
+    /// also darkening the hover tooltip, drawn later still. Always empty for
+    /// every other caller, which is what keeps this pass a verified no-op
+    /// everywhere but the Advancements screen.
+    pub dim2_verts: Vec<f32>,
     /// How many leading vertices of [`bg_verts`](Self::bg_verts) draw **under**
     /// the slot items: the panel art, the hover highlight's *back* sprite, and
     /// the empty-slot placeholders. The remainder is the highlight's *front*
@@ -262,6 +313,11 @@ impl ContainerGeometry {
                 model_verts: Vec::new(),
                 special: Vec::new(),
                 bg_verts: Vec::new(),
+                mid_bg_verts: Vec::new(),
+                mid_verts: Vec::new(),
+                mid_item_verts: Vec::new(),
+                mid_glint_verts: Vec::new(),
+                dim2_verts: Vec::new(),
                 bg_slot_vertex_count: 0,
                 dim_vertex_count: 0,
                 chrome_vertex_count: 0,
@@ -894,6 +950,16 @@ impl ContainerGeometry {
             model_verts: b.model_verts,
             special: b.special,
             bg_verts: b.bg_verts,
+            // Not populated from `build_inner`'s own layout at all — every
+            // caller through this path (the container screens) draws its
+            // slots/chrome through the existing six-pass sequence, which has
+            // no frame-then-icon-then-dim sandwich to fit. Only
+            // `menu::advancements` fills these.
+            mid_bg_verts: Vec::new(),
+            mid_verts: Vec::new(),
+            mid_item_verts: Vec::new(),
+            mid_glint_verts: Vec::new(),
+            dim2_verts: Vec::new(),
             widget_rect: Some(Rect {
                 x,
                 y,
