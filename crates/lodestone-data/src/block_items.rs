@@ -4,7 +4,7 @@
 //! # Why this is a census and not a name match
 //!
 //! Vanilla's `BlockItem` holds an explicit `Block` reference
-//! (`BlockItem.getBlock()`, `BlockItem.java:185`) and is registered against an
+//! (`BlockItem.getBlock()`) and is registered against an
 //! item id that need not match it. "The item places the block of the same
 //! name" is therefore a heuristic, and it is measurably wrong: against the
 //! committed dump it disagrees on **16 of the 1,537 items**, in both
@@ -12,19 +12,19 @@
 //!
 //! * **14 false negatives** — a real placeable item it declines outright,
 //!   because the block has a different name. `minecraft:redstone` places
-//!   `minecraft:redstone_wire` (`Items.java:753-755`); `minecraft:string`
+//!   `minecraft:redstone_wire` (`Items.REDSTONE`); `minecraft:string`
 //!   places `minecraft:tripwire`; `wheat_seeds`→`wheat`,
 //!   `cocoa_beans`→`cocoa`, `carrot`→`carrots`, `potato`→`potatoes`,
 //!   `pumpkin_seeds`→`pumpkin_stem`, `melon_seeds`→`melon_stem`.
 //! * **2 false positives** — a block of that name exists but the item is not a
 //!   `BlockItem` at all, so a name match would place a block for an item that
 //!   places nothing. `minecraft:wheat` is the crop's *drop*
-//!   (`Items.java:1048`, a plain `registerItem`) while `minecraft:wheat` the
+//!   (`Items.WHEAT`, a plain `registerItem`) while `minecraft:wheat` the
 //!   block is the crop; and `minecraft:air`.
 //!
 //! A false positive is the worse failure, because it places a block the player
 //! never asked for — the same class of defect as writing `minecraft:stone` for
-//! everything (#466), just rarer.
+//! everything, just rarer.
 //!
 //! # Scope: `BlockItem`, and the block, not its state
 //!

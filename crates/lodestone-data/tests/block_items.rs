@@ -8,8 +8,7 @@
 //!
 //! `tests/support/block_items_jvm.txt` is an authoritative dump produced by
 //! booting the real 26.2 server and walking `BuiltInRegistries.ITEM`, asking
-//! every item that is a `BlockItem` for its own `getBlock()`
-//! (`BlockItem.java:185`) — `oracle-java/BlockItemOracle.java`.
+//! every item that is a `BlockItem` for its own `getBlock()` — `oracle-java/BlockItemOracle.java`.
 //!
 //! Neither `registries.json` nor `blocks.json` can answer this: the first is a
 //! flat list of item *names* with no item→block relation at all, the second is
@@ -283,7 +282,7 @@ fn the_census_disagrees_with_a_name_match_exactly_where_the_game_does() {
     }
 }
 
-/// The ordinary cases #466 is about, plus the non-placeable direction.
+/// The ordinary name-match cases, plus the non-placeable direction.
 #[test]
 fn plain_blocks_resolve_to_themselves_and_tools_resolve_to_nothing() {
     for item in [

@@ -4,8 +4,7 @@
 //! # Why this table exists at all
 //!
 //! In vanilla a block entity is **not** created by a packet. `LevelChunk`'s
-//! `setBlockState` creates one from the state alone (26.2
-//! `LevelChunk.java:341`):
+//! `setBlockState` creates one from the state alone (`LevelChunk.setBlockState`):
 //!
 //! ```text
 //! if (state.hasBlockEntity() && …) {
@@ -19,8 +18,8 @@
 //! `block_entity_data` is only ever **data for an entity that already exists**.
 //! Lodestone had no equivalent: a `block_update` wrote the state and nothing
 //! else, so a freshly placed chest had a state, no block-entity record, and drew
-//! zero pixels while still opening (interaction resolves from the state) —
-//! issue #374. This census is the missing input: it is what lets a block-state
+//! zero pixels while still opening (interaction resolves from the state).
+//! This census is the missing input: it is what lets a block-state
 //! write decide whether to create, keep, replace or remove the record, which is
 //! [`lodestone_world::World::sync_block_entity`]'s job.
 //!

@@ -7,9 +7,9 @@
 //!
 //! `BlockState.blocksMotion()` is
 //! `block != COBWEB && block != BAMBOO_SAPLING && isSolid()`
-//! (`BlockBehaviour.java:541-545`), and `isSolid()` is a plain read of the cached
-//! `legacySolid` field (`BlockBehaviour.java:547-550`) computed once per state by
-//! `calculateSolid()` (`BlockBehaviour.java:484-504`):
+//! (`BlockBehaviour.BlockStateBase.blocksMotion`), and `isSolid()` is a plain read of the cached
+//! `legacySolid` field (`BlockBehaviour.BlockStateBase.isSolid`) computed once per state by
+//! `calculateSolid()` (`BlockBehaviour.BlockStateBase.calculateSolid`):
 //!
 //! ```text
 //! if (properties.forceSolidOn)  return true;
@@ -23,7 +23,8 @@
 //! `BlockBehaviour.Properties.forceSolidOn` / `forceSolidOff`, which have **no
 //! getter**, are absent from `blocks.json`, and are set on **237** and **8**
 //! blocks respectively in 26.2. The third fires for the 23 `dynamicShape()`
-//! blocks, whose `Cache` is never built (`BlockBehaviour.java:509-511`) — so
+//! blocks, whose `Cache` is never built (`BlockBehaviour.BlockStateBase.initCache`
+//! skips it when `hasDynamicShape()`) — so
 //! their `legacySolid` ignores the shape they nonetheless report.
 //!
 //! Deriving solidity from the shape instead gets **2,742 of 32,366 states across
@@ -70,7 +71,7 @@ fn bit(bits: &[u8], id: u32) -> Option<bool> {
 ///
 /// Prefer [`blocks_motion`] for physics. This is exposed because `isSolid()` has
 /// several vanilla consumers that are *not* motion blocking (replaceability
-/// checks, `BlockBehaviour.java:269`), and because it is the value the drift
+/// checks, `BlockBehaviour.canBeReplaced(BlockState, Fluid)`), and because it is the value the drift
 /// guard compares a shape-derived answer against.
 #[must_use]
 pub fn legacy_solid(id: u32) -> Option<bool> {

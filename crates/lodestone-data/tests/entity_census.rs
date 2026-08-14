@@ -123,7 +123,7 @@ enum Effect {
 /// inherit a permissive default. Adding a row is a deliberate act with a source
 /// line attached.
 ///
-/// `ServerPlayer.pushEntities` (`ServerPlayer.java:1312`, a tick-rate-manager
+/// `ServerPlayer.pushEntities` (a tick-rate-manager
 /// gate around `super`) is intentionally absent: `EntityType<Player>` is typed on
 /// `Player`, so a client-side census never reaches `ServerPlayer`, and a row here
 /// would be dead.
@@ -191,7 +191,7 @@ fn effect_of(class: &str) -> Effect {
 ///
 /// The three vanilla facts, in order:
 ///
-/// 1. Only `LivingEntity` runs the pass at all (`LivingEntity.java:3163` is the
+/// 1. Only `LivingEntity` runs the pass at all (`LivingEntity.aiStep` is the
 ///    sole caller of `pushEntities()` in the tree), so a non-living type is
 ///    `false` regardless of anything else. This is also the **default-deny**
 ///    hinge: a future non-living type needs no table entry to be excluded.
@@ -360,7 +360,7 @@ fn generate(rows: &[Row]) -> String {
     // sits at metadata index 8, and so does `AbstractArrow.ID_FLAGS` — both
     // plain bytes, indistinguishable by serializer. A version adapter needs this
     // to know whether an index-8 byte is a using-item bitfield or an arrow's
-    // crit flag (issue #57).
+    // crit flag.
     let _ = writeln!(
         out,
         "\n/// Whether this type's implementation class is a `LivingEntity`, by network\n\
@@ -384,7 +384,7 @@ fn generate(rows: &[Row]) -> String {
     // stand's `0x04` is "show arms" where a mob's is "aggressive", so an
     // is-*living* guard is not enough for index 15 the way it is for index 8:
     // `ArmorStand` is living. See `tests/support/entity_data_index_jvm.txt` in
-    // the `v770` crate for the collision, read off the jar (issue #379).
+    // the `v770` crate for the collision, read off the jar.
     let _ = writeln!(
         out,
         "\n/// Whether this type's implementation class is a `Mob`, by network registry id."
@@ -465,7 +465,7 @@ fn is_mob_is_strictly_narrower_than_is_living_and_the_gap_is_named() {
     // arms" on the other. `ArmorStand` is a `LivingEntity`, so unlike index 8 the
     // is-living guard does **not** resolve this one, and reading `is_living` as an
     // is-mob test would make every armour stand with arms report itself as an
-    // aggressive mob (issue #379).
+    // aggressive mob.
     let rows = parse_dump(DUMP);
     for row in &rows {
         assert!(

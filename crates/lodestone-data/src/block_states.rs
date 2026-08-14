@@ -4,9 +4,9 @@
 //! wire; rendering needs to turn each into a block name plus its property values
 //! (`facing=north`, `snowy=false`, …), because the blockstate/model JSON is keyed
 //! by exactly those. That id → (block, properties) mapping is generated data
-//! specific to 26.2, the one canonical internal version (#343). It is a
+//! specific to 26.2, the one canonical internal version. It is a
 //! game-data census, not wire-format code, so it lives here in this data
-//! crate (issue #361) rather than in `lodestone-v770` or in the fully
+//! crate rather than in `lodestone-v770` or in the fully
 //! version-free `lodestone-model`.
 //!
 //! # Memory design
@@ -343,9 +343,9 @@ pub fn air_state_id() -> u32 {
 /// `43a6e030`, fell back to the **lowest** id sharing the name — right for water
 /// (`86`, `level=0`) and lava (`102`), wrong for 661 of the 797 multi-state
 /// blocks. Three shipped consequences: bare `minecraft:grass_block` resolved to
-/// id `8`, `snowy=true`, so every blade of spread grass rendered snowy (#546);
+/// id `8`, `snowy=true`, so every blade of spread grass rendered snowy;
 /// bare directional blocks came out at whatever the lowest id's `facing` happened
-/// to be (#475); and redstone dust's four connection properties came out `up`
+/// to be; and redstone dust's four connection properties came out `up`
 /// rather than `none`, so wire rendered climbing rather than flat. The default is
 /// read from [`crate::snow_support::is_default_state`] — `state ==
 /// state.getBlock().defaultBlockState()` dumped from the real 26.2 server,
@@ -501,8 +501,8 @@ impl Default for BlockStateTable {
 mod tests {
     use super::*;
 
-    /// The discriminating case for issue #511: a partial-property lookup on a
-    /// block with many states must land on the *named* state, not on the
+    /// The discriminating case for a partial-property lookup: on a
+    /// block with many states it must land on the *named* state, not on the
     /// lowest id sharing the block's name.
     ///
     /// Redstone dust is the case that shipped wrong. Before `state_id`

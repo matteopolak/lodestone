@@ -3,8 +3,8 @@
 //! Item stacks carry the item as a `Holder<Item>`: a VarInt referencing the
 //! `minecraft:item` registry by id. The registry id→name mapping is generated
 //! from Mojang's own `registries.json` for 26.2, the one canonical internal
-//! version (#343), so it lives here in this data crate rather than in
-//! `lodestone-v770` (issue #361) — it is a game-data census, not wire-format
+//! version, so it lives here in this data crate rather than in
+//! `lodestone-v770` — it is a game-data census, not wire-format
 //! code.
 
 pub use crate::generated_items::ITEM_COUNT;

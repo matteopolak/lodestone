@@ -3,8 +3,8 @@
 //! `add_entity` carries the entity type as a network **registry id** (a
 //! varint), not its identifier. The id→name mapping is generated from
 //! Mojang's own `registries.json` for 26.2, the one canonical internal
-//! version (#343), so it lives here in this data crate rather than in
-//! `lodestone-v770` (issue #361) — it is a game-data census, not wire-format
+//! version, so it lives here in this data crate rather than in
+//! `lodestone-v770` — it is a game-data census, not wire-format
 //! code. The older version crates (`v47`, `v340`, `v735`) keep their own
 //! separate copies of this table, because for them it is genuinely
 //! translation data from an old wire id to this canonical name space. The
@@ -111,9 +111,9 @@ mod tests {
         );
     }
 
-    /// Behavioural gate for issue #523: three per-frame call sites
+    /// Behavioural gate: three per-frame call sites
     /// (`gpu/nametag.rs::entity_base_height`, `gpu/entity_passes.rs`'s
-    /// `flame_hitbox_width` and `eye_probe_offset`) were switched from this
+    /// `flame_hitbox_width` and `eye_probe_offset`) were switched from a
     /// linear `strip_prefix` scan to
     /// [`crate::entity_type::EntityType::from_name`]'s binary search. This
     /// proves the swap is behaviour-preserving for every one of the 158
