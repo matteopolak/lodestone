@@ -39,8 +39,8 @@ Eighteen bench binaries exist today:
 | `lodestone-physics` | `collision_sweep` | `collide` swept against open air / simple cube / real complex-shape census |
 | `lodestone-physics` | `pose_fit_gate` | `can_player_fit_within_blocks_when`, succeeding vs. repeatedly-failing transition |
 | `lodestone-physics` | `crowd_push` | `entity_push_impulse` pair-test cost at N = 10/50/200/1000 nearby entities |
-| `lodestone-render` | `render_submit` | terrain draw-list sizes (#128), entity-planning batch counts (#106), mesh-arena occupancy under load (#160), texture-atlas packing occupancy (#160) |
-| `lodestone-shell` | `render_submit` | `RenderState::render`'s terrain draw-call/camera-bind-group-switch counts (#128) and CPU submit-time baseline (#133), swept by resident section count over the packed/demo path |
+| `lodestone-render` | `render_submit` | terrain draw-list sizes, entity-planning batch counts, mesh-arena occupancy under load, texture-atlas packing occupancy |
+| `lodestone-shell` | `render_submit` | `RenderState::render`'s terrain draw-call/camera-bind-group-switch counts and CPU submit-time baseline, swept by resident section count over the packed/demo path |
 
 Run any of them with `cargo bench -p <crate> --bench <name>`.
 
@@ -335,7 +335,7 @@ Three things about it that were paid for (§12.130):
 - **Counting allocations needs a thread-local, not a global atomic.** The
   counting allocator in `benches/generation.rs` copies the design
   `crates/lodestone-fuzz/tests/length_prefix_allocation.rs` arrived at after two
-  failures (issue #450): a process-wide `AtomicU64` let one measurement absorb
+  failures: a process-wide `AtomicU64` let one measurement absorb
   another thread's allocations, and adding a mutex *flaked*, because a lock only
   excludes code that takes it. A `const`-initialised `Cell` per thread needs no
   cooperation from anything.
@@ -431,7 +431,8 @@ they can be held to:
   the acceptance criterion a later unit should be written in; see
   [`I_ss` above](#i_ss-instructions-retired-the-standing-beforeafter-comparator).
 - **C_cold** — the first `column()` in a fresh region (25 pre-ore chunks, 9 ore
-  walks from nothing, **and 441 chunks' structure starts** since issue #514). Needs
+  walks from nothing, **and 441 chunks' structure starts** now that structure starts are
+  computed too). Needs
   a **fresh generator**: the memo caches are per-generator, and reusing a warm one
   is the trap that neutered two determinism gates in this repo already.
 
@@ -483,7 +484,7 @@ a recorded false signal from doing that sequentially: a 3/5-vs-0/5 result that w
 Per `CLAUDE.md`'s "re-verify before routing around 'X doesn't exist yet'"
 rule, checked against the actual code rather than a prior comment's summary:
 
-- **#85 (worldgen stage-cost split) is now done, and closing it found something
+- **The worldgen stage-cost split is now done, and closing it found something
   worse than the missing fields.** The four-bucket `StageTimes` is now ten:
   aquifer / shape / biome / surface / materialize / carve / ore / vegetation /
   top_layer / intern. Two of the old four were misnamed — `fluid_heightmap` was
@@ -519,22 +520,22 @@ rule, checked against the actual code rather than a prior comment's summary:
   **fresh generator per arm** — the 512-entry memo cache would otherwise have the
   second arm agree with itself — with its own control proving the comparison can
   see a difference at all.
-- **#93/#94/#95 are satisfied by `light_propagation.rs`**, which already:
-  records the same functions #93 names into `support::record` (substance, not
-  the literal `tests/memory.rs` conversion #93's acceptance criterion
-  describes — the sanity tests stay untouched, per that issue's own
-  instruction); reports the from-scratch cost at realistic edit rates for
-  #94 (no incremental relight exists anywhere in the tree, confirmed by grep —
-  the issue's own documented fallback); and writes down #95's negative
+- **The lighting benchmark sub-issues are satisfied by `light_propagation.rs`**, which already:
+  records the same functions the acceptance criterion names into `support::record` (substance, not
+  the literal `tests/memory.rs` conversion the acceptance criterion
+  describes — the sanity tests stay untouched, per that criterion's own
+  instruction); reports the from-scratch cost at realistic edit rates
+  (no incremental relight exists anywhere in the tree, confirmed by grep —
+  the documented fallback); and writes down the negative
   finding (`Neighbourhood` is architecturally a fixed 3×3, confirmed at
   `lodestone-world/src/lighting.rs`, so there is no larger API to sweep
   against until that type changes shape). See that bench file's own module
   doc for the detail.
-- **#86's remaining ask (thread-count sweep + in-benchmark parity)** is now in
+- **The remaining ask (thread-count sweep + in-benchmark parity)** is now in
   `lodestone-server/examples/bench_worldgen.rs`: a 1/2/4/8/workers/2×workers
   sweep reporting scaling efficiency, plus an FNV-1a fingerprint comparing
   serial vs. parallel output over a 3×3 chunk subset that `panic!`s on
-  mismatch — the RNG-determinism break #86 is actually gated on, not merely a
+  mismatch — the RNG-determinism break is actually gated on, not merely a
   speed number.
 
 ### The render/entity batch (#87, #90, #91, #92, #97, #99, #106, #128, #151, #160)
@@ -567,19 +568,19 @@ across both runs. So:
 | #160 (texture atlas) | `used_pixels > 0`, `fraction ∈ (0, 1]`, `total_pixels >= used_pixels` at n = 16/64/256/1024 sprites | count |
 | #87/#97/#99 | — | duration, recorded baseline only |
 
-**Which mesher is which** (#90 vs #91 are different meshers and a bench aimed at
-the wrong one measures nothing): `--headless`/demo → `mesh_simple`, live terrain →
-`mesh_models`, decided at `crates/lodestone-shell/src/mesher.rs:1349`
+**Which mesher is which** (two of the rows above name different meshers and a
+bench aimed at the wrong one measures nothing): `--headless`/demo → `mesh_simple`, live terrain →
+`mesh_models`, decided by `crates/lodestone-shell/src/mesher.rs`'s `mesh_one`
 (`match classifier.models()`). The shell never calls `mesh_greedy`.
-**#91's premise is wrong**: `tests/world_mesher_bench.rs` does *not* exercise
+**One of those rows' premise is wrong**: `tests/world_mesher_bench.rs` does *not* exercise
 `mesh_models` — it passes `greedy = true` into `build_batch` and lands in
-`mesh_greedy` (`src/mesher.rs:303`).
+`mesh_greedy` (`crates/lodestone-render/src/mesher.rs`'s `build_batch`).
 
-**#92's premise needed correcting too.** It asks to assert the remesh does not
-touch interior sections; `dirty_jobs` deliberately does not have that property
-(its own doc at `src/mesher.rs:155` says callers re-mesh whatever loaded sections
-fall in the 9 columns). Asserting it would report a defect where there is a
-design choice, so the gate is the count-identity above instead.
+**Another row's premise needed correcting too.** It asks to assert the remesh does not
+touch interior sections; the per-load job set deliberately does not have that property
+(`crates/lodestone-render/src/mesher.rs`'s `neighbour_columns` doc comment says callers
+re-mesh whatever loaded sections fall in the 9 columns). Asserting it would report a
+defect where there is a design choice, so the gate is the count-identity above instead.
 
 **Closed by a later pass**, and worth recording exactly what closed since the
 note above was wrong by the time it was re-read (`CLAUDE.md`'s "re-verify
@@ -597,13 +598,13 @@ the moment it was checked, not merely optimistic):
   `&wgpu::BindGroup` (differing only in dynamic offset, the cheap and expected
   case) contributes exactly one. This is deliberately narrower than "every
   `set_bind_group` call" (179 sites workspace-wide, most of them unrelated
-  bind groups — entity camera, armour, block entities, …): #128 asks about the
-  *terrain* camera bind group specifically, the exact thing #75/#76 fixed.
+  bind groups — entity camera, armour, block entities, …): this gate asks about the
+  *terrain* camera bind group specifically, the exact thing an earlier fix addressed.
   `write_buffer` calls were **not** separately counted — the shared-uniform
   write is already exactly one per frame per path by construction
   (`update_model_shared_camera_buffer`), so a call-count gate there would
   measure a constant the code already asserts by its own shape, the code-reading
-  substitution #128 explicitly forbids; the *bind-group* count is the one that
+  substitution this gate explicitly forbids; the *bind-group* count is the one that
   can actually regress silently.
 - **Texture-atlas occupancy**: `lodestone_render::atlas_occupancy` /
   `AtlasOccupancy` (`crates/lodestone-render/src/texture.rs`) — CPU-only,
@@ -612,13 +613,13 @@ the moment it was checked, not merely optimistic):
   `used_area`/`slot_occupancy` accessor on `GpuAtlas` was needed after all: the
   CPU-side `Atlas` already carries everything the computation needs, and
   `GpuAtlas` is built from it at identical dimensions.
-- **#133** is now built as `crates/lodestone-shell/benches/render_submit.rs`,
+- **The draw-call/bind-group-switch/submit-time bench** is now built as `crates/lodestone-shell/benches/render_submit.rs`,
   through the four public wrappers (`RenderState::render`,
   `render_with_crack_and_effects`, …) exactly as this note originally
   proposed: `draw_calls == sections_drawn` and
   `terrain_camera_bind_group_switches <= 1` at radius 1/3/6 over the
   packed/demo path (up to ~4056 sections at radius 6, the same order of
-  magnitude as issue #75's own `sections=3880` profile), with CPU submit time
+  magnitude as an earlier `sections=3880` profile), with CPU submit time
   recorded as a provisional baseline. `MODEL_ORIGIN_ARENA_SLOTS` stays
   `pub(super)` — not widened — because the ceiling-headroom ask is answered by
   two new narrow accessors instead: `RenderState::model_origin_arena_stats`/
@@ -632,17 +633,17 @@ the moment it was checked, not merely optimistic):
   without one rather than failing — so a bench built against it would run
   differently in CI than on a machine with `.cache/mc/26.2` present. The
   packed path is not a stand-in invented for this gap either: it is the same
-  path issue #76 most recently fixed, so a reversal there is exactly what
+  path most recently fixed, so a reversal there is exactly what
   these gates are positioned to catch.
 
-**#97's `LockHolds` axis is deliberately absent rather than faked.** Driving
+**The `LockHolds` axis is deliberately absent rather than faked.** Driving
 `world.run_schedule(GameTick)` directly involves no guard, so a
 `LockHolds::snapshot()` there reads zero holds and a gate on it would be green,
 plausible and measuring nothing. That axis needs
 `hold_write(&handle, |w| w.run_schedule(GameTick))` against a real `EcsHandle`,
 which measures lock contention rather than per-system compute.
 
-**#99 names a function that no longer exists.** `fold_entity_snapshots` was
+**One earlier note names a function that no longer exists.** `fold_entity_snapshots` was
 deleted; the live replacement is `fold_entities`. The docs still referencing it
 (`docs/world-unification.md`, `docs/entity-components.md`) are stale.
 

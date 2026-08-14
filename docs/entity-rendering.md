@@ -93,7 +93,7 @@ Three things about it worth knowing before changing it:
   costs a few dozen extra decodes at startup and needs no change for a new variant.
   A reference the pack does not ship falls back to the model sheet.
 
-**A tamed wolf now draws its tame sheet — issue #235's chain is closed end to
+**A tamed wolf now draws its tame sheet — the chain is closed end to
 end.** `EntityMetadataUpdate::tamed`/`sitting` decode off the wire
 (`v770`'s `read_entity_metadata`, `MetadataClass::Tamable`), and
 `SimMob::snapshot` sends them for wolf/cat/parrot/ocelot.
@@ -185,7 +185,7 @@ incrementally:
 * **The per-tick integration.** `lodestone-shell`'s `entities.rs` has a
   `CreeperFuse` component (`swell_dir`/`old_swell`/`swell`), present only on
   entities whose `RenderKind` is `"creeper"`, and a `tick_creeper_fuse` system
-  in `GameTick`/`TickSet::Animate` that does exactly `Creeper.java:139`'s
+  in `GameTick`/`TickSet::Animate` that does exactly `Creeper.java`'s
   `this.swell += swellDir`, clamped `0..=30`. `extract_entity_draws` lerps
   `old_swell`/`swell` by the frame's partial tick and divides by 28 (not 30 —
   see `MAX_SWELL`'s doc) into `EntityDraw::creeper_swelling`, which feeds
@@ -207,14 +207,14 @@ incrementally:
   regardless of `u`, so a creeper that is somehow both hurt and swelling shows
   red, never a mix of the two.
   `creeper_white_overlay_pixels.rs` is a **magnitude** gate, not a direction
-  one — CLAUDE.md's own retrospective on the hurt overlay (issue #371: a
+  one — CLAUDE.md's own retrospective on the hurt overlay (a
   direction-only check passed 3440/3440 while the shader rendered 70% red
   where vanilla renders 30%) is exactly the trap this was written not to
   repeat. It renders a flat-**black**-textured mob (so `shaded` is a hard
   zero regardless of lighting) with fog disabled, predicts the *exact* output
   byte from `OverlayTexture`'s formula and the shader's own documented
   `srgb_to_linear`, and separately predicts the swapped-argument hypothesis
-  (issue #371's exact bug shape, reproduced) — the measurement must land on
+  (that same exact bug shape, reproduced) — the measurement must land on
   the correct prediction and clearly miss the swapped one. Measured: byte 133
   vs. predicted-correct 133, predicted-swapped 13.
 
@@ -279,14 +279,14 @@ constant box that always contains the drawn model costs a slightly conservative
 cull and cannot drift from the pose, where a per-frame exact box would be a
 second derivation of the same geometry.
 
-**A separate, server-side gap (issue #425), now also closed.** Everything
+**A separate, server-side gap, now also closed.** Everything
 above is the decode/render side — it works against *any* server that sends
 `SET_ENTITY_DATA`/`EXPLODE`, including a real vanilla one, which is what
 every gate above was validated against. Our own integrated server
 (`crates/lodestone-server`, `crates/protocol/v770/src/server_protocol.rs`)
-is a *different* producer, and until #425 it never sent either packet at
+is a *different* producer, and it used to never send either packet at
 all when hosting: `MobSim::tick` already called `MobSim::explode` the tick
-a creeper's fuse completed (issue #213's own exposure/damage maths, `SwellGoal`
+a creeper's fuse completed (the exposure/damage maths, `SwellGoal`
 landed in `1feed17`/`16a5b9f`/`614acb8`), but nothing encoded `DATA_SWELL_DIR`
 for the wire, and no `EXPLODE` encoder existed anywhere in this crate — so a
 client connected to *our* server saw a creeper vanish with real blast damage
@@ -340,7 +340,7 @@ hand runs under the same entry**: `renderItemInHand` is called from inside
 `renderLevel`, and `GameRenderer`'s only `setupFor(ITEMS_3D)` comes afterwards,
 for the GUI.
 
-Until issue #383 this was **one** light and an `abs()`
+Until a fix landed this was **one** light and an `abs()`
 (`0.4 + 0.6 * abs(dot(n, normalize(0.3, 1.0, 0.55)))`), which is wrong in two
 independent ways:
 
@@ -446,7 +446,7 @@ the sea floor and writes **opaque** colour straight over the surface. The result
 is a submerged mob painted on top of the water at any depth. Fog tints a mob by
 distance — it cannot put a water surface in front of it.
 
-### Render layers: sheep wool (issue #53)
+### Render layers: sheep wool
 
 Vanilla draws wool as a `RenderLayer` (`SheepWoolLayer`) over a sheep's own
 body model, following the exact same shape as the humanoid armour layer
@@ -598,8 +598,8 @@ particular that mattered:
    texture grouping armour needs and wool does not — one mesh, one sheet).
    Drawn through the **base** entity pipeline (`self.entities.pipeline.pipeline`),
    not `armour_pipeline`, for exactly the reason specified: wool has no second
-   layer at the same inflation to correct z-fighting for. (Both pipelines are
-   `LessEqual` since issue #21, so this is now a choice of pass, not of depth
+   layer at the same inflation to correct z-fighting for. (Both pipelines are now
+   `LessEqual`, so this is a choice of pass, not of depth
    compare — see `docs/armour-rendering.md`'s depth section.) `EntityRenderer` gained `wool_models: SheepWoolModelSet`,
    `wool_gpu: Option<GpuEntityModel>` and `wool_texture: Option<wgpu::BindGroup>`
    (no per-material table — there is only one mesh), loaded from
@@ -698,7 +698,7 @@ entityData.define(DATA_WOOL_ID, (byte)0);
 ```
 
 and byte `0` decodes to `DyeColor.byId(0 & 15)` = **white**, sheared bit
-(`0x10`) unset — `Sheep.java:228,258`. So a naturally white, unsheared sheep
+(`0x10`) unset — `Sheep.java`. So a naturally white, unsheared sheep
 never puts metadata index 18 on the wire, at spawn or ever. This is not a
 decode bug: `read_entity_metadata` in
 `crates/protocol/v770/src/packets/metadata.rs` was decoding correctly all
@@ -792,9 +792,9 @@ whole tree (not a named file):
 | arm | vanilla accessor & default (jar-confirmed) | decoded today? | reaches a pixel today? |
 |---|---|---|---|
 | `Dyed` (sheep) | `Sheep.DATA_WOOL_ID`, byte `0` = white/unsheared | yes | **yes, now** (this fix) |
-| `Horse { color, markings }` | `Horse.DATA_ID_TYPE_VARIANT`, int `0` = `Variant.WHITE`/no markings (`Horse.java:41,62`, `equine/Variant.java:12`) | yes (`IDX_HORSE_VARIANT`) | no — `EntityVariant::Horse` has no consumer outside `metadata.rs`'s own tests; `lodestone-assets`' `EntityVariant::HorseColor` is a *different*, unrelated enum in a different crate |
-| `Villager { kind, profession, level }` | `Villager.DATA_VILLAGER_DATA`, `VillagerData(PLAINS, NONE, 1)` (`Villager.java:465,469-472`, `VillagerData.java:16`) | yes | no — no consumer outside `metadata.rs`'s own tests |
-| `Keyed(id)` (registry-holder: pig/cow/chicken temperature, cat coat, wolf coat, frog, …) | one registry default per mob, e.g. `PigVariants.DEFAULT` (`Pig.java:117`), `CatVariants.BLACK` (`Cat.java:84,207`), `WolfVariants.DEFAULT` (`Wolf.java:224`) — same "never on the wire at default" shape, per mob | yes, by serializer (self-identifying, no class needed) | no — `lodestone-assets`' `EntityVariant::Temperature`/`Cat`/`Wolf`/… are again a separate enum; nothing bridges the two today |
+| `Horse { color, markings }` | `Horse.DATA_ID_TYPE_VARIANT`, int `0` = `Variant.WHITE`/no markings (`Horse.java`, `equine/Variant.java`) | yes (`IDX_HORSE_VARIANT`) | no — `EntityVariant::Horse` has no consumer outside `metadata.rs`'s own tests; `lodestone-assets`' `EntityVariant::HorseColor` is a *different*, unrelated enum in a different crate |
+| `Villager { kind, profession, level }` | `Villager.DATA_VILLAGER_DATA`, `VillagerData(PLAINS, NONE, 1)` (`Villager.java`, `VillagerData.java`) | yes | no — no consumer outside `metadata.rs`'s own tests |
+| `Keyed(id)` (registry-holder: pig/cow/chicken temperature, cat coat, wolf coat, frog, …) | one registry default per mob, e.g. `PigVariants.DEFAULT` (`Pig.java`), `CatVariants.BLACK` (`Cat.java`), `WolfVariants.DEFAULT` (`Wolf.java`) — same "never on the wire at default" shape, per mob | yes, by serializer (self-identifying, no class needed) | no — `lodestone-assets`' `EntityVariant::Temperature`/`Cat`/`Wolf`/… are again a separate enum; nothing bridges the two today |
 
 Recommendation: **do not fix the other three arms yet.** Doing so now would
 mean guessing at a default that has no pixel consumer to prove against —
@@ -824,7 +824,7 @@ villager and zombie-villager profession/type overlays, and glowing-eye layers
 mesh/tint/pixel level; the others have not been investigated further than this
 list.
 
-### Mob fire (issue #434)
+### Mob fire
 
 Player report: "mobs dont show flames yet." Landed as two separate halves —
 see the two commits' own messages — because the bit extraction alone reaches
@@ -844,7 +844,7 @@ field, was needed at all.
 
 **The geometry**, derived from vanilla's `FlameFeatureRenderer.prepare`
 (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/feature/
-FlameFeatureRenderer.java:29-66`) — see `flame_quads`'s doc in
+FlameFeatureRenderer.java`) — see `flame_quads`'s doc in
 `lodestone-render/src/entity_pipeline.rs` for the full line-by-line derivation
 and `lodestone-render/tests` (in-module `entity_pipeline::tests`) for the
 predicted-vs-measured geometry (a zombie: 6 quads, first-quad world

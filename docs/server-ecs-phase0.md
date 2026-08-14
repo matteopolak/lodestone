@@ -83,9 +83,9 @@ schedule inside the server.
 ## The gate, and the controls that were actually run
 
 Phase 0's plan text says it is "deliberately an island for exactly one phase". It is not, and that was
-the one hard requirement: `WindowApp.ecs` on the client (issue
-[#37](https://github.com/matteopolak/lodestone/issues/37)) is an `App` constructed and never run
-against — "an inert scaffold nothing reads", still open. Constructing an `App` and stopping is that
+the one hard requirement: `WindowApp.ecs` on the client (a still-open issue about
+an `App` constructed and never run
+against — "an inert scaffold nothing reads"). Constructing an `App` and stopping is that
 defect verbatim.
 
 So `advance_server_tick` increments `ServerTick` inside the `World` *and* mirrors it onto
@@ -154,8 +154,7 @@ Both are committed and neither is caused by this work. `just wasm-size` fails at
    are committed. This also fails `scripts/wasm-check.sh`'s `lodestone-v770` row and its `trunk build`
    row. Standard fix: `getrandom = { version = "0.2", features = ["js"] }` in `web/Cargo.toml`.
 2. **`web/src/main.rs` has drifted from `lodestone-render`'s camera API.** `block::camera_buffer` no
-   longer exists and `BlockPipeline::camera_bind_group` now takes a third `origin_buffer` argument
-   (`crates/lodestone-render/src/block.rs:358`). This one is masked by the first: `getrandom` fails
+   longer exists and `BlockPipeline::camera_bind_group` (`crates/lodestone-render/src/block.rs`) now takes a third `origin_buffer` argument. This one is masked by the first: `getrandom` fails
    earlier in the graph, so `wasm-check`'s output never names it.
 
 Both are reported rather than worked around. Fixing a churning render crate's browser consumer is not
@@ -194,7 +193,7 @@ singleplayer gains a tick loop.
 ## How to change it, and the gotchas
 
 - **Do not delete the witness while the `World` is still shallow.** `ServerTickWitness` and
-  `server_tick_count()` are the only thing separating this from issue #37. Once Phase 1 lands they get
+  `server_tick_count()` are the only thing separating this from the client's inert-scaffold problem above. Once Phase 1 lands they get
   *stronger*, not redundant: the witness must then advance in lockstep with `TickStats::tick_count`, and
   a divergence is the island detector the plan's Phase 1 asks for.
 - **Update the gate's predicted value when Phase 1 lands.** `Some(1)` is correct only while `ServerBoot`
@@ -223,7 +222,7 @@ a `Cargo.toml` dependency added with `App::add_plugins`.
 ## Dependencies
 
 `bevy_app` and `bevy_ecs` 0.19, through the same `[workspace.dependencies]` entries `lodestone-ecs`
-builds against (`Cargo.toml:91-92`): `default-features = false, features = ["std"]`, so no
+builds against (`Cargo.toml`'s `bevy_app`/`bevy_ecs` entries): `default-features = false, features = ["std"]`, so no
 `bevy_reflect` and never `multi_threaded`. That last omission is what keeps this migration free of a
 second threading model, and it is why bevy dispatches these systems as direct calls rather than through
 a task pool.

@@ -7,16 +7,16 @@ ported from vanilla's `Hud` class
 (`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`): the heart row
 flashes and jitters around a health change, the hunger row wobbles while
 saturation is empty, and a hotbar item "pops" (squashes then settles) when a
-stack lands in a slot. Issue #30.
+stack lands in a slot.
 
-**A fourth item in that issue's original text does not exist in vanilla.**
+**A fourth item in the original feature request does not exist in vanilla.**
 "XP bar flashes on level-up" was never real: `Player.giveExperienceLevels`
-(`Player.java:1561-1574`) only plays `PLAYER_LEVELUP` every 5 levels and draws
+(`Player.java`) only plays `PLAYER_LEVELUP` every 5 levels and draws
 nothing. `ContextualBar.extractExperienceLevel`
-(`ContextualBar.java:34-40`) and `ExperienceBar.extractRenderState`
-(`ExperienceBar.java:35-36`, empty) confirm there is no timer anywhere in the
+(`ContextualBar.java`) and `ExperienceBar.extractRenderState`
+(`ExperienceBar.java`, empty) confirm there is no timer anywhere in the
 XP bar's own render state. This is recorded rather than silently dropped
-because the issue asked for a citation on every item, and "no citation
+because the original request asked for a citation on every item, and "no citation
 exists" is itself the answer for this one — see `CLAUDE.md`'s §2 on stale
 issue text.
 
@@ -48,37 +48,37 @@ pixel-identically to before this existed.
 
 ### Heart row: blink (flash) + critical-health jitter
 
-`hud/anim::HeartAnim` ports `Hud.java:766-781` (`lastHealth`/`displayHealth`/
+`hud/anim::HeartAnim` ports `Hud.java` (`lastHealth`/`displayHealth`/
 `healthBlinkTime`/`lastHealthTime`) as a pure `tick(tick, health) -> (blink,
 display_health)` state machine:
 
-- **Damage** (health drops): a 20-tick blink window (`Hud.java:768-770`).
-- **Heal** (health rises): a 10-tick window (`Hud.java:771-773`), not 20.
+- **Damage** (health drops): a 20-tick blink window (`Hud.java`).
+- **Heal** (health rises): a 10-tick window (`Hud.java`), not 20.
 - **`blink`** alternates 3-on/3-off inside the window
-  (`(blink_until_tick - tick) / 3 % 2 == 1`, `Hud.java:766`) — and is read
+  (`(blink_until_tick - tick) / 3 % 2 == 1`, `Hud.java`) — and is read
   from the *previous* call's window before this call's comparison updates it,
   matching vanilla's own statement order (the read at `:766` runs before the
   reassignment at `:770`/`:773`), so a hit's blink becomes visible starting
   the *following* tick, not the one that registered the change.
 - **`display_health`** ("the ghost of health about to be lost") only catches
   up to the current value once 1000ms (20 ticks) have passed with no further
-  change (`Hud.java:776-779`).
+  change (`Hud.java`).
 
 `sprite_vitals` (`hud.rs`) uses `blink` twice: the **container** background
 sprite swaps to `hud/heart/container_blinking` for every heart slot regardless
-of that slot's own fill state (`Hud.java:871`), and a **ghost** overlay draws
+of that slot's own fill state (`Hud.java`), and a **ghost** overlay draws
 the pre-damage total in the `_blinking` sprite variant wherever
-`halves < display_health` (`Hud.java:882-885`).
+`halves < display_health` (`Hud.java`).
 
 Separately, `hud/anim::heart_jitter(tick, container)` ports the critical-health
-y-jitter (`Hud.java:863-865`, `currentHealth + absorption <= 4`): every heart
+y-jitter (`Hud.java`, `currentHealth + absorption <= 4`): every heart
 container redraws with a fresh `0..=1`px offset. `HudFrame` does not model
 absorption yet, so this gates on health alone — a documented narrowing, not a
 silent one.
 
 ### Hunger row: the empty-saturation wobble
 
-`hud/anim::hunger_wobble(tick, food, saturation, pip)` ports `Hud.java:977-979`
+`hud/anim::hunger_wobble(tick, food, saturation, pip)` ports `Hud.java`
 exactly: `saturation <= 0.0 && tick % (food * 3 + 1) == 0` gates a fresh
 `-1..=1`px offset; any other tick draws flush. Unlike the heart row this needs
 **no cross-frame memory** — it is a pure function of the current tick, food
@@ -92,8 +92,8 @@ wired it through draws exactly as before this field existed.
 ### Hotbar: the pickup "pop"
 
 `hud/anim::HotbarPop` ports `ItemStack.popTime`
-(`ItemStack.java:153,713-714,1047-1052`), set to `5` by `Inventory.add`
-whenever a stack merges into or fills a slot (`Inventory.java:220,268`) and
+(`ItemStack.java`'s `getPopTime`/`setPopTime`), set to `5` by `Inventory.add`
+whenever a stack merges into or fills a slot (`Inventory.java`) and
 decremented once per tick. Nothing forwards that server-side call site here,
 so `HotbarPop::tick` detects the same event client-side: a slot's item
 identity changed, or its count rose, versus the previous frame's contents.
@@ -135,12 +135,12 @@ vanilla's single pose-stack transform covers all three; this is a deliberate,
 documented narrowing (most hotbar items are flat sprites), not a
 decode-parity claim. The durability bar and stack count also draw unsquashed,
 matching vanilla's own `graphics.itemDecorations` call sitting *after* the
-pose is popped (`Hud.java:1155-1160`).
+pose is popped (`Hud.java`).
 
 ### Why the jitter is not vanilla's exact RNG sequence
 
 Vanilla reuses one `RandomSource`, reseeded once per `extractPlayerHealth`
-call (`Hud.java:783`, `random.setSeed(tickCount * 312871)`) and consumed
+call (`Hud.java`, `random.setSeed(tickCount * 312871)`) and consumed
 sequentially across heart containers and food pips in a fixed draw order.
 Reproducing that exact sequence buys nothing visible — nobody can
 screenshot-diff a purely cosmetic jitter against a live server — and
@@ -201,8 +201,8 @@ container/pip so two slots at one tick do not correlate.
   `LocalPlayer.setExperienceValues` stamping `experienceDisplayStartTick` —
   which `Hud.willPrioritizeExperienceInfo` uses to keep the XP bar *selected*
   over the other contextual bars for 100 ticks — and the every-fifth-level
-  sound in `Player.giveExperienceLevels` (`Player.java:1569-1572`). The flash
-  is what issue #30 asked for, built to sit alongside the others; **the real
+  sound in `Player.giveExperienceLevels` (`Player.java`). The flash
+  is what the original request asked for, built to sit alongside the others; **the real
   unbuilt parity item in this area is that 100-tick priority window**, which
   needs a contextual-bar selection this HUD does not have.
 - **The flash mix (`anim::flash_toward_white`) is in gamma space**, because
@@ -223,7 +223,7 @@ container/pip so two slots at one tick do not correlate.
 
 ## Known gap: saturation is not yet threaded from `sim.rs`
 
-`Vitals::saturation: Option<f32>` (`lodestone-ecs/src/session.rs:174-179`)
+`Vitals::saturation: Option<f32>` (`lodestone-ecs/src/session.rs`)
 already exists and is already populated — the doc comment on that field even
 says so ("no reader draws this today... `PlayerSnapshot::saturation` is a
 public bot-API field"). `Sim` exposes `health()`/`food()`/`air()`

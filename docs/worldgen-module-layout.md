@@ -135,7 +135,8 @@ So the plan is right about five of six and silent about the one that matters. `d
 `rng` really do call `crate::counters` (`density/chunk.rs`'s `bump_density_eval`,
 `bump_corner_lookup`, `bump_slot_hit`; `rng`'s `next_bits` hook), and **`counters` in turn
 depends on `density::Density::KIND_COUNT`** for two array sizes and a loop bound
-(`counters.rs:151`, `:162`, `:238`, `:303`). That is a cycle, and a cycle cannot be cut by a
+(`counters.rs`'s `Snapshot::density_evals`/`Snapshot::density_point_computes` fields and the
+`imp` module's `KINDS` const). That is a cycle, and a cycle cannot be cut by a
 crate boundary — extracting the plan's five modules as written would put 8 call sites in the
 new crate pointing back at the old one.
 

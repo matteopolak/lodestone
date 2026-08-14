@@ -42,7 +42,7 @@ file cannot become the hardcoded-`v770` dependency in shell code that `just chec
 to prevent, and the packet id comes out of `ServerDirective::Send` rather than being restated.
 
 Stage boundaries are the ones production already crosses, read from
-`crates/protocol/v770/src/adapter.rs:3689-3716`:
+`crates/protocol/v770/src/adapter/mod.rs`'s `handle_packet`:
 
 | stage | the exact call |
 |---|---|
@@ -62,7 +62,8 @@ single-biome fixture makes all 25 samples identical and any blend arithmetic pas
 
 S4 is a difference: the same frame with no terrain resident and then with every fixture
 section, divided by the section count. The fixed per-frame cost cancels, leaving the term that
-scales with render distance — which is the question, since `gpu/frame.rs:459/480/720` iterate
+scales with render distance — which is the question, since `gpu/frame.rs`'s `render_inner`
+(its packed, model and water section-draw loops) iterate
 *every* resident section with no frustum and no distance cull.
 
 ## What it measured
@@ -102,7 +103,7 @@ already set correctly: culling first.
 
 ### The fluid decomposition
 
-`mesh_fluids` (`lodestone-render/src/models.rs:1158`) scans all 4096 cells and `continue`s on
+`mesh_fluids` (`lodestone-render/src/models.rs`) scans all 4096 cells and `continue`s on
 `fluid_at(..) == None`. Splitting the centre column's sections by whether they contain any
 fluid cell separates the scan from the geometry:
 
@@ -123,7 +124,7 @@ The same neighbour cells are re-queried many times per cell and again by adjacen
 so it is water-bearing. An inland column with no lake would put the fluid share near zero. The
 *per-fluid-cell* number is the terrain-independent one; the 58.8% share is not.
 
-### The fluid decomposition after issue #542
+### The fluid decomposition, continued
 
 Same harness, same fixture, same 4,704 fluid cells, three separable commits. Each row is the
 **wet** arm (the 5 fluid-bearing sections), so the figure is per *fluid* cell:
@@ -143,7 +144,7 @@ Same harness, same fixture, same 4,704 fluid cells, three separable commits. Eac
   at **7.64** — near this core's retire width — so the loop was never memory-bound, and
   instructions and cycles fell by 2.07× and 2.09× respectively. The instrument's blind spot
   (see below) was not in play, and checking cost nothing.
-- **The largest single term was not the one issue #542 named.** Its diagnosis was the ~50
+- **The largest single term was not the one this decomposition's own diagnosis named.** That diagnosis was the ~50
   virtual calls per cell. Measured, **6,263 of the 13,709 (46%) were one `water_tint_at`**, of
   which **97.8% was `lodestone_assets::tint::biome_effects`** — a linear scan of 66
   `(&str, BiomeEffects)` entries with a string compare per entry, run 25 times per cell because
@@ -153,7 +154,7 @@ Same harness, same fixture, same 4,704 fluid cells, three separable commits. Eac
   4,096-cell scan. With `FluidGrid` filling through the trait's *default* `cell_at` (three
   independent probes) it went **356,874 → 1,021,034** per section, a 2.9× regression on
   exactly the terrain most sections are. Overriding `cell_at` in `SnapshotFluidView` to share
-  one `get_block` brought it to 404,542 — below the pre-#542 490,885. **Measure the arm your
+  one `get_block` brought it to 404,542 — below the pre-decomposition 490,885. **Measure the arm your
   optimisation does not target.**
 
 ### The biome-tint term, and the fluid decomposition after it (§12.128)
@@ -172,7 +173,7 @@ mesh figure cannot say whether a movement came from the 66-entry table lookup or
 `mesh_fluids` for the column **32,392,636 → 17,072,964**; the column's one-off total
 **78,636,976 → 63,336,018**. Four things worth reading off this rather than assuming:
 
-- **The first-byte index is worth 0.86% here and up to 10× in isolation.** #542's four-entry memo
+- **The first-byte index is worth 0.86% here and up to 10× in isolation.** The earlier four-entry memo
   already reduced `biome_effects` to *one* call per tinted quad, so making that call cheaper cannot
   move the mesh much. The isolated per-call figures are where it shows: 524 → 85 instructions for a
   late table entry, 503 → 50 for an absent name, and 58 → **73** (worse) for the first entry, which
@@ -188,7 +189,7 @@ mesh figure cannot say whether a movement came from the 66-entry table lookup or
   geometry while nearly every fluid quad is tinted. The per-*sample* saving is the same on both; the
   share of the stage is not.
 - **The dry arm regressed 3.0%** (404,590 → 416,555 per fluid-free section), from the
-  `RefCell<BlendedTintCursor>` the view now carries. Same shape as #542's 2.9× regression, two orders
+  `RefCell<BlendedTintCursor>` the view now carries. Same shape as the earlier 2.9× regression, two orders
   of magnitude smaller, and not chased further; it is ~12,000 instructions per fluid-free section
   against 3,207 saved per fluid cell.
 
@@ -220,9 +221,9 @@ as the memory-bound signal it is.
   reading. The replacement is the locality control, whose expectation is arithmetic — the same
   compiled loop taking the same number of steps over a 4 KiB and a 16 MiB table must retire the
   same instructions while its cycles blow out.
-- **`sections_drawn` is not the upload count.** It is incremented only by the opaque loop
-  (`frame.rs:480`); a water-only section carries `mesh: None` there while still issuing a water
-  draw at `frame.rs:720`. Measured 189 of 195 uploads. `draw_calls` counts both passes, and the
+- **`sections_drawn` is not the upload count.** It is incremented only by `render_inner`'s opaque
+  section-draw loop; a water-only section carries `mesh: None` there while still issuing a water
+  draw from `render_inner`'s water section-draw loop. Measured 189 of 195 uploads. `draw_calls` counts both passes, and the
   gap between the two *is* the render plan's U4 target.
 - **Page faults retire kernel instructions that count toward this process.** The locality
   control's instruction ratio was 1.17× before the tables were pre-faulted, and remains 1.00–1.03×

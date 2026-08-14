@@ -56,8 +56,8 @@ separately landable piece of work with its own evidence standard.
 Measured or directly cited defects, not adjectives. Cites are to the tree at `4307b59`.
 
 - **D1 — per-block recursive interpretation of a boxed enum tree.** `Density` is an AST of ~30
-  variants with `Box<Density>` children (`density/mod.rs:302`); `NoiseChunkSampler::eval`
-  (`density/chunk.rs:334`) re-walks it for every query, and `fill_stage` (`overworld.rs:1278`)
+  variants with `Box<Density>` children (`density/mod.rs`); `NoiseChunkSampler::eval`
+  (`density/chunk.rs`) re-walks it for every query, and `fill_stage` (`overworld/fill.rs`)
   makes **98,304 `AquiferSystem::block_at` calls per chunk**, each walking `final_density` plus up
   to 7 more trees. Cell interpolation exists and matches vanilla's 4×8×4 corner scheme, but it is
   implemented as memoised *point queries* (8 corner lookups through `RefCell`-guarded per-slot
@@ -65,26 +65,26 @@ Measured or directly cited defects, not adjectives. Cites are to the tree at `43
   §12.101): the arithmetic was already right and this paragraph previously prescribed the wrong
   fix.** Vanilla has *two* interpolation orders — `Mth.lerp3` (X-inner) under `fillingCell`, and
   the incremental `advanceCellX`/`updateForY` chain (Y-inner) — different IEEE 754 expressions,
-  and the block field only ever sees the first, because `NoiseChunk.java:157-160` wraps
+  and the block field only ever sees the first, because `NoiseChunk.java` wraps
   `final_density` in a code-only `cache_all_in_cell` whose cache is prefilled under
   `fillingCell == true`. `chunk.rs` implements exactly that; its module doc claimed the opposite
   (now fixed, with a standing inverted guard). The defect here is the per-block *lookup cost*,
   not the nesting: branchy dispatch + pointer-chasing + hash-or-index lookups per block, where
   vanilla pays a sliding lerp over a prefilled cell.
 - **D2 — `String` block states end-to-end.** `DenseBlockGrid` palette-interns but `get`/`set`
-  traffic in `&str` with a `HashMap<String,u16>` probe per write (`dense_grid.rs:108`).
-  `stitch_region` (`overworld.rs:866`) copies all 9 sources' full 16×384×16 grids into a fresh
+  traffic in `&str` with a `HashMap<String,u16>` probe per write (`dense_grid.rs`).
+  `stitch_region` (since removed — see "How to change it") copies all 9 sources' full 16×384×16 grids into a fresh
   48×384×48 `RegionGrid` string-by-string — ~2.8M get/set pairs per `column()` **even when every
-  cache hits** — and `stitch_veg_region` (`overworld.rs:1173`) calls `state.to_string()` per cell:
+  cache hits** — and `stitch_veg_region` (since removed — see "How to change it") calls `state.to_string()` per cell:
   ~885k heap allocations per column, warm. Vanilla decorates in place and copies nothing.
-- **D3 — per-chunk reconstruction of per-seed state.** `build_aquifer` (`overworld.rs:1253`)
+- **D3 — per-chunk reconstruction of per-seed state.** `build_aquifer` (`overworld/fill.rs`)
   deep-clones **eight full density trees** per chunk and rebuilds fresh slot caches; nothing is
   pooled or reused across chunks (fresh `Vec`s, grids, palettes, sparse-diff `HashMap`s per call).
 - **D4 — the 3×3-of-3×3 neighbourhood recursion, blunted by two global-mutex FIFO caches.**
   Vegetation needs 8 neighbours' *post-ore* worlds; each of those needs its own 3×3 pre-ore
   neighbourhood, so one cold `column()` touches a 5×5 = 25-chunk pre-ore region, 9 ore RNG walks,
   and ~17 `pre_ore_stage` lookups (revert `4307b59`'s own numbers). The caches
-  (`PreOreCache`/`PostOreCache`, `overworld.rs:264/283`) are each one `Mutex<HashMap + VecDeque>`,
+  (`PreOreCache`/`PostOreCache`, `overworld/store.rs`) are each one `Mutex<HashMap + VecDeque>`,
   FIFO-evicted at 512: a 289-column join burst produced ~5000 concurrent lock attempts on one
   `Arc<Mutex>` and forced the per-ring barrier back in (`4307b59` reverting `5104adf`). A mutex
   only excludes code that takes it — and then becomes the reason nobody restructures the thing it
@@ -93,7 +93,7 @@ Measured or directly cited defects, not adjectives. Cites are to the tree at `43
 - **D5 — an uncached O(7,594) biome search in the hottest loop.** `carve_stage` resolves a carver
   biome for each of a **17×17 = 289 source-chunk neighbourhood** per chunk
   (`carver/mod.rs`, `NEIGHBOURHOOD_RANGE = 8`), and each resolution is a brute-force
-  nearest-neighbour scan over the ~7,594-row climate parameter table (`biome.rs:176` explicitly
+  nearest-neighbour scan over the ~7,594-row climate parameter table (`biome/mod.rs`'s `nearest_biome` explicitly
   declines vanilla's RTree as "already fast"). That is ~2.2M squared-distance comparisons per
   pre-ore chunk, ×25 on a cold column, with zero memoisation even between two adjacent chunks
   whose 289-source windows overlap almost entirely.
@@ -152,7 +152,7 @@ both validates the D1–D3 diagnosis and means SIMD is headroom Pumpkin left on 
 - **Flattened component stack.** Pumpkin's density DAG is a topologically-sorted flat
   `Box<[ProtoNoiseFunctionComponent]>`; nodes hold integer indices into the same array, never
   pointers, and evaluation recurses by re-slicing (`proto_noise_router.rs`,
-  `chunk_noise_router.rs:249`). Per-seed immutable proto router; per-chunk instantiation borrows
+  `chunk_noise_router.rs`). Per-seed immutable proto router; per-chunk instantiation borrows
   the shared nodes by reference and allocates only the small mutable wrappers. This is
   target-architecture item 2.
 - **Vanilla's wrapper set, ported as real machinery**: `DensityInterpolator` (literal port of
@@ -166,7 +166,7 @@ both validates the D1–D3 diagnosis and means SIMD is headroom Pumpkin left on 
   arena-reuse answer to D3.
 - **Flat numeric chunk representation**: `ProtoChunk { flat_block_map: Box<[BlockStateId]>,
   flat_biome_map: Box<[u8]>, four [i16; 256] heightmaps, stage: StagedChunkEnum, carving_mask }`
-  (`proto_chunk.rs:129`). Target items 1 and 3.
+  (`proto_chunk.rs`). Target items 1 and 3.
 - **Staged generation as an explicit dependency graph**: an 11-stage `StagedChunkEnum` mirroring
   vanilla `ChunkStatus`, per-stage radius/dependency tables in one auditable place
   (`get_direct_radius()` returns 1 for Features — the 3×3), a `slotmap`-backed DAG scheduler with
@@ -193,16 +193,16 @@ both validates the D1–D3 diagnosis and means SIMD is headroom Pumpkin left on 
   compiling JSON → flat typed IR **once per generator construction**, which we already half-do;
   the defect was never "JSON is parsed" but "the IR is a boxed tree walked per block".
 - **Any of its actual placement/feature behaviour as an oracle.** The confirmed divergence map,
-  from its own sources: coral (`coral_claw.rs:29,44` — vanilla's `Util.shuffle` skipped, a random
-  direction draw replaced by a constant), tree decorators (`attached_to_logs.rs:24,26` — positions
+  from its own sources: coral (`coral_claw.rs` — vanilla's `Util.shuffle` skipped, a random
+  direction draw replaced by a constant), tree decorators (`attached_to_logs.rs` — positions
   unshuffled, direction hardcoded to `[0]`), and **surface rules knowingly ~1% off** — Pumpkin's
   own test asserts `mismatches <= 1060` post-surface against a vanilla dump where raw noise
-  asserts `== 0` (`proto_chunk_test.rs:205`). Decoration and carvers have **no** vanilla-dump
+  asserts `== 0` (`proto_chunk_test.rs`). Decoration and carvers have **no** vanilla-dump
   gates there at all. So: raw-terrain machinery is trustworthy engineering; everything from
   surface rules outward keeps going to our JVM oracles exclusively. Terrain *blending* is
   unfinished in Pumpkin but irrelevant to fresh-world generation.
 - **Its stage reorder** (Biomes before StructureStart, vanilla runs StructureStarts first;
-  `chunk_state.rs:153`). Safe only because biome sampling is pure; adopt vanilla's order anyway in
+  `chunk_state.rs`). Safe only because biome sampling is pure; adopt vanilla's order anyway in
   U14 — cheap insurance against any structure predicate that turns out to be order-sensitive.
 
 ## Q3: Is sub-ms serial generation achievable at 1:1 parity?
@@ -619,7 +619,7 @@ reproduce this otherwise.
 - **U2**: a timing taken while other agents compile is a sample; run alone, prefer counters, and
   record machine state alongside (`vm.swapusage`, not `Pages free`).
 - **U3**: palette/order determinism at the serve boundary — the `RandomState` iteration-order bug
-  already happened once (`overworld.rs:94` module-doc post-mortem); the byte-identical control is
+  already happened once (`overworld/mod.rs`'s module-doc post-mortem, near `materialize_world`); the byte-identical control is
   the gate. Evidence adds: steady-state String-allocation counter == 0.
 - **U4**: the semantic subtleties the interpreter hides — `Mul`'s `v1 == 0.0` short-circuit,
   `interpolated`-inside-corner transparency (`interpolate=false`), `flat_cache`'s forced `y=0`,
@@ -716,7 +716,7 @@ walking the `noise_settings` JSON, and the marker that selects the block field's
 arithmetic — `cache_all_in_cell` — appears **nowhere in 26.2's worldgen JSON** (0 hits across
 both the bundled corpus and the jar's own `data/minecraft/worldgen/`, with a working detector:
 the `minecraft:interpolated` control hits 2 and 8). Vanilla applies it in code,
-`NoiseChunk.java:157-160`. This is the same class as CLAUDE.md's `registries.json` trap: an
+`NoiseChunk.java`. This is the same class as CLAUDE.md's `registries.json` trap: an
 authoritative source answering a *neighbouring* question. A data census cannot see evaluation
 order; only the decompiled call path can.
 
@@ -824,11 +824,11 @@ lighting (different subsystem, excluded from C_ss by definition), mob spawn plac
 
 - The task brief's "75 biome documents" — the bundle has **66** (`assets/worldgen/biome/`),
   corroborated by DESIGN.md §12.30's own census. 262 placed / 226 configured are correct.
-- `benches/generation.rs:394` — scene string `patch=7x7(49 chunks)` over a 3×3 sweep (see U1).
-- `biome.rs:176`'s "brute force is already fast" — true in isolation, contradicted in composition
+- `benches/generation.rs`'s `bench_stage_split` — scene string `patch=7x7(49 chunks)` over a 3×3 sweep (see U1). Now fixed: the scene string is derived from `coords` rather than restated.
+- `biome/mod.rs`'s `nearest_biome`'s "brute force is already fast" — true in isolation, contradicted in composition
   by the 289-source × 25-chunk multiplier (D5). The comment predates carver composition.
-- `overworld.rs`'s module doc self-reports one stale sentence ("Vegetation … still-not-composed",
-  corrected in-place at line ~80) — already flagged in the file, nothing to do.
+- `overworld/mod.rs`'s module doc self-reports one stale sentence ("Vegetation … still-not-composed",
+  corrected in-place) — already flagged in the file, nothing to do.
 
 ## Unverified, needs follow-up
 

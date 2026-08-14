@@ -5,7 +5,7 @@
 Per-corner ambient occlusion and light smoothing for baked block-model geometry —
 vanilla's `ModelBlockRenderer.AmbientOcclusionFace`, ported to
 `quad_corner_sample`/`mesh_models` in `crates/lodestone-render/src/models.rs`. This
-is the "not Minecraft" tell issue [#22](https://github.com/matteopolak/lodestone/issues/22)
+is the "not Minecraft" tell a player report
 named: flat per-block light plus directional shade, with no darkening in corners
 and crevices.
 
@@ -83,7 +83,7 @@ clearest statement of why the two predicates are not interchangeable.
 `ModelSectionView::occludes_at`, i.e. `BlockModels::occludes` — a *rendering*
 predicate (all six faces fully cover, opaque, non-cutout). Vanilla never asks that.
 It calls `cache.getShadeBrightness(state, level, pos)`, which is
-`BlockBehaviour.getShadeBrightness` (`BlockBehaviour.java:315`):
+`BlockBehaviour.getShadeBrightness` (`BlockBehaviour.java`):
 
 ```java
 return state.isCollisionShapeFullBlock(level, pos) ? 0.2F : 1.0F;
@@ -125,8 +125,8 @@ bug:
 
 | term | trait method | vanilla | why |
 | --- | --- | --- | --- |
-| **AO shade** | `ModelSectionView::ao_occludes_at` | `getShadeBrightness == 0.2F` | `BlockModelLighter.java:45-110` averages `cache.getShadeBrightness` per corner |
-| **smooth light** | `ModelSectionView::occludes_at` | `translucentN` / `smoothBlend` | `BlockModelLighter.java:59-66` keys the light substitution on `!isViewBlocking \|\| getLightDampening() == 0`, which is a *rendering* question, not a collision one |
+| **AO shade** | `ModelSectionView::ao_occludes_at` | `getShadeBrightness == 0.2F` | `BlockModelLighter.java` averages `cache.getShadeBrightness` per corner |
+| **smooth light** | `ModelSectionView::occludes_at` | `translucentN` / `smoothBlend` | `BlockModelLighter.java` keys the light substitution on `!isViewBlocking \|\| getLightDampening() == 0`, which is a *rendering* question, not a collision one |
 
 So only the AO half moved. `occludes_at` and `corner_light_at` were not touched —
 swapping the light half too would have a leaf cell hand its own darkness to its
@@ -197,13 +197,13 @@ sometimes black on one side" — cross plants take the flat
 (`tesselateFlat`) path, not the AO one. The description of the *bug* below is
 kept verbatim because it is the clearest statement of the two-cell fork.
 
-`prepareQuadAmbientOcclusion` (`BlockModelLighter.java:39`):
+`prepareQuadAmbientOcclusion` (`BlockModelLighter.java`):
 
 ```java
 BlockPos basePosition = this.faceCubic ? centerPosition.relative(direction) : centerPosition;
 ```
 
-`faceCubic` (`:265`) is true when the quad is flat against the block boundary *or* the
+`faceCubic` is true when the quad is flat against the block boundary *or* the
 state is a full collision cube. `quad_corner_sample` always uses `np` — the block plus
 the face normal — which is the `faceCubic == true` branch. So for a genuinely partial
 quad (a stair's or slab's interior face) vanilla samples the ring around the block's
@@ -211,7 +211,7 @@ quad (a stair's or slab's interior face) vanilla samples the ring around the blo
 `shadeCenter` follow the same fork (`:114`–`:123`).
 
 **3. `smoothBlend`'s sky-inherit branch is missing.** `LightCoordsUtil.smoothBlend`
-(`:66`) has three cases per neighbour, not one:
+ has three cases per neighbour, not one:
 
 ```java
 if (sky(center) > 2 || block(center) > 2) {
@@ -247,10 +247,10 @@ described — because it also reaches the *flat* (`tesselateFlat`) path, which
 is the one every cross-plant model takes (`cross.json`,
 `tinted_cross.json`, `sunflower_top.json` all set `"ambientocclusion": false`).
 
-`ModelBlockRenderer.tesselateFlat` (`:157-190`) buckets a block's quads by
+`ModelBlockRenderer.tesselateFlat` buckets a block's quads by
 `cullface` — `QuadCollection.getQuads(direction)` for a culled quad,
 `getQuads(null)` for an unculled one — and `BlockModelLighter.prepareQuadFlat`
-(`:197-216`) picks the sample cell per bucket. `prepareQuadAmbientOcclusion`
+ picks the sample cell per bucket. `prepareQuadAmbientOcclusion`
 (`:39`, `:117`) expresses the identical fork for the smooth-lit ring and its
 centre:
 
@@ -270,14 +270,14 @@ reads the *interior* of that neighbour — the light engine's stored `0` there
 — instead of the plant's own, usually-lit cell. That is the reported
 "grass/ferns/sunflowers are sometimes black on one side if there's a block".
 The face is not literally `0,0,0` — vanilla's `AmbientColor` floor
-(`DimensionTypes.java:36`) keeps a sky-`0` sample at `~0.0935` of daylight —
+(`DimensionTypes.java`) keeps a sky-`0` sample at `~0.0935` of daylight —
 but it reads as black next to a fully-lit blade.
 
 The fix is `quad_is_on_face_boundary` (beside `quad_is_full_face`) plus a
 `sample_dir` selection in `mesh_models` that reproduces the table above
 exactly, including the culled-bucket row: `sample_dir` prefers `cullface` over
 `quad.direction`, which differ for e.g. `powder_snow`'s east shell — see
-`block_models.rs:2031`. `own_is_full_cube` (`view.occludes_at` on the block's
+`block_models.rs`'s `face_occlusion`. `own_is_full_cube` (`view.occludes_at` on the block's
 *own* cell) stands in for `isCollisionShapeFullBlock`, since this trait has no
 collision-shape table; the approximation only differs from vanilla for a
 non-opaque full collision cube (slime, spawner, ice), where it falls to the
@@ -353,7 +353,7 @@ Three conditions, and this codebase can only honour one of them:
    `glowstone`) will still take the smooth-AO path here, where vanilla would
    flatten it. See "How to change it" below for what closing this needs.
 
-`crates/lodestone-render/src/block_models.rs:924`'s `ambient_occlusion: false` is
+`extruded_sprite_geometry`'s (`crates/lodestone-render/src/block_models.rs`) `ambient_occlusion: false` is
 **not** this gate and is not a bug to "fix" by flipping it — it configures a
 synthesised `ResolvedModel` used only by `extruded_sprite_geometry`, the
 `builtin/generated` GUI-item sprite extrusion (a flat 2-D icon baked into a thin
@@ -387,7 +387,7 @@ read once per cell, before the quad loop.
 to `crates/lodestone-shell/src/mesher.rs`, closing what had been an island: the
 mechanism was built and tested inside this crate while `ModelSectionView`'s default
 (`true`) meant no block in the live world ever rendered flat through it. The
-default is still the correct fallback, and still reproduces pre-#22 behaviour for
+default is still the correct fallback, and still reproduces the flat-lighting behaviour for
 any view that does not override it. For reference, the override is one method,
 mirroring the `occludes_at`/`face_light_at` overrides beside it:
 
@@ -435,7 +435,7 @@ blend. It is a **fixed constant per face direction**, not a diffuse term:
 Do not confuse this with the *entity* diffuse. Entities and the first-person arm
 have no per-face direction to look up, so they run vanilla's two-light
 `minecraft_mix_light` instead (see
-[entity-rendering.md](./entity-rendering.md)); blocks never do. Issue #383 asked
+[entity-rendering.md](./entity-rendering.md)); blocks never do. A report asked
 whether block faces had drifted onto a dot product, and they had not.
 
 Re-verified against the **live** mesher (`mesh_models`, which is what
@@ -452,7 +452,7 @@ sky light, `entity_light_pixels::lighting_census_by_location`:
 
 Every face lands on `128 x shade` to within a byte, and every one is far from the
 linear-space column — so the constants and the colour space are both vanilla, and
-neither needed changing for #383.
+neither needed changing.
 
 Grass was singled out in that report because it carries a biome tint *and* a face
 shade, so a colour-space error would show up on it first. It does not:
@@ -525,7 +525,8 @@ each tinted source's *plains* colour — which changes hue, not brightness.
   just above the `quad_corner_sample` call, both in `models.rs`. Do not touch
   `crates/lodestone-shell/src/mesher.rs`'s `light_at`/`SnapshotFluidView` for
   this: those back `mesh_fluids`, a genuinely different "no single facing"
-  case (see `mesher.rs:861-865`'s doc comment), not the cross-plant one.
+  case (see `mesher.rs`'s `FluidSectionView for SnapshotFluidView`'s `light_at`
+  doc comment), not the cross-plant one.
   `crates/lodestone-render/tests/cross_plant_light_position_gate.rs` is the
   gate; its own doc comment explains why AO is deliberately disabled in its
   view (isolating this fork from the already-covered AO-averaging math).

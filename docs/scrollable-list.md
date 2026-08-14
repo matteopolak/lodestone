@@ -18,27 +18,27 @@ Four fields, each one a vanilla field:
 
 | `ScrollList` | vanilla |
 |---|---|
-| `scroll` | `AbstractScrollArea.scrollAmount` (`AbstractScrollArea.java:18`) |
-| `selected` | `AbstractSelectionList.selected` (`AbstractSelectionList.java:40`) |
-| `hovered` | `AbstractSelectionList.hovered` (`:41`) |
-| `dragging` | `AbstractScrollArea.scrolling` (`:19`) |
+| `scroll` | `AbstractScrollArea.scrollAmount` (`AbstractScrollArea.java`) |
+| `selected` | `AbstractSelectionList.selected` (`AbstractSelectionList.java`) |
+| `hovered` | `AbstractSelectionList.hovered` |
+| `dragging` | `AbstractScrollArea.scrolling` |
 
 Every method names the line it ports. The load-bearing ones:
 
 | method | vanilla |
 |---|---|
-| `content_height` | `Σ heights + 4` (`AbstractSelectionList.java:198-206`) |
-| `max_scroll` | `max(0, contentHeight - height)` (`AbstractScrollArea.java:84-86`) |
-| `set_scroll` | `Mth.clamp(v, 0, maxScrollAmount())` (`:67-69`) |
-| `scroll_rate` | `defaultEntryHeight / 2` (`AbstractSelectionList.java:44` → `:145-147`) |
-| `mouse_scrolled` | `scrollAmount - scrollY * scrollRate()` (`AbstractScrollArea.java:34`) |
-| `row_top` | `repositionEntries`' running `y` (`AbstractSelectionList.java:143-152`) |
-| `row_visible` | `extractListItems`' overlap test (`:346-352`) |
-| `scroll_to_entry` | `scrollToEntry` (`:251-261`) |
-| `scroller_height` | `clamp((int)(h²/content), 32, h-8)` (`AbstractScrollArea.java:96-98`) |
-| `scrollbar_y` | `scrollBarY()` (`:104-108`) |
-| `scrollbar_x` | `getRowRight() + scrollbarWidth() + 2` (`AbstractSelectionList.java:289-291`) |
-| `drag_to` | `mouseDragged` (`AbstractScrollArea.java:38-56`) |
+| `content_height` | `Σ heights + 4` (`AbstractSelectionList.java`) |
+| `max_scroll` | `max(0, contentHeight - height)` (`AbstractScrollArea.java`) |
+| `set_scroll` | `Mth.clamp(v, 0, maxScrollAmount())` |
+| `scroll_rate` | `defaultEntryHeight / 2` (`AbstractSelectionList.java` → `:145-147`) |
+| `mouse_scrolled` | `scrollAmount - scrollY * scrollRate()` (`AbstractScrollArea.java`) |
+| `row_top` | `repositionEntries`' running `y` (`AbstractSelectionList.java`) |
+| `row_visible` | `extractListItems`' overlap test |
+| `scroll_to_entry` | `scrollToEntry` |
+| `scroller_height` | `clamp((int)(h²/content), 32, h-8)` (`AbstractScrollArea.java`) |
+| `scrollbar_y` | `scrollBarY()` |
+| `scrollbar_x` | `getRowRight() + scrollbarWidth() + 2` (`AbstractSelectionList.java`) |
+| `drag_to` | `mouseDragged` (`AbstractScrollArea.java`) |
 
 ### The offset is pixels, and that was the bug
 
@@ -69,9 +69,9 @@ and it would desynchronise the draw from the hit-test, which read the same `row_
 ### Hover is not selection
 
 Two fields, and nothing copies between them. `hovered` is recomputed from the mouse
-at the top of every extract (`AbstractSelectionList.java:210`) and is only ever
-*read*, as a boolean argument to the entry's draw (`:360`). `selected` moves on a
-click, on a keyboard arrow, or through `setFocused` (`:299-311`) — never on a hover.
+at the top of every extract (`AbstractSelectionList.java`) and is only ever
+*read*, as a boolean argument to the entry's draw. `selected` moves on a
+click, on a keyboard arrow, or through `setFocused` — never on a hover.
 
 `set_hovered` therefore has **no code path to `selected`**. That is what makes the
 account-screen bug structurally impossible rather than a remembered rule: `hover`
@@ -80,7 +80,7 @@ act on, so moving the mouse silently re-aimed them.
 
 Closing that opens the mirror-image gap, so both halves belong together: a click
 *does* select in vanilla. On the accounts screen a click arrives as `hover` + `Enter`
-(`menu/nav.rs:1724-1725`), so `Enter` moves `highlighted` too.
+(`MenuNav::click`'s default fallback in `menu/nav.rs`), so `Enter` moves `highlighted` too.
 
 ### Clipping: why the offset could not be pixels before
 
@@ -191,25 +191,25 @@ list nothing can click at all.
   row by one at rest. `visible_range_agrees_with_row_visible_at_every_offset` sweeps
   the whole span and is what caught it.
 - **`resize` every frame, before reading geometry.** It is
-  `updateSizeAndPosition` (`AbstractSelectionList.java:186-195`) and it ends in the
+  `updateSizeAndPosition` (`AbstractSelectionList.java`) and it ends in the
   re-clamp; a list holding a stale `height` reports a stale `max_scroll`, which is
   how a shrunk window ends up scrolled past its own content and draws empty.
 - **`set_selected`'s `keyboard` flag is not cosmetic.** Vanilla scrolls into view
-  when the entry is clipped **or** when the last input was the keyboard (`:58`). A
+  when the entry is clipped **or** when the last input was the keyboard. A
   click passes `false`, which is what stops a click on a partly-visible row from
   yanking the list.
 - **Row heights may be uniform or per-entry** — `ScrollList::new_variable` (and
   `resize_variable`) take the heights, and `row_offset`/`row_height` are what
   every other method consults. This is `AbstractSelectionList`'s own
-  `addEntry(entry, height)` (`:122-129`), whose `repositionEntries` advances a
-  running `y` by each child's height (`:143-152`). **Uniform is the degenerate
+  `addEntry(entry, height)`, whose `repositionEntries` advances a
+  running `y` by each child's height. **Uniform is the degenerate
   case of the same arithmetic, not a second implementation**, and
   `an_explicit_equal_height_list_is_indistinguishable_from_a_uniform_one` holds
   it to that: it sweeps both modes across the whole span and compares every
   observable, so a prefix-sum off-by-one cannot hide behind a spot check.
 - **`row_h` is `defaultEntryHeight`, and once heights are explicit it is *not*
   "the height of a row".** It is only what `scroll_rate` is defined against
-  (`:44`). Deriving the rate from `heights.first()` would make the wheel speed
+ . Deriving the rate from `heights.first()` would make the wheel speed
   depend on which entry happens to be first — a settings list declaring 25 px
   scrolls **12** px per notch even when its first row is a 20 px header.
   `the_scroll_rate_ignores_the_entry_heights_entirely` pins it, and
@@ -236,11 +236,11 @@ None at runtime. The compile-time constants are vanilla's, in `menu::widget`:
 
 | constant | value | vanilla |
 |---|---|---|
-| `SCROLLBAR_WIDTH` | 6 | `AbstractScrollArea.java:13` |
+| `SCROLLBAR_WIDTH` | 6 | `AbstractScrollArea.java` |
 | `SCROLLBAR_MIN_HEIGHT` | 32 | `:14` |
 | `SCROLLBAR_HEIGHT_INSET` | 8 | `:97` |
-| `LIST_CONTENT_PADDING` | 2 | `AbstractSelectionList.java:435` |
-| `SCROLLER_SPRITE` | `widget/scroller` | `AbstractScrollArea.java:15` |
+| `LIST_CONTENT_PADDING` | 2 | `AbstractSelectionList.java` |
+| `SCROLLER_SPRITE` | `widget/scroller` | `AbstractScrollArea.java` |
 | `SCROLLER_BACKGROUND_SPRITE` | `widget/scroller_background` | `:16` |
 
 The jar-less scrollbar fallback is **not** a citation. 26.2 draws those two sprites
@@ -362,11 +362,11 @@ asserting only that the offset moved.
 
 | screen | offset | hover vs selection | verdict |
 |---|---|---|---|
-| `stats.rs` | **`scroll: f32`** | none at all | **ADOPTED** (#445). `ROW_H` 20 → notch **10 px**, predicted and measured; row-index (20) and page (`LIST_WINDOW_PX`) both asserted excluded |
-| `key_binds.rs` | **`scroll: f32`** | hover sets the cursor | **ADOPTED** (#445). `ROW_H` 20 → notch **10 px**. Control observed: with `scroll_by`/`scroll_to_cursor` snapped to whole rows, both notch gates fail |
-| `language.rs` | **`scroll: f32`** into a *filtered* list | hover sets the cursor | **ADOPTED** (#445). `ROW_H` **18** → notch **9 px**. `active_list` reports the post-filter count, so the search box shortens the bar. 10 is asserted excluded — it is `floor(WIDGET_H / 2)` |
-| `social.rs` | **`scroll: f32`** | hover sets the cursor | **ADOPTED** (#445), and the **only user of `RowBand::Inset`**. `ROW_H` 20 → notch **10 px**. `RIGHT_MARGIN` grew 10 → 14 to reserve the bar's gutter |
-| `options.rs` | **`scroll: f32`**, **variable** entry heights | hover sets the cursor | **ADOPTED** (#445), the only user of `ListSpec::with_heights`. `DEFAULT_ITEM_HEIGHT` **25** → notch **12 px**, and the gate proves the `heights` table does **not** change it — `scrollRate` is defined against `defaultEntryHeight`, so a page whose entry 0 is a 31 px header still scrolls 12. `Root` reports no list at all |
+| `stats.rs` | **`scroll: f32`** | none at all | **ADOPTED**. `ROW_H` 20 → notch **10 px**, predicted and measured; row-index (20) and page (`LIST_WINDOW_PX`) both asserted excluded |
+| `key_binds.rs` | **`scroll: f32`** | hover sets the cursor | **ADOPTED**. `ROW_H` 20 → notch **10 px**. Control observed: with `scroll_by`/`scroll_to_cursor` snapped to whole rows, both notch gates fail |
+| `language.rs` | **`scroll: f32`** into a *filtered* list | hover sets the cursor | **ADOPTED**. `ROW_H` **18** → notch **9 px**. `active_list` reports the post-filter count, so the search box shortens the bar. 10 is asserted excluded — it is `floor(WIDGET_H / 2)` |
+| `social.rs` | **`scroll: f32`** | hover sets the cursor | **ADOPTED**, and the **only user of `RowBand::Inset`**. `ROW_H` 20 → notch **10 px**. `RIGHT_MARGIN` grew 10 → 14 to reserve the bar's gutter |
+| `options.rs` | **`scroll: f32`**, **variable** entry heights | hover sets the cursor | **ADOPTED**, the only user of `ListSpec::with_heights`. `DEFAULT_ITEM_HEIGHT` **25** → notch **12 px**, and the gate proves the `heights` table does **not** change it — `scrollRate` is defined against `defaultEntryHeight`, so a page whose entry 0 is a 31 px header still scrolls 12. `Root` reports no list at all |
 | `packs.rs` | none | hover sets the cursor | **not applicable** — adopting means *adding* scroll, a feature not a refactor |
 | `telemetry.rs` | none | hover sets the cursor | **not applicable** — four fixed controls, no list |
 | `world_select.rs` | none | **genuinely separate** (`hovered` + `FocusSet`) | **not a scroll candidate — but it is the hover reference** |
@@ -407,7 +407,7 @@ still catches the `-1000` sentinel, which is negative in both axes.
 | `telemetry.rs` | none | hover sets the cursor | **not applicable** — four fixed controls, no list |
 | `world_select.rs` | none | **genuinely separate** (`hovered` + `FocusSet`) | **not a scroll candidate — but it is the hover reference** |
 
-### Two findings from converting `stats.rs` first (issue #445)
+### Two findings from converting `stats.rs` first
 
 **1. A screen whose rows are free text needed a new primitive, and it is
 `MenuFrame::list_labels`.** A pixel-scrolled list routinely has a row half
@@ -446,7 +446,7 @@ edge's rate, and the error is predicted as `(854 - w) / 2` rather than merely
 asserted non-zero: **107 px at 640, 213 at 1280, 533 at 1920**. Wrong shape, not a
 mistuned value.
 
-### `RowBand`, the canvas-relative row edge (issue #445)
+### `RowBand`, the canvas-relative row edge
 
 `ListSpec`'s `row_w: f32` became `band: RowBand`:
 
@@ -483,7 +483,7 @@ requires `spec.row_right(w) == report_button_x(w) + REPORT_BUTTON_W` at 640, 854
 Two things fall out and both are decisions, not details:
 
 - ~~**`options.rs` decides whether `ScrollList` grows variable row heights.**~~
-  **Decided (#445): it grows them.** `new_variable` landed, so `options.rs`'s
+  **Decided: it grows them.** `new_variable` landed, so `options.rs`'s
   mixed header/control heights are expressible and the other four screens are the
   degenerate uniform case of the same arithmetic. This was settled *before*
   converting any screen, deliberately — converting the four against a uniform-only
