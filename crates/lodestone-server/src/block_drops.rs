@@ -518,6 +518,18 @@ pub fn drop_explosion_loot(
 /// each destroyed block's table with the radius in the loot context, writes air,
 /// and returns the block changes alongside the items to spawn.
 ///
+/// # Chain reaction
+///
+/// A destroyed `minecraft:tnt` block is chain-primed rather than looted —
+/// `TntBlock::wasExploded` — because `TntBlock.dropFromExplosion` is `false`:
+/// vanilla replaces the loot roll for that cell with a fresh `PrimedTnt`
+/// entirely, it does not also drop a TNT item. Its positions are the third
+/// return value; the caller (`tick::run_tick_loop`) is what owns a
+/// [`crate::mobs::MobSim`] to spawn into, so this function only reports where,
+/// not the entity itself. Each one gets `PrimedTnt.getRandomShortFuse`'s
+/// shortened fuse, not [`crate::mobs::tnt::DEFAULT_FUSE_TIME`] — see
+/// [`crate::mobs::MobSim::spawn_tnt_short_fuse`].
+///
 /// # Why this lives here and not in `crate::explosion_blocks`
 ///
 /// [`crate::explosion_blocks::destroy_blocks`] writes air *before* it returns, so
@@ -551,12 +563,19 @@ pub fn drop_explosion_loot_in_blast<S: crate::chunk::ChunkSource>(
     tables: &LootTableSet,
     blast_rng: &mut SpawnRng,
     drops_rng: &mut SpawnRng,
-) -> (Vec<(BlockPos, String)>, Vec<PoppedItem>) {
+) -> (Vec<(BlockPos, String)>, Vec<PoppedItem>, Vec<BlockPos>) {
     let mut changes = Vec::new();
     let mut popped = Vec::new();
+    let mut primed_tnt = Vec::new();
     for pos in crate::explosion_blocks::exploded_positions(world, env, centre, radius, blast_rng) {
         let state = world.block_state(pos.x, pos.y, pos.z);
         if crate::random_tick::is_air_variant(&state) {
+            continue;
+        }
+        if crate::mobs::tnt::is_tnt_block(&state) {
+            primed_tnt.push(pos);
+            world.set_block(pos.x, pos.y, pos.z, crate::chunk::AIR);
+            changes.push((pos, crate::chunk::AIR.to_owned()));
             continue;
         }
         // Rolled **before** the write, because the table is keyed off the state
@@ -565,7 +584,7 @@ pub fn drop_explosion_loot_in_blast<S: crate::chunk::ChunkSource>(
         world.set_block(pos.x, pos.y, pos.z, crate::chunk::AIR);
         changes.push((pos, crate::chunk::AIR.to_owned()));
     }
-    (changes, popped)
+    (changes, popped, primed_tnt)
 }
 
 /// The shared body of [`drop_block_loot`] and [`drop_explosion_loot`] — one

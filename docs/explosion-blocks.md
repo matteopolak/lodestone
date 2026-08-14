@@ -114,8 +114,12 @@ There are 34 distinct resistances in 26.2; the extremes are `0.0`
   a creeper is the only producer, so `true` is exact today.
 - **Fire.** `createFire` runs only for a fire-flagged blast and a creeper's flag is
   `false`. `fire_positions` implements it anyway, for whichever producer sets it.
-- **Block entities and `wasExploded`.** A destroyed chest's contents are not
-  spilled and TNT is not chain-primed.
+- **Block entities.** A destroyed chest's contents are not spilled.
+- **`wasExploded` (TNT chain reaction) — landed, but not in this module.**
+  `destroy_blocks` here still has no loot/drop knowledge and is not the
+  production path; `crate::block_drops::drop_explosion_loot_in_blast` is, and
+  that is where a destroyed `minecraft:tnt` block is chain-primed
+  (`crate::mobs::MobSim::spawn_tnt_short_fuse`) instead of looted.
 
 ## How to change it, and the gotchas
 

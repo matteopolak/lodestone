@@ -164,6 +164,17 @@ mod falling_blocks;
 // `tick_vehicles`.
 mod vehicles;
 
+// `pub(crate)`, unlike every sidecar module above: `crate::block_drops`,
+// `crate::random_tick`, `crate::tick` and `crate::server` all need
+// `tnt::is_tnt_block`/`TICK_TNT_PRIME`/`DEFAULT_FUSE_TIME` to recognise and
+// schedule TNT ignition from outside this crate's mob simulation, which none
+// of the boat/falling-block/orb sidecars need. Every `impl MobSim` method
+// here was already `pub`; `TntCollision` stays private, used only within this
+// file's own `tick_tnt`. `TNT_LAUNCH_SEED` is `pub(super)` for the same
+// reason `ORB_BEHAVIOR_SEED` is — `MobSim::new` reads it directly as
+// `tnt::TNT_LAUNCH_SEED`.
+pub(crate) mod tnt;
+
 // No re-export: `LiveBolt` is `pub(super)`, visible within `mobs` and its
 // descendants, and every `impl MobSim` method here is either `pub` already or
 // `pub(super)` because only `crate::tick` (through `MobHandle::with`) and this
@@ -2002,6 +2013,15 @@ pub struct MobSim<'w> {
     /// the motion is [`lodestone_physics::vehicle`]'s, shared with the client so
     /// a boat we *watch* and a boat we *ride* cannot disagree about a slab.
     vehicles: HashMap<i32, TrackedVehicle>,
+    /// Live `PrimedTnt`, keyed by network entity id — see [`TrackedTnt`] for
+    /// why this is a plain map beside [`vehicles`](Self::vehicles) rather than
+    /// a [`SimMob`].
+    tnt: HashMap<i32, TrackedTnt>,
+    /// The `random.nextDouble()` draw a fresh `PrimedTnt`'s launch direction
+    /// makes (`PrimedTnt`'s three-argument constructor), on its own stream for
+    /// [`orb_rng`](Self::orb_rng)'s reason: priming TNT must not shift which
+    /// roll a mob spawn, a block drop or anything else sees.
+    tnt_rng: SpawnRng,
     /// Vanilla `PatrolSpawner.nextTick` — ticks remaining before the next
     /// patrol-spawn attempt, decremented once per
     /// [`run_patrol_spawn_cycle`](Self::run_patrol_spawn_cycle) call
@@ -2093,6 +2113,30 @@ struct TrackedVehicle {
     /// The **player entity id** of the controlling passenger, or `None` for an
     /// empty boat. `Some` suspends the server-side tick entirely.
     rider: Option<i32>,
+}
+
+/// One live `PrimedTnt` — wire identity, motion and the fuse countdown.
+///
+/// A plain map for [`falling_blocks`](Self::falling_blocks)'s reason: no
+/// lifecycle beyond the motion and a counter, so a `SimMob`'s species/goal
+/// machinery would be pure overhead for an entity with no AI and no box that
+/// matters (it is not selector-visible and nothing paths around it).
+///
+/// The block state it imitates (`PrimedTnt.DATA_BLOCK_STATE_ID`) is **not**
+/// carried here: this crate's only producers (`TntBlock::prime`'s several call
+/// sites) always construct vanilla's own `DEFAULT_BLOCK_STATE`
+/// (`Blocks.TNT.defaultBlockState()`) — nothing here ever calls
+/// `PrimedTnt.setBlockState` with anything else — so a per-entity field would
+/// carry one value forever. See `mobs::tnt`'s module doc for the rest of what
+/// is deliberately simplified.
+#[derive(Debug, Clone)]
+struct TrackedTnt {
+    uuid: Uuid,
+    motion: lodestone_physics::EntityMotion,
+    /// `PrimedTnt.DATA_FUSE_ID` — ticks remaining before detonation, counting
+    /// down from [`tnt::DEFAULT_FUSE_TIME`]. Detonates the tick this reaches
+    /// `0`, matching `if (fuse <= 0)` in `PrimedTnt.tick`.
+    fuse: i32,
 }
 
 /// One per-entity animation cue a hit produced, for
@@ -2206,6 +2250,8 @@ impl<'w> MobSim<'w> {
             breed_rng: SpawnRng::new(BREED_XP_SEED),
             mob_drops: true,
             vehicles: HashMap::new(),
+            tnt: HashMap::new(),
+            tnt_rng: SpawnRng::new(tnt::TNT_LAUNCH_SEED),
             // Vanilla's own field default (`private int nextTick;`, never
             // explicitly initialised, so Java's `0`) — the very first call
             // sees `nextTick <= 0` and may attempt a patrol on tick one,
@@ -5224,6 +5270,35 @@ impl<'w> MobSim<'w> {
                 // `AbstractBoat` does not override `getAddEntityPacket`.
                 object_data: 0,
                 // A boat is never a `Leashable`.
+                leash_link: None,
+            });
+        }
+        // Primed TNT. Sorted ids, for the same reason every other sidecar loop
+        // in this method is: a stable per-tick update order for
+        // `EntityStreamer::sync`.
+        let mut tnt_ids: Vec<i32> = self.tnt.keys().copied().collect();
+        tnt_ids.sort_unstable();
+        for id in tnt_ids {
+            let Some(t) = self.tnt.get(&id) else {
+                continue;
+            };
+            out.push(EntitySnapshot {
+                id,
+                uuid: t.uuid,
+                entity_type: tnt::tnt_entity_type(),
+                position: Vec3::new(t.motion.position.x, t.motion.position.y, t.motion.position.z),
+                // `PrimedTnt` never rotates — `Entity`'s base `yRot`/`xRot`
+                // stay `0.0` for the whole of its short life.
+                rotation: Rotation::new(0.0, 0.0),
+                head_yaw: 0.0,
+                velocity: Vec3::new(t.motion.velocity.x, t.motion.velocity.y, t.motion.velocity.z),
+                // `PrimedTnt.DATA_FUSE_ID` — see `MetadataField::TntFuse`'s own
+                // doc for why this is index 8's fifth `INT` claimant and must be
+                // class-guarded on decode.
+                metadata: vec![MetadataField::TntFuse(t.fuse)],
+                // `PrimedTnt` does not override `getAddEntityPacket`.
+                object_data: 0,
+                // Never a `Leashable`.
                 leash_link: None,
             });
         }

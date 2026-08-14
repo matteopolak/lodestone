@@ -349,6 +349,12 @@ pub const BLOCK_DROPS: &str = "block_drops";
 /// `mob_drops` — pre-26.2 `doMobLoot`. Read by `crate::mobs::MobSim::reap_dead`.
 pub const MOB_DROPS: &str = "mob_drops";
 
+/// `GameRules.TNT_EXPLODES`. Read by every `TntBlock::prime` call site
+/// (`crate::server`'s flint-and-steel arm, `crate::fire`'s burnout arm, the
+/// redstone-signal arm) and by `tick::run_tick_loop`'s chain-reaction arm,
+/// matching vanilla's own gate on all four.
+pub const TNT_EXPLODES: &str = "tnt_explodes";
+
 /// `allow_entering_nether_using_portals`. Read by `crate::server`'s portal-travel
 /// tick, which is where vanilla consults it (`Level.isAllowedToEnterPortal`).
 ///
@@ -527,6 +533,13 @@ impl GameRules {
     #[must_use]
     pub fn mob_drops(&self) -> bool {
         self.boolean(MOB_DROPS)
+    }
+
+    /// `tnt_explodes` — whether igniting TNT (by any producer) actually primes
+    /// it. See [`TNT_EXPLODES`] for every call site that gates on this.
+    #[must_use]
+    pub fn tnt_explodes(&self) -> bool {
+        self.boolean(TNT_EXPLODES)
     }
 
     /// `random_tick_speed` — random ticks per randomly-ticking section per tick.

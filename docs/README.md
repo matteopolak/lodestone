@@ -1153,6 +1153,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   **fit-gated state machine**, not by a pose→dimensions lookup. It lives in
   [`crates/lodestone-physics/src/pose.rs`](../crates/lodestone-physics/src/pose.rs)
   and runs from the end of `lodestone_physics::tick`.
+- [Primed TNT](./primed-tnt.md) — The `minecraft:tnt` entity — the fuse-countdown,
+  gravity-affected block that TNT becomes once ignited — plus every producer that
+  ignites one. A port of `PrimedTnt`
+  (`.cache/mc/26.2/src/net/minecraft/world/entity/item/PrimedTnt.java`) and
+  `TntBlock`'s ignition methods, living in `crates/lodestone-server/src/mobs/tnt.rs`.
 - [Projectile impact and the player's own launch](./projectile-impact.md) — The half
   of the projectile system that made arrows matter: hit detection against terrain and
   mobs, the per-projectile damage arithmetic, and the serverbound path by which a

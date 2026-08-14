@@ -87,8 +87,10 @@
 //!   nothing further is needed.
 //! * **Neighbour notification.** A block consumed by fire does not notify its own
 //!   neighbours here, so a torch losing its support to a fire stays floating.
-//! * **`TntBlock::prime`.** `checkBurnOut` primes TNT it consumes; this crate has
-//!   no primed-TNT entity, so the TNT is simply burnt away.
+//! * ~~**`TntBlock::prime`.**~~ Landed: [`check_burn_out`] now reports every
+//!   `minecraft:tnt` neighbour it consumes, and `tick::run_tick_loop`'s
+//!   `TICK_FIRE` arm spawns a real `PrimedTnt` there — see that function's
+//!   and [`run_scheduled_tick`]'s own doc comments for the handoff.
 //! * **Fire damage to entities.** `BaseFireBlock::entityInside` is the entity
 //!   domain's.
 //!
@@ -571,6 +573,16 @@ pub fn ticks_after_edit(pos: BlockPos) -> Vec<ScheduledTick<String>> {
 /// `pos` need not still hold fire: a tick whose cell has been replaced since it
 /// was scheduled returns after the reschedule is skipped, so a stale entry costs
 /// one read.
+///
+/// `primed_tnt` collects every `minecraft:tnt` neighbour this tick's
+/// [`check_burn_out`] calls consumed — see that function's own doc. The
+/// caller (`tick::run_tick_loop`'s `TICK_FIRE` arm) is what owns a
+/// [`crate::mobs::MobSim`] to spawn each one into, at
+/// [`crate::mobs::tnt::random_short_fuse`]'s shortened fuse — `TntBlock.prime`
+/// does not itself shorten the fuse (only `wasExploded` does), so a
+/// fire-primed TNT starts at the ordinary
+/// [`crate::mobs::tnt::DEFAULT_FUSE_TIME`].
+#[allow(clippy::too_many_arguments)]
 pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
     world: &S,
     env: FireEnv,
@@ -579,6 +591,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
     current_tick: u64,
     rng: &mut SpawnRng,
     changes: &mut Vec<(BlockPos, String)>,
+    primed_tnt: &mut Vec<BlockPos>,
 ) {
     let state = block_at(world, env, pos);
     if !is_ordinary_fire(&state) {
@@ -660,6 +673,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
             rng,
             age,
             changes,
+            primed_tnt,
         );
     }
 
@@ -705,6 +719,16 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
 /// **Draws `nextInt(chance)` unconditionally**, before comparing against the
 /// neighbour's burn odds, so a check against stone still costs one draw. That is
 /// the single easiest thing here to "optimise" into a divergent RNG stream.
+///
+/// `primed_tnt` is `TntBlock::prime`'s call, transcribed exactly where
+/// vanilla makes it: **after** either branch below, keyed on `oldState` (the
+/// block this call found at `pos`, before either the age-up or the
+/// `removeBlock`) — not on which branch ran. A `minecraft:tnt` neighbour is
+/// therefore reported here whether it burned to air or (structurally
+/// unreachable for TNT, since [`state_with_age`] only ever rebuilds a *fire*
+/// state) aged in place. This function only *reports* the position; spawning
+/// the entity needs a [`crate::mobs::MobSim`] this module has none of — see
+/// [`run_scheduled_tick`]'s own doc for the caller that does.
 #[allow(clippy::too_many_arguments)]
 fn check_burn_out<S: ChunkSource + ?Sized>(
     world: &S,
@@ -714,6 +738,7 @@ fn check_burn_out<S: ChunkSource + ?Sized>(
     rng: &mut SpawnRng,
     age: u32,
     changes: &mut Vec<(BlockPos, String)>,
+    primed_tnt: &mut Vec<BlockPos>,
 ) {
     let state = block_at(world, env, pos);
     let odds = i32::from(block_blast::burn_odds_for_state(&state));
@@ -733,6 +758,9 @@ fn check_burn_out<S: ChunkSource + ?Sized>(
     } else {
         world.set_block(pos.x, pos.y, pos.z, crate::chunk::AIR);
         changes.push((pos, crate::chunk::AIR.to_owned()));
+    }
+    if crate::mobs::tnt::is_tnt_block(&state) {
+        primed_tnt.push(pos);
     }
 }
 
@@ -917,7 +945,7 @@ mod tests {
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut r = rng();
         let mut changes = Vec::new();
-        run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 100, &mut r, &mut changes);
+        run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 100, &mut r, &mut changes, &mut Vec::new());
 
         let mut reference = rng();
         // 1: nextInt(10); 2: nextInt(3); 3-8: six nextInt(300/250).
@@ -945,7 +973,7 @@ mod tests {
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut r = rng();
         let mut changes = Vec::new();
-        run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 100, &mut r, &mut changes);
+        run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 100, &mut r, &mut changes, &mut Vec::new());
 
         let mut reference = rng();
         reference.next_int(10);
@@ -983,7 +1011,7 @@ mod tests {
             fire_at(&rig, pos, 0);
             let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
             let mut changes = Vec::new();
-            run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, round, &mut r, &mut changes);
+            run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, round, &mut r, &mut changes, &mut Vec::new());
             let pending: Vec<_> = queue.drain_due(u64::MAX, usize::MAX);
             let own = pending
                 .iter()
@@ -1007,7 +1035,7 @@ mod tests {
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut r = rng();
         let mut changes = Vec::new();
-        run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 0, &mut r, &mut changes);
+        run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 0, &mut r, &mut changes, &mut Vec::new());
         assert_eq!(
             rig.block_state(pos.x, pos.y, pos.z),
             crate::chunk::AIR,
@@ -1032,7 +1060,7 @@ mod tests {
             for tick in 0..200u64 {
                 let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
                 let mut changes = Vec::new();
-                run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, tick, &mut r, &mut changes);
+                run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, tick, &mut r, &mut changes, &mut Vec::new());
                 if is_fire(&rig.block_state(pos.x, pos.y, pos.z)) {
                     survived += 1;
                 } else {
@@ -1078,7 +1106,7 @@ mod tests {
             fire_at(&rig, pos, 0);
             let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
             let mut changes = Vec::new();
-            run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 0, &mut r, &mut changes);
+            run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 0, &mut r, &mut changes, &mut Vec::new());
             match rig.block_state(0, 99, 0).as_str() {
                 crate::chunk::AIR => to_air += 1,
                 s if is_fire(s) => to_fire += 1,
@@ -1124,7 +1152,7 @@ mod tests {
                 fire_at(&rig, pos, 0);
                 let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
                 let mut changes = Vec::new();
-                run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 0, &mut r, &mut changes);
+                run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 0, &mut r, &mut changes, &mut Vec::new());
                 if is_fire(&rig.block_state(1, 100, 0)) {
                     caught += 1;
                 }
@@ -1171,6 +1199,7 @@ mod tests {
                     tick,
                     &mut r,
                     &mut changes,
+                &mut Vec::new(),
                 );
                 for (at, state) in changes {
                     if is_fire(&state) {
@@ -1208,7 +1237,7 @@ mod tests {
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for tick in 0..50u64 {
             let mut changes = Vec::new();
-            run_scheduled_tick(&rig, env, pos, &mut queue, tick, &mut r, &mut changes);
+            run_scheduled_tick(&rig, env, pos, &mut queue, tick, &mut r, &mut changes, &mut Vec::new());
             assert!(changes.is_empty(), "a frozen fire changes nothing");
             queue.drain_due(u64::MAX, usize::MAX);
         }
@@ -1281,7 +1310,7 @@ mod tests {
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut r = rng();
         let mut changes = Vec::new();
-        run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 0, &mut r, &mut changes);
+        run_scheduled_tick(&rig, FireEnv::OVERWORLD, pos, &mut queue, 0, &mut r, &mut changes, &mut Vec::new());
         assert!(is_fire(&rig.block_state(pos.x, pos.y, pos.z)));
     }
 
@@ -1301,6 +1330,7 @@ mod tests {
             0,
             &mut r,
             &mut changes,
+        &mut Vec::new(),
         );
         assert!(changes.is_empty());
         assert!(queue.is_empty(), "a stale tick must not reschedule");
@@ -1348,6 +1378,7 @@ mod tests {
                         tick,
                         &mut r,
                         &mut changes,
+                    &mut Vec::new(),
                     );
                 }
             }
