@@ -1854,10 +1854,18 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             // fire `on_neighbor_changed` schedules on the rising edge. Handled
             // here, with its own `continue`, because it needs the live
             // container (`block_entities`) and the mob simulation (`mobs`),
-            // neither of which the `Option<String>` chain below has in scope
-            // — the exact gap `crate::redstone_dispenser`'s own module doc
-            // named as the one thing stopping `random_slot`/`plain_toss` from
-            // ever running in production.
+            // neither of which the `Option<String>` chain below has in scope.
+            //
+            // Issue #320's remainder: a dropper always either pushes into a
+            // container ahead or plain-tosses, never consulting the item
+            // table below (`DropperBlock.getDispenseMethod` hardcodes
+            // `DefaultDispenseItemBehavior` regardless of item); a dispenser
+            // instead matches the item against spawn egg, boat, bone meal and
+            // flint-and-steel in turn, falling to a plain toss when none
+            // match or a matched behaviour reports no effect. See
+            // `crate::redstone_dispenser`'s own module doc for the full
+            // behaviour table, including everything still deliberately
+            // unmodelled and why.
             if due.kind == crate::redstone_dispenser::TICK_DISPENSER_FIRE {
                 if crate::redstone_dispenser::is_dispenser_family(&state) {
                     let origin = BlockPos::new(x, y, z);
@@ -1876,43 +1884,151 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                         })
                     });
                     if let (Some(slots), Some(slot)) = (slots, picked) {
-                        // `ItemStack.split(1)`: one item leaves the picked
-                        // slot, the rest — if any — stays.
-                        let mut stack = slots[slot]
+                        let stack = slots[slot]
                             .clone()
                             .expect("random_slot only ever picks an occupied slot");
                         let item = stack.item.clone();
-                        stack.count = stack.count.saturating_sub(1);
-                        let remainder = if stack.count == 0 { None } else { Some(stack) };
-                        block_entities.with(|reg| {
-                            if let Some(entity) = reg.get_mut(origin) {
-                                entity.set_container_slot(slot, remainder);
-                            }
-                        });
+                        let item_str = item.to_string();
                         let face = crate::redstone_dispenser::facing(&state);
                         let center = (f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5);
-                        let (position, velocity) =
-                            crate::redstone_dispenser::plain_toss(center, face, &mut || {
-                                dispenser_rng.next_f64()
+                        // Bounded to this dispenser's own 16x16 column, the
+                        // same approximation `crate::redstone::make_lookup`'s
+                        // every other caller in this file already accepts —
+                        // a target one cell past a chunk edge reads as air.
+                        let lookup = crate::redstone::make_lookup(&column, min_x, min_z);
+
+                        // `consumed`: one item leaves the picked slot.
+                        // `toss`: additionally becomes a tossed item entity.
+                        // Two independent flags because a dropper's container
+                        // push, a spawned mob/vehicle and a bone-meal/ignite
+                        // world edit are all "consumed, not tossed" — only
+                        // the absence of any matching behaviour, or a matched
+                        // behaviour's own explicit fallback (a boat with
+                        // nothing to land on, a dropper with no container
+                        // ahead), is a toss.
+                        let mut consumed = true;
+                        let mut toss = false;
+
+                        if crate::redstone_dispenser::is_dropper(&state) {
+                            // `DropperBlock.dispenseFrom`'s container branch.
+                            let front = face.relative(origin);
+                            let menu = block_entities.with(|reg| reg.get(front).and_then(crate::block_entities::BlockEntity::menu_name));
+                            if menu.is_some_and(crate::redstone_dispenser::is_pushable_container) {
+                                let mut dest = block_entities
+                                    .with(|reg| reg.get(front).map(crate::block_entities::BlockEntity::container_slots))
+                                    .unwrap_or_default();
+                                let mut single = stack.clone();
+                                single.count = 1;
+                                if crate::hopper::try_move_item_into(single, &mut dest).is_none() {
+                                    block_entities.with(|reg| {
+                                        if let Some(entity) = reg.get_mut(front) {
+                                            for (i, s) in dest.into_iter().enumerate() {
+                                                entity.set_container_slot(i, s);
+                                            }
+                                        }
+                                    });
+                                } else {
+                                    // Full: neither a push nor a toss — the
+                                    // item stays exactly where it was.
+                                    consumed = false;
+                                }
+                            } else {
+                                // No container ahead — the same plain toss a
+                                // dispenser's own unmatched-item fallback uses.
+                                toss = true;
+                            }
+                        } else if let Some(entity_type) = crate::spawn_egg::entity_type_for_egg(&item_str) {
+                            let position = crate::redstone_dispenser::spawn_egg_position(origin, face, &lookup);
+                            mobs.with(|sim| {
+                                sim.spawn_species(entity_type, position);
                             });
-                        mobs.with(|sim| {
-                            sim.spawn_item(
-                                item,
-                                lodestone_model::Vec3::new(position.0, position.1, position.2),
-                                lodestone_model::Vec3::new(velocity.0, velocity.1, velocity.2),
-                                // Vanilla's dispensed `ItemEntity` never calls
-                                // `setDefaultPickUpDelay()`, so it keeps the
-                                // constructor's `pickupDelay = 0` — unlike a
-                                // broken block's drop, it is pickable the
-                                // instant it appears.
-                                lodestone_entity::ItemLifecycle {
-                                    age: 0,
-                                    pickup_delay: 0,
-                                    count: 1,
-                                    max_stack_size: lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
-                                },
-                            );
-                        });
+                        } else if let Some(entity_type) = crate::boat::entity_type_for_boat_item(&item_str) {
+                            match crate::redstone_dispenser::boat_dispense(origin, face, crate::boat::BOAT_WIDTH, &lookup) {
+                                crate::redstone_dispenser::BoatDispense::Place { position, yaw } => {
+                                    mobs.with(|sim| {
+                                        sim.spawn_vehicle(entity_type, position, yaw);
+                                    });
+                                }
+                                crate::redstone_dispenser::BoatDispense::Fallback => toss = true,
+                            }
+                        } else if item_str == crate::bone_meal::BONE_MEAL {
+                            let target = face.relative(origin);
+                            let target_state = lookup(target);
+                            let above_state = lookup(BlockPos::new(target.x, target.y + 1, target.z));
+                            match crate::bone_meal::apply_bone_meal(&target_state, &above_state, &mut dispenser_rng) {
+                                crate::bone_meal::BoneMealOutcome::Grew { state: new_state } => {
+                                    world.set_block(target.x, target.y, target.z, &new_state);
+                                    block_tick_out.publish(target.x, target.y, target.z, new_state);
+                                }
+                                crate::bone_meal::BoneMealOutcome::ConsumedNoChange => {}
+                                // Not a target, or a family this crate cannot
+                                // grow: vanilla's own `OptionalDispenseItemBehavior`
+                                // never falls back to a toss here either — the
+                                // item just stays put, unconsumed.
+                                crate::bone_meal::BoneMealOutcome::NotBonemealable
+                                | crate::bone_meal::BoneMealOutcome::NotModelled { .. } => {
+                                    consumed = false;
+                                }
+                            }
+                        } else if item_str == "minecraft:flint_and_steel" {
+                            let (min_y, height) = *fire_env.get_or_insert_with(|| {
+                                let probe = world.column(x.div_euclid(16), z.div_euclid(16));
+                                (probe.min_y, probe.height)
+                            });
+                            let env = crate::fire::FireEnv::overworld_in(min_y, height, world_state.difficulty().0, weather.raining);
+                            // Cross-chunk-correct, unlike `lookup` above:
+                            // `crate::fire`'s functions take a `ChunkSource`
+                            // directly rather than a closure, so this reads
+                            // through `world` itself rather than the bounded
+                            // column — matching the `TICK_FIRE` arm's own
+                            // precedent just above.
+                            match crate::redstone_dispenser::flint_and_steel_ignite(&*world, env, origin, face) {
+                                Some((target, new_state)) => {
+                                    world.set_block(target.x, target.y, target.z, &new_state);
+                                    block_tick_out.publish(target.x, target.y, target.z, new_state);
+                                }
+                                // Same shape as bone meal: no toss fallback in
+                                // vanilla's own `FlintAndSteelDispenseItemBehavior`.
+                                None => consumed = false,
+                            }
+                        } else {
+                            toss = true;
+                        }
+
+                        if consumed {
+                            let mut remaining = stack.clone();
+                            remaining.count = remaining.count.saturating_sub(1);
+                            let remainder = if remaining.count == 0 { None } else { Some(remaining) };
+                            block_entities.with(|reg| {
+                                if let Some(entity) = reg.get_mut(origin) {
+                                    entity.set_container_slot(slot, remainder);
+                                }
+                            });
+                        }
+                        if toss {
+                            let (position, velocity) =
+                                crate::redstone_dispenser::plain_toss(center, face, &mut || {
+                                    dispenser_rng.next_f64()
+                                });
+                            mobs.with(|sim| {
+                                sim.spawn_item(
+                                    item,
+                                    lodestone_model::Vec3::new(position.0, position.1, position.2),
+                                    lodestone_model::Vec3::new(velocity.0, velocity.1, velocity.2),
+                                    // Vanilla's dispensed `ItemEntity` never calls
+                                    // `setDefaultPickUpDelay()`, so it keeps the
+                                    // constructor's `pickupDelay = 0` — unlike a
+                                    // broken block's drop, it is pickable the
+                                    // instant it appears.
+                                    lodestone_entity::ItemLifecycle {
+                                        age: 0,
+                                        pickup_delay: 0,
+                                        count: 1,
+                                        max_stack_size: lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
+                                    },
+                                );
+                            });
+                        }
                     }
                 }
                 continue;
@@ -3012,6 +3128,70 @@ mod tests {
             }
             other => panic!("expected a rain ramp, got {other:?}"),
         }
+    }
+
+    /// `/weather`'s consumer half, driven through the **production** loop:
+    /// a `WeatherRequest` queued on `WorldStateHandle` *before* the loop ever
+    /// ticks must be applied on the very first pass and broadcast — this is
+    /// the gate `crate::world_state`'s own `a_weather_request_is_queued_then_taken_exactly_once`
+    /// cannot be, since that one only proves the queue itself works and never
+    /// drives `run_tick_loop_with_weather` at all. Without the hunk this
+    /// gates, a queued request would sit forever: `take_weather_request` is
+    /// never called by anything else.
+    ///
+    /// Starts clear (not raining) so the flip is unambiguous, and asserts the
+    /// exact two-event order this crate's own application logic produces:
+    /// the immediate `StartRaining` from the request being applied *before*
+    /// this tick's own `weather.tick()` call (see that hunk's own comment for
+    /// why applying first is what makes the flip land on tick one rather than
+    /// never), followed by that same tick's ordinary `RainLevelChanged` ramp.
+    #[tokio::test(start_paused = true)]
+    async fn a_queued_weather_request_is_applied_on_the_loops_first_pass() {
+        let (mobs, out, block_entities) = handles();
+        let clock = Arc::new(TickClock::new());
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        let weather_out = WeatherFeed::default();
+        // Clear, not raining — so a flip to raining is unambiguous.
+        let weather = WeatherState::default();
+
+        let world_state = crate::world_state::WorldStateHandle::new();
+        world_state.request_weather(crate::world_state::WeatherRequest::Rain { duration: i32::MAX });
+
+        let vote = SleepVote::new();
+        let feed = SleepFeed::default();
+        let weather_for_loop = weather_out.clone();
+        tokio::spawn(async move {
+            run_tick_loop_with_weather(
+                mobs,
+                out,
+                block_entities,
+                Arc::clone(&clock),
+                world,
+                block_tick_out,
+                tick_area,
+                ExplosionFeed::default(),
+                weather_for_loop,
+                weather,
+                &vote,
+                &feed,
+                crate::region_source::ScheduledTickHandle::default(),
+                world_state,
+                crate::tick_area::TickFollow::default(),
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(TICK_PERIOD).await;
+        tokio::task::yield_now().await;
+
+        let events = weather_out.drain_all();
+        assert_eq!(
+            events,
+            vec![WeatherEvent::StartRaining, WeatherEvent::RainLevelChanged(0.01)],
+            "a queued Rain request must flip the boolean immediately (before this tick's \
+             own weather.tick() runs) and that same tick must still ramp the level: {events:?}"
+        );
     }
 
     /// Gate (c)'s magnitude half, driven through the **production** loop
