@@ -2422,10 +2422,16 @@ fn resolve_entity_facts(
     // the single owner of what foil means (the HUD's own
     // `item_icon::stack_has_foil` bridges the *other* stack type to the same
     // predicate); nothing here re-spells it.
+    // Keyed on the item id as well as the components, because seven vanilla
+    // items bake `ENCHANTMENT_GLINT_OVERRIDE` into their prototype and glint
+    // with no enchantments at all — an enchanted book is the one a player
+    // notices. Reading only the components answers `false` for every one of
+    // them, which is what left a dropped or held enchanted book flat.
     let foil = match &display_item {
-        Reported::Reported(Some(stack)) => {
-            lodestone_render::glint::has_foil(&stack.components)
-        }
+        Reported::Reported(Some(stack)) => lodestone_render::glint::has_foil_for_stack(
+            &stack.item.to_string(),
+            &stack.components,
+        ),
         _ => false,
     };
     // Borrowed for the identical reason `count`/`foil` are: the wire's
