@@ -854,6 +854,110 @@ where
     }))
 }
 
+/// Moves a player through an End portal — `EndPortalBlock.getPortalDestination`'s
+/// `fromEnd == false` arm, the End's counterpart to [`travel_through_portal`].
+///
+/// **Deliberately not a generalisation of [`travel_through_portal`].** An End
+/// portal has no coordinate scale, no linked-position search and no fresh
+/// portal to build at the far end: [`crate::portal::end_portal_arrival`]
+/// names a **fixed** point, and [`crate::portal::ensure_end_platform`] builds
+/// (or repairs) the obsidian platform there before the chunk stream below can
+/// reach it. Reusing the Nether's destination search here would run
+/// `PortalForcer`'s site-scoring logic over the End's own terrain and could
+/// as easily strand a player over the void as land them on solid ground.
+///
+/// The packet sequence — forget every loaded column, the dimension-change
+/// pair, the new cache centre, the rebuilt view and join stream — is
+/// otherwise identical to [`travel_through_portal`]'s, because it is the same
+/// client-side contract regardless of which portal type triggered it; see
+/// that function's own doc comment for why each step is ordered the way it
+/// is.
+///
+/// **The return trip (`fromEnd == true`) is not implemented.** It needs the
+/// stronghold's exit portal and the dragon fight, neither of which exists in
+/// this crate yet. This function's only caller does not reach it while the
+/// player is already in the End — the same "correct degradation" this
+/// function's own `None` arm below uses for a world with no End sibling
+/// wired, rather than a panic or a silently wrong destination.
+async fn travel_through_end_portal<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    // The source this connection **joined** with — where the End sibling is
+    // reached from, exactly as in `travel_through_portal`.
+    home: SourceRef<'_, S>,
+    state: &mut State,
+    view: &mut ViewTracker,
+    join_stream: &mut crate::join_scheduler::JoinChunkStream<S>,
+    game_mode: GameMode,
+) -> Result<Option<PortalTrip>, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+{
+    let to = crate::dimension::Dimension::End;
+    let sibling: Arc<dyn ChunkSource> = match home.get().sibling(to) {
+        Some(sibling) => sibling,
+        // A single-dimension world (or one built without the End sibling
+        // wired): the same correct degradation `travel_through_portal` falls
+        // back to — the ring completes and nothing happens.
+        None => return Ok(None),
+    };
+    let destination: &dyn ChunkSource = &*sibling;
+
+    let (platform_origin, arrival) = crate::portal::end_portal_arrival();
+    // Written *before* anything is sent, exactly as `travel_through_portal`
+    // commits a freshly built Nether portal before telling the client
+    // anything — so the chunk stream below already carries the platform the
+    // player is about to be standing on.
+    crate::portal::ensure_end_platform(destination, platform_origin);
+
+    let change = proto.encode_dimension_change(to.key(), arrival, game_mode);
+    if change.is_empty() {
+        return Ok(None);
+    }
+
+    for &(cx, cz) in &view.loaded {
+        apply(conn, state, proto.encode_forget_chunk(cx, cz)).await?;
+    }
+    for directive in change {
+        apply(conn, state, directive).await?;
+    }
+
+    let centre_cx = (arrival.x / 16.0).floor() as i32;
+    let centre_cz = (arrival.z / 16.0).floor() as i32;
+    apply(
+        conn,
+        state,
+        proto.encode_chunk_cache_center(centre_cx, centre_cz),
+    )
+    .await?;
+
+    let radius = view.radius;
+    let max_radius = view.max_radius;
+    *view = ViewTracker::new((centre_cx, centre_cz), radius, max_radius);
+    let rings: Vec<Vec<(i32, i32)>> = join_view_rings(radius)
+        .into_iter()
+        .map(|ring| {
+            ring.into_iter()
+                .map(|(dx, dz)| (centre_cx + dx, centre_cz + dz))
+                .collect()
+        })
+        .collect();
+    *join_stream = crate::join_scheduler::JoinChunkStream::ringed(rings);
+
+    debug_assert_eq!(
+        destination.dimension().unwrap_or(crate::dimension::Dimension::Overworld),
+        to,
+        "the destination source must be the dimension we told the client about"
+    );
+
+    Ok(Some(PortalTrip {
+        source: Some(sibling),
+        position: arrival,
+    }))
+}
+
 /// Per-connection view-streaming bookkeeping: which chunk columns has this
 /// connection been sent, and around which chunk column.
 ///
@@ -6391,6 +6495,55 @@ where
             return Ok(());
         }
     }
+    // `EnderEyeItem.useOn`: an eye of ender placed into an unfired
+    // `end_portal_frame`. Also ahead of the placement branch — `ender_eye` is
+    // not a block item, so the census below cannot reach it at all.
+    //
+    // `crate::portal::ignite_end_portal_frame` is the pure decision (its own
+    // doc derives the ring's "every rim frame faces the centre" rule from
+    // vanilla's `BlockPattern`, rather than porting that generic engine); this
+    // call site owns every write, the same split `ignite` above uses. Vanilla
+    // always writes `eye=true` and consumes the eye on any unfired frame,
+    // whether or not a ring completes; the 3x3 `end_portal` fill only follows
+    // when this eye is the twelfth.
+    if held_item.as_deref() == Some("minecraft:ender_eye") {
+        if let Some(ignition) = crate::portal::ignite_end_portal_frame(source, pos) {
+            let (frame_pos, frame_state) = &ignition.frame;
+            source.set_block(frame_pos.x, frame_pos.y, frame_pos.z, frame_state);
+            apply(
+                conn,
+                state,
+                proto.encode_block_update(frame_pos.x, frame_pos.y, frame_pos.z, frame_state),
+            )
+            .await?;
+            if let Some(fill) = &ignition.portal_fill {
+                for (cell, cell_state) in fill {
+                    source.set_block(cell.x, cell.y, cell.z, cell_state);
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_block_update(cell.x, cell.y, cell.z, cell_state),
+                    )
+                    .await?;
+                }
+            }
+            // `ItemStack.shrink(1)`, unconditional in vanilla rather than
+            // routed through `consume(1, user)` — but `consume_one`'s
+            // creative no-op is still the right behaviour either way.
+            if consume_one(inventory, hand_native, game_mode) && game_mode != GameMode::Creative {
+                let remainder = inventory.native(hand_native).cloned();
+                if let Some(menu_slot) = window_zero_menu_slot(hand_native) {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
+                    )
+                    .await?;
+                }
+            }
+            return Ok(());
+        }
+    }
     // The census is the gate: it decides *whether* a placement happens at
     // all and *which* block it writes. `block_entity_for_item` no longer
     // makes that decision — it only supplies the live `BlockEntity` for
@@ -11523,32 +11676,67 @@ where
                 // a 3-tall portal only triggers on its middle row.
                 if let Some((x, y, z)) = player_pos {
                     let feet = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
-                    let standing_in = crate::portal::is_portal(
-                        &source.get().block_state(feet.x, feet.y, feet.z),
-                    )
-                    .then_some(feet);
-                    // `getPortalTransitionTime`: the creative delay for an
-                    // invulnerable (creative) player, the default otherwise. Read off
-                    // the shared rules, so a `/gamerule` change takes effect on the
-                    // next tick rather than at the next join.
+                    let feet_state = source.get().block_state(feet.x, feet.y, feet.z);
+                    // An end portal shares this same counter — vanilla's
+                    // `Entity.portalProcess`/`portalCooldown` are generic across
+                    // portal types, not Nether-specific — so a player cannot be
+                    // simultaneously ramping up a Nether trip and an End trip.
+                    let in_end_portal = crate::portal::is_end_portal(&feet_state);
+                    let standing_in =
+                        (in_end_portal || crate::portal::is_portal(&feet_state)).then_some(feet);
+                    // `getPortalTransitionTime`: `Portal`'s own default is 0 and
+                    // `EndPortalBlock` does not override it, so an end portal
+                    // fires on the very first tick inside — the Nether's
+                    // gamerule-configurable delay is `NetherPortalBlock`'s own
+                    // override, not the shared default. Read off the shared
+                    // rules, so a `/gamerule` change takes effect on the next
+                    // tick rather than at the next join.
                     let rules = world.rules();
-                    let transition = if Abilities::for_mode(game_mode).invulnerable {
+                    let transition = if in_end_portal {
+                        0
+                    } else if Abilities::for_mode(game_mode).invulnerable {
                         rules.players_nether_portal_creative_delay()
                     } else {
                         rules.players_nether_portal_default_delay()
                     }
                     .max(0);
                     if let Some(entry) = portal.tick(standing_in, transition) {
-                        // `allow_entering_nether_using_portals` is checked here rather
-                        // than inside the tracker: vanilla passes
-                        // `canUsePortal(false)` into `processPortalTeleportation`, so
-                        // the counter still climbs while travel is forbidden, and
-                        // turning the rule back on lets a player who has been standing
-                        // there travel immediately.
-                        let allowed = rules.allow_entering_nether_using_portals()
-                            || source.dimension() == crate::dimension::Dimension::Nether;
-                        if allowed {
-                            let trip = travel_through_portal(
+                        let entry_state = source.get().block_state(entry.x, entry.y, entry.z);
+                        let trip = if crate::portal::is_end_portal(&entry_state) {
+                            // `EndPortalBlock.getPortalDestination`'s `fromEnd`
+                            // branch is not implemented (see
+                            // `travel_through_end_portal`'s own doc) — reached
+                            // only by standing in an end portal *inside* the
+                            // End, which does not happen without the
+                            // stronghold's exit portal. Guarding it here rather
+                            // than inside the tracker keeps that gap a single,
+                            // named "do nothing" rather than a wrong
+                            // destination.
+                            if source.dimension() == crate::dimension::Dimension::End {
+                                None
+                            } else {
+                                travel_through_end_portal(
+                                    conn,
+                                    proto,
+                                    home,
+                                    &mut state,
+                                    &mut view,
+                                    &mut join_stream,
+                                    game_mode,
+                                )
+                                .await?
+                            }
+                        } else if rules.allow_entering_nether_using_portals()
+                            || source.dimension() == crate::dimension::Dimension::Nether
+                        {
+                            // `allow_entering_nether_using_portals` is checked here
+                            // rather than inside the tracker: vanilla passes
+                            // `canUsePortal(false)` into `processPortalTeleportation`,
+                            // so the counter still climbs while travel is forbidden,
+                            // and turning the rule back on lets a player who has been
+                            // standing there travel immediately. The End has no such
+                            // gamerule gate in vanilla.
+                            travel_through_portal(
                                 conn,
                                 proto,
                                 home,
@@ -11560,28 +11748,30 @@ where
                                 (x, y, z),
                                 game_mode,
                             )
-                            .await?;
-                            if let Some(trip) = trip {
-                                player_pos = Some((
-                                    trip.position.x,
-                                    trip.position.y,
-                                    trip.position.z,
-                                ));
-                                portal.begin_cooldown();
-                                pending_travel = Some(trip.source);
-                                // The deferred join stream this trip installed has to
-                                // start a fresh batch, so close any batch the previous
-                                // dimension's stream left open.
-                                if join_batch_open {
-                                    apply(
-                                        conn,
-                                        &mut state,
-                                        proto.end_chunk_batch(join_batch_size),
-                                    )
-                                    .await?;
-                                    join_batch_open = false;
-                                    join_batch_size = 0;
-                                }
+                            .await?
+                        } else {
+                            None
+                        };
+                        if let Some(trip) = trip {
+                            player_pos = Some((
+                                trip.position.x,
+                                trip.position.y,
+                                trip.position.z,
+                            ));
+                            portal.begin_cooldown();
+                            pending_travel = Some(trip.source);
+                            // The deferred join stream this trip installed has to
+                            // start a fresh batch, so close any batch the previous
+                            // dimension's stream left open.
+                            if join_batch_open {
+                                apply(
+                                    conn,
+                                    &mut state,
+                                    proto.end_chunk_batch(join_batch_size),
+                                )
+                                .await?;
+                                join_batch_open = false;
+                                join_batch_size = 0;
                             }
                         }
                     }
