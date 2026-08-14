@@ -158,6 +158,12 @@ mod falling_blocks;
 // `tick_vehicles`.
 mod vehicles;
 
+// No re-export: `LiveBolt` is `pub(super)`, visible within `mobs` and its
+// descendants, and every `impl MobSim` method here is either `pub` already or
+// `pub(super)` because only `crate::tick` (through `MobHandle::with`) and this
+// module's own driver plumbing call it.
+mod lightning;
+
 /// Reads a computed attribute value from `attrs` by bare path (e.g.
 /// `"max_health"`), applying the registry default when the attribute is not
 /// explicitly present — mirrors [`AttributeMap::value`]'s own fallback so a
@@ -406,6 +412,14 @@ pub struct PlayerPerception {
     /// some species or computed once per (player, species) pair by the caller,
     /// which is the feed's job, not the producer's.
     pub held_item: Option<ResourceKey>,
+    /// The player's normalised view direction — vanilla
+    /// `Entity.calculateViewVector(xRot, yRot)`, what `LivingEntity.isLookingAtMe`
+    /// calls as `target.getViewVector(1.0F)`. Feeds the enderman's gaze test
+    /// (issue #458, primitive 2): [`lodestone_entity::ai::mob::is_in_view_cone`]
+    /// takes this directly as its `look` argument. `Vec3::new(0.0, 0.0, 1.0)`
+    /// (looking due "south", vanilla's own zero-rotation direction) is the
+    /// honest default for a producer that has not resolved a real angle yet.
+    pub view_direction: Vec3,
 }
 
 /// **Who** a connected player is, as the mob simulation needs to know it.
@@ -826,6 +840,14 @@ pub struct SimMob<'w> {
     /// nothing in this sim needs the delayed-load half `restoreLeashFromSave`
     /// exists for (persistence is a different crate's concern).
     leash_holder: Option<LeashHolder>,
+    /// `MushroomCow.lastLightningBoltUUID` — which bolt (by this sim's own
+    /// lightning-bolt entity id, not a real UUID; see `mobs/lightning.rs`'s
+    /// module doc for why) last toggled this mob's variant, so a bolt whose
+    /// `hit_entities` fires across several ticks cannot flip the same mob
+    /// twice. `None` means never struck. Read by no species today except the
+    /// mooshroom guard itself — see that module's doc for why nothing yet
+    /// consumes the toggle this guards.
+    last_lightning_bolt: Option<i32>,
 }
 
 impl<'w> SimMob<'w> {
@@ -1908,6 +1930,24 @@ pub struct MobSim<'w> {
     /// makes, on its own stream for the same isolation reason
     /// [`patrol_rng`](Self::patrol_rng) is separate from every other roll.
     trader_rng: SpawnRng,
+    /// Live `LightningBolt` sidecars (issue #269), keyed by network entity id —
+    /// the same shape [`orbs`]'s [`OrbState`] map establishes: no
+    /// [`NavigatingMob`]/[`GoalSelector`] body, because a bolt has no box and
+    /// no AI. See `mobs/lightning.rs`'s module doc.
+    lightning_bolts: HashMap<i32, lightning::LiveBolt>,
+    /// Fire-ignition attempts a live bolt's [`lightning::tick_bolt`] made this
+    /// tick, awaiting the driver's world mutation — the same handoff shape as
+    /// [`pending_grazes`](Self::pending_grazes) and for the identical reason:
+    /// `world: &'w ChunkWorld` is an immutable pathfinding snapshot, not the
+    /// live `ChunkStore`, so this sim cannot place the fire itself. Drained by
+    /// [`take_lightning_fires`](Self::take_lightning_fires).
+    pending_lightning_fires: Vec<BlockPos>,
+    /// Every projectile-vs-block impact this tick's
+    /// [`resolve_projectile_impacts`](Self::resolve_projectile_impacts) found,
+    /// awaiting the driver — see [`ProjectileBlockHit`]'s own doc for why this
+    /// sim cannot resolve a target block's power write itself. Drained by
+    /// [`take_projectile_block_hits`](Self::take_projectile_block_hits).
+    pending_projectile_block_hits: Vec<ProjectileBlockHit>,
 }
 
 /// One live `AbstractBoat` — wire identity, motion, and who is aboard.
@@ -1983,6 +2023,36 @@ pub struct Detonation {
     pub radius: f32,
 }
 
+/// One projectile-vs-block impact [`MobSim::resolve_projectile_impacts`] found
+/// (issue #322), for [`take_projectile_block_hits`](MobSim::take_projectile_block_hits)
+/// to hand a driver — the same handoff shape as
+/// [`pending_grazes`](MobSim::pending_grazes)/[`pending_lightning_fires`](MobSim::pending_lightning_fires)
+/// and for the identical reason: `MobSim::world` is an immutable pathfinding
+/// snapshot, not the live `ChunkStore`, so this sim can neither read the real
+/// current block state (to check it is actually still a `minecraft:target`)
+/// nor write a new one, and has no `ScheduledTickQueue` to consult for
+/// `redstone_target::apply_hit`'s `has_pending_decay` guard. This is deliberately
+/// data about *every* block a projectile stopped against, not just a target —
+/// the driver is what already knows which block is there and dispatches
+/// accordingly, the same division `pending_lightning_fires` draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProjectileBlockHit {
+    /// The struck cell.
+    pub pos: BlockPos,
+    /// Which face axis the hit entered through —
+    /// `crate::redstone_target::redstone_strength`'s own `hit_axis` parameter.
+    pub axis: crate::redstone_target::HitAxis,
+    /// The hit point's fractional position within the cell, each in `[0.0,
+    /// 1.0]` — `Mth.frac(hitLocation.{x,y,z})`.
+    pub frac: Vec3,
+    /// Whether the projectile was an arrow (`redstone_target::activation_duration`'s
+    /// 20-vs-8-tick split) — `AbstractArrow`, not `SpectralArrow`/`Trident`
+    /// carrying their own subclass distinctions this sim does not model; see
+    /// [`resolve_projectile_impacts`](MobSim::resolve_projectile_impacts) for
+    /// exactly which registry paths set this.
+    pub is_arrow: bool,
+}
+
 // The integrated server owns the sim behind an `Arc<Mutex<…>>` and hands it to
 // a `tokio::spawn`ed connection task as an `EntitySource`, which requires
 // `Send`. `MobSim` stores goals as `Box<dyn Goal>`, so this holds only because
@@ -2033,6 +2103,9 @@ impl<'w> MobSim<'w> {
             trader_spawn_delay: WANDERING_TRADER_SPAWN_DELAY,
             trader_spawn_chance: WANDERING_TRADER_MIN_SPAWN_CHANCE,
             trader_rng: SpawnRng::new(WANDERING_TRADER_SPAWN_SEED),
+            lightning_bolts: HashMap::new(),
+            pending_lightning_fires: Vec::new(),
+            pending_projectile_block_hits: Vec::new(),
         }
     }
 
@@ -2291,6 +2364,7 @@ impl<'w> MobSim<'w> {
             temper: 0,
             knockback_resistance,
             leash_holder: None,
+            last_lightning_bolt: None,
         });
         self.mobs.last_mut().expect("just pushed")
     }
@@ -2950,6 +3024,7 @@ impl<'w> MobSim<'w> {
         let mut parent = vec![None; n];
         let mut owner = vec![None; n];
         let mut patrol_group = vec![None; n];
+        let mut stared_at = vec![false; n];
 
         // --- persistent anger (issue #458, primitive 1) --------------------
         //
@@ -3107,6 +3182,37 @@ impl<'w> MobSim<'w> {
             if me.is_patrolling() && !me.is_patrol_leader() {
                 patrol_group[i] = nearest_patrol_leader_target(&self.mobs, pos, me.id);
             }
+
+            // --- gaze (issue #458, primitive 2) -----------------------------
+            // `MobController::is_being_stared_at` is host-fed: the geometry is
+            // `lodestone_entity::ai::mob::is_in_view_cone`, vanilla's exact
+            // `dot > 1.0 - coneSize / dist`. Line of sight is the same
+            // disclosed gap `find_nearest_target` already carries — no world
+            // raycast at this seam, erring permissive. The carved-pumpkin
+            // disguise check (`PLAYER_NOT_WEARING_DISGUISE_ITEM`) is not
+            // modelled either: `PlayerPerception` has no armour-slot data yet.
+            //
+            // `0.025` is the enderman's own `coneSize`
+            // (`EnderMan.java:210`); this feed is per-mob, not per-species, so
+            // every mob gets the same tolerance today — the only consumer is
+            // `EndermanFreezeWhenLookedAt`, so this is not yet observably
+            // wrong, but a second gaze-gated species with a different
+            // `coneSize` would need this to become species-aware.
+            let mob_eye = Vec3::new(pos.x, pos.y + f64::from(me.shape().height) * 0.85, pos.z);
+            stared_at[i] = self.players.iter().any(|p| {
+                let player_eye = Vec3::new(
+                    p.perception.position.x,
+                    p.perception.position.y + PLAYER_EYE_HEIGHT,
+                    p.perception.position.z,
+                );
+                lodestone_entity::ai::mob::is_in_view_cone(
+                    player_eye,
+                    p.perception.view_direction,
+                    mob_eye,
+                    0.025,
+                    true,
+                )
+            });
         }
 
         for (i, m) in self.mobs.iter_mut().enumerate() {
@@ -3126,7 +3232,8 @@ impl<'w> MobSim<'w> {
                 .set_love_partner_candidate(partner[i])
                 .set_parent_candidate(parent[i])
                 .set_owner(owner[i])
-                .set_patrol_group_target(patrol_group[i]);
+                .set_patrol_group_target(patrol_group[i])
+                .set_stared_at(stared_at[i]);
         }
     }
 
@@ -3782,6 +3889,48 @@ impl<'w> MobSim<'w> {
     /// is entity metadata on the wire.
     pub fn take_grazes(&mut self) -> Vec<(BlockPos, EatenBlock)> {
         std::mem::take(&mut self.pending_grazes)
+    }
+
+    /// Drains every fire-ignition attempt a live lightning bolt made this
+    /// tick — [`pending_lightning_fires`](Self::pending_lightning_fires)'s own
+    /// doc explains why this sim cannot place the fire itself. The driver
+    /// (`crate::tick::run_tick_loop_with_weather`) is expected to test each
+    /// position with `crate::fire::can_survive` against the *live* world and
+    /// write `crate::fire::state_for_placement` only where the cell is air and
+    /// survives — this drain hands over candidates, not verified placements,
+    /// exactly matching `LightningBolt.spawnFire`'s own "air and canSurvive"
+    /// gate at the call site rather than here.
+    pub fn take_lightning_fires(&mut self) -> Vec<BlockPos> {
+        std::mem::take(&mut self.pending_lightning_fires)
+    }
+
+    /// Drains every projectile-vs-block impact recorded since the last call —
+    /// see [`ProjectileBlockHit`]'s own doc for why this sim hands the write
+    /// to a driver rather than resolving it here. The driver is expected to
+    /// read the *live* block at each `pos`, check it is really still
+    /// `redstone_target::TARGET`, consult its own `ScheduledTickQueue` for
+    /// `has_pending_decay`, and call `redstone_target::apply_hit`.
+    pub fn take_projectile_block_hits(&mut self) -> Vec<ProjectileBlockHit> {
+        std::mem::take(&mut self.pending_projectile_block_hits)
+    }
+
+    /// Every live mob or connected player's position, floored to a
+    /// [`BlockPos`] — `findLightningTargetAround`'s
+    /// `getEntitiesOfClass(LivingEntity.class, searchBounds, ...)` census,
+    /// pre-culling deferred to the caller (`lightning::find_lightning_target_around`
+    /// filters to its own search box internally, matching vanilla's own
+    /// `getEntitiesOfClass` shape).
+    #[must_use]
+    pub fn living_entity_positions(&self) -> Vec<BlockPos> {
+        self.mobs
+            .iter()
+            .map(|m| lightning::floor_block_pos(m.position()))
+            .chain(
+                self.players
+                    .iter()
+                    .map(|p| lightning::floor_block_pos(p.perception.position)),
+            )
+            .collect()
     }
 
     /// The number of ticks advanced so far.
@@ -4850,6 +4999,37 @@ impl<'w> MobSim<'w> {
                 leash_link: None,
             });
         }
+        // `LightningBolt` (issue #269). Sorted ids for the same reason the two
+        // loops above are: a bolt is short-lived but real entities, and a
+        // `HashMap` order would reshuffle which of two simultaneous strikes
+        // `EntityStreamer::sync` updates first.
+        //
+        // **Empty metadata is correct, not an omission**: `LightningBolt`
+        // overrides `defineSynchedData` with an empty body — it registers no
+        // accessor at all (`.cache/mc/26.2/src/net/minecraft/world/entity/LightningBolt.java`),
+        // so there is nothing to send.
+        let mut bolt_ids: Vec<i32> = self.lightning_bolts.keys().copied().collect();
+        bolt_ids.sort_unstable();
+        for id in bolt_ids {
+            let Some(bolt) = self.lightning_bolts.get(&id) else {
+                continue;
+            };
+            out.push(EntitySnapshot {
+                id,
+                uuid: bolt.uuid,
+                entity_type: lightning::lightning_bolt_entity_type(),
+                position: bolt.pos,
+                // A bolt never rotates or moves once struck.
+                rotation: Rotation::new(0.0, 0.0),
+                head_yaw: 0.0,
+                velocity: Vec3::new(0.0, 0.0, 0.0),
+                metadata: Vec::new(),
+                // `LightningBolt` does not override `getAddEntityPacket`.
+                object_data: 0,
+                // Never a `Leashable`.
+                leash_link: None,
+            });
+        }
         out
     }
 }
@@ -5698,6 +5878,7 @@ mod follow_range_tests {
         sim.set_players(vec![PlayerPerception {
             position: Vec3::new(distance, 0.0, 0.0),
             held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, 1.0),
         }]);
         for _ in 0..ticks {
             sim.tick();
@@ -6180,6 +6361,81 @@ mod primitives_tests {
             sim.get(pet_id).expect("alive").owner_position(),
             Some(owner_pos),
             "the feed must resolve the owner id to the owner's current position"
+        );
+    }
+
+    /// Primitive 2 (issue #458): the gaze feed reaches `is_being_stared_at`
+    /// in production, not just in `lodestone_entity`'s own hermetic gates.
+    ///
+    /// **The discriminating pair**: two sims, each with one enderman at the
+    /// *identical* position and one player at the *identical* position — the
+    /// only difference is the player's `view_direction`. A gate that only
+    /// varied position (closer/farther) could not tell a real gaze test from
+    /// a distance check; this one cannot vary anything else, because nothing
+    /// else differs.
+    #[test]
+    fn the_gaze_feed_reaches_is_being_stared_at_and_a_look_away_does_not() {
+        let world = flat_world();
+        let player_pos = Vec3::new(0.0, 0.0, 0.0);
+        let enderman_pos = Vec3::new(0.0, 0.0, 10.0);
+
+        // Resolve the real eye positions the feed itself uses, rather than
+        // guessing them — `feed_perception`'s own formula for the mob eye
+        // (`height * 0.85`) and `PLAYER_EYE_HEIGHT` for the player.
+        let mut probe = MobSim::new(&world);
+        let probe_id = probe
+            .spawn_species(ResourceKey::from_str("minecraft:enderman").expect("valid key"), enderman_pos)
+            .id();
+        let mob_eye_height = f64::from(probe.get(probe_id).expect("spawned").shape().height) * 0.85;
+        let mob_eye = Vec3::new(enderman_pos.x, enderman_pos.y + mob_eye_height, enderman_pos.z);
+        let player_eye = Vec3::new(player_pos.x, player_pos.y + PLAYER_EYE_HEIGHT, player_pos.z);
+        let delta = Vec3::new(mob_eye.x - player_eye.x, mob_eye.y - player_eye.y, mob_eye.z - player_eye.z);
+        let dist = (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z).sqrt();
+        let looking_at = Vec3::new(delta.x / dist, delta.y / dist, delta.z / dist);
+        // Exactly opposite the enderman — as far outside the cone as a unit
+        // vector can be (`dot == -1`), not a near-miss.
+        let looking_away = Vec3::new(-looking_at.x, -looking_at.y, -looking_at.z);
+
+        // The naive (non-distance-adjusted) hypothesis this feed's own doc
+        // warns against: reading `coneSize` (0.025) as the tolerance
+        // directly gives threshold `1.0 - 0.025 = 0.975`. At `looking_at`
+        // (`dot == 1.0`) both the naive and the real (`1.0 - 0.025/dist`)
+        // hypotheses agree — accepted either way — which is exactly why the
+        // boundary case belongs to `lodestone_entity`'s own
+        // `is_in_view_cone_boundary_at_the_endermans_own_cone_size` gate and
+        // not here; this test's job is only "does the feed reach the goal
+        // at all", which a dead-on look and a dead-opposite one already
+        // settle without needing a razor's-edge input.
+        assert!(dist > 1.0, "the fixture must not degenerate to zero distance: dist={dist}");
+
+        let mut watched = MobSim::new(&world);
+        let watched_id = watched
+            .spawn_species(ResourceKey::from_str("minecraft:enderman").expect("valid key"), enderman_pos)
+            .id();
+        watched.set_players(vec![PlayerPerception {
+            position: player_pos,
+            held_item: None,
+            view_direction: looking_at,
+        }]);
+        watched.tick();
+        assert!(
+            watched.get(watched_id).expect("alive").mob.is_being_stared_at(),
+            "a player looking straight at the enderman must set is_being_stared_at"
+        );
+
+        let mut unwatched = MobSim::new(&world);
+        let unwatched_id = unwatched
+            .spawn_species(ResourceKey::from_str("minecraft:enderman").expect("valid key"), enderman_pos)
+            .id();
+        unwatched.set_players(vec![PlayerPerception {
+            position: player_pos,
+            held_item: None,
+            view_direction: looking_away,
+        }]);
+        unwatched.tick();
+        assert!(
+            !unwatched.get(unwatched_id).expect("alive").mob.is_being_stared_at(),
+            "a player looking directly away, from the identical position, must not"
         );
     }
 }
@@ -6730,6 +6986,7 @@ mod leash_tests {
             perception: PlayerPerception {
                 position: pos,
                 held_item: None,
+                view_direction: Vec3::new(0.0, 0.0, 1.0),
             },
         }
     }
