@@ -983,10 +983,10 @@ a plugin:** a plugin cannot order a system against item physics, or against anyt
 same way, until Stage 4 lands, because until then it is not a system at all — it is a plain function
 called from inside another system, with no `SystemSet` label to anchor on.
 
-**`unsafe_code = "deny"` is a workspace-wide lint**, set once in the root `Cargo.toml`
-(`[workspace.lints.rust] unsafe_code = "deny"`, line 90) and inherited by every crate whose
-`Cargo.toml` sets `[lints] workspace = true` — confirmed for `lodestone-ecs`
-(`crates/lodestone-ecs/Cargo.toml:8-9`) and for every crate checked in this investigation. This closes
+**`unsafe_code = "deny"` is a workspace-wide lint**, set once in the root `Cargo.toml`'s
+`[workspace.lints.rust]` table and inherited by every crate whose
+`Cargo.toml` sets `[lints] workspace = true` — confirmed for `lodestone-ecs`'s own `Cargo.toml`
+and for every crate checked in this investigation. This closes
 the two usual routes around the `'static` constraint above (`unsafe impl` a shorter-lived type as
 `'static`, or hand-roll a raw-pointer resource) for the shipped binary. **It is not a plugin sandbox**
 — an external plugin crate sets its own lints and can simply not opt into workspace lints, so this

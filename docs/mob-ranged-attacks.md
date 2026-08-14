@@ -27,8 +27,8 @@ BlazeFireballGoal::tick
   -> NavigatingMob.launches                              (lodestone-entity ends here)
   -> MobSim::tick drains take_new_launches()              <-- NOT WIRED YET (#460)
   -> MobSim::spawn_projectile -> ProjectileRegistry
-  -> MobSim::snapshots() lowers it to an EntitySnapshot   (mobs.rs:2281-2310)
-  -> LiveMobSource -> EntityStreamer::sync -> encode_add_entity  (server.rs:248-262)
+  -> MobSim::snapshots() lowers it to an EntitySnapshot   (mobs/mod.rs)
+  -> LiveMobSource -> EntityStreamer::sync -> encode_add_entity  (server.rs)
   -> a real client sees the projectile appear
 ```
 
