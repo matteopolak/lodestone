@@ -311,6 +311,14 @@ mod redstone_wire;
 /// `region_source` is: it is a `std::fs` schema over `lodestone-anvil`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod player_data;
+/// [`live_save::LiveSaveSlot`] — the one piece of the player-save story that
+/// has to compile on every target. Deliberately **not** `cfg`-gated, unlike
+/// `player_data` above: `LiveSaveSlot` is threaded unconditionally through
+/// `crate::server`'s and `crate::integrated`'s connection-setup functions
+/// (shared by both the native and the wasm32 `serve_play`), so the type has
+/// to exist everywhere even though its filesystem-bearing payload — gated
+/// inside this module itself — cannot. See the module's own doc comment.
+pub mod live_save;
 /// Per-chunk entity persistence (issue #303) — the `entities/` region set that
 /// makes a mob and a dropped item survive a restart. Native only, like
 /// `player_data` and `region_source`.
