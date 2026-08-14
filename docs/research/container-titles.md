@@ -17,7 +17,7 @@ existing behaviour (with evidence) or a patch specification for something genuin
 
 Three of the four claims in the report are **already fixed and pixel-gated** in the current
 committed tree (`crates/lodestone-shell/src/container.rs`, commit `812eb67` "fix(container):
-vanilla's two screen labels — right words, typeface, anchors (#370)", plus `76fff73`/issue #52 for
+vanilla's two screen labels — right words, typeface, anchors", plus `76fff73` for
 the language-table resolution). The player report reads like it predates that fix, or was tested
 against a build before it landed — `git status` at the start of this task shows `container.rs`,
 `app.rs` and `sim.rs` are **not** among the files other agents currently have modified, so what
@@ -35,60 +35,60 @@ is a ready-to-apply, additive fix for exactly that gap.
 ## 1–2. The string and its capitalisation
 
 Vanilla never sends the words "Crafting"; `ClientboundOpenScreenPacket` carries a `Component`
-(`.cache/mc/26.2/src/net/minecraft/network/protocol/game/ClientboundOpenScreenPacket.java:24`), and
+(`.cache/mc/26.2/src/net/minecraft/network/protocol/game/ClientboundOpenScreenPacket.java`), and
 the **server** decides whether that component is the container's default translatable key or a
 custom literal name — see §4. The default key comes from each container block entity's
-`getDefaultName()` (`BaseContainerBlockEntity.java:66`), one `DEFAULT_NAME` constant per type:
+`getDefaultName()` (`BaseContainerBlockEntity.getDefaultName`), one `DEFAULT_NAME` constant per type:
 
 | container | wire `menu_type` | `container.*` key | `en_us.json` string | block entity source |
 |---|---|---|---|---|
-| Chest | `minecraft:generic_9x3`/`9x6` | `container.chest` | "Chest" | `ChestBlockEntity.java:30` |
+| Chest | `minecraft:generic_9x3`/`9x6` | `container.chest` | "Chest" | `ChestBlockEntity.DEFAULT_NAME` |
 | Ender Chest | `minecraft:generic_9x3` | `container.enderchest` | "Ender Chest" | (client-only menu, `EnderChestBlock.java`) |
 | Barrel | `minecraft:generic_9x3` | `container.barrel` | "Barrel" | (`BarrelBlockEntity`, not separately checked) |
-| Shulker Box | `minecraft:shulker_box` | `container.shulkerBox` | "Shulker Box" | `ShulkerBoxBlockEntity.java:44` |
+| Shulker Box | `minecraft:shulker_box` | `container.shulkerBox` | "Shulker Box" | `ShulkerBoxBlockEntity.DEFAULT_NAME` |
 | Crafting Table | `minecraft:crafting` | `container.crafting` | "Crafting" | `CraftingTableBlock.java` |
-| Player inventory (E) | *(no packet — local screen)* | `container.crafting` | "Crafting" | `InventoryScreen.java:28` |
-| Furnace | `minecraft:furnace` | `container.furnace` | "Furnace" | `FurnaceBlockEntity.java:12` |
-| Blast Furnace | `minecraft:blast_furnace` | `container.blast_furnace` | "Blast Furnace" | `BlastFurnaceBlockEntity.java:13` |
-| Smoker | `minecraft:smoker` | `container.smoker` | "Smoker" | `SmokerBlockEntity.java:13` |
-| Brewing Stand | `minecraft:brewing_stand` | `container.brewing` | "Brewing Stand" | `BrewingStandBlockEntity.java:40` |
-| Dispenser | `minecraft:generic_3x3` | `container.dispenser` | "Dispenser" | `DispenserBlockEntity.java:18` |
-| Dropper | `minecraft:generic_3x3` | `container.dropper` | "Dropper" | `DropperBlockEntity.java:8` |
-| Hopper | `minecraft:hopper` | `container.hopper` | "Item Hopper" | `HopperBlockEntity.java:36` |
-| Crafter | `minecraft:crafter_3x3` | `container.crafter` | "Crafter" | `CrafterBlockEntity.java:35` |
+| Player inventory (E) | *(no packet — local screen)* | `container.crafting` | "Crafting" | `InventoryScreen`'s constructor |
+| Furnace | `minecraft:furnace` | `container.furnace` | "Furnace" | `FurnaceBlockEntity.DEFAULT_NAME` |
+| Blast Furnace | `minecraft:blast_furnace` | `container.blast_furnace` | "Blast Furnace" | `BlastFurnaceBlockEntity.DEFAULT_NAME` |
+| Smoker | `minecraft:smoker` | `container.smoker` | "Smoker" | `SmokerBlockEntity.DEFAULT_NAME` |
+| Brewing Stand | `minecraft:brewing_stand` | `container.brewing` | "Brewing Stand" | `BrewingStandBlockEntity.DEFAULT_NAME` |
+| Dispenser | `minecraft:generic_3x3` | `container.dispenser` | "Dispenser" | `DispenserBlockEntity.DEFAULT_NAME` |
+| Dropper | `minecraft:generic_3x3` | `container.dropper` | "Dropper" | `DropperBlockEntity.DEFAULT_NAME` |
+| Hopper | `minecraft:hopper` | `container.hopper` | "Item Hopper" | `HopperBlockEntity.DEFAULT_NAME` |
+| Crafter | `minecraft:crafter_3x3` | `container.crafter` | "Crafter" | `CrafterBlockEntity.DEFAULT_NAME` |
 | Anvil | `minecraft:anvil` | `container.repair` | "Repair & Name" | (`AnvilMenu`, server-built title) |
 | Grindstone | `minecraft:grindstone` | `container.grindstone_title` | "Repair & Disenchant" | (`GrindstoneMenu`) |
-| Enchanting Table | `minecraft:enchantment` | `container.enchant` | "Enchant" | `EnchantingTableBlockEntity.java:20` |
+| Enchanting Table | `minecraft:enchantment` | `container.enchant` | "Enchant" | `EnchantingTableBlockEntity.DEFAULT_NAME` |
 | Loom | `minecraft:loom` | `container.loom` | "Loom" | (`LoomBlock.java`) |
 | Stonecutter | `minecraft:stonecutter` | `container.stonecutter` | "Stonecutter" | (`StonecutterBlock.java`) |
 | Cartography Table | `minecraft:cartography_table` | `container.cartography_table` | "Cartography Table" | (`CartographyTableBlock.java`) |
-| Beacon | `minecraft:beacon` | `container.beacon` | "Beacon" | `BeaconBlockEntity.java:67` |
+| Beacon | `minecraft:beacon` | `container.beacon` | "Beacon" | `BeaconBlockEntity.DEFAULT_NAME` |
 | Merchant (villager) | `minecraft:merchant` | *(no static key — `MerchantScreen` composes `merchant.title` + level)* | — | out of scope, see §5 |
-| Player's own second label | *(client-side, not from a packet)* | `container.inventory` | "Inventory" | `Inventory.java:55` |
+| Player's own second label | *(client-side, not from a packet)* | `container.inventory` | "Inventory" | `Inventory.DEFAULT_NAME` |
 
-`en_us.json` line numbers (`.cache/mc/26.2/src/assets/minecraft/lang/en_us.json`): `container.barrel`
-3193, `blast_furnace` 3197, `brewing` 3198, `cartography_table` 3199, `chest` 3200, `crafter` 3202,
-`crafting` 3203, `dispenser` 3205, `dropper` 3206, `enchant` 3207, `enderchest` 3214, `furnace` 3215,
-`grindstone_title` 3216, `hopper` 3217, `inventory` 3218, `loom` 3221, `repair` 3222, `shulkerBox`
-3225, `smoker` 3229, `stonecutter` 3231.
+`en_us.json` keys (`.cache/mc/26.2/src/assets/minecraft/lang/en_us.json`): `container.barrel`,
+`blast_furnace`, `brewing`, `cartography_table`, `chest`, `crafter`,
+`crafting`, `dispenser`, `dropper`, `enchant`, `enderchest`, `furnace`,
+`grindstone_title`, `hopper`, `inventory`, `loom`, `repair`, `shulkerBox`,
+`smoker`, `stonecutter`.
 
 **Where our string comes from.** `decode_open_screen`
-(`crates/protocol/v770/src/adapter.rs:1376-1390`) decodes the wire NBT title into a
+(`crates/protocol/v770/src/adapter/inventory.rs`) decodes the wire NBT title into a
 `lodestone_model::Text` (`Text::from_nbt`, preserving the `translate`/`literal` distinction — it
 does **not** flatten early). That `Text` rides `ClientEvent::ScreenOpened` through
-`Menus::apply` (`crates/lodestone-game/src/menus.rs:224-236`) to `Menus::opened_title()`
-(`menus.rs:199`), and is flattened to a string exactly once, at the shell's read boundary:
+`Menus::apply` (`crates/lodestone-game/src/menus.rs`) to `Menus::opened_title()`
+(`menus.rs`), and is flattened to a string exactly once, at the shell's read boundary:
 `app.rs::WindowApp::redraw` calls
 `crate::container::menu_title(&open.title, self.sim.translator().as_ref())`, which is
 `lodestone_game::text::resolve_to_string` (`container.rs::frame::menu_title`) — i.e. resolved through the
 **live language table** (`Language::translator`), not the model crate's own 14-key stub
-(`lodestone_model::Text::to_plain_string`'s doc comment at `crates/lodestone-model/src/text.rs:338-364`
+(`lodestone_model::Text::to_plain_string`'s doc comment in `crates/lodestone-model/src/text.rs`
 names this exact defect and cites this exact fix by number: "the container-screen title did not
 [go through the language table], and shipped `container.crafting` where 'Crafting' belonged").
 
 The player inventory screen (opened with `E`, no packet involved) gets the same treatment via
 `container::player_inventory_title` (`container.rs::frame::player_inventory_title`), which resolves
-`Text::translate("container.crafting", vec![])` — matching `InventoryScreen.java:28` exactly,
+`Text::translate("container.crafting", vec![])` — matching `InventoryScreen`'s constructor exactly,
 including the non-obvious fact that the **player inventory screen's title is "Crafting," not
 "Inventory"** (that word is the *second* label, drawn separately).
 
@@ -101,8 +101,7 @@ renamed "Loot" drew as "LOOT". That call is gone; confirmed by reading the curre
 `container.rs::frame::player_inventory_title`), neither of which touches case.
 
 **Conclusion: nothing to patch for claims 1–2.** They are correct, sourced from the real language
-table, and pixel-gated (`crates/lodestone-shell/tests/container_labels.rs::a_custom_name_reaches_the_panel_verbatim_and_nothing_is_uppercased`,
-line 498).
+table, and pixel-gated (`crates/lodestone-shell/tests/container_labels.rs::a_custom_name_reaches_the_panel_verbatim_and_nothing_is_uppercased`).
 
 ---
 
@@ -119,7 +118,7 @@ line 498).
   three bugs the play report was actually seeing);
 - draws with **no drop shadow** — the trailing `false` in vanilla's
   `graphics.text(font, title, titleLabelX, titleLabelY, -12566464, false)`
-  (`AbstractContainerScreen.java:189-191`, quoted at
+  (`AbstractContainerScreen.extractLabels`, quoted at
   `container.rs::geometry::ContainerGeometry::build_inner`) — matched by
   `Builder::label`'s doc comment (`container.rs::builder::Builder::label`) and the fact it never
   calls the shadowed `VanillaFont::draw`;
@@ -146,36 +145,36 @@ pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
 ```
 
 Its own doc comment (`container.rs::frame::label_layout`) already flags the gap: *"Not modelled:
-`AbstractFurnaceScreen.java:39` centres its title... There is no furnace `MenuKind` yet — a furnace
+`AbstractFurnaceScreen`'s constructor centres its title... There is no furnace `MenuKind` yet — a furnace
 arrives here as a `Generic` and gets `x = 8`."* That is true today for every one of these, read
 from `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/`:
 
 | wire `menu_type` | screen | vanilla `titleLabelX` | vanilla `titleLabelY` | source |
 |---|---|---|---|---|
-| `minecraft:furnace` | `FurnaceScreen` | `(imageWidth − font.width(title)) / 2` | `6` | `AbstractFurnaceScreen.java:39` |
-| `minecraft:blast_furnace` | `BlastFurnaceScreen` | same (inherits `AbstractFurnaceScreen`) | `6` | `AbstractFurnaceScreen.java:39` |
-| `minecraft:smoker` | `SmokerScreen` | same | `6` | `AbstractFurnaceScreen.java:39` |
-| `minecraft:brewing_stand` | `BrewingStandScreen` | `(imageWidth − font.width(title)) / 2` | `6` | `BrewingStandScreen.java:25` |
-| `minecraft:generic_3x3` | `DispenserScreen` (dispenser **and** dropper) | `(imageWidth − font.width(title)) / 2` | `6` | `DispenserScreen.java:20` |
-| `minecraft:crafter_3x3` | `CrafterScreen` | `(imageWidth − font.width(title)) / 2` | `6` | `CrafterScreen.java:33` |
-| `minecraft:anvil` | `AnvilScreen` | `60` (fixed, not centred) | `6` | `AnvilScreen.java:30` |
-| `minecraft:loom` | `LoomScreen` | `8` (default) | `4` (`6 − 2`) | `LoomScreen.java:68` |
-| `minecraft:stonecutter` | `StonecutterScreen` | `8` (default) | `5` (`6 − 1`) | `StonecutterScreen.java:45` |
-| `minecraft:cartography_table` | `CartographyTableScreen` | `8` (default) | `4` (`6 − 2`) | `CartographyTableScreen.java:29` |
+| `minecraft:furnace` | `FurnaceScreen` | `(imageWidth − font.width(title)) / 2` | `6` | `AbstractFurnaceScreen`'s constructor |
+| `minecraft:blast_furnace` | `BlastFurnaceScreen` | same (inherits `AbstractFurnaceScreen`) | `6` | `AbstractFurnaceScreen`'s constructor |
+| `minecraft:smoker` | `SmokerScreen` | same | `6` | `AbstractFurnaceScreen`'s constructor |
+| `minecraft:brewing_stand` | `BrewingStandScreen` | `(imageWidth − font.width(title)) / 2` | `6` | `BrewingStandScreen`'s constructor |
+| `minecraft:generic_3x3` | `DispenserScreen` (dispenser **and** dropper) | `(imageWidth − font.width(title)) / 2` | `6` | `DispenserScreen`'s constructor |
+| `minecraft:crafter_3x3` | `CrafterScreen` | `(imageWidth − font.width(title)) / 2` | `6` | `CrafterScreen`'s constructor |
+| `minecraft:anvil` | `AnvilScreen` | `60` (fixed, not centred) | `6` | `AnvilScreen`'s constructor |
+| `minecraft:loom` | `LoomScreen` | `8` (default) | `4` (`6 − 2`) | `LoomScreen`'s constructor |
+| `minecraft:stonecutter` | `StonecutterScreen` | `8` (default) | `5` (`6 − 1`) | `StonecutterScreen`'s constructor |
+| `minecraft:cartography_table` | `CartographyTableScreen` | `8` (default) | `4` (`6 − 2`) | `CartographyTableScreen`'s constructor |
 
 All of the above are currently drawn at `label_layout`'s `(8, 6)` Generic default, which is wrong for
 9 of the 10 (loom's `x` happens to already be right; only its `y` is off).
 
 **Every other server-openable menu type already matches `(8, 6)` in vanilla too**, so they need no
 change: `minecraft:grindstone` (no override, `GrindstoneScreen.java`), `minecraft:hopper`
-(`HopperScreen.java:14` — only `imageHeight` differs, title stays default), `minecraft:shulker_box`
-(`ShulkerBoxScreen.java:14` — same), `minecraft:enchantment` (`EnchantmentScreen.java` — no
+(`HopperScreen`'s constructor — only `imageHeight` differs, title stays default), `minecraft:shulker_box`
+(`ShulkerBoxScreen`'s constructor — same), `minecraft:enchantment` (`EnchantmentScreen.java` — no
 override), and every `minecraft:generic_9x1..9x6` (`ContainerScreen.java` — no override). `minecraft:crafting`
 is already correctly modelled at `x = 29` via the existing `craft_layout().is_some()` branch.
 
-**Deliberately out of scope** (see §5): `minecraft:beacon` (`BeaconScreen.java:46` — 230×219 image,
+**Deliberately out of scope** (see §5): `minecraft:beacon` (`BeaconScreen`'s constructor — 230×219 image,
 own `extractLabels` override, no background art of any kind in this crate) and `minecraft:merchant`
-(`MerchantScreen.java:85-98` — 276×166 image, composes trade-level text into the title, own
+(`MerchantScreen.extractLabels` — 276×166 image, composes trade-level text into the title, own
 background). Both need their own background/slot-layout work before a title anchor is meaningful;
 patching only the title would draw the right text over a still-wrong-shaped panel.
 
@@ -188,10 +187,10 @@ custom name — our client has no separate "is this custom?" branch to write, be
 client-side choice to make. Confirmed at the source:
 
 1. `BaseContainerBlockEntity.getDisplayName()`/`getName()`
-   (`.cache/mc/26.2/client-src/net/minecraft/world/level/block/entity/BaseContainerBlockEntity.java:51-53`):
+   (`.cache/mc/26.2/client-src/net/minecraft/world/level/block/entity/BaseContainerBlockEntity.java`):
    `return this.name != null ? this.name : this.getDefaultName();` — `this.name` is the `CustomName`
-   NBT tag, loaded at `:39` (`parseCustomNameSafe(input, "CustomName")`).
-2. `ServerPlayer.openMenu` (`.cache/mc/26.2/src/net/minecraft/server/level/ServerPlayer.java:1352`):
+   NBT tag, loaded in the same method (`parseCustomNameSafe(input, "CustomName")`).
+2. `ServerPlayer.openMenu` (`.cache/mc/26.2/src/net/minecraft/server/level/ServerPlayer.java`):
    `this.connection.send(new ClientboundOpenScreenPacket(menu.containerId, menu.getType(), provider.getDisplayName()));`
    — the packet's title is *always* whatever `getDisplayName()` returned, custom or default; the
    wire format cannot distinguish the two cases, and does not need to.
@@ -200,13 +199,13 @@ So the entire question is whether our client (a) decodes the title `Component` f
 it is `literal` or `translate`, and (b) carries it through to the draw call without dropping or
 re-deriving it. Traced end to end:
 
-| hop | file:line | does it carry the title through |
+| hop | location | does it carry the title through |
 |---|---|---|
-| decode | `crates/protocol/v770/src/adapter.rs:1383,1388` | `Text::from_nbt(&title)` — preserves literal vs. translate, no early flattening |
-| event | `crates/lodestone-model/src/event.rs:1239-1245` | `ClientEvent::ScreenOpened { title: Text, .. }` |
-| router | `crates/lodestone-ecs/src/session.rs:492` | `ScreenOpened` **is** listed in `session::handles_event`'s match — confirmed present, not a stale claim (grepped the live file, not a note about it) |
-| apply | `crates/lodestone-ecs/src/session.rs:530` (`apply_menus`) → `crates/lodestone-game/src/menus.rs:224-236` | `Menus::apply` stores `title` verbatim on the `pending`/`opened` record |
-| read | `crates/lodestone-game/src/menus.rs:199` | `Menus::opened_title()` |
+| decode | `decode_open_screen`, `crates/protocol/v770/src/adapter/inventory.rs` | `Text::from_nbt(&title)` — preserves literal vs. translate, no early flattening |
+| event | `crates/lodestone-model/src/event.rs` | `ClientEvent::ScreenOpened { title: Text, .. }` |
+| router | `crates/lodestone-ecs/src/session.rs` | `ScreenOpened` **is** listed in `session::handles_event`'s match — confirmed present, not a stale claim (grepped the live file, not a note about it) |
+| apply | `session::apply_menus`, `crates/lodestone-ecs/src/session.rs` → `crates/lodestone-game/src/menus.rs` | `Menus::apply` stores `title` verbatim on the `pending`/`opened` record |
+| read | `crates/lodestone-game/src/menus.rs` | `Menus::opened_title()` |
 | snapshot | `sim.rs::Sim::open_menu` | `Sim::open_menu()` copies it into `OpenMenuSnapshot::title` |
 | resolve | `app.rs::WindowApp::redraw` | `container::menu_title(&open.title, translator)` — the language table only changes the *rendering* of a `translate` node; a `literal` custom name passes through untouched |
 | draw | `app.rs::WindowApp::redraw`, `container.rs::geometry::ContainerGeometry::build_inner` | `ContainerFrame::new(container_menu, &container_title)` → `b.label(frame.title, ...)` |
@@ -220,8 +219,8 @@ is not a candidate island site here either.
 
 **This is also pixel-gated already**, not just data-flow-traced:
 `crates/lodestone-shell/tests/container_labels.rs::a_custom_name_reaches_the_panel_verbatim_and_nothing_is_uppercased`
-(line 498) builds a menu with a literal custom title (`"Bob's Loot"`), asserts the resolved string
-equals it exactly (line 508), and separately asserts the panel draws it un-uppercased.
+builds a menu with a literal custom title (`"Bob's Loot"`), asserts the resolved string
+equals it exactly, and separately asserts the panel draws it un-uppercased.
 
 **Conclusion: claim 4 needs no patch.** It is correct today, confirmed both by tracing the producer
 across every router (not just grepping one file) and by an existing pixel gate.
@@ -356,7 +355,7 @@ impl<'a> ContainerFrame<'a> {
 `recipe_book` and the untouched `with_inventory_label`/`with_cursor`/`with_recipe_book`/`with_drag`
 methods between the two shown spans — do not delete them, only insert the new field/method.)*
 
-### 5.2 `crates/lodestone-shell/src/container.rs` — new function, placed directly after `label_layout` (after line 351, before the `ContainerBackground` doc comment at line ~353)
+### 5.2 `crates/lodestone-shell/src/container.rs` — new function, placed directly after `label_layout`
 
 ```rust
 /// Vanilla `titleLabelX`/`titleLabelY` overrides for menu types whose real
@@ -593,13 +592,13 @@ fn a_furnace_titles_centred_like_vanillas_abstract_furnace_screen() {
 }
 ```
 
-The file's existing `use` block (`container_labels.rs:60-64`) already imports `label_layout`,
+The file's existing `use` block (`container_labels.rs`) already imports `label_layout`,
 `slot_layout`, `ContainerFrame`, `ContainerGeometry`, `ContainerRenderer`, `LabelLayout`,
 `panel_origin` from `lodestone::container`, and `Menu` from `lodestone_game::menu` — add
 `menu_type_title_anchor` to that same `lodestone::container::{...}` list. `VanillaFont` is **not**
 currently imported in this file (other pixel gates in this crate reach it via
 `lodestone::hud::VanillaFont` — e.g. `tests/vanilla_font_pixels.rs`,
-`tests/container_background_pixels.rs` — a valid public path since `lodestone-shell/src/lib.rs:39`
+`tests/container_background_pixels.rs` — a valid public path since `lodestone-shell/src/lib.rs`
 has `pub mod hud;`); add `use lodestone::hud::VanillaFont;` alongside the existing imports.
 
 ---
@@ -613,13 +612,13 @@ because these are brand-new tests with no risk of masking an unrelated red binar
 merge, run the crate with `--no-fail-fast` as the rules require).
 
 **Expected value, and where it comes from outside this code**:
-- Anvil: the literal `60.0` from `AnvilScreen.java:30`, typed by hand from the decompile — not
+- Anvil: the literal `60.0` from `AnvilScreen`'s constructor, typed by hand from the decompile — not
   derived from anything in this crate.
 - Furnace: `(176.0 − font.width("Furnace", 1.0)) / 2.0`, floored. The `176.0` (`imageWidth`) comes
-  from `AbstractContainerScreen`'s `DEFAULT_IMAGE_WIDTH` constant (`AbstractContainerScreen.java:33`),
+  from `AbstractContainerScreen`'s `DEFAULT_IMAGE_WIDTH` constant,
   not from `layout.width` being asserted equal to itself — that equality is `slot_layout`'s own
   existing job, already covered by `slot_layout_height_is_vanillas_image_height`
-  (`container_labels.rs:302`). The font-width term reuses this crate's own `VanillaFont`, which is
+  (`container_labels.rs`). The font-width term reuses this crate's own `VanillaFont`, which is
   legitimate here (see the test's doc comment) because the thing under test is the **centring
   arithmetic**, not the glyph metrics — the same posture this file already takes for every other
   centred-text assertion.
@@ -635,11 +634,11 @@ an absence need a control proving the detector works").
 (neither exists in `ContainerBackground`; see §3's "deliberately out of scope" note extended to
 these too, though title-anchor correctness does not depend on the background being right). Nothing
 else in this widget rect draws with the label colour except the two labels themselves —
-`assert_nothing_else_uses_the_label_colour` (`container_labels.rs:173`) already establishes this as
+`assert_nothing_else_uses_the_label_colour` (`container_labels.rs`) already establishes this as
 a general premise for the file, and the new tests do not need to re-derive it since they assert on
 `menu_type_title_anchor`'s **return value** directly, not on rendered ink — no bounding-box gate is
 needed for this part because there is no rendering step in these two tests; a follow-up pixel gate
-(mirroring `a_chest_screen_draws_both_labels_at_their_derived_anchors`, `container_labels.rs:369`)
+(mirroring `a_chest_screen_draws_both_labels_at_their_derived_anchors`, `container_labels.rs`)
 would be the natural next step once someone wants a true end-to-end pixel proof, but is not required
 to prove the arithmetic itself is right.
 
@@ -650,12 +649,12 @@ to prove the arithmetic itself is right.
 - **Not an island.** Traced `ScreenOpened` through both `ingest::handles_event` and
   `session::handles_event` by reading the live files (not grepping a note about them): it is
   correctly absent from the per-entity router and correctly present in the session-scalar router
-  (`crates/lodestone-ecs/src/session.rs:492`). `net.rs`'s shell-stream `forward` is not on this
+  (`session::handles_event`, `crates/lodestone-ecs/src/session.rs`). `net.rs`'s shell-stream `forward` is not on this
   event's path at all — `SessionMenus` is written directly by `apply_menus`
-  (`session.rs:530`), not via the `ClientEvent` shell stream — so that third router was never a
+  (`session.rs`), not via the `ClientEvent` shell stream — so that third router was never a
   candidate here.
 - **Not a stale-comment trap.** The doc comments in `container.rs` and `text.rs` that describe the
-  #52/#370 fixes were cross-checked against the *current* function bodies, not taken on faith — the
+  fixes above were cross-checked against the *current* function bodies, not taken on faith — the
   uppercasing call, the debug-font call, and the raw-key resolution they each describe as fixed are
   in fact absent from the code that runs today.
 - **Not a font/colour/shadow bug.** All three are correct for every anchor `label_layout` currently
@@ -667,8 +666,8 @@ to prove the arithmetic itself is right.
   art and slot geometry for these container types is a separate, materially larger piece of work
   (new texture sheets, non-grid slot positions — a furnace's 3 slots are not `n` cells in a row).
   Noting this rather than silently leaving it for someone to rediscover.
-- **Beacon and merchant title anchors** were investigated (`BeaconScreen.java:46`,
-  `MerchantScreen.java:85-98`) and deliberately excluded from the patch for the same
+- **Beacon and merchant title anchors** were investigated (`BeaconScreen`'s constructor,
+  `MerchantScreen.extractLabels`) and deliberately excluded from the patch for the same
   background/layout reason, plus the merchant's title is not a simple anchor move — it composes
   trade-level text in with the base title.
 - **Did not run any GPU/pixel gate** for this investigation — read-only, and the existing

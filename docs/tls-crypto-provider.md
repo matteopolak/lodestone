@@ -105,7 +105,7 @@ What catches it instead:
 Verified negative control (2026-08-04): neutering `install_crypto_provider` with
 an early `return` made all four non-ignored gates *and* the handshake gate fail,
 exit 101, with reqwest's own message — `No rustls crypto provider is configured`
-at `reqwest-0.13.4/src/async_impl/client.rs:2484`.
+from `reqwest`'s `default_rustls_crypto_provider` (`reqwest-0.13.4/src/async_impl/client.rs`).
 
 Other traps:
 

@@ -27,7 +27,7 @@ Read-only investigation. Every vanilla number below is quoted from
 | F3 | **Spherical** distance where vanilla's render-distance term is **cylindrical**. At an ordinary hilltop camera this reads **1.0** where vanilla reads **0.131**. | high | partly — `docs/fog.md` gap 2 pins an extreme ray, not this mundane case |
 | F4 | Fog base colour is `SKY_COLOR` (`#87B5EB`), vanilla's is `#B2CEFF` (RD 8). Saturated blue vs pale haze. | medium | yes, `docs/fog.md` gap 4 |
 | **N1** | **The night-shadow complaint is a HUE difference, not a brightness one.** Vanilla's midnight lightmap texel at (sky 15, block 0) is **`(0.2784, 0.2784, 0.5047)`** — blue. Ours is **`(0.5047, 0.5047, 0.5047)`** — grey. Our scalar is *exactly vanilla's blue channel*, which is why `light.rs`'s midnight gate passed. | **critical** | described in `docs/time-of-day-lighting.md`, decided "not built" |
-| N2 | Block light is warm in vanilla (`#FFD88C`, `BlockFactor 1.4`, additive) and grey in ours. At block level 8: vanilla `(0.586, 0.507, 0.352)`, ours `0.482` grey. | high | yes, "#383's third divergence" |
+| N2 | Block light is warm in vanilla (`#FFD88C`, `BlockFactor 1.4`, additive) and grey in ours. At block level 8: vanilla `(0.586, 0.507, 0.352)`, ours `0.482` grey. | high | yes, a prior fix's third divergence |
 | **N3** | **The `SKY_LIGHT_COLOR` tint needs no new uniform lane and no fifth bind group.** It is algebraically recoverable from the `sky_darken` lane we already send, verified byte-exact against the existing JVM oracle. This removes the stated blocker. | — | **No — new.** |
 
 ---
@@ -36,8 +36,8 @@ Read-only investigation. Every vanilla number below is quoted from
 
 ### 1.1 The uniform, and the two terms
 
-`FogRenderer` builds a six-float UBO
-(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/fog/FogRenderer.java:229-236`):
+`FogRenderer.updateBuffer` builds a six-float UBO
+(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/fog/FogRenderer.java`):
 
 ```java
 Std140Builder.intoBuffer(byteBuffer)
@@ -50,7 +50,7 @@ Std140Builder.intoBuffer(byteBuffer)
    .putFloat(endClouds);
 ```
 
-`assets/minecraft/shaders/include/fog.glsl:13-24` is the whole falloff:
+`assets/minecraft/shaders/include/fog.glsl`'s `linear_fog_value`/`total_fog_value` is the whole falloff:
 
 ```glsl
 float linear_fog_value(float vertexDistance, float fogStart, float fogEnd) {
@@ -65,7 +65,7 @@ float total_fog_value(float sphericalVertexDistance, float cylindricalVertexDist
 }
 ```
 
-`fog.glsl:32-40`:
+`fog.glsl`'s `fog_spherical_distance`/`fog_cylindrical_distance`:
 
 ```glsl
 float fog_spherical_distance(vec3 pos)   { return length(pos); }
@@ -77,7 +77,7 @@ falloff shape is linear in both — we get the shape right; we get the *terms* w
 
 ### 1.2 The render-distance term
 
-`FogRenderer.java:198-200`, run unconditionally *after* the environment hook:
+`FogRenderer.setupFog`, run unconditionally *after* the environment hook:
 
 ```java
 float renderDistanceFogSpan = Mth.clamp(renderDistanceInBlocks / 10.0F, 4.0F, 64.0F);
@@ -85,22 +85,22 @@ fog.renderDistanceStart = renderDistanceInBlocks - renderDistanceFogSpan;
 fog.renderDistanceEnd = renderDistanceInBlocks;
 ```
 
-`renderDistanceInBlocks = renderDistanceInChunks * 16` (`:185`), and the chunk count is
-`options.getEffectiveRenderDistance()` (`GameRenderer.java:632`).
+`renderDistanceInBlocks = renderDistanceInChunks * 16` (same method), and the chunk count is
+`options.getEffectiveRenderDistance()` (`GameRenderer.extractCamera`).
 
 **We already match this exactly** for render distances 3–40 chunks (`FOG_START_FRACTION = 0.9`
 is `1 - span/blocks` wherever the clamp is inactive). Not the bug.
 
 ### 1.3 The environmental term — the overworld's is NOT inert
 
-`EnvironmentAttributes.java:18-24` registered defaults:
+`EnvironmentAttributes`'s `FOG_START_DISTANCE`/`FOG_END_DISTANCE` registered defaults:
 
 ```java
 FOG_START_DISTANCE = ... .defaultValue(0.0F) ...
 FOG_END_DISTANCE   = ... .defaultValue(1024.0F) ...
 ```
 
-`AtmosphericFogEnvironment.java:68-69` reads exactly those attributes:
+`AtmosphericFogEnvironment.setupFog` reads exactly those attributes:
 
 ```java
 fog.environmentalStart = camera.attributeProbe().getValue(EnvironmentAttributes.FOG_START_DISTANCE, partialTicks);
@@ -117,18 +117,18 @@ the eye. That is precisely the "longer dropoff" the player is describing.
 
 ### 1.4 Sky and cloud ends (for completeness)
 
-`AtmosphericFogEnvironment.java:73-76`:
+`AtmosphericFogEnvironment.setupFog`:
 
 ```java
 fog.skyEnd   = Math.min(renderDistance, probe.getValue(SKY_FOG_END_DISTANCE, partialTicks));   // default 512
 fog.cloudEnd = Math.min(options.cloudRange().get() * 16, probe.getValue(CLOUD_FOG_END_DISTANCE, ...)); // default 2048
 ```
 
-We already implement `skyEnd` (`sky::sky_fog_end_for_render_distance`, #399). Not the bug.
+We already implement `skyEnd` (`sky::sky_fog_end_for_render_distance`). Not the bug.
 
 ### 1.5 The fog **colour**, including the night track
 
-`AtmosphericFogEnvironment.getBaseColor` (`:26-48`):
+`AtmosphericFogEnvironment.getBaseColor`:
 
 ```java
 int fogColor = camera.attributeProbe().getValue(EnvironmentAttributes.FOG_COLOR, partialTicks);
@@ -140,14 +140,14 @@ skyColorMixFactor = 1.0F - (float)Math.pow(skyColorMixFactor, 0.25);
 return ARGB.srgbLerp(skyColorMixFactor, fogColor, skyColor);
 ```
 
-Base attributes, from `dimension_type/overworld.json:36-37`:
+Base attributes, from `dimension_type/overworld.json`'s `visual/fog_color`/`visual/sky_color` keys:
 
 ```json
 "minecraft:visual/fog_color": "#c0d8ff",
 "minecraft:visual/sky_color": "#78a7ff"
 ```
 
-and **both are multiplied by a per-tick timeline track** (`Timelines.java:58-70`):
+and **both are multiplied by a per-tick timeline track** (`Timelines.bootstrap`):
 
 ```java
 .addModifierTrack(EnvironmentAttributes.FOG_COLOR, ColorModifier.MULTIPLY_RGB,
@@ -159,7 +159,7 @@ and **both are multiplied by a per-tick timeline track** (`Timelines.java:58-70`
                  .addKeyframe(13670, -16777216).addKeyframe(22330, -16777216))
 ```
 
-with (`Timelines.java:33-34`)
+with (`Timelines`'s `NIGHT_FOG_COLOR_MULTIPLIER_START`/`_END` fields)
 
 ```java
 int NIGHT_FOG_COLOR_MULTIPLIER_START = ARGB.colorFromFloat(1.0F, 0.05F, 0.05F, 0.09F);  // #0D0D16
@@ -176,11 +176,11 @@ int NIGHT_FOG_COLOR_MULTIPLIER_END   = ARGB.colorFromFloat(1.0F, 0.09F, 0.09F, 0
 | noon (6000) | `#C0D8FF` (192,216,255) | `#78A7FF` (120,167,255) | **`#B2CEFF` (178,206,255)** |
 | midnight (18000) | `#101216` → (16,18,22) | `#000000` | **`#0D0E11` (13,14,17)** |
 
-(`ARGB.multiply` is integer `red(lhs)*red(rhs)/255`, `ARGB.java:80`; `srgbLerp` is per-channel
-`Mth.lerpInt`, i.e. `p0 + floor(alpha*(p1-p0))`, `ARGB.java:155-160` — gamma space throughout,
+(`ARGB.multiply` is integer `red(lhs)*red(rhs)/255`; `ARGB.srgbLerp` is per-channel
+`Mth.lerpInt`, i.e. `p0 + floor(alpha*(p1-p0))` — gamma space throughout,
 consistent with CLAUDE.md's "vanilla is not colour-managed".)
 
-Void darkening and `darkenWorldAmount` are further multipliers (`FogRenderer.java:134-145`);
+Void darkening and `darkenWorldAmount` are further multipliers (`FogRenderer.computeFogColor`);
 both are 0 in the ordinary case.
 
 ---
@@ -188,7 +188,7 @@ both are 0 in the ordinary case.
 ## 2. Our fog implementation, and the precise divergences
 
 Ramp math: `crates/lodestone-render/src/fog.rs`.
-Shader: `crates/lodestone-render/src/shaders/{model,entity,fluid}.wgsl` (`fog_amount`, line 129 in `model.wgsl`).
+Shader: `crates/lodestone-render/src/shaders/{model,entity,fluid}.wgsl` (`fog_amount`, in `model.wgsl`).
 Preset selection: `sim.rs::fog_for_render_distance`.
 Upload: `gpu.rs::state::RenderState::fog_with_clock`.
 
@@ -196,8 +196,8 @@ Upload: `gpu.rs::state::RenderState::fog_with_clock`.
 
 * The falloff is linear, matching `linear_fog_value`.
 * `start`/`end` at RD 3–40 are vanilla-exact (`230.4 → 256` at RD 16).
-* The mix is in **gamma** space (`model.wgsl:246`), matching `fog.glsl:29` over
-  `terrain.fsh`'s non-colour-managed bytes. Fixed earlier; not a regression source.
+* The mix is in **gamma** space (`fs_main`, `model.wgsl`), matching `fog.glsl`'s
+  `apply_fog` over `terrain.fsh`'s non-colour-managed bytes. Fixed earlier; not a regression source.
 
 ### F1 — the fog colour has no clock (this is the "too extreme" at night)
 
@@ -215,9 +215,9 @@ fn fog_with_clock(&self, eye: glam::Vec3) -> FogUniform {
 }
 ```
 
-Meanwhile `fog_color_for_time_of_day` **exists** in `crates/lodestone-render/src/sky.rs:361`
-with a correct port of the `FOG_COLOR` track (`sky.rs:175-179`, `#0c0c16` / `#161616`) — and
-its only consumer in the whole tree is `sky_pipeline.rs:861`, the **sky disc**. Verified:
+Meanwhile `fog_color_for_time_of_day` **exists** in `crates/lodestone-render/src/sky.rs`
+with a correct port of the `FOG_COLOR` track (`sky.rs`'s `FOG_COLOR_TRACK`, `#0c0c16` / `#161616`) — and
+its only consumer in the whole tree is `sky_pipeline.rs`'s `resolve_colors`, the **sky disc**. Verified:
 
 ```
 grep -rn "fog_color_for_time_of_day" crates/   →  sky.rs (def), lib.rs (re-export),
@@ -264,7 +264,7 @@ the remaining 0.775.
 
 ### F3 — spherical where vanilla's render-distance term is cylindrical
 
-`model.wgsl:245` (and the entity/fluid twins):
+`fs_main` in `model.wgsl` (and the entity/fluid twins):
 
 ```wgsl
 let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
@@ -296,7 +296,7 @@ complaint without touching this.
 ### 3.1 What the player is seeing
 
 Vanilla's lightmap is a **16×16 RGB texture**, not a scalar, generated by a real fragment
-shader every frame — `assets/minecraft/shaders/core/lightmap.fsh:35-65`:
+shader every frame — `assets/minecraft/shaders/core/lightmap.fsh`'s `main`:
 
 ```glsl
 float block_level = floor(texCoord.x * 16) / 15;
@@ -312,10 +312,10 @@ color = clamp(color, 0.0, 1.0);
 color = mix(color, notGamma(color), lightmapInfo.BrightnessFactor);
 ```
 
-with `parabolicMixFactor(l) = (2l-1)²` (`:31-33`) and `notGamma` scaling the triple by
-`maxScaled / maxComponent`, `maxScaled = 1 - (1-max)⁴` (`:24-29`).
+with `parabolicMixFactor(l) = (2l-1)²` and `notGamma` scaling the triple by
+`maxScaled / maxComponent`, `maxScaled = 1 - (1-max)⁴`.
 
-The uniforms come from `LightmapRenderStateExtractor.extract` (`:53-56, 67`):
+The uniforms come from `LightmapRenderStateExtractor.extract`:
 
 ```java
 renderState.blockFactor    = this.blockLightFlicker + 1.4F;
@@ -325,17 +325,17 @@ renderState.skyLightColor  = ARGB.vector3fFromRGB24(probe.getValue(EnvironmentAt
 renderState.ambientColor   = ARGB.vector3fFromRGB24(probe.getValue(EnvironmentAttributes.AMBIENT_LIGHT_COLOR, partialTicks));
 ```
 
-`vector3fFromRGB24` is a bare `byte/255` (`ARGB.java:213-215`) — no linearisation. **All of
+`vector3fFromRGB24` is a bare `byte/255` — no linearisation. **All of
 this is gamma space.**
 
 The three colours, decoded from the raw ints:
 
 | uniform | source | value |
 |---|---|---|
-| `AmbientColor` | `overworld.json:33` `#0a0a0a`, = `DimensionTypes.java:36`'s `-16119286` = `0xFF0A0A0A` | `(0.03922, 0.03922, 0.03922)` — **grey** |
-| `BlockLightTint` | `DimensionDefaults.java:5` `BLOCK_LIGHT_TINT = -10100` = `0xFFFFD88C` | `(1.0, 0.84706, 0.54902)` — **warm amber** |
-| `SkyLightColor` | `Timelines.java:71-75` track: `730→-1`, `11270→-1`, `13140→NIGHT`, `22860→NIGHT`; `NIGHT_SKY_LIGHT_COLOR = ARGB.colorFromFloat(1.0, 0.48, 0.48, 1.0)` = `0xFF7A7AFF` (`Timelines.java:30`) | day `(1,1,1)`, midnight **`(0.47843, 0.47843, 1.0)` — blue** |
-| `SkyFactor` | `Timelines.java:76-80` track: `730→1.0`, `11270→1.0`, `13140→0.24`, `22860→0.24` | day `1.0`, midnight `0.24` |
+| `AmbientColor` | `overworld.json`'s `visual/ambient_light_color` key `#0a0a0a`, = `DimensionTypes.bootstrap`'s `-16119286` = `0xFF0A0A0A` | `(0.03922, 0.03922, 0.03922)` — **grey** |
+| `BlockLightTint` | `DimensionDefaults`'s `BLOCK_LIGHT_TINT = -10100` = `0xFFFFD88C` | `(1.0, 0.84706, 0.54902)` — **warm amber** |
+| `SkyLightColor` | `Timelines.bootstrap` track: `730→-1`, `11270→-1`, `13140→NIGHT`, `22860→NIGHT`; `NIGHT_SKY_LIGHT_COLOR = ARGB.colorFromFloat(1.0, 0.48, 0.48, 1.0)` = `0xFF7A7AFF` (`Timelines`'s `NIGHT_SKY_LIGHT_COLOR` field) | day `(1,1,1)`, midnight **`(0.47843, 0.47843, 1.0)` — blue** |
+| `SkyFactor` | `Timelines.bootstrap` track: `730→1.0`, `11270→1.0`, `13140→0.24`, `22860→0.24` | day `1.0`, midnight `0.24` |
 | `BrightnessFactor` | `Options.gamma` default | `0.5` |
 
 ### 3.2 The measurement that settles brightness-vs-hue
@@ -355,7 +355,7 @@ mix(color, notGamma, 0.5)
 
 **Vanilla midnight, open sky, unlit: `(0.278367, 0.278367, 0.504652)`.**
 
-Ours (`light.rs:192-199`, mirrored in `model.wgsl:91-96`, `entity.wgsl:74`, `fluid.wgsl:54`):
+Ours (`light_term_from_levels`, `light.rs`, mirrored in `vs_main`/`model.wgsl`, `vs_main`/`entity.wgsl`, `vs_main`/`fluid.wgsl`):
 
 ```rust
 let sky = brightness(sky_level) * sky_darken;   // 1.0 * 0.24
@@ -408,7 +408,7 @@ red and 44% too bright in blue. Two separate causes: the missing `BLOCK_LIGHT_TI
 
 `docs/time-of-day-lighting.md` costs this as needing a packed 24-bit lane. It does not.
 `SKY_LIGHT_COLOR` and `SKY_LIGHT_FACTOR` have **identical keyframe ticks** —
-`730 / 11270 / 13140 / 22860` (`Timelines.java:71-80`) — and **neither track calls
+`730 / 11270 / 13140 / 22860` (`Timelines.bootstrap`) — and **neither track calls
 `.setEasing(...)`**, so both interpolate linearly on the same parameter. Therefore:
 
 ```
@@ -427,14 +427,14 @@ sky_light_color = srgbLerp(t, vec3(1.0), vec3(122.0/255.0, 122.0/255.0, 1.0))
 | 13000 | `0x3e980310` = 0.296894 | 0.925139 | `255 + floor(0.925139·(-133)) = 131` → `ff8383ff` | **`ff8383ff`** ✓ |
 | 13140 | `0x3e75c28f` = 0.240000 | 1.000000 | `ff7a7aff` | **`ff7a7aff`** ✓ |
 
-The invariant also survives weather: `WeatherAttributes.java:17-19` and `:28-30` alpha-blend
+The invariant also survives weather: `WeatherAttributes`'s `RAIN` and `THUNDER` fields alpha-blend
 `SKY_LIGHT_COLOR` and `SKY_LIGHT_FACTOR` with the **same** alpha (0.3125 rain / 0.52734375
 thunder) toward the same night endpoints, and `addLayer` then lerps both by the same
 `rainLevel`/`thunderLevel`.
 
 **Two known exceptions, both momentary — flag but do not block:**
-`ClientLevel.java:268` forces `SKY_LIGHT_FACTOR = 1.0` during a sky flash without touching the
-colour, and `LightmapRenderStateExtractor.java:57-64` adds End-flash intensity to `skyFactor`.
+`ClientLevel.addEnvironmentAttributeLayers` forces `SKY_LIGHT_FACTOR = 1.0` during a sky flash without touching the
+colour, and `LightmapRenderStateExtractor.extract` adds End-flash intensity to `skyFactor`.
 Both push the factor to/above 1.0, so the derivation yields white where vanilla keeps blue for
 a few ticks. The `clamp` handles the >1.0 case safely.
 
@@ -444,7 +444,7 @@ a few ticks. The `clamp` handles the >1.0 case safely.
 
 ### FIX A — clock the terrain fog colour (F1). **Do this first; it is ~3 lines.**
 
-**File: `crates/lodestone-shell/src/gpu.rs`, in `fog_with_clock` (line 624).** Nowhere else.
+**File: `crates/lodestone-shell/src/gpu.rs`, in `fog_with_clock`.** Nowhere else.
 
 ```rust
 fn fog_with_clock(&self, eye: glam::Vec3) -> FogUniform {
@@ -470,7 +470,7 @@ Why here and not in `app.rs`:
   entities. One edit reaches every fogged pixel.
 * **Critical: `self.fog.color` must stay the un-tracked day base.** `gpu.rs::frame::RenderState::render_inner` passes it to
   `SkyFrame::with_fog_color`, and the sky pass applies `fog_color_for_time_of_day` itself
-  (`sky_pipeline.rs:861`). Pre-multiplying it in `app.rs` or inside `set_fog` would
+  (`resolve_colors`, `sky_pipeline.rs`). Pre-multiplying it in `app.rs` or inside `set_fog` would
   **double-apply the track to the sky disc** — `#161616²/255` ≈ `#020202`. Doing it inside
   `fog_with_clock` leaves the stored base alone, so the disc and the terrain derive one colour
   from one base and one clock and structurally cannot drift.
@@ -495,7 +495,7 @@ Both edit the same three `fog_amount` bodies, so splitting them doubles the chur
 
 1. `crates/lodestone-render/src/fog.rs`: add `environmental_start` / `environmental_end` to
    `FogSettings`, and pack them into `FogUniform`'s **two remaining free lanes** — `eye.w` and
-   `end_enabled.w`. `docs/fog.md:244-248` already confirms these are free (`end_enabled.z` is
+   `end_enabled.w`. `docs/fog.md` already confirms these are free (`end_enabled.z` is
    the sky-darken lane). **The struct does not grow, so no fifth bind group and no
    `max_bind_groups` risk.** Overworld and End: `0.0 / 1024.0`. Nether: `10.0 / 96.0`, with
    `for_render_distance`'s real band restored in the render-distance pair rather than
@@ -520,11 +520,11 @@ Both edit the same three `fog_amount` bodies, so splitting them doubles the chur
    describing the shader.
 
 Note `sky_disc.wgsl` should be left alone in this change — its ramp end is `skyEnd`, a third
-quantity, already handled by #399.
+quantity, already handled by a prior fix.
 
 ### FIX D — fog base colour `#C0D8FF` + `skyColorMixFactor` (F4)
 
-Leave deferred exactly as `docs/fog.md:234-242` argues. It is a genuine divergence but its
+Leave deferred exactly as `docs/fog.md` gap 4 argues. It is a genuine divergence but its
 blast radius is a dozen shell pixel-gate backgrounds, and Fix A removes the visible night
 symptom without it.
 
@@ -541,12 +541,12 @@ the uniform-budget half of the objection; the gate re-baselining half stands.
    callers until they are audited.
 2. `model.wgsl` and `fluid.wgsl`: `VsOut.shade: f32` → `vec3<f32>`; the fragment multiply
    `linear_to_srgb(tex.rgb) * tint_col * in.shade` is already component-wise.
-   `entity.wgsl`: `VsOut.light_term: f32` → `vec3<f32>`; `entity.wgsl:215` likewise.
+   `entity.wgsl`: `VsOut.light_term: f32` → `vec3<f32>`; `shade_entity` likewise.
    Two extra interpolated floats per shader.
 3. **No uniform change, no bind-group change** — the only per-frame input is `sky_darken`,
    already riding `fog_end_enabled.z`.
-4. `block.wgsl` is the demo-only packed path (#400); leave it.
-5. Consider porting `blockLightFlicker` (`LightmapRenderStateExtractor.java:33-35`) as its own
+4. `block.wgsl` is the demo-only packed path; leave it.
+5. Consider porting `blockLightFlicker` (updated in `LightmapRenderStateExtractor.extract`) as its own
    small follow-up — it is a visible torch shimmer, and modelling `BlockFactor` as a flat 1.4
    keeps every hermetic gate deterministic.
 
@@ -562,7 +562,7 @@ dump, never in our own formula.
 Where: a new `#[test]` next to `gpu.rs`'s `fog_start_fraction_matches_vanillas_span`, or in
 `crates/lodestone-render/tests/`.
 
-Expected value, **written out by hand** from `Timelines.java:34` and `ARGB.java:80`:
+Expected value, **written out by hand** from `Timelines`'s `NIGHT_FOG_COLOR_MULTIPLIER_END` field and `ARGB.multiply`:
 `NIGHT_FOG_COLOR_MULTIPLIER_END = ARGB.colorFromFloat(1.0, 0.09, 0.09, 0.09)`, and
 `as8BitChannel` floors, so the multiplier is `(22, 22, 22)`. `ARGB.multiply` is integer
 `a*b/255`. For our day base `#87B5EB`:
@@ -593,7 +593,7 @@ population.
 Where: extend `fog.rs`'s `ramp_gate` module, whose expectations are already hand-written
 literals rather than calls back into our formula.
 
-Expectations from `fog.glsl:23-24` + `EnvironmentAttributes.java:18-24`, RD 8, level ray
+Expectations from `fog.glsl`'s `total_fog_value` + `EnvironmentAttributes`'s `FOG_START_DISTANCE`/`FOG_END_DISTANCE` fields, RD 8, level ray
 (where `spherical == cylindrical`, so the table is metric-independent and therefore
 vanilla-exact):
 
@@ -680,31 +680,31 @@ shader edit.
 
 ## 6. Ruled out — do not re-investigate
 
-* **The fog falloff curve.** Linear in both (`fog.glsl:13-21` vs `fog.rs::fog_factor`). Not a
+* **The fog falloff curve.** Linear in both (`fog.glsl`'s `linear_fog_value`/`total_fog_value` vs `fog.rs::fog_factor`). Not a
   gamma/exponential mismatch.
-* **The fog mix's colour space.** Already gamma (`model.wgsl:246`, `fog::apply_fog_gamma`),
-  matching `fog.glsl:29` over `terrain.fsh`'s non-colour-managed bytes. Fixed earlier this
+* **The fog mix's colour space.** Already gamma (`fs_main`/`model.wgsl`, `fog::apply_fog_gamma`),
+  matching `fog.glsl`'s `apply_fog` over `terrain.fsh`'s non-colour-managed bytes. Fixed earlier this
   session and correct.
 * **`FOG_START_FRACTION = 0.9` as a taste knob.** It is algebraically
   `1 - span/blocks` wherever `Mth.clamp` is inactive, so `sim::fog_for_render_distance`'s ramp
   is **vanilla-exact** for RD 3–40 — including our default 8 and the reported 16. The
   outstanding migration to `for_render_distance` only matters at RD < 3 or > 40. Not the bug,
   and worth migrating for tidiness only.
-* **`sky_fog_end` / the sky disc's gradient length.** Correct since #399
+* **`sky_fog_end` / the sky disc's gradient length.** Correct since a prior fix
   (`sky::sky_fog_end_for_render_distance` implements
-  `min(renderDistanceInBlocks, 512)` per `AtmosphericFogEnvironment.java:73`).
+  `min(renderDistanceInBlocks, 512)` per `AtmosphericFogEnvironment.setupFog`).
 * **`sky_darken_for_time_of_day`.** It *is* `SKY_LIGHT_FACTOR`, JVM-gated to 1e-4 at all 24000
   ticks (`tests/sky_light_factor_timeline.rs`). `1.0` at noon, `0.24` at midnight. The scalar
   factor is right; only its *colour* companion is missing.
-* **`AMBIENT_LIGHT = 10/255`.** Independently confirmed twice: `DimensionTypes.java:36`'s
-  `-16119286` decodes to `0xFF0A0A0A`, and `dimension_type/overworld.json:33` literally reads
+* **`AMBIENT_LIGHT = 10/255`.** Independently confirmed twice: `DimensionTypes.bootstrap`'s
+  `-16119286` decodes to `0xFF0A0A0A`, and `dimension_type/overworld.json`'s `visual/ambient_light_color` key literally reads
   `"minecraft:visual/ambient_light_color": "#0a0a0a"`. Also confirmed **grey**, which is why
   the cave population stays neutral and the light term can remain a scalar underground.
 * **Biome-level fog distances.** Only `swamp.json` and `mangrove_swamp.json` override
   `visual/fog_start_distance` / `fog_end_distance` in the whole biome set; the standing-biome
   case is the registered `0.0 / 1024.0` default.
 * **`get_brightness` / `notGamma` / `BrightnessFactor 0.5`.** All three match
-  `lightmap.fsh:20-33` and `Options.java:900`. The scalar chain is right; its *rank* is wrong.
+  `lightmap.fsh`'s `get_brightness`/`notGamma` and `Options.gamma`. The scalar chain is right; its *rank* is wrong.
 * **Face shade / AO as the "night shadow".** Vanilla's per-face shade is a colour-neutral
   scalar and `notGamma`'s grey specialisation is exact for a grey input — neither can produce a
   hue. The hue lives entirely in the lightmap.

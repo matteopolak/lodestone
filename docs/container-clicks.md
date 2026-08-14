@@ -25,8 +25,8 @@ round trip described above.
 
 ### The seven `ContainerInput` modes
 
-`ContainerInput` (`click.rs:37-52`) is vanilla's click mode, dispatched in
-`Menu::do_click` (`click.rs:149-203`):
+`ContainerInput` (`click.rs`) is vanilla's click mode, dispatched in
+`Menu::do_click` (`click.rs`):
 
 | mode | variant | button semantics |
 | --- | --- | --- |
@@ -38,15 +38,14 @@ round trip described above.
 | 5 | `QuickCraft` | the drag sequence below |
 | 6 | `PickupAll` | double-click gather |
 
-Ergonomic constructors for each: `Click::left`/`right` (`click.rs:791-807`),
-`Click::shift` (`:829-837`), `Click::hotbar_swap`/`offhand_swap`
-(`:840-857`), `Click::clone_slot` (`:860-867`), `Click::drop_one`/`drop_stack`
-(`:869-887`), `Click::double` (`:889-897`).
+Ergonomic constructors for each, all in `click.rs`: `Click::left`/`right`,
+`Click::shift`, `Click::hotbar_swap`/`offhand_swap`, `Click::clone_slot`,
+`Click::drop_one`/`drop_stack`, `Click::double`.
 
 ### `QUICK_CRAFT`'s bit packing
 
-The drag protocol packs a header and a type into one wire byte,
-`click.rs:74-90`:
+The drag protocol packs a header and a type into one wire byte, in
+`click.rs`'s `quick_craft_mask`/`quick_craft_header`/`quick_craft_type`:
 
 ```rust
 fn quick_craft_mask(header: u8, kind: u8) -> u8 { (header & 3) | ((kind & 3) << 2) }
@@ -55,11 +54,11 @@ fn quick_craft_type(mask: u8) -> u8 { (mask >> 2) & 3 }
 ```
 
 `drag_header` is `{ START = 0, ADD = 1, END = 2 }`, `drag_type` is
-`{ EVEN = 0, ONE = 1, CLONE = 2 }` (`click.rs:54-72`). START and END always
-carry slot `-999` (`OUTSIDE_SLOT`) — `perform_drag` (`click.rs:699-723`)
+`{ EVEN = 0, ONE = 1, CLONE = 2 }` (`click.rs`). START and END always
+carry slot `-999` (`OUTSIDE_SLOT`) — `perform_drag` (`click.rs`)
 sends both through `do_click(OUTSIDE_SLOT, ...)`. **Only ADD carries a real
 slot**: its handler is the only arm of `do_quick_craft` that reads
-`slot_index` at all (`click.rs:515-524`). There is no fourth packet for
+`slot_index` at all (`click.rs`). There is no fourth packet for
 "still dragging, mouse moved but no new slot painted" — the protocol's three
 button-encoded headers are exhaustive; nothing is sent on a bare press.
 
@@ -67,10 +66,10 @@ button-encoded headers are exhaustive; nothing is sent on a bare press.
 
 Stages: **START** arms a drag of a given type → **ADD** records one painted
 slot → **END** distributes the cursor across every recorded slot. Implemented
-in `Menu::do_quick_craft` (`click.rs:482-533`). Three things reset it
+in `Menu::do_quick_craft` (`click.rs`). Three things reset it
 (`reset_quick_craft`, clearing `quick_craft_status`/`quick_craft_slots` but
 **not** `quick_craft_type` — the single-slot degrade path below reads it back
-after a reset, `menu.rs:819-826`):
+after a reset, `menu.rs`):
 
 1. **A bad header sequence** — a header that doesn't advance the expected
    state (with one vanilla-tolerated shortcut, start→end) resets:
@@ -95,8 +94,8 @@ after a reset, `menu.rs:819-826`):
 
 3. **An invalid type**, checked only at START — `EVEN`/`ONE` are always
    valid, `CLONE` needs `infinite_materials` (`is_valid_quick_craft_type`,
-   `click.rs:728-735`); an unrecognized 2-bit header value also resets
-   (`click.rs:529-531`).
+   `click.rs`); an unrecognized 2-bit header value also resets
+   (`do_quick_craft`, `click.rs`).
 
 **An invalid slot does *not* reset the drag.** ADD's handler filters it and
 keeps going:
@@ -116,34 +115,33 @@ drag_header::ADD => {
 No `else` arm calls `reset_quick_craft` — a slot holding a different item, or
 one that fails `can_drag_place`, is silently skipped and the drag stays
 armed for the next ADD or END. `drag_skips_a_slot_holding_a_different_item`
-and `drag_never_paints_the_result_slot` (`menu.rs:1113-1143`) pin this.
+and `drag_never_paints_the_result_slot` (`menu.rs`) pin this.
 
 Any ordinary (non-`QuickCraft`) click received while a drag is armed aborts
-it *and* is itself swallowed (`click.rs:164-168`,
-`ordinary_click_mid_drag_resets_and_is_itself_swallowed`, `menu.rs:977-1002`).
+it *and* is itself swallowed (`do_click`, `click.rs`,
+`ordinary_click_mid_drag_resets_and_is_itself_swallowed`, `menu.rs`).
 A single painted slot degrades to an ordinary pickup/place click rather than
-a distribute (`finish_quick_craft`, `click.rs:552-561`) — this is where the
+a distribute (`finish_quick_craft`, `click.rs`) — this is where the
 kept `quick_craft_type` matters.
 
 ### Per-menu quick-move (shift-click) orders
 
-Dispatched by `(kind, craft)` in `quick_move` (`menu.rs:564-576`):
+Dispatched by `(kind, craft)` in `quick_move` (`menu.rs`):
 
 - **Generic container** (chests, barrels, ender chests, every
   `generic_9xN`, hoppers, dispensers, droppers, shulker boxes —
-  `quick_move_generic`, `menu.rs:592-626`): container → player goes
+  `quick_move_generic`, `menu.rs`): container → player goes
   **backwards** (hotbar first); player → container goes forwards. Mirrors
-  `ChestMenu.java:94-109`, and per the same comment also
+  `ChestMenu.quickMoveStack`, and per the same comment also
   `HopperMenu`/`DispenserMenu`/`ShulkerBoxMenu`.
-- **Crafting table** (`quick_move_crafting`, `menu.rs:648-673`, mirroring
-  `CraftingMenu.java:107-152`): result slot → player inventory backwards;
+- **Crafting table** (`quick_move_crafting`, `menu.rs`, mirroring
+  `CraftingMenu.quickMoveStack`): result slot → player inventory backwards;
   a grid cell → player inventory forwards; a player-inventory item first
   tries to *load the grid* (`first_input..grid_end`), only falling back to
   the main↔hotbar hop if the grid refuses it. "Shift-clicking planks in a
-  crafting table loads the grid" (`menu.rs:643-645`).
-- **Player inventory screen** (`quick_move_player`, `menu.rs:708-727`,
-  mirroring `InventoryMenu.quickMoveStack`, `InventoryMenu.java:100-152`),
-  in order:
+  crafting table loads the grid" (`crafting_table_shift_click_loads_the_grid_first`, `menu.rs`).
+- **Player inventory screen** (`quick_move_player`, `menu.rs`,
+  mirroring `InventoryMenu.quickMoveStack`), in order:
 
   | # | source | destination |
   | --- | --- | --- |
@@ -159,8 +157,8 @@ Dispatched by `(kind, craft)` in `quick_move` (`menu.rs:564-576`):
   Auto-equip (4, 5) has to come before the main/hotbar hop, and has to be
   reachable from *every* source ≥ 9 including slot 45 — a prior bug let
   off-hand fall through to rule 8 instead of auto-equipping
-  (`menu.rs:692-704`, regression test
-  `shift_click_equips_armour_out_of_the_offhand_slot`, `menu.rs:1381-1388`).
+  (`quick_move_player`, `menu.rs`, regression test
+  `shift_click_equips_armour_out_of_the_offhand_slot`, `menu.rs`).
 
 ### Two menus left deliberately generic
 
@@ -170,13 +168,14 @@ powder/ingredients/potions, to specific slots before falling back to the
 main↔hotbar hop. Neither is modelled here: both predicates need data this
 tree doesn't have — `canSmelt` needs the cooking-recipe input set, `isFuel`
 needs the fuel-value registry — and guessing would just move the wrongness
-rather than remove it (`menu.rs:592-611`, `menus.rs:371-397`). A furnace
+rather than remove it (`quick_move_generic`, `menu.rs`, `build_menu`'s doc
+comment, `menus.rs`). A furnace
 therefore predicts a shift-click into container slot 0 where vanilla might
 have picked slot 1 or done nothing, and the server corrects it one round
-trip later — "a visible flicker, not a desync" (`menus.rs:393-397`). Routing
+trip later — "a visible flicker, not a desync" (`build_menu`, `menus.rs`). Routing
 for these, if it lands, must be carried as a `Menu`-level descriptor (like
 `CraftLayout`), not a new `MenuKind` variant — `MenuKind` is matched
-exhaustively in `lodestone-shell`'s `slot_layout` (`menus.rs:399-403`).
+exhaustively in `lodestone-shell`'s `slot_layout` (`build_menu`, `menus.rs`).
 
 ### Prediction versus authority
 
@@ -188,20 +187,20 @@ incoming server events into `ClientMenu`'s predict/reconcile machinery or
 into menu-lifecycle bookkeeping, and `Menus::click` applies a click
 optimistically, then returns the `ClickIntent` that goes on the wire — the
 server's own reply, when it arrives, overwrites the prediction through
-`apply` (`menus.rs:295-324`).
+`apply` (`menus.rs`).
 
 The clearest place prediction knowingly stops short of the truth is crafting
 results. A client's `CraftingMenu` is built with no level access, so it
 can't recompute the recipe after a take and its predicted loop exits after
 exactly one craft — which is exactly what vanilla's own client predicts too.
 The server crafts until the grid runs dry and reconciles the difference back
-as `container_set_slot`s (`menu.rs:229-243`). `predicted_craft_result`
-(`menus.rs:344-360`) is explicit about the boundary: "This is a prediction,
+as `container_set_slot`s (`do_quick_move`, `click.rs`). `predicted_craft_result`
+(`menus.rs`) is explicit about the boundary: "This is a prediction,
 not the truth… read the result slot for what the player is actually holding
 a claim to." `Menu::restore` is likewise labelled "server-authoritative
-resync" (`menu.rs:364`).
+resync" (`menu.rs`).
 
-### One inventory, one owner (issue #373)
+### One inventory, one owner
 
 Vanilla has exactly **one** `Inventory`. `InventoryMenu`'s slots and every
 `AbstractContainerMenu`'s player-section slots are all `Slot(inventory, i, x, y)`
@@ -279,27 +278,27 @@ hour, in the same session, once that census landed. It has: `67ff7c3` added
 `crates/lodestone-data/src/item_prototypes.rs` (an item→`{max_stack_size,
 max_damage, equip_slot}` table, the shape `generated/tools.rs` set the
 precedent for) and wired it into wire decoding at
-`read_component_patch` (`crates/protocol/v770/src/adapter.rs:752-830`): the
+`read_component_patch` (`crates/protocol/v770/src/adapter/inventory.rs`): the
 effective `max_stack_size`/`max_damage`/`equippable` fields are seeded from
 the prototype *before* the patch is read, and a patch that does mention one
 overrides the seeded value. `crate::container::equippable_slot` reads
 `stack.components().get_str("minecraft:equippable")`, so a stack decoded off
 the real wire now resolves it, `Slot::may_place` accepts it into the matching
-`Armor` slot, and `Menu::empty_equip_target` (`menu.rs:729-763`) finds it. No
+`Armor` slot, and `Menu::empty_equip_target` (`menu.rs`) finds it. No
 click-mode change was needed — the routing in the table above was always
 right; it had nothing to route.
 
 The `"body"` → `Chest` fold this section used to describe is gone, and
 deliberately: `EquipmentSlot::from_name` (`crates/lodestone-game/src/
 container.rs`) leaves `"body"` unmapped, because vanilla gates humanoid
-armour on `EquipmentSlot.Type.HUMANOID_ARMOR` (`EquipmentSlot.java:15-19`),
+armour on `EquipmentSlot.Type.HUMANOID_ARMOR`,
 which **excludes** `BODY` — `wolf_armor` and the four `*_horse_armor` items
 are real `body`-slot equipment, so folding `"body"` into `Chest` would have
 put animal armour in a player's chestplate slot the moment the census made
 `"body"` reachable.
 
 **One loose end this landing left behind:** `canary_wire_stacks_carry_
-no_prototype_components` (`menu.rs:1441-1487`) is still in the tree, still
+no_prototype_components` (`menu.rs`) is still in the tree, still
 green, and its own comment ("if this now resolves, the equippable census
 landed") is no longer an accurate description of what it tests. It builds its
 "wire stack" as `lodestone_model::ItemStack { …, components:
@@ -314,34 +313,33 @@ hand-built `ItemComponents::default()`.
 
 ### Three quirks that are transcribed deliberately, because they read as bugs
 
-`Menu::move_item_stack_to` (`menu.rs:493-549`) is the port of vanilla
-`moveItemStackTo` (`AbstractContainerMenu.java:636-697`). Its doc comment
-calls out three details explicitly kept rather than "fixed"
-(`menu.rs:465-492`):
+`Menu::move_item_stack_to` (`menu.rs`) is the port of vanilla
+`AbstractContainerMenu.moveItemStackTo`. Its doc comment
+calls out three details explicitly kept rather than "fixed" (`menu.rs`):
 
 1. **The merge pass never calls `may_place`.** Only the empty-slot pass does
-   (`slot.mayPlace`, `AbstractContainerMenu.java:682`, vs. no check at
-   `:647`). A shift-click can top up an existing stack in a slot that would
-   refuse the same item arriving into an empty cell.
+   (`slot.mayPlace`, in `AbstractContainerMenu.moveItemStackTo`, vs. no
+   check on the merge pass's equivalent). A shift-click can top up an
+   existing stack in a slot that would refuse the same item arriving into
+   an empty cell.
 2. **The merge pass is gated on `is_stackable`, not on the per-slot cap.**
    An unstackable item skips merging entirely and goes straight to the
-   first empty slot (`AbstractContainerMenu.java:645`).
+   first empty slot (`AbstractContainerMenu.moveItemStackTo`).
 3. **The two passes measure their cap against different stacks.** The merge
-   cap is `effective_max(slot, &target)` — the slot's *existing* stack
-   (`:650`); the empty-slot cap is `effective_max(slot, moving)` — the
-   *incoming* stack (`:683`). They agree whenever it's the same item, which
+   cap is `effective_max(slot, &target)` — the slot's *existing* stack;
+   the empty-slot cap is `effective_max(slot, moving)` — the
+   *incoming* stack. They agree whenever it's the same item, which
    the merge pass has already established by the time it runs — so it's
    only a difference in what the code says, not what it does, but it's what
    the source says, so it's transcribed as-is.
 
-The empty-slot pass also stops after exactly one placement (`break` at
-`AbstractContainerMenu.java:687`), which is why a caller moving more than
+The empty-slot pass also stops after exactly one placement (`break` in
+`AbstractContainerMenu.moveItemStackTo`), which is why a caller moving more than
 one stack's worth has to loop.
 
-## Audit against 26.2's `doClick` (issue #27)
+## Audit against 26.2's `doClick`
 
 A line-by-line walk of `AbstractContainerMenu.doClick`
-(`.cache/mc/26.2/src/net/minecraft/world/inventory/AbstractContainerMenu.java:334-557`)
 against every branch in `click.rs`/`menu.rs`, done after the predictor above had
 already landed. This was an audit, not a rewrite — the table below is the
 record of what was checked, what was found undertested, and the one real bug
@@ -356,28 +354,28 @@ than to in-game state. Rows marked "pre-existing, suite discipline" were not
 individually re-broken this pass (budget); confidence there instead comes
 from (a) this module's tests already citing exact vanilla line numbers and
 pairing every negative assertion with a positive control, per its own stated
-evidence standard (`menu.rs:849-862`), and (b) one representative spot-check
+evidence standard (the `tests` module's own doc comment, `menu.rs`), and (b) one representative spot-check
 — breaking `quick_craft_place_count`'s `ONE` case from `1` to `2` — which
 `right_drag_one_each` caught immediately, corroborating that the discipline
 described in the comments is real and not just asserted.
 
 | wire `ClickType` (mode / button) | 26.2 location | our location | test(s) | verified red? |
 | --- | --- | --- | --- | --- |
-| `PICKUP` left (`0`/`0`) | `AbstractContainerMenu.java:428-469` | `click.rs::do_pickup` | `left_click_places_whole_cursor_into_empty_slot`, `left_click_full_slot_empty_cursor_picks_up_whole`, `left_click_same_item_merges_up_to_cap`, `left_click_different_items_swaps_cursor_and_slot`, `placing_into_smaller_max_stack_respects_item_cap` | pre-existing, suite discipline |
+| `PICKUP` left (`0`/`0`) | `AbstractContainerMenu.doClick` | `click.rs::do_pickup` | `left_click_places_whole_cursor_into_empty_slot`, `left_click_full_slot_empty_cursor_picks_up_whole`, `left_click_same_item_merges_up_to_cap`, `left_click_different_items_swaps_cursor_and_slot`, `placing_into_smaller_max_stack_respects_item_cap` | pre-existing, suite discipline |
 | `PICKUP` right (`0`/`1`) | same | `do_pickup` | `right_click_places_one`, `right_click_full_slot_empty_cursor_takes_half_rounding_up` | pre-existing, suite discipline |
-| `PICKUP`/`QUICK_MOVE` outside (slot `-999`) | `:404-412` | `do_drop_cursor` | `drop_cursor_outside_left_drops_all`, `drop_cursor_outside_right_drops_one` | pre-existing, suite discipline |
-| `QUICK_MOVE` (`1`) + per-menu order | `:413-427`, `ChestMenu.java:94-109`, `CraftingMenu.java:107-152`, `InventoryMenu.java:100-152` | `do_quick_move`, `quick_move_generic`/`_crafting`/`_player` | `shift_click_from_hotbar_to_main_in_player_menu`, `shift_click_from_container_to_player_inventory`, `chest_to_player_fills_the_hotbar_first`, `crafting_table_shift_click_loads_the_grid_first`, `player_screen_shift_click_never_loads_the_two_by_two_grid`, `shift_click_equips_armour_before_trying_the_hotbar`/`_out_of_the_offhand_slot`, `shift_clicking_the_result_crafts_once_locally_and_again_on_server_refill` | pre-existing, suite discipline |
-| `SWAP` hotbar keys (`2`/`0-8`) | `:471-507` | `do_swap` | `hotbar_swap_moves_between_slot_and_hotbar`, `hotbar_swap_exchanges_two_stacks`, `number_key_swapping_the_result_out_also_crafts` | pre-existing, suite discipline |
+| `PICKUP`/`QUICK_MOVE` outside (slot `-999`) | `AbstractContainerMenu.doClick` | `do_drop_cursor` | `drop_cursor_outside_left_drops_all`, `drop_cursor_outside_right_drops_one` | pre-existing, suite discipline |
+| `QUICK_MOVE` (`1`) + per-menu order | `AbstractContainerMenu.doClick`, `ChestMenu.quickMoveStack`, `CraftingMenu.quickMoveStack`, `InventoryMenu.quickMoveStack` | `do_quick_move`, `quick_move_generic`/`_crafting`/`_player` | `shift_click_from_hotbar_to_main_in_player_menu`, `shift_click_from_container_to_player_inventory`, `chest_to_player_fills_the_hotbar_first`, `crafting_table_shift_click_loads_the_grid_first`, `player_screen_shift_click_never_loads_the_two_by_two_grid`, `shift_click_equips_armour_before_trying_the_hotbar`/`_out_of_the_offhand_slot`, `shift_clicking_the_result_crafts_once_locally_and_again_on_server_refill` | pre-existing, suite discipline |
+| `SWAP` hotbar keys (`2`/`0-8`) | `AbstractContainerMenu.doClick` | `do_swap` | `hotbar_swap_moves_between_slot_and_hotbar`, `hotbar_swap_exchanges_two_stacks`, `number_key_swapping_the_result_out_also_crafts` | pre-existing, suite discipline |
 | `SWAP` off-hand key (`2`/`40`) | same, guard `buttonNum == 40` | `do_swap` | `offhand_swap_moves_between_slot_and_offhand`, `offhand_swap_exchanges_two_stacks` (new) | **yes** — removing the `\|\| button == 40` arm turned both red |
-| `SWAP` overflow (`source.count() > cap`) | `:493-501` | `do_swap` overflow branch + `give_to_player` | `hotbar_swap_overflow_merges_into_the_remainder_it_left_behind`, `control_hotbar_swap_without_overflow_is_a_plain_exchange` (new) | **yes** — see Finding 1, a real bug this test caught and a fix landed for |
-| `CLONE` (`3`) | `:508-512` | `do_clone` | `middle_click_clone_creative_fills_cursor_full_stack`, `middle_click_clone_noop_in_survival`, `middle_click_clone_refuses_when_cursor_is_occupied` (new) | new test not independently re-broken (one-line guard, low risk); other two pre-existing, suite discipline |
-| `THROW` drop-one (`4`/`0`) | `:513-533` | `do_throw` | `throw_q_drops_one_from_slot`, `dropping_the_result_with_q_also_crafts` | pre-existing, suite discipline |
-| `THROW` drop-stack (`4`/`1`) | `:513-533`, incl. the repeat-while-same-item loop at `:523-532` | `do_throw` | `throw_ctrl_q_drops_whole_slot` | pre-existing, suite discipline; the missing loop is Finding 2 (proven inert, not fixed) |
-| `THROW` `canDropItems` gate | `:516-518` | `do_throw`'s `ctx.can_drop` check | `throw_is_a_noop_when_the_player_cannot_drop_items` (new) | **yes** — removing the check turned it red |
-| `QUICK_CRAFT` start/add/end, `EVEN`/`ONE`/`CLONE` (`5`) | `:336-399` | `do_quick_craft`, `finish_quick_craft` | `bare_drag_end_without_start_commits_nothing` / `control_well_formed_drag_does_commit`, `ordinary_click_mid_drag_resets_and_is_itself_swallowed` / `control_same_click_applies_when_no_drag_is_armed`, `drag_with_empty_cursor_commits_nothing`, `paint_stops_when_the_cursor_runs_out_of_items`, `even_split_clamps_at_the_slot_cap_and_returns_the_remainder`, `repainting_a_slot_does_not_inflate_the_divisor`, `clone_drag_resets_in_survival` / `control_clone_drag_commits_in_creative`, `drag_skips_a_slot_holding_a_different_item`, `drag_never_paints_the_result_slot`, `left_drag_even_split_across_three_slots`, `left_drag_even_split_leaves_remainder_on_cursor`, `right_drag_one_each`, `single_slot_drag_degrades_to_place`, `creative_middle_drag_places_full_stacks` | pre-existing, suite discipline — and the one representative spot-check (`right_drag_one_each` against a broken `ONE` place-count) was run this pass and did go red |
-| `PICKUP_ALL` (`6`) | `:534-556` | `do_pickup_all` | `double_click_gathers_matching_partial_stacks_first`, `pickup_all_defers_a_maxed_slot_to_the_second_pass` / `control_pickup_all_takes_a_near_max_slot_in_the_first_pass`, `pickup_all_never_drains_the_crafting_result` | pre-existing, suite discipline |
+| `SWAP` overflow (`source.count() > cap`) | `AbstractContainerMenu.doClick` | `do_swap` overflow branch + `give_to_player` | `hotbar_swap_overflow_merges_into_the_remainder_it_left_behind`, `control_hotbar_swap_without_overflow_is_a_plain_exchange` (new) | **yes** — see Finding 1, a real bug this test caught and a fix landed for |
+| `CLONE` (`3`) | `AbstractContainerMenu.doClick` | `do_clone` | `middle_click_clone_creative_fills_cursor_full_stack`, `middle_click_clone_noop_in_survival`, `middle_click_clone_refuses_when_cursor_is_occupied` (new) | new test not independently re-broken (one-line guard, low risk); other two pre-existing, suite discipline |
+| `THROW` drop-one (`4`/`0`) | `AbstractContainerMenu.doClick` | `do_throw` | `throw_q_drops_one_from_slot`, `dropping_the_result_with_q_also_crafts` | pre-existing, suite discipline |
+| `THROW` drop-stack (`4`/`1`) | `AbstractContainerMenu.doClick`, incl. the repeat-while-same-item loop | `do_throw` | `throw_ctrl_q_drops_whole_slot` | pre-existing, suite discipline; the missing loop is Finding 2 (proven inert, not fixed) |
+| `THROW` `canDropItems` gate | `AbstractContainerMenu.doClick` | `do_throw`'s `ctx.can_drop` check | `throw_is_a_noop_when_the_player_cannot_drop_items` (new) | **yes** — removing the check turned it red |
+| `QUICK_CRAFT` start/add/end, `EVEN`/`ONE`/`CLONE` (`5`) | `AbstractContainerMenu.doClick` | `do_quick_craft`, `finish_quick_craft` | `bare_drag_end_without_start_commits_nothing` / `control_well_formed_drag_does_commit`, `ordinary_click_mid_drag_resets_and_is_itself_swallowed` / `control_same_click_applies_when_no_drag_is_armed`, `drag_with_empty_cursor_commits_nothing`, `paint_stops_when_the_cursor_runs_out_of_items`, `even_split_clamps_at_the_slot_cap_and_returns_the_remainder`, `repainting_a_slot_does_not_inflate_the_divisor`, `clone_drag_resets_in_survival` / `control_clone_drag_commits_in_creative`, `drag_skips_a_slot_holding_a_different_item`, `drag_never_paints_the_result_slot`, `left_drag_even_split_across_three_slots`, `left_drag_even_split_leaves_remainder_on_cursor`, `right_drag_one_each`, `single_slot_drag_degrades_to_place`, `creative_middle_drag_places_full_stacks` | pre-existing, suite discipline — and the one representative spot-check (`right_drag_one_each` against a broken `ONE` place-count) was run this pass and did go red |
+| `PICKUP_ALL` (`6`) | `AbstractContainerMenu.doClick` | `do_pickup_all` | `double_click_gathers_matching_partial_stacks_first`, `pickup_all_defers_a_maxed_slot_to_the_second_pass` / `control_pickup_all_takes_a_near_max_slot_in_the_first_pass`, `pickup_all_never_drains_the_crafting_result` | pre-existing, suite discipline |
 
-### What this table is *scoped to*, and the bug that hid behind that scope (issue #378 part 1)
+### What this table is *scoped to*, and the bug that hid behind that scope
 
 **The table above audits `doClick` and nothing else.** Every row cites a range
 of `AbstractContainerMenu.java` against a function in
@@ -387,17 +385,17 @@ a click packet once it exists. It says nothing about the layer that decides
 `crates/lodestone-shell/src/container.rs`, a reimplementation of
 `AbstractContainerScreen`'s press/drag/release protocol.
 
-Issue #378 part 1 reported that taking from a crafting output onto a cursor
+A player report said that taking from a crafting output onto a cursor
 already holding the same item did nothing. The suspicion was that the audit had
-missed `PICKUP`'s cursor-merge arm. It had not: the arm is at
-`click.rs:303-314`, mirrors `AbstractContainerMenu.java:459-465` line for line,
+missed `PICKUP`'s cursor-merge arm. It had not: the arm is in `do_pickup`
+(`click.rs`), mirrors `AbstractContainerMenu.doClick` line for line,
 and driving a bare `Click::left(result)` into the machine merges correctly.
 **The `PICKUP` row is right.**
 
 What was wrong was that no `PICKUP` was ever sent. `MenuInput::dragged`
 recorded *every* slot the pointer crossed with the button down, where vanilla's
 `mouseDragged` gates the paint on `shouldAddSlotToQuickCraft`
-(`AbstractContainerScreen.java:554-561`), whose `slot.mayPlace(carried)` arm a
+(`AbstractContainerScreen.shouldAddSlotToQuickCraft`), whose `slot.mayPlace(carried)` arm a
 result slot always fails. So a click that jiggled the mouse by one pixel over
 the output painted it, and the *emptiness of the painted set is what selects the
 packet*:
@@ -405,7 +403,7 @@ packet*:
 | painted set at release | packet sent |
 | --- | --- |
 | non-empty | `QUICK_CRAFT` start / add… / end |
-| empty | plain `PICKUP` (`mouseReleased`'s `else if (!carried.isEmpty())`, `:420-430`) |
+| empty | plain `PICKUP` (`AbstractContainerScreen.mouseReleased`'s `else if (!carried.isEmpty())`) |
 
 The machine then dropped the `ADD` at its own `can_drag_place` — correctly, the
 two gates agree — and `finish_quick_craft` saw an empty painted set at `END` and
@@ -434,14 +432,14 @@ discriminated rather than passing as a lump.
 ### Finding 1 (fixed): swap-overflow displaced the wrong stack into a fresh slot instead of merging it back
 
 Number-key-swapping a stack bigger than the target slot's cap (`click.rs`'s
-`do_swap` overflow branch, mirroring `AbstractContainerMenu.java:493-501`)
+`do_swap` overflow branch, mirroring `AbstractContainerMenu.doClick`)
 splits the overflow into the target slot and has to put the target's old
 contents *somewhere* — `inventory.add(targetItemStack)` in vanilla,
 `give_to_player` here.
 
 The subtlety is aliasing. Vanilla's `source` is the literal object backing
-`inventory.getItem(buttonNum)` (`Inventory.getItem`, `Inventory.java:437-440`,
-returns the live list element) and `ItemStack.split` (`ItemStack.java:327-332`)
+`inventory.getItem(buttonNum)` (`Inventory.getItem`,
+returns the live list element) and `ItemStack.split`
 mutates it in place via `shrink`. So by the time `inventory.add` runs, the
 native slot the swap came from **already shows its reduced remainder**, and a
 same-item displaced stack naturally merges back into it. Our `ItemStack` isn't
@@ -459,16 +457,16 @@ Fixed in `click.rs`'s `do_swap`: `set_player_native` now runs before
 (`menu.rs`), with `control_hotbar_swap_without_overflow_is_a_plain_exchange`
 as the non-overflow control.
 
-**Fixed separately, issue #368:** `give_to_player`'s own scan order (it used to
+**Fixed separately:** `give_to_player`'s own scan order (it used to
 be a plain linear `0..36`, merge pass then first-empty pass) now models
-vanilla's actual `Inventory.add` → `addResource` → `getSlotWithRemainingSpace`
-priority — the *selected* hotbar slot first (`Inventory.java:225-227`), then
-the off-hand at native 40 (`:229-231`), then a merge-only linear scan across
-natives `0..36` (`:233-236`), and only once none of those already hold a
-mergeable stack does it fall back to `getFreeSlot`, the first **empty** slot
-in `0..36` (`Inventory.java:102-110`) — the off-hand is *never* used as an
-empty-slot fallback, because `getFreeSlot` scans only `this.items`, which
-vanilla sizes at exactly 36 (`Inventory.java:56`), independently of the
+vanilla's actual `Inventory.add` → `addResource` → `Inventory.getSlotWithRemainingSpace`
+priority — the *selected* hotbar slot first, then
+the off-hand at native 40, then a merge-only linear scan across
+natives `0..36`, and only once none of those already hold a
+mergeable stack does it fall back to `Inventory.getFreeSlot`, the first **empty** slot
+in `0..36` — the off-hand is *never* used as an
+empty-slot fallback, because `getFreeSlot` scans only the `items` field, which
+vanilla sizes at exactly 36, independently of the
 off-hand's separate `EquipmentSlot`-backed storage. `click.rs`'s
 `give_to_player`/`mergeable_native` carry the ordering; `PlayerCtx` grew a
 `selected_hotbar_slot` field to carry it in (default `0`, matching every
@@ -485,8 +483,8 @@ after.
 
 ### Finding 2 (investigated, not a bug): `THROW`'s missing repeat-while-same-item loop
 
-Vanilla's `THROW` branch loops for drop-stack (`buttonNum == 1`,
-`:523-532`): after the first `safeTake`, if the slot still holds the same
+Vanilla's `THROW` branch loops for drop-stack (`buttonNum == 1`, in
+`AbstractContainerMenu.doClick`): after the first `safeTake`, if the slot still holds the same
 item it takes again, and again, until it doesn't. This is the same idiom as
 `QUICK_MOVE`'s repeat loop, and exists for the same reason — a **server**-side
 result slot recomputes and refills between takes.
@@ -518,7 +516,7 @@ someone remembering `THROW` needs the loop too.
 `doClick`'s `PICKUP_ALL` branch supports `buttonNum != 0` (scan backwards from
 the last slot). The real 26.2 client never sends it: double-click gather is
 gated on `event.button() == 0` at the call site
-(`AbstractContainerScreen.java:387,401`), so `button` is always `0` on the
+(`AbstractContainerScreen.mouseClicked`), so `button` is always `0` on the
 wire. `Click::double`'s hardcoded button-`0` is a correct match to what the
 protocol actually carries, not a missing verb — there is nothing to test
 because there is nothing real to distinguish it from.
@@ -533,7 +531,7 @@ zero tests of its own today — the positive-case suite is in
 `tests/crafting_menu.rs`), while `menu.rs`'s `mod tests` holds the
 negative-control suite this doc's own header describes. Corrected below.
 
-## The shell layer's own verb table (issues #376, #378 tail)
+## The shell layer's own verb table
 
 The `doClick` table above audits the **machine**. This section is the audit the
 table's own postscript said did not exist: `AbstractContainerScreen`'s
@@ -544,39 +542,39 @@ ever sent.
 
 | vanilla entry point | 26.2 location | our location | state |
 | --- | --- | --- | --- |
-| `mouseClicked` | `AbstractContainerScreen.java:280-339` | `MenuInput::press` | covered |
-| `mouseDragged` + `shouldAddSlotToQuickCraft` | `:361-370`, `:554-561` | `MenuInput::dragged` | covered (#378 part 1) |
-| `mouseReleased` incl. `quickCraftToSlots` | `:373-435`, `:563-571` | `MenuInput::release` | covered |
-| `checkHotbarKeyPressed` (`SWAP`, hotbar + off-hand) | `:506-522` | `app.rs`'s `KeyOutcome::ContainerSwap` | covered (`43692c5`, `1585e69`) |
-| **`keyPressed`'s `THROW`/`CLONE`** | **`:495-501`** | **`MenuInput::key_pressed`** | **producer added; needs one `app.rs` binding** |
-| `checkHotbarMouseClicked` | `:341-355` | — | **not modelled** (see below) |
-| `mouseScrolled` (`ItemSlotMouseAction`) | `:140-151` | — | not modelled; bundles only |
+| `mouseClicked` | `AbstractContainerScreen.mouseClicked` | `MenuInput::press` | covered |
+| `mouseDragged` + `shouldAddSlotToQuickCraft` | `AbstractContainerScreen.mouseDragged`, `AbstractContainerScreen.shouldAddSlotToQuickCraft` | `MenuInput::dragged` | covered |
+| `mouseReleased` incl. `quickCraftToSlots` | `AbstractContainerScreen.mouseReleased`, `AbstractContainerScreen.quickCraftToSlots` | `MenuInput::release` | covered |
+| `checkHotbarKeyPressed` (`SWAP`, hotbar + off-hand) | `AbstractContainerScreen.checkHotbarKeyPressed` | `app.rs`'s `KeyOutcome::ContainerSwap` | covered (`43692c5`, `1585e69`) |
+| **`keyPressed`'s `THROW`/`CLONE`** | **`AbstractContainerScreen.keyPressed`** | **`MenuInput::key_pressed`** | **producer added; needs one `app.rs` binding** |
+| `checkHotbarMouseClicked` | `AbstractContainerScreen.checkHotbarMouseClicked` | — | **not modelled** (see below) |
+| `mouseScrolled` (`ItemSlotMouseAction`) | `AbstractContainerScreen.mouseScrolled` | — | not modelled; bundles only |
 
 ### `Q` inside an inventory did nothing, and it was an island in both directions
 
 The most expensive finding of this pass, and it is invisible to every test that
 exists. `Click::drop_one`/`drop_stack`, `do_throw` and its `can_drop` gate were
-all added and tested by the #27 audit above — the `THROW` rows say "covered", and
+all added and tested by the audit above — the `THROW` rows say "covered", and
 they are, *as machine branches*. They had **zero producers anywhere outside
 `crates/protocol/`**, which is `ClientAction::SetFlying`'s shape exactly.
 `ContainerInput::Throw` was reachable only at `OUTSIDE_SLOT`, and `doClick`'s own
-`slotIndex >= 0` guard (`AbstractContainerMenu.java:513`) drops that — so the
+`slotIndex >= 0` guard (`AbstractContainerMenu.doClick`) drops that — so the
 whole THROW-from-a-slot branch could not execute in the real game, at all.
 
 `MenuInput::key_pressed` is the missing producer. Three details are transcribed
 rather than reasoned about, because each reads as a bug:
 
 * **The gate is `hoveredSlot.hasItem()`, not an empty cursor.** Unlike
-  `checkHotbarKeyPressed` (`:507`), this branch never consults the carried stack;
+  `AbstractContainerScreen.checkHotbarKeyPressed`, this branch never consults the carried stack;
   `doClick` does. Copying that guard one method too far withholds a packet
   vanilla sends, which is a desync in the direction nothing corrects — the server
   simply never sees it. Control: adding a `cursor_loaded` guard turned
   `the_drop_key_needs_an_item_in_the_slot_but_not_an_empty_cursor` red at
   `left: [], right: [Click { slot: 9, button: 0, input: Throw }]`.
 * **`PickItem` is not gated on infinite materials**, where `press`'s middle-click
-  equivalent is. Not an inconsistency: `mouseClicked` (`:285`) uses
+  equivalent is. Not an inconsistency: `AbstractContainerScreen.mouseClicked` uses
   `hasInfiniteMaterials` to decide *which mouse button means clone*, while the
-  permission lives in `doClick`'s CLONE arm (`:508`). A key has no such
+  permission lives in `AbstractContainerMenu.doClick`'s CLONE arm. A key has no such
   ambiguity, so vanilla sends it in survival and the menu drops it.
 * **`else if`, not two `if`s** — a key bound to both actions clones only.
 
@@ -589,7 +587,7 @@ round-trip tested, exercised by an `#[ignore]`d live gate, and produced by
 nothing. One `Q` binding closes both, which is why this is not the "half a
 feature" that `43692c5` correctly refused for the off-hand key.
 
-### The two `Q` paths disagreed about prediction, and only one of them was wrong (issue #436)
+### The two `Q` paths disagreed about prediction, and only one of them was wrong
 
 Once the binding above landed, `Q` reached the wire from both sides — and the two
 sides did **not** behave the same. A player found it: *"throwing out items with Q
@@ -610,18 +608,18 @@ gameplay port is neutered — the two paths are genuinely independent.
 container click, so the server answers it with a state id and, on a mismatch,
 `broadcastFullState()` — a missed prediction there self-heals within a round trip.
 `DROP_ITEM`/`DROP_ALL_ITEMS` are not container clicks at all. They reach
-`ServerGamePacketListenerImpl.java:1303-1314`, which calls `this.player.drop(false)`
+`ServerGamePacketListenerImpl.handlePlayerAction`, which calls `this.player.drop(false)`
 / `drop(true)` and **returns without sending any slot or content packet**. So the
 count stayed stale *forever*, and the local mutation is the only thing that will
-ever change it. Vanilla's client has always done it: `LocalPlayer.java:314-319`
+ever change it. Vanilla's client has always done it: `LocalPlayer.drop`
 calls `getInventory().removeFromSelected(all)` into a variable it literally names
 `prediction`, and *then* sends the packet.
 
 **Where the fix lives, and why not at the call site.** The prediction is
 `Menus::drop_selected` → `ClientMenu::remove_from_selected` →
 `Menu::remove_from_selected`, a port of `Inventory.removeFromSelected`
-(`Inventory.java:527-530` → `removeItem` `:332-346` →
-`ContainerHelper.removeItem` `ContainerHelper.java:13-15` → `ItemStack.split`).
+(→ `Inventory.removeItem` →
+`ContainerHelper.removeItem` → `ItemStack.split`).
 Three things about that chain are load-bearing:
 
 * **It routes through `inventory_owner_mut`**, for *One inventory, one owner*'s
@@ -635,8 +633,8 @@ Three things about that chain are load-bearing:
   diff as a *visible correction that never happened*.
   `a_container_click_moves_only_the_prediction` is the control for that asymmetry.
 * **A zero remainder becomes `None`, not `Some(count: 0)`.** `app/redraw.rs` maps
-  any present stack to a `HotbarSlot` unconditionally and `hud/item_icon.rs:357`
-  draws the number only `if slot.count > 1`, so a surviving zero-count stack draws
+  any present stack to a `HotbarSlot` unconditionally and `draw_item_icon_counted`
+  (`hud/item_icon.rs`) draws the number only `if slot.count > 1`, so a surviving zero-count stack draws
   an icon with no number in a slot the player just emptied.
 
 The serverbound half stays at the call site: `NetClient::predict_drop_selected` is
@@ -660,20 +658,21 @@ count-1 frame is strictly shorter than either.
 
 ### `checkHotbarMouseClicked` is not modelled, and that is a real gap
 
-`:341-355` runs the hotbar/off-hand `SWAP` off a **mouse** button that is neither
+`AbstractContainerScreen.checkHotbarMouseClicked` runs the hotbar/off-hand `SWAP` off a **mouse** button that is neither
 left, right, nor pick — a side button someone has bound to `key.swapOffhand` or a
 hotbar slot. `MenuButton` has only three variants, so there is nowhere for it to
 arrive. Low value (it needs a rebind to reach) but recorded rather than left to
 be rediscovered.
 
-## Hover highlight and empty-slot placeholders (issue #376)
+## Hover highlight and empty-slot placeholders
 
 Two things reported from play, neither of which was the kind of gap it looked
 like.
 
 **The highlight is two sprites, not one.** `slot_highlight_back` and
 `slot_highlight_front`, both blitted at `(slot.x - 4, slot.y - 4, 24, 24)`
-(`AbstractContainerScreen.java:155`, `:161`), with `extractSlots` between them —
+(`AbstractContainerScreen.extractSlotHighlightBack`,
+`AbstractContainerScreen.extractSlotHighlightFront`), with `extractSlots` between them —
 one under the hovered slot's item and one over it. So `ContainerGeometry`'s
 `bg_verts` now draws in **two ranges** split at `bg_slot_vertex_count`, and
 `ContainerRenderer` replays the second after the item passes. A single highlight
@@ -728,8 +727,8 @@ anchor keys off `menu_type`, which the server already sends and
 `OpenMenuSnapshot::menu_type` already carries — and growing `MenuKind` is
 constrained against anyway, since `slot_layout` matches it exhaustively.
 
-**Three of the nine are decrements, not absolutes.** `LoomScreen.java:68` and
-`CartographyTableScreen.java:29` are `titleLabelY -= 2`; `StonecutterScreen.java:45`
+**Three of the nine are decrements, not absolutes.** `LoomScreen`'s constructor and
+`CartographyTableScreen`'s constructor are `titleLabelY -= 2`; `StonecutterScreen`'s constructor
 is `titleLabelY--`. They resolve to 4/4/5 *only because* the inherited
 `titleLabelY` is 6. If `label_layout`'s `title_y` ever stops being 6, all three go
 wrong and nothing else would say so.
@@ -758,7 +757,7 @@ a still-wrong-shaped panel.
   `AbstractContainerMenu` (or the specific menu subclass) line-for-line
   first; every existing test in this module cites the exact vanilla line it
   pins, per the module's own evidence-standard doc comment
-  (`menu.rs:849-862`) — "assertions of an absence need a control proving the
+  (the `tests` module's own doc comment, `menu.rs`) — "assertions of an absence need a control proving the
   detector works," matching `CLAUDE.md`'s rule. Every hand-derived expected
   value here comes from the `.cache/mc/26.2/src/net/minecraft/world/inventory/`
   decompile, never from this port's own implementation.
@@ -769,7 +768,7 @@ a still-wrong-shaped panel.
   descriptor, not a new `MenuKind`.
 - **Armour** — done (`67ff7c3`); see above. What is left is cleanup, not a
   feature: delete `canary_wire_stacks_carry_no_prototype_components`
-  (`menu.rs:1454`) and re-point its assertions at a stack built through
+  (`menu.rs`) and re-point its assertions at a stack built through
   `read_component_patch` instead of a hand-built `ItemComponents::default()`.
 
 ## Configuration
@@ -798,7 +797,7 @@ tests of its own; the positive-case suite lives in
 `tests/crafting_menu.rs`, and `menu.rs`'s `mod tests` holds the
 negative-control suite (every "commits nothing" / "resets" assertion paired
 with a positive control, per the module's own evidence-standard comment,
-`menu.rs:849-862`) plus the swap-overflow and per-menu shift-click tests.
+the `tests` module's own doc comment in `menu.rs`) plus the swap-overflow and per-menu shift-click tests.
 Notable ones cited above, across both locations:
 `bare_drag_end_without_start_commits_nothing`,
 `drag_with_empty_cursor_commits_nothing`, `clone_drag_resets_in_survival` /
@@ -821,7 +820,7 @@ Notable ones cited above, across both locations:
 `middle_click_clone_refuses_when_cursor_is_occupied`,
 `hotbar_swap_overflow_merges_into_the_remainder_it_left_behind` /
 `control_hotbar_swap_without_overflow_is_a_plain_exchange` — the last four
-landed from the issue #27 audit above, closing test-coverage gaps the audit
+landed from the audit above, closing test-coverage gaps the audit
 found (and, for the swap-overflow pair, a real bug alongside them),
 `canary_wire_stacks_carry_no_prototype_components` — this last one is now
 stale in a way worth flagging rather than silently trusting: it builds its

@@ -19,8 +19,8 @@ delivered. **Correction, made while implementing this plan:** every figure in th
 multiplies 2.108 ms by **361 columns** to reach **761 ms / 15.2× over budget** uses the wrong
 multiplier, and this section, the per-tick-saving bullet below and "Corrections to the briefing"
 item 1 all inherited it. The random-tick loop iterates `tick_area`, not the streamed view:
-`tick_area` is `mob_area` (`integrated.rs:520`) at radius `view_radius.clamp(1, 3)`
-(`net.rs:1773`) — a 7×7 square, **49 columns**, as `integrated.rs:538` states independently.
+`tick_area` is `mob_area` (`open_in_memory_with_mobs_using`, `integrated.rs`) at radius `view_radius.clamp(1, 3)`
+(`run_async`, `crates/lodestone-shell/src/net.rs`) — a 7×7 square, **49 columns**, as `integrated.rs` states independently.
 The correct figures are **103 ms per 50 ms tick, 2.07× over budget** against a
 `50 / 2.108 = 23.7`-column headroom. Every conclusion below is unchanged (49 > 23.7), and
 **761 ms / 15.2× / 361 must not be requoted**. The interim fix (classify
@@ -32,19 +32,19 @@ resident column's index grid is re-walked 20×/s to reach a decision that almost
 **Vanilla's mechanism, read from the record definition** (`.cache/mc/26.2/src/.../chunk/LevelChunkSection.java`):
 
 - Four `short` counters per section: `nonEmptyBlockCount`, `fluidCount`, `tickingBlockCount`,
-  `tickingFluidCount` (lines 14–17).
-- `setBlockState` (58–102) maintains all four incrementally: decrement for the previous state
+  `tickingFluidCount`.
+- `setBlockState` maintains all four incrementally: decrement for the previous state
   if it ticked, increment for the new one. No other mutation path exists — every block write in
   vanilla funnels through this one method.
-- `recalcBlockCounts` (122–153) recomputes all four with one palette-aware counting pass; it is
-  called by the constructor that adopts an existing `PalettedContainer` (line 33, the
-  deserialization path). The empty-section constructor (36–39) does **not** recalc — zero
-  counters are correct for an empty section. The copy constructor (21–28) copies the counters.
-- `isRandomlyTicking()` (110–112) is `isRandomlyTickingBlocks() || isRandomlyTickingFluids()` —
-  **blocks OR fluids**, not blocks alone. The driver, `ServerLevel::tickChunk` (495–538), gates
+- `recalcBlockCounts` recomputes all four with one palette-aware counting pass; it is
+  called by the constructor that adopts an existing `PalettedContainer` (the
+  deserialization path). The empty-section constructor does **not** recalc — zero
+  counters are correct for an empty section. The copy constructor copies the counters.
+- `isRandomlyTicking()` is `isRandomlyTickingBlocks() || isRandomlyTickingFluids()` —
+  **blocks OR fluids**, not blocks alone. The driver, `ServerLevel::tickChunk`, gates
   each section's `tickSpeed` position draws on that OR. The only vanilla fluid whose
-  `isRandomlyTicking()` is true is **lava** (`LavaFluid.java:221` overrides to `true`;
-  `Fluid.java:79` defaults `false`; `WaterFluid` never overrides). See "Fluids" below for why
+  `isRandomlyTicking()` is true is **lava** (`LavaFluid.isRandomlyTicking` overrides to `true`;
+  `Fluid.isRandomlyTicking` defaults `false`; `WaterFluid` never overrides). See "Fluids" below for why
   this matters and why the fluid counter is still out of scope.
 
 **Finding, not assumption: `ChunkColumn` has no per-section structure.**
@@ -136,8 +136,8 @@ so this is compiler-enforced, not conventional. The full production census:
 
 **Constructors** (initial count):
 
-1. `ChunkColumn::new` — all-air; counters zeroed. Callers: `chunk_nbt::read` (region load,
-   `chunk_nbt.rs:493`), `WorldgenChunkSource::column`, test fixtures.
+1. `ChunkColumn::new` — all-air; counters zeroed. Callers: `chunk_nbt::column_from_nbt` (region load,
+   `chunk_nbt.rs`), `WorldgenChunkSource::column`, test fixtures.
 2. `ChunkColumn::from_generated` — bulk adoption of the generator's palette + grid; the one
    place `recalc_ticking_counts` runs. Callers: `OverworldChunkSource::column` (every unedited
    request), `OverworldChunkSource::set_block` (edit-map seeding), `RegionChunkSource` via
@@ -150,17 +150,17 @@ so this is compiler-enforced, not conventional. The full production census:
 - `ChunkColumn::set_solid` (delegates; `WorldgenChunkSource`, shell worldgen fixtures).
 - **Player edits through the wire**: `server.rs`'s dig/place arms → `ChunkSource::set_block`
   impls, each of which mutates a retained `ChunkColumn` in place:
-  `OverworldChunkSource::set_block` (edits map, `chunk.rs:560–570`), `ChunkStore::set_block`
-  (cached entry, `chunk_store.rs:675–697`, plus forwarding to the inner source),
-  `RegionChunkSource::set_block` (disk-seeded edits map, `region_source.rs:835`).
-- **The tick loop** (`tick.rs`): random-tick mutations (grass/crop/sapling/leaf handlers
-  mutate the passed column inside `tick_chunk`), scheduled-tick redstone writes (~`tick.rs:1139`),
+  `OverworldChunkSource::set_block` (edits map, `chunk.rs`), `ChunkStore::set_block`
+  (cached entry, `chunk_store.rs`, plus forwarding to the inner source),
+  `RegionChunkSource::set_block` (disk-seeded edits map, `region_source.rs`).
+- **The tick loop** (`run_tick_loop`, `tick.rs`): random-tick mutations (grass/crop/sapling/leaf handlers
+  mutate the passed column inside `tick_chunk`), scheduled-tick redstone writes,
   and everything `propagate_and_react` writes (gravity settles, dust power, hopper/door
   immediate flips) — all `column.set_block`, then re-persisted per event via `world.set_block`.
-- **Mob grazing**: `mobs.rs`'s `ChunkWorld::set_block` (`mobs.rs:300–308`) on its own retained
+- **Mob grazing**: `ChunkWorld::set_block` (`mobs/world.rs`) on its own retained
   columns (sheep eat grass → dirt; `EatBlockGoal`).
 - **World spawn platform**: `world_spawn.rs`.
-- **Region load**: `chunk_nbt.rs:555` — builds via `new` + per-cell `set_block`, so the load
+- **Region load**: `chunk_nbt::column_from_nbt` (`chunk_nbt.rs`) — builds via `new` + per-cell `set_block`, so the load
   path needs **no separate recalc**: incremental maintenance covers it O(1) per cell. (Generation
   and load really are different entry points with different mechanisms — bulk-adopt-then-recalc
   vs. build-through-the-mutator — and the parity gate below fixtures both.)
@@ -301,7 +301,7 @@ the per-tick server profile should no longer show the section scan at all. Per t
 verification-effort convention in this repo, this is a confirmation run, not a gate the units
 block on — the hermetic gates carry the correctness load. Note for whoever runs it: the
 harness's `gamerule random_tick_speed 0` control arm is still structurally disconnected (see
-#508 below), and *additionally*, post-counter, even a connected control would show a near-null
+the random-tick-speed section below), and *additionally*, post-counter, even a connected control would show a near-null
 fill-time difference because the random-tick term is no longer the bottleneck — do not read
 that null as evidence about the control's wiring.
 
@@ -318,30 +318,30 @@ first lands, the same change must (1) add the fluid counter maintained at the sa
 sites, and (2) widen the section gate to the OR — a code comment at the gate site in
 `tick_chunk` will say exactly this and point here.
 
-## #508 (`random_tick_speed` island): split out, with a finding that changes its shape
+## The `random_tick_speed` island: split out, with a finding that changes its shape
 
 **Recommendation: do not fold in.** Verified state, deeper than the issue body:
 
-- `tick.rs:1166` passes `DEFAULT_RANDOM_TICK_SPEED` (hardcoded 3), confirmed, and no
+- `tick.rs` passes `DEFAULT_RANDOM_TICK_SPEED` (hardcoded 3), confirmed, and no
   `GameRulesHandle` appears anywhere in `tick.rs`.
 - But the world-level store the issue assumes is itself unwired WIP: `game_rules.rs`'s
   `GameRulesHandle` (with `random_tick_speed()`) is consumed **only** by `commands.rs`, and
   `ServerCommands`/`CommandContext` have **no production constructor** — commit `68775dba`
-  says so in its own message: "deliberately unwired (#327, #48)".
+  says so in its own message: "deliberately unwired".
 - Production's actual `gamerule` command path is a *different* store:
   `server.rs`'s per-connection `WorldAdminState.game_rules: HashMap<String, String>`
-  (`server.rs:3115`), which stores and echoes without applying.
+  (`server.rs`), which stores and echoes without applying.
 
-So the real fix is not "read the rule at :1166" — it is: give `GameRulesHandle` a production
+So the real fix is not "read the rule directly" — it is: give `GameRulesHandle` a production
 owner, make the `gamerule` parse path write into it (retiring or bridging the per-connection
 HashMap — otherwise we create a second two-stores fork, and this repo has paid for that twice
 in `ingest` vs `session`), and thread it into the tick loop (additive parameter on
 `run_tick_loop_with_weather`, the established `sleep_vote`/`weather` shape, so the four
-non-production call sites don't change). That is #327's scope, it touches two choke-point
+non-production call sites don't change). That is the game-rules-wiring issue's scope, it touches two choke-point
 files other agents are in (`tick.rs`, `server.rs`), and none of it changes the counter
 representation. What this plan does instead to stay compatible: Gate B runs at a non-default
 speed, so the `tick_speed` parameter is proven live end-to-end through the new decision path —
-when #508/#327 land, only the value's *source* changes, and nothing in these units assumes 3.
+when the random-tick-speed and game-rules-wiring issues land, only the value's *source* changes, and nothing in these units assumes 3.
 The `mesh_fill_rate` speed-0 control stays a known-disconnected subject until then (its doc
 already records the null-that-carried-no-evidence incident).
 
@@ -352,7 +352,7 @@ sites (read from `LevelChunkSection.java` directly, including the blocks-OR-flui
 briefing's summary omitted); lava as the only ticking fluid; `ChunkColumn`'s flat, private,
 append-only representation; the full mutation census above (every `ChunkSource::set_block`
 impl body read); the region-load path building through `set_block`; `bdf93a28`'s numbers
-against its commit message and `docs/mesh-fill-rate.md`; #507/#508 both still OPEN;
+against its commit message and `docs/mesh-fill-rate.md`; this plan's own tracking issue and the random-tick-speed issue both still OPEN;
 `GameRulesHandle`'s unwired status; `docs/plans/` being scanned by `cargo xtask docs-index`.
 
 Assumed (each low-risk, checked at implementation time): `u16` suffices for `section_ticking`
@@ -381,12 +381,12 @@ Checked rather than inherited, per the briefing's own request:
    counter is a separate optional feature" understates the coupling — a future fluid tick
    changes the *same* gate this plan's consumer reads (handled above by marking the boundary
    in code).
-4. **#508's framing** ("the rule is an island; tick.rs:1166 hardcodes the default") — true but
+4. **The random-tick-speed issue's framing** ("the rule is an island; `tick.rs` hardcodes the default") — true but
    understated: the world-level rules store the fix would read is itself deliberately-unwired
-   WIP for #327/#48, and the production `gamerule` path writes a different, per-connection
+   WIP for the game-rules-wiring work, and the production `gamerule` path writes a different, per-connection
    store. The one-line-looking fix is a multi-file wiring task with an ownership decision in
-   it; details in the #508 section above.
-5. **Client-side terms** — confirmed as described and left alone: `sim/step.rs:671`
-   (`heap_bytes()` walk under the world read lock per frame), `:669` (`loaded_chunks().len()`),
+   it; details in the random-tick-speed section above.
+5. **Client-side terms** — confirmed as described and left alone: `refresh_stats` (`sim/step.rs`)
+   (`heap_bytes()` walk under the world read lock per frame, and `loaded_chunks().len()`),
    and `gpu/frame.rs`'s uncalled per-section draw loops. Not this plan's scope; they are the
    next-largest terms in the same profile and nothing here changes their measurement baseline.

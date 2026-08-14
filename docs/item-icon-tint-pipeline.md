@@ -5,7 +5,7 @@
 Issue #171 asks for the *item-icon/held-item* tint path: potion bottle
 liquid colour, spawn-egg background/foreground dots, map marker/border
 colours, and leather dye's icon form (armour dye's **worn 3-D model** form
-is #17, already done, and out of scope here — see `crates/lodestone-assets/src/equipment.rs`'s
+is already done, a separate issue, and out of scope here — see `crates/lodestone-assets/src/equipment.rs`'s
 `only_leather_is_dyeable_and_only_its_base_layer`). This codebase already
 does biome (grass/foliage) tint and multiplies tint and shade in gamma
 space; this issue is specifically the *data-driven, per-item-stack* tint
@@ -20,7 +20,7 @@ task's ownership, and the parsing half already exists and needed no changes.
 ## What already exists
 
 `TintSource { kind: String, default: Option<i32> }`
-(`crates/lodestone-assets/src/item_model.rs:119-124`) already parses
+(`crates/lodestone-assets/src/item_model.rs`) already parses
 **every** tint kind generically from an item model's `tints` array —
 `minecraft:dye`, `minecraft:grass`, `minecraft:potion`, `minecraft:map_color`,
 `minecraft:firework`, whatever a pack names — because parsing only reads the
@@ -29,9 +29,9 @@ kind it is. This was already true before this session; the parsing half was
 never the gap.
 
 The gap is **evaluation**: turning a `TintSource` into a live colour for a
-concrete stack. `crates/lodestone-render/src/block_models.rs:1147-1154`
-(`extruded_sprite_geometry`'s doc, current line numbers — the issue's own
-citation of `805-816` has drifted, expected per `CLAUDE.md`'s "tracker lags
+concrete stack. `extruded_sprite_geometry`'s doc comment
+(`crates/lodestone-render/src/block_models.rs` — the issue's own
+line citation has since drifted, expected per `CLAUDE.md`'s "tracker lags
 the tree") states outright that every baked icon quad is **untinted**, by
 deliberate narrowing: a per-item tint index would have to live in a
 separate table from `BlockModels::tint_palette` (the *block* biome
@@ -76,7 +76,7 @@ $ grep -rn "dyed_color\|DYED_COLOR\|potion_contents\|POTION_CONTENTS" crates/lod
 ```
 
 `crates/lodestone-game/src/item.rs`'s `ComponentValue` enum
-(`item.rs:52-81`) has typed variants for `Int`, `Bool`, `Str`, `Text`,
+has typed variants for `Int`, `Bool`, `Str`, `Text`,
 `Tool`, `Enchantments` — the handful of components existing game logic
 inspects — and everything else, including `minecraft:potion_contents`,
 `minecraft:dyed_color` and (per `docs/filled-map-item.md`'s separate finding)
@@ -91,7 +91,7 @@ Adding a typed variant (or a component-specific NBT reader) means editing
 assigns to the cost-screens agent, not this one (`crates/lodestone-game/`
 is listed off-limits in the briefing). So evaluation was **not** built
 speculatively against data this crate cannot yet read — per this session's
-other finding for #184, that would be exactly the island `CLAUDE.md` warns
+other finding for the filled-map-item work, that would be exactly the island `CLAUDE.md` warns
 about: individually testable with synthetic data, reaching zero pixels in
 play because the real stack's colour is never actually reachable.
 
@@ -135,11 +135,11 @@ present" — a two-tier fallback, not a full rewrite.
 
 ## Related
 
-- `docs/banner-shield-patterns.md` (#174) — hits the identical
+- `docs/banner-shield-patterns.md` — hits the identical
   `ComponentValue::Opaque` wall for `minecraft:banner_patterns`, independent
   discovery, same root cause.
-- `docs/filled-map-item.md` (#184) — a *different* kind of missing data (no
+- `docs/filled-map-item.md` — a *different* kind of missing data (no
   packet decode at all, not just an untyped component), documented
   separately so the two are not conflated.
-- Issue #17 — leather armour's **worn** dye, already shipped; this issue's
+- Leather armour's **worn** dye, already shipped, is a separate issue; this issue's
   leather bullet is the icon form only.

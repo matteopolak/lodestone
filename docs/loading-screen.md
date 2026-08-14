@@ -5,7 +5,7 @@
 The screen shown between a menu click and a playable world: named connect
 phases while the session is established, then `Loading terrain...` with a real
 progress bar and a real per-chunk status grid while the initial view streams
-in. Issue #449 (the bar) and issue #568 (the grid) — its value is diagnostic
+in. Its value is diagnostic
 before it is cosmetic, because before it there was no way to tell "still
 loading" from "broken".
 
@@ -150,7 +150,7 @@ denominator, never a percentage:
 vanilla's `LevelLoadingScreen` geometry — 200×2, centred, black track
 (`0xFF000000`), green fill (`0xFF00FF00`) at `round(fraction * 200)`.
 
-### The chunk-status grid (issue #568)
+### The chunk-status grid
 
 Vanilla's `LevelLoadingScreen` also draws a square block of 2×2-px cells, one
 per chunk in the loading radius, coloured by `ChunkMap.getLatestStatus` — a
@@ -228,7 +228,7 @@ way vanilla's `ChunkMap` does, which nothing here currently models.
   and the screen's own dismissal predicate would silently point at different
   chunks.
 - **`LEVEL_CHUNKS_LOAD_START` (game event 13) is still not decoded.**
-  `crates/protocol/v770/src/adapter.rs`'s game-event match drops it in its
+  `V770Adapter::handle_play_chunk`'s (`crates/protocol/v770/src/adapter/chunk.rs`) game-event match drops it in its
   terminal arm, so there is no "the server is about to stream" edge and
   `terrain_loading()` has to infer the state from a chunk lookup. Wiring it
   would let the terrain phase begin at the packet rather than at login.

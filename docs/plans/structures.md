@@ -8,7 +8,7 @@ placement, templates, beardifier, jigsaw and the coded piece generators — turn
 rewrite plan's phase sketch (S0–S4) into landable units, each with its gate, its control, its
 outside evidence source and its cost stated as a counter against the serve-path budget.
 Written 2026-08-08 against `HEAD` `5f37fb83`; refines and partially supersedes issue **#514**
-(see [Relationship to #514](#relationship-to-514)).
+(see [Relationship to the parent issue](#relationship-to-the-parent-issue)).
 
 ## What was verified vs assumed (2026-08-08)
 
@@ -19,18 +19,18 @@ inventory was stale in exactly this area (corrected in the same commit as this f
   34 structures, 20 structure sets, 188 template pools, 40 processor lists under
   `crates/lodestone-server/assets/worldgen/`, plus **1,212 `.nbt` templates under
   `crates/lodestone-server/assets/structure/`** — note *not* under `assets/worldgen/`, which
-  is where a scoped `find` measures zero. Landed `6c6c0e10` under #484, byte-identical to the
+  is where a scoped `find` measures zero. Landed `6c6c0e10`, byte-identical to the
   jar (`worldgen-structure-corpus.md`). The only Rust reader is the drift gate
   `crates/lodestone-server/tests/worldgen_structure_corpus.rs`.
 - **`WorldgenRandom.setLargeFeatureWithSalt` is absent**: `/usr/bin/grep -rn
   "large_feature_with_salt" --include='*.rs' crates/` → 0 hits.
-  `lodestone-worldgen-core/src/rng/mod.rs` has `set_decoration_seed:124`,
-  `set_feature_seed:136`, `set_large_feature_seed:144` and nothing else. The record
-  definition, read from `.cache/mc/26.2/src/.../WorldgenRandom.java:66-69` (not from a call
+  `lodestone-worldgen-core/src/rng/mod.rs` has `set_decoration_seed`,
+  `set_feature_seed`, `set_large_feature_seed` and nothing else. The record
+  definition, read from `.cache/mc/26.2/src/.../WorldgenRandom.setLargeFeatureWithSalt` (not from a call
   site): `long result = x * 341873128712L + z * 132897987541L + seed + blend; setSeed(result)`
   — the fourth parameter is the structure set's `salt` (the decompiler names it `blend`).
-- **The beardifier is a constant-zero leaf**: `Density::Beardifier` parses at
-  `crates/lodestone-worldgen-core/src/density/mod.rs:826` and evaluates `0.0` at `:599`.
+- **The beardifier is a constant-zero leaf**: `Density::Beardifier` parses in
+  `Builder::build_object` (`crates/lodestone-worldgen-core/src/density/mod.rs`) and evaluates `0.0` in `Density::compute` (same file).
 - **Terrain adaptation is carried by 11 of 34 structures**, censused from the bundle
   (`python3` over `assets/worldgen/structure/*.json`): `beard_thin` — the 5 villages,
   `pillager_outpost`, `nether_fossil`; `beard_box` — `ancient_city`; `bury` — `stronghold`,
@@ -57,7 +57,7 @@ inventory was stale in exactly this area (corrected in the same commit as this f
   swamp_hut, jungle_temple, pillager_outpost, ancient_city, mansion. This census is the
   *world-species* precondition ledger for every gate below.
 - **The persistence path already ships an empty `structures` compound**:
-  `crates/lodestone-server/src/chunk_nbt.rs:466` writes
+  `structures_to_nbt` (`crates/lodestone-server/src/chunk_nbt.rs`) writes
   `structures{References:{}, starts:{}}` — the same "populated empty" shape as the empty
   heightmap NBT (census §10). Filling it is S1's cheapest production consumer.
 - **There are 13 parity binaries, not 11**: 11 `*_parity.rs` under
@@ -127,9 +127,9 @@ Concretely:
   the headline invariant is **`beardifier_evals == 0` and zero added allocations for any
   chunk with no adaptation-bearing start** — exact, not approximate.
 
-The full vanilla ticket/status pipeline (#289) is **not** a prerequisite and is not
+The full vanilla ticket/status pipeline is **not** a prerequisite and is not
 scheduled here: the store's stage slots plus the scheduler's dependency edges already
-express the one ordering fact structures need. #289 remains open for chunk lifecycle
+express the one ordering fact structures need. The chunk-lifecycle issue remains open for
 reasons unrelated to this group.
 
 ## Unit sequence
@@ -152,10 +152,10 @@ predicates* — the biome check via the climate sampler (pure) plus any structur
 pre-piece draws (mineshaft's probability draw lives here) — behind a registry in a new
 `crates/lodestone-worldgen/src/structure/` module, where a structure whose generator has
 not landed yet yields **no start** and is *named* in a `collect_unsupported`-style ledger
-(the legible-silence pattern from `feature/vegetation/config.rs:1085`), never silently
+(the legible-silence pattern from `unsupported_placed_ref`, `feature/vegetation/config.rs`), never silently
 skipped. (d) The two store slots and the `pre_ore` edge, with the beardifier context built
 and handed to a still-constant-zero leaf — bit-identical output, proven. (e) The
-production consumers: `chunk_nbt.rs:466`'s empty compound becomes real
+production consumers: `structures_to_nbt`'s (`chunk_nbt.rs`) empty compound becomes real
 `starts`/`References` NBT, and the singleplayer save path persists it.
 
 **Gate.** For every chunk of the survival world's 29 regions: our computed start set for
@@ -288,8 +288,8 @@ gate proves the bytes; this proves the *reader*), with the `collect_unsupported`
 so any residue is named. Element types to cover: `single_pool_element`,
 `legacy_single_pool_element`, `list_pool_element`, `feature_pool_element` (places a
 `placed_feature` — reuses the existing feature engine; note some referenced features may
-be among the 48/55 unimplemented types (#513), in which case the element places nothing
-**and the ledger names it** — do not let #513's gap hide inside S4), `empty_pool_element`.
+be among the 48/55 unimplemented types (the missing-feature-types issue), in which case the element places nothing
+**and the ledger names it** — do not let that gap hide inside S4), `empty_pool_element`.
 
 **Gate — the gem of this group**: piece-list equality against vanilla start NBT, block-free.
 For the oracle world's village (1), trial_chambers (8) and trail_ruins (1): every expanded
@@ -327,24 +327,24 @@ its 29-instance oracle is exactly what makes it the right first port.
 
 ### Out of scope, said explicitly
 
-- `structure_spawn_overrides` and in-structure mob spawning: **gameplay-blocked**
-  (#221/#222) — the generator parses and stores the overrides (S1 data model), and nothing
+- `structure_spawn_overrides` and in-structure mob spawning: **gameplay-blocked** —
+  the generator parses and stores the overrides (S1 data model), and nothing
   here consumes them.
 - Chest loot, spawner block entities *contents*: template placement produces the block
-  entity NBT slots; wiring block entities to the wire/persistence is #520/#477 territory.
+  entity NBT slots; wiring block entities to the wire/persistence is separate territory.
   S2 records produced-but-unshipped block entities in its ledger so the gap is measured.
 - `/locate` as a command: no production command dispatch exists; S1's placement API is
   `/locate`-shaped for tests only.
 - The Nether/End structures' *dimension hosting*: group NE.
 
-## Relationship to #514
+## Relationship to the parent issue
 
-This plan **refines** #514 (keep the issue as the group parent; file S1–S5 as sub-issues
+This plan **refines** the parent issue (keep it as the group parent; file S1–S5 as sub-issues
 from these units): it keeps S0's contract but merges it into S1's landing (stage plumbing
 alone is an island); replaces its "/locate dumps" oracle with the survival world's
 persisted starts (no live server needed); corrects S2/S3/S4's implied independence with
 the measured adaptation census (S3's composed gate depends on S4); and adds S5 for the
-coded family its S2/S4 dichotomy has no home for. #514's S1-blocker analysis
+coded family its S2/S4 dichotomy has no home for. The parent issue's S1-blocker analysis
 (`setLargeFeatureWithSalt`) and its evidence-standard paragraphs stand.
 
 ## The biggest risk

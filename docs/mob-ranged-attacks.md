@@ -38,29 +38,26 @@ Both remaining reasons are outside `ranged.rs`, and both must close before
 "skeletons shoot players" is true. Stating them together because each one alone
 looks like the only blocker:
 
-1. **Nothing drains the launches** —
-   [#460](https://github.com/matteopolak/lodestone/issues/460). The fourth line
-   above does not exist. `MobSim::tick` resolves melee intents (`mobs.rs:1578`)
+1. **Nothing drains the launches.** The fourth line
+   above does not exist. `MobSim::tick` (`mobs/mod.rs`) resolves melee intents
    but not launches, so `ProjectileRegistry` stays empty. Outside `ranged.rs`'s
    own tests, `take_new_launches` has **zero** callers tree-wide. One patch in
-   `mobs.rs`; see *How to change it*.
-2. **No ranged species is spawned** —
-   [#457](https://github.com/matteopolak/lodestone/issues/457).
+   `mobs/mod.rs`; see *How to change it*.
+2. **No ranged species is spawned.**
    `seed_demo_mobs` seeds `minecraft:zombie` only, so there is no blaze or
    skeleton in a running world to shoot at all.
 
-**Closed since this doc was drafted:** target acquisition. B3 listed
-[#455](https://github.com/matteopolak/lodestone/issues/455) here as a third
-blocker — `NavigatingMob::find_nearest_target` returned `self.attack_target`, the
+**Closed since this doc was drafted:** target acquisition. This doc listed a
+third blocker here — `NavigatingMob::find_nearest_target` returned `self.attack_target`, the
 field written by the only goal that calls it, so the loop could not bootstrap and
 every `can_use` in this family was false in practice. It now reads the
 `nearest_player` feed and applies vanilla's follow-range cut. The goals here no
 longer need a target handed to them, though every *gate* here still sets one
 explicitly, because a hermetic `PathWorld` has no player in it.
 
-The projectile *wire* path is **not** among them. It has worked since issue
-\#211 — `MobSim::snapshots` already lowers tracked projectiles onto the same
-`ADD_ENTITY` path a mob uses. A3's survey recorded `ProjectileRegistry` as
+The projectile *wire* path is **not** among them. It has worked since a
+prior fix — `MobSim::snapshots` already lowers tracked projectiles onto the same
+`ADD_ENTITY` path a mob uses. A prior survey recorded `ProjectileRegistry` as
 "permanently empty at runtime", which is true, but the cause is only (1).
 
 ### The goals
@@ -69,7 +66,7 @@ The projectile *wire* path is **not** among them. It has worked since issue
 |---|---|---|
 | `RangedBowAttackGoal` | `ai/goal/RangedBowAttackGoal.java` | 20-tick draw, release, then an interval; walks in when out of radius |
 | `RangedAttackGoal` | `ai/goal/RangedAttackGoal.java` | no draw phase; interval lerps with range between min and max |
-| `BlazeFireballGoal` | `monster/Blaze.java:156-252` | bursts of **three**, 6 ticks apart, after a 60-tick wind-up, then a 100-tick pause; melees below 2 blocks |
+| `BlazeFireballGoal` | `Blaze.BlazeAttackGoal` | bursts of **three**, 6 ticks apart, after a 60-tick wind-up, then a 100-tick pause; melees below 2 blocks |
 
 The blaze's step machine is the one worth re-reading before touching: `attackStep
 > 1` is tested *after* the reset to 0, which is why step 5 fires nothing and a
@@ -77,15 +74,14 @@ burst is three fireballs rather than four.
 
 ### Ballistics
 
-`ProjectileLaunch::aimed` is vanilla `Projectile.getMovementToShoot`
-(`projectile/Projectile.java:130-139`): normalise the direction, scale by power.
+`ProjectileLaunch::aimed` is vanilla `Projectile.getMovementToShoot`: normalise the direction, scale by power.
 
 * Arrows, tridents, snowballs, potions: power **1.6**, with vanilla's
   `horizontalDistance * 0.2` arc lift added to the vertical component.
 * Small fireballs: power **0.1**, and **no arc lift** — `SmallFireball` is an
   `AbstractHurtingProjectile`, whose constructor is
-  `direction.normalize().scale(accelerationPower)` with `accelerationPower`
-  defaulting to 0.1 (`AbstractHurtingProjectile.java:24`, `:180-183`). It
+  `direction.normalize().scale(accelerationPower)` (`AbstractHurtingProjectile.assignDirectionalMovement`) with `accelerationPower`
+  defaulting to 0.1 (`AbstractHurtingProjectile.accelerationPower`). It
   accelerates in flight rather than falling. Sixteen times slower off the muzzle
   than an arrow, and using 1.6 here is the obvious mistake.
 
@@ -105,7 +101,7 @@ Both are gated.
 * **A wrong registry name in `projectile_entity_type` does not fail — it streams
   the wrong entity.** `encode_add_entity_body` resolves the type with
   `entity_type_id(name).unwrap_or(0)`
-  (`crates/protocol/v770/src/server_protocol.rs:1117`), and 0 is a real entity
+  (`crates/protocol/v770/src/server_protocol.rs`), and 0 is a real entity
   the client renders happily. `every_projectile_kind_names_a_real_entity_type`
   exists for exactly this and checks against `lodestone-data`'s generated
   registry, not against a list in this repo.
@@ -114,22 +110,21 @@ Both are gated.
   vanilla has it stand still and shoot. Reading that as "the builder passes no
   speed" would be wrong; drive the distance per species.
 * **Do not test these against `ScriptMob`.** It overrides all eight perception
-  methods, which is how [#441](https://github.com/matteopolak/lodestone/issues/441)'s
+  methods, which is how a prior
   island stayed hidden — eight goals with green tests and a constant-false
   `can_use` in production. Every gate here drives a real `NavigatingMob`.
 * **Skeleton, stray, bogged, parched and drowned are not in this family** — they
   resolve through `hostile_melee.rs`, which claimed them first. `bow_attack` and
   `trident_attack` are `pub` so their rows can be registered from there, and
   `bow_attack` now is: the shared `SKELETON` table's priority-4 row is
-  `RangedBowAttackGoal`, covering skeleton, stray, bogged and parched
-  ([#226](https://github.com/matteopolak/lodestone/issues/226)).
+  `RangedBowAttackGoal`, covering skeleton, stray, bogged and parched.
 * **The skeleton's weapon branch is decided by equipment, not by a goal
   override.** `AbstractSkeleton.populateDefaultEquipmentSlots` hands out a `BOW`
-  unconditionally (`:109-112`), so `reassessWeaponGoal`'s `is(Items.BOW)` test at
-  `:137` is always true and the melee `else` at `:146` is unreachable — the table
-  carried that dead branch until #226. `WitherSkeleton` is the sole exception, and
+  unconditionally, so `AbstractSkeleton.reassessWeaponGoal`'s `is(Items.BOW)` test
+  is always true and the melee `else` is unreachable — the table
+  carried that dead branch until this fix. `WitherSkeleton` is the sole exception, and
   only because it overrides the *equipment* method with a `STONE_SWORD`
-  (`WitherSkeleton.java:74-76`); it never overrides `reassessWeaponGoal`. If you
+  (`WitherSkeleton.populateDefaultEquipmentSlots`); it never overrides `reassessWeaponGoal`. If you
   are deciding whether a variant shoots, read `populateDefaultEquipmentSlots`, not
   the goal registration.
 * **`trident_attack` is deliberately *not* registered.** The drowned's row stays
@@ -147,14 +142,14 @@ Both are gated.
   from 6 blocks a correct bow goal still walks in, because it only parks once
   `seeTime` reaches 20, and 20 ticks at 0.25 blocks/tick is 5 blocks.
 
-### The remaining `mobs.rs` patch
+### The remaining `mobs/mod.rs` patch
 
-Tracked as [#460](https://github.com/matteopolak/lodestone/issues/460), and not
-applied here because `mobs.rs` was held by another agent when this landed.
+Not
+applied here because `mobs/mod.rs` was held by another agent when this landed.
 
-The drain, mirroring how `take_detonations` is drained from `tick.rs:545`. Inside
+The drain, mirroring how `take_detonations` is drained from `run_tick_loop_with_weather` (`tick.rs`). Inside
 `MobSim::tick`'s existing per-mob loop, alongside the `take_new_attacks()` drain
-at `mobs.rs:1578`, collect `(id, launch)` pairs, then after the loop:
+(`mobs/mod.rs`), collect `(id, launch)` pairs, then after the loop:
 
 ```rust
 for (_shooter, launch) in launches {
