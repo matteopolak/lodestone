@@ -704,6 +704,23 @@ struct WindowApp {
     /// the same launch on a TCP port. `None` for a multiplayer session, which is
     /// what makes that button honest there — there is no world of ours to publish.
     hosted_world: Option<crate::menu::nav::SingleplayerLaunch>,
+    /// The merchant screen's own UI state (issue #245's UI half) — vanilla's
+    /// `MerchantScreen.shopItem`, which trade row is selected: whose
+    /// out-of-stock overlay shows, and the index the next `SELECT_TRADE` send
+    /// carries.
+    ///
+    /// Not reset on close, matching [`creative`](Self::creative)/
+    /// [`recipe_panel`](Self::recipe_panel)'s own "persisted across open/close"
+    /// precedent — vanilla's own field is `screen`-scoped state that a fresh
+    /// `MerchantScreen` starts at `0` every time, but this client rebuilds no
+    /// screen object per open, so restarting at `0` here would need an extra
+    /// reset call at the one place a merchant menu opens, for a difference no
+    /// player can see (`0` is what a stale value most often already is). A
+    /// stale value past the real offer list is harmless either way: every
+    /// reader (`container::geometry`'s `draw_merchant_trades`,
+    /// `container::merchant::hit_test_local`) indexes with `.get()`/a bounded
+    /// loop, never a bare index.
+    merchant_selected: usize,
 }
 
 #[cfg(test)]

@@ -1524,6 +1524,11 @@ fn synthetic_background() -> ContainerBackground {
         "cartography_table",
         "dispenser",
         "hopper",
+        // The merchant screen (issue #245's UI half) — real `villager.png` is
+        // `512x256`, but the stand-in only needs to exist; `whole_panel_sized`
+        // grabs a `276x166` sub-rect regardless of the sheet's own dimensions,
+        // the same way it already does for every sheet in this list.
+        "villager",
         // The creative screen's three sheets (issue #158) — loaded by
         // `ContainerBackground::build` alongside the sixteen above, so a
         // missing stand-in fails every test in this module rather than just
@@ -3942,5 +3947,150 @@ fn advanced_tooltips_add_lines_to_the_recipe_tooltip() {
         "advanced tooltips must add at least the id line: {} vs {}",
         advanced.verts.len(),
         plain.verts.len()
+    );
+}
+
+// -- merchant screen (issue #245's UI half) --------------------------------
+
+/// Builds the merchant `Menu` through the **real** dispatch path — a
+/// synthesized `ScreenOpened` + `ContainerContent`, exactly what a live
+/// `OPEN_SCREEN`/content packet pair produces — rather than calling
+/// `Menu::merchant()` directly. `lodestone_game::menus`'s own test module
+/// carries the size-guard control for this dispatch
+/// (`build_menu_selects_the_merchant_shape_for_a_real_open`,
+/// `control_merchant_menu_type_with_the_wrong_size_falls_back_to_generic`);
+/// this helper exists so the render gate below shares the same real path
+/// rather than re-deriving it.
+fn merchant_menu_via_real_path() -> Menu {
+    let mut menus = lodestone_game::menus::Menus::new();
+    assert!(menus.apply(&lodestone_model::ClientEvent::ScreenOpened {
+        window_id: 9,
+        menu_type: "minecraft:merchant".parse().expect("valid key"),
+        title: lodestone_model::Text::literal("Villager"),
+    }));
+    assert!(menus.apply(&lodestone_model::ClientEvent::ContainerContent {
+        window_id: 9,
+        state_id: 1,
+        items: vec![None; 3 + 36],
+        carried_item: None,
+    }));
+    menus.opened().expect("container open").clone()
+}
+
+/// One real offer, folded through [`lodestone_game::trades::TradeOffers::apply`]
+/// (the exact production fold) rather than hand-built already-populated —
+/// registry id `1` is `minecraft:stone` in the 26.2 table
+/// (`lodestone_data::items::item_name`).
+fn trade_offers_via_real_path() -> lodestone_game::trades::TradeOffers {
+    let mut store = lodestone_game::trades::TradeOffers::new();
+    assert!(store.apply(&lodestone_model::ClientEvent::MerchantOffersReceived {
+        window_id: 9,
+        offers: vec![lodestone_model::event::MerchantOffer {
+            cost_a: (1, 5),
+            cost_b: None,
+            result: None,
+            out_of_stock: false,
+            uses: 0,
+            max_uses: 12,
+            xp: 1,
+            special_price_diff: 0,
+            price_multiplier: 0.0,
+            demand: 0,
+        }],
+        villager_level: 1,
+        villager_xp: 0,
+        show_progress: false,
+        can_restock: false,
+    }));
+    store
+}
+
+/// [`ColourStream::rect`]'s own pixel-to-NDC formula, mirrored here (the
+/// function itself is private to `builder.rs`) so the probe point below is
+/// derived the same way the draw computes it.
+fn to_ndc(px: f32, py: f32, w: f32, h: f32) -> (f32, f32) {
+    (2.0 * px / w - 1.0, 1.0 - 2.0 * py / h)
+}
+
+/// How many colour-stream triangles cover NDC point `(x, y)` — a raster
+/// point-test against real triangle geometry (not a vertex-only sample),
+/// mirroring `app::recipe_book_wiring::coverage`'s inner loop. Returns a
+/// *count*, not a bool: the panel's own flat jar-less background already
+/// covers most of the interior, so the subject under test is a **count
+/// delta**, not bare presence — see the gate below.
+fn triangle_hits(verts: &[f32], (x, y): (f32, f32)) -> usize {
+    verts
+        .chunks_exact(FLOATS_PER_VERTEX * 3)
+        .filter(|tri| {
+            let (ax, ay) = (tri[0], tri[1]);
+            let (bx, by) = (tri[FLOATS_PER_VERTEX], tri[FLOATS_PER_VERTEX + 1]);
+            let (cx, cy) = (tri[FLOATS_PER_VERTEX * 2], tri[FLOATS_PER_VERTEX * 2 + 1]);
+            let d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+            if d.abs() < f32::EPSILON {
+                return false;
+            }
+            let w0 = ((bx - x) * (cy - y) - (cx - x) * (by - y)) / d;
+            let w1 = ((cx - x) * (ay - y) - (ax - x) * (cy - y)) / d;
+            let w2 = 1.0 - w0 - w1;
+            w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0
+        })
+        .count()
+}
+
+/// The island control this unit is dispatched against: V4 (server-side trade
+/// generation) does not exist yet, so nothing in a real session opens this
+/// screen today. This gate is the substitute — it drives the **real**
+/// `ScreenOpened`/`ContainerContent`/`MerchantOffersReceived` dispatch
+/// (not `Menu::merchant()` or `row_layout()` called directly) all the way
+/// through to rendered geometry, and proves the trade row lands at its own
+/// expected screen position rather than merely "somewhere".
+///
+/// The point sampled is the first trade row's cost-A icon centre
+/// (`super::merchant::row_layout(0)`, offset by the same
+/// `panel_origin_with_scale` the draw uses) — derived from the real layout
+/// expressions, never a restated pixel literal, per this repo's own
+/// `cluster_top` warning. The control is `ContainerFrame::with_trades`
+/// simply not called: **same menu**, same merchant special layout, only the
+/// offer data withheld — so a merchant screen with no offers yet (every
+/// pre-existing caller) is what proves the detector can fail.
+#[test]
+fn merchant_screen_opens_and_renders_its_trade_list_through_the_real_path() {
+    let menu = merchant_menu_via_real_path();
+    assert_eq!(
+        menu.special_layout(),
+        Some(SpecialLayout::Merchant),
+        "sanity: the real ScreenOpened/ContainerContent dispatch must have \
+         built the merchant shape"
+    );
+    let layout = crate::container::slot_layout(&menu);
+    assert_eq!(
+        layout.width, 276.0,
+        "the merchant panel is 276px wide, not the generic 176 — MerchantScreen.java:57"
+    );
+    assert_eq!(background_kind(&menu), BackgroundKind::Merchant);
+
+    let (w, h) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, VIEW.0, VIEW.1);
+    let (px, py) =
+        crate::container::panel_origin_with_scale(&layout, crate::config::AUTO_GUI_SCALE, VIEW.0, VIEW.1);
+    let row0 = crate::container::merchant::row_layout(0);
+    // +8, not +3: the swatch itself is inset 3px into its 16px cell and is
+    // 10px wide, so its centre is 3 + 5 = 8px from the cell's own origin
+    // (`Builder::draw_stack_counted`'s jar-less fallback).
+    let point = to_ndc(px + row0.cost_a[0] + 8.0, py + row0.cost_a[1] + 8.0, w, h);
+
+    let control = ContainerGeometry::build(&ContainerFrame::new(Some(&menu), "Villager"), VIEW.0, VIEW.1);
+    let control_hits = triangle_hits(&control.verts, point);
+
+    let trades = trade_offers_via_real_path();
+    let frame = ContainerFrame::new(Some(&menu), "Villager").with_trades(Some(&trades), 0);
+    let subject = ContainerGeometry::build(&frame, VIEW.0, VIEW.1);
+    let subject_hits = triangle_hits(&subject.verts, point);
+
+    assert!(
+        subject_hits > control_hits,
+        "control: a merchant screen with no TradeOffers attached must not draw \
+         a swatch at the first trade row's own cost-A position — got \
+         {control_hits} triangles there with no trades and {subject_hits} with \
+         a real offer folded through TradeOffers::apply"
     );
 }

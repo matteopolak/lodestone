@@ -863,6 +863,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   vanilla's four-state sprite record, and therefore the **disabled render path** —
   the thing the settings tree (#55) needs so an unsupported option can be present and
   greyed out rather than absent.
+- [The merchant/trading screen](./merchant-screen.md) — The client-side
+  villager/wandering-trader trading screen — vanilla's `MerchantScreen` over a
+  `MerchantMenu` — reached when the server sends `OPEN_SCREEN` with `menu_type =
+  minecraft:merchant` followed by `MERCHANT_OFFERS`. This is issue #245's UI half,
+  client-side only: it renders the real panel, the two payment slots and the take-only
+  result slot, the seven-row scrollable trade list with prices and availability
+  arrows, and sends `SELECT_TRADE` when a row is clicked. It does not generate trades,
+  assign professions, or open the screen from an in-game right-click — that is the
+  server half (#245's core / V4 in `docs/plans/villager-economy.md`), not built yet.
 - [Mesh fill rate](./mesh-fill-rate.md) — A headless measurement of the owner's own
   metric — **how long, standing still, the whole render distance takes to reach the
   GPU as meshed geometry** — driven through the real `Sim`, the real integrated

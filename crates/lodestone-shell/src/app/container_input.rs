@@ -161,6 +161,42 @@ impl WindowApp {
         true
     }
 
+    /// Resolve a click at the current cursor against the merchant screen's
+    /// trade-list buttons and act on it, returning whether it **consumed**
+    /// the click — vanilla's `postButtonClick`
+    /// (`MerchantScreen.java:61-65,74-82`): select the row, remember it, and
+    /// tell the server (issue #245's UI half).
+    ///
+    /// Given first refusal the same way
+    /// [`Self::handle_recipe_panel_click`] is, and for the same reason: the
+    /// trade buttons sit at local `x = 5..93`, well clear of the real payment
+    /// slots (`x = 136..`), so there is no real overlap today, but a screen
+    /// this contended is exactly where "one path forgets to check" bugs live,
+    /// and the first-refusal shape is what lets a caller add a click surface
+    /// without re-deriving the slot precedence rule each time.
+    pub(super) fn handle_merchant_click(&mut self, menu: &Menu, w: u32, h: u32) -> bool {
+        if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Merchant) {
+            return false;
+        }
+        let offer_count = self.sim.trades().offers().len();
+        let Some(index) = crate::container::merchant::button_hit_test(
+            menu,
+            offer_count,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+        ) else {
+            return false;
+        };
+        self.merchant_selected = index;
+        self.sim.send_select_trade(
+            i32::try_from(index).expect("a trade row index is always in i32 range"),
+        );
+        true
+    }
+
     /// Report this panel's open/filter state for `book_type` to the server —
     /// vanilla's `ServerboundRecipeBookChangeSettingsPacket`, sent from
     /// `RecipeBookComponent`'s own toggle and filter handlers.

@@ -124,6 +124,16 @@ pub enum SpecialLayout {
     /// exactly this issue's own class of defect: a plausible but wrong
     /// screen, not a missing one.
     Hopper,
+    /// `MerchantMenu`: payment slots `(136,37)`, `(162,37)`, take-only result
+    /// `(220,37)` — `MerchantMenu.java:42-45`. The **only** special layout
+    /// whose player-inventory section is not at `x = 8`:
+    /// `MerchantMenu.java:45`'s `addStandardInventorySlots(inventory, 108,
+    /// 84)` starts it at `x = 108`, and the panel itself is `276` wide, not
+    /// `176` (`MerchantScreen.java:57`). The trade **list** — seven scrollable
+    /// rows of cost/result icons that are not menu slots at all, vanilla's own
+    /// `ItemStack`s rendered as "fake items" — is not part of this layout;
+    /// see `lodestone_shell::container::merchant`.
+    Merchant,
 }
 
 /// Where a menu's crafting grid and result live, in **menu-slot** indices.
@@ -557,6 +567,33 @@ impl Menu {
     pub fn hopper() -> Self {
         let mut menu = Self::generic(5);
         menu.special_layout = Some(SpecialLayout::Hopper);
+        menu
+    }
+
+    /// Builds the merchant/trading menu: two payment slots (`0`, `1`), then a
+    /// take-only result slot (`2`), then the player's main storage and hotbar
+    /// (`MerchantMenu.java:42-45`).
+    ///
+    /// `MerchantMenu.quickMoveStack` is genuinely different from
+    /// [`quick_move_generic`](Self::quick_move_generic) — the result slot
+    /// (`slotIndex == 2`) empties into the player inventory the same way, but
+    /// the two payment slots (`0`, `1`) move to the player inventory
+    /// **forwards**, not backwards, and `MerchantMenu.java:171-216`'s
+    /// `tryMoveItems` (auto-filling the payment slots from the player's own
+    /// inventory when a trade row is selected) is not modelled at all — it
+    /// needs the offer list, which lives on [`crate::trades::TradeOffers`], not
+    /// on this menu. Left on the generic "container then player" order for the
+    /// same reason the furnace and brewing stand are (see
+    /// [`crate::menus::build_menu`]'s doc comment): the cost is bounded and
+    /// self-correcting, a visible flicker rather than a desync, and no server
+    /// half of trading exists yet to correct it against.
+    #[must_use]
+    pub fn merchant() -> Self {
+        let mut menu = Self::generic(3);
+        if let Some(slot) = menu.slots.get_mut(2) {
+            slot.kind = SlotKind::Output;
+        }
+        menu.special_layout = Some(SpecialLayout::Merchant);
         menu
     }
 
