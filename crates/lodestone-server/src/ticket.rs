@@ -271,6 +271,13 @@ pub mod ticket_type {
     };
 }
 
+/// The radius `PLAYER_SPAWN` is granted at — `PrepareSpawnTask.java:140`'s
+/// `addTicketAndLoadWithRadius` call, the same citation `PLAYER_SPAWN`'s own
+/// doc comment above already carries. Named here rather than left a literal
+/// at each grant site, since [`crate::server`]'s join arm and
+/// [`ticket_type::PLAYER_SPAWN`]'s own doc both need to agree on it.
+pub const PLAYER_SPAWN_RADIUS: i32 = 3;
+
 /// Which named ticket a [`TicketOwner`] holds — the second half of a
 /// [`TicketStore`] key. A plain enum rather than storing a [`TicketType`]
 /// directly in the key: two tickets of the same *kind* held by the same owner
@@ -643,6 +650,82 @@ impl TicketStoreHandle {
     fn active_ticket_count(&self) -> usize {
         self.lock().active_ticket_count()
     }
+
+    /// Grants a player-following `PLAYER_LOADING`/`PLAYER_SIMULATION` ticket
+    /// pair at `pos`, both at `radius` — issue #619's connection-side wiring.
+    ///
+    /// Both tickets share one radius because this crate has no separately
+    /// configured simulation distance yet (vanilla's `server.properties`
+    /// splits `view-distance` from `simulation-distance`); see
+    /// `docs/chunk-tickets.md`'s "Open work" for the gap. `id` need only be
+    /// unique per connection — [`TicketOwner::Player`]'s own doc says a
+    /// caller-assigned `u64` is enough, and [`crate::server`] derives one from
+    /// the connection's login uuid.
+    ///
+    /// Returns a [`PlayerTicketGuard`] whose `Drop` withdraws both tickets —
+    /// the same RAII shape [`crate::players::PlayerRegistry::join`]'s
+    /// `PlayerTicket` already uses for the entity roster, applied here to
+    /// residency so a connection's ticket dies on every exit path out of
+    /// `serve_play`, not just a clean disconnect.
+    #[must_use]
+    pub fn grant_player(&self, id: u64, pos: (i32, i32), radius: i32) -> PlayerTicketGuard {
+        self.set_ticket_with_radius(TicketOwner::Player(id), TicketKind::PlayerLoading, pos, radius);
+        self.set_ticket_with_radius(TicketOwner::Player(id), TicketKind::PlayerSimulation, pos, radius);
+        PlayerTicketGuard {
+            store: self.clone(),
+            id,
+        }
+    }
+}
+
+/// RAII guard for one connection's player-following ticket pair, from
+/// [`TicketStoreHandle::grant_player`]. See that method's doc for why the
+/// pair shares a radius.
+///
+/// `Drop` removes both tickets — [`crate::server`]'s `serve_play` owns one of
+/// these for the lifetime of the connection, so a chunk near a player stops
+/// being ticket-resident on every exit path (clean disconnect, a `?`
+/// propagated error, or a cancelled task), never only the happy path.
+#[derive(Debug)]
+pub struct PlayerTicketGuard {
+    store: TicketStoreHandle,
+    id: u64,
+}
+
+impl PlayerTicketGuard {
+    /// Re-grants this connection's ticket pair at `pos`/`radius` — moving a
+    /// ticket is granting it again under the same `(TicketOwner, TicketKind)`
+    /// key, exactly as this module's own doc says (`ticket.rs`'s "A ticket is
+    /// keyed by `(TicketOwner, TicketKind)`, not by position"). Called from
+    /// [`crate::server`]'s view-recenter and view-radius-change arms so a
+    /// player's residency claim follows their real position, not just their
+    /// join point.
+    pub fn move_to(&self, pos: (i32, i32), radius: i32) {
+        self.store
+            .set_ticket_with_radius(TicketOwner::Player(self.id), TicketKind::PlayerLoading, pos, radius);
+        self.store.set_ticket_with_radius(
+            TicketOwner::Player(self.id),
+            TicketKind::PlayerSimulation,
+            pos,
+            radius,
+        );
+    }
+
+    /// Resets the world's `PLAYER_SPAWN` ticket's countdown without moving
+    /// it — vanilla's `Ready.keepAlive()`, called from any connected
+    /// player's own keep-alive timer. A no-op if no spawn ticket is
+    /// currently held (e.g. every connection using a private, disconnected
+    /// [`TicketStoreHandle::default`]).
+    pub fn refresh_world_spawn(&self) -> bool {
+        self.store.refresh_ticket(TicketOwner::Spawn, TicketKind::PlayerSpawn)
+    }
+}
+
+impl Drop for PlayerTicketGuard {
+    fn drop(&mut self) {
+        self.store.remove_ticket(TicketOwner::Player(self.id), TicketKind::PlayerLoading);
+        self.store.remove_ticket(TicketOwner::Player(self.id), TicketKind::PlayerSimulation);
+    }
 }
 
 #[cfg(test)]
@@ -899,5 +982,78 @@ mod tests {
         assert!(handle.is_resident((0, 0)));
         assert_eq!(handle.status((0, 0)), ChunkStatus::Full);
         assert_eq!(handle.status((1000, 1000)), ChunkStatus::Empty);
+    }
+
+    /// Issue #619: `grant_player` must actually install both tickets,
+    /// `move_to` must move both together, and dropping the guard must
+    /// withdraw both — a positive control before the negative one below.
+    #[test]
+    fn a_player_ticket_guard_grants_moves_and_drops_both_tickets() {
+        let handle = TicketStoreHandle::new();
+        let guard = handle.grant_player(11, (0, 0), 4);
+        handle.tick();
+        assert!(handle.is_resident((4, 0)), "loading radius 4 must reach (4, 0)");
+        assert!(handle.is_simulating((4, 0)), "simulation radius 4 must reach (4, 0)");
+        assert!(!handle.is_resident((5, 0)), "radius 4 must not reach (5, 0)");
+
+        // Move far away — the old position must lose residency and the new
+        // one must gain it, proving this is a re-grant under the same key
+        // rather than a second, additive ticket.
+        guard.move_to((100, 100), 4);
+        handle.tick();
+        assert!(
+            !handle.is_resident((0, 0)),
+            "the old position must lose residency once the ticket moved away"
+        );
+        assert!(handle.is_resident((104, 100)), "the new position must gain residency");
+
+        drop(guard);
+        handle.tick();
+        assert!(
+            !handle.is_resident((104, 100)),
+            "dropping the guard must withdraw both tickets, not just stop refreshing them"
+        );
+    }
+
+    /// The permanent negative control for the gate above: a plain
+    /// `set_ticket_with_radius` grant with **no** guard must NOT be removed
+    /// by anything this test does — proving the drop above is the guard's
+    /// `Drop` impl actually firing, not `tick()`/`propagate()` incidentally
+    /// clearing every ticket.
+    #[test]
+    fn a_ticket_granted_without_a_guard_survives_unrelated_guard_drops() {
+        let handle = TicketStoreHandle::new();
+        handle.set_ticket_with_radius(TicketOwner::Forced(1), TicketKind::Forced, (0, 0), 0);
+        let guard = handle.grant_player(22, (50, 50), 2);
+        handle.tick();
+        assert!(handle.is_resident((0, 0)));
+
+        drop(guard);
+        handle.tick();
+        assert!(
+            handle.is_resident((0, 0)),
+            "an unrelated FORCED ticket must survive a different owner's guard being dropped"
+        );
+    }
+
+    /// `refresh_world_spawn` resets the countdown without moving the ticket,
+    /// and reports `false` when nothing is held — the shape
+    /// `crate::server`'s keep-alive-tick refresh relies on for every
+    /// connection whose `TicketStoreHandle` never received a spawn grant
+    /// (every non-production caller's private default handle).
+    #[test]
+    fn refresh_world_spawn_resets_without_moving_and_reports_absence() {
+        let handle = TicketStoreHandle::new();
+        let guard = handle.grant_player(1, (0, 0), 1);
+        assert!(
+            !guard.refresh_world_spawn(),
+            "no spawn ticket was ever granted on this handle"
+        );
+
+        handle.set_ticket_with_radius(TicketOwner::Spawn, TicketKind::PlayerSpawn, (7, 7), PLAYER_SPAWN_RADIUS);
+        assert!(guard.refresh_world_spawn());
+        handle.tick();
+        assert!(handle.is_resident((7 + PLAYER_SPAWN_RADIUS, 7)));
+        assert!(!handle.is_resident((7 + PLAYER_SPAWN_RADIUS + 1, 7)));
     }
 }

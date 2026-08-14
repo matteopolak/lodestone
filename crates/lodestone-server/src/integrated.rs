@@ -69,6 +69,11 @@ use crate::server::{
 use crate::server::{OnlineModeConfig, serve_connection_with_online_mode};
 use crate::spawn::{Task, spawn};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
+// Issue #619: `ChunkStore::tickets()`'s return type, threaded from
+// `open_in_memory`/`open_in_memory_with_mobs_using`/`open_to_lan`'s own
+// `source.primary().tickets()` into every real join path this file spawns —
+// see each call site's own comment for why that handle, not a fresh default.
+use crate::ticket::TicketStoreHandle;
 // `run_tick_loop`/`run_tick_loop_with_weather` (like `open_in_memory_with_mobs`
 // and, since issue #439, `bind` — their callers) are
 // `#[cfg(not(target_arch = "wasm32"))]`-gated in `tick.rs` — these imports must
@@ -194,6 +199,11 @@ struct HostCore {
     /// This world's configured view-distance cap, applied to every connection
     /// `publish` accepts exactly as `open_to_lan` applies it to its own.
     view_radius: i32,
+    /// Issue #619. The same real `TicketStoreHandle` the local connection and
+    /// this world's `ChunkStore` share — not a second, unread one. A `publish`
+    /// guest's residency claim has to move the store that store's own eviction
+    /// actually reads, exactly like `hub_block_ticks`/`subscribers` above.
+    tickets: TicketStoreHandle,
 }
 
 /// Hand-written: neither [`ServerProtocol`] nor [`ChunkSource`] requires
@@ -981,6 +991,15 @@ impl IntegratedServer {
             // built on this constructor lights a portal.
             None,
         ));
+        // Issue #619. Real, not a fresh default: this constructor is a genuine
+        // join path — it is the wasm32 build's own singleplayer entry (see
+        // `lodestone-shell/src/net.rs`'s `#[cfg(target_arch = "wasm32")]` arm,
+        // which calls `open_in_memory` directly), not a test harness. And it is
+        // not inert despite this constructor's "spawns no tick loop" contract:
+        // `ChunkStore::ensure` checks the ticket graph in on every real read
+        // (`ChunkStore::maybe_tick_tickets`), so ordinary chunk traffic from this
+        // one connection is enough to propagate and evict against it.
+        let tickets = source.primary().tickets();
         // A fresh, empty registry for this one connection's lifetime. Nothing
         // ticks it here — only `open_in_memory_with_mobs` spawns the tick
         // loop (see that constructor's doc comment) — so a block entity
@@ -1006,7 +1025,7 @@ impl IntegratedServer {
                 // — see the `open_in_memory_with_mobs_using` call site below for
                 // the policy, and `crate::server::ViewTracker::max_radius` for
                 // why the join radius could not serve as both.
-                _ = serve_connection_shared(&mut conn, &protocol, &source, &entities, view_radius, crate::server::MAX_CLIENT_VIEW_RADIUS, &block_entities, &mobs) => {}
+                _ = serve_connection_shared(&mut conn, &protocol, &source, &entities, view_radius, crate::server::MAX_CLIENT_VIEW_RADIUS, &block_entities, &mobs, &tickets) => {}
             }
         });
 
@@ -1393,6 +1412,18 @@ impl IntegratedServer {
                 shutdown: Arc::clone(&shutdown),
             }),
         ));
+        // Issue #619. The real handle this world's `ChunkStore` grants and
+        // reads tickets through — not a fresh default, since this is the
+        // constructor behind both `open_in_memory_with_mobs` (native
+        // singleplayer) and, via `world_dir`, `open_persistent_with_mobs`.
+        // Cloned per consumer below for the same reason `handle_portals`
+        // above is: `source` itself is about to be cloned into several
+        // `*_source` bindings and moved by value into the tick/seed/connection
+        // tasks, so anything that also needs the ticket graph after this point
+        // takes its own clone now rather than trying to reach back through a
+        // moved `Arc`. `TicketStoreHandle::clone` is one more reference to the
+        // same `Arc<Mutex<TicketStore>>` — see that type's own doc.
+        let tickets = source.primary().tickets();
 
         // Issue #454: **mob seeding is off the critical path.**
         //
@@ -1514,6 +1545,13 @@ impl IntegratedServer {
         let conn_block_entities = block_entities.clone();
         let conn_mobs = mob_handle.clone();
         let conn_source = Arc::clone(&source);
+        // Issue #619. This connection's own reference to the world's one real
+        // ticket graph — same "clone before the move" shape as every other
+        // `conn_*` binding here, and the same handle `host_tickets` below
+        // hands `publish`'s later connections, so a player-following ticket
+        // granted by one connection and a `publish`-added one both move the
+        // same store.
+        let conn_tickets = tickets.clone();
         // Issue #562: a third clone of each, for `HostCore` — `live_mobs` and
         // `block_entities` are both moved by value into the tick task below
         // (`run_tick_loop_with_weather`'s own signature), so a clone taken
@@ -1522,6 +1560,11 @@ impl IntegratedServer {
         // constructor already follows.
         let host_live_mobs = live_mobs.clone();
         let host_block_entities = block_entities.clone();
+        // Issue #619: same reason as `host_live_mobs`/`host_block_entities`
+        // above — `publish` (further down this file) accepts connections into
+        // this same running world and needs the same ticket graph, not a
+        // second, empty one.
+        let host_tickets = tickets.clone();
         // `conn_block_ticks`/`conn_explosions` are `local_subscriber`'s own
         // queues, built above alongside `subscribers`/`relay_task` — issue
         // #562. Not `block_tick_feed.clone()`/`explosion_feed.clone()`
@@ -1595,6 +1638,7 @@ impl IntegratedServer {
                     &conn_sleep_feed,
                     &conn_world_state,
                     &conn_live_save,
+                    &conn_tickets,
                 ) => {}
             }
             // Issue #562: lets the relay task above drop this connection's
@@ -1760,6 +1804,7 @@ impl IntegratedServer {
                     hub_block_ticks: block_tick_feed,
                     subscribers,
                     view_radius,
+                    tickets: host_tickets,
                 }),
                 #[cfg(not(target_arch = "wasm32"))]
                 relay_task: Some(relay_task),
@@ -2290,6 +2335,11 @@ impl IntegratedServer {
                 shutdown: Arc::clone(&shutdown),
             }),
         ));
+        // Issue #619. Real, shared across every accepted connection exactly
+        // like `source` above — a LAN guest's residency claim has to move the
+        // same ticket graph this world's own `ChunkStore` reads, not a private
+        // one nobody else sees.
+        let tickets = source.primary().tickets();
         let signal = shutdown.clone();
         // Shared across every accepted connection (like `protocol`/`source`
         // above) rather than one per connection, so two LAN players placing
@@ -2565,6 +2615,10 @@ impl IntegratedServer {
                         let source = source.clone();
                         let block_entities = block_entities.clone();
                         let mobs = mobs.clone();
+                        // Issue #619: one clone per accepted socket, all
+                        // naming the same ticket graph — see `tickets`'s own
+                        // declaration above this function's world-tick spawn.
+                        let tickets = tickets.clone();
                         let commands = conn_commands.clone();
                         let resource_packs = conn_resource_packs.clone();
                         let plugin_channels = conn_plugin_channels.clone();
@@ -2645,7 +2699,7 @@ impl IntegratedServer {
                                 Some(online_mode) => {
                                     serve_connection_with_online_mode(
                                         &mut conn, &*protocol, &source, &entities, view_radius,
-                                        &block_entities, &mobs,
+                                        &block_entities, &mobs, &tickets,
                                         &conn_block_ticks, &conn_explosions,
                                         &commands, &resource_packs, &plugin_channels, &world_state,
                                         &access, peer_ip, online_mode,
@@ -2655,7 +2709,7 @@ impl IntegratedServer {
                                 None => {
                                     serve_connection_with_mob_events_and_commands_shared(
                                         &mut conn, &*protocol, &source, &entities, view_radius,
-                                        &block_entities, &mobs,
+                                        &block_entities, &mobs, &tickets,
                                         &conn_block_ticks, &conn_explosions,
                                         &commands, &resource_packs, &plugin_channels, &world_state,
                                         &access, peer_ip,
@@ -2846,6 +2900,9 @@ impl IntegratedServer {
         let subscribers = Arc::clone(&host.subscribers);
         let view_radius = host.view_radius;
         let world_state = self.world_state.clone();
+        // Issue #619: the same real handle `host.tickets` carries, not a
+        // fresh default — see `HostCore::tickets`'s own doc comment.
+        let tickets = host.tickets.clone();
         let signal = self.shutdown.clone();
 
         let task = spawn(async move {
@@ -2860,6 +2917,7 @@ impl IntegratedServer {
                         let block_entities = block_entities.clone();
                         let mobs = mobs.clone();
                         let world_state = world_state.clone();
+                        let tickets = tickets.clone();
                         // Same composition `open_to_lan`'s own accept loop
                         // uses: the shared player registry is what puts every
                         // publish-time joiner (and the original local player)
@@ -2884,7 +2942,7 @@ impl IntegratedServer {
                             let mut conn = Connection::new(socket);
                             let _ = serve_connection_with_mob_events_and_commands_shared(
                                 &mut conn, &*protocol, &source, &entities, view_radius,
-                                &block_entities, &mobs,
+                                &block_entities, &mobs, &tickets,
                                 &conn_block_ticks, &conn_explosions,
                                 &crate::command::CommandDispatch::none(),
                                 &crate::server::ResourcePackPushFeed::default(),

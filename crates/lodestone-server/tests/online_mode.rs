@@ -28,8 +28,8 @@ use lodestone_net::{Connection, Transport, memory_pair, rsa_encrypt};
 use lodestone_server::{
     BlockEntityHandle, BlockTickFeed, ChunkColumn, ChunkSource, CommandDispatch, ExplosionFeed,
     MobHandle, NoEntities, OnlineModeConfig, PluginChannelRegistry, ResourcePackPushFeed,
-    ServeSummary, ServerError, access::AccessHandle, serve_connection_with_online_mode,
-    world_state::WorldStateHandle,
+    ServeSummary, ServerError, TicketStoreHandle, access::AccessHandle,
+    serve_connection_with_online_mode, world_state::WorldStateHandle,
 };
 use lodestone_v770::V770ServerProtocol;
 use lodestone_v770::packet_ids::{handshaking, login};
@@ -137,6 +137,7 @@ async fn run_online_login(
             0,
             &BlockEntityHandle::default(),
             &MobHandle::default(),
+            &TicketStoreHandle::default(),
             &BlockTickFeed::default(),
             &ExplosionFeed::default(),
             &CommandDispatch::none(),

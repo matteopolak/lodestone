@@ -109,6 +109,7 @@ use crate::redstone_diode::{set_comparator, set_repeater};
 use crate::redstone_observer::set_observer;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue};
 use crate::sleep::{SleepEvent, SleepFeed, SleepVote};
+use crate::ticket::{PlayerTicketGuard, TicketStoreHandle};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::weather::WeatherFeed;
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
@@ -2083,6 +2084,11 @@ pub(crate) async fn serve_connection_shared<T, P, S, E>(
     max_view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
+    // Issue #619. `IntegratedServer`'s real handle, from `ChunkStore::tickets()` —
+    // this is one of the entry points a real join reaches, so unlike most
+    // parameters in this file it must NOT default to a fresh, disconnected
+    // handle. See `serve_connection_inner`'s own parameter comment.
+    tickets: &TicketStoreHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -2103,6 +2109,7 @@ where
         max_view_radius,
         block_entities,
         mobs,
+        tickets,
         &BlockTickFeed::default(),
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
@@ -2174,6 +2181,10 @@ pub(crate) async fn serve_connection_with_mob_events_shared<T, P, S, E>(
     // shutdown` reads back, which is the whole point of threading this
     // through rather than defaulting it like every other feed above.
     live_save: &crate::live_save::LiveSaveSlot,
+    // Issue #619. `IntegratedServer`'s real handle — see
+    // `serve_connection_shared`'s own parameter comment; this is the
+    // singleplayer/open-to-LAN sibling that carries it.
+    tickets: &TicketStoreHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -2190,6 +2201,7 @@ where
         max_view_radius,
         block_entities,
         mobs,
+        tickets,
         block_ticks,
         explosions,
         &WeatherFeed::default(),
@@ -2257,6 +2269,7 @@ where
         view_radius,
         &BlockEntityHandle::default(),
         &MobHandle::default(),
+        &TicketStoreHandle::default(),
         &BlockTickFeed::default(),
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
@@ -2306,6 +2319,11 @@ pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S
     view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
+    // Issue #619. `IntegratedServer`'s real handle — see
+    // `serve_connection_shared`'s own parameter comment. Ungated like the rest
+    // of this function's signature, since browser singleplayer reaches the
+    // server through this entry point too.
+    tickets: &TicketStoreHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
     commands: &CommandDispatch,
@@ -2350,6 +2368,7 @@ where
         view_radius,
         block_entities,
         mobs,
+        tickets,
         block_ticks,
         explosions,
         &WeatherFeed::default(),
@@ -2411,6 +2430,10 @@ pub async fn serve_connection_with_online_mode<T, P, S, E>(
     view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
+    // Issue #619. `IntegratedServer`'s real handle — see
+    // `serve_connection_shared`'s own parameter comment. `open_to_lan` reaches
+    // this entry point whenever `LanConfig::online_mode` is `Some`.
+    tickets: &TicketStoreHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
     commands: &CommandDispatch,
@@ -2436,6 +2459,7 @@ where
         view_radius,
         block_entities,
         mobs,
+        tickets,
         block_ticks,
         explosions,
         &WeatherFeed::default(),
@@ -2499,6 +2523,7 @@ where
         view_radius,
         block_entities,
         mobs,
+        &TicketStoreHandle::default(),
         block_ticks,
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
@@ -2585,6 +2610,7 @@ where
         view_radius,
         block_entities,
         mobs,
+        &TicketStoreHandle::default(),
         block_ticks,
         explosions,
         weather,
@@ -2666,6 +2692,7 @@ where
         view_radius,
         block_entities,
         mobs,
+        &TicketStoreHandle::default(),
         block_ticks,
         explosions,
         &WeatherFeed::default(),
@@ -2745,6 +2772,7 @@ where
         view_radius,
         block_entities,
         mobs,
+        &TicketStoreHandle::default(),
         block_ticks,
         explosions,
         &WeatherFeed::default(),
@@ -2824,6 +2852,12 @@ where
         view_radius,
         block_entities,
         mobs,
+        // Issue #619: a fresh, disconnected store — this wrapper's whole
+        // compatibility shape (see every other feed just below), and its own
+        // doc names `serve_connection_with_plugin_channels` as a secondary
+        // entry point rather than one of `IntegratedServer`'s real join
+        // paths.
+        &TicketStoreHandle::default(),
         block_ticks,
         explosions,
         &WeatherFeed::default(),
@@ -2876,6 +2910,17 @@ async fn serve_connection_inner<T, P, S, E>(
     max_view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
+    // Issue #619. The chunk-ticket graph's shared handle — same compatibility
+    // shape as every feed below: every pre-existing entry point passes a
+    // fresh, disconnected `TicketStoreHandle::default()` (so no off-limits
+    // call site's residency behaviour changes), and the production `_shared`
+    // wrappers `IntegratedServer` uses carry the *same* handle
+    // `ChunkStore::tickets()` returns — the whole point, since a ticket
+    // granted into a store nobody else reads means nothing. See
+    // `docs/chunk-tickets.md`'s "Open work" for why this parameter, rather
+    // than a new `ChunkSource` trait method or a changed public signature,
+    // is how the connection reaches it.
+    tickets: &TicketStoreHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
     // Issue #324. Same shape as the two feeds above: the world tick loop's
