@@ -2988,3 +2988,79 @@ mod top_layer_parity {
         );
     }
 }
+
+/// Issue #518 part 2/4: the `SPAWN` stage against the **real** bundled
+/// generator, not a hand-built fixture — the biome document -> `BiomeSpawners`
+/// -> `SPAWN` stage -> `GeneratedColumn` link, exercised end to end with
+/// procedurally-placed terrain rather than a synthetic column.
+///
+/// Chunk (4, -3) at seed 12345 was found by an exhaustive scan of `cx`/`cz` in
+/// `-4..=4` (the only two chunks in that whole 9x9 area that proposed
+/// anything) and is not cherry-picked beyond "the search found it" — see
+/// `dark_forest.json`'s own `spawners.creature` list for the numbers this test
+/// predicts from, independently of running the code:
+/// `[(sheep, w12, 4-4), (pig, w10, 4-4), (chicken, w10, 4-4), (cow, w8, 4-4)]`.
+/// Every entry's pack is a fixed `4`, so **whichever species the weighted pick
+/// lands on, the predicted pack size is exactly 4** — the one thing this
+/// fixture lets a hand-derived prediction pin down without re-deriving the RNG
+/// stream. `dark_forest` was chosen from the scan's own output, not selected
+/// to make this true.
+#[cfg(test)]
+mod generation_spawn_reaches_a_real_chunk {
+    #[test]
+    fn dark_forest_chunk_proposes_a_full_pack_of_one_species() {
+        let generator = super::overworld_generator(12345);
+        let col = generator.column(4, -3);
+        assert_eq!(
+            col.biome_state(8, 8),
+            "minecraft:dark_forest",
+            "this fixture's own prediction depends on the biome being dark_forest; \
+             re-derive the expected species/pack if the generator ever changes this"
+        );
+        let candidates = col.spawn_candidates();
+        assert_eq!(
+            candidates.len(),
+            4,
+            "dark_forest's creature list is entirely fixed 4-4 packs — every entry \
+             predicts exactly 4 regardless of which one the weighted pick lands on"
+        );
+        let species = &candidates[0].entity_type;
+        assert!(
+            ["minecraft:sheep", "minecraft:pig", "minecraft:chicken", "minecraft:cow"]
+                .contains(&species.as_str()),
+            "{species} is not one of dark_forest's own four creature entries"
+        );
+        assert!(
+            candidates.iter().all(|c| &c.entity_type == species),
+            "one weighted pick names one species for the whole pack, not a mix"
+        );
+        for c in candidates {
+            assert!(
+                (4 * 16..4 * 16 + 16).contains(&c.x),
+                "x={} outside chunk (4, -3)'s own 16x16",
+                c.x
+            );
+            assert!(
+                (-3 * 16..-3 * 16 + 16).contains(&c.z),
+                "z={} outside chunk (4, -3)'s own 16x16",
+                c.z
+            );
+        }
+    }
+
+    /// Negative control at the real-generator level: a chunk this test does
+    /// **not** predict anything for (the 9x9 scan around it found nothing) must
+    /// itself carry no candidates — proving the positive result above is
+    /// biome-driven and not "every chunk gets something".
+    #[test]
+    fn a_chunk_the_scan_found_nothing_for_proposes_nothing() {
+        let generator = super::overworld_generator(12345);
+        let col = generator.column(0, 0);
+        assert!(
+            col.spawn_candidates().is_empty(),
+            "chunk (0, 0) at seed 12345 was not one of the two chunks the 9x9 scan \
+             found a candidate in; a non-empty result here means either the scan was \
+             stale or every chunk now proposes something regardless of biome"
+        );
+    }
+}

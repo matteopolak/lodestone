@@ -1403,6 +1403,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   geometry: a `HeaderAndFooterLayout` title, 36 px list rows with a 32×32 favicon,
   wrapped MOTD and a status column, and seven footer buttons three of which are
   inactive when there is nothing selected.
+- [Server-side login compression](./server-login-compression.md) —
+  `lodestone-server` (via `V770ServerProtocol`) now enables zlib packet compression
+  during login, the mechanical half of issue #273 ("server-side login has no
+  encryption or compression"). Encryption and the online-mode session-server ownership
+  check — the much larger half of #273 — remain **unimplemented**; see "Still
+  open" below.
 - [Server-side plugin messaging: the channel registry and dispatch](./server-plugin-channels.md) —
   The server side of Minecraft's custom plugin-message machinery, in
   `crates/lodestone-server/src/plugin_channels.rs`: a registry of channels the server
@@ -1688,11 +1694,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   that made opening a singleplayer world feel broken — *"it takes forever to load
   and the chunks generated are not close to me"* — and how they were fixed. Mob
   seeding used to generate the whole tick area **inside the constructor** from a
-  second, independent generator (issue #454), and the join used to generate all 361
-  columns of the view before encoding any, in raster order from the far corner (issue
-  #453). Both live in `lodestone-server`; both are about *ordering*, not throughput.
-  They are the tail of the same report the [`ChunkStore`](./chunk-store.md) fix (#289
-  U3) opened.
+  second, independent generator, and the join used to generate all 361 columns of the
+  view before encoding any, in raster order from the far corner. Both live in
+  `lodestone-server`; both are about *ordering*, not throughput. They are the tail of
+  the same report the [`ChunkStore`](./chunk-store.md) fix (its U3) opened.
 - [World persistence: `lodestone-anvil`](./world-persistence.md) — `lodestone-anvil`
   (`crates/lodestone-anvil/`) reads and writes Minecraft's on-disk world formats: the
   Anvil region file (`.mca`, issue
@@ -1859,6 +1864,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `VegGrid::with_sources` route reads to whichever source chunk owns the column
   instead, holding writes in a sparse overlay, which took the copy count from ~2.85M
   cells per column to zero.
+- [The `SPAWN` generation stage: animals placed once, at chunk generation](./worldgen-mob-generation-spawn.md) —
+  Vanilla's `ChunkStatus.SPAWN` step places a handful of `MobCategory.CREATURE`
+  animals once, the moment a chunk is generated for the first time — which is why a
+  freshly generated vanilla world already has cows and sheep on it before any spawn
+  tick runs. This is that step, ported as three pieces that only make sense together:
 - [Worldgen module layout and per-unit file ownership](./worldgen-module-layout.md) —
   The file layout of `crates/lodestone-worldgen`'s generation engine after Unit 16
   (the decomposition unit) of

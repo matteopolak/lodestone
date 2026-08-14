@@ -15,6 +15,8 @@ impl OverworldGenerator {
     /// `debug_assert!` below rather than merely asserted in a doc comment).
     pub(super) fn intern_from_dense(
         &self,
+        cx: i32,
+        cz: i32,
         world: crate::dense_grid::DenseBlockGrid,
         biome_quarts: [(String, bool); 16],
         biome_cells: super::BiomeCells,
@@ -25,6 +27,34 @@ impl OverworldGenerator {
         debug_assert_eq!(world.bounds().4, self.height, "centre chunk height must match the generator's");
         debug_assert_eq!(world.bounds().5, 16, "centre chunk depth must be 16");
         let (palette, blocks) = world.into_palette_and_blocks();
+        // Issue #518 part 2: the `SPAWN` stage. Computed here, alongside
+        // #516's heightmap scan above, for the identical reason — this is the
+        // one place already holding the *final* palette/block field and biome
+        // quarts, so no earlier stage has to grow a spawn-shaped call site.
+        // See `crate::spawn_stage`'s module doc for what these candidates are
+        // (and are not) — unconditioned on light/ground, a candidate list a
+        // server-side consumer re-validates.
+        let biome_names: [String; 16] = std::array::from_fn(|i| biome_quarts[i].0.clone());
+        let height = self.height;
+        let min_y = self.min_y;
+        let surface_y_at = |lx: usize, lz: usize| -> i32 {
+            for ly in (0..height).rev() {
+                let idx = ((ly * 16 + lz as i32) * 16 + lx as i32) as usize;
+                if blocks[idx] != 0 {
+                    return min_y + ly + 1;
+                }
+            }
+            min_y
+        };
+        let biome_at = |lx: usize, lz: usize| -> String { biome_names[(lz >> 2) * 4 + (lx >> 2)].clone() };
+        let spawn_candidates = crate::spawn_stage::spawn_candidates_for_chunk(
+            biome_at,
+            surface_y_at,
+            &self.spawners_by_biome,
+            self.seed,
+            cx,
+            cz,
+        );
         // Issue #516. Computed here rather than in its own stage for two
         // reasons: this is the one place that already holds the *final* palette
         // and block field (so the scan is integer-only — see
@@ -52,6 +82,7 @@ impl OverworldGenerator {
             biome_cells,
             block_entities,
             motion_blocking,
+            spawn_candidates,
         }
     }
 }
@@ -279,6 +310,12 @@ pub struct GeneratedColumn {
     /// column, so 512 bytes is noise, and a `Box` would add one allocation per
     /// column to a crate with four allocation-attribution gates.
     motion_blocking: Option<[u16; HEIGHTMAP_COLUMNS]>,
+    /// Issue #518 part 2: the `SPAWN` stage's proposed creature placements —
+    /// unconditioned on light/ground legality. See
+    /// [`crate::spawn_stage`]'s module doc and [`Self::spawn_candidates`].
+    /// Empty for the overwhelming majority of chunks (any biome with no
+    /// `creature` spawner entry), exactly like [`Self::block_entities`].
+    spawn_candidates: Vec<crate::spawn_stage::GenerationSpawn>,
 }
 
 impl GeneratedColumn {
@@ -377,6 +414,15 @@ impl GeneratedColumn {
     #[must_use]
     pub fn block_entities(&self) -> &[super::block_entities::GeneratedBlockEntity] {
         &self.block_entities
+    }
+
+    /// Issue #518 part 2: the `SPAWN` stage's proposed creature placements for
+    /// this chunk — see [`crate::spawn_stage`]'s module doc for what a
+    /// candidate is and is not (unconditioned on light/ground). Empty for
+    /// most chunks.
+    #[must_use]
+    pub fn spawn_candidates(&self) -> &[crate::spawn_stage::GenerationSpawn] {
+        &self.spawn_candidates
     }
 
     /// The 16 surface quarts — see the field's own doc for when this is the wrong

@@ -17,11 +17,13 @@ use crate::mob_spawn::SpawnRng;
 /// farm animal nothing, which is why it was a literal 8-name string match; that
 /// job now belongs to [`lodestone_entity::ai::roster`], keyed per species and
 /// cited against the jar. What is left here is spawn-category data, and it stays
-/// here on purpose: `MobCategory` is one of **two** independent types by that
-/// name in this workspace (this crate's, 7 variants, and
-/// [`lodestone_entity::spawn::MobCategory`], 8 variants with a different
-/// `check_despawn` signature), the roster deliberately takes no side in that fork,
-/// and unifying them is issue #221's call.
+/// here on purpose: species-to-category is version/registry knowledge, kept
+/// separate from [`crate::mob_spawn::MobCategory`] itself. That type used to be
+/// a second, independent 8-variant `MobCategory` (this crate's own, next to
+/// [`lodestone_entity::spawn::MobCategory`], with its own `check_despawn`) —
+/// issue #518 unified them: `crate::mob_spawn::MobCategory` is now a re-export
+/// of the `lodestone-entity` one, so this module and its callers see one type,
+/// not two.
 ///
 /// # Where these names come from, and the heuristic that was wrong (issue #457)
 ///
