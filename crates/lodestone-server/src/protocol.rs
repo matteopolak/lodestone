@@ -132,7 +132,7 @@ pub struct EntitySnapshot {
     /// Velocity in **blocks per tick**.
     pub velocity: Vec3,
     /// Per-species entity-metadata fields this entity currently wants a
-    /// client to hold (issue #425) — empty for every entity kind that has
+    /// client to hold — empty for every entity kind that has
     /// none (projectiles, dropped items, and any mob whose fields are all
     /// still at their default). [`crate::server::EntityStreamer::sync`]
     /// diffs this exactly like every other field on this struct: a spawn
@@ -229,7 +229,7 @@ pub struct ResourcePackPush {
 }
 
 /// One per-species entity-metadata field a [`ServerProtocol`] can push over
-/// `SET_ENTITY_DATA` (issue #425) — the general vocabulary
+/// `SET_ENTITY_DATA` — the general vocabulary
 /// [`ServerProtocol::encode_set_entity_data`] takes a slice of, replacing
 /// the single hardcoded local-player arm (`encode_air_supply_update`) that
 /// used to be the only metadata encoder anywhere in this crate. Adding a
@@ -345,15 +345,21 @@ pub enum MetadataField {
         /// `0x02` — `AbstractHorse.isTamed()`.
         tame: bool,
     },
-    /// `AgeableMob.DATA_BABY_ID` — whether this mob is a baby. Vanilla's
-    /// `LivingEntityRenderer` reads it to apply the age-scale shrink
-    /// (`0.5` generic, or the species' real `BABY_DIMENSIONS` literal where
-    /// one is modelled) to the model, independently of the hitbox — this
-    /// crate's aging unit already computes the correct **hitbox** dimensions
-    /// server-side (`crate::mobs::species_shape`); this variant is what lets
-    /// the *client* apply the same shrink to what it draws. `AgeableMob` is
-    /// the shared ancestor for the whole zombie family, cow, sheep, pig,
-    /// chicken, rabbit and wolf.
+    /// Whether this mob is a baby — `AgeableMob.DATA_BABY_ID` for the
+    /// breedable-animal family (cow, sheep, pig, chicken, rabbit, wolf), and
+    /// each of `Zombie.DATA_BABY_ID`/`Zoglin.DATA_BABY_ID` declared
+    /// separately on those classes rather than inherited from `AgeableMob`
+    /// (`Zombie`/`Zoglin` extend `Monster`, not `AgeableMob`) — all three
+    /// land at the same wire index as the same `BOOLEAN` serializer, which is
+    /// what lets one variant cover every eligible species; see
+    /// [`crate::mobs::SimMob::snapshot`] for the species switch that decides
+    /// who gets it. Vanilla's `LivingEntityRenderer` reads it to apply the
+    /// age-scale shrink (`0.5` generic, or the species' real
+    /// `BABY_DIMENSIONS` literal where one is modelled) to the model,
+    /// independently of the hitbox — this crate's aging unit already
+    /// computes the correct **hitbox** dimensions server-side
+    /// (`crate::mobs::species_shape`); this variant is what lets the
+    /// *client* apply the same shrink to what it draws.
     Baby(bool),
 }
 
@@ -1630,8 +1636,8 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes a `SET_ENTITY_DATA` metadata update for an arbitrary entity id
-    /// (issue #425), given every [`MetadataField`] that entity currently wants
+    /// Encodes a `SET_ENTITY_DATA` metadata update for an arbitrary entity id,
+    /// given every [`MetadataField`] that entity currently wants
     /// synced — not a hardcoded single field for a hardcoded entity id, the
     /// shape [`encode_air_supply_update`](Self::encode_air_supply_update) is
     /// stuck in for exactly that reason (`LOCAL_PLAYER_ENTITY_ID` only, one
