@@ -2,15 +2,15 @@
 //!
 //! # The defect
 //!
-//! `entity::model_for_type` resolves an entity-type path against the
+//! `entity::model_for_type` resolves an [`EntityType`] against the
 //! `entity_models` corpus, and the corpus names the four boat rigs by *class* —
 //! `boat`, `chest_boat`, `raft`, `chest_raft` — because that is how vanilla builds
 //! them (`BoatRenderer` picks its `ModelLayerLocation` from the boat's variant and
 //! its geometry from `BoatModel`/`ChestBoatModel`/`RaftModel`/`ChestRaftModel`; the
 //! wood species is a texture, not a mesh). The registry, meanwhile, has twenty
-//! *types*. So `model_for_type("oak_boat")` returned `None`, and `resolve_animated`
-//! skips an entity with no model — a placed boat was invisible, with the server
-//! streaming it correctly the whole time.
+//! *types*. So `model_for_type(EntityType::OakBoat)` returned `None`, and
+//! `resolve_animated` skips an entity with no model — a placed boat was invisible,
+//! with the server streaming it correctly the whole time.
 //!
 //! # Why a plain oak boat is the wrong input to test with
 //!
@@ -35,36 +35,46 @@
 //! map one-to-one onto the four corpus rigs. The table is then checked against
 //! `lodestone_data::entity_types` so it cannot drift into fiction: a species added
 //! or renamed in the registry fails the count arm rather than passing silently.
+//!
+//! # Non-entity-type rig names (`"boat"`, `"chest_boat"`, ...) and garbage input
+//!
+//! Those cases exercise `entity::canonical_model_name`, the crate-private `&str`
+//! boundary `model_for_type` no longer is — see that function's own doc and
+//! `lodestone-render/src/entity.rs`'s `mod tests` (`a_literal_corpus_rig_name_...`,
+//! `a_non_boat_type_gets_no_boat_rig`) for where that coverage moved. This file
+//! now covers only real, registered boat entity types, which is what
+//! [`EntityType`] can express.
 
+use lodestone_data::entity_type::EntityType;
 use lodestone_render::entity::model_for_type;
 
 /// The twenty boat types of 26.2 and the corpus rig each one draws with.
 ///
-/// `(entity type path, corpus rig name)`. Nine wood species × (boat, chest boat),
+/// `(entity type, corpus rig name)`. Nine wood species × (boat, chest boat),
 /// plus the two bamboo rafts. The rig column is the jar census's class column
 /// lowercased: `Boat` → `boat`, `ChestBoat` → `chest_boat`, `Raft` → `raft`,
 /// `ChestRaft` → `chest_raft`.
-const RIGS: &[(&str, &str)] = &[
-    ("acacia_boat", "boat"),
-    ("acacia_chest_boat", "chest_boat"),
-    ("bamboo_chest_raft", "chest_raft"),
-    ("bamboo_raft", "raft"),
-    ("birch_boat", "boat"),
-    ("birch_chest_boat", "chest_boat"),
-    ("cherry_boat", "boat"),
-    ("cherry_chest_boat", "chest_boat"),
-    ("dark_oak_boat", "boat"),
-    ("dark_oak_chest_boat", "chest_boat"),
-    ("jungle_boat", "boat"),
-    ("jungle_chest_boat", "chest_boat"),
-    ("mangrove_boat", "boat"),
-    ("mangrove_chest_boat", "chest_boat"),
-    ("oak_boat", "boat"),
-    ("oak_chest_boat", "chest_boat"),
-    ("pale_oak_boat", "boat"),
-    ("pale_oak_chest_boat", "chest_boat"),
-    ("spruce_boat", "boat"),
-    ("spruce_chest_boat", "chest_boat"),
+const RIGS: &[(EntityType, &str)] = &[
+    (EntityType::AcaciaBoat, "boat"),
+    (EntityType::AcaciaChestBoat, "chest_boat"),
+    (EntityType::BambooChestRaft, "chest_raft"),
+    (EntityType::BambooRaft, "raft"),
+    (EntityType::BirchBoat, "boat"),
+    (EntityType::BirchChestBoat, "chest_boat"),
+    (EntityType::CherryBoat, "boat"),
+    (EntityType::CherryChestBoat, "chest_boat"),
+    (EntityType::DarkOakBoat, "boat"),
+    (EntityType::DarkOakChestBoat, "chest_boat"),
+    (EntityType::JungleBoat, "boat"),
+    (EntityType::JungleChestBoat, "chest_boat"),
+    (EntityType::MangroveBoat, "boat"),
+    (EntityType::MangroveChestBoat, "chest_boat"),
+    (EntityType::OakBoat, "boat"),
+    (EntityType::OakChestBoat, "chest_boat"),
+    (EntityType::PaleOakBoat, "boat"),
+    (EntityType::PaleOakChestBoat, "chest_boat"),
+    (EntityType::SpruceBoat, "boat"),
+    (EntityType::SpruceChestBoat, "chest_boat"),
 ];
 
 /// [`RIGS`] is a claim about the registry, so it is checked against the registry
@@ -91,9 +101,13 @@ fn the_twenty_boat_types_are_exactly_what_the_registry_holds() {
         registry.len()
     );
 
+    // Every `RIGS` entry is already a real `EntityType` variant (the compiler
+    // enforced that), but this crosschecks it against `lodestone-data`'s
+    // *other* generated table (`entity_types`, not `entity_type_enum`), so the
+    // two tables cannot silently drift apart from each other.
     let missing: Vec<&str> = RIGS
         .iter()
-        .map(|&(type_path, _)| type_path)
+        .map(|&(entity_type, _)| entity_type.path())
         .filter(|type_path| !registry.contains(type_path))
         .collect();
     assert!(
@@ -125,8 +139,9 @@ fn the_twenty_boat_types_are_exactly_what_the_registry_holds() {
 #[test]
 fn every_boat_type_resolves_to_its_class_rig() {
     let mut wrong = Vec::new();
-    for &(type_path, expected) in RIGS {
-        match model_for_type(type_path) {
+    for &(entity_type, expected) in RIGS {
+        let type_path = entity_type.path();
+        match model_for_type(entity_type) {
             None => wrong.push(format!("{type_path}: no model at all (invisible)")),
             Some(entry) if entry.name != expected => {
                 wrong.push(format!("{type_path}: got {}, want {expected}", entry.name));
@@ -150,59 +165,19 @@ fn the_chest_and_raft_traps_resolve_correctly() {
     // `oak_chest_boat` ends with `_boat` too: testing the short suffix first
     // draws every chest boat as a plain boat.
     assert_eq!(
-        model_for_type("oak_chest_boat").map(|e| e.name),
+        model_for_type(EntityType::OakChestBoat).map(|e| e.name),
         Some("chest_boat"),
         "a chest boat must not fall back to the plain boat rig"
     );
     // Neither bamboo raft has a `_boat` suffix anywhere.
     assert_eq!(
-        model_for_type("bamboo_raft").map(|e| e.name),
+        model_for_type(EntityType::BambooRaft).map(|e| e.name),
         Some("raft"),
         "bamboo_raft carries no `_boat` suffix, so a `_boat`-only rule misses it"
     );
     assert_eq!(
-        model_for_type("bamboo_chest_raft").map(|e| e.name),
+        model_for_type(EntityType::BambooChestRaft).map(|e| e.name),
         Some("chest_raft"),
         "bamboo_chest_raft is the second suffix-less case"
     );
-}
-
-/// The suffix rules must not shadow the corpus's own names.
-///
-/// `chest_boat` and `chest_raft` are corpus entries that also satisfy the
-/// `_boat`/`_raft` suffix tests, so a resolver that consults the suffixes *before*
-/// the corpus resolves the literal `"chest_boat"` to the plain `boat` rig — a
-/// silent wrong-mesh substitution for any caller that passes a corpus name
-/// straight through, which the `player_wide`/`player_slim` path already does.
-#[test]
-fn a_literal_corpus_rig_name_still_resolves_to_itself() {
-    for name in ["boat", "chest_boat", "raft", "chest_raft"] {
-        assert_eq!(
-            model_for_type(name).map(|e| e.name),
-            Some(name),
-            "a literal corpus rig name must resolve to itself, not through the \
-             boat suffix rules"
-        );
-    }
-}
-
-/// The negative control: the suffix rules must not hand a boat rig to something
-/// that merely shares a word.
-///
-/// `chest_minecart` has no ported rig (the corpus has `minecart` only), and a
-/// resolver matching on `contains("boat")`/`contains("chest")` rather than on the
-/// suffix would be caught here. Without this arm, "return `chest_boat` for
-/// anything with `chest` in it" would satisfy every assertion above.
-#[test]
-fn a_non_boat_type_gets_no_boat_rig() {
-    for name in ["chest_minecart", "chest", "boater", "raft_of_ducks", "pig"] {
-        let resolved = model_for_type(name).map(|e| e.name);
-        assert!(
-            !matches!(
-                resolved,
-                Some("boat" | "chest_boat" | "raft" | "chest_raft")
-            ),
-            "`{name}` is not a boat, but resolved to {resolved:?}"
-        );
-    }
 }

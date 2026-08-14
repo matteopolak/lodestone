@@ -47,6 +47,7 @@ use lodestone_assets::entity::{EntityModelDef, bake_entity_parts};
 use lodestone_assets::entity_models::{EntityModelEntry, entity_models};
 use lodestone_assets::equipment::{ArmourLayer, ArmourSlot, armour_item, humanoid_armour_model};
 use lodestone_assets::{BakedQuad, DisplaySlot, DisplayTransform, DisplayTransforms, GuiLight};
+use lodestone_data::entity_type::EntityType;
 
 use crate::camera::Frustum;
 use crate::entity_anim::{AnimInput, HandPoseOverride, HumanoidArms, Skeleton};
@@ -175,16 +176,31 @@ pub fn sky_darken_for_time_of_day(time_of_day: i64) -> f32 {
     factor as f32
 }
 
-/// Look up the ported entity model for a canonical entity-type path (the
-/// `path()` of an entity type key, e.g. `"pig"` from `minecraft:pig`).
+/// Look up the ported entity model for a built-in [`EntityType`] — the
+/// registry identity the wire actually carries (issue #523's third pass:
+/// `EntityType as u8` **is** the `add_entity` registry id, so this call takes
+/// no string at any point between the decoded id and the corpus lookup).
 ///
 /// Returns the matching [`EntityModelEntry`] from the version-free
 /// [`entity_models`] corpus, or `None` if we have no model for that type yet —
 /// in which case the renderer skips the entity rather than substituting a wrong
-/// mesh.
+/// mesh. `None` is also the correct answer for a type that is real but has no
+/// rig by design (`experience_orb`, `tnt`) — see this module's tests for the
+/// negative controls that pin that.
+///
+/// A plugin-supplied entity type — an
+/// [`EntityTypeRef`](lodestone_data::entity_type::EntityTypeRef) whose
+/// [`kind()`](lodestone_data::entity_type::EntityTypeRef::kind) is `Custom` —
+/// has no place in [`entity_models`] at all: the corpus is a fixed,
+/// hand-ported set of vanilla rigs, so no `EntityType` value could ever name
+/// one. That is why this function takes `EntityType` rather than
+/// `EntityTypeRef` — a caller holding an `EntityTypeRef` decides at its own
+/// call site (`builtin_or_none()`) whether it even has a built-in type to look
+/// up; folding that decision in here would hide it behind a silent `None`
+/// instead of making the caller state it.
 #[must_use]
-pub fn model_for_type(type_path: &str) -> Option<EntityModelEntry> {
-    let name = canonical_model_name(type_path)?;
+pub fn model_for_type(entity_type: EntityType) -> Option<EntityModelEntry> {
+    let name = canonical_model_name_for_type(entity_type)?;
     entity_models().into_iter().find(|e| e.name == name)
 }
 
@@ -208,41 +224,52 @@ fn corpus_name_set() -> &'static std::collections::HashSet<&'static str> {
     SET.get_or_init(|| corpus_names().iter().copied().collect())
 }
 
-/// Maps an entity-type path to the `name` of the [`entity_models`] entry that
-/// renders it.
+/// Maps a built-in [`EntityType`] to the `name` of the [`entity_models`] entry
+/// that renders it.
 ///
-/// **The corpus is the source of truth**: a type path that names a corpus entry
-/// resolves to *that* entry, and only the handful of types whose registry path
-/// differs from the model name are listed here. The inverse — an explicit table
-/// enumerating every drawable type — is what shipped the "a drowned renders as
-/// an ordinary zombie" defect: `drowned` was aliased onto `zombie` back when the
-/// corpus had no drowned mesh, and the alias outlived the mesh's arrival by the
-/// whole tier-3 port. Deriving identity from the corpus means a newly ported mob
-/// is drawable the moment its mesh lands, and a wrong-mesh substitution has to be
-/// *written down* rather than left behind.
+/// **The corpus is the source of truth**: an entity type whose [`path()`]
+/// names a corpus entry resolves to *that* entry, and only the handful of
+/// types whose registry path differs from the model name are listed here. The
+/// inverse — an explicit table enumerating every drawable type — is what
+/// shipped the "a drowned renders as an ordinary zombie" defect: `drowned` was
+/// aliased onto `zombie` back when the corpus had no drowned mesh, and the
+/// alias outlived the mesh's arrival by the whole tier-3 port. Deriving
+/// identity from the corpus means a newly ported mob is drawable the moment
+/// its mesh lands, and a wrong-mesh substitution has to be *written down*
+/// rather than left behind.
 ///
 /// The aliases that remain are genuine "vanilla renders this type with another
-/// mob's model class" cases, not placeholders.
-fn canonical_model_name(type_path: &str) -> Option<&'static str> {
-    match type_path {
+/// mob's model class" cases, not placeholders. They are matched on the
+/// **enum discriminant**, not the path string, so an alias here can never be
+/// reached by a plugin's namespaced-but-coincidentally-matching path — the
+/// three arms below only ever fire for a real `minecraft:player`/`bogged`/
+/// `*_minecart` registry entry.
+///
+/// [`path()`]: EntityType::path
+fn canonical_model_name_for_type(entity_type: EntityType) -> Option<&'static str> {
+    match entity_type {
         // `PlayerRenderer` picks a skin model; wide/`steve` is the default.
-        "player" => return Some("player_wide"),
+        EntityType::Player => return Some("player_wide"),
         // `BoggedModel` (a skeleton with mushrooms) is not ported yet; the plain
         // skeleton is the closest ported mesh. Unlike the drowned alias this is
         // deliberate and outlives no mesh — remove it when `bogged` is ported.
-        "bogged" => return Some("skeleton"),
+        EntityType::Bogged => return Some("skeleton"),
         // `MinecartRenderer`/`AbstractMinecartRenderer`: every subclass shares
         // vanilla's one `MinecartModel` cart-frame rig (`MinecartModel.
         // createBodyLayer`) — the subclasses differ only in the block state
         // vanilla displays *inside* the cart, which `gpu/moving_blocks.rs`'s
         // `merge_minecart_contents` draws as a second, independent block-model
-        // pass, not a second corpus rig. Limited to the five entity types
+        // pass, not a second corpus rig. Limited to the four entity types
         // `lodestone_server::mobs::minecart::MinecartKind` actually spawns:
         // `spawner_minecart` and `command_block_minecart` are real registry
         // types this server never produces, and aliasing them ahead of that
         // work would be an untested alias exactly like the ones
-        // `boat_model_name`'s own doc warns against.
-        "chest_minecart" | "furnace_minecart" | "tnt_minecart" | "hopper_minecart" => {
+        // `boat_model_name`'s own doc warns against — both are exhaustively
+        // *not* matched below, on purpose, rather than falling into a `_ =>`.
+        EntityType::ChestMinecart
+        | EntityType::FurnaceMinecart
+        | EntityType::TntMinecart
+        | EntityType::HopperMinecart => {
             return Some("minecart");
         }
         _ => {}
@@ -252,9 +279,48 @@ fn canonical_model_name(type_path: &str) -> Option<&'static str> {
     // [`boat_model_name`]'s `_boat`/`_raft` suffix rules, so testing the suffixes
     // first would resolve the literal `"chest_boat"` to the plain boat rig.
     //
+    // `entity_type.path()` is the one place this function still touches a
+    // `&str`: the corpus (`lodestone_assets::entity_models`) and the boat-suffix
+    // rule are both keyed by the *model*'s own name, a smaller, separately
+    // hand-ported ~90-entry namespace that is not itself a registry, so there is
+    // no enum to match against on that side — see `boat_model_name`'s doc for
+    // why that space stays string/suffix-keyed rather than a 20-arm match.
+    //
     // O(1) via `corpus_name_set()` rather than a linear scan over
     // `corpus_names()` — same corpus, same membership, just not re-walked for
     // every one of up to 90 entries on every call (issue #523).
+    let path = entity_type.path();
+    corpus_name_set().get(path).copied().or_else(|| boat_model_name(path))
+}
+
+/// [`canonical_model_name_for_type`], reached from a raw type-path string
+/// rather than an already-resolved [`EntityType`].
+///
+/// This is the one surviving `&str` hop in this module, and it exists for a
+/// real reason rather than habit: [`EntityModelSet::resolve_animated`] and its
+/// siblings are called with [`EntityDraw::model_type_path`]'s result, which is
+/// **not always a registry entity type at all** — a slim-skinned player's
+/// rig comes back as the literal corpus name `"player_slim"`, a string with no
+/// `EntityType` variant to represent it, because vanilla's rig choice is
+/// per-player skin data, not registry identity. Converting
+/// `EntityModelSet::resolve*` to take `EntityType` would have to either drop
+/// that case or grow a second parameter every mob-only caller would ignore,
+/// and those methods are also called from `crates/lodestone-shell/src/
+/// container/player_preview.rs`, which this pass does not own. That is the
+/// genuine boundary issue #523 asks to stop at rather than force through.
+///
+/// What *did* change here (issue #523): a type path that **is** a real
+/// registry entity now resolves via one [`EntityType::from_name`] binary
+/// search (`O(log 158)`) into [`canonical_model_name_for_type`] — the same
+/// enum-keyed alias table [`model_for_type`] uses, so the two paths cannot
+/// silently disagree — instead of re-testing the three alias literals as
+/// strings and falling through to a second string scan. Only a **non**-entity-
+/// type string (a corpus/rig pseudo-name, or a boat path handled by suffix)
+/// still walks the corpus-name/boat-suffix fallback directly.
+fn canonical_model_name(type_path: &str) -> Option<&'static str> {
+    if let Some(entity_type) = EntityType::from_name(type_path) {
+        return canonical_model_name_for_type(entity_type);
+    }
     corpus_name_set()
         .get(type_path)
         .copied()
@@ -4348,17 +4414,17 @@ mod tests {
 
     #[test]
     fn maps_known_entity_types_to_models() {
-        assert_eq!(model_for_type("pig").unwrap().name, "pig");
-        assert_eq!(model_for_type("cow").unwrap().name, "cow");
-        assert_eq!(model_for_type("chicken").unwrap().name, "chicken");
-        assert_eq!(model_for_type("sheep").unwrap().name, "sheep");
-        assert_eq!(model_for_type("zombie").unwrap().name, "zombie");
-        assert_eq!(model_for_type("skeleton").unwrap().name, "skeleton");
-        assert_eq!(model_for_type("creeper").unwrap().name, "creeper");
-        assert_eq!(model_for_type("spider").unwrap().name, "spider");
+        assert_eq!(model_for_type(EntityType::Pig).unwrap().name, "pig");
+        assert_eq!(model_for_type(EntityType::Cow).unwrap().name, "cow");
+        assert_eq!(model_for_type(EntityType::Chicken).unwrap().name, "chicken");
+        assert_eq!(model_for_type(EntityType::Sheep).unwrap().name, "sheep");
+        assert_eq!(model_for_type(EntityType::Zombie).unwrap().name, "zombie");
+        assert_eq!(model_for_type(EntityType::Skeleton).unwrap().name, "skeleton");
+        assert_eq!(model_for_type(EntityType::Creeper).unwrap().name, "creeper");
+        assert_eq!(model_for_type(EntityType::Spider).unwrap().name, "spider");
         // The two surviving aliases: a type path that is not a corpus name.
-        assert_eq!(model_for_type("player").unwrap().name, "player_wide");
-        assert_eq!(model_for_type("bogged").unwrap().name, "skeleton");
+        assert_eq!(model_for_type(EntityType::Player).unwrap().name, "player_wide");
+        assert_eq!(model_for_type(EntityType::Bogged).unwrap().name, "skeleton");
     }
 
     /// The reported defect: a drowned rendered as an ordinary zombie. Its mesh
@@ -4367,16 +4433,18 @@ mod tests {
     /// to swallow, so each assertion is a distinct wrong-mesh substitution.
     #[test]
     fn mob_variants_resolve_to_their_own_model_not_a_base_mob() {
-        for (ty, wrong) in [
-            ("drowned", "zombie"),
-            ("husk", "zombie"),
-            ("zombie_villager", "zombie"),
-            ("stray", "skeleton"),
-            ("wither_skeleton", "skeleton"),
-            ("cave_spider", "spider"),
-            ("mooshroom", "cow"),
+        for (entity_type, wrong) in [
+            (EntityType::Drowned, "zombie"),
+            (EntityType::Husk, "zombie"),
+            (EntityType::ZombieVillager, "zombie"),
+            (EntityType::Stray, "skeleton"),
+            (EntityType::WitherSkeleton, "skeleton"),
+            (EntityType::CaveSpider, "spider"),
+            (EntityType::Mooshroom, "cow"),
         ] {
-            let model = model_for_type(ty).unwrap_or_else(|| panic!("{ty} has a corpus model"));
+            let ty = entity_type.path();
+            let model =
+                model_for_type(entity_type).unwrap_or_else(|| panic!("{ty} has a corpus model"));
             assert_eq!(
                 model.name, ty,
                 "{ty} resolved to {} — a variant is being drawn as its base mob",
@@ -4409,14 +4477,15 @@ mod tests {
     /// match arm above was widened past what it documents.
     #[test]
     fn minecart_subclasses_share_the_plain_carts_frame() {
-        for ty in [
-            "minecart",
-            "chest_minecart",
-            "furnace_minecart",
-            "tnt_minecart",
-            "hopper_minecart",
+        for entity_type in [
+            EntityType::Minecart,
+            EntityType::ChestMinecart,
+            EntityType::FurnaceMinecart,
+            EntityType::TntMinecart,
+            EntityType::HopperMinecart,
         ] {
-            let model = model_for_type(ty)
+            let ty = entity_type.path();
+            let model = model_for_type(entity_type)
                 .unwrap_or_else(|| panic!("{ty} must resolve to the minecart corpus rig"));
             assert_eq!(
                 model.name, "minecart",
@@ -4424,12 +4493,152 @@ mod tests {
                 model.name
             );
         }
-        for ty in ["spawner_minecart", "command_block_minecart"] {
+        for entity_type in [EntityType::SpawnerMinecart, EntityType::CommandBlockMinecart] {
+            let ty = entity_type.path();
             assert!(
-                model_for_type(ty).is_none(),
+                model_for_type(entity_type).is_none(),
                 "{ty} unexpectedly has a corpus model — this repo's server never spawns \
                  it, so this control should still be None; if the server grew a producer, \
                  add the alias and update this test's roster rather than deleting the control"
+            );
+        }
+    }
+
+    /// The round trip issue #523's third pass asks for: `u8` (the wire's
+    /// registry id) → [`EntityType`] → [`model_for_type`], swept for all 158
+    /// generated variants and checked against the independent `&str`-keyed
+    /// path ([`canonical_model_name`], reached via
+    /// [`EntityType::from_name`] rather than [`model_for_type`]) rather than
+    /// against itself — the two implementations cannot silently disagree
+    /// without this test naming which entity they disagreed on. Mismatches
+    /// are collected, not asserted inside the loop, so a regression reports
+    /// every disagreeing type instead of only the first.
+    #[test]
+    fn model_for_type_agrees_with_the_string_path_for_every_generated_entity_type() {
+        let mut checked = 0usize;
+        let mut mismatches = Vec::new();
+        for entity_type in EntityType::all() {
+            checked += 1;
+            // `u8 -> EntityType`: the decode seam's only fallible step.
+            let via_wire_id = EntityType::from_registry_id(entity_type.registry_id());
+            if via_wire_id != Some(entity_type) {
+                mismatches.push(format!(
+                    "{}: registry id {} did not round-trip (got {via_wire_id:?})",
+                    entity_type.path(),
+                    entity_type.registry_id()
+                ));
+                continue;
+            }
+            let via_type = model_for_type(entity_type).map(|e| e.name);
+            let via_str = canonical_model_name(entity_type.path());
+            if via_type != via_str {
+                mismatches.push(format!(
+                    "{}: model_for_type={via_type:?} canonical_model_name(str)={via_str:?}",
+                    entity_type.path()
+                ));
+            }
+        }
+        assert_eq!(
+            checked,
+            EntityType::COUNT as usize,
+            "swept {checked} of {} generated variants — roster too small to be a real gate",
+            EntityType::COUNT
+        );
+        assert!(
+            mismatches.is_empty(),
+            "{} of {checked} entity types disagree between the `EntityType` path and the \
+             `&str` path:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
+
+    /// The sweep above could pass by accident if every code path happened to
+    /// agree on some entity whose registry id and alphabetical rank coincide
+    /// (registration order is not alphabetical, but nothing rules out a lone
+    /// coincidence). This picks a **specific** entity where the two orders
+    /// provably disagree and checks the round trip on exactly that one, so a
+    /// hypothetical bug that resolves by alphabetical position instead of by
+    /// registry id has a concrete input it cannot pass.
+    #[test]
+    fn model_for_type_round_trips_on_an_entity_whose_registry_id_and_alphabetical_rank_differ() {
+        let mut alphabetical: Vec<EntityType> = EntityType::all().collect();
+        alphabetical.sort_by_key(|e| e.path());
+        let (alpha_rank, entity_type) = alphabetical
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|&(alpha_rank, entity_type)| alpha_rank as u8 != entity_type.registry_id())
+            .expect(
+                "registration order and alphabetical order must differ somewhere among 158 \
+                 entries — if this ever fires, the roster has no discriminating input left",
+            );
+        assert_ne!(
+            alpha_rank as u8,
+            entity_type.registry_id(),
+            "chose a coincidentally-aligned entity, which cannot discriminate"
+        );
+
+        let via_wire_id =
+            EntityType::from_registry_id(entity_type.registry_id()).expect("id round trip");
+        assert_eq!(via_wire_id, entity_type);
+        assert_eq!(
+            model_for_type(via_wire_id).map(|e| e.name),
+            canonical_model_name(entity_type.path()),
+            "{} (registry id {}, alphabetical rank {alpha_rank}) disagreed",
+            entity_type.path(),
+            entity_type.registry_id()
+        );
+    }
+
+    /// The suffix rules must not shadow the corpus's own names.
+    ///
+    /// `chest_boat` and `chest_raft` are corpus entries that also satisfy the
+    /// `_boat`/`_raft` suffix tests, so a resolver that consults the suffixes
+    /// *before* the corpus resolves the literal `"chest_boat"` to the plain
+    /// `boat` rig — a silent wrong-mesh substitution for any caller that
+    /// passes a corpus name straight through, which the `player_wide`/
+    /// `player_slim` path already does.
+    ///
+    /// Moved from `tests/boat_model_resolution.rs` (issue #523's third pass):
+    /// none of `"boat"`/`"chest_boat"`/`"raft"`/`"chest_raft"` is a real
+    /// `minecraft:entity_type` registry entry, so there is no `EntityType`
+    /// value to hand `model_for_type` any more — this is squarely the
+    /// surviving `&str`/corpus-name boundary, `canonical_model_name`, which
+    /// is private to this module and so cannot be reached from an external
+    /// integration test.
+    #[test]
+    fn a_literal_corpus_rig_name_still_resolves_to_itself() {
+        for name in ["boat", "chest_boat", "raft", "chest_raft"] {
+            assert_eq!(
+                canonical_model_name(name),
+                Some(name),
+                "a literal corpus rig name must resolve to itself, not through the \
+                 boat suffix rules"
+            );
+        }
+    }
+
+    /// The negative control: the suffix rules must not hand a boat rig to
+    /// something that merely shares a word.
+    ///
+    /// `chest_minecart` has no ported rig (the corpus has `minecart` only),
+    /// and a resolver matching on `contains("boat")`/`contains("chest")`
+    /// rather than on the suffix would be caught here. Without this arm,
+    /// "return `chest_boat` for anything with `chest` in it" would satisfy
+    /// every assertion above. `"chest"`/`"boater"`/`"raft_of_ducks"` are not
+    /// real registry paths at all, so — like the test above — this exercises
+    /// `canonical_model_name` directly rather than `model_for_type`.
+    ///
+    /// Moved from `tests/boat_model_resolution.rs` for the same reason as
+    /// [`a_literal_corpus_rig_name_still_resolves_to_itself`].
+    #[test]
+    fn a_non_boat_type_gets_no_boat_rig() {
+        for name in ["chest_minecart", "chest", "boater", "raft_of_ducks", "pig"] {
+            let resolved = canonical_model_name(name);
+            assert!(
+                !matches!(resolved, Some("boat" | "chest_boat" | "raft" | "chest_raft")),
+                "`{name}` is not a boat, but resolved to {resolved:?}"
             );
         }
     }
@@ -4529,9 +4738,14 @@ mod tests {
         // dropped item reaches the render path and is deliberately absent here for
         // exactly the same reason. So this assertion is load-bearing *after* the
         // orb landed, not before it.
-        assert!(model_for_type("experience_orb").is_none());
-        assert!(model_for_type("tnt").is_none());
-        assert!(model_for_type("").is_none());
+        assert!(model_for_type(EntityType::ExperienceOrb).is_none());
+        assert!(model_for_type(EntityType::Tnt).is_none());
+        // An empty/garbage path is not something `model_for_type` can even be
+        // asked any more — there is no `EntityType` value for it — so the
+        // equivalent negative belongs to the surviving `&str` boundary,
+        // `canonical_model_name`, which every non-registry type path (still)
+        // routes through.
+        assert!(canonical_model_name("").is_none());
     }
 
     /// The other side of [`unknown_entity_type_has_no_model`]: the three
@@ -4546,9 +4760,10 @@ mod tests {
     /// differ too.
     #[test]
     fn projectiles_resolve_to_their_own_rigs_and_sheets() {
-        for ty in ["arrow", "spectral_arrow", "trident"] {
+        for entity_type in [EntityType::Arrow, EntityType::SpectralArrow, EntityType::Trident] {
+            let ty = entity_type.path();
             let model =
-                model_for_type(ty).unwrap_or_else(|| panic!("{ty} must have a corpus model"));
+                model_for_type(entity_type).unwrap_or_else(|| panic!("{ty} must have a corpus model"));
             assert_eq!(model.name, ty);
             assert_eq!(
                 entity_texture_candidates(ty).len(),
@@ -6520,9 +6735,13 @@ mod tests {
         assert_eq!(player_model_name(true), "player_slim");
         // Both names must be real corpus entries in their own right (not just
         // `canonical_model_name`'s hidden alias target), since a caller with
-        // real skin data passes this straight through as a `type_path`.
-        assert_eq!(model_for_type("player_wide").unwrap().name, "player_wide");
-        assert_eq!(model_for_type("player_slim").unwrap().name, "player_slim");
+        // real skin data passes this straight through as a `type_path` — and
+        // neither name is a `minecraft:entity_type` registry entry at all
+        // (there is no `EntityType::PlayerWide`), so this goes through the
+        // surviving `&str` boundary, `canonical_model_name`, not
+        // `model_for_type`.
+        assert_eq!(canonical_model_name("player_wide"), Some("player_wide"));
+        assert_eq!(canonical_model_name("player_slim"), Some("player_slim"));
     }
 
     /// Vanilla draws two layers per limb: the base skin cube, and a slightly
