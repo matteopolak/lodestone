@@ -349,8 +349,16 @@ before relying on it.**
   flag that never closed, silently disabling comment detection in three scanners.
 
 **Prefer `cargo xtask connectedness` over any hand-derived coverage number**; the hand-derived version
-has been wrong four times in four different ways. Know its scope, because outside it the instrument is
-*silent* rather than wrong (§12.40):
+has been wrong four times in four different ways. **But first check the instrument runs at all** — it was
+found *unable to execute*, bailing with `duplicate play serverbound decode arm`, so every figure quoted
+while it was broken was hand-derived after all. The cause is worth knowing because it is invisible at
+runtime: `server_protocol.rs` had **two** `State::Play` decode arms for the same packet id, an old
+`Ignored` stub shadowed by a real arm added later and never deleted. Rust takes the first satisfied guard,
+so behaviour was correct and only the scanner choked. **Diagnostic: grep `server_protocol.rs` for a
+repeated `if packet_id == play::serverbound::` guard.** A dead duplicate arm is also its own hazard — the
+next reader edits the unreachable one.
+
+Know its scope, because outside it the instrument is *silent* rather than wrong (§12.40):
 
 - It answers **"is this clientbound packet reaching anything"** and nothing else — not Rust call graphs,
   where it returns byte-identical output before and after a fix. For a crate-internal island, grep for
