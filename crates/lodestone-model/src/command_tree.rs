@@ -1,4 +1,4 @@
-//! The client-side Brigadier command tree (issue #46).
+//! The client-side Brigadier command tree.
 //!
 //! ## What it is
 //!
@@ -164,7 +164,7 @@ pub enum ArgumentParser {
     ObjectiveCriteria,
     /// `minecraft:operation` (id 26). No payload. `OperationArgument`
     /// suggests exactly `["=", "+=", "-=", "*=", "/=", "%=", "<", ">", "><"]`
-    /// (`OperationArgument.java:49`).
+    /// (`OperationArgument.java`).
     Operation,
     /// `minecraft:particle` (id 27). No payload.
     Particle,
@@ -174,7 +174,7 @@ pub enum ArgumentParser {
     Rotation,
     /// `minecraft:scoreboard_slot` (id 30). No payload. `ScoreboardSlotArgument`
     /// suggests every `DisplaySlot::getSerializedName`
-    /// (`DisplaySlot.java:7-26`): `list`, `sidebar`, `below_name`, and
+    /// (`DisplaySlot.java`): `list`, `sidebar`, `below_name`, and
     /// `sidebar.team.<colour>` for the sixteen team colours.
     ScoreboardSlot,
     /// `minecraft:score_holder` (id 31). `ScoreHolderArgument.Info`: a flags
@@ -197,7 +197,7 @@ pub enum ArgumentParser {
     /// `minecraft:entity_anchor` (id 38). No payload. `EntityAnchorArgument`
     /// suggests exactly `["feet", "eyes"]`
     /// (`EntityAnchorArgument.Anchor.BY_NAME`'s declaration order,
-    /// `EntityAnchorArgument.java:58-59`).
+    /// `EntityAnchorArgument.java`).
     EntityAnchor,
     /// `minecraft:int_range` (id 39). No payload.
     IntRange,
@@ -207,7 +207,7 @@ pub enum ArgumentParser {
     Dimension,
     /// `minecraft:gamemode` (id 42). No payload. `GameModeArgument` suggests
     /// exactly `["survival", "creative", "adventure", "spectator"]`
-    /// (`GameType.java:17-20`'s declaration order).
+    /// (`GameType.java`'s declaration order).
     GameMode,
     /// `minecraft:time` (id 43). `TimeArgument.Info`: a plain `i32` minimum
     /// tick count (no flags byte, no maximum).

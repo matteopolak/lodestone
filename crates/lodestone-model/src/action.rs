@@ -229,7 +229,7 @@ pub enum ClientAction {
         /// Free-form client brand string, such as `vanilla`.
         brand: String,
     },
-    /// Send an arbitrary plugin message on `channel` (issue #301).
+    /// Send an arbitrary plugin message on `channel`.
     ///
     /// [`ClientAction::SendBrand`] is vanilla's one built-in use of
     /// `custom_payload`; this is the general case for a mod/plugin-aware
@@ -453,7 +453,7 @@ pub enum ClientAction {
         /// Requested game mode.
         mode: GameMode,
     },
-    /// Reply to a [`crate::event::ClientEvent::CookieRequested`] (issue #291).
+    /// Reply to a [`crate::event::ClientEvent::CookieRequested`].
     ///
     /// Vanilla's own client (`ClientCommonPacketListenerImpl.handleRequestCookie`)
     /// answers immediately from its local `serverCookies` map with no UI and no
@@ -471,7 +471,7 @@ pub enum ClientAction {
         payload: Option<Vec<u8>>,
     },
 
-    // ---- issue #304: the operator/debug serverbound set --------------------
+    // ---- the operator/debug serverbound set ---------------------------------
     //
     // Thirteen packets a vanilla client can send that we could not encode at
     // all. They divide by *producer*, and the division is the useful part of

@@ -70,7 +70,7 @@ pub struct ItemComponents {
     /// armour (and any other item whose base material takes dye) coloured by
     /// a dye or a dyeing table. Low 24 bits are the colour; vanilla's own
     /// `DyedItemColor.STREAM_CODEC` is a bare `ByteBufCodecs.INT`
-    /// (`DyedItemColor.java:24`), so this is the raw wire int, not yet split
+    /// (`DyedItemColor.java`), so this is the raw wire int, not yet split
     /// into RGB bytes — `lodestone_render::entity::armour_layer_tint_with_dye`
     /// does that, matching `ArmorMaterial`/`EquipmentLayerRenderer`'s own
     /// `dyeColor & 0x00FFFFFF != 0` "is this dyed" gate.
@@ -234,7 +234,7 @@ pub struct PotDecorations {
 }
 
 /// A smithing-table armour trim — vanilla's `ArmorTrim` record
-/// (`world/item/equipment/trim/ArmorTrim.java:21`), which is a
+/// (`world/item/equipment/trim/ArmorTrim.java`), which is a
 /// `Holder<TrimMaterial>` plus a `Holder<TrimPattern>`.
 ///
 /// Both are carried as bare registry **paths** (`"iron"`, `"sentry"`), the form

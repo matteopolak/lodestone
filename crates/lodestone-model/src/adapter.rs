@@ -67,7 +67,7 @@ pub enum Directive {
     },
     /// The connection should be closed.
     Disconnect(Text),
-    /// A `minecraft:bundle_delimiter` boundary (issue #299).
+    /// A `minecraft:bundle_delimiter` boundary.
     ///
     /// Vanilla's own pipeline (`BundlerInfo.java`) never gives this packet a
     /// body — it exists purely as a toggle: the first delimiter after a run of
@@ -662,39 +662,39 @@ pub const DEFAULT_BLOCK_PHYSICS: BlockPhysics = BlockPhysics {
 pub fn block_physics(block_name: &str) -> BlockPhysics {
     BlockPhysics {
         friction: match block_name {
-            // `Blocks.java:1950` (ice), `:3021` (packed ice), `:3732` (frosted ice).
+            // `Blocks.java`, for ice, packed ice and frosted ice alike.
             "minecraft:ice" | "minecraft:packed_ice" | "minecraft:frosted_ice" => 0.98,
-            // `Blocks.java:4227`.
+            // `Blocks.java`.
             "minecraft:blue_ice" => 0.989,
-            // `Blocks.java:2926`.
+            // `Blocks.java`.
             "minecraft:slime_block" => 0.8,
             _ => DEFAULT_BLOCK_PHYSICS.friction,
         },
-        // `Blocks.java:2024` (soul sand), `:4843` (honey block).
+        // `Blocks.java`, for soul sand and honey block alike.
         speed_factor: match block_name {
             "minecraft:soul_sand" | "minecraft:honey_block" => 0.4,
             _ => DEFAULT_BLOCK_PHYSICS.speed_factor,
         },
-        // `Blocks.java:4843` — honey block is the only block in 26.2 that sets it.
+        // `Blocks.java` — honey block is the only block in 26.2 that sets it.
         jump_factor: match block_name {
             "minecraft:honey_block" => 0.5,
             _ => DEFAULT_BLOCK_PHYSICS.jump_factor,
         },
         bounce_restitution: match block_name {
-            // `Blocks.java:2926`.
+            // `Blocks.java`.
             "minecraft:slime_block" => 1.0,
-            // `Blocks.java:684`, via the `BED` `ColorCollection` — all 16 dyed
+            // `Blocks.java`, via the `BED` `ColorCollection` — all 16 dyed
             // beds share one `Properties` builder. Matched by suffix *within the
             // vanilla namespace only*, so a modded `_bed` does not inherit it.
             name if name.starts_with("minecraft:") && name.ends_with("_bed") => 0.75,
             _ => DEFAULT_BLOCK_PHYSICS.bounce_restitution,
         },
         stuck_multiplier: match block_name {
-            // `WebBlock.java:30-35`.
+            // `WebBlock.java`.
             "minecraft:cobweb" => Some([0.25, 0.05, 0.25]),
-            // `PowderSnowBlock.java:66`.
+            // `PowderSnowBlock.java`.
             "minecraft:powder_snow" => Some([0.9, 1.5, 0.9]),
-            // `SweetBerryBushBlock.java:86`.
+            // `SweetBerryBushBlock.java`.
             "minecraft:sweet_berry_bush" => Some([0.8, 0.75, 0.8]),
             _ => DEFAULT_BLOCK_PHYSICS.stuck_multiplier,
         },
@@ -750,8 +750,8 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     ///
     /// **This may legitimately answer `true` for more than one number.** A
     /// family crate covers a whole *wire era*, not necessarily a single
-    /// protocol revision (epic #343 groups 1.9.4/1.10.2/1.11.2 into one crate,
-    /// and 1.14.4/1.15.2, and 1.17.1/1.18.2), so implementations should test
+    /// protocol revision (one crate groups 1.9.4/1.10.2/1.11.2 together,
+    /// another 1.14.4/1.15.2, another 1.17.1/1.18.2), so implementations should test
     /// membership in the crate's own `PROTOCOLS` slice rather than compare
     /// against a single `PROTOCOL` constant.
     ///
@@ -1159,7 +1159,7 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     ///
     /// `Some(true)` is the magma-block drain, `Some(false)` the soul-sand lift. The
     /// consumer is [`lodestone_physics::CollisionView::bubble_column`], which drives
-    /// the vertical impulse in `apply_bubble_column`. Issue #199.
+    /// the vertical impulse in `apply_bubble_column`.
     ///
     /// # Why this is a seam and not a name lookup
     ///
@@ -1176,7 +1176,7 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     /// term, despite that being a natural guess.
     ///
     /// The default returns `None` for every state: a version with no bubble-column
-    /// data reports "no column anywhere", which degrades to the pre-#199 behaviour
+    /// data reports "no column anywhere", which degrades to the original behaviour
     /// (a bubble column moves you like the plain water it already classifies as)
     /// rather than to a wrong impulse.
     fn block_bubble_column_drag(&self, state_id: u32) -> Option<bool> {
