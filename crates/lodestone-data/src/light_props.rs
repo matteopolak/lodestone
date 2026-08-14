@@ -12,8 +12,8 @@
 //! sending a constant.
 //!
 //! * **dampening** is vanilla's `BlockState.getLightDampening()`
-//!   (`BlockBehaviour.java:298-305`), `0..=15`. The engine applies `max(1, ·)`
-//!   itself — see `LightEngine.getOpacity`, `LightEngine.java:77-79` — so this is
+//!   (`BlockBehaviour.getLightDampening`), `0..=15`. The engine applies `max(1, ·)`
+//!   itself — see `LightEngine.getOpacity` — so this is
 //!   the **raw** dampening, not the stepped opacity. Air and glass are `0`; water,
 //!   ice and leaves are `1`; a full solid is `15`.
 //! * **emission** is `BlockState.getLightEmission()`, `0..=15`. Non-emitters are

@@ -18,21 +18,20 @@
 //! # What each one breaks while it is missing
 //!
 //! * **`minecraft:equippable`** — `ArmorSlot.mayPlace` is
-//!   `owner.isEquippableInSlot(stack, slot)` (`ArmorSlot.java:43-46`), which is
+//!   `owner.isEquippableInSlot(stack, slot)` (`ArmorSlot.mayPlace`), which is
 //!   `slot == equippable.slot() && canUseSlot(…) && equippable.canBeEquippedBy(…)`
-//!   (`LivingEntity.java:3886-3891`). With no component, the only slot that
+//!   (`LivingEntity.isEquippableInSlot`). With no component, the only slot that
 //!   accepts anything is `MAINHAND` — **no armour is equippable by any click
 //!   type**.
 //! * **`minecraft:max_stack_size`** — `ItemInstance.getMaxStackSize` is
-//!   `getOrDefault(MAX_STACK_SIZE, 1)` (`ItemInstance.java:14-16`). Vanilla's
-//!   `COMMON_ITEM_COMPONENTS` sets `64` (`DataComponents.java:419-430`), so a
+//!   `getOrDefault(MAX_STACK_SIZE, 1)`. Vanilla's
+//!   `DataComponents.COMMON_ITEM_COMPONENTS` sets `64`, so a
 //!   client that assumes 64 is right for most items and wrong for every bucket,
 //!   shulker box, tool and egg — every drag distributing those over-fills and is
 //!   corrected.
 //! * **`minecraft:max_damage`** — gates `ItemStack.isDamageableItem`
-//!   (`ItemStack.java:416-418`) and therefore `ItemStack.isStackable`
-//!   (`ItemStack.java:412-414`): without it two identically-componented swords
-//!   merge into a stack of two.
+//!   and therefore `ItemStack.isStackable`: without it two
+//!   identically-componented swords merge into a stack of two.
 //!
 //! # Scope: the slot, not the whole `Equippable`
 //!
@@ -63,8 +62,7 @@ pub struct ItemPrototypeDef {
     /// `Equippable.slot()`, or `None` for a non-equippable item.
     pub equip_slot: Option<EquipmentSlot>,
     /// Whether the prototype also carries `minecraft:damage`, which
-    /// `ItemStack.isDamageableItem` separately requires
-    /// (`ItemStack.java:416-418`).
+    /// `ItemStack.isDamageableItem` separately requires.
     ///
     /// In 26.2 this is exactly `max_damage.is_some()` for every one of the 1,537
     /// items — asserted, not assumed, by `tests/item_prototypes.rs` — so nothing
@@ -72,7 +70,7 @@ pub struct ItemPrototypeDef {
     /// fails that assertion instead of silently mis-answering `isDamageableItem`.
     pub has_damage: bool,
     /// Whether `Equippable.allowedEntities` is empty, i.e. any entity may wear
-    /// it (`Equippable.java:175-177`).
+    /// it (`Equippable.canBeEquippedBy`).
     pub equippable_by_any_entity: bool,
 }
 

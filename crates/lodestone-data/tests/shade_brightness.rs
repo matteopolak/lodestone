@@ -9,7 +9,7 @@
 //!
 //! `BlockModelLighter.prepareQuadAmbientOcclusion` darkens a smooth-lit vertex
 //! by `cache.getShadeBrightness(state, level, pos)`, i.e.
-//! `BlockBehaviour.getShadeBrightness` (`BlockBehaviour.java:315-317`):
+//! `BlockBehaviour.getShadeBrightness`:
 //! `state.isCollisionShapeFullBlock(level, pos) ? 0.2F : 1.0F`, with seven class
 //! overrides. That is a **collision** predicate, and a renderer naturally has a
 //! *culling* one to hand instead — the two agree on stone, slabs, water and

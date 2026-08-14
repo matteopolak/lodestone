@@ -9,25 +9,25 @@
 //! # The outline shape is what block selection uses
 //!
 //! `Entity.pick` clips with `ClipContext.Block.OUTLINE` and
-//! `ClipContext.Fluid.NONE` (`Entity.java:2012-2017`), and
+//! `ClipContext.Fluid.NONE`, and
 //! `ClipContext.Block.OUTLINE` is `BlockStateBase::getShape`
-//! (`ClipContext.java:57`). The three defaults diverge at the base class:
+//! (`ClipContext.Block`'s enum constants). The three defaults diverge at the base class:
 //!
 //! | getter | default | source |
 //! | --- | --- | --- |
-//! | `getShape` (outline) | `Shapes.block()` | `BlockBehaviour.java:323-325` |
-//! | `getCollisionShape` | `hasCollision ? state.getShape(…) : Shapes.empty()` | `BlockBehaviour.java:327-329` |
-//! | `getInteractionShape` | `Shapes.empty()` | `BlockBehaviour.java:295-297` |
+//! | `getShape` (outline) | `Shapes.block()` | `BlockBehaviour.getShape` |
+//! | `getCollisionShape` | `hasCollision ? state.getShape(…) : Shapes.empty()` | `BlockBehaviour.getCollisionShape` |
+//! | `getInteractionShape` | `Shapes.empty()` | `BlockBehaviour.getInteractionShape` |
 //!
 //! So every `noCollission()` block — kelp, seagrass, torches, cobweb, redstone
 //! wire, fire, every plant — has **no collision and a real outline**, and that is
 //! why neither "does it collide" nor "does the cell hold a fluid" can stand in
 //! for "can I target it":
 //!
-//! * `LiquidBlock.getShape` → `Shapes.empty()` (`LiquidBlock.java:145-147`), so
+//! * `LiquidBlock.getShape` → `Shapes.empty()`, so
 //!   open water and lava are never targeted;
-//! * `KelpBlock`'s is `Block.column(16, 0, 9)` (`KelpBlock.java:24`) and
-//!   `SeagrassBlock`'s `Block.column(12, 0, 12)` (`SeagrassBlock.java:29`) —
+//! * `KelpBlock`'s is `Block.column(16, 0, 9)` (`KelpBlock.SHAPE`) and
+//!   `SeagrassBlock`'s `Block.column(12, 0, 12)` (`SeagrassBlock.SHAPE`) —
 //!   non-empty, so both are targetable despite hardcoding `getFluidState` to
 //!   water;
 //! * `WebBlock` has no `getShape` override at all, so cobweb outlines to a full
@@ -35,8 +35,7 @@
 //!
 //! # The interaction shape refines the hit *face*; it does not add a hit
 //!
-//! Its one caller is `BlockGetter.clipWithInteractionOverride`
-//! (`BlockGetter.java:82-94`): it clips the **outline** first, and only if that
+//! Its one caller is `BlockGetter.clipWithInteractionOverride`: it clips the **outline** first, and only if that
 //! hit does it clip the interaction shape and — when that hit is nearer —
 //! substitute its `Direction` into the outline's hit, keeping the outline's hit
 //! location. It can never make an unpickable block pickable. Only the cauldron
@@ -49,11 +48,11 @@
 //! `CollisionContext.empty()` and `EmptyBlockGetter.INSTANCE`, which is exactly
 //! what vanilla's own shape cache does (`getOcclusionShape` →
 //! `state.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO)`,
-//! `BlockBehaviour.java:287-289`). Two knowable consequences:
+//! `BlockBehaviour.getOcclusionShape`). Two knowable consequences:
 //!
 //! * **`minecraft:light` outlines to nothing** — its shape is
 //!   `context.isHoldingItem(Items.LIGHT) ? Shapes.block() : Shapes.empty()`
-//!   (`LightBlock.java:66-68`). A client that wants vanilla's held-light
+//!   (`LightBlock.getShape`). A client that wants vanilla's held-light
 //!   behaviour must special-case it above this table; the table's answer (empty)
 //!   is the correct *not*-holding-a-light answer.
 //! * **`minecraft:scaffolding`** reports its standing rather than its descending

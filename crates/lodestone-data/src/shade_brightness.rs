@@ -4,11 +4,10 @@
 //!
 //! # What this answers, and why it is not the culling predicate
 //!
-//! `BlockModelLighter.prepareQuadAmbientOcclusion`
-//! (`client-src/.../renderer/block/BlockModelLighter.java:45-110`) darkens a
+//! `BlockModelLighter.prepareQuadAmbientOcclusion` darkens a
 //! smooth-lit vertex by averaging `cache.getShadeBrightness(state, level, pos)`
 //! over the three cells around each of a quad's corners. That value is
-//! `BlockBehaviour.getShadeBrightness` (`BlockBehaviour.java:315-317`):
+//! `BlockBehaviour.getShadeBrightness`:
 //!
 //! ```text
 //! return state.isCollisionShapeFullBlock(level, pos) ? 0.2F : 1.0F;

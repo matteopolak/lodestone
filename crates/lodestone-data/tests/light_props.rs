@@ -10,9 +10,10 @@
 //! jar. This one is not, and the reason is structural rather than laziness:
 //! `getLightDampening` and `getLightEmission` are **not** exposed on
 //! `BlockBehaviour.Properties`. `lightEmission` is a `ToIntFunction<BlockState>`
-//! stored on a private field (`BlockBehaviour.java:980`, read once into a private
-//! `lightEmission` at `BlockBehaviour.java:463`), and dampening is a protected
-//! method with per-block overrides (`BlockBehaviour.java:298-305`, overridden by
+//! stored on a private field (`BlockBehaviour.Properties.lightEmission`, read once
+//! into a private `lightEmission` field by `BlockBehaviour.BlockStateBase`'s
+//! constructor), and dampening is a protected
+//! method with per-block overrides (`BlockBehaviour.getLightDampening`, overridden by
 //! `LeavesBlock` and `TintedGlassBlock`). Reading either needs the running jar,
 //! and this table is generated from two *committed* sources instead:
 //!
@@ -26,7 +27,7 @@
 //!
 //! Source 1 was cross-checked against source 2's own formula
 //! (`getLightDampening` = `isSolidRender() ? 15 : propagatesSkylightDown() ? 0 : 1`,
-//! `BlockBehaviour.java:298-305`) on the cases that formula separates:
+//! `BlockBehaviour.getLightDampening`) on the cases that formula separates:
 //! `stone` → 15 (full occlusion shape), `stone_slab` → 0 (not a full occlusion
 //! shape, shape not full so skylight propagates), `water` → 1 (fluid state
 //! non-empty, so skylight does *not* propagate), `tinted_glass` → 15 (the
@@ -43,7 +44,7 @@
 //! | property | correction | why |
 //! |---|---|---|
 //! | `type=double` | dampening `15` | a double slab *is* a full cube, so `isSolidRender()` holds where the block's default (`bottom`) fails it |
-//! | `waterlogged=true` | dampening `max(1, ·)` | `propagatesSkylightDown`'s default requires `fluidState.isEmpty()` (`BlockBehaviour.java:397-399`), so a waterlogged non-solid costs 1, not 0 |
+//! | `waterlogged=true` | dampening `max(1, ·)` | `propagatesSkylightDown`'s default requires `fluidState.isEmpty()` (`BlockBehaviour.propagatesSkylightDown`), so a waterlogged non-solid costs 1, not 0 |
 //! | `lit=false` | emission `0` | an unlit furnace/campfire/redstone torch emits nothing; `blocks.json` records whichever the block's *default* state is |
 //!
 //! **Every correction, and every residual gap, moves the table toward darker or
@@ -132,7 +133,8 @@ const MCDATA: &str = include_str!("support/light_props_mcdata.txt");
 ///
 /// * The nine full cubes — `SULFUR`/`CINNABAR` and their `polished_`,
 ///   `_bricks`, `chiseled_` and `POTENT_SULFUR` copies — are plain
-///   `Properties.of()` with **no** `noOcclusion()` (`Blocks.java:5055-5099`), so
+///   `Properties.of()` with **no** `noOcclusion()` (`Blocks.SULFUR` and its
+///   `ofLegacyCopy`/`ofFullCopy` siblings), so
 ///   their occlusion shape is a full cube, `solidRender` holds and dampening is
 ///   15.
 /// * The eighteen `_slab`/`_stairs`/`_wall` variants are `registerSlab`/
@@ -141,9 +143,9 @@ const MCDATA: &str = include_str!("support/light_props_mcdata.txt");
 ///   is 0. (`type=double` slabs are lifted back to 15 by the per-state
 ///   correction, which is why this entry is not wrong for them.)
 /// * `GOLDEN_DANDELION` is a `FlowerBlock` with `noCollision()`
-///   (`Blocks.java:851-860`), `POTTED_GOLDEN_DANDELION` a `FlowerPotBlock`, and
+///   (`Blocks.GOLDEN_DANDELION`), `POTTED_GOLDEN_DANDELION` a `FlowerPotBlock`, and
 ///   `SULFUR_SPIKE` is `noOcclusion()` + `dynamicShape()`
-///   (`Blocks.java:5343-5356`) — none a full cube, so 0.
+///   (`Blocks.SULFUR_SPIKE`) — none a full cube, so 0.
 ///
 /// **Not one of the 30 calls `.lightLevel(...)`**, so every emission is 0.
 const NEW_IN_26_2: &[(&str, u8, u8)] = &[

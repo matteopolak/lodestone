@@ -24,12 +24,12 @@
 //! Three vanilla getters, three defaults, three different answers:
 //!
 //! * `getShape` (the outline) defaults to `Shapes.block()`
-//!   (`BlockBehaviour.java:323-325`);
+//!   (`BlockBehaviour.getShape`);
 //! * `getCollisionShape` defaults to
 //!   `hasCollision ? state.getShape(…) : Shapes.empty()`
-//!   (`BlockBehaviour.java:327-329`);
+//!   (`BlockBehaviour.getCollisionShape`);
 //! * `getInteractionShape` defaults to `Shapes.empty()`
-//!   (`BlockBehaviour.java:295-297`).
+//!   (`BlockBehaviour.getInteractionShape`).
 //!
 //! [`outline_differs_from_collision_for_half_of_all_states`] measures the
 //! divergence against the committed collision table: 16,484 of 32,366 states
@@ -624,8 +624,8 @@ fn only_box(boxes: &[lodestone_model::BlockAabb]) -> [f32; 6] {
 
 const FULL_CUBE: [f32; 6] = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
-/// `AirBlock.getShape` → `Shapes.empty()` (`AirBlock.java:29-32`), and
-/// `LiquidBlock.getShape` → `Shapes.empty()` (`LiquidBlock.java:145-147`). This
+/// `AirBlock.getShape` → `Shapes.empty()`, and
+/// `LiquidBlock.getShape` → `Shapes.empty()`. This
 /// is why block picking cannot be "the cell is not air": *fluids* are empty too,
 /// and vanilla runs the pick with `Fluid.NONE`.
 #[test]
@@ -647,10 +647,10 @@ fn air_and_fluids_have_an_empty_outline() {
     }
 }
 
-/// `KelpBlock`'s shape is `Block.column(16.0, 0.0, 9.0)` (`KelpBlock.java:24`)
+/// `KelpBlock`'s shape is `Block.column(16.0, 0.0, 9.0)` (`KelpBlock.SHAPE`)
 /// and `Block.column(sizeXZ, minY, maxY)` is
 /// `box(8 - sizeXZ/2, minY, 8 - sizeXZ/2, 8 + sizeXZ/2, maxY, 8 + sizeXZ/2)` in
-/// sixteenths (`Block.java:176-184`), i.e. `[0, 0, 0, 1, 9/16, 1]`. Non-empty,
+/// sixteenths (`Block.column`), i.e. `[0, 0, 0, 1, 9/16, 1]`. Non-empty,
 /// which is what makes kelp targetable and breakable — and its collision shape is
 /// empty, which is why the collision table cannot answer this.
 #[test]
@@ -671,7 +671,7 @@ fn kelp_outlines_to_nine_sixteenths_and_collides_with_nothing() {
 }
 
 /// `SeagrassBlock`'s shape is `Block.column(12.0, 0.0, 12.0)`
-/// (`SeagrassBlock.java:29`) → `[2/16, 0, 2/16, 14/16, 12/16, 14/16]`.
+/// (`SeagrassBlock.SHAPE`) → `[2/16, 0, 2/16, 14/16, 12/16, 14/16]`.
 #[test]
 fn seagrass_outlines_to_twelve_sixteenths_inset() {
     let id = first_id_named("minecraft:seagrass");
@@ -703,7 +703,8 @@ fn cobweb_outlines_to_a_full_cube_and_collides_with_nothing() {
 }
 
 /// `SlabBlock`'s shapes are `column(16, 0, 8)` / `column(16, 8, 16)` /
-/// `Shapes.block()` for BOTTOM / TOP / DOUBLE (`SlabBlock.java:35-36, 59-65`).
+/// `Shapes.block()` for BOTTOM / TOP / DOUBLE (`SlabBlock.SHAPE_BOTTOM`,
+/// `SlabBlock.SHAPE_TOP`, `SlabBlock.getShape`).
 /// This is the shape the current unit-cube selection box gets visibly wrong.
 #[test]
 fn slabs_outline_to_a_half_block() {
@@ -734,12 +735,12 @@ fn slabs_outline_to_a_half_block() {
 }
 
 /// Walls build their outline with `makeShapes(16.0F, 14.0F)` and their collision
-/// with `makeShapes(24.0F, 24.0F)` (`WallBlock.java:66-67`), so a wall's outline
+/// with `makeShapes(24.0F, 24.0F)` (`WallBlock`'s constructor), so a wall's outline
 /// tops out at `y = 1.0` while its collision reaches `y = 1.5`. Using the
 /// collision shape for selection would draw the box half a block above the wall.
 ///
 /// And the two states per wall with `up=false` and all four sides `NONE` fold to
-/// `Shapes.empty()` (`WallBlock.java:75-86`); because that shape function ignores
+/// `Shapes.empty()` (`WallBlock.makeShapes`); because that shape function ignores
 /// `WATERLOGGED` it is exactly two states, waterlogged and not.
 #[test]
 fn wall_outlines_stop_at_one_while_collision_reaches_one_and_a_half() {
@@ -767,8 +768,8 @@ fn wall_outlines_stop_at_one_while_collision_reaches_one_and_a_half() {
 }
 
 /// `LightBlock.getShape` is
-/// `context.isHoldingItem(Items.LIGHT) ? Shapes.block() : Shapes.empty()`
-/// (`LightBlock.java:66-68`), and the census dumps every shape with
+/// `context.isHoldingItem(Items.LIGHT) ? Shapes.block() : Shapes.empty()`,
+/// and the census dumps every shape with
 /// `CollisionContext.empty()`. So the table's answer for `minecraft:light` is
 /// **empty** — the correct not-holding-a-light answer, and a genuine limit of a
 /// context-free table. Pinned so nobody "fixes" it to a cube.
