@@ -13,16 +13,16 @@ questions against that corrected baseline.
 
 ## 0. What exists today (evidence)
 
-**The crate and its parity discipline.** `crates/lodestone-worldgen/src/lib.rs:1-7` describes itself
+**The crate and its parity discipline.** `crates/lodestone-worldgen/src/lib.rs` describes itself
 as a "version-free Minecraft Java Edition world-generation engine … no version-specific data,"
 parameterised by JSON a version crate supplies. Modules: `rng/`, `hash/`, `noise/`, `density/`
 (noise-router DAG interpreter, `Density` enum with ~28 variants at
-`crates/lodestone-worldgen/src/density/mod.rs:207-247`+), `surface/` (surface rules), `aquifer/`
+`crates/lodestone-worldgen/src/density/mod.rs`+), `surface/` (surface rules), `aquifer/`
 (the real, non-approximated aquifer), `carver/` (caves/ravines), `feature/` (ore placement),
-`overworld.rs` (the composed driver).
+`overworld/` (the composed driver).
 
-**JVM-oracle parity, measured, not claimed** (`DESIGN.md:1945-1949`, `scripts/worldgen-oracle/*.java`,
-run via `docker run --rm eclipse-temurin:25-jdk` per `scripts/worldgen-oracle/run.sh:1-20` — the exact
+**JVM-oracle parity, measured, not claimed** (`DESIGN.md` §12.83, `scripts/worldgen-oracle/*.java`,
+run via `docker run --rm eclipse-temurin:25-jdk` per `scripts/worldgen-oracle/run.sh` — the exact
 pattern the brief describes, already in use, not something to invent):
 
 | stage | result |
@@ -30,49 +30,49 @@ pattern the brief describes, already in use, not something to invent):
 | RNG | 663/663 bit-exact |
 | noise | 1224/1224 bit-exact |
 | density router | 5120/5120 bit-exact |
-| noise router, whole region | 34048/34048 = 100.0000% (`DESIGN.md:859-861`) |
-| interpolated `final_density`, whole chunk | 98304/98304 = 100.0000% (`DESIGN.md:1029-1038`) |
-| carvers | 98304/98304 × 2 chunks (`DESIGN.md:1947`) |
-| ore features | whole-chunk exact **both directions**, 3 fixtures / 2 seeds / 2 terrain profiles (`DESIGN.md:1949`) |
-| surface rules | block-for-block, own oracle (`crates/lodestone-worldgen/src/surface/mod.rs:21-27`) |
+| noise router, whole region | 34048/34048 = 100.0000% (`DESIGN.md` §12.30) |
+| interpolated `final_density`, whole chunk | 98304/98304 = 100.0000% (`DESIGN.md` §12.40) |
+| carvers | 98304/98304 × 2 chunks (`DESIGN.md` §12.83) |
+| ore features | whole-chunk exact **both directions**, 3 fixtures / 2 seeds / 2 terrain profiles (`DESIGN.md` §12.83) |
+| surface rules | block-for-block, own oracle (`crates/lodestone-worldgen/src/surface/mod.rs`) |
 
 None of this is `decode(encode(x))==x` self-play: every comparison is against the **running compiled
 26.2 server's own methods**, called through the oracle classes in `scripts/worldgen-oracle/` — e.g.
-`DESIGN.md:859` states it precisely: "the Rust interpreter reads disk JSON, while the oracle evaluates
+`DESIGN.md` §12.30 states it precisely: "the Rust interpreter reads disk JSON, while the oracle evaluates
 the running server's live `RandomState` router… If disk JSON were an incomplete picture, the two would
 diverge. They agree."
 
-**What's actually served, right now.** `crates/lodestone-server/src/worldgen_data.rs:100-108`
+**What's actually served, right now.** `crates/lodestone-server/src/worldgen_data.rs`
 (`overworld_generator`) builds an `OverworldGenerator` from JSON embedded at build time
-(`crates/lodestone-server/build.rs:1-15`, from `crates/lodestone-server/assets/worldgen/`, 90+ files).
-`crates/lodestone-server/src/chunk.rs:261-308` (`OverworldChunkSource`) wraps it as the server's
-`ChunkSource`, with edit retention. `crates/lodestone-server/src/worldgen_data.rs:182-226`
+(`crates/lodestone-server/build.rs`, from `crates/lodestone-server/assets/worldgen/`, 90+ files).
+`crates/lodestone-server/src/chunk.rs` (`OverworldChunkSource`) wraps it as the server's
+`ChunkSource`, with edit retention. `crates/lodestone-server/src/worldgen_data.rs`
 (`chunk_source_serves_generator_block_for_block`) proves the served chunk matches the generator
 block-for-block, non-vacuously (asserts water and non-stone-surface material are both present). The
-real v770 wire encoder is already the consumer: `crates/protocol/v770/src/server_protocol.rs:915`
-(`encode_chunk`) — not a stand-in. `crates/lodestone-shell/src/worldgen.rs:43,68-69` shows the shell's
+real v770 wire encoder is already the consumer: `crates/protocol/v770/src/server_protocol.rs`
+(`encode_chunk`) — not a stand-in. `crates/lodestone-shell/src/worldgen.rs` shows the shell's
 local-world path calls the same `overworld_generator`, so direct-singleplayer and
 server-then-loopback are not two generators.
 
-**The honest gap, in the code's own words.** `crates/lodestone-worldgen/src/overworld.rs:29-41`:
+**The honest gap, in the code's own words (superseded — see below).** `crates/lodestone-worldgen/src/overworld/mod.rs`:
 
 > "Not yet composed here: carvers (no caves), the real aquifer, and features (no ores/vegetation/trees)... The multi-noise biome source is not built yet, so generation runs a single fixed biome."
 
 So `OverworldGenerator::column` today runs shape → sea-level-only fluid fill (a documented
-*approximation* of the aquifer, not the real one, `overworld.rs:18-24`) → surface rules, under one
-hardcoded biome (`minecraft:plains`, `crates/lodestone-server/src/worldgen_data.rs:35-36`,
+*approximation* of the aquifer, not the real one, `overworld/mod.rs`) → surface rules, under one
+hardcoded biome (`minecraft:plains`, `crates/lodestone-server/src/worldgen_data.rs`,
 `DEFAULT_BIOME_SNOWS = false`). That is a genuine, walkable, real-shaped overworld with correct
 terrain contours, oceans, beaches, and grass/dirt/sand/gravel surfacing — but flat-biome, cave-free,
 ore-free, structure-free.
 
 **Where the container/lighting boundary actually is** (the brief's item 1). `lodestone-world` (a
 different crate from `lodestone-worldgen`) supplies the storage and lighting the brief names:
-`crates/lodestone-world/src/column.rs:26` (`ChunkColumn`, the palette/section container),
-`crates/lodestone-world/src/heightmap.rs:110` (`Heightmaps`), `crates/lodestone-world/src/light.rs:299`
-(`ColumnLight`), `crates/lodestone-world/src/lighting.rs:167` (`compute_column_light`). **This is a
+`crates/lodestone-world/src/column.rs` (`ChunkColumn`, the palette/section container),
+`crates/lodestone-world/src/heightmap.rs` (`Heightmaps`), `crates/lodestone-world/src/light.rs`
+(`ColumnLight`), `crates/lodestone-world/src/lighting.rs` (`compute_column_light`). **This is a
 third, distinct `ChunkColumn`** from `lodestone-worldgen::overworld::GeneratedColumn` (the raw
 generator output) and `lodestone-server::chunk::ChunkColumn` (the server's edit-tracking wrapper,
-`crates/lodestone-server/src/chunk.rs:88-97` — a simple flat palette+index grid, not
+`crates/lodestone-server/src/chunk.rs` — a simple flat palette+index grid, not
 `lodestone-world`'s richer section container). **These three do not currently unify**: the server path
 generates via `OverworldGenerator` → `GeneratedColumn` → its own light-weight `ChunkColumn` → the wire,
 never touching `lodestone-world::ChunkColumn`/`Heightmaps`/`ColumnLight` at all for served terrain. So
@@ -114,30 +114,30 @@ Already-built pieces map to:
 
 - **Noise router / density functions**: `net/minecraft/world/level/levelgen/DensityFunction.java`,
   `DensityFunctions.java`, `NoiseRouterData.java` — ported as `Density` (the ~28-variant enum,
-  `density/mod.rs:207+`) interpreted by `Builder`/`NoiseChunkSampler` (`density/chunk.rs`).
+  `density/mod.rs`) interpreted by `Builder`/`NoiseChunkSampler` (`density/chunk.rs`).
 - **`NoiseGeneratorSettings`**: `net/minecraft/world/level/levelgen/NoiseGeneratorSettings.java` — the
   per-dimension settings record (`noise` block/height, `sea_level`, `default_block`/`default_fluid`,
   `noise_router`, `surface_rule`, `disable_mob_generation`, `aquifers_enabled`). Consumed today via
-  `overworld_settings()` (`crates/lodestone-server/src/worldgen_data.rs:85-91`) from
+  `overworld_settings()` (`crates/lodestone-server/src/worldgen_data.rs`) from
   `noise_settings/overworld.json`.
 - **Surface rules**: `net/minecraft/world/level/levelgen/SurfaceRules.java`,
   `SurfaceSystem.java` — ported as `SurfaceSystem` (`crates/lodestone-worldgen/src/surface/mod.rs`).
 - **Aquifers**: `net/minecraft/world/level/levelgen/Aquifer.java` — ported
   (`crates/lodestone-worldgen/src/aquifer/mod.rs`), proven, **not composed into `OverworldGenerator`**.
-- **Carvers**: `net/minecraft/world/level/levelgen/NoiseBasedChunkGenerator.java:304`
+- **Carvers**: `net/minecraft/world/level/levelgen/NoiseBasedChunkGenerator.java`
   (`applyCarvers`), `net/minecraft/world/level/levelgen/carver/*Carver.java` — ported
   (`crates/lodestone-worldgen/src/carver/mod.rs`), proven, **not composed**.
 - **Ore/feature placement**: `net/minecraft/world/level/levelgen/feature/OreFeature.java` and the
   placement-modifier pipeline — ported for ores (`crates/lodestone-worldgen/src/feature/mod.rs`,
   `OreConfig`/`place_ore_feature`), proven, **not composed**. Vegetation/tree features are unbuilt
-  (the module doc says "and, later, vegetation and trees," `feature/mod.rs:2`).
+  (the module doc says "and, later, vegetation and trees," `feature/mod.rs`).
 - **Biome assignment**: `net/minecraft/world/level/biome/Climate.java` (`ParameterPoint`,
   `TargetPoint`, 7-dimension `Parameter` space: temperature, humidity, continentalness, erosion,
-  depth, weirdness, offset — `Climate.java:29-30,42-70`), `MultiNoiseBiomeSource.java` (95 lines,
+  depth, weirdness, offset), `MultiNoiseBiomeSource.java` (95 lines,
   nearest-point search via `Climate.Sampler.findValue`), and — the part that matters for scoping —
   `OverworldBiomeBuilder.java` (**1124 lines**), which *procedurally constructs* ~700+
   `(ParameterPoint, Biome)` pairs in Java code via nested loops over discretized climate bands
-  (`OverworldBiomeBuilder.java:36-50` shows the `temperatures`/`humidities` arrays that seed the
+  (`OverworldBiomeBuilder.java` shows the `temperatures`/`humidities` arrays that seed the
   construction). **Unbuilt anywhere in Rust.**
 - **Structures**: `net/minecraft/world/level/levelgen/structure/{Structure,StructureSet}.java`,
   jigsaw/template-pool assembly, `AncientCityStructurePieces.java` etc. — **entirely unbuilt**, no
@@ -147,7 +147,7 @@ Already-built pieces map to:
 
 ## 2. Data vs. code — and the highest-value finding
 
-`DESIGN.md:857` (§12.30) already established the headline: vanilla ships worldgen as **963 JSON
+`DESIGN.md` §12.30 already established the headline: vanilla ships worldgen as **963 JSON
 files** — 35 `density_function`, 63 `noise`, 7 `noise_settings`, 66 `biome`, 226
 `configured_feature`, 262 `placed_feature`, 188 `template_pool`, 54 `structure(_set)`, 40
 `processor_list`, 4 `configured_carver` (counts re-verified directly against
@@ -165,7 +165,7 @@ and it is already the architecture in use.
 
 The actual ~700 `(ParameterPoint, Biome)` pairs are **not** in that file or any other JSON — they are
 built at runtime by `OverworldBiomeBuilder.java` (1124 lines of Java, referenced above), registered
-through `MultiNoiseBiomeSourceParameterLists.java:10-17` (`OVERWORLD` preset). Porting that builder
+through `MultiNoiseBiomeSourceParameterLists.java` (`OVERWORLD` preset). Porting that builder
 faithfully (nested loops, named climate bands, special-cased river/badlands/frozen-ocean logic) would
 be a meaningful, error-prone transliteration effort — exactly the kind of thing `CLAUDE.md` warns is
 easy to get subtly wrong with no single test able to say why.
@@ -181,7 +181,7 @@ following the exact `LODESTONE_REGEN=1` generate-or-assert pattern `crates/proto
 already establish. **~700 code-only rows become one static data table**, and the 1124-line builder is
 never transliterated at all — only the nearest-neighbour search (Climate.java's nearest-point-in-7D
 logic) is code, and it's small: vanilla's own `RTree.findValueBruteForce`
-(`Climate.java:182`) is the un-optimized reference implementation sitting right next to the RTree,
+(`Climate.java`) is the un-optimized reference implementation sitting right next to the RTree,
 i.e. vanilla ships its own "spec example" for the brute-force version, satisfying the evidence
 standard for free. The RTree itself is a JVM performance optimization over an O(n) brute-force search
 of ~700 points — safe to skip per "never transliterate," since a few hundred squared-distance
@@ -215,10 +215,10 @@ the whole JVM-parity suite in §0's table.
 ### Phase 1 — real biome variety
 **Deliverable:** `MultiNoiseBiomeSource`-equivalent: per-column climate sample (temperature, humidity,
 continentalness, erosion, depth, weirdness from the existing noise router's climate outputs — these
-noises are *already computed* for shape, per `overworld.rs`'s doc on `final_density`'s dependencies)
+noises are *already computed* for shape, per `overworld/mod.rs`'s doc on `final_density`'s dependencies)
 → nearest-parameter-point lookup against the dumped overworld table (§2) → real biome id per column,
 threaded into `SurfaceSystem::build_surface` (which already accepts a `biome` parameter,
-`overworld.rs:78-85`) and, once Phase 2 lands, into carver/feature selection. **Observable:** flying
+called with one from `overworld/fill.rs`) and, once Phase 2 lands, into carver/feature selection. **Observable:** flying
 over a singleplayer world shows visibly different biomes — plains next to desert next to taiga — with
 correct surface materials per biome (snow in cold biomes, sand in desert, etc.), not one uniform
 plains everywhere.
@@ -231,11 +231,11 @@ sea-level approximation), and `feature::place_ore_feature` into `OverworldGenera
 vanilla's own order (`ChunkGenerator.applyCarvers` before decoration; `DESIGN.md`'s vanilla-order note
 in `feature/mod.rs`'s doc comment). **Observable:** walking underground finds real cave systems and
 ravines instead of solid stone; mining exposes actual ore veins (coal/iron/copper/gold/diamond/etc.,
-including the buried-ore RNG-draw subtlety `DESIGN.md:1957` already caught and fixed once); underground
+including the buried-ore RNG-draw subtlety `DESIGN.md` §12.83 already caught and fixed once); underground
 water/lava pockets appear where the real aquifer places them instead of only at sea level.
 **Note:** all three math engines are already proven bit-exact in isolation (§0's table) — this phase
 is pure composition risk (ordering, biome threading from Phase 1, RNG-seed derivation per chunk), not
-new algorithm risk. #295's own text calls this out: "the hard part... is done and proven... find the
+new algorithm risk. The tracked issue's own text calls this out: "the hard part... is done and proven... find the
 seam."
 
 ### Phase 3 — vegetation and tree features (recommended stopping point before this — see §5)
@@ -252,7 +252,7 @@ type) via `StructureSet` placement-grid RNG + template-pool NBT pasting, *not* t
 **Observable:** a specific structure type appears at a deterministic seed location, block-for-block
 matching vanilla.
 **Cost:** large — jigsaw assembly, piece-collision resolution, and NBT structure-file loading are all
-unported. This is why #136 records "do not start implementation" until this has a scope.
+unported. This is why the tracked plugin-structures issue records "do not start implementation" until this has a scope.
 
 ### Phase 5 (further out) — full structures, full feature catalogue, world-preset variety (nether/end)
 Not scoped here; see §5's cost/benefit discussion.
@@ -280,11 +280,11 @@ re-verify with `decode(encode(x))==x` against our own encoder — that trap is e
   boundary that's off by one climate band, matching the "vacuous test" species table's *magnitude* row
   (right direction, wrong number). The anti-vacuity floor: assert at least N distinct biomes across the
   probed region (N derived from the actual oracle output, not guessed).
-- **Phase 2 (carvers/aquifer/ores):** the composition-only gate #295 already specifies — generate a
+- **Phase 2 (carvers/aquifer/ores):** the composition-only gate the tracked issue already specifies — generate a
   chunk with `OverworldGenerator::column` post-composition and diff it block-for-block against
   `RegionOracle`/`DensityChunkOracle`-style full-chunk dumps (extending the existing oracle classes
   rather than writing new math, since the math itself already passed `carver_parity`/`feature_parity`/
-  `aquifer_parity` in isolation). The two-directional ore check already used (`DESIGN.md:1949`, "exact
+  `aquifer_parity` in isolation). The two-directional ore check already used (`DESIGN.md` §12.83, "exact
   BOTH directions") is worth keeping as a pattern: compare Rust→JVM and, separately, assert the JVM
   oracle's own ore *count* per chunk matches a hand-derived expectation, so a systematic RNG-order bug
   that shifted every ore by one call (which would still "match" a same-order oracle-vs-Rust diff if
@@ -293,7 +293,7 @@ re-verify with `decode(encode(x))==x` against our own encoder — that trap is e
   coordinate generated by lodestone-server for that seed.
 - **Phase 3 (features):** same whole-chunk block-for-block diff, extended to the tree/vegetation
   `configured_feature` set. Add an aggregate-statistics gate alongside exact-match (tree count per
-  biome type within an expected band) — `DESIGN.md:1957`'s lesson is that exact-match on one chunk
+  biome type within an expected band) — `DESIGN.md` §12.83's lesson is that exact-match on one chunk
   catches ordering bugs while count bands catch a plausible-but-wrong distribution, and neither
   substitutes for the other.
 - **Phase 4 (structures), if pursued:** block-for-block diff of the placed structure's full bounding
@@ -320,7 +320,7 @@ Reasoning:
 - **Cost asymmetry is stark.** Phases 1–3 compose or lightly extend machinery that is *already built
   and already proven bit-exact* — §0's table shows the hard numerical work (noise router, density,
   carvers, aquifer, ore placement) is done. The remaining work is wiring (Phase 2, already scoped as
-  #295 and correctly labelled "cheapest, highest-visual-impact win") and one new but bounded subsystem
+  the tracked issue and correctly labelled "cheapest, highest-visual-impact win") and one new but bounded subsystem
   (Phase 1's climate search, made cheap by §2's oracle-dump finding; Phase 3's vegetation placement,
   which reuses Phase 2's placement-modifier interpreter rather than needing a new one). Structures are
   a different order of magnitude: jigsaw assembly, piece-collision resolution against already-generated
@@ -333,14 +333,14 @@ Reasoning:
   explorable caves, mineable ores, and a world that looks populated (trees, grass) rather than bare
   stone. A player cannot tell from moment-to-moment play that villages are absent; they can immediately
   tell if terrain is flat, monotonous, or has a bare-stone underground.
-- **The tracker already treats structures as out of scope.** #136 explicitly says "do not start
+- **The tracker already treats structures as out of scope.** The tracked plugin-structures issue explicitly says "do not start
   implementation against this issue" pending core worldgen structure support, and no issue anywhere
   scopes vanilla (non-plugin) structure generation. This plan should not be the first to open that
   door without a much larger, separately-argued case.
 - **Multi-dimension (nether/end) generation** is out of scope for the same reason — it's `noise_settings`
   variety plus nether-specific biome source (`BiomeSources.java` shows a different, simpler biome
   source for the nether — checkerboard-adjacent, not full multi-noise) — worth a follow-up plan once
-  the overworld reaches Phase 3, not before. `docs/backlog.md`'s tier framing (issue #330, "multi-
+  the overworld reaches Phase 3, not before. `docs/backlog.md`'s tier framing (the dimension-registry issue, "multi-
   dimension support and server-driven portal travel") already tracks the prerequisite (portal travel,
   dimension switching) as separate, larger, tier-4 work.
 - **What Phase 4+ would cost if pursued anyway:** roughly bound it by the data-file count difference —
@@ -354,7 +354,7 @@ Reasoning:
 ## 6. Crate boundaries and the version seam
 
 **Current state is already correct and should not change shape, only grow.** `lodestone-worldgen`
-(`src/lib.rs:1-7`) is explicitly and deliberately version-free: "no version-specific data… Dropping a
+(`src/lib.rs`) is explicitly and deliberately version-free: "no version-specific data… Dropping a
 version drops its data, never this engine." It depends on nothing version-specific — `serde_json` for
 the data shape, and its own `rng`/`hash`/`math`/`noise` primitives. This is the right split and Phases
 1–3 do not disturb it: Phase 1's biome search is climate-math over a data table, same pattern as
@@ -365,7 +365,7 @@ placement-modifier engine, which is already version-free.
 plan).** `crates/lodestone-server/assets/worldgen/` + `worldgen_data.rs`'s `EmbeddedResolver` hold the
 actual JSON, embedded via `build.rs` directly into `lodestone-server` — **not** into
 `crates/protocol/v770`, where the rest of 26.2-specific data lives (block registries, collision
-shapes, hardness tables, per `CLAUDE.md`'s data-sources section). `worldgen_data.rs:10-16`'s own doc
+shapes, hardness tables, per `CLAUDE.md`'s data-sources section). `worldgen_data.rs`'s own doc
 comment already flags this as provisional: "Per plan §3 version-specific worldgen data eventually
 lives in the version crate… This bundled copy is the singleplayer default." Concretely,
 `lodestone-server` currently has a compile-time dependency on 26.2 data that has no version gate — it
@@ -399,7 +399,7 @@ own `Climate.RTree.findValueBruteForce` serving as the un-optimized reference al
 no ambiguity about what "correct" means even before the oracle dump exists.
 
 A secondary, smaller instance: **the placement-modifier interpreter Phase 3 needs already exists** —
-`feature/mod.rs`'s doc comment (`feature/mod.rs:20-27`) describes a general `Stream`-of-positions
+`feature/mod.rs`'s doc comment (`feature/mod.rs`) describes a general `Stream`-of-positions
 composition model already implemented for ores. Vegetation features (trees, patches) use the same
 placement-modifier pipeline in vanilla with different modifier *kinds*, not a different composition
 model — so Phase 3 is closer to "add more `configured_feature`/modifier variants to an existing
@@ -410,8 +410,8 @@ interpreter" than "build a second feature system."
 ## 8. Summary answers to the brief's items
 
 1. **Existing/missing boundary:** shape + sea-level-fluid-approximation + surface rules are composed
-   and served (`overworld.rs`); real aquifer, carvers, ore features exist and are proven but
-   uncomposed (`overworld.rs:29-34`, tracked as #295); biome assignment (multi-noise climate → real
+   and served (`overworld/mod.rs`); real aquifer, carvers, ore features exist and are proven but
+   uncomposed (`overworld/mod.rs`, tracked in the issue tracker); biome assignment (multi-noise climate → real
    biome variety) is entirely unbuilt; vegetation features and structures are entirely unbuilt.
    `lodestone-world`'s `ChunkColumn`/`Heightmaps`/`ColumnLight`/`compute_column_light` are a *different*
    crate serving the client's decode/render/light path, not currently touched by the server's
@@ -421,7 +421,7 @@ interpreter" than "build a second feature system."
    lines/stage; the one deceptive case (biome parameter list, looks like code, is dumpable) is §7's
    headline finding.
 4. **Phased plan:** §3, five phases, each with an observable end-state; Phase 0 already done, Phase 2
-   already tracked as #295.
+   already tracked in the issue tracker.
 5. **Verification per phase:** §4 — vanilla-generated-output comparison throughout, never
    self-referential, extending the existing `scripts/worldgen-oracle/` pattern per phase.
 6. **Crate boundaries / version seam:** §6 — `lodestone-worldgen` stays version-free and is the right
@@ -440,5 +440,5 @@ interpreter" than "build a second feature system."
 See the companion report for the exact numbers filed. In summary: one epic tying together the
 worldgen-completion phases not already tracked, plus child issues for Phase 1 (biome), Phase 3
 (vegetation features), the crate-boundary/version-seam follow-up (§6), and a pointer comment added to
-existing #295 (Phase 2) and #136 (structures, confirming it should stay blocked) rather than new
+existing tracked issues (Phase 2, and structures, confirming it should stay blocked) rather than new
 issues for those two, since they already exist and are already correctly scoped.

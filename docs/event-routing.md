@@ -104,7 +104,7 @@ Guessing the `ingest`/`session` fork wrong has cost work twice:
 belong to `session`. An arm in the wrong router compiles, unit-tests green, and
 never runs.
 
-**Two clarifications the #26 sweep forced, both of which look like exceptions and
+**Two clarifications the twenty-four-variant decode sweep forced, both of which look like exceptions and
 are not:**
 
 * **`DebugEntityValue` names an entity and is `session`.** A debug feed is keyed by
@@ -162,8 +162,8 @@ reviewable commit, not as a drive-by while landing something else.
 **26 of 132** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
 consumer, which is a normal state for a from-scratch client.
 
-> **`EntityLeashed` left the list when a leashed mob's rope was wired (issue
-> #236).** The variant carries a wire entity id (the holder), not a scalar, so
+> **`EntityLeashed` left the list when a leashed mob's rope was wired.** The
+> variant carries a wire entity id (the holder), not a scalar, so
 > it is per-entity `ingest` state — `ingest::apply_entity_leash` folds it into
 > a `Leashed` component, and `player::push_leash_lines` (`ExtractSet::Debug`)
 > turns that into a world-space line each frame. The consumer sat one layer
@@ -195,7 +195,7 @@ consumer, which is a normal state for a from-scratch client.
 > the seat pin already resolves one. Ask what a fold writes, not what the packet
 > names.
 
-> **The numerator did not move when issue #26 added twenty-four variants**, and
+> **The numerator did not move when the decode sweep added twenty-four variants**, and
 > that is the useful reading of this line rather than a coincidence: the
 > twenty-three clientbound packets that had no decode arm at all — plus the
 > enchantment registry order — now decode *and* fold, all of them into `session`
@@ -221,7 +221,7 @@ consumer, which is a normal state for a from-scratch client.
 > struct-update spread inside an arm that sets other flags and is *not* an island.
 
 **Twelve variants were different — a fold existed or was cheap, and nothing fed
-it.** Three were found by the original pass; the world-state sweep (epic #340)
+it.** Three were found by the original pass; the world-state sweep
 found nine more. All twelve are fixed:
 
 | variant | the fold that used to never run | now routed to | fixed by |
@@ -234,8 +234,8 @@ found nine more. All twelve are fixed:
 | `SpawnPositionChanged` | none — new `lodestone_game::levelstate::SpawnPoint` | `session` → `SessionSpawnPoint`, folded by `apply_spawn_point` | same |
 | `GameRulesChanged` | none — new `lodestone_game::levelstate::GameRuleValues` | `session` → `SessionGameRules`, folded by `apply_game_rules` | same |
 | `RecipeBookSettingsChanged` | **the packet had no decode at all** — a new variant, not an un-stranded one | `session` → `SessionRecipeBookSettings`, folded by `apply_recipe_book_settings` | same |
-| `MapItemData` | **no decode at all** — id 51 registered, nothing else (issue #184) | `session` → `SessionMaps`, folded by `apply_maps`. Keyed on **map id**, not on an entity: one map can be held by several players and hung in several frames at once | the map/advancement wire landing |
-| `AdvancementsUpdated` | **no decode at all** — id 130 registered, nothing else (issue #167) | `session` → `SessionAdvancements`, folded by `apply_advancements` | same |
+| `MapItemData` | **no decode at all** — id 51 registered, nothing else | `session` → `SessionMaps`, folded by `apply_maps`. Keyed on **map id**, not on an entity: one map can be held by several players and hung in several frames at once | the map/advancement wire landing |
+| `AdvancementsUpdated` | **no decode at all** — id 130 registered, nothing else | `session` → `SessionAdvancements`, folded by `apply_advancements` | same |
 
 ### One step earlier in the pipeline: id registered, never decoded
 
@@ -310,7 +310,7 @@ records the resize unstamped and the *system* stamps it, idempotently, so a late
 border packet cannot restart an interpolation already in flight.
 
 **On `GameRulesChanged`, two things that are easy to get backwards.** It is *not*
-issue #327's typed registry — that is a server-side 59-rule table and is unbuilt;
+the planned typed registry — that is a server-side 59-rule table and is unbuilt;
 this is a client-side raw-string table with typed accessors. And vanilla's
 `GAME_RULE_VALUES` is **request/response, not broadcast** (its only send site is
 `sendGameRuleValues()`, reachable solely via
@@ -343,14 +343,14 @@ entity's id — the same shape as `SessionBossBars`/`SessionTabList` just above 
 written: nothing in the shell read `SessionBlockDestruction` or `ServerDifficulty`,
 and for `BlockDestruction` specifically, the renderer's `CrackTarget`/`CrackPipeline`
 (`lodestone_shell::gpu`) only ever drew *one* target — the local player's own dig.
-Both were tracked as separate follow-up issues (#410, #411), closed as follows:
+Both were tracked as separate follow-up issues, closed as follows:
 
-* **#411 (`DifficultyChanged`)** — `Sim::difficulty()` now reads `ServerDifficulty`
+* **`DifficultyChanged`** — `Sim::difficulty()` now reads `ServerDifficulty`
   the same way `selected_slot()` reads `SelectedSlot`, and `app.rs` folds it into
   `DebugStats::difficulty` each frame. It shows as a `DIFFICULTY <NAME>[ (LOCKED)]`
   line on the F3 overlay (`hud.rs`'s `DebugStats::lines`); see
   [`vanilla-hud-text.md`](./vanilla-hud-text.md).
-* **#410 (`BlockDestruction`)** — `CrackPipeline`/`RenderState::render_with_crack`
+* **`BlockDestruction`** — `CrackPipeline`/`RenderState::render_with_crack`
   now take `cracks: &[CrackTarget]` instead of `Option<CrackTarget>`, so the
   render pass itself can paint any number of simultaneous crack overlays (proved
   by `lodestone-shell/tests/crack_multi_target_pixels.rs`, two targets at two
@@ -415,7 +415,7 @@ live in choke-point files:
 * **The compass** — `lodestone_render::item_render` lists `minecraft:compass` among
   range properties "deliberately unsourced because the datum genuinely is not
   decoded". It *was* decoded; it reached nothing. `SessionSpawnPoint` is now the
-  source, and a test at `item_render.rs:942` currently pins the property at `0.0`
+  source, and `item_render.rs`'s `unsourced_properties_read_as_unset` test currently pins the property at `0.0`
   with "must be unset" — that pin is what to change.
 * **Game rules** have no client consumer yet; `immediate_respawn` (skip the death
   screen) is the most visible candidate.

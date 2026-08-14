@@ -1,6 +1,6 @@
 # The particle catalogue: what's wired, what isn't, and why
 
-Issues #178 (ambient/environmental types) and #182 (combat/event types). Both start from the
+This covers ambient/environmental particle types and combat/event particle types. Both start from the
 same measured gap: `crates/protocol/v770/src/generated/particle_types.rs` (registry id →
 name) and `crates/lodestone-data/src/generated/particle_types.rs`
 (`PARTICLE_TYPE_COUNT: u32 = 125`) decode the full vanilla particle registry and network
@@ -44,7 +44,7 @@ the screen for the generic path even when the specific-trigger path is unbuilt.
 
 ### The trap: several of these particles are not server-sent at all
 
-Checked directly against `.cache/mc/26.2/src/net/minecraft/world/level/Level.java:497-509`:
+Checked directly against `.cache/mc/26.2/src/net/minecraft/world/level/Level.java`:
 `Level.addParticle(...)`'s **default body is empty** — a genuine no-op. `ClientLevel`
 overrides it to spawn a real local `Particle`; `ServerLevel` does **not** override it at all.
 So any vanilla gameplay code that calls `this.level().addParticle(...)` (not
@@ -53,7 +53,7 @@ particle only appears because the *same* method also runs on `ClientLevel` for e
 client itself ticks (breeding hearts, villager mood icons) or because a different, synced
 mechanism (a block-action/`triggerEvent` broadcast, for note blocks) replays the call
 client-side. This is the entity-state analogue of the block-state ambient prediction trap
-#178's own issue body already named.
+the tracking issue's own body already named.
 
 Confirmed per-type:
 
@@ -86,7 +86,7 @@ renders it. Two instances that mattered here:
   `INSTANT_EFFECT` (`spell_0..7`) are **all four** `SpellParticle`-family classes, but name
   two different physical sheets. `Sheet::Effect` already existed (unused); this pass added
   `Sheet::Spell` as a separate variant rather than reusing `Effect`, because reusing it would
-  have made witch particles sample the wrong PNGs the same way issue #45 did for the
+  have made witch particles sample the wrong PNGs the same way an earlier issue did for the
   block/particle atlas mix-up.
 - `ParticleTypes.TOTEM_OF_UNDYING` and `ParticleTypes.END_ROD` both name `glitter_0..7` —
   `totem_of_undying` (built here) reuses the pre-existing `Sheet::Glitter` variant directly.
@@ -97,7 +97,7 @@ renders it. Two instances that mattered here:
 
 ### What was built, per issue
 
-**#182 (combat/event), 6 of 8 checklist items reachable via the generic dispatch:**
+**Combat/event particles, 6 of 8 checklist items reachable via the generic dispatch:**
 `note`, `heart`, `angry_villager`, `happy_villager`, `witch`, `totem_of_undying`.
 
 Each is a direct transcription of its vanilla class (see `crates/lodestone-particle/src/
@@ -127,16 +127,16 @@ second, narrower one; flagged rather than special-cased, per the brief for this 
 
 **Correction (creeper explosion sound fix, `7025d90`): `explosion_emitter`/`explosion` are
 *not* in this bucket.** Both are `SimpleParticleType`
-(`.cache/mc/26.2/client-src/net/minecraft/core/particles/ParticleTypes.java:57-58`), whose own
+(`.cache/mc/26.2/client-src/net/minecraft/core/particles/ParticleTypes.java`), whose own
 stream codec reads no further bytes — there is no payload to decode, so nothing here is
 blocked on the shared `ParticleOptions` codec. `crates/protocol/v770/src/adapter.rs`'s
 `decode_explode` already distinguishes the two registry ids (29/30) for exactly this reason.
 (The real blocker in the `explode` packet is `blockParticles`, a
 `WeightedList<ExplosionParticleInfo>` whose *entries* do each carry a real particle-options
 payload — typically a block state for the flying debris — which is not decoded at all and is
-the accurate target for issue #26's blocker.)
+the accurate target for that blocker.)
 
-**Built, issue #416.** `explosion_emitter` (`ParticleTypes.EXPLOSION_EMITTER`, the id
+**Built.** `explosion_emitter` (`ParticleTypes.EXPLOSION_EMITTER`, the id
 `decode_explode` actually sees on the wire — see below) and `explosion` (`EXPLOSION`) both now
 have a `Behaviour`, an `emit::` function and a `spawn_one` dispatch arm:
 
@@ -166,7 +166,7 @@ have a `Behaviour`, an `emit::` function and a `spawn_one` dispatch arm:
   `NoRenderParticle` exclusion test with a positive control (a sibling `crit` particle in the
   same engine *does* extract a quad) proving the exclusion is deliberate, not a broken
   extractor. `lodestone-shell/src/particles.rs` has the same dispatch-reachability shape
-  #182/#178 established, **except** `explosion_emitter` is deliberately *not* in the shared
+  the combat/event and ambient/environmental passes established, **except** `explosion_emitter` is deliberately *not* in the shared
   loop that asserts `drawn == 1` for every newly-wired kind — it is dispatch-reachable but
   produces zero quads on its own by design, so it gets its own test
   (`explosion_emitter_reaches_pixels_only_after_a_tick`) that dispatches, asserts `drawn == 0`,
@@ -190,7 +190,7 @@ have a `Behaviour`, an `emit::` function and a `spawn_one` dispatch arm:
   `ClientEvent::Particles` already forwards generically into `Particles::spawn_particles` (see
   "The dispatch is reachable independently of any specific gameplay trigger" above).
 
-**#178 (ambient/environmental): landed.** Fourteen new sheets, two new behaviours, seventeen
+**Ambient/environmental: landed.** Fourteen new sheets, two new behaviours, seventeen
 new `spawn_one` arms and — the half this section previously called out as the real gap — a
 client-predicted per-block-state emitter.
 
@@ -255,7 +255,7 @@ transcribed vanilla constant, documented inline with its Java source line.
   dispatch this pass extended.
 - No protocol or ECS changes. The `ParticleOptions` decoder that `dust`/`sculk_charge`/
   `firework` are blocked on does not exist yet anywhere in the workspace — `explosion`/
-  `explosion_emitter` are **not** in that list (see "Built, issue #416" above); they never
+  `explosion_emitter` are **not** in that list (see "Built" above); they never
   needed the decoder, only the render `Behaviour` this pass added.
 
 ## How to change it
@@ -271,7 +271,7 @@ transcribed vanilla constant, documented inline with its Java source line.
   decoder first (protocol-side, brokered — not `lodestone-particle`'s to build alone).
   Special-casing one of these without it just produces a second narrow decoder to reconcile
   later. `explosion`/`explosion_emitter` looked like they belonged on this list too, and did
-  not — see "Built, issue #416" above for how that was checked before being ruled out, not
+  not — see "Built" above for how that was checked before being ruled out, not
   assumed.
 - **Read the type's `particles/<type>.json` frame list out of the jar, never infer it.** Half of
   vanilla's multi-frame sheets are listed descending and one (`enchant`) is alphabetic. A wrong

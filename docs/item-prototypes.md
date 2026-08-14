@@ -24,9 +24,9 @@ What each one broke while it was missing (all three were, until this landed):
 
 | component | consequence |
 | --- | --- |
-| `minecraft:equippable` | `ArmorSlot.mayPlace` is `owner.isEquippableInSlot(stack, slot)` (`ArmorSlot.java:43-46`) → `slot == equippable.slot() && …` (`LivingEntity.java:3886-3891`). With no component the only accepting slot is `MAINHAND`: **no armour was equippable by any click type.** |
+| `minecraft:equippable` | `ArmorSlot.mayPlace` is `owner.isEquippableInSlot(stack, slot)` (`ArmorSlot.java`) → `slot == equippable.slot() && …` (`LivingEntity.java`). With no component the only accepting slot is `MAINHAND`: **no armour was equippable by any click type.** |
 | `minecraft:max_stack_size` | Every stack reported 64, so a drag distributing water buckets, eggs or shulker boxes over-filled the prediction and was corrected by the server. |
-| `minecraft:max_damage` | `ItemStack.isDamageableItem` is `has(MAX_DAMAGE) && !has(UNBREAKABLE) && has(DAMAGE)` (`ItemStack.java:416-418`), which gates `isStackable` (`ItemStack.java:412-414`). Without it two identically-componented swords merged into a stack of 2. |
+| `minecraft:max_damage` | `ItemStack.isDamageableItem` is `has(MAX_DAMAGE) && !has(UNBREAKABLE) && has(DAMAGE)` (`ItemStack.java`), which gates `isStackable` (`ItemStack.java`). Without it two identically-componented swords merged into a stack of 2. |
 
 ## How it works
 
@@ -101,7 +101,7 @@ and a direct index keeps the hot lookup a single bounds check.
 ### Patch overrides that *are* decoded
 
 `minecraft:max_stack_size` and `minecraft:max_damage` are both
-`ByteBufCodecs.VAR_INT` (`DataComponents.java:110-115`), so the decoder reads
+`ByteBufCodecs.VAR_INT` (`DataComponents.java`), so the decoder reads
 them. Not because servers send them — they essentially never do — but because
 an unmodeled component halts patch decoding, which would leave the seeded
 prototype value silently stale.
@@ -109,7 +109,7 @@ prototype value silently stale.
 Removals are handled too, and the removal semantics are *not* "fall back to the
 prototype": a removal clears the component to nothing, and vanilla's own fallback
 with no `minecraft:max_stack_size` at all is **1**, not 64
-(`ItemInstance.java:14-16`). So `/give …[!minecraft:max_stack_size]` makes an item
+(`ItemInstance.java`). So `/give …[!minecraft:max_stack_size]` makes an item
 unstackable, and the decoder writes `Some(1)`.
 
 ## Gotchas
@@ -117,10 +117,10 @@ unstackable, and the decoder writes `Some(1)`.
 ### 1. `EquipmentSlot::Body` is not chest armour
 
 Vanilla's humanoid-armour gate is `eqSlot.getType() == EquipmentSlot.Type.HUMANOID_ARMOR`
-(`InventoryMenu.java:122`), and `HUMANOID_ARMOR` covers only
-`FEET`/`LEGS`/`CHEST`/`HEAD` (`EquipmentSlot.java:15-19`). `BODY` is
+(`InventoryMenu.java`), and `HUMANOID_ARMOR` covers only
+`FEET`/`LEGS`/`CHEST`/`HEAD` (`EquipmentSlot.java`). `BODY` is
 `ANIMAL_ARMOR` and `SADDLE` is its own type; `EquipmentSlot.isArmor()` is the
-*union* of humanoid and animal armour (`EquipmentSlot.java:73-75`) and is
+*union* of humanoid and animal armour (`EquipmentSlot.java`) and is
 therefore **not** the predicate a player armour slot wants.
 
 Folding `"body"` into `Chest` makes these placeable in a player's chestplate
@@ -138,7 +138,7 @@ pins all of them.
 ### 2. Only the slot is carried, not `allowedEntities`
 
 `ArmorSlot.mayPlace` also requires `equippable.canBeEquippedBy(entityType)`
-(`Equippable.java:175-177`). `ItemPrototype` carries only *whether*
+(`Equippable.java`). `ItemPrototype` carries only *whether*
 `allowedEntities` is empty, not the set. That is safe today because every
 entity-restricted item in 26.2 is already in a non-humanoid slot, so the slot
 check alone excludes it from a player armour slot — and
@@ -186,13 +186,13 @@ asserts the resulting stack still reports `max_stack_size: Some(1)`,
 distinguishes "the census exists" from "the census reaches a decoded stack".
 
 Values hand-checked against the decompiled source and cited in the tests:
-`ItemInstance.java:14-16` (the fallback is 1, not 64),
-`DataComponents.java:419-430` (`COMMON_ITEM_COMPONENTS` sets 64),
-`ItemStack.java:412-418` (`isStackable`/`isDamageableItem`),
-`ArmorSlot.java:43-46` and `LivingEntity.java:3886-3891` (`mayPlace`),
-`InventoryMenu.java:122` (the `HUMANOID_ARMOR` gate),
-`EquipmentSlot.java:13-20` (slot types and serialized names),
-`Equippable.java:175-177` (`canBeEquippedBy`).
+`ItemInstance.java` (the fallback is 1, not 64),
+`DataComponents.java` (`COMMON_ITEM_COMPONENTS` sets 64),
+`ItemStack.java` (`isStackable`/`isDamageableItem`),
+`ArmorSlot.java` and `LivingEntity.java` (`mayPlace`),
+`InventoryMenu.java` (the `HUMANOID_ARMOR` gate),
+`EquipmentSlot.java` (slot types and serialized names),
+`Equippable.java` (`canBeEquippedBy`).
 
 ## Configuration
 

@@ -10,7 +10,7 @@ three separate things off one number — `attackAnim`, swing progress in
 |---|---|---|---|
 | first-person arm | `ItemInHandRenderer.renderPlayerArm` | `first_person_arm_chain` | **wired** |
 | your own third-person body | `HumanoidModel.setupAttackAnimation` | `Skeleton::pose`'s `attack_anim` | **wired** |
-| other players and mobs | `ClientboundAnimatePacket` | `AttackSwing` (issue #10) | **wired**, see below |
+| other players and mobs | `ClientboundAnimatePacket` | `AttackSwing` | **wired**, see below |
 
 The packet half — telling the *server* we swung — was already done before this
 existed and is untouched: `lodestone_game::mining` emits
@@ -120,7 +120,8 @@ through zero, and down again, rather than making a single hump like `x` and `z`.
 
 ## How to change it, and the gotchas
 
-- **Drive the clock off the tick, never the frame.** `entities.rs:56-66` records
+- **Drive the clock off the tick, never the frame.** `entities.rs`'s module doc comment,
+  next to `tick_walk_animation`, records
   this exact bug being found in the limb-swing code: driven per frame the phase
   advanced up to 3x too fast and swing speed became frame-rate dependent.
   `swing_progress_advances_per_tick_not_per_render_read` (pose.rs) and
@@ -146,10 +147,10 @@ through zero, and down again, rather than making a single hump like `x` and `z`.
   deliberately — reordering that loop would move wire-ordering-sensitive code for
   an invisible gain. Documented on `Sim::swing_hand`.
 
-### Remote players and mobs (issue #10)
+### Remote players and mobs
 
 `ClientboundAnimatePacket` decodes into `ClientEvent::EntityAnimation { entity_id,
-action }` (`crates/protocol/v770/src/adapter.rs`, `play::clientbound::ANIMATE`),
+action }` (`crates/protocol/v770/src/adapter/entity.rs`, `play::clientbound::ANIMATE`),
 covered by `crates/protocol/v770/tests/entity_events.rs`. Only one of its five
 named actions is a swing at all — see
 `ClientboundAnimatePacket.java`/`ClientPacketListener.handleAnimate` in
@@ -211,10 +212,10 @@ entity at all (`lodestone_ecs::entity::EntityIndex` never holds our own id — s
 `apply_local_player_login`'s doc), and goes through `Sim::body_pose`/
 `Sim::hand_swing_progress` instead, per the sections above.
 
-### The five per-tick interpolation rules, and why there is no shared `TickScalar` (issue #218)
+### The five per-tick interpolation rules, and why there is no shared `TickScalar`
 
-#218 proposed extracting a `TickScalar<Kind>` with `Cyclic | Clamped | Eased`
-variants, on the grounds that the arm-swing bug above is a class and the next
+A proposal to extract a `TickScalar<Kind>` with `Cyclic | Clamped | Eased`
+variants argued for it on the grounds that the arm-swing bug above is a class and the next
 per-tick scalar will re-derive it. **The audit says no**, and the census is the
 reason. Every per-tick scalar in the client, with its *advance* rule and its
 *read* rule:
@@ -248,11 +249,12 @@ Four findings, and each one costs the proposal:
    more configuration than the two functions it replaces.
 3. **`swim_amount` is not an instance.** Nothing interpolates it. `camera_rig.rs`
    states outright that the camera's swim ramp is deliberately *not*
-   `PlayerState::swim_amount`. So the count the issue conditions on is three
+   `PlayerState::swim_amount`. So the count the proposal conditions on is three
    consumers, not four.
-4. **The predicted accumulation did not happen.** #218 says to re-audit once
-   `bobView` (#58) lands and after the next movement features. #58 landed;
-   #206 and #208 landed; between them they added **zero** interpolated scalars
+4. **The predicted accumulation did not happen.** The proposal called for
+   re-auditing once `bobView` lands and after the next movement features.
+   `bobView` landed, and two further movement features landed after it;
+   between them they added **zero** interpolated scalars
    (`FireworkBoost` and `ItemUseTicks` are integer counters read by no renderer).
    The trend the refactor was reserved for is not there.
 
@@ -265,7 +267,7 @@ prose away from the value would make that worse.
 
 **Keep this table current instead.** A new per-tick scalar should land a row here
 and cite the vanilla expression. If a *sixth* rule ever appears, or if two
-consumers ever end up needing the same non-obvious wrap, reopen #218 — that is
+consumers ever end up needing the same non-obvious wrap, reopen this decision — that is
 the trigger, not the instance count.
 
 ## Configuration

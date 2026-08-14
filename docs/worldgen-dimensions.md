@@ -57,8 +57,8 @@ one except the two above was already bundled.
 
 The jar's `multi_noise_biome_source_parameter_list/nether.json` is **37 bytes**:
 `{"preset": "minecraft:nether"}`. So is `overworld.json`. The codec only ever
-serialises the preset id (`MultiNoiseBiomeSourceParameterList.java:24-30`) and
-the table is Java-hardcoded (`:51-67`). There is nothing to copy, so
+serialises the preset id (`MultiNoiseBiomeSourceParameterList.java`) and
+the table is Java-hardcoded. There is nothing to copy, so
 `biome_parameters/nether.json` comes from
 `scripts/worldgen-oracle/NetherParametersOracle.java`, which reads
 `MultiNoiseBiomeSourceParameterList.knownPresets()` — public, and needing no
@@ -73,10 +73,10 @@ registry resolution because the values are plain identity-mapped
 | `warped_forest` | 0 | 5000 | 3750 |
 | `basalt_deltas` | −5000 | 0 | 1750 |
 
-Quantized by 10000 (`Climate.java:27`). Every channel is a **degenerate point**
+Quantized by 10000 (`Climate.java`). Every channel is a **degenerate point**
 — the Nether list never uses `Parameter.span`, unlike the Overworld's 7,594
 rows — and continentalness/erosion/depth/weirdness are all zero because the
-Nether router zeroes those channels (`NoiseRouterData.java:390-411`). The
+Nether router zeroes those channels (`NoiseRouterData.java`). The
 consequence is worth stating plainly: **temperature and humidity are the entire
 Nether biome layout**, so the two noises above are not a detail, they are the
 map.
@@ -122,24 +122,24 @@ the size of the job.** Say it precisely, because the loose version ("the legacy
 RNG is unimplemented") is false and was in an earlier revision of this doc:
 
 * `LegacyRandomSource` is **fully implemented and in production use** —
-  `rng/legacy.rs:16` (struct), `:41` (`impl RandomSource`), `:116`
-  (`consume_count`), `:125` `LegacyPositionalFactory`, `:137`
-  (`impl PositionalRandomFactory`). Live callers: `noise/perlin_simplex.rs` (14
+  `rng/legacy.rs`'s `LegacyRandomSource` (struct), its `impl RandomSource`,
+  `consume_count`, `LegacyPositionalFactory`,
+  and its `impl PositionalRandomFactory`. Live callers: `noise/perlin_simplex.rs` (14
   references), `noise/simplex.rs` (3), `feature/vegetation.rs` (5),
   `carver/mod.rs` (3).
-* `consume_count` is on the `RandomSource` **trait** (`rng/mod.rs:78`), not a
+* `consume_count` is on the `RandomSource` **trait** (`rng/mod.rs`), not a
   concrete-type convenience, and is implemented for both algorithms
-  (`legacy.rs:116`, `xoroshiro.rs:166`).
+  (`legacy.rs`, `xoroshiro.rs`).
 * What is missing is that **the flag is read nowhere**: `legacy_random_source` has
   **zero occurrences under `crates/lodestone-worldgen/`**. (Tree-wide it has 3, all
   of them in this phase's own
   `crates/lodestone-data/tests/worldgen_dimension_data.rs` — so quote the engine
   scope, not "tree-wide", or the number looks like progress.)
-* `density::Builder::new` hardcodes the other branch at `density/mod.rs:708`:
+* `density::Builder::new` hardcodes the other branch (`density/mod.rs`):
   `XoroshiroRandomSource::new(seed).fork_positional()`.
 * **Why it is more than a one-liner**: `Builder`'s `master` field is the
-  *concrete* type `crate::rng::XoroshiroPositionalFactory` (`density/mod.rs:700`),
-  and `Builder::positional_factory` (`:750`) *returns* that concrete type too. So
+  *concrete* type `crate::rng::XoroshiroPositionalFactory` (`density/mod.rs`),
+  and `Builder::positional_factory` *returns* that concrete type too. So
   there are **two** sites to make polymorphic (an enum or a boxed trait object),
   not one, and the accessor's return type is part of `density/`'s public surface.
 
@@ -151,7 +151,7 @@ U4's rewrite target, so sequencing matters.
 
 **2. The two Nether noises need bespoke instantiation** — [engine].
 
-They are special-cased in `RandomState.java:55-61`, which is *why* they are the
+They are special-cased in `RandomState.java`, which is *why* they are the
 only two noises the bundle lacked:
 
 ```java
@@ -162,23 +162,23 @@ if (noiseData.is(Noises.TEMPERATURE_NETHER)) {
 }
 ```
 
-`newLegacyInstance(n)` is `new LegacyRandomSource(seed + n)` (`:50-52`) — the raw
+`newLegacyInstance(n)` is `new LegacyRandomSource(seed + n)` — the raw
 world seed plus 0 and 1, *not* a positional fork. `createLegacyNetherBiome` is
 `new NormalNoise(random, parameters, useNewInitialization = false)`
-(`NormalNoise.java:26-28`). Our `PerlinNoise::new_legacy` exists but is private
+(`NormalNoise.java`). Our `PerlinNoise::new_legacy` exists but is private
 and reachable only via `create_legacy_for_blended_noise`; there is no
 `NormalNoise` legacy-init path.
 
 **3. `BlendedNoise` under legacy init** — [engine, small].
 
-`RandomState.java:70-73`: `useLegacyInit ? newLegacyInstance(0L) :
+`RandomState.java`: `useLegacyInit ? newLegacyInstance(0L) :
 random.fromHashOf("terrain")`. Both dimensions use `old_blended_noise`, so both
 take the legacy arm. Falls out of item 1.
 
 **4. `aquifers_enabled: false`** — [engine, small].
 
-`NoiseChunk.java:145-152` picks `Aquifer.createDisabled(globalFluidPicker)`, which
-is trivial (`Aquifer.java:30-41`): solid where `density > 0`, else
+`NoiseChunk.java` picks `Aquifer.createDisabled(globalFluidPicker)`, which
+is trivial (`Aquifer.java`): solid where `density > 0`, else
 `globalFluid.at(y)`. Our aquifer always runs — `aquifers_enabled` has zero
 occurrences in the engine. **The entire `NoiseBasedAquifer` machinery is
 Overworld-only**, so this is a bypass to add, not logic to port.
@@ -186,10 +186,10 @@ Overworld-only**, so this is a bypass to add, not logic to port.
 **5. Cell geometry is hardcoded** — [engine, small], **End only**.
 
 Vanilla derives cell size as `QuartPos.toBlock(noiseSize*)` = `size * 4`
-(`NoiseSettings.java:46-52`). The Overworld's `size_horizontal 1, size_vertical 2`
+(`NoiseSettings.java`). The Overworld's `size_horizontal 1, size_vertical 2`
 gives the familiar 4-wide/8-tall cell; **the End's `2, 1` gives an 8-wide/4-tall
 cell**, and the Nether matches the Overworld. `CELL_WIDTH`/`CELL_HEIGHT` are
-`const 4`/`const 8` (`aquifer/mod.rs:44-45`), and `size_horizontal` has zero
+`const 4`/`const 8` (`aquifer/mod.rs`), and `size_horizontal` has zero
 occurrences in the engine. `NoiseChunkSampler::new` already *takes* cell
 dimensions as parameters, so this is plumbing, not a missing primitive.
 
@@ -204,12 +204,12 @@ dimensions as parameters, so this is plumbing, not a missing primitive.
 | multi-noise biome source | **no gap** | see below |
 | surface rules | [unwritten] | uses a strict *subset* of Overworld condition types |
 | fortress, bastion, nether fossil, ruined portal | [structures] | sibling's group S |
-| dimension registry / portal travel | [gameplay] | #330; the generator is oracle-testable without it |
+| dimension registry / portal travel | [gameplay] | tracked separately; the generator is oracle-testable without it |
 
 **The lava "sea" is not an aquifer.** `sea_level` is **32** (Overworld 63) and
 `default_fluid` is **lava**, but `aquifers_enabled` is **false**, so the lava
 comes from the global fluid picker. The `-54` constant lives in the chunk
-generator, not `Aquifer.java` (`NoiseBasedChunkGenerator.java:68-80`):
+generator, not `Aquifer.java` (`NoiseBasedChunkGenerator.java`):
 
 ```java
 Aquifer.FluidStatus lavaStatus = new Aquifer.FluidStatus(-54, Blocks.LAVA.defaultBlockState());
@@ -225,7 +225,7 @@ agreement on the fluid type is not the same mechanism, and modelling the Nether
 as "an aquifer whose second fluid is lava" would be wrong.
 
 **Surface rules need no new condition type.** `SurfaceRuleData.nether()`
-(`SurfaceRuleData.java:300-387`) uses `stone_depth` (including
+(`SurfaceRuleData.java`) uses `stone_depth` (including
 `CaveSurface.CEILING` for the `UNDER_CEILING` ceiling rules), `y_above` in both
 `yBlockCheck` and `yStartCheck` forms, `not`, `hole`, 2-D `noise_threshold`,
 `vertical_gradient` and `biome` — every one of which the Overworld also uses. The
@@ -238,10 +238,10 @@ rather than flag-gated as in the Overworld.
 
 **The multi-noise biome source needs nothing.** `MultiNoiseBiomeSource.getNoiseBiome`
 is a straight `parameters().findValue(sampler.sample(...))`
-(`MultiNoiseBiomeSource.java:59-67`), which we implement. One thing was worth
+(`MultiNoiseBiomeSource.java`), which we implement. One thing was worth
 checking and came back clean: vanilla's `fitness` adds `Mth.square(this.offset)`
-as a flat penalty rather than a distance (`Climate.java:231-238`), while
-`biome.rs:155` loops all seven channels through `Parameter::distance`. For a real
+as a flat penalty rather than a distance (`Climate.java`), while
+`biome/mod.rs`'s `BiomeParameterPoint::fitness` loops all seven channels through `Parameter::distance`. For a real
 climate sample the target's offset channel is always 0, and `distance(0)` against
 a degenerate point equals `|offset|` for either sign — so the two formulations
 agree exactly and **no metric change is needed**.
@@ -260,9 +260,9 @@ agree exactly and **no metric change is needed**.
 | exit portal / podium, post-dragon gateways, platform re-place | [gameplay] | not worldgen at all |
 | dragon fight and respawn | [gameplay] | confirmed, not scoped here |
 
-**`TheEndBiomeSource` is not multi-noise** (`TheEndBiomeSource.java:60-81`) and
+**`TheEndBiomeSource` is not multi-noise** (`TheEndBiomeSource.java`) and
 serialises to an empty object — its five biome holders come from the registry,
-not JSON (`:14-23`). The logic is a pure function of position plus one density
+not JSON. The logic is a pure function of position plus one density
 sample:
 
 ```java
@@ -275,7 +275,7 @@ return heightValue < -0.21875 ? this.islands : this.barrens;
 ```
 
 It samples the **`erosion` slot**, which for the End router holds
-`cache2d(end_islands)` (`NoiseRouterData.java:433,443`) — every other channel
+`cache2d(end_islands)` (`NoiseRouterData.end`) — every other channel
 except `finalDensity` is `zero()`. Requires no mutable state; `cache2d` is an
 optimisation, not semantics. Inside chunk radius 64 (`chunkX² + chunkZ² <= 4096`)
 it always returns `the_end`, matching the `> 4096L` gate inside the density
@@ -292,7 +292,7 @@ data missing**.
 Corroborating the gameplay split from data alone: `end_gateway_delayed` has a
 configured feature but **no placed feature**, because nothing in worldgen places
 it — `EnderDragonFight.spawnNewGateway()` does
-(`EnderDragonFight.java:423-441`).
+(`EnderDragonFight.java`).
 
 **What is gameplay, not worldgen** — this is where a plan inflates if nobody
 checks:
@@ -300,13 +300,13 @@ checks:
 * **The exit portal / `EndPodiumFeature`** is a `Feature` subclass that is
   **never registered** in `Feature.java` or `EndFeatures.java`. Only
   `EnderDragonFight.spawnExitPortal(boolean)` instantiates it
-  (`EnderDragonFight.java:443-460`). It looks like worldgen and is not.
+  (`EnderDragonFight.java`). It looks like worldgen and is not.
 * **The obsidian pillars have two placers.** Worldgen places them via the
-  `end_spike` feature; `DragonRespawnStage.java:60-79` re-places them during the
+  `end_spike` feature; `DragonRespawnStage.java` re-places them during the
   respawn sequence with `crystalInvulnerable = true`. The worldgen half is
   [unwritten], the respawn half is [gameplay].
 * **The end platform likewise.** Worldgen places it at a fixed `(100, 49, 0)`
-  (`ServerLevel.END_SPAWN_POINT` is `(100, 50, 0)`), and `EndPortalBlock.java:90`
+  (`ServerLevel.END_SPAWN_POINT` is `(100, 50, 0)`), and `EndPortalBlock.java`
   re-creates it on every entry into the End.
 * **Gateways have three paths**: the worldgen `end_gateway_return` (rarity 700 in
   `end_highlands`) is ours; `EnderDragonFight.spawnNewGateway` and
@@ -315,7 +315,7 @@ checks:
   ruled. Not scoped here.
 
 **End city is a structure, not terrain** — a real `Structure`
-(`EndCityStructure.java:14-45`, `StructureType.java:26`), and notably
+(`EndCityStructure.java`, `StructureType.java`), and notably
 **template-piece based rather than jigsaw**: `findGenerationPoint` picks a
 rotation, uses `getLowestYIn5by5BoxOffset7Blocks`, rejects `y < 60`, and delegates
 to `EndCityPieces.startHouseTower`. It belongs to the structure group's S2 phase,
@@ -329,17 +329,17 @@ already-bundled `density_function/end/sloped_cheese.json`. Anyone implementing i
 must handle both sites.
 
 It is a `SimpleFunction` — no children, no arguments. The codec is
-`MapCodec.unit(new EndIslandDensityFunction(0L))` (`DensityFunctions.java:493-495`),
+`MapCodec.unit(new EndIslandDensityFunction(0L))` (`DensityFunctions.java`),
 so the JSON is literally `{"type": "minecraft:end_islands"}` and always
 deserialises with seed 0. **The seed is substituted at runtime**
-(`RandomState.java:74`):
+(`RandomState.java`):
 
 ```java
 return function instanceof DensityFunctions.EndIslandDensityFunction
     ? new DensityFunctions.EndIslandDensityFunction(seed) : function;
 ```
 
-where `seed` is the raw world seed. Construction (`DensityFunctions.java:496-503`):
+where `seed` is the raw world seed. Construction (`DensityFunctions.java`):
 
 ```java
 private static final float ISLAND_THRESHOLD = -0.9F;
@@ -353,9 +353,9 @@ public EndIslandDensityFunction(final long seed) {
 `consumeCount(17292)` is 17,292 `nextInt()` calls. `SimplexNoise(RandomSource)`
 then consumes three `nextDouble()` for `xo/yo/zo` (unused on the 2-D path but
 they consume randomness) and builds the 256-entry permutation by Fisher–Yates
-with `nextInt(256 - i)` (`SimplexNoise.java:33-48`).
+with `nextInt(256 - i)` (`SimplexNoise.java`).
 
-The height field (`DensityFunctions.java:505-529`):
+The height field (`DensityFunctions.java`):
 
 ```java
 private static float getHeightValue(final SimplexNoise islandNoise, final int sectionX, final int sectionZ) {
@@ -409,9 +409,9 @@ public double maxValue() { return  0.5625;  }   // ( 80 - 8) / 128
   island's plateau produced by the first `doffs` term.
 * `islandNoise.getValue` is sampled at **integer chunk coordinates**, and
   `SimplexNoise`'s 2-D path calls the 3-D corner routine with `z = 0.0` and base
-  `0.5`, output scaled by `70.0` (`SimplexNoise.java:73-104`).
+  `0.5`, output scaled by `70.0` (`SimplexNoise.java`).
 
-Wiring, for whoever implements it: `NoiseRouterData.java:127` is
+Wiring, for whoever implements it: `NoiseRouterData.java` is
 `end/sloped_cheese = add(endIslands(0L), BASE_3D_NOISE_END)`, and `:432-452` puts
 `cache2d(endIslands(0L))` in the router's **erosion** slot — which is exactly
 where `TheEndBiomeSource` reads it from.
@@ -427,14 +427,14 @@ port-of-a-port. `crates/lodestone-worldgen/**` also has a live owner.
 also argued it was "untestable in isolation right now" because the legacy RNG was
 missing. **That was wrong, and the correction matters more than the claim did**:
 every primitive `end_islands` needs already exists and is in production use —
-`LegacyRandomSource` (`rng/legacy.rs:16`, `impl RandomSource` at `:41`),
-`consume_count` on the `RandomSource` *trait* (`rng/mod.rs:78`, legacy impl at
-`legacy.rs:116`), and `SimplexNoise::new<R: RandomSource>` (`noise/simplex.rs:59`),
+`LegacyRandomSource` (`rng/legacy.rs`, `impl RandomSource` in the same file),
+`consume_count` on the `RandomSource` *trait* (`rng/mod.rs`, legacy impl in
+`legacy.rs`), and `SimplexNoise::new<R: RandomSource>` (`noise/simplex.rs`),
 which is generic and so takes a `LegacyRandomSource` directly.
 
 Crucially, `EndIslandDensityFunction`'s seeding **does not consult
 `legacy_random_source` at all** — it always constructs `new
-LegacyRandomSource(seed)` (`DensityFunctions.java:498`) regardless of the setting.
+LegacyRandomSource(seed)` (`DensityFunctions.java`) regardless of the setting.
 So the density function is independently constructible and gate-able **today**,
 against a `DensityOracle` dump at known coordinates. Item 1 is not a prerequisite
 of testing it; the two are independent.

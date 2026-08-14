@@ -115,7 +115,7 @@ they are not in a wasm `--lib` build. Cite symbols, not lines.
 | `tokio::time::{sleep,timeout}` | `menu/accounts.rs`, `net.rs` | **gated** with the sign-in workers |
 | blocking `Runtime::new` + `block_on` | `menu/accounts.rs`, `menu/status.rs`, `net.rs`, `remote_skins.rs` | **gated**: a browser main thread cannot block |
 
-**Update (issue #552): the seam now lives in its own crate.** `crate::platform::Instant`
+**Update: the seam now lives in its own crate.** `crate::platform::Instant`
 and `crate::platform::epoch_duration` are unchanged in name and behaviour, but
 `crate::platform` is now a two-line re-export of `lodestone-time`, which absorbed this
 module's clock content plus two improvised copies of the identical seam that had grown
