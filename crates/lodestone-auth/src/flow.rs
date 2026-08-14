@@ -34,6 +34,10 @@ const XSTS_URL: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
 const MC_LOGIN_URL: &str = "https://api.minecraftservices.com/authentication/login_with_xbox";
 const MC_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
 const JOIN_URL: &str = "https://sessionserver.mojang.com/session/minecraft/join";
+/// The server-side mirror of [`JOIN_URL`]: what a *hosting* server calls to
+/// check that a connecting client really did complete the client-side
+/// [`join_server`] call above. See [`has_joined`].
+const HAS_JOINED_URL: &str = "https://sessionserver.mojang.com/session/minecraft/hasJoined";
 const SCOPE: &str = "XboxLive.signin offline_access";
 
 /// A prompt to show the user so they can authorize the sign-in on another
@@ -836,6 +840,123 @@ pub async fn join_server(
     }
 }
 
+/// One property Mojang attaches to a `hasJoined` profile — carries the
+/// signed skin/cape texture blob. Passed straight through to
+/// `LOGIN_FINISHED`'s own property list by a caller that wants a real
+/// player's skin to render on other clients; unused (and untouched) if a
+/// caller only cares about identity.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HasJoinedProperty {
+    /// Property key, e.g. `"textures"`.
+    pub name: String,
+    /// Base64-encoded property value.
+    pub value: String,
+    /// Yggdrasil signature over `value`, when the session server signs it.
+    pub signature: Option<String>,
+}
+
+/// The authenticated identity the session server hands back for a verified
+/// join — **this**, not the client's self-reported username/uuid from its
+/// `LoginHello`, is what a caller must trust; that substitution is the whole
+/// point of the online-mode check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HasJoinedProfile {
+    /// The account's real profile UUID.
+    pub id: Uuid,
+    /// The account's current (case-correct) username.
+    pub name: String,
+    /// Signed profile properties (skin/cape), if any.
+    pub properties: Vec<HasJoinedProperty>,
+}
+
+#[derive(Deserialize)]
+struct HasJoinedResponse {
+    id: String,
+    name: String,
+    #[serde(default)]
+    properties: Vec<HasJoinedProperty>,
+}
+
+/// Interprets the session server's raw `hasJoined` answer (HTTP status plus
+/// body text) into the typed outcome.
+///
+/// Split out from [`has_joined`] purely so the classification is testable
+/// without a network call — the exact split [`crate`]'s own doc names as
+/// necessary here, since a test that instead called the real session server
+/// would be the same class of hazard `CLAUDE.md` records for this crate (a
+/// pre-existing test quietly reaching a real external service), just for a
+/// read rather than a token-rotating write. No test in this module makes an
+/// HTTP request.
+fn parse_has_joined_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<Option<HasJoinedProfile>> {
+    // Real deployments have been observed answering "not joined" both ways:
+    // a bare 204 (the documented shape) and a 200 with an empty body. Treat
+    // both as `None` rather than trying to parse zero bytes as JSON.
+    if status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(AuthError::Service {
+            step: "has_joined",
+            message: format!("session server returned {status}: {body}"),
+        });
+    }
+    if body.is_empty() {
+        return Ok(None);
+    }
+    let resp: HasJoinedResponse = serde_json::from_str(body)?;
+    let id = Uuid::parse_str(&resp.id).map_err(|e| AuthError::Service {
+        step: "has_joined",
+        message: format!("invalid profile uuid {:?}: {e}", resp.id),
+    })?;
+    Ok(Some(HasJoinedProfile {
+        id,
+        name: resp.name,
+        properties: resp.properties,
+    }))
+}
+
+/// Asks the session server whether `username` really joined using
+/// `server_hash` (the same non-standard hash [`crate::server_hash`]
+/// computes, from the same three inputs both sides derive independently) —
+/// the server-side half of the online-mode handshake, mirroring
+/// [`join_server`] from the other role. A real client's [`join_server`] call
+/// always precedes a well-behaved server's call here with the identical
+/// hash; vanilla's own `ServerLoginPacketListenerImpl.handleKey` is the
+/// reference for the ordering.
+///
+/// Returns `Ok(None)` when the session server says this player never joined
+/// (the hash didn't match, or no `join_server` call was ever made — the
+/// "someone else's username" case this check exists to catch), and
+/// `Ok(Some(profile))` with the authenticated identity on success.
+///
+/// # Errors
+///
+/// Returns [`AuthError::Http`]/[`AuthError::Json`] on transport or parse
+/// failure, or [`AuthError::Service`] if the session server answers with an
+/// unexpected non-success status.
+pub async fn has_joined(
+    client: &reqwest::Client,
+    username: &str,
+    server_hash: &str,
+) -> Result<Option<HasJoinedProfile>> {
+    // Built by hand rather than via reqwest's `query()` builder (which would
+    // need the workspace's `reqwest` to enable its `"query"` feature, unused
+    // everywhere else in this crate): both inputs are already restricted to a
+    // URL-safe charset by the time they get here — `username` was validated
+    // player-name-safe (alnumeric/underscore) before login ever reached this
+    // call, and `server_hash` is [`crate::server_hash`]'s own output, always
+    // hex digits with at most a single leading `-`. Neither can contain a `&`,
+    // `?`, space or any byte that would need percent-encoding.
+    let url = format!("{HAS_JOINED_URL}?username={username}&serverId={server_hash}");
+    let http = client.get(url).send().await?;
+    let status = http.status();
+    let text = http.text().await?;
+    parse_has_joined_response(status, &text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1070,5 +1191,77 @@ mod tests {
         .unwrap();
         assert_eq!(resp.interval, 5);
         assert_eq!(resp.expires_in, 900);
+    }
+
+    // `parse_has_joined_response` tests: no network call anywhere in this
+    // module, by construction — see the function's own doc comment for why
+    // that split exists. `has_joined`'s own thin HTTP wrapper is exercised by
+    // nothing in this crate's automated tests, same as `join_server`'s (see
+    // this crate's module doc: "unverified end-to-end").
+
+    #[test]
+    fn no_content_status_means_not_joined() {
+        let outcome = parse_has_joined_response(reqwest::StatusCode::NO_CONTENT, "").unwrap();
+        assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn empty_body_on_a_success_status_also_means_not_joined() {
+        // Some real deployments answer "not joined" with a bare 200 and no
+        // body rather than the documented 204 — both must parse to `None`
+        // rather than failing to parse zero bytes as JSON.
+        let outcome = parse_has_joined_response(reqwest::StatusCode::OK, "").unwrap();
+        assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn a_verified_join_parses_id_name_and_signed_properties() {
+        // Pairwise-distinct fixture: id, name and the property's own
+        // name/value/signature are all different strings, so a field
+        // transposition in the decode would be visible.
+        let json = r#"{
+            "id":"069a79f444e94726a5befca90e38aaf5",
+            "name":"Notch",
+            "properties":[
+                {"name":"textures","value":"eyJ0aW1lc3RhbXAiOjB9","signature":"c2ln"}
+            ]
+        }"#;
+        let outcome = parse_has_joined_response(reqwest::StatusCode::OK, json)
+            .unwrap()
+            .expect("a 200 with a body is a verified join");
+        assert_eq!(outcome.id.simple().to_string(), "069a79f444e94726a5befca90e38aaf5");
+        assert_eq!(outcome.name, "Notch");
+        assert_eq!(outcome.properties.len(), 1);
+        assert_eq!(outcome.properties[0].name, "textures");
+        assert_eq!(outcome.properties[0].value, "eyJ0aW1lc3RhbXAiOjB9");
+        assert_eq!(outcome.properties[0].signature.as_deref(), Some("c2ln"));
+    }
+
+    #[test]
+    fn a_verified_join_with_no_properties_defaults_to_an_empty_list() {
+        let json = r#"{"id":"069a79f444e94726a5befca90e38aaf5","name":"Notch"}"#;
+        let outcome = parse_has_joined_response(reqwest::StatusCode::OK, json)
+            .unwrap()
+            .unwrap();
+        assert!(outcome.properties.is_empty());
+    }
+
+    #[test]
+    fn a_non_success_status_is_a_service_error_not_a_silent_none() {
+        // A 500 or a 403 must not be folded into "not joined" — that would
+        // make an outage or a misconfiguration look identical to "someone
+        // else's username", which is exactly the failure mode this check
+        // exists to distinguish.
+        let err =
+            parse_has_joined_response(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom")
+                .unwrap_err();
+        assert!(matches!(err, AuthError::Service { step: "has_joined", .. }));
+    }
+
+    #[test]
+    fn a_malformed_uuid_is_a_service_error() {
+        let json = r#"{"id":"not-a-uuid","name":"Notch"}"#;
+        let err = parse_has_joined_response(reqwest::StatusCode::OK, json).unwrap_err();
+        assert!(matches!(err, AuthError::Service { step: "has_joined", .. }));
     }
 }
