@@ -143,13 +143,18 @@
 //!   a clock. [`is_cursor_visible`] is the pure predicate, ready for the day one
 //!   does; [`EditBox::show_cursor`] takes `None` to mean "always on", which is
 //!   what the shell passes and what the pre-existing form caret already did.
-//! - **Clipboard shortcuts are declined, not faked.** `isCopy`/`isCut`/`isPaste`
-//!   all return `true` in vanilla *and* touch
-//!   `Minecraft.keyboardHandler.setClipboard`. This shell has no clipboard seam,
-//!   so [`EditBox::handle_key`] returns `false` for all three rather than
-//!   consuming a keystroke it cannot honour — and in particular Ctrl+X does
-//!   **not** delete, so nothing is lost to a clipboard that was never written.
-//!   Select-all needs no clipboard and is implemented.
+//! - **Clipboard shortcuts are real, ported line-for-line from
+//!   `EditBox.keyPressed`'s `default:` group.** `isCopy`/`isCut`/`isPaste` all
+//!   return `true` in vanilla *and* touch
+//!   `Minecraft.keyboardHandler.setClipboard`/`getClipboard`; [`clipboard_seam`]
+//!   is that boundary here — the real OS clipboard in production, an in-memory
+//!   `thread_local` under every `#[cfg(test)]` build so no test run ever reads
+//!   or writes the developer's actual clipboard. This used to be a deliberate
+//!   decline (`isCopy`/`isCut`/`isPaste` all returned `false`, on the reasoning
+//!   that a cut into a clipboard nobody could write was a data-loss trap worse
+//!   than doing nothing); that was right while the seam did not exist, and
+//!   wrong to leave that way once it does — see the module's own issue history
+//!   for the paste-inserts-`v` report this replaced.
 //! - **A `false` from [`EditBox::handle_key`] is load-bearing.** It is what
 //!   lets Up/Down out to `Screen`'s focus navigation
 //!   (`EditBox.java:279-284` lists 260/264/265/266/267 in the `default:` group),
@@ -168,6 +173,57 @@ use super::focus::{
     KEY_LEFT, KEY_RIGHT,
 };
 use super::widget::{LayoutElement, Widget, WidgetSprites, argb_to_rgba};
+
+/// The clipboard `handle_key`'s copy/cut/paste arms read and write —
+/// `Minecraft.getInstance().keyboardHandler.getClipboard()`/`setClipboard`.
+///
+/// Forked at compile time exactly the way `accounts::open_in_browser` forks
+/// its own OS side effect (`CLAUDE.md`'s "test that performs an OS-level side
+/// effect" rule): production reads and writes the real OS clipboard through
+/// [`crate::platform::clipboard`]; **every** `#[cfg(test)]` build — which
+/// includes every other module's unit tests in this crate, not only this
+/// file's — routes through an in-memory stand-in instead, so no `cargo test`
+/// run ever touches, or depends on, whatever happens to be on the developer's
+/// real clipboard. `EditBox` itself stays free of any `cfg` — only this
+/// module forks.
+///
+/// This is deliberately *not* threaded through [`EditBox::handle_key`] as a
+/// closure parameter the way [`EditBox::measure_with`]'s font is: `handle_key`
+/// is also [`super::focus::FocusTarget::key_pressed`]'s body, and that trait
+/// method's signature is shared with every other focusable widget, so adding
+/// a parameter here would ripple into files this change does not own.
+#[cfg(not(test))]
+mod clipboard_seam {
+    pub fn get() -> String {
+        crate::platform::clipboard::get()
+    }
+
+    pub fn set(text: &str) {
+        crate::platform::clipboard::set(text);
+    }
+}
+
+/// The `#[cfg(test)]` half of [`clipboard_seam`] — a `thread_local` string, not
+/// the OS clipboard. Exposed as `pub(crate)` (test-only, since the module only
+/// exists under `cfg(test)`) so a test elsewhere in the crate can seed or
+/// inspect it without cloning the OS-clipboard test hazard into every screen
+/// that owns an [`EditBox`].
+#[cfg(test)]
+pub(crate) mod clipboard_seam {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static FAKE: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+
+    pub fn get() -> String {
+        FAKE.with(|c| c.borrow().clone())
+    }
+
+    pub fn set(text: &str) {
+        FAKE.with(|c| *c.borrow_mut() = text.to_owned());
+    }
+}
 
 /// `EditBox.SPRITES` (`EditBox.java:30-32`) — the **two**-argument
 /// `WidgetSprites` collapse, so `disabled` is `enabled` and there is no disabled
@@ -961,11 +1017,31 @@ impl EditBox {
                     self.move_cursor_to_end(false);
                     self.set_highlight_pos(0);
                     true
+                } else if event.is_copy() {
+                    // `keyboardHandler.setClipboard(this.getHighlighted())` —
+                    // unconditional, even on a non-editable (read-only,
+                    // still-selectable) field.
+                    clipboard_seam::set(&self.highlighted());
+                    true
+                } else if event.is_paste() {
+                    // `insertText(getClipboard())`, gated on `isEditable()` —
+                    // the read happens either way in vanilla, but there is
+                    // nothing to do with it on a read-only field.
+                    if self.is_editable {
+                        let text = clipboard_seam::get();
+                        self.insert_text(&text);
+                    }
+                    true
+                } else if event.is_cut() {
+                    // `setClipboard(getHighlighted())` first, then delete the
+                    // selection — same order as vanilla, so a cut on a
+                    // read-only field still copies (it just cannot delete).
+                    clipboard_seam::set(&self.highlighted());
+                    if self.is_editable {
+                        self.insert_text("");
+                    }
+                    true
                 } else {
-                    // Copy, cut and paste return `true` in vanilla because they
-                    // touch the clipboard. This shell has no clipboard seam, so
-                    // they are declined rather than consumed — see the module
-                    // docs. Nothing is deleted for a cut that cannot be pasted.
                     false
                 }
             }
@@ -1095,8 +1171,9 @@ impl LayoutElement for EditBox {
 #[cfg(test)]
 mod tests {
     use super::super::focus::{
-        FocusTarget, KeyEvent, EDIT_SHORTCUT_MODIFIER, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN,
-        KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP, MOD_SHIFT,
+        FocusTarget, KeyEvent, EDIT_SHORTCUT_MODIFIER, KEY_A, KEY_BACKSPACE, KEY_C, KEY_DELETE,
+        KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP, KEY_V, KEY_X,
+        MOD_SHIFT,
     };
     use super::*;
 
@@ -1320,14 +1397,108 @@ mod tests {
         typed(&mut b, "X");
         assert_eq!(b.value(), "hello woX");
         assert_eq!(b.highlighted(), "", "and collapses the selection");
-        // Select-all then Backspace clears the field. Ctrl/Cmd+A is the only
-        // clipboard-adjacent shortcut implemented; see the module docs.
-        let all = KeyEvent::with_modifiers(super::super::focus::KEY_A, EDIT_SHORTCUT_MODIFIER);
+        // Select-all then Backspace clears the field.
+        let all = KeyEvent::with_modifiers(KEY_A, EDIT_SHORTCUT_MODIFIER);
         assert!(all.is_select_all(), "premise: the modifier is the quirked one");
         assert!(b.handle_key(all));
         assert_eq!(b.highlighted(), "hello woX");
         assert!(b.handle_key(KeyEvent::new(KEY_BACKSPACE)));
         assert!(b.is_empty());
+    }
+
+    /// Copy writes the *selection*, not the whole value, to
+    /// [`clipboard_seam`]'s test-mode fake — `getHighlighted()` in the jar,
+    /// not `getValue()`.
+    #[test]
+    fn copy_writes_only_the_selection_to_the_clipboard() {
+        clipboard_seam::set(""); // isolate from any earlier test on this thread
+        let mut b = field();
+        typed(&mut b, "hello world");
+        for _ in 0..3 {
+            b.handle_key(KeyEvent::with_modifiers(KEY_LEFT, MOD_SHIFT));
+        }
+        assert_eq!(b.highlighted(), "rld");
+        let copy = KeyEvent::with_modifiers(KEY_C, EDIT_SHORTCUT_MODIFIER);
+        assert!(copy.is_copy());
+        assert!(b.handle_key(copy));
+        assert_eq!(clipboard_seam::get(), "rld");
+        // Copy does not delete.
+        assert_eq!(b.value(), "hello world");
+    }
+
+    /// Cut writes the selection to the clipboard *and* deletes it — same
+    /// order as vanilla's `setClipboard` then `insertText("")`.
+    #[test]
+    fn cut_writes_the_selection_and_deletes_it() {
+        clipboard_seam::set("");
+        let mut b = field();
+        typed(&mut b, "hello world");
+        for _ in 0..3 {
+            b.handle_key(KeyEvent::with_modifiers(KEY_LEFT, MOD_SHIFT));
+        }
+        let cut = KeyEvent::with_modifiers(KEY_X, EDIT_SHORTCUT_MODIFIER);
+        assert!(cut.is_cut());
+        assert!(b.handle_key(cut));
+        assert_eq!(clipboard_seam::get(), "rld", "the cut text reached the clipboard");
+        assert_eq!(b.value(), "hello wo", "and was removed from the field");
+    }
+
+    /// A cut on a non-editable field still copies but does not delete —
+    /// vanilla's own `isEditable()` gate is on `insertText`, not on
+    /// `setClipboard`.
+    #[test]
+    fn cut_on_a_read_only_field_copies_but_does_not_delete() {
+        clipboard_seam::set("");
+        let mut b = field();
+        typed(&mut b, "hello world");
+        b.is_editable = false;
+        for _ in 0..3 {
+            b.handle_key(KeyEvent::with_modifiers(KEY_LEFT, MOD_SHIFT));
+        }
+        assert!(b.handle_key(KeyEvent::with_modifiers(KEY_X, EDIT_SHORTCUT_MODIFIER)));
+        assert_eq!(clipboard_seam::get(), "rld");
+        assert_eq!(b.value(), "hello world", "nothing was deleted");
+    }
+
+    /// The reported bug's other half: paste inserts the clipboard's contents
+    /// in place of the selection, exactly as typing over a selection does —
+    /// see `insert_text`'s doc for why a single `insertText` call and this
+    /// replace-then-continue behaviour are the same operation.
+    #[test]
+    fn paste_replaces_the_selection_with_the_clipboard() {
+        clipboard_seam::set("goodbye");
+        let mut b = field();
+        typed(&mut b, "hello world");
+        for _ in 0..3 {
+            b.handle_key(KeyEvent::with_modifiers(KEY_LEFT, MOD_SHIFT));
+        }
+        assert_eq!(b.highlighted(), "rld");
+        let paste = KeyEvent::with_modifiers(KEY_V, EDIT_SHORTCUT_MODIFIER);
+        assert!(paste.is_paste());
+        assert!(b.handle_key(paste));
+        assert_eq!(b.value(), "hello wogoodbye");
+    }
+
+    /// Pasting with no selection inserts at the caret rather than replacing
+    /// anything, and the field's `maxLength` still caps the result.
+    #[test]
+    fn paste_at_the_caret_respects_max_length() {
+        clipboard_seam::set("xyz");
+        let mut b = field().with_max_length(4);
+        typed(&mut b, "ab");
+        assert!(b.handle_key(KeyEvent::with_modifiers(KEY_V, EDIT_SHORTCUT_MODIFIER)));
+        assert_eq!(b.value(), "abxy", "only two more chars fit the 4-char budget");
+    }
+
+    /// Paste is declined on a read-only field — nothing to insert into.
+    #[test]
+    fn paste_on_a_read_only_field_does_nothing() {
+        clipboard_seam::set("xyz");
+        let mut b = field();
+        typed(&mut b, "ab");
+        b.is_editable = false;
+        assert!(b.handle_key(KeyEvent::with_modifiers(KEY_V, EDIT_SHORTCUT_MODIFIER)));
+        assert_eq!(b.value(), "ab", "the keystroke is still consumed (`true`)");
     }
 
     #[test]

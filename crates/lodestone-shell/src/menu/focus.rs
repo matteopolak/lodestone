@@ -332,31 +332,47 @@ impl KeyEvent {
     /// [`super::nav::MenuKey::Char`] — which is vanilla's *`charTyped`* path, a
     /// different callback entirely, and must not be smuggled through this one.
     ///
-    /// **This mapping is deliberately partial, and that is the honest state of
-    /// it.** `app.rs` translates exactly seven winit keys into `MenuKey`
-    /// (`app.rs:1237-1260`): Up, Down, Enter, Escape, Tab, Backspace, Delete.
-    /// So Left/Right/Home/End, and every modifier, are *implemented* in
-    /// [`super::edit_box::EditBox::handle_key`] and *unreachable in production*
-    /// until `app.rs` produces them. Four `KeyCode` arms there light them up; no
-    /// change is needed here or in `EditBox`.
+    /// **This mapping used to be partial, and the mismatch was a shipped bug**
+    /// (menu inputs never receiving keyboard modifiers): the doc here used to
+    /// claim "no change is needed in `app.rs` or `EditBox`" for
+    /// Cmd/Ctrl+A/C/X/V, which was true of *this* function and false of the
+    /// producer — `winit`'s modifier state was never tracked anywhere in this
+    /// crate, so every real `KeyEvent` app.rs built carried `modifiers: 0` and
+    /// Cmd+A was indistinguishable from `a`. `app::lifecycle` now tracks
+    /// `ModifiersChanged` and `app::menus::menu_key_for` produces
+    /// [`super::nav::MenuKey::SelectAll`]/`Copy`/`Cut`/`Paste` only when the
+    /// shortcut modifier is held, which is what makes the four arms below
+    /// reachable in production. Left/Right/Home/End are still not produced —
+    /// nothing has reported caret-only navigation as broken, and
+    /// [`super::edit_box::EditBox::handle_key`] already declines them
+    /// correctly (falls through to focus navigation) when they never arrive.
     #[must_use]
     pub fn from_menu_key(key: super::nav::MenuKey) -> Option<Self> {
         use super::nav::MenuKey;
-        Some(Self::new(match key {
-            MenuKey::Up => KEY_UP,
-            MenuKey::Down => KEY_DOWN,
-            MenuKey::Enter => KEY_ENTER,
-            MenuKey::Escape => KEY_ESCAPE,
-            MenuKey::Tab => KEY_TAB,
-            MenuKey::Backspace => KEY_BACKSPACE,
-            MenuKey::Delete => KEY_DELETE,
+        Some(match key {
+            MenuKey::Up => Self::new(KEY_UP),
+            MenuKey::Down => Self::new(KEY_DOWN),
+            MenuKey::Enter => Self::new(KEY_ENTER),
+            MenuKey::Escape => Self::new(KEY_ESCAPE),
+            MenuKey::Tab => Self::new(KEY_TAB),
+            MenuKey::Backspace => Self::new(KEY_BACKSPACE),
+            MenuKey::Delete => Self::new(KEY_DELETE),
             // F5 is a real key event, so a focused child is offered it first
             // exactly as vanilla's `Screen.keyPressed` does — `EditBox` declines
             // 294 (it is in `keyPressed`'s `default:` group), which is what lets
             // the multiplayer screen's own `keyPressed` see it.
-            MenuKey::Refresh => KEY_F5,
+            MenuKey::Refresh => Self::new(KEY_F5),
+            // `EDIT_SHORTCUT_MODIFIER` is Cmd on macOS and Ctrl elsewhere
+            // (`InputQuirks.EDIT_SHORTCUT_KEY_MODIFIER`), and these four GLFW
+            // key codes plus that one bit are exactly `isSelectAll`/`isCopy`/
+            // `isCut`/`isPaste` — see [`Self::is_select_all`] and its
+            // siblings, and `EditBox::handle_key`'s `_` arm for what each does.
+            MenuKey::SelectAll => Self::with_modifiers(KEY_A, EDIT_SHORTCUT_MODIFIER),
+            MenuKey::Copy => Self::with_modifiers(KEY_C, EDIT_SHORTCUT_MODIFIER),
+            MenuKey::Cut => Self::with_modifiers(KEY_X, EDIT_SHORTCUT_MODIFIER),
+            MenuKey::Paste => Self::with_modifiers(KEY_V, EDIT_SHORTCUT_MODIFIER),
             MenuKey::Char(_) => return None,
-        }))
+        })
     }
 }
 

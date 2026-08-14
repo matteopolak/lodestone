@@ -215,23 +215,44 @@ not own.
 
 ## Deliberate gaps, each with the reason
 
-- **Left/Right/Home/End and every modifier are implemented and unreachable.**
-  `app.rs::menus::WindowApp::menu_key_for` translates exactly seven winit keys into `MenuKey`: Up, Down,
-  Enter, Escape, Tab, Backspace, Delete. `EditBox::handle_key` handles the rest and
-  is unit-tested on them; four `KeyCode` arms in `app.rs` would light them up, with
-  no change needed in `focus.rs` or `edit_box.rs`. Adding `MenuKey` variants
-  pre-emptively would break the exhaustive `match key` in every other `key_*` arm
-  for no gain.
+- **Left/Right/Home/End are still not produced from a real keystroke** —
+  `app::menus::WindowApp::menu_key_for` still does not translate the arrow
+  keys or Home/End into `MenuKey`, only Up/Down/Enter/Escape/Tab/Backspace/
+  Delete, plus (now) select-all/copy/cut/paste. `EditBox::handle_key`
+  already handles Left/Right/Home/End correctly and is unit-tested on them;
+  nothing has reported caret-only navigation as broken, so this gap is
+  deliberately unclosed rather than pre-emptively wired. **This bullet used to
+  claim the same about every modifier, which was wrong in a way that shipped a
+  bug**: `menu_key_for` never tracked `winit`'s modifier state at all, so
+  Cmd+A/Cmd+V — reported as "it inserts an a"/"inserts a v" — were
+  indistinguishable from plain `a`/`v` in production despite `EditBox` and
+  `KeyEvent::is_select_all`/`is_copy`/`is_cut`/`is_paste` being correct and
+  unit-tested the whole time. Fixed by tracking `ModifiersChanged` in
+  `app::lifecycle::window_event` (`WindowApp::modifiers`) and adding
+  `MenuKey::SelectAll`/`Copy`/`Cut`/`Paste`, produced only while the platform
+  shortcut modifier is held (`app::menus::shortcut_modifier_held`, unit-tested
+  for both the macOS and non-macOS mapping without needing to run on either
+  platform).
 - **A click is routed as a row index, not a position.** `MenuNav::click` /
   `hover` take a `usize`, so a click focuses the right *field* but cannot place the
   caret at the clicked character. `EditForm::click_at` and
   `FocusSet::mouse_clicked` implement the real thing and are tested; they need an
   `app.rs` that passes logical `(x, y)`.
-- **No clipboard.** `isCopy`/`isCut`/`isPaste` return `true` in vanilla *and*
-  touch `Minecraft.keyboardHandler`. There is no clipboard seam here, so
-  `handle_key` declines all three rather than consuming a keystroke it cannot
-  honour — in particular **Ctrl+X does not delete**, so nothing is lost to a
-  clipboard that was never written. Select-all needs no clipboard and works.
+- **The clipboard seam is real, not declined.** `isCopy`/`isCut`/`isPaste`
+  return `true` in vanilla *and* touch `Minecraft.keyboardHandler`; this used
+  to be a deliberate decline (a cut into a clipboard nobody could write is a
+  data-loss trap), which was the right call while no seam existed and wrong
+  to leave that way once one was built. `edit_box::clipboard_seam` is the
+  boundary: the real OS clipboard (`crate::platform::clipboard`, `arboard` on
+  native) in production, an in-memory `thread_local` under every
+  `#[cfg(test)]` build so no test run ever touches the developer's actual
+  clipboard — the same fork `menu::accounts::open_in_browser` uses for its own
+  OS side effect. **wasm32 paste is a known remaining gap**: a browser
+  clipboard read is asynchronous (`navigator.clipboard.readText()` returns a
+  `Promise`) and `EditBox::handle_key` is not, so `platform::clipboard::get()`
+  degrades to an empty string there rather than blocking or faking a value —
+  copy/cut still work on wasm32 (`writeText` is fire-and-forget). Select-all
+  needed no clipboard and worked before this too.
 - **The caret does not blink.** `TextCursorUtils.isCursorVisible` is a 300 ms
   interval on `Util.getMillis() - focusedTime`, and no `MenuFrame` carries a clock.
   `edit_box::is_cursor_visible` is the pure predicate; `EditBox::show_cursor(None)`

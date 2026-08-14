@@ -212,6 +212,13 @@ pollster = { workspace = true }
 memory-stats = "1"
 # `level.dat` for the singleplayer save list — see the long note above.
 lodestone-anvil = { path = "../lodestone-anvil" }
+# The OS clipboard, for `menu::edit_box::EditBox`'s copy/cut/paste
+# (`src/platform.rs`'s `clipboard` module). Single consumer, so a direct pin
+# rather than a `[workspace.dependencies]` entry, matching `memory-stats`
+# above. Native-only: a browser's clipboard is `navigator.clipboard`, reached
+# through `web-sys` in the wasm32 section below, not through this crate (which
+# does not build for `wasm32-unknown-unknown` at all).
+arboard = { version = "3", default-features = false }
 # `menu/accounts.rs` builds its own short-lived `reqwest::Client` to drive the
 # device-code/refresh calls interactively from the account-switcher screen
 # (the same crate `lodestone-auth`'s own chain runs on).
@@ -244,6 +251,10 @@ web-sys = { version = "0.3", features = [
     "HtmlCanvasElement",
     "Performance",
     "Storage",
+    # `platform::clipboard::set`'s `navigator.clipboard.writeText` (issue: menu
+    # inputs never receive keyboard modifiers).
+    "Clipboard",
+    "Navigator",
 ] }
 
 

@@ -68,6 +68,18 @@ pub enum MenuKey {
     /// onto one would type an `r` into the address field. `focus::KEY_F5` is the
     /// GLFW code `JoinMultiplayerScreen.keyPressed` tests for (`:234`).
     Refresh,
+    /// Ctrl/Cmd+A — select all text in the focused field
+    /// (`focus::EDIT_SHORTCUT_MODIFIER` already picks Cmd on macOS, Ctrl
+    /// elsewhere; see [`focus::KeyEvent::is_select_all`]).
+    SelectAll,
+    /// Ctrl/Cmd+C — copy the focused field's selection to the clipboard.
+    Copy,
+    /// Ctrl/Cmd+X — cut the focused field's selection to the clipboard.
+    Cut,
+    /// Ctrl/Cmd+V — paste the clipboard into the focused field, replacing any
+    /// selection. `app.rs` produces this only when the shortcut modifier is
+    /// held, so it can never collide with a plain `v` (see [`MenuKey::Char`]).
+    Paste,
     /// A printable character: a command on the list, text in the form.
     Char(char),
 }
@@ -2934,6 +2946,15 @@ impl MenuNav {
                 // `self.command_block` `state` above, so this reads the tree
                 // without a second `&mut self`.
                 state.apply_completion(self.command_tree.as_deref());
+                MenuAction::None
+            }
+            // Select-all/copy/cut/paste on the command field — `from_menu_key`
+            // is the one place that knows the GLFW key + modifier each of
+            // these stands for, so this forwards rather than re-deriving it.
+            MenuKey::SelectAll | MenuKey::Copy | MenuKey::Cut | MenuKey::Paste => {
+                if let Some(event) = KeyEvent::from_menu_key(key) {
+                    state.handle_key(event);
+                }
                 MenuAction::None
             }
             MenuKey::Up | MenuKey::Down | MenuKey::Refresh => MenuAction::None,

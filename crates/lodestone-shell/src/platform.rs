@@ -232,3 +232,84 @@ pub mod assets {
         BUNDLE.get()
     }
 }
+
+/// The system clipboard, for `menu::edit_box::EditBox`'s copy/cut/paste
+/// (`Minecraft.keyboardHandler.getClipboard`/`setClipboard`).
+///
+/// # Native vs. browser
+///
+/// A native OS clipboard call is genuinely synchronous — it returns the string
+/// right there, in microseconds — which is what lets [`get`]/[`set`] be plain
+/// functions and `EditBox::handle_key` stay a plain `fn(&mut self, KeyEvent) ->
+/// bool` with no `async` anywhere in the menu stack.
+///
+/// A browser's `navigator.clipboard` is **not** synchronous: `readText`/
+/// `writeText` both return a `Promise`, with `readText` additionally gated on a
+/// user-activation/permission check that can itself prompt. [`set`] is still a
+/// plain function on wasm32 — it fires the write and does not wait for it,
+/// which is fine because vanilla's own `setClipboard` has no return value
+/// either and nothing downstream needs to know when the browser finishes.
+/// [`get`] cannot be given the same treatment without an `EditBox` that can
+/// suspend, so on wasm32 it degrades to an **empty string**, synchronously —
+/// the same "declined rather than faked" choice `EditBox`'s module docs made
+/// for the whole clipboard before this seam existed, now scoped to just the
+/// one platform that cannot honour a synchronous read. A paste that inserts
+/// nothing is the honest degradation; inserting stale or wrong text would not
+/// be.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod clipboard {
+    use std::sync::Mutex;
+
+    // A single `arboard::Clipboard`, opened once and reused. On X11 in
+    // particular, opening one per call is wasteful (it briefly owns the
+    // selection via a background thread to answer a paste), and there is no
+    // reason to pay that cost every keystroke.
+    static HANDLE: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
+
+    fn with_handle<T>(f: impl FnOnce(&mut arboard::Clipboard) -> T) -> Option<T> {
+        let mut guard = HANDLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.is_none() {
+            *guard = arboard::Clipboard::new().ok();
+        }
+        guard.as_mut().map(f)
+    }
+
+    /// The clipboard's text contents, or an empty string if there is no
+    /// clipboard, it holds no text, or the platform call fails — vanilla's own
+    /// `getClipboard` swallows `UnsupportedFlavorException`/`IOException` the
+    /// same way (`KeyboardHandler.java`).
+    #[must_use]
+    pub fn get() -> String {
+        with_handle(|cb| cb.get_text().ok()).flatten().unwrap_or_default()
+    }
+
+    /// Best-effort write. A failure here has no user-visible error path in
+    /// vanilla either — `setClipboard` also just logs and moves on.
+    pub fn set(text: &str) {
+        let _ = with_handle(|cb| cb.set_text(text.to_owned()));
+    }
+}
+
+/// See the native arm's docs for the sync/async split this mirrors.
+#[cfg(target_arch = "wasm32")]
+pub mod clipboard {
+    /// Always empty — see the module doc's "why `get` degrades" note. Kept as
+    /// a real function rather than deleted so `EditBox::handle_key`'s paste
+    /// arm needs no `cfg` of its own.
+    #[must_use]
+    pub fn get() -> String {
+        String::new()
+    }
+
+    /// Fire-and-forget `navigator.clipboard.writeText`. Silently does nothing
+    /// without a `Window` (there always is one in the browser build this
+    /// compiles for) or without clipboard-write permission — the same
+    /// "no visible error path" as vanilla's own `setClipboard`.
+    pub fn set(text: &str) {
+        let Some(window) = web_sys::window() else { return };
+        let promise = window.navigator().clipboard().write_text(text);
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+        });
+    }
+}

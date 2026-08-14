@@ -4,11 +4,61 @@
 
 use super::*;
 
+/// Whether `modifiers` holds the platform's edit-shortcut key —
+/// `InputQuirks.EDIT_SHORTCUT_KEY_MODIFIER`'s own split
+/// (`Screen.hasControlDown`): Cmd (`SUPER`) on macOS, Ctrl everywhere else.
+/// Must agree with `focus::EDIT_SHORTCUT_MODIFIER`, which is what
+/// `is_select_all`/`is_copy`/`is_cut`/`is_paste` test once the `MenuKey` this
+/// produces reaches `KeyEvent::from_menu_key` — the two sides of the same
+/// modifier can't be allowed to drift apart.
+///
+/// `is_macos` is a parameter rather than a `cfg!` read inline **so the macOS
+/// branch is a unit test, not a fact about whichever machine runs the
+/// suite** — `cfg!(target_os = "macos")` alone cannot be exercised from CI
+/// running on a different platform, and getting this exact mapping wrong is
+/// invisible on Linux and Windows (Ctrl already worked there) while breaking
+/// every shortcut on a Mac. [`WindowApp::menu_key_for`] and
+/// [`WindowApp::chat_shortcut_modifier_held`] both call this with the real
+/// `cfg!` value; the tests at the bottom of this file call it with both.
+pub(super) fn shortcut_modifier_held(modifiers: ModifiersState, is_macos: bool) -> bool {
+    if is_macos {
+        modifiers.super_key()
+    } else {
+        modifiers.control_key()
+    }
+}
+
 impl WindowApp {
     /// Translate one winit key event into a [`MenuKey`], or `None` if the menu
     /// has no use for it.
-    pub(super) fn menu_key_for(event: &winit::event::KeyEvent) -> Option<MenuKey> {
-        if let PhysicalKey::Code(code) = event.physical_key {
+    ///
+    /// Takes `physical_key`/`text` rather than a whole `&winit::event::KeyEvent`
+    /// **on purpose**: that type's only public constructor is winit's own event
+    /// pump (its `platform_specific` field is `pub(crate)` to winit), so a
+    /// version taking the struct could never be driven from a unit test —
+    /// which is exactly how this conversion went untested long enough to ship
+    /// a menu that never received keyboard modifiers in the first place;
+    /// `nav.rs`'s own module doc used to note "the winit mapping ... is the
+    /// only untested part". Destructuring at the boundary is what makes the
+    /// tests at the bottom of this file possible at all.
+    ///
+    /// `modifiers` is `self.modifiers` at the moment of the press — tracked
+    /// from `WindowEvent::ModifiersChanged` in `app::lifecycle::window_event`.
+    ///
+    /// # Menu inputs never received keyboard modifiers
+    ///
+    /// Before `modifiers` existed here, every real `KeyEvent` reaching this
+    /// function looked unmodified — winit reports modifier state as its own
+    /// event, separate from the key press — so Cmd+A was indistinguishable
+    /// from `a` and fell straight into the text arm below. This function is
+    /// now the one place that tells the two apart.
+    pub(super) fn menu_key_for(
+        physical_key: PhysicalKey,
+        text: Option<&str>,
+        modifiers: ModifiersState,
+    ) -> Option<MenuKey> {
+        let shortcut_held = shortcut_modifier_held(modifiers, cfg!(target_os = "macos"));
+        if let PhysicalKey::Code(code) = physical_key {
             match code {
                 KeyCode::ArrowUp => return Some(MenuKey::Up),
                 KeyCode::ArrowDown => return Some(MenuKey::Down),
@@ -22,16 +72,42 @@ impl WindowApp {
                 // rather than falling through to the text path below: a function
                 // key has no `text`, so without this it would reach nothing.
                 KeyCode::F5 => return Some(MenuKey::Refresh),
+                // Select-all/copy/cut/paste — gated on *exactly* the shortcut
+                // modifier, matching `focus::KeyEvent::is_edit_shortcut`'s own
+                // `!has_shift_down() && !has_alt_down()` guard, so Cmd+Shift+A
+                // is not consumed here either (it falls through to nothing,
+                // the same as it does in vanilla).
+                KeyCode::KeyA if shortcut_held && !modifiers.shift_key() && !modifiers.alt_key() => {
+                    return Some(MenuKey::SelectAll);
+                }
+                KeyCode::KeyC if shortcut_held && !modifiers.shift_key() && !modifiers.alt_key() => {
+                    return Some(MenuKey::Copy);
+                }
+                KeyCode::KeyX if shortcut_held && !modifiers.shift_key() && !modifiers.alt_key() => {
+                    return Some(MenuKey::Cut);
+                }
+                KeyCode::KeyV if shortcut_held && !modifiers.shift_key() && !modifiers.alt_key() => {
+                    return Some(MenuKey::Paste);
+                }
                 _ => {}
             }
+        }
+        // The other half of the fix: suppress printable insertion whenever the
+        // shortcut modifier is held, independent of Shift/Alt and of whether
+        // the letter above matched a known shortcut. Without this, a chord
+        // this function does not recognise (or one held with an extra
+        // modifier) would still fall into the text arm below and type —
+        // which is the literal reported symptom, "it inserts a v"/"inserts an
+        // a" — and a *recognised* shortcut would type its letter **alongside**
+        // acting, since `event.text` is set on the same `KeyEvent` as
+        // `physical_key`.
+        if shortcut_held {
+            return None;
         }
         // Anything else is text. `KeyEvent::text` is already the composed
         // character, so this is the path that makes non-US layouts type
         // correctly into the address field.
-        event
-            .text
-            .as_ref()
-            .and_then(|t| t.chars().next())
+        text.and_then(|t| t.chars().next())
             .filter(|c| !c.is_control())
             .map(MenuKey::Char)
     }
@@ -422,13 +498,47 @@ impl WindowApp {
                     }
                     return;
                 }
+                // Ctrl/Cmd+V — same platform split as `menu_key_for`'s
+                // shortcut detection, and the chat box's own share of the same
+                // bug: before this arm, a paste here fell straight to the
+                // `text` arm below and typed a literal `v`. `ChatInput` has no
+                // selection model (`chat.rs`'s own docs: `highlight`/`complete`
+                // are about the *popup*, not the line), so paste here is a
+                // plain insert at the cursor, matching `ChatInput::push_str`'s
+                // existing typed-text path exactly — there is no selection to
+                // replace.
+                KeyCode::KeyV if self.chat_shortcut_modifier_held() => {
+                    let text = crate::platform::clipboard::get();
+                    if !text.is_empty() {
+                        self.chat_input.push_str(&text);
+                        self.refresh_command_suggestions();
+                    }
+                    return;
+                }
                 _ => {}
             }
+        }
+        // The other half of the fix for chat: holding the shortcut modifier
+        // while typing must not insert the letter, whether or not it matched
+        // a shortcut arm above (an unrecognised chord, e.g. Cmd+B, should do
+        // nothing here rather than type `b`).
+        if self.chat_shortcut_modifier_held() {
+            return;
         }
         if let Some(text) = &event.text {
             self.chat_input.push_str(text.as_str());
             self.refresh_command_suggestions();
         }
+    }
+
+    /// Whether the platform's edit-shortcut modifier — Cmd on macOS, Ctrl
+    /// elsewhere, matching `focus::EDIT_SHORTCUT_MODIFIER` — is currently
+    /// held. Shared by [`Self::handle_chat_key`]'s paste/suppress arms; the
+    /// menu side of the same check lives in [`Self::menu_key_for`], which is
+    /// a free function rather than a method (it has to stay driveable without
+    /// a window for its own unit tests) and so cannot share this one.
+    fn chat_shortcut_modifier_held(&self) -> bool {
+        shortcut_modifier_held(self.modifiers, cfg!(target_os = "macos"))
     }
 
     /// `ChatScreen.onEdited` — the `EditBox` responder, run after every edit to
