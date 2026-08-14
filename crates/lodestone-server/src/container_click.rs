@@ -70,6 +70,26 @@
 //!   return value and the caller decides what to do with them). Also unmodelled:
 //!   creative-mode `Clone` is gated on the caller's `creative` flag, matching
 //!   `player.hasInfiniteMaterials()`.
+//! * **`Slot.mayPickup` is not modelled at all — every take in this module
+//!   succeeds unconditionally.** Vanilla's own use of it is per-slot, not
+//!   uniform: `ArmorSlot.mayPickup` refuses a take while the piece carries
+//!   `minecraft:prevent_armor_change` and the wearer is not creative
+//!   (`ArmorSlot.java`), and — the one this crate's own anvil economy already
+//!   half-relies on — `ItemCombinerMenu`'s result slot routes through
+//!   `AnvilMenu.mayPickup`: `(player.hasInfiniteMaterials() ||
+//!   player.experienceLevel >= this.cost.get()) && this.cost.get() > 0`
+//!   (`AnvilMenu.java`). `crate::server`'s `ContainerClicked` arm charges the
+//!   XP levels *after* `apply_container_clicked` has already let the take
+//!   happen (`PlayerExperience::take_levels` merely clamps at zero rather
+//!   than refusing), so today a survival player with no XP levels can take a
+//!   repaired/renamed item off an anvil for free — the charge silently costs
+//!   nothing they do not have, instead of vanilla's outright refusal that
+//!   leaves the item sitting in the result slot. Threading a real gate through
+//!   here needs an economy-aware `may_pickup(index, item) -> bool` hook (the
+//!   same shape [`ResultRecipe`] already is for the result), which is more
+//!   than this pass's connectivity-focused scope — filed rather than patched
+//!   in place, since `apply_container_clicked`'s own doc already discloses
+//!   this module is deliberately economy-free.
 //!
 //! # Dependencies
 //!
@@ -463,6 +483,18 @@ fn same(a: &ItemStack, b: &ItemStack) -> bool {
     a.item == b.item && a.components == b.components
 }
 
+/// `ItemStack.isSameItem` — item type only, components ignored. **Not** the same
+/// predicate as [`same`]: vanilla's `doClick` uses this narrower check (`a.is(b.getItem())`,
+/// `ItemStack.java`) for both of its "did the slot refill with the same thing"
+/// repeat-loop guards ([`quick_move`]'s `QUICK_MOVE` loop and the `THROW` arm's
+/// ctrl-Q loop in [`do_click_with`]) — using [`same`] there instead would stop a
+/// repeat early whenever a regenerated crafting/take-only result's components
+/// differ stack-to-stack (e.g. a component the recipe does not pin down), which
+/// vanilla's own loop condition does not care about.
+fn same_item(a: &ItemStack, b: &ItemStack) -> bool {
+    a.item == b.item
+}
+
 /// One inbound click, straight off the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Click {
@@ -643,13 +675,51 @@ pub fn do_click_with(
             }
         }
         // THROW — Q (one) or ctrl-Q (the whole stack), cursor must be empty.
+        //
+        // Vanilla (`AbstractContainerMenu.doClick`'s `THROW` arm):
+        // ```java
+        // int amount = buttonNum == 0 ? 1 : slot.getItem().getCount();
+        // itemStack = slot.safeTake(amount, MAX, player); player.drop(itemStack, true);
+        // if (buttonNum == 1) {
+        //    while (!itemStack.isEmpty() && ItemStack.isSameItem(slot.getItem(), itemStack)) {
+        //       itemStack = slot.safeTake(amount, MAX, player); player.drop(itemStack, true);
+        //    }
+        // }
+        // ```
+        // `amount` is fixed at the *first* read of the slot's count and reused for
+        // every iteration — for an ordinary stack the slot empties on the first take
+        // and the loop condition fails immediately, but for a take-only result slot
+        // that `slotsChanged` refills (crafting/smithing/anvil/grindstone — the same
+        // regeneration [`quick_move`]'s own repeat loop drains), ctrl-Q keeps
+        // crafting-and-dropping until the grid can no longer refill it. A single
+        // `take_from` call here reproduced only the first drop and silently dropped
+        // this repeat, which is exactly the "the common modes look finished" trap:
+        // a plain-stack ctrl-Q (the overwhelmingly common case) looked identical
+        // either way.
         4 if state.carried.is_none() => {
             if let Some(index) = index.filter(|i| *i < layout.len()) {
                 let whole = click.button == 1;
-                if let Some(taken) =
-                    take_from(layout, slots, index, if whole { u32::MAX } else { 1 }, recipe)
-                {
-                    dropped.push(taken);
+                let amount = if whole {
+                    slots[index].as_ref().map_or(0, |s| s.count)
+                } else {
+                    1
+                };
+                if let Some(mut taken) = take_from(layout, slots, index, amount, recipe) {
+                    dropped.push(taken.clone());
+                    while whole {
+                        let refilled_same = slots[index]
+                            .as_ref()
+                            .is_some_and(|next| same_item(next, &taken));
+                        if !refilled_same {
+                            break;
+                        }
+                        let Some(next_taken) = take_from(layout, slots, index, amount, recipe)
+                        else {
+                            break;
+                        };
+                        taken = next_taken;
+                        dropped.push(taken.clone());
+                    }
                 }
             }
         }
@@ -1059,9 +1129,11 @@ fn quick_move(
             return;
         }
         // Vanilla's `while`: the grid refilled the result with the same item, so
-        // craft again.
+        // craft again. `ItemStack.isSameItem` — item type only, not
+        // `isSameItemSameComponents` (see [`same_item`]'s own doc for why the
+        // distinction is load-bearing here).
         match slots[index].as_ref() {
-            Some(next) if same(next, &source) => {}
+            Some(next) if same_item(next, &source) => {}
             _ => return,
         }
     }
@@ -1495,6 +1567,58 @@ mod tests {
         let dropped = do_click(&layout, &mut slots, &mut state, click(0, 1, 4), false);
         assert_eq!(dropped.iter().map(|s| s.count).sum::<u32>(), 4);
         assert_eq!(slots[0], None);
+    }
+
+    /// Ctrl-Q on a **crafting result** must keep crafting-and-dropping until the
+    /// grid runs out — vanilla's `THROW` arm's own repeat `while`, mirroring
+    /// [`quick_move`]'s shift-click repeat for the same reason (a refilling
+    /// take-only slot). A single-take implementation drops one crafted item and
+    /// leaves two planks pairs sitting in the grid; this asserts the whole grid
+    /// drains and every drop is counted, not just that "something" was dropped.
+    #[test]
+    fn ctrl_q_on_a_crafting_result_drains_the_grid() {
+        let layout = MenuLayout::player();
+        let mut slots = vec![None; layout.len()];
+        // Two crafts' worth of planks in every 2x2 cell (pairwise-distinct from the
+        // "1" a bug would leave behind).
+        for cell in 1..=4 {
+            slots[cell] = Some(stack("minecraft:oak_planks", 2));
+        }
+        let recipe: ResultRecipe<'_> = &|cells: &[Option<ItemStack>]| {
+            if cells.iter().all(|c| c.as_ref().is_some_and(|s| s.count > 0)) {
+                Some(stack("minecraft:crafting_table", 1))
+            } else {
+                None
+            }
+        };
+        slots[0] = Some(stack("minecraft:crafting_table", 1));
+        let mut state = ClickState::default();
+
+        let dropped = do_click_with(
+            &layout,
+            &mut slots,
+            &mut state,
+            click(0, 1, 4),
+            false,
+            Some(recipe),
+        );
+
+        assert_eq!(
+            dropped.iter().map(|s| s.count).sum::<u32>(),
+            2,
+            "two crafts' worth of tables should have dropped, got {dropped:?}"
+        );
+        for cell in 1..=4 {
+            assert_eq!(
+                slots[cell],
+                None,
+                "grid cell {cell} should be fully drained, not left at a partial count"
+            );
+        }
+        assert_eq!(
+            slots[0], None,
+            "the result slot must not be left holding a phantom third craft"
+        );
     }
 
     /// `Clone` is creative-only. In survival it does nothing at all — the arm that
