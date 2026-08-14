@@ -189,6 +189,49 @@ fn ring_distance(centre: (i32, i32), coord: (i32, i32)) -> i32 {
     (coord.0 - centre.0).abs().max((coord.1 - centre.1).abs())
 }
 
+/// This module's own generation priority, expressed as a `crate::ticket`
+/// **level** rather than as a bare ring index — issue #289's "priority is the
+/// ticket level" unified with this module's pre-existing, independently-built
+/// distance/frustum queue.
+///
+/// # Why a formula, and not a shared [`crate::ticket::TicketStore`]
+///
+/// This module's [`ColumnQueue`] answers "in what order should *this
+/// connection's* still-owed columns be generated" — a per-connection wire-order
+/// question with its own frustum bonus and re-prioritisation-on-turn, already
+/// solved (see the module doc's "The wire order" section). `crate::ticket`
+/// answers a different question: "does any chunk anywhere want to exist at
+/// all, independent of one connection's view." Coupling the two stores would
+/// make a join's *wire order* depend on residency bookkeeping that has nothing
+/// to do with it, and — the reason this crate does not do it this session —
+/// every call site that would grant the ticket lives in `crate::server`'s
+/// generic, `S: ChunkSource`-parameterised connection code, which cannot reach
+/// a concrete `crate::chunk_store::ChunkStore`'s ticket handle without either a
+/// new `ChunkSource` trait method (the exact unforwarded-wrapper trap
+/// `crate::dimension::DimensionalSource` already carries a scar from) or a
+/// signature change to a public, cross-crate entry point. See
+/// `docs/chunk-tickets.md` for the fuller account.
+///
+/// What *is* shared, safely, is the **arithmetic**: `crate::ticket::TicketStore`'s
+/// propagator computes `ticket.level + chebyshev(ticket.pos, target)` for
+/// every position within the ticket's reach (`crate::ticket::TicketStore`'s
+/// own `propagate_one`), and `base_level + ring` here is exactly that
+/// expression read backwards — "how urgent" from "how far," off the same
+/// centre-level convention. `ring` is [`ring_distance`]'s output (or any
+/// Chebyshev distance from a priority centre); `base_level` is the level a
+/// ticket at the centre would carry (`crate::ticket::FULL_CHUNK_LEVEL - radius`
+/// for a radius-derived grant, per that module).
+///
+/// **Only meaningful within the granting ticket's own reach**
+/// (`crate::ticket::MAX_LEVEL - base_level`) — beyond it a real
+/// [`crate::ticket::TicketStore`] does not report a level at all (the position
+/// is simply unresident), so a level computed past that point describes
+/// nothing a real ticket would ever produce and must not be compared to one.
+#[must_use]
+pub(crate) const fn ticket_level_for_ring(base_level: i32, ring: i32) -> i32 {
+    base_level + ring
+}
+
 /// Whether `coord` lies inside the horizontal cone a player at `centre` facing
 /// `yaw_degrees` can see, in Minecraft's yaw convention (0 = +Z, 90 = −X).
 ///
@@ -1492,5 +1535,36 @@ mod tests {
             "a single-column view emits it"
         );
         assert!(pipeline.next().await.is_none());
+    }
+
+    /// [`ticket_level_for_ring`] must describe the same quantity a real
+    /// [`crate::ticket::TicketStore`] computes, within the granting ticket's
+    /// reach, or the two "priority" notions this module's own doc comment
+    /// says are unified in arithmetic only would silently drift apart. The
+    /// expected values are read from the real propagator, not hand-derived
+    /// twice — this is a **parity** gate between two independent
+    /// implementations of the same physical rule, not a restatement of
+    /// either one. `base_level` is chosen with a generous reach (`MAX_LEVEL -
+    /// base_level = 33`) so every tested ring is well inside it — see
+    /// [`ticket_level_for_ring`]'s own doc for why a ring past the reach is
+    /// not a valid input to compare.
+    #[test]
+    fn ticket_level_for_ring_matches_a_real_ticket_stores_propagation() {
+        use crate::ticket::{TicketKind, TicketOwner, TicketStore};
+
+        const BASE_LEVEL: i32 = 0;
+        let mut store = TicketStore::new();
+        store.set_ticket_at_level(TicketOwner::Forced(0), TicketKind::Forced, (0, 0), BASE_LEVEL);
+        store.propagate();
+
+        for ring in 0..5 {
+            let expected = store.loading_level((ring, 0));
+            assert_eq!(
+                ticket_level_for_ring(BASE_LEVEL, ring),
+                expected,
+                "ring {ring}: this module's own priority arithmetic must match the real \
+                 ticket propagator's level at the same Chebyshev distance"
+            );
+        }
     }
 }

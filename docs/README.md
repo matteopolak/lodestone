@@ -282,6 +282,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   repeating 50 ms timers were requesting them, which made singleplayer effectively
   unplayable. It is unit **U3** of
   [`plans/chunk-lifecycle.md`](./plans/chunk-lifecycle.md) (issue #289).
+- [Chunk tickets and the status pipeline](./chunk-tickets.md) — `crate::ticket`
+  (`crates/lodestone-server/src/ticket.rs`) is a vanilla-shaped ticket/level graph
+  that answers one question independent of any single connection's view radius: *why
+  should this chunk exist at all, and how urgently*. `crate::chunk_store::ChunkStore`
+  (`crates/lodestone-server/src/ chunk_store.rs`) is the one production consumer —
+  it grants tickets, checks in with the graph on its own read traffic, and evicts a
+  chunk through the real persistence-aware [`crate::chunk::ChunkSource::unload`] path
+  once nothing wants it any more.
 - [The chunk world as an ECS resource](./chunk-world-resource.md) — One
   `lodestone_world::World` for the whole process, held behind `Arc<RwLock<_>>` as the
   `bevy_ecs` resource `lodestone_ecs::ChunkWorld`, plus all terrain-mesh scheduling
@@ -667,11 +675,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   container per tick while the player has the Regeneration effect. It is the one heart
   animation still missing from our HUD, and this doc exists mainly to correct a
   plausible-sounding but wrong model of *what triggers* the heart and hunger offsets.
-- [HUD text scale](./hud-text-scale.md) — The pose scale applied to the three
-  server-driven HUD text surfaces — the title, the subtitle and the action bar
-  (vanilla's "overlay message") — and why all three currently draw at exactly **2×
-  vanilla**. It also records the answer to a recurring design question: vanilla
-  exposes **no** size option for any of them, and we should not invent one.
+- [HUD text scale](./hud-text-scale.md) — The pose scale applied to the HUD's own
+  text surfaces, and the record of an ad-hoc, HUD-wide 2× pitch
+  (`HUD_TEXT_SCALE`/`hud_line_h`) that used to double several of them against vanilla.
+  It also records the answer to a recurring design question: vanilla exposes **no**
+  size option for the title/subtitle/action-bar trio, and we should not invent one.
 - [HUD vertical layout](./hud-vertical-layout.md) — Where every row of the
   bottom-centre HUD cluster sits — hotbar, XP bar and level number, hearts, hunger,
   armour, air bubbles, action bar — and which vanilla expression each `y` is
