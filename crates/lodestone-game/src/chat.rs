@@ -23,7 +23,7 @@
 
 use std::collections::VecDeque;
 
-use lodestone_model::{Text, TextStyle};
+use lodestone_model::{Text, TextSpan, TextStyle};
 use uuid::Uuid;
 
 /// A parameter slot substituted into a chat-type decoration.
@@ -460,6 +460,40 @@ impl ChatLog {
             .collect()
     }
 
+    /// The most recent `n` lines' full styled spans, oldest-first, paired with
+    /// each entry's arrival timestamp — the span sibling of
+    /// [`recent`](Self::recent): same walk, `to_spans()` in place of
+    /// `to_legacy_string()`, so a colour `to_legacy_string` cannot represent
+    /// (any `TextColor::Rgb`) survives.
+    ///
+    /// `recent`'s own flattening is the loss point named in
+    /// `docs/text-colour.md`'s "Chat is still hex-blind" section: `ChatEntry`
+    /// already stores a full [`Text`] per entry, so nothing about storage
+    /// changes here, only how one is read out.
+    #[must_use]
+    pub fn recent_spans(&self, n: usize) -> Vec<(Vec<TextSpan>, f64)> {
+        let start = self.feed.len().saturating_sub(n);
+        self.feed
+            .iter()
+            .zip(self.times.iter())
+            .skip(start)
+            .map(|(entry, at)| (entry_display(entry).to_spans(), *at))
+            .collect()
+    }
+
+    /// The most recent `n` lines' styled spans paired with their **age** in
+    /// seconds relative to `now` — the span sibling of
+    /// [`recent_ages`](Self::recent_ages): same "age relative to now, floored
+    /// at zero" projection, composed over [`recent_spans`](Self::recent_spans)
+    /// instead of [`recent`](Self::recent).
+    #[must_use]
+    pub fn recent_ages_spans(&self, n: usize, now: f64) -> Vec<(Vec<TextSpan>, f32)> {
+        self.recent_spans(n)
+            .into_iter()
+            .map(|(spans, at)| (spans, (now - at).max(0.0) as f32))
+            .collect()
+    }
+
     /// Total retained lines.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -545,5 +579,61 @@ mod log_tests {
         let mut log = ChatLog::new();
         log.push_system(Text::literal("ahead"), 5.0);
         assert_eq!(log.recent_ages(1, 1.0), vec![("ahead".to_string(), 0.0)]);
+    }
+
+    /// The discriminating input for this whole gap: an RGB colour has no
+    /// legacy-code equivalent (`TextColor::legacy_code` returns `None` for
+    /// it), so `recent`'s own flattening carries no colour at all for it —
+    /// this is what makes chat "hex-blind" and what a named colour could
+    /// never catch. `recent_spans` must preserve it.
+    #[test]
+    fn recent_spans_preserves_a_hex_colour_the_legacy_string_cannot_represent() {
+        let mut log = ChatLog::new();
+        let mut styled = Text::literal("hex");
+        styled.style.color = Some(lodestone_model::TextColor::Rgb(0x1a_2b3c));
+        log.push_system(styled, 1.0);
+
+        let (line, _) = &log.recent(1)[0];
+        assert_eq!(
+            line, "hex",
+            "the legacy string is the control: it must show the loss, not accidentally dodge it"
+        );
+
+        let spans = log.recent_spans(1);
+        assert_eq!(spans.len(), 1);
+        let (spans, at) = &spans[0];
+        assert_eq!(*at, 1.0);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans[0].style.color,
+            Some(lodestone_model::TextColor::Rgb(0x1a_2b3c)),
+            "the hex colour must survive the span read"
+        );
+    }
+
+    /// [`ChatLog::recent_ages_spans`] is [`ChatLog::recent_ages`]'s own
+    /// "age relative to now" projection composed over
+    /// [`ChatLog::recent_spans`] rather than [`ChatLog::recent`] — checked
+    /// against the same clock arithmetic `recent_ages_subtracts_the_supplied_clock`
+    /// already pins, with a hex colour riding along to confirm the span path
+    /// is really what is under the composition.
+    #[test]
+    fn recent_ages_spans_ages_like_recent_ages_and_keeps_the_colour() {
+        let mut log = ChatLog::new();
+        let mut old = Text::literal("old");
+        old.style.color = Some(lodestone_model::TextColor::Rgb(0x10_2030));
+        log.push_system(old, 1.0);
+        let mut new = Text::literal("new");
+        new.style.color = Some(lodestone_model::TextColor::Aqua);
+        log.push_system(new, 9.0);
+
+        let out = log.recent_ages_spans(2, 10.0);
+        assert_eq!(out.len(), 2);
+        let (old_spans, old_age) = &out[0];
+        assert_eq!(*old_age, 9.0, "must match recent_ages's own arithmetic exactly");
+        assert_eq!(old_spans[0].style.color, Some(lodestone_model::TextColor::Rgb(0x10_2030)));
+        let (new_spans, new_age) = &out[1];
+        assert_eq!(*new_age, 1.0);
+        assert_eq!(new_spans[0].style.color, Some(lodestone_model::TextColor::Aqua));
     }
 }
