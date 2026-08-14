@@ -4,8 +4,9 @@
 //! # What it is
 //!
 //! One [`Registration`] table per species, transcribed from that species'
-//! `registerGoals()` in `.cache/mc/26.2/src/net/minecraft/world/entity/`. Owned
-//! by issue [#226]; extend it here and nothing else in the tree changes.
+//! `registerGoals()` in `.cache/mc/26.2/src/net/minecraft/world/entity/`. This
+//! is the melee-family roster; extend it here and nothing else in the tree
+//! changes.
 //!
 //! # How to change it
 //!
@@ -30,22 +31,22 @@
 //! | class | declares | consequence |
 //! |---|---|---|
 //! | `Husk`, `ZombieVillager` | nothing | share [`ZOMBIE`] verbatim |
-//! | `Drowned` | **`addBehaviourGoals`**, not `registerGoals` (`:91-103`) | keeps `Zombie`'s *three* base rows and replaces all nine others — [`DROWNED`] |
+//! | `Drowned` | **`Drowned.addBehaviourGoals`**, not `registerGoals` | keeps `Zombie`'s *three* base rows and replaces all nine others — [`DROWNED`] |
 //! | `CaveSpider` | nothing | shares [`SPIDER`] |
 //! | `Skeleton`, `Stray`, `Bogged`, `Parched` | nothing | share [`SKELETON`] |
-//! | `WitherSkeleton` | `registerGoals` (`:38-41`) | one extra target row *before* `super` — [`WITHER_SKELETON`] |
+//! | `WitherSkeleton` | `WitherSkeleton.registerGoals` | one extra target row *before* `super` — [`WITHER_SKELETON`] |
 //!
 //! The `Drowned` case is the one a family-shaped assumption gets wrong.
-//! `Zombie.registerGoals` calls `this.addBehaviourGoals()` at `:116`, so the
+//! `Zombie.registerGoals` calls `this.addBehaviourGoals()`, so the
 //! override is a *partial* replacement: a drowned still gets the turtle-egg goal
 //! and both priority-8 look goals, but none of `SpearUseGoal`,
 //! `ZombieAttackGoal`, `MoveThroughVillageGoal` or the water-avoiding stroll.
 //! Transcribing `Zombie`'s whole table for it would give it four goals vanilla
 //! does not register and omit six it does.
 //!
-//! `Parched` (`monster/skeleton/Parched.java:17`) is a 26.2 skeleton variant that
-//! was not in issue #226's list at all; it declares no `registerGoals`, so it
-//! shares the base table.
+//! `Parched` is a 26.2 skeleton variant that was not covered when this table was
+//! first transcribed; it declares no `registerGoals`, so it shares the base
+//! table.
 //!
 //! # Known gaps, all disclosed in the tables
 //!
@@ -54,18 +55,20 @@
 //!   of `reassessWeaponGoal()` unconditionally. They exist now
 //!   ([`super::ranged`]), and `48062b7` *replaced* [`SKELETON`]'s priority-4 row
 //!   with `RangedBowAttackGoal` rather than adding to it — both candidates claim
-//!   MOVE and vanilla removes both before re-adding exactly one (`:132-148`), so
-//!   a second row would make the winner registration-order dependent.
+//!   MOVE and `AbstractSkeleton.reassessWeaponGoal` removes both before
+//!   re-adding exactly one, so a second row would make the winner
+//!   registration-order dependent.
 //!   `AbstractSkeleton.populateDefaultEquipmentSlots` puts a `BOW` in the main
-//!   hand **unconditionally** (`:111` — no random roll, no difficulty gate), so
-//!   `reassessWeaponGoal`'s `is(Items.BOW)` test at `:137` holds for every
-//!   normally-spawned skeleton and the melee `else` at `:146` never runs.
+//!   hand **unconditionally** — no random roll, no difficulty gate — so
+//!   `reassessWeaponGoal`'s `is(Items.BOW)` test holds for every
+//!   normally-spawned skeleton and the melee `else` branch never runs.
 //!   **The boundary is the *equipment* override, not the goal method**:
 //!   [`WITHER_SKELETON`] genuinely keeps melee, because
-//!   `WitherSkeleton.java:74` overrides that method with a `STONE_SWORD` and so
-//!   fails the bow test — it does not override `reassessWeaponGoal` at all, only
-//!   calls it (`:88`). `Skeleton`, `Stray`, `Bogged` and `Parched` override
-//!   neither. So [`melee_attack_1_2`] survives with exactly one reachable caller,
+//!   `WitherSkeleton.populateDefaultEquipmentSlots` overrides that method with a
+//!   `STONE_SWORD` and so fails the bow test — it does not override
+//!   `reassessWeaponGoal` at all, only calls it from
+//!   `WitherSkeleton.finalizeSpawn`. `Skeleton`, `Stray`, `Bogged` and `Parched`
+//!   override neither. So [`melee_attack_1_2`] survives with exactly one reachable caller,
 //!   and "skeletons shoot" is *not* the whole rule.
 //!   A drowned still never throws its trident: [`super::ranged`] has a
 //!   `trident_attack` builder, but [`DROWNED`]'s row is still
@@ -76,7 +79,8 @@
 //!   spawned.
 //! * **`HurtByTargetGoal.setAlertOthers` is not modelled** — our
 //!   `HurtByTargetGoal` retaliates but never propagates anger to nearby mobs.
-//!   That needs the sim-side census issue #233 owns.
+//!   That needs a sim-side census of nearby same-species mobs this repo does
+//!   not have yet.
 //! * **No water-aware navigation exists**, so all five of the drowned's
 //!   amphibious goals (`DrownedGoToWaterGoal`, `DrownedGoToBeachGoal`,
 //!   `DrownedSwimUpGoal`, and the two that gate on `okTarget`) are `Missing`. A
@@ -90,26 +94,27 @@
 //! `NavigatingMob::find_nearest_target` returned the `self.attack_target` its own
 //! caller writes, so `NearestAttackableTargetGoal::can_use` asked for a target,
 //! got back the target it was supposed to be finding, and returned `false`
-//! forever. That was measured and true when written. It is not true now: issue
-//! #455 (`23b3dd2`) made `find_nearest_target` read the `nearest_player` the
-//! server's perception feed populates, cut by vanilla's `FOLLOW_RANGE` (a
+//! forever. That was measured and true when written. It is not true now: a
+//! later fix (`23b3dd2`) made `find_nearest_target` read the `nearest_player`
+//! the server's perception feed populates, cut by vanilla's `FOLLOW_RANGE` (a
 //! `distanceToSqr` against `max(range, 2.0)`), and `mobs.rs` now passes the
 //! per-species attribute through. A hosted zombie acquires a player it was never
 //! told about and walks at it.
 //!
-//! **`set_attack_target` still has no production caller** — every one is a test,
-//! a bench or `SimMob`'s wrapper — and that is why the gates below hand the
-//! target over directly rather than waiting for acquisition. It keeps a failure
-//! in this file attributable to a **table row**;
-//! `crates/lodestone-entity/tests/target_acquisition.rs` is what proves
-//! acquisition itself.
+//! **`set_attack_target` is now written in production**, but only by the goal
+//! that reads `find_nearest_target` in the first place —
+//! `NearestAttackableTargetGoal` and `HurtByTargetGoal` in
+//! [`crate::ai::goals`] are the only production writers. The gates below still
+//! hand the target over directly rather than waiting for acquisition, because
+//! that keeps a failure in this file attributable to a **table row** rather than
+//! to acquisition; `crates/lodestone-entity/tests/target_acquisition.rs` is what
+//! proves acquisition itself.
 //!
-//! What is still missing is **line of sight**: vanilla's is an eye-to-eye
-//! `level.clip` ray (`TargetingConditions.java:90`), which #456's local block
-//! cues structurally cannot answer, so it is unimplemented. That errs
-//! *permissive* — a mob can acquire through a wall.
-//!
-//! [#226]: https://github.com/matteopolak/lodestone/issues/226
+//! What is still missing is **line of sight**: vanilla's is an eye-to-eye ray
+//! cast (`TargetingConditions.test` calling `LivingEntity.hasLineOfSight`, which
+//! resolves to `level.clip`), which this repo's local `BlockCues` lookups
+//! structurally cannot answer, so it is unimplemented. That errs *permissive* —
+//! a mob can acquire through a wall.
 
 use crate::ai::goal::Goal;
 use crate::ai::goals::{MeleeAttackGoal, RandomStrollGoal};
@@ -140,30 +145,27 @@ pub const SPECIES: &[&str] = &[
 #[must_use]
 pub fn lookup(species: &str) -> Option<&'static [Registration]> {
     match species {
-        // `Husk` (`monster/zombie/Husk.java:31`) and `ZombieVillager`
-        // (`monster/zombie/ZombieVillager.java:61`) both extend `Zombie` and
-        // declare neither `registerGoals` nor `addBehaviourGoals`, so they
-        // inherit the whole table verbatim. Checked per class, not inferred from
-        // the family — their sibling `Drowned` does override, one method down.
+        // `Husk` and `ZombieVillager` both extend `Zombie` and declare neither
+        // `registerGoals` nor `addBehaviourGoals`, so they inherit the whole
+        // table verbatim. Checked per class, not inferred from the family —
+        // their sibling `Drowned` does override, one method down.
         "zombie" | "husk" | "zombie_villager" => Some(ZOMBIE),
         "drowned" => Some(DROWNED),
         "creeper" => Some(CREEPER),
-        // `CaveSpider` (`monster/spider/CaveSpider.java:20`) likewise inherits
-        // `Spider`'s; its only overrides are attributes and a poison effect on
-        // hit.
+        // `CaveSpider` likewise inherits `Spider`'s; its only overrides are
+        // attributes and a poison effect on hit.
         "spider" | "cave_spider" => Some(SPIDER),
         // `Skeleton`, `Stray`, `Bogged` and `Parched` all extend
         // `AbstractSkeleton` and declare no `registerGoals`.
         "skeleton" | "stray" | "bogged" | "parched" => Some(SKELETON),
-        // `WitherSkeleton` *does* declare one
-        // (`monster/skeleton/WitherSkeleton.java:38-41`), so it gets its own
-        // table rather than sharing the base one.
+        // `WitherSkeleton` *does* declare one (`WitherSkeleton.registerGoals`),
+        // so it gets its own table rather than sharing the base one.
         "wither_skeleton" => Some(WITHER_SKELETON),
         _ => None,
     }
 }
 
-/// `monster/Creeper.java:65-74`.
+/// `Creeper.registerGoals`.
 ///
 /// The reference shape for this family: a creeper's swell and detonation already
 /// reach a real client (`crates/protocol/v770/tests/server_creeper_metadata_and_explode.rs`),
@@ -199,7 +201,7 @@ pub const CREEPER: &[Registration] = &[
     Registration::target(2, "HurtByTargetGoal", hurt_by_target),
 ];
 
-/// `monster/spider/Spider.java:57-67`.
+/// `Spider.registerGoals`.
 pub const SPIDER: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
     // `AvoidEntityGoal<>(this, Armadillo.class, 6.0F, 1.0, 1.2, e -> !e.isScared())`.
@@ -224,9 +226,9 @@ pub const SPIDER: &[Registration] = &[
     Registration::missing(Selector::Target, 3, "Spider.SpiderTargetGoal(IronGolem)"),
 ];
 
-/// `monster/zombie/Zombie.java:112-116` plus `addBehaviourGoals` at `:119-130`,
-/// which `registerGoals` calls at `:116` — the registrations are split across two
-/// methods and both halves belong to this table.
+/// `Zombie.registerGoals` plus `Zombie.addBehaviourGoals`, which
+/// `registerGoals` calls — the registrations are split across two methods and
+/// both halves belong to this table.
 ///
 /// A zombie gets **no** `FloatGoal`, which is not an omission: vanilla does not
 /// register one, because zombies sink and walk along the bottom.
@@ -240,7 +242,8 @@ pub const ZOMBIE: &[Registration] = &[
     Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
     Registration::goal(8, "RandomLookAroundGoal", random_look_around),
     // `SpearUseGoal<>(this, 1.0, 1.0, 10.0F, 2.0F)` — new in 26.2, and a ranged
-    // goal, so it belongs to #227 rather than here.
+    // goal, so it belongs to the ranged-attack roster (`super::ranged`) rather
+    // than here.
     Registration::missing(Selector::Goal, 2, "SpearUseGoal"),
     // `ZombieAttackGoal(this, 1.0, false)` extends `MeleeAttackGoal`, adding only
     // the raised-arms metadata flag while it runs.
@@ -250,7 +253,7 @@ pub const ZOMBIE: &[Registration] = &[
     Registration::missing(Selector::Goal, 6, "MoveThroughVillageGoal"),
     Registration::goal(7, "WaterAvoidingRandomStrollGoal", stroll),
     // `HurtByTargetGoal(this).setAlertOthers(ZombifiedPiglin.class)`. The
-    // retaliation is modelled; the alert propagation is not (#233).
+    // retaliation is modelled; the alert propagation to nearby mobs is not.
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
     Registration::target(2, "NearestAttackableTargetGoal(Player)", nearest_attackable_target),
     Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(AbstractVillager)"),
@@ -258,12 +261,12 @@ pub const ZOMBIE: &[Registration] = &[
     Registration::missing(Selector::Target, 5, "NearestAttackableTargetGoal(Turtle)"),
 ];
 
-/// `monster/zombie/Zombie.java:113-115` plus `monster/zombie/Drowned.java:91-103`.
+/// `Zombie.registerGoals` plus `Drowned.addBehaviourGoals`.
 ///
 /// **The one species in this family whose parent's table is only partly
-/// inherited.** `Drowned extends Zombie` (`Drowned.java:67`) and overrides
-/// `addBehaviourGoals` — *not* `registerGoals`. Since `Zombie.registerGoals`
-/// calls `this.addBehaviourGoals()` at `:116`, a drowned keeps exactly the three
+/// inherited.** `Drowned extends Zombie` and overrides `addBehaviourGoals` —
+/// *not* `registerGoals`. Since `Zombie.registerGoals` calls
+/// `this.addBehaviourGoals()`, a drowned keeps exactly the three
 /// rows `Zombie.registerGoals` adds itself (turtle-egg at 4, and both look goals
 /// at 8) and replaces the other nine wholesale. Reading "Drowned inherits
 /// Zombie's goals" off the class hierarchy would give it `SpearUseGoal`,
@@ -274,39 +277,41 @@ pub const ZOMBIE: &[Registration] = &[
 /// of the eight unmodelled ones are the amphibious navigation and the trident,
 /// neither of which exists in this repo.
 pub const DROWNED: &[Registration] = &[
-    // -- inherited from `Zombie.registerGoals` (`Zombie.java:113-115`) --------
+    // -- inherited from `Zombie.registerGoals` --------------------------------
     Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
     Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
     Registration::goal(8, "RandomLookAroundGoal", random_look_around),
-    // -- `Drowned.addBehaviourGoals` (`Drowned.java:92-103`) ------------------
+    // -- `Drowned.addBehaviourGoals` ------------------------------------------
     // `Drowned.DrownedGoToWaterGoal(this, 1.0)` — seeks a water column to
     // submerge in. Needs the water-aware navigation `AmphibiousPathNavigation`
-    // provides (`Drowned.java:86-88`) and this repo's `PathWorld` does not.
+    // provides (`Drowned.createNavigation`) and this repo's `PathWorld` does
+    // not.
     Registration::missing(Selector::Goal, 1, "Drowned.DrownedGoToWaterGoal"),
     // `Drowned.DrownedTridentAttackGoal(this, 1.0, 40, 10.0F)` extends
-    // `RangedAttackGoal` (`Drowned.java:531`) — ranged, so issue #227's, not
-    // this unit's. Note it shares priority 2 with the melee goal below: vanilla
-    // gates them on the held item rather than on precedence.
+    // `RangedAttackGoal` — ranged, so it belongs to the ranged-attack roster
+    // (`super::ranged`), not this unit's. Note it shares priority 2 with the
+    // melee goal below: vanilla gates them on the held item rather than on
+    // precedence.
     Registration::missing(Selector::Goal, 2, "Drowned.DrownedTridentAttackGoal"),
-    // `Drowned.DrownedAttackGoal(this, 1.0, false)` extends `ZombieAttackGoal`
-    // (`Drowned.java:323`), adding only the `okTarget` check — vanilla's rule
-    // that a drowned in water will chase anything but on land only chases a
-    // target that is itself in water (`Drowned.java:223`). Not modelled: our
-    // melee goal chases whatever target it is given, which on land makes a
-    // drowned slightly more aggressive than vanilla's.
+    // `Drowned.DrownedAttackGoal(this, 1.0, false)` extends `ZombieAttackGoal`,
+    // adding only the `okTarget` check — vanilla's rule that a drowned in water
+    // will chase anything but on land only chases a target that is itself in
+    // water (`Drowned.okTarget`). Not modelled: our melee goal chases whatever
+    // target it is given, which on land makes a drowned slightly more
+    // aggressive than vanilla's.
     Registration::goal(2, "Drowned.DrownedAttackGoal", melee_attack),
-    // `Drowned.DrownedGoToBeachGoal(this, 1.0)` extends `MoveToBlockGoal`
-    // (`Drowned.java:342`) — leaves the water at night to hunt. No sun/time
-    // query on the AI seam and no water to leave.
+    // `Drowned.DrownedGoToBeachGoal(this, 1.0)` extends `MoveToBlockGoal` —
+    // leaves the water at night to hunt. No sun/time query on the AI seam and
+    // no water to leave.
     Registration::missing(Selector::Goal, 5, "Drowned.DrownedGoToBeachGoal"),
-    // `Drowned.DrownedSwimUpGoal(this, 1.0, seaLevel)` (`Drowned.java:482`) —
-    // rises toward the surface. Needs a sea-level query and vertical swimming.
+    // `Drowned.DrownedSwimUpGoal(this, 1.0, seaLevel)` — rises toward the
+    // surface. Needs a sea-level query and vertical swimming.
     Registration::missing(Selector::Goal, 6, "Drowned.DrownedSwimUpGoal"),
     // `RandomStrollGoal(this, 1.0)` — the plain stroll, **not** the
     // water-avoiding subclass every other species in this family registers
-    // (contrast `Zombie.java:123`). So this is the one stroll row in the roster
-    // where our `RandomStrollGoal` is an exact match rather than a disclosed
-    // simplification: a drowned is happy to wander into water.
+    // (contrast `Zombie.addBehaviourGoals`). So this is the one stroll row in
+    // the roster where our `RandomStrollGoal` is an exact match rather than a
+    // disclosed simplification: a drowned is happy to wander into water.
     Registration::goal(7, "RandomStrollGoal", stroll),
     // `HurtByTargetGoal(this, Drowned.class).setAlertOthers(ZombifiedPiglin.class)`.
     // The second constructor argument is the *ignore* list — a drowned does not
@@ -323,39 +328,38 @@ pub const DROWNED: &[Registration] = &[
     Registration::missing(Selector::Target, 5, "NearestAttackableTargetGoal(Turtle)"),
 ];
 
-/// `monster/skeleton/AbstractSkeleton.java:76-86`, plus the priority-4 weapon
-/// goal that `reassessWeaponGoal()` installs at `:144`/`:146` rather than in
-/// `registerGoals`.
+/// `AbstractSkeleton.registerGoals`, plus the priority-4 weapon goal that
+/// `reassessWeaponGoal()` installs rather than in `registerGoals`.
 ///
-/// That priority-4 slot is the reason [`GoalSelector::remove`] exists: vanilla
-/// removes *both* candidate goals and re-adds exactly one every time the
-/// skeleton's held item changes (`:132-148`).
+/// That priority-4 slot is the reason [`GoalSelector::remove`] exists: vanilla's
+/// `AbstractSkeleton.reassessWeaponGoal` removes *both* candidate goals and
+/// re-adds exactly one every time the skeleton's held item changes.
 ///
 /// **Which one it re-adds is not a coin toss.** `populateDefaultEquipmentSlots`
-/// puts a `BOW` in the main hand *unconditionally* (`:109-112` — no random roll,
-/// no difficulty gate), so `usedWeapon.is(Items.BOW)` at `:137` is true for every
-/// normally-spawned skeleton and the `else` at `:146` **never runs**. This table
+/// puts a `BOW` in the main hand *unconditionally* — no random roll, no
+/// difficulty gate — so `usedWeapon.is(Items.BOW)` is true for every
+/// normally-spawned skeleton and the `else` branch **never runs**. This table
 /// therefore carries the bow half, which is the only branch the game reaches.
-/// It used to carry the melee half, modelling a state a skeleton is never in
-/// (#226) — and a *second* priority-4 row would have been worse than either,
-/// since both goals claim MOVE and the winner would be registration-order
-/// dependent.
+/// It used to carry the melee half, modelling a state a skeleton is never in —
+/// and a *second* priority-4 row would have been worse than either, since both
+/// goals claim MOVE and the winner would be registration-order dependent.
 ///
 /// [`WITHER_SKELETON`] is the exception, and the boundary is the **equipment**
-/// override, not the goal method: `WitherSkeleton.java:74-76` overrides
-/// `populateDefaultEquipmentSlots` to hand out a `STONE_SWORD`, and the
-/// *inherited* `reassessWeaponGoal` then takes the `else`. It does not override
-/// `reassessWeaponGoal` itself — only calls it (`:88`). `Skeleton`, `Stray`,
-/// `Bogged` and `Parched` override neither method, so all four inherit the bow
-/// and share this table.
+/// override, not the goal method: `WitherSkeleton.populateDefaultEquipmentSlots`
+/// overrides that method to hand out a `STONE_SWORD`, and the *inherited*
+/// `reassessWeaponGoal` then takes the `else`. It does not override
+/// `reassessWeaponGoal` itself — only calls it, from `WitherSkeleton.finalizeSpawn`.
+/// `Skeleton`, `Stray`, `Bogged` and `Parched` override neither method, so all
+/// four inherit the bow and share this table.
 ///
 /// One known simplification inside the shared row: `Bogged` and `Parched` *do*
 /// override the interval, to `70` below Hard against `AbstractSkeleton`'s `40`
-/// (`Bogged.java:117-124`, `Parched.java:57-64`, `AbstractSkeleton.java:151-157`).
-/// All four get `40` here, because the interval is an argument to the shared
-/// builder rather than a row identity, and nothing in this repo carries a world
-/// difficulty for the Hard half either. Splitting it needs a per-species field on
-/// [`SpeciesContext`], not a fourth table.
+/// (`Bogged.getAttackInterval`, `Parched.getAttackInterval`,
+/// `AbstractSkeleton.getAttackInterval`). All four get `40` here, because the
+/// interval is an argument to the shared builder rather than a row identity, and
+/// nothing in this repo carries a world difficulty for the Hard half either.
+/// Splitting it needs a per-species field on [`SpeciesContext`], not a fourth
+/// table.
 ///
 /// [`GoalSelector::remove`]: crate::ai::GoalSelector::remove
 pub const SKELETON: &[Registration] = &[
@@ -364,16 +368,17 @@ pub const SKELETON: &[Registration] = &[
     // daytime query plus an empty HEAD slot, and its *effect* is
     // `GroundPathNavigation.setAvoidSun(true)` — a sky-light penalty in the
     // path evaluator, a pathfinder feature. `FleeSunGoal` needs a host-computed
-    // shaded position (`FleeSunGoal.java:64-73` probes ten spots). So a
-    // skeleton does not seek shade. Daylight *burning* is separately #226's.
+    // shaded position (`FleeSunGoal.getHidePos` probes ten spots). So a
+    // skeleton does not seek shade. Daylight *burning* is modelled separately,
+    // not by this table.
     Registration::missing(Selector::Goal, 2, "RestrictSunGoal"),
     Registration::missing(Selector::Goal, 3, "FleeSunGoal"),
     Registration::goal(3, "AvoidEntityGoal(Wolf)", avoid_entity),
-    // `reassessWeaponGoal()` at `:144`: the bow branch, the only one a
+    // `AbstractSkeleton.reassessWeaponGoal`'s bow branch, the only one a
     // normally-spawned skeleton takes. Vanilla's `bowGoal` field is
-    // `new RangedBowAttackGoal<>(this, 1.0, 20, 15.0F)` (`:55`), with the
-    // interval overwritten per difficulty at `:138-143`. The `else` at `:146`
-    // installs `meleeGoal` and belongs to `WITHER_SKELETON` alone.
+    // `new RangedBowAttackGoal<>(this, 1.0, 20, 15.0F)`, with the interval
+    // overwritten per difficulty. The `else` branch installs `meleeGoal` and
+    // belongs to `WITHER_SKELETON` alone.
     Registration::goal(4, "RangedBowAttackGoal", super::ranged::bow_attack),
     Registration::goal(5, "WaterAvoidingRandomStrollGoal", stroll),
     Registration::goal(6, "LookAtPlayerGoal(Player)", look_at_player_8),
@@ -384,13 +389,14 @@ pub const SKELETON: &[Registration] = &[
     Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(Turtle)"),
 ];
 
-/// `monster/skeleton/WitherSkeleton.java:38-41` — one extra target registration,
-/// then everything in [`SKELETON`].
+/// `WitherSkeleton.registerGoals` — one extra target registration, then
+/// everything in [`SKELETON`].
 ///
 /// `WitherSkeleton` is the only class in this family that declares
-/// `registerGoals`, and it adds its row **before** calling `super.registerGoals()`
-/// at `:40`, which is why the piglin row comes first here. Vanilla's ordering is
-/// observable only among rows of equal priority, and this row shares priority 3
+/// `registerGoals`, and it adds its row **before** calling
+/// `super.registerGoals()`, which is why the piglin row comes first here.
+/// Vanilla's ordering is observable only among rows of equal priority, and this
+/// row shares priority 3
 /// with two others, so transcribing the order matters even though all three are
 /// unmodelled.
 ///
@@ -402,16 +408,17 @@ pub const SKELETON: &[Registration] = &[
 /// the two cannot drift.
 pub const WITHER_SKELETON: &[Registration] = &[
     // `NearestAttackableTargetGoal<>(this, AbstractPiglin.class, true)`
-    // (`WitherSkeleton.java:39`). No piglin can exist in this sim.
+    // (`WitherSkeleton.registerGoals`). No piglin can exist in this sim.
     Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(AbstractPiglin)"),
-    // -- `super.registerGoals()` (`AbstractSkeleton.java:77-86`) + `:146` -----
+    // -- `super.registerGoals()` (`AbstractSkeleton.registerGoals`) plus the
+    // -- weapon `else` branch --------------------------------------------
     Registration::missing(Selector::Goal, 2, "RestrictSunGoal"),
     Registration::missing(Selector::Goal, 3, "FleeSunGoal"),
     Registration::goal(3, "AvoidEntityGoal(Wolf)", avoid_entity),
-    // The `else` half of `reassessWeaponGoal` (`:146`) — the one branch of this
-    // family that is really melee, because `WitherSkeleton.java:74-76` overrides
-    // `populateDefaultEquipmentSlots` with a `STONE_SWORD` and so fails the
-    // `is(Items.BOW)` test at `:137`. [`SKELETON`] takes `:144` instead.
+    // The `else` half of `reassessWeaponGoal` — the one branch of this family
+    // that is really melee, because `WitherSkeleton.populateDefaultEquipmentSlots`
+    // overrides with a `STONE_SWORD` and so fails the `is(Items.BOW)` test.
+    // [`SKELETON`] takes the bow branch instead.
     Registration::goal(4, "MeleeAttackGoal", melee_attack_1_2),
     Registration::goal(5, "WaterAvoidingRandomStrollGoal", stroll),
     Registration::goal(6, "LookAtPlayerGoal(Player)", look_at_player_8),
@@ -422,15 +429,14 @@ pub const WITHER_SKELETON: &[Registration] = &[
     Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(Turtle)"),
 ];
 
-/// `WaterAvoidingRandomStrollGoal(this, 0.8)` — creeper (`Creeper.java:70`) and
-/// spider (`Spider.java:62`).
+/// `WaterAvoidingRandomStrollGoal(this, 0.8)` — creeper (`Creeper.registerGoals`)
+/// and spider (`Spider.registerGoals`).
 fn stroll_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RandomStrollGoal::new(ctx.speed * 0.8))
 }
 
-/// `MeleeAttackGoal(this, 1.2, false)` — `AbstractSkeleton`'s `meleeGoal` field
-/// (`monster/skeleton/AbstractSkeleton.java:56`), faster than the 1.0 every other
-/// species in this family uses.
+/// `MeleeAttackGoal(this, 1.2, false)` — `AbstractSkeleton`'s `meleeGoal` field,
+/// faster than the 1.0 every other species in this family uses.
 ///
 /// Declared on `AbstractSkeleton` but reachable only by [`WITHER_SKELETON`]: the
 /// `else` branch that installs it needs a non-bow main hand, and only the wither
@@ -539,8 +545,8 @@ mod tests {
     ///
     /// `/usr/bin/grep -n "registerGoals\|addGoal\|addBehaviourGoals"` over each
     /// class: zero hits for `Husk`, `ZombieVillager`, `CaveSpider`, `Skeleton`,
-    /// `Stray`, `Bogged` and `Parched`; `Drowned.java:91` overrides
-    /// `addBehaviourGoals`; `WitherSkeleton.java:38` overrides `registerGoals`.
+    /// `Stray`, `Bogged` and `Parched`; `Drowned` overrides `addBehaviourGoals`;
+    /// `WitherSkeleton` overrides `registerGoals`.
     #[test]
     fn inheritance_matches_which_classes_declare_register_goals() {
         let same = |a: &str, b: &str| {
@@ -591,10 +597,12 @@ mod tests {
     /// That divergence is the priority-4 weapon row, and it is *asserted* rather
     /// than filtered away. `reassessWeaponGoal` picks its branch from the held
     /// item, so the skeleton's unconditional `BOW`
-    /// (`AbstractSkeleton.java:109-112`) reaches `:144` and the wither's
-    /// `STONE_SWORD` (`WitherSkeleton.java:74-76`) reaches `:146`. A gate that
-    /// merely skipped priority 4 would still pass with both tables carrying the
-    /// *same* goal — which is precisely the state #226 found.
+    /// (`AbstractSkeleton.populateDefaultEquipmentSlots`) reaches the bow branch
+    /// and the wither's `STONE_SWORD`
+    /// (`WitherSkeleton.populateDefaultEquipmentSlots`) reaches the melee
+    /// branch. A gate that merely skipped priority 4 would still pass with both
+    /// tables carrying the *same* goal — which is precisely the bug the
+    /// pre-split shared table produced.
     #[test]
     fn wither_skeleton_is_the_base_table_plus_the_piglin_row_and_the_weapon_swap() {
         assert_eq!(
@@ -677,41 +685,43 @@ mod tests {
     /// rather than merely move in the right direction.
     ///
     /// The interesting row is the wither skeleton's melee. Vanilla's `meleeGoal`
-    /// field is `new MeleeAttackGoal(this, 1.2, false)`
-    /// (`monster/skeleton/AbstractSkeleton.java:56`) — every other melee row in
-    /// this family is `1.0` — so at the skeleton family's `MOVEMENT_SPEED 0.25`
-    /// (`:90`) the two hypotheses are `0.30` and `0.25`, and the assertion is
-    /// written to fail on the wrong one.
+    /// field is `new MeleeAttackGoal(this, 1.2, false)` — every other melee row
+    /// in this family is `1.0` — so at the skeleton family's
+    /// `AbstractSkeleton.createAttributes` `MOVEMENT_SPEED 0.25` the two
+    /// hypotheses are `0.30` and `0.25`, and the assertion is written to fail on
+    /// the wrong one.
     ///
-    /// The plain skeleton's priority-4 row is the *bow* goal, whose multiplier is
-    /// `1.0` (`:55`), so it cannot host that discriminator — 1.0 × 0.25 is its
-    /// bare movement speed. It is still pinned to the value, just without the
-    /// inequality; the wither carries the inequality.
+    /// The plain skeleton's priority-4 row is the *bow* goal, whose multiplier
+    /// is `1.0` (`AbstractSkeleton`'s `bowGoal` field), so it cannot host that
+    /// discriminator — 1.0 × 0.25 is its bare movement speed. It is still
+    /// pinned to the value, just without the inequality; the wither carries the
+    /// inequality.
     #[test]
     fn transcribed_speed_multipliers_land_on_the_jars_value() {
         // (species, movement_speed, vanilla row, jar factor)
         let cases: &[(&str, f64, &str, f64)] = &[
-            // `AbstractSkeleton.java:55` — the bowGoal's 1.0, at `:90`'s
-            // MOVEMENT_SPEED 0.25.
+            // `AbstractSkeleton`'s `bowGoal` field — 1.0, at
+            // `AbstractSkeleton.createAttributes`'s MOVEMENT_SPEED 0.25.
             ("skeleton", 0.25, "RangedBowAttackGoal", 1.0),
-            // `AbstractSkeleton.java:56` — the meleeGoal's 1.2, at the same 0.25.
+            // `AbstractSkeleton`'s `meleeGoal` field — 1.2, at the same 0.25.
             // Only the wither ever installs it.
             ("wither_skeleton", 0.25, "MeleeAttackGoal", 1.2),
-            // `Creeper.java:69` — 1.0, at 0.25.
+            // `Creeper.registerGoals` — 1.0, at 0.25.
             ("creeper", 0.25, "MeleeAttackGoal", 1.0),
-            // `Zombie.java:121` — `ZombieAttackGoal(this, 1.0, false)`, at
-            // `Zombie.java:134`'s MOVEMENT_SPEED 0.23.
+            // `Zombie.addBehaviourGoals` — `ZombieAttackGoal(this, 1.0, false)`,
+            // at `Zombie.createAttributes`'s MOVEMENT_SPEED 0.23.
             ("zombie", 0.23, "ZombieAttackGoal", 1.0),
-            // `Drowned.java:94` — 1.0. `Drowned.createAttributes` is
-            // `Zombie.createAttributes().add(STEP_HEIGHT, 1.0)`
-            // (`Drowned.java:81-83`), so the speed is the zombie's 0.23.
+            // `Drowned.addBehaviourGoals` — 1.0. `Drowned.createAttributes` is
+            // `Zombie.createAttributes().add(STEP_HEIGHT, 1.0)`, so the speed is
+            // the zombie's 0.23.
             ("drowned", 0.23, "Drowned.DrownedAttackGoal", 1.0),
-            // `Creeper.java:70` and `Spider.java:62` — the 0.8 strolls.
+            // `Creeper.registerGoals` and `Spider.registerGoals` — the 0.8
+            // strolls.
             ("creeper", 0.25, "WaterAvoidingRandomStrollGoal", 0.8),
             ("spider", 0.3, "WaterAvoidingRandomStrollGoal", 0.8),
-            // `Zombie.java:123` — 1.0.
+            // `Zombie.addBehaviourGoals` — 1.0.
             ("zombie", 0.23, "WaterAvoidingRandomStrollGoal", 1.0),
-            // `Drowned.java:97` — the *plain* `RandomStrollGoal(this, 1.0)`.
+            // `Drowned.addBehaviourGoals` — the *plain* `RandomStrollGoal(this, 1.0)`.
             ("drowned", 0.23, "RandomStrollGoal", 1.0),
         ];
 
@@ -807,16 +817,17 @@ mod tests {
     /// roster says it gets, and ticks.
     ///
     /// **No `add` call of its own.** A gate that installs the goal it is about to
-    /// observe cannot tell whether the roster installed it — the closed loop that
-    /// hid issue #441's island. `NavigatingMob` is the only production
-    /// implementor of `MobController`, so the goals run against the same
-    /// perception the running game gives them.
+    /// observe cannot tell whether the roster installed it — the closed loop
+    /// that hid a real island: a hostile mob's target acquisition was wired but
+    /// unreachable, because the perception feed was written and never read.
+    /// `NavigatingMob` is the only production implementor of `MobController`, so
+    /// the goals run against the same perception the running game gives them.
     ///
     /// The attack target is set explicitly so this gate stays about the *roster*
-    /// rather than about acquisition: `find_nearest_target` reads the perception
-    /// feed as of #455, and `tests/target_acquisition.rs` is what proves that.
-    /// Handing the target over directly keeps this file's failures attributable
-    /// to a table row.
+    /// rather than about acquisition: `NavigatingMob::find_nearest_target` reads
+    /// the perception feed, and `tests/target_acquisition.rs` is what proves
+    /// that. Handing the target over directly keeps this file's failures
+    /// attributable to a table row.
     fn run(species: &str, movement_speed: f64, at: Vec3, ticks: usize) -> Outcome {
         let world = Flat::new();
         let ctx = SpeciesContext::new(movement_speed);
@@ -897,13 +908,13 @@ mod tests {
     /// production path — the priority-order-sensitive gate.
     ///
     /// `SwellGoal` is at goal-priority 2 and `MeleeAttackGoal` at 4
-    /// (`monster/Creeper.java:66`, `:69`), and both claim MOVE, so the *only*
+    /// (`Creeper.registerGoals`), and both claim MOVE, so the *only*
     /// reason the fuse ever climbs is that 2 outranks 4. Transcribe the swell at
     /// any number above 4 and melee holds MOVE and the creeper never primes,
     /// which is the control A3 ran and this gate inherits.
     #[test]
     fn a_creeper_swells_because_vanillas_priority_2_outranks_melees_4() {
-        // Inside `SwellGoal`'s 9.0 squared proximity (`ai/goal/SwellGoal.java:20`).
+        // Inside `SwellGoal.canUse`'s 9.0 squared proximity.
         let close = Vec3::new(2.0, 0.0, 0.5);
         let creeper = run("creeper", 0.25, close, 40);
         let zombie = run("zombie", 0.23, close, 40);
@@ -928,8 +939,8 @@ mod tests {
     /// `drowned` was in no family, so `registrations_for` returned `FALLBACK` and
     /// a drowned in the running game could only stroll and look — the same
     /// observable as the llama control above. Its melee row is at goal-priority 2
-    /// (`Drowned.java:94`), not the zombie's 3, and it is the only modelled MOVE
-    /// goal in its table besides the priority-7 stroll.
+    /// (`Drowned.addBehaviourGoals`), not the zombie's 3, and it is the only
+    /// modelled MOVE goal in its table besides the priority-7 stroll.
     #[test]
     fn a_drowned_attacks_from_its_own_table_rather_than_the_fallback() {
         let target = Vec3::new(6.5, 0.0, 0.5);
@@ -952,7 +963,7 @@ mod tests {
     }
 
     /// A skeleton **shoots** and a wither skeleton **punches** — the behavioural
-    /// gate for #226's weapon-branch fix.
+    /// gate for the skeleton weapon-branch fix (`48062b7`).
     ///
     /// A priority multiset cannot see this fix: the slot is 4 on both sides either
     /// way and only the occupant changes. So assert the observable instead, and
@@ -966,19 +977,19 @@ mod tests {
     /// The launch count is predicted rather than merely required to be positive.
     /// The bow draws for `BOW_FULL_DRAW_TICKS` = 20 (vanilla's
     /// `getTicksUsingItem() >= 20`) and then waits out `getAttackInterval()` = 40,
-    /// the value `reassessWeaponGoal` installs below Hard
-    /// (`AbstractSkeleton.java:139-143`, `:151-157`) — a 60-tick cycle whose first
+    /// the value `AbstractSkeleton.reassessWeaponGoal` installs below Hard via
+    /// `getAttackInterval`/`getHardAttackInterval` — a 60-tick cycle whose first
     /// release lands on tick 21, so ticks 21, 81, … 741 give **13** releases in
     /// 800. A wrong interval or a missing draw phase lands somewhere else.
     ///
     /// The **target is 30 blocks out**, which is what makes the distance assertion
     /// mean anything. At 6 blocks a skeleton legitimately walks *in* — the goal
-    /// only parks once `seeTime` reaches 20 (`RangedBowAttackGoal.java:86-92`), and
-    /// 20 ticks at 0.25 blocks/tick is 5 blocks, so it arrives at 1.25 and a
+    /// only parks once `seeTime` reaches 20 (`RangedBowAttackGoal.tick`), and 20
+    /// ticks at 0.25 blocks/tick is 5 blocks, so it arrives at 1.25 and a
     /// "did not close" bound would fail on correct code. Measured, and the reason
-    /// this gate is shaped the way it is. From 30 the binding constraint is instead
-    /// the bow's own `attackRadius` of `15.0F` (`AbstractSkeleton.java:55`), so the
-    /// hold distance itself becomes the prediction.
+    /// this gate is shaped the way it is. From 30 the binding constraint is
+    /// instead the bow's own `attackRadius` of `15.0F` (`AbstractSkeleton`'s
+    /// `bowGoal` field), so the hold distance itself becomes the prediction.
     #[test]
     fn a_skeleton_shoots_from_range_and_a_wither_skeleton_closes_and_punches() {
         // 30 blocks out — beyond the bow's 15.0 radius, inside the 35.0 follow
