@@ -1228,6 +1228,69 @@ pub trait ChunkSource: Send + Sync {
     }
 }
 
+/// Forwards every [`ChunkSource`] method through the `Arc`, the same shape
+/// `crate::protocol`'s `impl<P: ServerProtocol + ?Sized> ServerProtocol for
+/// Box<P>` already establishes for that trait — see its own doc comment for
+/// why the forwarding has to be hand-written rather than derived.
+///
+/// Issue #562: this is what lets [`IntegratedServer::publish`](crate::IntegratedServer::publish)
+/// hand every connection it accepts an `Arc<dyn ChunkSource>` — the
+/// type-erased handle a running world's `HostCore` stores — through a
+/// `serve_connection*` entry point whose `S: ChunkSource` bound is otherwise
+/// only satisfiable by a concrete, `Sized` source. `Arc` is `#[fundamental]`,
+/// so the impl is coherent here in the trait's own crate, same as `Box`'s.
+///
+/// **When you add a method to [`ChunkSource`], add its forward here too** — an
+/// unforwarded defaulted method would silently answer the trait's own default
+/// (`None`, a no-op, or a full regeneration) for every erased source instead
+/// of asking the real one, which for `sibling`/`dimension` means a published
+/// LAN player's portal travel would silently stop working while a directly-held
+/// concrete source kept it.
+impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
+    fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        (**self).column(cx, cz)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        (**self).block_state(x, y, z)
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        (**self).set_block(x, y, z, name);
+    }
+
+    fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<crate::block_entities::BlockEntity> {
+        (**self).block_entity(x, y, z)
+    }
+
+    fn unload(&self, cx: i32, cz: i32) {
+        (**self).unload(cx, cz);
+    }
+
+    fn set_retention_radius(&self, view_radius: i32) {
+        (**self).set_retention_radius(view_radius);
+    }
+
+    fn world_registries(&self) -> Option<WorldRegistries> {
+        (**self).world_registries()
+    }
+
+    fn dimension(&self) -> Option<crate::dimension::Dimension> {
+        (**self).dimension()
+    }
+
+    fn sibling(
+        &self,
+        dimension: crate::dimension::Dimension,
+    ) -> Option<std::sync::Arc<dyn ChunkSource>> {
+        (**self).sibling(dimension)
+    }
+
+    fn portal_index(&self) -> Option<&crate::portal::PortalIndex> {
+        (**self).portal_index()
+    }
+}
+
 /// The live registries a persistent [`ChunkSource`] owns, handed to a
 /// server constructor so the tick loop and the save path share one instance.
 ///

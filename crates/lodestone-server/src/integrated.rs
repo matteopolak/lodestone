@@ -140,6 +140,65 @@ impl LanSubscriber {
     }
 }
 
+/// Shared, type-erased handles to a running world's connection-facing state
+/// (issue #562) — what [`IntegratedServer::publish`] needs to add a second,
+/// TCP-backed accept loop over the *same* running world instead of building a
+/// new one. Populated only by a constructor that already shares a tick loop
+/// and a [`PlayerRegistry`] between connections
+/// ([`open_in_memory_with_mobs`](IntegratedServer::open_in_memory_with_mobs) /
+/// [`open_persistent_with_mobs`](IntegratedServer::open_persistent_with_mobs));
+/// the plain in-memory constructors serve exactly one connection and build
+/// none of this, so [`IntegratedServer::host`] stays `None` for them and
+/// `publish` refuses.
+///
+/// `mobs` and `world_state` are deliberately **not** duplicated here: both
+/// already live on [`IntegratedServer`] itself (`Self::mobs`/`Self::world_state`),
+/// so `publish` reads them straight off `self` instead of a second `Arc` naming
+/// the same handle.
+#[cfg(not(target_arch = "wasm32"))]
+struct HostCore {
+    /// Erased to `Box<dyn ServerProtocol>` rather than `Arc<dyn ServerProtocol>`
+    /// directly: the existing `impl ServerProtocol for Box<P>` (`P: ?Sized`) is
+    /// what makes this — and not a second, hand-written `Arc` blanket — the
+    /// coercion `serve_connection*`'s generic `P: ServerProtocol` bound accepts.
+    protocol: Arc<Box<dyn ServerProtocol>>,
+    /// Double-`Arc`, not one: `serve_connection*`'s `source: &Arc<S>` parameter
+    /// always wraps its own generic `S` in an `Arc`, so satisfying it with an
+    /// erased source needs `S` itself to already be `Arc<dyn ChunkSource>` —
+    /// which `chunk.rs`'s `impl<S: ChunkSource + ?Sized> ChunkSource for
+    /// Arc<S>` is what makes `Sized` and `ChunkSource` both hold for.
+    source: Arc<Arc<dyn ChunkSource>>,
+    block_entities: BlockEntityHandle,
+    live_mobs: LiveMobSource,
+    player_registry: PlayerRegistry,
+    /// The tick loop's outbound hub. `publish` calls
+    /// [`BlockTickFeed::subscriber`] on this for every connection it accepts —
+    /// the same call [`IntegratedServer::open_to_lan`]'s own accept loop makes
+    /// per socket.
+    hub_block_ticks: BlockTickFeed,
+    /// The relay task's live subscriber list (see the relay spawned in
+    /// [`IntegratedServer::open_in_memory_with_mobs_using`]), shared so
+    /// `publish` pushes new connections into the **same** relay this world
+    /// already runs rather than standing up a second one.
+    subscribers: Arc<std::sync::Mutex<Vec<LanSubscriber>>>,
+    /// This world's configured view-distance cap, applied to every connection
+    /// `publish` accepts exactly as `open_to_lan` applies it to its own.
+    view_radius: i32,
+}
+
+/// Hand-written: neither [`ServerProtocol`] nor [`ChunkSource`] requires
+/// `Debug` (see `crate::server::SourceRef`'s own doc comment for why —
+/// erasure to a trait object is what lets a connection stay generic over "the
+/// source", and demanding `Debug` on the trait would infect every
+/// implementor), so `#[derive(Debug)]` on [`IntegratedServer`] cannot see
+/// through the two `Arc<dyn _>` fields above.
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for HostCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostCore").finish_non_exhaustive()
+    }
+}
+
 /// Environment variable that re-enables [`crate::mobs::seed_demo_mobs`]'s
 /// population for a debug session. Any value, including empty, enables it.
 pub const DEMO_MOBS_ENV: &str = "LODESTONE_DEMO_MOBS";
@@ -480,6 +539,23 @@ pub struct IntegratedServer {
     /// Joined on shutdown for the same reason `query_task` is.
     #[cfg(not(target_arch = "wasm32"))]
     discovery_task: Option<Task>,
+    /// This world's shared, type-erased connection state (issue #562),
+    /// `Some` only for a constructor that already shares a tick loop and
+    /// player registry between connections. See [`HostCore`] for why
+    /// `publish` needs it and what it deliberately leaves off this struct.
+    #[cfg(not(target_arch = "wasm32"))]
+    host: Option<HostCore>,
+    /// The relay task every [`HostCore::subscribers`] entry is fanned out by
+    /// — including this handle's own local connection, since #562 made it a
+    /// subscriber too. `Some` alongside `host`; nothing else spawns one.
+    #[cfg(not(target_arch = "wasm32"))]
+    relay_task: Option<Task>,
+    /// [`publish`](IntegratedServer::publish)'s own accept-loop task, `Some`
+    /// once a caller has actually published this world. A second `publish`
+    /// call is refused rather than starting a second listener — see that
+    /// method's own doc comment.
+    #[cfg(not(target_arch = "wasm32"))]
+    publish_task: Option<Task>,
 }
 
 /// Everything an open-to-LAN host can configure (issue #535).
@@ -696,6 +772,15 @@ impl IntegratedServer {
                 query_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 discovery_task: None,
+                // No shared tick loop or player registry (see the field's own
+                // doc comment), so there is nothing `publish` could add a
+                // second connection to.
+                #[cfg(not(target_arch = "wasm32"))]
+                host: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                relay_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                publish_task: None,
             },
             client_end,
         )
@@ -839,6 +924,64 @@ impl IntegratedServer {
         // doc comment for why this is safe with exactly one connection (this
         // constructor's own shape).
         let explosion_feed = ExplosionFeed::default();
+        // Issue #562: this connection is a *subscriber* of the two feeds
+        // above rather than their sole direct consumer — the same shape
+        // `open_to_lan`'s relay already uses (see `LanSubscriber`), applied
+        // here so `publish` can add a second, TCP-backed connection to this
+        // same running world later without racing this one for the hub's
+        // drain-all queues. From here on `block_tick_feed`/`explosion_feed`
+        // are the **hub** the tick loop alone publishes into; every consumer
+        // — including this constructor's own local connection — reads
+        // through a subscriber the relay task below fans out to.
+        let subscribers: Arc<std::sync::Mutex<Vec<LanSubscriber>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let local_subscriber = LanSubscriber {
+            block_ticks: block_tick_feed.subscriber(),
+            ..LanSubscriber::default()
+        };
+        let conn_block_ticks = local_subscriber.block_ticks.clone();
+        let conn_explosions = local_subscriber.explosions.clone();
+        let conn_alive = Arc::clone(&local_subscriber.alive);
+        subscribers
+            .lock()
+            .expect("subscriber list poisoned")
+            .push(local_subscriber);
+        // The relay itself: drains the hub once per tick period and fans out
+        // to every live subscriber, pruning dead ones first — byte-for-byte
+        // the loop `open_to_lan`'s accept task runs inline for LAN, pulled out
+        // here so it can also serve connections `publish` adds later. Always
+        // spawned, even for a world nobody ever publishes: it is this
+        // constructor's *only* connection's own feed too now.
+        let relay_hub_block_ticks = block_tick_feed.clone();
+        let relay_hub_explosions = explosion_feed.clone();
+        let relay_subscribers = Arc::clone(&subscribers);
+        let relay_task = spawn_tick_task(&shutdown, async move {
+            let mut relay = tokio::time::interval(crate::tick::TICK_PERIOD);
+            loop {
+                relay.tick().await;
+                let changes = relay_hub_block_ticks.drain_all();
+                let detonations = relay_hub_explosions.drain_all();
+                let effects = relay_hub_block_ticks.drain_effects_tagged();
+                let mut subs = relay_subscribers.lock().expect("subscriber list poisoned");
+                subs.retain(LanSubscriber::is_alive);
+                for subscriber in subs.iter() {
+                    for (x, y, z, state) in &changes {
+                        subscriber.block_ticks.publish(*x, *y, *z, state.clone());
+                    }
+                    for detonation in &detonations {
+                        subscriber.explosions.publish(*detonation);
+                    }
+                    for (except, effect) in &effects {
+                        match except {
+                            Some(player) => subscriber
+                                .block_ticks
+                                .publish_effect_except(*player, effect.clone()),
+                            None => subscriber.block_ticks.publish_effect(effect.clone()),
+                        }
+                    }
+                }
+            }
+        });
         // Issue #325 / `docs/plans/world-state.md` S1: the night-skip vote and
         // its feed, shared between the connection task and the tick task the
         // same way the two feeds above are. The connection records `lay_down`/
@@ -1037,8 +1180,27 @@ impl IntegratedServer {
         let conn_block_entities = block_entities.clone();
         let conn_mobs = mob_handle.clone();
         let conn_source = Arc::clone(&source);
-        let conn_block_ticks = block_tick_feed.clone();
-        let conn_explosions = explosion_feed.clone();
+        // Issue #562: a third clone of each, for `HostCore` — `live_mobs` and
+        // `block_entities` are both moved by value into the tick task below
+        // (`run_tick_loop_with_weather`'s own signature), so a clone taken
+        // there would be too late; this is the same "clone before the move"
+        // shape every other `*_for_handle`/`tick_*` binding in this
+        // constructor already follows.
+        let host_live_mobs = live_mobs.clone();
+        let host_block_entities = block_entities.clone();
+        // `conn_block_ticks`/`conn_explosions` are `local_subscriber`'s own
+        // queues, built above alongside `subscribers`/`relay_task` — issue
+        // #562. Not `block_tick_feed.clone()`/`explosion_feed.clone()`
+        // anymore: those are the hub now, and only the relay task drains them.
+        // Issue #562: erased to `Box<dyn ServerProtocol>` (via the existing
+        // `impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P>`) and
+        // `Arc`-wrapped for cheap sharing, so `publish` can hand the exact
+        // same protocol instance to every connection it accepts later, not
+        // just this one — see `HostCore::protocol`. Erasing here rather than
+        // keeping the concrete `P` is what lets `HostCore` — a field on the
+        // non-generic `IntegratedServer` — name a type at all.
+        let protocol: Arc<Box<dyn ServerProtocol>> = Arc::new(Box::new(protocol));
+        let conn_protocol = Arc::clone(&protocol);
         // Issue #325: cloned out here rather than inside the `async move`
         // below, for the same reason `clock` is — an `Arc::clone` *inside* the
         // block would move the original out of reach of the tick task, which
@@ -1066,7 +1228,7 @@ impl IntegratedServer {
                 // call-site change — see `crate::server::SourceRef`.
                 _ = serve_connection_with_mob_events_shared(
                     &mut conn,
-                    &protocol,
+                    &*conn_protocol,
                     &conn_source,
                     &conn_entities,
                     view_radius,
@@ -1087,6 +1249,10 @@ impl IntegratedServer {
                     &conn_world_state,
                 ) => {}
             }
+            // Issue #562: lets the relay task above drop this connection's
+            // subscriber on its next pass, exactly as `open_to_lan`'s own
+            // per-connection wrapper does for a LAN socket.
+            conn_alive.store(false, std::sync::atomic::Ordering::Relaxed);
         });
 
         let clock = Arc::new(TickClock::new());
@@ -1112,6 +1278,13 @@ impl IntegratedServer {
         // evaluated eagerly, and the distinction did not arise.
         let tick_clock = Arc::clone(&clock);
         let tick_source = Arc::clone(&source);
+        // Issue #562: clones, not the hub bindings themselves — `block_tick_feed`/
+        // `explosion_feed` have to survive this constructor so `HostCore` can
+        // hand `publish` the same hub every later connection's subscriber is
+        // built against. The tick loop only ever needs *a* handle to publish
+        // into, not this particular one.
+        let tick_block_ticks = block_tick_feed.clone();
+        let tick_explosions = explosion_feed.clone();
         // **The world tick follows the player from here on.** `tick_area` above is
         // now only the fallback the loop uses while no player has reported a
         // position; the anchor set rides `world_state`, which the connection task
@@ -1126,7 +1299,14 @@ impl IntegratedServer {
         let follow = crate::tick_area::TickFollow {
             // `DimensionalSource::dimension` — its own inherent accessor, which
             // returns the dimension it serves rather than the trait's `Option`.
-            dimension: source.dimension(),
+            // Issue #562's `impl ChunkSource for Arc<S>` (in `chunk.rs`) gives
+            // `Arc<DimensionalSource<..>>` a *trait* `dimension()` too, and
+            // method resolution stops at the first receiver type with any
+            // match at all — so calling this through the `Arc` directly would
+            // now silently resolve to the trait method (`Option<Dimension>`)
+            // instead of this inherent one. The explicit deref forces
+            // resolution to start at `DimensionalSource` itself.
+            dimension: (*source).dimension(),
             radius: crate::chunk_store::CONCURRENT_TICK_RADIUS,
             anchors: world_state.tick_anchors().clone(),
         };
@@ -1149,9 +1329,9 @@ impl IntegratedServer {
                 block_entities,
                 tick_clock,
                 tick_source,
-                block_tick_feed,
+                tick_block_ticks,
                 tick_area,
-                explosion_feed,
+                tick_explosions,
                 WeatherFeed::default(),
                 WeatherState::default(),
                 &sleep_vote,
@@ -1162,6 +1342,22 @@ impl IntegratedServer {
             )
             .await;
         });
+
+        // Issue #562: `HostCore::source`'s double-`Arc` — see that field's own
+        // doc comment for why one layer is not enough. `source` itself is
+        // still alive here (every earlier use only ever cloned the `Arc`, per
+        // `Arc::clone(&source)` at each of `seed_source`/`conn_source`/
+        // `tick_source` above), so this is one more clone, not a move.
+        let host_source: Arc<Arc<dyn ChunkSource>> = {
+            // `source.clone()` (method syntax), not `Arc::clone(&source)`:
+            // the unsizing coercion to `Arc<dyn ChunkSource>` happens at the
+            // `let` binding's declared type, and only method-call syntax
+            // lets the receiver stay `Arc<Concrete>` while the *return* type
+            // coerces — `Arc::clone(&source)` fixes the argument type from
+            // the annotation instead and fails to unify.
+            let erased: Arc<dyn ChunkSource> = source.clone();
+            Arc::new(erased)
+        };
 
         (
             Self {
@@ -1192,6 +1388,25 @@ impl IntegratedServer {
                 query_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 discovery_task: None,
+                // Issue #562: this constructor is the one place that builds a
+                // tick loop *and* a player registry shared between
+                // connections, so it is the one place that can hand `publish`
+                // something to add a second connection to.
+                #[cfg(not(target_arch = "wasm32"))]
+                host: Some(HostCore {
+                    protocol,
+                    source: host_source,
+                    block_entities: host_block_entities,
+                    live_mobs: host_live_mobs,
+                    player_registry,
+                    hub_block_ticks: block_tick_feed,
+                    subscribers,
+                    view_radius,
+                }),
+                #[cfg(not(target_arch = "wasm32"))]
+                relay_task: Some(relay_task),
+                #[cfg(not(target_arch = "wasm32"))]
+                publish_task: None,
             },
             client_end,
         )
@@ -1998,6 +2213,18 @@ impl IntegratedServer {
             query_task,
             #[cfg(not(target_arch = "wasm32"))]
             discovery_task,
+            // `open_to_lan` manages its own accept loop and relay inline
+            // (issue #439's shape); it is not built through the `HostCore`
+            // seam `publish` uses, so there is nothing to add a connection
+            // *to* here — a caller that wants to publish a running world
+            // calls `publish` on a handle from `open_in_memory_with_mobs` /
+            // `open_persistent_with_mobs` instead.
+            #[cfg(not(target_arch = "wasm32"))]
+            host: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            relay_task: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            publish_task: None,
         };
         // After the `Self` literal, because `start_rcon` needs the handle's
         // shutdown signal — and propagating with `?` here is deliberate: a
@@ -2007,6 +2234,167 @@ impl IntegratedServer {
             server.start_rcon(rcon)?;
         }
         Ok(server)
+    }
+
+    /// Adds a TCP listener to this **already-running** world (issue #562) —
+    /// the "Open to LAN" verb vanilla's
+    /// `Minecraft.getSingleplayerServer().publishServer` is. Nothing about the
+    /// world already in progress is rebuilt: every entity, loaded chunk and
+    /// player position this handle already has is exactly what the next
+    /// accepted connection joins. Contrast [`open_to_lan`](Self::open_to_lan)/
+    /// [`bind`](Self::bind), which *construct* a fresh world — that is what
+    /// this handle's own [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs)/
+    /// [`open_persistent_with_mobs`](Self::open_persistent_with_mobs) already
+    /// called to produce the world this method publishes.
+    ///
+    /// Every connection this accepts shares the **same** [`PlayerRegistry`],
+    /// tick loop, [`ChunkStore`] and [`BlockEntityHandle`] this handle's own
+    /// local connection already uses — reached through [`HostCore`], which
+    /// those two constructors alone populate — and is relayed block ticks and
+    /// detonations by the same relay task that already serves the local
+    /// connection (issue #562 made it a subscriber of that relay too, rather
+    /// than the hub's sole direct reader, precisely so this could be added
+    /// later without racing it). Commands are refused
+    /// ([`CommandDispatch::none`](crate::command::CommandDispatch::none)) and
+    /// resource-pack pushes/plugin channels/access lists are inert defaults —
+    /// the same starting point [`bind`](Self::bind) gives a freshly-built LAN
+    /// world; a host that wants more configures [`open_to_lan`](Self::open_to_lan)
+    /// at world-open time instead.
+    ///
+    /// `discovery_motd` mirrors [`LanConfig::discovery`]: `Some` announces the
+    /// world on vanilla's LAN multicast group so it appears in a joining
+    /// client's multiplayer list unprompted; `None` leaves discovery off. A
+    /// failed discovery bind is logged and otherwise ignored, exactly as
+    /// [`open_to_lan`](Self::open_to_lan) treats it — a world nobody can
+    /// *discover* is still a world you can join by typing the address.
+    ///
+    /// Returns the socket's **actual** bound address — read back from the
+    /// listener, never the address requested (issue #559): pass port `0` for
+    /// an OS-assigned one and report the number this returns, not the one you
+    /// asked for.
+    ///
+    /// # Errors
+    ///
+    /// `io::ErrorKind::Unsupported` if this handle has nothing to publish —
+    /// only a constructor that shares a tick loop and player registry between
+    /// connections builds a [`HostCore`]; [`open_in_memory`](Self::open_in_memory)/
+    /// [`open_in_memory_with_entities`](Self::open_in_memory_with_entities)
+    /// serve exactly one connection and have no registry to add a second to.
+    /// `io::ErrorKind::AlreadyExists` if this handle is already published —
+    /// call this at most once per handle. Otherwise the [`std::io::Error`]
+    /// from binding the TCP listener.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn publish(
+        &mut self,
+        addr: impl tokio::net::ToSocketAddrs,
+        discovery_motd: Option<String>,
+    ) -> std::io::Result<std::net::SocketAddr> {
+        if self.publish_task.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "this world is already published",
+            ));
+        }
+        let Some(host) = &self.host else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this handle has no shared world core to publish — only a world opened with \
+                 open_in_memory_with_mobs/open_persistent_with_mobs can add a second connection",
+            ));
+        };
+        // `self.mobs`/`self.world_state` rather than a copy on `HostCore`:
+        // both already live on this handle for `mobs()`/`world_state()` (see
+        // `HostCore`'s own doc comment), so a second `Arc` here would be a
+        // second name for the same handle, not new state.
+        let Some(mobs) = self.mobs.clone() else {
+            // Unreachable in practice — every constructor that sets `host`
+            // also sets `mobs` (see `open_in_memory_with_mobs_using`'s `Self`
+            // literal) — but `mobs` is independently `Option`-typed, so this
+            // is checked rather than assumed.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this handle has a world core but no mob population to share (this is a bug: \
+                 every constructor that sets one sets the other)",
+            ));
+        };
+
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let local_addr = listener.local_addr()?;
+
+        let protocol = Arc::clone(&host.protocol);
+        let source = Arc::clone(&host.source);
+        let block_entities = host.block_entities.clone();
+        let live_mobs = host.live_mobs.clone();
+        let player_registry = host.player_registry.clone();
+        let hub_block_ticks = host.hub_block_ticks.clone();
+        let subscribers = Arc::clone(&host.subscribers);
+        let view_radius = host.view_radius;
+        let world_state = self.world_state.clone();
+        let signal = self.shutdown.clone();
+
+        let task = spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = signal.notified() => break,
+                    accepted = listener.accept() => {
+                        let Ok((socket, peer)) = accepted else { break };
+                        let peer_ip = Some(peer.ip());
+                        let protocol = Arc::clone(&protocol);
+                        let source = Arc::clone(&source);
+                        let block_entities = block_entities.clone();
+                        let mobs = mobs.clone();
+                        let world_state = world_state.clone();
+                        // Same composition `open_to_lan`'s own accept loop
+                        // uses: the shared player registry is what puts every
+                        // publish-time joiner (and the original local player)
+                        // in each other's tab list.
+                        let entities =
+                            PlayerAwareSource::new(live_mobs.clone(), player_registry.clone());
+                        // A subscriber of the **same** hub/relay the local
+                        // connection already reads through — see
+                        // `open_in_memory_with_mobs_using`'s relay task.
+                        let subscriber = LanSubscriber {
+                            block_ticks: hub_block_ticks.subscriber(),
+                            ..LanSubscriber::default()
+                        };
+                        let conn_block_ticks = subscriber.block_ticks.clone();
+                        let conn_explosions = subscriber.explosions.clone();
+                        let alive = Arc::clone(&subscriber.alive);
+                        subscribers
+                            .lock()
+                            .expect("subscriber list poisoned")
+                            .push(subscriber);
+                        drop(spawn(async move {
+                            let mut conn = Connection::new(socket);
+                            let _ = serve_connection_with_mob_events_and_commands_shared(
+                                &mut conn, &*protocol, &source, &entities, view_radius,
+                                &block_entities, &mobs,
+                                &conn_block_ticks, &conn_explosions,
+                                &crate::command::CommandDispatch::none(),
+                                &crate::server::ResourcePackPushFeed::default(),
+                                &crate::plugin_channels::PluginChannelRegistry::default(),
+                                &world_state,
+                                &crate::access::AccessHandle::default(),
+                                peer_ip,
+                            )
+                            .await;
+                            alive.store(false, std::sync::atomic::Ordering::Relaxed);
+                        }));
+                    }
+                }
+            }
+        });
+
+        self.local_addr = Some(local_addr);
+        self.publish_task = Some(task);
+        if let Some(motd) = discovery_motd {
+            self.discovery_task = spawn_lan_discovery(
+                &self.shutdown,
+                &LanDiscovery { motd },
+                local_addr.port(),
+            );
+        }
+        Ok(local_addr)
     }
 
     /// Returns the bound socket address, if this server was started with
@@ -2115,6 +2503,21 @@ impl IntegratedServer {
         self.task.join().await;
         if let Some(mut tick_task) = self.tick_task.take() {
             tick_task.join().await;
+        }
+        // Joined, not aborted: the relay races the `shutdown` notify directly
+        // (through `spawn_tick_task`), same as `query_task` below, so it has
+        // already been asked to stop and this only waits for it to actually
+        // have. Issue #562.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(mut relay_task) = self.relay_task.take() {
+            relay_task.join().await;
+        }
+        // Aborted, not joined, like `rcon_task` below: `publish`'s accept loop
+        // parks in `accept()`, where the notify cannot reach it until a
+        // connection arrives. Issue #562.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(publish_task) = self.publish_task.take() {
+            publish_task.abort();
         }
         // Aborted rather than joined, unlike the two above. Seeding's whole
         // point (issue #454) is that it holds a multi-second generation batch;
@@ -2227,6 +2630,14 @@ impl Drop for IntegratedServer {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(discovery_task) = &self.discovery_task {
             discovery_task.abort();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(relay_task) = &self.relay_task {
+            relay_task.abort();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(publish_task) = &self.publish_task {
+            publish_task.abort();
         }
     }
 }
@@ -2441,6 +2852,147 @@ mod tests {
              {} would mean mob seeding is back inside the constructor (issue #454).",
             (2 * MOB_RADIUS + 1) * (2 * MOB_RADIUS + 1)
         );
+        drop(server);
+    }
+
+    /// Issue #562's discriminating gate. A `publish` that *rebuilds* the world
+    /// (the pre-fix shell behaviour, and the naive way to implement this
+    /// method) would hand the newly bound listener a **fresh** `HostCore`
+    /// with its own, empty subscriber list — this proves it does not.
+    ///
+    /// `HostCore::subscribers` is the relay task's own live subscriber list
+    /// (see `open_in_memory_with_mobs_using`'s relay, spawned once at world
+    /// open and never again): the constructor's own local, in-memory
+    /// connection is already in it as its first entry before `publish` is
+    /// ever called. If `publish` pushes a newly accepted connection's
+    /// subscriber into this **same** list — read straight off `self.host`,
+    /// which a rebuild would have replaced — then the new connection shares
+    /// the exact relay, tick loop and world the local player is already in.
+    /// A test that only checked the socket accepts connections would pass
+    /// under a rebuild too; this one would not, because a rebuild's accept
+    /// loop closes over its own new list that this assertion never reads.
+    #[tokio::test]
+    async fn publish_adds_the_new_connection_to_the_already_running_worlds_subscriber_list() {
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let (mut server, _client) = open_like_the_shell_does(&calls);
+
+        let subscribers_before = server
+            .host
+            .as_ref()
+            .expect("open_in_memory_with_mobs must build a HostCore")
+            .subscribers
+            .lock()
+            .expect("subscriber list poisoned")
+            .len();
+        assert_eq!(
+            subscribers_before, 1,
+            "the constructor's own local connection must already be the relay's \
+             first subscriber before anything is published"
+        );
+
+        let addr = server
+            .publish(("127.0.0.1", 0), None)
+            .await
+            .expect("publish must bind a fresh listener on a running world");
+
+        // Accepting is enough to push a subscriber — `publish`'s accept arm
+        // does that before it ever calls `serve_connection*`, so this needs
+        // no protocol handshake to observe.
+        let _accepted = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connecting to the published listener must succeed");
+
+        // Bounded poll: the accept loop is a separate spawned task.
+        let mut waited = 0;
+        let subscribers_after = loop {
+            let n = server
+                .host
+                .as_ref()
+                .expect("HostCore survives publish — publish never replaces it")
+                .subscribers
+                .lock()
+                .expect("subscriber list poisoned")
+                .len();
+            if n > subscribers_before || waited >= 200 {
+                break n;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            waited += 1;
+        };
+        assert_eq!(
+            subscribers_after, 2,
+            "the newly accepted connection must join the SAME subscriber list the \
+             constructor's own local connection is already in, not a fresh one \
+             `publish` (or a rebuild standing in for it) would have handed a new listener"
+        );
+
+        drop(server);
+    }
+
+    /// Issue #559's gate: the reported port must be the socket's **actual**
+    /// bound one, never the `0` that was requested. Requesting `0` is the
+    /// fixture that makes this discriminating — asserting only "some port
+    /// came back" would pass even for a hardcoded echo of the request.
+    #[tokio::test]
+    async fn publish_reports_the_actual_bound_port_not_the_requested_zero() {
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let (mut server, _client) = open_like_the_shell_does(&calls);
+
+        let reported = server
+            .publish(("127.0.0.1", 0), None)
+            .await
+            .expect("publish must bind");
+
+        assert_ne!(
+            reported.port(),
+            0,
+            "the reported port must be the OS-assigned one, not an echo of the \
+             requested 0 — that is the exact bug issue #559 reports"
+        );
+        assert_eq!(
+            server.local_addr().map(|a| a.port()),
+            Some(reported.port()),
+            "local_addr() must agree with publish()'s own return value"
+        );
+
+        drop(server);
+    }
+
+    /// A handle with no shared world core — the plain in-memory constructors,
+    /// which serve exactly one connection and build no `HostCore` — must
+    /// refuse rather than silently doing nothing or panicking.
+    #[tokio::test]
+    async fn publish_refuses_a_handle_with_no_shared_world_core() {
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let (mut server, _client) =
+            IntegratedServer::open_in_memory(Silent, CountingSource::new(&calls), 4);
+
+        let err = server
+            .publish(("127.0.0.1", 0), None)
+            .await
+            .expect_err("a handle with no HostCore must refuse to publish");
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+
+        drop(server);
+    }
+
+    /// A second `publish` call must be refused, not silently start a second
+    /// listener no caller can address (`publish_task` only holds one `Task`).
+    #[tokio::test]
+    async fn publish_refuses_a_second_call() {
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let (mut server, _client) = open_like_the_shell_does(&calls);
+
+        server
+            .publish(("127.0.0.1", 0), None)
+            .await
+            .expect("first publish must succeed");
+        let err = server
+            .publish(("127.0.0.1", 0), None)
+            .await
+            .expect_err("a second publish on the same handle must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
         drop(server);
     }
 
