@@ -63,19 +63,29 @@ production hook needed) applies vanilla's two distance thresholds:
   bounding-box subtraction from the elastic threshold (flat `6.0` instead of
   `6.0 - both widths`), and an unresolvable holder (disconnected player,
   removed mob) silently drops the leash with no item.
-- **The server.rs hooks are not wired yet.** Both `try_leash` (right-click a
-  leashed/leashable mob) and `try_leash_to_fence` (right-click a fence with a
-  lead in hand) need call sites in `server.rs`, which is outside this pass's
-  ownership. See the broker note this session left (leashing server hooks)
-  for the exact anchors — `ServerBound::InteractEntity`'s existing taming
-  dispatch, and `apply_use_item_on`'s block-click path — and the proposed
-  patches.
-- **No `SET_ENTITY_LINK`-equivalent wire packet was checked for.** Whether
-  `v770` can even encode a leash link is unverified — that lives in
-  `crates/protocol/v770/src/server_protocol.rs`, out of ownership this pass.
-  Until it exists (or is confirmed to already exist), a client would see the
-  leashed mob's position update from the pull physics but never draw a lead
-  line to it.
+- **`try_leash`'s `server.rs` hook is wired.** `ServerBound::InteractEntity`'s
+  main-hand arm calls `try_leash` before the existing `MobSim::interact`
+  taming dispatch, exactly mirroring vanilla `Mob.interact`'s own order
+  (`Entity.interact`'s leash branches run, and short-circuit, before
+  `mobInteract`). `LeashOutcome::Attached` consumes one `minecraft:lead` from
+  the hotbar through the same `consume_one`/window-0 sync every other
+  consuming interaction there uses; `Detached` needs no follow-up (`try_leash`
+  already spawns the dropped lead itself); `Refused` falls through to the
+  taming chain unchanged, matching vanilla's own `PASS` fallthrough.
+- **`try_leash_to_fence`'s hook (right-click a fence with a lead) is still
+  unwired** — it needs a call site in `apply_use_item_on`'s block-click path,
+  which is a separate anchor from the one above. Not part of this pass.
+- **No `SET_ENTITY_LINK`-equivalent wire packet exists.** Confirmed by
+  reading `ServerProtocol` (`crates/lodestone-server/src/protocol.rs`) and
+  `v770`'s `server_protocol.rs`: there is no `encode_set_entity_link` (or
+  equivalent) trait method or implementation anywhere — only the *client*
+  decode side exists (`v770`'s `adapter/entity.rs` raises
+  `ClientEvent::EntityLeashed` when joining a real server). So a mob leashed
+  through this pass's new hook is pulled toward its holder by `tick_leashes`'
+  physics and that motion is visible, but no lead-line renders, because
+  nothing on the hosting side encodes the link itself. Adding it means a new
+  `ServerProtocol` trait method plus a `v770` implementation, both in files
+  this pass treats as heavily contended rather than owned.
 - **Adding a leashable exception**: a species where `!is_hostile_species`
   gives the wrong answer (a water creature, or the eventual hoglin/zoglin)
   needs a small exception table inside `is_leashable_species`, not a rewrite
