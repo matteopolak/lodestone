@@ -360,20 +360,40 @@ Honest list, so nothing here reads as finished:
 * **Flint and steel lights portals and nothing else**, and takes no durability damage.
   A plain fire needs `fire::ticks_after_edit` and a live block-tick queue, and an
   inert fire block looks like a working one. This item did nothing at all before.
-* **Neither dimension's *other* one ticks.** `tick::run_tick_loop` holds the overworld
-  source, so a Nether chunk gets no random ticks, no fluid flow and no scheduled
-  ticks, and vice versa once a player leaves the overworld.
+* **A sibling dimension now ticks on its own**, once a player has visited it at least
+  once this session. `dimension_tick::spawn_for_dimension` starts a second
+  `run_tick_loop_with_weather` the first time `with_nether`'s factory builds a
+  Nether/End `ChunkSource`, following the same dimension-tagged `TickAnchors` handle
+  every connection already publishes into. **What this does not close**: `server.rs`'s
+  `serve_play` threads one fixed `BlockEntityHandle`/`BlockTickFeed` pair through the
+  whole connection, taken from the join dimension, and does not swap it on a portal
+  trip — so a furnace lit or a lever flipped while standing in the Nether still lands
+  in the overworld's registry today. Random ticks (crop growth, fire, leaf decay) and
+  any scheduled tick already restored from a dimension's own saved region file are
+  unaffected by that gap, since neither goes through the connection's fixed handle.
+  See `dimension_tick.rs`'s own module doc for the full account and its own tests for
+  a playerless-dimension gate with a control.
 * **Entities and mobs are world-scoped, not dimension-scoped.** A player in the Nether
   is still streamed the overworld's entities. Nether biome spawn lists *are* in
   `bundled_biome_spawners` (the five nether biomes are bundled), so natural spawning
   would pick them up for free if it ran over a Nether column — it does not, because
   the spawner runs from the overworld tick loop.
-* **Nothing persists per-dimension.** `region_source` and `entity_storage` both
-  hardcode `dimensions/minecraft/overworld/`, so the Nether is in-memory for the
-  session. `PortalIndex` is not persisted either.
-* **A portal is never extinguished.** Vanilla's `NetherPortalBlock.updateShape`
-  removes a portal cell whose frame was broken; nothing here does, so mining a frame
-  block leaves floating portal blocks.
+* **Terrain now persists per dimension.** `RegionChunkSource::new` takes the
+  `Dimension` it is rooting, so `IntegratedServer::open_persistent_with_mobs` roots a
+  Nether/End sibling's own `RegionChunkSource` under
+  `<world>/dimensions/minecraft/the_nether|the_end/region` (verified against
+  `.cache/mc/survival/world`'s own layout) the first time that sibling is built,
+  rather than staying in-memory for the session. **Still not persisted**:
+  `entity_storage` (mobs/dropped items) is still overworld-only — extending it needs
+  the entity/mob dimension-scoping item above first, since an entity has no dimension
+  tag of its own yet. `PortalIndex` is still not persisted either.
+* **A portal is now extinguished when its frame breaks.** `portal::should_extinguish`
+  ports `NetherPortalBlock.updateShape`'s three-clause condition (wrong-axis skip,
+  portal-neighbour skip, frame re-scan), and `portal::extinguish_broken_frames` runs
+  it outward from a changed cell as a cascade — mining one frame block clears the
+  whole interior, not just the cell nearest the break, matching vanilla's own
+  `setBlock`-triggers-`updateShape`-on-its-neighbours chain. Wired into
+  `server::destroy_block` alongside `collapse_unsupported`, on the same broken cell.
 * **The End is reachable from a running server**, entry-only: `Dimension::End`, its
   generator, `EndChunkSource`, the obsidian platform's geometry
   (`portal::ensure_end_platform`), frame ignition

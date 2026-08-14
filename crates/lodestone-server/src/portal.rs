@@ -347,6 +347,171 @@ pub fn find_any_shape<S: ChunkSource + ?Sized>(
     }
 }
 
+/// Vanilla's `NetherPortalBlock.updateShape` — whether the portal cell at
+/// `pos` (on `axis`) must be extinguished (replaced with air) because its
+/// neighbour in `direction_to_neighbour` just changed to `neighbour_state`.
+///
+/// ```java
+/// Direction.Axis updateAxis = directionToNeighbour.getAxis();
+/// Direction.Axis axis = state.getValue(AXIS);
+/// boolean wrongAxis = axis != updateAxis && updateAxis.isHorizontal();
+/// return !wrongAxis && !neighbourState.is(this) && !PortalShape.findAnyShape(level, pos, axis).isComplete()
+///    ? Blocks.AIR.defaultBlockState()
+///    : super.updateShape(...);
+/// ```
+///
+/// Three clauses, all required (this crate's own evidence standard: a
+/// conjunction ported as "the interesting clause" silently drops the other
+/// two the day an input needs them):
+///
+/// 1. **`!wrongAxis`** — vanilla's `Direction.Axis` has three values (X, Y,
+///    Z) where this crate's [`Axis`] only models the horizontal two, so it is
+///    expressed here as "vertical, or horizontal along the portal's own
+///    axis". A neighbour change *perpendicular* to the portal's plane (in
+///    front of or behind it) cannot have touched the frame and is skipped
+///    outright — this is what stops a torch placed against the portal's
+///    face from re-triggering a frame scan on every flicker.
+/// 2. **`!neighbourState.is(this)`** — [`is_portal`]: a notification from
+///    another portal cell (not a frame block) needs no re-validation: an
+///    interior cell changing does not mean the frame broke.
+/// 3. **`!findAnyShape(...).isComplete()`** — [`find_any_shape`] rebuilt on
+///    `axis`, `pos`'s own frame is still intact. `isComplete`, not
+///    `isValid`: a frame whose obsidian is intact but has lost a *portal*
+///    block (through some other cell already having been cleared) must also
+///    extinguish this one, matching vanilla exactly — see
+///    [`PortalShape::is_complete`]'s own doc comment.
+///
+/// # Dependencies
+///
+/// [`find_any_shape`] for the frame re-scan; [`crate::neighbor_update::Direction`]
+/// for `direction_to_neighbour`, matching the shape every other neighbour-change
+/// reaction in this crate ([`crate::server::collapse_unsupported`],
+/// `crate::random_tick::react_to_notification`) already uses.
+#[must_use]
+pub fn should_extinguish<S: ChunkSource + ?Sized>(
+    world: &S,
+    dimension: Dimension,
+    pos: BlockPos,
+    axis: Axis,
+    direction_to_neighbour: Direction,
+    neighbour_state: &str,
+) -> bool {
+    // `updateAxis.isHorizontal()`: only North/South (Z) and East/West (X)
+    // qualify: Up/Down is vertical, so `wrong_axis` is unconditionally
+    // `false` for them regardless of the match below — a broken block above
+    // or below a portal cell must always be re-validated.
+    let horizontal_matches_axis = match (axis, direction_to_neighbour) {
+        (Axis::X, Direction::West | Direction::East) => true,
+        (Axis::Z, Direction::North | Direction::South) => true,
+        _ => false,
+    };
+    let update_is_horizontal = !matches!(direction_to_neighbour, Direction::Up | Direction::Down);
+    let wrong_axis = update_is_horizontal && !horizontal_matches_axis;
+    if wrong_axis {
+        return false;
+    }
+    if is_portal(neighbour_state) {
+        return false;
+    }
+    !find_any_shape(world, dimension, pos, axis).is_complete()
+}
+
+/// Vanilla's `maxChainedNeighborUpdates` for this cascade specifically —
+/// mirrors [`crate::server::collapse_unsupported`]'s own `MAX_SUPPORT_COLLAPSE`
+/// for the identical reason: a runaway guard rather than a behavioural limit.
+/// The tallest/widest real portal is 21×21 = 441 interior cells, so this bound
+/// is never reached by any frame [`PortalShape::is_valid`] would accept —
+/// only a `crate::block_support`-style data error in [`is_portal`] could walk
+/// the world, and this stops it rather than assuming it cannot happen.
+const MAX_PORTAL_EXTINGUISH_CASCADE: usize = 1024;
+
+/// Runs [`should_extinguish`] outward from `origin` — the cell that just
+/// changed (typically just written to air or a fluid by a break) —
+/// extinguishing (writing air, in `world`) any `nether_portal` neighbour
+/// whose frame no longer validates, and **cascading**: each cell this
+/// extinguishes is itself a change, so its own neighbours are re-checked in
+/// turn, exactly the shape [`crate::server::collapse_unsupported`]'s queue
+/// already uses for the gravity/attachment-support cascade.
+///
+/// The cascade is what makes mining *one* frame block clear an entire
+/// multi-cell portal rather than only the one interior cell nearest the
+/// break: vanilla's `setBlock` always re-runs `updateNeighbourShapes` on the
+/// cell it just changed, so extinguishing portal cell A (adjacent to the
+/// broken frame block) asks portal cell B (adjacent to A, part of the same
+/// portal) the same question — B's own [`find_any_shape`] rescan now finds
+/// one fewer `portal_blocks` than its rectangle needs, so
+/// [`PortalShape::is_complete`] is false for B too, and so on until the
+/// whole rectangle has cleared.
+///
+/// This is the caller [`should_extinguish`] itself cannot be: vanilla's
+/// `updateNeighbourShapes` runs `updateShape` on **every** direct neighbour of
+/// a changed cell, not just ones a support table names (unlike
+/// [`crate::server::collapse_unsupported`], which is scoped to
+/// [`crate::block_support`]'s survives table and does not know about
+/// `nether_portal` at all — a portal frame is not "supported by one specific
+/// neighbour", it is re-validated against its whole rectangle). A block break
+/// or placement's caller should run this alongside that pass, on the same
+/// `origin`.
+///
+/// Returns `(pos, state_before)` for each cell extinguished, matching
+/// [`crate::server::collapse_unsupported`]'s own return shape so a caller can
+/// feed both into the same "send a `block_update`, roll the loot (there is
+/// none here), relight" pipeline without a second code path.
+#[must_use]
+pub fn extinguish_broken_frames<S: ChunkSource + ?Sized>(
+    world: &S,
+    dimension: Dimension,
+    origin: BlockPos,
+) -> Vec<(BlockPos, String)> {
+    use crate::neighbor_update::{ALL_DIRECTIONS, Notification};
+    use std::collections::VecDeque;
+
+    let mut removed: Vec<(BlockPos, String)> = Vec::new();
+    // Seeded exactly like `NeighborPropagator::propagate`'s own fan-out: one
+    // `Notification` per direction off `origin`, `from` carrying the
+    // direction that produced it — see that type's own doc comment for the
+    // "from is the causing direction" convention this reuses rather than
+    // reinventing.
+    let mut queue: VecDeque<Notification> = ALL_DIRECTIONS
+        .iter()
+        .map(|&from| Notification { pos: from.relative(origin), from })
+        .collect();
+
+    while let Some(n) = queue.pop_front() {
+        if removed.len() >= MAX_PORTAL_EXTINGUISH_CASCADE {
+            tracing::warn!(
+                "nether portal extinguish cascade from {origin:?} hit its \
+                 {MAX_PORTAL_EXTINGUISH_CASCADE}-cell bound"
+            );
+            break;
+        }
+        if removed.iter().any(|(seen, _)| *seen == n.pos) {
+            continue;
+        }
+        let state = world.block_state(n.pos.x, n.pos.y, n.pos.z);
+        if !is_portal(&state) {
+            continue;
+        }
+        let axis = Axis::from_state(&state);
+        // The direction *from this cell* to whichever neighbour just
+        // changed — the opposite of `n.from`, which names the direction
+        // *into* `n.pos` the change arrived from. See `Notification`'s own
+        // doc comment.
+        let direction_to_neighbour = n.from.opposite();
+        let causing_pos = direction_to_neighbour.relative(n.pos);
+        let causing_state = world.block_state(causing_pos.x, causing_pos.y, causing_pos.z);
+        if !should_extinguish(world, dimension, n.pos, axis, direction_to_neighbour, &causing_state) {
+            continue;
+        }
+        world.set_block(n.pos.x, n.pos.y, n.pos.z, "minecraft:air");
+        removed.push((n.pos, state));
+        for &from in &ALL_DIRECTIONS {
+            queue.push_back(Notification { pos: from.relative(n.pos), from });
+        }
+    }
+    removed
+}
+
 /// `PortalShape.findPortalShape` with `findEmptyPortalShape`'s predicate: valid,
 /// and holding **no** portal blocks yet.
 ///
@@ -1730,6 +1895,150 @@ mod tests {
         let shape = find_any_shape(&world, Dimension::Overworld, BlockPos::new(0, 70, 0), Axis::X);
         assert!(shape.is_complete(), "every interior cell is lit");
         assert_eq!(shape.portal_blocks(), 6);
+    }
+
+    /// Issue #579. Directly exercises [`should_extinguish`]'s `wrongAxis`
+    /// clause against a fixture that is **genuinely** broken (a frame block
+    /// removed by hand, independent of [`extinguish_broken_frames`] entirely)
+    /// — so the same-axis and perpendicular answers on the *identical* input
+    /// must disagree, proving the perpendicular direction really is declined
+    /// by the axis check and not merely by a frame that happens to still be
+    /// complete.
+    #[test]
+    fn should_extinguish_only_checks_the_frame_on_a_matching_or_vertical_axis() {
+        let world = FlatWorld::new();
+        world.frame(0, 70, 0, Axis::X, 2, 3);
+        for (pos, state) in ignite(&world, Dimension::Overworld, BlockPos::new(0, 70, 0)).unwrap() {
+            world.set_block(pos.x, pos.y, pos.z, &state);
+        }
+        // Break the bottom-middle frame cell directly, bypassing
+        // `extinguish_broken_frames` entirely, so the frame is genuinely
+        // incomplete going into this test rather than assumed to be.
+        world.set_block(0, 69, 0, "minecraft:air");
+        let shape = find_any_shape(&world, Dimension::Overworld, BlockPos::new(0, 70, 0), Axis::X);
+        assert!(!shape.is_complete(), "fixture setup: the frame must actually be broken here");
+
+        let interior = BlockPos::new(0, 70, 0);
+        assert!(
+            should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::West, "minecraft:air"),
+            "a same-axis (East/West) neighbour must reach the real, broken frame"
+        );
+        assert!(
+            !should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::North, "minecraft:air"),
+            "a perpendicular (North/South) neighbour must decline without consulting \
+             the frame at all -- on the *same* broken fixture the same-axis case above \
+             correctly extinguishes"
+        );
+        assert!(
+            should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::Down, "minecraft:air"),
+            "vertical is never wrongAxis and must also reach the real frame"
+        );
+    }
+
+    /// Issue #579. [`should_extinguish`]'s second clause: a neighbour that is
+    /// itself a portal cell must decline, even reaching a genuinely broken
+    /// frame — paired against the non-portal neighbour case on the identical
+    /// fixture so the two answers must disagree.
+    #[test]
+    fn should_extinguish_declines_when_the_neighbour_is_itself_a_portal_cell() {
+        let world = FlatWorld::new();
+        world.frame(0, 70, 0, Axis::X, 2, 3);
+        for (pos, state) in ignite(&world, Dimension::Overworld, BlockPos::new(0, 70, 0)).unwrap() {
+            world.set_block(pos.x, pos.y, pos.z, &state);
+        }
+        world.set_block(0, 69, 0, "minecraft:air");
+        let interior = BlockPos::new(0, 70, 0);
+        assert!(
+            should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::West, "minecraft:air"),
+            "a non-portal neighbour reaches the real, broken frame"
+        );
+        assert!(
+            !should_extinguish(
+                &world,
+                Dimension::Overworld,
+                interior,
+                Axis::X,
+                Direction::West,
+                "minecraft:nether_portal[axis=x]"
+            ),
+            "a neighbour that is itself a portal cell must decline, on the same broken fixture"
+        );
+    }
+
+    /// Issue #579, the end-to-end shape: mining a single frame block clears
+    /// every interior cell of the portal it supported, not just the one cell
+    /// touching the break -- vanilla's `setBlock` re-triggers `updateShape`
+    /// on the cell it just changed, cascading through the whole rectangle.
+    ///
+    /// Predicts the exact count (6, the full 2x3 interior) rather than merely
+    /// "at least one", which is what a single-hop (non-cascading) mistake
+    /// would satisfy -- a single-hop implementation extinguishes only the one
+    /// interior cell directly adjacent to the broken frame block and leaves
+    /// the other five lit.
+    #[test]
+    fn breaking_one_frame_block_extinguishes_the_whole_portal() {
+        let world = FlatWorld::new();
+        world.frame(0, 70, 0, Axis::X, 2, 3);
+        for (pos, state) in ignite(&world, Dimension::Overworld, BlockPos::new(0, 70, 0)).unwrap() {
+            world.set_block(pos.x, pos.y, pos.z, &state);
+        }
+        let shape_before = find_any_shape(&world, Dimension::Overworld, BlockPos::new(0, 70, 0), Axis::X);
+        assert_eq!(shape_before.portal_blocks(), 6, "fixture setup: the full 2x3 interior is lit");
+
+        // The bottom-middle frame obsidian, adjacent to interior cell (0, 70, 0)
+        // -- the caller's own `set_block` (already-broken, matching every real
+        // call site: `destroy_block` writes the break before running this).
+        let broken = BlockPos::new(0, 69, 0);
+        world.set_block(broken.x, broken.y, broken.z, "minecraft:air");
+
+        let removed = extinguish_broken_frames(&world, Dimension::Overworld, broken);
+        assert_eq!(removed.len(), 6, "every interior cell of the 2x3 portal must extinguish");
+        let mut removed_positions: Vec<BlockPos> = removed.iter().map(|(pos, _)| *pos).collect();
+        removed_positions.sort_by_key(|p| (p.x, p.y, p.z));
+        let mut expected: Vec<BlockPos> = (0..2)
+            .flat_map(|x| (70..73).map(move |y| BlockPos::new(x, y, 0)))
+            .collect();
+        expected.sort_by_key(|p| (p.x, p.y, p.z));
+        assert_eq!(removed_positions, expected, "exactly the 2x3 interior, no more and no less");
+        for (pos, state) in &removed {
+            assert!(is_portal(state), "each removed cell's *recorded* prior state must have been a real portal block: {pos:?} was {state:?}");
+        }
+        for y in 70..73 {
+            for x in 0..2 {
+                assert_eq!(
+                    world.block_state(x, y, 0),
+                    "minecraft:air",
+                    "cell ({x}, {y}, 0) must have been written to air"
+                );
+            }
+        }
+    }
+
+    /// The control for the cascade test above: breaking a frame block on one
+    /// portal must not touch a second, unrelated portal far away -- rules out
+    /// a bug where the cascade queue is unbounded by distance/dimension
+    /// rather than by "is this cell actually a neighbour of something that
+    /// changed".
+    #[test]
+    fn extinguishing_one_portal_does_not_touch_an_unrelated_one() {
+        let world = FlatWorld::new();
+        world.frame(0, 70, 0, Axis::X, 2, 3);
+        world.frame(500, 70, 500, Axis::X, 2, 3);
+        for (pos, state) in ignite(&world, Dimension::Overworld, BlockPos::new(0, 70, 0)).unwrap() {
+            world.set_block(pos.x, pos.y, pos.z, &state);
+        }
+        for (pos, state) in ignite(&world, Dimension::Overworld, BlockPos::new(500, 70, 500)).unwrap() {
+            world.set_block(pos.x, pos.y, pos.z, &state);
+        }
+
+        let broken = BlockPos::new(0, 69, 0);
+        world.set_block(broken.x, broken.y, broken.z, "minecraft:air");
+        let removed = extinguish_broken_frames(&world, Dimension::Overworld, broken);
+        assert_eq!(removed.len(), 6, "the near portal still fully extinguishes");
+
+        let far_shape = find_any_shape(&world, Dimension::Overworld, BlockPos::new(500, 70, 500), Axis::X);
+        assert!(far_shape.is_complete(), "the unrelated portal must still be fully lit");
+        assert_eq!(far_shape.portal_blocks(), 6);
     }
 
     /// The transition counter's three faithful details, each against an input that
