@@ -86,8 +86,8 @@ it into "emit nothing for this packet". The connection survives either way.
 ## How to change it
 
 - Adding a modeled data component: extend `read_component_patch` in
-  `crates/protocol/v770/src/adapter.rs`. Both the container path and this one
-  pick it up for free.
+  `crates/protocol/v770/src/adapter/inventory.rs`. Both the container path and
+  this one pick it up for free.
 - Changing what the metadata event carries: `EntityMetadataUpdate` in
   `crates/lodestone-model/src/event.rs`. Remember `is_empty()` — a field missing
   from it makes an otherwise-real update get swallowed as "empty".

@@ -23,7 +23,7 @@ again (decoded 114→116, connected 17→21, `Ignored` 43→41), and every serve
 number it cited drifted. Anchor by grep pattern; treat cited line numbers as hints.
 
 **What exists.** Four family crates under `crates/protocol/`, all implementing
-`VersionAdapter` (trait at `crates/lodestone-model/src/adapter.rs:697`, still). Since U2
+`VersionAdapter` (trait at `crates/lodestone-model/src/adapter.rs`, still). Since U2
 (`02b8053`), `supports` tests membership in the family's own `PROTOCOLS` const, and
 adapters are constructed *with* the negotiated protocol — see the seam section below.
 
@@ -76,23 +76,18 @@ never a one-file scan.
 **Already implemented, issues still open** (`git log --grep`; the sixteen issues remain
 OPEN — per the standing rule, check the log before dispatching any child):
 
-- #343 groundwork: `faeb692` — the derived sixteen-row version table,
-  `crates/lodestone-registry/src/generated/version_table.rs` (16 `Entry` rows, protocol +
-  DataVersion + per-field provenance; `docs/version-table.md`). `d0cd8d6` — the
-  pre-Flattening id:meta table from the 1.13.2 jar's own DataFixerUpper. The epic's
-  "change the CLAUDE.md scope line with the first non-770 family" instruction is already
-  satisfied (`07e3d83`).
-- **This plan's own U1, U2 and U3 landed between its two same-day revisions:** U1 =
-  `3ba959a` (`crates/lodestone-canonical` extracted, v340 re-exports through it,
-  `docs/canonical-block-states.md`); U2 = `02b8053` (protocol-at-construction seam,
-  `docs/multi-protocol-seam.md`); U3 = `fa75f38` + `c033f1f` + `7f5512a` (v47
-  canonicalisation, `docs/protocol-47-canonicalisation.md`). Details at each unit below.
-- #345 (1.8.9): `53b906a` four v47 decode arms; `0a3e00f` outbound death-screen/spectate.
-- #349 (1.12.2): `35d4401` decode arms; `714209b` `block_change`/`multi_block_change`
-  decoded *into canonical states* via the flattening bridge.
-- #353 (1.16.5): partial outbound via `0a3e00f`; the issue's "v735 may be 1.16.1" caveat
-  is resolved — `supports` says 754, which is 1.16.5. `f8c96d4` (U4) closed the remaining
-  canonicalisation-retrofit scope: chunk decode now lands *canonical 26.2* states.
+| issue | already landed |
+|---|---|
+| #343 | groundwork: `faeb692` — the derived sixteen-row version table, `crates/lodestone-registry/src/generated/version_table.rs` (16 `Entry` rows, protocol + DataVersion + per-field provenance; `docs/version-table.md`). `d0cd8d6` — the pre-Flattening id:meta table from the 1.13.2 jar's own DataFixerUpper. The epic's "change the CLAUDE.md scope line with the first non-770 family" instruction is already satisfied (`07e3d83`). |
+| #345 (1.8.9) | `53b906a` four v47 decode arms; `0a3e00f` outbound death-screen/spectate. |
+| #349 (1.12.2) | `35d4401` decode arms; `714209b` `block_change`/`multi_block_change` decoded *into canonical states* via the flattening bridge. |
+| #353 (1.16.5) | partial outbound via `0a3e00f`; the issue's "v735 may be 1.16.1" caveat is resolved — `supports` says 754, which is 1.16.5. `f8c96d4` (U4) closed the remaining canonicalisation-retrofit scope: chunk decode now lands *canonical 26.2* states. |
+
+**This plan's own U1, U2 and U3 landed between its two same-day revisions:** U1 =
+`3ba959a` (`crates/lodestone-canonical` extracted, v340 re-exports through it,
+`docs/canonical-block-states.md`); U2 = `02b8053` (protocol-at-construction seam,
+`docs/multi-protocol-seam.md`); U3 = `fa75f38` + `c033f1f` + `7f5512a` (v47
+canonicalisation, `docs/protocol-47-canonicalisation.md`). Details at each unit below.
 
 **Assets on disk.** `.cache/mc/` holds 12 of the 16 target versions — missing only
 **1.7.10, 1.9.4, 1.10.2, 1.11.2** (`xtask version-table --fetch-missing` exists to fetch
@@ -163,15 +158,14 @@ revision's verification pass.
 ### The hosting blockers, located
 
 1. **The configuration-phase handshake is hardwired into the connection state machine,
-   not version-gated.** `crates/lodestone-server/src/server.rs:1318-1330` this pass —
-   grep `ServerBound::LoginAcknowledged`, the number drifts with the live server work:
+   not version-gated.** Handled inside `serve_connection_inner`
+   (`crates/lodestone-server/src/server.rs`) — grep `ServerBound::LoginAcknowledged`:
    `LoginAcknowledged` → `State::Configuration` → `begin_configuration()`,
    and `ServerBound::ConfigurationFinished` → `State::Play` → `begin_play()`. A pre-1.20.2
    client sends **neither packet** — they do not exist on its wire; after Login Success it
    transitions straight to Play — so a legacy host connection stalls in Login forever.
    And the fix cannot live inside a family: `ServerProtocol::decode`
-   (`crates/lodestone-server/src/protocol.rs:619` this pass, formerly :521 — same drift
-   warning) is strictly one-packet-in, one-`ServerBound`-out, so a family cannot
+   (`crates/lodestone-server/src/protocol.rs`) is strictly one-packet-in, one-`ServerBound`-out, so a family cannot
    synthesize the two transitions from packets that never arrive. This is **one-off
    substrate** (H0), touching two choke-point files once, after which no per-family work
    recurs.
@@ -183,16 +177,19 @@ revision's verification pass.
 3. **v770's own hosting is only 21/69 connected** (the two-file join above). Widening that
    is per-packet work on the existing family, orthogonal to this epic's units, but any
    "host version X" claim inherits whatever the shared `server.rs` loop actually consumes.
-4. **`resource_pack_push/pop` is handled in Play state only, not Configuration** (#294).
+4. **`resource_pack_push/pop` is handled in Play state only, not Configuration.**
    Re-verified at `e2508e3`, still open: the v770 adapter's Configuration-state
-   clientbound arms (`adapter.rs:2831-2900` this pass) cover ten packet ids with no
+   clientbound arms (`V770Adapter::handle_configuration` in
+   `crates/protocol/v770/src/adapter/connection.rs`) cover ten packet ids with no
    `RESOURCE_PACK_PUSH/POP`; the
-   Play arms exist at `adapter.rs:4495/4517`, and the serverbound *response* encoder is
-   already state-aware (`adapter.rs:4699` picks
-   `configuration::serverbound::RESOURCE_PACK`). So #294 is a decode-side gap in the
+   Play arms exist in `V770Adapter::handle_play_connection` (same directory), and the
+   serverbound *response* encoder is already state-aware
+   (`V770Adapter::encode_client_action` in
+   `crates/protocol/v770/src/adapter/serverbound.rs` picks
+   `configuration::serverbound::RESOURCE_PACK`). So this is a decode-side gap in the
    **join** direction against real 26.2 servers, and it matters here because v766's
-   configuration-phase machinery (U11) will be built by imitating v770's — fix #294 first
-   or the copy inherits the hole. The patch belongs to #294, not this epic: add the two
+   configuration-phase machinery (U11) will be built by imitating v770's — fix it first
+   or the copy inherits the hole. The patch belongs to this gap, not this epic: add the two
    Configuration-state decode arms delegating to the same handlers Play uses.
 
 ### Per-version split
@@ -225,7 +222,7 @@ change to that family only, invisible to the registry.
 
 Evidence, not preference:
 
-1. `docs/roadmap/protocol.md` (§#306) measured the irreducible cost of a new family at
+1. `docs/roadmap/protocol.md` measured the irreducible cost of a new family at
    **~900 hand-written lines** (line 539) concentrated in `adapter.rs` and `chunk.rs`, and
    recorded that the `xtask new-version` cloning experiment produced "a 1.12.2 client
    wearing 1.16 packet IDs" — now structurally mitigated by the `SHAPE_REVIEW.toml` gate,
@@ -258,7 +255,7 @@ Evidence, not preference:
 | v735 | 754 | 1.16.5 | #353 | exists; canonicalisation retrofit landed (U4, `f8c96d4`); rename to v754 optional (U12) |
 | v756 | 756, 758 | 1.17.1, 1.18.2 | #354–#355 | new, one crate (1.18 section-biome branch — the riskiest grouping, split if the chunk paths stop sharing) |
 | v762 | 762 | 1.19.4 | #356 | new — chat-signing state machine |
-| v766 | 766 | 1.20.6 | #357 | new — configuration phase + item components; **fix #294 first** |
+| v766 | 766 | 1.20.6 | #357 | new — configuration phase + item components; **fix the Configuration-state resource-pack decode gap first** |
 | v774 | 774 | 1.21.11 | #358 | new — nearest neighbour to v770; still its own crate (v770 is the canonical space *and* the only `ServerProtocol`; keeping it single-protocol keeps the hosting seam simple) |
 | v770 | 776 | 26.2 | — | done, canonical |
 
@@ -331,8 +328,8 @@ built; that scope is U5's, intact.
   *deliberately* denied v340's table to preserve per-crate deletability. **Decided and
   executed: `flattening` + `canonical` extracted into `lodestone-canonical` (U1,
   `3ba959a`), and v47 became its second consumer (U3).** Deletability applies
-  to *families*; shared game data already has a precedent crate (`lodestone-data`, the
-  #361 extraction), and the alternative is four copies of a 9k-line generated table
+  to *families*; shared game data already has a precedent crate (`lodestone-data`, an
+  earlier extraction), and the alternative is four copies of a 9k-line generated table
   drifting independently. Deleting a family remains folder + dep line + feature line
   (`xtask check-deletable` verifies exactly this).
 - **Post-1.13 families (v404, v498, v735, v756, v762, v766, v774):** each speaks its own
@@ -367,8 +364,8 @@ lore, enchantments, damage) and preserve-the-rest; full fidelity is not required
 
 Authority order per child issues: real oracle jar (strongest) → jar's generated reports →
 minecraft-data (cross-check only, never authority). Protocol/DataVersion numbers: always
-the derived table, never hand-written (epic first task, satisfied by `faeb692`). The #275
-lesson binds every registry-sync unit here: a generator file is authoritative about
+the derived table, never hand-written (epic first task, satisfied by `faeb692`). The lesson
+binds every registry-sync unit here: a generator file is authoritative about
 registry *contents*, not about which registries are *sent* — the sent-list comes from the
 jar (`RegistryDataLoader.SYNCHRONIZED_REGISTRIES` for 26.2; establish the per-version
 equivalent from each era's jar, not from `registries.json`).
@@ -512,7 +509,7 @@ protocol A must select A's `packet_ids` table when B is in the family's set, ass
 an id that differs between them. Blocked by: oracle script, jar fetch (U1 and U2 landed).
 
 **U7 — family v404 (1.13.2), issue #350.** The boundary anchor: first native-block-model
-family, new chunk format, command tree (reuse `lodestone-command`, the #118 substrate).
+family, new chunk format, command tree (reuse `lodestone-command`, the existing substrate).
 State mapping via the first *small* DFU walk (1631 → 4903). Owns: `crates/protocol/v404/`
 + registry 2-liner. Gate/control: as U6, jar already on disk. Blocked by: U4's oracle
 pattern (not U2 — single protocol).
@@ -538,12 +535,12 @@ creep). Owns: `crates/protocol/v762/` + registry 2-liner. Blocked by: U7 pattern
 **U11 — family v766 (1.20.6, #357) and family v774 (1.21.11, #358).** Two units, one
 briefing: configuration-phase state machine (v766 — the login flow structurally differs;
 v770's own configuration handling is the reference implementation to imitate, not import —
-**and #294's Configuration-state `resource_pack` gap must be fixed in v770 first, or the
+**and v770's own Configuration-state `resource_pack` gap must be fixed first, or the
 imitation copies the hole**) and components-era items (both; v774 items are near-26.2).
 v774 is the cheapest new family in the set — closest wire to v770 — and its packet shapes
 can come from its own jar's report if present. Owns: `crates/protocol/v766/`,
 `crates/protocol/v774/` + registry 2-liners. Blocked by: U7 pattern; v766 also by U5 and
-#294.
+the v770 resource-pack decode gap.
 
 **U13 — family v5 (1.7.10), issue #344 — last, eyes open.** No minecraft-data, no cached
 jar, pre-compression pre-UUID wire; every shape from captures against a fetched real jar.
@@ -552,8 +549,8 @@ anything — nothing depends on it. Owns: `crates/protocol/v5/` + registry 2-lin
 
 **U12 (optional, anytime) — rename v735 → v754** per `docs/protocol-crate-naming.md`
 (family named for its lowest protocol). Cheap but repo-wide: grep for the old crate path
-*including doctests* and run `cargo test --workspace`, not just check — the #361
-extraction's exact trap.
+*including doctests* and run `cargo test --workspace`, not just check — the same trap
+`lodestone-data`'s own extraction hit.
 
 ## Units of work — phase 2 (host)
 
@@ -565,8 +562,9 @@ tiny, independently gateable with fakes, and every legacy host unit is blocked o
 `ServerProtocol::has_configuration_phase(&self) -> bool { true }`; in the connection
 loop, when it answers false, run the Configuration→Play sequence immediately after
 `login_success` instead of waiting for `LoginAcknowledged`/`ConfigurationFinished` (which
-pre-1.20.2 wires cannot send — located at `server.rs:1199-1207`, decode contract at
-`protocol.rs:521`). Owns: `crates/lodestone-server/src/protocol.rs` (trait),
+pre-1.20.2 wires cannot send — the transition lives in `serve_connection_inner`
+(`crates/lodestone-server/src/server.rs`), decode contract in `ServerProtocol::decode`
+(`crates/lodestone-server/src/protocol.rs`)). Owns: `crates/lodestone-server/src/protocol.rs` (trait),
 `crates/lodestone-server/src/server.rs` (transition) — **both are live-agent choke
 points; the orchestrator schedules this as a solo slot.** Gate: a fake protocol with
 `has_configuration_phase() == false` reaches Play and receives chunks without either ack

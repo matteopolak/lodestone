@@ -11,47 +11,52 @@ tree-wide, and three children turned out substantially landed since their issues
 
 Staleness corrections, each confirmed against the tree — the issue bodies predate them:
 
-- **#323 is substantially landed.** The server sends `SET_TIME` once at join
-  (`encode_set_time(0, Some(0))`, `crates/lodestone-server/src/server.rs:703`) and every second
-  (`server.rs:1882`, monotonic game time with an empty day-clock map — the correct 26.2 shape).
-  What remains is exactly three things: the `game_time` on the wire is **wall-clock-since-join,
-  per connection** (`server.rs:1711`) rather than the tick loop's own counter —
-  `tick::run_tick_loop`'s `game_tick` (`tick.rs:498`) never reaches the wire, rule 1's island in
-  its purest form; there is no `advance_time` gamerule gate; and nothing persists world age
-  (#437's hook).
-- **#327's storage half landed** (`34725eb`): `WorldAdminState.game_rules:
-  HashMap<String, String>` (`server.rs:943`), serverbound `SET_GAME_RULE` decoded
-  (`crates/protocol/v770/src/server_protocol.rs:1154`), applied (`server.rs:1001-1015`), confirmed
-  via `encode_game_rule_values` (`crates/lodestone-server/src/protocol.rs:542`), gated by
-  `crates/lodestone-server/tests/serve_play.rs:794`.
-- **#328's storage + wire round-trip landed** under #268 (`34725eb`, `eb05ebe`):
-  `CHANGE_DIFFICULTY`/`LOCK_DIFFICULTY` decoded (`server_protocol.rs:1140,1148`), applied into
-  `WorldAdminState` (`server.rs:961-985`).
-- **But `WorldAdminState` is per-connection** — constructed fresh per serve (`server.rs:1382,
-  1562`). Two LAN clients each get their own difficulty and game rules. This is a shipped
-  violation of `docs/server-ecs.md`'s never-straddle invariant, and it is #327/#328's problem to
-  fix, not inherit.
-- **`IntegratedServer::bind` (LAN) spawns no tick loop at all** (`tick.rs:104-111` documents it;
-  only `open_in_memory_with_mobs` spawns `run_tick_loop`). World state would be frozen for LAN.
-- **Persistence: #298 and #300 are both CLOSED** — `lodestone-anvil` landed with working `.mca`
-  and `level.dat` codecs (`129f0bb`, `bbf27af`). **#437 (wiring it into the server's save/load
-  path) is the open dependency with zero commits.** Every persistence hook below cites #437, and
+- **T1's time work is substantially landed.** The server sends `SET_TIME` once at join
+  (`encode_set_time(0, Some(0))`, `serve_connection_inner` in `crates/lodestone-server/src/server.rs`)
+  and every second (`serve_play`'s `time_sync_tick` arm in `server.rs`, monotonic game time with an
+  empty day-clock map — the correct 26.2 shape). What remains is exactly three things: the
+  `game_time` on the wire is **wall-clock-since-join, per connection** (same `time_sync_tick` arm)
+  rather than the tick loop's own counter — `tick::run_tick_loop_with_weather`'s `game_tick` never
+  reaches the wire, rule 1's island in its purest form; there is no `advance_time` gamerule gate;
+  and nothing persists world age (the open persistence-wiring dependency's hook).
+- **R1's storage half landed** (`34725eb`): `WorldAdminState.game_rules:
+  HashMap<String, String>` (`crate::server::WorldAdminState`, `server.rs`), serverbound
+  `SET_GAME_RULE` decoded (the `SET_GAME_RULE` arm of `ServerProtocol::decode` in
+  `crates/protocol/v770/src/server_protocol.rs`), applied (`apply_game_rule_changed` in
+  `server.rs`), confirmed via `encode_game_rule_values` (`ServerProtocol::encode_game_rule_values`
+  in `crates/lodestone-server/src/protocol.rs`), gated by
+  `a_set_game_rule_is_validated_and_a_renamed_key_is_refused` in
+  `crates/lodestone-server/tests/serve_play.rs`.
+- **The difficulty half of R2's storage + wire round-trip landed** (`34725eb`, `eb05ebe`):
+  `CHANGE_DIFFICULTY`/`LOCK_DIFFICULTY` decoded (the corresponding arms of `ServerProtocol::decode`
+  in `server_protocol.rs`), applied into `WorldAdminState` (`apply_difficulty_change` in
+  `server.rs`).
+- **But `WorldAdminState` is per-connection** — constructed fresh per serve (each
+  `serve_connection*` wrapper in `server.rs`). Two LAN clients each get their own difficulty and
+  game rules. This is a shipped violation of `docs/server-ecs.md`'s never-straddle invariant, and
+  it is R1/R2's problem to fix, not inherit.
+- **`IntegratedServer::bind` (LAN) spawns no tick loop at all** — only `open_in_memory_with_mobs`
+  spawns `run_tick_loop`. World state would be frozen for LAN.
+- **Persistence: the anvil codec work is CLOSED** — `lodestone-anvil` landed with working `.mca`
+  and `level.dat` codecs (`129f0bb`, `bbf27af`). **Wiring it into the server's save/load path is
+  the open dependency with zero commits.** Every persistence hook below cites that dependency, and
   this plan does not design the format.
 - **The server sends zero registry data** (`begin_configuration` sends only
-  FINISH_CONFIGURATION — issue #275) and **`lodestone-worldgen` has zero Nether/End code**
+  FINISH_CONFIGURATION) and **`lodestone-worldgen` has zero Nether/End code**
   (grep for `nether|the_end|end_islands` over `crates/lodestone-worldgen/src` is empty). Both
-  block #330.
-- **Spawn is hardcoded `(8, 100, 8)`** inline in `v770::begin_play`
-  (`crates/protocol/v770/src/server_protocol.rs:1788`), mirrored by the shell
-  (`crates/lodestone-shell/src/net.rs:1492`); `GameLogin` is all literals (seed 0, game_type 0).
+  block D1.
+- **Spawn is hardcoded `(8, 100, 8)`** inline in `V770ServerProtocol::begin_play`
+  (`crates/protocol/v770/src/server_protocol.rs`), mirrored by the shell
+  (`crates/lodestone-shell/src/net.rs`); `GameLogin` is all literals (seed 0, game_type 0).
 - **Client-side wire coverage** (per-packet audit): time, weather, game-mode and difficulty
   events are all consumed. **Five decode paths route to nowhere**: all six world-border events,
   `GameRulesChanged`, and `SpawnPositionChanged` are decoded and dropped —
-  `crates/lodestone-model/src/event.rs:2191`'s `route()` table is the authoritative fork
+  `event.rs`'s `route()` function (`crates/lodestone-model/src/event.rs`) is the authoritative fork
   (ingest / session / shell stream), and its own doc warns: never flip a route without landing
   the consumer in the same commit.
-- **`DESIGN.md:2243`'s write-only-events list is stale** — `WeatherChanged` now folds into the
-  shell's `WeatherCell` (`net.rs:1868`, read in `app.rs::WindowApp::redraw`).
+- **`DESIGN.md` §12.88's write-only-events list is stale** — `WeatherChanged` now folds into the
+  shell's `WeatherCell` (`forward`'s `WeatherChanged` arm in `net.rs`, read in
+  `app.rs::WindowApp::redraw`).
 
 ## The 26.2 rework: constants and mechanics (all cites into `.cache/mc/26.2/src/`)
 
@@ -60,69 +65,81 @@ Staleness corrections, each confirmed against the tree — the issue bodies pred
 ### Time
 
 - Day/night is a registry-driven clock system, not `dayTime` on level data: two `WorldClock`s
-  exist, `minecraft:overworld` and `minecraft:the_end` (`world/clock/WorldClocks.java:9-14`).
+  exist, `minecraft:overworld` and `minecraft:the_end` (`WorldClocks`, `world/clock/WorldClocks.java`).
   State per clock: `ClockState(long totalTicks, float partialTick, float rate, boolean paused)`
-  (`world/clock/ClockState.java:7`, defaults `0.0/1.0/false` at `:11-13`), persisted as
-  server-global SavedData `world_clocks` via `ServerClockManager`.
-- Advance (`world/clock/ServerClockManager.java:161-168`):
+  (`ClockState`, `world/clock/ClockState.java`, defaults `0.0/1.0/false` at `ClockState.CODEC`),
+  persisted as server-global SavedData `world_clocks` via `ServerClockManager`.
+- Advance (`ServerClockManager.ClockInstance.tick`, `world/clock/ServerClockManager.java`):
   `partialTick += rate; fullTicks = floor(partialTick); partialTick -= fullTicks;
-  totalTicks += fullTicks` — gated on the **global** `advance_time` rule (`:63-69`), driven from
-  `MinecraftServer.java:1089-1092`. A separate per-level monotonic game time survives:
-  `ServerLevel.tickTime()` (`ServerLevel.java:474-482`).
+  totalTicks += fullTicks` — gated on the **global** `advance_time` rule
+  (`ServerClockManager.tick`), driven from `MinecraftServer.tickChildren`
+  (`MinecraftServer.java`). A separate per-level monotonic game time survives:
+  `ServerLevel.tickTime()` (`ServerLevel.java`).
 - Sync: heartbeat every 20 ticks carrying **game time only, empty clock map**
-  (`MinecraftServer.java:1095-1099`, `:1158-1163`). Full clock sync is event-driven only: on
-  join/dimension change (`PlayerList.java:651`), on `modifyClock`
-  (`ServerClockManager.java:112-122`), on `advance_time` flip (`MinecraftServer.java:2123-2125`).
-  Paused or rule-off sends `rate = 0.0` so the client freezes (`:174-178`).
-- Overworld timeline (`world/timeline/Timelines.java:44-53`): period **24000**; markers
-  `WAKE_UP_FROM_SLEEP=0`, `DAY=1000`, `NOON=6000`, `NIGHT=13000`, `MIDNIGHT=18000`; night window
-  12600–23401 (`:42-43`).
+  (`MinecraftServer.tickChildren`'s 20-tick branch, calling
+  `MinecraftServer.forceGameTimeSynchronization`'s empty `Map.of()`, both `MinecraftServer.java`).
+  Full clock sync is event-driven only: on join/dimension change (`PlayerList.sendLevelInfo`,
+  `PlayerList.java`), on `modifyClock` (`ServerClockManager.modifyClock`, `ServerClockManager.java`),
+  on `advance_time` flip (`MinecraftServer.onGameRuleChanged`, `MinecraftServer.java`). Paused or
+  rule-off sends `rate = 0.0` so the client freezes (`ServerClockManager.ClockInstance.packNetworkState`).
+- Overworld timeline (`Timelines.bootstrap`, `world/timeline/Timelines.java`): period **24000**;
+  markers `WAKE_UP_FROM_SLEEP=0`, `DAY=1000`, `NOON=6000`, `NIGHT=13000`, `MIDNIGHT=18000`; night
+  window 12600–23401 (same method).
 
 ### Weather
 
-- Server-global SavedData `minecraft:weather` (`WeatherData.java:8-26`), not per-dimension.
-- Rolls (`ServerLevel.java:188-191`, bounds inclusive): `RAIN_DELAY = UniformInt(12000,180000)`,
+- Server-global SavedData `minecraft:weather` (`WeatherData`'s `CODEC`/`TYPE`,
+  `world/level/saveddata/WeatherData.java`), not per-dimension.
+- Rolls (`ServerLevel`'s `RAIN_DELAY`/`RAIN_DURATION`/`THUNDER_DELAY`/`THUNDER_DURATION` constants,
+  `ServerLevel.java`, bounds inclusive): `RAIN_DELAY = UniformInt(12000,180000)`,
   `RAIN_DURATION = (12000,24000)`, `THUNDER_DELAY = (12000,180000)`,
-  `THUNDER_DURATION = (3600,15600)`. Cycle: `advanceWeatherCycle` (`:708-751`), gated on
+  `THUNDER_DURATION = (3600,15600)`. Cycle: `advanceWeatherCycle` (`ServerLevel.java`), gated on
   `advance_weather`.
-- Interpolation ±0.01F/tick clamped [0,1] (`:753-768`); on load, levels snap to 1.0 (`:699-707`).
-- Broadcast (`:771-792`): `RAIN_LEVEL_CHANGE`/`THUNDER_LEVEL_CHANGE` are dimension-scoped;
-  `START_RAINING`/`STOP_RAINING` go to all dimensions. `ClientboundGameEventPacket` ids
-  (`network/protocol/game/ClientboundGameEventPacket.java:14-27`): start rain 1, stop rain 2,
+- Interpolation ±0.01F/tick clamped [0,1] (`ServerLevel.advanceWeatherCycle`); on load, levels
+  snap to 1.0 (`ServerLevel.prepareWeather`).
+- Broadcast (`ServerLevel.advanceWeatherCycle`): `RAIN_LEVEL_CHANGE`/`THUNDER_LEVEL_CHANGE` are
+  dimension-scoped; `START_RAINING`/`STOP_RAINING` go to all dimensions.
+  `ClientboundGameEventPacket` ids (`network/protocol/game/ClientboundGameEventPacket.java`):
+  start rain 1, stop rain 2,
   change game mode 3, rain level 7, thunder level 8, `LEVEL_CHUNKS_LOAD_START` 13. Wire form:
   unsigned byte + float.
 
 ### Sleep
 
 - `sleepersNeeded = max(1, ceil(activePlayers * pct / 100.0))`, spectators excluded
-  (`server/players/SleepStatus.java:21-23`, `:33-49`); deep-sleep threshold 100 ticks
-  (`world/entity/player/Player.java:128`, `:1355-1357`).
-- Skip (`ServerLevel.java:367-379`): when enough players sleep *and* deep-sleep, call
-  `moveToTimeMarker(WAKE_UP_FROM_SLEEP)` — advance **forward to the next multiple of 24000** and
-  zero `partialTick` (`world/clock/ClockTimeMarker.java:20-36`); wake all; clear weather only if
-  `advance_weather` **and** currently raining.
+  (`SleepStatus.sleepersNeeded`, `SleepStatus.update`, `server/players/SleepStatus.java`);
+  deep-sleep threshold 100 ticks (`Player.SLEEP_DURATION`, `Player.isSleepingLongEnough`,
+  `world/entity/player/Player.java`).
+- Skip (`ServerLevel.tick`'s sleep-skip block, `ServerLevel.java`): when enough players sleep *and*
+  deep-sleep, call `moveToTimeMarker(WAKE_UP_FROM_SLEEP)` — advance **forward to the next multiple
+  of 24000** and zero `partialTick` (`ClockTimeMarker.resolveTimeToMoveTo`,
+  `world/clock/ClockTimeMarker.java`); wake all; clear weather only if `advance_weather` **and**
+  currently raining.
 - Bed entry has no dedicated packet — it is a use-item-on-bed interaction. Checks
-  (`server/level/ServerPlayer.java:1186-1240`): distance (`TOO_FAR_AWAY`), obstruction, monsters
-  within ±8.0 horizontal / ±5.0 vertical AABB (`:1214-1227`, skipped in creative).
-  `BedSleepingProblem` is a record in 26.2, not an enum (`Player.java:2060-2065`). Wake is
-  serverbound `PLAYER_COMMAND` (StopSleeping) — **decoded and discarded by our server today**.
+  (`ServerPlayer.startSleepInBed`, `server/level/ServerPlayer.java`): distance (`TOO_FAR_AWAY`),
+  obstruction, monsters within ±8.0 horizontal / ±5.0 vertical AABB (same method, skipped in
+  creative). `BedSleepingProblem` is a record in 26.2, not an enum (`Player.BedSleepingProblem`,
+  `Player.java`). Wake is serverbound `PLAYER_COMMAND` (StopSleeping) — **decoded and discarded by
+  our server today**.
 
 ### World border
 
 - `WorldBorder` extends SavedData. `MAX_SIZE = 5.999997E7` (**not** 1.21's `5.9999968E7`),
-  `MAX_CENTER_COORDINATE = 2.9999984E7` (`world/level/border/WorldBorder.java:22-23`);
-  `damagePerBlock = 0.2`, `warningBlocks = 5` (`:31,34`); safe zone 5.0.
+  `MAX_CENTER_COORDINATE = 2.9999984E7` (`WorldBorder`'s own constants,
+  `world/level/border/WorldBorder.java`); `damagePerBlock = 0.2`, `warningBlocks = 5` (same file's
+  field declarations); safe zone 5.0.
 - **Warning-time discrepancy, recorded so nobody re-derives it:** the field initializer says
-  `warningTime = 15` (`:33`) but `Settings.DEFAULT` carries **300** (`:459`) and
-  `applyInitialSettings` (`:284-299`) always overwrites — `ServerLevel.getWorldBorder()` always
-  calls it (`ServerLevel.java:1455-1458`). Effective default: **300**. The 15 is dead code.
-- Lerp: `lerpSizeBetween(from, to, ticks, gameTime)` → `MovingBorderExtent` (`:195-196`,
-  `:330-`). Centre is not clamped on set; clamping happens at read time in the extents
-  (`:353-384`).
+  `warningTime = 15` but `WorldBorder.Settings.DEFAULT` carries **300** and
+  `WorldBorder.applyInitialSettings` always overwrites — `ServerLevel.getWorldBorder()` always
+  calls it (`ServerLevel.java`). Effective default: **300**. The 15 is dead code.
+- Lerp: `lerpSizeBetween(from, to, ticks, gameTime)` (`WorldBorder.lerpSizeBetween`) →
+  `WorldBorder.MovingBorderExtent`. Centre is not clamped on set; clamping happens at read time in
+  the extents (`MovingBorderExtent.getMinX`/`getMinZ`/`getMaxX`/`getMaxZ`).
 - Damage is **players-only**: `max(1, floor(-dist * damagePerBlock))` past the safe zone
-  (`world/entity/LivingEntity.java:425-434`). `onSetDamagePerBlock`/`onSetSafeZone` listeners are
-  never sent to the client (`PlayerList.java:268-275`) — those two fields are server-internal.
-- Ticked first in `ServerLevel.tick`: border (`:361`) → weather (`:363`) → sleep check (`:367`).
+  (`LivingEntity.baseTick`, `world/entity/LivingEntity.java`).
+  `onSetDamagePerBlock`/`onSetSafeZone` listeners are never sent to the client
+  (`PlayerList.addWorldborderListener`, `PlayerList.java`) — those two fields are server-internal.
+- Ticked first in `ServerLevel.tick`: border → weather → sleep check (same method, in that order).
 
 ### Game rules
 
@@ -130,63 +147,70 @@ Staleness corrections, each confirmed against the tree — the issue bodies pred
   (`BuiltInRegistries.GAME_RULE`), snake_case, **59 rules**, only `BOOL` and `INT` types.
   Renames that silently break old names:
 
-  | 1.21 name | 26.2 key | default | GameRules.java |
+  | 1.21 name | 26.2 key | default | `GameRules` constant (`GameRules.java`) |
   |---|---|---|---|
-  | `doDaylightCycle` | `advance_time` | true (release) | `:24` |
-  | `doWeatherCycle` | `advance_weather` | true (release) | `:25` |
-  | `playersSleepingPercentage` | `players_sleeping_percentage` | 100 | `:70` |
-  | `spawnRadius` | `respawn_radius` | 10 | `:76` |
-  | `naturalRegeneration` | `natural_health_regeneration` | true | `:62` |
-  | `doMobSpawning` | `spawn_mobs` | true | `:81` |
-  | `randomTickSpeed` | `random_tick_speed` | 3 | `:74` |
-  | `keepInventory` | `keep_inventory` | false | `:46` |
-  | `mobGriefing` | `mob_griefing` | true | `:61` |
-  | `doImmediateRespawn` | `immediate_respawn` | false | `:45` |
+  | `doDaylightCycle` | `advance_time` | true (release) | `ADVANCE_TIME` |
+  | `doWeatherCycle` | `advance_weather` | true (release) | `ADVANCE_WEATHER` |
+  | `playersSleepingPercentage` | `players_sleeping_percentage` | 100 | `PLAYERS_SLEEPING_PERCENTAGE` |
+  | `spawnRadius` | `respawn_radius` | 10 | `RESPAWN_RADIUS` |
+  | `naturalRegeneration` | `natural_health_regeneration` | true | `NATURAL_HEALTH_REGENERATION` |
+  | `doMobSpawning` | `spawn_mobs` | true | `SPAWN_MOBS` |
+  | `randomTickSpeed` | `random_tick_speed` | 3 | `RANDOM_TICK_SPEED` |
+  | `keepInventory` | `keep_inventory` | false | `KEEP_INVENTORY` |
+  | `mobGriefing` | `mob_griefing` | true | `MOB_GRIEFING` |
+  | `doImmediateRespawn` | `immediate_respawn` | false | `IMMEDIATE_RESPAWN` |
 
 - **`GAME_RULE_VALUES` is request/response, not broadcast.** Its only send site is
-  `sendGameRuleValues()` (`ServerGamePacketListenerImpl.java:1925`), reachable solely via
-  `ServerboundClientCommandPacket.REQUEST_GAMERULE_VALUES` (`:1919-1920`). Nothing pushes rule
-  changes to clients — not even to the setter. Our current confirm-on-set
-  (`server.rs:1001-1015`) diverges from vanilla; see #327 below.
+  `sendGameRuleValues()` (`ServerGamePacketListenerImpl.sendGameRuleValues`,
+  `ServerGamePacketListenerImpl.java`), reachable solely via
+  `ServerboundClientCommandPacket.REQUEST_GAMERULE_VALUES` (the corresponding case in
+  `ServerGamePacketListenerImpl.handleClientCommand`). Nothing pushes rule changes to clients —
+  not even to the setter. Our current confirm-on-set (`apply_game_rule_changed` in `server.rs`)
+  diverges from vanilla; see #327 below.
 - Serverbound values arrive as strings, parsed server-side; permission gate
   `Permissions.COMMANDS_GAMEMASTER`; unknown keys logged and skipped, parse failures silently
-  dropped (`ServerGamePacketListenerImpl.java:799-816`).
+  dropped (`ServerGamePacketListenerImpl.handleSetGameRule`, `ServerGamePacketListenerImpl.java`).
 
 ### Difficulty
 
-- Stored in `LevelSettings.DifficultySettings` (`PrimaryLevelData.java:250-267`); hardcore
-  force-pins HARD (`MinecraftServer.java:1288-1295`). Both packet handlers gate on gamemaster
+- Stored in `LevelSettings.DifficultySettings` (`PrimaryLevelData`'s difficulty accessors,
+  `PrimaryLevelData.java`); hardcore force-pins HARD (`MinecraftServer.setDifficulty`,
+  `MinecraftServer.java`). Both packet handlers gate on gamemaster
   permission OR singleplayer owner; `handleLockDifficulty` has no else-branch, so unauthorized
   lock attempts are silently dropped — an asymmetry with `handleChangeDifficulty` worth
   preserving deliberately or diverging from deliberately, not by accident.
 
 ### Spawn
 
-- Initial world spawn: `setInitialSpawn` (`MinecraftServer.java:480-532`) — spiral of
-  `Mth.square(11)` = 121 iterations clamped to a ±5-chunk box (`:504-520`).
+- Initial world spawn: `setInitialSpawn` (`MinecraftServer.java`) — spiral of
+  `Mth.square(11)` = 121 iterations clamped to a ±5-chunk box (same method).
 - Respawn scatter: `PlayerSpawnFinder` (replaces 1.21's `PlayerRespawnLogic`):
   `ABSOLUTE_MAX_ATTEMPTS = 1024`, candidates `min(1024, (radius*2+1)^2)` with a coprime-stride
   permutation, radius clamped by border distance, **adventure mode skips scatter**, and the
   search is **async, chunk-ticket driven** (`TicketType.SPAWN_SEARCH`, returns
-  `CompletableFuture<Vec3>`) — a concrete tie to #297's ticket system.
+  `CompletableFuture<Vec3>`) — a concrete tie to the chunk-lifecycle plan's ticket system.
 
 ### Portals and dimension change
 
-- `PortalForcer`: nether search radius 16, overworld 128 (literals at `:43`), POI-based
+- `PortalForcer`: nether search radius 16, overworld 128 (`PortalForcer.NETHER_PORTAL_RADIUS`/
+  `OVERWORLD_PORTAL_RADIUS`, `world/level/portal/PortalForcer.java`), POI-based
   (`PoiTypes.NETHER_PORTAL`). `PortalProcessor` per-entity: `portalTime++` until
-  `getPortalTransitionTime` (0 creative / 80 default), decays −4/tick when out (`:27,:40`).
-  Nether `coordinate_scale = 8.0` (`DimensionTypes.java:73`); `getTeleportationScale = oldScale /
-  newScale` (`DimensionType.java:108-113`).
-- **Dimension-change packet sequence** (`ServerPlayer.java:1093-1148`), what #330 must
-  reproduce: `RESPAWN` (data-to-keep byte 3) → `CHANGE_DIFFICULTY` → `PLAYER_ABILITIES` →
-  `sendLevelInfo` (`PlayerList.java:648-663`): `INITIALIZE_BORDER` → full clock sync →
-  `SET_DEFAULT_SPAWN_POSITION` → weather game events if raining → `GAME_EVENT(13)`
-  (chunks-load-start) → tick rate → player info/effects. Same-dimension teleport is a fast path
-  with **no** respawn packet (`:1108-1113`).
+  `getPortalTransitionTime` (0 creative / 80 default,
+  `PortalProcessor.processPortalTeleportation`), decays −4/tick when out
+  (`PortalProcessor.decayTick`, `world/entity/PortalProcessor.java`). Nether
+  `coordinate_scale = 8.0` (`DimensionTypes.bootstrap`, `data/worldgen/DimensionTypes.java`);
+  `getTeleportationScale = oldScale / newScale` (`DimensionType.getTeleportationScale`,
+  `world/level/dimension/DimensionType.java`).
+- **Dimension-change packet sequence** (`ServerPlayer.teleport`, `server/level/ServerPlayer.java`),
+  what #330 must reproduce: `RESPAWN` (data-to-keep byte 3) → `CHANGE_DIFFICULTY` →
+  `PLAYER_ABILITIES` → `sendLevelInfo` (`PlayerList.sendLevelInfo`, `PlayerList.java`):
+  `INITIALIZE_BORDER` → full clock sync → `SET_DEFAULT_SPAWN_POSITION` → weather game events if
+  raining → `GAME_EVENT(13)` (chunks-load-start) → tick rate → player info/effects. Same-dimension
+  teleport is a fast path with **no** respawn packet (same `ServerPlayer.teleport` method).
 
 ## ECS placement (per `docs/server-ecs.md`, referencing `docs/plans/server-ecs-migration.md`)
 
-The server-ECS decision is final (`f0d22a1`, issue #433) and **unimplemented** — no
+The server-ECS decision is final (`f0d22a1`) and **unimplemented** — no
 `bevy_ecs`/`lodestone-ecs` in `crates/lodestone-server/Cargo.toml`, and no phase issues exist on
 GitHub yet; the migration plan is being written concurrently to
 `docs/plans/server-ecs-migration.md`. This plan therefore names the migration **shape** each
@@ -210,38 +234,42 @@ child needs, not a phase number:
 | #329 spawn | `LevelSpawn{pos, yaw}` resource; `RespawnPosition{dim, pos, yaw, forced}` **component** per player | `Resource` + component (A for world spawn, B for per-player) | event-driven, not per-tick |
 | #330 dimensions | `Dimensions` registry resource + per-dimension chunk sources; player dimension as component | `Resource` + component (A + B) | portal systems in `GameTick` |
 
-**Blocked-on-shape summary:** #325 and #329's per-player half hard-require shape B. #326's
+**Blocked-on-shape summary:** S1 and P2 (the per-player respawn half) hard-require shape B. B1's
 damage system wants B but has an honest interim (per-connection player position is where vitals
 already live). Everything else needs only shape A — and until shape A lands, every `Resource`
-above can live as a **plain struct owned by `run_tick_loop`** (`tick.rs:478`'s local state,
-exactly like its existing `game_tick`/`block_ticks` locals): same no-lock, tick-thread-owned
-discipline, mechanical move to `Resource` later. **Do not build new `Arc<Mutex<_>>` shared state
-for any of this** — that is the shape the migration exists to delete. Publication to connection
-tasks uses the established snapshot-feed idiom (`LiveMobSource`/`BlockTickFeed`, `tick.rs:90-168`),
+above can live as a **plain struct owned by `run_tick_loop_with_weather`** (its local state,
+exactly like its existing `game_tick`/`block_ticks` locals, both in `tick.rs`): same no-lock,
+tick-thread-owned discipline, mechanical move to `Resource` later. **Do not build new
+`Arc<Mutex<_>>` shared state for any of this** — that is the shape the migration exists to
+delete. Publication to connection tasks uses the established snapshot-feed idiom
+(`LiveMobSource` in `crates/lodestone-server/src/mobs/mod.rs` / `BlockTickFeed` in `tick.rs`),
 with their documented single-consumer caveat.
 
 Two structural gaps belong to the migration plan, cited here as dependencies, not planned:
 `bind()` spawning no tick loop (LAN world state frozen), and per-connection `WorldAdminState`
-(the straddle #327/#328 must not inherit — see unit R2).
+(the straddle R1/R2 must not inherit — see unit R2).
 
-## Plugin visibility (the #77 lens)
+## Plugin visibility
 
 The owner's standing rule: plugins are ordinary bevy plugins, and core functionality goes through
 the plugin surface — no separate internal API. Choosing `Resource`s in the server `World` makes
-#323/#324/#326/#327/#328's state **plugin-visible by construction** for native server plugins
+T1/W1/B1/R1/R2's state **plugin-visible by construction** for native server plugins
 (`Res`/`ResMut` + system ordering); the Bukkit `World.setTime`/`setStorm`/`WorldBorder`/
 `GameRule` surface is exactly these resources. What that leans on per child:
 
-- **Write etiquette / veto**: ordering against an `Adjudicate` set — #105 (priority convention),
-  #110 (monitor tier), #101 (cancellation semantics). Shape C, not blocking any child landing.
-- **Observation as events**: #104's message bus (a `GameEvent` message when weather flips or the
-  border moves).
-- **#325 sleep**: the cancellable "player enters bed" verb is #109's cancelable-action wrapper.
-- **#330 dimensions**: plugin-registered dimensions are #134; custom generators #132.
-- **WASM tier**: none of this is reachable from sandboxed plugins until #173's capability ABI
-  names query/action surfaces for it — cite per-resource entries there when #173 lands.
+- **Write etiquette / veto**: ordering against an `Adjudicate` set — priority convention, monitor
+  tier, cancellation semantics. Shape C, not blocking any child landing.
+- **Observation as events**: the plugin message bus (a `GameEvent` message when weather flips or
+  the border moves).
+- **S1 sleep**: the cancellable "player enters bed" verb is the plugin surface's
+  cancelable-action wrapper.
+- **D1 dimensions**: plugin-registered dimensions are a separate plugin-surface concern; so are
+  custom generators.
+- **WASM tier**: none of this is reachable from sandboxed plugins until the capability ABI names
+  query/action surfaces for it — cite per-resource entries there once it lands.
 - **Commands** (`/time`, `/weather`, `/gamerule`, `/difficulty`, `/worldborder`,
-  `/setworldspawn`): consumers of this state via #118's command registration; out of scope here.
+  `/setworldspawn`): consumers of this state via the command-registration system; out of scope
+  here.
 
 ## Units
 
@@ -251,22 +279,38 @@ through the orchestrator; the patch is the single stated line). `server.rs`, `ti
 `protocol.rs`, `event.rs`, `net.rs`, `app.rs` are contended: re-read before writing, stage hunks,
 pathspec commits.
 
-### R1 — typed game-rule registry (#327, start immediately)
+| unit | child issue |
+|---|---|
+| R1 | #327 |
+| T1 | #323 |
+| W1 | #324 |
+| R2 | #327 + #328 |
+| B1 | #326 (server half) |
+| B2 | #326 (client half) |
+| S1 | #325 |
+| P1 | #329 (minus per-player respawn) |
+| P2 | #329 (per-player respawn half) |
+| D1 | #330 |
+
+### R1 — typed game-rule registry (start immediately)
 
 - **Files:** new `crates/lodestone-server/src/gamerules.rs` (owner: one agent); `lib.rs` gets
   `mod gamerules;`.
 - **What:** typed registry of all 59 rules (BOOL/INT only), snake_case 26.2 keys, defaults per
   the table above (source: `gamerules/GameRules.java`); `get_bool`/`get_int` lookups; write path
   validates key against the registry and parses the string value, unknown keys logged-and-skipped,
-  parse failures dropped (vanilla `ServerGamePacketListenerImpl.java:799-816` semantics).
-  Replaces the raw `HashMap<String,String>` inside `WorldAdminState` (`server.rs:943-956`).
-- **Consumer:** `apply_game_rule_changed` (`server.rs:1001-1015`) validates through it; units T1,
+  parse failures dropped (vanilla `ServerGamePacketListenerImpl.handleSetGameRule` semantics).
+  Replaces the raw `HashMap<String,String>` inside `WorldAdminState` (`crate::server::WorldAdminState`,
+  `server.rs`).
+- **Consumer:** `apply_game_rule_changed` (`server.rs`) validates through it; units T1,
   W1, S1 read it. Until R2, it stays inside `WorldAdminState` (still per-connection — R2 fixes
   that, not this unit).
-- **Permission:** vanilla gates on gamemaster; we have no permission model — cite #336, keep
-  current accept-all behaviour with a doc comment naming #336, do not invent an interim model.
+- **Permission:** vanilla gates on gamemaster; we have no permission model — keep current
+  accept-all behaviour with a doc comment naming the open permission-model dependency, do not
+  invent an interim model.
 - **Vanilla-divergence decision recorded:** vanilla never pushes rule values (request/response
-  only, `ServerGamePacketListenerImpl.java:1919-1925`). Our confirm-on-set stays (it is what our
+  only, `ServerGamePacketListenerImpl.handleClientCommand`'s `REQUEST_GAMERULE_VALUES` case calling
+  `sendGameRuleValues`). Our confirm-on-set stays (it is what our
   test gates and is harmless), but add the `REQUEST_GAMERULE_VALUES` client-command path when the
   serverbound `CLIENT_COMMAND` decode grows that variant — check
   `server_protocol.rs`'s Play arms before assuming it is absent.
@@ -278,42 +322,44 @@ pathspec commits.
   What would make it vacuous: asserting only on the confirm packet (round-trips the string
   without proving a reader exists).
 
-### T1 — connect the clock to the wire, gate on `advance_time` (#323 remainder)
+### T1 — connect the clock to the wire, gate on `advance_time` (the remainder)
 
-- **Files:** `tick.rs` (add `WorldClocks` plain-struct state to `run_tick_loop`, advance per
-  `ServerClockManager.java:161-168`); `server.rs` time-sync arm (`:1811-1882`).
-- **The island to close, precisely:** `server.rs:1711` derives `game_time` from wall clock;
-  `run_tick_loop` already counts real ticks (`TickClock::tick_count`, `tick.rs:329`) and the
-  connection task already holds the `Arc<TickClock>`. The fix is one substitution: the periodic
-  `encode_set_time(ticks_since(play_start), None)` reads `clock.tick_count()` instead. Overrun
-  semantics come free (forgiven backlog = time genuinely didn't advance).
+- **Files:** `tick.rs` (add `WorldClocks` plain-struct state to `run_tick_loop_with_weather`,
+  advance per `ServerClockManager.ClockInstance.tick`); `server.rs`'s `serve_play` time-sync arm
+  (`time_sync_tick`).
+- **The island to close, precisely:** `serve_play`'s `time_sync_tick` arm derives `game_time` from
+  wall clock; `run_tick_loop_with_weather` already counts real ticks (`TickClock::tick_count`) and
+  the connection task already holds the `Arc<TickClock>`. The fix is one substitution: the
+  periodic `encode_set_time(ticks_since(play_start), None)` reads `clock.tick_count()` instead.
+  Overrun semantics come free (forgiven backlog = time genuinely didn't advance).
 - **Gate:** integration test — run the loop N virtual ticks, assert the broadcast game time
   equals `tick_count` exactly; with `advance_time` off, the day-clock rate resent is 0.0 and the
   client-visible anchor frozen (join sync sends `rate: 0.0`, matching
-  `ServerClockManager.java:174-178`). Negative control: with the rule on, the frozen-assert must
-  fail. Vacuous-risk: asserting "time increased" (sign) instead of "equals tick_count"
-  (magnitude).
-- **Client:** none — `SET_TIME` → `TimeChanged` → `state.rs:555` → `WorldTime` → sky already
-  works end-to-end.
-- **Persistence hook:** world age and clock states load/save via #437 (`world_clocks` SavedData
-  shape); until then tick 0 = process start, documented.
-- **Suggested issue hygiene:** per the owner's triage comment on #323, close it and let
-  #437/#327/this-unit carry the remainder.
+  `ServerClockManager.ClockInstance.packNetworkState`). Negative control: with the rule on, the
+  frozen-assert must fail. Vacuous-risk: asserting "time increased" (sign) instead of "equals
+  tick_count" (magnitude).
+- **Client:** none — `SET_TIME` → `TimeChanged` → `SharedState::apply`
+  (`crates/lodestone-client/src/state.rs`) → `WorldTime` → sky already works end-to-end.
+- **Persistence hook:** world age and clock states load/save via the persistence-wiring dependency
+  (`world_clocks` SavedData shape); until then tick 0 = process start, documented.
+- **Suggested issue hygiene:** per the owner's triage comment on T1's issue, close it and let the
+  persistence-wiring dependency, R1's issue, and this unit carry the remainder.
 
-### W1 — weather state machine + `encode_game_event` (#324)
+### W1 — weather state machine + `encode_game_event`
 
 - **Files:** new `crates/lodestone-server/src/weather.rs` (state machine, pure, seeded-RNG
   constructor); `lib.rs` `mod weather;`; `tick.rs` (tick it before sleep; publish transitions
   into a `WeatherFeed` mirroring `BlockTickFeed`); `protocol.rs` + `v770/server_protocol.rs`
   (new trait method `encode_game_event(kind: u8, value: f32)`); `server.rs` sync arm forwards
   drained transitions.
-- **Mechanics:** exactly `advanceWeatherCycle` (`ServerLevel.java:708-751`) with the four
-  `UniformInt` ranges (`:188-191`), ±0.01F/tick interpolation clamped [0,1] (`:753-768`),
-  `advance_weather` gate (reads R1). Keep the interpolated levels — the issue's own trap warning
-  stands, and the client's `WeatherCell` consumes the ramp.
-- **Consumer (already wired):** client decodes GAME_EVENT → `WeatherChanged` → `net.rs:1868`
-  fold → `WeatherCell` → `app.rs::WindowApp::redraw`. Rain *particles/overlay rendering* is the Tier-1 backlog
-  client item, explicitly not this unit.
+- **Mechanics:** exactly `ServerLevel.advanceWeatherCycle` with the four `UniformInt` ranges
+  (`ServerLevel`'s `RAIN_DELAY`/`RAIN_DURATION`/`THUNDER_DELAY`/`THUNDER_DURATION` constants),
+  ±0.01F/tick interpolation clamped [0,1] (same method), `advance_weather` gate (reads R1). Keep
+  the interpolated levels — the issue's own trap warning stands, and the client's `WeatherCell`
+  consumes the ramp.
+- **Consumer (already wired):** client decodes GAME_EVENT → `WeatherChanged` → `forward`'s
+  `WeatherChanged` arm in `net.rs` fold → `WeatherCell` → `app.rs::WindowApp::redraw`. Rain
+  *particles/overlay rendering* is the Tier-1 backlog client item, explicitly not this unit.
 - **Gate:** (a) seeded-RNG unit test pinning exact transition ticks for a known seed (expected
   values derived by hand from the UniformInt sampling, not from our own code); (b) duty-cycle
   distribution band over ~1M simulated ticks against the range midpoints; (c) wire gate: force
@@ -321,38 +367,41 @@ pathspec commits.
   (magnitude), then id 1/2 on flips. Negative control: with `advance_weather` off the state must
   not change over N ticks — and flipping the rule on must make that same assert fail.
 
-### R2 — world-level admin state (the straddle fix, #327 + #328 jointly)
+### R2 — world-level admin state (the straddle fix, joining R1's game rules with the difficulty state)
 
-- **What:** move `WorldAdminState` (difficulty, lock, game rules) from per-connection
-  (`server.rs:1382,1562`) to tick-thread-owned world state, broadcast changes to **all**
-  connections. This is the natural **pilot for migration shape A** — coordinate with
+- **What:** move `WorldAdminState` (difficulty, lock, game rules) from per-connection (each
+  `serve_connection*` wrapper in `server.rs`) to tick-thread-owned world state, broadcast changes
+  to **all** connections. This is the natural **pilot for migration shape A** — coordinate with
   `docs/plans/server-ecs-migration.md` before starting; if shape A is imminent, land this as the
   first real `Resource` instead of a plain struct, and do not build it twice.
 - **Files:** `server.rs` (state relocation + broadcast), `tick.rs` or the new `World` (owner
   decided by migration timing). Difficulty extras: hardcore→HARD pin has no server-side hardcore
-  flag yet — note in code, cite #300-successor wiring (#437) for where the flag will come from.
+  flag yet — note in code, cite the anvil-persistence wiring dependency for where the flag will
+  come from.
 - **Gate:** two-connection test — connection A sets difficulty, connection B receives the
   `CHANGE_DIFFICULTY` broadcast. **This gate fails against today's tree by construction** (B has
   its own `WorldAdminState`), which is the negative control demonstrating the straddle is real:
   run it before the fix, watch it fail, land the fix, watch it pass. Same for a game-rule set
   observed by B's behaviour (not by a confirm packet — B never gets one, matching vanilla).
-- **Permissions:** still #336. Record vanilla's lock-difficulty silent-drop asymmetry
-  (`ServerGamePacketListenerImpl`) in the doc comment when #336 lands the check.
-- **Client (#328):** none — `player_state.rs:160-162` already consumes difficulty.
+- **Permissions:** still no permission model. Record vanilla's lock-difficulty silent-drop
+  asymmetry (`ServerGamePacketListenerImpl`) in the doc comment when the permission-model work
+  lands the check.
+- **Client:** none — `HudState::apply` (`crates/lodestone-game/src/player_state.rs`)
+  already consumes difficulty.
 
-### B1 — world border state + wire (#326, server half)
+### B1 — world border state + wire (server half)
 
 - **Files:** new `crates/lodestone-server/src/border.rs`; `lib.rs` `mod border;`; `tick.rs`
   (tick first, per `ServerLevel.tick` order); `protocol.rs` + `v770/server_protocol.rs`: encoders
   for `INITIALIZE_BORDER` (sent in `begin_play`'s join sequence, mirroring
-  `PlayerList.java:648-663`) and the five `SET_BORDER_*` deltas; `server.rs` forwards a
+  `PlayerList.sendLevelInfo`) and the five `SET_BORDER_*` deltas; `server.rs` forwards a
   `BorderFeed`.
 - **State/defaults:** the resource row in the table above with 26.2 defaults — size
   5.999997E7, damage 0.2, safe zone 5.0, warning blocks 5, warning time **300** (the
-  `Settings.DEFAULT` value; the field's 15 is dead — discrepancy recorded above so nobody
-  "fixes" it backwards). Lerp per `MovingBorderExtent`; centre clamped at read, not write.
+  `WorldBorder.Settings.DEFAULT` value; the field's 15 is dead — discrepancy recorded above so
+  nobody "fixes" it backwards). Lerp per `MovingBorderExtent`; centre clamped at read, not write.
 - **Enforcement:** players-only damage `max(1, floor(-dist * damage_per_block))`
-  (`LivingEntity.java:425-434`) past safe zone. Interim (pre-shape-B): compute in the
+  (`LivingEntity.baseTick`) past safe zone. Interim (pre-shape-B): compute in the
   connection task against its own player position and vitals, exactly where vitals live today —
   classified simulation-state-in-the-wrong-place, migrating with vitals.
 - **Gate:** shrink via lerp, sample broadcast size at ticks {0, d/4, d/2, d} against the exact
@@ -361,9 +410,9 @@ pathspec commits.
   and the control proving the 0-detector works: move the same player outside and the 0-assert
   must fail.
 
-### B2 — border client consumer (#326, client half; pairs with B1, same PR train)
+### B2 — border client consumer (client half; pairs with B1, same PR train)
 
-> **Stale as of issue #436's island sweep — re-verify before following this bullet.** The
+> **Stale as of a recent island sweep — re-verify before following this bullet.** The
 > border events did **not** route to SHELL and there is no `BorderCell`. They route
 > `session` (`event.rs`'s own table, `ClientEvent::WorldBorder* => SESSION`) and fold into
 > `lodestone_ecs::session::SessionWorldBorder` via `apply_world_border`, stamped off
@@ -372,14 +421,15 @@ pathspec commits.
 >
 > What is genuinely still open is only the consumer, and it is bigger than "tint the screen
 > edge red": vanilla's warning is a **cyan tint on the vignette** inside `Hud.extractVignette`
-> (`Hud.java:1057-1078`), needing `misc/vignette.png` plus a **multiply** blend state that
+> (`Hud.java`), needing `misc/vignette.png` plus a **multiply** blend state that
 > `lodestone-render/src/screen_effects.rs` does not have. The formula itself is ported and
 > gated (`sim::session::border_warning`) and reaches the debug overlay today. See
 > `docs/screen-overlays.md`'s "The world-border warning" section for the exact remaining list.
 
-- **Files:** `event.rs:2191` route table (six border events → SHELL — world state, so neither
-  `ingest` nor `session`, per the established fork); `net.rs` fold into a new `BorderCell`
-  (mirror `WeatherCell`, `net.rs:1868`); consumer: warning vignette — when
+- **Files:** `event.rs`'s `route()` route table (six border events → SHELL — world state, so
+  neither `ingest` nor `session`, per the established fork); `net.rs` fold into a new `BorderCell`
+  (mirror `WeatherCell`, `forward`'s `WeatherChanged` arm in `net.rs`); consumer: warning vignette
+  — when
   `distance_to_border < max(warning_blocks, speed * warning_time_ticks)` tint the screen edge
   red (`hud.rs`/`gpu.rs` — exact anchor chosen by the implementing agent with the orchestrator,
   since both files are contended). The animated wall render is a follow-up render feature, filed
@@ -391,15 +441,15 @@ pathspec commits.
   failure report** (location, never frame average); negative control: route flip reverted →
   the same gate must fail. Vacuous-risk: asserting the cell updated (state) without the draw.
 
-### S1 — sleep and the night-skip vote (#325; blocked on shape B + T1 + W1 + R1)
+### S1 — sleep and the night-skip vote (blocked on shape B + T1 + W1 + R1)
 
 - **Files:** new `crates/lodestone-server/src/sleep.rs`; `lib.rs` `mod sleep;`; `server.rs`
-  use-item-on-bed arm (bed detection in `apply_use_item_on`, `server.rs:1189` area);
+  use-item-on-bed arm (bed detection in `apply_use_item_on`);
   `server_protocol.rs` PLAYER_COMMAND arm stops discarding StopSleeping.
-- **Mechanics:** entry checks per `ServerPlayer.java:1186-1240` (distance, obstruction, monster
-  AABB ±8/±5, creative skip); vote per `SleepStatus.java:21-23` with the 100-tick deep-sleep
+- **Mechanics:** entry checks per `ServerPlayer.startSleepInBed` (distance, obstruction, monster
+  AABB ±8/±5, creative skip); vote per `SleepStatus.sleepersNeeded` with the 100-tick deep-sleep
   threshold; skip = clock jump to next multiple of 24000 via T1's clock (zero `partial_tick`),
-  wake all, clear weather iff `advance_weather` && raining (`ServerLevel.java:367-379`).
+  wake all, clear weather iff `advance_weather` && raining (`ServerLevel.tick`'s sleep-skip block).
 - **Why blocked:** the vote is over **all connected players** — per-connection sleeping flags
   cannot express it honestly for LAN; it needs players as shared state (shape B). Do not build a
   per-connection approximation; that is the straddle again.
@@ -412,14 +462,15 @@ pathspec commits.
   100-tick deep-sleep threshold, to exactly `ceil(t/24000)*24000`. Use
   `lodestone-testsupport::unique_username` per connection (offline-mode UUID trap).
 
-### P1 — world spawn point (#329, minus per-player respawn)
+### P1 — world spawn point (minus per-player respawn)
 
 - **Files:** new `crates/lodestone-server/src/world_spawn.rs` (spiral search per
-  `MinecraftServer.java:480-532`: 121 iterations, ±5-chunk box, heightmap-based); `lib.rs`
+  `MinecraftServer.setInitialSpawn`: 121 iterations, ±5-chunk box, heightmap-based); `lib.rs`
   `mod world_spawn;`; **`protocol.rs` `begin_play` signature grows a spawn-position parameter**
   (choke: the trait change touches all `ServerProtocol` impls — exactly one exists, `v770`) —
-  deleting the `(8,100,8)` literal at `server_protocol.rs:1788`; `server.rs` threads the chosen
-  spawn through; new `SET_DEFAULT_SPAWN_POSITION` encoder in the join sequence.
+  deleting the `(8,100,8)` literal in `V770ServerProtocol::begin_play`
+  (`crates/protocol/v770/src/server_protocol.rs`); `server.rs` threads the chosen spawn through;
+  new `SET_DEFAULT_SPAWN_POSITION` encoder in the join sequence.
 - **Client half (same-commit pairing):** `SpawnPositionChanged` currently routes NOWHERE. Route
   → SHELL, fold into the session cell the death/respawn screen will read; the concrete consumer
   today is the shell's respawn-position display (and the F3-style debug row if the screen isn't
@@ -430,34 +481,36 @@ pathspec commits.
   spawn (asserting the search actually searched); vacuous if the test seed's spawn happens to be
   the origin.
 - **Dependency:** chunk availability during the search — cite `docs/plans/chunk-lifecycle.md`
-  (#297 spawn-chunk tickets, planned separately). The search itself can run against
-  `ChunkSource::column` synchronously today; the *keep-loaded* half is #297's.
+  (spawn-chunk tickets, planned separately). The search itself can run against
+  `ChunkSource::column` synchronously today; the *keep-loaded* half is that plan's.
 
-### P2 — per-player respawn points (#329 second half; blocked on shape B + death flow)
+### P2 — per-player respawn points (blocked on shape B + death flow)
 
 - Bed/anchor interaction sets `RespawnPosition` with vanilla validation; respawn placement uses
   `PlayerSpawnFinder` semantics (1024-attempt cap, `respawn_radius` rule via R1, adventure
-  skips scatter, border-clamped radius). The async ticket-driven search ties to #297 — cite,
-  don't plan. Persistence of respawn points is #437. Blocked additionally on a death→respawn
-  server flow (the death screen sends a client command our server must answer with respawn) —
-  verify the serverbound CLIENT_COMMAND decode before scoping, per rule 2.
+  skips scatter, border-clamped radius). The async ticket-driven search ties to the chunk-lifecycle
+  ticket plan — cite, don't plan. Persistence of respawn points is the open persistence-wiring
+  dependency's job. Blocked additionally on a death→respawn server flow (the death screen sends a
+  client command our server must answer with respawn) — verify the serverbound CLIENT_COMMAND
+  decode before scoping, per rule 2.
 - **Gate:** legal/illegal bed placements from captured scenarios (issue's own verification),
   plus: destroy the bed, die → respawn falls back to world spawn with the vanilla message.
 
-### D1 — multi-dimension plumbing + portal travel (#330; last, and honestly blocked)
+### D1 — multi-dimension plumbing + portal travel (last, and honestly blocked)
 
-- **Blocked on, cited plainly:** #275 (server sends zero registry data — clients cannot even be
-  told a second dimension exists), Nether/End worldgen (**does not exist** in
-  `lodestone-worldgen`; a second large worldgen project, explicitly not planned here), and a
+- **Blocked on, cited plainly:** the zero-registry-data gap (server sends zero registry data —
+  clients cannot even be told a second dimension exists), Nether/End worldgen (**does not exist**
+  in `lodestone-worldgen`; a second large worldgen project, explicitly not planned here), and a
   `RESPAWN` encoder (none exists server-side).
-- **Thin slice that is real once #275 lands:** dimension registry resource + per-dimension chunk
-  sources (`worldgen_data.rs:100,118` currently exposes overworld only — a void-generator second
-  dimension is enough to prove plumbing); player-dimension component; portal-frame
-  detection/ignition as a pure function (testable against known-valid/invalid frames, no
-  worldgen needed); `PortalProcessor`-style per-player timer; `encode_respawn` + the exact
-  packet sequence from `ServerPlayer.java:1093-1148` (order matters and is easy to get wrong:
-  respawn → difficulty → abilities → border → clocks → spawn pos → weather → game-event 13 →
-  chunks; same-dimension sends no respawn packet).
+- **Thin slice that is real once that registry-data gap is closed:** dimension registry resource +
+  per-dimension chunk sources (`worldgen_data.rs`'s `BUNDLED_WORLDGEN_SCOPE`/
+  `bundled_worldgen_serves` currently expose overworld only — a void-generator second dimension is
+  enough to prove plumbing); player-dimension component; portal-frame detection/ignition as a pure
+  function (testable against known-valid/invalid frames, no worldgen needed);
+  `PortalProcessor`-style per-player timer; `encode_respawn` + the exact packet sequence from
+  `ServerPlayer.teleport` (order matters and is easy to get wrong: respawn → difficulty →
+  abilities → border → clocks → spawn pos → weather → game-event 13 → chunks; same-dimension
+  sends no respawn packet).
 - **Client half: already done** — RESPAWN is fully consumed (dimension visuals, fog, sky landed;
   `fc6b6c6`). #330 must not re-implement any client piece; the client is the oracle for the
   server's sequence.
@@ -481,8 +534,9 @@ after #275 + worldgen call:   D1
 - B2/P1-client pair with their server units in the same commit train (route-flip rule).
 - R2 must not race the ECS migration's first phase — same state, one owner; the orchestrator
   sequences whichever lands first.
-- Persistence for everything here is **#437** (level.dat/world_clocks/weather/border SavedData
-  hooks); #298/#300 are closed and `lodestone-anvil` is ready to be consumed.
+- Persistence for everything here is **the open persistence-wiring dependency**
+  (level.dat/world_clocks/weather/border SavedData hooks); the anvil codec work is closed and
+  `lodestone-anvil` is ready to be consumed.
 
 ## Top risks
 

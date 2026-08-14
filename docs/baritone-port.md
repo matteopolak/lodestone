@@ -386,13 +386,13 @@ exposes exactly what a navigator needs:
   `tick_air` / `tick_water` / `tick_lava` / `tick_elytra` arms
   ([`player.rs`](../crates/lodestone-physics/src/player.rs)).
 - `MovementInput { forward: f32, strafe: f32, jump: bool, sneak: bool, sprint: bool }`
-  ([`player.rs:39`](../crates/lodestone-physics/src/player.rs)) — **the same input a human
+  ([`player.rs`](../crates/lodestone-physics/src/player.rs)) — **the same input a human
   produces.** This is what the executor should target, and it is what makes the cost model
   meaningful.
 - `PlayerState { position, velocity, yaw, pitch, on_ground, horizontal_collision, no_jump_delay,
   sprinting, fall_flying, effects }`.
 - `PhysicsProfile::mc_1_21()`
-  ([`profile.rs:140`](../crates/lodestone-physics/src/profile.rs)) — the constants, each cited to
+  ([`profile.rs`](../crates/lodestone-physics/src/profile.rs)) — the constants, each cited to
   vanilla by name and each confirmed against `.cache/mc/26.2/src`:
   `base_movement_speed 0.1` (`Player.createAttributes`), `sprint_speed_modifier 0.3`
   (`LivingEntity.SPEED_MODIFIER_SPRINTING`, `ADD_MULTIPLIED_TOTAL`), `sneaking_speed 0.3`,
@@ -402,9 +402,9 @@ exposes exactly what a navigator needs:
   jump. **This is where movement constants come from. Do not re-derive them and do not hardcode a
   blocks-per-second figure anywhere.**
 - `EntityDimensions::PLAYER = { width 0.6, height 1.8, step_height 0.6 }`
-  ([`entity.rs:79`](../crates/lodestone-physics/src/entity.rs)). Confirmed: 26.2's player does not
+  ([`entity.rs`](../crates/lodestone-physics/src/entity.rs)). Confirmed: 26.2's player does not
   override `maxUpStep()`; step height is the `STEP_HEIGHT` attribute, default 0.6.
-- `CollisionView` ([`collision.rs:25`](../crates/lodestone-physics/src/collision.rs)) — the world
+- `CollisionView` ([`collision.rs`](../crates/lodestone-physics/src/collision.rs)) — the world
   seam, per block cell: `collision_boxes`, `collision_top` (**deliberately uncapped** — fences
   return 1.5, and its doc comment explains why in terms of a pathfinder's step-up check),
   `friction`, `speed_factor`, `jump_factor`, `is_water`, `is_lava`, `is_climbable`,
@@ -551,7 +551,7 @@ Three of five have **no consumer outside their own drift tests.** That is a larg
 oracle-verified data sitting one trait method away from usefulness, which is why §7.5 treats
 widening `VersionAdapter` as prerequisite work rather than as part of the navigator.
 
-`lodestone_model::PathType` ([`path.rs:30`](../crates/lodestone-model/src/path.rs)) is already the
+`lodestone_model::PathType` ([`path.rs`](../crates/lodestone-model/src/path.rs)) is already the
 right shared vocabulary — `Blocked, Open, Walkable, WalkableDoor, Trapdoor, PowderSnow,
 OnTopOfPowderSnow, Fence, Lava, Water, WaterBorder, Rail, UnpassableRail, Fire, Damaging,
 DoorOpen, DoorWoodClosed, DoorIronClosed, Breach, Leaves, StickyHoney, Cocoa, …` — and this design
@@ -586,15 +586,17 @@ seam is `PathWorld`, deliberately a trait so nothing there names a version crate
 
 ### 3.5 The off-thread-snapshot pattern already exists and is the right one
 
-The section mesher states the rule absolutely
-([`crates/lodestone-shell/src/mesher.rs:1-20`](../crates/lodestone-shell/src/mesher.rs)): *"the
-world is never locked while meshing."* Two phases — on the owning thread, clone the neighbourhood
-into an owned `Send` snapshot; on a worker, mesh it with no world access at all.
+The section mesher's module doc comment states the rule absolutely
+([`crates/lodestone-shell/src/mesher.rs`](../crates/lodestone-shell/src/mesher.rs)): *"the
+world is never locked while meshing."* Two phases — on the owning thread, `snapshot_section` clones
+the neighbourhood into an owned `Send` snapshot; on a worker, `mesh_snapshot` meshes it with no world
+access at all.
 
 The primitives:
 
 - `lodestone_world::World` has **no** interior mutability; the lock is one level up
-  (`Arc<std::sync::RwLock<World>>`, [`state.rs:230`](../crates/lodestone-client/src/state.rs)).
+  (`SharedState::world: Arc<std::sync::RwLock<World>>`,
+  [`state.rs`](../crates/lodestone-client/src/state.rs)).
 - Sections are `Arc<ChunkSection>` with **copy-on-write at section granularity** —
   `ChunkColumn::set_block` uses `Arc::make_mut`, forking only the touched section. A held `Arc`
   therefore **cannot** change under a reader.
@@ -640,8 +642,8 @@ The ingress side has what a navigator must observe: `TeleportPlayer`, `HealthCha
 ### 3.7 What is genuinely missing
 
 **This list is from the document's original draft and three of its seven items have since closed —
-re-verified directly against the tree rather than assumed, while auditing `docs/plugin-api.md` for
-issue #180 and building `crates/plugins/lodestone-autopilot` (this document's own §9 M1). The
+re-verified directly against the tree rather than assumed, while auditing `docs/plugin-api.md`
+and building `crates/plugins/lodestone-autopilot` (this document's own §9 M1). The
 correction box at the top of this document already flags item 1; the other two closures were not
 previously recorded here at all, which is its own small instance of the exact staleness pattern
 `CLAUDE.md` warns is this repo's most common written-record defect — fixing a claim in one place does
@@ -1545,7 +1547,7 @@ current plan does not yet provide.
 > **STATUS (superseded, like §3.2's box above).** Every subsection below was written as a
 > requirement-plus-gap pair against the tree as it stood when this document was first drafted. Five of
 > the seven have since closed — re-verified directly against the tree while auditing
-> `docs/plugin-api.md` for issue #180 and building `crates/plugins/lodestone-autopilot` (§9's M1):
+> `docs/plugin-api.md` and building `crates/plugins/lodestone-autopilot` (§9's M1):
 >
 > | § | requirement | status |
 > |---|---|---|

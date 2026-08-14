@@ -1,8 +1,7 @@
 # Overworld biome assignment (multi-noise climate)
 
-Issue [#405](https://github.com/matteopolak/lodestone/issues/405), epic
-[#404](https://github.com/matteopolak/lodestone/issues/404) (Phase 1). See
-[`worldgen-plan.md`](./worldgen-plan.md) for the surrounding phased plan.
+Phase 1 of the surrounding phased plan. See
+[`worldgen-plan.md`](./worldgen-plan.md) for that plan.
 
 ## What it is
 
@@ -44,13 +43,13 @@ files (no oracle needed for this one), used to approximate `cold_enough_to_snow`
 grid is 3-D (`4×4×4`-block cells, full height). This phase samples once per **horizontal** quart
 (16 per chunk, at that quart's own corner — see the y = 0 trap below) and broadcasts the answer
 vertically. That is deliberately narrower than vanilla: caves aren't composed into
-`OverworldGenerator` yet (issue #295 / epic #404 Phase 2), so there is no vertical volume for a
+`OverworldGenerator` yet (a later phase of the same plan), so there is no vertical volume for a
 cave biome to describe. Revisiting this (real 3-D sampling) is the natural first step once caves
 land.
 
 **Wiring.** `OverworldGenerator::biome_stage` runs between the fluid-fill and surface stages, needs
 `heights[]` (the fluid stage's own output) for the y = 0 fix below. `surface/mod.rs`'s `Cond::BiomeIs`
-and `Cond::Temperature` (issue #405 made both **runtime** checks against a per-column `Ctx`, not
+and `Cond::Temperature` (this work made both **runtime** checks against a per-column `Ctx`, not
 build-time constants — `SurfaceSystem` used to be built for exactly one fixed biome for its whole
 life). The served column carries biome as a small `[String; 16]` quart grid
 (`GeneratedColumn`/`ChunkColumn::biome_state`), and `crates/protocol/v770/src/server_protocol.rs`'s
@@ -147,10 +146,10 @@ existed — nothing new needed on the wire-format side).
   from the client's id→name *resolution* this bullet is about; see the bullet below. The
   swamp/mangrove-swamp two-tone noise term (`Biome.BIOME_INFO_NOISE`) also stays unported — 64 of
   66 biomes are unaffected by that gap.
-- **`chunks_biomes` (protocol issue #26) is decoded and reaches the world**, independently of tint:
+- **`chunks_biomes` is decoded and reaches the world**, independently of tint:
   `World::merge_biomes` (`crates/lodestone-world/src/world.rs`) applies a live biome edit (vanilla's
   `/fillbiome`) to an already-loaded column without touching its block state, and
-  `crates/protocol/v770/src/adapter.rs`'s `CHUNKS_BIOMES` arm reuses `ClientEvent::ChunkLoaded` as the
+  `crates/protocol/v770/src/adapter/chunk.rs`'s `CHUNKS_BIOMES` arm reuses `ClientEvent::ChunkLoaded` as the
   remesh signal — the same dirty-region event `light_update` already uses for a non-block-changing
   update. See `docs/clientbound-packet-coverage.md`'s now-`Landed` row and
   `crates/protocol/v770/tests/chunks_biomes.rs`.

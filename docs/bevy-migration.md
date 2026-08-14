@@ -52,14 +52,14 @@ This is not a hypothetical hazard. Measured in the current tree:
 
 | state | fold #1 | fold #2 |
 |---|---|---|
-| scoreboard | `lodestone_client::scoreboard::Scoreboard` via `Inner::apply` ([`state.rs:190`](../crates/lodestone-client/src/state.rs), [`:792-831`](../crates/lodestone-client/src/state.rs)) | folded into `lodestone_ecs::SessionScoreboard`, read by [`sim.rs::Sim::sidebar`](../crates/lodestone-shell/src/sim.rs) |
-| player list | `Inner.players: HashMap<Uuid, PlayerListEntry>` ([`state.rs:187`](../crates/lodestone-client/src/state.rs), fold at `:787`) | folded into `lodestone_ecs::SessionTabList`, read by [`sim.rs::Sim::tab_list`](../crates/lodestone-shell/src/sim.rs) |
-| entity pose | `EntityView` ([`state.rs:107`](../crates/lodestone-client/src/state.rs)) | `EntitySnapshot` ([`entities.rs:149`](../crates/lodestone-shell/src/entities.rs)) → `Track` ([`entities.rs:248`](../crates/lodestone-shell/src/entities.rs)) |
+| scoreboard | `lodestone_client::scoreboard::Scoreboard` via `Inner::apply` ([`state.rs`](../crates/lodestone-client/src/state.rs)) | folded into `lodestone_ecs::SessionScoreboard`, read by [`Sim::sidebar`](../crates/lodestone-shell/src/sim/session.rs) |
+| player list | `Inner.players: HashMap<Uuid, PlayerListEntry>` ([`state.rs`](../crates/lodestone-client/src/state.rs)) | folded into `lodestone_ecs::SessionTabList`, read by [`Sim::tab_list`](../crates/lodestone-shell/src/sim/session.rs) |
+| entity pose | `EntityView` ([`state.rs`](../crates/lodestone-client/src/state.rs)) | `EntitySnapshot` ([`entities.rs`](../crates/lodestone-shell/src/entities.rs)) → `Track` ([`entities.rs`](../crates/lodestone-shell/src/entities.rs)) |
 
 Two *different types* named `Scoreboard` fold the same `ClientEvent` stream in two crates, and the
-shell simultaneously reads `handle.players()` ([`net.rs:487`](../crates/lodestone-shell/src/net.rs),
-[`sim.rs::Sim::tab_list`](../crates/lodestone-shell/src/sim.rs)) *and* keeps its own `TabList`. Entity pose is
-copied three times per frame: `EntityView` → `EntitySnapshot` (`net.rs:495`) → `Track`.
+shell simultaneously reads `handle.players()` ([`net.rs`](../crates/lodestone-shell/src/net.rs),
+[`Sim::tab_list`](../crates/lodestone-shell/src/sim/session.rs)) *and* keeps its own `TabList`. Entity pose is
+copied three times per frame: `EntityView` → `EntitySnapshot` (`net.rs`) → `Track`.
 
 Collapsing these is the concrete, checkable benefit of the migration. It is also the reason the
 authority test is the grading criterion: if the migration adds a fourth copy, it has made the
@@ -313,9 +313,9 @@ components are in the same `World` now); the other stands, since ingest runs in 
 Four decisions, each load-bearing:
 
 **(a) The net thread stays.** It owns the tokio runtime and the socket
-([`net.rs:344-390`](../crates/lodestone-shell/src/net.rs) spawns `lodestone-net`), and it must keep
+([`connect_impl`](../crates/lodestone-shell/src/net.rs) spawns `lodestone-net`), and it must keep
 draining regardless of frame rate. It produces `ClientEvent`s into the existing channel — which
-`NetClient::poll()` (`net.rs:394`) already is. **This is how we avoid azalea's ingest-gated-on-
+`NetClient::poll()` (`net.rs`) already is. **This is how we avoid azalea's ingest-gated-on-
 `Update` problem (§2.5):** the socket is drained continuously and buffered; a slow frame delays
 *application*, never *receipt*.
 
@@ -331,10 +331,11 @@ has shipped for years.
 
 **(d) Chunks stay in `Arc<RwLock<lodestone_world::World>>`, exposed as a `Resource`.** Not
 components. This is azalea's `Worlds` (§2.3) and it is also what preserves the reason chunk data
-bypasses the event channel today ([`state.rs:12-23`](../crates/lodestone-client/src/state.rs): a
-decoded column is orders of magnitude larger than a scalar event, and routing it through a bounded
-channel lets a slow consumer buffer whole columns). The adapter keeps writing through `WorldSink`
-(`state.rs:301`); systems read the resource.
+bypasses the event channel today ([`state.rs`](../crates/lodestone-client/src/state.rs)'s "Why chunk
+data lives here, not in the event channel" doc comment: a decoded column is orders of magnitude
+larger than a scalar event, and routing it through a bounded channel lets a slow consumer buffer
+whole columns). The adapter keeps writing through `WorldSink`
+(`state.rs`); systems read the resource.
 
 ### 4.2 Schedules and public sets
 
@@ -354,7 +355,7 @@ New crate `lodestone-ecs` owns these. They are the plugin ABI (§6).
 ### 4.3 `VersionAdapter` becomes a resource, and stays a trait object
 
 `VersionAdapter` is already `Send + Sync + Debug`
-([`adapter.rs:391`](../crates/lodestone-model/src/adapter.rs)), so this is legal today with no
+([`adapter.rs`](../crates/lodestone-model/src/adapter.rs)), so this is legal today with no
 signature change:
 
 ```rust
@@ -365,10 +366,10 @@ pub struct VersionData(pub Box<dyn lodestone_model::VersionAdapter>);
 Keep it a trait object. Making it a generic parameter would monomorphise the whole App per protocol
 family and force the shell to name a version — the thing `lodestone-shell` has never done
 (its only route to version data is `lodestone_registry::adapter_for_protocol`, see
-[`sim.rs:460-475`](../crates/lodestone-shell/src/sim.rs)).
+[`Sim::adopt`](../crates/lodestone-shell/src/sim/build.rs)).
 
 Small free win: the shell currently holds a **second** adapter instance because the first was moved
-into the driver thread (`sim.rs:466-475`). With one App, that collapses to one resource.
+into the driver thread (`Sim::adopt` in `sim/build.rs`). With one App, that collapses to one resource.
 
 ### 4.4 The renderer observes, but does not depend on bevy
 
@@ -385,7 +386,7 @@ Why not put `Query`s in `lodestone-render`:
 - extract-in-the-consumer is what Bevy's own renderer does.
 
 The observable consequence: `EntityInterpolator::draws()`
-([`entities.rs:594`](../crates/lodestone-shell/src/entities.rs)) becomes a system in
+([`entities.rs`](../crates/lodestone-shell/src/entities.rs)) becomes a system in
 `ExtractSet::Entities`, and `EntityDraw` either survives as the extract output type or is replaced
 directly by `EntityInstance`.
 
@@ -400,14 +401,14 @@ azalea: `azalea-client` (shared) matches on `ClientboundGamePacket` (version-spe
 
 Lodestone: the version crate implements `VersionAdapter::handle_packet(&self, world: &mut dyn WorldSink,
 state, packet_id: i32, payload: &[u8]) -> Result<Vec<Directive>, AdapterError>`
-([`adapter.rs:431-437`](../crates/lodestone-model/src/adapter.rs)). Version knowledge is already
+([`adapter.rs`](../crates/lodestone-model/src/adapter.rs)). Version knowledge is already
 lowered to `ClientEvent` (version-free, `lodestone-model/src/event.rs`) plus `Directive`, and
 `packet_id` is documented as never escaping that boundary.
 
 So the migration is: **the fold becomes systems; the decode does not.**
 
 - The net thread calls `handle_packet` as it does today. Unchanged.
-- `NetIngest` systems replace `Inner::apply` ([`state.rs:591-841`](../crates/lodestone-client/src/state.rs)),
+- `NetIngest` systems replace `Inner::apply` ([`state.rs`](../crates/lodestone-client/src/state.rs)),
   one system per event family (player, entity spawn/despawn, entity movement, metadata, equipment,
   attributes, scoreboard, boss bars, menus, time). Each is a public item in the `IngestSet::Apply`
   set, so a plugin can order against it.
@@ -513,12 +514,12 @@ supposed to go red, and its going red is the plan working.
 **Landed** (`415138f`). `crates/lodestone-ecs` exists with the four schedules and
 their set labels (§4.2), `WorldTime`, and the `Arc<RwLock<World>>` handle. `Inner`'s
 `world_age`/`time_of_day` fields are gone from `lodestone-client/src/state.rs` —
-`state.rs` now reads `WorldTime` through the resource and its own comment says so
-(`state.rs:647`: "`docs/bevy-migration.md` deleted `Inner.world_age`/`Inner.time_of_day`").
+`state.rs` now reads `WorldTime` through the resource and its own comment says so, on
+`SharedState::time` (`state.rs`): "`docs/bevy-migration.md` deleted `Inner.world_age`/`Inner.time_of_day`".
 `lodestone-ecs` is in `scripts/wasm-check.sh`'s `CRATES` list, and
 `cargo xtask check-connected` has no allowlist entry for it, per plan.
 
-**Moves:** `world_age` / `time_of_day` (`state.rs:188-189`, folded at `state.rs:668-674`) →
+**Moves:** `world_age` / `time_of_day` (`Inner`, `state.rs`) →
 `#[derive(Resource)] struct WorldTime { age: i64, time_of_day: i64 }`.
 
 **Adds:** crate `lodestone-ecs` — `bevy_app` + `bevy_ecs` (`default-features = false`,
@@ -570,18 +571,18 @@ the shipped shape and three places it differs from the plan below:
   (`EntityInterpolator`'s own `World`). Unifying them is §4.1, not this stage.
 
 **Moves:**
-- `EntityView` (`state.rs:107-178`) and `Inner.entities` (`state.rs:186`) → components:
+- `EntityView` (`state.rs`) and `Inner.entities` (`state.rs`) → components:
   `MinecraftEntityId(i32)`, `EntityKind(ResourceKey)`, `Position`, `Rotation`, `HeadYaw`,
   `Velocity`, `OnGround`, `EntityFlags`, `CustomName`, `Pose`, `Health`, `Baby`, `Variant`,
   `Equipment`, `Attributes`, `DisplayItem`.
-- `Inner::apply`'s entity arms (`state.rs:675-786`) and `apply_metadata` (`state.rs:848-879`) →
+- `Inner::apply`'s entity arms (`state.rs`) and `apply_metadata` (`state.rs`) →
   `NetIngest` systems.
-- `EntityInterpolator` / `Track` / `ItemPhysics` (`entities.rs:248-310`, `:371-624`) → components
+- `EntityInterpolator` / `Track` / `ItemPhysics` (`entities.rs`) → components
   `InterpFrom`, `InterpTo`, `InterpClock`, `WalkAnim`, `ItemPhysics`, plus a `GameTick` system for
   the 20 Hz item-physics step and walk-animation tick and an `Update` system for the clocks.
-- `EntitySnapshot` (`entities.rs:149`) and `net::entity_snapshot` (`net.rs:495`) → **deleted.** The
+- `EntitySnapshot` (`entities.rs`) and `net::entity_snapshot` (`net.rs`) → **deleted.** The
   intermediate copy has no reason to exist once ingest writes components directly.
-- `EntityInterpolator::draws()` (`entities.rs:594`) → an `ExtractSet::Entities` system.
+- `EntityInterpolator::draws()` (`entities.rs`) → an `ExtractSet::Entities` system.
 
 **Stays:** `lodestone_entity::{pose, item_entity}` — `WalkAnimation`, `walk_target_speed`,
 `clamp_head_to_body`, `ItemMotion`. Plain functions the systems call. Do **not** turn them into
@@ -637,9 +638,9 @@ shape is and why it differs from the plan below in three places:
   instead of returning one. `LiveCollision: Send + Sync` held. **This also unblocks
   `tick_item_physics`**, which no longer has any reason not to be a `GameTick` system.
 
-**Moves:** `PlayerSnapshot` (`state.rs:49-81`) and `Sim.player: PlayerState` (`sim.rs:284`) →
+**Moves:** `PlayerSnapshot` (`state.rs`) and `Sim.player: PlayerState` (`sim.rs`) →
 components on the `LocalPlayer` entity, plus `PhysicsState`, `MovementIntent`, `FluidState`
-(`sim.rs:459`), `Mining`, `Placement`, `SelectedSlot`, `LastPlayerInput` (`sim.rs:436-452`).
+(`sim.rs`), `Mining`, `Placement`, `SelectedSlot`, `LastPlayerInput` (`sim.rs`).
 
 **Stays — emphatically:** `lodestone-physics` remains a plain library. The system reads components,
 calls `lodestone_physics::…`, writes components back. **Do not move the integrator into a system.**
@@ -659,9 +660,9 @@ failure the evidence standard names.
 **Two sources of truth:** one stage wide. `Sim` still exists but no longer owns player state.
 
 **Verified by:** the physics golden traces (unchanged — they test the library, not the schedule);
-the live jump gate, whose discriminator is `teleport_count` (`sim.rs:343-348`) — a burst *during* a
+the live jump gate, whose discriminator is `teleport_count` (`sim.rs`) — a burst *during* a
 jump is the server rejecting the ascent, so a flat count through a clean arc is the assertion; and
-`collide_against_live_world = false` (`sim.rs:349-354`) still reproducing the fall-through negative
+`collide_against_live_world = false` (`sim.rs`) still reproducing the fall-through negative
 control.
 
 ---
@@ -709,7 +710,7 @@ stayed green on a one-plugin `App`. A closed loop, with no pixels involved. See
 
 **Moves:** `chat_log`, `tab_list`, `scoreboard`, `hud_effects`, `title`, `action_bar`, `health`,
 `food`, `experience`, `phase`, `dead`, `respawn_count`, `local_entity_id`
-(`sim.rs:364-435`) and `Inner.{players, scoreboard, boss_bars, menus}` (`state.rs:186-193`) →
+(`sim.rs`) and `Inner.{players, scoreboard, boss_bars, menus}` (`state.rs`) →
 components on the `LocalPlayer` entity.
 
 Components on the local player, **not** resources — that is what keeps multi-client/swarm possible
@@ -778,8 +779,8 @@ wrong:
   needs to read blocks off the frame thread.
 
 **Moves:** `Arc<RwLock<lodestone_world::World>>` → a `Resource` (§4.1(d)). `Sim.scheduler`
-(`MeshScheduler`), `dirty_columns` (`sim.rs:342`), `pending_removals` (`sim.rs:310`),
-`vanilla_atlas`, `mesh_drops` (`sim.rs:328`) → resources plus `Update` systems that enqueue and
+(`MeshScheduler`), `dirty_columns` (`sim.rs`), `pending_removals` (`sim.rs`),
+`vanilla_atlas`, `mesh_drops` (`sim.rs`) → resources plus `Update` systems that enqueue and
 drain.
 
 **Stays:** chunks are **not** entities. The worker pool stays a worker pool; systems only enqueue
@@ -790,9 +791,9 @@ a scheduler between the oracle and the code it validates.
 **Authority test:** the world resource is the only chunk store; `Sim` holds no world.
 
 **Verified by:** live chunk-load gates; `mesh_drops` staying `0` in a healthy session
-(`sim.rs:324-328` — a non-zero value is the one-line diagnosis for this defect class); water not
+(`sim.rs` — a non-zero value is the one-line diagnosis for this defect class); water not
 growing a falling wall at chunk borders, which is the `dirty_columns` coalescing still working
-(`sim.rs:329-341`).
+(`sim.rs`).
 
 ---
 
@@ -848,7 +849,7 @@ the brief handed to the stage) was wrong:
 
 **Moves:** whatever `Sim` still holds — `input`, `stats`, `target`, `clock_secs`, `particles`,
 `audio`, `language`, `asset_banner`, `interp_alpha`, `tick_count`, `frame_count`, `fly`.
-`Sim::step` (`sim.rs:494`+) becomes the four schedules; `App::redraw` becomes `app.update()` then
+`Sim::step` (`sim/step.rs`) becomes the four schedules; `App::redraw` becomes `app.update()` then
 `renderer.draw(extracted)`.
 
 **Stays:** `lodestone-render` bevy-free (§4.4). `lodestone-particle`, `lodestone-audio`,
@@ -865,7 +866,7 @@ misled twice).
 
 ### Stage 6 — the async bot tier
 
-**Moves:** `SharedState` (`state.rs:229-233`) and `ClientHandle`'s query methods →
+**Moves:** `SharedState` (`state.rs`) and `ClientHandle`'s query methods →
 `ClientHandle { world: Arc<RwLock<bevy World>>, entity: Entity }`, reimplemented over the ECS —
 azalea's `Client` (`azalea-client/src/client.rs`, `azalea/src/bot.rs:82-144`). `wait_for(pred)`
 becomes "await a tick broadcast, then re-check the World", which is azalea's `wait_ticks` /

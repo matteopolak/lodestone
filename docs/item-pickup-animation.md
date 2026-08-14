@@ -3,7 +3,7 @@
 ## What it is
 
 The short flight a collected item makes toward whoever collected it, before it
-vanishes — vanilla's `ItemPickupParticle`. Issue #365, reported from live play as
+vanishes — vanilla's `ItemPickupParticle`. Reported from live play as
 "picked-up items teleport into the inventory".
 
 Companion docs: [Dropped items](./dropped-items.md) for the item-model draw path
@@ -23,7 +23,7 @@ this.level.removeEntity(packet.getItemId(), Entity.RemovalReason.DISCARDED);
 ```
 
 **The item entity is removed immediately.** It is *not* retargeted and lerped —
-that is what issue #365's own summary says, and it is not what the jar does. What
+that is what the original bug report's own summary says, and it is not what the jar does. What
 flies is a **frozen copy** of the item's extracted render state, owned by a
 particle. Two consequences fall straight out of that and both are visible:
 
@@ -79,7 +79,7 @@ pass, no new shader and no new buffer.
 ### Where it was an island, and which router
 
 Every piece except one existed and was tested: the `TAKE_ITEM_ENTITY` decode in
-`crates/protocol/v770/src/adapter.rs`, and `PickupFeed` in
+`crates/protocol/v770/src/adapter/entity.rs`, and `PickupFeed` in
 `crates/lodestone-game/src/mining.rs` with unit tests. `PickupFeed` had **no caller
 anywhere in the tree**.
 

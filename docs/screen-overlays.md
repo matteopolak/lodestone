@@ -2,8 +2,7 @@
 
 ## What it is
 
-Seven full-screen (or near-full-screen) post-hand-pass effects, issues #108,
-#112, #185, #139, #154, #144 and #149: a blue-ish tint plus a scrolling
+Seven full-screen (or near-full-screen) post-hand-pass effects: a blue-ish tint plus a scrolling
 `misc/underwater.png` texture when the camera's eye is submerged, a looping
 flame texture across the bottom of the screen while the local player is on
 fire, a static full-screen `misc/pumpkinblur.png` vignette while a carved
@@ -15,10 +14,10 @@ overlay while the Nausea effect is active, and an animated
 `block/nether_portal.png` swirl while near a nether/end portal (portal takes
 priority over confusion when both are active). Underwater and fire come from
 one vanilla class, `ScreenEffectRenderer.submit`
-(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/
-ScreenEffectRenderer.java:55-83`); pumpkin/freeze/spyglass/confusion/portal
+(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/ScreenEffectRenderer.java`);
+pumpkin/freeze/spyglass/confusion/portal
 are all vanilla's *different* mechanism, `Hud.extractCameraOverlays`
-(`Hud.java:269-309` — see the pumpkin section below for why it shares this
+(`Hud.java` — see the pumpkin section below for why it shares this
 pipeline anyway) but share the identical "textured, alpha-blended,
 screen-space quad after the hand pass" shape closely enough that all seven
 landed in one pass rather than inventing a second pipeline:
@@ -36,8 +35,8 @@ see its own section for the exact chain.
 
 One `wgpu::RenderPipeline` draws both overlays — vanilla's own two pipelines,
 `BLOCK_SCREEN_EFFECT` and `FIRE_SCREEN_EFFECT`
-(`RenderPipelines.java:713-718`), are textually identical builds of the same
-`GUI_TEXTURED_SNIPPET` base (`RenderPipelines.java:153-161`: position+uv+colour
+(`RenderPipelines.java`), are textually identical builds of the same
+`GUI_TEXTURED_SNIPPET` base (`RenderPipelines.java`: position+uv+colour
 vertex format, `BlendFunction.TRANSLUCENT`, no depth state), so there is
 nothing to differentiate beyond which texture bind group is active.
 
@@ -59,7 +58,7 @@ because there is no comparison.
 
 ### Underwater: texture, scroll and tint
 
-`submitWater` (`ScreenEffectRenderer.java:155-166`) tints `underwater.png`
+`submitWater` (`ScreenEffectRenderer.java`) tints `underwater.png`
 by `ARGB.colorFromFloat(0.1F, brightness, brightness, brightness)` — **not
 blue**. The blue cast the real texture has comes entirely from the PNG's own
 pixels; the vertex colour is a flat grayscale at a fixed `0.1` alpha. UVs
@@ -92,9 +91,9 @@ drew. Vanilla runs both at once when submerged (short water fog *and* the
 tinted overlay); nothing here changes `fog.rs`, and this pass does not read
 `FogSettings` at all.
 
-### Closed: a "hurt flash" and "screen shake" (issue #98)
+### Closed: a "hurt flash" and "screen shake"
 
-**Issue #98 is closed.** What survives of it: the per-entity hurt/death red
+**This is closed.** What survives of it: the per-entity hurt/death red
 overlay below is the real vanilla mechanism and it shipped; the full-screen
 tint the issue's title asked for does not exist in vanilla at all (confirmed
 twice, independently, in two different sessions); "screen shake" is not a
@@ -108,7 +107,7 @@ issue scoped explicitly as new game-feel work, not vanilla parity — nothing
 here builds it speculatively. The rest of this section is kept as the
 historical record of *why*.
 
-Issue #98 asked for a full-screen red tint on taking damage, framed as
+The closed issue asked for a full-screen red tint on taking damage, framed as
 plausibly belonging in this pass — this file's own module doc, and the fact
 that this pass already draws "exactly this shape of thing," is why a later
 agent's task briefing pointed here first. It does not belong here, and nothing
@@ -116,7 +115,7 @@ was added: `ScreenEffectRenderer.java` (this pass's own vanilla source) has
 **zero** references to `hurt`/`hurtTime` anywhere in it, and `Gui.java`/
 `LevelRenderer.java`/`GameRenderer.java` were grepped clean too. Vanilla's only
 local-player-facing responses to taking damage are `bobHurt` (a camera roll,
-issue #58's scope, not a screen-space overlay) and a per-entity model overlay
+out of this pass's own scope, not a screen-space overlay) and a per-entity model overlay
 that is invisible on the local player's own first-person view (that overlay's
 render mechanism, and the full jar citations, are in `docs/combat.md`'s "The
 per-entity hurt/death red overlay (issue #98, entity half)" section). A
@@ -145,24 +144,24 @@ symmetrically, and why the hurt half did not wait on `on_fire`'s
 
 ### Fire: a real animated texture, and now the real two-quad placement
 
-`submitFire` (`ScreenEffectRenderer.java:168-184`) draws **exactly two**
+`submitFire` (`ScreenEffectRenderer.java`) draws **exactly two**
 1×1 unit quads sampling `ModelBakery.FIRE_1` (`"block/fire_1"`,
-`ModelBakery.java:50`), each `translate(±0.24, -0.3, 0.0)` then
+`ModelBakery.java`), each `translate(±0.24, -0.3, 0.0)` then
 `rotateY(∓π/18)` (10°), at vertex colour `-436207617` = ARGB
 `(229, 255, 255, 255)` (white, alpha `229/255` — `FIRE_TINT` in this port).
 `fire_1.png` is a **16×512** strip: 32 stacked 16×16 frames
 (`fire_frame_count`), vanilla's default animation metadata
 (`fire_1.png.mcmeta` is `{"animation": {}}`, i.e. one frame per tick,
-looping) — this is genuinely the "looping flame texture" issue #112 asks
-for, not a hand-authored UV scroll.
+looping) — this is genuinely a looping flame texture, not a hand-authored
+UV scroll.
 
 **Placement is now vanilla's real transform, flattened to NDC instead of
-tiled (issue #420).** This doc previously said the two rotated quads were
+tiled.** This doc previously said the two rotated quads were
 approximated as four mirrored NDC tiles across a bottom strip capped at
 `y = -0.3` (~35% of the frame), and that was a deliberate choice at the
-time, matching #112's own wording ("flame texture across the bottom of the
+time, matching the original request's own wording ("flame texture across the bottom of the
 screen"). It read, in practice, as the fire texture visibly repeating —
-exactly what a player reported (issue #420) — because vanilla never tiles
+exactly what a player reported — because vanilla never tiles
 this sprite at all. `fire_overlay_triangles` now reproduces vanilla's real
 per-quad transform (`rotateY` then `translate`, matching the pose-stack's
 own accumulation order) and only drops the resulting `z` afterwards — an
@@ -192,14 +191,14 @@ frame.
 
 ### Pumpkin: not `ScreenEffectRenderer` at all in vanilla, but the same shape
 
-Issue #185's overlay is **not** part of `ScreenEffectRenderer.java` — grepping
+The pumpkin overlay is **not** part of `ScreenEffectRenderer.java` — grepping
 that file for `pumpkin` returns nothing. It is a generic mechanism in
 `Hud.java`: `extractCameraOverlays`
-(`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java:269-291`) walks
+(`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`) walks
 every `EquipmentSlot`, and for any equipped `ItemStack` whose
 `DataComponents.EQUIPPABLE` component has a `cameraOverlay` set, blits that
 texture full-screen at alpha `1.0`
-(`extractTextureOverlay`, `Hud.java:1026-1031`:
+(`extractTextureOverlay`, `Hud.java`:
 `graphics.blit(RenderPipelines.GUI_TEXTURED, texture, 0, 0, 0, 0, guiWidth, guiHeight, guiWidth, guiHeight, ARGB.white(1.0F))`).
 Carved pumpkin is simply the **one item in the game** that ships this
 component populated:
@@ -217,7 +216,7 @@ So vanilla's real mechanism is a per-item lookup table with exactly one
 populated entry today, not a hardcoded pumpkin check. This port takes the
 one-entry version of that table rather than building unused generality:
 `ScreenEffects::wearing_pumpkin` is `true` iff the head slot holds
-`minecraft:carved_pumpkin`, computed in `app.rs`'s `redraw()` from the
+`minecraft:carved_pumpkin`, computed in `app/redraw.rs`'s `redraw()` from the
 already-in-scope `player_menu` (native inventory index 39 — the same head
 slot `Sim::third_person_body_state`'s `ARMOUR_NATIVE_SLOTS` table uses for
 armour rendering). If a second item ever ships a `camera_overlay`, the
@@ -245,24 +244,24 @@ future gate audit finds vanilla *does* show camera overlays to a spectator
 wearing a pumpkin somewhere else in the call chain, that is the one deviation
 to revisit here.
 
-### Freeze (issue #139): the mechanic is real, borrowed, and coordinated
+### Freeze: the mechanic is real, borrowed, and coordinated
 
 Vanilla's freeze vignette is the `player.getTicksFrozen() > 0` branch of
-`Hud.extractCameraOverlays` (`Hud.java:293-295`):
+`Hud.extractCameraOverlays` (`Hud.java`):
 `extractTextureOverlay(POWDER_SNOW_OUTLINE_LOCATION, player.getPercentFrozen())`
 — exactly pumpkin's static-quad shape, but with a *variable* alpha
 (`player.getPercentFrozen()`, `0.0..=1.0`) instead of pumpkin's fixed `1.0`.
 `freeze_overlay_triangles(percent)` in `screen_effects.rs` is that: same
 UVs/positions as `pumpkin_overlay_triangles`, tint `[1,1,1,percent]`.
 
-**The underlying mechanic (issue #212) is not this issue's own work, and was
+**The underlying mechanic is not this feature's own work, and was
 not duplicated here.** `lodestone_physics::player::PlayerState::frozen_ticks`/
-`percent_frozen()`/`is_freezing()` (`crates/lodestone-physics/src/player.rs:431-568`)
-already exist, already tick (`update_freezing`, called from `tick` at
-`player.rs:2783`), and are already reachable from the shell with **no new
+`percent_frozen()`/`is_freezing()` (`crates/lodestone-physics/src/player.rs`)
+already exist, already tick (`update_freezing`, called from `tick` in
+`player.rs`), and are already reachable from the shell with **no new
 `Sim` accessor** — `Sim::player()` already returns the physics crate's
 `PlayerState` by value (`sim.rs::Sim::player`), so `self.sim.player().percent_frozen()`
-is a real, tested input today, not a stub. This also answers issue #139's own
+is a real, tested input today, not a stub. This also answers freeze's own
 first scope checkbox ("determine whether the freezing state is
 server-authoritative or client-computed"): it is **client-computed**, the
 same swept-collision-per-tick shape as `fall_distance`/sprinting/every other
@@ -275,12 +274,12 @@ correct port of how vanilla itself computes it.
 differs from pumpkin/spyglass and how `RenderState::render_inner` reflects
 it.
 
-### Spyglass (issue #154): a dedicated method, not the generic `camera_overlay` table
+### Spyglass: a dedicated method, not the generic `camera_overlay` table
 
 **Answering the open question the briefing asked to settle: no, this is not
 a two-line addition to the generic `camera_overlay` table pumpkin uses.**
 `Hud.extractCameraOverlays` branches on `player.isScoping()` *before* it ever
-reaches that per-slot loop (`Hud.java:277-291`):
+reaches that per-slot loop (`Hud.java`):
 
 ```java
 if (player.isScoping()) {
@@ -290,7 +289,7 @@ if (player.isScoping()) {
 }
 ```
 
-`extractSpyglassOverlay` (`Hud.java:1033-1048`) is its own method with its
+`extractSpyglassOverlay` (`Hud.java`) is its own method with its
 own geometry: a centred `spyglass_scope.png` lens sized by a scale factor,
 surrounded by **four separate opaque-black fills** (`graphics.fill`, not a
 texture) covering whatever the lens does not. `spyglass_lens_triangles`/
@@ -300,7 +299,7 @@ texture) covering whatever the lens does not. `spyglass_lens_triangles`/
   algebraically from `Hud`'s own `srcWidth = srcHeight = min(guiWidth,
   guiHeight)` / `ratio = min(...) * scale` — the smaller screen dimension
   always gets half-extent `SPYGLASS_SCALE = 1.125` (vanilla's settled
-  `Hud.scopeScale` lerp target, `Hud.java:276`; the few-frame ease-in ramp
+  `Hud.scopeScale` lerp target, `Hud.java`; the few-frame ease-in ramp
   toward it is dropped as a deliberate simplification, same spirit as the
   fire overlay's placement), the larger one is compressed by `aspect`. On a
   landscape screen this overflows the lens past the top/bottom of NDC —
@@ -312,47 +311,47 @@ texture) covering whatever the lens does not. `spyglass_lens_triangles`/
   sampled.
 
 **The FOV-zoom half is real, tested, and now wired — the vignette above was
-only half of #154.** `AbstractClientPlayer.getFieldOfViewModifier`
-(`AbstractClientPlayer.java:92-114`) returns `0.1F` outright (a 10x zoom,
+only half of this feature.** `AbstractClientPlayer.getFieldOfViewModifier`
+(`AbstractClientPlayer.java`) returns `0.1F` outright (a 10x zoom,
 overriding every other FOV modifier) when `firstPerson && isScoping()`.
 `lodestone_render::spyglass_fov_modifier(scoping: bool) -> f32` in
 `camera.rs` models exactly that (`0.1` scoping, `1.0` otherwise) and is unit
 tested. `camera_rig.rs`'s `apply_spyglass_fov(camera: Camera, scoping: bool)
 -> Camera` is the composable half that multiplies it onto
 `Camera::fov_y_degrees` without overwriting whatever else already produced
-that value — per issue #154's own scope note about that exact trap. `Sim::
-render_camera` (`sim.rs`) calls it on the early first-person return only
+that value — per the spyglass scope note about that exact trap.
+`Sim::render_camera` (`sim/camera.rs`) calls it on the early first-person return only
 (`if !self.third_person { return apply_spyglass_fov(eye,
 self.spyglass_scoping()); }`), matching vanilla's own `firstPerson &&`
 gate — a third-person camera never zooms, so the composition never runs on
 either of the two third-person branches below that return.
 
 **`scoping`'s input is real, not stubbed.** `Player.isScoping()` is
-`isUsingItem() && getUseItem().is(Items.SPYGLASS)` (`Player.java:1936-1938`),
+`isUsingItem() && getUseItem().is(Items.SPYGLASS)` (`Player.java`),
 and both halves exist: `Sim::using_item()` (a thin accessor over the
 existing `UsingItem` ECS resource, armed by `use_item`/`use_item_live` and
 cleared by `end_use`/`end_use_live`) for the first half, and the held item
 for the second. `Sim::render_camera` computes the condition itself via the
 private `Sim::spyglass_scoping()` (`self.using_item() && self.player_menu()
 .player_native(self.selected_slot())...` checked against
-`"minecraft:spyglass"`), so it needs no new parameter. `app.rs`'s
+`"minecraft:spyglass"`), so it needs no new parameter. `app/redraw.rs`'s
 `ScreenEffects::scoping` (the vignette half) computes the identical
 condition independently, from `held_for_scoping` — the same item id already
 computed for the first-person hand pass, cloned before it moves into
-`set_main_hand_source`'s closure — rather than sharing a call with `sim.rs`,
-the same way `wearing_pumpkin` is computed locally in `app.rs`. Issues
-#54/#57 (held-item pose, bow/crossbow draw) are what this depended on and
+`set_main_hand_source`'s closure — rather than sharing a call with `Sim`,
+the same way `wearing_pumpkin` is computed locally in `app/redraw.rs`. Held-item
+pose and bow/crossbow draw are what this depended on and
 both are closed, so nothing here was blocked on missing state — only on the
 two-line `sim.rs` accessor `Sim::using_item`, which now exists.
 
-### Confusion and portal (issues #144, #149): one screen-space pair, one shared projection warp
+### Confusion and portal: one screen-space pair, one shared projection warp
 
 Vanilla ties nausea and portal together in **two** places, and this port
 keeps them together in the same two places rather than treating them as
 unrelated features that happen to look similar:
 
-1. **The screen-space overlay**, mutually exclusive, portal winning
-   (`Hud.java:297-308`):
+1. **The screen-space overlay**, mutually exclusive, portal winning, in
+   `Hud.extractCameraOverlays` (`Hud.java`):
    ```java
    if (portalIntensity > 0.0F) {
        this.extractPortalOverlay(graphics, portalIntensity);
@@ -361,14 +360,14 @@ unrelated features that happen to look similar:
    }
    ```
    `confusion_overlay_triangles(strength)` transcribes `extractConfusionOverlay`
-   (`Hud.java:1109-1132`): the quad is scaled about the screen centre by
+   (`Hud.java`): the quad is scaled about the screen centre by
    `size = 2.0 - strength` (vanilla's `Mth.lerp(strength, 2.0F, 1.0F)`,
    always `>= 1.0` for valid `strength`, so it always at least covers the
    full screen — the rasterizer clips the rest, the same free-clip
    [`spyglass_lens_triangles`] relies on), tinted a green-biased
    `(0.2, 0.4, 0.2) * strength` at alpha `1.0`. `portal_overlay_triangles`/
    `portal_overlay_alpha` transcribe `extractPortalOverlay`
-   (`Hud.java:1097-1107`): a full-screen quad sampling the **same
+   (`Hud.java`): a full-screen quad sampling the **same
    32-frame-strip shape** as the fire overlay (`nether_portal.png` is
    `16x512`, `{"animation": {}}`, identical to `fire_1.png` — `fire_frame_count`
    applies unchanged), tinted white at `alpha^4 * 0.8 + 0.2` below `1.0`
@@ -376,11 +375,11 @@ unrelated features that happen to look similar:
 
 2. **The world-projection "spinning" warp**
    (`GameRenderer.renderLevel`, `.cache/mc/26.2/client-src/net/minecraft/
-   client/renderer/GameRenderer.java:543-552`), which is **not** screen-space
+   client/renderer/GameRenderer.java`), which is **not** screen-space
    geometry at all — it rotates and shears the *world's own projection
    matrix* before every world-space draw call that frame, which is why
    `crate::camera::nausea_portal_warp` lives in `camera.rs`, not
-   `screen_effects.rs`. This answers #144's own briefing question ("a
+   `screen_effects.rs`. This answers the warp's own briefing question ("a
    projection-matrix effect, establish where it belongs before writing it"):
    it belongs on `Camera`, specifically as a post-multiply on
    `view_projection()` (`Camera::view_projection_warped`), because
@@ -396,7 +395,7 @@ unrelated features that happen to look similar:
    down without a screenshot.
 
    Vanilla accumulates the warp's spin angle as a per-tick integral
-   (`GameRenderer.tick`, lines 261-270) that only advances while either
+   (`GameRenderer.tick`) that only advances while either
    intensity is positive. This crate's `RenderState::render_inner` takes
    `&self`, not `&mut self` — there is nowhere to store that integral, and
    every other "how far has this animation progressed" input in this pass
@@ -491,15 +490,15 @@ checks obsidian and air do not count.
 The render mechanism — geometry, pipeline, projection warp, gating, mutual
 exclusion — was already real, tested and wired all the way to
 `RenderState::render_inner`. It was simply never told the truth, the same
-shape `on_fire` was in before issue #112 closed it.
+shape `on_fire` was in before the on-fire fold closed it.
 
 ### Draw order and gating
 
-`GameRenderer.java:568-577`: the hand pass, then
+`GameRenderer.renderLevel` (`GameRenderer.java`): the hand pass, then
 `screenEffectRenderer.submit`, then the HUD/feature renderers. This port's
 overlay draw sits in `RenderState::render_inner`, immediately after
 `draw_first_person_hand` and before `queue.submit` — the shell's own HUD
-draws afterward, in a separate pass in `app.rs`, so the ordering matches.
+draws afterward, in a separate pass in `app/redraw.rs`, so the ordering matches.
 (The pumpkin overlay's *vanilla* source is `Hud.java`, drawn as part of the
 HUD proper, not this pass — see above for why it landed here anyway.)
 
@@ -508,8 +507,8 @@ Gating mirrors `ScreenEffectRenderer.submit`'s
 portal, **not with one gate**. `Hud.extractCameraOverlays` itself has two
 groups, checked directly against the jar rather than assumed: pumpkin/
 spyglass sit inside its `if (getCameraType().isFirstPerson())` block
-(`Hud.java:277-291`), while freeze (`Hud.java:293-295`) and confusion/portal
-(`Hud.java:297-308`) are **siblings** of that block, not nested in it — they
+(`Hud.java`), while freeze (`Hud.java`) and confusion/portal
+(`Hud.java`) are **siblings** of that block, not nested in it — they
 draw in third person too. `ScreenEffects::any_active` folds both groups into
 one bool (the outer short-circuit `render_inner` checks before opening any
 pass), but exposes each group separately —
@@ -535,27 +534,27 @@ renders in spectator". See `spectator_suppresses_both_overlays`/
 `first_person_group_active`/`camera_agnostic_group_active` unit tests in
 `crates/lodestone-shell/src/gpu/screen_effects.rs`.
 
-Portal/confusion mutual exclusion (`Hud.java:300-302`'s `if`/`else if`) is
+Portal/confusion mutual exclusion (`Hud.extractCameraOverlays`'s `if`/`else if`) is
 reproduced as an `if`/`else if` in `render_inner`'s own dispatch, not two
 independent `if`s — see `stats.confusion_overlay_drawn`'s doc.
 
-## The on-fire flag's route to the shell (closed, issue #112)
+## The on-fire flag's route to the shell (closed)
 
 **Closed.** `apply_local_player_on_fire` now folds the bit into
-`Vitals::on_fire`, `PlayerSnapshot::on_fire` carries it, and `app.rs` reads it —
+`Vitals::on_fire`, `PlayerSnapshot::on_fire` carries it, and `app/redraw.rs` reads it —
 the overlay is live. The analysis below is kept because it explains *why* a
 dedicated fold was the only route, which is not obvious from the code.
 The shared-entity-flags byte (`Entity.FLAG_ONFIRE = 0`,
-`Entity.java:261`) **does** decode: `protocol/v770/src/packets/metadata.rs`
+`Entity.java`) **does** decode: `protocol/v770/src/packets/metadata.rs`
 already parses `IDX_SHARED_FLAGS` into `EntityMetadata::flags: Option<u8>`
-(`decodes_air_supply_at_index_1`'s sibling test at line 592 pins index 0 to
-`0x01`), and `lodestone-ecs/src/ingest.rs::apply_entity_metadata` already
+(`decodes_air_supply_at_index_1`'s sibling test, `decodes_named_baby_pig_metadata`,
+pins index 0 to `0x01`), and `lodestone-ecs/src/ingest.rs::apply_entity_metadata` already
 folds it into a generic `EntityFlags(u8)` ECS component for **any** tracked
-entity (line 567-568).
+entity.
 
 It does not reach the **local player**, and this is by explicit design, not
 an oversight: `apply_local_player_login`'s own doc
-(`lodestone-ecs/src/ingest.rs:156-165`) states that the local player
+(`lodestone-ecs/src/ingest.rs`) states that the local player
 deliberately gets *only* `MinecraftEntityId` and `Attributes` — no
 `EntityKind`/`Position`/`Rotation`/`HeadYaw` — specifically *because*
 `lodestone_client::state::entity_view` requires all four and its absence is
@@ -567,26 +566,26 @@ entity (the event is in `ingest::handles_event`'s routing switch, and
 surface it: the early `?` on `EntityKind` returns `None` before `flags` is
 even read.
 
-This is exactly the shape `air_supply` was in before issue #60: metadata
+This is exactly the shape `air_supply` was in before it was fixed: metadata
 that arrives for any entity but has to reach the **session**-scoped
 `PlayerSnapshot`, not the generic per-entity view. `air_supply` got a
 dedicated fold, `apply_local_player_air_supply`
-(`lodestone-ecs/src/ingest.rs:617-639`), off the *same* `EntityMetadataUpdated`
+(`lodestone-ecs/src/ingest.rs`), off the *same* `EntityMetadataUpdated`
 event, writing into `crate::session::Vitals` instead. **No equivalent fold
 exists for the on-fire bit.**
 
 `crates/lodestone-shell/src/gpu/screen_effects.rs::ScreenEffects::on_fire` is
 wired all the way through the render pass (see the pixel gate below), but
-`app.rs`'s real per-frame call always passes `on_fire: false`, with a comment
+`app/redraw.rs`'s real per-frame call always passes `on_fire: false`, with a comment
 pointing back here. This is not a placeholder pretending to work — the
 render mechanism is real and gated correctly, but there is genuinely no data
 to feed it yet.
 
 > **Historical, as of the "Closed" heading above.** That last paragraph describes
-> the state *before* #112 landed. `app.rs`'s `redraw()` now reads
+> the state *before* this landed. `app/redraw.rs`'s `redraw()` now reads
 > `PlayerSnapshot::on_fire` off the shared handle
-> (`app.rs::WindowApp::redraw`), so production does pass `true`. It
-> matters for issue #390 below: the flag reaches real pixels, which is what made
+> (`app/redraw.rs::WindowApp::redraw`), so production does pass `true`. It
+> matters for the session-reset section below: the flag reaches real pixels, which is what made
 > a *stale* flag a real defect rather than a dormant one.
 
 ### The patch, as applied
@@ -597,19 +596,19 @@ to feed it yet.
    of field is session-scoped rather than folded by `apply_local_player_state`).
 2. **`lodestone-ecs/src/ingest.rs`**: a new system,
    `apply_local_player_on_fire`, copy-shaped from
-   `apply_local_player_air_supply` (lines 617-639): same
+   `apply_local_player_air_supply`: same
    `Query<&mut Vitals, With<LocalPlayer>>`, same `EntityIndex` lookup, but
    reading `metadata.flags` and testing bit `0x01`
    (`lodestone_entity::SharedEntityFlags::from_bits(flags as i8).on_fire()`
    already exists and does exactly this — see
-   `crates/lodestone-entity/src/metadata.rs:206-224`) instead of
+   `crates/lodestone-entity/src/metadata.rs`) instead of
    `metadata.air_supply`. Register it next to `apply_local_player_air_supply`
-   in the same system set (line ~783).
+   in the same system set (`IngestPlugin::build`).
 3. **`lodestone-client/src/state.rs`**: add `on_fire: bool` to
    `PlayerSnapshot`, folded from `Vitals::on_fire` in `ClientHandle::player()`
    the same way `air` is (`vitals.on_fire.unwrap_or(false)` — unreported reads
    as "not on fire", the safe default, unlike `air`'s "reads as full").
-4. **`crates/lodestone-shell/src/app.rs`**: change the one line
+4. **`crates/lodestone-shell/src/app/redraw.rs`**: change the one line
    `on_fire: false` (in the `redraw()` `ScreenEffects` construction, next to
    `eye_in_water`) to read the new `PlayerSnapshot::on_fire` off
    `self.sim.net()`'s shared handle — the same shape the new `spectator`
@@ -619,17 +618,17 @@ No change needed in `lodestone-shell/src/gpu.rs`, `gpu/screen_effects.rs`, or
 `lodestone-render` — the render half of this feature does not know or care
 where `on_fire` came from.
 
-## The pumpkin flag's route to the shell (closed, issue #185)
+## The pumpkin flag's route to the shell (closed)
 
-**Closed — stale "patch pending" heading corrected.** `app.rs`'s `redraw()`
+**Closed — stale "patch pending" heading corrected.** `app/redraw.rs`'s `redraw()`
 already computes `wearing_pumpkin` from `player_menu.player_native(39)` and
-feeds it into the `screen_effects` literal (in `app.rs::WindowApp::redraw`, as of this
+feeds it into the `screen_effects` literal (in `app/redraw.rs::WindowApp::redraw`, as of this
 writing). `ScreenEffects::wearing_pumpkin`, `stats.pumpkin_overlay_drawn`,
 `ScreenEffectRenderer::draw_pumpkin`, `pumpkin_overlay_triangles`, and
 `load_pumpkin_overlay_texture` are all real and wired end to end through
 `RenderState::render_inner` — proved by the pipeline-level GPU gate above.
 
-## The freeze/spyglass/confusion/portal flags' route to the shell (issues #139, #144, #149, #154)
+## The freeze/spyglass/confusion/portal flags' route to the shell
 
 All four render mechanisms (geometry, pipeline, `ScreenEffects` fields,
 `render_inner` dispatch, stats counters) are real and wired end to end,
@@ -642,7 +641,7 @@ they were reconstructed from `HEAD` plus only the overlay hunks, verified by
 diffing the result against both `HEAD` and the working tree, and landed
 separately). The pixel-producing half is entirely done.
 
-**Freeze's input is landed too** — `app.rs`'s `screen_effects` construction
+**Freeze's input is landed too** — `app/redraw.rs`'s `screen_effects` construction
 now reads `let freeze_percent = self.sim.player().percent_frozen();`, no
 `sim.rs` change needed since `Sim::player()` already returns
 `lodestone_physics::player::PlayerState` by value.
@@ -652,11 +651,11 @@ now reads `let freeze_percent = self.sim.player().percent_frozen();`, no
 exists and is unit-tested (the `0.1` scaling while scoping, no-op while not,
 and a composition check that a non-default `fov_y_degrees` scales relative to
 itself rather than being reset to an absolute constant). `Sim::render_camera`
-(`sim.rs`) calls it on the early first-person return, with `scoping` from the
+(`sim/camera.rs`) calls it on the early first-person return, with `scoping` from the
 private `Sim::spyglass_scoping()` — `self.using_item()` (a thin accessor over
 the `UsingItem` resource, next to `Self::target`) combined with a held-item
 identity check against `"minecraft:spyglass"` via `self.player_menu()
-.player_native(self.selected_slot())`. `app.rs`'s `ScreenEffects::scoping`
+.player_native(self.selected_slot())`. `app/redraw.rs`'s `ScreenEffects::scoping`
 (the vignette half) computes the identical `Player.isScoping()` condition
 independently, from `held_for_scoping` — the same item id already computed
 in `redraw()` for `set_main_hand_source`, cloned before that closure takes
@@ -669,7 +668,7 @@ changed, with a non-spyglass-item and a not-yet-pressed negative control.
 **`nausea_intensity` remains honestly at `0.0`** — no potion-effect-duration
 tracker exists anywhere in this codebase yet to compute vanilla's
 `getEffectBlendFactor(NAUSEA, ...)`, which would be `lodestone-ecs` work.
-Exactly `on_fire`'s pre-#112 shape.
+Exactly `on_fire`'s pre-fix shape.
 
 **`portal_intensity` is live**, produced by `Sim::portal_effect_intensity`
 off `Sim::tick_portal_effect` — see "The portal curve is asymmetric" above.
@@ -677,7 +676,7 @@ This paragraph used to name a "nether-portal-proximity tracker" as the
 blocker for it; there is no such subsystem in vanilla either, and the real
 requirement was a bounding-box/block-state predicate this crate already had.
 
-## A session-scoped flag needs an explicit reset (issue #390)
+## A session-scoped flag needs an explicit reset
 
 `Vitals::on_fire` is written by exactly one thing —
 `apply_local_player_on_fire`, off entity metadata naming our own id — and
@@ -686,12 +685,12 @@ metadata only arrives when the server has something to say. So the field is
 contradicts it, and a respawn does not produce a contradicting packet on its own.
 
 Vanilla never hits this because a respawn is a *new entity on both sides*:
-`PlayerList.respawn` does `new ServerPlayer(...)` (`PlayerList.java:393`), and
+`PlayerList.respawn` does `new ServerPlayer(...)` (`PlayerList.java`), and
 the client throws away its `LocalPlayer` and builds another via
-`gameMode.createPlayer` (`ClientPacketListener.handleRespawn`, `:1286`), keeping
+`gameMode.createPlayer` (`ClientPacketListener.handleRespawn`), keeping
 only the entity id. The fresh entity's synched data starts at `Entity`'s
 declared defaults — shared flags `0`, air `getMaxAirSupply()`
-(`Entity.java:319`).
+(`Entity.java`).
 
 We keep one long-lived entity across the whole session, so the clear has to be
 written down. `session::apply_local_player_state`'s `Respawned` arm now sets
@@ -800,9 +799,9 @@ installed, not a startup failure.
   `draw_pumpkin`/`draw_freeze`/`draw_spyglass`/`draw_confusion`/
   `draw_portal`).
 - `lodestone-render::camera` — `nausea_portal_warp`/
-  `spinning_effect_angle_degrees`/`Camera::view_projection_warped` (issues
-  #144/#149's shared world-projection warp) and `spyglass_fov_modifier`
-  (issue #154's FOV-zoom half, wired to the live `Camera` via
+  `spinning_effect_angle_degrees`/`Camera::view_projection_warped` (the
+  shared confusion/portal world-projection warp) and `spyglass_fov_modifier`
+  (the spyglass FOV-zoom half, wired to the live `Camera` via
   `camera_rig::apply_spyglass_fov` — see the "Spyglass" section above).
 - `lodestone-shell::gpu` — `RenderState::screen_effects`,
   `install_screen_effects`/`has_screen_effects`, the draw calls inside
@@ -818,11 +817,11 @@ installed, not a startup failure.
   mirroring `load_sky` exactly; `ScreenEffectRenderer::new` loads every
   texture in one call, so there is nothing per-overlay to add here.
 - `lodestone-shell::sim` — `Sim::player().percent_frozen()` (already public,
-  no patch needed, issue #139), `Sim::using_item()` and the private
-  `Sim::spyglass_scoping()` (issue #154, landed — see "The freeze/spyglass/
+  no patch needed), `Sim::using_item()` and the private
+  `Sim::spyglass_scoping()` (landed — see "The freeze/spyglass/
   confusion/portal flags' route to the shell").
 - `lodestone-physics::player` — `PlayerState::frozen_ticks`/`percent_frozen`/
-  `is_freezing` (issue #212's mechanic, consumed not duplicated here).
+  `is_freezing` (the freeze mechanic, consumed not duplicated here).
 - `lodestone-shell::app::redraw` — computes `wearing_pumpkin` from the
   already-in-scope `player_menu`'s native slot 39, and `freeze_percent`/
   `scoping` the same local-computation way (all landed).
@@ -874,7 +873,7 @@ checks `self.screen_effects`/`ScreenEffects`, through the real
 (installs a third-person body source, then asserts freeze/portal still draw
 while underwater/fire/pumpkin/spyglass do not, and portal wins over
 confusion when both are positive). **Now run, on this machine's real
-adapter, once `gpu.rs`'s wiring and `app.rs`'s field upgrade both landed**
+adapter, once `gpu.rs`'s wiring and `app/redraw.rs`'s field upgrade both landed**
 — all 5 tests pass in 60.52s:
 
 ```text
@@ -913,7 +912,7 @@ proves their geometry independent of the shell.
 
 The fire gate's row bands are now predicted from
 `fire_overlay_vertical_extent()` rather than a restated `FIRE_STRIP_TOP`
-decimal (issue #420 replaced the tiled-strip placement with vanilla's real
+decimal (the fire-placement fix replaced the tiled-strip placement with vanilla's real
 two-quad transform — see "Fire: a real animated texture" above), with a
 small `MARGIN_ROWS` either side of the exact predicted edge to absorb
 rasterisation rounding at the boundary itself without weakening the claim
@@ -937,12 +936,12 @@ mechanism; three-quarters of the mechanism is one merge away from being told
 the truth, one-quarter needs new `lodestone-ecs`/`lodestone-physics` work
 first.
 
-## The world-border warning: what landed, and what it still needs (issue #436)
+## The world-border warning: what landed, and what it still needs
 
 Vanilla's world-border warning is **not** one of the overlays this module
 draws, and that is worth stating plainly because it looks like it should be.
 It is a *tint applied to the vignette* inside `Hud.extractVignette`
-(`Hud.java:1057-1078`, `.cache/mc/26.2/client-src`), not a member of
+(`Hud.java`, `.cache/mc/26.2/client-src`), not a member of
 `extractCameraOverlays`:
 
 ```text
@@ -959,7 +958,7 @@ green = blue = brightness + (1 - brightness) * strength
 — i.e. the vignette goes cyan as you approach the wall, it does not gain a new
 full-screen quad.
 
-**What landed for #436**: the formula, ported and gated, as
+**What landed for the world-border warning**: the formula, ported and gated, as
 `crate::sim::session::border_warning` and read through
 `Sim::world_border_warning`. `app/redraw.rs` puts its three values
 (`dist`, `warn_at`, `strength`) on screen as a debug-overlay line, the same
@@ -989,8 +988,8 @@ because the fold really does reach a struct that nothing renders.
 ### A unit hazard in the formula, recorded because it fails safe
 
 `getLerpSpeed()` is `abs(from - to) / (lerpEnd - lerpBegin)`
-(`WorldBorder.java:403-405`), and that denominator is `lerpSizeBetween`'s third
-parameter — named **`ticks`** (`WorldBorder.java:195`), not milliseconds. Our
+(`WorldBorder.java`), and that denominator is `lerpSizeBetween`'s third
+parameter — named **`ticks`** (`WorldBorder.java`), not milliseconds. Our
 `BorderExtent::Moving` stores `duration_ms`, documented as milliseconds as the
 server sent it, so `border_warning` converts at an explicit `MILLIS_PER_TICK`.
 
@@ -998,11 +997,11 @@ server sent it, so `border_warning` converts at an explicit `MILLIS_PER_TICK`.
 It fails safe: `max(warning_blocks, …)` still floors the warning distance, so
 the tint appears at the static distance and only the *early* warning for an
 incoming shrink is short. The static case — which is what the gates pin, since
-`StaticBorderExtent.getLerpSpeed()` returns `0.0` (`WorldBorder.java:534-535`)
+`StaticBorderExtent.getLerpSpeed()` returns `0.0` (`WorldBorder.java`)
 — is exact either way. **What would falsify it**: a live server shrinking a
 border, and a measurement of when the tint first appears.
 
-## Game rules reaching behaviour: `doImmediateRespawn` (issue #436)
+## Game rules reaching behaviour: `doImmediateRespawn`
 
 Not an overlay, but the same island and the same commit. `SessionGameRules`
 was folded and read by nothing. Its most user-visible member is

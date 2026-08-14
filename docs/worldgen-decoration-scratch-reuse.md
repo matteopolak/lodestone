@@ -257,8 +257,8 @@ because the containers are recycled whole rather than being small (the `dirty` l
 reaches ~2,500 entries), `bumpalo` solves many-short-lived-heterogeneous allocations
 and the residual is neither, `memchr` has no scan left to accelerate since Unit 8's
 interning, and `hashbrown`/`rustc-hash` would replace arithmetic that
-`hash/fast.rs:86-90` records **deliberately** declining to take as a dependency — "a
-`Cargo.lock` edit in a shared checkout for the same arithmetic". `Cargo.lock` is
+`lodestone_worldgen_core::hash::fast`'s own module doc records **deliberately** declining to take as a
+dependency — "a `Cargo.lock` edit in a shared checkout for the same arithmetic". `Cargo.lock` is
 untouched by this unit.
 
 `scratch_free_list_lengths`, `scratch_misses`, `reset_scratch_misses` and

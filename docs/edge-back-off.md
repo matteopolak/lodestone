@@ -10,17 +10,17 @@ while shift is held. It lives in `lodestone-physics` as
 `MoveContext::edge_back_off: EdgeBackOff`.
 
 **It is a desync rule, not a feel rule.** The server replays the movement we claim
-through `player.move(MoverType.PLAYER, …)`
-(`.cache/mc/26.2/src/net/minecraft/server/network/ServerGamePacketListenerImpl.java:1134`),
-and `MoverType.PLAYER` is one of the two mover types this rule's own gate admits
-(`Player.java:884`). It then compares the replay result against our claimed position
-and teleports us back when `movedDist > 0.0625` — **0.25 blocks in a single packet,
-no accumulator** (`:1146-1153`).
+through `player.move(MoverType.PLAYER, …)`, inside
+`ServerGamePacketListenerImpl.handleMovePlayer`,
+and `MoverType.PLAYER` is one of the two mover types this rule's own gate
+(`Player.maybeBackOffFromEdge`) admits. `handleMovePlayer` then compares the
+replay result against our claimed position and teleports us back when
+`movedDist > 0.0625` — **0.25 blocks in a single packet, no accumulator**.
 
 Two details sharpen that:
 
-* The `yDist` clamp immediately before the comparison is
-  `if (yDist > -0.5 || yDist < 0.5) { yDist = 0.0; }` (`:1137-1139`). That disjunction
+* The `yDist` clamp immediately before the comparison, also in `handleMovePlayer`, is
+  `if (yDist > -0.5 || yDist < 0.5) { yDist = 0.0; }`. That disjunction
   is true for every finite `yDist`, so **Y is always zeroed and the check is purely
   horizontal**. This rule modifies exactly and only the horizontal components, so a
   back-off disagreement lands squarely in the measured quantity. (It reads like an
@@ -33,11 +33,11 @@ Two details sharpen that:
 ## How it works
 
 `maxDownStep = this.maxUpStep()` — the resolved **`STEP_HEIGHT` attribute**
-(`LivingEntity.java:3975`), whose `RangedAttribute` default is `0.6`
-(`Attributes.java:98-100`). It is *not* a literal; the port takes it from
+(`LivingEntity.maxUpStep`), whose `RangedAttribute` default is `0.6`
+(the `Attributes.STEP_HEIGHT` field). It is *not* a literal; the port takes it from
 `EntityDimensions::step_height`, documented as the post-modifier value.
 
-### The gate (`Player.java:881-886`)
+### The gate (`Player.maybeBackOffFromEdge`)
 
 ```java
 !this.abilities.flying
@@ -52,10 +52,10 @@ Two details sharpen that:
 | `!abilities.flying` | by construction — this crate has no creative flight, and a flying driver does not call `tick` (same standing argument as `Player.updateSwimming`'s flying override) |
 | `!(delta.y > 0.0)` | read from the candidate delta. Kept as the negated `>` so a NaN Y branches as Java does. **`delta.y == 0.0` is not upward** and does back off — that is the walking case |
 | mover type | by construction — `move_entity` *is* `move(MoverType.SELF, …)`. The excluded type is `PISTON`, which this crate has no equivalent of |
-| `isStayingOnGroundSurface()` | `EdgeBackOff::Player::staying_on_ground_surface`. It is exactly `isShiftKeyDown()` (`Player.java:300-302`) — the **raw shift key**, not the crouch pose and not `isCrouching()` |
+| `isStayingOnGroundSurface()` | `EdgeBackOff::Player::staying_on_ground_surface`. It is exactly `isShiftKeyDown()` (`Player.isStayingOnGroundSurface`) — the **raw shift key**, not the crouch pose and not `isCrouching()` |
 | `isAboveGround(maxDownStep)` | `on_ground \|\| fallDistance < maxDownStep && !canFallAtLeast(0, 0, maxDownStep - fallDistance)` |
 
-### `canFallAtLeast` (`Player.java:935-950`)
+### `canFallAtLeast` (`Player.canFallAtLeast`)
 
 The probe box is **not** uniformly shrunk:
 
@@ -76,7 +76,7 @@ first clears at `deltaX >= 0.8 - 1e-7` — i.e. `canFallAtLeast` becomes true *e
 on the tick the move would leave the supporting block, and not before. That is why
 the rule appears to "stop you at the edge" despite never measuring a distance to one.
 
-### The stepping loop (`Player.java:887-925`)
+### The stepping loop (`Player.maybeBackOffFromEdge`)
 
 Vanilla does **not** clamp once. It walks the delta toward zero in `0.05` steps,
 re-probing each time, in **three** loops — X and Z independent *first*, then joint:
@@ -114,8 +114,8 @@ Vanilla rewrites the **local candidate delta only** — it never calls
 * `getDeltaMovement()`, which `restituteMovementAfterCollisions` later reads, keeps its
   un-backed-off value. Velocity keeps accumulating while you are held at a ledge, and
   releasing shift launches you at full speed.
-* `xCollision`/`zCollision` compare against the *backed-off* delta
-  (`Entity.java:766-767`), so a fully cancelled component reads as **no collision** and
+* `xCollision`/`zCollision` compare against the *backed-off* delta, inside `Entity.move`
+  itself, so a fully cancelled component reads as **no collision** and
   is never zeroed by restitution.
 
 `move_entity` mirrors this by rewriting only `move_delta` and leaving
@@ -125,37 +125,36 @@ both of these wrong.
 ## How to change it, and the gotchas
 
 * **Position in the tick order is load-bearing.** The rule runs *inside* the move:
-  after the stuck-speed multiplier is consumed and before `collide`
-  (`Entity.java:735-744`). So a cobweb-slowed delta is what gets probed and stepped.
+  after the stuck-speed multiplier is consumed and before `collide`, both within
+  `Entity.move`. So a cobweb-slowed delta is what gets probed and stepped.
   Moving it before or after the move changes results.
-* **`fall_distance` is now maintained by `PlayerState`'s own tick, not just an input
-  (issue #194 closed this).** It reaches the rule as `PlayerState::fall_distance` →
+* **`fall_distance` is now maintained by `PlayerState`'s own tick, not just an input.**
+  It reaches the rule as `PlayerState::fall_distance` →
   `EdgeBackOff::Player::fall_distance`, and is read by **one** place:
   `isAboveGround`'s airborne branch, only when `on_ground` is false. What maintains it
   now, each cited against the jar (full detail lives on
   `PlayerState::fall_distance`'s own doc comment, which is the source of truth — this
   is a summary):
-  - accumulation + grounded reset, `Entity.checkFallDamage`'s `-= (float) ya`
-    (`Entity.java:1564-1582`), called from inside `Entity.move()` itself
-    (`Entity.java:783-784`) — reproduced right after every `do_move`/`travel_in_air`
-    call in `tick_air`/`tick_water`/`tick_lava`/`tick_elytra`;
-  - the water reset (`Entity.java:1658-1659`), reached from `baseTick`
-    (`Entity.java:537`), at the top of `tick_water`;
-  - the `*= 0.5` lava halving in `baseTick` (`:555-557`), at the top of `tick_lava`;
-  - the climbable reset (`LivingEntity.java:2693-2695`), in `tick_air` only — vanilla
-    reaches it only through `travelInAir`;
-  - the Slow Falling/Levitation reset (`LivingEntity.java:3123-3125`) and the elytra
-    `checkFallDistanceAccumulation` clamp to `1.0` (`:2904-2908`, called from
-    `updateFallFlying`, `LivingEntity.java:3117-3119`), both in `tick`, before the
+  - accumulation + grounded reset, `Entity.checkFallDamage`'s `-= (float) ya`,
+    called from inside `Entity.move()` itself — reproduced right after every
+    `do_move`/`travel_in_air` call in `tick_air`/`tick_water`/`tick_lava`/`tick_elytra`;
+  - the water reset (`Entity.updateFluidInteraction`), reached from `Entity.baseTick`,
+    at the top of `tick_water`;
+  - the `*= 0.5` lava halving in `Entity.baseTick`, at the top of `tick_lava`;
+  - the climbable reset (`LivingEntity.handleOnClimbable`), in `tick_air` only —
+    vanilla reaches it only through `travelInAir`;
+  - the Slow Falling/Levitation reset and the elytra
+    `Entity.checkFallDistanceAccumulation` clamp to `1.0` (called from
+    `updateFallFlying`), both inside `LivingEntity.aiStep`, before the
     travel dispatch;
-  - the stuck-in-block reset (`Entity.makeStuckInBlock`, `:2945-2947`), riding along
+  - the stuck-in-block reset (`Entity.makeStuckInBlock`), riding along
     with `update_stuck_multiplier`'s existing block scan.
 
   **One known divergence, bounded and pinned.** `updateFluidInteraction` has
-  **two** call sites, not one: `Entity.baseTick` (`Entity.java:537`) *and*
-  `LivingEntity.checkFallDamage` (`LivingEntity.java:365`), the latter running
+  **two** call sites, not one: `Entity.baseTick` *and*
+  `LivingEntity.checkFallDamage`, the latter running
   inside `move()` against the **post-move** position under `if (!isInWater())`.
-  `isInWater()` is the *cached* `wasTouchingWater` (`Entity.java:1605-1607`) that
+  `isInWater()` is the *cached* `wasTouchingWater` (`Entity.isInWater`) that
   `updateFluidInteraction` itself rewrites, so vanilla resets mid-`move` on the
   tick a fall first touches water and then skips that tick's accumulation,
   ending at exactly `0.0`. This crate freezes the summary per tick, so the entry
@@ -170,9 +169,9 @@ both of these wrong.
   `water_entry_tick_is_the_one_known_divergence_and_it_lasts_exactly_one_tick`.
 
   **Still not modelled**, matching pre-existing gaps elsewhere in this crate: the
-  `movementLength >= 1.0` clip-through reset inside `move` (`:747-754`, needs a world
+  `movementLength >= 1.0` clip-through reset inside `Entity.move` (needs a world
   raycast against `FALLDAMAGE_RESETTING` this crate's `CollisionView` has no
-  equivalent of), creative flight's reset (`Player.java:449-451` — this crate has no
+  equivalent of), creative flight's reset (`Player.aiStep` — this crate has no
   creative flight at all), riding/vehicles (this crate has no riding state), and
   bubble columns. **Teleport is the driver's responsibility**: this crate has no
   teleport primitive of its own, so a caller that snaps `PlayerState::position`
@@ -207,8 +206,8 @@ both of these wrong.
 * **`no_collision` is the block half only, and `canFallAtLeast` is one of the two
   callers that notices.** Vanilla's `noCollision(entity, box)` is
   `noBlockCollision && noEntityCollision && noBorderCollision`
-  (`CollisionGetter.java:51-53`), and `Player.canFallAtLeast` calls the full form
-  (`Player.java:936-949`). **Update:** the entity term now exists as
+  (`CollisionGetter.noCollision`), and `Player.canFallAtLeast` calls the full form.
+  **Update:** the entity term now exists as
   `lodestone_physics::push::no_entity_collision`, with the conjunction as
   `no_collision_among_entities` — see [`entity-push.md`](./entity-push.md). The back-off
   still calls the block-only form, and the gap that leaves is narrower than it reads:
@@ -229,7 +228,7 @@ None. No feature flag, no env var. The rule is on for every `PlayerState` moved 
 
 ## Wiring — already complete, nothing to do in the shell
 
-`crates/lodestone-ecs/src/player.rs:433` (`player_physics`) calls
+`player_physics` (`crates/lodestone-ecs/src/player.rs`) calls
 `lodestone_physics::tick(player, intent, view, profile)` with `intent =
 MovementIntent.0`, whose `sneak` bit is written by
 `lodestone-controller`'s `movement_intent` system. `tick_air` builds
@@ -237,9 +236,9 @@ MovementIntent.0`, whose `sneak` bit is written by
 input.sneak, .. }`, so the rule reaches real movement with **no shell change**.
 
 The other half of the wire was already correct too:
-`crates/lodestone-controller/src/ecs.rs:199` sends `shift: intent.sneak` in
+`send_player_input` (`crates/lodestone-controller/src/ecs.rs`) sends `shift: intent.sneak` in
 `ServerboundPlayerInputPacket`, which is precisely what makes the server call
-`setShiftKeyDown(true)` (`ServerGamePacketListenerImpl.java:427`) and therefore apply
+`setShiftKeyDown(true)` inside `ServerGamePacketListenerImpl.handlePlayerInput` and therefore apply
 the back-off in its own replay.
 
 **That is the confirmation the open question wanted.** It also means the divergence
@@ -263,7 +262,7 @@ path ever bypasses `movement_intent`, it must set both or neither.
   `fall_distance` gate (at the `move_entity` primitive level, `fall_distance`
   hand-set), and the velocity-survives-the-cancel property.
 * `crates/lodestone-physics/tests/fall_distance.rs` — whether `PlayerState`
-  actually *maintains* `fall_distance` (issue #194): every accumulation/reset site
+  actually *maintains* `fall_distance`: every accumulation/reset site
   driven by real ticks through the public `tick`/`tick_air`/`tick_water`/
   `tick_lava`/`tick_elytra` entry points, plus a flagship test that drives a real
   fall past `maxDownStep` and shows it changes the committed position at this gate
@@ -274,19 +273,20 @@ path ever bypasses `movement_intent`, it must set both or neither.
 
 `docs/baritone-port.md` §10 names two verifications. The first — read the
 `maybeBackOffFromEdge` call site in `Entity.move` and confirm the server replay reaches
-it — is **done and confirmed** (`ServerGamePacketListenerImpl.java:1134`, mover type
-`PLAYER`, admitted by `Player.java:884`). The second — sneak off a ledge on the oracle
+it — is **done and confirmed** (`ServerGamePacketListenerImpl.handleMovePlayer`, mover type
+`PLAYER`, admitted by `Player.maybeBackOffFromEdge`). The second — sneak off a ledge on the oracle
 and watch the correction counter — has **not been run**.
 
 Whoever runs it should know three things that are easy to get wrong:
 
 1. **It must be the survival oracle** (`./scripts/live-oracles/survival.sh`, game
-   `:25565`, RCON `:25566`). The rubber-band check is skipped for `!isCreative()`
-   (`ServerGamePacketListenerImpl.java:1147-1152`), so running it against
+   `:25565`, RCON `:25566`). The rubber-band check is skipped for `!isCreative()`,
+   also inside `handleMovePlayer`, so running it against
    `creative.sh` — the default reflex — gives a **guaranteed vacuous pass**: zero
    corrections whether or not the rule is modelled.
-2. **The counter to read is `Sim::teleport_count`** (`crates/lodestone-shell/src/sim.rs:506`),
-   incremented on every adopted `TeleportPlayer` (`:2641`).
+2. **The counter to read is `Sim::teleport_count`** (`crates/lodestone-shell/src/sim.rs`),
+   incremented on every adopted `TeleportPlayer` inside `Sim::poll_net`
+   (`crates/lodestone-shell/src/sim/net_apply.rs`).
 3. **It needs a control proving the counter can move inside the test's lifetime** —
    an RCON `tp` provocation that must increment it. Otherwise "no corrections" is the
    *duration* species of vacuous test: a counter that was never going to move.

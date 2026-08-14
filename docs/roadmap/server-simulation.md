@@ -22,7 +22,7 @@ hardness, entity dimensions, and block physics constants. A generated `path_type
 mob-AI side isn't starting from zero either). `lodestone-server` exists as a real crate with a working
 tokio target-split, an in-memory *and* TCP transport behind the same connection loop
 (`crates/lodestone-server/src/integrated.rs`), and a real (if currently unwired) v770 server protocol
-implementation (`crates/protocol/v770/src/server_protocol.rs:364`). NBT has a complete, tested
+implementation (`V770ServerProtocol` in `crates/protocol/v770/src/server_protocol.rs`). NBT has a complete, tested
 reader/writer in `crates/lodestone-core/src/lib.rs`. None of this is a green-field project.
 
 What is *not* in place, confirmed by whole-tree search rather than assumed: Anvil region-file
@@ -134,7 +134,7 @@ verification method.
 | [#312](https://github.com/matteopolak/lodestone/issues/312) | Fire spread and burnout |
 | [#313](https://github.com/matteopolak/lodestone/issues/313) | Explosion block-destruction and blast resistance — complements [#213](https://github.com/matteopolak/lodestone/issues/213) (entity-exposure/damage, a different crate, already built) rather than duplicating it |
 
-### Phase 4 — redstone family (parent [#314](https://github.com/matteopolak/lodestone/issues/314) plus 8 sub-issues, nested under it)
+### Phase 4 — redstone family (8 sub-issues, nested under one parent)
 
 | # | Issue |
 |---|---|
@@ -178,7 +178,7 @@ verification method.
 
 Confirmed built-and-tested-but-zero-consumer code, labelled `island` on the relevant issue:
 
-- **`V770ServerProtocol`** (`crates/protocol/v770/src/server_protocol.rs:364`) — a real protocol-776
+- **`V770ServerProtocol`** (`crates/protocol/v770/src/server_protocol.rs`) — a real protocol-776
   server implementation, exercised only by its own crate's tests. [#287](https://github.com/matteopolak/lodestone/issues/287).
 - **Carvers and ore-feature placement** (`crates/lodestone-worldgen/src/carver/`, `src/feature/mod.rs`) —
   JVM-parity-tested, never composed into `OverworldGenerator`. [#295](https://github.com/matteopolak/lodestone/issues/295).
@@ -192,7 +192,8 @@ rather than here — noted for completeness since this doc's own research trippe
 - `crates/lodestone-entity/src/explosion.rs` (entity-exposure/knockback math for a blast, zero
   consumers) — [#213](https://github.com/matteopolak/lodestone/issues/213).
 - `MobSim`'s `!Send` `Goal` trait blocking it from the real entity-streaming path
-  (`crates/protocol/v770/tests/entity_streaming_live.rs:71-86` documents this explicitly) —
+  (`SharedSnapshotSource`'s own doc comment in
+  `crates/protocol/v770/tests/entity_streaming_live.rs` documents this explicitly) —
   [#217](https://github.com/matteopolak/lodestone/issues/217) covers the consequence (mob positions
   never reach a client); the root cause is a `Send` bound on `lodestone_entity::ai::Goal`, flagged
   separately as a background task rather than filed here since fixing it means touching entity-AI code

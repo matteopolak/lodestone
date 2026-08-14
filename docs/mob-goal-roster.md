@@ -83,7 +83,7 @@ its `stop` hook, as vanilla's `removeAllGoals` does) and drops it, rewriting the
 flag-lock table's indices. This exists for vanilla's runtime goal swap:
 `AbstractSkeleton.reassessWeaponGoal()` removes both its melee and bow goals and
 re-adds exactly one at priority 4 whenever the held item changes
-(`monster/skeleton/AbstractSkeleton.java:132-146`). `disable` cannot express it —
+(`monster/skeleton/AbstractSkeleton.java`). `disable` cannot express it —
 it is per-`Flag` and would take out every MOVE goal the mob has.
 
 Handles rather than indices, because removal shifts every later index down; an
@@ -123,13 +123,13 @@ missing from it is a species nothing checks, and
   (`0.2 × 1.25 = 0.25`) and measures what the goal asks the mob for, via
   `roster::probe::SpeedProbe`.
 - **`registerGoals` is not always one method.** A zombie's registrations are split
-  across `registerGoals` (`Zombie.java:112-116`) and `addBehaviourGoals`
-  (`:119-130`), and a subclass may add rows before calling `super`
-  (`WitherSkeleton.java:38-41`). Grep `addGoal` in the whole file, and check
+  across `Zombie.java`'s `registerGoals` and `addBehaviourGoals`, and a subclass
+  may add rows before calling `super` (`WitherSkeleton.java`'s `registerGoals`).
+  Grep `addGoal` in the whole file, and check
   whether the subclass overrides at all — `Husk`, `MushroomCow`, `Skeleton`,
   `Stray`, `Bogged` and `CaveSpider` do not, which is why they share a table.
 - **Do not test a goal against `ScriptMob` and call it done.** That fake overrides
-  all eight perception methods, which is exactly how issue #441's island survived:
+  all eight perception methods, which is exactly how that island survived:
   every affected goal had a green unit test while its `can_use` was a compile-time
   constant `false` in production. A roster gate must drive
   `MobSim::spawn_species`.
@@ -160,8 +160,8 @@ None. The tables are `const`, resolved at compile time, and take no feature flag
 - **`MobCategory` and hostility.** Two independent types by that name exist in
   this workspace (`lodestone_entity::spawn::MobCategory`, 8 variants, and
   `lodestone_server::mob_spawn::MobCategory`, 7 variants and a different
-  `check_despawn` signature); the server uses its own and unifying them is issue
-  #221's call. The roster is keyed on the species path string and returns goals
+  `check_despawn` signature); the server uses its own and unifying them is a
+  separate decision. The roster is keyed on the species path string and returns goals
   only, so it takes no side. `is_hostile_species` stays in `mobs/species.rs`
   (moved there from `mobs.rs` by the file split), reduced to spawn category
   and despawn persistence.
@@ -177,8 +177,8 @@ None. The tables are `const`, resolved at compile time, and take no feature flag
   than consulting the roster. It has no production caller (only
   `tests/mob_spawn.rs`), and it spawns through `MobSim::spawn`, which hardcodes
   `minecraft:zombie` — so routing it through the roster would hand every naturally
-  spawned mob the zombie set. That belongs with the natural-spawn driver, issue
-  #222.
+  spawned mob the zombie set. That belongs with the natural-spawn driver, not
+  this one.
 - **Two of our goals' flag sets differ from vanilla's**, measured against the jar
   and left alone here because changing them alters scheduling for every species at
   once: `MeleeAttackGoal` claims `{MOVE}` where vanilla claims `{MOVE, LOOK}`
@@ -191,24 +191,25 @@ None. The tables are `const`, resolved at compile time, and take no feature flag
 - **A hostile mob still never acquires a target in the running game**, so every
   melee and swell row in `hostile_melee.rs` is one hop short of a player.
   `MobController::find_nearest_target` is documented as "the host applies the
-  version/type-specific filter" (`ai/mob.rs:90-92`), but `NavigatingMob` implements
-  it as `self.attack_target` (`ai/navigating_mob.rs:904`) — it never consults the
-  `nearest_player` that `MobSim::tick`'s perception feed does populate
-  (`mobs.rs:1737`) — and `set_attack_target` has **zero production call sites**
+  version/type-specific filter" (`ai/mob.rs`), but
+  `NavigatingMob::find_nearest_target` (`ai/navigating_mob.rs`) implements it as
+  `self.attack_target` — it never consults the `nearest_player` that
+  `MobSim::tick`'s perception feed does populate (`MobSim::feed_perception` in
+  `mobs/mod.rs`) — and `set_attack_target` has **zero production call sites**
   (every caller is a test or a bench). So `NearestAttackableTargetGoal::can_use`
   asks for a target, is handed back the target it was meant to find, and returns
-  `false` forever. This is a perception island one hop beyond the six #441 closed;
-  it needs an owner on `navigating_mob.rs` or `mobs.rs`, and it is why the hostile
+  `false` forever. This is a perception island one hop beyond the six closed
+  earlier; it needs an owner on `navigating_mob.rs` or `mobs/mod.rs`, and it is why the hostile
   gates drive the target in explicitly.
-- **`wither_skeleton` has its own table** as of #226, since `WitherSkeleton` is the
+- **`wither_skeleton` has its own table**, since `WitherSkeleton` is the
   one class in the family that declares `registerGoals`
-  (`WitherSkeleton.java:38-41`, adding an `AbstractPiglin` target row *before*
+  (`WitherSkeleton.java`, adding an `AbstractPiglin` target row *before*
   `super`). It previously shared `SKELETON`, which made that table knowingly not a
   complete transcription; `wither_skeleton_is_the_base_table_plus_the_piglin_row`
   now pins the eleven duplicated rows so the two cannot drift.
 - **`Drowned` overrides `addBehaviourGoals`, not `registerGoals`**, which is the
   one place a family-shaped assumption gets the jar wrong. Because
-  `Zombie.registerGoals` calls `this.addBehaviourGoals()` at `:116`, a drowned
+  `Zombie.registerGoals` calls `this.addBehaviourGoals()`, a drowned
   keeps exactly `Zombie`'s three own rows and replaces the other nine
-  (`Drowned.java:91-103`). Transcribing zombie's whole table for it would add four
+  (`Drowned.java`'s `addBehaviourGoals`). Transcribing zombie's whole table for it would add four
   goals vanilla never registers and drop six it does.

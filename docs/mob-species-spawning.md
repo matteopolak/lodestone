@@ -1,8 +1,8 @@
-# Species-aware mob spawning (issue #205)
+# Species-aware mob spawning
 
 ## What it is
 
-`MobSim::spawn_species` (`crates/lodestone-server/src/mobs.rs`), a spawn entry
+`MobSim::spawn_species` (`crates/lodestone-server/src/mobs/mod.rs`), a spawn entry
 point that resolves a mob's body, combat stats, and baseline goal set from its
 real vanilla species instead of the universal `minecraft:zombie` placeholder
 `MobSim::spawn` used to hand every caller. Before this, `SimMob::entity_type`
@@ -46,7 +46,7 @@ example.
 `MobCategory` and despawn persistence — goal sets have belonged to
 `lodestone_entity::ai::roster` since the roster landed.
 
-**Updated by #457.** It listed eight species for a long time after the roster
+**Updated as the roster grew.** It listed eight species for a long time after the roster
 grew to twenty-seven, so `drowned`, `cave_spider`, `zombie_villager`,
 `parched`, `guardian`, `elder_guardian`, `ghast`, `blaze`, `enderman` and
 `zombified_piglin` all got the wrong category. It now lists seventeen, each
@@ -57,7 +57,7 @@ attribute template, which is a different question with a different answer:
 - a **ghast** is `MobCategory.MONSTER` while its attribute builder is a bare
   `Mob.createMobAttributes()` with no `attack_damage` at all;
 - a **snow golem** is `MobCategory.MISC`, which this boolean cannot represent
-  — it lands as `Creature`, the safe direction, and that gap is #221's.
+  — it lands as `Creature`, the safe direction, a known gap in this classifier.
 
 It is still a name list, and a name list still ages. What keeps it honest is
 `every_rostered_species_has_a_decided_category`, which drives
