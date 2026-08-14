@@ -18,14 +18,44 @@ client with a real `block_update` packet, and respecting the break *sequence*
 interaction-range check. Both moved in with issue #531 and now live in
 `crates/lodestone-server/src/block_breaking.rs` — see
 [`server-block-break-validation.md`](./server-block-break-validation.md), which also
-covers why `StartDestroy` can now break a block by itself.
+covers why `StartDestroy` can now break a block by itself. Item consumption from
+inventory is also no longer out of scope: `apply_use_item_on` calls `consume_one` for a
+non-creative placement (see "Placement resolves the held item" below) — this doc used
+to say otherwise, which had gone stale.
 
-**Out of scope, deliberately:** item
-consumption from inventory (placement resolves the held item but never *spends* it —
-see "Placement resolves the held item" below), drops, block-entity data beyond the six
-ticking blocks, redstone/neighbour updates, and
-and vanilla's full `canBeReplaced` set (only air, fluids and a matching half-slab are
-replaceable here). Spawn protection is still skipped.
+**Placement now refuses to intersect the placer.** `apply_use_item_on` had no
+obstruction test of any kind — the only legality gate was "is the target cell air or a
+fluid" — so a full block could be written through a standing player, reported as "I can
+place blocks in myself as if I don't have a hitbox". `placement_obstructs_placer`
+(`server.rs`) is the server-side half of vanilla's `BlockItem.canPlace` →
+`Level.isUnobstructed(state, pos, CollisionContext.empty())`: it tests the placed
+state's real collision boxes (`lodestone_data::collision_shapes::collision_boxes`, keyed
+off the resolved placement state, not the bare item name) against the placer's own
+`0.6 x 1.8` bounding box built from `player_pos`. A state with an **empty** collision
+shape — a torch, a rail, a pressure plate, redstone dust — is never obstructed, matching
+vanilla: those are still legal to place at your own feet.
+
+**Still narrower than vanilla, on purpose.** `isUnobstructed` tests *every* entity's
+bounding box in the target cell (excluding spectators); this server has no
+per-connection entity-bounding-box registry to query for other players or mobs, so only
+the placer is checked today. `player_pos` is `None` until the first movement packet
+arrives, in which case the check is skipped rather than refused — the same
+conservative-elsewhere-but-permissive-here gap `is_legal_bed_respawn` already documents
+for the bed-reach check.
+
+**The client's own local prediction (`lodestone-shell`'s
+`sim::placement::block_intersects_player`) is a separate, coarser check**: it tests the
+*full target cell* against the player's box regardless of the block's actual collision
+shape, so it over-refuses (e.g. it will not locally predict a torch at your own feet,
+where vanilla and this server both allow it). That mismatch only costs a round trip —
+the client always sends `use_item_on` regardless of its own local decision, so this
+server's real geometry-aware check is the authoritative one — but the two are not the
+same rule and nothing keeps them in sync. Narrowing the client check to reuse real
+collision shapes, and covering other entities server-side, are both open.
+
+**Out of scope, deliberately:** drops, block-entity data beyond the six ticking blocks,
+redstone/neighbour updates, and vanilla's full `canBeReplaced` set (only air, fluids and
+a matching half-slab are replaceable here). Spawn protection is still skipped.
 
 ## How it works
 
