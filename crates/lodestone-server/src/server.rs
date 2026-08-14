@@ -5247,6 +5247,11 @@ async fn apply_use_item_on<T, P, S>(
     // by the caller anyway, matching the composter roll's own "one draw per
     // right-click, whatever block was hit" reasoning.
     enchant_seed_roll: i64,
+    // `ServerBound::UseItemOn::hand` (`0` main, `1` off) — which native slot
+    // `held_item` below reads from. Previously there was no such parameter
+    // and every click acted on the selected hotbar slot only, so a shulker
+    // box (or anything else) held in the off hand could never be placed.
+    hand: u8,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -5625,7 +5630,17 @@ where
 
     let neighbour = relative(pos, face);
     let clicked = source.block_state(pos.x, pos.y, pos.z);
-    let held_item = inventory.selected_item().map(|stack| stack.item.to_string());
+    // Which native slot this click reads from. Vanilla's `Player.useItemOn`
+    // uses `player.getItemInHand(hand)` for the spawn-egg, flint-and-steel
+    // and block-placement branches below — all three share this one
+    // resolution point via `held_item`, so an item held only in the off hand
+    // now reaches them instead of the main hand's slot always winning.
+    let hand_native = if hand == 1 {
+        crate::inventory::OFFHAND_NATIVE
+    } else {
+        usize::from(inventory.selected_hotbar_slot())
+    };
+    let held_item = inventory.native(hand_native).map(|stack| stack.item.to_string());
 
     // `SpawnEggItem.useOn`. Between the block's own `useWithoutItem` above and
     // `BlockItem.place` below, which is vanilla's order in `Player.useItemOn` —
@@ -5670,17 +5685,17 @@ where
                     // `ItemStack.consume`'s own `!hasInfiniteMaterials()` gate
                     // applies: a creative player's eggs are not used up, which is
                     // vanilla and was not true of the inline shrink this replaces.
-                    let native = usize::from(inventory.selected_hotbar_slot());
+                    let native = hand_native;
                     if consume_one(inventory, native, game_mode) && game_mode != GameMode::Creative {
                         let remainder = inventory.native(native).cloned();
-                        let hotbar_slot =
-                            i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
-                        apply(
-                            conn,
-                            state,
-                            proto.encode_container_slot(0, 0, hotbar_slot, remainder.as_ref()),
-                        )
-                        .await?;
+                        if let Some(menu_slot) = window_zero_menu_slot(native) {
+                            apply(
+                                conn,
+                                state,
+                                proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
+                            )
+                            .await?;
+                        }
                     }
                     return Ok(());
                 }
@@ -5856,7 +5871,7 @@ where
             // leaving a zero-count stack naming an item, which renders as a block
             // you can place forever.
             if game_mode != GameMode::Creative {
-                let native = usize::from(inventory.selected_hotbar_slot());
+                let native = hand_native;
                 if consume_one(inventory, native, game_mode) {
                     placement_remainder = Some(inventory.native(native).cloned());
                 }
@@ -5869,12 +5884,13 @@ where
     // bone-meal and spawn-egg arms above send after they consume. `state_id` is
     // `0`: this crate applies a container diff verbatim and never validates a
     // stale id (`apply_container_clicked`).
-    if let Some(remainder) = placement_remainder {
-        let hotbar_slot = i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+    if let Some(remainder) = placement_remainder
+        && let Some(menu_slot) = window_zero_menu_slot(hand_native)
+    {
         apply(
             conn,
             state,
-            proto.encode_container_slot(0, 0, hotbar_slot, remainder.as_ref()),
+            proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
         )
         .await?;
     }
@@ -8495,6 +8511,7 @@ where
             face,
             cursor,
             sequence: _,
+            hand,
         } => {
             // Issue #249: one roll per right-click, whatever block was hit —
             // vanilla's level RNG advances on plenty of unrelated draws too,
@@ -8538,6 +8555,7 @@ where
                 world.difficulty().0,
                 *game_mode,
                 enchant_seed_roll,
+                hand,
             )
             .await?;
         }

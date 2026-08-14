@@ -274,6 +274,10 @@ const METADATA_SER_BYTE: i32 = 0;
 /// than one field with two names.
 const METADATA_IDX_HORSE_FLAGS: u8 = 18;
 
+/// `AgeableMob.DATA_BABY_ID`, index 16 — a `BOOLEAN`. Matches the decode
+/// side's `IDX_BABY` in `crates/protocol/v770/src/packets/metadata.rs`.
+const METADATA_IDX_BABY: u8 = 16;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -2977,14 +2981,10 @@ impl ServerProtocol for V770ServerProtocol {
                             z: use_item.cursor_z,
                         },
                         sequence: use_item.sequence,
-                        // `use_item.hand` (already decoded off the wire, see
-                        // `packets::game::UseItemOn`) is not yet threaded through:
-                        // `lodestone_server::ServerBound::UseItemOn` has no `hand`
-                        // field to put it in yet, so a placement always reads the
-                        // selected hotbar slot regardless of which hand the client
-                        // used. Needs a field added to that enum (off-limits to this
-                        // crate) plus the consumer in `crate::server::apply_use_item_on`
-                        // reading it, before this arm can pass `hand` through.
+                        // Same malformed-input convention as `USE_ITEM`'s hand just
+                        // above: anything outside `0..=1` degrades to main hand
+                        // rather than dropping the packet.
+                        hand: u8::try_from(use_item.hand).unwrap_or(0),
                     },
                     None => ServerBound::Ignored,
                 }
@@ -4444,6 +4444,11 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(METADATA_SER_BYTE);
                     w.i8(byte);
                 }
+                MetadataField::Baby(b) => {
+                    w.u8(METADATA_IDX_BABY);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*b);
+                }
             }
         }
         w.u8(METADATA_EOF);
@@ -5413,8 +5418,64 @@ mod block_edit_tests {
                     z: 0.5,
                 },
                 sequence: 7,
+                hand: 0,
             }
         );
+    }
+
+    /// The off-hand ordinal (`1`) must survive decode — this is the field that
+    /// used to be read off the wire and then discarded, which is why off-hand
+    /// placement was impossible: every `UseItemOn` reached the server-side
+    /// model reporting main hand regardless of which hand the client used.
+    #[test]
+    fn decode_use_item_on_carries_the_off_hand_ordinal() {
+        let proto = V770ServerProtocol;
+        let body = encode(&UseItemOn {
+            hand: 1,
+            pos: pack_block_pos(1, 2, 3),
+            face: 0,
+            cursor_x: 0.25,
+            cursor_y: 0.0,
+            cursor_z: 0.75,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 11,
+        });
+        let decoded = proto.decode(State::Play, play::serverbound::USE_ITEM_ON, &body);
+        let ServerBound::UseItemOn { hand, .. } = decoded else {
+            panic!("expected UseItemOn, got {decoded:?}");
+        };
+        assert_eq!(hand, 1);
+    }
+
+    /// Same malformed-input convention as `USE_ITEM`'s own hand field: `hand`
+    /// is decoded with `u8::try_from(..).unwrap_or(0)`, which degrades to main
+    /// hand rather than dropping the packet — but only for a wire value
+    /// outside `u8`'s own range (`256` and up, or negative). `300` rather
+    /// than, say, `99`: the latter fits in a `u8` and survives the conversion
+    /// unclamped, which is worth recording rather than assuming — this
+    /// decoder does not validate the ordinal is `0` or `1`, only that it fits
+    /// in a byte, matching `USE_ITEM`'s own established (if narrower than it
+    /// sounds) convention.
+    #[test]
+    fn decode_use_item_on_clamps_a_malformed_hand_ordinal_to_main() {
+        let proto = V770ServerProtocol;
+        let body = encode(&UseItemOn {
+            hand: 300,
+            pos: pack_block_pos(0, 0, 0),
+            face: 0,
+            cursor_x: 0.0,
+            cursor_y: 0.0,
+            cursor_z: 0.0,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 0,
+        });
+        let decoded = proto.decode(State::Play, play::serverbound::USE_ITEM_ON, &body);
+        let ServerBound::UseItemOn { hand, .. } = decoded else {
+            panic!("expected UseItemOn, got {decoded:?}");
+        };
+        assert_eq!(hand, 0);
     }
 
     /// [`resolve_state_id`] round-trips the two propertyless states this

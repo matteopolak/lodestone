@@ -299,3 +299,115 @@ async fn every_held_item_places_its_own_block_in_the_servers_own_world() {
         "the server never confirmed the final placement ({last_block}) to the client"
     );
 }
+
+/// **Off-hand placement.** Before `ServerBound::UseItemOn` carried a `hand`
+/// field, `apply_use_item_on` always read `inventory.selected_hotbar_slot()`
+/// regardless of which hand the client actually used — so a block held only
+/// in the off hand, with an unplaceable item in the main hand, could never be
+/// placed at all. This holds a sword in the main hand (which must place
+/// nothing) and dirt in the off hand (menu slot 45,
+/// `PlayerInventory::OFFHAND_NATIVE`'s own wire mapping — vanilla's
+/// `InventoryMenu` puts the off-hand slot at the end, after the four armour
+/// slots and the 27+9 inventory/hotbar), then sends `UseItemOn { hand:
+/// Hand::Off, .. }`.
+#[tokio::test]
+async fn use_item_on_with_hand_off_places_the_off_hand_item_not_the_main_hand_one() {
+    let view_radius = 0;
+    let (client_io, server_io) = memory_pair();
+    let source = SharedAirSource::default();
+    let server_source = source.clone();
+
+    let server_task = tokio::spawn(async move {
+        let mut conn = Connection::new(server_io);
+        serve_connection(
+            &mut conn,
+            &V770ServerProtocol,
+            &server_source,
+            &NoEntities,
+            view_radius,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+        )
+        .await
+    });
+
+    let (mut handle, _events) =
+        ClientBuilder::new(address(), profile("OffHandPlacer"), Box::new(adapter())).connect_with(client_io);
+
+    handle
+        .wait_for_spawn(Duration::from_secs(30))
+        .await
+        .expect("client never spawned");
+    handle
+        .wait_for_chunks(1, Duration::from_secs(30))
+        .await
+        .expect("initial column never arrived");
+
+    handle
+        .send_action(ClientAction::ChangeGameMode {
+            mode: GameMode::Creative,
+        })
+        .expect("client still connected");
+    // Main hand (hotbar slot 0, menu slot 36): a sword, which places nothing.
+    handle
+        .send_action(ClientAction::SetCreativeModeSlot {
+            slot: 36,
+            item: Some(stack("minecraft:diamond_sword")),
+        })
+        .expect("client still connected");
+    handle
+        .send_action(ClientAction::SetCarriedItem { slot: 0 })
+        .expect("client still connected");
+    // Off hand (menu slot 45): dirt, which does place.
+    handle
+        .send_action(ClientAction::SetCreativeModeSlot {
+            slot: 45,
+            item: Some(stack("minecraft:dirt")),
+        })
+        .expect("client still connected");
+
+    let target = BlockPos::new(2, 5, 2);
+    handle
+        .send_action(ClientAction::UseItemOn {
+            hand: Hand::Off,
+            pos: target,
+            face: BlockFace::Up,
+            cursor: Vec3f::new(0.5, 0.0, 0.5),
+            inside_block: false,
+            sequence: 1,
+        })
+        .expect("send use item on");
+
+    let confirmed = handle
+        .wait_for(Duration::from_secs(30), |h| {
+            h.block_at(target)
+                .is_some_and(|id| lodestone_data::block_states::block_name(id) == Some("minecraft:dirt"))
+        })
+        .await
+        .is_ok();
+
+    handle.shutdown();
+    let _ = handle.join().await;
+    let _summary = tokio::time::timeout(Duration::from_secs(10), server_task)
+        .await
+        .expect("serve_connection task did not finish in time")
+        .expect("serve_connection task panicked")
+        .expect("serve_connection returned an error");
+
+    let edits = source.edits();
+    assert_eq!(
+        edits.get(&(2, 5, 2)).map(String::as_str),
+        Some("minecraft:dirt"),
+        "an off-hand UseItemOn must place the off-hand item (dirt), not fall back to the main \
+         hand's sword (which cannot place at all): got {:?}",
+        edits.get(&(2, 5, 2))
+    );
+    assert!(
+        !edits.values().any(|block| block == "minecraft:diamond_sword"),
+        "the main-hand sword must never be written as a block: {edits:?}"
+    );
+    assert!(
+        confirmed,
+        "the server never confirmed the off-hand placement to the client"
+    );
+}
