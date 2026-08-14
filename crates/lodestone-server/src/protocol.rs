@@ -1006,6 +1006,40 @@ pub enum ServerBound {
         /// The client-typed text, unfiltered.
         name: String,
     },
+    /// Middle-click (`keyPickItem`) aimed at a block
+    /// (`ServerboundPickItemFromBlockPacket`). Vanilla's client sends this
+    /// unconditionally on every pick against a block hit — there is no
+    /// client-side prediction of which of the three pick-block outcomes
+    /// applies (`Minecraft.pickBlockOrEntity` → `MultiPlayerGameMode
+    /// ::handlePickItemFromBlock` does nothing but forward the packet); the
+    /// whole hotbar-select/swap/create decision is server-authoritative, in
+    /// `ServerGamePacketListenerImpl::handlePickItemFromBlock` →
+    /// `tryPickItem`. See `crate::server`'s consumer for that three-way split.
+    PickItemFromBlock {
+        /// The targeted block position.
+        pos: BlockPos,
+        /// `hasControlDown()` at the time of the pick — copy the block's data
+        /// (block-entity contents/NBT) onto the resulting stack. Gated
+        /// server-side on infinite materials, not decoded away here: `packet
+        /// .includeData() && this.player.hasInfiniteMaterials()` is
+        /// vanilla's own AND, and only the consumer has the game-mode half.
+        include_data: bool,
+    },
+    /// Middle-click aimed at an entity
+    /// (`ServerboundPickItemFromEntityPacket`) — same shape as
+    /// [`PickItemFromBlock`](Self::PickItemFromBlock), aimed at
+    /// `entity.getPickResult()` instead of a block's clone stack.
+    PickItemFromEntity {
+        /// The targeted entity's network id.
+        entity_id: i32,
+        /// `hasControlDown()`. For an entity this also gates
+        /// `FetchProfileCommand.printForAvatar` on a game-master avatar in
+        /// vanilla — not modelled here (no game-master command channel), so
+        /// this crate's consumer uses it only for the block-entity NBT case,
+        /// which does not apply to an entity target at all; carried for wire
+        /// fidelity and symmetry with the block variant.
+        include_data: bool,
+    },
     /// The client pressed a data-driven button in an open menu
     /// (`ServerboundContainerButtonClickPacket`). Only `EnchantmentMenu` reads
     /// this in vanilla (`ServerGamePacketListenerImpl.handleContainerButtonClick`
@@ -2024,6 +2058,39 @@ pub trait ServerProtocol: Send + Sync {
         Vec::new()
     }
 
+    /// Encodes a generic post-join teleport/position-sync
+    /// (`ClientboundPlayerPositionPacket`) — `/tp`'s producer, and any future
+    /// caller that needs to move an already-joined player without a dimension
+    /// change or a respawn.
+    ///
+    /// # Why this did not already exist
+    ///
+    /// The join sequence (`begin_play_at`) and the respawn path
+    /// ([`encode_respawn`](Self::encode_respawn)) each build this exact packet
+    /// with a free function private to their own implementing module, because
+    /// neither needed it exposed through the trait. `dispatch_play_packet` is
+    /// generic over `P: ServerProtocol` and cannot reach a family's private
+    /// free function, so `/tp` needed this method before it could be wired at
+    /// all — see `docs/server-commands.md`'s own note on why the command was
+    /// previously unregistered.
+    ///
+    /// `yaw`/`pitch` are always absolute here, never relative: the *value*
+    /// resolved by [`crate::commands::Effect::Teleport`]'s applier is already
+    /// the target's final facing (see that variant's own doc for how a missing
+    /// rotation is resolved to the target's current one before this is ever
+    /// called), so this method carries no relative-flags bitset the way the
+    /// wire packet's own optional relative-move fields could.
+    ///
+    /// The default emits nothing, so a protocol family with no `/tp` support
+    /// need not override it and `/tp` typed against it produces a command that
+    /// runs and reports success with no visible effect — the same documented
+    /// posture [`encode_system_chat`](Self::encode_system_chat)'s own doc
+    /// describes for a family that wants commands but not chat.
+    fn encode_teleport(&self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> ServerDirective {
+        let _ = (x, y, z, yaw, pitch);
+        ServerDirective::None
+    }
+
     /// Encodes a **dimension change** — the same `ClientboundRespawnPacket` pair
     /// [`encode_respawn`](Self::encode_respawn) sends, aimed at another level.
     ///
@@ -2154,6 +2221,18 @@ pub trait ServerProtocol: Send + Sync {
         item: Option<&ItemStack>,
     ) -> ServerDirective {
         let _ = (window_id, state_id, slot, item);
+        ServerDirective::None
+    }
+
+    /// Encodes the clientbound `set_held_slot` packet (vanilla
+    /// `ClientboundSetHeldSlotPacket`) — a single VarInt hotbar index. Vanilla
+    /// sends this as the unconditional first half of
+    /// `ServerGamePacketListenerImpl::tryPickItem` (issue #558's pick-block),
+    /// whether or not the pick actually moved anything, so the client's
+    /// selection is always resynchronised to the server's own
+    /// `Inventory.selected` after a middle-click. The default emits nothing.
+    fn encode_set_held_slot(&self, slot: u8) -> ServerDirective {
+        let _ = slot;
         ServerDirective::None
     }
 
@@ -2599,6 +2678,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_container_data(window_id, property, value)
     }
 
+    fn encode_set_held_slot(&self, slot: u8) -> ServerDirective {
+        (**self).encode_set_held_slot(slot)
+    }
+
     fn encode_initialize_border(&self, border: &crate::border::WorldBorder) -> ServerDirective {
         (**self).encode_initialize_border(border)
     }
@@ -2723,6 +2806,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
         (**self).encode_respawn(spawn)
+    }
+
+    fn encode_teleport(&self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> ServerDirective {
+        (**self).encode_teleport(x, y, z, yaw, pitch)
     }
 
     fn encode_recipe_book_add(
@@ -2891,6 +2978,9 @@ mod tests {
         }
         fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
             send(600 + window_id * 100 + property * 10 + value)
+        }
+        fn encode_set_held_slot(&self, slot: u8) -> ServerDirective {
+            send(650 + i32::from(slot))
         }
         fn encode_initialize_border(&self, border: &crate::border::WorldBorder) -> ServerDirective {
             send(1000 + border.size() as i32)
@@ -3087,6 +3177,10 @@ mod tests {
         assert_eq!(
             boxed.encode_container_data(7, 0, 42),
             direct.encode_container_data(7, 0, 42)
+        );
+        assert_eq!(
+            boxed.encode_set_held_slot(4),
+            direct.encode_set_held_slot(4)
         );
         let border = crate::border::WorldBorder::default();
         assert_eq!(

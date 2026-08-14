@@ -322,6 +322,63 @@ fn plain_blocks_resolve_to_themselves_and_tools_resolve_to_nothing() {
     );
 }
 
+/// [`block_items::item_for_block`], the inverse this issue's server-side half
+/// needs: pairwise-distinct blocks so a transposition in the `OnceLock`
+/// build (`table[placed as usize] = ...`) cannot survive, plus the two `None`
+/// shapes — a block with no `BlockItem` at all, and an out-of-range `Block`
+/// cannot occur since `Block` is exhaustive, so only the first shape is real.
+#[test]
+fn item_for_block_inverts_block_for_item_id_for_ordinary_blocks() {
+    for (item, block_name) in [
+        ("minecraft:dirt", "minecraft:dirt"),
+        ("minecraft:oak_planks", "minecraft:oak_planks"),
+        ("minecraft:diamond_block", "minecraft:diamond_block"),
+        ("minecraft:glass", "minecraft:glass"),
+    ] {
+        let block = Block::from_name(block_name).unwrap_or_else(|| panic!("{block_name} must be a real block"));
+        assert_eq!(
+            block_items::item_for_block(block).map(lodestone_data::item::Item::name),
+            Some(item),
+            "item_for_block({block_name}) must invert block_for_item({item})"
+        );
+    }
+}
+
+/// A block no `BlockItem` targets at all — fluids and technical blocks a
+/// player can never hold as an item — must report `None` rather than a
+/// fabricated item. (`minecraft:redstone_wire` is *not* such a block: the
+/// census's own false-negative example, `minecraft:redstone` places it, so
+/// `item_for_block` correctly answers `Some(Redstone)` there — this test
+/// picks blocks with no `BlockItem` pointing at them by any name.)
+#[test]
+fn item_for_block_is_none_for_a_block_with_no_block_item() {
+    for name in ["minecraft:water", "minecraft:fire", "minecraft:air", "minecraft:nether_portal"] {
+        let block = Block::from_name(name).unwrap_or_else(|| panic!("{name} is a real block"));
+        assert_eq!(block_items::item_for_block(block), None, "{name} must have no BlockItem");
+    }
+}
+
+/// Every block this crate's `item_for_block` names must round-trip back
+/// through [`block_items::block_for_item_id`] — the property that makes it a
+/// true inverse rather than an independently-wrong second table.
+#[test]
+fn item_for_block_round_trips_through_block_for_item_id_for_every_block() {
+    let mut checked = 0usize;
+    for block in Block::all() {
+        let Some(item) = block_items::item_for_block(block) else {
+            continue;
+        };
+        let item_id = i32::from(item.registry_id());
+        assert_eq!(
+            block_items::block_for_item_id(item_id),
+            Some(block),
+            "{item:?} must place {block:?} back"
+        );
+        checked += 1;
+    }
+    assert!(checked > 1000, "expected most of the 1,054 placeable blocks to round-trip, got {checked}");
+}
+
 /// The block-entity blocks `lodestone-server` models must still resolve, since
 /// its placement path composes this table with `block_entity_for_item`.
 #[test]

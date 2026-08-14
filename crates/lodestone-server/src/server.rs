@@ -3113,6 +3113,8 @@ where
             | ServerBound::PlayerCommand { .. }
             | ServerBound::RenameItem { .. }
             | ServerBound::ContainerButtonClick { .. }
+            | ServerBound::PickItemFromBlock { .. }
+            | ServerBound::PickItemFromEntity { .. }
             | ServerBound::Ignored => {}
         }
     }
@@ -4623,6 +4625,17 @@ async fn apply_own_effect<T, P>(
     // already passed here.
     player_entity_id: i32,
     username: &str,
+    // `/tp`'s `Teleport` arm. This connection's own tracked position/rotation
+    // — read to preserve facing when the effect carries no `yaw`/`pitch`
+    // (`Effect::Teleport`'s own doc explains why that resolution can only
+    // happen here, at application time, never at the executor that produced
+    // the effect), and written so this connection's own `player_pos`/
+    // `player_rot` agree with the teleport it just sent — the same
+    // `player_pos`/`player_rot` `dispatch_play_packet`'s movement arms keep in
+    // sync, so a later relative move is computed from the post-teleport
+    // position rather than a stale pre-teleport one.
+    player_pos: &mut Option<(f64, f64, f64)>,
+    player_rot: &mut Option<Rotation>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -4815,6 +4828,22 @@ where
         | crate::commands::Effect::Fill { .. }
         | crate::commands::Effect::Broadcast { .. }
         | crate::commands::Effect::SetRespawnPoint { .. } => {}
+        // `/tp`/`/teleport`. Unlike the world/broadcast effects above, this one
+        // genuinely reaches any connected player, so it is an ordinary
+        // per-uuid effect applied right here — for the caller inline, for a
+        // directed target by that target's own connection loop. A missing
+        // `yaw`/`pitch` means "keep this connection's current facing", which
+        // is exactly `player_rot`'s own last-known value; a connection with no
+        // facing on record yet (never sent one since join) falls back to
+        // `0.0`/`0.0`, matching the join sequence's own default.
+        crate::commands::Effect::Teleport { x, y, z, yaw, pitch } => {
+            let current = player_rot.unwrap_or(Rotation { yaw: 0.0, pitch: 0.0 });
+            let yaw = yaw.unwrap_or(current.yaw);
+            let pitch = pitch.unwrap_or(current.pitch);
+            *player_pos = Some((x, y, z));
+            *player_rot = Some(Rotation { yaw, pitch });
+            apply(conn, state, proto.encode_teleport(x, y, z, yaw, pitch)).await?;
+        }
     }
     Ok(())
 }
@@ -9415,8 +9444,16 @@ where
                 crate::commands::overworld_dimension(),
                 commands.permission_level,
             );
-            let command_world =
-                crate::commands::CommandWorld { rules: world, players: &candidates, state: world };
+            let command_world = crate::commands::CommandWorld {
+                rules: world,
+                players: &candidates,
+                state: world,
+                // `/summon`'s synchronous spawn entry point — the same shared
+                // `MobHandle` `dispatch_play_packet` already holds, so a
+                // spawned mob is picked up by the tick loop's own next
+                // publish (see `crate::commands::summon`'s module doc).
+                mobs: Some(mobs),
+            };
             match commands.builtins.run(&command_world, &source, &command) {
                 Some(outcome) => {
                     for directed in outcome.effects {
@@ -9481,6 +9518,8 @@ where
                                     experience,
                                     player_entity_id,
                                     username,
+                                    player_pos,
+                                    player_rot,
                                 )
                                 .await?;
                             }
@@ -9559,6 +9598,70 @@ where
         // connection close, since a Play-state ping must not end the session.
         ServerBound::PingRequest { time } => {
             apply(conn, state, proto.encode_pong_response(time)).await?;
+        }
+        // `ServerboundPickItemFromBlockPacket` (middle-click pick, issue
+        // #558). `crate::item_use::try_pick_item` is the "where it goes"
+        // three-way split (`ServerGamePacketListenerImpl::tryPickItem`); this
+        // arm resolves the "what" — the clicked block's clone-item-stack —
+        // and the one thing only this function can see: the interaction
+        // range and the live block state. `include_data` is not read: the
+        // gate it feeds (`addBlockDataToItem`, copying a block entity's NBT
+        // onto the stack) has no consumer in this crate, the same "not
+        // modelled, no completion hook" scope cut `crate::item_use`'s module
+        // doc already takes for other `Item.use` arms.
+        ServerBound::PickItemFromBlock { pos, include_data: _ } => {
+            let feet = player_pos.map(|(x, y, z)| Vec3::new(x, y, z));
+            if crate::block_breaking::within_interaction_range(feet, pos) {
+                let block_state = source.get().block_state(pos.x, pos.y, pos.z);
+                if let Some(stack) = crate::item_use::clone_item_stack_for_block(&block_state) {
+                    let creative = *game_mode == GameMode::Creative;
+                    let outcome = crate::item_use::try_pick_item(inventory, stack, creative);
+                    apply(conn, state, proto.encode_set_held_slot(outcome.selected)).await?;
+                    for native in outcome.changed {
+                        if let Some(menu_slot) = window_zero_menu_slot(native) {
+                            apply(
+                                conn,
+                                state,
+                                proto.encode_container_slot(0, 0, menu_slot, inventory.native(native)),
+                            )
+                            .await?;
+                        }
+                    }
+                }
+            }
+        }
+        // `ServerboundPickItemFromEntityPacket` — same split, aimed at
+        // `entity.getPickResult()` instead of a block's clone stack. Only the
+        // `Mob` override (a spawn egg) is modelled; see
+        // `crate::item_use::spawn_egg_for_entity_type`'s doc comment for the
+        // entities this refuses. `include_data` also gates a game-master
+        // avatar-profile debug command in vanilla (`FetchProfileCommand`),
+        // which this crate has no command channel for, so it is unread here
+        // too.
+        ServerBound::PickItemFromEntity { entity_id, include_data: _ } => {
+            let target = mobs.with(|sim| {
+                sim.get(entity_id).map(|mob| (mob.entity_type().to_string(), mob.position()))
+            });
+            if let Some((entity_type, entity_pos)) = target {
+                let feet = player_pos.map(|(x, y, z)| Vec3::new(x, y, z));
+                if crate::item_use::within_entity_pick_range(feet, entity_pos)
+                    && let Some(stack) = crate::item_use::spawn_egg_for_entity_type(&entity_type)
+                {
+                    let creative = *game_mode == GameMode::Creative;
+                    let outcome = crate::item_use::try_pick_item(inventory, stack, creative);
+                    apply(conn, state, proto.encode_set_held_slot(outcome.selected)).await?;
+                    for native in outcome.changed {
+                        if let Some(menu_slot) = window_zero_menu_slot(native) {
+                            apply(
+                                conn,
+                                state,
+                                proto.encode_container_slot(0, 0, menu_slot, inventory.native(native)),
+                            )
+                            .await?;
+                        }
+                    }
+                }
+            }
         }
         // The pre-Play phase signals, unreachable here by construction: a
         // connection in `State::Play` cannot decode a handshake, a login, or
@@ -11184,6 +11287,8 @@ where
                             &mut experience,
                             player_entity_id,
                             &username,
+                            &mut player_pos,
+                            &mut player_rot,
                         )
                         .await?;
                     }

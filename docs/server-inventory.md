@@ -207,6 +207,93 @@ The other drop path — clicking outside an open window with a held stack, slot
 routes through the same velocity and delay, which is what vanilla does
 (`doClick`'s outside case calls the same `Player.drop`).
 
+## Pick-block / pick-entity (middle-click, issue #558)
+
+`ServerBound::PickItemFromBlock { pos, include_data }` and
+`ServerBound::PickItemFromEntity { entity_id, include_data }` →
+`dispatch_play_packet`'s two arms next to `PingRequest`, mirroring vanilla's
+`ServerGamePacketListenerImpl::handlePickItemFromBlock`/
+`handlePickItemFromEntity` → `tryPickItem`.
+
+**Vanilla's client does no local prediction here.** `Minecraft
+::pickBlockOrEntity` unconditionally forwards to
+`MultiPlayerGameMode::handlePickItemFromBlock`/`handlePickItemFromEntity`,
+which do nothing but send the packet — the three-way split below is entirely
+server-authoritative, and the client's `SET_HELD_SLOT` round trip is exactly
+vanilla's own latency, not a missing optimisation. (An earlier note on issue
+#558 assumed the opposite; re-reading `Minecraft.java`/`MultiPlayerGameMode
+.java` in `.cache/mc/26.2/client-src` settled it.)
+
+### The three-way split: `crate::item_use::try_pick_item`
+
+The owner-reported behaviour, and vanilla's own decision order in
+`ServerGamePacketListenerImpl::tryPickItem`:
+
+1. **Already in the hotbar** (`Inventory.isHotbarSlot`) — just move the
+   selection there. No slot's contents change.
+2. **Elsewhere in the inventory** — swap it into a suitable (first empty,
+   wrapping from the current selection) hotbar slot (`Inventory.pickSlot`).
+3. **Not held anywhere, creative only** — mint it into a suitable hotbar
+   slot, banking whatever was displaced into the first free slot
+   (`Inventory.addAndPickItem`). Survival falls straight through and changes
+   nothing.
+
+All three answer through one `PickOutcome { selected, changed }`: `selected`
+is always sent back (`ClientboundSetHeldSlotPacket`/`encode_set_held_slot`,
+new — the client already decoded `SET_HELD_SLOT` into
+`ClientEvent::HeldSlotChanged`, it just had no server-side encoder), and
+`changed` is the native slots the caller must echo with
+`encode_container_slot(0, 0, window_zero_menu_slot(native), ...)`, the same
+window-`0`/state-`0` convention `crate::commands::Effect::GiveItems` already
+uses for a server-initiated write.
+
+### What to pick: block vs. entity
+
+`dispatch_play_packet`'s two arms resolve the "what" — the one part
+`item_use.rs` cannot see (it has no world or mob handle) — then hand a
+resolved `ItemStack` to `try_pick_item`:
+
+- **Block** — `crate::item_use::clone_item_stack_for_block(block_state)` is
+  `BlockState.getCloneItemStack`'s **default** arm
+  (`new ItemStack(this.asItem())`), via
+  `lodestone_data::block_items::item_for_block(Block) -> Option<Item>` — the
+  **inverse** of the existing item→block census (`block_for_item_id`),
+  computed once behind a `OnceLock` from that same generated table rather
+  than hand-rolled, so the two directions cannot drift. `None` for a block
+  with no `BlockItem` at all (air, fluids, redstone wire, portal blocks).
+  **Not modelled**: per-block `getCloneItemStack` overrides — crops clone to
+  their seed, flower pots to the potted plant, banners/beehives/candle-cakes
+  copy block-entity data. Each is a distinct vanilla override this crate has
+  no per-block model for; `item_for_block`'s own doc comment lists them.
+- **Entity** — `crate::item_use::spawn_egg_for_entity_type(entity_type)` is
+  `Mob.getPickResult()`'s only modelled arm: a mob's own spawn egg, derived
+  by name (`{entity path}` -> `{entity path}_spawn_egg`) the same way
+  `crate::spawn_egg::entity_type_for_egg` derives the reverse, and checked
+  against the real item registry so a misderived name refuses rather than
+  proposing an egg that does not exist. `None` for every entity whose
+  `getPickResult` also returns `null` by default (item entities, arrows, XP
+  orbs, the player) and for the handful of non-`Mob` overrides not modelled
+  (minecarts, boats, item frames, paintings, end crystals, leash knots,
+  armour stands — each returns something other than a spawn egg).
+
+`include_data` (`hasControlDown()` at pick time) gates two vanilla effects
+neither of which has a consumer here: copying a block entity's NBT onto the
+picked stack, and a game-master `FetchProfileCommand` debug print for an
+avatar target. Decoded for wire fidelity, read by nothing — the same "not
+modelled, no completion hook" scope cut `crate::item_use`'s module doc
+already takes for other `Item.use` arms.
+
+### Range gates
+
+`crate::block_breaking::within_interaction_range` (already existed, reused
+as-is) for the block case; `crate::item_use::within_entity_pick_range` (new,
+same flattened-radius shape) for the entity case. Both are approximations of
+vanilla's per-attribute `*_INTERACTION_RANGE` plus this packet's own extra
+tolerance (`isWithinBlockInteractionRange(pos, 1.0)` /
+`isWithinEntityInteractionRange(entity, 3.0)`), not an exact port — proportionate
+to what a cheat-prevention gate needs, matching the existing block-break gate's
+own documented simplification.
+
 ## How to change it
 
 - **A new native slot / equipment kind** — extend `PlayerInventory` and
@@ -255,6 +342,12 @@ None — no flags or env vars gate this.
   for "genuinely different, no data to model it, drop rather than guess"
   scope cuts (there: furnace/brewing-stand shift-click routing; here: the
   crafting-grid menu slots).
+- `lodestone_data::block_items::item_for_block` — pick-block's block→item
+  resolution, the generated-table inverse `block_for_item_id` already
+  provides in the other direction.
+- `crate::spawn_egg::entity_type_for_egg` — not called directly, but
+  pick-entity's `spawn_egg_for_entity_type` is its mirror-image derivation
+  and depends on the same name convention being exact.
 
 ## Verification
 
@@ -262,7 +355,18 @@ None — no flags or env vars gate this.
 cargo test -p lodestone-server --lib --no-fail-fast -- inventory::
 cargo test -p lodestone-v770 --lib --no-fail-fast -- inventory_decode_tests::
 cargo test -p lodestone-v770 --test server_inventory_live
+cargo test -p lodestone-server --lib --no-fail-fast -- item_use::
+cargo test -p lodestone-data --test block_items -- item_for_block
+cargo test -p lodestone-v770 --test serverbound_interaction_tier2
 ```
+
+The last three cover the pick-block/pick-entity addition specifically: the
+`item_use::` run is [`try_pick_item`](crate::item_use::try_pick_item)'s three
+outcomes (hotbar hit, inventory swap with both an empty and an occupied
+destination, creative create with and without a displaced stack, and the
+survival-miss control), `item_for_block` is the generated-table inverse, and
+`serverbound_interaction_tier2` is the wire round trip for both packets plus
+`set_held_slot`.
 
 The last one is a real `lodestone-client` (real `V770Adapter`) sending
 `SET_CARRIED_ITEM` + `CONTAINER_CLICK` over an in-memory transport against
