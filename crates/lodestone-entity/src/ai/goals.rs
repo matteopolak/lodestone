@@ -539,6 +539,188 @@ impl Goal for EndermanFreezeWhenLookedAt {
     }
 }
 
+/// Turns a stare into an actual attack: the enderman's own aggro/teleport
+/// state machine, and the goal that is missing precisely when "an enderman
+/// does nothing when I look at it" is reported — `EndermanFreezeWhenLookedAt`
+/// only pins the head, this is what ever calls
+/// [`set_attack_target`](MobController::set_attack_target) unprovoked.
+///
+/// Vanilla `EnderMan.EndermanLookForPlayerGoal` (target-selector priority 1,
+/// flag TARGET, `EnderMan.java`):
+///
+/// ```text
+/// canUse():      pendingTarget = nearestPlayer(startAggroTargetConditions)
+///                // isAngerInducing: isBeingStaredBy(p) || isAngryAt(p)
+///                return pendingTarget != null
+/// start():       aggroTime = adjustedTickDelay(5); teleportTime = 0
+/// canContinueToUse():
+///                if pendingTarget != null: isAngerInducing(pendingTarget)
+///                else: target != null && continueAggroTargetConditions(target)
+/// tick():        if pendingTarget != null:
+///                    if --aggroTime <= 0: target = pendingTarget; pendingTarget = null
+///                else if target != null:
+///                    if isBeingStaredBy(target):
+///                        if distanceToSqr(target) < 16.0: teleport()  // random blink
+///                        teleportTime = 0
+///                    else if distanceToSqr(target) > 256.0
+///                         && teleportTime++ >= adjustedTickDelay(30)
+///                         && teleportTowards(target):
+///                        teleportTime = 0
+/// ```
+///
+/// # Three disclosed narrowings, same shape as [`EndermanFreezeWhenLookedAt`]
+///
+/// * **No per-player identity.** This seam's [`MobController::is_being_stared_at`]
+///   is one boolean over every nearby player, not "is *this specific* player
+///   staring", and [`MobController::nearest_player`] is a position, not a
+///   reference. So `isAngerInducing`/`pendingTarget` collapse to: anger-inducing
+///   iff `is_being_stared_at() || angry_target().is_some()`, and the candidate
+///   position is `nearest_player()` (falling back to `angry_target()` when only
+///   the grudge, not a nearby player, is live). With one player in range — the
+///   case every existing gaze/target gate in this crate exercises — this agrees
+///   with vanilla exactly; a second player in range could pick a different one
+///   than vanilla's live-reference `pendingTarget` would have, the same
+///   divergence [`NearestAttackableTargetGoal`]'s own doc comment already
+///   discloses for its position-valued seam.
+/// * **Line of sight is not modelled**, the same disclosed gap
+///   [`MobController::find_nearest_target`] already carries.
+/// * **The "teleport away" blink has no landing check.** Vanilla's
+///   `EnderMan::teleport` walks blocks downward looking for solid ground before
+///   committing; [`MobController::teleport_to`] writes position directly (see
+///   its own doc comment), so this goal picks vanilla's exact random offset
+///   (±32 blocks XZ, `nextInt(64) - 32` on Y) and hands it over unchecked,
+///   exactly like every other user of that primitive.
+#[derive(Debug, Default)]
+pub struct EndermanLookForPlayerGoal {
+    /// The candidate found by `can_use`, still counting down `aggro_time`
+    /// before it is promoted to a real target — vanilla's `pendingTarget`.
+    pending: Option<Vec3>,
+    /// The live target, once promoted — vanilla's `target` (this goal's own
+    /// copy; [`MobController::set_attack_target`] is the mirror every other
+    /// goal reads).
+    target: Option<Vec3>,
+    aggro_time: i32,
+    teleport_time: i32,
+}
+
+impl EndermanLookForPlayerGoal {
+    /// Creates the goal with no pending or live target.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Vanilla's `isAngerInducing` selector, narrowed to this seam's boolean
+    /// gaze feed plus the persistent-grudge primitive — see this type's own
+    /// doc comment.
+    fn anger_inducing(mob: &mut dyn MobController) -> bool {
+        mob.is_being_stared_at() || mob.angry_target().is_some()
+    }
+
+    /// The candidate position vanilla's `getNearestPlayer` would have found —
+    /// see this type's own doc comment for why a position, not a reference.
+    fn candidate(mob: &mut dyn MobController) -> Option<Vec3> {
+        mob.nearest_player().or_else(|| mob.angry_target())
+    }
+}
+
+impl Goal for EndermanLookForPlayerGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Target])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if !Self::anger_inducing(mob) {
+            self.pending = None;
+            return false;
+        }
+        self.pending = Self::candidate(mob);
+        self.pending.is_some()
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if self.pending.is_some() {
+            return Self::anger_inducing(mob);
+        }
+        let Some(_) = self.target else {
+            return false;
+        };
+        // Vanilla's `continueAggroTargetConditions` ignores line of sight and
+        // the stare test — it is the ordinary "still a valid combat target"
+        // check, which this seam resolves the same way
+        // `NearestAttackableTargetGoal::can_continue_to_use` re-derives a live
+        // position: ask the same feed `can_use` used, and refresh from it so a
+        // moving player is actually pursued rather than chased to a frozen
+        // point.
+        let Some(live) = Self::candidate(mob) else {
+            return false;
+        };
+        let within = mob.follow_range();
+        if distance_sqr(mob.position(), live) > within * within {
+            return false;
+        }
+        self.target = Some(live);
+        mob.set_attack_target(Some(live));
+        true
+    }
+
+    fn start(&mut self, _mob: &mut dyn MobController) {
+        self.aggro_time = 5;
+        self.teleport_time = 0;
+    }
+
+    fn stop(&mut self, mob: &mut dyn MobController) {
+        self.pending = None;
+        self.target = None;
+        mob.set_attack_target(None);
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        if let Some(pending) = self.pending {
+            self.aggro_time -= 1;
+            if self.aggro_time <= 0 {
+                self.target = Some(pending);
+                self.pending = None;
+                mob.set_attack_target(self.target);
+            }
+            return;
+        }
+        let Some(target) = self.target else {
+            return;
+        };
+        if mob.is_being_stared_at() {
+            if distance_sqr(mob.position(), target) < 16.0 {
+                // Vanilla `EnderMan::teleport`: a random point ±32 blocks on X
+                // and Z, and `nextInt(64) - 32` on Y.
+                let dx = (mob.next_f64() - 0.5) * 64.0;
+                let dy = f64::from(mob.next_i32(64) - 32);
+                let dz = (mob.next_f64() - 0.5) * 64.0;
+                let pos = mob.position();
+                mob.teleport_to(Vec3::new(pos.x + dx, pos.y + dy, pos.z + dz));
+            }
+            self.teleport_time = 0;
+        } else if distance_sqr(mob.position(), target) > 256.0 {
+            self.teleport_time += 1;
+            if self.teleport_time >= 30 {
+                // Vanilla `EnderMan::teleportTowards`: 16 blocks past the
+                // target, along the target -> enderman direction.
+                let pos = mob.position();
+                let dir = Vec3::new(pos.x - target.x, pos.y - target.y, pos.z - target.z);
+                let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
+                if len > 1.0e-6 {
+                    let scale = 16.0 / len;
+                    mob.teleport_to(Vec3::new(
+                        target.x + dir.x * scale,
+                        target.y + dir.y * scale,
+                        target.z + dir.z * scale,
+                    ));
+                }
+                self.teleport_time = 0;
+            }
+        }
+    }
+}
+
 /// Acquires the nearest attackable entity as the mob's target.
 ///
 /// Vanilla `NearestAttackableTargetGoal` (flag TARGET). Runs in the mob's

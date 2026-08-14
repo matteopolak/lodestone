@@ -29,7 +29,7 @@
 //! | absent primitive | blocks | landed as |
 //! |---|---|---|
 //! | the anger timer + anger target (a *grudge*) | all four | host-side `SimMob::anger` + `MobController::angry_target` (the deadline stays on the host) |
-//! | "is that player looking at me" (a gaze test) | enderman freeze + stare | `MobController::is_being_stared_at` + free `is_in_view_cone` geometry, now consumed by `EndermanFreezeWhenLookedAt` below (`Coverage::Modelled`). **The host feed is still blocked** — `lodestone_server::mobs::PlayerPerception` does not yet carry a view vector, so `is_being_stared_at` reads a permanent `false` in the running game until that lands; see this table's own doc on the enderman row. The teleport half (`EndermanLookForPlayerGoal`) stays `Missing` — it needs the anger-target primitive threaded through its own aggro/teleport state machine, not just the gaze boolean |
+//! | "is that player looking at me" (a gaze test) | enderman freeze + stare | `MobController::is_being_stared_at` + free `is_in_view_cone` geometry, consumed by both `EndermanFreezeWhenLookedAt` and `EndermanLookForPlayerGoal` below (both `Coverage::Modelled`). **The host feed has landed**: `lodestone_server::mobs::MobSim::tick_with_terrain` computes it every tick from each connected player's real position and view direction (`PerceivedPlayer::perception.view_direction`), so `is_being_stared_at` is a live boolean in the running game, not a permanent `false` — see this table's own doc on the enderman row |
 //! | relocating a mob instantly (a teleport) | enderman teleport | `MobController::teleport_to`, host-commanded via `SimMob::teleport_to` |
 //! | a mob damaging **itself** | bee sting-then-die | `MobController::damage_self`, drained by `MobSim::tick` through the damage pipeline |
 //! | an owner relationship | wolf tame half | `MobController::owner_position`/`is_tame`/`is_ordered_to_sit` + host-side `SimMob::owner`. **No longer blocked**: `lodestone_server::mobs::PerceivedPlayer` puts a `PlayerIdentity` (account uuid + runtime entity id) at the perception seam, so a mob can be owned *by a player*, and the wolf's `SitWhenOrderedToGoal` and `FollowOwnerGoal` rows below are `Modelled` |
@@ -50,22 +50,20 @@
 //! repo's dominant defect class is named after — so this module does not
 //! contain most of them.
 //!
-//! **The enderman's freeze half is the first exception**, and it is worth
-//! being precise about what "exception" means here. `EndermanFreezeWhenLookedAt`
-//! is a real [`Coverage::Modelled`] row below, driven off the real
-//! [`MobController::is_being_stared_at`](super::MobController::is_being_stared_at)
-//! seam, reachable through the real roster — not a stand-in that does
-//! something else. What is *not* landed yet
-//! is the host feed that computes the boolean from an actual player view
-//! vector (`lodestone_server::mobs::PlayerPerception` still carries no view
-//! direction), so in the running game today this goal's `can_use` reads a
-//! permanent `false` and an enderman never actually freezes. That is the same
-//! honest intermediate state `nearest_player`/`temptation` sat in before
-//! their own feed lines landed — a goal with no possible input yet,
-//! rather than a goal doing the wrong thing — and it is disclosed here rather
-//! than left to be rediscovered. `EndermanLookForPlayerGoal` (the teleport
-//! half) is unaffected by any of this: it stays [`Coverage::Missing`] because
-//! it needs its own aggro/teleport state machine, not just the gaze boolean.
+//! **The enderman's stare is now the exception that closed, not the one still
+//! open.** Both halves are real [`Coverage::Modelled`] rows below, driven off
+//! the real [`MobController::is_being_stared_at`](super::MobController::is_being_stared_at)
+//! seam and reachable through the real roster: `EndermanFreezeWhenLookedAt`
+//! (goal priority 1) pins the head and stops the navigation while stared at,
+//! and `EndermanLookForPlayerGoal` (target priority 1) is what actually turns
+//! a stare into an attack target — see its own doc comment for the port and
+//! for the identity/line-of-sight/landing-check narrowings the position-only
+//! seam forces. This used to be the honest intermediate state
+//! `nearest_player`/`temptation` sat in before their own feed lines landed —
+//! a goal with no possible input, `can_use` reading a permanent `false` — but
+//! that state ended once `MobSim::tick_with_terrain` started computing
+//! `is_being_stared_at` from a real per-player view vector each tick; see this
+//! table's own doc on the enderman row for the citation.
 //!
 //! # The trap that decided the target rows
 //!
@@ -157,7 +155,8 @@
 
 use crate::ai::goal::Goal;
 use crate::ai::goals::{
-    EndermanFreezeWhenLookedAt, FollowOwnerGoal, FollowParentGoal, PanicGoal, TemptGoal,
+    EndermanFreezeWhenLookedAt, EndermanLookForPlayerGoal, FollowOwnerGoal, FollowParentGoal,
+    PanicGoal, TemptGoal,
 };
 
 use super::{
@@ -190,17 +189,16 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// Attributes from `EnderMan.createAttributes` — `MAX_HEALTH 40.0`, `MOVEMENT_SPEED 0.3F`,
 /// `ATTACK_DAMAGE 7.0`, `FOLLOW_RANGE 64.0`.
 ///
-/// The stare is two goals, not one. `EndermanFreezeWhenLookedAt` at goal
-/// priority 1 stops the navigation while a player within 16 blocks
-/// (`distanceToSqr <= 256.0`, in `EnderMan.EndermanFreezeWhenLookedAt.canUse`) is staring — that one is
-/// [`Coverage::Modelled`] below, though the host feed behind its gaze
-/// boolean is not landed yet; see this module's own doc.
-/// `EndermanLookForPlayerGoal` at target priority 1 does the teleporting and
-/// stays `Missing` — it needs its own aggro/teleport state machine on top of
-/// the gaze test, not just the boolean. Both route through `EnderMan.isBeingStaredBy`,
-/// which is
+/// The stare is two goals, not one, and both are [`Coverage::Modelled`] below.
+/// `EndermanFreezeWhenLookedAt` at goal priority 1 stops the navigation while
+/// a player within 16 blocks (`distanceToSqr <= 256.0`, in
+/// `EnderMan.EndermanFreezeWhenLookedAt.canUse`) is staring.
+/// `EndermanLookForPlayerGoal` at target priority 1 does the aggro/teleport —
+/// see its own doc comment for the port and its disclosed narrowings. Both
+/// route through `EnderMan.isBeingStaredBy`, which is
 /// `LivingEntity.PLAYER_NOT_WEARING_DISGUISE_ITEM` (a carved
-/// pumpkin, via `ItemTags.GAZE_DISGUISE_EQUIPMENT`, defeats the stare) **and**
+/// pumpkin, via `ItemTags.GAZE_DISGUISE_EQUIPMENT`, defeats the stare — **not
+/// modelled**, `PlayerPerception` carries no armour-slot data) **and**
 /// `isLookingAtMe(player, 0.025, true, false, getEyeY())`.
 ///
 /// That gaze test has a real geometric definition worth citing rather than
@@ -237,10 +235,12 @@ pub const ENDERMAN: &[Registration] = &[
     // block-placement path the AI seam has no access to.
     Registration::missing(Selector::Goal, 10, "EnderMan.EndermanLeaveBlockGoal"),
     Registration::missing(Selector::Goal, 11, "EnderMan.EndermanTakeBlockGoal"),
-    // `EnderMan.EndermanLookForPlayerGoal(this, this::isAngryAt)` —
-    // the teleport-on-stare goal, needing the gaze test, a teleport primitive and
-    // the anger predicate all three.
-    Registration::missing(Selector::Target, 1, "EnderMan.EndermanLookForPlayerGoal"),
+    // `EnderMan.EndermanLookForPlayerGoal(this, this::isAngryAt)` — the
+    // teleport-on-stare goal. `Coverage::Modelled` now: see
+    // `EndermanLookForPlayerGoal`'s own doc comment for the port and its
+    // disclosed narrowings (no per-player identity, no line of sight, no
+    // landing check on the teleport).
+    Registration::target(1, "EnderMan.EndermanLookForPlayerGoal", look_for_player),
     Registration::target(2, "HurtByTargetGoal", hurt_by_target),
     // No endermite can exist in this sim.
     Registration::missing(
@@ -487,6 +487,12 @@ pub const WOLF: &[Registration] = &[
 /// `EnderMan.EndermanFreezeWhenLookedAt(this)` takes no constructor arguments.
 fn freeze_when_looked_at(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(EndermanFreezeWhenLookedAt::new())
+}
+
+/// `EnderMan.EndermanLookForPlayerGoal(this, this::isAngryAt)` takes no
+/// per-species argument this port carries — see the goal's own doc comment.
+fn look_for_player(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(EndermanLookForPlayerGoal::new())
 }
 
 /// `TamableAnimal.TamableAnimalPanicGoal(1.5, …)` — the wolf's panic speed
@@ -739,12 +745,6 @@ mod tests {
     #[test]
     fn the_four_blocked_mechanisms_are_recorded_as_missing_not_omitted() {
         let blocked: &[(&str, i32, Selector, &str)] = &[
-            (
-                "enderman",
-                1,
-                Selector::Target,
-                "EnderMan.EndermanLookForPlayerGoal",
-            ),
             ("bee", 0, Selector::Goal, "Bee.BeeAttackGoal"),
             ("wolf", 1, Selector::Target, "OwnerHurtByTargetGoal"),
         ];
@@ -888,6 +888,250 @@ mod tests {
              is_being_stared_at() false, MeleeAttackGoal should win MOVE and \
              close the gap; the enderman only moved {gap_closed} blocks in 60 \
              ticks (ended at {closing:?})"
+        );
+    }
+
+    /// The look-for-player row is a real, working goal built from the seam —
+    /// the same shape as the freeze row's own gate above, with the same
+    /// discriminating pair: identical candidate, only `is_being_stared_at`
+    /// differs (a live grudge is the other way in, not exercised here).
+    #[test]
+    fn the_enderman_look_for_player_row_is_modelled_and_built_from_the_seam() {
+        let row = registrations_for("enderman")
+            .iter()
+            .find(|r| r.vanilla == "EnderMan.EndermanLookForPlayerGoal")
+            .expect("enderman has a look-for-player row");
+        assert_eq!(row.selector, Selector::Target);
+        assert_eq!(row.priority, 1);
+        assert!(
+            matches!(row.coverage, Coverage::Modelled(_)),
+            "EndermanLookForPlayerGoal is a real goal now; this row must say so"
+        );
+        let build = row.build().expect("a Modelled row must build something");
+
+        let world = Flat::dry();
+        let ctx = SpeciesContext::new(ENDERMAN_SPEED);
+
+        let mut watched = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            Vec3::new(0.0, 0.0, 0.0),
+            ENDERMAN_SPEED,
+            560,
+            1,
+        );
+        watched.set_nearest_player(Some(Vec3::new(5.0, 0.0, 0.0)));
+        watched.set_stared_at(true);
+        assert!(
+            build(&ctx).can_use(&mut watched),
+            "a stared-at nearby player must make the real row's goal eligible"
+        );
+
+        let mut unwatched = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            Vec3::new(0.0, 0.0, 0.0),
+            ENDERMAN_SPEED,
+            560,
+            1,
+        );
+        unwatched.set_nearest_player(Some(Vec3::new(5.0, 0.0, 0.0)));
+        unwatched.set_stared_at(false);
+        assert!(
+            !build(&ctx).can_use(&mut unwatched),
+            "the identical nearby player with is_being_stared_at() false and no \
+             live grudge must NOT make the real row's goal eligible — if this \
+             fires, the row's build function has degenerated into a proximity \
+             check"
+        );
+    }
+
+    /// Predicts the exact tick the stare turns into an attack target — vanilla's
+    /// `aggroTime = adjustedTickDelay(5)`, counted down once per `tick()` — not
+    /// merely "eventually acquires one". Driven directly against the real
+    /// [`EndermanLookForPlayerGoal`] (not through a `GoalSelector`, so nothing
+    /// else perturbs `attack_target` or moves the mob), matching this module's
+    /// own `the_enderman_freeze_row_is_modelled_and_built_from_the_seam` style.
+    #[test]
+    fn an_endermans_stare_provokes_an_attack_after_exactly_the_aggro_delay() {
+        use crate::ai::mob::MobController;
+
+        let world = Flat::dry();
+        let candidate = Vec3::new(5.0, 0.0, 0.0);
+        let mut mob = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            Vec3::new(0.0, 0.0, 0.0),
+            ENDERMAN_SPEED,
+            560,
+            2,
+        );
+        mob.set_nearest_player(Some(candidate));
+        mob.set_stared_at(true);
+
+        let mut goal = EndermanLookForPlayerGoal::new();
+        assert!(goal.can_use(&mut mob), "the stare must make the goal eligible");
+        goal.start(&mut mob);
+
+        for n in 1..=4 {
+            goal.tick(&mut mob);
+            assert!(
+                mob.attack_target().is_none(),
+                "aggro_time is 5; tick {n} of 4 must not yet promote a target \
+                 (got {:?})",
+                mob.attack_target()
+            );
+        }
+        goal.tick(&mut mob);
+        assert_eq!(
+            mob.attack_target(),
+            Some(candidate),
+            "the fifth tick must promote the pending candidate to a real target"
+        );
+    }
+
+    /// Predicts the exact landing point of `EnderMan::teleportTowards`, not
+    /// merely "the enderman moved" or "moved closer" — both the *magnitude*
+    /// species of vacuous test this repo's evidence standards name explicitly.
+    /// `teleport_time` must reach vanilla's `adjustedTickDelay(30)` while the
+    /// target stays farther than 16 blocks (`distanceToSqr > 256.0`) and the
+    /// enderman is *not* currently stared at (the sibling branch, exercised
+    /// separately below); the landing point is 16 blocks from the target along
+    /// the target-to-enderman direction, computed independently of the goal's
+    /// own implementation from the same inputs.
+    #[test]
+    fn a_far_untended_target_is_closed_by_a_predicted_teleport_not_a_walk() {
+        use crate::ai::mob::MobController;
+
+        let world = Flat::dry();
+        let start = Vec3::new(0.0, 0.0, 0.0);
+        let far_target = Vec3::new(50.0, 0.0, 0.0); // distSqr 2500 > 256
+        let mut mob = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            start,
+            ENDERMAN_SPEED,
+            560,
+            3,
+        );
+        mob.set_follow_range(64.0); // EnderMan.createAttributes' real FOLLOW_RANGE
+        mob.set_nearest_player(Some(far_target));
+        // Acquisition needs the stare (or a live grudge, exercised elsewhere);
+        // once a target is *held*, vanilla's `continueAggroTargetConditions`
+        // ignores the stare, which is exactly what the phase below exercises.
+        mob.set_stared_at(true);
+
+        let mut goal = EndermanLookForPlayerGoal::new();
+        assert!(goal.can_use(&mut mob), "the far candidate must be eligible");
+        goal.start(&mut mob);
+        for _ in 0..5 {
+            goal.tick(&mut mob);
+        }
+        assert_eq!(
+            mob.attack_target(),
+            Some(far_target),
+            "precondition: the aggro delay must have promoted the far target"
+        );
+
+        // The player looks away: the far-teleport branch is gated on *not*
+        // being stared at (the sibling blink branch is the stared-at one).
+        mob.set_stared_at(false);
+
+        // 29 ticks: teleport_time reaches 29, still short of the >=30 gate.
+        for n in 1..=29 {
+            goal.tick(&mut mob);
+            assert_eq!(
+                mob.position(),
+                start,
+                "tick {n} of 29 must not teleport yet"
+            );
+        }
+        // The 30th tick crosses the gate.
+        goal.tick(&mut mob);
+
+        // Independently derived expectation: `EnderMan::teleportTowards`
+        // lands 16 blocks from the target along (enderman - target),
+        // normalised. Here that direction is exactly -X, so the landing point
+        // is target.x - 16.
+        let expected = Vec3::new(far_target.x - 16.0, 0.0, 0.0);
+        let got = mob.position();
+        assert!(
+            (got.x - expected.x).abs() < 1.0e-9 && got.y == expected.y && got.z == expected.z,
+            "expected the teleport-towards landing point {expected:?}, got {got:?}"
+        );
+    }
+
+    /// The sibling branch: a target *closer* than 16 blocks while actively
+    /// stared at must trigger vanilla's evasive blink
+    /// (`EnderMan::teleport`, ±32 blocks XZ and `nextInt(64) - 32` on Y) —
+    /// and, as the control, a target beyond 16 blocks while stared at must
+    /// hold still (the far branch is gated on *not* being stared at).
+    #[test]
+    fn a_close_stared_at_target_triggers_the_evasive_blink_and_a_far_one_does_not() {
+        use crate::ai::mob::MobController;
+
+        let world = Flat::dry();
+        let start = Vec3::new(0.0, 0.0, 0.0);
+        let close_target = Vec3::new(2.0, 0.0, 0.0); // distSqr 4 < 16
+        let mut mob = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            start,
+            ENDERMAN_SPEED,
+            560,
+            4,
+        );
+        mob.set_follow_range(64.0);
+        mob.set_nearest_player(Some(close_target));
+        mob.set_stared_at(true);
+
+        let mut goal = EndermanLookForPlayerGoal::new();
+        assert!(goal.can_use(&mut mob));
+        goal.start(&mut mob);
+        for _ in 0..5 {
+            goal.tick(&mut mob);
+        }
+        assert_eq!(mob.attack_target(), Some(close_target));
+
+        goal.tick(&mut mob);
+        assert_ne!(
+            mob.position(),
+            start,
+            "a close, stared-at target must trigger the evasive blink \
+             (EnderMan::teleport), but the position never changed"
+        );
+
+        // Control: the same close distance, but not stared at — the blink is
+        // gated on `isBeingStaredBy`, so this must hold still (it takes the
+        // far/near-walk branch instead, which does not fire under 256 sqr
+        // distance either).
+        let mut control = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            start,
+            ENDERMAN_SPEED,
+            560,
+            5,
+        );
+        control.set_follow_range(64.0);
+        control.set_nearest_player(Some(close_target));
+        // Acquire exactly like the subject (the stare gates acquisition
+        // itself), then look away only for the tick under test.
+        control.set_stared_at(true);
+        let mut control_goal = EndermanLookForPlayerGoal::new();
+        assert!(control_goal.can_use(&mut control));
+        control_goal.start(&mut control);
+        for _ in 0..5 {
+            control_goal.tick(&mut control);
+        }
+        assert_eq!(control.attack_target(), Some(close_target));
+        control.set_stared_at(false);
+        control_goal.tick(&mut control);
+        assert_eq!(
+            control.position(),
+            start,
+            "control: not stared at and within 16 blocks must trigger neither \
+             the blink nor the far-teleport branch"
         );
     }
 
