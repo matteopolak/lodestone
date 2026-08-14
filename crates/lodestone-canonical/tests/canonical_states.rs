@@ -23,7 +23,7 @@
 //!    regeneration that silently changed a slot fails here too.
 //! 2. **The canonical 26.2 state id** is a hardcoded literal, checked against
 //!    `lodestone_data::block_states` — itself generated from the 26.2 jar
-//!    (`lodestone-data`, issue #361). Hardcoding the number rather than
+//!    (`lodestone-data`). Hardcoding the number rather than
 //!    re-deriving it is the point: a re-derivation would use the very reverse
 //!    index `canonical::resolve` uses, and would agree with any two symmetric
 //!    misunderstandings.
