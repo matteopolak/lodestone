@@ -45,6 +45,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use lodestone_core::State;
+use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::{PersistenceStats, RegionChunkSource};
 use lodestone_server::{ChunkColumn, ChunkSource, ServerBound, ServerDirective, ServerProtocol};
 use uuid::Uuid;
@@ -356,7 +357,7 @@ async fn a_reopened_world_reads_from_disk_instead_of_regenerating() {
     server.shutdown().await;
 
     // --- session two: an exclusive observer over the same directory ---------
-    let observer = RegionChunkSource::new(world_source(SEED), &dir, MIN_Y, HEIGHT)
+    let observer = RegionChunkSource::new(world_source(SEED), &dir, Dimension::Overworld, MIN_Y, HEIGHT)
         .expect("reopen the saved world");
     let observer_handle = observer.save_handle();
     let stats = observer_handle.stats();

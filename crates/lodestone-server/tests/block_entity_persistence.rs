@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use lodestone_model::{BlockPos, ItemStack};
+use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::RegionChunkSource;
 use lodestone_server::{
     BlockEntity, ChunkColumn, ChunkSource, Furnace, FurnaceKind, Hopper, HOPPER_SIZE,
@@ -79,7 +80,7 @@ fn tempdir(name: &str) -> PathBuf {
 }
 
 fn open(dir: &Path) -> RegionChunkSource<Flat> {
-    RegionChunkSource::new(Flat, dir, MIN_Y, HEIGHT).expect("open world")
+    RegionChunkSource::new(Flat, dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world")
 }
 
 fn stack(item: &str, count: u32) -> ItemStack {

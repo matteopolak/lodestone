@@ -28,6 +28,7 @@ use std::sync::atomic::Ordering;
 
 use lodestone_anvil::region::{RegionFile, region_and_local};
 use lodestone_core::{Nbt, Reader, read_named_nbt};
+use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::RegionChunkSource;
 use lodestone_server::{ChunkColumn, ChunkSource, TickPriority};
 
@@ -81,7 +82,7 @@ fn tempdir(name: &str) -> PathBuf {
 }
 
 fn open(dir: &Path) -> RegionChunkSource<Flat> {
-    RegionChunkSource::new(Flat, dir, MIN_Y, HEIGHT).expect("open world")
+    RegionChunkSource::new(Flat, dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world")
 }
 
 fn field<'a>(nbt: &'a Nbt, key: &str) -> Option<&'a Nbt> {
