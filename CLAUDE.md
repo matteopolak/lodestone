@@ -437,6 +437,21 @@ the answer is nothing, the issue is more accurately open than closed.
 The cheap mechanical tell is an **`#[allow(dead_code)]` nobody removed**. Treat removing one as the signal
 the island actually closed — and if the attribute is still needed afterwards, the wiring did not take.
 
+**A whole corpus can stop one layer above the defect, and then no test in it can see a dead draw branch.**
+Measured: the menu tab widget's `draw_tab` had **never once run** since the day it landed. `draw()` checked
+`MenuRow::tab` *nested inside* `if row.slot.is_some()`, and a tab row never carries a slot — its rect comes
+from a separate `row_rect` arm keyed on `row.tab`. So every tab row fell through to the un-slotted "centred
+stack" path and drew as a plain button, on **both** consumer screens. Not one gate caught it, and each gate
+was individually well written: they build a `MenuFrame` and assert on *it*, and never ask `draw`/`geometry`
+to rasterise it. The frame was always correct; the branch that consumes the frame was dead.
+
+So the audit question is not "is this tested?" but **"does any gate in this subsystem reach the layer that
+actually emits geometry?"** If every test in a corpus stops at the model, the entire renderer below it is
+unguarded by construction — the same shape as a corpus that shares one fixture value or one construction
+path, one level lower. Note also the honest form of the neuter here: the new rasterising gates **failed
+before the fix and passed after**, and that failing run *is* the control. A control you observed fail is
+worth more than one you constructed afterwards.
+
 **A defaulted trait method plus a wrapper impl is an island generator, and it compiles silently.** Measured:
 gating the block-entity scan on residency added `ChunkSource::is_column_resident` with a `true` default, and
 neither `Arc<S>` nor `DimensionalSource<S>` forwarded it. Production always wraps `ChunkStore` in
