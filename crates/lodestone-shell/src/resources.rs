@@ -222,6 +222,43 @@ pub fn open_pack_stack(root: &Path) -> Option<ResourceManager> {
     Some(build_pack_stack(Box::new(zip)))
 }
 
+/// Opens the production vanilla pack stack, version- **and platform-free**.
+///
+/// Every `load_*` helper below used to call `asset_root()` and
+/// [`open_pack_stack`] directly. `asset_root` is plain `std::env`/`std::fs`,
+/// which is not `cfg`-gated because it does not need to be — `std::fs` on
+/// wasm32 returns `Err(Unsupported)` rather than trapping — but the practical
+/// effect is that it **always** returns `None` in a browser, so every one of
+/// those call sites silently fell back to "no pack found" even after `web/`
+/// had already `fetch`ed and installed the jar. [`vanilla_manager`] is the
+/// choke point that actually knows about the wasm bundle (see its own doc),
+/// but nothing in this file routed through it except [`BlockResources::try_vanilla`]
+/// and, incidentally, the font loader in `hud/vanilla_font.rs`. This is the
+/// fix: one function both targets go through, so a browser session's GUI
+/// atlas, panorama, sky, item/particle atlases, entity textures, container
+/// art and recipe corpus load from the same bytes the font already does,
+/// instead of only the block atlas doing so.
+///
+/// Native: identical to `open_pack_stack(&asset_root()?)` — same discovery,
+/// same user-pack layering. Browser: the same `fetch`ed bytes
+/// [`vanilla_manager`] reads, run through [`build_pack_stack`] so a selected
+/// user pack would still layer on top (today that list is always empty on
+/// wasm32, since [`open_pack_source`] has nothing to open there, but the
+/// call is the same shape as the native side rather than a special case).
+#[must_use]
+fn open_vanilla_pack_stack() -> Option<ResourceManager> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bytes = crate::platform::assets::bundle()?.client_jar.clone();
+        let zip = ZipSource::from_bytes(bytes).ok()?;
+        Some(build_pack_stack(Box::new(zip)))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        open_pack_stack(&asset_root()?)
+    }
+}
+
 /// Lays the currently selected user packs on top of the built-in pack.
 ///
 /// `builtin` is the bottom of the stack — vanilla's own `Pack.Position.BOTTOM`
@@ -599,10 +636,7 @@ pub fn load_entity_textures() -> std::collections::HashMap<&'static str, lodesto
     use lodestone_assets::Image;
 
     let mut out = std::collections::HashMap::new();
-    let Some(root) = asset_root() else {
-        return out;
-    };
-    let Some(manager) = open_pack_stack(&root) else {
+    let Some(manager) = open_vanilla_pack_stack() else {
         return out;
     };
 
@@ -663,10 +697,7 @@ pub fn load_entity_variant_textures()
     use lodestone_assets::Image;
 
     let mut out = std::collections::HashMap::new();
-    let Some(root) = asset_root() else {
-        return out;
-    };
-    let Some(manager) = open_pack_stack(&root) else {
+    let Some(manager) = open_vanilla_pack_stack() else {
         return out;
     };
 
@@ -731,10 +762,7 @@ pub fn load_block_entity_textures()
     use lodestone_assets::Image;
 
     let mut out = std::collections::HashMap::new();
-    let Some(root) = asset_root() else {
-        return out;
-    };
-    let Some(manager) = open_pack_stack(&root) else {
+    let Some(manager) = open_vanilla_pack_stack() else {
         return out;
     };
 
@@ -798,8 +826,7 @@ pub const RECIPE_BOOK_PANEL_SPRITE: &str = "recipe_book/panel";
 
 #[must_use]
 pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
-    let root = asset_root()?;
-    let manager = open_pack_stack(&root)?;
+    let manager = open_vanilla_pack_stack()?;
     match GuiAtlas::build_with_extras(&manager, RECIPE_BOOK_TEXTURES) {
         Ok(atlas) => {
             tracing::info!(
@@ -810,7 +837,7 @@ pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
             Some(Arc::new(atlas))
         }
         Err(e) => {
-            tracing::warn!(target: "assets", "build GUI atlas from {}: {e}", root.display());
+            tracing::warn!(target: "assets", "build GUI atlas: {e}");
             None
         }
     }
@@ -835,15 +862,14 @@ pub fn load_sky(
     queue: &wgpu::Queue,
     color_format: wgpu::TextureFormat,
 ) -> Option<SkyRenderer> {
-    let root = asset_root()?;
-    let manager = open_pack_stack(&root)?;
+    let manager = open_vanilla_pack_stack()?;
     match SkyRenderer::new(device, queue, color_format, &manager) {
         Ok(sky) => {
             tracing::info!(target: "assets", "loaded vanilla sky (sun/moon/stars/clouds)");
             Some(sky)
         }
         Err(e) => {
-            tracing::warn!(target: "assets", "build sky renderer from {}: {e}", root.display());
+            tracing::warn!(target: "assets", "build sky renderer: {e}");
             None
         }
     }
@@ -860,15 +886,14 @@ pub fn load_screen_effects(
     queue: &wgpu::Queue,
     color_format: wgpu::TextureFormat,
 ) -> Option<ScreenEffectRenderer> {
-    let root = asset_root()?;
-    let manager = open_pack_stack(&root)?;
+    let manager = open_vanilla_pack_stack()?;
     match ScreenEffectRenderer::new(device, queue, color_format, &manager) {
         Ok(fx) => {
             tracing::info!(target: "assets", "loaded underwater/fire screen overlays");
             Some(fx)
         }
         Err(e) => {
-            tracing::warn!(target: "assets", "build screen-effect renderer from {}: {e}", root.display());
+            tracing::warn!(target: "assets", "build screen-effect renderer: {e}");
             None
         }
     }
@@ -889,8 +914,7 @@ pub fn load_screen_effects(
 /// scalars and needs no textures at all. Only the visible droplets are lost.
 #[must_use]
 pub fn load_weather_textures() -> Option<lodestone_render::WeatherTextures> {
-    let root = asset_root()?;
-    let manager = open_pack_stack(&root)?;
+    let manager = open_vanilla_pack_stack()?;
     match lodestone_render::load_weather_textures(&manager) {
         Ok(textures) => {
             tracing::info!(
@@ -902,7 +926,7 @@ pub fn load_weather_textures() -> Option<lodestone_render::WeatherTextures> {
             Some(textures)
         }
         Err(e) => {
-            tracing::warn!(target: "assets", "load weather textures from {}: {e}", root.display());
+            tracing::warn!(target: "assets", "load weather textures: {e}");
             None
         }
     }
@@ -925,8 +949,7 @@ pub fn load_weather_textures() -> Option<lodestone_render::WeatherTextures> {
 /// pass-not-installed convention `RenderState::glint` documents.
 #[must_use]
 pub fn load_glint_texture() -> Option<lodestone_assets::Image> {
-    let root = asset_root()?;
-    let manager = open_pack_stack(&root)?;
+    let manager = open_vanilla_pack_stack()?;
     let path = "assets/minecraft/textures/misc/enchanted_glint_item.png";
     let png = manager.read(path)?;
     match lodestone_assets::Image::decode_png(&png) {
@@ -1030,8 +1053,7 @@ const _: () = assert!(
 /// renderers from `app.rs`.
 #[must_use]
 pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
-    let root = asset_root()?;
-    let manager = open_pack_stack(&root)?;
+    let manager = open_vanilla_pack_stack()?;
     match GuiAtlas::build_with_extras(&manager, MENU_TEXTURES) {
         Ok(atlas) => {
             tracing::info!(
@@ -1043,7 +1065,7 @@ pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
             Some(Arc::new(atlas))
         }
         Err(e) => {
-            tracing::warn!(target: "assets", "build menu GUI atlas from {}: {e}", root.display());
+            tracing::warn!(target: "assets", "build menu GUI atlas: {e}");
             None
         }
     }
@@ -1070,22 +1092,29 @@ pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
 /// sheet is the one thing that would make them unusable.
 #[must_use]
 pub fn load_panorama() -> Option<Arc<crate::menu::panorama::PanoramaFaces>> {
-    let root = asset_root()?;
-    let manager = open_pack_stack(&root)?;
+    let manager = open_vanilla_pack_stack()?;
     // Absent or unreadable is not fatal: `panorama::load` falls back to the jar
     // per face and reports how many faces it actually got from the store.
-    let objects = match crate::asset_objects::AssetObjectStore::open(&root) {
-        Ok(store) => Some(store),
-        Err(e) => {
-            tracing::warn!(
-                target: "assets",
-                "no asset-object store at {}: {e} — the panorama will fall back to \
-                 client.jar's 1x1 stub faces, which render a flat grey sky",
-                root.display()
-            );
-            None
+    // `asset_root` is plain `std::fs` and always `None` in a browser (there is
+    // no on-disk store there), which is exactly the "no store" case a native
+    // run outside a populated `.cache/mc` already falls back from — so this
+    // must not bail the whole function the way it used to when it re-derived
+    // `root` from `asset_root()?` up front instead of through
+    // `open_vanilla_pack_stack`.
+    let objects = asset_root().and_then(|root| {
+        match crate::asset_objects::AssetObjectStore::open(&root) {
+            Ok(store) => Some(store),
+            Err(e) => {
+                tracing::warn!(
+                    target: "assets",
+                    "no asset-object store at {}: {e} — the panorama will fall back to \
+                     client.jar's 1x1 stub faces, which render a flat grey sky",
+                    root.display()
+                );
+                None
+            }
         }
-    };
+    });
     match crate::menu::panorama::load(&manager, objects.as_ref()) {
         Ok(faces) => {
             if faces.is_real_art() {
@@ -1108,11 +1137,7 @@ pub fn load_panorama() -> Option<Arc<crate::menu::panorama::PanoramaFaces>> {
             Some(Arc::new(faces))
         }
         Err(e) => {
-            tracing::warn!(
-                target: "assets",
-                "load panorama cubemap from {}: {e}",
-                root.display()
-            );
+            tracing::warn!(target: "assets", "load panorama cubemap: {e}");
             None
         }
     }
@@ -1126,19 +1151,14 @@ pub fn load_panorama() -> Option<Arc<crate::menu::panorama::PanoramaFaces>> {
 /// programmatic fill rather than the whole run failing.
 #[must_use]
 pub fn load_container_background() -> Option<Arc<crate::container::ContainerBackground>> {
-    let root = asset_root()?;
-    let manager = open_pack_stack(&root)?;
+    let manager = open_vanilla_pack_stack()?;
     match crate::container::ContainerBackground::build(&manager) {
         Ok(background) => {
             tracing::info!(target: "assets", "loaded vanilla container background art");
             Some(Arc::new(background))
         }
         Err(e) => {
-            tracing::warn!(
-                target: "assets",
-                "build container background atlas from {}: {e}",
-                root.display()
-            );
+            tracing::warn!(target: "assets", "build container background atlas: {e}");
             None
         }
     }
@@ -1182,12 +1202,11 @@ pub fn load_particle_atlas() -> Option<Arc<ParticleAtlas>> {
 }
 
 fn build_particle_atlas() -> Option<Arc<ParticleAtlas>> {
-    let root = asset_root()?;
-    let manager = open_pack_stack(&root)?;
+    let manager = open_vanilla_pack_stack()?;
     let (atlas, report) = match ParticleAtlas::build_reported(&manager) {
         Ok(pair) => pair,
         Err(e) => {
-            tracing::warn!(target: "assets", "build particle atlas from {}: {e}", root.display());
+            tracing::warn!(target: "assets", "build particle atlas: {e}");
             return None;
         }
     };
@@ -1211,12 +1230,11 @@ fn build_particle_atlas() -> Option<Arc<ParticleAtlas>> {
 /// panicking.
 #[must_use]
 pub fn load_item_atlas() -> Option<Arc<ItemAtlas>> {
-    let root = asset_root()?;
-    let manager = open_pack_stack(&root)?;
+    let manager = open_vanilla_pack_stack()?;
     let (atlas, report) = match ItemAtlas::build_reported(&manager) {
         Ok(pair) => pair,
         Err(e) => {
-            tracing::warn!(target: "assets", "build item atlas from {}: {e}", root.display());
+            tracing::warn!(target: "assets", "build item atlas: {e}");
             return None;
         }
     };
@@ -1256,8 +1274,7 @@ pub fn load_item_atlas() -> Option<Arc<ItemAtlas>> {
 pub fn load_recipe_book() -> Option<lodestone_game::recipe::RecipeBook> {
     use lodestone_game::recipe_json::CorpusBuilder;
 
-    let root = asset_root()?;
-    let manager = open_pack_stack(&root)?;
+    let manager = open_vanilla_pack_stack()?;
 
     let mut builder = CorpusBuilder::new();
     for path in manager.list("data/") {
