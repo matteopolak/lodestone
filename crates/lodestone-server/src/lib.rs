@@ -464,7 +464,7 @@ pub use random_tick::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use rcon::{DEFAULT_RCON_PORT, RconConfig};
-pub use scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
+pub use scheduled_tick::{ScheduledTick, ScheduledTickQueue, StagedTick, TickPriority};
 pub use server::{
     // Issue #551's gate in `tests/view_radius_store_capacity.rs` asserts at compile
     // time that the radius it raises the slider to is one `ViewTracker::max_radius`
