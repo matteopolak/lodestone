@@ -1738,6 +1738,41 @@ fn player_store<S: ChunkSource + ?Sized>(source: &S) -> Option<crate::player_dat
 /// has to complete before the task ends — handing it to a pool there would race
 /// the runtime shutting the pool down, which loses exactly the save that matters
 /// most.
+/// Builds the [`PlayerData`](crate::player_data::PlayerData) snapshot
+/// [`persist_player`] would write and [`live_publish_player`] would mirror,
+/// without doing either — the construction half, factored out so both the
+/// two deliberate disk-write call sites and `serve_play`'s per-iteration
+/// live-publish (see [`crate::player_data::LiveSaveSlot`]) build the
+/// identical snapshot from the identical arguments rather than risking two
+/// copies drifting.
+///
+/// See [`persist_player`]'s own doc comment for why `player_pos` is an
+/// `Option` and `fallback` exists.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn player_save_snapshot(
+    player_pos: Option<(f64, f64, f64)>,
+    player_rot: Option<Rotation>,
+    fallback: Vec3,
+    vitals: &PlayerVitals,
+    game_mode: GameMode,
+    inventory: &PlayerInventory,
+    experience: &crate::experience::PlayerExperience,
+    preserved: &[(String, lodestone_core::Nbt)],
+) -> crate::player_data::PlayerData {
+    let pos = player_pos.map_or(fallback, |(x, y, z)| Vec3::new(x, y, z));
+    crate::player_data::PlayerData::capture(
+        pos,
+        player_rot.unwrap_or(Rotation::new(0.0, 0.0)),
+        vitals.health(),
+        vitals.air_supply(),
+        game_mode,
+        inventory,
+        *experience,
+        preserved.to_vec(),
+    )
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 fn persist_player(
@@ -1759,20 +1794,38 @@ fn persist_player(
     let Some(store) = store else {
         return;
     };
-    let pos = player_pos.map_or(fallback, |(x, y, z)| Vec3::new(x, y, z));
-    let data = crate::player_data::PlayerData::capture(
-        pos,
-        player_rot.unwrap_or(Rotation::new(0.0, 0.0)),
-        vitals.health(),
-        vitals.air_supply(),
-        game_mode,
-        inventory,
-        *experience,
-        preserved.to_vec(),
+    let data = player_save_snapshot(
+        player_pos, player_rot, fallback, vitals, game_mode, inventory, experience, preserved,
     );
     if let Err(err) = store.write(uuid, &data) {
         tracing::warn!("could not save player data for {uuid}: {err}");
     }
+}
+
+/// Refreshes `live_save` with the current live state — see
+/// [`crate::player_data::LiveSaveSlot`]'s own doc comment. Cheap and
+/// in-memory only (no disk I/O), unlike [`persist_player`]: `serve_play`
+/// calls this once per iteration of its own `select!` loop, not only at the
+/// two deliberate save points.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn live_publish_player(
+    live_save: &crate::player_data::LiveSaveSlot,
+    store: Option<&crate::player_data::PlayerDataStore>,
+    uuid: uuid::Uuid,
+    player_pos: Option<(f64, f64, f64)>,
+    player_rot: Option<Rotation>,
+    fallback: Vec3,
+    vitals: &PlayerVitals,
+    game_mode: GameMode,
+    inventory: &PlayerInventory,
+    experience: &crate::experience::PlayerExperience,
+    preserved: &[(String, lodestone_core::Nbt)],
+) {
+    let data = player_save_snapshot(
+        player_pos, player_rot, fallback, vitals, game_mode, inventory, experience, preserved,
+    );
+    live_save.publish(store.cloned(), uuid, data);
 }
 
 /// Turns one [`ColumnPayload`](crate::join_scheduler::ColumnPayload) into the
@@ -3612,6 +3665,7 @@ where
                     plugin_channels,
                     game_mode,
                     world,
+                    live_save,
                 )
                 .await;
             }
@@ -7442,12 +7496,33 @@ fn join_experience<P: ServerProtocol>(
 
 /// The local player's combat-relevant attributes as wire-shaped snapshots —
 /// [`PlayerInventory::combat_stats`]'s already-folded `AttributeMap`, one
-/// snapshot per attribute, each carrying its final value as `base` and an
-/// empty modifier list.
+/// snapshot per **named** attribute below, each carrying its final value as
+/// `base` and an empty modifier list.
 ///
-/// Empty modifiers rather than re-publishing the per-item ones
-/// [`lodestone_entity::equipment::apply_equipment`] built the fold from: the
-/// client's own fold (`instance_from_snapshot`/`AttributeInstance::value`,
+/// # Every attribute is named explicitly — this is not `AttributeMap::iter`
+///
+/// `AttributeMap` is sparse: an attribute only appears in it once *something*
+/// has touched it ([`lodestone_entity::equipment::apply_equipment`] calls
+/// `get_or_default` only for a piece that is actually equipped). Iterating it
+/// therefore **omits** `minecraft:armor` entirely the moment the last piece
+/// comes off, rather than including it at `0.0` — and the client's own merge
+/// (`lodestone_ecs::ingest::apply_entity_attributes`) treats an attribute
+/// absent from a packet as *unchanged*, not as *reset to default*: it only
+/// overwrites entries the packet actually names. The reported symptom was
+/// exactly this — the bar tracked every equip and every partial removal
+/// correctly (a non-zero value was always sent) and then froze on the last
+/// piece, because that transition was the one case where the whole attribute
+/// stopped being sent rather than being sent as zero. Reading each attribute
+/// through [`lodestone_entity::attribute::AttributeMap::value`] instead —
+/// which already falls back to the registry default for an attribute the map
+/// has no entry for — closes that gap for every attribute named here, not
+/// only `armor`.
+///
+/// # Why empty modifiers
+///
+/// Rather than re-publishing the per-item ones `apply_equipment` built the
+/// fold from: the client's own fold
+/// (`instance_from_snapshot`/`AttributeInstance::value`,
 /// `crates/lodestone-entity/src/attribute.rs`) is a no-op over a bare base
 /// value with no modifiers, and re-deriving the exact same modifier ids and
 /// operations at the wire would be a second copy of
@@ -7456,14 +7531,27 @@ fn join_experience<P: ServerProtocol>(
 /// folded result (the shell's `Session::armour_value` and the attack-speed
 /// and water-efficiency readers documented alongside it).
 fn player_attribute_snapshots(inventory: &PlayerInventory) -> Vec<EntityAttributeSnapshot> {
-    inventory
-        .combat_stats()
-        .attributes
-        .iter()
-        .map(|(id, instance)| EntityAttributeSnapshot {
-            attribute: id.clone(),
-            base: instance.value(),
-            modifiers: Vec::new(),
+    // Every attribute `lodestone_entity::equipment::item_modifiers` can ever
+    // publish a modifier for. Adding a new equipment-driven attribute there
+    // means adding its name here too, or it inherits this exact bug for
+    // itself.
+    const COMBAT_ATTRIBUTES: [&str; 4] = [
+        "minecraft:armor",
+        "minecraft:armor_toughness",
+        "minecraft:knockback_resistance",
+        "minecraft:attack_damage",
+    ];
+    let attrs = inventory.combat_stats().attributes;
+    COMBAT_ATTRIBUTES
+        .into_iter()
+        .filter_map(|name| {
+            let attribute: lodestone_model::Identifier = name.parse().ok()?;
+            let base = attrs.value(&attribute)?;
+            Some(EntityAttributeSnapshot {
+                attribute,
+                base,
+                modifiers: Vec::new(),
+            })
         })
         .collect()
 }
@@ -10889,6 +10977,16 @@ async fn serve_play<T, P, S, E>(
     // the same handle `run_tick_loop` ticks. Replaced the `WorldAdminState` local
     // that used to be constructed right here, one per accepted socket.
     world: &crate::world_state::WorldStateHandle,
+    // Issue #302's shutdown-cancellation gap. Published to once per iteration
+    // of this function's own `select!` loop below — see
+    // `crate::player_data::LiveSaveSlot`'s own doc comment for why a
+    // continuously-refreshed mirror exists at all: `IntegratedServer::
+    // shutdown`'s connection-task race drops this whole function's future
+    // mid-`.await` on an ordinary singleplayer quit, so the disconnect-save
+    // arm below (the `conn.read_packet()` returning `Ok(None)` branch) is
+    // structurally unreachable on that path, and only this mirror survives
+    // the cancellation to be read back afterwards.
+    live_save: &crate::player_data::LiveSaveSlot,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -12310,6 +12408,30 @@ where
                 watch.pass("container_sync_tick");
             }
         }
+        // Issue #302's shutdown-cancellation gap — see `live_publish_player`'s
+        // and `crate::player_data::LiveSaveSlot`'s own doc comments. Once per
+        // iteration, after whichever arm above completed, so the mirror is at
+        // most one packet or timer tick behind whatever the cancellation
+        // below would otherwise drop entirely. Placed here rather than inside
+        // each arm individually: every arm reaches this same point on a
+        // normal completion, and an arm that instead returns via `?` or the
+        // disconnect arm's own explicit `return` skips it — correctly, since
+        // both of those are real completions with their own save story
+        // already (a genuine error, or the `persist_player` call right
+        // above).
+        live_publish_player(
+            live_save,
+            player_store.as_ref(),
+            player_uuid,
+            player_pos,
+            player_rot,
+            world_spawn,
+            &vitals,
+            game_mode,
+            &inventory,
+            &experience,
+            &preserved_player_fields,
+        );
     }
 }
 
@@ -12430,6 +12552,13 @@ async fn serve_play<T, P, S, E>(
     // the same handle `run_tick_loop` ticks. Replaced the `WorldAdminState` local
     // that used to be constructed right here, one per accepted socket.
     world: &crate::world_state::WorldStateHandle,
+    // Accepted for signature parity with the native definition and with
+    // `serve_connection_inner`'s target-agnostic call, but never published to:
+    // this target has no `PlayerDataStore` at all — "there is no player store
+    // in the browser", per this loop's own experience-restore comment below —
+    // so there is nothing for `IntegratedServer::shutdown` to read back
+    // regardless.
+    live_save: &crate::player_data::LiveSaveSlot,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -12857,15 +12986,115 @@ mod tests {
             .expect("a full diamond set must publish armor_toughness");
         assert!((toughness.base - 8.0).abs() < 1e-6, "toughness {}", toughness.base);
 
-        // Control: an unarmoured player publishes no `minecraft:armor` snapshot
-        // at all (the attribute is never created in `AttributeMap` until
-        // something equips into it — see `lodestone_entity::equipment::
-        // apply_equipment`), so this test could not pass by accident with the
-        // fold broken and every snapshot coincidentally absent.
+        // Control: an unarmoured player still publishes `minecraft:armor`
+        // explicitly, at `0.0` — **not** an absent entry. This is the exact
+        // owner-reported bug (removing the last piece left the HUD frozen at
+        // its last non-zero reading) and the reason
+        // `player_attribute_snapshots` reads named attributes through
+        // `AttributeMap::value` rather than iterating the sparse map: an
+        // omitted attribute is "unchanged" to the client's merge
+        // (`lodestone_ecs::ingest::apply_entity_attributes`), not "reset".
         let bare = player_attribute_snapshots(&PlayerInventory::new());
+        let bare_armor = bare
+            .iter()
+            .find(|s| s.attribute.to_string() == "minecraft:armor")
+            .expect("an unarmoured player must still publish minecraft:armor, explicitly");
         assert!(
-            bare.iter().all(|s| s.attribute.to_string() != "minecraft:armor"),
-            "an unarmoured player must not publish minecraft:armor at all"
+            bare_armor.base.abs() < 1e-6,
+            "an unarmoured player's armor must be exactly 0.0, got {}",
+            bare_armor.base
+        );
+    }
+
+    /// **The owner-reported bug, reproduced directly.** Equip a helmet and a
+    /// chestplate (distinct per-piece values — `3.0` and `8.0` — so a
+    /// transposition or an off-by-one cannot hide), remove them one at a
+    /// time, and assert the *sequence* of published armour values: `11.0`
+    /// (both), `8.0` (helmet off — matches "it sort of updates when I remove
+    /// armour"), then `0.0` (chestplate off too — the transition the bug
+    /// dropped). Collected into one list and asserted on together, per
+    /// `CLAUDE.md`'s evidence standard, so a regression names *which* step
+    /// went stale rather than only "some step failed".
+    #[test]
+    fn removing_the_last_piece_of_armor_publishes_an_explicit_zero() {
+        let mut inv = PlayerInventory::new();
+        inv.set_native(
+            crate::inventory::HEAD_NATIVE,
+            Some(ItemStack::new(item_key("diamond_helmet"), 1)),
+        );
+        inv.set_native(
+            crate::inventory::CHEST_NATIVE,
+            Some(ItemStack::new(item_key("diamond_chestplate"), 1)),
+        );
+
+        fn armor_of(inv: &PlayerInventory) -> Option<f64> {
+            player_attribute_snapshots(inv)
+                .into_iter()
+                .find(|s| s.attribute.to_string() == "minecraft:armor")
+                .map(|s| s.base)
+        }
+        fn check(mismatches: &mut Vec<String>, inv: &PlayerInventory, label: &str, expected: f64) {
+            let Some(got) = armor_of(inv) else {
+                mismatches.push(format!("{label}: minecraft:armor was not published at all"));
+                return;
+            };
+            if (got - expected).abs() > 1e-6 {
+                mismatches.push(format!("{label}: expected {expected}, got {got}"));
+            }
+        }
+
+        let mut mismatches = Vec::new();
+        check(&mut mismatches, &inv, "both pieces worn", 11.0);
+        inv.set_native(crate::inventory::HEAD_NATIVE, None);
+        check(&mut mismatches, &inv, "helmet removed, chestplate still worn", 8.0);
+        inv.set_native(crate::inventory::CHEST_NATIVE, None);
+        check(&mut mismatches, &inv, "last piece removed", 0.0);
+
+        assert!(
+            mismatches.is_empty(),
+            "armour publication went stale: {mismatches:?}"
+        );
+    }
+
+    /// **The control for the assertion of absence above.** Forces the
+    /// `AttributeMap::iter()`-only bug back (reading only entries the map
+    /// happens to hold) and shows the same removal sequence fails at exactly
+    /// the step the owner reported — proving the detector actually fires
+    /// rather than passing vacuously.
+    #[test]
+    fn the_sparse_iteration_bug_is_caught_by_the_removal_sequence_above() {
+        fn buggy_snapshots(inventory: &PlayerInventory) -> Vec<EntityAttributeSnapshot> {
+            inventory
+                .combat_stats()
+                .attributes
+                .iter()
+                .map(|(id, instance)| EntityAttributeSnapshot {
+                    attribute: id.clone(),
+                    base: instance.value(),
+                    modifiers: Vec::new(),
+                })
+                .collect()
+        }
+
+        let mut inv = PlayerInventory::new();
+        inv.set_native(
+            crate::inventory::HEAD_NATIVE,
+            Some(ItemStack::new(item_key("diamond_helmet"), 1)),
+        );
+        inv.set_native(
+            crate::inventory::CHEST_NATIVE,
+            Some(ItemStack::new(item_key("diamond_chestplate"), 1)),
+        );
+        inv.set_native(crate::inventory::HEAD_NATIVE, None);
+        inv.set_native(crate::inventory::CHEST_NATIVE, None);
+
+        let armor = buggy_snapshots(&inv)
+            .into_iter()
+            .find(|s| s.attribute.to_string() == "minecraft:armor");
+        assert!(
+            armor.is_none(),
+            "control did not reproduce the bug: the sparse-iteration version was expected to \
+             omit minecraft:armor entirely once the last piece came off, but it published {armor:?}"
         );
     }
 
