@@ -10,9 +10,17 @@ The two things that happen when two entities occupy the same space, ported into
 | **soft push** — a horizontal velocity shove, every tick, while boxes overlap | `LivingEntity.pushEntities` → `Entity.push(Entity)` | `push::entity_push_impulse` / `push::apply_entity_push` / `player::tick_among_entities` |
 | **hard collision** — entity boxes clipping movement | `EntityGetter.getEntityCollisions` → `Entity.collide`, and the entity term of `noCollision` | `push::entity_collision_boxes`, `collision::collide_among_entities`, `entity::move_entity_among_entities`, `push::no_entity_collision` / `push::no_collision_among_entities` |
 
-Everything here is **inert until the shell hands over a neighbour list** — see
-[Wiring](#wiring-what-is-still-owed). Nothing in `lodestone-shell`,
-`lodestone-ecs` or `lodestone-client` calls it yet.
+**The client-side half — a local player feeling a push from nearby
+entities — is still inert**; see [Wiring](#wiring-what-is-still-owed). Nothing
+in `lodestone-shell`, `lodestone-ecs` or `lodestone-client` calls it.
+
+**The server-side half now has a real consumer.**
+`lodestone_server::mobs::MobSim::push_entities` calls `pair_push_vector` to
+shove mobs apart from each other and away from an overlapping player — the
+"server-authoritative mob, not client-authoritative local player" direction
+this module's own doc comments distinguish below. See
+[Server-side: a mob consumer](#server-side-a-mob-consumer) for what it covers
+and what it still narrows.
 
 ## The rule, and the three things it is not
 
@@ -173,6 +181,37 @@ apply_entity_push                         ← pushEntities (:3163)
 pushes before `travel` is wrong on the first tick of contact and agrees from the
 second — a one-tick divergence that looks correct on screen.
 
+## Server-side: a mob consumer
+
+`lodestone_server::mobs::MobSim::push_entities` runs after the per-mob goal/movement
+loop in `MobSim::tick_with_terrain` — the same "after `travel`" placement
+`player::tick_among_entities` gives the client half, and for the same reason
+(`pushEntities` runs at the end of `LivingEntity::baseTick`, after that tick's own
+`travel` call). It reuses `pair_push_vector` rather than re-deriving the formula,
+so a fix or a golden-trace regeneration to that function covers both consumers.
+
+Two things this consumer is, on purpose, that the client-facing API above is not:
+
+* **A pusher of other simulated entities**, not just a receiver. A real vanilla
+  client never initiates a push (`EntitySelector.pushableBy`'s clause admits only
+  the local player as a pushee on the client); the server simulates every mob
+  itself and is the authority on where each one ends up, so it both computes and
+  *applies* both halves of a mob-mob pair, and the mob half of a player-mob pair.
+* **Missing the player-recoil half entirely.** A player's velocity is
+  client-authoritative here (the client sends `move_player_pos`; the server does
+  not own it the way it owns a mob's), so shoving a player back needs a
+  clientbound self-velocity packet the client applies to its own physics — outside
+  `lodestone-server`, in `crates/protocol/**` and the client-side wiring this
+  section already describes as owed. Until that lands, walking into a mob moves
+  the mob but not the player — vanilla's `Entity.push` is symmetric and this port
+  is deliberately only half of it.
+* **A simplified overlap test.** Horizontal distance under the pair's combined
+  half-widths, not vanilla's real AABB intersection (`Level::getEntities`), and
+  applied once per pair per tick rather than vanilla's two (each side's own
+  `pushEntities` call invokes `doPush` against the other). Both are disclosed on
+  `MobSim::push_entities`'s own doc comment, along with why `isPushable`/vehicle
+  exclusions and cramming damage are not modelled either.
+
 ## Wiring: what is still owed
 
 ### The interface the physics crate wants
@@ -303,10 +342,11 @@ server-side game rule affecting damage only and is not read here.
   the block half of `noCollision`), `collide_among_entities`.
 * `lodestone-physics::mth` — `abs_max`, `java_max_f64`, `floor`.
 * `lodestone-physics::geometry` — `Aabb::{intersects, inflate, size}`, `Vec3d`.
-* Consumers: the **push** still has none — see
-  [Wiring](#wiring-what-is-still-owed). `no_collision_among_entities` does:
-  `lodestone-physics::pose`'s fit gate
-  ([`pose-dimensions.md`](./pose-dimensions.md)).
+* Consumers: the client-facing API — see [Wiring](#wiring-what-is-still-owed).
+  `no_collision_among_entities` does: `lodestone-physics::pose`'s fit gate
+  ([`pose-dimensions.md`](./pose-dimensions.md)). `pair_push_vector` also has a
+  server-side consumer now: `lodestone_server::mobs::MobSim::push_entities` —
+  see [Server-side: a mob consumer](#server-side-a-mob-consumer).
 
 ## Gates
 
@@ -316,6 +356,7 @@ server-side game rule affecting damage only and is not read here.
 | bit-exact trajectories vs the Python oracle | `tests/golden.rs`: `entity_push_shove`, `entity_push_wide_plateau`, `entity_push_flush_control` | the whole rule end-to-end through `tick_among_entities`, zero tolerance |
 | the hard-collision half | `tests/entity_collision.rs` (5 tests) | a shulker clipping movement, auto-step onto a boat deck at `0.5625`, `move_entity(&[])` bit-identical to `move_entity`, the pose fit gate's two terms, same-vehicle exclusion |
 | tick order and pipeline inertness | `tests/entity_push.rs` (3 tests) | the push landing on velocity *after* the move, `tick_among_entities(&[])` bit-identical to `tick` over 40 ticks × 3 starts, and the ladder veto with its control |
+| the server-side mob consumer | `lodestone-server`'s `mobs::follow_range_tests`: `push_impulse_matches_a_hand_computed_off_axis_example_not_the_euclidean_alternative`, `push_impulse_is_none_just_outside_the_touch_threshold`, `overlapping_mobs_separate_over_real_ticks_and_a_distant_one_does_not_move`, `a_player_overlapping_a_mob_pushes_the_mob_away` | an off-axis magnitude that discriminates Chebyshev from Euclidean normalisation, the touch-threshold control, mob-mob separation wired into real ticks with a distant control, and a player shoving a mob without the mob shoving back |
 
 `lodestone-physics` goes from **127 to 150 tests**, all passing, zero
 non-compiling targets (`cargo test -p lodestone-physics --no-fail-fast`).
