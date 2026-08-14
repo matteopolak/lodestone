@@ -1337,6 +1337,39 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             let nearest = mobs.with(|sim| sim.players().first().map(|p| p.perception.position));
             mobs.with(|sim| sim.despawn_pass(nearest, &mut despawn_rng));
         }
+        // Issue #241a: pillager patrols. Same live, player-following terrain
+        // snapshot the natural spawner above used — see
+        // `MobSim::run_patrol_spawn_cycle`'s own doc comment for why it must
+        // not be `MobSim`'s own static `self.world`. Called every tick
+        // regardless of `players.is_empty()` above (unlike the natural-spawn
+        // block, which is gated on a nonempty player list) because vanilla's
+        // own `PatrolSpawner.tick` decrements its countdown every world tick
+        // with no such gate, and skipping calls here would make patrols
+        // rarer than vanilla rather than merely checked less often.
+        //
+        // `is_bright_outside` is vanilla's `ServerLevel.isBrightOutside()`
+        // simplified to "daytime", ignoring thunder — no weather state
+        // crosses this seam. `day_time` is this loop's own tracked mirror,
+        // already read above for `natural_spawner.set_day_time`.
+        //
+        // `spawn_terrain` is only ever `Some` once the natural-spawn block
+        // above has run at least once (built lazily on first need). If it is
+        // still `None` — `spawn_mobs` is off, or no players are connected
+        // yet — patrols simply do not attempt that tick: a real, disclosed
+        // divergence from vanilla (which shares no such cache), and a
+        // narrower gate than `spawn_patrols` alone.
+        let is_bright_outside = day_time.rem_euclid(24000) < 12000;
+        if let Some(terrain) = spawn_terrain.as_ref() {
+            let spawn_world = std::sync::Arc::clone(terrain);
+            mobs.with(|sim| {
+                sim.run_patrol_spawn_cycle(
+                    &spawn_world,
+                    world_state.spawn_patrols(),
+                    is_bright_outside,
+                    world_state.difficulty().0,
+                );
+            });
+        }
         mob_out.publish(mobs.with(|sim| sim.snapshots()));
         // Issue #425: `MobSim::tick` already calls `MobSim::explode` the
         // tick a creeper's own fuse completes (`1feed17`/`614acb8`), but
