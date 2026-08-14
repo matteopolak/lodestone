@@ -2186,35 +2186,64 @@ impl HudGeometry {
             // flat, non-legacy draw is right, and at **full** opacity — vanilla
             // never multiplies the input `EditBox`'s own text by `chatOpacity`,
             // which only governs the scrollback below.
-            let caret = if frame.chat_caret_visible { "_" } else { "" };
-            b.text(
-                &format!("{input}{caret}"),
-                margin,
-                input_y,
-                chat_pose_scale,
-                [1.0, 1.0, 1.0, 1.0],
-            );
-            // The highlighted suggestion, previewed in grey after the caret —
-            // `EditBox.extractRenderState`'s `graphics.text(font, suggestion,
-            // cursorX - 1, textY, -8355712, …)`. Vanilla's `cursorX` is
-            // `font.width(value)` — the typed text alone — because its caret is
-            // a separately blinking overlay rectangle that never affects a
-            // measured width. This port instead draws the caret as a literal
-            // appended `_` glyph, so the pen has to reserve that glyph's own
-            // advance to land in the same place, but it must reserve it
-            // **unconditionally**: measuring against the live blinking `caret`
-            // string (`{input}{caret}`, empty half the time) made the ghost's
-            // pen slide by the underscore's width every blink, since the
-            // input text itself is always drawn — only the ghost's *measure*
-            // must not depend on the blink phase.
-            if let Some(ghost) = frame.chat_suggestion_ghost {
-                let pen = margin + b.text_width(&format!("{input}_"), chat_pose_scale);
+            b.text(input, margin, input_y, chat_pose_scale, [1.0, 1.0, 1.0, 1.0]);
+            // The highlighted suggestion, previewed in grey **behind** the
+            // caret — `EditBox.extractRenderState`'s
+            // `graphics.text(font, suggestion, cursorX - 1, textY, -8355712,
+            // this.textShadow)`. Two things a previous fix here got wrong,
+            // both because it measured the pen against `{input}_` instead of
+            // `input` alone:
+            //
+            // 1. **`cursorX` is `font.width(value)` — the typed text alone.**
+            //    The caret contributes *no* advance in vanilla, because there
+            //    it is a separately blinking overlay rectangle, never part of
+            //    the measured string. Reserving the caret glyph's own width
+            //    (`{input}_`) landed the ghost one whole underscore-width too
+            //    far right, *permanently* — stable, and wrong: the owner's own
+            //    report was "it's supposed to be behind [the caret], not
+            //    pushing it to the right".
+            // 2. **The suggestion must be drawn *before* the caret, not
+            //    after**, so the caret glyph composites on top and the two
+            //    overlap by design (`EditBox.java`'s render order is text →
+            //    hint → suggestion → highlight → cursor). The previous fix
+            //    drew `{input}{caret}` as one string, then the ghost after —
+            //    on top of the caret, backwards from vanilla either way.
+            //
+            // `!insert` gate: vanilla's `insert = cursorPos < value.length() ||
+            // value.length() >= maxLength`. This shell's `ChatInput` only ever
+            // edits at the end of the line (see the caret comment above), so
+            // the first disjunct is always false here; the second is real —
+            // `ChatInput::push_char` caps a line at 256 — so the suggestion is
+            // suppressed once the line is full, matching vanilla rather than
+            // overlapping the last few glyphs.
+            let full = input.chars().count() >= 256;
+            if !full && let Some(ghost) = frame.chat_suggestion_ghost {
+                let pen = margin + b.text_width(input, chat_pose_scale);
                 b.text(
                     ghost,
                     pen - chat_pose_scale,
                     input_y,
                     chat_pose_scale,
                     SUGGESTION_GHOST,
+                );
+            }
+            // The caret, drawn **last** so it composites on top of both the
+            // typed text and any ghost suggestion — the literal fix for the
+            // draw-order bug above. A trailing underscore stands in for
+            // vanilla's append-caret
+            // (`TextCursorUtils.extractAppendCursor`,
+            // `TextCursorUtils.java:15-17`); `chat_caret_visible` blinks it at
+            // vanilla's real 300ms rate (see [`HudFrame::chat_caret_visible`]).
+            // Its own pen is `margin + text_width(input)` — the same `cursorX`
+            // the ghost above measures from, with no `-1`: that offset is
+            // `EditBox`'s own, applied only to the suggestion.
+            if frame.chat_caret_visible {
+                b.text(
+                    "_",
+                    margin + b.text_width(input, chat_pose_scale),
+                    input_y,
+                    chat_pose_scale,
+                    [1.0, 1.0, 1.0, 1.0],
                 );
             }
         }
@@ -4680,9 +4709,12 @@ impl HudRenderer {
         // state machine it feeds is otherwise a pure function of that integer.
         let tick = anim::wall_tick(self.anim_start);
         let (heart_blink, display_health) = self.heart_anim.tick(tick, frame.health.unwrap_or(0.0));
-        let hotbar_pop = self
-            .hotbar_pop
-            .tick(tick, frame.hotbar_items.unwrap_or(&[]));
+        // `Option`, not `.unwrap_or(&[])`. Collapsing "the hotbar is hidden
+        // this frame" and "the hotbar is genuinely empty" into the same empty
+        // slice is exactly what made returning from a deeper menu (Options)
+        // fire the pickup pop on every slot; see
+        // `hud::anim::HotbarPop::tick`'s own doc.
+        let hotbar_pop = self.hotbar_pop.tick(tick, frame.hotbar_items);
         let xp_flash = self.xp_flash.tick(tick, frame.xp.map(|(level, _)| level));
         let anim = HudAnim {
             heart_blink,
@@ -5872,6 +5904,167 @@ mod tests {
             ghost_min_x(&off),
             "the suggestion ghost's x must not move when the caret blinks"
         );
+    }
+
+    /// The landed blink-invariance fix above made the ghost's pen *stable*,
+    /// but stable at the wrong x: one whole underscore-width too far right,
+    /// permanently. **The discriminating assertion is the absolute x, not
+    /// stability** — a gate that only re-runs the blink-invariance check
+    /// above would pass on the regression this predicts and rejects.
+    ///
+    /// `HudGeometry`'s `verts` are in **NDC** (`ColourStream::rect`'s own doc:
+    /// "positions in NDC"), not pixels, so the pixel-space prediction below is
+    /// converted through the same `to_ndc` vanilla-canvas math the draw uses
+    /// — via [`crate::menu::render::logical_canvas`], the one function that
+    /// resolves a framebuffer size to the logical canvas every layout site
+    /// (including this draw) measures against.
+    #[test]
+    fn suggestion_ghost_sits_at_cursor_x_minus_one_not_after_the_caret() {
+        let stats = DebugStats::default();
+        let (w, h) = (640u32, 480u32);
+        let pose = chat_pose_scale(ChatDisplayOptions::default());
+        let (logical_w, _) =
+            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
+        let to_ndc_x = |px: f32| 2.0 * px / logical_w - 1.0;
+
+        let ghost_min_x = |g: &HudGeometry| -> f32 {
+            let mut min_x = f32::INFINITY;
+            for chunk in g.verts.chunks(FLOATS_PER_VERTEX) {
+                if chunk[2..6] == SUGGESTION_GHOST {
+                    min_x = min_x.min(chunk[0]);
+                }
+            }
+            assert!(min_x.is_finite(), "no SUGGESTION_GHOST-coloured vertex found");
+            min_x
+        };
+
+        // The ghost text starts with `A`, not `llo` as the other gates in this
+        // module use — deliberately: this fallback font's `l` glyph has a
+        // **blank leading column** (`font::glyph_rows('l')`'s column 0 is
+        // unlit in all seven rows), so "leftmost lit pixel" would measure one
+        // glyph-column right of the real pen for any string starting with
+        // `l`. `A` lights column 0 on at least one row, so its own leftmost
+        // lit pixel *is* the pen position — which is what this test needs to
+        // assert an exact x. The other gates in this module only compare
+        // *relative* ghost positions, where that per-glyph offset cancels out
+        // and does not matter.
+        let frame = HudFrame {
+            crosshair: false,
+            show_debug: false,
+            chat_input: Some("he"),
+            chat_caret_visible: true,
+            chat_suggestion_ghost: Some("Allo"),
+            ..HudFrame::new(&stats)
+        };
+        let geo = HudGeometry::build(&frame, w, h);
+
+        // Vanilla's `cursorX - 1`: `font.width("he")`, the typed text *alone*
+        // — no caret glyph folded in, unlike the formula this replaces
+        // (`font.width("he_")`).
+        let expected = to_ndc_x(HUD_MARGIN + measure_text(None, "he", pose) - pose);
+        let wrong_hypothesis =
+            to_ndc_x(HUD_MARGIN + measure_text(None, "he_", pose) - pose);
+        assert!(
+            (expected - wrong_hypothesis).abs() > 1e-3,
+            "sanity check on the reproduction: the two hypotheses must be \
+             discriminably far apart, or a coincidence could pass either way"
+        );
+        assert!(
+            (ghost_min_x(&geo) - expected).abs() < 1e-4,
+            "ghost x (NDC) = {}, expected cursorX - 1 = {expected} (the old, \
+             wrong formula would have placed it at {wrong_hypothesis})",
+            ghost_min_x(&geo)
+        );
+    }
+
+    /// The other half of the fix: the caret must draw **after** (on top of)
+    /// the suggestion, not before — `EditBox.java`'s render order is text →
+    /// hint → suggestion → highlight → cursor. `HudGeometry::build` appends
+    /// vertices in draw order, so "after" is observable as "later in `verts`".
+    #[test]
+    fn caret_draws_after_the_suggestion_so_it_composites_on_top() {
+        let stats = DebugStats::default();
+        let (w, h) = (640u32, 480u32);
+
+        let frame = HudFrame {
+            crosshair: false,
+            show_debug: false,
+            chat_input: Some("he"),
+            chat_caret_visible: true,
+            chat_suggestion_ghost: Some("llo"),
+            ..HudFrame::new(&stats)
+        };
+        let geo = HudGeometry::build(&frame, w, h);
+
+        let last_index_with_color = |target: [f32; 4]| -> Option<usize> {
+            geo.verts
+                .chunks(FLOATS_PER_VERTEX)
+                .enumerate()
+                .filter(|(_, chunk)| chunk[2..6] == target)
+                .map(|(i, _)| i)
+                .max()
+        };
+        let ghost_last = last_index_with_color(SUGGESTION_GHOST)
+            .expect("the ghost must draw when chat_suggestion_ghost is Some");
+        // The caret shares the input text's own white and the same input
+        // row, so identify it as a white quad **inside that row's glyph box**
+        // appearing after the ghost — restricted to the row so an unrelated
+        // white element elsewhere in the frame (this test does not disable
+        // every HUD element) cannot produce a false pass. The box spans the
+        // full glyph height, not just `input_y` exactly: `_`'s own bitmap
+        // (`font::glyph_rows('_')`) only lights the bottom row, so its quad's
+        // y sits `6 * pose` px below `input_y`, not at it. `input_y` and the
+        // span are converted to NDC the same way
+        // [`suggestion_ghost_sits_at_cursor_x_minus_one_not_after_the_caret`]
+        // converts x, using the logical (not raw framebuffer) canvas height
+        // `chat_input_top` itself is measured against.
+        let pose = chat_pose_scale(ChatDisplayOptions::default());
+        let (_, logical_h) =
+            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
+        let input_y_ndc = 1.0 - 2.0 * chat_input_top(logical_h, pose) / logical_h;
+        let glyph_h_ndc = 2.0 * (font::GLYPH_H as f32 * pose) / logical_h;
+        let white = [1.0_f32, 1.0, 1.0, 1.0];
+        let caret_after_ghost = geo.verts.chunks(FLOATS_PER_VERTEX).enumerate().skip(ghost_last + 1).any(
+            |(_, chunk)| {
+                chunk[2..6] == white
+                    && chunk[1] <= input_y_ndc + 1e-3
+                    && chunk[1] >= input_y_ndc - glyph_h_ndc - 1e-3
+            },
+        );
+        assert!(
+            caret_after_ghost,
+            "the caret's white quad, on the input's own row, must appear \
+             after the ghost's grey quad in draw order, so it composites on \
+             top"
+        );
+    }
+
+    /// Vanilla's `!insert` gate: a full line (256 chars, `ChatInput::push_char`'s
+    /// own cap) suppresses the suggestion entirely, matching
+    /// `EditBox`'s own `insert = cursorPos < value.length() || value.length()
+    /// >= maxLength` — this shell's chat caret is always at the end (see the
+    /// draw's own comment), so only the length half of that disjunction can
+    /// ever apply here.
+    #[test]
+    fn suggestion_is_suppressed_once_the_chat_line_is_full() {
+        let stats = DebugStats::default();
+        let (w, h) = (640u32, 480u32);
+        let full_line: String = "x".repeat(256);
+
+        let frame = HudFrame {
+            crosshair: false,
+            show_debug: false,
+            chat_input: Some(full_line.as_str()),
+            chat_caret_visible: true,
+            chat_suggestion_ghost: Some("llo"),
+            ..HudFrame::new(&stats)
+        };
+        let geo = HudGeometry::build(&frame, w, h);
+        let has_ghost = geo
+            .verts
+            .chunks(FLOATS_PER_VERTEX)
+            .any(|chunk| chunk[2..6] == SUGGESTION_GHOST);
+        assert!(!has_ghost, "a full line must draw no suggestion ghost");
     }
 
     /// Predicts the exact geometry of a hard-wrapped chat line from first

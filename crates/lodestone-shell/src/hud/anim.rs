@@ -184,12 +184,28 @@ pub(super) fn hunger_wobble(tick: i64, food: i32, saturation: f32, pip: usize) -
 pub(super) struct HotbarPop {
     slots: [Option<(ResourceLocation, u32)>; 9],
     triggered_tick: [Option<i64>; 9],
-    /// Whether [`HotbarPop::tick`] has run at least once. All nine slots are
-    /// primed together on the same first call (unlike [`HeartAnim`], nothing
-    /// here is staggered per-slot), so one flag covers all nine — without it,
-    /// a hotbar that already holds items at HUD startup would misread as
-    /// nine simultaneous pickups on frame one, the same false-trigger
-    /// [`HeartAnim::tick`]'s `None` arm exists to prevent for health.
+    /// Whether [`HotbarPop::tick`] has been given a **real observation** at
+    /// least once. All nine slots are primed together on the same call
+    /// (unlike [`HeartAnim`], nothing here is staggered per-slot), so one
+    /// flag covers all nine — without it, a hotbar that already holds items
+    /// at HUD startup would misread as nine simultaneous pickups on frame
+    /// one, the same false-trigger [`HeartAnim::tick`]'s `None` arm exists to
+    /// prevent for health.
+    ///
+    /// This is also, now, half of the fix for a second false-trigger that
+    /// shares the mechanism: a deeper menu (Options, reached from Pause)
+    /// hides the hotbar, and `app::redraw` reports that as `hotbar_items:
+    /// None` for as long as it stays hidden — a frame [`HotbarPop::tick`]
+    /// **never sees**, not a frame that observed an empty hotbar. A prior
+    /// version of this call fed `Option::unwrap_or(&[])` at the boundary,
+    /// which collapsed exactly that distinction: hidden frames looked
+    /// identical to a genuinely emptied hotbar, so every slot recorded
+    /// `Some -> None` while hidden and then `None -> Some` on return — nine
+    /// simultaneous "pickups" again, this time not on startup but on
+    /// returning from the menu. [`HotbarPop::tick`] now takes
+    /// `Option<&[..]>` and leaves `slots`/`primed` completely untouched on
+    /// `None`, generalising the startup guard this field already was to
+    /// "any frame this was not observed", not just the first one.
     primed: bool,
 }
 
@@ -204,8 +220,26 @@ impl HotbarPop {
 
     /// Advances to `tick` for this frame's hotbar contents (`0..9`, missing
     /// slots treated as empty), returning each slot's current pop amount.
-    pub(super) fn tick(&mut self, tick: i64, slots: &[Option<HotbarSlot>]) -> [f32; 9] {
+    ///
+    /// `slots` is `None` on a frame the hotbar is not drawn at all (a deeper
+    /// menu hides it — see [`Self::primed`]'s doc). That is a frame this
+    /// state machine did not observe, and must not be treated as one that
+    /// observed an empty hotbar: `self.slots`/`self.primed` are left
+    /// completely untouched, and only an *already in-flight* pop (triggered
+    /// before the hotbar was hidden) keeps decaying — matching vanilla's own
+    /// `popTime`, which ticks down regardless of whether `Hud` currently
+    /// draws it.
+    pub(super) fn tick(&mut self, tick: i64, slots: Option<&[Option<HotbarSlot>]>) -> [f32; 9] {
         let mut out = [0.0f32; 9];
+        let Some(slots) = slots else {
+            for (i, o) in out.iter_mut().enumerate() {
+                *o = match self.triggered_tick[i] {
+                    Some(t0) => (5.0 - (tick - t0) as f32).max(0.0),
+                    None => 0.0,
+                };
+            }
+            return out;
+        };
         for i in 0..9 {
             let now = slots
                 .get(i)
@@ -518,8 +552,8 @@ mod tests {
         // from the phantom one.
         let mut p = HotbarPop::new();
         let slots = [Some(slot("minecraft:torch", 3)), None, None, None, None, None, None, None, None];
-        assert_eq!(p.tick(0, &slots), [0.0; 9], "must not pop on the very first tick");
-        assert_eq!(p.tick(1, &slots), [0.0; 9], "and must stay settled with no change");
+        assert_eq!(p.tick(0, Some(&slots)), [0.0; 9], "must not pop on the very first tick");
+        assert_eq!(p.tick(1, Some(&slots)), [0.0; 9], "and must stay settled with no change");
     }
 
     #[test]
@@ -528,15 +562,15 @@ mod tests {
         // (settled) in every slot, forever — the pre-existing draw exactly.
         let mut p = HotbarPop::new();
         let slots = [Some(slot("minecraft:stone", 1)), None, None, None, None, None, None, None, None];
-        assert_eq!(p.tick(0, &slots), [0.0; 9]);
-        assert_eq!(p.tick(1_000, &slots), [0.0; 9]);
+        assert_eq!(p.tick(0, Some(&slots)), [0.0; 9]);
+        assert_eq!(p.tick(1_000, Some(&slots)), [0.0; 9]);
     }
 
     #[test]
     fn hotbar_pop_new_item_pops_then_decays_linearly_to_zero() {
         let mut p = HotbarPop::new();
         let empty = [None, None, None, None, None, None, None, None, None];
-        p.tick(0, &empty);
+        p.tick(0, Some(&empty));
         let mut with_item = empty.clone();
         with_item[2] = Some(slot("minecraft:diamond", 1));
 
@@ -545,7 +579,7 @@ mod tests {
         // 1.0 (an "is it popping" bool rather than the real magnitude) would
         // also pass a bare `> 0.0` check, which is why this asserts the exact
         // value rather than just its sign.
-        let at_trigger = p.tick(10, &with_item);
+        let at_trigger = p.tick(10, Some(&with_item));
         assert_eq!(at_trigger[2], 5.0);
         assert_eq!(
             &at_trigger[..2],
@@ -556,11 +590,11 @@ mod tests {
         // Two opposite phases: 2 ticks later it must have decayed by exactly
         // 2.0 (linear, 1.0/tick), and by tick 15 (5 ticks later) it must have
         // fully settled at 0.0, not gone negative.
-        let mid = p.tick(12, &with_item);
+        let mid = p.tick(12, Some(&with_item));
         assert_eq!(mid[2], 3.0);
-        let settled = p.tick(15, &with_item);
+        let settled = p.tick(15, Some(&with_item));
         assert_eq!(settled[2], 0.0);
-        let past = p.tick(30, &with_item);
+        let past = p.tick(30, Some(&with_item));
         assert_eq!(past[2], 0.0, "must clamp at 0.0, never go negative");
     }
 
@@ -569,14 +603,14 @@ mod tests {
         let mut p = HotbarPop::new();
         let mut slots = [None, None, None, None, None, None, None, None, None];
         slots[0] = Some(slot("minecraft:arrow", 10));
-        p.tick(0, &slots);
+        p.tick(0, Some(&slots));
 
         slots[0] = Some(slot("minecraft:arrow", 5)); // used some — a decrease
-        let after_decrease = p.tick(1, &slots);
+        let after_decrease = p.tick(1, Some(&slots));
         assert_eq!(after_decrease[0], 0.0, "a decrease must not pop");
 
         slots[0] = Some(slot("minecraft:arrow", 20)); // picked more up
-        let after_increase = p.tick(2, &slots);
+        let after_increase = p.tick(2, Some(&slots));
         assert_eq!(after_increase[0], 5.0, "an increase must pop");
     }
 
@@ -585,10 +619,66 @@ mod tests {
         let mut p = HotbarPop::new();
         let mut slots = [None, None, None, None, None, None, None, None, None];
         slots[5] = Some(slot("minecraft:oak_log", 3));
-        p.tick(0, &slots);
+        p.tick(0, Some(&slots));
         slots[5] = Some(slot("minecraft:stone", 1)); // different item, lower count
-        let after = p.tick(1, &slots);
+        let after = p.tick(1, Some(&slots));
         assert_eq!(after[5], 5.0, "a swapped identity must pop even at a lower count");
+    }
+
+    /// The owner-reported bug this gates: "when i exit out of [a deeper menu
+    /// like Options] it does the [pop] animation on the slots as if i just
+    /// picked up the items". Three phases, per the report's own verification
+    /// note: visible with items, hidden for several ticks (`None` — a deeper
+    /// menu owns the frame), then visible again — asserting **zero** pops on
+    /// the return frame, for every slot.
+    ///
+    /// The control this gate needs is the pre-fix behaviour itself: fed
+    /// `Some(&empty)` instead of `None` for the hidden phase (what
+    /// `.unwrap_or(&[])` produced before this fix), the same sequence must
+    /// fire all nine — proving the assertion above is discriminating rather
+    /// than vacuously always zero.
+    #[test]
+    fn returning_from_a_hidden_hotbar_fires_no_pops() {
+        let full: [Option<HotbarSlot>; 9] = std::array::from_fn(|i| {
+            Some(slot(
+                match i {
+                    0 => "minecraft:torch",
+                    1 => "minecraft:arrow",
+                    _ => "minecraft:stone",
+                },
+                (i as u32) + 1,
+            ))
+        });
+
+        // The fixed behaviour: `None` while hidden.
+        let mut fixed = HotbarPop::new();
+        assert_eq!(fixed.tick(0, Some(&full)), [0.0; 9], "priming tick");
+        for t in 1..5 {
+            fixed.tick(t, None); // hidden behind a deeper menu
+        }
+        let on_return = fixed.tick(5, Some(&full));
+        assert_eq!(
+            on_return,
+            [0.0; 9],
+            "no slot may pop on return when the contents never actually changed"
+        );
+
+        // The control: the pre-fix formula fed an empty slice while hidden
+        // instead of `None`, which must reproduce the reported bug — nine
+        // simultaneous false pops, all at the trigger value.
+        let mut buggy = HotbarPop::new();
+        let empty: [Option<HotbarSlot>; 9] = Default::default();
+        assert_eq!(buggy.tick(0, Some(&full)), [0.0; 9], "priming tick");
+        for t in 1..5 {
+            buggy.tick(t, Some(&empty)); // the bug: "hidden" read as "emptied"
+        }
+        let buggy_return = buggy.tick(5, Some(&full));
+        assert_eq!(
+            buggy_return,
+            [5.0; 9],
+            "control: the un-fixed formula must reproduce all nine false pops, \
+             or this test cannot tell the fix from a no-op"
+        );
     }
 }
 

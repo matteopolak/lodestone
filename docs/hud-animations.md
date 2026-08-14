@@ -175,6 +175,23 @@ container/pip so two slots at one tick do not correlate.
   `hotbar_pop_first_observation_primes_without_a_false_pop`; the latter's
   absence produced a **second-order** bug where a real, later decrease still
   read a nonzero pop left over from the phantom initial one.
+- **"Not observed this frame" and "observed as empty" are different inputs,
+  and `HotbarPop::tick` takes `Option<&[..]>` specifically so the caller can
+  say which.** A deeper menu (Options, reached from Pause) hides the hotbar
+  entirely, and `app::redraw` reports that frame as `hotbar_items: None` —
+  the same shape as the startup case above, just recurring instead of
+  one-shot. A prior version of the call site collapsed that with
+  `.unwrap_or(&[])`, so every hidden frame read as "the hotbar just emptied",
+  and returning from the menu then read as "nine items just landed" — all
+  nine slots popping at once, an owner report. `heart_anim`/`HeartAnim`
+  does **not** share this failure: `HudFrame::health` is populated
+  unconditionally in `app::redraw` regardless of which screen is open (only
+  `hotbar_items`/`hotbar` are `world_hud`-gated to `None`), so a hidden hearts
+  row still receives the real health value every frame and has nothing to
+  misread on return. `returning_from_a_hidden_hotbar_fires_no_pops` in
+  `hud/anim.rs` is the regression gate, with the un-fixed `.unwrap_or(&[])`
+  formula as its own control (asserted to reproduce all nine false pops, so
+  the "zero pops" assertion is proven discriminating rather than vacuous).
 - **`XpFlash` is the one animation here that is *not* a vanilla port, and its
   doc says so.** Read the record before "fixing" it toward parity: 26.2 has no
   XP-bar flash at all. `ExperienceBar.extractBackground` blits background +
