@@ -30,17 +30,32 @@
 //! gradient), and what the row/label `MenuFrame` system does not. The creative
 //! inventory screen (#158) uses the same seam for the same reason.
 //!
-//! **Clipping is done on the CPU.** Vanilla scissors the 234×113 viewport;
-//! `render_geometry_scaled` has no scissor, so [`advancements_geometry`] culls
-//! any widget whose 26×26 frame falls entirely outside the viewport and clamps
-//! the connector lines to it. A widget straddling the edge therefore draws
-//! slightly past the frame where vanilla would cut it — the one visible
-//! divergence, and the honest one to take rather than growing a scissor rect
-//! through four call sites.
+//! **Clipping is done on the CPU, not via a GPU scissor.**
+//! `render_geometry_scaled` has no scissor (unlike vanilla's own
+//! `enableScissor`/`disableScissor` bracket around `AdvancementTab.
+//! drawWidgets`), so [`advancements_geometry`] clamps every piece of tree
+//! content to the `234 x 113` viewport by hand instead: the connector lines
+//! (`clamp_to`, a plain `Rect` intersection) and, since issue #565, a
+//! widget's frame sprite too (`push_sprite_clipped`/`clip_sprite_quad`,
+//! which shrinks the sprite's UV rect in lock-step with its destination rect
+//! rather than squishing the art to fit). Before that fix a widget crossing
+//! the boundary went from wholly undrawn to its full, unclamped `26 x 26`
+//! frame the instant [`AdvancementsLayout::widgets`]'s inclusion test
+//! (`overlaps`, deliberately permissive so an edge click still lands) turned
+//! true — a visible **pop**, not a clip.
+//!
+//! **The item icon inside each frame is still not clipped** — [`Builder::
+//! draw_stack`] has no sub-rect clip primitive at all (it is closer to a
+//! small item-icon render than a sprite blit), so an icon whose frame is
+//! only partly visible still draws in full or not at all. This is a smaller
+//! divergence than the frame used to be: the icon is inset well inside the
+//! `26 x 26` frame ([`ICON_DX`]/[`ICON_DY`]), so by the time any of it would
+//! be visible the frame around it already reads as "arriving", rather than
+//! a fully-formed icon popping into empty space the way the *frame* used to.
 
 use lodestone_assets::ItemAtlas;
 use lodestone_game::item::ItemStack;
-use lodestone_render::BlockModels;
+use lodestone_render::{BlockModels, GuiSpriteQuad};
 
 use crate::container::builder::Builder;
 use crate::container::{ContainerBackground, ContainerGeometry, Rect};
@@ -974,33 +989,36 @@ pub fn advancements_geometry(
     );
     let dim_floats = b.verts.len();
 
-    // Unselected tabs first, then the window, then the selected tab — vanilla's
-    // own order (`AdvancementsScreen.java:206-215`), so an unselected tab is
-    // partly covered by the window edge and the selected one is not.
+    // Unselected tabs first — vanilla's own order (`AdvancementsScreen.java:
+    // 206-215`), so an unselected tab is partly covered by the window edge and
+    // the selected one is not.
     for (i, rect) in layout.tabs.iter().enumerate() {
         if i == layout_tab(layout) {
             continue;
         }
         push_sprite(&mut b, background, tab_sprite(i, false), *rect);
     }
-    match background.and_then(|bg| bg.advancements_window_quad(layout.window.x, layout.window.y)) {
-        Some(q) => b.bg_sprite(q),
-        // The jar-less picture: a flat panel plus a darker viewport well, so the
-        // tree still reads against something.
-        None => {
-            b.rect_px(
-                layout.window.x,
-                layout.window.y,
-                layout.window.w,
-                layout.window.h,
-                [0.08, 0.075, 0.065, 0.94],
-            );
-        }
-    }
-    // The tiled per-tab background, inside the window art so the window's own
-    // frame is not painted over. Vanilla scissors this; we clamp instead (module
-    // doc), which for a 16x16 tile grid means dropping the ring that falls wholly
-    // outside and trimming the rest.
+    // The tiled per-tab background, drawn **before** the window art — issue
+    // #565's fourth defect ("the inner shadow and border are missing").
+    //
+    // `AdvancementTab.extractContents` (stratum 1, `AdvancementsScreen.
+    // extractInside`) draws the tile grid; `AdvancementsScreen.extractWindow`
+    // (stratum 2, drawn *after* via `graphics.nextStratum()`) draws
+    // `window.png` on top of it. That ordering is load-bearing, not
+    // cosmetic: `window.png` is not an opaque frame with a transparent hole —
+    // measured on the real 26.2 asset, its pixels from `x = WINDOW_INSIDE_X`
+    // (9) inward carry a **translucent black gradient**, alpha 171 at the
+    // very edge fading to 0 by roughly `x = 16` (`(0,0,0,171)` at column 9,
+    // `(0,0,0,0)` by column ~16, sampled at `y = 25`) — vanilla's inner
+    // shadow, baked into the texture rather than drawn as a separate quad,
+    // and it only *reads* as a shadow if something opaque is already there
+    // for it to composite over. Drawing the window **before** the tiles (the
+    // previous order here) let the opaque tile grid painted last cover that
+    // gradient completely — the border still showed (it is fully opaque,
+    // outside the tile clip rect either way), but the shadow at the seam
+    // never did. Vanilla scissors this to the viewport; we clamp instead
+    // (module doc), which for a 16x16 tile grid means dropping the ring that
+    // falls wholly outside and trimming the rest.
     if let (Some(bg), Some(id)) = (background, plan.background) {
         for (tx, ty) in &plan.tiles {
             let mut dst = Rect { x: *tx, y: *ty, w: TILE, h: TILE };
@@ -1021,6 +1039,22 @@ pub fn advancements_geometry(
             [0.10, 0.10, 0.12, 1.0],
         );
     }
+    match background.and_then(|bg| bg.advancements_window_quad(layout.window.x, layout.window.y)) {
+        Some(q) => b.bg_sprite(q),
+        // The jar-less picture: a flat panel plus a darker viewport well, so the
+        // tree still reads against something. No separate shadow quad here
+        // either — see the comment above: vanilla's is baked into `window.
+        // png`, which this fallback (by construction) does not have.
+        None => {
+            b.rect_px(
+                layout.window.x,
+                layout.window.y,
+                layout.window.w,
+                layout.window.h,
+                [0.08, 0.075, 0.065, 0.94],
+            );
+        }
+    }
     push_sprite(
         &mut b,
         background,
@@ -1028,25 +1062,18 @@ pub fn advancements_geometry(
         layout.tabs[layout_tab(layout)],
     );
     for (rect, sprite, _, _) in &plan.frames {
-        push_sprite(&mut b, background, sprite, *rect);
+        push_sprite_clipped(&mut b, background, sprite, *rect, layout.inside);
     }
-    // The hover tooltip's own sprites: description panel, then the title bar over
-    // it, then the icon frame redrawn on top — `extractHover`'s order, and the
-    // reason the frame is drawn twice per hovered widget.
-    if let Some((_, hover)) = &hover {
-        if let Some(panel) = hover.panel {
-            push_sprite(&mut b, background, SPRITE_TITLE_BOX, panel);
-        }
-        for (rect, obtained) in &hover.bars {
-            let sprite = if *obtained {
-                SPRITE_BOX_OBTAINED
-            } else {
-                SPRITE_BOX_UNOBTAINED
-            };
-            push_sprite(&mut b, background, sprite, *rect);
-        }
-        push_sprite(&mut b, background, hover.frame.1, hover.frame.0);
-    }
+    // `bg_slot_vertex_count`'s split, **before** the hover tooltip's own
+    // sprites — issue #565's second defect ("the hover popover draws under
+    // the entry"). See the big comment below the item-icon loops for why: in
+    // short, the renderer's four-pass order draws every background sprite
+    // pushed up to this marker *before* any item icon, so a tooltip panel
+    // pushed here (the pre-#565 shape) would sit under every widget's icon —
+    // not just the hovered one's, since the icon pass has no idea which
+    // sprite belongs to which widget. Everything from here on that belongs to
+    // the tooltip is pushed **after** this marker instead, landing in the
+    // "front" bg range the renderer draws once every icon already has.
     let bg_slot_floats = b.bg_verts.len();
 
     // The connector lines, shadows already ordered before foregrounds by
@@ -1062,18 +1089,6 @@ pub fn advancements_geometry(
             if *shadow { shadow_ink } else { line_ink },
         );
     }
-    // The hover dim over the viewport, before the icons so a hovered
-    // advancement's own icon stays bright. Ramped by `tick_fade`, so it also
-    // draws for the few frames *after* the pointer leaves a widget.
-    if view.fade > 0.0 {
-        b.rect_px(
-            layout.inside.x,
-            layout.inside.y,
-            layout.inside.w,
-            layout.inside.h,
-            [HOVER_DIM_RGB[0], HOVER_DIM_RGB[1], HOVER_DIM_RGB[2], view.fade],
-        );
-    }
     if !view.title.is_empty() {
         b.label(
             view.title,
@@ -1083,6 +1098,9 @@ pub fn advancements_geometry(
             TITLE_COLOUR,
         );
     }
+    // `chrome_vertex_count`'s split: connector lines and the title above it,
+    // the hover dim below — see the dim's own comment for why it needs to sit
+    // in the *next* colour range rather than this one.
     let chrome_floats = b.verts.len();
 
     // ---- the chrome/icon split ----
@@ -1103,7 +1121,80 @@ pub fn advancements_geometry(
             rect.y + TAB_ICON_DY,
         );
     }
-    // The tooltip text, and the hovered widget's icon redrawn over its own frame.
+    // `slot_item_vertex_count`/`slot_model_vertex_count`/`slot_glint_vertex_
+    // count`/`slot_special_count`'s split — every widget's own icon (drawn
+    // above, at rest) is done; the hovered widget's *redrawn* icon, below, is
+    // the tooltip's. All four stack-draw streams split here together, so an
+    // enchanted hovered item's glint (or a special-rendered icon, e.g. a
+    // shulker box) lands in the same pass as the base icon it belongs to
+    // rather than drawing a stratum early.
+    let slot_item_floats = b.item_verts.len();
+    let slot_model_verts = b.model_verts.len();
+    let slot_glint_floats = b.glint_verts.len();
+    let slot_special = b.special.len();
+
+    // ---- issue #565's second defect, the rest of the fix ------------------
+    //
+    // Everything from here down is the tooltip, and everything above is not —
+    // that is now the *only* fact this split needs to encode, because
+    // [`push_sprite_clipped`]'s viewport clip (the third defect's fix) already
+    // keeps tree content from ever overlapping the window/tab chrome above.
+    // So two z-tiers is enough, and the renderer already has exactly two:
+    // `ContainerRenderer::render_geometry_scaled_between_strata`'s "slot" and
+    // "carried" passes — built for an item held on the cursor, but structurally
+    // the same shape as "content, then a tooltip that must sit above literally
+    // everything else". Reusing that pair (rather than adding a third ordering
+    // primitive — this module's own advice, learned from the recipe book's
+    // `between_strata` hook) is what the markers above and below are for.
+    //
+    // Within this tier the four-pass order still applies, so three more
+    // sub-splits do the rest of vanilla's own `extractHover` order
+    // (`AdvancementWidget.java:230-279`): the dim first (**this** colour
+    // range, which the renderer draws right after every widget's icon, so it
+    // darkens all of them uniformly — matching vanilla's unconditional `fill`
+    // over the whole viewport, not a hovered-cell exclusion); the panel/bars/
+    // frame-redraw next (`bg_slot_floats`'s "front" range, which the renderer
+    // draws after *this* colour range); and the text plus the icon redraw
+    // last of all, in the carried pass proper, so both land above the panel.
+    if view.fade > 0.0 {
+        b.rect_px(
+            layout.inside.x,
+            layout.inside.y,
+            layout.inside.w,
+            layout.inside.h,
+            [HOVER_DIM_RGB[0], HOVER_DIM_RGB[1], HOVER_DIM_RGB[2], view.fade],
+        );
+    }
+    // `slot_vertex_count`'s split: the hover dim above is still "slot" colour
+    // (the renderer's front-bg pass, next, needs to draw after it); the
+    // tooltip text below is `verts`' only carried-pass content.
+    let slot_floats = b.verts.len();
+
+    // The hover tooltip's own sprites: description panel, then the title bar
+    // over it, then the icon frame redrawn on top — `extractHover`'s order,
+    // and the reason the frame is drawn twice per hovered widget. Pushed
+    // *after* `bg_slot_floats`, so the renderer's front-bg pass draws these
+    // once every widget's icon already has, rather than the pre-#565
+    // ordering, which pushed them before `bg_slot_floats` and so drew them
+    // before the icon pass ever ran.
+    if let Some((_, hover)) = &hover {
+        if let Some(panel) = hover.panel {
+            push_sprite(&mut b, background, SPRITE_TITLE_BOX, panel);
+        }
+        for (rect, obtained) in &hover.bars {
+            let sprite = if *obtained {
+                SPRITE_BOX_OBTAINED
+            } else {
+                SPRITE_BOX_UNOBTAINED
+            };
+            push_sprite(&mut b, background, sprite, *rect);
+        }
+        push_sprite(&mut b, background, hover.frame.1, hover.frame.0);
+    }
+
+    // The tooltip text, and the hovered widget's icon redrawn over its own
+    // frame — both pushed after every "slot" marker above, so both land in
+    // the carried pass and draw after the panel.
     if let Some((text, hover)) = &hover {
         for (i, line) in text.title.iter().enumerate() {
             b.label(
@@ -1140,14 +1231,6 @@ pub fn advancements_geometry(
             );
         }
     }
-
-    // Nothing here draws a carried stack, so the slot stratum runs to the end of
-    // every stream and the renderer's carried passes are empty by construction.
-    let slot_floats = b.verts.len();
-    let slot_item_floats = b.item_verts.len();
-    let slot_glint_floats = b.glint_verts.len();
-    let slot_model_verts = b.model_verts.len();
-    let slot_special = b.special.len();
 
     ContainerGeometry {
         bg_slot_vertex_count: bg_slot_floats / crate::hud::SPRITE_FLOATS_PER_VERTEX,
@@ -1198,6 +1281,76 @@ fn push_sprite(
         Some(q) => b.bg_sprite(q),
         None => b.rect_px(rect.x, rect.y, rect.w, rect.h, [0.24, 0.21, 0.17, 1.0]),
     }
+}
+
+/// [`push_sprite`], clamped to `clip` — issue #565's third defect: entries
+/// popped fully in and out at the viewport edge, because [`AdvancementsLayout
+/// ::widgets`]'s *inclusion* test (`overlaps`, in [`advancements_layout`]) is
+/// the only gate a widget's frame art passed through, and that test is
+/// deliberately permissive (any overlap at all counts, so a click at the very
+/// edge still lands). Once included, the frame's **full** `26 x 26` sprite
+/// drew unclamped — so a widget at the boundary either was not drawn at all,
+/// or was drawn whole and spilling past the window's own art. Vanilla
+/// scissors the `234 x 113` viewport around exactly this draw
+/// (`AdvancementWidget.draw`, called from inside `AdvancementTab.
+/// drawWidgets`'s `enableScissor`/`disableScissor` bracket); this ports that
+/// by shrinking the sprite's own destination rect **and** its sampled UV rect
+/// in lock-step, so the visible sliver still samples the right part of the
+/// art rather than being squished to fit — see [`clip_sprite_quad`].
+fn push_sprite_clipped(
+    b: &mut Builder<'_>,
+    background: Option<&ContainerBackground>,
+    id: &str,
+    rect: Rect,
+    clip: Rect,
+) {
+    match background.and_then(|bg| bg.sprite_quad_for(id, rect.x, rect.y, rect.w, rect.h)) {
+        Some(q) => {
+            if let Some(clipped) = clip_sprite_quad(q, clip) {
+                b.bg_sprite(clipped);
+            }
+        }
+        None => {
+            let mut dst = rect;
+            if clamp_to(&mut dst, clip) {
+                b.rect_px(dst.x, dst.y, dst.w, dst.h, [0.24, 0.21, 0.17, 1.0]);
+            }
+        }
+    }
+}
+
+/// Shrinks a [`GuiSpriteQuad`] to its intersection with `clip`, adjusting the
+/// sampled UV rect **proportionally** so the visible sub-rect still samples
+/// the correct part of the sprite. `None` when nothing survives, mirroring
+/// [`clamp_to`]'s `bool` for a plain [`Rect`].
+///
+/// Valid because a `GuiSpriteQuad` (unlike a nine-slice sprite) maps its
+/// whole `dst` rect to `[uv_min, uv_max]` **uniformly** — the same
+/// fraction-of-declared-size principle the nine-slice fix (#561) uses for a
+/// border quad, applied here to a plain one instead: the fraction of `dst`
+/// kept on each axis is the same fraction of the UV span kept.
+#[must_use]
+fn clip_sprite_quad(q: GuiSpriteQuad, clip: Rect) -> Option<GuiSpriteQuad> {
+    let [x, y, w, h] = q.dst;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let x0 = x.max(clip.x);
+    let y0 = y.max(clip.y);
+    let x1 = (x + w).min(clip.x + clip.w);
+    let y1 = (y + h).min(clip.y + clip.h);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let (fx0, fx1) = ((x0 - x) / w, (x1 - x) / w);
+    let (fy0, fy1) = ((y0 - y) / h, (y1 - y) / h);
+    let u_span = q.uv_max[0] - q.uv_min[0];
+    let v_span = q.uv_max[1] - q.uv_min[1];
+    Some(GuiSpriteQuad {
+        dst: [x0, y0, x1 - x0, y1 - y0],
+        uv_min: [q.uv_min[0] + fx0 * u_span, q.uv_min[1] + fy0 * v_span],
+        uv_max: [q.uv_min[0] + fx1 * u_span, q.uv_min[1] + fy1 * v_span],
+    })
 }
 
 /// The tab-button sprite for `index` — `AdvancementTabType.extractRenderState`
@@ -1395,6 +1548,153 @@ mod tests {
         // shows a handful — the number is a floor against "nothing is clickable",
         // not a claim about how many vanilla would show.
         assert!(resolved >= 5, "only {resolved} widgets were clickable");
+    }
+
+    // -- clipping, not culling (issue #565) ----------------------------------
+
+    #[test]
+    fn clip_sprite_quad_shrinks_dst_and_uv_in_lock_step() {
+        // A 26x26 sprite spanning the whole atlas UV range, straddling a clip
+        // rect's right edge by exactly half its width and half its height.
+        let q = GuiSpriteQuad {
+            dst: [100.0, 100.0, 26.0, 26.0],
+            uv_min: [0.0, 0.0],
+            uv_max: [1.0, 1.0],
+        };
+        let clip = Rect { x: 0.0, y: 0.0, w: 113.0, h: 113.0 };
+        let clipped = clip_sprite_quad(q, clip).expect("must survive — it overlaps");
+        // Destination: only the left/top half survives (100..113 of 100..126).
+        assert_eq!(clipped.dst, [100.0, 100.0, 13.0, 13.0]);
+        // UV: the *same* fraction (0.5) is kept on each axis — this is the
+        // property a naive "shrink dst, leave UV alone" implementation gets
+        // wrong, which would stretch the visible half across the whole sprite
+        // instead of showing its actual left/top half.
+        assert_eq!(clipped.uv_min, [0.0, 0.0]);
+        assert_eq!(clipped.uv_max, [0.5, 0.5]);
+    }
+
+    #[test]
+    fn clip_sprite_quad_leaves_a_wholly_contained_quad_unchanged() {
+        let q = GuiSpriteQuad {
+            dst: [10.0, 10.0, 26.0, 26.0],
+            uv_min: [0.25, 0.25],
+            uv_max: [0.75, 0.75],
+        };
+        let clip = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        assert_eq!(clip_sprite_quad(q, clip), Some(q));
+    }
+
+    #[test]
+    fn clip_sprite_quad_drops_a_quad_wholly_outside() {
+        let q = GuiSpriteQuad {
+            dst: [500.0, 500.0, 26.0, 26.0],
+            uv_min: [0.0, 0.0],
+            uv_max: [1.0, 1.0],
+        };
+        let clip = Rect { x: 0.0, y: 0.0, w: 113.0, h: 113.0 };
+        assert_eq!(clip_sprite_quad(q, clip), None);
+        // Control: the same quad moved onto the clip rect must survive, so the
+        // rejection above is measuring position and not always answering `None`.
+        let overlapping = GuiSpriteQuad {
+            dst: [50.0, 50.0, 26.0, 26.0],
+            ..q
+        };
+        assert!(clip_sprite_quad(overlapping, clip).is_some());
+    }
+
+    /// The magnitude assertion for the reported bug itself: a widget frame
+    /// that only *just* crosses into the viewport must draw a **small**
+    /// sliver, not the full `26 x 26` frame unclamped. Exercised on the
+    /// jar-less fallback path (`push_sprite_clipped`'s `None` arm — every
+    /// test in this module goes through it, since none attaches a real
+    /// `ContainerBackground`), decoding the emitted rect's pixel width back
+    /// out of its NDC vertices rather than trusting a vertex *count*, which
+    /// is six either way and would not discriminate clipped from unclamped.
+    #[test]
+    fn a_frame_straddling_the_viewport_edge_draws_only_its_visible_sliver() {
+        let inside = Rect { x: 9.0, y: 18.0, w: INSIDE_W, h: INSIDE_H };
+        // One pixel of a 26x26 frame poking in from the right edge.
+        let straddling = Rect { x: inside.x + inside.w - 1.0, y: inside.y + 5.0, w: FRAME_SIZE, h: FRAME_SIZE };
+        let canvas_w = 400.0;
+        let mut b = Builder::new(canvas_w, 300.0, None);
+        push_sprite_clipped(&mut b, None, "advancements/frame_unobtained", straddling, inside);
+        assert_eq!(b.verts.len(), 36, "one flat rect: 6 vertices x 6 floats each");
+        // Vertex 0 is (x0, y0), vertex 1 is (x1, y0) — `ColourStream::rect`'s own
+        // emission order — so `verts[6] - verts[0]` is the rect's NDC width,
+        // and `* canvas_w / 2.0` undoes `to_ndc`'s `2*px/w - 1` back to pixels.
+        let clipped_px_w = (b.verts[6] - b.verts[0]) * canvas_w / 2.0;
+        assert!(
+            (clipped_px_w - 1.0).abs() < 0.01,
+            "expected a 1 px-wide sliver, got {clipped_px_w} px"
+        );
+
+        // The control: the pre-#565 unclamped path draws the full 26 px width
+        // for the exact same input, so the assertion above is measuring the
+        // clip and not merely "some rect got drawn".
+        let mut b_full = Builder::new(canvas_w, 300.0, None);
+        push_sprite(&mut b_full, None, "advancements/frame_unobtained", straddling);
+        let full_px_w = (b_full.verts[6] - b_full.verts[0]) * canvas_w / 2.0;
+        assert!(
+            (full_px_w - FRAME_SIZE).abs() < 0.01,
+            "control: the unclamped path must draw the full {FRAME_SIZE} px, got {full_px_w}"
+        );
+        assert!(clipped_px_w < full_px_w, "the clip must actually shrink the rect");
+    }
+
+    // -- z-order: the tooltip must draw over every icon (issue #565) --------
+
+    #[test]
+    fn hovering_a_widget_pushes_its_tooltip_into_the_carried_pass() {
+        let mut state = AdvancementsState::default();
+        let progress = AdvancementProgress::default();
+        let layout = advancements_layout(&mut state, &progress, 1, 1280, 720).expect("a layout");
+        let (hovered, _) = *layout.widgets.first().expect("at least one on-screen widget");
+
+        let view = AdvancementsView {
+            title: "Test Tab",
+            hovered: Some(hovered),
+            hovered_title: "Hovered Advancement",
+            hovered_description: "A description long enough to need a panel.",
+            progress: &progress,
+            fade: 0.3,
+        };
+        // `background: None` throughout this module's tests (no atlas
+        // attached), which matters here specifically: `push_sprite`'s
+        // jar-less fallback degrades *every* sprite — the tooltip panel/bars/
+        // frame-redraw included — to `Builder::rect_px`, i.e. the plain
+        // colour stream, never `bg_verts`. So `bg_slot_vertex_count` cannot
+        // be exercised from this test; what *is* exercised, and is the part
+        // that was actually broken pre-#565, is that every one of the
+        // tooltip's own draws — the panel/bars/frame-redraw fallback rects
+        // *and* the tooltip text *and* the icon-redraw fallback — lands
+        // after `slot_vertex_count`, i.e. in the carried pass, alongside
+        // everything else the fix moved there.
+        let geo = advancements_geometry(&layout, view, 1, 1280, 720, None, None, None, None);
+        assert!(
+            geo.slot_vertex_count < geo.verts.len() / COLOUR_FLOATS_PER_VERTEX,
+            "the tooltip's own draws (panel/bars/frame-redraw fallback rects, \
+             the hover dim's colour range boundary, and the tooltip text) must \
+             land after slot_vertex_count, in the carried pass — otherwise \
+             they draw in the same pass as, and can end up under, every \
+             widget's own icon"
+        );
+
+        // The control: with nothing hovered, there is no tooltip content at
+        // all, so the carried range must be empty — proving the assertion
+        // above is measuring the hover, not merely "this screen always has a
+        // carried range" (the hover-dim rect alone, gated on `fade > 0.0`,
+        // could do that on its own if this control did not zero it too).
+        let no_hover = AdvancementsView {
+            hovered: None,
+            fade: 0.0,
+            ..view
+        };
+        let geo_idle = advancements_geometry(&layout, no_hover, 1, 1280, 720, None, None, None, None);
+        assert_eq!(
+            geo_idle.slot_vertex_count,
+            geo_idle.verts.len() / COLOUR_FLOATS_PER_VERTEX,
+            "no hover and no fade, so no carried colour range at all"
+        );
     }
 
     #[test]

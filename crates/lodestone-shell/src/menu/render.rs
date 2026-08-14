@@ -104,7 +104,7 @@ pub use frame::{
     AccountEntryView, Align, Arrow, FaviconCache, MenuBackdrop, MenuFrame, MenuLabel, MenuNotice,
     MenuProgress,
     MenuRow, PROGRESS_BAR_BG, PROGRESS_BAR_FG, PROGRESS_BAR_H, PROGRESS_BAR_W, PackEntryView,
-    ServerEntryView, WorldEntryView, notice_rect, owns_frame,
+    ServerEntryView, TabEntryView, WorldEntryView, notice_rect, owns_frame,
 };
 pub use measure::{
     EDIT_BOX_H, field_rect, field_row_rects, logical_canvas, menu_row_under, row_rect, text_px,

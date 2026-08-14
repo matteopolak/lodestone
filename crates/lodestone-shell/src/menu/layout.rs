@@ -1493,6 +1493,57 @@ impl LayoutElement for SpacerElement {
     fn visit_widgets(&self, _visitor: &mut dyn FnMut(&Widget)) {}
 }
 
+// -- the tab widget's row geometry (issue #564) ------------------------------
+//
+// `MenuTabBar.arrangeElements` (`MenuTabBar.java:67-82`) — not a
+// `LayoutElement`, unlike everything above: a `MenuTabBar` positions its own
+// children directly rather than through `LinearLayout`/`GridLayout`
+// arithmetic, so this is transcribed as a free function instead of a type.
+
+/// `MenuTabBar.HEIGHT` (`MenuTabBar.java:17`).
+pub const TAB_BAR_HEIGHT: f32 = 24.0;
+/// `MenuTabBar.MAX_WIDTH` (`:18`).
+const TAB_BAR_MAX_WIDTH: f32 = 400.0;
+
+/// `Mth.roundToward(int, int)` (`Mth.java:674-676`): round `value` **up** to
+/// the nearest multiple of `multiple`, via `positiveCeilDiv`.
+///
+/// Transcribed for the `f32` geometry this crate uses everywhere else rather
+/// than reproducing vanilla's `int` type. `positiveCeilDiv` exists to get the
+/// sign right for a *negative* `value` (`-Math.floorDiv(-input, divisor)`);
+/// every call site in [`tab_bar_geometry`] passes a non-negative `value` (a
+/// tab's share of a canvas width, or the canvas's own centring remainder,
+/// which [`tab_bar_geometry`]'s own doc shows is always positive), so the
+/// plain `ceil` division below is the same function on the domain this crate
+/// actually evaluates it on.
+#[must_use]
+pub fn round_toward(value: f32, multiple: f32) -> f32 {
+    (value / multiple).ceil() * multiple
+}
+
+/// `MenuTabBar.arrangeElements(width)` (`MenuTabBar.java:67-82`): the tab
+/// row's own left edge and each tab's (equal) width, for `tab_count` tabs
+/// spread across a canvas `width` px wide.
+///
+/// Returns `(start_x, tab_width)`; tab `i`'s rect is
+/// `(start_x + tab_width * i, 0.0, tab_width, `[`TAB_BAR_HEIGHT`]`)`.
+///
+/// Vanilla's `tabsWidth` is `min(400, width) - 28` (`MARGIN = 14` either
+/// side), each tab gets an equal, 2 px-rounded share of it, and the row is
+/// then centred (also 2 px-rounded) rather than flush left — `roundToward`
+/// always rounds *up*, so the centring is asymmetric by construction on an
+/// odd remainder, exactly as vanilla's is. `tabs_width < width` always holds
+/// (`min(400, width) - 28 < width` for any `width > -28`), so
+/// `width - tabs_width` — [`round_toward`]'s input here — is always positive.
+#[must_use]
+pub fn tab_bar_geometry(width: f32, tab_count: usize) -> (f32, f32) {
+    let tabs_width = (width.min(TAB_BAR_MAX_WIDTH) - 28.0).max(0.0);
+    let count = (tab_count.max(1)) as f32;
+    let tab_width = round_toward(tabs_width / count, 2.0);
+    let start_x = round_toward((width - tabs_width) / 2.0, 2.0);
+    (start_x, tab_width)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1958,5 +2009,60 @@ mod tests {
         let mut hf = HeaderAndFooterLayout::new(400.0, 200.0);
         hf.arrange_elements();
         assert_eq!(hf.contents().y(), 63.0);
+    }
+
+    // -- the tab widget's geometry (issue #564) ------------------------------
+
+    #[test]
+    fn round_toward_rounds_up_to_the_multiple_never_down() {
+        assert_eq!(round_toward(0.0, 2.0), 0.0);
+        assert_eq!(round_toward(1.0, 2.0), 2.0, "not 0 -- always rounds up");
+        assert_eq!(round_toward(2.0, 2.0), 2.0, "already a multiple: unchanged");
+        assert_eq!(round_toward(3.0, 2.0), 4.0);
+        assert_eq!(round_toward(124.0, 2.0), 124.0);
+        assert_eq!(round_toward(125.0, 2.0), 126.0);
+    }
+
+    /// Three tabs at 854 px — the width every other geometry test in this
+    /// tree measures against. Hand-derived from `MenuTabBar.java:70-80`
+    /// rather than round-tripped through [`tab_bar_geometry`] itself:
+    /// `tabsWidth = min(400, 854) - 28 = 372`, `tabWidth =
+    /// roundToward(372 / 3, 2) = roundToward(124, 2) = 124`, `startX =
+    /// roundToward((854 - 372) / 2, 2) = roundToward(241, 2) = 242`.
+    #[test]
+    fn tab_bar_geometry_matches_vanillas_own_arithmetic_at_854_wide() {
+        let (start_x, tab_width) = tab_bar_geometry(854.0, 3);
+        assert_eq!(tab_width, 124.0);
+        assert_eq!(start_x, 242.0);
+        // The three tabs' rects, laid out left to right, must not overlap and
+        // must not overrun the canvas.
+        for i in 0..3u32 {
+            let x = start_x + tab_width * i as f32;
+            assert!(x >= 0.0 && x + tab_width <= 854.0, "tab {i} at x={x}");
+        }
+    }
+
+    /// `min(400, width)` clamps at a wide canvas — the row does not keep
+    /// growing past vanilla's own 400 px ceiling.
+    #[test]
+    fn tab_bar_width_is_capped_on_a_wide_canvas() {
+        let (start_x_wide, tab_width_wide) = tab_bar_geometry(1280.0, 3);
+        let (start_x_max, tab_width_max) = tab_bar_geometry(428.0, 3);
+        // tabsWidth = min(400, 428) - 28 = 372, identical to the 400-ceiling
+        // case at 1280 px: tabsWidth = min(400, 1280) - 28 = 372.
+        assert_eq!(tab_width_wide, tab_width_max);
+        // The row centres differently on the two canvases even though its own
+        // width is the same, because centring depends on the *canvas* width.
+        assert_ne!(start_x_wide, start_x_max);
+    }
+
+    #[test]
+    fn a_single_tab_gets_the_whole_row_and_the_count_is_never_treated_as_zero() {
+        // `tab_count.max(1)` guards the division; a caller that (incorrectly)
+        // passes 0 must not divide by it.
+        let (_, width_one) = tab_bar_geometry(854.0, 1);
+        let (_, width_zero_guarded) = tab_bar_geometry(854.0, 0);
+        assert_eq!(width_one, width_zero_guarded);
+        assert_eq!(width_one, round_toward(372.0, 2.0));
     }
 }

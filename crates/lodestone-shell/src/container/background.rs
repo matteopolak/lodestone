@@ -329,20 +329,44 @@ impl ContainerBackground {
         })
     }
 
+    /// `AdvancementsScreen.BACKGROUND_TEXTURE_WIDTH`/`_HEIGHT` (`:34-35`) — the
+    /// declared sheet size [`Self::advancements_window_quad`] scales its
+    /// `252 x 140` sample against.
+    const BACKGROUND_TEXTURE_SIZE: f32 = 256.0;
+
     /// The Advancements screen's window blit (issue #167) —
     /// `graphics.blit(..., WINDOW_LOCATION, leftPos, topPos, 0, 0, 252, 140, 256,
     /// 256)` (`AdvancementsScreen.java:205`).
+    ///
+    /// The `252 x 140` sample is scaled by the sprite's **real placed size**
+    /// against vanilla's declared `256 x 256` sheet
+    /// (`BACKGROUND_TEXTURE_WIDTH`/`HEIGHT`, `AdvancementsScreen.java:34-35`) —
+    /// issue #565's first defect ("the bottom and right side don't have UI on
+    /// the edges"). `window.png` has no sibling `.mcmeta` (see this struct's
+    /// own doc), so a higher-resolution pack is the only way this sheet's real
+    /// size can differ from 256x256, and nothing else here would notice: the
+    /// unscaled version always sampled a fixed 252x140 **real pixels**
+    /// starting at the sprite's atlas origin, so a 2x pack (a `512x512`
+    /// sheet) sampled only its top-left quarter — cropping the window's own
+    /// bottom and right edges clean off, exactly the reported symptom. The
+    /// same fraction-of-declared-size fix as the nine-slice arm (issue #561),
+    /// applied to this hand-rolled sub-rect blit instead, since `window.png`
+    /// is loose `textures/gui/container/**` art and never reaches
+    /// [`lodestone_render::GuiAtlas`]'s `GuiScaling` system at all.
     #[must_use]
     pub(crate) fn advancements_window_quad(&self, x: f32, y: f32) -> Option<GuiSpriteQuad> {
         use crate::menu::advancements::{WINDOW_H, WINDOW_W};
         let sprite = self.atlas.sprite(&self.advancements_window)?;
         let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
+        let scale_x = sprite.width as f32 / Self::BACKGROUND_TEXTURE_SIZE;
+        let scale_y = sprite.height as f32 / Self::BACKGROUND_TEXTURE_SIZE;
+        let (sample_w, sample_h) = (WINDOW_W * scale_x, WINDOW_H * scale_y);
         Some(GuiSpriteQuad {
             dst: [x, y, WINDOW_W, WINDOW_H],
             uv_min: [sprite.x as f32 / aw, sprite.y as f32 / ah],
             uv_max: [
-                (sprite.x as f32 + WINDOW_W) / aw,
-                (sprite.y as f32 + WINDOW_H) / ah,
+                (sprite.x as f32 + sample_w) / aw,
+                (sprite.y as f32 + sample_h) / ah,
             ],
         })
     }
@@ -353,6 +377,15 @@ impl ContainerBackground {
     /// survived the viewport clamp; the UV window is narrowed by the same
     /// fraction, which is what makes CPU clipping look like vanilla's scissor
     /// (`crate::menu::advancements`' module doc explains why there is no scissor).
+    ///
+    /// The fraction (`u0`/`v0`/`u1`/`v1`) is measured against `full`'s
+    /// **declared** `16 x 16` size, since `full`/`dst` are already logical
+    /// layout rects at that scale — but the fraction is then applied to the
+    /// sprite's **real** placed size (`sprite.width`/`height`), not `full.w`/
+    /// `full.h` again, for the same reason [`Self::advancements_window_quad`]
+    /// scales its own sample: a higher-resolution tile texture has no
+    /// `.mcmeta` to declare it, so `full.w`/`full.h` would otherwise be
+    /// reused as a real-pixel span they are not.
     #[must_use]
     pub(crate) fn advancements_tile_quad(
         &self,
@@ -368,10 +401,11 @@ impl ContainerBackground {
         let u1 = (dst.x + dst.w - full.x) / full.w;
         let v1 = (dst.y + dst.h - full.y) / full.h;
         let (sx, sy) = (sprite.x as f32, sprite.y as f32);
+        let (real_w, real_h) = (sprite.width as f32, sprite.height as f32);
         Some(GuiSpriteQuad {
             dst: [dst.x, dst.y, dst.w, dst.h],
-            uv_min: [(sx + u0 * full.w) / aw, (sy + v0 * full.h) / ah],
-            uv_max: [(sx + u1 * full.w) / aw, (sy + v1 * full.h) / ah],
+            uv_min: [(sx + u0 * real_w) / aw, (sy + v0 * real_h) / ah],
+            uv_max: [(sx + u1 * real_w) / aw, (sy + v1 * real_h) / ah],
         })
     }
 
