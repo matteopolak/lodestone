@@ -446,6 +446,34 @@ pub struct EntityMetadataUpdate {
     /// reads as vanilla's own accessor default of `0` — `getIcon(0)` is cell 0 —
     /// never as a cleared value.
     pub experience_orb_value: Option<i32>,
+    /// Whether a tamed-animal-family entity is tamed, when present and the
+    /// entity is known to belong to that family.
+    ///
+    /// Two different vanilla bytes feed this one field: `TamableAnimal.isTame()`
+    /// (`DATA_FLAGS_ID & 0x04`) for wolf/cat/parrot, and `AbstractHorse.isTamed()`
+    /// (`DATA_ID_FLAGS & 0x02`) for the horse family — a *different* bit at the
+    /// same wire index. A version adapter resolves which family the concrete
+    /// entity type belongs to and reads the matching bit; this field is the
+    /// version-free result either way, so a consumer never needs to know the bit
+    /// differed.
+    ///
+    /// # Why this can be absent on a packet that carried the byte
+    ///
+    /// Same shape as [`living_flags`](Self::living_flags): index 18's `BYTE` is
+    /// also `Sheep.DATA_WOOL_ID` and `Shulker.DATA_COLOR_ID`. A version adapter
+    /// that cannot establish the entity is a tamable-animal or a horse leaves
+    /// this `None` rather than surfacing a byte that may mean a wool colour.
+    /// `None` therefore means "not known to be a tameable family", which a
+    /// consumer must treat as "draw the untamed/wild appearance", never as a
+    /// cleared bitfield.
+    pub tamed: Option<bool>,
+    /// `TamableAnimal.isInSittingPose()` (`DATA_FLAGS_ID & 0x01`), when present
+    /// and the entity is known to be a `TamableAnimal` (wolf/cat/parrot). The
+    /// horse family has no equivalent bit at this index, so this is `None` for
+    /// every horse-family entity regardless of pose. Same absence rule as
+    /// [`tamed`](Self::tamed): `None` means "not known to be a tamable animal",
+    /// not "not sitting".
+    pub sitting: Option<bool>,
 }
 
 impl EntityMetadataUpdate {
@@ -467,6 +495,8 @@ impl EntityMetadataUpdate {
             && self.creeper_powered.is_none()
             && self.creeper_ignited.is_none()
             && self.experience_orb_value.is_none()
+            && self.tamed.is_none()
+            && self.sitting.is_none()
     }
 }
 
