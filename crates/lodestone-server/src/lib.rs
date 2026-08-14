@@ -343,6 +343,17 @@ mod tick;
 pub mod tick_area;
 mod vitals;
 mod weather;
+/// Lightning: per-chunk strike-target selection during a thunderstorm, the
+/// `LightningBolt` life-cycle and its entity-facing effects (`docs/lightning.md`).
+/// Public because spawning the bolt as a real entity and applying an effect
+/// both happen outside this module, in `crate::mobs` — this module only
+/// decides, and hands its decision off through [`lightning::LightningFeed`].
+pub mod lightning;
+/// Vanilla's regional difficulty (`DifficultyInstance`) — the scalar grown
+/// from world difficulty, elapsed game time and moon phase
+/// (`docs/regional-difficulty.md`). Public because [`lightning`]'s
+/// skeleton-horse-trap roll reads it from outside this crate's tick loop.
+pub mod regional_difficulty;
 mod world_spawn;
 /// One shared, persistable store for the world's scalars — game rules,
 /// difficulty and the clock (issues #327, #328, #323). Public because a host and
