@@ -452,49 +452,159 @@ fn an_unusable_sky_color_reads_as_absent_rather_than_as_a_default() {
 // Server-side mirror (issue #275)
 // ---------------------------------------------------------------------------
 
-/// The server's `registry_data` payloads are byte-identical to the captured
-/// vanilla fixtures this file decodes above.
+/// The server's Configuration-phase registry burst is byte-identical to the
+/// captured vanilla fixtures, for every one of the 29 synchronized
+/// registries, and carries `select_known_packs` first and `update_tags` last.
 ///
-/// Issue #275 made the server *send* registry data during Configuration.
+/// Issue #275 made the server send the **full** synchronized-registry set
+/// (previously just `dimension_type`/`world_clock`) plus `select_known_packs`
+/// and `update_tags`.
 /// [`V770ServerProtocol::encode_registry_data`](lodestone_v770::V770ServerProtocol)'s
-/// NBT bodies are copied verbatim from the same two fixtures this file decodes,
-/// so the proof is a round-trip through the public seam: the directives it
-/// emits, compared against every byte a real vanilla 26.2 server authored. The
-/// fixture stands outside both encoder and decoder, so two symmetric
-/// misunderstandings cannot satisfy it (`CLAUDE.md`, evidence standards).
+/// bodies are copied verbatim from fixtures this crate's `live_registry_data*`
+/// gates captured from a real vanilla 26.2 server, so the proof is a
+/// round-trip through the public seam: the directives it emits, compared
+/// against every byte a real server authored. The fixture stands outside
+/// both encoder and decoder, so two symmetric misunderstandings cannot
+/// satisfy it (`CLAUDE.md`, evidence standards).
 #[test]
 fn server_registry_data_payloads_match_the_captured_vanilla_fixtures() {
     use lodestone_server::{ServerDirective, ServerProtocol};
-    use lodestone_v770::{V770ServerProtocol, packet_ids::configuration::clientbound::REGISTRY_DATA};
+    use lodestone_v770::packets::registry::RegistryData;
+    use lodestone_v770::{
+        V770ServerProtocol,
+        packet_ids::configuration::clientbound::{
+            REGISTRY_DATA, SELECT_KNOWN_PACKS, UPDATE_TAGS,
+        },
+    };
+
+    // The 29 entries of `RegistryDataLoader.SYNCHRONIZED_REGISTRIES`
+    // (`.cache/mc/26.2/src/net/minecraft/resources/RegistryDataLoader.java`),
+    // not `generated/reports/registries.json` — that file is authoritative
+    // about registry *contents*, not which registries are synchronized, and
+    // it omits `dimension_type`/`world_clock` entirely (`CLAUDE.md`).
+    const SYNCHRONIZED_REGISTRIES: &[&str] = &[
+        "minecraft:worldgen/biome",
+        "minecraft:chat_type",
+        "minecraft:trim_pattern",
+        "minecraft:trim_material",
+        "minecraft:wolf_variant",
+        "minecraft:wolf_sound_variant",
+        "minecraft:pig_variant",
+        "minecraft:pig_sound_variant",
+        "minecraft:frog_variant",
+        "minecraft:cat_variant",
+        "minecraft:cat_sound_variant",
+        "minecraft:cow_sound_variant",
+        "minecraft:cow_variant",
+        "minecraft:chicken_sound_variant",
+        "minecraft:chicken_variant",
+        "minecraft:zombie_nautilus_variant",
+        "minecraft:painting_variant",
+        "minecraft:sulfur_cube_archetype",
+        "minecraft:dimension_type",
+        "minecraft:damage_type",
+        "minecraft:banner_pattern",
+        "minecraft:enchantment",
+        "minecraft:jukebox_song",
+        "minecraft:instrument",
+        "minecraft:test_environment",
+        "minecraft:test_instance",
+        "minecraft:dialog",
+        "minecraft:world_clock",
+        "minecraft:timeline",
+    ];
 
     let directives = V770ServerProtocol.encode_registry_data();
-    let sends: Vec<(&[u8], i32)> = directives
+    assert_eq!(
+        directives.len(),
+        31,
+        "select_known_packs + 29 registries + update_tags"
+    );
+
+    let sends: Vec<(i32, &[u8])> = directives
         .iter()
-        .filter_map(|directive| match directive {
-            ServerDirective::Send { packet_id, payload } => {
-                Some((payload.as_slice(), *packet_id))
-            }
-            _ => None,
+        .map(|directive| match directive {
+            ServerDirective::Send { packet_id, payload } => (*packet_id, payload.as_slice()),
+            other => panic!("expected every configuration directive to be a Send, got {other:?}"),
         })
         .collect();
 
+    // --- Order: select_known_packs first, update_tags last ----------------
     assert_eq!(
-        sends.len(),
-        2,
-        "exactly the two registries this server's join sequence depends on"
+        sends.first().map(|(id, _)| *id),
+        Some(SELECT_KNOWN_PACKS),
+        "select_known_packs must precede every registry_data packet, matching \
+         SynchronizeRegistriesTask's own wire order"
     );
-    for (_, packet_id) in &sends {
-        assert_eq!(*packet_id, REGISTRY_DATA, "every payload is a registry_data packet");
-    }
     assert_eq!(
-        sends[0].0,
+        sends.first().map(|(_, payload)| *payload),
+        Some([0u8].as_slice()),
+        "requesting zero known packs — this server ships no datapacks"
+    );
+    assert_eq!(
+        sends.last().map(|(id, _)| *id),
+        Some(UPDATE_TAGS),
+        "update_tags must follow every registry_data packet"
+    );
+    assert_eq!(
+        sends.last().map(|(_, payload)| *payload),
+        Some(fixture("update_tags_configuration.hex").as_slice()),
+        "update_tags payload must match vanilla's captured bytes byte-for-byte"
+    );
+
+    // --- The 29 registries in between --------------------------------------
+    let registry_sends = &sends[1..sends.len() - 1];
+    assert_eq!(registry_sends.len(), 29);
+
+    let mut by_name: std::collections::BTreeMap<String, &[u8]> = std::collections::BTreeMap::new();
+    for &(packet_id, payload) in registry_sends {
+        assert_eq!(packet_id, REGISTRY_DATA, "every middle payload is registry_data");
+        let mut reader = lodestone_core::Reader::new(payload);
+        let decoded = RegistryData::decode(&mut reader, CTX).expect("must decode");
+        reader.ensure_empty().expect("no trailing bytes");
+        assert!(
+            by_name.insert(decoded.registry, payload).is_none(),
+            "a registry must not be sent twice"
+        );
+    }
+
+    let sent: Vec<&str> = by_name.keys().map(String::as_str).collect();
+    let mut expected: Vec<&str> = SYNCHRONIZED_REGISTRIES.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        sent, expected,
+        "the server must send exactly the 29 synchronized registries, no more, no fewer"
+    );
+
+    // --- Spot-check byte-identity against the captured fixtures ------------
+    // The two structured registries (resolved elsewhere by holder id) plus a
+    // sample of the opaque pass-through ones, so this is a content check, not
+    // just a count.
+    assert_eq!(
+        by_name["minecraft:dimension_type"],
         fixture("registry_data_dimension_type.hex"),
         "dimension_type payload must match vanilla's captured bytes byte-for-byte"
     );
     assert_eq!(
-        sends[1].0,
+        by_name["minecraft:world_clock"],
         fixture("registry_data_world_clock.hex"),
         "world_clock payload must match vanilla's captured bytes byte-for-byte"
+    );
+    assert_eq!(
+        by_name["minecraft:worldgen/biome"],
+        fixture("registry_data_worldgen_biome.hex"),
+        "worldgen/biome payload must match vanilla's captured bytes byte-for-byte"
+    );
+    assert_eq!(
+        by_name["minecraft:enchantment"],
+        fixture("registry_data_enchantment.hex"),
+        "enchantment payload must match vanilla's captured bytes byte-for-byte"
+    );
+    assert_eq!(
+        by_name["minecraft:test_environment"],
+        fixture("registry_data_test_environment.hex"),
+        "test_environment payload must match vanilla's captured bytes byte-for-byte \
+         (the smallest registry — an empty-or-near-empty entry list)"
     );
 }
 
