@@ -1061,6 +1061,22 @@ pub struct PickItemFromEntity {
     pub include_data: bool,
 }
 
+/// Clientbound `set_held_slot` packet — the server's answer to a middle-click
+/// pick (issue #558), resynchronising the client's selected hotbar slot after
+/// `ServerGamePacketListenerImpl::tryPickItem`. Also the packet a real
+/// vanilla server sends for any other server-initiated selection change; this
+/// crate's client already decodes it into `ClientEvent::HeldSlotChanged`
+/// (`adapter::player::handle_play_player`) and had no server-side encoder.
+///
+/// Wire layout: a single VarInt hotbar slot index (`0`-`8`).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:set_held_slot", state = Play, bound = Client)]
+pub struct SetHeldSlot {
+    /// Selected hotbar slot index.
+    #[mc(varint)]
+    pub slot: i32,
+}
+
 /// Serverbound `rename_item` packet (anvil name field).
 ///
 /// Wire layout: a single UTF string, the new item name.

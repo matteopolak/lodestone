@@ -120,7 +120,8 @@ use crate::packets::game::{
     SelectTrade, ServerboundPlayerAbilities, SetBorderCenter, SetBorderLerpSize,
     SetBorderSize, SetBorderWarningDelay, SetBorderWarningDistance, SetCarriedItem,
     SetCommandBlock, SetCommandMinecart, SetDefaultSpawnPosition, SetGameRule, SetHealth,
-    SetJigsawBlock, SetStructureBlock, SetTestBlock, SignUpdate, Swing, UseItem, UseItemOn,
+    SetHeldSlot, SetJigsawBlock, SetStructureBlock, SetTestBlock, SignUpdate, Swing, UseItem,
+    UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginCompression, LoginDisconnect, LoginFinished, LoginHello};
@@ -3410,13 +3411,26 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
+            // Issue #558: middle-click pick. `crate::server`'s consumer runs
+            // vanilla's `tryPickItem` three-way split (hotbar-select /
+            // inventory-swap / creative-create); this arm is only the wire
+            // shape, unpacking `pos` the same way `USE_ITEM_ON` above does.
             State::Play if packet_id == play::serverbound::PICK_ITEM_FROM_BLOCK => {
-                let _ = decode_full::<PickItemFromBlock>(payload);
-                ServerBound::Ignored
+                match decode_full::<PickItemFromBlock>(payload) {
+                    Some(PickItemFromBlock { pos, include_data }) => ServerBound::PickItemFromBlock {
+                        pos: unpack_block_pos(pos),
+                        include_data,
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::PICK_ITEM_FROM_ENTITY => {
-                let _ = decode_full::<PickItemFromEntity>(payload);
-                ServerBound::Ignored
+                match decode_full::<PickItemFromEntity>(payload) {
+                    Some(PickItemFromEntity { entity_id, include_data }) => {
+                        ServerBound::PickItemFromEntity { entity_id, include_data }
+                    }
+                    None => ServerBound::Ignored,
+                }
             }
             // Bonus beyond this issue's own 16-packet count (its "remaining
             // container/recipe-adjacent ids" clause) — the same bundle-select
@@ -4914,6 +4928,21 @@ impl ServerProtocol for V770ServerProtocol {
         ]
     }
 
+    /// `/tp`'s producer — see [`ServerProtocol::encode_teleport`]'s trait doc
+    /// for why this method exists at all. The wire body is the exact same
+    /// `encode_player_position_teleport` free function the join sequence and
+    /// [`encode_respawn`](Self::encode_respawn) already use, so all three stay
+    /// byte-identical for the same inputs by construction, not by convention —
+    /// teleport id `0`, matching every other caller here: this crate tracks no
+    /// `ACCEPT_TELEPORTATION` id and never has (see that decode arm's own
+    /// comment), so a distinct id would buy nothing.
+    fn encode_teleport(&self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::PLAYER_POSITION,
+            payload: encode_player_position_teleport(0, x, y, z, yaw, pitch),
+        }
+    }
+
     /// The dimension-change respawn pair — see
     /// [`ServerProtocol::encode_dimension_change`]'s trait doc for why this is a
     /// separate encoder from [`encode_respawn`](Self::encode_respawn) rather than
@@ -5053,6 +5082,15 @@ impl ServerProtocol for V770ServerProtocol {
             packet_id: play::clientbound::CONTAINER_SET_DATA,
             payload: encode_container_data_body(window_id, property, value),
         }
+    }
+
+    /// See [`ServerProtocol::encode_set_held_slot`]'s trait doc comment
+    /// (issue #558). The client side of this exact wire shape already exists
+    /// (`adapter::player::handle_play_player`'s `SET_HELD_SLOT` arm decodes
+    /// the same single VarInt into `ClientEvent::HeldSlotChanged`); this was
+    /// the missing server-side encoder.
+    fn encode_set_held_slot(&self, slot: u8) -> ServerDirective {
+        send(play::clientbound::SET_HELD_SLOT, &SetHeldSlot { slot: i32::from(slot) })
     }
 
     /// See [`ServerProtocol::encode_initialize_border`]'s trait doc comment
