@@ -112,7 +112,7 @@ fn effective_levels_are_capped_by_the_smallest_sprite() {
     );
 }
 
-/// Issue #575 ("sprites bleed into each other at distance"): a GPU sampler
+/// Sprites bleed into each other at distance: a GPU sampler
 /// minifying with `Linear` reads across a sprite boundary unless the atlas
 /// reserves a gutter, and that gutter has to be re-extruded (filled from the
 /// sprite's own edge) at *every* mip level, not just level 0 — `pad` itself
