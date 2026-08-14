@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// `AmbientMoodSettings.LEGACY_CAVE_SETTINGS` — `AmbientMoodSettings.java:19`. Every
+/// `AmbientMoodSettings.LEGACY_CAVE_SETTINGS`. Every
 /// biome that sets a mood in real data reuses these three numbers with only the sound
 /// changed, which the value check below asserts.
 const LEGACY_TICK_DELAY: i64 = 6_000;
@@ -141,7 +141,7 @@ fn parse_all() -> BTreeMap<String, Parsed> {
             );
         }
 
-        // `additions` uses a compact list codec (`AmbientSounds.java:20`), so it is
+        // `additions` uses a compact list codec (`AmbientSounds.CODEC`), so it is
         // either a single object or an array. Both shapes must be accepted; real 26.2
         // data uses the single-object form, and assuming an array would panic.
         let additions = match o.get("additions") {

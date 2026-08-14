@@ -1,4 +1,4 @@
-//! Gates for situational music selection and scheduling (issue #135).
+//! Gates for situational music selection and scheduling.
 //!
 //! # What these assert, and why it is the identifier rather than "audio played"
 //!
@@ -111,13 +111,13 @@ fn in_biome(background: &BackgroundMusic) -> MusicSituation<'_> {
 // 1. The Musics table, against the jar
 // ---------------------------------------------------------------------------
 
-/// `Musics.java:11-21`, every field. These seven rows are the constants every
+/// `Musics`, every field. These seven rows are the constants every
 /// delay computation below is derived from, so if one drifts the rest of the file
 /// is measuring the wrong thing.
 #[test]
 fn the_musics_table_matches_the_jar() {
-    // (music, sound, min_delay, max_delay, replace) — Musics.java:11-17,
-    // with createGameMusic's 12000/24000/false from :19-21.
+    // (music, sound, min_delay, max_delay, replace) — Musics.MENU through Musics.END,
+    // with Musics.createGameMusic's 12000/24000/false for UNDER_WATER and GAME.
     let expected = [
         (&musics::MENU, "music.menu", 20, 600, true),
         (&musics::CREATIVE, "music.creative", 12_000, 24_000, false),
@@ -144,7 +144,7 @@ fn the_musics_table_matches_the_jar() {
     }
 
     // The two easiest to get wrong from the constant *name* rather than the
-    // registered event: END_BOSS is `music.dragon` (SoundEvents.java:1040), and
+    // registered event: END_BOSS is `music.dragon` (SoundEvents.MUSIC_DRAGON), and
     // END's min is FIVE_MINUTES, not the game tracks' TEN_MINUTES.
     assert_eq!(musics::END_BOSS.sound(), "music.dragon");
     assert_ne!(musics::END.min_delay, musics::GAME.min_delay);
@@ -159,7 +159,7 @@ fn the_musics_table_matches_the_jar() {
 /// track **identifier**, not merely "some track".
 #[test]
 fn a_named_biome_selects_the_jar_derived_track_identifier() {
-    // jungle sets only `default` (OverworldBiomes.java:112).
+    // jungle sets only `default` (`OverworldBiomes.jungle`).
     let jungle = biome_music("jungle").expect("jungle declares background music");
     assert_eq!(
         jungle
@@ -178,8 +178,9 @@ fn a_named_biome_selects_the_jar_derived_track_identifier() {
         Some("music.overworld.jungle")
     );
 
-    // Several biomes share one track — birch_forest, dark_forest and
-    // old_growth_birch_forest all use MUSIC_BIOME_FOREST (OverworldBiomes.java:600).
+    // Several biomes share one track — birch_forest and old_growth_birch_forest use
+    // MUSIC_BIOME_FOREST via `OverworldBiomes.forest`, and dark_forest sets the same
+    // event directly in `OverworldBiomes.darkForest`.
     for biome in ["forest", "birch_forest", "dark_forest", "old_growth_birch_forest"] {
         assert_eq!(
             biome_music(biome)
@@ -190,7 +191,8 @@ fn a_named_biome_selects_the_jar_derived_track_identifier() {
         );
     }
 
-    // The Nether biomes each have their own (NetherBiomes.java:65..227).
+    // The Nether biomes each have their own (`NetherBiomes.netherWastes` through
+    // `.warpedForest`, one `BACKGROUND_MUSIC` setAttribute call apiece).
     assert_eq!(
         biome_music("nether_wastes")
             .and_then(|m| m.select(false, false))
@@ -205,13 +207,13 @@ fn a_named_biome_selects_the_jar_derived_track_identifier() {
     );
 }
 
-/// `BackgroundMusic.select` (`BackgroundMusic.java:35-41`). The precedence is the
+/// `BackgroundMusic.select`. The precedence is the
 /// part worth pinning: **underwater outranks creative**, and each specific slot
 /// falls back to `default` only when *absent*.
 #[test]
 fn slot_precedence_is_underwater_then_creative_then_default() {
     // The ocean family is the only one with all three slots
-    // (OverworldBiomes.java:355 — OVERWORLD.withUnderwater(UNDER_WATER)).
+    // (`OverworldBiomes.baseOcean` — OVERWORLD.withUnderwater(UNDER_WATER)).
     let ocean = biome_music("ocean").expect("ocean declares background music");
     assert!(ocean.default.is_some() && ocean.creative.is_some() && ocean.underwater.is_some());
 
@@ -245,7 +247,7 @@ fn slot_precedence_is_underwater_then_creative_then_default() {
     }
 }
 
-/// `Minecraft.getSituationalMusic` (`Minecraft.java:2601-2621`), in order.
+/// `Minecraft.getSituationalMusic`, in order.
 #[test]
 fn situational_selection_follows_the_documented_order() {
     let jungle = biome_music("jungle").unwrap();
@@ -290,7 +292,8 @@ fn situational_selection_follows_the_documented_order() {
     );
 
     // pale_garden is the one biome that declares *no* music
-    // (OverworldBiomes.java:596, BackgroundMusic.EMPTY) — and it must come back as
+    // (`OverworldBiomes.darkForest`'s pale-garden branch sets `BackgroundMusic.EMPTY`)
+    // — and it must come back as
     // an empty-but-present entry, distinct from "biome not in the table".
     let pale = biome_music("pale_garden").expect("pale_garden has a present, empty entry");
     assert!(pale.is_empty(), "pale_garden must be BackgroundMusic::EMPTY");
@@ -313,7 +316,7 @@ fn situational_selection_follows_the_documented_order() {
     );
 }
 
-/// `Minecraft.getMusicVolume` (`Minecraft.java:2623-2627`): a screen with its own
+/// `Minecraft.getMusicVolume`: a screen with its own
 /// music forces full volume, overriding the biome attribute.
 #[test]
 fn screen_music_forces_full_volume() {
@@ -335,15 +338,16 @@ fn screen_music_forces_full_volume() {
 // 3. Delays: the computed value, not "it is positive"
 // ---------------------------------------------------------------------------
 
-/// `MusicFrequency.getNextSongDelay` (`MusicManager.java:174-186`) for every
+/// `MusicManager.MusicFrequency.getNextSongDelay` for every
 /// variant, predicting the exact value and excluding the plausible wrong ones.
 #[test]
 fn the_computed_delay_equals_the_jar_derived_value() {
     const SEED: i64 = 0x5EED_1234;
 
-    // DEFAULT: cap = 20 * 1200 = 24000 (MusicManager.java:159, :170), so the range
+    // DEFAULT: cap = 20 * 1200 = 24000 (`MusicManager.MusicFrequency.DEFAULT`'s
+    // declared minutes, times its constructor's `* 1200`), so the range
     // is min(12000,24000)..=min(24000,24000) = 12000..=24000 inclusive
-    // (Mth.java:146-148).
+    // (`Mth.nextInt`).
     let mut rng = JavaRandom::new(SEED);
     let got = MusicFrequency::Default.next_song_delay(Some(&musics::GAME), &mut rng);
 
@@ -374,7 +378,7 @@ fn the_computed_delay_equals_the_jar_derived_value() {
     );
 
     // FREQUENT: cap = 10 * 1200 = 12000, so BOTH ends clamp to 12000 and
-    // Mth.nextInt's `min >= max` early return (Mth.java:147) yields exactly 12000
+    // `Mth.nextInt`'s `min >= max` early return yields exactly 12000
     // while consuming NO randomness. That is an exact prediction with no seed
     // dependence at all, and it pins the early return.
     let mut rng = JavaRandom::new(SEED);
@@ -387,7 +391,8 @@ fn the_computed_delay_equals_the_jar_derived_value() {
         "the min >= max path must consume no random draws"
     );
 
-    // CONSTANT: a flat STARTING_DELAY (MusicManager.java:179-181), *not* its
+    // CONSTANT: a flat STARTING_DELAY (`MusicManager.MusicFrequency.getNextSongDelay`'s
+    // `this == CONSTANT` branch), *not* its
     // max_frequency of 0 — which would restart music every tick.
     assert_eq!(MusicFrequency::Constant.max_frequency(), 0);
     let mut rng = JavaRandom::new(SEED);
@@ -397,7 +402,7 @@ fn the_computed_delay_equals_the_jar_derived_value() {
     );
     assert_eq!(STARTING_DELAY, 100);
 
-    // No music selected: the raw cap, unrandomised (MusicManager.java:175-177).
+    // No music selected: the raw cap, unrandomised (`getNextSongDelay`'s `music == null` branch).
     for freq in MusicFrequency::ALL {
         let mut rng = JavaRandom::new(SEED);
         assert_eq!(
@@ -410,14 +415,14 @@ fn the_computed_delay_equals_the_jar_derived_value() {
     assert_eq!(MusicFrequency::Frequent.max_frequency(), 12_000);
 }
 
-/// `Mth.nextInt` is inclusive at **both** ends (`Mth.java:146-148`), which a
+/// `Mth.nextInt` is inclusive at **both** ends, which a
 /// single draw cannot demonstrate. Drawing many values from one fixed stream and
 /// asserting the observed extremes land exactly on the bounds does — and being
 /// seeded, it is deterministic rather than probabilistic, and being a count it is
 /// immune to machine load.
 #[test]
 fn the_delay_range_is_inclusive_at_both_ends() {
-    // MENU's 20..=600 (Musics.java:11) is narrow enough that 20_000 draws from one
+    // MENU's 20..=600 (`Musics.MENU`) is narrow enough that 20_000 draws from one
     // stream hit both endpoints; a game track's 12001-wide range would not.
     let mut rng = JavaRandom::new(0x1234_5678);
     let (mut lo, mut hi) = (i32::MAX, i32::MIN);
@@ -429,7 +434,8 @@ fn the_delay_range_is_inclusive_at_both_ends() {
     assert_eq!(lo, 20, "min_delay must be attainable");
     assert_eq!(hi, 600, "max_delay must be attainable — the bound is inclusive");
 
-    // The zero-width tracks (CREDITS, END_BOSS at 0..=0, Musics.java:13-14) must
+    // The zero-width tracks (CREDITS, END_BOSS at 0..=0, `Musics.CREDITS` and
+    // `Musics.END_BOSS`) must
     // return 0 without asserting inside next_i32_bound, which panics on bound <= 0.
     let mut rng = JavaRandom::new(1);
     assert_eq!(next_int(&mut rng, 0, 0), 0);
@@ -444,7 +450,8 @@ fn the_delay_range_is_inclusive_at_both_ends() {
 // ---------------------------------------------------------------------------
 
 /// The manager starts a track only after the countdown expires, and the countdown
-/// is the jar's `STARTING_DELAY` on a fresh manager (`MusicManager.java:25`).
+/// is the jar's `STARTING_DELAY` on a fresh manager (vanilla's `nextSongDelay` field
+/// initializer).
 #[test]
 fn a_fresh_manager_waits_exactly_starting_delay_ticks_before_the_first_track() {
     let jungle = biome_music("jungle").unwrap();
@@ -455,8 +462,9 @@ fn a_fresh_manager_waits_exactly_starting_delay_ticks_before_the_first_track() {
 
     assert_eq!(mgr.next_song_delay(), STARTING_DELAY);
 
-    // `:58` clamps to max_delay (24000) which is larger, so the countdown is the
-    // starting 100. `:59` pre-decrements, so the 100th tick is the one that fires.
+    // `MusicManager.tick`'s `Math.min(nextSongDelay, music.maxDelay())` clamps to
+    // max_delay (24000) which is larger, so the countdown is the starting 100. Its
+    // trailing `--nextSongDelay` pre-decrements, so the 100th tick is the one that fires.
     for tick in 1..STARTING_DELAY {
         mgr.tick(&situation, &mut rng, &mut sink);
         assert!(
@@ -466,14 +474,15 @@ fn a_fresh_manager_waits_exactly_starting_delay_ticks_before_the_first_track() {
     }
     mgr.tick(&situation, &mut rng, &mut sink);
     assert_eq!(sink.started, vec!["music.overworld.jungle".to_string()]);
-    // `:81` — `startPlaying` parks the countdown at Integer.MAX_VALUE, and it is
-    // still parked at the end of the tick that started the track because `:58`
-    // already ran before `:59` fired.
+    // `MusicManager.startPlaying` parks the countdown at Integer.MAX_VALUE, and it is
+    // still parked at the end of the tick that started the track because the
+    // max_delay clamp already ran before the decrement fired.
     assert_eq!(mgr.next_song_delay(), i32::MAX);
     assert_eq!(mgr.current_track(), Some("music.overworld.jungle"));
 
-    // A playing track does not burn the countdown (`:59`'s `current == null`
-    // guard), but the clamp at `:58` is **outside** the `currentMusic != null`
+    // A playing track does not burn the countdown (`MusicManager.tick`'s
+    // `currentMusic == null` guard on the decrement), but the max_delay clamp is
+    // **outside** the `currentMusic != null`
     // block, so from the very next tick the parked value is `max_delay` rather
     // than MAX. It then stays there, because nothing decrements it.
     //
@@ -496,8 +505,8 @@ fn a_fresh_manager_waits_exactly_starting_delay_ticks_before_the_first_track() {
     );
 }
 
-/// `MENU` is flagged `replace_current_music` (`Musics.java:11`), so without
-/// `canReplace`'s second clause (`MusicManager.java:66`, "and is not the same
+/// `MENU` is flagged `replace_current_music` (`Musics.MENU`), so without
+/// `canReplace`'s second clause (`MusicManager.canReplace`, "and is not the same
 /// track") the title screen would stop and restart the menu track every tick.
 #[test]
 fn a_replacing_track_does_not_replace_itself() {
@@ -506,7 +515,8 @@ fn a_replacing_track_does_not_replace_itself() {
     let mut sink = RecordingSink::playing();
     let mut rng = JavaRandom::new(11);
 
-    // MENU's max_delay is 600, and `:58` clamps, so it starts within 100 ticks.
+    // MENU's max_delay is 600, and `MusicManager.tick`'s max_delay clamp applies, so
+    // it starts within 100 ticks.
     for _ in 0..STARTING_DELAY {
         mgr.tick(&situation, &mut rng, &mut sink);
     }
@@ -519,7 +529,7 @@ fn a_replacing_track_does_not_replace_itself() {
     assert_eq!(sink.stops, 0, "menu music was stopped and replaced by itself");
 }
 
-/// The tick's load-bearing ordering (`MusicManager.java:46-56`): on a replacing
+/// The tick's load-bearing ordering (`MusicManager.tick`'s replacing branch): on a replacing
 /// selection vanilla stops the old track and sets
 /// `nextSongDelay = nextInt(0, min_delay/2)`, then — in the *same* tick, because
 /// `currentMusic` was not cleared — sees an inactive track and `min`s the delay
@@ -539,7 +549,7 @@ fn a_replacing_selection_takes_the_min_of_two_draws() {
     assert_eq!(mgr.current_track(), Some("music.overworld.jungle"));
     assert_eq!(sink.stops, 0);
 
-    // Now the End boss starts: END_BOSS is replacing (Musics.java:14) and is a
+    // Now the End boss starts: END_BOSS is replacing (`Musics.END_BOSS`) and is a
     // different track, so canReplace is true.
     let boss = MusicSituation {
         end_boss_active: true,
@@ -549,11 +559,12 @@ fn a_replacing_selection_takes_the_min_of_two_draws() {
     // Predict both draws independently, from the jar's arithmetic, using a clone
     // of the RNG at exactly this point.
     let mut oracle = rng.clone();
-    // `:49` — Mth.nextInt(rng, 0, END_BOSS.min_delay / 2) = nextInt(0, 0) = 0,
-    // and Mth's min>=max early return consumes no draw for a zero-width range.
+    // `MusicManager.tick`'s stop branch — Mth.nextInt(rng, 0, END_BOSS.min_delay / 2)
+    // = nextInt(0, 0) = 0, and Mth's min>=max early return consumes no draw for a
+    // zero-width range.
     let first = next_int(&mut oracle, 0, musics::END_BOSS.min_delay / 2);
-    // `:54` — min with getNextSongDelay(END_BOSS): range min(0,24000)..=min(0,24000)
-    // = 0..=0, again no draw.
+    // The same tick's `!isActive` branch — min with getNextSongDelay(END_BOSS): range
+    // min(0,24000)..=min(0,24000) = 0..=0, again no draw.
     let second = MusicFrequency::Default.next_song_delay(Some(&musics::END_BOSS), &mut oracle);
     let predicted = first.min(second);
     assert_eq!(
@@ -564,8 +575,9 @@ fn a_replacing_selection_takes_the_min_of_two_draws() {
 
     mgr.tick(&boss, &mut rng, &mut sink);
     assert_eq!(sink.stops, 1, "the jungle track must have been stopped");
-    // Both assignments landed, then `:58` clamped to END_BOSS.max_delay (0), then
-    // `:59` decremented and fired in the same tick — so the boss track is already
+    // Both assignments landed, then the max_delay clamp reduced it to
+    // END_BOSS.max_delay (0), then the trailing decrement fired in the same tick —
+    // so the boss track is already
     // playing rather than merely scheduled.
     assert_eq!(predicted, 0);
     assert_eq!(
@@ -580,7 +592,7 @@ fn a_replacing_selection_takes_the_min_of_two_draws() {
 }
 
 /// A non-replacing selection must wait for the current track to end
-/// (`Musics.java:12,17` — `CREATIVE` and `GAME` are both non-replacing), which is
+/// (`Musics.CREATIVE` and `Musics.GAME` are both non-replacing), which is
 /// what stops music stuttering as you walk across a biome border.
 #[test]
 fn a_non_replacing_selection_waits_rather_than_interrupting() {
@@ -619,7 +631,7 @@ fn a_non_replacing_selection_waits_rather_than_interrupting() {
     );
 }
 
-/// `MusicManager.java:44` — with nothing selected the countdown is *floored* at
+/// `MusicManager.tick`'s `music == null` branch — with nothing selected the countdown is *floored* at
 /// `STARTING_DELAY` rather than counted down, so a music-less biome does not
 /// accumulate a fire-immediately countdown that discharges the moment you step
 /// out of it.
@@ -738,7 +750,7 @@ fn control_a_panicking_missing_track_fails_the_gate() {
 
 /// The other half of "no blocking wait": a silent start must not leave the
 /// countdown parked at `i32::MAX` forever. Vanilla recovers through the ordinary
-/// "track finished" branch (`MusicManager.java:52-55`), and so must this.
+/// "track finished" branch, `MusicManager.tick`'s `!isActive` check, and so must this.
 #[test]
 fn a_silent_start_rearms_the_countdown_within_two_ticks() {
     let jungle = biome_music("jungle").unwrap();
@@ -768,7 +780,7 @@ fn a_silent_start_rearms_the_countdown_within_two_ticks() {
 // 6. Volume fade
 // ---------------------------------------------------------------------------
 
-/// `MusicManager.fadePlaying` (`MusicManager.java:107-136`). `pale_garden`'s
+/// `MusicManager.fadePlaying`. `pale_garden`'s
 /// `music_volume: 0.0` is the real caller: it fades an already-playing track out
 /// and then stops it, rather than cutting it.
 #[test]
@@ -876,8 +888,8 @@ fn the_music_modules_cannot_reach_a_device_or_a_clock() {
     );
 }
 
-/// `MusicSituation`'s `creative` flag is `instabuild && mayfly`
-/// (`Minecraft.java:2615`), not "gamemode == creative". Spectator has `mayfly`
+/// `MusicSituation`'s `creative` flag is `instabuild && mayfly`, matching
+/// `Minecraft.getSituationalMusic`, not "gamemode == creative". Spectator has `mayfly`
 /// without `instabuild`, and adventure has neither, so a gamemode check would give
 /// spectators the creative track.
 #[test]
