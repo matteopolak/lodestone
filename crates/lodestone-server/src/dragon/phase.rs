@@ -264,15 +264,14 @@ impl Default for PhaseManager {
 }
 
 impl PhaseManager {
-    /// `new EnderDragonPhaseManager(dragon)` — starts in `HOLDING_PATTERN`,
-    /// matching the constructor's `this.setPhase(EnderDragonPhase.HOVERING)`…
-    /// **no** — vanilla's constructor actually sets `HOVERING` first, but
-    /// every real dragon spawn immediately calls
-    /// `dragon.getPhaseManager().setPhase(EnderDragonPhase.HOLDING_PATTERN)`
-    /// right after construction (`EnderDragonFight.createNewDragon`). This
-    /// constructor starts at `HoldingPattern` directly so a freshly spawned
-    /// dragon needs no follow-up call to reach the state production code
-    /// actually puts it in.
+    /// Starts in `HoldingPattern` — **not** a literal port of
+    /// `new EnderDragonPhaseManager(dragon)`, whose constructor actually sets
+    /// `HOVERING` first. Every real dragon spawn immediately overwrites that
+    /// with `dragon.getPhaseManager().setPhase(EnderDragonPhase.HOLDING_PATTERN)`
+    /// right after construction (`EnderDragonFight.createNewDragon`), so this
+    /// constructor starts where production code actually leaves a fresh
+    /// dragon, skipping the one-tick `HOVERING` detour a literal port would
+    /// need a follow-up call to skip anyway.
     #[must_use]
     pub fn new() -> Self {
         Self {

@@ -15,14 +15,14 @@
 //! work" with "a gameplay placer" rather than terrain generation, and that
 //! gameplay placer has never been written. Concretely this means:
 //!
-//! * [`updated_crystal_count`] and the fight's own scan do not require
+//! * The crystal count and the fight's own scan do not require
 //!   pillars to exist — crystals in this world are floating wherever a
 //!   caller puts them, not standing on spikes 40-80 blocks up.
 //! * The "caged vs. uncaged crystal" distinction issue #276 names
 //!   (`EndSpikeFeature`'s `guarded` flag wraps a *short* pillar's crystal in
 //!   iron bars) has no pillars to attach cages to, so it is not modelled.
 //!   There is nothing to cage.
-//! * [`RespawnStage::Summoning­Pillars`]'s pillar-summoning sub-steps are
+//! * [`RespawnStage::SummoningPillars`]'s pillar-summoning sub-steps are
 //!   ported **faithfully as a state machine parameterized by a spike count**
 //!   (see [`tick_respawn`]), so the logic is correct if pillar placement
 //!   lands later — but today, called with zero spikes (the honest count in a
@@ -76,10 +76,18 @@ pub fn boss_bar_value(dragon_killed: bool, health: f32, max_health: f32) -> Boss
 }
 
 /// Persisted per-world fight state — the fields of `EnderDragonFight` that
-/// survive a save/load round trip (`EnderDragonFight.CODEC`), minus the ones
-/// this module does not model (`gateways`/`respawn_crystals` — see
-/// [`RespawnState`] and the gateway helpers below for why those are kept
-/// separate).
+/// survive a save/load round trip (`EnderDragonFight.CODEC`), minus two this
+/// module does not model: `respawn_crystals` (the four crystal ids a live
+/// respawn is tracking — [`try_respawn`]'s return value is the same
+/// information, kept out of `FightState` because the caller, not this
+/// module, is the one that persists a respawn in progress) and `gateways`
+/// (the pool of 20 unused gateway positions `EnderDragonFight.spawnNewGateway`
+/// pops from). **No gateway geometry is ported at all** — `DeathOutcome::spawn_gateway`
+/// only signals *that* one should be placed; the position formula
+/// (`Mth.floor(96.0 * Math.cos(...))`/`sin`) and the shuffled-pool bookkeeping
+/// are not implemented here. This is a real, disclosed gap (not attempted,
+/// not stubbed) rather than a modelled-and-simplified one like the exit
+/// portal or the respawn stages.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FightState {
     /// `EnderDragonFight.needsStateScanning` — `true` for a fresh

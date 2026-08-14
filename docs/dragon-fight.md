@@ -66,7 +66,10 @@ Three submodules:
   own codec round-trips) plus free functions: `scan_state` (the world-load
   scan for an existing dragon/portal), `set_dragon_killed` (what to do the
   tick the dragon actually dies — egg placement gated on first-kill-ever,
-  portal activation, gateway spawn), `boss_bar_value` (the `progress`/
+  portal activation, and a `spawn_gateway: true` flag for the caller to act
+  on — **no gateway position formula or shuffled-pool bookkeeping is
+  implemented anywhere**, a real disclosed gap rather than a simplification;
+  see `fight::FightState`'s own doc comment), `boss_bar_value` (the `progress`/
   `visible` pair a `BOSS_EVENT` packet needs), `exit_portal_blocks` (a
   clause-for-clause port of `EndPodiumFeature.place`'s block geometry — the
   bedrock/end-stone foundation, the bedrock-ring-and-portal-or-air disc, the
