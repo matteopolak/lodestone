@@ -23,6 +23,27 @@
 //!   [`BakedQuad`] is emitted verbatim (translated to its block position) unless
 //!   its `cullface` neighbour fully occludes it.
 //!
+//! **Verified against the tree (not assumed): today this policy's first bullet
+//! has zero production callers.** `lodestone-shell`'s live (`Vanilla`)
+//! classifier always attaches a real `BlockModels`
+//! (`crate::block_resolver::BlockAtlas::with_models`, called unconditionally by
+//! `BlockResources::try_vanilla`), so `mesh_one`'s `classifier.models()` branch
+//! is always `Some` and every live block — stone and dirt included — is meshed
+//! by [`mesh_models_layers`] through the wide, never-merged, per-quad path this
+//! module owns. [`is_packed_cube`]/[`mesh_greedy`](crate::mesh::mesh_greedy)/
+//! `SectionGeometry::Packed` are reachable **only** through
+//! `ShellClassifier::Demo`, the offline 10-block sandbox palette, whose own
+//! doc says water there "renders opaque in this demo" — it has no translucent
+//! block in its palette at all. So the D1 argument below (packed cubes
+//! dominate rendered *volume*) is a real, measured fact about the baked model
+//! set, but is not, right now, a fact about what the live game draws: every
+//! live block currently pays the wide [`ModelVertex`] cost (152 vs 72 bytes
+//! per quad including indices — see [`model_vram_bytes`] vs
+//! [`crate::vertex::vram_bytes`]), and [`is_packed_cube`] requiring a real
+//! [`RenderLayer`] (below) is a no-op on today's live rendering *precisely
+//! because* nothing calls it there yet — it only forecloses the mistake for
+//! whoever wires the packed path back in for live full cubes.
+//!
 //! # Why a separate vertex type (the D1 measurement)
 //!
 //! The packed [`PackedVertex`](crate::vertex::PackedVertex) stores position in
@@ -114,6 +135,7 @@ use lodestone_assets::{BakedQuad, Direction, GuiLight};
 use crate::block_models::{FluidCell, FluidKind, FluidSprites};
 use crate::fluid_grid::{FluidGrid, FluidNeighborCell};
 use crate::section::{Face, SECTION_SIZE};
+use crate::translucency::RenderLayer;
 
 /// A vertex for arbitrary baked-model geometry. Wider than the packed cube
 /// vertex because model positions need sub-block precision and atlas-relative
@@ -459,12 +481,29 @@ pub fn is_full_cube(quads: &[BakedQuad]) -> bool {
 }
 
 /// Whether a baked model can take the packed 8-byte cube path: a full cube
-/// ([`is_full_cube`]) whose faces are all **untinted**. The packed vertex has no
-/// per-vertex colour, so a tinted cube (grass, leaves, water still-cube) must
-/// use the wider [`ModelVertex`] path even though its geometry is a cube.
+/// ([`is_full_cube`]) whose faces are all **untinted** and whose block
+/// [`RenderLayer`] is [`RenderLayer::Solid`].
+///
+/// Two disqualifiers, not one. The packed vertex has no per-vertex colour, so a
+/// tinted cube (grass, leaves, water still-cube) must use the wider
+/// [`ModelVertex`] path even though its geometry is a cube. And the packed
+/// block shader (`block.wgsl`, unlike [`crate::shaders`]'s `model.wgsl`) has no
+/// alpha-test discard and no blending — it draws depth-written and opaque
+/// unconditionally — so a full cube whose real per-texel alpha is `Cutout` or
+/// `Translucent` (stained glass, ice, tinted glass, slime, honey: measured,
+/// every texel of each carries alpha strictly between 0 and 255, see
+/// `crates/lodestone-render/tests/block_models_gate.rs` and the sibling gate
+/// for `is_packed_cube` itself) would render as a solid, see-through-nothing
+/// block if this predicate ever routed it there. **`layer` must come from the
+/// same [`crate::block_models::BlockModels::layer`] derivation the model path
+/// already trusts** — never re-derived or assumed — so this function cannot be
+/// satisfied by geometry alone; a caller is forced to look up the real layer
+/// before asking.
 #[must_use]
-pub fn is_packed_cube(quads: &[BakedQuad]) -> bool {
-    is_full_cube(quads) && quads.iter().all(|q| q.tint_index.is_none())
+pub fn is_packed_cube(quads: &[BakedQuad], layer: RenderLayer) -> bool {
+    is_full_cube(quads)
+        && layer == RenderLayer::Solid
+        && quads.iter().all(|q| q.tint_index.is_none())
 }
 
 /// The mesher's view of a section for the model path.
@@ -1964,7 +2003,28 @@ mod tests {
     fn full_cube_is_recognised() {
         let cube = full_cube();
         assert!(is_full_cube(&cube));
-        assert!(is_packed_cube(&cube));
+        assert!(is_packed_cube(&cube, RenderLayer::Solid));
+    }
+
+    #[test]
+    fn cutout_or_translucent_full_cube_is_not_packed() {
+        // Untinted, geometrically a full cube — exactly what an alpha-blind
+        // predicate would wrongly accept. `is_packed_cube` must reject it once
+        // the real layer says otherwise, because the packed block shader has
+        // no discard and no blending: it draws depth-written and opaque
+        // unconditionally.
+        let cube = full_cube();
+        assert!(is_full_cube(&cube));
+        assert!(
+            !is_packed_cube(&cube, RenderLayer::Cutout),
+            "a cutout full cube (leaves-shaped alpha on a cube, e.g. plain glass) \
+             must not take the opaque-only packed path"
+        );
+        assert!(
+            !is_packed_cube(&cube, RenderLayer::Translucent),
+            "a translucent full cube (stained glass, ice, tinted glass, slime, honey) \
+             must not take the opaque-only packed path"
+        );
     }
 
     #[test]
@@ -2020,7 +2080,7 @@ mod tests {
         let mut cube = full_cube();
         cube[1].tint_index = Some(0); // tinted top (grass-like)
         assert!(is_full_cube(&cube));
-        assert!(!is_packed_cube(&cube));
+        assert!(!is_packed_cube(&cube, RenderLayer::Solid));
     }
 
     #[test]
