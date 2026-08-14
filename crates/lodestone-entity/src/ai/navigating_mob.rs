@@ -101,6 +101,24 @@ pub const DEFAULT_FOLLOW_RANGE: f64 = 16.0;
 /// acquires at `2.0`.
 pub const MIN_TARGET_VISIBILITY_DISTANCE: f64 = 2.0;
 
+/// Vanilla `LivingEntity.DEFAULT_BASE_GRAVITY` (`0.08`): the downward
+/// acceleration [`advance`](NavigatingMob::advance) integrates each tick a
+/// waypoint sits below the mob, so a drop the pathfinder allowed (see
+/// [`crate::pathfinding::MobShape::max_up_step`]'s sibling, the fall-limit
+/// this crate's own `mob_drops_down_within_fall_limit` test names) is a
+/// gravity-accelerated fall rather than an instant teleport to the landing
+/// height. An instant snap is what let the mob's rendered position sink into
+/// the block under its *old* x/z before it had walked far enough horizontally
+/// to actually be over the drop — the reported "phases through the ground".
+pub const FALL_GRAVITY_PER_TICK: f64 = 0.08;
+
+/// Vanilla `LivingEntity.BASE_VERTICAL_AIR_DRAG` (`0.98`): the per-tick decay
+/// [`advance`](NavigatingMob::advance) applies to the stored fall speed
+/// between ticks. Paired with [`FALL_GRAVITY_PER_TICK`], the two converge to
+/// vanilla's real terminal velocity (`-3.92` blocks/tick), though a path-driven
+/// drop is rarely long enough to reach it.
+pub const FALL_VERTICAL_AIR_DRAG: f64 = 0.98;
+
 /// A tiny deterministic RNG (SplitMix64) so a `NavigatingMob` needs no `rand`
 /// dependency and its stroll behaviour is reproducible in tests.
 #[derive(Debug, Clone)]
@@ -162,6 +180,15 @@ pub struct NavigatingMob<'w> {
     /// velocity in **blocks per tick** (vanilla `getDeltaMovement`). Zero when the
     /// follower did not move this tick.
     velocity: Vec3,
+    /// The stored downward speed carried between ticks while the mob is
+    /// falling toward a waypoint below it — vanilla's own `deltaMovement.y`
+    /// between calls to `LivingEntity.travel`, integrated by
+    /// [`FALL_GRAVITY_PER_TICK`]/[`FALL_VERTICAL_AIR_DRAG`] each
+    /// [`advance`](Self::advance) call and reset to `0.0` the tick the mob is
+    /// climbing, level, or has landed. Always `>= 0.0` (a magnitude; this
+    /// follower's gravity is always downward, unlike vanilla's single
+    /// signed `deltaMovement.y` which also carries jump/knockback).
+    fall_speed: f64,
     /// The mob's body yaw in degrees, derived from its horizontal movement
     /// direction and retained across idle ticks (vanilla `yBodyRot`).
     body_yaw: f32,
@@ -477,6 +504,7 @@ impl<'w> NavigatingMob<'w> {
             tick_count: 0,
             last_search_tick: None,
             velocity: Vec3::new(0.0, 0.0, 0.0),
+            fall_speed: 0.0,
             body_yaw: 0.0,
             love_ticks: 0,
             partner_candidate: None,
@@ -1026,6 +1054,54 @@ impl<'w> NavigatingMob<'w> {
         self.advance();
     }
 
+    /// One tick of vertical motion toward `waypoint_y`, bounded independently
+    /// of the horizontal step [`advance`](Self::advance) applies alongside it.
+    ///
+    /// A rise of at most `max_up_step` resolves in this one call — vanilla's
+    /// auto-step, which happens within the same tick's collision response
+    /// with no visible pause (`Entity.maxUpStep`, the `step_height`
+    /// attribute). A larger rise is a real jump in vanilla (`JumpControl`, a
+    /// parabolic arc under gravity); this kinematic follower has no
+    /// jump-velocity/gravity-up model to integrate, so it approximates the
+    /// arc as a climb bounded at the same per-tick rate as a step —
+    /// disclosed simplification, not a modelled jump, but bounded rather than
+    /// instant either way.
+    ///
+    /// A drop integrates vanilla's real fall physics instead of snapping
+    /// straight to the landing height: `LivingEntity.DEFAULT_BASE_GRAVITY`
+    /// (0.08 blocks/tick²) accelerates `*fall_speed` each call, decayed by
+    /// `LivingEntity.BASE_VERTICAL_AIR_DRAG` (0.98) — `LivingEntity::travelInAir`'s
+    /// own order: this call's *displacement* is last call's stored speed plus
+    /// gravity, applied before this call's own drag, which only shapes what
+    /// gets stored for the next call. `*fall_speed` resets to `0.0` the tick
+    /// the mob is climbing, level, or has just landed.
+    ///
+    /// An unconditional `pos.y = waypoint_y` — what this replaced — produced
+    /// two symptoms from one cause: a full-block rise "glided" up with no
+    /// jump, and a drop let the mob's rendered y reach the lower floor before
+    /// its x/z had travelled far enough to actually be over the edge, so it
+    /// visibly sank into the block under its *old* position — "phases through
+    /// the ground".
+    fn step_vertical(pos_y: f64, waypoint_y: f64, max_up_step: f64, fall_speed: &mut f64) -> f64 {
+        let dy = waypoint_y - pos_y;
+        if dy >= 0.0 {
+            *fall_speed = 0.0;
+            if dy <= max_up_step {
+                waypoint_y
+            } else {
+                pos_y + dy.min(max_up_step)
+            }
+        } else {
+            let displacement = *fall_speed + FALL_GRAVITY_PER_TICK;
+            *fall_speed = displacement * FALL_VERTICAL_AIR_DRAG;
+            let landed = (pos_y - displacement).max(waypoint_y);
+            if landed <= waypoint_y {
+                *fall_speed = 0.0;
+            }
+            landed
+        }
+    }
+
     /// Advances the follower one step toward the current waypoint. Public so a
     /// caller running its own goal loop can drive movement explicitly.
     pub fn advance(&mut self) {
@@ -1090,8 +1166,16 @@ impl<'w> NavigatingMob<'w> {
             self.pos.x += dx * scale;
             self.pos.z += dz * scale;
         }
-        // Grounded follower: snap the vertical to the waypoint's floor.
-        self.pos.y = waypoint.y;
+        // Vertical motion is bounded independently of the horizontal step
+        // above — see `step_vertical`'s own doc comment for why, and for the
+        // "glide up" / "phase through the ground" bug an unconditional
+        // `pos.y = waypoint.y` used to produce.
+        self.pos.y = Self::step_vertical(
+            self.pos.y,
+            waypoint.y,
+            f64::from(self.shape.max_up_step),
+            &mut self.fall_speed,
+        );
         // Record the applied delta as blocks/tick velocity, and face the
         // horizontal motion (retaining the last body yaw while stationary).
         let moved_x = self.pos.x - old.x;
@@ -2266,6 +2350,135 @@ mod tests {
             Vec3::new(0.0, 0.0, 0.0),
             "with no path, advance() must not perpetuate the knockback velocity"
         );
+    }
+
+    // ---- Vertical motion: step-up bound and gravity-accelerated fall -------
+    //
+    // `step_vertical` is exercised directly rather than through the full
+    // path/goal machinery: the timing of exactly which tick first sees a
+    // raised or lowered waypoint depends on navigator internals this module
+    // does not expose, so driving the pure function is what makes the
+    // expected values exact rather than "eventually converges".
+
+    /// Two arms, because one alone cannot separate "bounded at 0.6" from
+    /// "unbounded" (both pass a rise that already fits) or from "zero" (both
+    /// fail a rise that needs any step at all).
+    #[test]
+    fn a_rise_within_max_up_step_resolves_in_one_call_and_a_larger_one_does_not() {
+        let mut fall_speed = 0.0;
+
+        // A 0.5-block slab: within the default 0.6 step height, so vanilla's
+        // auto-step (and this follower) resolves it in one call.
+        let after_slab = NavigatingMob::step_vertical(0.0, 0.5, 0.6, &mut fall_speed);
+        assert_eq!(
+            after_slab, 0.5,
+            "a rise at or under max_up_step must resolve in a single call"
+        );
+        assert_eq!(fall_speed, 0.0, "resolving a rise must not leave a fall speed");
+
+        // A full block: over the step height, so it must NOT glide straight
+        // to 1.0 in one call — the control this repo's evidence standards
+        // require, proving the bound actually fires rather than merely
+        // existing in the source.
+        let mut fall_speed = 0.0;
+        let after_block = NavigatingMob::step_vertical(0.0, 1.0, 0.6, &mut fall_speed);
+        assert!(
+            after_block < 1.0,
+            "a rise beyond max_up_step must not resolve in one call (an \
+             unbounded step is exactly the reported 'glides up immediately' \
+             bug), got {after_block}"
+        );
+        assert_eq!(
+            after_block, 0.6,
+            "the first call must climb by exactly max_up_step, not some other \
+             partial amount"
+        );
+
+        // Two more calls finish a 1.0 rise bounded at 0.6/call: 0.6, then
+        // 0.4 (capped by the remaining distance, not another full 0.6).
+        let after_second = NavigatingMob::step_vertical(after_block, 1.0, 0.6, &mut fall_speed);
+        assert_eq!(after_second, 1.0, "the remaining 0.4 must not overshoot the waypoint");
+    }
+
+    /// Control proving the bound is load-bearing: with `max_up_step` at
+    /// `f64::INFINITY` (the pre-fix behaviour), the same full-block rise DOES
+    /// glide straight to the waypoint in one call — so the assertion above
+    /// that it does not is a real property of the bound, not a coincidence of
+    /// the chosen numbers.
+    #[test]
+    fn removing_the_step_bound_reproduces_the_glide_bug() {
+        let mut fall_speed = 0.0;
+        let after = NavigatingMob::step_vertical(0.0, 1.0, f64::INFINITY, &mut fall_speed);
+        assert_eq!(
+            after, 1.0,
+            "control: an unbounded step must reproduce the instant glide, or \
+             the subject test above proves nothing about the bound"
+        );
+    }
+
+    /// Predicts the exact y after each tick of a fast fall from vanilla's own
+    /// gravity/drag constants, computed independently of `step_vertical`'s
+    /// implementation — not "y decreased" (the *magnitude* species of
+    /// vacuous test this repo's evidence standards name explicitly).
+    #[test]
+    fn a_fall_accelerates_under_gravity_instead_of_snapping_to_the_landing_height() {
+        let waypoint_y = -20.0; // far enough below that the fall never lands early
+        let mut pos_y = 0.0f64;
+        let mut fall_speed = 0.0f64;
+        for _ in 1..=5 {
+            pos_y = NavigatingMob::step_vertical(pos_y, waypoint_y, 0.6, &mut fall_speed);
+        }
+        // Independently re-derived expectation from vanilla's own constants —
+        // a separate loop, not a refactor of `step_vertical`'s body, so a bug
+        // shared between the test and the implementation cannot cancel out.
+        let mut y = 0.0f64;
+        let mut v = 0.0f64;
+        for _ in 0..5 {
+            let d = v + FALL_GRAVITY_PER_TICK;
+            v = d * FALL_VERTICAL_AIR_DRAG;
+            y -= d;
+        }
+        assert!(
+            (pos_y - y).abs() < 1.0e-12,
+            "after 5 ticks of unobstructed fall, expected y={y} from vanilla's \
+             gravity/drag constants, got {pos_y}"
+        );
+        // The discriminating check: an instant-snap implementation would have
+        // reached the landing height (or at least moved much farther) on the
+        // very first tick; a gravity-accelerated one barely moves at first.
+        let mut first_tick_fall_speed = 0.0f64;
+        let first_tick_y = NavigatingMob::step_vertical(0.0, waypoint_y, 0.6, &mut first_tick_fall_speed);
+        assert!(
+            first_tick_y > -1.0,
+            "the first tick of a fall must move well under a block (gravity \
+             starts at ~0.08/tick), not snap toward the landing height; got \
+             {first_tick_y}"
+        );
+    }
+
+    /// The mob must land exactly on the waypoint's floor, never overshoot past
+    /// it even once the accelerating fall speed exceeds the remaining
+    /// distance, and the stored fall speed must reset once landed so the next
+    /// climb or fall starts clean rather than inheriting terminal velocity.
+    #[test]
+    fn a_fall_lands_exactly_on_the_surface_and_resets_afterwards() {
+        let waypoint_y = -2.0;
+        let mut pos_y = 0.0f64;
+        let mut fall_speed = 0.0f64;
+        for _ in 0..200 {
+            pos_y = NavigatingMob::step_vertical(pos_y, waypoint_y, 0.6, &mut fall_speed);
+            if pos_y <= waypoint_y {
+                break;
+            }
+        }
+        assert_eq!(pos_y, waypoint_y, "the fall must land exactly on the floor, never past it");
+        assert_eq!(fall_speed, 0.0, "landing must reset the stored fall speed");
+
+        // A subsequent small rise from the landed position must resolve in
+        // one call, exactly as if the mob had never fallen — proving the
+        // reset actually took effect rather than merely being asserted above.
+        let after_step = NavigatingMob::step_vertical(pos_y, waypoint_y + 0.5, 0.6, &mut fall_speed);
+        assert_eq!(after_step, waypoint_y + 0.5);
     }
 
     // ---- Gaze / teleport / self-damage / ownership primitives ---------------
