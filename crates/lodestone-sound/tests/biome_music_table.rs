@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// `Musics.createGameMusic`'s delays (`Musics.java:19-21`), used only to sanity
+/// `Musics.createGameMusic`'s delays, used only to sanity
 /// check that the data says what the jar says.
 const GAME_MIN: i64 = 12_000;
 const GAME_MAX: i64 = 24_000;
@@ -61,7 +61,7 @@ fn strip_ns(id: &str) -> &str {
 }
 
 /// Parses one `Music` record. Anything other than the plain object shape is a hard
-/// error: `biome_sky_color` (`protocol/v770/.../registry.rs:531`) has to cope with
+/// error: `lodestone_v770::packets::registry::biome_sky_color` has to cope with
 /// an `Int`/`String`/modifier-compound union because it reads *wire* NBT, but these
 /// are our own committed JSON files and a surprise shape there means the assets
 /// changed in a way this generator has not been taught. Failing loudly beats

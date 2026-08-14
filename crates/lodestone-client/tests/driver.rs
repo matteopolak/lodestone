@@ -272,6 +272,12 @@ fn signed_chat(signature: Vec<u8>, was_shown: bool) -> Directive {
             signature,
             global_index: 0,
             was_shown,
+            message_index: 0,
+            timestamp_millis: 1_700_000_000_000,
+            salt: 1,
+            raw_content: "hi".to_string(),
+            last_seen: Vec::new(),
+            verified: false,
         }),
     })
 }
@@ -1150,6 +1156,192 @@ async fn signed_chat_is_acknowledged_on_keep_alive_tick() {
         Some(ClientEvent::Chat { ack: None, .. })
     ));
     assert_eq!(events.recv().await, Some(ClientEvent::KeepAlive { id: 7 }));
+
+    drop(handle);
+}
+
+/// Issue #283's remaining half, end to end: a valid signed message reaches
+/// `events` with `ack.verified == true` and untouched text; a tampered one
+/// (same sender, same session, same chain, one signature byte flipped)
+/// reaches it `verified == false` with the not-secure tag prepended. Neither
+/// case touches a real session server or the keychain: `ClientBuilder::new`
+/// here never sets an `auth_session`, and `lodestone_auth::ChatKeyPair::for_tests`
+/// is the same offline fixture builder `driver.rs`'s own unit tests use.
+#[tokio::test]
+async fn incoming_signed_chat_is_verified_against_the_announced_public_key() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey};
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+
+    const PLAYER_INFO: i32 = 0x50;
+    const VALID_CHAT: i32 = 0x51;
+    const TAMPERED_CHAT: i32 = 0x52;
+
+    // Same fixed PKCS#8-DER RSA-2048 test key `driver.rs`'s own chat-signing
+    // unit tests use — a public, throwaway fixture, no secrecy shared with
+    // anything real.
+    let der = BASE64
+        .decode(concat!(
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDtM+q+4UwoW3cZ",
+            "Q8TVkfa9TfGdxpl13PlfNei77mmWz+kLCxeOXpF2hX/VXSoxj3yBjjhtGHZB59eX",
+            "0VW2zw+G913ZMmtT+9phKBA9BOID4c4hNpz852wJ5sp2pFOyrrg47UTrakey9iQT",
+            "+ckO4qfeMR13NTDP44cLFBwa1/ot80Fwq00xg5KHJK6WeWmjPayc+lf3FSPC+cNO",
+            "aOJ3oaWK16b2LFqvzwwkl53e0yyHFgffA5AdClVJgZc7pEDScO0zLHLqe8ySrbsJ",
+            "yZ9PQSTNC7cmXkJPQjlYJJ2M4/+HJRtjY/CQyP5C7sTdu/Lhn1nUawhj74Egyvg8",
+            "HXeysPeZAgMBAAECggEBAMg+0ee+jupq/MpJWbvqc2Awks7dP+QuXh8whX9Rr7Xv",
+            "Yw89l+9KioaCAP8AnYQlW7iLdbszsXHF5U13HWMsvjD0VzfqxoypyxvGFJ9Opfcd",
+            "A0Uqs7EVNTHOshEifL4VndQBCfOrT0gXXzG15zQ3x/tdf0CJmOGHdRO3MFrBBaUP",
+            "XJgVcGCWyKK9/p+uV9lolnQprotiuctX6nI5hYAX7PG1XFJlPAW5k9DLE4W31+8Y",
+            "FiJgsS/WTRAsvjs7zJefGwUNE0+86ylREEmSvHWqjS6pgxf7REZed0208kTHC1P8",
+            "aGP9nnrHZfiKBDtxt2usRbG00Whf9NVTOZBeC9ExKjkCgYEA948Wr8q0lFVMZ7xt",
+            "u5Dx8Mvjvz2Bl5wclX27qrqeu7T3aGnP2EwVSQW5xUB/KpYpxoMFiJIy9cVqo1XT",
+            "Vege7i8WsGRK+D9xpd6QEhME79nIbltmxTVP9Ue9foBev0S0QM5n1Qk6L4hKUnva",
+            "dwQ1Ow6XoPejGcu2BhYzywUPrJsCgYEA9UpuTzZgMg7CVCIRH6Ze8jNP56GADXYB",
+            "8BH5hSuaKO67PukLa/iqSo38w1uZSVLvNgLxts5Q+pinSglJlZ8mRrLVFI8qkcIg",
+            "j/qZKpVP0mfOuBYu/DNkX0VO4nG1pBSKgT1dmUiVVAvBfgbUHeG1vVEENKh0NbSH",
+            "nswL84z8XdsCgYBpnapYJWsVPa7zMvi95QDTcqkfleYMAJZRUOsX07aU7of/C+WY",
+            "qh0Kol63QOUADkCUaKGbuoPzRt5QAPXA2N8ZTw2nA6LYdnjOAz4D+AlLKubP7j7S",
+            "NASA6LJ3ndzOTUl5vJWf1ef1D3hl6GE0FZ+AKqGWExCKmNZ3klFWdDpTsQKBgFG9",
+            "FttApHep4WoF3Czu1O7i2Hq4n6Jcs7KbWsncyMdhHnaNVCgLujuT6ynyiTcc8ufN",
+            "vVyMjgGkAwMx6xp36Vpf14+9UZM23ID+IjJFhU75FrLTeZ7DRWxV/T6KY9wkmC8P",
+            "EvS0ckaKkFT904uNnnFS4RLnG6qV2Se6mTT0w1hHAoGADIwcasJrU/5xnBPICA6f",
+            "u43x6dk1/v+GeRLz0N0aVADsj7tInJ+7pHV1/NrHaGONJKIQ0uWIKxVdHufDmYVU",
+            "KY0Oh6wzS/m5Z2tmxK24z0UJyXvAu67ETx5QUhqH63i5km9a2Au+zkwGXBBg6Bvh",
+            "7kWCpm322pipbRs6hKc7klQ=",
+        ))
+        .expect("valid base64 fixture");
+    let private_key = RsaPrivateKey::from_pkcs8_der(&der).expect("valid PKCS#8 DER fixture");
+    let public_key = RsaPublicKey::from(&private_key);
+    let public_key_der = public_key
+        .to_public_key_der()
+        .expect("encode test public key")
+        .into_vec();
+    let key_pair = lodestone_auth::ChatKeyPair::for_tests(
+        private_key,
+        public_key_der.clone(),
+        vec![0xAA, 0xBB],
+        i64::MAX,
+        i64::MAX,
+    );
+    let sender = Uuid::from_u128(77);
+    let mut chat_session = lodestone_auth::ChatSession::new(sender, key_pair);
+    let session_id = chat_session.session_id();
+
+    let content = "hi from a real key";
+    let timestamp_millis = 1_700_000_000_456i64;
+    let salt = 24_681_357i64;
+    let (signature, message_index) = chat_session
+        .sign(content, timestamp_millis / 1000, salt, &[])
+        .expect("signing must succeed")
+        .expect("a fresh session has chain left");
+
+    let ack = |sig: Vec<u8>| ChatAckInfo {
+        signature: sig,
+        global_index: 0,
+        was_shown: true,
+        message_index,
+        timestamp_millis,
+        salt,
+        raw_content: content.to_string(),
+        last_seen: Vec::new(),
+        verified: false,
+    };
+
+    let mut tampered = signature.to_vec();
+    tampered[0] ^= 0xFF;
+
+    let adapter = FakeAdapter::new()
+        .on(
+            ConnectionState::Handshaking,
+            PLAYER_INFO,
+            vec![Directive::Emit(ClientEvent::PlayerListUpdate {
+                entries: vec![lodestone_model::event::PlayerListEntry {
+                    uuid: sender,
+                    name: Some("Signer".to_string()),
+                    game_mode: None,
+                    latency: None,
+                    display_name: None,
+                    listed: None,
+                    properties: None,
+                    chat_session: Some(lodestone_model::event::ChatSessionInfo {
+                        session_id,
+                        public_key: public_key_der.clone(),
+                        expires_at: i64::MAX,
+                    }),
+                }],
+            })],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            VALID_CHAT,
+            vec![Directive::Emit(ClientEvent::Chat {
+                text: Text::literal(content),
+                kind: ChatKind::Chat,
+                sender: Some(sender),
+                ack: Some(ack(signature.to_vec())),
+            })],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            TAMPERED_CHAT,
+            vec![Directive::Emit(ClientEvent::Chat {
+                text: Text::literal(content),
+                kind: ChatKind::Chat,
+                sender: Some(sender),
+                ack: Some(ack(tampered)),
+            })],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+
+    peer.write_packet(PLAYER_INFO, &[]).await.unwrap();
+    peer.write_packet(VALID_CHAT, &[]).await.unwrap();
+    peer.write_packet(TAMPERED_CHAT, &[]).await.unwrap();
+
+    assert!(matches!(
+        events.recv().await,
+        Some(ClientEvent::PlayerListUpdate { .. })
+    ));
+
+    match events.recv().await {
+        Some(ClientEvent::Chat {
+            ack: Some(info),
+            text,
+            ..
+        }) => {
+            assert!(info.verified, "a genuinely signed message must verify");
+            assert_eq!(
+                text,
+                Text::literal(content),
+                "a verified message's text must be untouched"
+            );
+        }
+        other => panic!("expected the valid signed chat event, got {other:?}"),
+    }
+
+    match events.recv().await {
+        Some(ClientEvent::Chat {
+            ack: Some(info),
+            text,
+            ..
+        }) => {
+            assert!(!info.verified, "a tampered signature must not verify");
+            assert!(
+                matches!(
+                    &text.content,
+                    lodestone_model::TextContent::Literal(s) if s == "[Not Secure] "
+                ),
+                "an unverified message must carry the not-secure tag, got {text:?}"
+            );
+            assert_eq!(
+                text.extra.first(),
+                Some(&Text::literal(content)),
+                "the original text must survive as the tag's child"
+            );
+        }
+        other => panic!("expected the tampered signed chat event, got {other:?}"),
+    }
 
     drop(handle);
 }

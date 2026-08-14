@@ -68,6 +68,25 @@ impl GameProfile {
     }
 }
 
+/// A player's announced chat-signing session (vanilla's `RemoteChatSession`):
+/// their session id and Mojang-issued public key, needed to verify a signed
+/// message from them (`lodestone_auth::verify_signature`).
+///
+/// Kept as its own type rather than reusing
+/// `lodestone_model::event::ChatSessionInfo` directly, matching this module's
+/// own precedent for [`ProfileProperty`]: the game layer owns its own shapes
+/// rather than speaking the wire model's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteChatSession {
+    /// This player's chat-session UUID — half of the `SignedMessageLink`
+    /// their signed messages are hashed against.
+    pub session_id: Uuid,
+    /// DER-encoded (X.509 `SubjectPublicKeyInfo`) RSA public key.
+    pub public_key: Vec<u8>,
+    /// Public-key expiry, epoch milliseconds.
+    pub expires_at: i64,
+}
+
 /// One tab-list entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerListEntry {
@@ -86,6 +105,13 @@ pub struct PlayerListEntry {
     pub list_order: i32,
     /// Whether the player's hat (second skin layer) renders in the tab list.
     pub show_hat: bool,
+    /// This player's announced chat-signing session, when the server has
+    /// sent one (`INITIALIZE_CHAT`) — the receiving half of secure chat
+    /// (issue #283). `None` means either "never announced" or "not yet
+    /// folded"; the two are indistinguishable here for the same reason
+    /// [`Self::profile`]'s properties collapse an analogous pair — see
+    /// `lodestone_model::event::PlayerListEntry::chat_session`'s doc.
+    pub chat_session: Option<RemoteChatSession>,
 }
 
 impl PlayerListEntry {
@@ -101,6 +127,7 @@ impl PlayerListEntry {
             display_name: None,
             list_order: 0,
             show_hat: true,
+            chat_session: None,
         }
     }
 
@@ -301,6 +328,16 @@ impl TabList {
                         })
                         .collect();
                 }
+                // Same merge rule as `properties` just above: `None` means
+                // this delta carried no `INITIALIZE_CHAT`, so the existing
+                // session (if any) survives a latency-only update untouched.
+                if let Some(session) = &e.chat_session {
+                    existing.chat_session = Some(RemoteChatSession {
+                        session_id: session.session_id,
+                        public_key: session.public_key.clone(),
+                        expires_at: session.expires_at,
+                    });
+                }
             }
             None => {
                 let name = e.name.clone().unwrap_or_default();
@@ -325,6 +362,13 @@ impl TabList {
                         })
                         .collect();
                 }
+                if let Some(session) = &e.chat_session {
+                    entry.chat_session = Some(RemoteChatSession {
+                        session_id: session.session_id,
+                        public_key: session.public_key.clone(),
+                        expires_at: session.expires_at,
+                    });
+                }
                 self.insert(entry);
             }
         }
@@ -348,6 +392,7 @@ mod fold_tests {
             display_name: None,
             listed: Some(true),
             properties: None,
+            chat_session: None,
         }
     }
 
@@ -382,6 +427,7 @@ mod fold_tests {
                 display_name: None,
                 listed: None,
                 properties: None,
+                chat_session: None,
             }],
         });
         let entry = tabs.get(&id).expect("entry present");
@@ -412,6 +458,7 @@ mod fold_tests {
                     value: "eyJ0ZXh0dXJlcyI6e319".into(),
                     signature: Some("sig".into()),
                 }]),
+                chat_session: None,
             }],
         });
         assert_eq!(
@@ -430,6 +477,7 @@ mod fold_tests {
                 display_name: None,
                 listed: None,
                 properties: None,
+                chat_session: None,
             }],
         });
         let entry = tabs.get(&id).expect("entry present");
@@ -451,6 +499,7 @@ mod fold_tests {
                 display_name: None,
                 listed: None,
                 properties: Some(Vec::new()),
+                chat_session: None,
             }],
         });
         assert!(
@@ -460,6 +509,59 @@ mod fold_tests {
                 .properties
                 .is_empty(),
             "Some(vec![]) means the profile really has none, unlike None"
+        );
+    }
+
+    /// Issue #283's real gap, closed: `INITIALIZE_CHAT`'s session used to be
+    /// decoded and have nowhere to go once it reached this layer. Same shape
+    /// as `a_delta_without_add_player_keeps_the_existing_profile_properties`:
+    /// a session survives a delta that did not carry `INITIALIZE_CHAT`.
+    #[test]
+    fn a_chat_session_survives_a_delta_without_initialize_chat() {
+        let mut tabs = TabList::new();
+        let id = uid(20);
+        let session_id = Uuid::from_u128(999);
+        let public_key = vec![1, 2, 3, 4];
+        tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![m::PlayerListEntry {
+                uuid: id,
+                name: Some("Eve".into()),
+                game_mode: Some(GameMode::Survival),
+                latency: Some(1),
+                display_name: None,
+                listed: Some(true),
+                properties: None,
+                chat_session: Some(m::ChatSessionInfo {
+                    session_id,
+                    public_key: public_key.clone(),
+                    expires_at: 1_700_000_000_000,
+                }),
+            }],
+        });
+        let entry = tabs.get(&id).expect("entry present");
+        let session = entry.chat_session.as_ref().expect("session folded in");
+        assert_eq!(session.session_id, session_id);
+        assert_eq!(session.public_key, public_key);
+        assert_eq!(session.expires_at, 1_700_000_000_000);
+
+        // A latency-only delta: `chat_session` absent, must not clear it.
+        tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![m::PlayerListEntry {
+                uuid: id,
+                name: None,
+                game_mode: None,
+                latency: Some(50),
+                display_name: None,
+                listed: None,
+                properties: None,
+                chat_session: None,
+            }],
+        });
+        let entry = tabs.get(&id).expect("entry present");
+        assert_eq!(entry.latency, 50);
+        assert!(
+            entry.chat_session.is_some(),
+            "a delta with no INITIALIZE_CHAT must keep the announced session"
         );
     }
 
@@ -476,6 +578,7 @@ mod fold_tests {
                 display_name: Some(Text::literal("[VIP] Cara")),
                 listed: Some(true),
                 properties: None,
+                chat_session: None,
             }],
         });
         let entry = tabs.get(&id).expect("entry present");

@@ -987,6 +987,17 @@ impl SharedState {
                         })
                         .collect(),
                 ),
+                // Unlike `properties`, `None` here is unambiguous: this
+                // player either has announced a session or has not, with no
+                // "explicitly empty" third state to distinguish from "no
+                // update yet".
+                chat_session: entry.chat_session.as_ref().map(|session| {
+                    lodestone_model::event::ChatSessionInfo {
+                        session_id: session.session_id,
+                        public_key: session.public_key.clone(),
+                        expires_at: session.expires_at,
+                    }
+                }),
             })
             .collect()
     }
@@ -1004,6 +1015,23 @@ impl SharedState {
             .get::<SessionTabList>(self.session)
             .map(|list| list.0.clone())
             .unwrap_or_default()
+    }
+
+    /// One player's announced chat-signing session, if the tab list has
+    /// folded one in for them (issue #283) — the lookup
+    /// [`crate::driver::Driver`]'s incoming-chat signature verification needs.
+    ///
+    /// A single-entry lookup rather than routing every caller through
+    /// [`Self::tab_list`]: that clones the whole `HashMap`, which is wasted
+    /// work for the common case of checking one sender.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub(crate) fn chat_session_of(&self, id: &uuid::Uuid) -> Option<lodestone_game::tablist::RemoteChatSession> {
+        self.ecs
+            .read()
+            .get::<SessionTabList>(self.session)
+            .and_then(|list| list.0.get(id))
+            .and_then(|entry| entry.chat_session.clone())
     }
 
     /// Returns `(world_age, time_of_day)`, read from the [`WorldTime`]

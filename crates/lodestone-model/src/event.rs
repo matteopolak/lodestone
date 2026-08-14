@@ -39,10 +39,10 @@ pub struct DeathLocation {
 /// where the geometry and lighting rules actually live. Two levels can share one
 /// type, and a data pack can give a level called `mypack:mine` the vanilla
 /// overworld type — which is exactly the case that made matching on the level
-/// name wrong (issue #34).
+/// name wrong.
 ///
 /// Version adapters fill this in from the Configuration `registry_data` packet;
-/// before #288 nothing decoded that packet at all, so every field here was
+/// before that, nothing decoded that packet at all, so every field here was
 /// hardcoded client-side by level-name match.
 ///
 /// # Field selection
@@ -99,12 +99,59 @@ impl DimensionTypeInfo {
 /// render to the user.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChatAckInfo {
-    /// Raw message signature bytes.
+    /// Raw message signature bytes. Empty means this message carried no
+    /// signature at all (vanilla's `!PlayerChatMessage.hasSignature()`) —
+    /// the common case on a server with signed chat disabled, and by itself
+    /// enough to treat the message as unverified.
     pub signature: Vec<u8>,
     /// Server-global signed-chat index.
     pub global_index: i32,
     /// Whether the message was shown to the user after filtering.
     pub was_shown: bool,
+    /// This message's position in the sender's signing chain
+    /// (`SignedMessageLink.index`, the wire's `index` field on `PLAYER_CHAT`).
+    /// Needed, together with the sender's announced chat-session id
+    /// ([`PlayerListEntry::chat_session`]), to reconstruct the exact
+    /// `SignedMessageLink` `lodestone_auth::verify_signature` hashes —
+    /// verification cannot be attempted without it.
+    pub message_index: i32,
+    /// The signed body's own timestamp, epoch **milliseconds** — the wire
+    /// unit (`SignedMessageBody.Packed`'s field). The signature payload
+    /// itself is built over epoch **seconds**
+    /// (`lodestone_auth::chat_session::build_signature_payload`'s
+    /// `timestamp_epoch_seconds` parameter); converting is the verifier's
+    /// job, not this struct's — carrying the wire unit verbatim is what
+    /// keeps that conversion a single, visible `/ 1000` at the one call site
+    /// that needs it, rather than an implicit unit change baked into a field
+    /// name.
+    pub timestamp_millis: i64,
+    /// The signed body's random salt (`SignedMessageBody.Packed`'s `salt`).
+    pub salt: i64,
+    /// The raw signed message content, verbatim — **not** [`ClientEvent::Chat`]'s
+    /// own `text`, which may be the server's *decorated* form
+    /// (`unsigned_content`) instead. Verification must hash exactly what the
+    /// sender signed, so this is kept alongside the decorated text rather
+    /// than reconstructed from it.
+    pub raw_content: String,
+    /// The resolved last-seen signature chain this message was built over
+    /// (`SignedMessageBody.Packed.lastSeen`, already resolved against the
+    /// connection's signature cache — see `read_last_seen_packed`), each
+    /// entry 256 raw signature bytes.
+    pub last_seen: Vec<Vec<u8>>,
+    /// Whether this message's signature was checked against the sender's
+    /// announced public key and found valid.
+    ///
+    /// **Populated by the client driver, not by the wire decoder** — the
+    /// adapter that builds this struct has no access to the per-player
+    /// public-key store, only the driver's read-model does (see
+    /// `lodestone_client::driver`'s `emit` handling of `ClientEvent::Chat`).
+    /// Every adapter constructs this `false` (fail-closed: unverified until
+    /// proven otherwise, never trusted by default), and the driver may raise
+    /// it to `true` after a successful `lodestone_auth::verify_signature`
+    /// call. An empty `signature` (no signature at all) is left `false` and
+    /// is never attempted — vanilla's own rule
+    /// (`ChatTrustLevel.evaluate`'s `!message.hasSignature()` arm).
+    pub verified: bool,
 }
 
 /// A packed message signature, from `MessageSignature.Packed`.
@@ -348,7 +395,7 @@ pub struct EntityMetadataUpdate {
     /// `AbstractZombieModel`) read `Mob.isAggressive()`; the using-item bit behind
     /// [`living_flags`](Self::living_flags) is the *player* mechanism. A skeleton
     /// drawing on you never sets the using-item bit, so a client that only decodes
-    /// index 8 leaves every mob in the rest pose (issue #379).
+    /// index 8 leaves every mob in the rest pose.
     ///
     /// # Why this can be absent on a packet that carried the byte
     ///
@@ -408,7 +455,7 @@ pub struct EntityMetadataUpdate {
     /// `1` while counting up to detonation. The counter itself
     /// (`Creeper.swell`/`oldSwell`) is never sent — only the direction is, and
     /// a consumer integrates it client-side one tick at a time, exactly as
-    /// vanilla's own client does (`Creeper.java:139`). See
+    /// vanilla's own client does (`Creeper.java`). See
     /// `lodestone_render::entity_anim::pose_swelling`'s docs for why the split
     /// between "synced direction" and "locally integrated counter" exists.
     pub creeper_swell_dir: Option<i32>,
@@ -650,7 +697,7 @@ impl EquipmentSlot {
     /// The slot for a canonical vanilla name — the exact inverse of
     /// [`name`](Self::name).
     ///
-    /// Added for issue #143's game -> model lowering: `lodestone_game`'s opaque
+    /// Added for the game -> model lowering: `lodestone_game`'s opaque
     /// component map stores `minecraft:equippable` as the slot *name* string
     /// (there being no typed slot variant in a `ComponentValue`), so recovering a
     /// typed slot from it needs this direction. `None` for an unrecognised name
@@ -727,6 +774,42 @@ pub struct PlayerListEntry {
     /// The distinction matters because a tab-list fold merges partial updates — an
     /// absent field must keep the existing value rather than clear it.
     pub properties: Option<Vec<ProfileProperty>>,
+    /// This player's announced chat-signing session, from `INITIALIZE_CHAT`.
+    /// `None` means the update did not carry that action, exactly like
+    /// [`Self::properties`]'s `None` — a fold must keep the existing value,
+    /// not clear it.
+    ///
+    /// This is the receiving half of secure chat: the public
+    /// key needed to verify a signed message from this player
+    /// (`lodestone_auth::verify_signature`). It used to be decoded and
+    /// discarded at the protocol-adapter layer with nowhere to put it —
+    /// `PlayerInfoEntry::chat_session` existed in `v770` but this canonical
+    /// struct had no field to carry it into, so no consumer could ever look
+    /// a sender's key up. See `docs/secure-chat.md`.
+    pub chat_session: Option<ChatSessionInfo>,
+}
+
+/// A player's announced chat-signing session (`RemoteChatSession.Data`):
+/// their session UUID and Mojang-issued public key, as broadcast by
+/// `INITIALIZE_CHAT` and carried per-entry on [`PlayerListEntry`].
+///
+/// `key_signature` (Mojang's own signature over `public_key`) is
+/// deliberately not carried this far — nothing downstream re-verifies it
+/// against Mojang's key; only the *server* does, per
+/// `crates/protocol/v770/src/packets/player_info.rs`'s
+/// `RemoteChatSessionData` doc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatSessionInfo {
+    /// This player's chat-session UUID — half of the `SignedMessageLink`
+    /// every one of their signed messages is hashed against.
+    pub session_id: uuid::Uuid,
+    /// DER-encoded (X.509 `SubjectPublicKeyInfo`) RSA public key, verbatim —
+    /// what `lodestone_auth::verify_signature` parses.
+    pub public_key: Vec<u8>,
+    /// Public-key expiry, epoch milliseconds (`ProfilePublicKey.Data.expiresAt`).
+    /// Not enforced by anything here yet — see `ChatTrustLevel.evaluate`'s
+    /// `hasExpiredClient` clause in vanilla for the check this would feed.
+    pub expires_at: i64,
 }
 
 /// One entry of a player profile's property multimap, as `ADD_PLAYER` carries it.
@@ -1123,7 +1206,7 @@ pub enum ClientEvent {
         text: Text,
         /// Message kind.
         kind: ChatKind,
-        /// The sender's profile UUID — issue #419's filter key. Only a signed
+        /// The sender's profile UUID — the filter key. Only a signed
         /// player-chat message carries one on the wire (`PLAYER_CHAT`); system,
         /// disguised, and action-bar messages have none (the server
         /// pre-decorates the display name into the text), and the legacy
@@ -2074,7 +2157,7 @@ pub enum ClientEvent {
         last_death_location: Option<DeathLocation>,
     },
     /// The dimension **type** the local player is in changed, resolved against
-    /// the Configuration `registry_data` (issue #288).
+    /// the Configuration `registry_data`.
     ///
     /// Emitted alongside [`Self::Login`] and [`Self::Respawned`] — the two
     /// packets that carry a dimension-type holder id — and always *before* them,
@@ -2087,8 +2170,8 @@ pub enum ClientEvent {
     /// received (an older server, or a protocol family that does not send it),
     /// or the entry's contents were elided or malformed. That is deliberately
     /// **not** the same as "the overworld" — a consumer must fall back
-    /// explicitly rather than inherit a plausible default, which is the shape
-    /// issue #34 got wrong. `holder_id` is always present, so a consumer can log
+    /// explicitly rather than inherit a plausible default, which is a shape
+    /// that has been gotten wrong before. `holder_id` is always present, so a consumer can log
     /// exactly which id failed to resolve.
     DimensionTypeChanged {
         /// The `minecraft:dimension_type` holder id the server sent.
@@ -2097,7 +2180,7 @@ pub enum ClientEvent {
         dimension_type: Option<DimensionTypeInfo>,
     },
     /// The per-biome visual attributes the server declared in the Configuration
-    /// `registry_data` (issue #96), **indexed by biome holder id**.
+    /// `registry_data`, **indexed by biome holder id**.
     ///
     /// Emitted alongside [`Self::Login`], for the same reason and in the same
     /// position as [`Self::DimensionTypeChanged`]: re-entering Configuration
@@ -2127,8 +2210,7 @@ pub enum ClientEvent {
         sky_colors: Vec<Option<u32>>,
     },
     /// The per-biome **climate** the server declared in the same Configuration
-    /// `registry_data` [`Self::BiomeVisuals`] reads (issue #25/#26's shared
-    /// biome lane), **indexed by biome holder id** exactly as
+    /// `registry_data` [`Self::BiomeVisuals`] reads, **indexed by biome holder id** exactly as
     /// [`Self::BiomeVisuals::sky_colors`] is.
     ///
     /// A *separate* variant rather than two more fields on [`Self::BiomeVisuals`]
@@ -2154,8 +2236,8 @@ pub enum ClientEvent {
         has_precipitation: Vec<Option<bool>>,
     },
     /// The ordered entry names of the `minecraft:worldgen/biome` registry the
-    /// server declared in the Configuration `registry_data` (follow-up to
-    /// issue #96, commit `eb423ac`), **indexed by holder id** exactly as
+    /// server declared in the Configuration `registry_data`,
+    /// **indexed by holder id** exactly as
     /// [`Self::BiomeVisuals::sky_colors`] and [`Self::BiomeClimates`] are.
     ///
     /// Emitted at the same point (`Login`) and for the same reason as those
@@ -2197,8 +2279,8 @@ pub enum ClientEvent {
     /// # The latent bug this exists to remove
     ///
     /// Exactly [`Self::BiomeRegistryNames`]'s story, one registry over. The table
-    /// was **already decoded** — `ClientRegistries::entry_names` has had it since
-    /// #288 — and was simply never handed past the version crate, so
+    /// was **already decoded** — `ClientRegistries::entry_names` has had it all
+    /// along — and was simply never handed past the version crate, so
     /// `Sim::riptide_level` resolved `minecraft:riptide` through a **hardcoded
     /// holder id of 32**, derived from `riptide` being the 33rd of 26.2's 43
     /// built-in enchantments in resource-location-sorted order.
@@ -2223,8 +2305,9 @@ pub enum ClientEvent {
     /// through the exit portal after defeating the ender dragon.
     ///
     /// Carries no data: vanilla's own handler ignores the packet's `param` for
-    /// this event and always opens the credits screen with `showCredits = true`
-    /// (`ClientPacketListener.java:1548-1552`:
+    /// this event and always opens the credits screen with `WinScreen`'s
+    /// `poem` parameter set `true`
+    /// (`ClientPacketListener.java`:
     /// `this.minecraft.gui.setScreen(new WinScreen(true, () -> { ... }))`), so
     /// there is nothing version-free left to carry — this is a pure signal,
     /// like [`Self::Respawned`] is for a plain "you are alive again" with no
@@ -2304,7 +2387,7 @@ pub enum ClientEvent {
         show_advancements: bool,
     },
 
-    // ---- issue #26: the remaining clientbound packets ----------------------
+    // ---- the remaining clientbound packets ----------------------------------
     //
     // Every variant below routes to `session`, which is deliberate and is the
     // fork `route`'s doc says has cost work twice. None of them is per-entity
@@ -2485,7 +2568,7 @@ pub enum ClientEvent {
     /// Another zero-byte `StreamCodec.unit` packet.
     DialogCleared,
 
-    // ---- issue #26's recipe/trade tranche ----------------------------------
+    // ---- the recipe/trade tranche --------------------------------------------
     //
     // These five needed `SlotDisplay` — a *recursive* registry-dispatched union
     // of eleven variants with no length prefix anywhere — so none of them could
@@ -3065,7 +3148,7 @@ pub fn route(event: &ClientEvent) -> Route {
         // the sole writer of. The subject comes from `session::Riding`, exactly as
         // the seat pin already resolves its vehicle from that same scalar.
         | ClientEvent::VehicleMoved { .. }
-        // The mob's own leash state (issue #236, `SET_ENTITY_LINK`) — per-entity
+        // The mob's own leash state (`SET_ENTITY_LINK`) — per-entity
         // like every other row in this block, folded by `lodestone_ecs::ingest::
         // apply_entity_leash` into `Leashed`. Used to be unclaimed entirely (see
         // the "claimed by nothing" block below, which is where this line lived
@@ -3189,11 +3272,11 @@ pub fn route(event: &ClientEvent) -> Route {
         // table folded into a shell-owned cell (`net::BiomeNameCell`), read by
         // the mesher at mesh time. No `handles_event` arm needed.
         | ClientEvent::BiomeRegistryNames { .. }
-        // The credits screen (issue #192): a pure world/session signal with no
+        // The credits screen: a pure world/session signal with no
         // per-entity or per-session scalar to fold, forwarded to the shell's
         // own `NetUpdate` stream exactly like `WeatherChanged`.
         | ClientEvent::WinGame
-        // Issue #46: same shape as `BiomeRegistryNames` just above — a
+        // Same shape as `BiomeRegistryNames` just above — a
         // registry-generation table with one obvious consumer (the chat
         // box), no per-entity or per-session scalar to fold. Both travel the
         // shell's own stream; no `handles_event` arm needed for either.
@@ -3224,8 +3307,8 @@ pub fn route(event: &ClientEvent) -> Route {
         // The eviction twin, and this entry used to read `CLIENT` with the
         // comment "the adapter has already dropped the column through the
         // `WorldSink`, so the event is a notification with nothing left to do."
-        // That was true of the *world* and false of the *renderer*, which is
-        // issue #479: collision re-reads the store every tick and so tracked the
+        // That was true of the *world* and false of the *renderer*:
+        // collision re-reads the store every tick and so tracked the
         // unload for free, while the GPU kept every section the column ever
         // uploaded — for the whole session, unculled, against a fixed-capacity
         // origin arena. Kept as a worked example of the failure mode `CLAUDE.md`
@@ -3289,11 +3372,11 @@ pub fn route(event: &ClientEvent) -> Route {
         // compass target every legacy family's packet doc names.
         ClientEvent::SpawnPositionChanged { .. } => SESSION,
         // `lodestone_game::levelstate::GameRuleValues` via `apply_game_rules`.
-        // Note this is *not* #327's typed registry, which is server-side and
+        // Note this is *not* the typed registry, which is server-side and
         // unbuilt.
         ClientEvent::GameRulesChanged { .. } => SESSION,
 
-        // ---- issue #26's remaining clientbound set, all session -------------
+        // ---- the remaining clientbound set, all session --------------------
         //
         // Every one of these folds into a `Session*` component in
         // `lodestone_ecs::session`, the same way the scoreboard, the tab list,
