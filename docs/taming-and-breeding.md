@@ -83,7 +83,9 @@ entity id, because nothing persists it and there is no uuid to resolve. Collapsi
 
 ## 2. The four taming mechanisms
 
-`tame_mechanism(species)` in `mobs.rs`. Read the table before assuming a shared constant:
+`tame_mechanism(species)` in `mobs/species.rs` (moved there from `mobs.rs`
+by the file split; called from `MobSim::interact` in `mobs/mod.rs`). Read the
+table before assuming a shared constant:
 
 | species | trigger | roll | also sits? |
 |---|---|---|---|
@@ -228,7 +230,7 @@ Two additions to `resolve_breeding`:
 | knob | what it does |
 |---|---|
 | `MobSim::set_tame_rng(SpawnRng)` | replaces the tame-roll stream. The injection point a chance gate needs: seed it so the first draw is known and the outcome becomes a prediction. |
-| `TAME_ROLL_SEED` / `BREED_XP_SEED` (`mobs.rs`) | default seeds. Separate streams from `ORB_BEHAVIOR_SEED` and the spawn RNG, so a tame attempt cannot shift which roll a spawn or a despawn pass sees. |
+| `TAME_ROLL_SEED` / `BREED_XP_SEED` (`mobs/mod.rs`) | default seeds. Separate streams from `ORB_BEHAVIOR_SEED` and the spawn RNG, so a tame attempt cannot shift which roll a spawn or a despawn pass sees. |
 | `SimMob::set_temper` | stages a horse at a chosen temper instead of feeding it 34 times. |
 | `mob_drops` game rule | gates the breeding orb. |
 

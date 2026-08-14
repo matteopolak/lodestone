@@ -162,11 +162,13 @@ None. The tables are `const`, resolved at compile time, and take no feature flag
   `lodestone_server::mob_spawn::MobCategory`, 7 variants and a different
   `check_despawn` signature); the server uses its own and unifying them is issue
   #221's call. The roster is keyed on the species path string and returns goals
-  only, so it takes no side. `is_hostile_species` stays in `mobs.rs`, reduced to
-  spawn category and despawn persistence.
+  only, so it takes no side. `is_hostile_species` stays in `mobs/species.rs`
+  (moved there from `mobs.rs` by the file split), reduced to spawn category
+  and despawn persistence.
 - **Perception data.** "Which species does a spider flee", "which items tempt a
   pig" describe what a mob can *see*, are fed through `MobController` by the
-  server's own census, and live next to that feed in `mobs.rs`. The roster only
+  server's own census, and live next to that feed in `mobs/mod.rs`
+  (`feed_perception`, still core `MobSim` tick logic). The roster only
   decides that a spider gets an `AvoidEntityGoal` at all.
 
 ## Known gaps

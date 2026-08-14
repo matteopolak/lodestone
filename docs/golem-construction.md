@@ -5,8 +5,9 @@
 Block-pattern detection and spawn for the snow golem and the iron golem —
 given a just-placed carved pumpkin or jack o'lantern, does a valid
 `snow_block`/`iron_block` structure now exist around it, and if so, spawn
-the golem. Lives in `crates/lodestone-server/src/mobs.rs` as
-`MobSim::try_construct_golem`, ported from vanilla
+the golem. Lives in `crates/lodestone-server/src/mobs/mod.rs` as
+`MobSim::try_construct_golem` (the pattern-matching internals it calls into
+are `mobs/golem.rs`, split out of the same file since this doc was written), ported from vanilla
 `CarvedPumpkinBlock.trySpawnGolem`
 (`.cache/mc/26.2/src/net/minecraft/world/level/block/CarvedPumpkinBlock.java`).
 
@@ -55,7 +56,7 @@ already existed).
 ## How to change it, and the gotchas
 
 - **The server.rs hook is not wired yet.** Detection and spawn are complete
-  and tested (`crates/lodestone-server/src/mobs.rs`'s `golem_tests` module),
+  and tested (`crates/lodestone-server/src/mobs/golem.rs`'s `golem_tests` module),
   but nothing in `server.rs`'s block-placement path calls
   `try_construct_golem` — that file is outside this pass's ownership. See
   the broker note this session left (golem construction server hook) for the
@@ -93,5 +94,5 @@ No feature flags or env vars.
 - `.cache/mc/26.2/src/net/minecraft/world/level/block/CarvedPumpkinBlock.java`,
   `.../state/pattern/{BlockPattern,BlockPatternBuilder}.java` — the ported
   pattern-matching engine and both golem shapes.
-- `crates/lodestone-server/src/mobs.rs`'s `spawn_species` — the entity spawn
+- `crates/lodestone-server/src/mobs/mod.rs`'s `spawn_species` — the entity spawn
   itself, so a constructed golem gets the same goal set as any other.

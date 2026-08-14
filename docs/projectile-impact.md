@@ -79,7 +79,7 @@ where `Instant::now()` compiles and then panics at runtime with no log line.
 ## How to change it
 
 * **A new projectile's damage** is a row in `impact_effect`. Its *damage type* is a
-  row in `projectile_damage_type` (`mobs.rs`) — that one is registry data this crate
+  row in `projectile_damage_type` (`mobs/projectiles.rs`) — that one is registry data this crate
   owns, which is why it is not folded into the version-free function.
 * **A rule that depends on the target's species** cannot live in `impact_effect`,
   which is a pure function of the projectile. `Snowball.onHitEntity`'s

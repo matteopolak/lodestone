@@ -136,9 +136,16 @@ No feature flags. Constants live at the call site:
 
 - `net.rs`: mob count (`6`), spawn center (`(8, 8)`, matching `begin_play`'s
   hardcoded spawn), and `mob_area` radius (`view_radius.clamp(1, 3)`).
-- `mobs.rs`: `seed_demo_mobs`'s ring radius (`6.0` blocks), `MOB_TICK_INTERVAL`
-  (`50ms`, one vanilla tick), and the `1000` starting id in
-  `run_mob_tick_loop`.
+- `mobs/mod.rs`: `seed_demo_mobs`'s ring radius (`6.0` blocks),
+  `MOB_TICK_INTERVAL` (`50ms`, one vanilla tick), and the `1000` starting id
+  in `run_mob_tick_loop`. As of the `mobs.rs` file split
+  (`docs/plans/crate-and-file-splits.md`), `mobs.rs` is a `mobs/` directory
+  module: `MobSim`'s own core (spawn/tick/interact/leash/breed/death handling),
+  `SimMob`, and this wiring (`LiveMobSource`/`MobHandle`/`run_mob_tick_loop`/
+  `DEMO_SPECIES`) stay in `mobs/mod.rs`; the per-entity-kind tick/query slices
+  (projectiles, dropped items, experience orbs, falling blocks, vehicles) and
+  the pure-data tables (block-state ids, `ChunkWorld`, golem construction,
+  species tables) each moved to their own sibling file.
 
 ## Dependencies
 

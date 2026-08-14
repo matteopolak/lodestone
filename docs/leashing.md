@@ -5,7 +5,10 @@
 Lead attach/detach, the fence-anchor re-parent, and the distance-based pull
 and snap physics for a leashed mob — vanilla `Leashable`/`LeadItem`
 (`.cache/mc/26.2/src/net/minecraft/world/entity/Leashable.java`,
-`.../item/LeadItem.java`). Lives in `crates/lodestone-server/src/mobs.rs`:
+`.../item/LeadItem.java`). Lives in `crates/lodestone-server/src/mobs/mod.rs`
+(the `mobs.rs` file split moved several other domains to sibling files under
+`mobs/`, but leashing stayed in `mod.rs` — it is core `MobSim` tick logic, not
+a per-entity-kind slice):
 `MobSim::try_leash`, `MobSim::try_leash_to_fence`, `MobSim::tick_leashes`,
 plus the `LeashHolder`/`LeashOutcome` types and a `leash_holder` field on
 `SimMob`.
@@ -82,7 +85,7 @@ production hook needed) applies vanilla's two distance thresholds:
 ## Configuration
 
 No feature flags or env vars. `LEASH_TOO_FAR_DIST` (12.0) and
-`LEASH_ELASTIC_DIST` (6.0) are `const`s in `mobs.rs`, transcribed from
+`LEASH_ELASTIC_DIST` (6.0) are `const`s in `mobs/mod.rs`, transcribed from
 vanilla's own `Leashable` constants.
 
 ## Dependencies

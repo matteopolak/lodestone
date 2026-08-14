@@ -85,8 +85,8 @@ way.
 
 | knob | where | value |
 |---|---|---|
-| `ITEM_DIMENSIONS` | `mobs.rs` | `0.25 × 0.25`, step height `0.0` |
-| `VOID_DESPAWN_DEPTH` | `mobs.rs` | 64 blocks below `min_y` |
+| `ITEM_DIMENSIONS` | `mobs/mod.rs` | `0.25 × 0.25`, step height `0.0` |
+| `VOID_DESPAWN_DEPTH` | `mobs/mod.rs` | 64 blocks below `min_y` |
 | `ITEM_GRAVITY` / `ITEM_AIR_DRAG` | `lodestone-entity` | `0.04` / `0.98` |
 
 ## Cost, and why it is a counter
