@@ -291,47 +291,52 @@ changes"), here is exactly what does and does not:
 
 ## How to change it, and the gotchas
 
-- **The two queues are still `run_tick_loop` locals, and that is the one thing
-  standing between scheduled ticks and the disk.** A follow-up landing
-  built the whole
-  persistence path for them — `chunk_nbt::SavedTick` for the schema and
-  `region_source::ScheduledTickHandle` for the shared queues plus the game tick
-  their `trigger_tick`s are measured against — and both halves are gated
-  (`tests/scheduled_tick_persistence.rs`,
-  `tests/chunk_extras_vanilla_oracle.rs`). What is missing is that
-  `tick::run_tick_loop` still writes:
+- **The queues are shared, not `run_tick_loop` locals — and `run_tick_loop`
+  holds their lock across a section that reads the world. Nothing may take that
+  lock from inside a `ChunkSource` call.** `tick::run_tick_loop` takes
+  `scheduled: crate::region_source::ScheduledTickHandle` (the in-memory
+  constructor passes `ScheduledTickHandle::default()`,
+  `IntegratedServer::open_persistent_with_mobs` passes
+  `persistent.scheduled_ticks()`), stores the clock with
+  `scheduled.set_game_tick(game_tick)`, and wraps its whole scheduled-tick and
+  random-tick section in one `scheduled.with(|queues| { … })` binding
+  `let block_ticks = &mut queues.block; let fluid_ticks = &mut queues.fluid;`
+  so every use site inside is textually unchanged. Persistence rides
+  `chunk_nbt::SavedTick` for the schema, gated by
+  `tests/scheduled_tick_persistence.rs` and
+  `tests/chunk_extras_vanilla_oracle.rs`.
 
-  ```rust
-  let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-  let mut fluid_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-  ```
+  **The gotcha that cost the owner every saved world.** That `with` region calls
+  `world.column`, `world.block_state` and `world.set_block`, and on a persistent
+  world those reach `region_source::RegionChunkSource::load`, which restores the
+  loaded chunk's saved ticks. Restoring used to take the same
+  `std::sync::Mutex` — which is not reentrant — so the tick thread parked on its
+  own lock. Total, deterministic, and reached the first time a world tick touched
+  a column that exists on disk; the join wedged before its first chunk batch, and
+  the client sat at "Loading terrain 1/4000" and then in a void with **no error,
+  no disconnect and no panic**. A chunk load now hands its ticks to
+  `ScheduledTickHandle::stage` behind a *separate* mutex, carrying absolute
+  trigger ticks already rebased by the loader, and `with` merges them before it
+  runs its closure — so no reader can see a staged-but-unscheduled queue, and the
+  deferral cannot move when a restored tick fires. **Lock order is always `queues`
+  then `staged`; never the reverse.** Anything else that wants to schedule from
+  inside a `ChunkSource` call must stage too, not lock.
 
-  so the queues persistence can read are always empty in production, and a pending
-  repeater tick is still lost on quit. The wiring is deliberately shaped to be a
-  **wrapper rather than a rewrite**, because this function is where the redstone
-  work lives:
+  A brand-new world never reached it (`load` returns before touching the handle
+  when the chunk is not on disk, and `restore` returns early for a chunk with no
+  ticks), which is why every singleplayer terrain gate in the tree — all of which
+  open an in-memory or brand-new world — stayed green. The gate that can see it
+  is `tests/saved_world_ticks_from_inside_the_queue_lock.rs`: a saved chunk
+  carrying one block and one fluid tick, read from inside `with` on a spawned
+  thread with a bounded `recv_timeout` so the deadlock *fails* instead of hanging.
 
-  1. Add a parameter `scheduled: crate::region_source::ScheduledTickHandle`, and
-     pass `persistent.scheduled_ticks()` from
-     `IntegratedServer::open_persistent_with_mobs` (the in-memory constructor
-     passes `ScheduledTickHandle::default()`, exactly as it now does for
-     `BlockEntityHandle`).
-  2. Delete the two `let mut` lines above.
-  3. Wrap the existing scheduled-tick section — from the
-     `block_tick_out.drain_scheduled_ticks()` adoption loop through the last use
-     of `fluid_ticks` — in one `scheduled.with(|queues| { … })`, binding
-     `let block_ticks = &mut queues.block; let fluid_ticks = &mut queues.fluid;`
-     at the top so **every existing use site is textually unchanged**.
-  4. Add `scheduled.set_game_tick(game_tick);` right after `game_tick += 1`.
-
-  Two things to know before doing it. `with` hands over both queues in one
-  **synchronous** closure on purpose: a closure cannot contain an `.await`, so
-  the compiler — not a reviewer — guarantees the `MutexGuard` is never held
-  across a suspension point, which would make the tick task non-`Send`. And the
-  game tick must come from *this* counter and not be re-derived: a second clock
-  here is the same class of
-  bug in a new place, where `SET_TIME` decoded and really did darken the sky with
-  every link in the wire green while the value was wall-clock
+  Two further things to know. `with` hands over both queues in one **synchronous**
+  closure on purpose: a closure cannot contain an `.await`, so the compiler — not
+  a reviewer — guarantees the `MutexGuard` is never held across a suspension
+  point, which would make the tick task non-`Send`. And the game tick must come
+  from *this* counter and not be re-derived: a second clock here is the same class
+  of bug in a new place, where `SET_TIME` decoded and really did darken the sky
+  with every link in the wire green while the value was wall-clock
   elapsed-since-join.
 - **`ChunkColumn`'s `block_state`/`set_block` take LOCAL x/z; every tick
   handler is handed ABSOLUTE x/z plus `min_x`/`min_z` to convert with.** Mixing
