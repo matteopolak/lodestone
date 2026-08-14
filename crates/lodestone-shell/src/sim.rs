@@ -557,6 +557,15 @@ pub struct Sim {
     /// there is no per-session state to fold it into. Reset by
     /// [`Self::end_session`] so a later session starts un-won.
     won: bool,
+    /// Set once `NetUpdate::LanOpened` has arrived this session — the ground
+    /// truth `app::session::drive_ui_from_session` pushes into
+    /// `MenuNav::set_lan_published`, which is what makes the pause menu stop
+    /// offering Open to LAN once there is nothing left for it to do (issue
+    /// #535's scope 2). The same plain-field shape as [`Self::won`]: exactly
+    /// one consumer, no per-session ECS state to fold it into. Reset by
+    /// [`Self::end_session`] so a later session starts unpublished, matching
+    /// a fresh integrated-server handle's own unpublished state.
+    lan_published: bool,
     /// The dimension whose one-time client-side reset has already run — **an edge
     /// detector, not a source of truth.**
     ///

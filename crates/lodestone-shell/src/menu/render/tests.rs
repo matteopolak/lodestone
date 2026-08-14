@@ -2921,6 +2921,10 @@ fn frame_for_defers_to_an_overlay_for_in_world_settings() {
     assert!(owns_frame(Screen::Settings));
 }
 
+/// The unpublished row set — `nav.set_lan_published` is never called, so this
+/// is `MenuNav::pause_buttons`'s `PAUSE_BUTTONS` answer. See
+/// `the_published_pause_frame_drops_open_to_lan_and_reflows_options` below for
+/// the other one, added when issue #535's scope 2 made this list conditional.
 #[test]
 fn pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight() {
     use crate::menu::nav::{PAUSE_BUTTONS, PauseButton};
@@ -2990,6 +2994,78 @@ fn pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight() {
     assert!(!geometry(&f, 1280.0, 720.0).is_empty());
 }
 
+/// Issue #535's scope 2: once the hosted world is published, Open to LAN has
+/// nothing left to offer (this client has no unpublish/toggle form — see
+/// `PauseButton::OpenToLan`'s own doc) and `MenuNav::pause_buttons` omits it
+/// rather than merely disabling it.
+///
+/// The discriminating check is the row **set**, not just a flag on one row:
+/// a `enabled: false` row would still show up in `f.rows` at the same
+/// length (10) as the unpublished case, so a gate that only checked
+/// `f.rows[8].enabled` would pass under the wrong hypothesis (disabled, not
+/// omitted) too. Asserting `f.rows.len() == 9` — one less than
+/// `pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight`'s
+/// 10 — is what a "disabled, not omitted" implementation gets wrong, since a
+/// disabled row is still a row. The rect check goes one step further: it also
+/// catches a "the row is gone but the grid still leaves the gap where it was"
+/// implementation, which a bare row-count check cannot.
+#[test]
+fn the_published_pause_frame_drops_open_to_lan_and_reflows_options() {
+    use crate::menu::nav::{PAUSE_BUTTONS, PAUSE_BUTTONS_PUBLISHED, PauseButton};
+
+    let mut nav = test_nav("pause-frame-published");
+    let mut ui = UiState::new();
+    ui.enter_dev_world();
+    ui.pause();
+    nav.set_lan_published(true);
+
+    // The row **set**: nine, not ten, and Open to LAN is not merely disabled
+    // among them — it is absent.
+    assert_eq!(nav.pause_buttons(), PAUSE_BUTTONS_PUBLISHED.as_slice());
+    assert_ne!(
+        PAUSE_BUTTONS_PUBLISHED.len(),
+        PAUSE_BUTTONS.len(),
+        "premise: the published list really is shorter, or this gate cannot \
+         distinguish omission from disablement"
+    );
+    assert!(
+        !PAUSE_BUTTONS_PUBLISHED.contains(&PauseButton::OpenToLan),
+        "premise: Open to LAN really is missing from the published list"
+    );
+
+    let f = pause_frame(&nav);
+    assert_eq!(f.rows.len(), PAUSE_BUTTONS_PUBLISHED.len());
+    assert!(
+        f.rows.iter().all(|r| r.label != PauseButton::OpenToLan.label()),
+        "Open to LAN must not appear anywhere in the published frame's rows"
+    );
+    assert_eq!(f.rows[0].label, PauseButton::BackToGame.label());
+    assert_eq!(f.rows[7].label, PauseButton::Options.label());
+    assert_eq!(f.rows[8].label, PauseButton::QuitToTitle.label());
+
+    // The discriminating rect: vanilla's own non-singleplayer branch gives
+    // Options the full-width row alone (`PauseScreen.java`, `:160-164`) once
+    // there is no sibling to share it with, and this reproduces that shape
+    // rather than leaving a half-width gap where Open to LAN used to sit.
+    let options_rect = f.rows[7].slot.expect("Options has a slot").resolve(V_W, V_H);
+    let (_, _, options_w, _) = options_rect;
+    assert_eq!(
+        options_w, 204.0,
+        "Options must take the full-width row once published, matching \
+         vanilla's non-singleplayer branch — a merely-disabled Open to LAN \
+         would leave this at 98.0"
+    );
+    // And Disconnect's rect is exactly where the unpublished grid puts it —
+    // dropping one row's *sibling* must not move any other row, since both
+    // grids keep the same five rows (see `pause_menu_grid_with`'s own doc).
+    let disconnect_rect = f.rows[8].slot.expect("Disconnect has a slot").resolve(V_W, V_H);
+    assert_eq!(
+        disconnect_rect,
+        pause_slot(PauseButton::QuitToTitle, false).resolve(V_W, V_H),
+        "Disconnect's rect must be unchanged by publishing"
+    );
+}
+
 /// The canvas vanilla's own default window resolves to (854×480 at GUI
 /// scale 1 is vanilla's canonical GUI size), so the expected rects below are
 /// the numbers a vanilla screenshot at that size would show.
@@ -3037,6 +3113,10 @@ fn the_title_screen_rects_are_vanillas_own() {
     assert_eq!(qx - (ox + ow), 4.0, "title screen gutter");
 }
 
+/// The unpublished grid — issue #535's scope 2 gave `pause_slot` a second
+/// `published: true` arrangement (`the_published_pause_screen_drops_open_to_lan`
+/// below), so every rect here is pinned with `false` rather than left
+/// implicit.
 #[test]
 fn the_pause_screen_rects_are_vanillas_own() {
     use crate::menu::nav::PauseButton as B;
@@ -3072,7 +3152,7 @@ fn the_pause_screen_rects_are_vanillas_own() {
     ];
     for (button, want) in expected {
         assert_eq!(
-            pause_slot(button).resolve(V_W, V_H),
+            pause_slot(button, false).resolve(V_W, V_H),
             want,
             "{button:?} is not where vanilla puts it"
         );
@@ -3084,11 +3164,11 @@ fn the_pause_screen_rects_are_vanillas_own() {
     // 4 — both fall out of the 204+8 cell, and both are the details a
     // remembered layout gets wrong.
     assert_eq!(
-        pause_slot(B::BackToGame).resolve(V_W, V_H).0,
+        pause_slot(B::BackToGame, false).resolve(V_W, V_H).0,
         V_W / 2.0 - 102.0
     );
-    let (ax, _, aw, _) = pause_slot(B::Advancements).resolve(V_W, V_H);
-    let (sx, ..) = pause_slot(B::Statistics).resolve(V_W, V_H);
+    let (ax, _, aw, _) = pause_slot(B::Advancements, false).resolve(V_W, V_H);
+    let (sx, ..) = pause_slot(B::Statistics, false).resolve(V_W, V_H);
     assert_eq!(sx - (ax + aw), 8.0, "pause screen gutter");
     assert_eq!(
         (ax + aw + sx) / 2.0,
@@ -3107,7 +3187,7 @@ fn the_pause_grid_size_is_the_arranged_layouts_own() {
     assert_eq!(pause_grid_size(), (PAUSE_GRID_W, PAUSE_GRID_H));
     // The same numbers reached the other way, from the arranged tree rather
     // than the cache, so the cache cannot be what is agreeing with itself.
-    let grid = pause_menu_grid_with(PAUSE_MENU_PADDING_TOP);
+    let grid = pause_menu_grid_with(PAUSE_MENU_PADDING_TOP, false);
     assert_eq!((grid.width(), grid.height()), (212.0, 166.0));
     // And the grid really does hold nine drawable leaves in `PAUSE_BUTTONS`
     // order — the four icon buttons among them come from a *nested*
@@ -3116,6 +3196,33 @@ fn the_pause_grid_size_is_the_arranged_layouts_own() {
     assert_eq!(
         layout::widget_rects(&grid).len(),
         crate::menu::nav::PAUSE_BUTTONS.len()
+    );
+}
+
+/// `pause_grid_size` takes no `published` flag (see its own doc) because the
+/// two arranged grids share the same overall size — this is the gate that
+/// premise depends on: if a future edit ever made the published Options row
+/// change the grid's height or width, this would be the first thing to fail,
+/// well before `Origin::PauseGrid`'s callers noticed misplaced rects.
+#[test]
+fn the_pause_grid_size_matches_whether_or_not_lan_is_published() {
+    let unpublished = pause_menu_grid_with(PAUSE_MENU_PADDING_TOP, false);
+    let published = pause_menu_grid_with(PAUSE_MENU_PADDING_TOP, true);
+    assert_eq!(
+        (unpublished.width(), unpublished.height()),
+        (published.width(), published.height()),
+        "the published grid drops Open to LAN's row *sibling*, not a row — \
+         both arrangements keep the same five rows"
+    );
+    // And the leaf count really did drop by exactly one — the two grids
+    // agreeing on size is not evidence they are identical.
+    assert_eq!(
+        layout::widget_rects(&unpublished).len(),
+        crate::menu::nav::PAUSE_BUTTONS.len()
+    );
+    assert_eq!(
+        layout::widget_rects(&published).len(),
+        crate::menu::nav::PAUSE_BUTTONS_PUBLISHED.len()
     );
 }
 
@@ -3130,8 +3237,8 @@ fn a_changed_cell_padding_moves_every_pause_rect() {
     // (a) move Back to Game up 10, (b) shrink the grid 10, and therefore
     // (c) move every *later* row up 10 as well — a silently no-op arrange pass
     // would fail all three.
-    let real = layout::widget_rects(&pause_menu_grid_with(PAUSE_MENU_PADDING_TOP));
-    let short = layout::widget_rects(&pause_menu_grid_with(PAUSE_MENU_PADDING_TOP - 10));
+    let real = layout::widget_rects(&pause_menu_grid_with(PAUSE_MENU_PADDING_TOP, false));
+    let short = layout::widget_rects(&pause_menu_grid_with(PAUSE_MENU_PADDING_TOP - 10, false));
     assert_eq!(real[0].1, 50.0);
     assert_eq!(short[0].1, 40.0, "row 0's padding must move row 0");
     for (i, (r, s)) in real.iter().zip(&short).enumerate() {
@@ -3142,7 +3249,7 @@ fn a_changed_cell_padding_moves_every_pause_rect() {
         );
         assert_eq!(r.0, s.0, "and nothing may move horizontally");
     }
-    let grid = pause_menu_grid_with(PAUSE_MENU_PADDING_TOP - 10);
+    let grid = pause_menu_grid_with(PAUSE_MENU_PADDING_TOP - 10, false);
     assert_eq!(
         (grid.width(), grid.height()),
         (PAUSE_GRID_W, PAUSE_GRID_H - 10.0),
@@ -3740,7 +3847,7 @@ fn every_title_and_pause_widget_draws_the_sprite_the_widget_layer_picks() {
         .chain(
             PAUSE_BUTTONS
                 .iter()
-                .map(|b| (b.label(), b.enabled(), pause_slot(*b))),
+                .map(|b| (b.label(), b.enabled(), pause_slot(*b, false))),
         )
         .collect();
     // The premise, checked rather than assumed: both screens really do carry
@@ -7648,6 +7755,199 @@ fn in_world_settings_carries_the_same_band_chrome_as_the_main_menu() {
             "control: the unstamped frame still tinted {raw_tint} of the band"
         ));
     }
+
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+// -- the tab bar "meshes with the border" (issues #564/#567, owner's visual audit) --
+//
+// Point-sampled, not vertex-counted: `colour_at` reads the *topmost quad
+// covering an exact pixel*, which is what lets this tell a large enclosing
+// fill (the merge panel, or `chrome`'s own full-width tint) apart from a
+// thin 1 px separator drawn on top of it — a vertex-in-rect probe like
+// `band_coverage` would read the merge fill's own large quad as "nothing
+// here" for a small separator-sized probe rect, which is exactly the trap
+// `CLAUDE.md` names. See `colour_at`/`coverage_of`'s own docs for why this
+// codebase already prefers point sampling for this class of check
+// (`the_selected_row_is_visibly_different_from_its_neighbours` is the
+// precedent).
+
+/// Statistics's own tab bar at the same 854×480 canvas
+/// `tab_bar_geometry_matches_vanillas_own_arithmetic_at_854_wide` measures:
+/// `start_x = 242`, `tab_width = 124`, so General is `242..366`, Items
+/// `366..490`, Mobs `490..614`, and the flanks are `0..242`/`614..854`.
+///
+/// Three claims, all from the owner's report and none of them a size
+/// change (`MenuTabBar.HEIGHT`/`tab_bar_geometry` were already vanilla's
+/// own constants):
+///
+/// 1. The header separator (`Screen.HEADER_SEPARATOR`) appears in the two
+///    flanking margins, and **only** there — not under any tab, selected
+///    or not. Before this fix a full-width bar ran under the whole strip.
+/// 2. The selected tab's bottom edge **meshes with the content panel
+///    below**: the merge fill (`LIST_BAND_TINT`, standing in for vanilla's
+///    `Screen.MENU_BACKGROUND`, which this client has no tiled texture
+///    for) paints under General but not under the unselected Items tab.
+/// 3. That merge is not a guess at a gap — the selected tab's own bottom
+///    edge (`layout::TAB_BAR_HEIGHT`) and the content band's own top
+///    (`ListSpec::model(..).top()`) are asserted to be the **same
+///    coordinate**, both read from the expressions the draw actually
+///    uses rather than restated as a literal `24.0` twice.
+#[test]
+fn the_statistics_tab_bar_meshes_selected_tab_only_and_the_flanks_carry_the_header_separator() {
+    let nav = test_nav("tab-mesh-stats");
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut fav = FaviconCache::new();
+    let mut ui = UiState::new();
+    ui.enter_dev_world();
+    ui.pause();
+    ui.open_statistics_from_pause();
+    assert_eq!(ui.screen(), Screen::Statistics, "premise");
+
+    let frame = frame_for(&ui, &nav, &statuses, &mut fav).expect("Statistics draws a frame");
+    let (w, h) = (854.0_f32, 480.0_f32);
+    let v = geometry(&frame, w, h);
+    assert!(!v.is_empty(), "the screen must draw something");
+
+    // Claim 3: the same coordinate, derived from both sides' own expressions.
+    let chrome_top = frame
+        .list
+        .as_ref()
+        .and_then(|spec| spec.model(h))
+        .map(|list| list.top())
+        .expect("Statistics has a content band");
+    assert_eq!(
+        chrome_top,
+        layout::TAB_BAR_HEIGHT,
+        "the content band's own top ({chrome_top}) must be the tab bar's own bottom \
+         ({}) — a gap here is exactly what 'does not mesh' looks like",
+        layout::TAB_BAR_HEIGHT
+    );
+
+    let (start_x, tab_width) = layout::tab_bar_geometry(w, 3);
+    assert_eq!((start_x, tab_width), (242.0, 124.0), "premise: the known-good geometry");
+
+    let at = |px: f32, py: f32| colour_at(&v, 2.0 * px / w - 1.0, 1.0 - 2.0 * py / h);
+    let close = |c: Option<[f32; 4]>, want: [f32; 4]| {
+        c.is_some_and(|c| c.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01))
+    };
+
+    let mut wrong = Vec::new();
+
+    // Claim 1: the flanks carry the separator, at the tab bar's own bottom
+    // edge (`h - SEPARATOR_H .. h`), and interior points under any tab do
+    // not — checked under the *selected* tab (General, 242..366) and an
+    // *unselected* one (Items, 366..490), so a fix that only special-cased
+    // the selected tab could not pass this by accident.
+    for (x, y, want, what) in [
+        (100.0, 22.5, SEPARATOR_LIGHT, "left flank, light row"),
+        (100.0, 23.5, SEPARATOR_DARK, "left flank, dark row"),
+        (700.0, 22.5, SEPARATOR_LIGHT, "right flank, light row"),
+        (700.0, 23.5, SEPARATOR_DARK, "right flank, dark row"),
+    ] {
+        let got = at(x, y);
+        if !close(got, want) {
+            wrong.push(format!(
+                "{what} at ({x}, {y}): expected {want:?}, got {got:?}"
+            ));
+        }
+    }
+    for (x, y, what) in [
+        (300.0, 22.5, "under General (selected), light row"),
+        (300.0, 23.5, "under General (selected), dark row"),
+        (420.0, 22.5, "under Items (unselected), light row"),
+        (420.0, 23.5, "under Items (unselected), dark row"),
+    ] {
+        let got = at(x, y);
+        if close(got, SEPARATOR_LIGHT) || close(got, SEPARATOR_DARK) {
+            wrong.push(format!(
+                "{what} at ({x}, {y}) painted a header-separator colour ({got:?}) — vanilla's \
+                 `MenuTabBar` never draws one under any tab, only in the two flanking margins"
+            ));
+        }
+    }
+
+    // Claim 2: the merge fill under General's own inset body (`x+2, y+2` per
+    // `MenuTabButton.renderMenuBackground`), sampled 10 px in from the tab's
+    // left edge and away from its centred label so a glyph quad cannot be
+    // mistaken for (or hide) the fill. Absent under Items, which is not
+    // selected and must not merge with anything.
+    let general_merge = at(start_x + 10.0, 10.0);
+    if !close(general_merge, LIST_BAND_TINT) {
+        wrong.push(format!(
+            "General's own inset body at ({}, 10) is {general_merge:?}, not the content \
+             panel's own LIST_BAND_TINT — the selected tab does not mesh with the panel below it",
+            start_x + 10.0
+        ));
+    }
+    let items_x = start_x + tab_width;
+    let items_merge = at(items_x + 10.0, 10.0);
+    if close(items_merge, LIST_BAND_TINT) {
+        wrong.push(format!(
+            "Items (unselected) painted the merge fill at ({}, 10) — only the selected tab \
+             may merge with the panel below",
+            items_x + 10.0
+        ));
+    }
+
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// Create New World's own tab bar (issue #567's second consumer) at the same
+/// canvas: the flanking separators are this bar's own concern regardless of
+/// whether a content band sits below it (unlike Statistics, this screen has
+/// no `ListSpec` at all), but the merge fill must **never** appear here —
+/// there is no panel to merge with, and painting one anyway would be a
+/// worse regression than the pre-fix "no merge anywhere" state, since it
+/// would show a tinted patch floating over the plain backdrop.
+#[test]
+fn create_worlds_tab_bar_gets_the_flanking_separators_but_never_the_merge_fill() {
+    let nav = test_nav("tab-mesh-create-world");
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut fav = FaviconCache::new();
+    let mut ui = UiState::new();
+    ui.open_world_select();
+    ui.open_create_world();
+    assert_eq!(ui.screen(), Screen::CreateWorld, "premise");
+
+    let frame = frame_for(&ui, &nav, &statuses, &mut fav).expect("Create New World draws a frame");
+    assert!(
+        frame.list.is_none(),
+        "premise: this screen has no ListSpec, which is exactly why its merge fill must stay off"
+    );
+    let (w, h) = (854.0_f32, 480.0_f32);
+    let v = geometry(&frame, w, h);
+    assert!(!v.is_empty());
+
+    let (start_x, tab_width) = layout::tab_bar_geometry(w, create_world::TAB_LABELS.len());
+    let at = |px: f32, py: f32| colour_at(&v, 2.0 * px / w - 1.0, 1.0 - 2.0 * py / h);
+    let close = |c: Option<[f32; 4]>, want: [f32; 4]| {
+        c.is_some_and(|c| c.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01))
+    };
+
+    let mut wrong = Vec::new();
+    for (x, y, want, what) in [
+        (100.0, 22.5, SEPARATOR_LIGHT, "left flank, light row"),
+        (100.0, 23.5, SEPARATOR_DARK, "left flank, dark row"),
+        (700.0, 22.5, SEPARATOR_LIGHT, "right flank, light row"),
+        (700.0, 23.5, SEPARATOR_DARK, "right flank, dark row"),
+    ] {
+        let got = at(x, y);
+        if !close(got, want) {
+            wrong.push(format!("{what} at ({x}, {y}): expected {want:?}, got {got:?}"));
+        }
+    }
+    // Game (index 0) is selected by default — sample its own inset body,
+    // same offset the Statistics gate uses.
+    let game_merge = at(start_x + 10.0, 10.0);
+    if close(game_merge, LIST_BAND_TINT) {
+        wrong.push(format!(
+            "Game (selected, default tab) painted the merge fill at ({}, 10) even though this \
+             screen has no content band to merge with",
+            start_x + 10.0
+        ));
+    }
+    let _ = tab_width;
 
     assert!(wrong.is_empty(), "{wrong:#?}");
 }

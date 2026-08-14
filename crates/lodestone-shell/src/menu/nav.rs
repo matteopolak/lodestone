@@ -7803,7 +7803,6 @@ mod tests {
         ui.pause();
         nav.set_lan_published(true);
         assert_eq!(nav.pause_buttons(), PAUSE_BUTTONS_PUBLISHED.as_slice());
-        let __deliberate_type_error: u32 = "not a number";
         assert_eq!(nav.pause_button(), PauseButton::BackToGame);
 
         nav.key(&mut ui, MenuKey::Down);

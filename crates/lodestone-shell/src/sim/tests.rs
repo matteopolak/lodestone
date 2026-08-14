@@ -2228,6 +2228,94 @@ fn session_phase_reports_net_error_as_ended() {
     }
 }
 
+/// The absence control for the two tests below: this is the exact defect
+/// report ("if i open to lan, then open it a second time it kicks me and
+/// says lan is already up") reproduced directly at the `Sim` boundary, using
+/// the *old* wrong variant a second publish attempt used to be reported
+/// through. It must still end the session — proving the detector the next
+/// test relies on (`session_phase != Ended`) would actually have caught the
+/// bug, rather than merely asserting the negative and hoping the mechanism
+/// works.
+#[test]
+fn net_update_error_would_have_caught_the_old_already_published_kick() {
+    use crate::net::NetUpdate;
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+    ingest(&mut sim, login_event(7));
+    sim.poll_net();
+    assert_eq!(sim.session_phase(), SessionPhase::Connected, "premise");
+
+    // The literal message `net.rs` sent for this case before
+    // `NetUpdate::LanPublishError` existed.
+    feed.send(NetUpdate::Error(
+        "open to LAN: this world is already published".into(),
+    ))
+    .unwrap();
+    sim.poll_net();
+    assert!(
+        matches!(sim.session_phase(), SessionPhase::Ended(_)),
+        "control failed: NetUpdate::Error must still end a session, or the \
+         positive test below is not measuring anything"
+    );
+}
+
+/// The fix (issue #535's "kicks me" report): a second Open to LAN press —
+/// `IntegratedServer::publish` returning `AlreadyExists` — must reach the
+/// player as one more chat line on a session that is still alive, never as a
+/// disconnect. See `NetUpdate::LanPublishError`'s own doc for the full
+/// button → net thread → publish handler → error path trace, and the control
+/// immediately above for evidence the assertion below would actually fail if
+/// the old code path (`NetUpdate::Error`) were used instead.
+#[test]
+fn a_second_lan_publish_reports_a_chat_error_without_ending_the_session() {
+    use crate::net::NetUpdate;
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+    ingest(&mut sim, login_event(7));
+    sim.poll_net();
+    assert_eq!(
+        sim.session_phase(),
+        SessionPhase::Connected,
+        "premise: a live session to publish from"
+    );
+
+    // The first publish succeeds.
+    feed.send(NetUpdate::LanOpened { port: 25565 }).unwrap();
+    sim.poll_net();
+    assert_eq!(sim.session_phase(), SessionPhase::Connected);
+    assert!(
+        sim.is_lan_published(),
+        "premise: the world really is published now, or the second call \
+         below is not the scenario this test claims to cover"
+    );
+
+    // The second publish — a second press of the same button — fails
+    // server-side, and must not disturb the session at all.
+    feed.send(NetUpdate::LanPublishError(
+        "open to LAN: this world is already published".into(),
+    ))
+    .unwrap();
+    sim.poll_net();
+    assert_eq!(
+        sim.session_phase(),
+        SessionPhase::Connected,
+        "a second publish attempt must never disconnect an otherwise \
+         healthy session — this is the discriminating assertion, not the \
+         chat line below"
+    );
+    let chat = sim.recent_chat(10);
+    assert!(
+        chat.iter()
+            .any(|(line, _)| line.contains("already published")),
+        "the failure must still reach the player, through the ordinary chat \
+         path: {chat:?}"
+    );
+}
+
 #[test]
 fn end_session_tears_down_and_a_fresh_connect_afterward_starts_clean() {
     // The real acceptance test for `Sim::end_session`: not just that it
