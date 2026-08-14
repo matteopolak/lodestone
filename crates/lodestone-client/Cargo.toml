@@ -22,6 +22,17 @@ lodestone-world = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+# The wall clock a signed chat message's timestamp is stamped with
+# (`ClientAction::SendSignedChat::timestamp_millis`). `epoch_duration()` is the
+# one portable seam — `std::time::SystemTime::now()` compiles for wasm32 and
+# panics at runtime, same family as `Instant::now()`, which this crate already
+# bans crate-wide (see `scripts/wasm-check.sh`'s `lodestone-client instant-ban`
+# rule). The signing call site itself is native-only anyway (chat-signing
+# needs `lodestone-auth`'s RSA, which is `cfg(not(wasm32))`), but going through
+# this seam rather than `std::time` directly keeps the crate's "no bare wall-
+# clock read" invariant a checked one rather than one with a native-only
+# exception nobody grepped for.
+lodestone-time = { workspace = true }
 
 # The version-free signed-chat acknowledgement algorithm (`chat_ack`: the vanilla
 # 20-slot last-seen tracker). The stateful tracker accumulates across a session,
@@ -97,3 +108,7 @@ lodestone-testsupport = { workspace = true }
 # module docs for exactly what this does and does not prove.
 rsa = { workspace = true }
 rand = { workspace = true }
+# Decodes the same fixed PKCS#8-DER test RSA key `lodestone-auth`'s own chat
+# signing tests use (a public, throwaway fixture — reused rather than
+# duplicated as raw bytes) for `driver.rs`'s signed-chat unit test.
+base64 = { workspace = true }
