@@ -85,7 +85,7 @@ action bar, the held-item name, container tooltips once they exist) tracks a
 run alongside the existing colour tracking, with the same reset rule
 `lodestone-model`'s `apply_legacy_code` already uses: a colour code or `§r`
 clears every flag, not just the one it names
-(`lodestone-model/src/text.rs:626-644`), and resolves each character into a
+(`crates/lodestone-model/src/text.rs`), and resolves each character into a
 `ResolvedGlyph` rather than drawing it immediately — decoding and drawing are
 now two separate passes, with `bidi_reorder_glyphs` (UAX #9) running between
 them. `draw_resolved` then draws each glyph via `glyph_styled`, which — unlike
@@ -97,16 +97,16 @@ advance).
 All five rules are transcribed from `.cache/mc/26.2/client-src`, not
 invented:
 
-- **Bold** (`BakedSheetGlyph.renderChar`, `BakedSheetGlyph.java:110-113`):
+- **Bold** (`BakedSheetGlyph.renderChar`):
   redraw the *same* glyph a second time, offset `+metrics::BOLD_OFFSET` in x —
   not a font-weight variant. Applies independently to the shadow pass and the
   main pass (each gets its own doubled draw), which falls out for free here
   because the two passes are already two separate `draw_resolved` calls with
   different per-glyph `(x, y)`. The advance also grows by `BOLD_OFFSET`
-  (`GlyphInfo.getAdvance(bold)`, `GlyphInfo.java:6-8`) for *every* glyph,
+  (`GlyphInfo.getAdvance(bold)`) for *every* glyph,
   drawable or not.
 - **Italic** (`BakedSheetGlyph.shearTop`/`shearBottom`,
-  `BakedSheetGlyph.java:144-150`, both `1.0F - 0.25F * v`): vanilla shears a
+  both `1.0F - 0.25F * v`): vanilla shears a
   glyph as one quad with two sheared edges — a continuous linear function of
   `v`, the edge's logical-pixel offset from the line's top. This renderer
   draws ink as per-texel-row quads instead of one quad, so `draw_ink`
@@ -118,7 +118,7 @@ invented:
   shifting `+1` px and the bottom row `-1` px — a **2 px** lean across an 8 px
   glyph, not the 1 px the old doc comment here used to say (fixed alongside
   this change).
-- **Underline / strikethrough** (`Font.java:274,284-299`): a
+- **Underline / strikethrough** (`Font.PreparedTextBuilder.accept`): a
   `metrics::EFFECT_THICKNESS`-tall (`1.0` px) bar per glyph, from that glyph's
   pen position to `pen + advance`, extended `metrics::EFFECT_LEAD_IN` (`1.0`
   px) further left **only for the first glyph of the run**
@@ -127,8 +127,8 @@ invented:
   underline's at `metrics::UNDERLINE_Y` (`9.0`) — two different constants, not
   one "draw a line" helper parameterised by a boolean that happens to share a
   y.
-- **Obfuscated** (`Font.getGlyph`, `Font.java:82-91`, and `FontSet`'s
-  `glyphsByWidth`, `FontSet.java:58,109,160-163`): every draw call swaps in a
+- **Obfuscated** (`Font.getGlyph`, and `FontSet`'s
+  `glyphsByWidth`): every draw call swaps in a
   **same-width-class** replacement codepoint's pixels — width class is
   `ceil(original_advance)` — while the *advance* stays the original
   codepoint's. `VanillaFont::obfuscation_pool` builds that width→codepoints
@@ -138,10 +138,10 @@ invented:
   invisible whitespace, so it is left out — a small, documented divergence).
   `VanillaFont::obfuscation_rng` is a free-running `AtomicU64` advanced once
   per obfuscated glyph, mirroring `Font.random`
-  (`Font.java:34`, `RandomSource.create()`, **never reseeded**) — every frame's
+  (`RandomSource.create()`, **never reseeded**) — every frame's
   draw call advances the same stream further, which is what makes `§k` read as
   continuously animated with no timer anywhere. Space is never a candidate for
-  replacement (`codepoint != 32`, `Font.java:85`) and never receives one
+  replacement (`codepoint != 32`, in `Font.getGlyph`) and never receives one
   either, since it has no raster to begin with.
 
 ### Wiring, and why it is not an island
@@ -163,8 +163,8 @@ site was converted from the free `text_w` to `b.text_width`.
   jar, and `hud/item_icon.rs`'s pixel gates assert against the fixed-width fallback.
   `HudGeometry::build` stays jar-free and byte-deterministic on purpose; use
   `build_with_font` when you want vanilla text from pure geometry.
-- **Bold, italic, underline, strikethrough and obfuscated draw real geometry**
-  (issue #117), in `VanillaFont::resolve_legacy`/`glyph_styled`/`draw_ink` — see
+- **Bold, italic, underline, strikethrough and obfuscated draw real geometry**,
+  in `VanillaFont::resolve_legacy`/`glyph_styled`/`draw_ink` — see
   [Styling](#styling) below. This used to be the module's one documented gap: the
   metrics existed (`Font::advance_bold`, `metrics::ITALIC_SHEAR`) and
   `Font::legacy_width` already zero-widthed `§k`/`§l`/`§m`/`§n`/`§o` correctly for
@@ -209,11 +209,11 @@ site was converted from the free `text_w` to `b.text_width`.
   for a hand-rolled outline.** A live player report on the XP bar's level number
   ("too big and too high") traced to `hud::sprite_vitals` drawing that digit at
   `scale = 2.0` with a `text()`/`draw()` call, when vanilla's own
-  `ContextualBar.extractExperienceLevel` (`ContextualBar.java:34-40`) draws it at
+  `ContextualBar.extractExperienceLevel` draws it at
   scale 1, **five** times with `shadow = false` on every call: four ±1px-offset
   black copies (the outline) then one green copy — not vanilla's usual
   single-shadow text. `VanillaFont::draw_plain` / `Builder::text_plain` exist for
-  exactly this: the unshadowed pass `AbstractContainerScreen.java:190-191`'s
+  exactly this: the unshadowed pass `AbstractContainerScreen.extractLabels`'s
   container labels also use. Reaching for `text()` for a hand-rolled outline
   layers an unwanted extra shadow under it.
 - **A HUD row's y-offset from its neighbour is not a font-metrics quantity.**
