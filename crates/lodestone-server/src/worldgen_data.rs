@@ -568,13 +568,20 @@ impl Resolver for NetherResolver {
 /// `Resolver::biome_parameters` widening is needed for either preset.
 ///
 /// Other presets are deliberately absent from this enum: `single_biome_surface`
-/// needs a `FixedBiomeSource` this tree does not have, `flat`/
-/// `flat_all_dimensions` need a `FlatLevelSource`-style generator distinct from
-/// [`OverworldGenerator`], and `debug_all_block_states` needs its own
-/// block-grid generator. Adding a variant for one of those without the
-/// generator behind it would silently produce ordinary overworld terrain
-/// under a preset's name — see this module's own doc on why that is worse
-/// than the preset being unreachable.
+/// needs a `FixedBiomeSource` this tree does not have, and
+/// `debug_all_block_states` needs its own block-grid generator. Adding a
+/// variant for one of those without the generator behind it would silently
+/// produce ordinary overworld terrain under a preset's name — see this
+/// module's own doc on why that is worse than the preset being unreachable.
+///
+/// `flat`/`flat_all_dimensions` are **not** a `WorldType` variant even though
+/// their generator now exists ([`lodestone_worldgen::flat::FlatLevelSource`],
+/// issue #519's third landing) — they were never blocked on the same axis as
+/// `Amplified`/`LargeBiomes`. Both of those are still [`OverworldGenerator`]s,
+/// just parameterised by a different `noise_settings` document; a flat world
+/// is a structurally different generator (no noise router, no seed, no
+/// carvers — see that module's own doc), so it needs its own entry point
+/// rather than a new arm here. See [`flat_generator`]/[`FlatChunkSource`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorldType {
     #[default]
@@ -730,6 +737,185 @@ pub fn overworld_chunk_source_of_type(
     world_type: WorldType,
 ) -> crate::chunk::OverworldChunkSource {
     crate::chunk::OverworldChunkSource::new(overworld_generator_of_type(seed, world_type))
+}
+
+/// Parses one of the 9 bundled `flat_level_generator_preset/<id>` documents
+/// (id without the `minecraft:` prefix, e.g. `"classic_flat"`, `"the_void"`,
+/// `"water_world"`) into a
+/// [`FlatLevelGeneratorSettings`](lodestone_worldgen::flat::FlatLevelGeneratorSettings)
+/// — the alternate layer stacks vanilla's "Customize" screen offers once a
+/// Flat world type is chosen (`assets/worldgen/tags/worldgen/
+/// flat_level_generator_preset/visible.json` lists 9 of them in UI order;
+/// `overworld` is bundled but excluded from `visible`, matching the jar).
+///
+/// # Panics
+/// Panics if `id` names no bundled `flat_level_generator_preset` document.
+#[must_use]
+pub fn flat_level_generator_preset_settings(
+    id: &str,
+) -> lodestone_worldgen::flat::FlatLevelGeneratorSettings {
+    let name = id.strip_prefix("minecraft:").unwrap_or(id);
+    let doc = EmbeddedResolver.json(&format!("flat_level_generator_preset/{name}"));
+    lodestone_worldgen::flat::FlatLevelGeneratorSettings::from_json(&doc["settings"])
+}
+
+/// Parses the overworld dimension's embedded flat settings out of
+/// `world_preset/flat` (`all_dimensions == false`) or
+/// `world_preset/flat_all_dimensions` (`all_dimensions == true`) — the two
+/// "world types" a player actually picks at world creation that need this
+/// generator, as opposed to [`flat_level_generator_preset_settings`]'s
+/// Customize-screen alternates.
+///
+/// Scope matches [`WorldType`]: **overworld only**. `flat_all_dimensions`
+/// also names flat settings for its own Nether/End dimensions
+/// (`world_preset/flat_all_dimensions.json`'s `dimensions` map has all
+/// three), which stay unreachable here for the same reason multi-dimension
+/// travel is out of scope for issue #519 (see #485/#330).
+#[must_use]
+pub fn world_preset_flat_settings(
+    all_dimensions: bool,
+) -> lodestone_worldgen::flat::FlatLevelGeneratorSettings {
+    let key = if all_dimensions {
+        "world_preset/flat_all_dimensions"
+    } else {
+        "world_preset/flat"
+    };
+    let doc = EmbeddedResolver.json(key);
+    lodestone_worldgen::flat::FlatLevelGeneratorSettings::from_json(
+        &doc["dimensions"]["minecraft:overworld"]["generator"]["settings"],
+    )
+}
+
+/// Builds a [`FlatLevelSource`](lodestone_worldgen::flat::FlatLevelSource) for
+/// `settings`, using the bundled overworld `noise_settings`' own `min_y`/
+/// `height` for the vertical bounds — the dimension a flat overworld world
+/// occupies, read from data already embedded rather than re-hardcoded
+/// (`-64`/`384` for 26.2, but this way a future data bump cannot desync the
+/// two).
+#[must_use]
+pub fn flat_generator(
+    settings: lodestone_worldgen::flat::FlatLevelGeneratorSettings,
+) -> lodestone_worldgen::flat::FlatLevelSource {
+    let noise = &settings_for(WorldType::Overworld)["noise"];
+    let min_y = noise["min_y"].as_i64().unwrap_or(-64) as i32;
+    let height = noise["height"].as_i64().unwrap_or(384) as i32;
+    lodestone_worldgen::flat::FlatLevelSource::new(settings, min_y, height)
+}
+
+/// The [`ChunkSource`](crate::chunk::ChunkSource) a superflat world serves —
+/// issue #519's scope item 4 ("Superflat … as separate `ChunkSource`
+/// implementations") for the one preset family whose generator this module
+/// now has. Lives here rather than in `chunk.rs` (this crate's other
+/// `ChunkSource` implementors' home) because [`lodestone_worldgen::flat`] is
+/// this file's dependency to add, not `chunk.rs`'s — the trait itself is
+/// public and implementable from any module in this crate, so this needed no
+/// change to `chunk.rs` at all.
+///
+/// Built entirely from [`crate::chunk::ChunkColumn`]'s existing public API
+/// (`new` + `set_block` + `set_biome_quarts`) rather than a new
+/// `ChunkColumn::from_flat` constructor — same reason.
+///
+/// A flat world's raw terrain is deterministic and seed-free (see
+/// [`lodestone_worldgen::flat`]'s module doc), so unlike
+/// [`crate::chunk::OverworldChunkSource`] every generated column before edits
+/// is identical; the per-chunk cost here is the 16×16×(layer height) fill
+/// loop, not any generation work.
+pub struct FlatChunkSource {
+    generator: lodestone_worldgen::flat::FlatLevelSource,
+    edits: std::sync::Mutex<std::collections::HashMap<(i32, i32), crate::chunk::ChunkColumn>>,
+}
+
+impl FlatChunkSource {
+    #[must_use]
+    pub fn new(generator: lodestone_worldgen::flat::FlatLevelSource) -> Self {
+        Self {
+            generator,
+            edits: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The wrapped generator's own settings — e.g. for a debug screen or a
+    /// save-file record of which preset a world was created with.
+    #[must_use]
+    pub fn generator(&self) -> &lodestone_worldgen::flat::FlatLevelSource {
+        &self.generator
+    }
+
+    fn generate(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
+        let col = self.generator.column(cx, cz);
+        let mut out = crate::chunk::ChunkColumn::new(col.min_y(), col.height());
+        let biome_quarts: [String; 16] = std::array::from_fn(|_| col.biome().to_string());
+        out.set_biome_quarts(&biome_quarts);
+        for (row, state) in col.rows().iter().enumerate() {
+            if state == "minecraft:air" {
+                continue;
+            }
+            let y = col.min_y() + row as i32;
+            for lz in 0..16i32 {
+                for lx in 0..16i32 {
+                    out.set_block(lx, y, lz, state);
+                }
+            }
+        }
+        out
+    }
+}
+
+impl std::fmt::Debug for FlatChunkSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlatChunkSource").finish_non_exhaustive()
+    }
+}
+
+impl crate::chunk::ChunkSource for FlatChunkSource {
+    fn column(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        if let Some(edited) = edits.get(&(cx, cz)) {
+            return edited.clone();
+        }
+        drop(edits);
+        self.generate(cx, cz)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        let mut edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        let column = edits
+            .entry((cx, cz))
+            .or_insert_with(|| self.generate(cx, cz));
+        column.set_block(lx, y, lz, name);
+    }
+}
+
+/// Builds the [`FlatChunkSource`] for `settings` — the server/worldgen
+/// boundary a world-creation UI needs for a superflat world: it persists the
+/// chosen preset id (or its raw settings) alongside the seed, and at load
+/// time calls [`flat_level_generator_preset_settings`] or
+/// [`world_preset_flat_settings`] to rebuild `settings`, then this, exactly
+/// as [`overworld_chunk_source_of_type`] does for [`WorldType`].
+///
+/// **What a UI would still need to call**: this crate now exposes the
+/// generator and the `ChunkSource`; nothing outside `lodestone-worldgen`/
+/// this file constructs one yet. Wiring `flat_chunk_source` into world
+/// creation is a `crate::server`/`crate::integrated` change (outside this
+/// file's ownership boundary), and offering the choice in
+/// `create_world.rs` is a `lodestone-shell` change — both untouched here.
+#[must_use]
+pub fn flat_chunk_source(
+    settings: lodestone_worldgen::flat::FlatLevelGeneratorSettings,
+) -> FlatChunkSource {
+    FlatChunkSource::new(flat_generator(settings))
 }
 
 /// The parsed Nether noise settings (parsed once, reused across seeds).
@@ -3261,5 +3447,156 @@ mod generation_spawn_reaches_a_real_chunk {
              found a candidate in; a non-empty result here means either the scan was \
              stale or every chunk now proposes something regardless of biome"
         );
+    }
+
+    /// `world_preset/flat.json`'s embedded `generator.settings` object, pinned
+    /// so a change to the bundled asset is caught here rather than silently
+    /// reflected into every consumer.
+    #[test]
+    fn world_preset_flat_settings_matches_the_bundled_document() {
+        let settings = super::world_preset_flat_settings(false);
+        assert_eq!(settings.biome, "minecraft:plains");
+        assert!(!settings.features);
+        assert!(!settings.lakes);
+        assert_eq!(settings.total_height(), 4);
+    }
+
+    /// `world_preset/flat_all_dimensions.json`'s embedded overworld settings —
+    /// a different biome and a taller sandstone stack from `flat`'s, so this
+    /// is also the discriminator that the two `all_dimensions` branches are
+    /// not accidentally reading the same document.
+    #[test]
+    fn world_preset_flat_all_dimensions_settings_matches_the_bundled_document() {
+        let settings = super::world_preset_flat_settings(true);
+        assert_eq!(settings.biome, "minecraft:desert");
+        assert!(!settings.features);
+        assert!(!settings.lakes);
+        assert_eq!(settings.total_height(), 68, "bedrock(1) + sandstone(67)");
+    }
+
+    /// `flat_level_generator_preset/the_void.json`'s `structure_overrides` is
+    /// an explicit empty array, not an absent field — the same discriminator
+    /// `lodestone_worldgen::flat`'s own unit tests check against a hand-built
+    /// document; this exercises it against the real embedded asset instead.
+    #[test]
+    fn flat_level_generator_preset_the_void_structure_overrides_is_explicit_empty() {
+        let settings = super::flat_level_generator_preset_settings("the_void");
+        assert_eq!(settings.biome, "minecraft:the_void");
+        assert_eq!(settings.layers.len(), 1);
+        assert_eq!(
+            settings.structure_overrides,
+            lodestone_worldgen::flat::StructureOverrides::Explicit(Vec::new())
+        );
+    }
+
+    /// The discriminating assertion issue #519 asks for: at the same seed and
+    /// the same column, [`flat_chunk_source`] must produce `world_preset/flat`'s
+    /// exact layer stack, and that stack must differ from what
+    /// [`overworld_chunk_source`] produces at the identical column — proving
+    /// `FlatChunkSource` is really generating flat terrain, not silently
+    /// routing through the default overworld generator under a different name
+    /// (the trap this module's own [`WorldType`] doc names).
+    ///
+    /// The default arm's own values below were **measured**, not guessed: a
+    /// throwaway probe (`eprintln!` over `overworld_chunk_source(4242)
+    /// .column(0, 0)`, since deleted — see the module history) read them off
+    /// the real generator before this assertion was written. At seed 4242,
+    /// chunk (0, 0), local (0, 0), the plain overworld returns
+    /// `minecraft:bedrock` at y = -63, -62 and -61, and
+    /// `minecraft:deepslate[axis=y]` at y = -60 — ordinary underground
+    /// terrain, structurally unable to coincide with a flat world's fixed
+    /// layer stack at those same rows. Mismatches are collected rather than
+    /// asserted one at a time (CLAUDE.md: "collect mismatches and assert on
+    /// the collection").
+    #[test]
+    fn flat_world_produces_the_exact_layer_stack_and_differs_from_default_overworld_at_the_same_column()
+     {
+        use crate::chunk::ChunkSource;
+        let seed: i64 = 4242;
+
+        let flat = super::flat_chunk_source(super::world_preset_flat_settings(false));
+        let overworld = super::overworld_chunk_source(seed);
+
+        let flat_col = flat.column(0, 0);
+        let overworld_col = overworld.column(0, 0);
+
+        let mut mismatches: Vec<String> = Vec::new();
+
+        let expected_flat: [(i32, &str); 5] = [
+            (-64, "minecraft:bedrock"),
+            (-63, "minecraft:dirt"),
+            (-62, "minecraft:dirt"),
+            (-61, "minecraft:grass_block[snowy=false]"),
+            (-60, "minecraft:air"),
+        ];
+        for &(y, want) in &expected_flat {
+            let got = flat_col.block_state(0, y, 0);
+            if got != want {
+                mismatches.push(format!("flat y={y}: expected {want:?}, got {got:?}"));
+            }
+        }
+
+        // The default arm's own measured values — the "wrong hypothesis" this
+        // gate demonstrably rejects, not merely "differs from an unstated
+        // baseline" (CLAUDE.md's *magnitude* species).
+        let expected_default: [(i32, &str); 4] = [
+            (-63, "minecraft:bedrock"),
+            (-62, "minecraft:bedrock"),
+            (-61, "minecraft:bedrock"),
+            (-60, "minecraft:deepslate[axis=y]"),
+        ];
+        for &(y, want) in &expected_default {
+            let got = overworld_col.block_state(0, y, 0);
+            if got != want {
+                mismatches.push(format!(
+                    "default overworld y={y}: expected {want:?} (re-derive rather \
+                     than editing this if the plain overworld's own output moved \
+                     at this seed and column), got {got:?}"
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "layer-stack mismatches:\n{mismatches:#?}"
+        );
+
+        // The load-bearing comparison: at every row both arms cover, the flat
+        // world's fixed layer stack must not equal the default's ordinary
+        // underground terrain.
+        for y in [-63, -62, -61] {
+            assert_ne!(
+                flat_col.block_state(0, y, 0),
+                overworld_col.block_state(0, y, 0),
+                "flat and default overworld agree at y={y}; FlatChunkSource may be \
+                 silently routing through the default generator — the exact \
+                 failure mode this gate exists to catch"
+            );
+        }
+
+        // A flat world has no per-column variation: a second, distant chunk
+        // must report the identical stack.
+        let far = flat.column(500, -500);
+        for &(y, want) in &expected_flat {
+            assert_eq!(far.block_state(3, y, 11), want, "y={y} at a distant chunk");
+        }
+
+        assert_eq!(flat_col.biome_state(0, 0), "minecraft:plains");
+    }
+
+    /// A `set_block` edit through [`FlatChunkSource`] must be visible on a
+    /// later `column`/`block_state` read for the same chunk, and must not
+    /// leak into a neighbouring, unedited chunk — the same edit-cache contract
+    /// [`crate::chunk::OverworldChunkSource`] provides.
+    #[test]
+    fn flat_chunk_source_set_block_persists_and_stays_chunk_local() {
+        use crate::chunk::ChunkSource;
+        let flat = super::flat_chunk_source(super::world_preset_flat_settings(false));
+
+        assert_eq!(flat.block_state(0, -61, 0), "minecraft:grass_block[snowy=false]");
+        flat.set_block(0, -61, 0, "minecraft:diamond_block");
+        assert_eq!(flat.block_state(0, -61, 0), "minecraft:diamond_block");
+
+        // A different column, never edited, still reads the generated stack.
+        assert_eq!(flat.block_state(16, -61, 0), "minecraft:grass_block[snowy=false]");
     }
 }
