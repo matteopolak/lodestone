@@ -38,6 +38,7 @@ pub mod aquifer;
 pub mod biome;
 pub mod carver;
 pub mod compose;
+pub mod debug;
 pub mod dense_grid;
 pub mod end;
 pub mod feature;
