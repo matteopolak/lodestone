@@ -3,7 +3,7 @@
 //!
 //! # What it is
 //!
-//! Issue [#227]'s first half (**B3a**): a real ranged-attack goal family, and the
+//! A real ranged-attack goal family, and the
 //! [`ProjectileLaunch`] intent that carries a shot out of the AI layer. Before
 //! this module, `RangedAttackGoal` and `BowAttack` were zero hits tree-wide, so
 //! **no mob in this repo could shoot anything**.
@@ -28,8 +28,8 @@
 //!   -> NavigatingMob.launches                         (this crate ends here)
 //!   -> MobSim::tick drains take_new_launches()        <-- THE ONE REMAINING LINK
 //!   -> MobSim::spawn_projectile -> ProjectileRegistry
-//!   -> MobSim::snapshots() lowers it to an EntitySnapshot   (mobs.rs:2281-2310)
-//!   -> LiveMobSource -> EntityStreamer::sync -> encode_add_entity  (server.rs:248-262)
+//!   -> MobSim::snapshots() lowers it to an EntitySnapshot
+//!   -> LiveMobSource -> EntityStreamer::sync -> encode_add_entity
 //!   -> a real client sees minecraft:small_fireball appear
 //! ```
 //!
@@ -47,7 +47,7 @@
 //! launches a projectile in production" and that `ProjectileRegistry` is
 //! "permanently empty at runtime", which is true, but the reason is only the
 //! missing drain: `MobSim::snapshots` has lowered tracked projectiles into
-//! `EntitySnapshot`s since issue #211, so a projectile that *does* get spawned
+//! `EntitySnapshot`s for a while now, so a projectile that *does* get spawned
 //! already reaches a client over the same `ADD_ENTITY` path a mob uses.
 //! `projectile_reaches_a_real_client` in
 //! `crates/lodestone-server/tests/ranged_projectile_visibility.rs` measures that
@@ -56,9 +56,9 @@
 //! # Hit detection is B3b, and is genuinely absent
 //!
 //! Nothing damages anything when a projectile arrives. `MobSim::spawn_projectile`
-//! says so itself (`mobs.rs:2137-2143`, "hit detection against terrain/entities
+//! says so itself ("hit detection against terrain/entities
 //! and the resulting damage/area-effect are **not** done here"), as does
-//! `ProjectileRegistry`'s own module doc (`projectile.rs:186-191`). `tick` only
+//! `ProjectileRegistry`'s own module doc. `tick` only
 //! ever advances motion.
 //!
 //! # How to change it
@@ -68,8 +68,6 @@
 //! sound. Two rows for this family live in [`super::hostile_melee`] instead,
 //! because skeletons and drowned resolve there; [`bow_attack`] and
 //! [`trident_attack`] are `pub` for exactly that reason.
-//!
-//! [#227]: https://github.com/matteopolak/lodestone/issues/227
 
 use lodestone_model::Vec3;
 
@@ -87,7 +85,7 @@ use crate::ai::mob::{MobController, ProjectileKind, ProjectileLaunch, distance_s
 ///
 /// Vanilla spawns a mob arrow at the shooter's shoulder — `ProjectileUtil.getMobArrow`
 /// builds it at `eyeY - 0.1` — and the blaze puts its fireball at
-/// `getY(0.5) + 0.5` (`monster/Blaze.java:239`). The [`MobController`] seam
+/// `getY(0.5) + 0.5` (`Blaze.BlazeAttackGoal.tick`). The [`MobController`] seam
 /// carries neither eye height nor bounding box, so this is one flat figure: a
 /// skeleton is 1.99 tall with a 1.74 eye height, giving 1.64, and 1.4 is that
 /// rounded down to sit inside the shorter mobs in the family too. **A disclosed
@@ -97,35 +95,35 @@ const SHOOTER_SHOULDER_Y: f64 = 1.4;
 /// Where a shot is aimed on the target, as a height above its feet.
 ///
 /// Vanilla aims a third of the way up the target's box
-/// (`target.getY(0.3333)`, `monster/skeleton/AbstractSkeleton.java:165`); for a
+/// (`target.getY(0.3333)`, `AbstractSkeleton.performRangedAttack`); for a
 /// 1.8-tall player that is 0.6. Same disclosure as
 /// [`SHOOTER_SHOULDER_Y`] — the seam has no target bounding box.
 const AIM_HEIGHT: f64 = 0.6;
 
 /// Vanilla's ballistic arc compensation: the vertical aim component gains
-/// `horizontalDistance * 0.2` (`AbstractSkeleton.java:170`,
-/// `monster/Witch.java:249`, `animal/golem/SnowGolem.java:122`). All three
+/// `horizontalDistance * 0.2` (`AbstractSkeleton.performRangedAttack`,
+/// `Witch.performRangedAttack`, `SnowGolem.performRangedAttack`). All three
 /// species in this family use the same `0.2F`.
 const ARC_LIFT: f64 = 0.2;
 
 /// A bow at full draw. Vanilla releases at `getTicksUsingItem() >= 20`
-/// (`ai/goal/RangedBowAttackGoal.java:128`), which is also the point
+/// (`RangedBowAttackGoal.tick`), which is also the point
 /// `BowItem.getPowerForTime` reaches its `1.0` ceiling.
 const BOW_FULL_DRAW_TICKS: i32 = 20;
 
 /// Arrow launch power, vanilla's `1.6F`
-/// (`AbstractSkeleton.java:170` — the `pow` argument to
+/// (`AbstractSkeleton.performRangedAttack` — the `pow` argument to
 /// `Projectile.spawnProjectileUsingShoot`). The snow golem
-/// (`SnowGolem.java:129`) uses the same figure.
+/// (`SnowGolem.performRangedAttack`) uses the same figure.
 const ARROW_POWER: f64 = 1.6;
 
 /// A blaze fireball's launch speed. `SmallFireball` is an
 /// `AbstractHurtingProjectile`, whose constructor sets
 /// `direction.normalize().scale(accelerationPower)` with `accelerationPower`
-/// defaulting to `0.1` (`hurtingprojectile/AbstractHurtingProjectile.java:24`
-/// and `:180-183`). **Not `1.6`** — a fireball is two orders of magnitude
+/// defaulting to `0.1` (`AbstractHurtingProjectile.accelerationPower`'s field
+/// default and `AbstractHurtingProjectile.assignDirectionalMovement`). **Not `1.6`** — a fireball is two orders of magnitude
 /// slower off the muzzle than an arrow, and it accelerates afterwards
-/// (`:126`) rather than falling.
+/// (in `AbstractHurtingProjectile.tick`) rather than falling.
 const FIREBALL_POWER: f64 = 0.1;
 
 /// Resolves the shot from `shooter_feet` to `target_feet` for a species that
@@ -133,8 +131,8 @@ const FIREBALL_POWER: f64 = 0.1;
 ///
 /// Shared by the bow goal and the generic ranged goal because all three jar
 /// sites compute it identically apart from the power figure
-/// (`AbstractSkeleton.java:164-171`, `Witch.java:225-249`,
-/// `SnowGolem.java:119-129`).
+/// (`AbstractSkeleton.performRangedAttack`, `Witch.performRangedAttack`,
+/// `SnowGolem.performRangedAttack`).
 fn arced_shot(
     kind: ProjectileKind,
     shooter_feet: Vec3,
@@ -163,21 +161,21 @@ fn arced_shot(
 /// The **draw/release cycle and the approach/hold distance logic** are the
 /// behaviour: close to `attackRadius` with the target in sight the mob stops
 /// moving and shoots on a fixed interval; further out it walks in. That is
-/// `:70-137`.
+/// `RangedBowAttackGoal.tick`.
 ///
 /// Three things are deliberately not modelled, each because the seam cannot see
 /// them:
 ///
-/// * **`isHoldingBow`** (`:40-42`). Nothing in this repo gives a mob an
+/// * **`isHoldingBow`** (`RangedBowAttackGoal.isHoldingBow`). Nothing in this repo gives a mob an
 ///   inventory, so [`can_use`](Goal::can_use) gates on having a target alone.
 ///   This is also why the runtime melee↔bow swap in `AbstractSkeleton.reassessWeaponGoal`
-///   (`:132-146`) has nothing to swap *on*: a skeleton's weapon never changes,
+///   has nothing to swap *on*: a skeleton's weapon never changes,
 ///   so its table registers the bow at priority 4 statically.
 /// * **Line of sight** (`getSensing().hasLineOfSight`). The server's own census
 ///   already applies a visibility filter before it feeds
 ///   [`MobController::find_nearest_target`], so "has a target" stands in for
 ///   "can see the target", and `seeTime` therefore only ever climbs.
-/// * **Strafing** (`:94-113`). It drives `MoveControl.strafe`, a controller this
+/// * **Strafing** (in `RangedBowAttackGoal.tick`). It drives `MoveControl.strafe`, a controller this
 ///   repo has no equivalent of; the mob holds position instead of circling.
 #[derive(Debug)]
 pub struct RangedBowAttackGoal {
@@ -185,17 +183,18 @@ pub struct RangedBowAttackGoal {
     /// Vanilla's `attackIntervalMin`, the cooldown after a release.
     attack_interval: i32,
     attack_radius_sqr: f64,
-    /// `-1` until the first release, then counts down (`:17`, `:134`).
+    /// `-1` until the first release, then counts down (`RangedBowAttackGoal.attackTime`'s
+    /// field default and its decrement in `RangedBowAttackGoal.tick`).
     attack_time: i32,
     see_time: i32,
     /// `Some(ticks)` while the bow is drawn — vanilla's `isUsingItem` plus
-    /// `getTicksUsingItem` (`:123-136`).
+    /// `getTicksUsingItem` (in `RangedBowAttackGoal.tick`).
     drawing: Option<i32>,
 }
 
 impl RangedBowAttackGoal {
     /// `RangedBowAttackGoal(mob, speedModifier, attackIntervalMin, attackRadius)`
-    /// (`ai/goal/RangedBowAttackGoal.java:23-29`). `speed` is already absolute
+    /// (`RangedBowAttackGoal`'s constructor). `speed` is already absolute
     /// (the caller has applied the jar's multiplier).
     #[must_use]
     pub fn new(speed: f64, attack_interval: i32, attack_radius: f64) -> Self {
@@ -212,23 +211,23 @@ impl RangedBowAttackGoal {
 
 impl Goal for RangedBowAttackGoal {
     fn flags(&self) -> FlagSet {
-        // `setFlags(EnumSet.of(MOVE, LOOK))` (`:28`).
+        // `setFlags(EnumSet.of(MOVE, LOOK))`, in `RangedBowAttackGoal`'s constructor.
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
-        // `getTarget() == null ? false : isHoldingBow()` (`:36-38`), minus the
+        // `getTarget() == null ? false : isHoldingBow()`, in `RangedBowAttackGoal.canUse`, minus the
         // inventory half — see the type's own doc.
         mob.attack_target().is_some()
     }
 
     fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
-        // `canUse() || !getNavigation().isDone()` (`:46`).
+        // `canUse() || !getNavigation().isDone()`, in `RangedBowAttackGoal.canContinueToUse`.
         mob.attack_target().is_some() || !mob.navigation_done()
     }
 
     fn stop(&mut self, mob: &mut dyn MobController) {
-        // `:56-62` — clears both timers and drops the draw.
+        // `RangedBowAttackGoal.stop` — clears both timers and drops the draw.
         self.see_time = 0;
         self.attack_time = -1;
         self.drawing = None;
@@ -242,7 +241,7 @@ impl Goal for RangedBowAttackGoal {
         let target_dist_sqr = distance_sqr(mob.position(), target);
         self.see_time += 1;
 
-        // `:86-92`: hold position once close enough and settled, else close in.
+        // `RangedBowAttackGoal.tick`: hold position once close enough and settled, else close in.
         if target_dist_sqr <= self.attack_radius_sqr && self.see_time >= 20 {
             mob.stop_navigation();
         } else {
@@ -250,7 +249,7 @@ impl Goal for RangedBowAttackGoal {
         }
         mob.look_at(target);
 
-        // `:123-136`: draw for 20 ticks, release, then wait out the interval.
+        // `RangedBowAttackGoal.tick`: draw for 20 ticks, release, then wait out the interval.
         match self.drawing {
             Some(pull) => {
                 let pull = pull + 1;
@@ -284,9 +283,10 @@ impl Goal for RangedBowAttackGoal {
 ///
 /// Unlike the bow goal this has no draw phase: it fires the moment its
 /// interval expires, and the interval itself **scales with range** between
-/// `attackIntervalMin` and `attackIntervalMax` (`:88-99`). Every species in this
+/// `attackIntervalMin` and `attackIntervalMax` (in `RangedAttackGoal.tick`). Every species in this
 /// family passes the same value for both, via the four-argument constructor
-/// (`:22-24`), so the lerp is currently a constant — transcribed anyway, because
+/// (`RangedAttackGoal`'s 4-arg overload, which delegates to the 5-arg one),
+/// so the lerp is currently a constant — transcribed anyway, because
 /// a species that passes two different values is a one-line change and a
 /// flattened constant could not be checked against the jar.
 ///
@@ -307,7 +307,7 @@ pub struct RangedAttackGoal {
 
 impl RangedAttackGoal {
     /// `RangedAttackGoal(mob, speedModifier, attackIntervalMin, attackIntervalMax, attackRadius)`
-    /// (`ai/goal/RangedAttackGoal.java:26-41`), plus which projectile this
+    /// (`RangedAttackGoal`'s 5-arg constructor), plus which projectile this
     /// species throws and at what power — vanilla carries those in the species'
     /// own `performRangedAttack` rather than in the goal.
     #[must_use]
@@ -332,7 +332,7 @@ impl RangedAttackGoal {
         }
     }
 
-    /// Vanilla's own `Mth.floor(Mth.lerp(dist / radius, min, max))` (`:98`).
+    /// Vanilla's own `Mth.floor(Mth.lerp(dist / radius, min, max))`, in `RangedAttackGoal.tick`.
     fn interval_at(&self, distance: f64) -> i32 {
         let t = (distance / self.attack_radius).clamp(0.0, 1.0);
         let min = f64::from(self.interval_min);
@@ -343,17 +343,17 @@ impl RangedAttackGoal {
 
 impl Goal for RangedAttackGoal {
     fn flags(&self) -> FlagSet {
-        // `:40`.
+        // `RangedAttackGoal`'s constructor.
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
-        // `:44-52` — a live target, nothing more.
+        // `RangedAttackGoal.canUse` — a live target, nothing more.
         mob.attack_target().is_some()
     }
 
     fn stop(&mut self, mob: &mut dyn MobController) {
-        // `:60-64`.
+        // `RangedAttackGoal.stop`.
         self.see_time = 0;
         self.attack_time = -1;
         mob.stop_navigation();
@@ -367,7 +367,7 @@ impl Goal for RangedAttackGoal {
         let target_dist_sqr = distance_sqr(position, target);
         self.see_time += 1;
 
-        // `:81-85`. Note the threshold is 5 here, not the bow goal's 20.
+        // `RangedAttackGoal.tick`. Note the threshold is 5 here, not the bow goal's 20.
         if target_dist_sqr <= self.attack_radius_sqr && self.see_time >= 5 {
             mob.stop_navigation();
         } else {
@@ -375,7 +375,7 @@ impl Goal for RangedAttackGoal {
         }
         mob.look_at(target);
 
-        // `:88-99`.
+        // `RangedAttackGoal.tick`.
         self.attack_time -= 1;
         let distance = target_dist_sqr.sqrt();
         if self.attack_time == 0 {
@@ -389,10 +389,11 @@ impl Goal for RangedAttackGoal {
 
 // -- BlazeFireballGoal -------------------------------------------------------
 
-/// Vanilla's private `Blaze.BlazeAttackGoal` (`monster/Blaze.java:156-252`).
+/// Vanilla's private `Blaze.BlazeAttackGoal`.
 ///
 /// Not a `RangedAttackGoal`: a blaze fires in **bursts of three** on a fixed
-/// cadence, and melees instead when very close. The state machine is `:216-233`
+/// cadence, and melees instead when very close. The state machine is
+/// `Blaze.BlazeAttackGoal.tick`
 /// and the exact numbers are load-bearing:
 ///
 /// | `attack_step` after increment | `attack_time` set to | fires? |
@@ -405,30 +406,30 @@ impl Goal for RangedAttackGoal {
 /// then a 100-tick pause. `attackStep > 1` is tested *after* the reset, which is
 /// why step 5 fires nothing.
 ///
-/// Within 4 blocks (`:206`) it melees on a 20-tick cooldown instead, via
+/// Within 4 blocks (in `Blaze.BlazeAttackGoal.tick`) it melees on a 20-tick cooldown instead, via
 /// [`MobController::attack`] — the same intent `MeleeAttackGoal` uses, so the
 /// host's existing melee resolution picks it up with no extra wiring.
 ///
-/// The triangle-distributed spread on each fireball (`:236-238`,
+/// The triangle-distributed spread on each fireball (in `Blaze.BlazeAttackGoal.tick`,
 /// `random.triangle(xd, 2.297 * sqrt(sqrt(distance)) * 0.5)`) is not modelled,
 /// the same disclosure [`ProjectileLaunch::aimed`] carries.
 #[derive(Debug)]
 pub struct BlazeFireballGoal {
     speed: f64,
-    /// `Attributes.FOLLOW_RANGE`, `48.0` for a blaze (`monster/Blaze.java:55`).
+    /// `Attributes.FOLLOW_RANGE`, `48.0` for a blaze (`Blaze.createAttributes`).
     follow_range: f64,
     attack_step: i32,
     attack_time: i32,
 }
 
-/// A blaze melees below this distance rather than shooting (`Blaze.java:206`,
+/// A blaze melees below this distance rather than shooting (`Blaze.BlazeAttackGoal.tick`,
 /// `distance < 4.0` — already a squared distance in the jar).
 const BLAZE_MELEE_DIST_SQR: f64 = 4.0;
 
 impl BlazeFireballGoal {
     /// The goal as a blaze registers it — no arguments in vanilla
-    /// (`Blaze.java:45`, `new Blaze.BlazeAttackGoal(this)`); `speed` is the
-    /// absolute figure behind `setWantedPosition(..., 1.0)` (`:212`, `:246`) and
+    /// (`Blaze.registerGoals`, `new Blaze.BlazeAttackGoal(this)`); `speed` is the
+    /// absolute figure behind `setWantedPosition(..., 1.0)` (in `Blaze.BlazeAttackGoal.tick`) and
     /// `follow_range` the blaze's own attribute.
     #[must_use]
     pub fn new(speed: f64, follow_range: f64) -> Self {
@@ -443,27 +444,27 @@ impl BlazeFireballGoal {
 
 impl Goal for BlazeFireballGoal {
     fn flags(&self) -> FlagSet {
-        // `:164`.
+        // `Blaze.BlazeAttackGoal`'s constructor.
         FlagSet::of(&[Flag::Move, Flag::Look])
     }
 
     fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
-        // `:168-171` — `getTarget() != null && isAlive() && canAttack(target)`.
+        // `Blaze.BlazeAttackGoal.canUse` — `getTarget() != null && isAlive() && canAttack(target)`.
         mob.attack_target().is_some()
     }
 
     fn start(&mut self, _mob: &mut dyn MobController) {
-        // `:174-176`.
+        // `Blaze.BlazeAttackGoal.start`.
         self.attack_step = 0;
     }
 
     fn stop(&mut self, _mob: &mut dyn MobController) {
-        // `:179-182` — `setCharged(false)`, which for us is just the step.
+        // `Blaze.BlazeAttackGoal.stop` — `setCharged(false)`, which for us is just the step.
         self.attack_step = 0;
     }
 
     fn tick(&mut self, mob: &mut dyn MobController) {
-        // `:191` — the decrement happens before anything else, every tick.
+        // `Blaze.BlazeAttackGoal.tick` — the decrement happens before anything else, every tick.
         self.attack_time -= 1;
         let Some(target) = mob.attack_target() else {
             return;
@@ -472,14 +473,14 @@ impl Goal for BlazeFireballGoal {
         let distance_sq = distance_sqr(position, target);
 
         if distance_sq < BLAZE_MELEE_DIST_SQR {
-            // `:206-215`.
+            // `Blaze.BlazeAttackGoal.tick`'s melee branch.
             if self.attack_time <= 0 {
                 self.attack_time = 20;
                 mob.attack(target);
             }
             mob.move_to(target, self.speed);
         } else if distance_sq < self.follow_range * self.follow_range {
-            // `:216-245`.
+            // `Blaze.BlazeAttackGoal.tick`'s burst branch.
             if self.attack_time <= 0 {
                 self.attack_step += 1;
                 if self.attack_step == 1 {
@@ -491,9 +492,9 @@ impl Goal for BlazeFireballGoal {
                     self.attack_step = 0;
                 }
 
-                // `:235` — tested *after* the reset above, so step 5 is silent.
+                // Tested *after* the reset above, so step 5 is silent.
                 if self.attack_step > 1 {
-                    // `:234-240`: the fireball leaves from `getY(0.5) + 0.5` and
+                    // The fireball leaves from `getY(0.5) + 0.5` and
                     // aims at the target's own mid-height, with no arc lift —
                     // a fireball flies flat and accelerates.
                     let origin = Vec3::new(
@@ -516,7 +517,7 @@ impl Goal for BlazeFireballGoal {
             }
             mob.look_at(target);
         } else {
-            // `:246-247`.
+            // `Blaze.BlazeAttackGoal.tick`'s far branch.
             mob.move_to(target, self.speed);
         }
     }
@@ -525,12 +526,13 @@ impl Goal for BlazeFireballGoal {
 // -- builders ----------------------------------------------------------------
 
 /// `RangedBowAttackGoal<>(this, 1.0, 20, 15.0F)`
-/// (`monster/skeleton/AbstractSkeleton.java:55`), registered at priority 4 by
-/// `reassessWeaponGoal` (`:144`).
+/// (`AbstractSkeleton`'s `bowGoal` field), registered at priority 4 by
+/// `AbstractSkeleton.reassessWeaponGoal`.
 ///
 /// The interval argument is `20`, but `reassessWeaponGoal` overwrites it with
-/// `getAttackInterval()` = **40** on anything below Hard difficulty (`:139-144`,
-/// `:155-157`). 40 is the figure used here: nothing in this repo carries a world
+/// `getAttackInterval()` = **40** on anything below Hard difficulty
+/// (`AbstractSkeleton.reassessWeaponGoal`,
+/// `AbstractSkeleton.getAttackInterval`). 40 is the figure used here: nothing in this repo carries a world
 /// difficulty, and Normal is the default a player meets.
 ///
 /// `pub` because the skeleton's row lives in [`super::hostile_melee`].
@@ -540,8 +542,10 @@ pub fn bow_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
 }
 
 /// `Drowned.DrownedTridentAttackGoal(this, 1.0, 40, 10.0F)`
-/// (`monster/zombie/Drowned.java:93`), a `RangedAttackGoal` subclass whose only
-/// override is the animation (`:531-534`).
+/// (`Drowned.registerGoals`), a `RangedAttackGoal` subclass that additionally
+/// requires holding a trident (`Drowned.DrownedTridentAttackGoal.canUse`) and
+/// drives the throw animation through `start`/`stop`
+/// (`startUsingItem`/`stopUsingItem` plus `setAggressive`).
 ///
 /// `pub` because the drowned's row lives in [`super::hostile_melee`].
 #[must_use]
@@ -556,16 +560,16 @@ pub fn trident_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
     ))
 }
 
-/// `Blaze.BlazeAttackGoal(this)` (`monster/Blaze.java:45`). The `1.0` speed
-/// multiplier is inside the goal (`:212`), and `48.0` is the blaze's own
-/// `FOLLOW_RANGE` (`:55`).
+/// `Blaze.BlazeAttackGoal(this)` (`Blaze.registerGoals`). The `1.0` speed
+/// multiplier is inside the goal (`Blaze.BlazeAttackGoal.tick`), and `48.0` is the blaze's own
+/// `FOLLOW_RANGE` (`Blaze.createAttributes`).
 fn blaze_fireball(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(BlazeFireballGoal::new(ctx.speed * 1.0, 48.0))
 }
 
 /// `RangedAttackGoal(this, 1.25, 20, 10.0F)`
-/// (`animal/golem/SnowGolem.java:56`), throwing a snowball at `1.6F`
-/// (`:129`).
+/// (`SnowGolem.registerGoals`), throwing a snowball at `1.6F`
+/// (`SnowGolem.performRangedAttack`).
 fn snowball_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RangedAttackGoal::new(
         ProjectileKind::Snowball,
@@ -577,11 +581,11 @@ fn snowball_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
     ))
 }
 
-/// `RangedAttackGoal(this, 1.0, 60, 10.0F)` (`monster/Witch.java:68`), throwing a
+/// `RangedAttackGoal(this, 1.0, 60, 10.0F)` (`Witch.registerGoals`), throwing a
 /// splash potion.
 ///
-/// The power is `Witch.performRangedAttack`'s own `dist <= 2.0 ? 0.45F : 0.75F`
-/// (`:249`). `0.75` is used: the goal only fires while the witch is inside its
+/// The power is `Witch.performRangedAttack`'s own `dist <= 2.0 ? 0.45F : 0.75F`.
+/// `0.75` is used: the goal only fires while the witch is inside its
 /// 10-block attack radius and closing, so the far branch is the one a player meets,
 /// and this crate's `RangedAttackGoal` carries one power rather than a per-shot
 /// function of distance.
@@ -590,7 +594,7 @@ fn snowball_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
 ///
 /// First, *which* potion is not modelled. Vanilla picks between harming, healing,
 /// regeneration, slowness, poison and weakness from the target's own health,
-/// distance and existing effects (`:229-244`) — a five-way branch over state a
+/// distance and existing effects (in `Witch.performRangedAttack`) — a five-way branch over state a
 /// `ProjectileKind` cannot carry, and one of whose arms even clears the target.
 /// Every throw here is a plain `SplashPotion`.
 ///
@@ -612,13 +616,13 @@ fn witch_potion(ctx: &SpeciesContext) -> Box<dyn Goal> {
     ))
 }
 
-/// `Witch.performRangedAttack`'s far-distance throw power (`:249`,
-/// `dist <= 2.0 ? 0.45F : 0.75F`).
+/// `Witch.performRangedAttack`'s far-distance throw power
+/// (`dist <= 2.0 ? 0.45F : 0.75F`).
 const WITCH_POTION_POWER: f64 = 0.75;
 
 /// `RangedCrossbowAttackGoal<>(this, 1.0, 8.0F)`
-/// (`monster/illager/Pillager.java:74`), firing at `1.6F`
-/// (`Pillager.performRangedAttack` → `performCrossbowAttack(this, 1.6F)`, `:198`).
+/// (`Pillager.registerGoals`), firing at `1.6F`
+/// (`Pillager.performRangedAttack` → `performCrossbowAttack(this, 1.6F)`).
 ///
 /// Modelled with [`RangedAttackGoal`] rather than a new crossbow goal, and the
 /// difference is worth stating: vanilla's `RangedCrossbowAttackGoal` has a
@@ -653,7 +657,7 @@ fn crossbow_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
 const CROSSBOW_CHARGE_TICKS: i32 = 25;
 
 /// `PatrollingMonster.LongDistancePatrolGoal<>(this, 0.7, 0.595)`
-/// (`monster/PatrollingMonster.java:40`) — `(speedModifier, leaderSpeedModifier)`,
+/// (`PatrollingMonster.registerGoals`) — `(speedModifier, leaderSpeedModifier)`,
 /// the same kind of `MOVEMENT_SPEED` multiplier every other builder in this
 /// roster scales by `ctx.speed`. [`LongDistancePatrolGoal::new`]'s own doc
 /// comment has the counterintuitive part: the *leader* is the slower of the
@@ -664,7 +668,7 @@ fn patrol_goal(ctx: &SpeciesContext) -> Box<dyn Goal> {
 
 // -- tables ------------------------------------------------------------------
 
-/// `monster/Blaze.java:44-52`. No `super.registerGoals()` call, so this is the
+/// `Blaze.registerGoals`. No `super.registerGoals()` call, so this is the
 /// blaze's whole table.
 pub const BLAZE: &[Registration] = &[
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
@@ -680,10 +684,10 @@ pub const BLAZE: &[Registration] = &[
     Registration::goal(8, "RandomLookAroundGoal", random_look_around),
 ];
 
-/// `animal/golem/SnowGolem.java:54-61`. No `super.registerGoals()` call.
+/// `SnowGolem.registerGoals`. No `super.registerGoals()` call.
 pub const SNOW_GOLEM: &[Registration] = &[
     // `NearestAttackableTargetGoal<>(this, Mob.class, 10, true, false, target -> target instanceof Enemy)`
-    // (`:60`) — a snow golem hunts *hostile mobs*, not players. Our
+    // (`SnowGolem.registerGoals`) — a snow golem hunts *hostile mobs*, not players. Our
     // `NearestAttackableTargetGoal` resolves through
     // `MobController::find_nearest_target`, which the server answers with the
     // nearest **player**, so substituting it here would make snow golems shoot
@@ -693,7 +697,7 @@ pub const SNOW_GOLEM: &[Registration] = &[
     // The consequence is worth stating plainly: with no target feed, a snow
     // golem's `RangedAttackGoal` below cannot fire in production. It is
     // registered because vanilla registers it, and because the day
-    // `find_nearest_target` learns about mob-vs-mob hostility (#221/#233) this
+    // `find_nearest_target` learns about mob-vs-mob hostility this
     // row starts working with no change here.
     Registration::missing(Selector::Target, 1, "NearestAttackableTargetGoal"),
     Registration::goal(1, "RangedAttackGoal", snowball_attack),
@@ -702,9 +706,9 @@ pub const SNOW_GOLEM: &[Registration] = &[
     Registration::goal(4, "RandomLookAroundGoal", random_look_around),
 ];
 
-/// `monster/Witch.java:61-75`, **including** the `super.registerGoals()` chain the
-/// first line calls: `Raider.registerGoals` (`raid/Raider.java:62-68`), which itself
-/// calls `PatrollingMonster.registerGoals` (`:38-41`), which calls `Monster`'s.
+/// `Witch.registerGoals`, **including** the `super.registerGoals()` chain the
+/// first line calls: `Raider.registerGoals`, which itself
+/// calls `PatrollingMonster.registerGoals`, which calls `Monster`'s.
 ///
 /// Those inherited rows are the reason this table is mostly `Missing`, and the
 /// reason the witch was left out of this family until now: every one of them is
@@ -713,7 +717,7 @@ pub const SNOW_GOLEM: &[Registration] = &[
 /// repo to approximate. They are transcribed as `Missing` rather than omitted so a
 /// gate comparing this table against the jar sees the whole `addGoal` set.
 ///
-/// The ranged row itself is real, and it is what #227 asked for.
+/// The ranged row itself is real, and it is what this family exists for.
 pub const WITCH: &[Registration] = &[
     // -- inherited from PatrollingMonster / Raider --
     Registration::missing(Selector::Goal, 4, "PatrollingMonster.LongDistancePatrolGoal"),
@@ -740,7 +744,7 @@ pub const WITCH: &[Registration] = &[
     Registration::target(3, "NearestAttackableWitchTargetGoal", nearest_attackable_target),
 ];
 
-/// `monster/illager/Pillager.java:69-82`, plus the same inherited
+/// `Pillager.registerGoals`, plus the same inherited
 /// `Raider`/`PatrollingMonster` chain [`WITCH`] documents.
 ///
 /// The crossbow row is [`crossbow_attack`]; read its doc comment for what is exact
@@ -752,7 +756,7 @@ pub const WITCH: &[Registration] = &[
 /// account, including what the goal itself does not port.
 pub const PILLAGER: &[Registration] = &[
     // -- inherited from PatrollingMonster / Raider --
-    // Issue #241a: pillager patrols. This row was `Missing` alongside the
+    // Pillager patrols. This row was `Missing` alongside the
     // witch's identical one — both inherit `PatrollingMonster.registerGoals`
     // — but the pillager is the *only* species vanilla's `PatrolSpawner`
     // ever spawns (`level/levelgen/PatrolSpawner.java`), so it is the only
@@ -766,7 +770,7 @@ pub const PILLAGER: &[Registration] = &[
     Registration::missing(Selector::Goal, 5, "Raider.RaiderCelebration"),
     // -- the pillager's own --
     Registration::goal(0, "FloatGoal", float_goal),
-    // `AvoidEntityGoal<Creaking>` (`:72`). Ours resolves the avoided species
+    // `AvoidEntityGoal<Creaking>` (`Pillager.registerGoals`). Ours resolves the avoided species
     // through the host's own feed, the same route the creeper's cat/ocelot
     // avoidance takes.
     Registration::goal(1, "AvoidEntityGoal", avoid_entity),
@@ -774,20 +778,20 @@ pub const PILLAGER: &[Registration] = &[
     // village bell" behaviour. Raid machinery again.
     Registration::missing(Selector::Goal, 2, "Raider.HoldGroundAttackGoal"),
     Registration::goal(3, "RangedCrossbowAttackGoal", crossbow_attack),
-    // `RandomStrollGoal(this, 0.6)` (`:75`) — note this is the plain stroll, not
+    // `RandomStrollGoal(this, 0.6)` (`Pillager.registerGoals`) — note this is the plain stroll, not
     // the water-avoiding one the witch gets, and vanilla's speed factor is 0.6.
     // Ours is one goal for both, so the row is `Modelled` with the factor visible
     // at `stroll`'s own definition rather than here.
     Registration::goal(8, "RandomStrollGoal", stroll),
     Registration::goal(9, "LookAtPlayerGoal", look_at_player_8),
     // The second `LookAtPlayerGoal` at priority 10 targets `Mob`, not `Player`
-    // (`:77`) — a different class, so per this family's own rule it is a row
+    // (`Pillager.registerGoals`) — a different class, so per this family's own rule it is a row
     // covered by the one above rather than a second instance fighting it for LOOK.
     Registration::covered(Selector::Goal, 10, "LookAtPlayerGoal", "LookAtPlayerGoal"),
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
     Registration::target(2, "NearestAttackableTargetGoal", nearest_attackable_target),
     // The two priority-3 target rows name `AbstractVillager` and `IronGolem`
-    // (`:80-81`). Both are mob-vs-mob targeting, which `find_nearest_target`
+    // (`Pillager.registerGoals`). Both are mob-vs-mob targeting, which `find_nearest_target`
     // answers with the nearest *player* — substituting ours would make a pillager
     // shoot the player under a villager's priority, which is not a simplification
     // but a duplicate of the row above. `Missing`, for the same reason the snow
@@ -808,7 +812,7 @@ pub const PILLAGER: &[Registration] = &[
 /// A `Trident` spawns as `minecraft:trident` — the *thrown entity* shares its
 /// name with the item, unlike `SplashPotion`, whose entity is
 /// `minecraft:splash_potion` while `ThrownSplashPotion` is the class
-/// (`monster/Witch.java:248`).
+/// (`Witch.performRangedAttack`).
 #[must_use]
 pub const fn projectile_entity_type(kind: ProjectileKind) -> &'static str {
     match kind {
@@ -830,7 +834,7 @@ pub const fn projectile_entity_type(kind: ProjectileKind) -> &'static str {
 /// `::throwable` when it is `false`.
 ///
 /// A small fireball is **neither** in vanilla — `AbstractHurtingProjectile`
-/// *accelerates* instead of falling (`:126`) — so it is reported as a throwable,
+/// *accelerates* instead of falling (in `AbstractHurtingProjectile.tick`) — so it is reported as a throwable,
 /// the closer of the two, and its trajectory is wrong past the first few ticks.
 /// Named here rather than left implicit because it is a real inaccuracy that the
 /// launch velocity being jar-exact does not fix.
@@ -853,7 +857,7 @@ pub const fn integrates_as_arrow(kind: ProjectileKind) -> bool {
 /// registered from that file.
 ///
 /// **Not the ghast** — its fireball feeds `explosion.rs` and it belongs to the
-/// specialist family (#232).
+/// specialist family.
 ///
 /// **The witch and the pillager are here now.** This list used to exclude them with
 /// the reasoning that both extend `Raider`, whose `registerGoals` chain adds raid
@@ -911,10 +915,10 @@ mod tests {
         }
     }
 
-    /// A real production controller — **not `ScriptMob`**. Issue #441's island
-    /// was eight goals with green `ScriptMob` tests and a constant-false
-    /// `can_use` in production, and the only thing that separates the two is the
-    /// *type* under the `&mut dyn MobController`.
+    /// A real production controller — **not `ScriptMob`**. A whole roster's
+    /// worth of goals once stayed green under `ScriptMob` tests with a
+    /// constant-false `can_use` in production, and the only thing that
+    /// separates the two is the *type* under the `&mut dyn MobController`.
     fn real_mob<'w>(world: &'w dyn PathWorld, at: Vec3, speed: f64) -> NavigatingMob<'w> {
         NavigatingMob::new(world, MobShape::land(0.6, 1.95), at, speed, 400, 0)
     }
@@ -924,7 +928,7 @@ mod tests {
     #[test]
     fn a_real_navigating_mob_records_a_bow_launch() {
         let world = Flat;
-        // Skeleton speed 0.25 (`AbstractSkeleton.java:91`), target 8 blocks out
+        // Skeleton speed 0.25 (`AbstractSkeleton.createAttributes`), target 8 blocks out
         // — inside the bow goal's 15.0 radius.
         let mut mob = real_mob(&world, Vec3::new(0.0, 0.0, 0.0), 0.25);
         let target = Vec3::new(8.0, 0.0, 0.0);
@@ -1012,7 +1016,7 @@ mod tests {
     #[test]
     fn a_blaze_fires_three_fireballs_per_burst_on_the_jars_cadence() {
         let world = Flat;
-        // Blaze speed 0.23 (`Blaze.java:55`). Target 10 blocks out: past the
+        // Blaze speed 0.23 (`Blaze.createAttributes`). Target 10 blocks out: past the
         // 4-block melee threshold, inside the 48-block follow range.
         let mut mob = real_mob(&world, Vec3::new(0.0, 0.0, 0.0), 0.23);
         let target = Vec3::new(10.0, 0.0, 0.0);
@@ -1031,7 +1035,7 @@ mod tests {
             }
         }
 
-        // Predicted from `Blaze.java:216-233`, computed here rather than copied
+        // Predicted from `Blaze.BlazeAttackGoal.tick`, computed here rather than copied
         // from a run: tick 1 sets step 1 / attack_time 60 and fires nothing.
         // attack_time then reaches 0 at tick 61, which fires (step 2) and sets
         // 6; tick 67 fires (step 3); tick 73 fires (step 4); tick 79 sets step
@@ -1066,8 +1070,8 @@ mod tests {
         let v = launch.velocity;
         let speed = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
         // The two competing hypotheses, both computed from outside this file:
-        // `AbstractHurtingProjectile.accelerationPower` 0.1 (`:24`, `:180-183`)
-        // and an arrow's 1.6 (`AbstractSkeleton.java:170`). They differ by 16x,
+        // `AbstractHurtingProjectile.accelerationPower`'s field default of 0.1
+        // and an arrow's 1.6 (`AbstractSkeleton.performRangedAttack`). They differ by 16x,
         // so landing on one refutes the other.
         assert!(
             (speed - FIREBALL_POWER).abs() < 1e-9,
@@ -1095,7 +1099,7 @@ mod tests {
     /// trip: at the probe's default 4 blocks a **blaze records no `move_to` at
     /// all**, because 4 blocks is inside its follow range and outside its
     /// 2-block melee radius, so vanilla has it stand still and shoot
-    /// (`Blaze.java:216-245`). Reading that as "the builder passes no speed"
+    /// (`Blaze.BlazeAttackGoal.tick`). Reading that as "the builder passes no speed"
     /// would have been wrong; the speed is only observable in the branches that
     /// actually walk.
     #[test]
@@ -1103,16 +1107,16 @@ mod tests {
         // (builder, ctx speed, expected move_to speed, target distance, why)
         let cases: [(fn(&SpeciesContext) -> Box<dyn Goal>, f64, f64, f64, &str); 4] = [
             // `RangedBowAttackGoal<>(this, 1.0, ...)` × skeleton 0.25
-            // (`AbstractSkeleton.java:55`, `:91`). Walks while `seeTime < 20`.
+            // (`AbstractSkeleton`'s `bowGoal` field, `AbstractSkeleton.createAttributes`). Walks while `seeTime < 20`.
             (bow_attack, 0.25, 0.25, 4.0, "skeleton bow, 1.0 x 0.25"),
-            // `Blaze.BlazeAttackGoal` uses 1.0 internally (`Blaze.java:212`) ×
-            // blaze 0.23 (`:55`). Only walks inside the melee radius (< 2
+            // `Blaze.BlazeAttackGoal` uses 1.0 internally (`Blaze.BlazeAttackGoal.tick`) ×
+            // blaze 0.23 (`Blaze.createAttributes`). Only walks inside the melee radius (< 2
             // blocks) or beyond follow range.
             (blaze_fireball, 0.23, 0.23, 1.0, "blaze melee approach, 1.0 x 0.23"),
-            // `RangedAttackGoal(this, 1.25, ...)` (`SnowGolem.java:56`) × snow
-            // golem 0.2 (`:64`). Walks while `seeTime < 5`.
+            // `RangedAttackGoal(this, 1.25, ...)` (`SnowGolem.registerGoals`) × snow
+            // golem 0.2 (`SnowGolem.createAttributes`). Walks while `seeTime < 5`.
             (snowball_attack, 0.2, 0.25, 4.0, "snow golem, 1.25 x 0.2"),
-            // `DrownedTridentAttackGoal(this, 1.0, ...)` (`Drowned.java:93`) ×
+            // `DrownedTridentAttackGoal(this, 1.0, ...)` (`Drowned.registerGoals`) ×
             // drowned 0.23.
             (trident_attack, 0.23, 0.23, 4.0, "drowned trident, 1.0 x 0.23"),
         ];
@@ -1246,7 +1250,7 @@ mod tests {
         // `Modelled` row and no `Missing` or `CoveredBy` one, which is what makes the
         // raid rows honest bookkeeping rather than silently-registered no-ops. The
         // pillager's second `LookAtPlayerGoal` is `CoveredBy`, so 16 rows minus 8
-        // uncovered gives 8: issue #241a's `LongDistancePatrolGoal` row is the one
+        // uncovered gives 8: the pillager patrol's `LongDistancePatrolGoal` row is the one
         // that moved from `Missing` to `Modelled` and is why the pillager's count is
         // no longer the same as the witch's identical inherited-row count.
         for (species, expected_built) in
@@ -1268,7 +1272,7 @@ mod tests {
         }
     }
 
-    /// A blaze registers two goals at priority 8 (`Blaze.java:48-49`), which is
+    /// A blaze registers two goals at priority 8 (`Blaze.registerGoals`), which is
     /// legal in vanilla and must stay legal here: `LookAtPlayerGoal` claims LOOK
     /// and `RandomLookAroundGoal` claims LOOK, so the second is simply
     /// preempted, not rejected. A `GoalSelector` that deduplicated by priority
@@ -1289,7 +1293,7 @@ mod tests {
     ///
     /// This is not pedantry about strings. `encode_add_entity_body` resolves the
     /// type with `entity_type_id(name).unwrap_or(0)`
-    /// (`crates/protocol/v770/src/server_protocol.rs:1117`), and id `0` is a
+    /// (`lodestone_v770::server_protocol::encode_add_entity_body`), and id `0` is a
     /// real entity — so a typo here does not fail, it silently streams **the
     /// wrong entity** to the client, which renders it happily. There is no error
     /// anywhere in that path.
@@ -1356,7 +1360,7 @@ mod tests {
     }
 
     /// A `GoalSelector` is what actually runs a goal, and `remove` is what
-    /// `AbstractSkeleton.reassessWeaponGoal` needs (`GoalSelector.java:42-44`).
+    /// `AbstractSkeleton.reassessWeaponGoal` needs (`GoalSelector.removeGoal`).
     /// A bow goal removed mid-flight must stop cleanly and stop shooting.
     #[test]
     fn removing_the_bow_goal_stops_the_shooting() {
@@ -1388,7 +1392,7 @@ mod tests {
         );
     }
 
-    // -- issue #241a: pillager patrols ---------------------------------------
+    // -- pillager patrols -----------------------------------------------------
 
     /// The pillager's roster row installs a real, reachable
     /// `LongDistancePatrolGoal` — the structural fact a table entry alone
