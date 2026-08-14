@@ -8518,16 +8518,24 @@ where
                 sleep_vote.get_up(player_entity_id);
             }
         }
+        // `ServerboundPingRequestPacket` shares one wire struct across Status
+        // and Play (see the decode arm's own comment), so `PingRequest` reaches
+        // here too, unlike its `Handshake`/`LoginStart`/etc. siblings below.
+        // `ServerGamePacketListenerImpl.handlePingRequest` is exactly "echo the
+        // time back" — the same body the Status-state arm above uses, minus the
+        // connection close, since a Play-state ping must not end the session.
+        ServerBound::PingRequest { time } => {
+            apply(conn, state, proto.encode_pong_response(time)).await?;
+        }
         // The pre-Play phase signals, unreachable here by construction: a
         // connection in `State::Play` cannot decode a handshake, a login, or
-        // (issue #277) a Status-phase status/ping request, because every
-        // `ServerProtocol::decode` arm for those is gated on the state.
+        // a Status-phase status request, because every `ServerProtocol::decode`
+        // arm for those is gated on the state.
         ServerBound::Handshake { .. }
         | ServerBound::LoginStart { .. }
         | ServerBound::LoginAcknowledged
         | ServerBound::ConfigurationFinished
         | ServerBound::StatusRequest
-        | ServerBound::PingRequest { .. }
         | ServerBound::Ignored => {}
     }
     Ok(())

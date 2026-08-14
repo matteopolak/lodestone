@@ -112,6 +112,17 @@ const SET_GAME_RULE_C2S: i32 = 59;
 /// reads (hunger's per-block exhaustion, `crate::food`).
 const PLAYER_INPUT_C2S: i32 = 60;
 
+/// A stand-in `ping_request`: one big-endian `i64`, matching the real
+/// packet's only field. `dispatch_play_packet`'s `PingRequest` arm calls
+/// `encode_pong_response`, so this exercises the dispatch-and-consumer half
+/// of that wiring — the wire-shape half is covered separately, against the
+/// real `V770ServerProtocol`, in `crates/protocol/v770/src/server_protocol.rs`'s
+/// own `play_ping_request_tests`.
+const PING_REQUEST_C2S: i32 = 91;
+/// `ClientboundPongResponsePacket`'s stand-in — the `time` echoed back
+/// unchanged.
+const PONG_RESPONSE_S2C: i32 = 92;
+
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
 /// tests are about packet scheduling, not terrain, so real worldgen would
 /// only add cost and noise.
@@ -328,6 +339,12 @@ impl ServerProtocol for FakeProtocol {
                     sequence: 0,
                 }
             }
+            State::Play if packet_id == PING_REQUEST_C2S => {
+                let mut r = Reader::new(payload);
+                ServerBound::PingRequest {
+                    time: r.i64().expect("ping time"),
+                }
+            }
             _ => ServerBound::Ignored,
         }
     }
@@ -391,6 +408,19 @@ impl ServerProtocol for FakeProtocol {
         w.string(&reason.to_plain_string());
         ServerDirective::Send {
             packet_id: DISCONNECT_S2C,
+            payload: w.as_slice().to_vec(),
+        }
+    }
+
+    /// The default trait method emits `ServerDirective::None` (see its own
+    /// doc comment) — overridden here so `ping_request_gets_a_pong_response`
+    /// below has an actual wire reply to observe, exactly like
+    /// `encode_keep_alive` above.
+    fn encode_pong_response(&self, time: i64) -> ServerDirective {
+        let mut w = Writer::default();
+        w.i64(time);
+        ServerDirective::Send {
+            packet_id: PONG_RESPONSE_S2C,
             payload: w.as_slice().to_vec(),
         }
     }
@@ -768,6 +798,16 @@ async fn send_player_input(client: &mut Connection<DuplexStream>, sprint: bool) 
         .write_packet(PLAYER_INPUT_C2S, w.as_slice())
         .await
         .expect("send player input");
+}
+
+/// Sends the stand-in `ping_request` (one big-endian `i64`).
+async fn send_ping_request(client: &mut Connection<DuplexStream>, time: i64) {
+    let mut w = Writer::default();
+    w.i64(time);
+    client
+        .write_packet(PING_REQUEST_C2S, w.as_slice())
+        .await
+        .expect("send ping request");
 }
 
 /// Sends the stand-in `set_game_rule` with one `(key, value)` entry.
@@ -1514,6 +1554,55 @@ async fn creative_mode_slot_write_lands_in_the_real_inventory() {
         Some(&stack),
         "menu slot 9 (main storage) must land at native index 9"
     );
+}
+
+/// The play-state `ServerBound::PingRequest` arm added to
+/// `dispatch_play_packet`: previously this variant sat in the "unreachable
+/// here by construction" catch-all alongside `Handshake`/`LoginStart`/etc,
+/// so even after the decode arm stopped discarding it, the reply would
+/// still never have been sent. This is the dispatch-and-consumer half of
+/// that fix (`encode_pong_response` actually gets called); the wire-shape
+/// half is `crates/protocol/v770/src/server_protocol.rs`'s own
+/// `play_ping_request_tests`, against the real `V770ServerProtocol`, per
+/// `CLAUDE.md`'s note that a `FakeProtocol` test proves dispatch and
+/// consumer but never decode.
+///
+/// The time value is echoed unchanged (`ClientboundPongResponsePacket`
+/// carries the same field, un-transformed) — asserted by value, not just by
+/// "a reply arrived", so a consumer that answered with the wrong field (or a
+/// constant) cannot pass.
+#[tokio::test(start_paused = true)]
+async fn ping_request_gets_a_pong_response_echoing_the_time() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Pinger", 1).await;
+
+    send_ping_request(&mut client, 0x0102_0304_0506_0708).await;
+    let reply = drain_available(&mut client).await;
+    let pongs: Vec<i64> = reply
+        .iter()
+        .filter(|(id, _)| *id == PONG_RESPONSE_S2C)
+        .map(|(_, payload)| {
+            let mut r = Reader::new(payload);
+            r.i64().expect("pong time")
+        })
+        .collect();
+    assert_eq!(
+        pongs,
+        vec![0x0102_0304_0506_0708],
+        "exactly one pong, echoing the ping's own time unchanged: {reply:?}"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
 }
 
 /// **Control**: menu slot 0 (the crafting-result slot) has no native index

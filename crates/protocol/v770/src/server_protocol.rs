@@ -3210,10 +3210,11 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<Swing>(payload);
                 ServerBound::Ignored
             }
-            State::Play if packet_id == play::serverbound::USE_ITEM => {
-                let _ = decode_full::<UseItem>(payload);
-                ServerBound::Ignored
-            }
+            // `USE_ITEM` is decoded and connected above (the
+            // right-click-in-air arm constructing `ServerBound::UseItem`) —
+            // this used to be a second, shadowed stub that decoded to
+            // `Ignored` and could never run because a `match` picks the
+            // first satisfied guard.
             State::Play if packet_id == play::serverbound::PLAYER_COMMAND => {
                 // Issue #325: only the `STOP_SLEEPING` action (0) has a
                 // server-side consumer — the "wake up" the client sends when
@@ -3491,10 +3492,28 @@ impl ServerProtocol for V770ServerProtocol {
             // structs exercised by this crate's client encoder; the rest
             // follow the same field-verified-against-decompiled-source
             // convention as the other four families above.
+            //
+            // `ServerboundPingRequestPacket` is the same struct the Status-state
+            // arm above decodes (vanilla shares one packet class across both
+            // states — see that arm's own comment), so this reuses
+            // `ServerBound::PingRequest` rather than adding a second variant.
+            // `dispatch_play_packet` answers it with `encode_pong_response`,
+            // matching `ServerGamePacketListenerImpl.handlePingRequest`
+            // (`this.connection.send(new ClientboundPongResponsePacket(packet.getTime()))`)
+            // exactly — the Status arm additionally closes the connection, which
+            // this one must not do.
             State::Play if packet_id == play::serverbound::PING_REQUEST => {
-                let _ = decode_full::<PingRequest>(payload);
-                ServerBound::Ignored
+                match decode_full::<PingRequest>(payload) {
+                    Some(ping) => ServerBound::PingRequest { time: ping.time },
+                    None => ServerBound::Ignored,
+                }
             }
+            // `ServerboundPongPacket`: vanilla's own handler
+            // (`ServerCommonPacketListenerImpl.handlePong`) is a genuine empty
+            // method — this reply exists as a hook point for server mods, not
+            // for anything vanilla itself consumes, so decoding it and staying
+            // `Ignored` matches vanilla's own no-op rather than stranding a
+            // packet vanilla would otherwise act on.
             State::Play if packet_id == play::serverbound::PONG => {
                 let _ = decode_full::<Pong>(payload);
                 ServerBound::Ignored
@@ -7175,5 +7194,64 @@ mod index_eighteen_tests {
         assert_eq!(r.u8().expect("terminator"), 0xFF);
         assert!(r.ensure_empty().is_ok(), "no trailing bytes");
         byte
+    }
+}
+
+#[cfg(test)]
+mod play_ping_request_tests {
+    use lodestone_core::State;
+    use lodestone_server::{ServerBound, ServerProtocol};
+
+    use super::V770ServerProtocol;
+    use crate::packet_ids::play;
+
+    /// `ServerboundPingRequestPacket`: a single big-endian `i64`. Bytes are
+    /// hand-built rather than round-tripped through this crate's own encoder — a
+    /// symmetric transposition/endianness bug would otherwise pass against
+    /// itself — and the value is non-zero/non-palindromic so a byte-order
+    /// mistake cannot coincidentally read back correctly.
+    #[test]
+    fn decode_play_ping_request_lifts_the_time() {
+        let proto = V770ServerProtocol;
+        let body = 0x0102_0304_0506_0708_i64.to_be_bytes().to_vec();
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::PING_REQUEST, &body),
+            ServerBound::PingRequest {
+                time: 0x0102_0304_0506_0708,
+            },
+        );
+    }
+
+    /// A malformed (short) frame must not construct a variant with a
+    /// truncated/zeroed time — the control for the assertion above: without
+    /// it, an implementation that always returned `PingRequest { time: 0 }`
+    /// regardless of the payload would also pass the happy-path test.
+    #[test]
+    fn decode_play_ping_request_rejects_a_short_frame() {
+        let proto = V770ServerProtocol;
+        let short = vec![1, 2, 3];
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::PING_REQUEST, &short),
+            ServerBound::Ignored,
+        );
+    }
+
+    /// `ServerboundPongPacket`'s vanilla handler
+    /// (`ServerCommonPacketListenerImpl.handlePong`) is a genuine empty
+    /// method, so producing no `ServerBound` variant here is the
+    /// behaviour-matching outcome, not a stranded packet — pinned so a
+    /// future change does not "fix" this into a variant nothing should
+    /// consume.
+    #[test]
+    fn decode_play_pong_is_deliberately_ignored() {
+        let proto = V770ServerProtocol;
+        // `Pong.id`: a raw big-endian 32-bit id, distinct from
+        // `KeepAlive`'s 64-bit one (see `packets::common::Pong`'s own doc
+        // comment) — not a VarInt.
+        let body = 42i32.to_be_bytes().to_vec();
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::PONG, &body),
+            ServerBound::Ignored,
+        );
     }
 }
