@@ -577,6 +577,7 @@ fn diode_output_signal(state: &str) -> u8 {
 /// `:100-102`).
 #[must_use]
 pub fn own_signal(state: &str) -> u8 {
+    crate::redstone_counters::bump_state_parse();
     if is_wire(state) {
         wire_power(state)
     } else if is_torch(state) {
@@ -851,6 +852,7 @@ pub fn best_neighbor_signal<F>(lookup: &F, pos: BlockPos, ignore_wire: bool) -> 
 where
     F: Fn(BlockPos) -> String,
 {
+    crate::redstone_counters::bump_signal_query();
     let mut best = 0u8;
     for direction in ALL_DIRECTIONS {
         let signal = signal_at(lookup, direction.relative(pos), direction, ignore_wire);
@@ -959,6 +961,7 @@ pub fn make_lookup(column: &crate::chunk::ChunkColumn, min_x: i32, min_z: i32) -
         if !(0..16).contains(&lx) || !(0..16).contains(&lz) || p.y < column.min_y || p.y >= column.min_y + column.height {
             return "minecraft:air".to_string();
         }
+        crate::redstone_counters::bump_cell_read();
         column.block_state(lx, p.y, lz).to_string()
     }
 }
