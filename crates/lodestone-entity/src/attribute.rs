@@ -426,7 +426,7 @@ pub fn water_movement_efficiency_key() -> Identifier {
     Identifier::from_str("minecraft:water_movement_efficiency").expect("valid built-in identifier")
 }
 
-/// The canonical id of vanilla's `movement_speed` attribute (issue #193).
+/// The canonical id of vanilla's `movement_speed` attribute.
 ///
 /// Reaches physics via [`PlayerState::with_movement_speed`](
 /// https://docs.rs/lodestone-physics) the same way
@@ -437,14 +437,14 @@ pub fn water_movement_efficiency_key() -> Identifier {
 /// through [`attribute_value`] already covers Speed/Slowness and soul speed
 /// for free: vanilla applies those as `MOVEMENT_SPEED` `AttributeModifier`s
 /// **server-side** (`LivingEntity.onEffectAdded`/`onEffectUpdated`, gated on
-/// `!level().isClientSide()` — `LivingEntity.java:1075-1103`,
-/// `.cache/mc/26.2/src`) and syncs the resulting base+modifiers back over the
+/// `!level().isClientSide()`) and syncs the resulting base+modifiers back over the
 /// wire via `ClientboundUpdateAttributesPacket`
-/// (`ServerEntity.sendChanges`/`removeVehicle`, `ServerEntity.java:289,352`);
+/// (`ServerEntity.sendPairingData` on initial tracking, `ServerEntity.sendDirtyEntityData`
+/// on the per-tick resync `ServerEntity.sendChanges` drives);
 /// the client never re-derives the modifier itself. The sprint bonus is the
 /// same shape too — `LivingEntity.setSprinting` adds/removes a transient
 /// `+0.3F ADD_MULTIPLIED_TOTAL` modifier keyed `minecraft:sprinting`
-/// (`LivingEntity.java:154-157`, matching
+/// (`LivingEntity.setSprinting`, matching
 /// [`sprint_modifier_matches_physics_convention`]'s worked example) — but a
 /// caller reading this attribute client-side sees that modifier only once the
 /// server has processed the corresponding `PlayerCommand` and resynced, which
@@ -458,9 +458,8 @@ pub fn movement_speed_key() -> Identifier {
 }
 
 /// Vanilla's transient sprint modifier on `minecraft:movement_speed` —
-/// `LivingEntity.SPRINTING_MODIFIER_ID`
-/// (`.cache/mc/26.2/src/.../LivingEntity.java:153-157`), `+0.3`
-/// `ADD_MULTIPLIED_TOTAL`.
+/// `LivingEntity.SPRINTING_MODIFIER_ID` and its `SPEED_MODIFIER_SPRINTING`
+/// constant, `+0.3` `ADD_MULTIPLIED_TOTAL`.
 ///
 /// Exposed so a client that predicts sprint locally can tell whether the
 /// server's own modifier has arrived yet. `LivingEntity.setSprinting` adds and
@@ -476,8 +475,7 @@ pub fn sprinting_modifier_id() -> Identifier {
 
 /// Builds a foldable [`AttributeInstance`] from a wire-shaped
 /// [`EntityAttributeSnapshot`] — the shape `ClientboundUpdateAttributesPacket`
-/// decodes to (see `read_update_attributes`,
-/// `crates/protocol/v770/src/packets/metadata.rs:485`).
+/// decodes to (see `lodestone_v770::packets::metadata::read_update_attributes`).
 ///
 /// The wire snapshot carries only `base` and `modifiers`; it has no min/max
 /// range (vanilla never sends `RangedAttribute`'s bounds over the network —
@@ -533,19 +531,18 @@ pub fn attribute_value(snapshots: &[EntityAttributeSnapshot], key: &Identifier) 
 /// `createMonsterAttributes` / `createAnimalAttributes` chain.
 ///
 /// All three variants extend `Mob.createMobAttributes()` (living +
-/// `follow_range` 16 — `Mob.java:166-168`), which is the shared prefix in
+/// `follow_range` 16), which is the shared prefix in
 /// [`template_bases`]; they differ only in the one attribute the subclass
 /// builder adds.
 ///
-/// # Why the third variant is `Mob` and not `AbstractGolem` (issue #457)
+/// # Why the third variant is `Mob` and not `AbstractGolem`
 ///
 /// A snow golem is an `AbstractGolem`, so the obvious reading is that it needs
 /// an `AbstractGolem` variant. It does not: **`AbstractGolem` declares no
 /// `createAttributes` at all**, and `SnowGolem.createAttributes()` calls
-/// `Mob.createMobAttributes()` directly
-/// (`animal/golem/SnowGolem.java:63-65`). The same is true of a ghast, which
+/// `Mob.createMobAttributes()` directly. The same is true of a ghast, which
 /// is `extends Mob implements Enemy` — hostile by interface, but with none of
-/// `Monster`'s `attack_damage` (`monster/Ghast.java:116-122`).
+/// `Monster`'s `attack_damage` (`Ghast.createAttributes`).
 ///
 /// So this enum keys on the **attribute-supplier chain**, not the class
 /// hierarchy, and the two diverge. Adding a variant per superclass would have
@@ -623,7 +620,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
         ("spawn_reinforcements", 0.0),
     ];
     // `Drowned.createAttributes()` is `Zombie`'s plus `STEP_HEIGHT 1.0`
-    // (`monster/zombie/Drowned.java:81-82`) — spelled out rather than derived
+    // — spelled out rather than derived
     // from `ZOMBIE`, because `overrides` is a `&'static [_]` and there is no
     // const concatenation. Keep the first five rows in sync with `ZOMBIE`;
     // `zombie_family_variants_share_their_parents_bases` pins that.
@@ -637,7 +634,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
     ];
     let spec = match path {
         // `ZombieVillager` declares no `createAttributes`, so it shares
-        // `Zombie`'s (`monster/zombie/Zombie.java:131-137`) — checked per
+        // `Zombie.createAttributes()` — checked per
         // class, since `Drowned` in the same family does override.
         "zombie" | "husk" | "zombie_villager" => TypeSpec {
             template: BaseTemplate::Monster,
@@ -652,8 +649,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
             overrides: &[("movement_speed", 0.25)],
         },
         // `Parched.createAttributes()` is `AbstractSkeleton`'s plus
-        // `MAX_HEALTH 16.0` (`monster/skeleton/Parched.java:32-33`). A 26.2
-        // variant that no issue's species list mentions.
+        // `MAX_HEALTH 16.0`. A 26.2 variant not otherwise covered here.
         "parched" => TypeSpec {
             template: BaseTemplate::Monster,
             overrides: &[("movement_speed", 0.25), ("max_health", 16.0)],
@@ -662,7 +658,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
             template: BaseTemplate::Monster,
             overrides: &[("movement_speed", 0.25)],
         },
-        // `Witch.createAttributes()` (`monster/Witch.java:106-108`): the monster
+        // `Witch.createAttributes()`: the monster
         // base plus `MAX_HEALTH 26.0` and `MOVEMENT_SPEED 0.25`. **26, not 20** —
         // the witch is one of the few monsters that is not on the generic health,
         // and inheriting the base here would have made it a third easier to kill
@@ -671,7 +667,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
             template: BaseTemplate::Monster,
             overrides: &[("max_health", 26.0), ("movement_speed", 0.25)],
         },
-        // `Pillager.createAttributes()` (`monster/illager/Pillager.java:84-90`):
+        // `Pillager.createAttributes()`:
         // `MOVEMENT_SPEED 0.35`, `MAX_HEALTH 24.0`, `ATTACK_DAMAGE 5.0`,
         // `FOLLOW_RANGE 32.0`.
         //
@@ -693,8 +689,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
         // `ZombifiedPiglin.createAttributes()` is `Zombie`'s with
         // `SPAWN_REINFORCEMENTS_CHANCE` re-added as 0.0 (already 0.0 in
         // `ZOMBIE`, so a no-op), `MOVEMENT_SPEED` re-added as 0.23 (also a
-        // no-op) and `ATTACK_DAMAGE` **raised to 5.0**
-        // (`monster/zombie/ZombifiedPiglin.java:80-85`). Two of its three
+        // no-op) and `ATTACK_DAMAGE` **raised to 5.0**. Two of its three
         // `add` calls restate the parent's value; only the damage differs, and
         // `zombie_family_variants_share_their_parents_bases` pins that split.
         "zombified_piglin" => TypeSpec {
@@ -707,7 +702,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("spawn_reinforcements", 0.0),
             ],
         },
-        // `Guardian.createAttributes()` (`monster/Guardian.java:85-87`).
+        // `Guardian.createAttributes()`.
         "guardian" => TypeSpec {
             template: BaseTemplate::Monster,
             overrides: &[
@@ -719,7 +714,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
         // `ElderGuardian.createAttributes()` is `Guardian.createAttributes()`
         // with all three of its values re-`add`ed — vanilla's `add` replaces,
         // so the elder keeps *none* of the guardian's numbers
-        // (`monster/ElderGuardian.java:35-37`). Note the elder is the
+        // Note the elder is the
         // **slower** of the two (0.3 against 0.5); a table derived from "elder
         // is the bigger one" would have got that backwards.
         "elder_guardian" => TypeSpec {
@@ -730,7 +725,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("max_health", 80.0),
             ],
         },
-        // `Blaze.createAttributes()` (`monster/Blaze.java:54-56`). No
+        // `Blaze.createAttributes()`. No
         // `max_health` override, so it keeps the living default of 20.
         "blaze" => TypeSpec {
             template: BaseTemplate::Monster,
@@ -740,7 +735,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("follow_range", 48.0),
             ],
         },
-        // `EnderMan.createAttributes()` (`monster/EnderMan.java:113-120`).
+        // `EnderMan.createAttributes()`.
         // `follow_range` 64 is the widest in this table and feeds
         // `MobSim::spawn_species`'s A* budget directly.
         "enderman" => TypeSpec {
@@ -753,7 +748,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("step_height", 1.0),
             ],
         },
-        // `Ghast.createAttributes()` (`monster/Ghast.java:116-122`) — a
+        // `Ghast.createAttributes()` — a
         // **bare `Mob`** builder despite `Ghast implements Enemy`, so it has
         // no `attack_damage` at all and no `movement_speed` override (it is
         // flight-driven; the 0.06 is `flying_speed`). Its `follow_range` 100
@@ -767,14 +762,14 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("flying_speed", 0.06),
             ],
         },
-        // `SnowGolem.createAttributes()` (`animal/golem/SnowGolem.java:63-65`)
+        // `SnowGolem.createAttributes()`
         // — also a bare `Mob` builder, not an `Animal` one: a snow golem has
         // no `tempt_range` and cannot be led by food.
         "snow_golem" => TypeSpec {
             template: BaseTemplate::Mob,
             overrides: &[("max_health", 4.0), ("movement_speed", 0.2)],
         },
-        // `IronGolem.createAttributes()` (`animal/golem/IronGolem.java:91-98`)
+        // `IronGolem.createAttributes()`
         // — also a bare `Mob` builder. `knockback_resistance` **1.0** is the
         // one to notice: a golem cannot be knocked back at all, unlike every
         // other mob in this table, and `step_height` **1.0** is a full block
@@ -790,7 +785,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("step_height", 1.0),
             ],
         },
-        // `Bee.createAttributes()` (`animal/bee/Bee.java:528-534`). An
+        // `Bee.createAttributes()`. An
         // `Animal` that also carries `ATTACK_DAMAGE`, like the rabbit below.
         "bee" => TypeSpec {
             template: BaseTemplate::Animal,
@@ -801,7 +796,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("attack_damage", 2.0),
             ],
         },
-        // `Wolf.createAttributes()` (`animal/wolf/Wolf.java:216-218`). A
+        // `Wolf.createAttributes()`. A
         // `TamableAnimal`, but its builder calls `Animal.createAnimalAttributes()`
         // and `TamableAnimal` declares no `createAttributes` of its own — the
         // supplier chain, not the class chain (see [`BaseTemplate`]).
@@ -813,7 +808,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("attack_damage", 4.0),
             ],
         },
-        // `Villager.createAttributes()` (`npc/villager/Villager.java:227-229`) —
+        // `Villager.createAttributes()` —
         // the only override `AbstractVillager`'s hierarchy declares.
         // `WanderingTrader` has no `createAttributes` of its own, so it
         // inherits this: `max_health`/`attack_damage`/`armor` stay at the
@@ -827,8 +822,8 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
             template: BaseTemplate::Monster,
             overrides: &[("max_health", 16.0), ("movement_speed", 0.3)],
         },
-        // `CaveSpider.createAttributes()` is `Spider`'s with `MAX_HEALTH`
-        // re-`add`ed as 12.0 (`monster/spider/CaveSpider.java:26`), so it keeps
+        // `CaveSpider.createCaveSpider()` is `Spider`'s with `MAX_HEALTH`
+        // re-`add`ed as 12.0, so it keeps
         // the 0.3 speed and loses 4 health. Written flat rather than as
         // "spider's, overridden", because `add` in vanilla replaces and the
         // flat form is what `default_attributes` applies in order anyway.
@@ -852,7 +847,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
             template: BaseTemplate::Animal,
             overrides: &[("max_health", 4.0), ("movement_speed", 0.25)],
         },
-        // `Rabbit.createAttributes()` (`animal/rabbit/Rabbit.java:292-293`).
+        // `Rabbit.createAttributes()`.
         // The only `Animal` here that carries `ATTACK_DAMAGE`: the killer
         // bunny uses it, and vanilla puts it on every rabbit's supplier rather
         // than on that variant, so it belongs in the base set and not behind
@@ -866,7 +861,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("attack_damage", 3.0),
             ],
         },
-        // `Cat.createAttributes()` (`animal/feline/Cat.java:286-288`). A
+        // `Cat.createAttributes()`. A
         // `TamableAnimal`, same reason the wolf's arm above is: the supplier
         // chain calls `Animal.createAnimalAttributes()` directly, since
         // `TamableAnimal` declares no `createAttributes` of its own.
@@ -878,7 +873,7 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("attack_damage", 3.0),
             ],
         },
-        // `Parrot.createAttributes()` (`animal/parrot/Parrot.java:173-179`).
+        // `Parrot.createAttributes()`.
         // The only species in this table with both `flying_speed` and
         // `attack_damage` set alongside a sub-default `movement_speed` — a
         // parrot walks slowly (`0.2`, against the registry default `0.7`)
@@ -1121,7 +1116,7 @@ mod tests {
         assert!(default_attributes(&id("modded:thing")).is_none());
     }
 
-    /// Issue #457: five species with landed, jar-cited goal rosters had **no**
+    /// Five species with landed, jar-cited goal rosters had **no**
     /// `type_spec` arm, so `default_attributes` returned `None` and every
     /// consumer fell through to `AttributeMap::value`'s registry default.
     ///
@@ -1163,7 +1158,7 @@ mod tests {
             ("cave_spider", 0.3, 12.0, "monster/spider/CaveSpider.java:26"),
             ("zombie_villager", 0.23, 20.0, "monster/zombie/Zombie.java:131"),
             ("parched", 0.25, 16.0, "monster/skeleton/Parched.java:32"),
-            // Second batch (#457). Every one of these overrides
+            // Second batch. Every one of these overrides
             // `movement_speed`, so all of them are separated from the 0.7
             // fallback by the assertion below. The one species that does
             // **not** override it — the ghast — is deliberately absent, and
@@ -1239,7 +1234,7 @@ mod tests {
         // A zombified piglin is also `Zombie.createAttributes()`-derived, but
         // it is the one variant that genuinely *diverges*: two of its three
         // `add` calls restate the parent's numbers and only `ATTACK_DAMAGE`
-        // changes (`ZombifiedPiglin.java:80-85`). Pinned here rather than in
+        // changes. Pinned here rather than in
         // the loop above precisely because it must **not** match.
         let piglin = default_attributes(&id("minecraft:zombified_piglin")).unwrap();
         let damage = id("minecraft:attack_damage");
@@ -1255,7 +1250,7 @@ mod tests {
         }
     }
 
-    /// The structural half of #457, and the one gate here that does not
+    /// The structural half of the jar-exact-bases guarantee, and the one gate here that does not
     /// restate a name list: **every species any roster family claims must
     /// resolve to a `type_spec` arm.**
     ///
@@ -1304,10 +1299,10 @@ mod tests {
     /// structurally cannot cover, because its "still falling through"
     /// assertion is exactly "not 0.7".
     ///
-    /// `Ghast.createAttributes()` (`monster/Ghast.java:116-122`) overrides
+    /// `Ghast.createAttributes()` overrides
     /// `flying_speed` and never `movement_speed`, because a ghast does not
     /// walk. So the fact that its ground speed reads 0.7 is *correct* and not
-    /// the #457 bug — the two are distinguished by whether the whole spec
+    /// a missing-arm bug — the two are distinguished by whether the whole spec
     /// resolves, which is what `default_attributes(...).is_some()` below
     /// measures. Without this test, giving a ghast an arm and giving it no arm
     /// would be indistinguishable on the attribute the other gate reads.
@@ -1322,8 +1317,8 @@ mod tests {
         // `get`, not `value`: a ghast's `movement_speed` must be **present and
         // seeded at 0.7** by `createLivingAttributes`, not absent-and-answered
         // by `value`'s registry fallback. Those two are indistinguishable
-        // through `value` — which is the whole reason the #457 bug was
-        // invisible — so the distinction has to be made here.
+        // through `value` — which is the whole reason a missing `type_spec`
+        // arm was invisible — so the distinction has to be made here.
         let speed = ghast
             .get(&id("minecraft:movement_speed"))
             .expect("LivingEntity.createLivingAttributes adds MOVEMENT_SPEED to every mob");
@@ -1355,8 +1350,8 @@ mod tests {
     /// [`default_def`]`(key).default` for any registry-known attribute, so a
     /// ghast with no `attack_damage` in its set still answers `Some(2.0)`
     /// through it. The first draft of this test asserted `value(...) == None`
-    /// and failed for exactly that reason — the same fallback that made #457
-    /// invisible in the first place, met a second time one layer up. Anything
+    /// and failed for exactly that reason — the same fallback that made a
+    /// missing `type_spec` arm invisible in the first place, met a second time one layer up. Anything
     /// asking "does this type *have* this attribute" has to go through `get`.
     #[test]
     fn a_bare_mob_template_adds_neither_attack_damage_nor_tempt_range() {
@@ -1472,8 +1467,8 @@ mod tests {
         // No boots, no enchantment: the server has never sent an explicit
         // `water_movement_efficiency` snapshot for this entity, and absence
         // must read as "still the default", matching `RangedAttribute`'s own
-        // default (`Attributes.java:108-109`), not as a hard zero baked into
-        // the caller.
+        // default (`Attributes.WATER_MOVEMENT_EFFICIENCY`'s registration, `0.0`),
+        // not as a hard zero baked into the caller.
         let v = attribute_value(&[], &id("minecraft:water_movement_efficiency"));
         assert_eq!(v, 0.0);
 
@@ -1512,8 +1507,8 @@ mod tests {
     #[test]
     fn movement_speed_key_matches_the_registry_id() {
         assert_eq!(movement_speed_key(), id("minecraft:movement_speed"));
-        // The *generic* `RangedAttribute` default (0.7, `Attributes.java:108-109`
-        // equivalent) — a player's own base is 0.1 (`Player.createAttributes()`),
+        // The *generic* `RangedAttribute` default (0.7, `Attributes.MOVEMENT_SPEED`'s
+        // registration) — a player's own base is 0.1 (`Player.createAttributes()`),
         // supplied by the wire snapshot once the server sends one, not by this
         // table. This table's job is the fallback + clamp range only.
         assert_eq!(default_def(&movement_speed_key()).unwrap().default, 0.7);
