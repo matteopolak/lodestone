@@ -1,4 +1,4 @@
-//! The behavioural gate for issue #209: a Brain-driven mob actually moves.
+//! The behavioural gate proving a Brain-driven mob actually moves.
 //!
 //! # What this has to prove, and what would have passed without proving it
 //!
@@ -14,8 +14,8 @@
 //! * **The mob is the production body.** `NavigatingMob` is the only implementor
 //!   of [`MobController`] outside test doubles, and the only one whose
 //!   `brain_mob()` answers `Some`. Every double inherits the `None` default, so a
-//!   brain installed on a fake does *nothing* — the shape that hid the islands in
-//!   #441 and #455, where `ScriptMob` and `ai/roster/probe.rs` override all eight
+//!   brain installed on a fake does *nothing* — the shape that previously hid
+//!   islands where `ScriptMob` and `ai/roster/probe.rs` override all eight
 //!   perception methods and a constant-`false` `can_use` stayed green.
 //! * **The goals come from `goals_for`, not from this file.** That is the same
 //!   function `MobSim::spawn_species` calls, so if the roster stopped installing a
