@@ -441,6 +441,72 @@ fn read_pot_decorations(reader: &mut Reader<'_>) -> Result<PotDecorations, Adapt
     })
 }
 
+/// Decodes `minecraft:potion_contents`' payload — `PotionContents.STREAM_CODEC`:
+/// `Optional<Holder<Potion>>`, `Optional<Integer>`, `List<MobEffectInstance>`, then
+/// `Optional<String>` — and folds it straight into the mixed ARGB colour via
+/// [`lodestone_data::potion::potion_color`], since nothing else in this client reads
+/// the raw potion id or effect list back out.
+fn read_potion_contents_color(reader: &mut Reader<'_>) -> Result<u32, AdapterError> {
+    // `Potion.STREAM_CODEC = ByteBufCodecs.holderRegistry(Registries.POTION)`: a
+    // plain 0-based VarInt registry id (the same shape `minecraft:mob_effect` uses),
+    // wrapped in `ByteBufCodecs.optional` — a bool presence flag then the value.
+    let potion = if reader.bool().map_err(dec_err)? {
+        Some(reader.var_i32().map_err(dec_err)?)
+    } else {
+        None
+    };
+    // `ByteBufCodecs.INT.apply(ByteBufCodecs::optional)`: fixed-width, not a VarInt —
+    // the same `minecraft:dyed_color` trap documented above.
+    let custom_color = if reader.bool().map_err(dec_err)? {
+        Some(reader.i32().map_err(dec_err)? as u32)
+    } else {
+        None
+    };
+    let custom_effects = read_mob_effect_instances(reader)?;
+    // `customName`: `ByteBufCodecs.STRING_UTF8.apply(ByteBufCodecs::optional)`,
+    // consumed for alignment only — nothing here reads it back.
+    if reader.bool().map_err(dec_err)? {
+        reader.string(32767).map_err(dec_err)?;
+    }
+    Ok(lodestone_data::potion::potion_color(potion, custom_color, &custom_effects))
+}
+
+/// `MobEffectInstance.STREAM_CODEC.apply(ByteBufCodecs.list())`: a VarInt count then
+/// that many `(MobEffect id, MobEffectInstance.Details)` pairs. Only the effect id
+/// and amplifier are kept — the colour mix needs nothing else — but every field is
+/// still read off the wire in declaration order, because skipping one would
+/// misalign every byte after it.
+fn read_mob_effect_instances(reader: &mut Reader<'_>) -> Result<Vec<(i32, u8)>, AdapterError> {
+    let count = read_count(reader, "potion custom_effects")?;
+    let mut out = Vec::with_capacity(count.min(64));
+    for _ in 0..count {
+        // `MobEffect.STREAM_CODEC = ByteBufCodecs.holderRegistry(Registries.MOB_EFFECT)`:
+        // the same plain 0-based VarInt shape as the potion holder above.
+        let effect_id = reader.var_i32().map_err(dec_err)?;
+        let amplifier = read_mob_effect_details(reader)?;
+        out.push((effect_id, amplifier));
+    }
+    Ok(out)
+}
+
+/// `MobEffectInstance.Details.STREAM_CODEC`: VarInt amplifier, VarInt duration, bool
+/// ambient, bool showParticles, bool showIcon, then `Optional<Details>` recursing
+/// into this same shape — **without** its own leading effect id, since `hiddenEffect`
+/// is a nested `Details`, not a nested `MobEffectInstance`. Returns just the
+/// amplifier, clamped into `u8` the way `MobEffectInstance`'s own constructor
+/// (`Mth.clamp(amplifier, 0, 255)`) does.
+fn read_mob_effect_details(reader: &mut Reader<'_>) -> Result<u8, AdapterError> {
+    let amplifier = reader.var_i32().map_err(dec_err)?;
+    reader.var_i32().map_err(dec_err)?; // duration
+    reader.bool().map_err(dec_err)?; // ambient
+    reader.bool().map_err(dec_err)?; // showParticles
+    reader.bool().map_err(dec_err)?; // showIcon
+    if reader.bool().map_err(dec_err)? {
+        read_mob_effect_details(reader)?; // hiddenEffect, discarded
+    }
+    Ok(amplifier.clamp(0, 255) as u8)
+}
+
 /// Decodes an item stack's `DataComponentPatch` into the modeled component set,
 /// returning whether the patch was fully consumed.
 ///
@@ -522,6 +588,16 @@ fn read_component_patch(
             // initial world load. See [`read_pot_decorations`].
             Some("minecraft:pot_decorations") => {
                 components.pot_decorations = Some(read_pot_decorations(reader)?);
+            }
+            // Decoded for the same reason as the trim, map id and pot decorations
+            // above: `minecraft:potion_contents`' payload is not length-prefixed, so
+            // leaving it unmodeled truncated the rest of the packet from any potion,
+            // splash potion, lingering potion or tipped arrow onward. Folded straight
+            // into the mixed colour rather than kept as raw fields, since nothing
+            // else in this client reads the potion id or effect list. See
+            // [`read_potion_contents_color`].
+            Some("minecraft:potion_contents") => {
+                components.potion_color = Some(read_potion_contents_color(reader)?);
             }
             // Both of these are `ByteBufCodecs.VAR_INT` (`DataComponents.java`)
             // and both *override* the prototype value seeded above. They are
