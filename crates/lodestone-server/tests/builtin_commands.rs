@@ -1127,10 +1127,12 @@ fn tp_targets_location_resolves_against_the_source_never_the_target() {
     );
 }
 
-/// `/tp <destination>` (self) and `/tp <targets> <destination>` both resolve
-/// to the destination's live *position*, never a fixed literal — carol and
-/// dave sit at different `x` per [`roster`], so a stale/transposed lookup
-/// would be visible immediately.
+/// `/tp @s <destination>` (self, through `<targets>` → `<destination>` — see
+/// `crate::commands::teleport`'s module doc for why the bare, `@s`-free
+/// self-to-entity form does not exist here) and `/tp <targets> <destination>`
+/// both resolve to the destination's live *position*, never a fixed literal —
+/// carol and dave sit at different `x` per [`roster`], so a stale/transposed
+/// lookup would be visible immediately.
 #[test]
 fn tp_to_an_entity_resolves_its_current_position() {
     use lodestone_server::{DirectedEffect, Effect};
@@ -1139,7 +1141,7 @@ fn tp_to_an_entity_resolves_its_current_position() {
     let players = roster();
 
     let self_to_carol =
-        run(&commands, &GameRulesHandle::new(), &players, &alice, "tp carol").expect("root matched");
+        run(&commands, &GameRulesHandle::new(), &players, &alice, "tp @s carol").expect("root matched");
     assert_eq!(
         self_to_carol.effects,
         [DirectedEffect::new(
@@ -1156,6 +1158,19 @@ fn tp_to_an_entity_resolves_its_current_position() {
             uuid(2),
             Effect::Teleport { x: 30.0, y: 64.0, z: 0.0, yaw: None, pitch: None }
         )]
+    );
+
+    // The control for the module doc's disclosed gap: the bare, `@s`-free
+    // form must actually be absent, not merely undocumented. Without this,
+    // a future tree edit that silently reintroduced (and re-broke) the
+    // ambiguous top-level `<destination>` node would show no red anywhere —
+    // the same "assertions of an absence need a control" standard the
+    // `deferred selector options` refusals already meet.
+    let bare = run(&commands, &GameRulesHandle::new(), &players, &alice, "tp carol")
+        .expect("root matched");
+    assert!(
+        !bare.response.is_ran(),
+        "the bare, `@s`-free self-to-entity form is a disclosed gap and must stay refused: {bare:?}"
     );
 }
 
