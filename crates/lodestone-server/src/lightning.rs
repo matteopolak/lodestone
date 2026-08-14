@@ -152,6 +152,19 @@ pub const LIGHTNING_ROD: &str = "minecraft:lightning_rod";
 /// network id 77.
 pub const LIGHTNING_BOLT: &str = "minecraft:lightning_bolt";
 
+/// Default seed for the driver's **strike target-selection** stream —
+/// `tick_thunder_for_chunk`'s own `rng` parameter, when the caller wants a
+/// fixed default rather than injecting one. Arbitrary and fixed, the same
+/// shape `crate::mobs::orbs::ORB_BEHAVIOR_SEED` establishes.
+pub const LIGHTNING_STRIKE_SEED: u64 = 0x4C49_4748_5453_5452;
+
+/// Default seed for a bolt's **own** state-machine stream (`BoltState::new`,
+/// `tick_bolt`'s `spawnFire` draws) — deliberately separate from
+/// [`LIGHTNING_STRIKE_SEED`] so a strike decision can never shift which roll
+/// a bolt's own life/flashes/ignition sees, [`LIGHTNING_STRIKE_SEED`]'s own
+/// reason restated for the sibling stream.
+pub const LIGHTNING_BOLT_SEED: u64 = 0x4C49_4748_5442_4F4C;
+
 /// Everything about the world a strike-selection pass needs that is not a
 /// block state — the same shape [`crate::fire::FireEnv`] establishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,8 +584,18 @@ mod tests {
     impl Rig {
         fn with_floor(fill: &str, floor_y: i32) -> Self {
             let rig = Self { columns: StdMutex::new(HashMap::new()) };
-            for z in -8..8 {
-                for x in -8..8 {
+            // `-8..16`, not `-8..8`: `block_random_pos(rv, xo, 0, zo, 15)`'s
+            // `& 15` mask can offset up to **+15** from `xo`/`zo`, and every
+            // `tick_thunder_for_chunk` test below passes `chunk_min_x =
+            // chunk_min_z = 0`. A `-8..8` floor left columns 8..16
+            // unfilled, so a seed landing there (as the fixed `rv = 7` this
+            // file uses does — column `(13, 12)`) read the void heightmap
+            // fallback instead of the floor, independently of which
+            // `SpawnRng` seed was in play. Caught only once the RNG-search
+            // widening above stopped masking it with a *different* panic
+            // ("no seed rolls zero in range") on the same test.
+            for z in -8..16 {
+                for x in -8..16 {
                     for y in MIN_Y..=floor_y {
                         rig.set_block(x, y, z, fill);
                     }
@@ -627,12 +650,20 @@ mod tests {
     /// generator seeded to draw exactly `0` on its first call must strike;
     /// one that draws anything else must not, and both must have consumed
     /// one draw.
+    ///
+    /// **The search space was previously `0..2000`, against a 1-in-100000
+    /// target — an expected 0.02 hits, so this test failed on nearly every
+    /// run** (`strike_gate_fires_on_a_zero_roll_and_consumes_one_draw` was one
+    /// of the two known-failing `lightning::tests` on `main` this landing
+    /// found and fixed; unrelated to the mob-feed wiring itself).
+    /// `0..2_000_000` has an expected 20 hits, so the miss probability is
+    /// `(1 - 1e-5)^2_000_000 ≈ 2e-9` — search a real seed space rather than
+    /// asserting a literal magic seed (a round number masquerading as a
+    /// derivation), just a large enough one that the assertion is not itself
+    /// a coin flip.
     #[test]
     fn strike_gate_fires_on_a_zero_roll_and_consumes_one_draw() {
-        // Search a small seed space for one whose first `nextInt(100000)` is
-        // zero, rather than asserting a literal magic seed (a round number
-        // masquerading as a derivation).
-        let seed = (0u64..2000)
+        let seed = (0u64..2_000_000)
             .find(|&s| SpawnRng::new(s).next_int(STRIKE_ROLL_BOUND) == 0)
             .expect("at least one seed in range must roll zero");
         let mut hit = SpawnRng::new(seed);
@@ -774,7 +805,11 @@ mod tests {
     #[test]
     fn a_favourable_seed_produces_a_strike_above_the_floor() {
         let rig = Rig::with_floor("minecraft:stone", 0);
-        let seed = (0u64..5000)
+        // See `strike_gate_fires_on_a_zero_roll_and_consumes_one_draw`'s own
+        // comment: `0..5000` was the second of the two known-failing
+        // `lightning::tests` on `main` (expected 0.05 hits against the same
+        // 1-in-100000 target), fixed the same way.
+        let seed = (0u64..2_000_000)
             .find(|&s| SpawnRng::new(s).next_int(STRIKE_ROLL_BOUND) == 0)
             .expect("a zero-rolling seed must exist in range");
         let mut r = SpawnRng::new(seed);

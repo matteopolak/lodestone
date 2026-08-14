@@ -1507,6 +1507,14 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         for effect in mobs.with(MobSim::take_vocalisations) {
             block_tick_out.publish_effect(effect);
         }
+        // Issue #322: target-block projectile impacts. Drained here (outside
+        // the `scheduled.with` region below) because `MobSim` is the only
+        // thing that saw the hit; resolved *inside* it further down because a
+        // target's power write needs `block_ticks` (for
+        // `redstone_target::apply_hit`'s `has_pending_decay` guard and to
+        // schedule the decay) and the live `world`, neither of which `MobSim`
+        // holds — see `crate::mobs::ProjectileBlockHit`'s own doc comment.
+        let projectile_block_hits = mobs.with(MobSim::take_projectile_block_hits);
         // Issue #321: the hopper redstone lock. `tick_all`'s unlocked shorthand
         // would tick every hopper as `enabled: true` forever, which is what this
         // line used to do — see `BlockEntityRegistry::tick_all_with_hopper_lock`,
@@ -1696,6 +1704,52 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 game_tick + pending.trigger_tick,
                 pending.priority,
             );
+        }
+
+        // Issue #322: resolve each target-block hit `MobSim::resolve_projectile_impacts`
+        // found this tick — see the drain above for why this has to happen
+        // inside this closure rather than there. A hit at a position that is
+        // no longer (or never was) a `minecraft:target` by the time this runs
+        // is silently dropped, matching every other drain here that re-checks
+        // live state rather than trusting a snapshot taken a moment earlier.
+        let target_decay_kind = crate::redstone_target::TICK_TARGET_DECAY.to_owned();
+        for hit in &projectile_block_hits {
+            let state = world.block_state(hit.pos.x, hit.pos.y, hit.pos.z);
+            if !crate::redstone::is_target(&state) {
+                continue;
+            }
+            let strength = crate::redstone_target::redstone_strength(
+                hit.axis, hit.frac.x, hit.frac.y, hit.frac.z,
+            );
+            let has_pending_decay =
+                block_ticks.has_scheduled((hit.pos.x, hit.pos.y, hit.pos.z), &target_decay_kind);
+            let Some(outcome) =
+                crate::redstone_target::apply_hit(&state, strength, hit.is_arrow, has_pending_decay)
+            else {
+                continue;
+            };
+            world.set_block(hit.pos.x, hit.pos.y, hit.pos.z, &outcome.new_state);
+            block_tick_out.publish(hit.pos.x, hit.pos.y, hit.pos.z, outcome.new_state.clone());
+            block_ticks.schedule(
+                (hit.pos.x, hit.pos.y, hit.pos.z),
+                target_decay_kind.clone(),
+                game_tick + u64::from(outcome.delay),
+                TickPriority::Normal,
+            );
+            // Neighbour fan-out, matching every other analog-power write in
+            // this family (`crate::random_tick::propagate_and_react`) — a
+            // target's own doc names this as "none beyond the ordinary
+            // fan-out", so this is that ordinary fan-out, not a special case.
+            let cx = hit.pos.x.div_euclid(16);
+            let cz = hit.pos.z.div_euclid(16);
+            let mut column = world.column(cx, cz);
+            for event in crate::random_tick::propagate_and_react(
+                &mut column, cx * 16, cz * 16, hit.pos.x, hit.pos.y, hit.pos.z, &mut block_ticks, game_tick,
+            ) {
+                let (ex, ey, ez) = event.pos;
+                world.set_block(ex, ey, ez, &event.to);
+                block_tick_out.publish(ex, ey, ez, event.to);
+            }
         }
 
         // #308, block before fluid (`ServerLevel.java:388-391`). Draining
@@ -2065,11 +2119,11 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 Some(new_state)
             } else if due.kind == crate::redstone_target::TICK_TARGET_DECAY {
                 // `TargetBlock.tick` (`:85-89`) — decay the analog `power`
-                // back to 0. Nothing schedules this kind yet in production
-                // (see `crate::redstone_target`'s own module doc for why);
-                // wired here so the dispatch is ready the moment a projectile
-                // producer exists, the same "ready seam, no producer" shape
-                // `crate::redstone_target::apply_hit` itself already is.
+                // back to 0. Issue #322: scheduled for real now, by the
+                // projectile-block-hit resolution earlier in this same
+                // `scheduled.with` region (search this file for
+                // `crate::mobs::ProjectileBlockHit`) — a target's `power`
+                // set by a projectile hit no longer decays from nothing.
                 crate::redstone_target::run_scheduled_tick(&state)
             } else if due.kind == crate::hand_use::TICK_BUTTON {
                 // Issue #532: a pressed button releasing itself after its
