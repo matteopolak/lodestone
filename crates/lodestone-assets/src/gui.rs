@@ -173,10 +173,22 @@ impl GuiScaling {
 
     /// Builds the geometry mapping this sprite onto a `dst_w` x `dst_h` target.
     ///
-    /// `sprite_w`/`sprite_h` are the sprite's real pixel dimensions (used by the
-    /// stretch and tile modes; nine-slice measures against its own `width`/
-    /// `height`). Returns quads whose destination rectangles tile the target
-    /// exactly, with no gaps or overlap.
+    /// `sprite_w`/`sprite_h` are the sprite's real pixel dimensions, and **all
+    /// three modes need them, nine-slice included**. Vanilla's
+    /// `GuiSpriteScaling.NineSlice` treats its declared `width`/`height` as the
+    /// size the border insets were *authored* against, not as the size of the
+    /// texture on disk: a 32x pack ships a sprite twice the declared dimensions,
+    /// and every source coordinate is therefore a fraction of the declared size
+    /// applied across the sprite's real UV span. Measuring against the declared
+    /// numbers alone samples only the top-left quadrant of a high-resolution
+    /// sprite, which drops the right and bottom borders — the visible symptom
+    /// that this parameter list exists to prevent.
+    ///
+    /// `Tile` is immune by construction rather than by care, since its tile size
+    /// equals the sprite size; `Stretch` maps the whole sprite either way.
+    ///
+    /// Returns quads whose destination rectangles tile the target exactly, with
+    /// no gaps or overlap.
     pub fn geometry(&self, sprite_w: u32, sprite_h: u32, dst_w: u32, dst_h: u32) -> Vec<GuiQuad> {
         match self {
             GuiScaling::Stretch => vec![GuiQuad {
