@@ -109,7 +109,7 @@ use crate::redstone_diode::{set_comparator, set_repeater};
 use crate::redstone_observer::set_observer;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue};
 use crate::sleep::{SleepEvent, SleepFeed, SleepVote};
-use crate::ticket::{PlayerTicketGuard, TicketStoreHandle};
+use crate::ticket::{PLAYER_SPAWN_RADIUS, PlayerTicketGuard, TicketKind, TicketOwner, TicketStoreHandle};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::weather::WeatherFeed;
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
@@ -3278,6 +3278,29 @@ where
                     }
                 };
 
+                // Issue #297/#619: keep the world spawn's own chunks loaded
+                // independent of where any particular player is standing —
+                // vanilla's `PrepareSpawnTask.java`, radius 3
+                // (`ticket::PLAYER_SPAWN_RADIUS`). Re-granting under the same
+                // `(TicketOwner::Spawn, TicketKind::PlayerSpawn)` key on every
+                // join is a refresh, not a second ticket — see `ticket.rs`'s
+                // own doc for why a ticket is keyed by owner+kind rather than
+                // position. Every entry point but `IntegratedServer`'s real
+                // join paths carries a fresh, disconnected
+                // `TicketStoreHandle::default()` here, so this is a no-op
+                // nobody reads on those, exactly like every other feed in
+                // this file.
+                let spawn_chunk = (
+                    (spawn.pos.x / 16.0).floor() as i32,
+                    (spawn.pos.z / 16.0).floor() as i32,
+                );
+                tickets.set_ticket_with_radius(
+                    TicketOwner::Spawn,
+                    TicketKind::PlayerSpawn,
+                    spawn_chunk,
+                    PLAYER_SPAWN_RADIUS,
+                );
+
                 // Issue #302: this player's own saved state, if this world has
                 // any. Reached through `ChunkSource::world_registries` rather
                 // than a new parameter — see `crate::chunk::WorldRegistries`'s
@@ -3650,6 +3673,25 @@ where
                     )
                 });
 
+                // Issue #619: this connection's own chunk-residency ticket
+                // pair (`PLAYER_LOADING` + `PLAYER_SIMULATION`), keyed by the
+                // same login uuid `PlayerRegistry::join` above uses for the
+                // entity ticket — XOR-folded to a `u64` since
+                // `TicketOwner::Player` only needs per-connection uniqueness,
+                // never identity (see `TicketStoreHandle::grant_player`'s own
+                // doc). Moved into `serve_play` below; its `Drop` withdraws
+                // both tickets on every exit path out of that function,
+                // exactly like `player_ticket` just above. A disconnected
+                // `TicketStoreHandle::default()` (every non-`IntegratedServer`
+                // caller) makes the grant, every `move_to`, and the eventual
+                // drop all reach a store nobody else reads — observably a
+                // no-op, same as every other feed in this file.
+                let player_ticket_guard = {
+                    let bits = login_uuid.unwrap_or_else(uuid::Uuid::nil).as_u128();
+                    let id = (bits as u64) ^ ((bits >> 64) as u64);
+                    tickets.grant_player(id, (join_cx, join_cz), view_radius)
+                };
+
                 // Initial entity sync — the same pass the old single-loop
                 // version ran on this same iteration via its trailing
                 // `if state == State::Play` check, now made explicit because
@@ -3763,6 +3805,7 @@ where
                     streamer,
                     player_list,
                     player_ticket,
+                    player_ticket_guard,
                     view,
                     username,
                     spawn.pos,
@@ -9405,6 +9448,12 @@ async fn dispatch_play_packet<T, P, S>(
     view_radius: i32,
     state: &mut State,
     view: &mut ViewTracker,
+    // Issue #619. This connection's chunk-residency guard, so a chunk-boundary
+    // crossing or a live view-radius change (the `recenter`/`set_view_radius`
+    // arms below) can move the same `PLAYER_LOADING`/`PLAYER_SIMULATION`
+    // tickets `serve_play` granted at join, rather than leaving them pinned to
+    // the join column for the connection's whole lifetime.
+    player_ticket_guard: &PlayerTicketGuard,
     pending_keep_alive: &mut Option<i64>,
     pending_break: &mut Option<PendingBreak>,
     player_pos: &mut Option<(f64, f64, f64)>,
@@ -9707,6 +9756,10 @@ where
                 cx,
                 cz,
             }]);
+            // Issue #619: read before the call, since `recenter` writes
+            // `self.center` in place — comparing after would always see the
+            // new value and move the ticket pair even on a no-op pass.
+            let center_before_recenter = view.center;
             let update = view.recenter(
                 proto,
                 cx,
@@ -9716,6 +9769,9 @@ where
                 // player is looking at rather than by `cx` then `cz`.
                 player_rot.map(|rotation| rotation.yaw),
             );
+            if view.center != center_before_recenter {
+                player_ticket_guard.move_to(view.center, view.radius);
+            }
             send_view_update(
                 conn,
                 proto,
@@ -10656,12 +10712,18 @@ where
             // The ceiling now lives on the `ViewTracker` as its own field and
             // `set_view_radius` applies it — see `ViewTracker::max_radius` for
             // the per-path policy and why the two roles had to be separated.
+            // Issue #619: same "read before the call" reasoning as the
+            // `recenter` arm above.
+            let radius_before_resize = view.radius;
             let update = view.set_view_radius(
                 proto,
                 source,
                 i32::from(view_distance),
                 player_rot.map(|rotation| rotation.yaw),
             );
+            if view.radius != radius_before_resize {
+                player_ticket_guard.move_to(view.center, view.radius);
+            }
             send_view_update(
                 conn,
                 proto,
@@ -11176,6 +11238,15 @@ async fn serve_play<T, P, S, E>(
     // somewhere else and reintroduce the ghost-player leak the RAII exists to
     // prevent.
     player_ticket: Option<PlayerTicket>,
+    // Issue #619: same ownership shape as `player_ticket` just above, and for
+    // the same reason — this function's every exit path (clean disconnect,
+    // a propagated `?`, or task cancellation at shutdown) must withdraw this
+    // connection's `PLAYER_LOADING`/`PLAYER_SIMULATION` tickets, not just the
+    // happy path. `dispatch_play_packet` calls
+    // [`PlayerTicketGuard::move_to`] whenever the tracked view actually
+    // recentres or its radius changes, so residency follows the player
+    // rather than staying pinned to the join column.
+    player_ticket_guard: PlayerTicketGuard,
     mut view: ViewTracker,
     username: String,
     // Issue #329 / the death-screen respawn. The world spawn `serve_connection`
@@ -11548,6 +11619,7 @@ where
                     view_radius,
                     &mut state,
                     &mut view,
+                    &player_ticket_guard,
                     &mut pending_keep_alive,
                     &mut pending_break,
                     &mut player_pos,
@@ -11912,6 +11984,16 @@ where
                 keep_alive_sent_at = tokio::time::Instant::now();
                 watch.clear_unserviced();
                 apply(conn, &mut state, proto.encode_keep_alive(next_keep_alive_id)).await?;
+                // Issue #297/#619: vanilla's `Ready.keepAlive()`, run from this
+                // connection's own keep-alive timer rather than from the world
+                // tick loop (`tick.rs` is off-limits to this change, and the
+                // ticket graph's own read-driven check-in means there is no
+                // world-tick hook to add regardless — see
+                // `ChunkStore::maybe_tick_tickets`'s doc). A no-op, reported by
+                // its own `bool`, on every non-`IntegratedServer` entry point,
+                // whose `tickets` is a disconnected default that never held a
+                // spawn ticket to begin with.
+                player_ticket_guard.refresh_world_spawn();
                 watch.pass("keep_alive_tick");
             }
 
@@ -12756,6 +12838,19 @@ where
 /// packet-driven-only loop (no `tokio::select!`, no timers). See the native
 /// definition's doc comment for why the two forked instead of sharing one
 /// body with an internal `cfg`.
+///
+/// Issue #619's world-spawn-ticket refresh (`PlayerTicketGuard::
+/// refresh_world_spawn`) is threaded through this target too, but nothing on
+/// this loop ever calls it — the native definition's own `keep_alive_tick`
+/// timer arm is the one caller, and this target has no timer arm at all (see
+/// the native doc comment above). Real, not a bug this issue introduces: this
+/// target's `open_in_memory` join path is the one production `IntegratedServer`
+/// entry point where `PLAYER_SPAWN`'s 20-"tick" countdown (a `TicketStore::tick`
+/// unit, driven by `ChunkStore::maybe_tick_tickets`'s own read-cadence check-in
+/// — see that method's doc) can lapse with nobody refreshing it. The
+/// `PLAYER_LOADING`/`PLAYER_SIMULATION` pair this same guard grants is
+/// unaffected (`timeout: 0`, i.e. does not expire), so this only ever costs the
+/// world-spawn ring specifically, on this one target.
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
 async fn serve_play<T, P, S, E>(
@@ -12772,6 +12867,15 @@ async fn serve_play<T, P, S, E>(
     // identically on this target: it is entirely packet-driven, exactly like
     // `FallTracker`, so it needs none of the timers this loop lacks.
     player_ticket: Option<PlayerTicket>,
+    // Issue #619: same ownership shape as `player_ticket` just above, and for
+    // the same reason — this function's every exit path (clean disconnect,
+    // a propagated `?`, or task cancellation at shutdown) must withdraw this
+    // connection's `PLAYER_LOADING`/`PLAYER_SIMULATION` tickets, not just the
+    // happy path. `dispatch_play_packet` calls
+    // [`PlayerTicketGuard::move_to`] whenever the tracked view actually
+    // recentres or its radius changes, so residency follows the player
+    // rather than staying pinned to the join column.
+    player_ticket_guard: PlayerTicketGuard,
     mut view: ViewTracker,
     username: String,
     // Issue #329 / the death-screen respawn. The world spawn `serve_connection`
@@ -12999,6 +13103,7 @@ where
             view_radius,
             &mut state,
             &mut view,
+            &player_ticket_guard,
             &mut pending_keep_alive,
             &mut pending_break,
             &mut player_pos,

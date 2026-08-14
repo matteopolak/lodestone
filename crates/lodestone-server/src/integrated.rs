@@ -2142,6 +2142,20 @@ impl IntegratedServer {
         self.mobs.as_ref()
     }
 
+    /// Issue #619. The world's real chunk-ticket graph — the same handle every
+    /// connection's `PLAYER_LOADING`/`PLAYER_SIMULATION` grant and the world's
+    /// own `PLAYER_SPAWN` grant move, not a copy. `None` for a constructor
+    /// that starts no shared world core (`open_in_memory`, the wasm32 build's
+    /// own join path — see [`HostCore::tickets`]'s own doc for why that
+    /// target still carries a real handle into `serve_connection_shared`
+    /// despite this accessor answering `None` for it): there is nothing to
+    /// hand out a second reference to.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn tickets(&self) -> Option<TicketStoreHandle> {
+        self.host.as_ref().map(|host| host.tickets.clone())
+    }
+
     /// The world's shared portal index (issue #303's second half) — the same
     /// handle every dimension's `ChunkSource` shares, so a caller (a gate, a
     /// command) can inspect or extend the exact index a return trip consults
