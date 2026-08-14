@@ -225,6 +225,17 @@ makes it safe — and leaves the index clean, so **do not run `git reset` after 
   files you were adding to** — check that before believing a reconstruction, and recover with a follow-up
   commit, never an amend. Both agents here disclosed the incident from their own side, which is the only
   reason it was untangled rather than silently kept.
+- **Third instance, same shape, different cause — and this one is a *shell* failure, not a git one. The step
+  that establishes your base can fail silently and `set -e` will not fire.** A `git checkout --detach` inside
+  a throwaway worktree failed, the script continued against a **stale `main`**, and the commit built on that
+  parent **discarded five other agents' commits** when `update-ref` moved the ref. The CAS again protected the
+  parent and not the tree, so nothing objected. All five were recovered from the object store and merged back.
+  The rule that generalises: **read the exit status of every step that establishes your base, not only the
+  steps that write** — a `checkout`, a `read-tree`, a `worktree add`. `set -e` does not cover a command whose
+  status is consumed by a conditional, a pipeline or a function call, and the failure presents as a correct
+  commit against the wrong world. Sanity-check the parent you are about to build on (`git rev-parse HEAD` in
+  the same invocation, compared against the shared checkout's) before `commit-tree`, exactly as you already
+  sanity-check the tree's file count.
 
 **`GIT_INDEX_FILE` + `commit-tree` is the escape hatch, and its only use is partial-file granularity.**
 Two traps: **`git write-tree` against a missing index writes the EMPTY tree, silently, and that commit
