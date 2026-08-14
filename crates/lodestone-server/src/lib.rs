@@ -273,6 +273,13 @@ mod redstone_openable;
 /// Test-only — it holds the oracle table and the gates, no production code.
 #[cfg(test)]
 mod redstone_oracle_gate;
+/// `docs/plans/redstone-execution-model.md`'s U0: an order-sensitive oracle
+/// corpus (a repeater-locked latch raced against its own scheduled flip),
+/// measured on a real 26.2 server — the safety net the plan requires before
+/// any execution-model rework. Test-only — it holds the oracle readings and
+/// the gates, no production code.
+#[cfg(test)]
+mod redstone_order_oracle_gate;
 /// Issue #465's delayed half: a component a player mutates must flip at the
 /// tick the live 26.2 server flipped it, and the flip must reach the wire —
 /// driven through the real `tick::run_tick_loop` rather than through
