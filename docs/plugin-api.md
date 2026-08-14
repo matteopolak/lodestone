@@ -582,7 +582,7 @@ something without touching the build." A bevy plugin is `impl Plugin` compiled i
 "Install a plugin" means "add a `Cargo.toml` dependency and rebuild." If what is actually wanted is
 users dropping a `.so`/`.wasm` file into a folder, this tier does not deliver that at all — see §6.
 
-### Custom world generation: not a verification-model conflict, but blocked on two other gaps (issue #132)
+### Custom world generation: not a verification-model conflict, but blocked on two other gaps
 
 `lodestone-worldgen` is deliberately **not** a system — `docs/bevy-migration.md` §8 keeps it a plain
 library precisely because it is a version-free interpreter verified block-for-block against real
@@ -995,7 +995,7 @@ alongside §"what stays privileged" above: the deny lint is why the Stage-4 depe
 *internally*, not evidence that a plugin is somehow prevented from doing unsafe things generally — it
 is not.
 
-### Settled: `EcsHandle` reentrancy is unrepresentable for the sanctioned plugin surface (issue #177)
+### Settled: `EcsHandle` reentrancy is unrepresentable for the sanctioned plugin surface
 
 `lodestone_ecs::EcsHandle` (`Arc<parking_lot::RwLock<World>>`) is not reentrant — `write()` then
 `read()` on the same thread deadlocks with no panic and no log line

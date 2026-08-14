@@ -69,7 +69,7 @@ new regression tests in `server_protocol.rs`'s `view_streaming_decode_tests` mod
 real client encoder/adapter into this module's decoder for both packet ids, so a future decode
 arm reverting to `Ignored` fails loudly rather than silently reopening this gap.
 
-### #425: a per-species `SET_ENTITY_DATA` encoder and an `EXPLODE` encoder (2026-08-04)
+### A per-species `SET_ENTITY_DATA` encoder and an `EXPLODE` encoder (2026-08-04)
 
 Not a `connected`-measured gap — that column is clientbound/serverbound **decode**
 connectivity; this is server-side **encode**, the opposite direction. `crates/lodestone-server`
@@ -114,12 +114,12 @@ cheapest real next step (`SET_CREATIVE_MODE_SLOT` writes into the exact slot spa
 `PlayerInventory` already models; `CLIENT_INFORMATION`/`CLIENT_COMMAND`/`CHUNK_BATCH_RECEIVED`
 are #270's).
 
-### Four client-completeness gaps closed: #299, #296, #291, #301 (2026-08-04)
+### Four client-completeness gaps closed (2026-08-04)
 
 A same-day pass closed the four client-side (not server-side) gaps this doc's own
 ["What was already filed"](#what-was-already-filed) table pointed at:
 
-- **#299 — `BUNDLE_DELIMITER` had no decode arm.** Measured first, per the issue's own
+- **`BUNDLE_DELIMITER` had no decode arm.** Measured first, per the issue's own
   instruction: before any fix, the packet fell through the play-state catch-all to
   `Ok(Vec::new())` — a silent no-op that never mis-framed anything, because every real
   packet is independently length-framed by the transport regardless of bundling. The
@@ -128,7 +128,7 @@ A same-day pass closed the four client-side (not server-side) gaps this doc's ow
   `Directive::BundleDelimiter`, and `lodestone-client`'s driver (`Driver::absorb_bundle`)
   buffers directives between an opening and closing delimiter, releasing them to
   `execute()` as one batch on the close.
-- **#296 — `update_tags` was never decoded.** Decoded in both Configuration and Play
+- **`update_tags` was never decoded.** Decoded in both Configuration and Play
   (one wire shape, `ClientCommonPacketListener` handles both); the `minecraft:block`
   registry's tags are installed as a process-wide override in
   `lodestone_data::tool::set_block_tag_overrides`, consulted by `block_tag_members` —
@@ -136,14 +136,14 @@ A same-day pass closed the four client-side (not server-side) gaps this doc's ow
   code resolves its `VersionAdapter` once from the compiled family
   (`inferred_version_data`), a different instance than the one that decoded the live
   session's packets.
-- **#291 — cookies and transfers were dead ends.** Added `ClientAction::CookieResponse`
+- **Cookies and transfers were dead ends.** Added `ClientAction::CookieResponse`
   (Login/Configuration/Play, one wire shape) and an in-memory cookie store on the driver
   mirroring vanilla's own `ClientCommonPacketListenerImpl.serverCookies`. `transfer` now
   ends the session with `SessionOutcome::Transferred { host, port, cookies }` rather than
   reaching nothing — short of a silent reconnect, since the driver has no generic way to
   open a new transport from inside itself (native TCP and wasm32 are different
   `ClientBuilder::connect`/`connect_with` entry points).
-- **#301 — custom payload/plugin channels had no registry.** Filled the two remaining
+- **Custom payload/plugin channels had no registry.** Filled the two remaining
   decode gaps (`custom_payload` in Configuration, `custom_query` in Login — the latter
   answered unconditionally with no payload, matching vanilla's own reference client
   exactly), added `ClientAction::SendCustomPayload` for the general case `SendBrand` is
@@ -278,7 +278,7 @@ The eleven-islands figure the domain brief cited (`ClientboundAnimatePacket`,
 `Directive::BeginEncryption`, `TakeItemEntity`/`SET_EQUIPMENT`) is **partially stale**:
 see [corrections](#corrections-to-the-briefing-this-roadmap-started-from).
 
-### v47 (1.8.9) / v340 (1.12.2): ten clientbound decode arms landed against #345/#349 (2026-08-04)
+### v47 (1.8.9) / v340 (1.12.2): ten clientbound decode arms landed (2026-08-04)
 
 Picked by what a player would actually notice, not by packet id order — the two
 families' "under a quarter decoded" figure at the top of this section was concentrated
@@ -384,7 +384,7 @@ rather than duplicating:
 | [#10](https://github.com/matteopolak/lodestone/issues/10), [#29](https://github.com/matteopolak/lodestone/issues/29) | `ClientboundAnimatePacket`/`TakeItemEntity`/`SET_EQUIPMENT` islands | not touched — audited, still accurate, already correctly labelled `island` |
 | [#63](https://github.com/matteopolak/lodestone/issues/63), [#73](https://github.com/matteopolak/lodestone/issues/73) | account switcher UI, auth composition duplication | out of this domain's scope (UI/refactor, not protocol coverage) — not touched |
 
-## Server-side: 13 issues on epic #5
+## Server-side
 
 Being a server is a different axis, not a further step along the client axis, and it
 starts from much further back than the client does. The **client's** login/configuration
@@ -436,7 +436,7 @@ real (non-offline-mode) account without #273, and cannot do anything once in the
 without #262–266. #268, #281, #282 and the keep-alive/disconnect issues are hardening
 that matters most once the earlier ones are real and strangers' bytes start arriving.
 
-## Client-side completeness: 10 issues on epic #4
+## Client-side completeness
 
 The client already does far more than the server does — this list is real gaps, not a
 symmetric mirror of the server list.

@@ -538,7 +538,7 @@ rule, checked against the actual code rather than a prior comment's summary:
   mismatch — the RNG-determinism break is actually gated on, not merely a
   speed number.
 
-### The render/entity batch (#87, #90, #91, #92, #97, #99, #106, #128, #151, #160)
+### The render/entity batch
 
 Three new bench sites — `lodestone-render/benches/{meshing,render_submit}.rs`,
 `lodestone-world/benches/session_rss.rs`, `lodestone-shell/benches/entity_tick.rs`
