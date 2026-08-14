@@ -402,7 +402,7 @@ dispensers/droppers from a standing start.
 |---|---|---|
 | powered/activator rail | `POWERED` tracking: direct signal or an up-to-8-cell chain of same-shape powered rails, both classes confirmed to be one Java class registered twice | `SHAPE`/curve connectivity (`BaseRailBlock`'s own placement algorithm) — a block-placement concern, not redstone |
 | detector rail | (read already landed) | producer: needs a real `AbstractMinecart`, which this crate has none of (#11). **The issue body's own suggested test — a dropped item — is stale**: vanilla's `getInteractingMinecartOfType` filters to `AbstractMinecart` specifically, so a dropped item never triggers it in real 26.2 either |
-| dispenser/dropper | the shared `TRIGGERED` state machine (`hasNeighborSignal(pos) \|\| hasNeighborSignal(pos.above())`, 4-tick fire schedule); the dropper/dispenser boundary (`getDispenseMethod`) documented and the ~40-entry behaviour table enumerated from the jar's own `bootStrap`; **the fire itself** (issue #320) — `tick.rs`'s scheduled-tick drain now has a `TICK_DISPENSER_FIRE` arm that reads the live 9-slot `generic_3x3` container (`block_entities.rs`) through the `BlockEntityHandle` it already carries, picks a slot with `random_slot`, and tosses one item with `plain_toss` (`dispense_position` plus `DefaultDispenseItemBehavior.execute`'s velocity math) through `MobSim::spawn_item` — the same entry point `crate::block_drops` uses for a broken block's loot | **zero of the ~35 special item behaviours** (arrow, bucket, TNT, boat, …) — every dispensed item takes the plain-toss row regardless of what it is, which is wrong for those and indistinguishable from correct for a plain stack; every one either spawns an entity or reads/writes fluid, and this crate's entity-spawn seam (`MobHandle::spawn_species`) has no velocity/projectile support; an empty container is a silent no-op rather than vanilla's click sound, since this crate does not model sound effects here yet |
+| dispenser/dropper | the shared `TRIGGERED` state machine; the dropper/dispenser boundary (`getDispenseMethod`) documented and the ~35-entry behaviour table enumerated from the jar's own `bootStrap`; **the fire itself** (issue #320) — `tick.rs`'s `TICK_DISPENSER_FIRE` arm reads the live 9-slot `generic_3x3` container through the `BlockEntityHandle`, picks a slot with `random_slot`, and dispatches per item: a dropper always either pushes one item into a container ahead (`crate::hopper::try_move_item_into`, gated on `is_pushable_container`) or plain-tosses, never consulting the item table; a dispenser matches a spawn egg (`MobSim::spawn_species`), a boat/chest-boat/raft (`boat_dispense`, `MobSim::spawn_vehicle`), bone meal (`crate::bone_meal::apply_bone_meal`) and the fire-placement half of flint-and-steel (`flint_and_steel_ignite`) in turn, falling to `plain_toss` through `MobSim::spawn_item` when none match or a matched behaviour reports no effect | most of the ~35 special item behaviours remain unmodelled, each for its own named reason in `redstone_dispenser.rs`'s own table — projectiles (arrow/egg/snowball/potions/firework/fire-charge/wind-charge, ~12 items) have a shooter-side spawn path (`MobSim::spawn_projectile_from`) but no per-item power/uncertainty config table and no potion-contents item component; TNT needs a primed-TNT entity this crate has none of at all; minecarts need a minecart entity/vehicle physics this crate has none of at all (`crate::redstone_rail` already says so); shears need a shearing/wool-state mechanism that exists nowhere in this crate, not even for a player's own direct use; every armor/equippable item needs an entity spatial query and a mob equipment-slot model neither of which exist; buckets need an item-triggered fluid place/pickup entry point, which does not exist (`crate::fluid` only ticks a fluid already in the world); wither skull and carved pumpkin need `BlockPattern` multi-block shape matching (wither/golem shapes); an empty container is a silent no-op rather than vanilla's click sound, since this crate does not model sound effects here yet |
 | note block | instrument selection (`setInstrument`, partial per-block table — 9 single-block overrides + 7 heads + the small `SNARE` family, `BASS`/`BASEDRUM`'s ~330 blocks unmodelled and documented as such); the `POWERED` pulse reaction, rising-edge-only, gated on audibility | right-click note cycling (needs a `hand_use.rs` hook this module does not own); the sound/particle pulse itself (`level.blockEvent` — no client-visible-effect-with-no-state-write wire path exists in this crate yet) |
 | tripwire hook + tripwire | `calculateState`'s full scan/attach/power algorithm, both hooks' writes, the wire-segment `attached` fan-out, the 10-tick recheck; wired for **placement** of either block (`react_at_placement`, since vanilla drives this from `setPlacedBy`/`onPlace`, never `neighborChanged`) | **entity crossing** (`checkPressed`'s entity-AABB read — no collision census, the same gap pressure plates/detector rail already have); the **instant break-pulse** (`affectNeighborsAfterRemoval` — needs a block-*removal* callback carrying the destroyed state, which nothing in this crate's block-breaking path offers yet — `on_wire_removed` is written and ready) |
 | target | `getRedstoneStrength` (hit distance -> `1..=15`), the arrow-vs-other duration split, the decay-to-zero scheduled tick | the trigger itself — a projectile hit is an external event this crate does not produce; `apply_hit` is a tested, unwired seam |
@@ -457,22 +457,30 @@ Two things worth carrying into that rework specifically:
   different prerequisites (#11's minecarts vs. a general collision/AABB
   census).
 - **Dispensers dispatch on the *item*, not the block, and the table is wide on
-  purpose.** `DispenseItemBehavior.bootStrap` registers ~40 entries across
+  purpose.** `DispenseItemBehavior.bootStrap` registers entries across
   ~13 shapes (plain toss, projectile, boat, bucket-fill, bucket-empty,
   flint-and-steel, bone meal, TNT, wither-skull, carved-pumpkin, shulker-box,
-  glass-bottle, glowstone, shears, brush, honeycomb, potion, minecart) — see
+  glass-bottle, glowstone, shears, brush, honeycomb, potion, minecart), plus
+  three implicit defaults (spawn egg, equippable, sulfur-cube) `getDefaultDispenseMethod`
+  falls back to when no explicit registration matches — see
   `redstone_dispenser.rs`'s own module doc table for the full enumeration
   with a jar citation per row. Treating "ejects an item" as done without
   reading that table is exactly the trap the issue body named.
-- **The fire arm was a confirmed island until #320 landed it.** `random_slot`
-  and `dispense_position` were implemented, individually tested and marked
-  `#[allow(dead_code)]` — `tick.rs`'s scheduled-tick drain had no arm for
-  `TICK_DISPENSER_FIRE` at all, so a filled, powered dispenser never ejected
-  anything. `plain_toss` (the missing velocity/position math,
-  `DefaultDispenseItemBehavior.execute`'s own formula) plus the drain arm
-  close it; `is_dropper` and `facing_name` are still `#[allow(dead_code)]`
-  and genuinely so — neither dispenser nor dropper needs them while the only
-  modelled behaviour is the plain toss both fall back to.
+- **The fire arm was a confirmed island until #320's first half landed it, and
+  the special-behaviour table was a second, narrower island inside the same
+  arm.** `random_slot` and `dispense_position` were implemented, individually
+  tested and marked `#[allow(dead_code)]` — `tick.rs`'s scheduled-tick drain
+  had no arm for `TICK_DISPENSER_FIRE` at all, so a filled, powered dispenser
+  never ejected anything. That landing closed the plain-toss path; #320's
+  remainder closed the dropper's container push and five of the special
+  per-item behaviours (spawn egg, boat, bone meal, flint-and-steel's
+  fire-placement arm) the same way — implemented and tested, but the
+  `TICK_DISPENSER_FIRE` arm took only the plain-toss row regardless of item
+  until this landing's dispatch chain was wired in. `is_dropper` lost its
+  `#[allow(dead_code)]` with this landing (it now picks the dropper's
+  container-push-or-toss path); `facing_name` remains dead — nothing added
+  here needed a `Direction -> &str` conversion outside `direction_to_str`'s
+  existing round trip.
 - **`PoweredRailBlock` is one Java class serving two item ids.** Confirmed
   against `Blocks.java`'s own `register` calls rather than assumed — both
   `minecraft:powered_rail` and `minecraft:activator_rail` share every byte of
