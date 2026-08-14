@@ -252,11 +252,13 @@ pub mod query;
 mod random_tick;
 mod redstone;
 mod redstone_diode;
+mod redstone_dispenser;
 /// Issue #315/#317's end-to-end gates: repeater delay/locking, comparator
 /// modes and observer pulse width, driven through the production entry point
 /// against values measured on a real 26.2 server. Test-only.
 #[cfg(test)]
 mod redstone_diode_oracle_gate;
+mod redstone_note_block;
 mod redstone_observer;
 mod redstone_openable;
 /// Issue #314's end-to-end gate: redstone propagation driven through the
@@ -272,7 +274,10 @@ mod redstone_oracle_gate;
 /// see. Test-only.
 #[cfg(test)]
 mod redstone_placement_gate;
+mod redstone_rail;
+mod redstone_target;
 mod redstone_torch;
+mod redstone_tripwire;
 mod redstone_wire;
 /// Per-player `.dat` persistence (issue #302) — inventory, position, health and
 /// game mode across a disconnect. Native only, for the same reason

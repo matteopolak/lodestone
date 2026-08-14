@@ -380,11 +380,108 @@ knowing from here:
 
 See [`redstone-pistons.md`](./redstone-pistons.md) for what is and is not modelled.
 
+## Devices: rails, dispensers/droppers, note blocks, tripwire, target (#318/#320/#322)
+
+Five more modules, same "pure decision, `lookup` closure" shape as the family
+above: [`redstone_rail.rs`](../crates/lodestone-server/src/redstone_rail.rs),
+[`redstone_dispenser.rs`](../crates/lodestone-server/src/redstone_dispenser.rs),
+[`redstone_note_block.rs`](../crates/lodestone-server/src/redstone_note_block.rs),
+[`redstone_tripwire.rs`](../crates/lodestone-server/src/redstone_tripwire.rs),
+[`redstone_target.rs`](../crates/lodestone-server/src/redstone_target.rs).
+
+**Triage first, because two of the three issues' "what exists: nothing" was
+already stale.** A prior landing (the lever/button/plate/tripwire-hook/
+detector-rail/target/daylight-detector/redstone-block signal-*read* pass)
+had already put tripwire hook's and target's `ownSignal`/`getDirectSignal`
+arms and `is_signal_source` membership into `redstone.rs`, and detector
+rail's alongside them — see that module's own "what sources exist today"
+table. This landing is the *producer* half for those three, plus rails and
+dispensers/droppers from a standing start.
+
+| device | what landed | what did not, and why |
+|---|---|---|
+| powered/activator rail | `POWERED` tracking: direct signal or an up-to-8-cell chain of same-shape powered rails, both classes confirmed to be one Java class registered twice | `SHAPE`/curve connectivity (`BaseRailBlock`'s own placement algorithm) — a block-placement concern, not redstone |
+| detector rail | (read already landed) | producer: needs a real `AbstractMinecart`, which this crate has none of (#11). **The issue body's own suggested test — a dropped item — is stale**: vanilla's `getInteractingMinecartOfType` filters to `AbstractMinecart` specifically, so a dropped item never triggers it in real 26.2 either |
+| dispenser/dropper | the shared `TRIGGERED` state machine (`hasNeighborSignal(pos) \|\| hasNeighborSignal(pos.above())`, 4-tick fire schedule); the dropper/dispenser boundary (`getDispenseMethod`) documented and the ~40-entry behaviour table enumerated from the jar's own `bootStrap`; `random_slot`/`dispense_position` pure math; a real persistent 9-slot `generic_3x3` container (`block_entities.rs`) | the fire itself — nothing threads a live container into `tick.rs`'s scheduled-tick drain yet, so `TICK_DISPENSER_FIRE` has no consumer; **zero of the ~35 special item behaviours** (arrow, bucket, TNT, boat, …) — every one either spawns an entity or reads one, and this crate's entity-spawn seam (`MobHandle::spawn_species`) has no velocity/projectile support |
+| note block | instrument selection (`setInstrument`, partial per-block table — 9 single-block overrides + 7 heads + the small `SNARE` family, `BASS`/`BASEDRUM`'s ~330 blocks unmodelled and documented as such); the `POWERED` pulse reaction, rising-edge-only, gated on audibility | right-click note cycling (needs a `hand_use.rs` hook this module does not own); the sound/particle pulse itself (`level.blockEvent` — no client-visible-effect-with-no-state-write wire path exists in this crate yet) |
+| tripwire hook + tripwire | `calculateState`'s full scan/attach/power algorithm, both hooks' writes, the wire-segment `attached` fan-out, the 10-tick recheck; wired for **placement** of either block (`react_at_placement`, since vanilla drives this from `setPlacedBy`/`onPlace`, never `neighborChanged`) | **entity crossing** (`checkPressed`'s entity-AABB read — no collision census, the same gap pressure plates/detector rail already have); the **instant break-pulse** (`affectNeighborsAfterRemoval` — needs a block-*removal* callback carrying the destroyed state, which nothing in this crate's block-breaking path offers yet — `on_wire_removed` is written and ready) |
+| target | `getRedstoneStrength` (hit distance -> `1..=15`), the arrow-vs-other duration split, the decay-to-zero scheduled tick | the trigger itself — a projectile hit is an external event this crate does not produce; `apply_hit` is a tested, unwired seam |
+
+### What each device needs of the execution model (for issue #548)
+
+The owner's #548 rework (an incrementally-invalidated dependency graph
+replacing the per-tick rescan) is deliberately sequenced *after* the device
+set, so this table is meant to double as its spec-in-progress rather than
+prose describing the graph:
+
+| device | trigger | propagation | scheduled tick | cross-device read |
+|---|---|---|---|---|
+| powered/activator rail | neighbour notification | `pos.below()` always, `pos.above()` too iff the rail's own `SHAPE` is a slope — **not** a plain six-direction fan-out | none | yes, and unusually far: up to 8 cells outward in two directions, through *other rails' own* `POWERED` |
+| dispenser/dropper | neighbour notification (`pos` and `pos.above()`) | none beyond the ordinary fan-out | yes, one-shot, rising-edge only, fixed 4 ticks, never reschedules | no |
+| note block | neighbour notification | none — a note block emits no signal | none | no |
+| tripwire hook/tripwire | **placement**, not a neighbour notification (`setPlacedBy`/`onPlace`); periodically, a 10-tick self-recheck | up to two hook positions plus every wire cell between them — the widest blast radius here after a piston's multi-cell move | yes, conditionally (only when the scan was itself driven by one specific wire cell) | yes: the hook's own scan reads up to 41 cells outward, live, on every recheck |
+| target | an external projectile-hit event (unmodelled) | none | yes, one-shot, 20 or 8 ticks depending on projectile kind, suppressed while already pending | no |
+
+Two things worth carrying into that rework specifically:
+
+- **Not every device fits the `react_to_notification`/`Option<String>` single-
+  write shape the diode/torch/observer family established.** Tripwire's
+  multi-position write plan (`CalculatedState`) and a piston's multi-cell move
+  are the same shape for the same reason — either can rewrite positions well
+  outside the notified cell — and both needed their own `tick.rs`/
+  `random_tick.rs` entry points (`run_tripwire_recheck`, gravity's
+  `settle_gravity_at`) rather than sharing the ordinary dispatch chain. A
+  graph rework needs an edge type for "one recomputation writes N nodes," not
+  just "one recomputation writes its own node."
+- **A device's trigger is not always a neighbour notification, and rails prove
+  it two different ways in one family.** A rail reacts to `neighborChanged`
+  like every other family here, *and* also has to notify itself once on
+  placement (`BaseRailBlock.onPlace` calls `neighborChanged` on itself) — the
+  same "the placed block owes itself a reaction the neighbour pass cannot
+  deliver" shape the hopper `ENABLED` write and fire's first tick already
+  established, now with a third and fourth caller (rail, tripwire hook,
+  tripwire). Tripwire goes further: it has **no** `neighborChanged` at all,
+  only placement and a self-scheduled poll. A graph keyed purely on "which
+  positions does a `setBlock` notify" cannot express either case.
+
+### Traps specific to this batch, and what they cost
+
+- **A conjunction with an entity half is not "half done", it is a different
+  scope.** Detector rail's read (a prior landing) and this landing's tripwire
+  connectivity both look complete in isolation and both stop exactly at the
+  entity-presence clause — `AbstractMinecart` for the rail,
+  `!entity.isIgnoringBlockTriggers()` for the wire. Neither clause is
+  guessable from the other family's shape (a rail wants *only* minecarts; a
+  tripwire wants *any* non-ignoring entity), so "detector rail's producer" and
+  "tripwire's entity trigger" are not one future task, they are two, gated on
+  different prerequisites (#11's minecarts vs. a general collision/AABB
+  census).
+- **Dispensers dispatch on the *item*, not the block, and the table is wide on
+  purpose.** `DispenseItemBehavior.bootStrap` registers ~40 entries across
+  ~13 shapes (plain toss, projectile, boat, bucket-fill, bucket-empty,
+  flint-and-steel, bone meal, TNT, wither-skull, carved-pumpkin, shulker-box,
+  glass-bottle, glowstone, shears, brush, honeycomb, potion, minecart) — see
+  `redstone_dispenser.rs`'s own module doc table for the full enumeration
+  with a jar citation per row. Treating "ejects an item" as done without
+  reading that table is exactly the trap the issue body named.
+- **`PoweredRailBlock` is one Java class serving two item ids.** Confirmed
+  against `Blocks.java`'s own `register` calls rather than assumed — both
+  `minecraft:powered_rail` and `minecraft:activator_rail` share every byte of
+  the `POWERED`-tracking logic in this landing; only activator rail's
+  minecart-launching side (unmodelled, needs a minecart) differs at all.
+- **A round-number instinct would have under-cited the target formula.** The
+  `max(1, …)` floor is easy to drop by assuming a grazing hit reads `0`; the
+  quarter-offset case (`distance = 0.25` -> `ceil(7.5) = 8`) is the one this
+  landing's tests pin exactly rather than merely asserting "less than 15".
+
 ## Configuration
 
 No new constants beyond each family's own vanilla-cited literals: torch
 delay `2` ticks, repeater delay `DELAY * 2` (`2, 4, 6, 8`), comparator delay
-`2` ticks, observer pulse `2` ticks (on then off).
+`2` ticks, observer pulse `2` ticks (on then off). This batch adds: rail
+search cap `8` cells, tripwire recheck `10` ticks (max span `41` cells),
+dispenser fire delay `4` ticks, target decay `20`/`8` ticks
+(arrow/other).
 
 ## Dependencies
 

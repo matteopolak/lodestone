@@ -96,8 +96,17 @@ pub enum BlockEntity {
 /// barrel (`ChestBlockEntity`'s `NonNullList.withSize(27, …)`).
 pub const CONTAINER_9X3_SIZE: usize = 27;
 
+/// Slot count of vanilla's `generic_3x3` menu — a dispenser or dropper
+/// (`DispenserBlockEntity`'s `NonNullList.withSize(9, …)`). Issue #320: this
+/// gives both blocks real, persistent storage the same way the three
+/// `generic_9x3` blocks already have it; `crate::redstone_dispenser`'s own
+/// module doc names the remaining gap (nothing yet threads a live container
+/// into the scheduled fire tick).
+pub const CONTAINER_3X3_SIZE: usize = 9;
+
 /// The block-entity type key for a container block, or `None` if that block is
-/// not one of the `generic_9x3` containers this crate models.
+/// not one of the plain-inventory containers this crate models (`generic_9x3`
+/// or `generic_3x3` — see [`BlockEntity::container`]/[`container_of_size`]).
 ///
 /// Keyed on the block *name* with no properties, so a caller holding a canonical
 /// state string must split it first.
@@ -107,6 +116,8 @@ pub fn container_type_for_block(block: &str) -> Option<&'static str> {
         "minecraft:chest" => Some("minecraft:chest"),
         "minecraft:trapped_chest" => Some("minecraft:trapped_chest"),
         "minecraft:barrel" => Some("minecraft:barrel"),
+        "minecraft:dispenser" => Some("minecraft:dispenser"),
+        "minecraft:dropper" => Some("minecraft:dropper"),
         _ => None,
     }
 }
@@ -118,6 +129,17 @@ impl BlockEntity {
         BlockEntity::Container {
             id: id.to_owned(),
             slots: vec![None; CONTAINER_9X3_SIZE],
+        }
+    }
+
+    /// A fresh, empty container of type `id` with `size` slots — the
+    /// dispenser/dropper `generic_3x3` counterpart to [`Self::container`],
+    /// which is fixed at [`CONTAINER_9X3_SIZE`].
+    #[must_use]
+    pub fn container_of_size(id: &str, size: usize) -> Self {
+        BlockEntity::Container {
+            id: id.to_owned(),
+            slots: vec![None; size],
         }
     }
 }
@@ -199,7 +221,16 @@ impl BlockEntity {
                 FurnaceKind::BlastFurnace => "minecraft:blast_furnace",
             }),
             BlockEntity::Hopper(_) => Some("minecraft:hopper"),
-            BlockEntity::Container { .. } => Some("minecraft:generic_9x3"),
+            // Issue #320: a dispenser/dropper's `generic_3x3` (9 slots) is
+            // narrower than a chest/trapped-chest/barrel's `generic_9x3` (27) —
+            // the two `Container` shapes share one Rust variant but not one
+            // vanilla menu, so this reads the id rather than assuming.
+            BlockEntity::Container { id, slots } => Some(if slots.len() == CONTAINER_3X3_SIZE {
+                debug_assert!(id == "minecraft:dispenser" || id == "minecraft:dropper", "a 9-slot container must be a dispenser or dropper: {id}");
+                "minecraft:generic_3x3"
+            } else {
+                "minecraft:generic_9x3"
+            }),
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. } => None,
         }
     }
@@ -334,6 +365,14 @@ pub fn block_entity_for_item(item: &str) -> Option<(&'static str, BlockEntity)> 
             BlockEntity::container("minecraft:trapped_chest"),
         )),
         "minecraft:barrel" => Some(("minecraft:barrel", BlockEntity::container("minecraft:barrel"))),
+        "minecraft:dispenser" => Some((
+            "minecraft:dispenser",
+            BlockEntity::container_of_size("minecraft:dispenser", CONTAINER_3X3_SIZE),
+        )),
+        "minecraft:dropper" => Some((
+            "minecraft:dropper",
+            BlockEntity::container_of_size("minecraft:dropper", CONTAINER_3X3_SIZE),
+        )),
         _ => None,
     }
 }
@@ -705,6 +744,33 @@ mod tests {
 
         entity.set_container_slot(1, Some(stack("minecraft:emerald", 1)));
         assert_eq!(entity.container_slots()[1], Some(stack("minecraft:emerald", 1)));
+    }
+
+    /// Issue #320: a dispenser and dropper each get a real 9-slot
+    /// `generic_3x3` container — distinct from a chest's 27-slot
+    /// `generic_9x3`, which the `menu_name`/`container_slots` split by size
+    /// must not collapse into one shape.
+    #[test]
+    fn dispenser_and_dropper_get_a_nine_slot_generic_3x3_container() {
+        let (block, entity) = block_entity_for_item("minecraft:dispenser").expect("dispenser");
+        assert_eq!(block, "minecraft:dispenser");
+        assert_eq!(entity.menu_name(), Some("minecraft:generic_3x3"));
+        assert_eq!(entity.container_slots().len(), CONTAINER_3X3_SIZE);
+
+        let (block, entity) = block_entity_for_item("minecraft:dropper").expect("dropper");
+        assert_eq!(block, "minecraft:dropper");
+        assert_eq!(entity.menu_name(), Some("minecraft:generic_3x3"));
+        assert_eq!(entity.container_slots().len(), CONTAINER_3X3_SIZE);
+
+        // The existing chest path must still answer the wider menu — the
+        // control that the id-based split above did not just make every
+        // container 9 slots.
+        let (_, chest) = block_entity_for_item("minecraft:chest").expect("chest");
+        assert_eq!(chest.menu_name(), Some("minecraft:generic_9x3"));
+        assert_eq!(chest.container_slots().len(), CONTAINER_9X3_SIZE);
+
+        assert_eq!(container_type_for_block("minecraft:dispenser"), Some("minecraft:dispenser"));
+        assert_eq!(container_type_for_block("minecraft:dropper"), Some("minecraft:dropper"));
     }
 
     /// **Control**: composter and brewing stand have no menu at all
