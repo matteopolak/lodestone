@@ -310,6 +310,10 @@ pub mod player_data;
 /// `player_data` and `region_source`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod entity_storage;
+/// Per-section point-of-interest persistence (issue #303's second half) — the
+/// `poi/` region set. Native only, like `entity_storage`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod poi_storage;
 /// World persistence (issue #437). Native only: a browser singleplayer world
 /// has no filesystem, and `lodestone-anvil` is a `std::fs` crate — see this
 /// crate's `Cargo.toml` for the matching target-gated dependency.
@@ -471,6 +475,8 @@ pub use server::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::serve_connection_with_access;
+#[cfg(not(target_arch = "wasm32"))]
+pub use server::{OnlineModeConfig, serve_connection_with_online_mode};
 pub use tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 pub use weather::{WeatherEvent, WeatherFeed, WeatherState};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};

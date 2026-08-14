@@ -1140,6 +1140,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   most-used non-event surface in the Java plugin ecosystem. A plugin schedules a
   closure to run on a future `GameTick`, once or on a period, instead of hand-rolling
   a countdown component plus a per-tick system that checks it. Issue #113.
+- [Point-of-interest storage](./point-of-interest-storage.md) — The reader/writer
+  for vanilla's third region-file set: `poi/`, a per-section index of workstations,
+  beds, bells and lit nether portals — `PoiRecord`/`PoiSection`/`PoiManager` in
+  vanilla. It is the second half of the persistence work
+  [`entity-and-player-persistence.md`](./entity-and-player-persistence.md) covers;
+  that doc's own "what is not done yet" section used to list this as absent.
 - [The portable clock (`lodestone-time`)](./portable-clock.md) — `lodestone-time` is
   the workspace's one sanctioned way to read a clock. It wraps `web-time` —
   `Instant` (monotonic) and `epoch_duration()` (wall-clock time since the Unix epoch)
