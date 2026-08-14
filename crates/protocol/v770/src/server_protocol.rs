@@ -307,6 +307,29 @@ const METADATA_IDX_TNT_FUSE: u8 = 8;
 /// own doc for why the producer alone disambiguates them.
 const METADATA_IDX_MINECART_FUEL: u8 = 13;
 
+/// `EnderDragon.DATA_PHASE` — index 16, serializer `INT` (1). Off the jar
+/// dump (`tests/support/entity_data_index_jvm.txt`: `16 EnderDragon.DATA_PHASE
+/// 1 INT`), one of six `INT` claimants at index 16 alongside
+/// [`METADATA_IDX_BABY`]'s `BOOLEAN` neighbours — see
+/// `MetadataField::DragonPhase`'s own doc for the full list. The producer
+/// (`MobSim::push_dragon_snapshots`, the sole caller) disambiguates.
+const METADATA_IDX_DRAGON_PHASE: u8 = 16;
+
+/// `EndCrystal.DATA_BEAM_TARGET` — index 8, serializer `OPTIONAL_BLOCK_POS`
+/// (11). Off the jar dump (`8 EndCrystal.DATA_BEAM_TARGET 11
+/// OPTIONAL_BLOCK_POS`) — the only index-8 claimant with this serializer, so
+/// no producer guard is needed the way [`METADATA_IDX_TNT_FUSE`]'s `INT`
+/// siblings need one.
+const METADATA_IDX_CRYSTAL_BEAM_TARGET: u8 = 8;
+const METADATA_SER_OPTIONAL_BLOCK_POS: i32 = 11;
+
+/// `EndCrystal.DATA_SHOW_BOTTOM` — index 9, serializer `BOOLEAN` (8). Off the
+/// jar dump (`9 EndCrystal.DATA_SHOW_BOTTOM 8 BOOLEAN`), one of three
+/// `BOOLEAN` claimants at index 9 — see `MetadataField::CrystalShowBottom`'s
+/// own doc for the other two. The producer
+/// (`MobSim::push_end_crystal_snapshots`, the sole caller) disambiguates.
+const METADATA_IDX_CRYSTAL_SHOW_BOTTOM: u8 = 9;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -4749,11 +4772,107 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*lit);
                 }
+                MetadataField::DragonPhase(phase) => {
+                    // `EnderDragon.DATA_PHASE` — index 16; only
+                    // `MobSim::push_dragon_snapshots` ever builds this
+                    // variant. See `METADATA_IDX_DRAGON_PHASE`'s own doc for
+                    // the five other `INT` claimants this never collides with
+                    // in practice.
+                    w.u8(METADATA_IDX_DRAGON_PHASE);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(*phase);
+                }
+                MetadataField::CrystalBeamTarget(target) => {
+                    // `EndCrystal.DATA_BEAM_TARGET` — index 8,
+                    // `OPTIONAL_BLOCK_POS`: a presence bool, then (if present)
+                    // the packed-long block position `pack_block_pos` already
+                    // writes for every other block-position field in this
+                    // module.
+                    w.u8(METADATA_IDX_CRYSTAL_BEAM_TARGET);
+                    w.var_i32(METADATA_SER_OPTIONAL_BLOCK_POS);
+                    match target {
+                        Some(pos) => {
+                            w.bool(true);
+                            w.i64(pack_block_pos(pos.x, pos.y, pos.z));
+                        }
+                        None => w.bool(false),
+                    }
+                }
+                MetadataField::CrystalShowBottom(show) => {
+                    // `EndCrystal.DATA_SHOW_BOTTOM` — index 9; only
+                    // `MobSim::push_end_crystal_snapshots` ever builds this
+                    // variant. See `METADATA_IDX_CRYSTAL_SHOW_BOTTOM`'s own
+                    // doc for the other two `BOOLEAN` claimants this never
+                    // collides with in practice.
+                    w.u8(METADATA_IDX_CRYSTAL_SHOW_BOTTOM);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*show);
+                }
             }
         }
         w.u8(METADATA_EOF);
         ServerDirective::Send {
             packet_id: play::clientbound::SET_ENTITY_DATA,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// `ClientboundBossEventPacket.createAddPacket`'s `ADD` operation
+    /// (`.cache/mc/26.2/src/net/minecraft/network/protocol/game/ClientboundBossEventPacket.java`,
+    /// `AddOperation.write`), read for wire order rather than transcribed from
+    /// the constructor: UUID, operation type (`ADD` = `0`, a `VarInt` —
+    /// `writeEnum` writes the ordinal), then the `AddOperation` payload —
+    /// network-NBT `name`, `f32` progress, color `VarInt`, overlay `VarInt`,
+    /// one flags byte.
+    ///
+    /// Color and overlay are hardcoded to `PINK`/`PROGRESS` (both ordinal `0`)
+    /// and the flags byte to `0b110` (`playMusic | createWorldFog`, no
+    /// `darkenScreen`) — `EnderDragonFight.init`'s own
+    /// `new ServerBossEvent(id, EVENT_DISPLAY_NAME, PINK, PROGRESS)` followed
+    /// by `.setPlayBossMusic(true).setCreateWorldFog(true)` — the one producer
+    /// this crate has today (`lodestone_server::BossBarSnapshot`'s own doc). A
+    /// future second producer with different style would need these as
+    /// parameters instead; not plumbed through today since nothing else
+    /// builds a bar yet.
+    fn encode_boss_event_add(&self, id: Uuid, name: &Text, progress: f32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.uuid(id);
+        w.var_i32(0); // OperationType.ADD
+        w.bytes(&encode_component_nbt(name));
+        w.f32(progress);
+        w.var_i32(0); // BossBarColor.PINK
+        w.var_i32(0); // BossBarOverlay.PROGRESS
+        w.u8(0b110); // playMusic | createWorldFog, not darkenScreen
+        ServerDirective::Send {
+            packet_id: play::clientbound::BOSS_EVENT,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// `ClientboundBossEventPacket.createUpdateProgressPacket`'s
+    /// `UPDATE_PROGRESS` operation (operation type `2`): UUID, type, one
+    /// `f32`. See [`encode_boss_event_add`](Self::encode_boss_event_add)'s doc
+    /// for the citation this mirrors.
+    fn encode_boss_event_update_progress(&self, id: Uuid, progress: f32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.uuid(id);
+        w.var_i32(2); // OperationType.UPDATE_PROGRESS
+        w.f32(progress);
+        ServerDirective::Send {
+            packet_id: play::clientbound::BOSS_EVENT,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// `ClientboundBossEventPacket.createRemovePacket`'s `REMOVE` operation
+    /// (operation type `1`): UUID, type, no payload at all
+    /// (`REMOVE_OPERATION.write` is an empty method).
+    fn encode_boss_event_remove(&self, id: Uuid) -> ServerDirective {
+        let mut w = Writer::default();
+        w.uuid(id);
+        w.var_i32(1); // OperationType.REMOVE
+        ServerDirective::Send {
+            packet_id: play::clientbound::BOSS_EVENT,
             payload: w.into_vec(),
         }
     }
@@ -7824,6 +7943,356 @@ mod index_sixteen_tests {
             assert_eq!(r.u8().expect("terminator"), 0xFF);
             assert!(r.ensure_empty().is_ok(), "no trailing bytes");
         }
+    }
+}
+
+/// Index 16's `INT` claimants, checked mechanically against the committed jar
+/// dump — the same shape [`index_sixteen_tests`] establishes for the
+/// `BOOLEAN`-serializer baby collision, one level over: a producer
+/// disambiguation ("only `MobSim::push_dragon_snapshots` ever builds
+/// `MetadataField::DragonPhase`") is only as trustworthy as the premise that
+/// index 16's *other* real claimants really do carry the collision this
+/// module assumes.
+#[cfg(test)]
+mod index_sixteen_dragon_tests {
+    use lodestone_core::Reader;
+    use lodestone_server::{MetadataField, ServerDirective, ServerProtocol};
+
+    use super::{METADATA_IDX_DRAGON_PHASE, METADATA_SER_INT, V770ServerProtocol};
+
+    const INDEX_DUMP: &str = include_str!("../tests/support/entity_data_index_jvm.txt");
+
+    fn dump_row(owner_field: &str) -> (u8, i32) {
+        for line in INDEX_DUMP.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut tok = line.split_whitespace();
+            let index: u8 = tok.next().expect("index column").parse().expect("u8");
+            let owner = tok.next().expect("owner.FIELD column");
+            let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
+            if owner == owner_field {
+                return (index, serializer);
+            }
+        }
+        panic!("{owner_field} is not in the jar dump — read the dump before changing the constant")
+    }
+
+    /// `EnderDragon.DATA_PHASE` really is index 16 under the `INT` serializer
+    /// this encoder writes.
+    #[test]
+    fn dragon_phase_index_matches_the_jar_dump() {
+        let (index, serializer) = dump_row("EnderDragon.DATA_PHASE");
+        assert_eq!(index, METADATA_IDX_DRAGON_PHASE, "EnderDragon.DATA_PHASE must be index 16");
+        assert_eq!(serializer, METADATA_SER_INT, "EnderDragon.DATA_PHASE must be an INT");
+    }
+
+    /// **The premise the producer-based disambiguation depends on**: every
+    /// other index-16 `INT` claimant the jar dump lists really is a different
+    /// owner (so the producer, not the wire, is what keeps them apart).
+    /// Collected rather than asserted per-row so a failure names every wrong
+    /// one, not just the first.
+    #[test]
+    fn index_sixteens_other_int_claimants_are_all_distinct_from_the_dragon() {
+        let mut wrong: Vec<String> = Vec::new();
+        for accessor in [
+            "Creeper.DATA_SWELL_DIR",
+            "Display.DATA_BRIGHTNESS_OVERRIDE_ID",
+            "Phantom.ID_SIZE",
+            "Warden.CLIENT_ANGER_LEVEL",
+            "WitherBoss.DATA_TARGET_A",
+        ] {
+            let (index, serializer) = dump_row(accessor);
+            if index != METADATA_IDX_DRAGON_PHASE || serializer != METADATA_SER_INT {
+                wrong.push(format!(
+                    "{accessor} is ({index}, ser {serializer}) in the jar, expected the same \
+                     collision ({METADATA_IDX_DRAGON_PHASE}, ser {METADATA_SER_INT}) `DragonPhase` shares"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// Byte-accurate encode: index, serializer id, the phase int itself, then
+    /// the `0xFF` terminator, with no trailing bytes. Pairwise-distinct from
+    /// the entity id so a transposition cannot survive.
+    #[test]
+    fn dragon_phase_encodes_to_the_exact_index_and_serializer() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } =
+            proto.encode_set_entity_data(11, &[MetadataField::DragonPhase(4)])
+        else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().expect("entity id"), 11);
+        assert_eq!(r.u8().expect("metadata index"), METADATA_IDX_DRAGON_PHASE);
+        assert_eq!(r.var_i32().expect("serializer id"), METADATA_SER_INT);
+        assert_eq!(r.var_i32().expect("phase int"), 4);
+        assert_eq!(r.u8().expect("terminator"), 0xFF);
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+    }
+}
+
+/// The end crystal's two claimed indices — 8 (`OPTIONAL_BLOCK_POS`, no
+/// collision the encoder needs a producer guard for) and 9 (`BOOLEAN`, a
+/// three-way collision) — checked against the committed jar dump.
+#[cfg(test)]
+mod end_crystal_index_tests {
+    use lodestone_core::Reader;
+    use lodestone_server::{MetadataField, ServerDirective, ServerProtocol};
+
+    use super::{
+        METADATA_IDX_CRYSTAL_BEAM_TARGET, METADATA_IDX_CRYSTAL_SHOW_BOTTOM, METADATA_SER_BOOLEAN,
+        METADATA_SER_OPTIONAL_BLOCK_POS, V770ServerProtocol,
+    };
+
+    const INDEX_DUMP: &str = include_str!("../tests/support/entity_data_index_jvm.txt");
+
+    fn dump_row(owner_field: &str) -> (u8, i32) {
+        for line in INDEX_DUMP.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut tok = line.split_whitespace();
+            let index: u8 = tok.next().expect("index column").parse().expect("u8");
+            let owner = tok.next().expect("owner.FIELD column");
+            let serializer: i32 = tok.next().expect("serializer column").parse().expect("i32");
+            if owner == owner_field {
+                return (index, serializer);
+            }
+        }
+        panic!("{owner_field} is not in the jar dump — read the dump before changing the constant")
+    }
+
+    #[test]
+    fn crystal_beam_target_index_matches_the_jar_dump() {
+        let (index, serializer) = dump_row("EndCrystal.DATA_BEAM_TARGET");
+        assert_eq!(index, METADATA_IDX_CRYSTAL_BEAM_TARGET);
+        assert_eq!(serializer, METADATA_SER_OPTIONAL_BLOCK_POS);
+    }
+
+    /// **The premise that lets the beam-target decode arm skip a class
+    /// guard**: no *other* index-8 claimant in the jar carries
+    /// `OPTIONAL_BLOCK_POS`. If one ever did, `(index, serializer)` alone
+    /// would stop uniquely identifying the crystal and a class guard would
+    /// become necessary, exactly as index 9 already needs one below.
+    #[test]
+    fn index_eight_has_exactly_one_optional_block_pos_claimant() {
+        let claimants: Vec<&str> = INDEX_DUMP
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter(|l| {
+                let mut tok = l.split_whitespace();
+                let index: u8 = tok.next().expect("index").parse().expect("u8");
+                let _owner = tok.next();
+                let serializer: i32 = tok.next().expect("serializer").parse().expect("i32");
+                index == METADATA_IDX_CRYSTAL_BEAM_TARGET && serializer == METADATA_SER_OPTIONAL_BLOCK_POS
+            })
+            .collect();
+        assert_eq!(
+            claimants.len(),
+            1,
+            "expected exactly EndCrystal.DATA_BEAM_TARGET at index 8 with OPTIONAL_BLOCK_POS, got {claimants:?}"
+        );
+    }
+
+    #[test]
+    fn crystal_show_bottom_index_matches_the_jar_dump() {
+        let (index, serializer) = dump_row("EndCrystal.DATA_SHOW_BOTTOM");
+        assert_eq!(index, METADATA_IDX_CRYSTAL_SHOW_BOTTOM);
+        assert_eq!(serializer, METADATA_SER_BOOLEAN);
+    }
+
+    /// **The premise the producer-based disambiguation depends on for
+    /// `CrystalShowBottom`**: index 9's other two `BOOLEAN` claimants really
+    /// are different owners.
+    #[test]
+    fn index_nines_other_boolean_claimants_are_distinct_from_the_crystal() {
+        let mut wrong: Vec<String> = Vec::new();
+        for accessor in ["AreaEffectCloud.DATA_WAITING", "FishingHook.DATA_BITING"] {
+            let (index, serializer) = dump_row(accessor);
+            if index != METADATA_IDX_CRYSTAL_SHOW_BOTTOM || serializer != METADATA_SER_BOOLEAN {
+                wrong.push(format!(
+                    "{accessor} is ({index}, ser {serializer}) in the jar, expected the same \
+                     collision ({METADATA_IDX_CRYSTAL_SHOW_BOTTOM}, ser {METADATA_SER_BOOLEAN}) \
+                     `CrystalShowBottom` shares"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// Byte-accurate encode of a present beam target: presence bool, then the
+    /// packed-long block position. Coordinates are pairwise-distinct so a
+    /// transposition against `pack_block_pos`'s own `(x, y, z)` order cannot
+    /// survive.
+    #[test]
+    fn crystal_beam_target_encodes_a_present_position() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } = proto.encode_set_entity_data(
+            13,
+            &[MetadataField::CrystalBeamTarget(Some(lodestone_model::BlockPos::new(11, 65, 4)))],
+        ) else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().expect("entity id"), 13);
+        assert_eq!(r.u8().expect("metadata index"), METADATA_IDX_CRYSTAL_BEAM_TARGET);
+        assert_eq!(r.var_i32().expect("serializer id"), METADATA_SER_OPTIONAL_BLOCK_POS);
+        assert!(r.bool().expect("presence bool"));
+        let packed = r.i64().expect("packed block pos");
+        // Unpack the same way `crate::packets::metadata`'s decode side does,
+        // independently re-derived here rather than calling that function, so
+        // this assertion cannot pass by construction against a shared bug.
+        let x = (packed >> 38) as i32;
+        let y = ((packed << 52) >> 52) as i32;
+        let z = ((packed << 26) >> 38) as i32;
+        assert_eq!((x, y, z), (11, 65, 4));
+        assert_eq!(r.u8().expect("terminator"), 0xFF);
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+    }
+
+    /// Byte-accurate encode of a cleared beam target: presence bool `false`,
+    /// no position bytes at all.
+    #[test]
+    fn crystal_beam_target_encodes_absence_as_a_bare_false() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } =
+            proto.encode_set_entity_data(13, &[MetadataField::CrystalBeamTarget(None)])
+        else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().expect("entity id"), 13);
+        assert_eq!(r.u8().expect("metadata index"), METADATA_IDX_CRYSTAL_BEAM_TARGET);
+        assert_eq!(r.var_i32().expect("serializer id"), METADATA_SER_OPTIONAL_BLOCK_POS);
+        assert!(!r.bool().expect("presence bool"));
+        assert_eq!(r.u8().expect("terminator"), 0xFF);
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+    }
+
+    /// Byte-accurate encode of `CrystalShowBottom`, both values — and
+    /// deliberately alongside a `CrystalBeamTarget` set to the *other*
+    /// boolean-shaped state (`Some`, not `None`) in the same field list, so a
+    /// transposition between the two adjacent crystal fields cannot survive
+    /// (`CLAUDE.md`: "two adjacent bools coincide half the time by chance").
+    #[test]
+    fn crystal_show_bottom_encodes_to_the_exact_index_and_serializer() {
+        let proto = V770ServerProtocol;
+        for value in [true, false] {
+            let ServerDirective::Send { payload, .. } = proto.encode_set_entity_data(
+                13,
+                &[
+                    MetadataField::CrystalBeamTarget(Some(lodestone_model::BlockPos::new(2, 70, -3))),
+                    MetadataField::CrystalShowBottom(value),
+                ],
+            ) else {
+                panic!("encode_set_entity_data must emit a Send");
+            };
+            let mut r = Reader::new(&payload);
+            assert_eq!(r.var_i32().expect("entity id"), 13);
+            // Beam target first: presence bool, packed position.
+            assert_eq!(r.u8().expect("beam index"), METADATA_IDX_CRYSTAL_BEAM_TARGET);
+            assert_eq!(r.var_i32().expect("beam serializer"), METADATA_SER_OPTIONAL_BLOCK_POS);
+            assert!(r.bool().expect("beam presence"));
+            r.i64().expect("packed pos");
+            // Then show-bottom.
+            assert_eq!(r.u8().expect("show-bottom index"), METADATA_IDX_CRYSTAL_SHOW_BOTTOM);
+            assert_eq!(r.var_i32().expect("show-bottom serializer"), METADATA_SER_BOOLEAN);
+            assert_eq!(r.bool().expect("show-bottom bool"), value);
+            assert_eq!(r.u8().expect("terminator"), 0xFF);
+            assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+        }
+    }
+}
+
+/// `BOSS_EVENT`'s three operations this crate emits, checked against
+/// `ClientboundBossEventPacket`'s own `write` method
+/// (`.cache/mc/26.2/src/net/minecraft/network/protocol/game/ClientboundBossEventPacket.java`)
+/// rather than its constructors — see `encode_boss_event_add`'s own doc for
+/// why the field order there differs from a naive transcription.
+#[cfg(test)]
+mod boss_event_tests {
+    use lodestone_core::Reader;
+    use lodestone_model::Text;
+    use lodestone_server::{ServerDirective, ServerProtocol};
+    use uuid::Uuid;
+
+    use super::V770ServerProtocol;
+
+    /// A fixed, non-nil UUID so a byte-order mistake in `Writer::uuid` cannot
+    /// coincidentally read back correctly.
+    fn id() -> Uuid {
+        Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10)
+    }
+
+    #[test]
+    fn add_writes_uuid_type_name_progress_color_overlay_flags_in_that_order() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } =
+            proto.encode_boss_event_add(id(), &Text::literal("Ender Dragon"), 0.75)
+        else {
+            panic!("encode_boss_event_add must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.uuid().expect("boss bar id"), id());
+        assert_eq!(r.var_i32().expect("operation type"), 0, "ADD");
+        // Network-NBT component: skip via the same path the decode side uses
+        // elsewhere in this crate (`read_network_nbt`), so this assertion does
+        // not re-implement NBT parsing.
+        lodestone_core::read_network_nbt(&mut r).expect("name component");
+        assert_eq!(r.f32().expect("progress"), 0.75);
+        assert_eq!(r.var_i32().expect("color"), 0, "PINK");
+        assert_eq!(r.var_i32().expect("overlay"), 0, "PROGRESS");
+        assert_eq!(r.u8().expect("flags"), 0b110, "playMusic | createWorldFog");
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+    }
+
+    #[test]
+    fn update_progress_writes_uuid_type_then_a_bare_float() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } = proto.encode_boss_event_update_progress(id(), 0.25) else {
+            panic!("encode_boss_event_update_progress must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.uuid().expect("boss bar id"), id());
+        assert_eq!(r.var_i32().expect("operation type"), 2, "UPDATE_PROGRESS");
+        assert_eq!(r.f32().expect("progress"), 0.25);
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+    }
+
+    #[test]
+    fn remove_writes_uuid_and_type_with_no_payload_at_all() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } = proto.encode_boss_event_remove(id()) else {
+            panic!("encode_boss_event_remove must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.uuid().expect("boss bar id"), id());
+        assert_eq!(r.var_i32().expect("operation type"), 1, "REMOVE");
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes — REMOVE carries no payload");
+    }
+
+    /// Two different progress values must not collide on the wire — the
+    /// control for `update_progress`'s own assertion above (a transposition
+    /// or an endianness bug that happened to read back `0.25` correctly would
+    /// still pass that test alone).
+    #[test]
+    fn add_and_update_progress_carry_genuinely_different_bytes_for_different_progress() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload: low, .. } = proto.encode_boss_event_update_progress(id(), 0.1)
+        else {
+            panic!("must emit a Send");
+        };
+        let ServerDirective::Send { payload: high, .. } = proto.encode_boss_event_update_progress(id(), 0.9)
+        else {
+            panic!("must emit a Send");
+        };
+        assert_ne!(low, high);
     }
 }
 

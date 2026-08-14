@@ -183,6 +183,42 @@ pub struct EntitySnapshot {
     pub leash_link: Option<i32>,
 }
 
+/// One boss bar this world wants a client to hold, keyed by [`id`](Self::id) —
+/// the version-free input to [`ServerProtocol::encode_boss_event_add`]/
+/// [`encode_boss_event_update_progress`](ServerProtocol::encode_boss_event_update_progress)/
+/// [`encode_boss_event_remove`](ServerProtocol::encode_boss_event_remove),
+/// diffed by [`crate::server::EntityStreamer`] the same way [`EntitySnapshot`]
+/// is: a fresh `id` sends ADD, a changed `progress`/`visible` sends
+/// UPDATE_PROGRESS (or REMOVE, once `visible` goes `false` — vanilla's own
+/// `ClientboundBossEventPacket` has no wire "visible" flag; visibility is
+/// spelled by whether the bar is on the client at all, exactly as
+/// `ServerBossEvent`'s own player-set add/remove does), and a vanished `id`
+/// sends REMOVE.
+///
+/// Color (`PINK`) and overlay (`PROGRESS`) are not fields here because vanilla
+/// never varies them for the one producer today (`EnderDragonFight.init`,
+/// `EnderDragonFight`'s own module doc) — an implementor hardcodes them once,
+/// same as that constructor does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BossBarSnapshot {
+    /// The bar's stable id — **not** necessarily the boss entity's own uuid on
+    /// the wire (vanilla mints a separate `Mth.createInsecureUUID` for
+    /// `EnderDragonFight`'s bar); [`crate::mobs::MobSim::boss_bars`] reuses the
+    /// dragon's entity uuid as a documented simplification, since this crate
+    /// tracks one bar per dragon and nothing needs the two identities to
+    /// differ.
+    pub id: Uuid,
+    /// The bar's title, e.g. `Text::translate("entity.minecraft.ender_dragon", vec![])`.
+    pub name: Text,
+    /// `health / max_health`, clamped to `[0.0, 1.0]` — see
+    /// [`crate::dragon::fight::boss_bar_value`].
+    pub progress: f32,
+    /// Whether the bar should currently be shown at all — `false` once the
+    /// boss is dead. See this struct's own doc for why that is spelled as
+    /// add/remove on the wire rather than a packet field.
+    pub visible: bool,
+}
+
 /// One connected player as the tab list carries them (issue #438) — the
 /// version-free vocabulary
 /// [`ServerProtocol::encode_player_info_add`] takes a slice of.
@@ -419,6 +455,53 @@ pub enum MetadataField {
     /// this variant, and it never fires for a command-block minecart (this
     /// crate does not model that entity type).
     MinecartFuel(bool),
+    /// `EnderDragon.DATA_PHASE` — the dragon's current
+    /// `crate::dragon::phase::Phase` id (`Phase::id`), the wire twin of the
+    /// state [`crate::mobs::MobSim::tick_dragons`] already drives for real.
+    ///
+    /// **Index 16, one of six `INT` claimants** in the committed jar dump
+    /// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`):
+    /// `Creeper.DATA_SWELL_DIR`, `Display.DATA_BRIGHTNESS_OVERRIDE_ID`,
+    /// `EnderDragon.DATA_PHASE`, `Phantom.ID_SIZE`, `Warden.CLIENT_ANGER_LEVEL`,
+    /// `WitherBoss.DATA_TARGET_A` (index 16 also carries `EnderMan.DATA_CARRY_STATE`,
+    /// but that one is `OPTIONAL_BLOCK_STATE`, a different serializer). The
+    /// serializer alone cannot separate one `INT` claimant from another, so
+    /// only the producer — `MobSim::push_dragon_snapshots`, the sole caller —
+    /// disambiguates; never push this variant for anything but a
+    /// `minecraft:ender_dragon`.
+    DragonPhase(i32),
+    /// `EndCrystal.DATA_BEAM_TARGET` — where the crystal's healing/summoning
+    /// beam points, or `None` for no beam (vanilla's own default).
+    ///
+    /// **Index 8, serializer `OPTIONAL_BLOCK_POS`** — self-identifying at that
+    /// index (no other index-8 claimant in the jar dump uses
+    /// `OPTIONAL_BLOCK_POS`; the other seventeen are `BYTE`/`FLOAT`/`INT`/
+    /// `ITEM_STACK`/`BLOCK_POS`/`DIRECTION`/`BOOLEAN`), but `OPTIONAL_BLOCK_POS`
+    /// itself is **not** globally self-identifying — the same serializer is
+    /// also `LivingEntity.SLEEPING_POS_ID` at index 14 and `Creaking.HOME_POS`
+    /// at index 19, so a decoder must still key on the index, not the
+    /// serializer alone.
+    ///
+    /// **No producer sets `Some` yet.** This crate has no obsidian pillars
+    /// anywhere (`crate::dragon::fight`'s module doc) and no respawn sequence
+    /// wired to a real crystal (`crate::dragon::fight::tick_respawn`'s
+    /// `SetBeamTarget`/`ClearBeamTarget`/`AimAtSpike` events reach no world),
+    /// so every live crystal streams `None` today — a real, disclosed gap
+    /// (matching [`crate::mobs::MobSim::damage_dragon`]'s own "not yet wired
+    /// to a real hit" precedent), not a silent stub.
+    CrystalBeamTarget(Option<BlockPos>),
+    /// `EndCrystal.DATA_SHOW_BOTTOM` — whether the crystal draws its bedrock
+    /// base, `true` unless it is a caged crystal on an obsidian spike.
+    ///
+    /// **Index 9, one of three `BOOLEAN` claimants** in the jar dump:
+    /// `AreaEffectCloud.DATA_WAITING`, `EndCrystal.DATA_SHOW_BOTTOM`,
+    /// `FishingHook.DATA_BITING` — the serializer does not separate them, so
+    /// only the producer (`MobSim::push_end_crystal_snapshots`) disambiguates.
+    /// Always `true` in this crate today: there are no obsidian pillars and so
+    /// no caged crystal is ever spawned (see [`CrystalBeamTarget`](Self::CrystalBeamTarget)'s
+    /// own doc) — a real field, pushed unconditionally, whose value simply
+    /// never varies yet.
+    CrystalShowBottom(bool),
 }
 
 /// One generated trade offer, ready for the wire (issue #245) —
@@ -1867,6 +1950,44 @@ pub trait ServerProtocol: Send + Sync {
     /// screen.
     fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
         let _ = (entity_id, fields);
+        ServerDirective::None
+    }
+
+    /// Encodes a `BOSS_EVENT` `ADD` operation — vanilla
+    /// `ClientboundBossEventPacket.createAddPacket`
+    /// (`.cache/mc/26.2/src/net/minecraft/network/protocol/game/ClientboundBossEventPacket.java`).
+    /// `id` is the bar's own id (see [`BossBarSnapshot::id`]), `name` its title,
+    /// `progress` its `[0.0, 1.0]` fill.
+    ///
+    /// [`crate::server::EntityStreamer`] is the one caller, sending this the
+    /// first time a [`BossBarSnapshot`] with `visible: true` is seen for a
+    /// given id — the wire has no "visible" flag of its own; see
+    /// [`BossBarSnapshot`]'s doc for why visibility is spelled as add/remove.
+    ///
+    /// The default emits nothing, so a protocol family with no boss-bar
+    /// support need not override it and a dragon fight simply shows no bar
+    /// there.
+    fn encode_boss_event_add(&self, id: Uuid, name: &Text, progress: f32) -> ServerDirective {
+        let _ = (id, name, progress);
+        ServerDirective::None
+    }
+
+    /// Encodes a `BOSS_EVENT` `UPDATE_PROGRESS` operation — vanilla
+    /// `ClientboundBossEventPacket.createUpdateProgressPacket`. Sent on every
+    /// streaming pass where a previously-added bar's `progress` changed and it
+    /// is still `visible`; see [`encode_boss_event_add`](Self::encode_boss_event_add).
+    fn encode_boss_event_update_progress(&self, id: Uuid, progress: f32) -> ServerDirective {
+        let _ = (id, progress);
+        ServerDirective::None
+    }
+
+    /// Encodes a `BOSS_EVENT` `REMOVE` operation — vanilla
+    /// `ClientboundBossEventPacket.createRemovePacket`. Sent once a
+    /// previously-added bar's [`BossBarSnapshot::visible`] goes `false`, or the
+    /// id vanishes from the source entirely (the dragon itself despawned);
+    /// see [`encode_boss_event_add`](Self::encode_boss_event_add).
+    fn encode_boss_event_remove(&self, id: Uuid) -> ServerDirective {
+        let _ = id;
         ServerDirective::None
     }
 
