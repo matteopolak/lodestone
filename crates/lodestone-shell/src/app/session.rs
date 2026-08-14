@@ -345,7 +345,7 @@ impl WindowApp {
 
     /// Arm and service the deferred Render Distance commit — vanilla's
     /// `OptionInstance.OptionInstanceSliderButton` `delayedApplyAt` /
-    /// `applyUnsavedValue` pair (`OptionInstance.java:404-409, 429-435`).
+    /// `applyUnsavedValue` pair (`OptionInstance.java, 429-435`).
     ///
     /// Called once per frame from `app/redraw.rs`. The deadline is **re-armed by
     /// every change**, so a drag that crosses ten values commits once, 600 ms
@@ -460,7 +460,7 @@ impl WindowApp {
     }
 
     /// Vanilla's `key.debug.spectate` (F3+N): drop into spectator, or come back
-    /// out of it (`KeyboardHandler.java:222-231`).
+    /// out of it (`KeyboardHandler.java`).
     ///
     /// **The first producer of `ClientAction::ChangeGameMode` anywhere outside
     /// `crates/protocol/`** — the variant was encoded by two families and sent by
@@ -493,7 +493,7 @@ impl WindowApp {
     /// Vanilla's `key.debug.switchGameMode` (F3+F4), cycling instead of opening a
     /// radial picker.
     ///
-    /// `KeyboardHandler.java:235-241` shows a `GameModeSwitcherScreen` — a
+    /// `KeyboardHandler.java` shows a `GameModeSwitcherScreen` — a
     /// four-slot hover picker with its own hotbar-style art. Cycling is the
     /// honest subset: it reaches every mode with the same chord and needs no new
     /// screen, and a player holding F3 and tapping F4 four times sees exactly the
@@ -600,6 +600,16 @@ impl WindowApp {
             SingleplayerLaunch::Open(_) => resolve_launch_seed(None),
             SingleplayerLaunch::Created { config, .. } => resolve_launch_seed(Some(config)),
         };
+        // Issue #273's shell-side control: only `SingleplayerLaunch::Created`
+        // carries a `WorldCreationConfig` to hold this on — `Open` (Play
+        // Selected World) has none, so an existing world always takes the
+        // ordinary offline path below. See
+        // `WorldCreationConfig::online_mode`'s own doc for the full picture.
+        #[cfg(not(target_arch = "wasm32"))]
+        let online_mode = matches!(
+            &launch,
+            SingleplayerLaunch::Created { config, .. } if config.online_mode
+        );
         let session = Some((self.sim.ecs().clone(), self.sim.local_player()));
         // Vanilla streams `simulationDistance`/`viewDistance` chunks around the
         // player; ours is the same number the camera's far plane and the mesher
@@ -608,7 +618,7 @@ impl WindowApp {
         //
         // **Plus one, and the `+ 1` is not slack — it is the buffer ring the
         // mesher's invariant requires.** Vanilla's own server tracks
-        // `center + viewDistance + 1` (`ChunkTrackingView.java:92, 96`), and it has
+        // `center + viewDistance + 1` (`ChunkTrackingView.java, 96`), and it has
         // to: a section is only meshed once all its neighbours are resident, so the
         // outermost ring of a radius-`n` stream permanently lacks a neighbour and
         // **never draws**. Streaming exactly `render_distance` made singleplayer
@@ -621,14 +631,15 @@ impl WindowApp {
         let view_radius = i32::try_from(self.config.render_distance)
             .unwrap_or(i32::MAX)
             .saturating_add(1);
-        match launch_singleplayer(
-            self.config.protocol,
-            view_radius,
-            session,
-            seed,
-            #[cfg(not(target_arch = "wasm32"))]
-            world_dir,
-        ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let launch_result = if online_mode {
+            launch_open_to_lan_online(self.config.protocol, view_radius, session, seed, world_dir)
+        } else {
+            launch_singleplayer(self.config.protocol, view_radius, session, seed, world_dir)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let launch_result = launch_singleplayer(self.config.protocol, view_radius, session, seed);
+        match launch_result {
             Ok(net) => {
                 self.sim.attach_net(net);
                 // Issue #449: the loading screen's denominator. Declared only
@@ -746,7 +757,7 @@ impl WindowApp {
             // `EnvironmentAttributes.SKY_LIGHT_FACTOR` is a single attribute in
             // vanilla too: the time-of-day curve is its base and
             // `WeatherAttributes`' two layers modify it
-            // (`WeatherAttributes.java:19`, `:30`), so a separate uniform would be
+            // (`WeatherAttributes.java`, `:30`), so a separate uniform would be
             // a second writer of one value and the two would drift. This is the
             // exact `sky_darken` `lodestone_render::light`'s module doc derives,
             // and terrain, mobs and the first-person arm all read it through the

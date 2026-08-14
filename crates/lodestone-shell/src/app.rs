@@ -101,6 +101,9 @@ use creative_screen::creative_panel_geometry;
 pub(crate) use input::{KeyGate, KeyOutcome, drop_selected_action, offhand_swap_action, resolve_key};
 #[allow(unused_imports)]
 pub(crate) use launch::{LaunchError, launch_singleplayer};
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(unused_imports)]
+pub(crate) use launch::launch_open_to_lan_online;
 #[allow(unused_imports)]
 use launch::{java_string_hash_code, parse_seed, requested_a_connection, resolve_launch_seed};
 #[allow(unused_imports)]
@@ -247,22 +250,22 @@ fn mouse_action_for(binds: &Keybinds, button: MouseButton) -> Option<InputAction
 ///
 /// - `GameRenderer.extract` computes
 ///   `readyForLevelRendering = resourcesLoaded && advanceGameTime && level != null`
-///   and passes it straight into the GUI (`GameRenderer.java:377,389`) — note it
+///   and passes it straight into the GUI (`GameRenderer.java`) — note it
 ///   asks about the *level*, never about `screen`.
 /// - `Gui.extractRenderState` calls `hud.extractRenderState` under that flag
-///   alone (`Gui.java:152-156`), then draws the open screen **afterwards**
-///   (`Gui.java:171-189`), i.e. on top.
+///   alone (`Gui.java`), then draws the open screen **afterwards**
+///   (`Gui.java`), i.e. on top.
 /// - `Hud.extractRenderState` itself gates only on F1 (`isHidden`) and
-///   `LevelLoadingScreen` (`Hud.java:218-221`). Inside it, the hotbar, hearts,
+///   `LevelLoadingScreen` (`Hud.java`). Inside it, the hotbar, hearts,
 ///   hunger, the XP bar and the held-item name are gated on **game mode** only
-///   (`Hud.java:534-562`) — nothing there consults `screen()`.
+///   (`Hud.java`) — nothing there consults `screen()`.
 ///
 /// Exactly two HUD elements in vanilla do consult `screen()`, and neither is a
-/// vital: the potion-effect icons (`Hud.java:486-488`, suppressed only when the
+/// vital: the potion-effect icons (`Hud.java`, suppressed only when the
 /// screen `showsActiveEffects()`, which is overridden `true` by `InventoryScreen`
 /// and `CreativeModeInventoryScreen` because those draw their own) and the
-/// subtitle overlay (`Hud.java:238-241`). The crosshair is **not** one of them
-/// (`Hud.java:439-470` gates on camera type and spectator mode only) — we still
+/// subtitle overlay (`Hud.java`). The crosshair is **not** one of them
+/// (`Hud.java` gates on camera type and spectator mode only) — we still
 /// hide it with [`crate::menu::UiState::is_playing`], a deliberate divergence
 /// while container screens have no dimmed background pass to hide behind
 /// (issue #51).
@@ -284,7 +287,7 @@ fn hud_follows_world(screen: crate::menu::Screen) -> bool {
     )
 }
 
-/// `MouseHandler.onScroll`'s scroll-delta transform (`MouseHandler.java:189-192`),
+/// `MouseHandler.onScroll`'s scroll-delta transform (`MouseHandler.java`),
 /// which is the boundary **both** wheel consumers read (issues #203, #444):
 ///
 /// ```java
@@ -347,7 +350,7 @@ fn adapter_lines(gpu: &GpuContext) -> Vec<String> {
 /// How long after the last Render Distance change the new value goes live —
 /// vanilla's literal `600L` in
 /// `OptionInstance.OptionInstanceSliderButton.applyValue`
-/// (`OptionInstance.java:408`): `this.delayedApplyAt = Util.getMillis() + 600L`.
+/// (`OptionInstance.java`): `this.delayedApplyAt = Util.getMillis() + 600L`.
 pub(crate) const RENDER_DISTANCE_APPLY_DELAY: Duration = Duration::from_millis(600);
 
 /// GLFW's own scale for a **precise** scrolling delta — a trackpad or a Magic
@@ -400,7 +403,7 @@ fn wheel_notches(delta: winit::event::MouseScrollDelta) -> f64 {
 ///
 /// `accum` resets to zero on a direction reversal
 /// (`Math.signum(scaledYOffset) != Math.signum(this.accumulatedScrollY)`,
-/// `ScrollWheelHandler.java:14-16`) rather than fighting the new direction with
+/// `ScrollWheelHandler.java`) rather than fighting the new direction with
 /// old carry — one hard flick back should not need to "pay off" the previous
 /// direction's fractional debt first.
 fn accumulate_scroll(accum: &mut f64, scaled: f64) -> i32 {
@@ -424,7 +427,7 @@ fn accumulate_scroll(accum: &mut f64, scaled: f64) -> i32 {
 enum CaptureKey {
     /// Escape: cancel the capture without changing the binding. Vanilla sets
     /// `InputConstants.UNKNOWN` on Escape unconditionally
-    /// (`KeyBindsScreen.java:73-74`); this client deliberately does not — see
+    /// (`KeyBindsScreen.java`); this client deliberately does not — see
     /// [`crate::menu::nav::MenuNav::capture_binding`]'s own doc on why
     /// unconditional-Unbound is the `Pause` hazard.
     Cancel,
@@ -525,9 +528,9 @@ struct WindowApp {
     /// # Why deferred rather than per-frame
     ///
     /// `renderDistance` is the one `IntRange` vanilla builds with
-    /// `applyValueImmediately == false` (`Options.java:1470-1477`), and
+    /// `applyValueImmediately == false` (`Options.java`), and
     /// `applyValue` is `this.delayedApplyAt = Util.getMillis() + 600L`
-    /// (`OptionInstance.java:404-409`), committed from the render extract once
+    /// (`OptionInstance.java`), committed from the render extract once
     /// the deadline passes (`:429-435`). Re-armed by *every* change, so the
     /// commit lands 600 ms after the drag stops, not 600 ms after it starts.
     ///
@@ -683,8 +686,9 @@ struct WindowApp {
     /// the process is a private field on `Sim` with no public play method. Adding
     /// one `pub fn play_local_sound(&mut self, name: &str, category, pos, volume,
     /// pitch)` to `crate::sim::Sim` — forwarding to `self.audio` exactly as the
-    /// `NetUpdate::Sound` arm at `sim.rs:4722` already does — is the whole
-    /// remaining wiring. Recorded here rather than left as two dead fields, per
+    /// `NetUpdate::Sound` arm in `Sim::poll_net` (`crate::sim::net_apply`)
+    /// already does — is the whole remaining wiring. Recorded here rather
+    /// than left as two dead fields, per
     /// `CLAUDE.md`'s island rule: an unused field reads as an oversight, a named
     /// blocker does not.
     weather: Option<Arc<WeatherTracker>>,
