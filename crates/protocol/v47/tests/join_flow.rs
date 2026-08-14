@@ -520,15 +520,17 @@ fn play_chat_emits_extracted_text() {
 }
 
 #[test]
-fn play_position_emits_confirmation_then_teleport_with_flags() {
+fn play_position_emits_confirmation_then_teleport_when_absolute() {
     let adapter = V47Adapter::new();
+    // Pairwise-distinct coordinates and a nonzero yaw/pitch, so a transposed
+    // field would fail this assertion rather than surviving it.
     let payload = encode(&ClientboundPositionLook {
-        x: 1.5,
+        x: 11.0,
         y: 64.0,
-        z: -3.5,
+        z: 4.0,
         yaw: 90.0,
         pitch: -10.0,
-        flags: 0x01 | 0x10, // relative x and pitch
+        flags: 0, // fully absolute — the real join-teleport shape.
     });
     let directives = adapter
         .handle_packet(
@@ -540,7 +542,10 @@ fn play_position_emits_confirmation_then_teleport_with_flags() {
         .expect("handle");
     // 1.8 confirms a teleport by echoing a serverbound `position_look` back;
     // it must be the FIRST directive (before the emit) so the driver sends it
-    // while still in Play. There is no teleport-id, unlike 340+.
+    // while still in Play. There is no teleport-id, unlike 340+. This is safe
+    // only because `flags == 0` means `body.x/y/z` are already absolute — see
+    // `play_position_with_relative_flags_emits_no_immediate_echo` below for
+    // why a relative-flagged packet must not take this path.
     match directives.as_slice() {
         [
             Directive::Send {
@@ -556,12 +561,59 @@ fn play_position_emits_confirmation_then_teleport_with_flags() {
             assert_eq!(*packet_id, play::serverbound::POSITION_LOOK);
             // The confirmation echoes the received coordinates exactly.
             let confirm: ServerboundPositionLook = decode(confirm_bytes);
-            assert_eq!(confirm.x, 1.5);
+            assert_eq!(confirm.x, 11.0);
             assert_eq!(confirm.y, 64.0);
-            assert_eq!(confirm.z, -3.5);
+            assert_eq!(confirm.z, 4.0);
             assert_eq!(confirm.yaw, 90.0);
             assert_eq!(confirm.pitch, -10.0);
-            assert_eq!(*pos, Vec3::new(1.5, 64.0, -3.5));
+            assert_eq!(*pos, Vec3::new(11.0, 64.0, 4.0));
+            assert_eq!(*rotation, Rotation::new(90.0, -10.0));
+            assert!(!flags.relative_x);
+            assert!(!flags.relative_y);
+            assert!(!flags.relative_z);
+            assert!(!flags.relative_yaw);
+            assert!(!flags.relative_pitch);
+        }
+        other => panic!("expected confirmation + teleport, got {other:?}"),
+    }
+}
+
+/// A relative-flagged `player_position` must **not** get the immediate raw
+/// echo: `body.x/y/z` are deltas in this shape, not absolute coordinates, so
+/// echoing them verbatim sends the server a bogus position it can never match
+/// against its own pending-teleport target — the server keeps holding
+/// movement, and every following packet repeats the mismatch. That is the
+/// "couldn't move at all, kept getting rubber-banded" failure shape. The only
+/// safe response is to emit the teleport event alone and let the physics
+/// layer's own resolved position ride out on the next `ClientAction::Move`
+/// (which this adapter also lowers to `POSITION_LOOK` — see
+/// `encode_move_uses_position_look`).
+#[test]
+fn play_position_with_relative_flags_emits_no_immediate_echo() {
+    let adapter = V47Adapter::new();
+    let payload = encode(&ClientboundPositionLook {
+        x: 11.0,
+        y: 64.0,
+        z: 4.0,
+        yaw: 90.0,
+        pitch: -10.0,
+        flags: 0x01 | 0x10, // relative x and pitch
+    });
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::POSITION,
+            &payload,
+        )
+        .expect("handle");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::TeleportPlayer {
+            pos,
+            rotation,
+            flags,
+        })] => {
+            assert_eq!(*pos, Vec3::new(11.0, 64.0, 4.0));
             assert_eq!(*rotation, Rotation::new(90.0, -10.0));
             assert!(flags.relative_x);
             assert!(!flags.relative_y);
@@ -569,7 +621,11 @@ fn play_position_emits_confirmation_then_teleport_with_flags() {
             assert!(!flags.relative_yaw);
             assert!(flags.relative_pitch);
         }
-        other => panic!("expected confirmation + teleport, got {other:?}"),
+        other => panic!(
+            "expected the teleport event alone, with no immediate echo (a relative-flagged \
+             packet cannot be confirmed by an adapter that does not own the player's current \
+             position) — got {other:?}"
+        ),
     }
 }
 
