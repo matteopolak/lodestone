@@ -11,6 +11,7 @@ use lodestone_entity::projectile::{Projectile, TrackedProjectile};
 use lodestone_model::{BlockPos, ResourceKey, Vec3};
 use uuid::Uuid;
 
+use crate::mob_effects;
 use crate::redstone_target::HitAxis;
 
 use super::{ChunkWorld, MobSim, ProjectileMeta, ProjectileBlockHit};
@@ -32,6 +33,30 @@ struct ProjectileHit {
     /// Where the projectile was when it struck, standing in for the shooter as
     /// the retaliation direction.
     origin: Vec3,
+}
+
+/// One splash/lingering potion impact [`MobSim::resolve_projectile_impacts`]
+/// found, staged for the same reason [`ProjectileHit`] is: applying the burst
+/// mutates `self.mobs` while the search that found it still borrows it.
+#[derive(Debug, Clone, Copy)]
+struct PotionImpact {
+    /// Where the burst is centred — `ThrownSplashPotion.onHitAsPotion`'s own
+    /// `hitResult.getLocation()`, approximated here as the exact segment point
+    /// the collision sweep found (entity hit) or the coarse block-entry point
+    /// (block hit). The projectile's own bounding box (`potionAabb` in
+    /// vanilla) is small enough relative to [`mob_effects::SPLASH_RANGE`] that
+    /// treating the impact as a point rather than moving that box to it is a
+    /// disclosed simplification, not a different rule.
+    location: Vec3,
+    /// The thrown stack's `minecraft:potion` registry id — see
+    /// [`ProjectileMeta::potion`]. `None` means nothing to apply (no resolved
+    /// potion contents), the same "component absent" contract that field uses.
+    potion: Option<i32>,
+    /// `ProjectileUtil.computeMargin(this)` at the moment of impact — the same
+    /// value the entity-hit search above already computed for this tracked
+    /// projectile, reused rather than recomputed from a `ticks_alive` this
+    /// struct does not otherwise need to carry.
+    margin: f64,
 }
 
 /// The `minecraft:damage_type` a projectile's impact deals, from each
@@ -138,6 +163,19 @@ fn block_entry(from: Vec3, delta: Vec3, cell: BlockPos) -> Option<(f64, HitAxis,
     Some((enter, enter_axis, frac))
 }
 
+/// Squared distance from a point to an axis-aligned box — `AABB.distanceToSqr`
+/// specialised to the potion-splash case, where one side of the comparison is
+/// always a point (see [`PotionImpact::location`]'s own doc for why a point is
+/// an acceptable stand-in for the projectile's own small bounding box). `0.0`
+/// when the point is inside the box, matching a direct hit's `dist == 0.0`.
+#[must_use]
+fn point_to_box_distance_sq(point: Vec3, min: Vec3, max: Vec3) -> f64 {
+    let dx = (min.x - point.x).max(0.0).max(point.x - max.x);
+    let dy = (min.y - point.y).max(0.0).max(point.y - max.y);
+    let dz = (min.z - point.z).max(0.0).max(point.z - max.z);
+    dx * dx + dy * dy + dz * dz
+}
+
 impl<'w> MobSim<'w> {
     /// Registers a ballistic projectile (arrow, snowball, ender pearl, …) at
     /// its current [`Projectile::position`]/[`Projectile::velocity`] so
@@ -181,8 +219,36 @@ impl<'w> MobSim<'w> {
                 uuid: Uuid::new_v4(),
                 entity_type,
                 owner,
+                potion: None,
             },
         );
+        id
+    }
+
+    /// [`spawn_projectile_from`](Self::spawn_projectile_from) plus the thrown
+    /// stack's own `minecraft:potion` registry id, so
+    /// [`resolve_projectile_impacts`](Self::resolve_projectile_impacts) knows
+    /// which effects a splash/lingering potion applies on impact — see
+    /// [`ProjectileMeta::potion`]'s own doc. `potion` is `None` for a water
+    /// bottle (no `minecraft:potion_contents` resolved) or any non-potion
+    /// throwable, exactly [`spawn_projectile_from`](Self::spawn_projectile_from)'s
+    /// own behaviour, so this is purely additive.
+    ///
+    /// **Not yet called by production code.** The one call site that has the
+    /// potion id in hand — `apply_use_item`'s launch arm in `crate::server`,
+    /// via `spawn_player_projectile` — is outside this change's file ownership;
+    /// see the issue this ships against for the exact hunk it still needs.
+    pub fn spawn_potion_projectile_from(
+        &mut self,
+        entity_type: ResourceKey,
+        projectile: Projectile,
+        owner: Option<i32>,
+        potion: Option<i32>,
+    ) -> i32 {
+        let id = self.spawn_projectile_from(entity_type, projectile, owner);
+        if let Some(meta) = self.projectile_meta.get_mut(&id) {
+            meta.potion = potion;
+        }
         id
     }
 
@@ -247,6 +313,11 @@ impl<'w> MobSim<'w> {
         // consumed" ordering doesn't change here, only what is recorded
         // alongside a block hit rather than only its projectile's removal.
         let mut block_hits: Vec<ProjectileBlockHit> = Vec::new();
+        // A splash/lingering potion's blast, staged the same way as `hits`/
+        // `spent`/`block_hits`: `resolve_potion_splash` mutates `self.mobs`
+        // (health, status effects), so it cannot run while this loop still
+        // holds an immutable borrow of it.
+        let mut potion_impacts: Vec<PotionImpact> = Vec::new();
         for tracked in self.projectiles.iter() {
             let from = tracked.projectile.position;
             let delta = tracked.projectile.velocity;
@@ -256,6 +327,13 @@ impl<'w> MobSim<'w> {
             let meta = self.projectile_meta.get(&tracked.id);
             let owner = meta.and_then(|m| m.owner);
             let margin = lodestone_entity::projectile::hitbox_margin(tracked.ticks_alive);
+            // `AbstractThrownPotion`'s family — `ThrownSplashPotion` and
+            // `ThrownLingeringPotion` both override `onHit` to run the splash
+            // burst; nothing else in this sim's throwable set does.
+            let potion_id = meta.and_then(|m| m.potion);
+            let is_potion_family = meta
+                .map(|m| matches!(m.entity_type.path(), "splash_potion" | "lingering_potion"))
+                .unwrap_or(false);
 
             // Nearest mob along the segment.
             let mut nearest: Option<(f64, i32)> = None;
@@ -283,6 +361,18 @@ impl<'w> MobSim<'w> {
             match (nearest, block_t) {
                 (Some((entity_t, target)), block) if block.is_none_or(|b| entity_t <= b) => {
                     let entity_type = meta.map(|m| m.entity_type.path().to_owned());
+                    if is_potion_family {
+                        // Vanilla's own search is over the blast AABB, not
+                        // just whichever entity the collision sweep names as
+                        // the nearest — so the burst is staged here exactly
+                        // as it is in the block-hit arm below, from the same
+                        // impact point.
+                        potion_impacts.push(PotionImpact {
+                            location: from + delta.scale(entity_t),
+                            potion: potion_id,
+                            margin,
+                        });
+                    }
                     hits.push(ProjectileHit {
                         projectile: tracked.id,
                         target,
@@ -300,6 +390,13 @@ impl<'w> MobSim<'w> {
                     // against that one cell, the same slab test
                     // `clip_aabb` runs for an entity hitbox.
                     let coarse_hit = from + delta.scale(block_t);
+                    if is_potion_family {
+                        potion_impacts.push(PotionImpact {
+                            location: coarse_hit,
+                            potion: potion_id,
+                            margin,
+                        });
+                    }
                     let cell = super::lightning::floor_block_pos(coarse_hit);
                     if let Some((_, axis, frac)) = block_entry(from, delta, cell) {
                         let path = meta.map(|m| m.entity_type.path().to_owned()).unwrap_or_default();
@@ -329,6 +426,13 @@ impl<'w> MobSim<'w> {
         }
         for id in spent {
             self.remove_projectile(id);
+        }
+        // After the projectiles that struck them are gone (so a splash that
+        // also happened to be the nearest-mob hit does not double-resolve
+        // against a dangling id) and before the reaper, so a lethal instant
+        // splash of harming drops loot on the same tick a melee kill would.
+        for impact in &potion_impacts {
+            self.resolve_potion_splash(impact);
         }
         // Through the shared reaper, so an arrow kill drops the same loot a melee
         // kill does — the same argument `attack`'s own killing blow makes.
@@ -376,6 +480,127 @@ impl<'w> MobSim<'w> {
             applied
         };
         self.note_vocalisation(hit.target, applied);
+    }
+
+    /// Applies one splash-family potion's blast at its impact point —
+    /// `ThrownSplashPotion.onHitAsPotion`'s whole entity loop, run for
+    /// **every** splash/lingering impact regardless of whether the collision
+    /// sweep named a mob as the target: vanilla's own search is over the blast
+    /// AABB, not over whatever stopped the projectile.
+    ///
+    /// # What this does not do
+    ///
+    /// A **lingering** potion's real vanilla behaviour is
+    /// `ThrownLingeringPotion.onHitAsPotion`: it does not run this loop at all
+    /// — it spawns an `AreaEffectCloud` that reapplies these effects every 5
+    /// ticks for up to 30 seconds. That entity does not exist in this sim, so a
+    /// lingering potion applies its burst exactly **once**, at impact, same as
+    /// a splash — closer to the real gameplay point (something happens) than
+    /// doing nothing, but not the real mechanic. Tracked as a follow-up.
+    fn resolve_potion_splash(&mut self, impact: &PotionImpact) {
+        let Some(potion) = impact.potion else {
+            // No `minecraft:potion_contents` resolved for the thrown stack —
+            // matches vanilla's own no-effects case (`!potion.hasEffects()`),
+            // which is silent too. This is also the water-bottle path: a
+            // water bottle's `potion` is `Some(water)`, but
+            // `potion_splash_effects` itself returns nothing for it (empty
+            // built-in list) — checked here as `None` only so an unresolved
+            // stack short-circuits before the AABB search runs at all.
+            return;
+        };
+
+        // First pass: read-only over `self.mobs`, exactly the `hits`/`spent`
+        // staging pattern `resolve_projectile_impacts` already uses — applying
+        // an effect can remove a mob (a lethal instant splash of harming), so
+        // nothing here may mutate `self.mobs` until this loop is done reading it.
+        let mut applications: Vec<(i32, Vec<mob_effects::SplashEffect>)> = Vec::new();
+        for m in &self.mobs {
+            // `LivingEntity.isAffectedByPotions() == !isDeadOrDying()`; this
+            // sim has no distinct dying state, so health above zero is the
+            // whole guard.
+            if m.health() <= 0.0 {
+                continue;
+            }
+            let shape = m.shape();
+            let pos = m.position();
+            let hw = f64::from(shape.width) / 2.0 + impact.margin;
+            let min = Vec3::new(pos.x - hw, pos.y - impact.margin, pos.z - hw);
+            let max = Vec3::new(
+                pos.x + hw,
+                pos.y + f64::from(shape.height) + impact.margin,
+                pos.z + hw,
+            );
+            let dist_sq = point_to_box_distance_sq(impact.location, min, max);
+            if dist_sq >= mob_effects::SPLASH_RANGE_SQ {
+                continue;
+            }
+            let scale = mob_effects::splash_scale(dist_sq);
+            // `1.0`: this build's `ItemComponents` does not model
+            // `minecraft:potion_duration_scale` — see `mob_effects`'s module
+            // doc for the disclosed gap.
+            let effects = mob_effects::potion_splash_effects(potion, scale, 1.0);
+            if !effects.is_empty() {
+                applications.push((m.id(), effects));
+            }
+        }
+
+        for (id, effects) in applications {
+            for effect in effects {
+                match effect {
+                    mob_effects::SplashEffect::Instant { effect_id, amount } => {
+                        self.apply_instant_splash_effect(id, &effect_id, amount, impact.location);
+                    }
+                    mob_effects::SplashEffect::Timed {
+                        effect_id,
+                        duration,
+                        amplifier,
+                    } => {
+                        if let Some(mob) = self.get_mut(id) {
+                            mob.apply_effect(&effect_id, duration, amplifier);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `HealOrHarmMobEffect.applyInstantaneousEffect`'s two branches: heal for
+    /// `instant_health`, damage through `indirect_magic` (vanilla's
+    /// `source != null` branch — the projectile that hit is always known
+    /// here) for `instant_damage`. Any other id [`mob_effects`] resolved as
+    /// instantaneous would be a bug in that module's own table, so it is
+    /// silently skipped here rather than guessed at.
+    fn apply_instant_splash_effect(&mut self, target: i32, effect_id: &str, amount: f32, impact_location: Vec3) {
+        let path = effect_id.strip_prefix("minecraft:").unwrap_or(effect_id);
+        match path {
+            "instant_health" => {
+                if let Some(mob) = self.get_mut(target) {
+                    mob.heal(amount);
+                }
+            }
+            "instant_damage" => {
+                if amount <= 0.0 {
+                    return;
+                }
+                // `indirect_magic` bypasses armour, wolf armour and the
+                // shield — a splash of harming hurts exactly as hard behind a
+                // raised shield as without one.
+                let flags = DamageFlags::for_damage_type_name("indirect_magic").unwrap_or_default();
+                let applied = {
+                    let Some(mob) = self.get_mut(target) else {
+                        return;
+                    };
+                    let applied = mob.apply_damage(amount, flags);
+                    // Retaliation, matching `resolve_projectile_hit`'s own
+                    // pattern: the impact point stands in for the shooter,
+                    // the best identity this sim has for a splash.
+                    mob.mob.note_hurt(Some(impact_location));
+                    applied
+                };
+                self.note_vocalisation(target, applied);
+            }
+            _ => {}
+        }
     }
 
     /// Removes a tracked projectile (impact or manual despawn), returning its
@@ -683,5 +908,201 @@ mod tests {
             "the potion must still be tracked — the control that proves the detector \
              would have fired had a wall actually been there"
         );
+    }
+
+    // ---- splash-potion impact effects (the report's real gap: collision is
+    // fine, nothing applies on impact) ----
+
+    /// A generic mob at `pos`, health/armour from `combat_defaults`'s zombie
+    /// default (the generic [`MobSim::spawn`]'s own placeholder species) — the
+    /// exact numbers are read back from the mob rather than assumed, so these
+    /// tests never predict a "plausible round number" for health.
+    fn spawn_target<'w>(sim: &mut MobSim<'w>, pos: Vec3) -> i32 {
+        sim.spawn(pos, lodestone_entity::pathfinding::MobShape::land(0.6, 1.95), 0.2, 32)
+            .id()
+    }
+
+    /// **The discriminating gate for the real bug this issue reports.** A
+    /// splash potion of swiftness lands on two mobs at two different
+    /// distances from its impact — a **direct** entity hit (`scale == 1.0`)
+    /// and a block hit whose blast reaches a second mob at the edge of its
+    /// range (`distance_sq == 10.24`, `scale == 0.2`) — and the applied
+    /// duration must differ between them. The wrong hypothesis ("no falloff",
+    /// i.e. applying the base 3600-tick duration unconditionally) is checked
+    /// explicitly and must NOT match either case.
+    ///
+    /// Expected durations come from
+    /// `lodestone_data::potion::potion_effect_entries` (swiftness's own base
+    /// duration, an independently-tested source) and the falloff arithmetic
+    /// transcribed directly here — not by calling this crate's own
+    /// `mob_effects::splash_timed_duration`.
+    #[test]
+    fn a_splash_potion_of_swiftness_scales_the_applied_duration_by_distance() {
+        let swiftness = lodestone_data::potion::potion_id("minecraft:swiftness").expect("swiftness exists");
+        let entries = lodestone_data::potion::potion_effect_entries(swiftness);
+        assert_eq!(entries.len(), 1, "swiftness carries exactly one built-in effect");
+        let base_duration = f64::from(entries[0].duration_ticks);
+        assert_eq!(base_duration, 3600.0, "swiftness's own base duration");
+
+        let mut mismatches: Vec<String> = Vec::new();
+
+        // Case 1: a direct entity hit. No wall in the way; the throw sweeps
+        // straight through the mob's own hitbox, so the collision sweep
+        // resolves this as an entity impact and the burst's own distance is
+        // zero (the impact point is inside the target's box).
+        {
+            let world = ChunkWorld::new(-4, 24);
+            let mut sim = MobSim::new(&world);
+            let target = spawn_target(&mut sim, Vec3::new(5.0, 1.0, 1.5));
+            sim.spawn_potion_projectile_from(
+                "minecraft:splash_potion".parse().expect("valid key"),
+                Projectile::throwable(Vec3::new(0.5, 1.5, 1.5), Vec3::new(8.0, 0.0, 0.0)),
+                None,
+                Some(swiftness),
+            );
+            sim.resolve_projectile_impacts();
+            let duration = sim.get(target).and_then(|m| m.effects().get("minecraft:speed")).map(|e| e.duration());
+            // scale(0.0) = 1.0 -> floor(1.0 * 3600 + 0.5) = 3600.
+            if duration != Some(3600) {
+                mismatches.push(format!("direct hit: expected duration Some(3600), got {duration:?}"));
+            }
+        }
+
+        // Case 2: a block hit, with a second mob placed off the throw's own
+        // line (so the sweep cannot clip it directly) at the edge of the
+        // blast — `distance_sq = 3.2^2 = 10.24`, inside `SPLASH_RANGE_SQ`
+        // (16.0) but far enough that "no falloff" and the real formula give
+        // different integers, not just different floats that round the same.
+        {
+            let mut world = ChunkWorld::new(-4, 24);
+            world.set_solid(5, 1, 1, true);
+            let mut sim = MobSim::new(&world);
+            let target = spawn_target(&mut sim, Vec3::new(5.0, 1.0, 5.0));
+            sim.spawn_potion_projectile_from(
+                "minecraft:splash_potion".parse().expect("valid key"),
+                Projectile::throwable(Vec3::new(0.5, 1.5, 1.5), Vec3::new(8.0, 0.0, 0.0)),
+                None,
+                Some(swiftness),
+            );
+            let removed = sim.resolve_projectile_impacts();
+            if removed != 1 {
+                mismatches.push(format!("block hit: expected the potion to be consumed by the wall, removed={removed}"));
+            }
+            let duration = sim.get(target).and_then(|m| m.effects().get("minecraft:speed")).map(|e| e.duration());
+            // scale(10.24) = 1.0 - 3.2/4.0 = 0.2 -> floor(0.2 * 3600 + 0.5) = 720.
+            if duration != Some(720) {
+                mismatches.push(format!("blast edge: expected duration Some(720), got {duration:?}"));
+            }
+            if duration == Some(3600) {
+                mismatches.push("blast edge: got the DIRECT-HIT duration — falloff was not applied at all".to_owned());
+            }
+        }
+
+        assert!(mismatches.is_empty(), "splash duration falloff mismatches:\n{}", mismatches.join("\n"));
+    }
+
+    /// The instant-vs-timed split: a splash potion of harming (`instant_damage`)
+    /// must scale the *damage*, not a duration, and must scale it by the same
+    /// falloff — the discriminating case the timed-effect gate above cannot
+    /// cover on its own.
+    #[test]
+    fn a_splash_potion_of_harming_scales_instant_damage_by_distance() {
+        let harming = lodestone_data::potion::potion_id("minecraft:harming").expect("harming exists");
+        let mut mismatches: Vec<String> = Vec::new();
+
+        // Direct hit: scale 1.0 -> floor(1.0 * 6 + 0.5) = 6.
+        {
+            let world = ChunkWorld::new(-4, 24);
+            let mut sim = MobSim::new(&world);
+            let target = spawn_target(&mut sim, Vec3::new(5.0, 1.0, 1.5));
+            let before = sim.get(target).expect("just spawned").health();
+            sim.spawn_potion_projectile_from(
+                "minecraft:splash_potion".parse().expect("valid key"),
+                Projectile::throwable(Vec3::new(0.5, 1.5, 1.5), Vec3::new(8.0, 0.0, 0.0)),
+                None,
+                Some(harming),
+            );
+            sim.resolve_projectile_impacts();
+            let after = sim.get(target).expect("still alive at 6 damage").health();
+            let dealt = before - after;
+            if (dealt - 6.0).abs() > 1e-4 {
+                mismatches.push(format!("direct hit: expected 6.0 damage, dealt {dealt}"));
+            }
+        }
+
+        // Blast edge: scale 0.2 -> floor(0.2 * 6 + 0.5) = 1.
+        {
+            let mut world = ChunkWorld::new(-4, 24);
+            world.set_solid(5, 1, 1, true);
+            let mut sim = MobSim::new(&world);
+            let target = spawn_target(&mut sim, Vec3::new(5.0, 1.0, 5.0));
+            let before = sim.get(target).expect("just spawned").health();
+            sim.spawn_potion_projectile_from(
+                "minecraft:splash_potion".parse().expect("valid key"),
+                Projectile::throwable(Vec3::new(0.5, 1.5, 1.5), Vec3::new(8.0, 0.0, 0.0)),
+                None,
+                Some(harming),
+            );
+            sim.resolve_projectile_impacts();
+            let after = sim.get(target).expect("still alive at 1 damage").health();
+            let dealt = before - after;
+            if (dealt - 1.0).abs() > 1e-4 {
+                mismatches.push(format!("blast edge: expected 1.0 damage, dealt {dealt}"));
+            }
+            if (dealt - 6.0).abs() < 1e-4 {
+                mismatches.push("blast edge: dealt the DIRECT-HIT amount — falloff was not applied at all".to_owned());
+            }
+        }
+
+        assert!(mismatches.is_empty(), "splash instant-damage falloff mismatches:\n{}", mismatches.join("\n"));
+    }
+
+    /// **Control**: a thrown water bottle (no `minecraft:potion_contents`
+    /// effects — `potion_id` resolves, but its built-in effect list is empty)
+    /// must apply nothing at all, even on a direct hit well inside the blast.
+    /// Without this, a gate that only checks "some effect landed" cannot tell
+    /// a real splash from one that always applies something.
+    #[test]
+    fn a_thrown_water_bottle_applies_no_effects_the_control() {
+        let water = lodestone_data::potion::potion_id("minecraft:water").expect("water exists");
+        let world = ChunkWorld::new(-4, 24);
+        let mut sim = MobSim::new(&world);
+        let target = spawn_target(&mut sim, Vec3::new(5.0, 1.0, 1.5));
+        let before = sim.get(target).expect("just spawned").health();
+        sim.spawn_potion_projectile_from(
+            "minecraft:splash_potion".parse().expect("valid key"),
+            Projectile::throwable(Vec3::new(0.5, 1.5, 1.5), Vec3::new(8.0, 0.0, 0.0)),
+            None,
+            Some(water),
+        );
+        sim.resolve_projectile_impacts();
+        let mob = sim.get(target).expect("water does not kill anything");
+        assert_eq!(mob.health(), before, "a water bottle must not change health");
+        assert!(mob.effects().is_empty(), "a water bottle must not apply any status effect");
+    }
+
+    /// **Control**: the pre-existing `spawn_projectile`/`spawn_projectile_from`
+    /// API (used throughout this file's own collision tests, and by every
+    /// production call site until the server-side launch seam is wired to
+    /// [`MobSim::spawn_potion_projectile_from`]) leaves `ProjectileMeta::potion`
+    /// as `None` — a splash potion launched through it must apply no effects,
+    /// exactly as an unresolved `minecraft:potion_contents` does. Without this,
+    /// a regression that ignored `ProjectileMeta::potion` entirely (applying
+    /// some hardcoded effect to every splash regardless of identity) would
+    /// still pass every gate above.
+    #[test]
+    fn a_splash_potion_with_no_resolved_potion_id_applies_nothing() {
+        let world = ChunkWorld::new(-4, 24);
+        let mut sim = MobSim::new(&world);
+        let target = spawn_target(&mut sim, Vec3::new(5.0, 1.0, 1.5));
+        let before = sim.get(target).expect("just spawned").health();
+        sim.spawn_projectile(
+            "minecraft:splash_potion".parse().expect("valid key"),
+            Projectile::throwable(Vec3::new(0.5, 1.5, 1.5), Vec3::new(8.0, 0.0, 0.0)),
+        );
+        sim.resolve_projectile_impacts();
+        let mob = sim.get(target).expect("still alive");
+        assert_eq!(mob.health(), before);
+        assert!(mob.effects().is_empty());
     }
 }

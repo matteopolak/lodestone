@@ -85,14 +85,40 @@
 //! `!this.isInfiniteDuration() && (this.duration < other.duration || other.isInfiniteDuration())`
 //! rather than as a plain comparison.
 //!
+//! ## A splash/lingering potion's impact-time burst is [`potion_splash_effects`]
+//!
+//! `ThrownSplashPotion.onHitAsPotion` splits a potion's built-in effect list by
+//! instant-vs-timed and scales each by distance from the impact —
+//! [`splash_scale`] is `1.0 - sqrt(dist) / 4.0`, and an instant effect
+//! ([`effect_is_instantaneous`] — only `instant_health`/`instant_damage` are
+//! reachable from a potion's own list) is scaled through
+//! [`splash_instant_amount`] while a timed one is scaled through
+//! [`splash_timed_duration`] and then dropped outright by
+//! [`splash_would_be_dropped`] if that leaves it `endsWithin(20)` ticks.
+//! [`potion_splash_effects`] runs the whole thing for one entity already known
+//! to be in range; `crate::mobs::projectiles::resolve_potion_splash` is the
+//! consumer that finds which entities that is and applies the result.
+//!
+//! This build's `ItemComponents` does not carry a thrown stack's
+//! `customEffects` patch (only the potion's own built-in
+//! `minecraft:potion_contents` `potion` id), so a `/give`-authored custom
+//! effect on a splash potion is silently absent here — a declared gap, not a
+//! silent wrong answer: [`potion_splash_effects`] returns exactly the potion's
+//! *built-in* list, same as an unpatched stack would resolve to in vanilla.
+//!
 //! # What is deliberately not here
 //!
 //! * **Attribute-modifier effects** (`speed`, `slowness`, `health_boost`,
 //!   `absorption`). Those need an attribute system; `lodestone_physics::effect`
 //!   already classifies the movement ones, and this module's job is to be the store
 //!   it reads from rather than to duplicate its table.
-//! * **Area-effect clouds and lingering-potion colour mixing.** That needs an entity
-//!   with a radius and a per-tick membership test; there is no cloud entity.
+//! * **A lingering potion's own `AreaEffectCloud` entity** — radius, a
+//!   radius-per-tick shrink, a duration, and a reapplication delay, so the same
+//!   burst lands repeatedly over up to 30 seconds rather than once. See
+//!   `crate::mobs::projectiles::resolve_potion_splash`'s own doc for what a
+//!   lingering potion does today instead of that (one splash-shaped burst at
+//!   impact, exactly like a splash potion) — tracked as a follow-up rather than
+//!   built here.
 //! * **`ambient` / `visible` / `showIcon`** and the `blendState`. All three are
 //!   purely presentational and travel in the `update_mob_effect` packet, which
 //!   nothing encodes.
@@ -105,11 +131,19 @@
 //! * **A consumer**: `crate::server`'s vitals tick calls
 //!   [`ActiveEffects::tick`] and applies the [`EffectTick`]. Everything else should
 //!   *read* [`ActiveEffects::amplifier_of`] rather than keep its own copy.
+//! * **The splash formula**: [`potion_splash_effects`] is the one entry point;
+//!   its pieces ([`splash_scale`], [`splash_instant_amount`],
+//!   [`splash_timed_duration`], [`splash_would_be_dropped`]) are separated
+//!   because each is independently testable against `AbstractThrownPotion`'s own
+//!   named constant or `MobEffectInstance` method.
 //!
 //! # Dependencies
 //!
-//! None beyond `std`. No world access, no RNG, no clock — the caller supplies the
-//! entity's own tick count for the infinite-duration case.
+//! No world access, no RNG, no clock — the caller supplies the entity's own
+//! tick count for the infinite-duration case. [`potion_splash_effects`] alone
+//! reads `lodestone_data::potion`/`lodestone_data::mob_effects` for the potion
+//! registry's built-in effect list and mob-effect id resolution; nothing else in
+//! this module depends on that crate.
 
 use std::collections::BTreeMap;
 
@@ -199,6 +233,163 @@ pub fn instant_health_amount(amplifier: u32) -> f32 {
 #[must_use]
 pub fn instant_damage_amount(amplifier: u32) -> f32 {
     (6i32 << amplifier.min(24)) as f32
+}
+
+// ---------------------------------------------------------------------------
+// A splash/lingering potion's impact-time burst — `ThrownSplashPotion
+// .onHitAsPotion` (`.cache/mc/26.2/src/net/minecraft/world/entity/projectile
+// /throwableitemprojectile/ThrownSplashPotion.java`).
+// ---------------------------------------------------------------------------
+
+/// `AbstractThrownPotion.SPLASH_RANGE` — a splash/lingering blast only reaches
+/// an entity within four blocks of the impact point.
+pub const SPLASH_RANGE: f64 = 4.0;
+
+/// `AbstractThrownPotion.SPLASH_RANGE_SQ` — the squared form `onHitAsPotion`'s
+/// own `dist < 16.0` guard actually compares against, since the distance it has
+/// in hand is already squared.
+pub const SPLASH_RANGE_SQ: f64 = 16.0;
+
+/// `ThrownSplashPotion.onHitAsPotion`'s falloff: `1.0 - Math.sqrt(dist) / 4.0`,
+/// where `distance_sq` is a squared distance already checked against
+/// [`SPLASH_RANGE_SQ`] (this function does not gate on it).
+///
+/// `1.0` at a direct hit (`distance_sq == 0.0`) and `0.0` at the very edge of the
+/// blast (`distance_sq == SPLASH_RANGE_SQ`) — the two extremes "no falloff at
+/// all" and "the correct falloff" disagree at every point in between but happen
+/// to agree at neither of these on their own; both ends are asserted in this
+/// module's tests for exactly that reason.
+#[must_use]
+pub fn splash_scale(distance_sq: f64) -> f64 {
+    1.0 - distance_sq.sqrt() / SPLASH_RANGE
+}
+
+/// `MobEffect.isInstantaneous()` for exactly the effects a potion in this
+/// build's registry can carry.
+///
+/// `true` only for `instant_health`/`instant_damage` — `HealOrHarmMobEffect` is
+/// the sole `InstantaneousMobEffect` subclass any `Potions.java` entry ever
+/// grants (the jar's *other* instantaneous effect, `saturation`, backs no
+/// potion). Accepts a bare path as well as a namespaced id, matching
+/// [`periodic_effect`]'s own input handling.
+#[must_use]
+pub fn effect_is_instantaneous(effect_id: &str) -> bool {
+    matches!(
+        effect_id.strip_prefix("minecraft:").unwrap_or(effect_id),
+        "instant_health" | "instant_damage"
+    )
+}
+
+/// `HealOrHarmMobEffect.applyInstantaneousEffect`'s scaled amount:
+/// `(int)(scale * base_amount + 0.5)`, where `base_amount` is
+/// [`instant_health_amount`]/[`instant_damage_amount`] at the instance's own
+/// amplifier. Truncation via `as f32` on a non-negative value is `floor`, which
+/// is what Java's `(int)` cast does here since `scale` and `base_amount` are
+/// both non-negative.
+#[must_use]
+pub fn splash_instant_amount(base_amount: f32, scale: f64) -> f32 {
+    ((scale * f64::from(base_amount)) + 0.5).floor() as f32
+}
+
+/// `MobEffectInstance.mapDuration(d -> (int)(scale * d * durationScale + 0.5))`
+/// — the timed-effect duration after splash falloff and the item's own
+/// `minecraft:potion_duration_scale` (pass `1.0` for the default — this build's
+/// `ItemComponents` does not model that component, so every splash uses the
+/// unscaled potion duration; see the module doc's disclosed gap).
+#[must_use]
+pub fn splash_timed_duration(base_duration_ticks: u32, scale: f64, duration_scale: f32) -> i32 {
+    ((scale * f64::from(base_duration_ticks) * f64::from(duration_scale)) + 0.5).floor() as i32
+}
+
+/// `MobEffectInstance.endsWithin(20)` — a splashed timed effect scaled down to
+/// this short or shorter is **dropped entirely**, not applied at a token
+/// duration. [`INFINITE_DURATION`] never qualifies, matching `endsWithin`'s own
+/// `!isInfiniteDuration() && …` guard (no potion's built-in list is infinite, but
+/// the check is here for the same reason `EffectInstance` carries it generally).
+#[must_use]
+pub fn splash_would_be_dropped(duration: i32) -> bool {
+    duration != INFINITE_DURATION && duration <= 20
+}
+
+/// One potion effect as it lands on one entity after splash falloff — the two
+/// arms `onHitAsPotion`'s loop takes per `MobEffectInstance`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SplashEffect {
+    /// `MobEffect.applyInstantaneousEffect`'s branch: `effect_id` is
+    /// `instant_health` or `instant_damage`, `amount` is already
+    /// distance-scaled ([`splash_instant_amount`]) and ready to heal or damage
+    /// with directly.
+    Instant {
+        /// Canonical `minecraft:*` mob-effect id.
+        effect_id: String,
+        /// Already scaled by distance; never negative.
+        amount: f32,
+    },
+    /// The `entity.addEffect(newEffect, effectSource)` branch: a fresh
+    /// [`EffectInstance`]'s `(duration, amplifier)`, ready for
+    /// [`ActiveEffects::apply`]. Already passed the [`splash_would_be_dropped`]
+    /// filter, so every `Timed` this module hands back is meant to land.
+    Timed {
+        /// Canonical `minecraft:*` mob-effect id.
+        effect_id: String,
+        /// Distance-scaled duration in ticks, always `> 20`.
+        duration: i32,
+        /// Unscaled — vanilla's falloff never touches the amplifier, only the
+        /// duration and (for instant effects) the amount.
+        amplifier: u32,
+    },
+}
+
+/// `ThrownSplashPotion.onHitAsPotion`'s whole per-entity loop, for one entity
+/// already known to be in range: every one of `potion_registry_id`'s **built-in**
+/// effects (see the module doc for why not `customEffects`), split
+/// instant-vs-timed and scaled by `scale` ([`splash_scale`] of that entity's own
+/// distance) and `duration_scale` (the item's `minecraft:potion_duration_scale`,
+/// `1.0` for the default this build always uses).
+///
+/// `potion_registry_id` is the raw `minecraft:potion` network id
+/// (`lodestone_model::item::ItemComponents::potion`). An id outside the
+/// registry, or one whose built-in list is empty (`water`/`mundane`/`thick`/
+/// `awkward` — a potion with no effects, `!potion.hasEffects()`), yields an
+/// empty `Vec` — the water-bottle control this module's tests assert
+/// explicitly, so an empty result is never mistaken for "not looked up yet".
+#[must_use]
+pub fn potion_splash_effects(potion_registry_id: i32, scale: f64, duration_scale: f32) -> Vec<SplashEffect> {
+    let Some(built_in) = lodestone_data::potion::potion_built_in_effects(potion_registry_id) else {
+        return Vec::new();
+    };
+    built_in
+        .iter()
+        .filter_map(|&(effect_index, amplifier, base_duration)| {
+            let effect_id = lodestone_data::mob_effects::mob_effect_name(i32::try_from(effect_index).ok()?)?;
+            let amplifier = u32::from(amplifier);
+            if effect_is_instantaneous(effect_id) {
+                let base_amount = match effect_id.strip_prefix("minecraft:").unwrap_or(effect_id) {
+                    "instant_health" => instant_health_amount(amplifier),
+                    "instant_damage" => instant_damage_amount(amplifier),
+                    // No other id passes `effect_is_instantaneous`, so this
+                    // arm is unreachable — kept explicit rather than panicking
+                    // on a table this module does not own.
+                    _ => return None,
+                };
+                Some(SplashEffect::Instant {
+                    effect_id: effect_id.to_owned(),
+                    amount: splash_instant_amount(base_amount, scale),
+                })
+            } else {
+                let duration = splash_timed_duration(base_duration, scale, duration_scale);
+                if splash_would_be_dropped(duration) {
+                    None
+                } else {
+                    Some(SplashEffect::Timed {
+                        effect_id: effect_id.to_owned(),
+                        duration,
+                        amplifier,
+                    })
+                }
+            }
+        })
+        .collect()
 }
 
 /// One live effect — vanilla's `MobEffectInstance`, reduced to the fields that decide
@@ -925,5 +1116,150 @@ mod tests {
         assert!(effects.remove("minecraft:strength"));
         assert!(effects.is_empty(), "the queued weak instance must go too");
         assert!(!effects.remove("minecraft:strength"), "and removing twice is a no-op");
+    }
+
+    // ---- the splash falloff, and its two extremes ----
+
+    /// [`splash_scale`] at the two ends of the blast: `1.0` dead-on, `0.0` at the
+    /// very edge — both from [`SPLASH_RANGE`]/[`SPLASH_RANGE_SQ`] directly, not a
+    /// re-typed literal.
+    #[test]
+    fn splash_scale_is_one_at_zero_distance_and_zero_at_the_blast_edge() {
+        assert_eq!(splash_scale(0.0), 1.0);
+        assert_eq!(splash_scale(SPLASH_RANGE_SQ), 0.0);
+        // Two blocks out (distance_sq = 4.0, distance = 2.0): halfway.
+        assert_eq!(splash_scale(4.0), 0.5);
+    }
+
+    /// Only the two `HealOrHarmMobEffect` ids are instantaneous — every other
+    /// potion-reachable effect, and a bare unrelated string, are not.
+    #[test]
+    fn only_heal_or_harm_effects_are_instantaneous() {
+        assert!(effect_is_instantaneous("minecraft:instant_health"));
+        assert!(effect_is_instantaneous("minecraft:instant_damage"));
+        assert!(effect_is_instantaneous("instant_damage"), "bare path also works");
+        assert!(!effect_is_instantaneous("minecraft:speed"));
+        assert!(!effect_is_instantaneous("minecraft:regeneration"));
+        assert!(!effect_is_instantaneous("minecraft:poison"));
+    }
+
+    /// [`splash_instant_amount`] at the two discriminating scales: full and a
+    /// scale where "no falloff" and "the correct falloff" give different
+    /// integers, not just different floats that happen to round the same.
+    #[test]
+    fn splash_instant_amount_scales_down_not_just_direction() {
+        // instant_damage at amplifier 0 is 6.0 (HealOrHarmMobEffect's own `6 <<
+        // amplification`).
+        let base = instant_damage_amount(0);
+        assert_eq!(splash_instant_amount(base, 1.0), 6.0, "a direct hit is unscaled");
+        assert_eq!(
+            splash_instant_amount(base, 0.5),
+            3.0,
+            "half scale must give half the amount, not the full 6"
+        );
+        assert_ne!(
+            splash_instant_amount(base, 1.0),
+            splash_instant_amount(base, 0.5),
+            "the wrong hypothesis (no falloff) would make these equal"
+        );
+    }
+
+    /// [`splash_timed_duration`] on a real potion's own base duration
+    /// (swiftness: 3600 ticks, from `lodestone_data::potion::POTION_EFFECTS`),
+    /// at two scales chosen so "no falloff" and "the real falloff" disagree by
+    /// far more than rounding.
+    #[test]
+    fn splash_timed_duration_scales_a_real_potion_duration() {
+        let base = 3600u32; // swiftness's own base duration
+        assert_eq!(splash_timed_duration(base, 1.0, 1.0), 3600, "a direct hit is unscaled");
+        assert_eq!(
+            splash_timed_duration(base, 0.2, 1.0),
+            720,
+            "scale 0.2 of 3600 is 720, not 3600"
+        );
+        assert_ne!(
+            splash_timed_duration(base, 1.0, 1.0),
+            splash_timed_duration(base, 0.2, 1.0),
+            "the wrong hypothesis (no falloff) would make these equal"
+        );
+    }
+
+    /// `endsWithin(20)`: a duration of exactly 20 is dropped, 21 survives — the
+    /// boundary `splash_would_be_dropped` exists to get right in both
+    /// directions, plus the infinite sentinel never qualifying.
+    #[test]
+    fn splash_would_be_dropped_at_the_endswithin_twenty_boundary() {
+        assert!(splash_would_be_dropped(20), "endsWithin(20) is <=, so 20 itself is dropped");
+        assert!(splash_would_be_dropped(0));
+        assert!(!splash_would_be_dropped(21), "21 survives the same boundary");
+        assert!(
+            !splash_would_be_dropped(INFINITE_DURATION),
+            "an infinite duration never ends within anything"
+        );
+    }
+
+    /// [`potion_splash_effects`] on a real timed-only potion (swiftness) at two
+    /// distances that must disagree, computed from
+    /// [`lodestone_data::potion::potion_effect_entries`] — an independently
+    /// tested source for the base duration/amplifier — rather than from this
+    /// module's own [`splash_timed_duration`].
+    #[test]
+    fn potion_splash_effects_scales_a_timed_effect_by_distance() {
+        let swiftness = lodestone_data::potion::potion_id("minecraft:swiftness").expect("swiftness exists");
+        let entries = lodestone_data::potion::potion_effect_entries(swiftness);
+        assert_eq!(entries.len(), 1, "swiftness carries exactly one built-in effect");
+        let base_duration = entries[0].duration_ticks;
+        let amplifier = u32::from(entries[0].amplifier);
+        assert_eq!(base_duration, 3600, "swiftness's own base duration");
+        assert_eq!(amplifier, 0);
+
+        let close = potion_splash_effects(swiftness, splash_scale(0.0), 1.0);
+        let far = potion_splash_effects(swiftness, splash_scale(10.24), 1.0);
+        assert_eq!(close.len(), 1);
+        assert_eq!(far.len(), 1);
+        match (&close[0], &far[0]) {
+            (
+                SplashEffect::Timed { effect_id: c_id, duration: c_dur, amplifier: c_amp },
+                SplashEffect::Timed { effect_id: f_id, duration: f_dur, amplifier: f_amp },
+            ) => {
+                assert_eq!(c_id, "minecraft:speed");
+                assert_eq!(f_id, "minecraft:speed");
+                assert_eq!(*c_amp, amplifier);
+                assert_eq!(*f_amp, amplifier);
+                // scale(0.0) = 1.0 -> 3600; scale(10.24) = 1.0 - 3.2/4.0 = 0.2 -> 720.
+                assert_eq!(*c_dur, 3600);
+                assert_eq!(*f_dur, 720);
+                assert_ne!(c_dur, f_dur, "distance must change the applied duration");
+            }
+            other => panic!("expected two Timed effects, got {other:?}"),
+        }
+    }
+
+    /// The instant-vs-timed split, on a real instant-only potion (harming).
+    #[test]
+    fn potion_splash_effects_scales_an_instant_effect_by_distance() {
+        let harming = lodestone_data::potion::potion_id("minecraft:harming").expect("harming exists");
+        let close = potion_splash_effects(harming, splash_scale(0.0), 1.0);
+        let far = potion_splash_effects(harming, splash_scale(10.24), 1.0);
+        assert_eq!(close, vec![SplashEffect::Instant { effect_id: "minecraft:instant_damage".to_owned(), amount: 6.0 }]);
+        assert_eq!(far, vec![SplashEffect::Instant { effect_id: "minecraft:instant_damage".to_owned(), amount: 1.0 }]);
+    }
+
+    /// **Control**: a water bottle (`minecraft:water`, `POTION_EFFECTS` empty)
+    /// yields no splash effects at any scale — proving an empty result is the
+    /// potion's own no-effects case, not this function failing to look anything
+    /// up. Without this, a version that always returned an empty `Vec` would
+    /// pass every gate above it vacuously.
+    #[test]
+    fn potion_splash_effects_water_bottle_control() {
+        let water = lodestone_data::potion::potion_id("minecraft:water").expect("water exists");
+        assert_eq!(potion_splash_effects(water, 1.0, 1.0), Vec::new());
+        // An out-of-range id (this build's registry) must also yield nothing,
+        // rather than panicking or guessing.
+        assert_eq!(potion_splash_effects(-1, 1.0, 1.0), Vec::new());
+        assert_eq!(
+            potion_splash_effects(lodestone_data::potion::POTION_COUNT as i32, 1.0, 1.0),
+            Vec::new()
+        );
     }
 }

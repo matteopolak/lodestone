@@ -923,6 +923,15 @@ pub struct SimMob<'w> {
     /// scan [`villager::find_and_claim_workstation`] runs — see that
     /// function's own doc for why the scan itself is not free.
     job_search_cooldown: i32,
+    /// This mob's live status effects — `LivingEntity.activeEffects`. Populated
+    /// by a splash/lingering potion's impact
+    /// ([`MobSim::resolve_projectile_impacts`] via
+    /// `crate::mobs::projectiles::resolve_potion_splash`); nothing yet ticks it
+    /// periodically for a mob the way `crate::server`'s vitals tick does for a
+    /// player, so a poison/wither/regeneration effect landed here does not yet
+    /// deal its own periodic damage or heal — see [`crate::mob_effects`]'s
+    /// module doc for the splash side of this gap.
+    effects: crate::mob_effects::ActiveEffects,
 }
 
 impl<'w> SimMob<'w> {
@@ -1507,6 +1516,21 @@ impl<'w> SimMob<'w> {
         outcome.to_health
     }
 
+    /// This mob's live status effects — see [`Self::apply_effect`] to add one.
+    #[must_use]
+    pub fn effects(&self) -> &crate::mob_effects::ActiveEffects {
+        &self.effects
+    }
+
+    /// Applies one status effect through vanilla's own stacking rule
+    /// (`LivingEntity.addEffect` → [`crate::mob_effects::EffectInstance::update`]
+    /// — see that type's own doc for the "remembered, not ignored or replaced"
+    /// table). Returns whether the active instance changed, matching
+    /// [`crate::mob_effects::ActiveEffects::apply`]'s own return.
+    pub fn apply_effect(&mut self, effect_id: &str, duration: i32, amplifier: u32) -> bool {
+        self.effects.apply(effect_id, duration, amplifier)
+    }
+
     /// The mob's current position.
     #[must_use]
     pub fn position(&self) -> Vec3 {
@@ -1793,6 +1817,14 @@ struct ProjectileMeta {
     /// `ProjectileUtil.computeMargin` keeps the hitbox at zero inflation for the
     /// first two ticks — and this is the first half.
     owner: Option<i32>,
+    /// The thrown stack's raw `minecraft:potion` network id
+    /// (`lodestone_model::item::ItemComponents::potion`), for a splash or
+    /// lingering potion only — `None` for every other throwable, and `None` for
+    /// a potion whose stack carried no resolved `minecraft:potion_contents`
+    /// (a bare/uncomponented stack). [`MobSim::resolve_projectile_impacts`]
+    /// reads this to decide what [`crate::mob_effects::potion_splash_effects`]
+    /// applies on impact.
+    potion: Option<i32>,
 }
 
 /// Wire identity plus fall dynamics for one tracked dropped item.
@@ -2658,6 +2690,7 @@ impl<'w> MobSim<'w> {
             villager_level: 1,
             villager_xp: 0,
             job_search_cooldown: 0,
+            effects: crate::mob_effects::ActiveEffects::new(),
         });
         self.mobs.last_mut().expect("just pushed")
     }
@@ -5853,13 +5886,27 @@ fn nearest_patrol_leader_target(mobs: &[SimMob<'_>], from: Vec3, exclude_id: i32
 /// reaches a real client; this type is the production version, now fed by a
 /// real simulation instead of a hand-mutated `Vec`.
 #[derive(Debug, Clone, Default)]
-pub struct LiveMobSource(Arc<Mutex<Vec<EntitySnapshot>>>);
+pub struct LiveMobSource(
+    Arc<Mutex<Vec<EntitySnapshot>>>,
+    /// The dragon fight's boss bars, published the same way `.0` is — see
+    /// [`publish_boss_bars`](Self::publish_boss_bars). A second field rather
+    /// than folding into `.0` because a boss bar is not an entity and has no
+    /// `EntitySnapshot` shape to borrow.
+    Arc<Mutex<Vec<crate::protocol::BossBarSnapshot>>>,
+);
 
 impl EntitySource for LiveMobSource {
     fn snapshots(&self) -> Vec<EntitySnapshot> {
         self.0
             .lock()
             .expect("live mob snapshot lock poisoned")
+            .clone()
+    }
+
+    fn boss_bars(&self) -> Vec<crate::protocol::BossBarSnapshot> {
+        self.1
+            .lock()
+            .expect("live mob boss-bar lock poisoned")
             .clone()
     }
 }
@@ -5875,6 +5922,13 @@ impl LiveMobSource {
     /// this directly rather than through a second wrapper.
     pub(crate) fn publish(&self, snapshots: Vec<EntitySnapshot>) {
         *self.0.lock().expect("live mob snapshot lock poisoned") = snapshots;
+    }
+
+    /// Replaces the published boss-bar set — the [`boss_bars`](EntitySource::boss_bars)
+    /// twin of [`publish`](Self::publish), called from the same tick-loop
+    /// call site right after it (see `crate::tick::run_tick_loop`).
+    pub(crate) fn publish_boss_bars(&self, bars: Vec<crate::protocol::BossBarSnapshot>) {
+        *self.1.lock().expect("live mob boss-bar lock poisoned") = bars;
     }
 }
 
@@ -6055,6 +6109,10 @@ impl EntitySource for MobHandle {
     /// unticked mob (e.g. an attack test) can use the handle directly instead.
     fn snapshots(&self) -> Vec<EntitySnapshot> {
         self.with(|sim| sim.snapshots())
+    }
+
+    fn boss_bars(&self) -> Vec<crate::protocol::BossBarSnapshot> {
+        self.with(|sim| sim.boss_bars())
     }
 }
 
