@@ -358,6 +358,23 @@ so behaviour was correct and only the scanner choked. **Diagnostic: grep `server
 repeated `if packet_id == play::serverbound::` guard.** A dead duplicate arm is also its own hazard — the
 next reader edits the unreachable one.
 
+**And an ordinary refactor can blind an instrument while every test stays green — so `SKIPPED` must never be
+reachable for a subject that exists.** Splitting v770's 7,876-line `adapter.rs` into a `src/adapter/`
+directory module was verified thoroughly (796/796 tests before and after, at one pinned sha) and
+nonetheless made `connectedness` report v770 as **SKIPPED**: the scan hardcoded a search for a *flat*
+`src/adapter.rs`. The one family the tool exists to report on vanished with no error, and the run still
+exited 0. After the fix it reports 141/141. Two rules follow. **Re-run the *instruments* after a module
+move, not just the tests** — this repo already says to re-run `cargo test` after a rename because no
+`cargo check` sees a doctest; scanners are the same class and worse, because they fail *quietly*. And
+**treat a skip as a failure unless the subject is genuinely absent**: a tool whose primary subject can go
+missing without a non-zero exit is reporting a false negative, which is the same defect as a guard whose
+detector errored.
+
+Five instruments were found broken in a single day — five clock rules, the xtask rule table, this scanner's
+duplicate-arm bail, this scanner's module-shape blindness, and `conformance`'s unconditional workspace
+gate. **Every one reported success or silently declined to run.** None was concealing a real defect, which
+is the good outcome and also the reason nobody noticed. Budget for auditing the tools, not only the code.
+
 Know its scope, because outside it the instrument is *silent* rather than wrong (§12.40):
 
 - It answers **"is this clientbound packet reaching anything"** and nothing else — not Rust call graphs,
