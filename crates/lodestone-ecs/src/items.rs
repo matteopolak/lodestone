@@ -1,4 +1,4 @@
-//! Plugin-defined custom items as a shared resource — issue #147.
+//! Plugin-defined custom items as a shared resource.
 //!
 //! # What this is
 //!

@@ -342,8 +342,8 @@ pub fn apply_entity_movement(
 ///
 /// # Why the local player takes a different path — this is the knockback fix
 ///
-/// Vanilla's `Entity.lerpMotion` (`Entity.java:2649-2651`,
-/// `handleSetEntityMotion` at `ClientPacketListener.java:623-629`) is
+/// Vanilla's `Entity.lerpMotion`
+/// (`ClientPacketListener.handleSetEntityMotion` calls it) is
 /// `this.setDeltaMovement(movement)` — an unconditional **replace**, despite
 /// the "lerp" name — and `LocalPlayer` declares no override, so a
 /// `ClientboundSetEntityMotionPacket` naming our own id (server-applied
@@ -392,8 +392,8 @@ pub fn apply_entity_velocity(
 }
 
 /// Vanilla's `hurtDuration`/`hurtTime` reset value, in ticks —
-/// `LivingEntity.animateHurt` (`LivingEntity.java:1873-1876`) and
-/// `LivingEntity.handleDamageEvent` (`LivingEntity.java:2044-2049`) both write
+/// `LivingEntity.animateHurt` and
+/// `LivingEntity.handleDamageEvent` both write
 /// `hurtDuration = 10; hurtTime = hurtDuration;`.
 const HURT_DURATION_TICKS: u32 = 10;
 
@@ -425,7 +425,7 @@ pub fn apply_entity_damaged(
 /// The same countdown reset as [`apply_entity_damaged`] —
 /// `LivingEntity.animateHurt` writes the identical two fields. The packet's
 /// `yaw` is not carried into the component: vanilla's own override accepts
-/// the parameter and does not store it (`LivingEntity.java:1873`), so there is
+/// the parameter and does not store it, so there is
 /// nothing to lose by not carrying it further here.
 pub fn apply_entity_hurt_animation(
     batch: Res<IngestBatch>,
@@ -612,12 +612,12 @@ pub fn apply_entity_animation(
 }
 
 /// `IngestSet::Apply`: `ClientEvent::EntityPassengersChanged` → [`Passengers`]
-/// on the vehicle and [`Vehicle`] on each rider (issue: Tier 1 item 8).
+/// on the vehicle and [`Vehicle`] on each rider.
 ///
 /// # This was a total island
 ///
-/// `SET_PASSENGERS` decoded correctly at
-/// `crates/protocol/v770/src/adapter.rs:3080` and was round-tripped by
+/// `SET_PASSENGERS` decoded correctly in
+/// `lodestone_v770::adapter::V770Adapter::handle_play_entity` and was round-tripped by
 /// `crates/protocol/v770/tests/entity_events.rs`, and a tree-wide grep for
 /// `EntityPassengersChanged` found **four** hits: the decode, its two tests, and
 /// the `ClientEvent` variant itself. Zero consumers, and — the usual
@@ -720,7 +720,7 @@ pub fn tick_entity_swing(mut entities: Query<&mut AttackSwing>) {
 }
 
 /// `IngestSet::Apply`: the living-entity flags byte of
-/// `ClientEvent::EntityMetadataUpdated` → [`ItemUse`] (issue #57).
+/// `ClientEvent::EntityMetadataUpdated` → [`ItemUse`].
 ///
 /// # Why this is not another arm inside [`apply_entity_metadata`]
 ///
@@ -855,7 +855,7 @@ pub fn apply_entity_metadata(
         if let Some(baby) = metadata.baby {
             entity.insert(Baby(baby));
         }
-        // `TamableAnimal.DATA_FLAGS_ID & 4` (issue #235). Per-entity state —
+        // `TamableAnimal.DATA_FLAGS_ID & 4`. Per-entity state —
         // there can be several tamed wolves at once, each independently tame
         // or not — so this belongs beside `Baby`/`Health` in `ingest`, not in
         // `crate::session`, which carries only the local player's own scalars.
@@ -889,7 +889,7 @@ pub fn apply_entity_metadata(
         if let Some(value) = metadata.experience_orb_value {
             entity.insert(ExperienceOrbValue(value));
         }
-        // The *mob* flags byte (issue #379) — a different byte at a different
+        // The *mob* flags byte — a different byte at a different
         // index from the living-entity one [`apply_entity_item_use`] folds, and
         // the one that actually makes a mob hold a weapon pose. It belongs in this
         // system rather than beside `ItemUse` because it is a plain latched
@@ -910,8 +910,8 @@ pub fn apply_entity_metadata(
     }
 }
 
-/// `IngestSet::Apply`: `ClientEvent::EntityLeashed` → [`Leashed`] (issue
-/// #236). A dedicated system rather than an arm inside
+/// `IngestSet::Apply`: `ClientEvent::EntityLeashed` → [`Leashed`].
+/// A dedicated system rather than an arm inside
 /// [`apply_entity_metadata`] immediately above: `EntityLeashed` decodes from
 /// `SET_ENTITY_LINK`, a wholly different packet from the metadata family
 /// that system's arms all share, so folding it there would blur two
@@ -959,7 +959,7 @@ pub fn apply_entity_leash(batch: Res<IngestBatch>, index: Res<EntityIndex>, mut 
 /// entity carries [`LocalPlayer`]. A `Query` miss (a real mob's metadata, or
 /// an id metadata arrived for before its `Vitals`-bearing session entity
 /// `IngestSet::Apply`: `ClientEvent::EntityMetadataUpdated` → the local player's
-/// own [`crate::session::Vitals::on_fire`] (issue #112), when the event names our
+/// own [`crate::session::Vitals::on_fire`], when the event names our
 /// id.
 ///
 /// The sibling of [`apply_local_player_air_supply`] below, and it exists for the
@@ -974,7 +974,7 @@ pub fn apply_entity_leash(batch: Res<IngestBatch>, index: Res<EntityIndex>, mut 
 /// before `flags` is read, and no amount of correct generic folding can surface
 /// it. A session-scoped fold is the only route.
 ///
-/// Bit 0 is `Entity.FLAG_ONFIRE` (`Entity.java:261`), read through
+/// Bit 0 is `Entity.FLAG_ONFIRE`, read through
 /// [`lodestone_entity::metadata::SharedEntityFlags`] rather than by testing
 /// `& 0x01` inline — the flags byte carries seven other meanings and an inline
 /// mask is the kind of thing that gets copied to the wrong bit later.
@@ -1235,7 +1235,7 @@ impl Plugin for IngestPlugin {
                 apply_local_player_air_supply,
                 apply_local_player_on_fire,
                 // Third reader of the same batch, folding the *living*-entity flags
-                // byte into `ItemUse` (issue #57). A separate system because it
+                // byte into `ItemUse`. A separate system because it
                 // read-modify-writes a tick counter rather than replacing a
                 // component — see its own doc.
                 apply_entity_item_use,
@@ -1590,7 +1590,7 @@ mod tests {
 
     // ---- combat: knockback and the hurt-flash countdown -------------------
 
-    /// Issue #12's knockback half. `ClientEvent::EntityVelocity` naming the
+    /// The knockback half of local-player velocity handling. `ClientEvent::EntityVelocity` naming the
     /// **local player's own** id must overwrite `PhysicsState.velocity`
     /// directly — vanilla's `Entity.lerpMotion` is
     /// `this.setDeltaMovement(movement)`, an unconditional replace, and
@@ -1628,7 +1628,7 @@ mod tests {
         );
     }
 
-    // ---- issue #57: using-item state reaching a component ------------------
+    // ---- using-item state reaching a component ------------------------------
 
     /// **The routing check, and the reason this feature is not an island.**
     /// `SharedState::apply` only forwards events one of the two `handles_event`
@@ -1653,7 +1653,7 @@ mod tests {
         );
     }
 
-    /// The same routing check for the **mob** flags byte (issue #379). It rides
+    /// The same routing check for the **mob** flags byte. It rides
     /// the same `EntityMetadataUpdated` event, so no new arm was needed — which is
     /// exactly why it is asserted: "no change required" is the state in which a
     /// later narrowing of the switch silently deletes a feature, and the switch
@@ -1848,8 +1848,8 @@ mod tests {
     }
 
     /// End-to-end through the **real schedule**: a spawn, then a metadata packet
-    /// carrying `tamed: Some(true)`, produces a [`Tamed`] component (issue
-    /// #235) — the fold `crates/lodestone-render/src/entity.rs`'s
+    /// carrying `tamed: Some(true)`, produces a [`Tamed`] component —
+    /// the fold `crates/lodestone-render/src/entity.rs`'s
     /// `entity_variant_sheet_for` needed a caller for, and
     /// `lodestone-shell/src/entities.rs::extract_entity_draws` now bridges off
     /// this exact component the same way it bridges `Variant`.
@@ -1896,7 +1896,7 @@ mod tests {
     }
 
     /// End-to-end through the **real schedule**: `ClientEvent::EntityLeashed`
-    /// (decoded from `SET_ENTITY_LINK`) folds into [`Leashed`] (issue #236),
+    /// (decoded from `SET_ENTITY_LINK`) folds into [`Leashed`],
     /// covering a fresh attach, a detach, and — the case `handles_event`
     /// alone cannot prove — that `EntityLeashed` is routed to `INGEST` and
     /// therefore reaches this exact system in production, not merely in a
@@ -2113,7 +2113,7 @@ mod tests {
     }
 
     /// Metadata naming our own id folds the on-fire bit into
-    /// [`crate::session::Vitals::on_fire`] (issue #112) — the wiring
+    /// [`crate::session::Vitals::on_fire`] — the wiring
     /// [`apply_local_player_on_fire`] exists for, and the reason it has to exist
     /// at all: the generic `EntityFlags` fold *does* run on our own entity, but
     /// `entity_view()` can never surface it because the local player has no
@@ -2411,7 +2411,7 @@ mod tests {
         assert_eq!(world.get::<HurtTime>(entity).map(|h| h.0), Some(0));
     }
 
-    /// The island this closes (issue #10): a `SwingMainHand` report reaches
+    /// The island this closes: a `SwingMainHand` report reaches
     /// [`AttackSwing`] on the *ingest* entity, and [`tick_entity_swing`] then
     /// carries it through a full swing and back to rest — the same six-tick
     /// arc [`lodestone_entity::pose::EntityPose`] drives for the local player.
@@ -3041,7 +3041,7 @@ mod tests {
             yaw: 0.0,
         }));
         // `EntityAnimation` was the identical shape of island a third time
-        // (issue #10 / `docs/arm-swing-animation.md`): decoded, unit-tested at
+        // (see `docs/arm-swing-animation.md`): decoded, unit-tested at
         // the protocol layer, and reachable from a hermetic `feed()` call, but
         // absent from this `matches!` — so `SharedState::apply` never routed it
         // into `NetIngest` and `apply_entity_animation` never ran in production.
@@ -3049,7 +3049,7 @@ mod tests {
             entity_id: 1,
             action: AnimationAction::SwingMainHand,
         }));
-        // `EntityPassengersChanged` (Tier 1 item 8) was the fifth instance of the
+        // `EntityPassengersChanged` was the fifth instance of the
         // identical island: decoded at `v770`'s `SET_PASSENGERS`, round-tripped by
         // `crates/protocol/v770/tests/entity_events.rs`, and a tree-wide grep for
         // the variant returned exactly **four** hits — the decode, those two tests,
@@ -3069,7 +3069,7 @@ mod tests {
             entity_id: 1,
             block_state_id: 7,
         }));
-        // `EntityLeashed` (issue #236, `SET_ENTITY_LINK`) — per-entity like
+        // `EntityLeashed` (decoded from `SET_ENTITY_LINK`) — per-entity like
         // `FallingBlockState` immediately above, and used to sit in
         // `lodestone_model::event::route`'s "claimed by nothing" block until
         // `apply_entity_leash` existed to claim it.
@@ -3136,7 +3136,7 @@ mod tests {
             "…and something must claim it, or it falls through to the scalar fold \
              that no longer has an arm for it and is silently dropped"
         );
-        // Same shape for `DimensionTypeChanged` (issue #288): folded by
+        // Same shape for `DimensionTypeChanged`: folded by
         // `crate::session::apply_local_player_state` into `ServerDimensionType`,
         // beside `ServerDimension` off the same packet — so *this* module must
         // not claim it, and `session` must.

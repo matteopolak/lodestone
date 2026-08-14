@@ -1,4 +1,4 @@
-//! The permission node system (issues #125 and #127): dotted nodes, wildcards,
+//! The permission node system: dotted nodes, wildcards,
 //! per-node defaults, per-player and per-group grants with negation, vanilla's
 //! five command levels, and a resolver trait a permissions *plugin* can use to
 //! replace the built-in resolution entirely.
@@ -20,7 +20,7 @@
 //! them is the mistake to avoid:
 //!
 //! - **Vanilla 26.2** has a real permission system now — it is no longer the
-//!   bare numeric op level that issue #127's body describes. Read from the
+//!   bare numeric op level of earlier versions. Read from the
 //!   26.2 jar at `.cache/mc/26.2/src/net/minecraft/server/permissions/`:
 //!   `PermissionLevel` is a five-variant enum (`ALL`=0, `MODERATORS`=1,
 //!   `GAMEMASTERS`=2, `ADMINS`=3, `OWNERS`=4) with `isEqualOrHigherThan`;
@@ -45,8 +45,8 @@
 //! wildcard question at all (see the next section).
 //!
 //! 1. **An installed [`PermissionResolver`] wins outright**, if it returns
-//!    `Some`. This is issue #125's "a resolver trait so a permissions *plugin*
-//!    can override the built-in op-level resolver entirely", and it is checked
+//!    `Some`. This is the resolver trait that lets a permissions *plugin*
+//!    override the built-in op-level resolver entirely, and it is checked
 //!    first so a LuckPerms-equivalent really does get the whole decision. A
 //!    resolver returning `None` falls through to everything below, so a plugin
 //!    can also override *selectively*.
@@ -86,8 +86,8 @@
 //! 5. **The node's declared default**, evaluated against op status —
 //!    `PermissionDefault.getValue(boolean op)` from Bukkit, whose four values
 //!    are exactly [`PermissionDefault`]'s: `TRUE`→`true`, `FALSE`→`false`,
-//!    `OP`→`op`, `NOT_OP`→`!op`. Issue #125's body says the default is
-//!    "`true`/`false`/`op`" — **three** values; Bukkit has **four**, and
+//!    `OP`→`op`, `NOT_OP`→`!op`. A three-value description of the default —
+//!    "`true`/`false`/`op`" — misses one: Bukkit has **four**, and
 //!    `NOT_OP` is load-bearing for real plugins (it is how you gate a thing
 //!    *away* from staff). See [`PermissionDefault`].
 //!
@@ -129,18 +129,18 @@
 //! those children into the attachment map when the permission is **set**. That
 //! design cannot answer "does `myplugin.admin.reload` match the `myplugin.*`
 //! this player holds?" for a node nobody declared in advance — which is
-//! precisely the question issue #125 asks for ("wildcard suffix matching").
+//! precisely the "wildcard suffix matching" this module exists to answer.
 //!
 //! So wildcards here are resolved at *check* time, LuckPerms-style, which is
-//! also what almost every real server's authors are actually used to (#125's
-//! own body says "in practice, on almost every real server, a permissions
-//! *plugin* like LuckPerms layered on top"). The consequence to know: a
+//! also what almost every real server's authors are actually used to: in
+//! practice, on almost every real server, a permissions
+//! *plugin* like LuckPerms is layered on top. The consequence to know: a
 //! wildcard grant here matches nodes that no plugin declared, where in bare
 //! Bukkit it would not.
 //!
-//! **Vanilla's built-in resolver denies atoms, and is stricter than issue
-//! #125 claims.** #125 says to ship "a minimal built-in resolver (op =
-//! everything, non-op = only nodes explicitly defaulted true)". Vanilla 26.2's
+//! **Vanilla's built-in resolver denies atoms, and is stricter than "a
+//! minimal built-in resolver (op = everything, non-op = only nodes explicitly
+//! defaulted true)" would be.** Vanilla 26.2's
 //! `LevelBasedPermissionSet.hasPermission` does *not* do that — an
 //! `Atom` permission returns `false` for **every** level except the one
 //! hardcoded case `COMMANDS_ENTITY_SELECTORS` (which requires `GAMEMASTERS`):
@@ -187,14 +187,14 @@
 //!
 //! None — no env vars, no files. [`Permissions::default`] is an empty registry
 //! with no grants and no resolver, which by step 6 means *ops hold every node
-//! and nobody else holds any*: vanilla's op/non-op split, which is #125's
-//! "usable with zero permission plugins installed".
+//! and nobody else holds any*: vanilla's op/non-op split, which keeps the
+//! system usable with zero permission plugins installed.
 //!
 //! ## Dependencies
 //!
 //! `bevy_ecs` for `Resource`, `uuid` for the subject id. Deliberately not
 //! `lodestone-command` — a permission is a string to this module, and the
-//! command tree's per-node gating (issue #122) is the *caller's* join of the
+//! command tree's per-node gating is the *caller's* join of the
 //! two, in [`crate::commands`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -207,8 +207,8 @@ use uuid::Uuid;
 /// `net.minecraft.server.permissions.PermissionLevel` — same variants, same
 /// ids, same `isEqualOrHigherThan`.
 ///
-/// Issue #127's body calls these "four op levels (2-4 for the built-in
-/// commands, plus the `op`/non-op boolean)". There are **five** (0 through 4),
+/// A description of "four op levels (2-4 for the built-in
+/// commands, plus the `op`/non-op boolean)" misses one. There are **five** (0 through 4),
 /// and `ALL`=0 is the level a non-op holds rather than the absence of a level;
 /// `ops.json`'s `level` field is exactly this id
 /// (`ServerOpListEntry`: `PermissionLevel.byId(object.get("level").getAsInt())`).
@@ -303,8 +303,8 @@ pub enum Permission {
     /// has no wildcards.
     Atom(String),
     /// "is this subject at command level `N` or higher" — vanilla's
-    /// `HasCommandLevel`, and issue #127's "is this player at least op level
-    /// N" in its authoritative spelling.
+    /// `HasCommandLevel`, "is this player at least op level
+    /// N" in vanilla's own spelling.
     HasCommandLevel(PermissionLevel),
 }
 
@@ -318,8 +318,8 @@ impl Permission {
 /// Bukkit's `org.bukkit.permissions.PermissionDefault` — what a *declared*
 /// node resolves to when no grant matched.
 ///
-/// All four values, with Bukkit's exact `getValue(boolean op)` table. Issue
-/// #125 lists only three (`true`/`false`/`op`); [`PermissionDefault::NotOp`]
+/// All four values, with Bukkit's exact `getValue(boolean op)` table. A
+/// three-value description (`true`/`false`/`op`) misses one; [`PermissionDefault::NotOp`]
 /// is the fourth and is not decorative — it is how a plugin makes a node that
 /// staff specifically *lack* (a "show the newbie hints" toggle, say).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -568,11 +568,11 @@ pub enum PermissionSubject {
     Console,
 }
 
-/// The per-player and per-group grant store — issue #127's "a per-player and
-/// per-group grant store (in-memory to start)".
+/// The per-player and per-group grant store — a per-player and
+/// per-group grant store, in-memory to start.
 ///
-/// In-memory on purpose: #127 says persistence "is the plugin's own job via
-/// the persistent-data-container issue, not this one".
+/// In-memory on purpose: persistence is the plugin's own job via
+/// a persistent-data-container mechanism, not this module's.
 #[derive(Debug, Default)]
 pub struct PermissionStore {
     subjects: HashMap<Uuid, SubjectPermissions>,
@@ -683,7 +683,7 @@ impl PermissionStore {
     }
 }
 
-/// What each declared node defaults to — issue #125's "a per-node default".
+/// What each declared node defaults to — a per-node default.
 #[derive(Debug, Default)]
 pub struct PermissionRegistry {
     declared: HashMap<String, PermissionDefault>,
@@ -763,9 +763,9 @@ impl PermissionQuery<'_> {
     }
 }
 
-/// The seam issue #125 asks for: "a resolver trait so a permissions *plugin*
+/// The seam this module provides: a resolver trait so a permissions *plugin*
 /// (matching the real-world pattern of delegating to LuckPerms) can override
-/// the built-in op-level resolver entirely".
+/// the built-in op-level resolver entirely.
 ///
 /// Returning `Some(bool)` decides the query outright. Returning `None` falls
 /// through to the built-in order, so a plugin can own only the nodes it cares
@@ -931,7 +931,7 @@ impl Permissions {
         self.check(subject, &Permission::Atom(node.to_string()))
     }
 
-    /// Is this subject at `level` or higher? Issue #127's op-level accessor,
+    /// Is this subject at `level` or higher? The op-level accessor,
     /// expressed through the same resolution order so an installed resolver
     /// can override *this* too — a LuckPerms-equivalent that wants to grant
     /// gamemaster powers by node rather than by op list can.
@@ -1059,7 +1059,8 @@ mod tests {
 
     /// Bukkit's `PermissionDefault.getValue(boolean op)` table, all four
     /// values against both op states. Eight cells, because the interesting
-    /// value (`NotOp`) is the one issue #125's three-value description omits.
+    /// value (`NotOp`) is the one a three-value description of the default
+    /// omits.
     #[test]
     fn permission_default_matches_bukkit_get_value_table() {
         let table = [
