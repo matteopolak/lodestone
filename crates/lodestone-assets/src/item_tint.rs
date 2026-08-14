@@ -194,13 +194,26 @@ fn strip_ns(kind: &str) -> &str {
 ///
 /// # Which of these can ever be live here
 ///
-/// Only `dye`. [`ItemComponents`] models `dyed_color` and none of
-/// `potion_contents`, `map_color`, `firework_explosion` or `custom_model_data`,
-/// so those four are reported [`TintProvenance::Unmodeled`] and resolve to the
-/// definition's `default`. `team` needs a `LivingEntity` holder that an item
-/// icon does not have — vanilla itself takes the default when `owner == null`
+/// `dye` and `potion`. [`ItemComponents`] models `dyed_color` and
+/// `potion_color` — the latter is not the raw `minecraft:potion_contents`
+/// patch but its *already-mixed* result
+/// (`lodestone_data::potion::potion_color`, folded in once at decode time
+/// rather than on every icon draw) — and neither `map_color`,
+/// `firework_explosion` nor `custom_model_data`, so those three are reported
+/// [`TintProvenance::Unmodeled`] and resolve to the definition's `default`.
+/// `team` needs a `LivingEntity` holder that an item icon does not have —
+/// vanilla itself takes the default when `owner == null`
 /// (`TeamColor.calculate`), so [`TintProvenance::Default`] is the honest label
 /// there rather than `Unmodeled`.
+///
+/// **Modeled is not the same as drawn.** The one caller in the shell that
+/// draws item icons (`lodestone_shell::hud::item_icon::sprite_layer_tint`)
+/// still resolves every tint against `ItemTintContext::default()` — no stack
+/// in hand at all — which is a pre-existing gap this module's own history
+/// already names for `dye` and that `potion` now shares rather than
+/// introduces: the *resolver* being correct does not mean a drawn creative-menu
+/// potion icon is tinted yet, only that it will be the moment a caller passes
+/// real components through.
 ///
 /// **`minecraft:spawn_egg` is deliberately absent, and that is not an
 /// omission.** 26.2 has no spawn-egg tint source: `SpawnEggItem`'s whole class
@@ -259,8 +272,15 @@ pub fn resolve(source: &TintSource, ctx: &ItemTintContext<'_>) -> Option<Resolve
         // opaque'd. We do not model that component.
         "firework" => tint(default?, TintProvenance::Unmodeled),
 
-        // `Potion.calculate`: `ARGB.opaque(...)` on both branches.
-        "potion" => tint(opaque(default?), TintProvenance::Unmodeled),
+        // `Potion.calculate`: `ARGB.opaque(contents.getColorOr(defaultColor))`
+        // when present, `ARGB.opaque(defaultColor)` when absent — both forced.
+        // `potion_color` is already opaque by construction
+        // (`lodestone_data::potion::potion_color` forces alpha itself), so no
+        // second `opaque()` call is needed on the `Some` branch.
+        "potion" => match ctx.components.and_then(|c| c.potion_color) {
+            Some(argb) => tint(argb, TintProvenance::Component),
+            None => tint(opaque(default?), TintProvenance::Default),
+        },
 
         // `MapColor.calculate`: `ARGB.opaque(...)` on both branches.
         "map_color" => tint(opaque(default?), TintProvenance::Unmodeled),
@@ -348,12 +368,11 @@ mod tests {
         assert_eq!(defaults::GRASS_COLORMAP_FALLBACK as i32, -65_281);
     }
 
-    /// The four unmodeled-component sources resolve to their definition's
+    /// The three still-unmodeled sources resolve to their definition's
     /// `default`, and say so.
     #[test]
     fn unmodeled_components_fall_back_to_the_definition_default() {
         for (kind, default, expect) in [
-            ("minecraft:potion", -13_083_194, defaults::POTION_BASE),
             ("minecraft:map_color", 4_603_950, defaults::MAP),
             ("minecraft:custom_model_data", 0x0012_3456, 0xFF12_3456),
         ] {
@@ -362,6 +381,43 @@ mod tests {
             assert_eq!(r.argb, expect, "{kind}");
             assert_eq!(r.provenance, TintProvenance::Unmodeled, "{kind}");
         }
+    }
+
+    /// `potion` with no components in context (the majority case today — see
+    /// `resolve`'s "modeled is not the same as drawn" doc) resolves to the
+    /// definition's `default` and reports `Default`, not `Unmodeled` — the
+    /// component genuinely is modeled now, so a missing stack means "no potion
+    /// in hand", not "this build cannot decode it".
+    #[test]
+    fn potion_with_no_stack_in_context_is_default_not_unmodeled() {
+        let r = resolve(
+            &src("minecraft:potion", Some(-13_083_194)),
+            &ItemTintContext::default(),
+        )
+        .expect("a source with a default always resolves");
+        assert_eq!(r.argb, defaults::POTION_BASE);
+        assert_eq!(r.provenance, TintProvenance::Default);
+    }
+
+    /// `potion` reads the *pre-mixed* `potion_color` component field, the one
+    /// real live path this source has — mirroring `dye_reads_the_modeled_dyed_color_component`
+    /// below.
+    #[test]
+    fn potion_reads_the_modeled_potion_color_component() {
+        let components = ItemComponents {
+            potion_color: Some(0xFF12_3456),
+            ..ItemComponents::default()
+        };
+        let r = resolve(
+            &src("minecraft:potion", Some(-13_083_194)),
+            &ItemTintContext {
+                components: Some(&components),
+                grass_colormap: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(r.argb, 0xFF12_3456);
+        assert_eq!(r.provenance, TintProvenance::Component);
     }
 
     /// `firework` is the one unmodeled source whose fallback is **not** opaque'd
