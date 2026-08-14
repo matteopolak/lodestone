@@ -653,7 +653,10 @@ impl VanillaFont {
     ) -> f32 {
         let cp = ch as u32;
         let base_r = self.raster.raster(cp);
-        let advance = match base_r {
+        // Matches by reference (not `base_r` by value): `GlyphRaster` is not
+        // `Copy`, and `base_r` is matched again below to draw the glyph, so
+        // moving it here would make that second match a use-after-move.
+        let advance = match &base_r {
             Some(r) => r.advance(),
             None if self.raster.font().contains(cp) => {
                 self.raster.advance(cp).unwrap_or(MISSING_ADVANCE)
