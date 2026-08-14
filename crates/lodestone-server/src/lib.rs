@@ -258,6 +258,13 @@ mod protocol;
 pub mod query;
 mod random_tick;
 mod redstone;
+/// `docs/plans/redstone-execution-model.md`'s U1: structural counters through
+/// the redstone notification/reaction/scheduling path, feature-gated behind
+/// `redstone-counters` (default off) — see this module's own doc comment.
+/// `pub`, matching `lodestone-worldgen-core::counters`'s own visibility: a
+/// future measurement harness (U6's bench, or a `tests/` gate) reads
+/// `snapshot()`/`reset()` from outside this crate.
+pub mod redstone_counters;
 mod redstone_diode;
 mod redstone_dispenser;
 /// Issue #315/#317's end-to-end gates: repeater delay/locking, comparator

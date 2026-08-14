@@ -9,6 +9,16 @@ description = "Lodestone integrated server (singleplayer + open-to-LAN) over the
 [lints]
 workspace = true
 
+[features]
+default = []
+# Structural counters through the redstone notification/reaction/scheduling
+# path — the instrument `docs/plans/redstone-execution-model.md`'s U1 unit
+# specifies. See `src/redstone_counters.rs`'s own module doc. Default off,
+# additive-only (atomics plus hook bodies), same guarantee
+# `lodestone-worldgen-core`'s `gen-counters` makes: enabling it cannot change
+# any propagation or scheduling decision, only what gets counted.
+redstone-counters = []
+
 [dependencies]
 # The portable clock. **`web-time`'s non-wasm arm is literally `pub use std::time::*`,
 # so on native this IS `std::time` — same types, not newtypes — and native behaviour is

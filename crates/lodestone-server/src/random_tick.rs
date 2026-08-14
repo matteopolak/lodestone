@@ -1541,6 +1541,7 @@ pub(crate) fn propagate_and_react(
     block_ticks: &mut ScheduledTickQueue<String>,
     current_tick: u64,
 ) -> Vec<RandomTickEvent> {
+    crate::redstone_counters::begin_drain();
     let mut events = Vec::new();
     let propagator = NeighborPropagator::default();
     let origin = BlockPos::new(x, y, z);
@@ -1567,6 +1568,7 @@ pub(crate) fn propagate_and_react(
             react_to_notification(column, min_x, min_z, n, block_ticks, current_tick, &mut events)
         });
     }
+    crate::redstone_counters::end_drain();
     events
 }
 
@@ -1592,6 +1594,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
+        crate::redstone_counters::bump_notification();
         let state = column.block_state(tlx, n.pos.y, tlz).to_string();
 
         // 1. Gravity — first, matching the existing precedent.
@@ -1653,6 +1656,8 @@ fn react_to_notification(
 
         // 2. Redstone dust (#314).
         if redstone::is_wire(&state) {
+            crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Dust);
+            crate::redstone_counters::bump_wire_recompute();
             let new_power = redstone_wire::calculate_target_strength(&redstone::make_lookup(column, min_x, min_z), n.pos);
             let old_power = redstone::wire_power(&state);
             if new_power != old_power {
@@ -1666,22 +1671,27 @@ fn react_to_notification(
 
         // 3a. Redstone torches (#314).
         if redstone::is_torch(&state) {
+            crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Torch);
             let has_signal = redstone_torch::has_neighbor_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, &state);
-            if redstone_torch::should_schedule_check(&state, has_signal)
-                && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_TORCH.to_string())
-            {
-                block_ticks.schedule(
-                    (n.pos.x, n.pos.y, n.pos.z),
-                    redstone::TICK_TORCH.to_string(),
-                    current_tick + 2,
-                    TickPriority::Normal,
-                );
+            if redstone_torch::should_schedule_check(&state, has_signal) {
+                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_TORCH.to_string()) {
+                    crate::redstone_counters::bump_schedule_deduped();
+                } else {
+                    crate::redstone_counters::bump_schedule_requested();
+                    block_ticks.schedule(
+                        (n.pos.x, n.pos.y, n.pos.z),
+                        redstone::TICK_TORCH.to_string(),
+                        current_tick + 2,
+                        TickPriority::Normal,
+                    );
+                }
             }
             return Vec::new();
         }
 
         // 3b. Repeaters (#315).
         if redstone::is_repeater(&state) {
+            crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Repeater);
             let facing = redstone::diode_facing(&state);
             let recomputed_lock = redstone_diode::recompute_locked(&redstone::make_lookup(column, min_x, min_z), n.pos, &state);
             if let Some(new_state) = recomputed_lock {
@@ -1690,22 +1700,25 @@ fn react_to_notification(
             }
             let state_now = column.block_state(tlx, n.pos.y, tlz).to_string();
             let should_on = redstone_diode::repeater_should_turn_on(&redstone::make_lookup(column, min_x, min_z), n.pos, facing);
-            if redstone_diode::should_schedule_repeater_check(&state_now, should_on)
-                && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_REPEATER.to_string())
-            {
-                let priority = redstone_diode::repeater_schedule_priority(
-                    &redstone::make_lookup(column, min_x, min_z),
-                    n.pos,
-                    facing,
-                    redstone::diode_powered(&state_now),
-                );
-                let delay = redstone_diode::repeater_delay(&state_now);
-                block_ticks.schedule(
-                    (n.pos.x, n.pos.y, n.pos.z),
-                    redstone::TICK_REPEATER.to_string(),
-                    current_tick + u64::from(delay),
-                    priority,
-                );
+            if redstone_diode::should_schedule_repeater_check(&state_now, should_on) {
+                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_REPEATER.to_string()) {
+                    crate::redstone_counters::bump_schedule_deduped();
+                } else {
+                    crate::redstone_counters::bump_schedule_requested();
+                    let priority = redstone_diode::repeater_schedule_priority(
+                        &redstone::make_lookup(column, min_x, min_z),
+                        n.pos,
+                        facing,
+                        redstone::diode_powered(&state_now),
+                    );
+                    let delay = redstone_diode::repeater_delay(&state_now);
+                    block_ticks.schedule(
+                        (n.pos.x, n.pos.y, n.pos.z),
+                        redstone::TICK_REPEATER.to_string(),
+                        current_tick + u64::from(delay),
+                        priority,
+                    );
+                }
             }
             return Vec::new();
         }
@@ -1838,19 +1851,23 @@ fn react_to_notification(
 
         // 3c. Comparators (#315).
         if redstone::is_comparator(&state) {
+            crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Comparator);
             let facing = redstone::diode_facing(&state);
             let input = redstone::input_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, facing);
             let side = redstone::alternate_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, facing, false);
-            if redstone_diode::should_schedule_comparator_check(&state, input, side)
-                && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_COMPARATOR.to_string())
-            {
-                let priority = redstone_diode::comparator_schedule_priority(&redstone::make_lookup(column, min_x, min_z), n.pos, facing);
-                block_ticks.schedule(
-                    (n.pos.x, n.pos.y, n.pos.z),
-                    redstone::TICK_COMPARATOR.to_string(),
-                    current_tick + 2,
-                    priority,
-                );
+            if redstone_diode::should_schedule_comparator_check(&state, input, side) {
+                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_COMPARATOR.to_string()) {
+                    crate::redstone_counters::bump_schedule_deduped();
+                } else {
+                    crate::redstone_counters::bump_schedule_requested();
+                    let priority = redstone_diode::comparator_schedule_priority(&redstone::make_lookup(column, min_x, min_z), n.pos, facing);
+                    block_ticks.schedule(
+                        (n.pos.x, n.pos.y, n.pos.z),
+                        redstone::TICK_COMPARATOR.to_string(),
+                        current_tick + 2,
+                        priority,
+                    );
+                }
             }
             return Vec::new();
         }
@@ -1888,17 +1905,20 @@ fn react_to_notification(
 
         // 3d. Observers (#317).
         if redstone::is_observer(&state) {
+            crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Observer);
             let watch = redstone_observer::watch_direction(&state);
-            if n.from == watch
-                && redstone_observer::should_start_signal(&state)
-                && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_OBSERVER.to_string())
-            {
-                block_ticks.schedule(
-                    (n.pos.x, n.pos.y, n.pos.z),
-                    redstone::TICK_OBSERVER.to_string(),
-                    current_tick + 2,
-                    TickPriority::Normal,
-                );
+            if n.from == watch && redstone_observer::should_start_signal(&state) {
+                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_OBSERVER.to_string()) {
+                    crate::redstone_counters::bump_schedule_deduped();
+                } else {
+                    crate::redstone_counters::bump_schedule_requested();
+                    block_ticks.schedule(
+                        (n.pos.x, n.pos.y, n.pos.z),
+                        redstone::TICK_OBSERVER.to_string(),
+                        current_tick + 2,
+                        TickPriority::Normal,
+                    );
+                }
             }
             return Vec::new();
         }
