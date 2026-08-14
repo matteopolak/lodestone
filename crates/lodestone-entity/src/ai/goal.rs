@@ -137,7 +137,7 @@ pub trait Goal: Send {
 /// Returned by [`GoalSelector::add`] and consumed by
 /// [`GoalSelector::remove`]. It exists because vanilla identifies a goal for
 /// removal by *object identity* — `removeGoal(this.bowGoal)`
-/// (`ai/goal/GoalSelector.java:42-44`, `removeAllGoals(goal -> goal == toRemove)`)
+/// (`GoalSelector.removeGoal`, which delegates to `GoalSelector.removeAllGoals`)
 /// — and a `Box<dyn Goal>` moved into the selector has no identity the caller
 /// can still name. A positional index will not do either: [`remove`] shifts
 /// every later index down, so an index captured before a removal silently names
@@ -223,20 +223,18 @@ impl GoalSelector {
 
     /// Removes the goal `id` names, stopping it first if it is running.
     ///
-    /// Returns whether a goal was found. Mirrors vanilla `removeGoal`
-    /// (`ai/goal/GoalSelector.java:42-44`), which delegates to `removeAllGoals`
-    /// (`:32-40`) — note that vanilla stops a *running* match **before**
-    /// dropping it, so the goal's `stop` hook always runs and the flag it held
-    /// is released. That is why this takes a `mob`: our `Goal::stop` needs the
-    /// controller vanilla's parameterless `Goal::stop` reads off the mob field.
+    /// Returns whether a goal was found. Mirrors vanilla `GoalSelector.removeGoal`,
+    /// which delegates to `GoalSelector.removeAllGoals` — note that vanilla stops
+    /// a *running* match **before** dropping it, so the goal's `stop` hook always
+    /// runs and the flag it held is released. That is why this takes a `mob`:
+    /// our `Goal::stop` needs the controller vanilla's parameterless `Goal::stop`
+    /// reads off the mob field.
     ///
-    /// This exists for vanilla's runtime goal swap. `AbstractSkeleton`
+    /// This exists for vanilla's runtime goal swap. `AbstractSkeleton.reassessWeaponGoal`
     /// removes *both* its melee and bow goals and re-adds exactly one at
-    /// priority 4 every time its weapon changes
-    /// (`monster/skeleton/AbstractSkeleton.java:132-146`,
-    /// `reassessWeaponGoal()`, re-added at `:144`/`:146`), which is
-    /// inexpressible with `add`/`disable` alone: `disable` is per-[`Flag`] and
-    /// would take out every MOVE goal the mob has, not one of them.
+    /// priority 4 every time its weapon changes, which is inexpressible with
+    /// `add`/`disable` alone: `disable` is per-[`Flag`] and would take out
+    /// every MOVE goal the mob has, not one of them.
     ///
     /// Removal shifts every later goal's *index* down by one, so
     /// [`running_indices`](Self::running_indices) and
@@ -390,11 +388,11 @@ impl GoalSelector {
 ///
 /// # This type has no production user, deliberately
 ///
-/// `lodestone_server::mobs::SimMob` holds **one** [`GoalSelector`], and issue
-/// #225's plan unit A3 resolved that fork in favour of keeping it that way
-/// rather than adopting this type. The reasoning, because "there is an unused
-/// type modelling the thing we do by hand" reads like an island to fix and is
-/// not one:
+/// `lodestone_server::mobs::SimMob` holds **one** [`GoalSelector`], and a plan
+/// unit resolved that fork in favour of keeping it that way rather than
+/// adopting this type. The reasoning, because "there is an unused type
+/// modelling the thing we do by hand" reads like an island to fix and is not
+/// one:
 ///
 /// * **Two selectors and one selector are observationally equivalent here, for a
 ///   checkable reason.** A selector's priority number is only ever compared
@@ -598,12 +596,12 @@ mod tests {
 
     // -- `remove` ------------------------------------------------------------
     //
-    // These gate the capability `AbstractSkeleton.reassessWeaponGoal()`
-    // (`monster/skeleton/AbstractSkeleton.java:132-146`) needs. The weak version
-    // of this test asserts `len()` shrank, which proves nothing about the
-    // *scheduler*: a goal can be gone from the collection and still have been
-    // the last thing to hold a flag, and a goal can be present and never run.
-    // So both gates below observe scheduling, not membership.
+    // These gate the capability `AbstractSkeleton.reassessWeaponGoal` needs.
+    // The weak version of this test asserts `len()` shrank, which proves
+    // nothing about the *scheduler*: a goal can be gone from the collection
+    // and still have been the last thing to hold a flag, and a goal can be
+    // present and never run. So both gates below observe scheduling, not
+    // membership.
 
     /// A goal whose lifecycle counters live outside the `Box`, so they are still
     /// readable after the selector has dropped the goal.
@@ -680,8 +678,8 @@ mod tests {
 
     /// The other half: the removed goal must stop *running* — its `tick` is
     /// never invoked again and its `stop` hook fired exactly once, as vanilla's
-    /// `removeAllGoals` guarantees (`GoalSelector.java:32-40`). Counters live
-    /// outside the box so they survive the drop.
+    /// `GoalSelector.removeAllGoals` guarantees. Counters live outside the box
+    /// so they survive the drop.
     #[test]
     fn remove_stops_the_goal_and_never_ticks_it_again() {
         let mut mob = DummyMob;
