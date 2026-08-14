@@ -6,9 +6,11 @@ The representation this codebase uses to name a registry entry — a block, an
 item, an entity type — in memory and in generated tables. The answer is a
 **generated enum whose discriminant is the registry id**, with the plugin case
 kept in a separate wrapper type so it costs the built-in path nothing.
-`lodestone_data::block::Block` is the first and, so far, only registry converted;
-this document records the decision, what was rejected, what was measured, and the
-order the remaining registries should follow.
+`lodestone_data::block::Block` was the first registry converted;
+`lodestone_data::item::Item` and `lodestone_data::entity_type::EntityType` are
+Stage 1, landed the same way. This document records the decision, what was
+rejected, what was measured, and the order the remaining registries should
+follow.
 
 ## How it works
 
@@ -39,6 +41,49 @@ Three properties carry the design, in the order they mattered:
    storage in this crate** — `CustomBlockId` is an opaque handle into a registry
    the host owns — so an application with no plugins links zero bytes of
    interner.
+
+### `Item` and `EntityType`: the same shape, two different provenances
+
+Both mirror `Block` exactly — `#[repr(u16)]`/`#[repr(u8)]` enum with explicit
+discriminants, a `*Ref` wrapper (`ItemRef`, `EntityTypeRef`) for the plugin
+case, no `Custom` variant, not `#[non_exhaustive]` — but each is generated
+from a **different** committed JVM dump than `Block`'s, because
+`tests/support/tool_jvm.txt` (the dump `generate_block_enum` reads) carries
+only block data:
+
+* **`Item`** (`crates/lodestone-data/src/generated/item_enum.rs`,
+  `tests/item_enum.rs`) is generated from
+  `tests/support/item_prototype_jvm.txt` — the dump `ItemPrototypeOracle.java`
+  already produces for `item_prototypes.rs`, read here for its `id`/`name`
+  columns only. `tests/item_prototypes.rs`'s
+  `dump_ids_and_names_match_the_registries_json_table` had already
+  cross-checked that dump's id/name pairing against Mojang's own
+  `registries.json` (the source of the pre-existing `items::ITEM_NAMES`
+  table), so the two independently produced artifacts agreed before this enum
+  ever existed. `Item::name()` reads `generated_items::ITEM_NAMES` rather than
+  duplicating the 1,537 strings a second time — the same trick `Block::name()`
+  plays against `block_registry.rs`'s `BLOCK_REGISTRY_NAMES`.
+* **`EntityType`** (`crates/lodestone-data/src/generated/entity_type_enum.rs`,
+  `tests/entity_type_enum.rs`) is generated from
+  `tests/support/entity_census_jvm.txt` — `EntityCensusOracle.java`'s dump for
+  `entity_census.rs`/`entity_dimensions.rs`, again read for `id`/`name` only.
+  158 entries fit a `u8`, the one Stage 1 registry small enough for it (`Block`
+  is 1,196, `Item` is 1,537). `EntityType::name()` reads
+  `generated_entity_types::ENTITY_TYPE_NAMES`, mirroring `Item::name()`.
+
+Neither generated file carries a default-state-shaped table: an item and an
+entity type have no analogue of a block state, so — unlike `block_enum.rs`'s
+`DEFAULT_STATE` — the generated files here hold only the enum and the two
+id/name index tables (`*_BY_REGISTRY_ID`, `REGISTRY_IDS_BY_NAME`).
+
+One real consumer was migrated per registry, in `lodestone-data` only, mirroring
+`StateId::block()`'s role for `Block`: `item_prototypes::prototype_for(Item)`
+and `entity_dimensions::base_dimensions_for(EntityType)` are infallible
+siblings of the existing `i32`-keyed lookups, each with a test asserting
+agreement against the untyped form for every registry entry. `Item` also
+unblocks `tools::ITEM_TOOLS` (Stage 2's `CrossReference` debt row in
+`tests/generated_string_columns.rs`) — that conversion itself is Stage 2 work
+and was not done here; the debt count is still 4.
 
 ### Block versus block state
 
@@ -183,13 +228,12 @@ sweep done opportunistically as files are touched for other reasons. A mass swee
 is maximally destructive with many agents writing concurrently and nearly free
 once the types and generators are right, so it is explicitly **not** scheduled.
 
-**Stage 1 — the two remaining large registries (can run concurrently with each
-other).** `Item` (1,537 variants) and `EntityType` (158). Both are the same
-shape as `Block` and both were verified derivable: all `minecraft:`, all inside
-`[a-z0-9_]`, no digit-leading paths, no camel-case collisions. Each is
-additive — a new generated module plus accessors — so neither breaks a held
-crate. `Item` should land first: it unblocks `tools::ITEM_TOOLS`, which is keyed
-by item name today.
+**Stage 1 — done.** `Item` (1,537 variants) and `EntityType` (158) landed the
+same shape as `Block`: additive, no held crate touched, one real
+in-crate consumer each. See "`Item` and `EntityType`: the same shape, two
+different provenances" above for which JVM dump backs each and why neither is
+`tool_jvm.txt`. `Item` now exists, which unblocks `tools::ITEM_TOOLS` (Stage 2,
+below) — that conversion itself has not happened yet.
 
 **Stage 2 — the four debt columns, one per registry, each independent.** In
 size order: `block_states::BLOCK_NAMES` (a second, name-sorted copy of the block

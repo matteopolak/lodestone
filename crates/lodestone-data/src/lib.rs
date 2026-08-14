@@ -60,10 +60,14 @@ pub(crate) mod generated_data_component_types;
 pub(crate) mod generated_entity_census;
 #[path = "generated/entity_dimensions.rs"]
 pub(crate) mod generated_entity_dimensions;
+#[path = "generated/entity_type_enum.rs"]
+pub(crate) mod generated_entity_type_enum;
 #[path = "generated/entity_types.rs"]
 pub(crate) mod generated_entity_types;
 #[path = "generated/hardness.rs"]
 pub(crate) mod generated_hardness;
+#[path = "generated/item_enum.rs"]
+pub(crate) mod generated_item_enum;
 #[path = "generated/item_prototypes.rs"]
 pub(crate) mod generated_item_prototypes;
 #[path = "generated/items.rs"]
@@ -104,8 +108,10 @@ pub mod data_component_types;
 pub mod entity_census;
 pub mod entity_disguise;
 pub mod entity_dimensions;
+pub mod entity_type;
 pub mod entity_types;
 pub mod hardness;
+pub mod item;
 pub mod item_prototypes;
 pub mod items;
 pub mod light_props;
