@@ -60,8 +60,10 @@ model; the bell body/rim; and the shulker box — see [Shulker box](#shulker-box
 lectern, the campfire and the enchanting table, so **12 of 26** — wall banners share the `BANNER`
 registration with standing ones. **Piston head makes 13** (see [Piston head](#piston-head)), and it is
 the first entry landed through the *moving-block-model* seam rather than through `EntityPipeline` or
-the item path. The rest are still absent. Picking the next few should read this list, not the original
-issue body.
+the item path. **Decorated pot makes 14** (see [Decorated pot](#decorated-pot)), through the fifth
+destination this doc has needed: a render pass proven reachable with no live per-frame install yet,
+the same stage bell passed through before its own install landed. The rest are still absent. Picking
+the next few should read this list, not the original issue body.
 
 **The registration list had two entries this document's "what is not built" section never mentioned
 either way: `LECTERN` (`LecternRenderer`, the open book on a lectern) and `CONDUIT` (`ConduitRenderer`,
@@ -90,8 +92,10 @@ Today: chests (single, double left, double right; every material; the lid animat
 geometry (five of vanilla's seven types), the bell body/rim (see [Bell](#bell)), the shulker box (see
 [Shulker box](#shulker-box)), standing/wall/hanging sign text, the banner with its pattern layers, the
 lectern's book (see [Lectern](#lectern)), the enchanting table's floating book (see
-[Enchanting table](#enchanting-table)) and the food on a campfire (see [Campfire](#campfire), which is
-the one type here that draws no cuboid rig at all).
+[Enchanting table](#enchanting-table)), the food on a campfire (see [Campfire](#campfire), which is
+the one type here that draws no cuboid rig at all), the piston head (see [Piston head](#piston-head),
+which draws whole moving *block* models rather than a cuboid rig) and the decorated pot's base plus
+its four independently-sherded sides (see [Decorated pot](#decorated-pot)).
 
 This is not a nice-to-have layer over an existing box. A 26.2 chest has **no block model at all** —
 `assets/minecraft/blockstates/chest.json` points at `block/chest`, and that file is verbatim:
@@ -1358,6 +1362,116 @@ Also unbuilt: vanilla's `getViewDistance()` for this renderer is **68**, not the
 blocks away is culled a little early. Left as-is deliberately rather than silently: a second
 per-renderer distance constant for four blocks of a two-tick animation is not worth the second table.
 
+## Decorated pot
+
+The one type in this module whose blocker was never "port the geometry" — `DecoratedPotRenderer.submit`
+draws **seven** `submitModelPart` calls per pot (`.cache/mc/26.2/client-src/net/minecraft/client/
+renderer/blockentity/DecoratedPotRenderer.java`): the neck/top/bottom sharing one sheet, then
+front/back/left/right, **each with its own sprite** resolved from the block entity's NBT `sherds`. This
+module's batch key had always been one texture per *instance*, and issue #23's own body named the exact
+consequence: "needs up to four independently textured sprites per instance."
+
+### The banner's mechanism does not generalise here, and it is worth saying why
+
+`resolve_banner` solves a **different** shape of the same-sounding problem. A banner stacks up to
+sixteen *tinted masks* over **one** shared mesh (the flag) — same geometry, same base sprite, only the
+tint and the mask differ per layer — which is precisely what the plain `(model, texture)` batcher cannot
+express on a single instance, so it needs a second, unbatched, alpha-blended draw list
+(`BannerLayerDraw`/`BannerInstances::layers`, drawn through `EntityPipeline::banner_layer_pipeline`; see
+[Wall banners](#wall-banners) and `docs/banner-shield-patterns.md`).
+
+A decorated pot's four sides are the opposite shape: **distinct diffuse textures on distinct quads**,
+never composited or blended together — exactly what the ordinary opaque batcher was already built for,
+the same way two chests in different materials batch into two separate groups today. So this needed
+**no new mechanism, no bind-group change and no shader change**. The model shader's own 4-bind-group
+floor (`CLAUDE.md`'s rendering-constraints section) was never at risk, because nothing here touches a
+bind group at all.
+
+### The decomposition: a base instance plus four side instances
+
+`BlockEntityModelSet::resolve_decorated_pot` returns **five** ordinary `BlockEntityInstance`s — one
+`decorated_pot_base` (neck + top + bottom, 32×32 sheet, `entity/decorated_pot/decorated_pot_base`) and
+four single-quad side models (`decorated_pot_side_{front,back,left,right}`, 16×16 sheet), each carrying
+its own resolved texture. This is exactly what this doc's own "What is not built" section predicted
+before any of the geometry existed: "it would need decomposing into a plain base plus up to four small
+per-side instances, not a straightforward follow-on to chest/skull."
+
+**Four models, not one reused four times.** `DecoratedPotRenderer.createSidesLayer()` bakes all four
+sides as named children of one `MeshDefinition`, each with its own fixed `PartPose` —
+`offsetAndRotation(1, 16, 15, PI, 0, 0)` for `front`, `(15, 16, 1, 0, 0, PI)` for `back`, `(1, 16, 1, 0,
+-PI/2, PI)` for `left`, `(15, 16, 15, 0, PI/2, PI)` for `right` — none of them a yaw step around the
+block's own facing (that rotation is applied once, by [`decorated_pot_placement_matrix`], before any of
+these). And because a [`BlockEntityInstance`] carries exactly one texture for every part it draws,
+putting all four sides in one model (mirroring the jar's own grouping) would force all four sherds back
+onto one sheet — the very limitation this decomposition exists to route around. Each side is instead its
+own `EntityModelDef` with the pose baked directly into the cube's placement, so each can be its own
+instance with its own texture.
+
+Every side model's one box (`sidePlane = texOffs(1, 0).addBox(0, 0, 0, 14, 16, 0,
+EnumSet.of(Direction.NORTH))`) emits **only the `North` face** — `visible_faces` set to that single index
+rather than the usual all-six default, because the box has zero depth and the other five faces are
+degenerate or coincident. `decorated_pot_side_models_emit_exactly_one_quad_the_north_face_only`
+(`lodestone-assets`) holds this down: a mesher that dropped the restriction would still bake *something*
+and pass any "does this model have geometry" check.
+
+### Placement: centre pivot, and the jar's own extra `180°` term
+
+`decorated_pot_placement_matrix` ports `DecoratedPotRenderer.createModelTransformation`:
+`rotateAround(Axis.YP.rotationDegrees(180.0F - entityDirection.toYRot()), 0.5F, 0.5F, 0.5F)`. **Not**
+[`block_entity_placement_matrix`] with a yaw — the pivot is the block's *centre* (like
+[`shulker_placement_matrix`]'s, not chest's floor pivot), and the angle carries the jar's own `180°` term
+chest does not. Reusing the chest matrix draws every pot rotated a half-turn from its real facing, which
+still looks like a plausible pot from most angles — the kind of bug a screenshot does not catch.
+
+### Sherds: a 23-entry table, transcribed from the registration, not guessed from names
+
+`decorated_pot_pattern_texture_stem` maps a stored sherd's item path (`"angler_pottery_sherd"`, …) to its
+pattern's own asset id (`entity/decorated_pot/angler_pottery_pattern`), transcribed from
+`DecoratedPotPatterns.java`'s `bootstrap` — the pattern's *registered* asset id, not assumed from the
+sherd's own name (they happen to share a `<name>_pottery_sherd`/`<name>_pottery_pattern` stem, which is a
+jar convention this reads off the real registration rather than takes on faith). An absent side, or an
+item path this table does not recognise, falls back to `DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM`
+(`entity/decorated_pot/decorated_pot_side`) — `DecoratedPotRenderer.getSideSprite`'s own fallback for a
+`null` map lookup. Every side always resolves to an instance, decorated or not: vanilla's `submit` calls
+all four `submitModelPart`s unconditionally, so an undecorated pot is four default-textured sides, never
+three sides plus a hole.
+
+### The discriminating test
+
+`four_distinct_sherds_produce_four_distinct_textures_on_the_right_faces` (`lodestone-render`) feeds four
+**pairwise-distinct** sherds — never reusing one sherd across two sides, the discipline `CLAUDE.md`
+requires of adjacent same-typed fields — and checks the resulting texture **by the named model**
+(`DECORATED_POT_SIDE_FRONT` etc.), not by position. A resolver that transposed two sides (say, wiring
+`front` to `DECORATED_POT_SIDE_BACK`'s texture) would still produce "four distinct textures somewhere",
+which is why the check has to be keyed on which named side each one landed on, not merely on the set of
+textures produced.
+
+### Status: the render pass is proven reachable; the live install is not done
+
+`resolve_decorated_pot`, the geometry, the texture table and `DecoratedPotSource`/
+`set_decorated_pot_source` are all wired through the ordinary `prepare_block_entities` path — the pot
+draws through the same `RenderState::set_decorated_pot_source` + real GPU draw
+`decorated_pot_block_entity_pixels.rs` calls directly, the same shape `bell_block_entity_pixels.rs` used
+before bell's own live install landed (see [Bell](#bell)'s history).
+
+**Not done: the live per-frame install** — a `Sim::decorated_pot_source` call site in `sim.rs`, installed
+from `app.rs` the way `Sim::bell_source`/`Sim::shulker_source` are. Neither file was touched landing this,
+so a real client does not yet draw a decorated pot it walks past; only the pass itself, and its GPU pixel
+gates, prove it is correct and reachable once that source exists. This is the same gap this doc's Bell
+section once carried and later closed — see that section's own history for the shape the fix takes.
+
+**Not done either: the hit-wobble animation.** `DecoratedPotBlockEntity`'s wobble is a `BLOCK_EVENT` this
+workspace does not decode for pots (chest's own `b0 == 1`/bell's shake are the two `BLOCK_EVENT` meanings
+folded so far — see [Bell](#bell)'s note on why `b0` cannot be routed on alone). `DecoratedPotSpawn`
+carries no wobble phase for the same reason `ShulkerSpawn::progress` cannot yet vary: a pot always draws
+at rest, which is the honest state rather than a placeholder.
+
+```bash
+cargo test -p lodestone-render --lib block_entity::
+cargo test -p lodestone-assets --lib block_entity_models::
+cargo test -p lodestone-shell --test decorated_pot_block_entity_pixels -- --ignored --nocapture
+```
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -1660,12 +1774,14 @@ Against the real 26-entry registration list (see above), not the issue's origina
 - **Piston head — landed**, including the client-side progress clock and the per-frame install (see
   [Piston head](#piston-head) above). Open within its scope is a *server* gap, not a render one: our
   own server produces no `moving_piston` block entity, so it draws against a real 26.2 server only.
+- **Decorated pot — the render pass is landed** (see [Decorated pot](#decorated-pot) above): the base
+  plus four independently-textured side instances, resolved from the block entity's own `sherds` NBT
+  through the plain `(model, texture)` batcher with no new mechanism. **Not landed: the live per-frame
+  install** (no `Sim::decorated_pot_source` call site in `sim.rs`/`app.rs` yet — off limits for the task
+  that landed the render pass) and the hit-wobble `BLOCK_EVENT` animation, the same not-yet-decoded gap
+  [Bell](#bell) once had for its own shake.
 - Mob spawner (draws a miniature spinning entity inside the cage —
-  reuses full entity rendering, not a simple cuboid rig), brushable block,
-  decorated pot (`decorated_pot` atlas; its sides need **up to four independently textured sprites
-  per instance** from NBT `sherds`, which the current `(model, texture)` single-texture-per-instance
-  batch key cannot express as one instance — it would need decomposing into a plain base plus up to
-  four small per-side instances, not a straightforward follow-on to chest/skull), trial spawner,
+  reuses full entity rendering, not a simple cuboid rig), brushable block, trial spawner,
   vault, copper golem statue, shelf. End portal/end gateway/beacon are their own shader effects, not
   cuboid rigs, and structure block/test instance block are creative/dev-only — none of the four
   belong in "what a survival player sees."
@@ -1700,9 +1816,10 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
 - Vanilla reference: `.cache/mc/26.2/client-src/net/minecraft/client/{model/object/{chest/ChestModel,
   skull/SkullModel,bell/BellModel},renderer/blockentity/{BlockEntityRenderers,ChestRenderer,
   SkullBlockRenderer,BlockEntityRenderDispatcher,AbstractSignRenderer,StandingSignRenderer,
-  BellRenderer},renderer/Sheets}.java`, plus
-  `net/minecraft/world/level/block/{BellBlock,entity/BellBlockEntity}.java` for the block-state
-  properties and the `BLOCK_EVENT` trigger bell does not yet decode.
+  BellRenderer,DecoratedPotRenderer},renderer/Sheets}.java`, plus
+  `net/minecraft/world/level/block/{BellBlock,entity/{BellBlockEntity,DecoratedPotBlockEntity,
+  DecoratedPotPatterns,PotDecorations}}.java` for the block-state properties and the `BLOCK_EVENT`
+  triggers bell and the decorated pot do not yet decode.
   `BlockEntityRenderers.java` is the registration list itself — read it directly rather than trusting
   any summary of it, including this doc's, the next time the scope needs re-deriving.
 - [`banner-shield-patterns.md`](./banner-shield-patterns.md) — the pattern compositing function and
