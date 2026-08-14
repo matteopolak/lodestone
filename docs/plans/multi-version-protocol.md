@@ -112,11 +112,30 @@ family unit below should use all three.
 
 **`conformance` does not take `--family <vNNN>` alone**, which this document claimed in two
 places and U3 found unrunnable. It also needs `--minecraft` and `--protocol`, plus
-`--source minecraft-data` for a legacy family, and it **rejects `--target-dir`** — so it
-cannot be pointed at a private build directory the way every other command here is. It then
-bails at the pre-existing `lodestone-fuzz` isolation failure (that crate has non-optional
-deps on all four families), so its later stages have to be run separately. U3 did exactly
-that: clippy 0 errors, and `check-deletable v47` naming `lodestone-canonical` nowhere.
+`--source minecraft-data` for a legacy family (the Mojang `--reports` generator postdates
+1.12.2 and 1.16.5, and no `gen-reports` command exists yet to produce
+`.cache/mc/<version>/generated/reports/packets.json` for them — the `--source mojang`
+default fails outright with a missing-file error for any legacy family). It **rejects
+`--target-dir`** — so it cannot be pointed at a private build directory the way every other
+command here is.
+
+The `lodestone-fuzz` isolation failure this section used to describe is fixed — `lodestone-fuzz`'s
+per-family deps are `optional` now, so `check-isolation` and `check-deletable` both pass clean for
+all three legacy families (re-verified 2026-08-14). **Re-verified 2026-08-14, `e577b4bd`:**
+`conformance --family {v47,v340,v735}` (each with the right `--minecraft`/`--protocol`/`--source
+minecraft-data`) now gets past packet-ids, registries (skipped — no Mojang registry report for
+pre-1.13 jars), isolation, deletability and shape-review, then **bails at `check-connected`** —
+not a legacy-family problem at all: 11 crates workspace-wide (`lodestone-autopilot`,
+`lodestone-event-logger`, `lodestone-fuzz`, `lodestone-nav`, `lodestone-plugin-support`,
+`lodestone-server-brand`, `lodestone-shop`, `lodestone-shop-api`, `lodestone-shop-stats`,
+`lodestone-wasm-host`, `lodestone-worldedit`) are unreachable from any shipped binary/cdylib root,
+and `check-connected` runs unconditionally inside `conformance` regardless of which family you
+asked about. None of those eleven are protocol crates. **Run `conformance --skip-cargo` first**
+to see the family-specific steps pass before hitting this unrelated wall, then run
+`cargo test -p lodestone-<family> --no-fail-fast` and `cargo clippy -p lodestone-<family>
+--all-targets --no-deps -- -D warnings` separately (`--no-deps` matters: without it, clippy
+re-lints every workspace dependency including `lodestone-model`, so a concurrent edit there can
+fail a legacy family's clippy step for code that isn't the legacy family's).
 **Run it, read its `--help`, and expect to split it — do not transcribe an invocation from
 this document.**
 
