@@ -2777,6 +2777,26 @@ impl IntegratedServer {
         // above already signalled it (both tasks `select!` on clones of the
         // same `Arc<Notify>`).
         self.task.join().await;
+        // Issue #302's shutdown-cancellation gap. The connection task above
+        // has just been joined, so it is known to have stopped — nothing can
+        // publish a newer snapshot from here on, which is what makes reading
+        // the mirror now (rather than racing to read it from inside the
+        // cancelled future itself) correct. See `crate::player_data::
+        // LiveSaveSlot`'s own doc comment for why this exists at all: on an
+        // ordinary quit the `trigger()` two lines up cancels the connection
+        // task's serving future mid-`.await`, so `crate::server::
+        // persist_player`'s own disconnect-save arm never got to run, and
+        // this is the only copy of the session's last position, rotation,
+        // game mode and inventory that survived that cancellation. A `None`
+        // here is the ordinary case for every constructor but singleplayer's
+        // persistent one (in-memory, LAN, a fresh world that was never
+        // written to) — see the field's own doc comment.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((store, uuid, data)) = self.live_save.take() {
+            if let Err(err) = store.write(uuid, &data) {
+                tracing::warn!("player data flush on shutdown failed for {uuid}: {err}");
+            }
+        }
         if let Some(mut tick_task) = self.tick_task.take() {
             tick_task.join().await;
         }
