@@ -9,9 +9,23 @@ GameSpy4/UT3 query listener (#332), resource-pack pushes (#334), plugin channels
 commands (#48). Adds vanilla's LAN-discovery broadcast so the world shows up in a client's
 multiplayer list without anyone typing an address.
 
-Scopes 1, 2 and 3 of issue #535 are all closed: the pause menu's **Open to LAN** button
-(vanilla's `menu.multiplayerOptions.button`, whose `en_us` value really is "Open to LAN") is
-the production caller.
+Scopes 1, 2 and 3 of issue #535 are all closed in the sense that `open_to_lan` itself is real,
+tested and reachable — the pause menu's **Open to LAN** button (vanilla's
+`menu.multiplayerOptions.button`, whose `en_us` value really is "Open to LAN") is a production
+caller of `open_to_lan`.
+
+**But that caller does not turn every field on.** `net.rs`'s `open_lan_world` builds its
+`LanConfig` as `LanConfig { view_radius, discovery: Some(..), ..LanConfig::default() }` — so
+`rcon` (`None`) and, until the fix this paragraph documents, `query` (`false`) stayed at their
+defaults. `start_rcon` and `QueryServer::bind` are both real and correctly wired *when a config
+asks for them*; the code example below is what a caller with the fields turned on looks like,
+not a description of what the shipped pause-menu button passes. Issues #331 and #332 were
+reopened for exactly this — "implemented, gated, and then unreachable" — and #331 in particular
+is **still** open: RCON additionally needs a password, and there is no UI anywhere in this flow
+that collects one (see "Known gaps" below), so closing it needs a real settings control, not a
+config-literal flip. `query` needs only the latter — flip `net.rs`'s `LanConfig` literal to
+`query: true` — and nothing else in this crate changes; whether that one-line fix has landed is
+this doc drifting again if the field table above still says "off" and nobody has updated it.
 
 ## How it works
 
@@ -37,8 +51,8 @@ which is `bind`'s pre-#535 behaviour verbatim — no existing caller changes.
 
 | field | reaches | was |
 |---|---|---|
-| `rcon` | `start_rcon` right after the handle is built | only ever called by `tests/rcon.rs` |
-| `query` | the UDP listener on the game port's UDP space | always on, unconditionally |
+| `rcon` | `start_rcon` right after the handle is built | only ever called by `tests/rcon.rs`; **still true of `net.rs`'s real caller** — needs a password UI, see "Known gaps" |
+| `query` | the UDP listener on the game port's UDP space | always on, unconditionally in `bind`; `net.rs`'s `open_to_lan` caller left it off until the fix noted above |
 | `discovery` | `spawn_lan_discovery` | did not exist |
 | `commands` | every accepted connection's `/`-commands | hardcoded `CommandDispatch::none()` |
 | `resource_packs` | `ResourcePackPushFeed` per connection | hardcoded `::default()` |
@@ -156,11 +170,17 @@ explicit flush described above.
 
 ## Known gaps
 
-* **No port field, no game mode, no allow-commands toggle.** Vanilla's
-  `MultiplayerOptionsScreen` is a form; this publishes straight away on
-  `net::LAN_DEFAULT_PORT` (25565). A port already in use fails the publish loudly rather than
-  sliding to another, because a host who reads "opened on 25565" and is actually on 25566 has
-  been given a wrong answer.
+* **No port field, no game mode, no allow-commands toggle, and (issue #331) no password field
+  for RCON.** Vanilla's `MultiplayerOptionsScreen` is a form; this publishes straight away on
+  `net::LAN_DEFAULT_PORT` (25565), with no dialog of any kind in between the button press and
+  the publish. A port already in use fails the publish loudly rather than sliding to another,
+  because a host who reads "opened on 25565" and is actually on 25566 has been given a wrong
+  answer. The RCON gap is the same shape as the port one: `LanConfig::rcon` is real and correctly
+  wired (`start_rcon`, tested against a real vanilla RCON server in
+  `crates/lodestone-server/tests/rcon_live_oracle.rs`), but `RconConfig` requires a non-empty
+  password by design (mirrors vanilla refusing to enable RCON with an empty `rcon.password`), so
+  there is no config-literal fix the way `query`'s was — someone has to add the settings screen
+  before this field can ever be `Some`.
 * **The button is always present**, where vanilla hides the whole half-width row on a remote
   server. `PauseButton::enabled` is a pure function of the variant at every call site, so the
   "there is nothing of ours to publish" case is stated in chat instead.
