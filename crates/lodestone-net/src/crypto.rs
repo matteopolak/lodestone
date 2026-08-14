@@ -16,11 +16,15 @@ use std::fmt;
 use aes::Aes128;
 use cfb8::cipher::KeyIvInit;
 #[cfg(not(target_arch = "wasm32"))]
+use rsa::RsaPrivateKey;
+#[cfg(not(target_arch = "wasm32"))]
 use rsa::RsaPublicKey;
 #[cfg(not(target_arch = "wasm32"))]
 use rsa::pkcs1v15::Pkcs1v15Encrypt;
 #[cfg(not(target_arch = "wasm32"))]
 use rsa::pkcs8::DecodePublicKey;
+#[cfg(not(target_arch = "wasm32"))]
+use rsa::pkcs8::EncodePublicKey;
 
 use crate::error::{NetError, Result};
 
@@ -104,6 +108,25 @@ pub fn generate_shared_secret() -> [u8; SHARED_SECRET_LEN] {
     secret
 }
 
+/// Length in bytes of the online-mode verify-token challenge a server sends
+/// alongside `EncryptionRequest`, matching vanilla's own framing
+/// (`Ints.toByteArray(RandomSource.create().nextInt())` —
+/// `ServerLoginPacketListenerImpl`'s constructor — a 4-byte big-endian `int`).
+pub const VERIFY_TOKEN_LEN: usize = 4;
+
+/// Generates a fresh 4-byte verify-token challenge using the OS CSPRNG. The
+/// server half of the handshake: it is sent in the clear inside
+/// `EncryptionRequest`, and the client must echo it back RSA-encrypted so the
+/// server can confirm the reply actually used its public key.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn generate_verify_token() -> [u8; VERIFY_TOKEN_LEN] {
+    use rand::RngCore;
+    let mut token = [0u8; VERIFY_TOKEN_LEN];
+    rand::rngs::OsRng.fill_bytes(&mut token);
+    token
+}
+
 /// Encrypts `data` for the server using its DER-encoded (SPKI) RSA public key
 /// with PKCS#1 v1.5 padding.
 ///
@@ -124,6 +147,86 @@ pub fn rsa_encrypt(public_key_der: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     let mut rng = rand::rngs::OsRng;
     key.encrypt(&mut rng, Pkcs1v15Encrypt, data)
         .map_err(|e| NetError::Rsa(e.to_string()))
+}
+
+/// The server half of the online-mode handshake: a 1024-bit RSA keypair, the
+/// same size vanilla ships (`MinecraftServer.keyPair`, generated via
+/// `KeyPairGenerator.getInstance("RSA")` seeded at 1024 in
+/// `Crypt.generateKeyPair`). Holds the private key for decrypting the
+/// client's `EncryptionResponse` and the DER (SubjectPublicKeyInfo) form of
+/// the public half, which is what travels on the wire unmodified inside
+/// `EncryptionRequest`.
+///
+/// **Generated per connection, not once per server.** Vanilla caches one
+/// keypair for the process lifetime; this type's constructor is instead
+/// called fresh by whichever code drives a single login (`lodestone-server`'s
+/// connection loop), because the `ServerProtocol` implementors in this repo
+/// are deliberately stateless (`V770ServerProtocol` is a unit struct — see
+/// its own doc comment on why `ChunkEncoder` is implemented on it directly
+/// rather than through a field). Nothing in the wire protocol requires one
+/// keypair per *server*: within a single connection, all that matters is that
+/// the public key sent in `EncryptionRequest` and the private key used to
+/// decrypt that connection's `EncryptionResponse` are the same pair, which a
+/// fresh keypair per login satisfies. The cost (RSA-1024 keygen, tens of
+/// milliseconds) is paid only by a connection that actually reaches online-mode
+/// login, not on every packet.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct ServerKeyPair {
+    private: RsaPrivateKey,
+    public_der: Vec<u8>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Debug for ServerKeyPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never expose key material; the DER-encoded public key is not
+        // secret, but printing it verbatim would still be noise in a log.
+        f.write_str("ServerKeyPair(..)")
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ServerKeyPair {
+    /// Generates a fresh 1024-bit RSA keypair using the OS CSPRNG.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Rsa`] if key generation or the public-key DER
+    /// encoding fails.
+    pub fn generate() -> Result<Self> {
+        let mut rng = rand::rngs::OsRng;
+        let private =
+            RsaPrivateKey::new(&mut rng, 1024).map_err(|e| NetError::Rsa(e.to_string()))?;
+        let public_der = RsaPublicKey::from(&private)
+            .to_public_key_der()
+            .map_err(|e| NetError::Rsa(e.to_string()))?
+            .into_vec();
+        Ok(Self {
+            private,
+            public_der,
+        })
+    }
+
+    /// The DER-encoded (SPKI) public key, sent verbatim in `EncryptionRequest`
+    /// and hashed (unmodified) into the session-server's server-id digest.
+    #[must_use]
+    pub fn public_key_der(&self) -> &[u8] {
+        &self.public_der
+    }
+
+    /// Decrypts a client-submitted ciphertext (the shared secret or the
+    /// verify token) with PKCS#1 v1.5 padding — the inverse of
+    /// [`rsa_encrypt`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Rsa`] if decryption fails (wrong key, corrupt
+    /// ciphertext, or bad padding).
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        self.private
+            .decrypt(Pkcs1v15Encrypt, ciphertext)
+            .map_err(|e| NetError::Rsa(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +348,14 @@ mod tests {
     }
 
     #[test]
+    fn generate_verify_token_is_4_bytes_and_varies() {
+        let a = generate_verify_token();
+        let b = generate_verify_token();
+        assert_eq!(a.len(), VERIFY_TOKEN_LEN);
+        assert_ne!(a, b, "two tokens must not collide");
+    }
+
+    #[test]
     fn rsa_encrypt_roundtrips_against_a_generated_key() {
         use rsa::pkcs8::EncodePublicKey;
         use rsa::{RsaPrivateKey, pkcs1v15::Pkcs1v15Encrypt};
@@ -257,5 +368,62 @@ mod tests {
         let ciphertext = rsa_encrypt(pub_der.as_bytes(), &secret).unwrap();
         let recovered = priv_key.decrypt(Pkcs1v15Encrypt, &ciphertext).unwrap();
         assert_eq!(recovered, secret, "server-side decrypt must recover secret");
+    }
+
+    #[test]
+    fn server_keypair_decrypts_what_the_client_side_rsa_encrypt_produces() {
+        // Mirrors the test above from the other role: `ServerKeyPair` is the
+        // server side of the exact same handshake `rsa_encrypt` already
+        // proves for the client. Using `rsa_encrypt` (the client's own
+        // function, already NIST/pyca-independent for the cipher and
+        // round-trip-verified for RSA above) as the encryptor, rather than
+        // hand-rolling a second encrypt call, is what makes this a real
+        // cross-role check rather than testing `ServerKeyPair` against
+        // itself.
+        let server_key = ServerKeyPair::generate().unwrap();
+
+        // Pairwise-distinct: the shared secret and verify token are two
+        // adjacent same-shaped byte buffers travelling through the same
+        // decrypt call, so they must differ from each other to catch a
+        // transposition.
+        let secret = generate_shared_secret();
+        let verify_token: [u8; 4] = [0x11, 0x22, 0x33, 0x44];
+        assert_ne!(&secret[..4], &verify_token[..], "fixture must be distinguishable");
+
+        let enc_secret = rsa_encrypt(server_key.public_key_der(), &secret).unwrap();
+        let enc_token = rsa_encrypt(server_key.public_key_der(), &verify_token).unwrap();
+
+        let dec_secret = server_key.decrypt(&enc_secret).unwrap();
+        let dec_token = server_key.decrypt(&enc_token).unwrap();
+
+        assert_eq!(dec_secret, secret, "server must recover the exact shared secret");
+        assert_eq!(dec_token, verify_token, "server must recover the exact verify token");
+        assert_ne!(dec_secret, dec_token, "the two decrypted buffers must not collide");
+    }
+
+    #[test]
+    fn server_keypair_public_der_is_parseable_by_the_client_side_decoder() {
+        // The public key travels the wire as opaque bytes inside
+        // `EncryptionRequest`; a real client feeds it straight into
+        // `RsaPublicKey::from_public_key_der` (what `rsa_encrypt` does
+        // internally). If `ServerKeyPair::generate` ever emitted PKCS#1
+        // rather than SPKI DER, `rsa_encrypt` against it would fail — this
+        // test is that check, independent of the round-trip test above.
+        let server_key = ServerKeyPair::generate().unwrap();
+        let probe = [7u8; 16];
+        assert!(rsa_encrypt(server_key.public_key_der(), &probe).is_ok());
+    }
+
+    #[test]
+    fn wrong_keypair_cannot_decrypt() {
+        // Negative control: a ciphertext encrypted for one keypair must not
+        // decrypt under a different one — proves `decrypt` is actually
+        // checking against its own private key rather than, say, ignoring
+        // padding failures.
+        let right_key = ServerKeyPair::generate().unwrap();
+        let wrong_key = ServerKeyPair::generate().unwrap();
+        let secret = generate_shared_secret();
+        let ciphertext = rsa_encrypt(right_key.public_key_der(), &secret).unwrap();
+        assert!(wrong_key.decrypt(&ciphertext).is_err());
     }
 }

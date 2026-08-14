@@ -8,7 +8,8 @@
 //! * the Microsoft device-code OAuth flow and the Xbox Live → XSTS → Minecraft
 //!   services token chain ([`flow`]);
 //! * the session-server [`join_server`] call that proves ownership of the shared
-//!   secret;
+//!   secret, and its server-side mirror [`has_joined`], which a *hosting* server
+//!   uses to check that a connecting client really made that call;
 //! * multi-account storage (issue #64, native only): [`store`] holds the
 //!   long-lived Microsoft **refresh** token in the real OS keychain, keyed by
 //!   profile UUID; [`metadata`] holds everything else (username, profile UUID,
@@ -96,9 +97,10 @@ pub use tls::install_crypto_provider;
 pub use error::XstsErrorKind;
 #[cfg(not(target_arch = "wasm32"))]
 pub use flow::{
-    DeviceCodePrompt, MOJANG_CLIENT_ID, MsToken, PendingLogin, Profile, ProfileSkin, Session,
-    SkinVariant, authenticate_with_device_code, join_server, poll_token, refresh_token,
-    request_device_code, session_from_ms_token,
+    DeviceCodePrompt, HasJoinedProfile, HasJoinedProperty, MOJANG_CLIENT_ID, MsToken,
+    PendingLogin, Profile, ProfileSkin, Session, SkinVariant, authenticate_with_device_code,
+    has_joined, join_server, poll_token, refresh_token, request_device_code,
+    session_from_ms_token,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use login::{
