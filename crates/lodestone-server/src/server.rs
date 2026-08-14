@@ -8665,6 +8665,12 @@ fn apply_use_item(
     };
     let held = stack.item.to_string();
     let path = stack.item.path().to_owned();
+    // Captured before `consume_one` borrows the inventory mutably, and before
+    // the stack this reads is gone. A splash or lingering potion carries its
+    // identity here and nowhere else on the launch path, so without this the
+    // thrown entity has no potion to apply on impact and the whole splash
+    // implementation is unreachable from play.
+    let thrown_potion = stack.components.potion;
 
     if let Some(intent) = launch_intent(&path) {
         // No tracked position means no launch origin, and guessing the origin
@@ -8701,7 +8707,13 @@ fn apply_use_item(
                     pitch_offset,
                     power,
                 );
-                spawn_player_projectile(mobs, projectile, Vec3::new(x, y + EYE_HEIGHT, z), velocity);
+                spawn_player_projectile(
+                    mobs,
+                    projectile,
+                    Vec3::new(x, y + EYE_HEIGHT, z),
+                    velocity,
+                    thrown_potion,
+                );
                 UseItemOutcome::Nothing
             }
         };
@@ -8822,7 +8834,7 @@ fn apply_release_use_item(
         0.0,
         power * BOW_ARROW_SPEED,
     );
-    spawn_player_projectile(mobs, "arrow", Vec3::new(x, y + EYE_HEIGHT, z), velocity);
+    spawn_player_projectile(mobs, "arrow", Vec3::new(x, y + EYE_HEIGHT, z), velocity, None);
     true
 }
 
@@ -8835,7 +8847,19 @@ fn apply_release_use_item(
 /// impact candidates either, so a player cannot be hit by their own arrow
 /// regardless. Passing a player entity id here would silently exclude whichever
 /// *mob* happened to share that number, which is worse than passing nothing.
-fn spawn_player_projectile(mobs: &MobHandle, projectile: &str, origin: Vec3, velocity: Vec3) {
+///
+/// `potion` is the thrown stack's `minecraft:potion` registry id, and is what
+/// [`MobSim::resolve_potion_splash`] later reads to decide which effects the
+/// impact applies. It is `None` for every projectile that is not a splash or
+/// lingering potion, and also for a potion stack carrying no potion component —
+/// a water bottle, which correctly applies nothing.
+fn spawn_player_projectile(
+    mobs: &MobHandle,
+    projectile: &str,
+    origin: Vec3,
+    velocity: Vec3,
+    potion: Option<i32>,
+) {
     use lodestone_entity::projectile::Projectile;
     let Ok(key) = lodestone_model::ResourceKey::new("minecraft", projectile) else {
         return;
@@ -8847,7 +8871,18 @@ fn spawn_player_projectile(mobs: &MobHandle, projectile: &str, origin: Vec3, vel
         "arrow" | "spectral_arrow" | "trident" => Projectile::arrow(origin, velocity),
         _ => Projectile::throwable(origin, velocity),
     };
-    mobs.with(|sim| sim.spawn_projectile_from(key.clone(), ballistic, None));
+    // Only the two potion kinds take the potion-carrying spawn; everything else
+    // would record a `potion` nothing reads. Splitting on the projectile name
+    // rather than on `potion.is_some()` keeps a mis-set component from turning
+    // a snowball into a splash.
+    match projectile {
+        "splash_potion" | "lingering_potion" => mobs.with(|sim| {
+            sim.spawn_potion_projectile_from(key.clone(), ballistic, None, potion);
+        }),
+        _ => mobs.with(|sim| {
+            sim.spawn_projectile_from(key.clone(), ballistic, None);
+        }),
+    }
 }
 
 /// The first native slot holding `path`, if any.
