@@ -147,14 +147,14 @@ async fn join<T: Transport>(client: &mut Connection<T>, name: &str, uuid: Uuid) 
     client.write_packet(0, &handshake_bytes()).await.unwrap();
     client.write_packet(0, &hello_bytes(name, uuid)).await.unwrap();
     let mut seen = Vec::new();
-    if let Ok(Some(p)) = client.read_packet().await {
+    if let Ok(Some(p)) = common::read_login_packet(client).await {
         seen.push(p);
     }
     client
         .write_packet(login::serverbound::LOGIN_ACKNOWLEDGED, &[])
         .await
         .unwrap();
-    if let Ok(Some(p)) = client.read_packet().await {
+    if let Ok(Some(p)) = common::read_login_packet(client).await {
         seen.push(p);
     }
     client

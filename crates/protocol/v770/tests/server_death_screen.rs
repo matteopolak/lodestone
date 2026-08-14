@@ -166,12 +166,12 @@ async fn drain<T: Transport>(client: &mut Connection<T>) -> Vec<(i32, Vec<u8>)> 
 async fn join<T: Transport>(client: &mut Connection<T>, name: &str, uuid: Uuid) -> i32 {
     client.write_packet(0, &handshake_bytes()).await.unwrap();
     client.write_packet(0, &hello_bytes(name, uuid)).await.unwrap();
-    let _ = client.read_packet().await;
+    let _ = common::read_login_packet(client).await;
     client
         .write_packet(login::serverbound::LOGIN_ACKNOWLEDGED, &[])
         .await
         .unwrap();
-    let _ = client.read_packet().await;
+    let _ = common::read_login_packet(client).await;
     client
         .write_packet(configuration::serverbound::FINISH_CONFIGURATION, &[])
         .await

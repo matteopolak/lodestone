@@ -181,12 +181,12 @@ async fn join<T: Transport>(client: &mut Connection<T>) {
         .write_packet(0, &hello_bytes(&unique_username(), Uuid::new_v4()))
         .await
         .unwrap();
-    let _ = client.read_packet().await;
+    let _ = common::read_login_packet(client).await;
     client
         .write_packet(login::serverbound::LOGIN_ACKNOWLEDGED, &[])
         .await
         .unwrap();
-    let _ = client.read_packet().await;
+    let _ = common::read_login_packet(client).await;
     client
         .write_packet(configuration::serverbound::FINISH_CONFIGURATION, &[])
         .await

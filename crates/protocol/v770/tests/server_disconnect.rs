@@ -50,6 +50,8 @@ use lodestone_v770::packet_ids::{configuration, login, play};
 use lodestone_v770::V770ServerProtocol;
 use lodestone_world::World;
 
+mod common;
+
 /// The vanilla capture, parsed. Panics rather than skipping if absent — a
 /// *precondition*-species vacuous test would `return` here and report green.
 fn vanilla_capture() -> serde_json::Value {
@@ -602,7 +604,8 @@ async fn attempt_login(name: &str) -> (Vec<(i32, Vec<u8>)>, Result<(), ServerErr
 
     let mut sent = Vec::new();
     while let Ok(Ok(Some(packet))) =
-        tokio::time::timeout(Duration::from_millis(250), client.read_packet()).await
+        tokio::time::timeout(Duration::from_millis(250), common::read_login_packet(&mut client))
+            .await
     {
         sent.push(packet);
     }
@@ -616,15 +619,17 @@ async fn attempt_login(name: &str) -> (Vec<(i32, Vec<u8>)>, Result<(), ServerErr
 async fn drive_to_play<T: lodestone_net::Transport>(client: &mut Connection<T>, name: &str) {
     client.write_packet(0, &handshake_bytes(2)).await.unwrap();
     client.write_packet(0, &hello_bytes(name)).await.unwrap();
-    // Read the login_finished, then acknowledge it.
-    let _ = client.read_packet().await.unwrap();
+    // Read the login_finished, then acknowledge it. Goes through
+    // `common::read_login_packet` so a `login_compression` packet along the way
+    // is applied to this connection rather than misparsed as the next frame.
+    let _ = common::read_login_packet(client).await.unwrap();
     // `login_acknowledged`: empty body.
     client
         .write_packet(login::serverbound::LOGIN_ACKNOWLEDGED, &[])
         .await
         .unwrap();
     // Drain configuration (a single finish_configuration), then acknowledge.
-    let _ = client.read_packet().await.unwrap();
+    let _ = common::read_login_packet(client).await.unwrap();
     client
         .write_packet(configuration::serverbound::FINISH_CONFIGURATION, &[])
         .await

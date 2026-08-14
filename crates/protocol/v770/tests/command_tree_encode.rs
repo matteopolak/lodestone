@@ -366,13 +366,19 @@ fn an_unmodeled_parser_id_degrades_only_its_own_node() {
 // Permission pruning
 // ---------------------------------------------------------------------------
 
-/// Every built-in root is level-gated, so a level-0 player's tree is the root
-/// **and nothing else** — and the counts are predicted, not compared.
+/// Most built-in roots are level-gated, but three are deliberately ungated —
+/// `help.rs`'s `HELP_LEVEL` and `chat_commands.rs`'s `ME_LEVEL`/`MSG_LEVEL` are
+/// all `0`, matching vanilla's `HelpCommand`/`EmoteCommand`/`MessageCommand`
+/// permission levels — so a level-0 player's tree is the root plus those three
+/// subtrees, and the counts are predicted, not compared.
 ///
 /// `ServerCommands::wire_tree()` (unfiltered) and `wire_tree_for(4)` must agree on
-/// size because level 4 denies nothing; `wire_tree_for(0)` must be exactly one
-/// node. A "fewer nodes at level 0" assertion would pass while pruning the wrong
-/// branch.
+/// size because level 4 denies nothing. The level-0 count is derived from each
+/// ungated command's own registration shape rather than hardcoded, so it cannot
+/// silently drift back to "predicted" being whatever the code happens to emit:
+/// `/help` is a bare literal (1 node); `/me` is a literal plus one greedy
+/// `action` argument (2); `/msg` and its aliases `/tell`/`/w` are each a literal
+/// plus a `targets` argument plus a `message` argument (3 each, 9 total).
 #[test]
 fn permission_pruning_predicts_both_ends_exactly() {
     let commands = ServerCommands::new();
@@ -385,14 +391,26 @@ fn permission_pruning_predicts_both_ends_exactly() {
         full.len(),
         "level 4 denies nothing, so the filtered walk must reach every node"
     );
+
+    let help_nodes = 1;
+    let me_nodes = 2;
+    let msg_alias_nodes = 3;
+    let msg_family_nodes = msg_alias_nodes * 3; // msg, tell, w
+    let expected_len = 1 /* root */ + help_nodes + me_nodes + msg_family_nodes;
     assert_eq!(
         nobody.len(),
-        1,
-        "every built-in root carries a level requirement, so a level-0 player is sent the bare root"
+        expected_len,
+        "a level-0 player must see the root plus exactly the ungated `/help`, `/me` \
+         and `/msg`(+aliases) subtrees — no more (a gated command leaking through) \
+         and no fewer (an ungated command wrongly pruned)"
     );
-    assert!(
-        nobody.node(nobody.root()).expect("root").children.is_empty(),
-        "the bare root must have no children left pointing at pruned nodes"
+
+    let mut visible = root_literals(&nobody);
+    visible.sort();
+    assert_eq!(
+        visible,
+        ["help", "me", "msg", "tell", "w"],
+        "exactly the ungated built-ins must survive pruning at level 0"
     );
 
     // The pruned tree still has to be a *valid* tree on the wire, which is the
@@ -558,10 +576,21 @@ async fn the_join_sequence_sends_the_servers_own_command_tree() {
     );
 
     // Named explicitly as well, because equality with a projection would also
-    // hold if both were empty.
+    // hold if both were empty. Derived from `expected`'s own root literals
+    // rather than a hardcoded list: `ServerCommands::new()` has grown new
+    // built-ins several times since this assertion was first written, and a
+    // literal list here is exactly the kind of duplicate that rots — the
+    // `assert!(!literals.is_empty())` is what keeps this non-vacuous once the
+    // hardcoded list is gone.
     let mut literals = root_literals(&tree);
     literals.sort();
-    assert_eq!(literals, ["effect", "gamemode", "gamerule", "give"]);
+    let mut expected_literals = root_literals(&expected);
+    expected_literals.sort();
+    assert!(!literals.is_empty(), "the decoded root must carry at least one built-in");
+    assert_eq!(
+        literals, expected_literals,
+        "the client-decoded root literals must match the server's own wire_tree_for(4) projection"
+    );
 
     // And the one thing the client's completion actually reads off an argument
     // node: `/give <targets> <item> [count]`'s count is `integer(1, ..)`, so its

@@ -171,14 +171,14 @@ async fn join_and_pump<T: Transport>(client: &mut Connection<T>) -> Vec<(i32, Ve
         .await
         .unwrap();
     let mut seen = Vec::new();
-    if let Ok(Some(p)) = client.read_packet().await {
+    if let Ok(Some(p)) = common::read_login_packet(client).await {
         seen.push(p);
     }
     client
         .write_packet(login::serverbound::LOGIN_ACKNOWLEDGED, &[])
         .await
         .unwrap();
-    if let Ok(Some(p)) = client.read_packet().await {
+    if let Ok(Some(p)) = common::read_login_packet(client).await {
         seen.push(p);
     }
     client

@@ -35,10 +35,12 @@ use std::time::Duration;
 use lodestone_core::{Reader, Writer};
 use lodestone_net::Connection;
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
-use lodestone_testsupport::unique_username;
 use lodestone_v770::V770ServerProtocol;
 use lodestone_v770::packet_ids::{configuration, login, play};
 use uuid::Uuid;
+
+mod common;
+use common::unique_username;
 
 /// `minecraft:player`'s network entity-type id in protocol 776 — Mojang's own
 /// generated `registries.json` for 26.2, not our table. See
@@ -182,12 +184,12 @@ async fn handshake<T: lodestone_net::Transport>(
         .write_packet(0, &hello_bytes(name, uuid))
         .await
         .unwrap();
-    let _ = client.read_packet().await.unwrap(); // login_finished
+    let _ = common::read_login_packet(client).await.unwrap(); // login_finished
     client
         .write_packet(login::serverbound::LOGIN_ACKNOWLEDGED, &[])
         .await
         .unwrap();
-    let _ = client.read_packet().await.unwrap(); // finish_configuration
+    let _ = common::read_login_packet(client).await.unwrap(); // finish_configuration
     client
         .write_packet(configuration::serverbound::FINISH_CONFIGURATION, &[])
         .await
