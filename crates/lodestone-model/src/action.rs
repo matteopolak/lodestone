@@ -28,6 +28,55 @@ pub enum ClientAction {
         /// previous acknowledgement.
         offset: i32,
     },
+    /// Send a cryptographically signed chat message (vanilla's secure-chat
+    /// `chat` packet, carrying a real `SHA256withRSA` signature and the
+    /// client's last-seen acknowledgement window) rather than the always-
+    /// unsigned [`ClientAction::SendChat`].
+    ///
+    /// A driver holding a live signing session produces this itself from a
+    /// plain [`ClientAction::SendChat`] it receives — the signature must
+    /// cover the *current* last-seen chain, which only the driver tracks, so
+    /// this is not meant to be constructed by an application directly.
+    SendSignedChat {
+        /// Chat text without a leading command slash.
+        text: String,
+        /// Client timestamp, epoch **milliseconds** — the wire's own unit
+        /// (`ChatMessage.timestamp`/`writeInstant`). Deliberately not the
+        /// epoch-**seconds** value the signature payload itself is computed
+        /// over (`SignedMessageBody.updateSignature`'s
+        /// `timeStamp.getEpochSecond()`): carrying only the millisecond form
+        /// here and deriving seconds from it at the signing call site
+        /// removes the chance of the two drifting apart.
+        timestamp_millis: i64,
+        /// Random per-message salt, part of the signed payload.
+        salt: i64,
+        /// The 256-byte `SHA256withRSA` signature over this message
+        /// (`lodestone_auth::build_signature_payload`'s output, signed).
+        signature: Vec<u8>,
+        /// Offset of the last-seen acknowledgement window this same packet
+        /// carries — vanilla piggybacks the ack update on every chat send,
+        /// signed or not.
+        last_seen_offset: i32,
+        /// Fixed 20-bit acknowledged bit set, packed into 3 bytes.
+        acknowledged: [u8; 3],
+        /// Acknowledgement checksum (`0` means "ignore checksum").
+        checksum: i8,
+    },
+    /// Announce (or re-announce) this client's chat-signing session to the
+    /// server (`chat_session_update`) — required before the server accepts
+    /// any [`ClientAction::SendSignedChat`] this session sends.
+    AnnounceChatSession {
+        /// This client's session UUID (client-generated once per session).
+        session_id: Uuid,
+        /// Profile public key expiry, epoch milliseconds.
+        expires_at_millis: i64,
+        /// DER-encoded (X.509 `SubjectPublicKeyInfo`) RSA public key,
+        /// verbatim from the key-issuing service.
+        public_key: Vec<u8>,
+        /// The issuing service's signature over `public_key`, forwarded
+        /// verbatim — never verified by this client, only by servers.
+        key_signature: Vec<u8>,
+    },
     /// Send player movement.
     ///
     /// Carries the same two boolean status bits vanilla's
