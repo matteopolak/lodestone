@@ -1202,9 +1202,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [The version-free part of each adapter's helper prologue](./protocol-adapter-prologue.md) —
   `crates/lodestone-core/src/lib.rs` now exports `encode_body`, `decode_body`,
   `decode_body_exact`, and `unpack_degrees` — the substance of four small helpers
-  that used to be hand-copied, byte-for-byte, at the top of
-  `crates/protocol/{v47,v340,v735,v770}/src/adapter.rs`. Each version crate keeps a
-  same-named local wrapper that is now one line.
+  that used to be hand-copied, byte-for-byte, at the top of each version crate's
+  adapter (`crates/protocol/{v47,v340,v735}/src/adapter.rs`; `v770`'s equivalent now
+  lives in `crates/protocol/v770/src/adapter/mod.rs`, since that crate's adapter was
+  later split into a directory module). Each version crate keeps a same-named local
+  wrapper that is now one line.
 - [Protocol version crate naming, and what `v47`/`v340`/`v735` already are](./protocol-crate-naming.md) —
   Groundwork for GitHub epic #343 (support 1.7.10 through 26.2, one crate per major
   version's latest patch, via a single canonical internal version plus a per-version
