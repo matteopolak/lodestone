@@ -206,7 +206,16 @@ impl GuiScaling {
                 height,
                 border,
                 stretch_inner,
-            } => nine_slice_geometry(*width, *height, *border, *stretch_inner, dst_w, dst_h),
+            } => nine_slice_geometry(
+                *width,
+                *height,
+                sprite_w,
+                sprite_h,
+                *border,
+                *stretch_inner,
+                dst_w,
+                dst_h,
+            ),
         }
     }
 }
@@ -276,6 +285,12 @@ fn tile_region(
 
 /// Emits one inner segment (edge or center): stretched to a single quad or
 /// tiled at its native size.
+///
+/// `dst_w`/`dst_h` and `tile_step_w`/`tile_step_h` are in *declared* (GUI-pixel)
+/// units — the on-screen rect and, for a tiled segment, the repeat spacing,
+/// both resolution-independent. `src_x`/`src_y`/`src_w`/`src_h` are already in
+/// *real* sprite pixels (the caller has scaled them); this function never
+/// touches the real/declared ratio itself.
 #[allow(clippy::too_many_arguments)]
 fn inner_segment(
     out: &mut Vec<GuiQuad>,
@@ -284,18 +299,20 @@ fn inner_segment(
     dst_y: u32,
     dst_w: u32,
     dst_h: u32,
-    src_x: u32,
-    src_y: u32,
-    src_w: u32,
-    src_h: u32,
+    tile_step_w: u32,
+    tile_step_h: u32,
+    src_x: f32,
+    src_y: f32,
+    src_w: f32,
+    src_h: f32,
 ) {
-    if dst_w == 0 || dst_h == 0 || src_w == 0 || src_h == 0 {
+    if dst_w == 0 || dst_h == 0 || src_w <= 0.0 || src_h <= 0.0 {
         return;
     }
     if stretch_inner {
         out.push(GuiQuad {
             dst: [dst_x as i32, dst_y as i32, dst_w as i32, dst_h as i32],
-            src: [src_x as f32, src_y as f32, src_w as f32, src_h as f32],
+            src: [src_x, src_y, src_w, src_h],
         });
     } else {
         tile_region(
@@ -304,54 +321,137 @@ fn inner_segment(
             dst_y,
             dst_w,
             dst_h,
-            src_x as f32,
-            src_y as f32,
+            src_x,
+            src_y,
+            tile_step_w,
+            tile_step_h,
             src_w,
             src_h,
-            src_w as f32,
-            src_h as f32,
         );
     }
 }
 
-/// Emits a fixed-size (unscaled) corner quad.
-fn corner(out: &mut Vec<GuiQuad>, dst_x: u32, dst_y: u32, src_x: u32, src_y: u32, w: u32, h: u32) {
-    if w == 0 || h == 0 {
+/// Emits a fixed-size-on-screen corner quad. `dst_w`/`dst_h` are the
+/// destination size in declared (GUI-pixel) units; `src_x`/`src_y`/`src_w`/
+/// `src_h` are already scaled to real sprite pixels by the caller.
+#[allow(clippy::too_many_arguments)]
+fn corner(
+    out: &mut Vec<GuiQuad>,
+    dst_x: u32,
+    dst_y: u32,
+    dst_w: u32,
+    dst_h: u32,
+    src_x: f32,
+    src_y: f32,
+    src_w: f32,
+    src_h: f32,
+) {
+    if dst_w == 0 || dst_h == 0 {
         return;
     }
     out.push(GuiQuad {
-        dst: [dst_x as i32, dst_y as i32, w as i32, h as i32],
-        src: [src_x as f32, src_y as f32, w as f32, h as f32],
+        dst: [dst_x as i32, dst_y as i32, dst_w as i32, dst_h as i32],
+        src: [src_x, src_y, src_w, src_h],
     });
 }
 
+/// `sprite_w`/`sprite_h` are the sprite's **real** pixel dimensions; `nw`/`nh`
+/// are the `.mcmeta`-declared dimensions the border insets are measured
+/// against, which need not match (a resource pack can ship a higher-resolution
+/// PNG under metadata inherited from the base game).
+///
+/// # Why source rects are rescaled and destination rects are not
+///
+/// Vanilla (`GuiGraphicsExtractor.blitNineSlicedSprite`,
+/// `AbstractBoatRenderer` is unrelated — see `GuiGraphicsExtractor.java:512`)
+/// never computes an absolute source pixel offset. Every corner/edge call
+/// passes `nineSlice.width()`/`height()` as `spriteWidth`/`spriteHeight` and a
+/// *declared*-space offset as `textureX`/`textureY`, and the actual sample is
+/// `sprite.getU((float) textureX / spriteWidth)` — a **fraction** of the
+/// declared size, applied against the atlas UV span that spans the sprite's
+/// real pixel width. A fraction is resolution-independent, so vanilla's
+/// nine-slice source math implicitly rescales to whatever the real texture
+/// turns out to be; only the *destination* geometry (`x`, `y`, `width`,
+/// `height`, `borderLeft`, …) is ever in raw, unscaled pixels, because a
+/// nine-slice border is always drawn at a fixed GUI-pixel thickness regardless
+/// of how many real texture pixels back it.
+///
+/// This function reproduces that split explicitly: `bl`/`br`/`bt`/`bb`/`cw`/
+/// `ch` (declared units, clamped to half the target exactly like vanilla's own
+/// `Math.min(border.left(), width / 2)`) drive every **destination** rect and
+/// the **tile step** of a tiled edge/center, unchanged from before this fix.
+/// Every **source** rect is the same declared-space quantity multiplied by
+/// `sprite_w / nw` (or `sprite_h / nh`) — vanilla's fraction, applied up
+/// front instead of deferred to a shader, since [`GuiQuad::src`] is already
+/// documented as real sprite pixels, and `lodestone_render::GuiAtlas::geometry`
+/// turns it into atlas UVs by adding the sprite's atlas offset and dividing by
+/// the atlas's real pixel size — never by `nw`/`nh`. At a 1× pack (real ==
+/// declared) the ratio is `1.0`
+/// and every quad is byte-identical to before; at Faithful 32× (400×40 real
+/// under inherited 200×20 metadata) the ratio is `2.0` and the right/bottom
+/// source rects land on the real border pixels instead of the texture's
+/// middle.
+#[allow(clippy::too_many_arguments)]
 fn nine_slice_geometry(
     nw: u32,
     nh: u32,
+    sprite_w: u32,
+    sprite_h: u32,
     border: Border,
     stretch_inner: bool,
     dst_w: u32,
     dst_h: u32,
 ) -> Vec<GuiQuad> {
-    // Borders never exceed half the target, so opposing regions never overlap.
+    // Borders never exceed half the target, so opposing regions never
+    // overlap. Declared/GUI-pixel units — destination-only.
     let bl = border.left.min(dst_w / 2);
     let br = border.right.min(dst_w / 2);
     let bt = border.top.min(dst_h / 2);
     let bb = border.bottom.min(dst_h / 2);
     let cw = dst_w - bl - br; // center/edge destination width
     let ch = dst_h - bt - bb; // center/edge destination height
-    // Source insets use the same clamped borders (matches vanilla).
-    let scw = nw - bl - br; // center/edge source width
-    let sch = nh - bt - bb; // center/edge source height
+    // One inner tile's declared size — the destination repeat step for a
+    // tiled (non-stretched) edge/center. Still declared units: vanilla derives
+    // this the same way (`nineSlice.width() - borderRight - borderLeft`)
+    // before it ever touches the real texture.
+    let scw = nw - bl - br;
+    let sch = nh - bt - bb;
+
+    // The real-to-declared ratio: `1.0` for a pack whose PNG matches its own
+    // metadata, `> 1.0` for a higher-resolution PNG under stale/inherited
+    // metadata. Every source rect below is a declared-space quantity times
+    // this ratio, mirroring vanilla's `textureX / spriteWidth` fraction.
+    let rx = sprite_w as f32 / nw as f32;
+    let ry = sprite_h as f32 / nh as f32;
+    let s_bl = bl as f32 * rx;
+    let s_br = br as f32 * rx;
+    let s_bt = bt as f32 * ry;
+    let s_bb = bb as f32 * ry;
+    let s_w = sprite_w as f32;
+    let s_h = sprite_h as f32;
+    let s_scw = scw as f32 * rx;
+    let s_sch = sch as f32 * ry;
 
     let mut out = Vec::new();
-    // Corners (fixed size, unscaled).
-    corner(&mut out, 0, 0, 0, 0, bl, bt);
-    corner(&mut out, dst_w - br, 0, nw - br, 0, br, bt);
-    corner(&mut out, 0, dst_h - bb, 0, nh - bb, bl, bb);
-    corner(&mut out, dst_w - br, dst_h - bb, nw - br, nh - bb, br, bb);
+    // Corners (fixed destination size, real-pixel source size).
+    corner(&mut out, 0, 0, bl, bt, 0.0, 0.0, s_bl, s_bt);
+    corner(&mut out, dst_w - br, 0, br, bt, s_w - s_br, 0.0, s_br, s_bt);
+    corner(&mut out, 0, dst_h - bb, bl, bb, 0.0, s_h - s_bb, s_bl, s_bb);
+    corner(
+        &mut out,
+        dst_w - br,
+        dst_h - bb,
+        br,
+        bb,
+        s_w - s_br,
+        s_h - s_bb,
+        s_br,
+        s_bb,
+    );
     // Edges (scale along one axis).
-    inner_segment(&mut out, stretch_inner, bl, 0, cw, bt, bl, 0, scw, bt); // top
+    inner_segment(
+        &mut out, stretch_inner, bl, 0, cw, bt, scw, bt, s_bl, 0.0, s_scw, s_bt,
+    ); // top
     inner_segment(
         &mut out,
         stretch_inner,
@@ -359,12 +459,16 @@ fn nine_slice_geometry(
         dst_h - bb,
         cw,
         bb,
-        bl,
-        nh - bb,
         scw,
         bb,
+        s_bl,
+        s_h - s_bb,
+        s_scw,
+        s_bb,
     ); // bottom
-    inner_segment(&mut out, stretch_inner, 0, bt, bl, ch, 0, bt, bl, sch); // left
+    inner_segment(
+        &mut out, stretch_inner, 0, bt, bl, ch, bl, sch, 0.0, s_bt, s_bl, s_sch,
+    ); // left
     inner_segment(
         &mut out,
         stretch_inner,
@@ -372,12 +476,151 @@ fn nine_slice_geometry(
         bt,
         br,
         ch,
-        nw - br,
-        bt,
         br,
         sch,
+        s_w - s_br,
+        s_bt,
+        s_br,
+        s_sch,
     ); // right
     // Center.
-    inner_segment(&mut out, stretch_inner, bl, bt, cw, ch, bl, bt, scw, sch);
+    inner_segment(
+        &mut out, stretch_inner, bl, bt, cw, ch, scw, sch, s_bl, s_bt, s_scw, s_sch,
+    );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 20×20 nine-slice with a uniform 4px border, drawn at its own declared
+    /// size and looked up by `(dst_x, dst_y)` — the shape of every quad this
+    /// scaling can produce, regardless of resolution.
+    fn find<'a>(quads: &'a [GuiQuad], dst_x: i32, dst_y: i32) -> &'a GuiQuad {
+        quads
+            .iter()
+            .find(|q| q.dst[0] == dst_x && q.dst[1] == dst_y)
+            .unwrap_or_else(|| panic!("no quad at dst ({dst_x}, {dst_y}) in {quads:#?}"))
+    }
+
+    /// The regression control: a 1× pack (real pixels == declared metadata) is
+    /// the case that shipped and passed for years, so this fix must not move a
+    /// single byte of it. Every source rect here is hand-derived from the
+    /// scaling alone (no border scaling applies at ratio 1.0).
+    #[test]
+    fn a_1x_pack_is_unchanged_by_the_real_declared_split() {
+        let border = Border::uniform(4);
+        let quads = nine_slice_geometry(20, 20, 20, 20, border, false, 20, 20);
+        assert_eq!(quads.len(), 9, "4 corners + 4 edges + 1 center");
+
+        let top_left = find(&quads, 0, 0);
+        assert_eq!(top_left.dst, [0, 0, 4, 4]);
+        assert_eq!(top_left.src, [0.0, 0.0, 4.0, 4.0]);
+
+        let bottom_right = find(&quads, 16, 16);
+        assert_eq!(bottom_right.dst, [16, 16, 4, 4]);
+        assert_eq!(bottom_right.src, [16.0, 16.0, 4.0, 4.0]);
+
+        let center = find(&quads, 4, 4);
+        assert_eq!(center.dst, [4, 4, 12, 12]);
+        assert_eq!(center.src, [4.0, 4.0, 12.0, 12.0]);
+    }
+
+    /// The discriminating input the bug needed and never got: a real sprite
+    /// **twice** the pixel size its `.mcmeta` declares — exactly Faithful 32×
+    /// (400×40 real) under inherited 200×20 metadata, scaled down to a small
+    /// fixture. The destinations are identical to the 1× case above (a
+    /// nine-slice border is always the same number of *GUI* pixels); only the
+    /// **source** rects move, to the real border pixels rather than the
+    /// texture's middle.
+    ///
+    /// This is the exact regression `GuiScaling::geometry` had: it received
+    /// `sprite_w`/`sprite_h` and silently dropped them for the `NineSlice` arm,
+    /// so `bottom_right.src` before this fix was `[16.0, 16.0, 4.0, 4.0]` — the
+    /// dead centre of a 40×40 texture — instead of the real bottom-right corner.
+    #[test]
+    fn a_higher_resolution_pack_scales_source_rects_not_destinations() {
+        let border = Border::uniform(4);
+        let quads = nine_slice_geometry(20, 20, 40, 40, border, false, 20, 20);
+        assert_eq!(quads.len(), 9);
+
+        // Destinations: byte-identical to the 1x case — always GUI-pixel sized.
+        let top_left = find(&quads, 0, 0);
+        assert_eq!(top_left.dst, [0, 0, 4, 4]);
+        let top_right = find(&quads, 16, 0);
+        assert_eq!(top_right.dst, [16, 0, 4, 4]);
+        let bottom_right = find(&quads, 16, 16);
+        assert_eq!(bottom_right.dst, [16, 16, 4, 4]);
+        let center = find(&quads, 4, 4);
+        assert_eq!(center.dst, [4, 4, 12, 12]);
+
+        // Sources: every declared-pixel quantity times the real/declared ratio
+        // of 2.0 — landing on the real texture's own border pixels.
+        assert_eq!(
+            top_left.src,
+            [0.0, 0.0, 8.0, 8.0],
+            "top-left corner source must double with the resolution"
+        );
+        assert_eq!(
+            top_right.src,
+            [32.0, 0.0, 8.0, 8.0],
+            "top-right corner source must sample near the real right edge \
+             (x=32 of 40), not the middle of the texture"
+        );
+        assert_eq!(
+            bottom_right.src,
+            [32.0, 32.0, 8.0, 8.0],
+            "the exact regression: this used to read [16.0, 16.0, 4.0, 4.0], \
+             sampling the dead centre of the 40x40 texture instead of its \
+             bottom-right corner"
+        );
+        assert_eq!(
+            center.src,
+            [8.0, 8.0, 24.0, 24.0],
+            "the tiled center's source rect must also scale"
+        );
+    }
+
+    /// The same discriminating input, but `stretch_inner: true` — the edges and
+    /// center are emitted as one quad each rather than tiled, a different code
+    /// path through [`inner_segment`] that needs its own coverage.
+    #[test]
+    fn stretch_inner_also_scales_source_rects_under_a_resolution_mismatch() {
+        let border = Border::uniform(4);
+        let quads = nine_slice_geometry(20, 20, 40, 40, border, true, 20, 20);
+        assert_eq!(quads.len(), 9);
+
+        let center = find(&quads, 4, 4);
+        assert_eq!(center.dst, [4, 4, 12, 12]);
+        assert_eq!(
+            center.src,
+            [8.0, 8.0, 24.0, 24.0],
+            "a stretched center must scale its source rect exactly like a \
+             tiled one — this is a different branch of `inner_segment`"
+        );
+    }
+
+    /// [`GuiScaling::geometry`] is the real entry point every caller uses; this
+    /// pins that it actually threads `sprite_w`/`sprite_h` into the `NineSlice`
+    /// arm rather than discarding them (the bug lived exactly here — the
+    /// function received both real dimensions and a working [`nine_slice_geometry`]
+    /// to hand them to, and just never made the call with them).
+    #[test]
+    fn gui_scaling_geometry_forwards_real_dimensions_to_nine_slice() {
+        let scaling = GuiScaling::NineSlice {
+            width: 20,
+            height: 20,
+            border: Border::uniform(4),
+            stretch_inner: false,
+        };
+        let quads = scaling.geometry(40, 40, 20, 20);
+        let bottom_right = find(&quads, 16, 16);
+        assert_eq!(
+            bottom_right.src,
+            [32.0, 32.0, 8.0, 8.0],
+            "GuiScaling::geometry must forward its real sprite_w/sprite_h into \
+             nine_slice_geometry, not just the declared width/height"
+        );
+    }
 }

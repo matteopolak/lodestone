@@ -954,6 +954,72 @@ pub fn dying_entity_model_matrix(
     translate_feet * rotate * fall_over * flip_scale * lift
 }
 
+/// The vertical bob and extra spin a **non-living vehicle** rig needs in place
+/// of [`MODEL_FEET_OFFSET`], keyed by model name — the second switch beside
+/// [`projectile_pitch_offset_deg`] that decides which of three placements a
+/// corpus model gets. `None` for every model that really is a
+/// `LivingEntityRenderer` (every mob, the player, and — despite the name —
+/// `armor_stand`, which extends `LivingEntity` in vanilla and keeps the
+/// 1.501 lift).
+///
+/// Read from the 26.2 decompile, not inferred:
+///
+/// * `boat`/`chest_boat`/`raft`/`chest_raft` — `AbstractBoatRenderer.submit`
+///   (`AbstractBoatRenderer.java:24-43`) does `translate(0, 0.375, 0)`,
+///   `rotateY(180 - yRot)`, `scale(-1, -1, 1)`, **then a fixed
+///   `rotateY(90)`** — `AbstractBoatRenderer extends EntityRenderer`, not
+///   `LivingEntityRenderer`, so there is no 1.501 lift at all, and the model
+///   (hull length along local `+X`, matching `BoatModel`'s own pivots) needs
+///   that trailing spin to face the right way once the yaw and flip are
+///   applied. Dropping it would leave every boat floating at the right
+///   height but broadside to its heading.
+/// * `minecart` — `AbstractMinecartRenderer.submit` /
+///   `newRender`/`oldRender` (`AbstractMinecartRenderer.java:37-98`) also
+///   does a `0.375` bob before its own `scale(-1, -1, 1)` and no lift. Vanilla
+///   composes the cart's yaw as a bare `rotateY(yRot)` (no `180 -`, no rail
+///   curve tracking, both because this engine has no per-tick rail-curve
+///   state to feed it) rather than the mob convention this crate already
+///   applies elsewhere; reusing the existing `180 - yaw` term here rather
+///   than porting that difference keeps the change scoped to the lift bug
+///   this function exists to fix, so the extra spin is `0.0` (an exact
+///   identity) rather than a second unverified rotation formula.
+///
+/// `end_crystal` is deliberately **not** in this table: `EndCrystalRenderer`
+/// has no `scale(-1, -1, 1)` flip at all (`EndCrystalRenderer.java:27-36`), so
+/// it is not a small variation on this placement the way the vehicles are —
+/// fixing it needs its own investigation into whether the corpus geometry was
+/// even authored for the flipped frame, not a table entry here.
+#[must_use]
+pub fn non_living_vehicle_placement(model_name: &str) -> Option<(f32, f32)> {
+    match model_name {
+        "boat" | "chest_boat" | "raft" | "chest_raft" => Some((0.375, 90.0)),
+        "minecart" => Some((0.375, 0.0)),
+        _ => None,
+    }
+}
+
+/// The world placement transform for a **non-living vehicle** — a model
+/// [`non_living_vehicle_placement`] recognises — matching the vanilla pose-stack
+/// order that function documents: bob, yaw, flip, then the model's own extra
+/// spin. `vertical_offset` is the bob (in world-Y, applied before the yaw
+/// rotate — the two commute since the bob is Y-only and the rotation is about
+/// Y) and `extra_yaw_deg` is the trailing spin, `0.0` for models with none.
+#[must_use]
+pub fn non_living_vehicle_matrix(
+    feet: Vec3,
+    yaw_deg: f32,
+    scale: f32,
+    vertical_offset: f32,
+    extra_yaw_deg: f32,
+) -> Mat4 {
+    let translate_feet = Mat4::from_translation(feet);
+    let bob = Mat4::from_translation(Vec3::new(0.0, vertical_offset, 0.0));
+    let rotate = Mat4::from_rotation_y((180.0 - yaw_deg).to_radians());
+    let flip_scale = Mat4::from_scale(Vec3::new(-scale, -scale, scale));
+    let spin = Mat4::from_rotation_y(extra_yaw_deg.to_radians());
+    translate_feet * bob * rotate * flip_scale * spin
+}
+
 /// The extra pitch, in degrees, a projectile rig needs on top of the entity's
 /// own `xRot` — or `None` for a model that is **not** placed by
 /// [`projectile_model_matrix`].
@@ -1185,6 +1251,36 @@ impl EntityInstance {
             anim,
             // No projectile is a creeper, and `0.0` is `pose_swelling`'s exact
             // identity case — see [`new_swelling`](Self::new_swelling).
+            0.0,
+        )
+    }
+
+    /// Build an instance for a **non-living vehicle** — a model
+    /// [`non_living_vehicle_placement`] recognises — placed by
+    /// [`non_living_vehicle_matrix`] instead of [`dying_entity_model_matrix`].
+    ///
+    /// Separate constructor for the same reason [`new_projectile`](Self::new_projectile)
+    /// is: the placements share the yaw-rotate and the flip, but not the
+    /// vertical term (a small bob in world-Y rather than the 1.501
+    /// [`MODEL_FEET_OFFSET`] lift) or the trailing spin some of these rigs need.
+    /// No vehicle is dying or swelling, so both extras `new_animated` carries are
+    /// their documented identities here.
+    #[must_use]
+    pub fn new_non_living(
+        model: &'static str,
+        mesh: &EntityMesh,
+        feet: Vec3,
+        yaw_deg: f32,
+        scale: f32,
+        anim: &AnimInput,
+        vertical_offset: f32,
+        extra_yaw_deg: f32,
+    ) -> Self {
+        Self::placed(
+            model,
+            mesh,
+            non_living_vehicle_matrix(feet, yaw_deg, scale, vertical_offset, extra_yaw_deg),
+            anim,
             0.0,
         )
     }
@@ -1467,8 +1563,8 @@ impl EntityModelSet {
     ) -> Option<EntityInstance> {
         let name = canonical_model_name(type_path)?;
         let mesh = self.get(name)?;
-        Some(match projectile_pitch_offset_deg(name) {
-            Some(offset) => EntityInstance::new_projectile(
+        Some(if let Some(offset) = projectile_pitch_offset_deg(name) {
+            EntityInstance::new_projectile(
                 name,
                 mesh,
                 feet,
@@ -1476,10 +1572,22 @@ impl EntityModelSet {
                 pitch_deg + offset,
                 scale,
                 anim,
-            ),
-            None => EntityInstance::new_animated(
-                name, mesh, feet, yaw_deg, scale, anim, swell, death_time,
-            ),
+            )
+        } else if let Some((vertical_offset, extra_yaw_deg)) =
+            non_living_vehicle_placement(name)
+        {
+            EntityInstance::new_non_living(
+                name,
+                mesh,
+                feet,
+                yaw_deg,
+                scale,
+                anim,
+                vertical_offset,
+                extra_yaw_deg,
+            )
+        } else {
+            EntityInstance::new_animated(name, mesh, feet, yaw_deg, scale, anim, swell, death_time)
         })
     }
 
