@@ -286,6 +286,50 @@ pub fn try_move_one_item(from: &mut [Option<ItemStack>], to: &mut [Option<ItemSt
     false
 }
 
+/// The dropper-push counterpart to [`try_move_one_item`]: `HopperBlockEntity
+/// .addItem`/`tryMoveInItem`, but for a caller that has already chosen its one
+/// source item externally rather than scanning a `from` array in slot order.
+///
+/// `DropperBlock.dispenseFrom` fixes the source slot with
+/// `DispenserBlockEntity.getRandomSlot` *before* the container check ever
+/// runs (`crate::redstone_dispenser`'s own module doc explains why that
+/// ordering makes [`try_move_one_item`] not a drop-in reuse here), then calls
+/// `HopperBlockEntity.addItem(blockEntity, into, itemStack.copyWithCount(1),
+/// direction.getOpposite())` — always exactly one item. This mirrors that:
+/// tries every slot in `to` in order, landing in the first empty slot
+/// outright or merging into the first slot holding the same item with room
+/// under [`MAX_STACK_SIZE`], and returns `None` once `item` is fully placed.
+/// `Some(item)` (unchanged, since a single item cannot partially land) means
+/// no slot accepted it — vanilla's own remainder, which `DropperBlock
+/// .dispenseFrom` reads as "leave the source stack exactly as it was", **not**
+/// as a cue to fall back to a toss (see this module's own doc comment on the
+/// face-restriction gap this shares with [`try_move_one_item`]).
+#[must_use]
+pub fn try_move_item_into(mut item: ItemStack, to: &mut [Option<ItemStack>]) -> Option<ItemStack> {
+    for dest in to.iter_mut() {
+        match dest {
+            None => {
+                *dest = Some(item);
+                return None;
+            }
+            Some(existing) => {
+                if existing.count < MAX_STACK_SIZE && same_item_same_components(existing, &item) {
+                    let space = MAX_STACK_SIZE - existing.count;
+                    let moved = item.count.min(space);
+                    if moved > 0 {
+                        existing.count += moved;
+                        item.count -= moved;
+                        if item.count == 0 {
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Some(item)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +386,54 @@ mod tests {
         let mut to = [None];
         assert!(!try_move_one_item(&mut from, &mut to));
         assert_eq!(to[0], None);
+    }
+
+    /// [`try_move_item_into`]'s happy path: an externally-chosen item lands in
+    /// the first empty slot and the caller is told nothing is left over.
+    #[test]
+    fn try_move_item_into_lands_in_the_first_empty_slot() {
+        let mut to = [Some(stack("minecraft:charcoal", 1)), None, None];
+        let leftover = try_move_item_into(stack("minecraft:coal", 1), &mut to);
+        assert_eq!(leftover, None);
+        assert_eq!(to[1], Some(stack("minecraft:coal", 1)), "skips the mismatched first slot");
+        assert_eq!(to[0], Some(stack("minecraft:charcoal", 1)), "untouched");
+    }
+
+    /// A destination with a matching partial stack merges rather than using a
+    /// later empty slot — proves the scan does not stop at "any" slot.
+    #[test]
+    fn try_move_item_into_merges_into_a_matching_partial_stack() {
+        let mut to = [Some(stack("minecraft:coal", 10)), None];
+        let leftover = try_move_item_into(stack("minecraft:coal", 1), &mut to);
+        assert_eq!(leftover, None);
+        assert_eq!(to[0], Some(stack("minecraft:coal", 11)));
+        assert_eq!(to[1], None, "the empty slot must not be used when a merge succeeds first");
+    }
+
+    /// **Control, the discriminating "full or absent" pair's full half**: every
+    /// slot full or mismatched hands the whole item straight back, unchanged —
+    /// this is what `DropperBlock.dispenseFrom` reads as "leave the source
+    /// slot exactly as it was", not as a cue to toss.
+    #[test]
+    fn try_move_item_into_a_full_container_returns_the_item_untouched() {
+        let mut to = [
+            Some(stack("minecraft:coal", MAX_STACK_SIZE)),
+            Some(stack("minecraft:charcoal", 3)),
+        ];
+        let leftover = try_move_item_into(stack("minecraft:coal", 1), &mut to);
+        assert_eq!(leftover, Some(stack("minecraft:coal", 1)), "nothing accepted it");
+        assert_eq!(to[0], Some(stack("minecraft:coal", MAX_STACK_SIZE)), "untouched");
+        assert_eq!(to[1], Some(stack("minecraft:charcoal", 3)), "untouched");
+    }
+
+    /// An empty `to` (the "absent container" half of the discriminating pair
+    /// is a caller-side check — see `crate::redstone_dispenser`'s own doc
+    /// comment — but an empty slice is the degenerate case of "nothing
+    /// accepts it" this function itself must still get right).
+    #[test]
+    fn try_move_item_into_an_empty_slice_returns_the_item() {
+        let mut to: [Option<ItemStack>; 0] = [];
+        assert_eq!(try_move_item_into(stack("minecraft:coal", 1), &mut to), Some(stack("minecraft:coal", 1)));
     }
 
     /// A hopper above an empty chest, with one item, sucks it down on the
