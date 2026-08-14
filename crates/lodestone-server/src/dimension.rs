@@ -361,6 +361,21 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.block_entity(x, y, z)
     }
 
+    // Issue #504: forwarded for the same reason every method above is — see
+    // `chunk.rs`'s `impl ChunkSource for Arc<S>` doc comment, which names
+    // exactly this failure mode ("an unforwarded defaulted method would
+    // silently answer the trait's own default … instead of asking the real
+    // one"). Missing here specifically meant the block-entity tick's new
+    // residency gate was a no-op in production: `with_nether` wraps the real
+    // `ChunkStore` in this type before handing it to the tick loop, so
+    // `world.is_column_resident(..)` was resolving to this impl block's
+    // absent-therefore-default `true` one layer above `ChunkStore`'s real
+    // answer, for every world with a Nether sibling wired — which is
+    // production, not a corner case.
+    fn is_column_resident(&self, cx: i32, cz: i32) -> bool {
+        self.primary.is_column_resident(cx, cz)
+    }
+
     fn unload(&self, cx: i32, cz: i32) {
         self.primary.unload(cx, cz);
     }
@@ -476,5 +491,36 @@ mod tests {
         // And the frame is four tall above the landing spot, so the whole portal
         // fits: `createPortal` requires `y + 4 <= maxPlaceableY`.
         assert!(landed + 4 <= Dimension::Nether.max_placeable_y());
+    }
+
+    /// Issue #504's real production bug, reproduced directly: `is_column_resident`
+    /// must reach the wrapped `ChunkStore`'s real answer through this wrapper, not
+    /// silently answer the trait's own default (`true`) because this `impl` forgot
+    /// to forward it. `crate::integrated`'s `with_nether` wraps every real
+    /// `ChunkStore` — overworld and Nether alike — in exactly this type before
+    /// handing it to the tick loop, so an unforwarded method here is not a corner
+    /// case, it is the only path production ever takes.
+    #[test]
+    fn is_column_resident_forwards_through_the_dimensional_wrapper() {
+        let store = crate::chunk_store::ChunkStore::new(crate::overworld_chunk_source(42));
+        let wrapped =
+            DimensionalSource::alone(store, Dimension::Overworld, crate::portal::PortalIndex::new());
+
+        assert!(
+            !wrapped.is_column_resident(0, 0),
+            "an untouched column must report not-resident through the wrapper"
+        );
+        let _ = wrapped.column(0, 0);
+        assert!(
+            wrapped.is_column_resident(0, 0),
+            "a column just generated through the wrapper must report resident — proving \
+             `is_column_resident` reaches the real `ChunkStore` rather than silently answering \
+             the trait's own default `true` one layer above it"
+        );
+        assert!(
+            !wrapped.is_column_resident(9, 9),
+            "a distinct, untouched column must still report not-resident — the positive check \
+             above must not be a constant `true`"
+        );
     }
 }
