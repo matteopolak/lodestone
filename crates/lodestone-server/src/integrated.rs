@@ -37,6 +37,7 @@
 //! [`memory_pair`]: lodestone_net::memory_pair
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use lodestone_net::{Connection, memory_pair};
@@ -278,54 +279,197 @@ pub fn demo_mob_count(requested: usize) -> usize {
 /// to restore, or one already populated from disk (see
 /// [`IntegratedServer::open_persistent_with_mobs`]) so a portal lit in an
 /// earlier session is not rebuilt as a duplicate.
+///
+/// # Issue #579: `world_dir`/`ticking`
+///
+/// `world_dir` is `Some` only for a world with somewhere on disk to persist
+/// to ([`IntegratedServer::open_persistent_with_mobs`]) — passing it makes a
+/// Nether or End sibling, once built, root its own
+/// [`crate::region_source::RegionChunkSource`] under
+/// `<world_dir>/dimensions/minecraft/<dimension>/region`, exactly the
+/// sibling directory of the overworld's own `RegionChunkSource` that
+/// `open_persistent_with_mobs` already builds. `None` (every in-memory
+/// constructor) keeps a sibling exactly as before this issue: a bare
+/// `ChunkStore` over the generator, gone the moment the `DimensionalSource`
+/// holding it is dropped.
+///
+/// `ticking` is `Some` only for a caller that already starts the primary
+/// (overworld) tick loop — `None` preserves
+/// [`open_in_memory_with_entities`](IntegratedServer::open_in_memory_with_entities)'s
+/// documented "spawns no tick loop" contract even after a portal trip builds
+/// a sibling, which some of that constructor's own callers rely on for
+/// deterministic block-entity state. When `Some`, the first build of each
+/// sibling also starts that dimension's own background tick loop — see
+/// [`crate::dimension_tick`] for why a *second* loop is what closes issue
+/// #579's "a dimension nobody is standing in never ticks" gap, and why doing
+/// it here (inside the once-per-dimension memoized factory
+/// [`crate::dimension::DimensionalSource::sibling`] already guards) is what
+/// keeps the loop from being started twice.
 fn with_nether<S>(
     overworld: S,
     view_radius: i32,
     uncapped: bool,
     portals: crate::portal::PortalIndex,
+    world_dir: Option<PathBuf>,
+    ticking: Option<crate::dimension_tick::DimensionTickContext>,
 ) -> DimensionalSource<S>
 where
     S: ChunkSource + 'static,
 {
     let shared = portals.clone();
-    let factory: crate::dimension::SiblingFactory = Arc::new(move |dimension| match dimension {
-        Dimension::Nether => {
-            let seed = crate::worldgen_data::active_world_seed();
-            let terrain = crate::worldgen_data::nether_chunk_source(seed);
-            let store = if uncapped {
-                ChunkStore::for_integrated_view_radius(terrain, view_radius)
-            } else {
-                ChunkStore::for_view_radius(terrain, view_radius)
-            };
-            // `alone`, not `with_siblings`: the way *home* is the source the
-            // connection joined with, which `crate::server` still holds. See
-            // `DimensionalSource`'s "the links are one-directional" note.
-            Some(Arc::new(DimensionalSource::alone(
-                store,
-                Dimension::Nether,
-                shared.clone(),
-            )) as Arc<dyn ChunkSource>)
-        }
-        Dimension::End => {
-            let seed = crate::worldgen_data::active_world_seed();
-            let terrain = crate::worldgen_data::end_chunk_source(seed);
-            let store = if uncapped {
-                ChunkStore::for_integrated_view_radius(terrain, view_radius)
-            } else {
-                ChunkStore::for_view_radius(terrain, view_radius)
-            };
-            // Same shape as the `Nether` arm above: `alone`, not `with_siblings`
-            // — the way home is the source the connection joined with, not a
-            // link the End itself carries.
-            Some(Arc::new(DimensionalSource::alone(
-                store,
-                Dimension::End,
-                shared.clone(),
-            )) as Arc<dyn ChunkSource>)
-        }
-        Dimension::Overworld => None,
+    let factory: crate::dimension::SiblingFactory = Arc::new(move |dimension| {
+        let (source, block_entities, scheduled) = match dimension {
+            Dimension::Nether => {
+                let seed = crate::worldgen_data::active_world_seed();
+                sibling_chunk_source(
+                    Dimension::Nether,
+                    || crate::worldgen_data::nether_chunk_source(seed),
+                    view_radius,
+                    uncapped,
+                    shared.clone(),
+                    world_dir.as_deref(),
+                )
+            }
+            Dimension::End => {
+                let seed = crate::worldgen_data::active_world_seed();
+                sibling_chunk_source(
+                    Dimension::End,
+                    || crate::worldgen_data::end_chunk_source(seed),
+                    view_radius,
+                    uncapped,
+                    shared.clone(),
+                    world_dir.as_deref(),
+                )
+            }
+            Dimension::Overworld => return None,
+        };
+        start_sibling_tick_loop(dimension, &source, block_entities, scheduled, &ticking);
+        Some(source)
     });
     DimensionalSource::with_siblings(overworld, Dimension::Overworld, factory, portals)
+}
+
+/// The native half of issue #579's sibling wiring: starts `dimension`'s own
+/// tick loop when `ticking` carries a context. A free function rather than an
+/// inline `#[cfg(not(target_arch = "wasm32"))]` block inside `with_nether`'s
+/// closure so neither target leaves `ticking` unused in the other's build —
+/// `with_nether` itself has no `cfg` gate (it also serves
+/// [`IntegratedServer::open_in_memory_with_entities`], which the browser
+/// build genuinely runs), so its closure body must compile on both targets.
+#[cfg(not(target_arch = "wasm32"))]
+fn start_sibling_tick_loop(
+    dimension: Dimension,
+    source: &Arc<dyn ChunkSource>,
+    block_entities: BlockEntityHandle,
+    scheduled: crate::region_source::ScheduledTickHandle,
+    ticking: &Option<crate::dimension_tick::DimensionTickContext>,
+) {
+    if let Some(ctx) = ticking {
+        crate::dimension_tick::spawn_for_dimension(
+            dimension,
+            Arc::clone(source),
+            block_entities,
+            scheduled,
+            ctx,
+        );
+    }
+}
+
+/// wasm32 has no [`crate::tick::run_tick_loop`] at all (see that function's
+/// own "native only" note) — this is the same no-op every other tick-related
+/// wasm32 arm in this crate already is, kept as a same-named twin rather than
+/// a call-site `cfg` so `with_nether`'s closure is identical on both targets.
+#[cfg(target_arch = "wasm32")]
+fn start_sibling_tick_loop(
+    _dimension: Dimension,
+    _source: &Arc<dyn ChunkSource>,
+    _block_entities: BlockEntityHandle,
+    _scheduled: crate::region_source::ScheduledTickHandle,
+    _ticking: &Option<crate::dimension_tick::DimensionTickContext>,
+) {
+}
+
+/// Builds one sibling dimension's [`ChunkSource`] — persisted under
+/// `world_dir` (its `dimension` subdirectory, via
+/// [`crate::region_source::RegionChunkSource`]) when given one, or a bare
+/// in-memory [`ChunkStore`] over `make_terrain()` otherwise — and returns it
+/// alongside the block-entity/scheduled-tick handles that source now owns.
+///
+/// Those two handles are the dimension's **own**, not the primary loop's:
+/// [`crate::region_source::RegionChunkSource::block_entities`]/
+/// [`::scheduled_ticks`](crate::region_source::RegionChunkSource::scheduled_ticks)
+/// when persistent, or a fresh empty pair when not — see
+/// [`crate::dimension_tick::spawn_for_dimension`]'s own doc comment for why a
+/// second dimension's tick loop must never share the primary's.
+///
+/// `make_terrain` is a closure rather than an already-built value because a
+/// failed [`crate::region_source::RegionChunkSource::new`] (its region
+/// directory could not be created) still needs *a* terrain source to fall
+/// back to in-memory with, and the failed call already consumed the first one
+/// — see [`crate::region_source::RegionChunkSource::new`]'s signature, which
+/// takes its inner source by value. The fallback is a **decline, not a
+/// panic**: this dimension simply will not survive a restart this session,
+/// the same "correct degradation" [`crate::server::travel_through_portal`]'s
+/// own `None` arms already use for a world with no such dimension wired.
+fn sibling_chunk_source<S>(
+    dimension: Dimension,
+    make_terrain: impl Fn() -> S,
+    view_radius: i32,
+    uncapped: bool,
+    portals: crate::portal::PortalIndex,
+    world_dir: Option<&std::path::Path>,
+) -> (
+    Arc<dyn ChunkSource>,
+    BlockEntityHandle,
+    crate::region_source::ScheduledTickHandle,
+)
+where
+    S: ChunkSource + 'static,
+{
+    if let Some(dir) = world_dir {
+        match crate::region_source::RegionChunkSource::new(
+            make_terrain(),
+            dir,
+            dimension,
+            dimension.min_y(),
+            dimension.height(),
+        ) {
+            Ok(persistent) => {
+                let block_entities = persistent.block_entities();
+                let scheduled = persistent.scheduled_ticks();
+                let store = if uncapped {
+                    ChunkStore::for_integrated_view_radius(persistent, view_radius)
+                } else {
+                    ChunkStore::for_view_radius(persistent, view_radius)
+                };
+                // `alone`, not `with_siblings`: the way *home* is the source
+                // the connection joined with, which `crate::server` still
+                // holds. See `DimensionalSource`'s "the links are
+                // one-directional" note.
+                let source = Arc::new(DimensionalSource::alone(store, dimension, portals))
+                    as Arc<dyn ChunkSource>;
+                return (source, block_entities, scheduled);
+            }
+            Err(err) => {
+                tracing::error!(
+                    "{dimension:?} region directory unavailable, it will not persist \
+                     this session (will still tick and serve terrain in memory): {err}"
+                );
+            }
+        }
+    }
+    let store = if uncapped {
+        ChunkStore::for_integrated_view_radius(make_terrain(), view_radius)
+    } else {
+        ChunkStore::for_view_radius(make_terrain(), view_radius)
+    };
+    let source =
+        Arc::new(DimensionalSource::alone(store, dimension, portals)) as Arc<dyn ChunkSource>;
+    (
+        source,
+        BlockEntityHandle::default(),
+        crate::region_source::ScheduledTickHandle::default(),
+    )
 }
 
 /// Spawns `fut` racing against `shutdown`'s notification — whichever finishes
@@ -345,8 +489,11 @@ where
 /// this helper is once again genuinely shared rather than merely being the one
 /// place the shutdown-race wrapper is written. Native only, like the tick loop
 /// itself and every caller of this function.
+/// `pub(crate)`: [`crate::dimension_tick::spawn_for_dimension`] reuses this
+/// rather than re-implementing the same shutdown race a second time — see its
+/// own doc comment.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_tick_task<F>(shutdown: &Arc<ShutdownSignal>, fut: F) -> Task
+pub(crate) fn spawn_tick_task<F>(shutdown: &Arc<ShutdownSignal>, fut: F) -> Task
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
@@ -409,18 +556,22 @@ where
 /// signal that did not exist there would leave the browser no way to stop its own
 /// server. Only [`Self::notify_handle`] is gated, because its one consumer is.
 #[derive(Debug, Default)]
-struct ShutdownSignal {
+pub(crate) struct ShutdownSignal {
     notify: Arc<Notify>,
     fired: std::sync::atomic::AtomicBool,
 }
 
 impl ShutdownSignal {
-    fn new() -> Arc<Self> {
+    /// `pub(crate)`: [`crate::dimension_tick::spawn_for_dimension`] builds a
+    /// dimension's tick loop the same way every background task in this
+    /// module does, and needs to construct/hold this signal to race against
+    /// (via [`spawn_tick_task`]) — see that function's own doc comment.
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
     /// Fire the signal. Idempotent, and safe to call from `Drop`.
-    fn trigger(&self) {
+    pub(crate) fn trigger(&self) {
         // Flag first, notify second — see the type's doc comment. Reversing these
         // two lines restores the lost wakeup.
         self.fired
@@ -805,6 +956,14 @@ impl IntegratedServer {
             // nothing on disk to restore — a fresh index, same as before
             // `with_nether` took one as a parameter.
             crate::portal::PortalIndex::new(),
+            // No world directory, so a sibling stays in-memory-only — same as
+            // every dimension was before issue #579.
+            None,
+            // This constructor's own contract is "spawns no tick loop" (see
+            // the `block_entities`/`mobs` comments just below) — issue #579's
+            // sibling loop must not silently start one the first time a test
+            // built on this constructor lights a portal.
+            None,
         ));
         // A fresh, empty registry for this one connection's lifetime. Nothing
         // ticks it here — only `open_in_memory_with_mobs` spawns the tick
@@ -967,6 +1126,9 @@ impl IntegratedServer {
             None,
             // Same reasoning: no `poi/` set either, so a fresh index.
             crate::portal::PortalIndex::new(),
+            // Issue #579: no world directory, so a Nether/End sibling stays
+            // in-memory-only, same as everything else this constructor opens.
+            None,
         )
     }
 
@@ -1022,6 +1184,15 @@ impl IntegratedServer {
         // empty one is exactly as cheap to construct as `None` would be to
         // unwrap.
         portals: crate::portal::PortalIndex,
+        // Issue #579. `Some` only from `open_persistent_with_mobs`: the same
+        // directory its own `RegionChunkSource` is already rooted at, handed
+        // down so a Nether/End sibling built later (on the first portal trip)
+        // gets its **own** `RegionChunkSource` under that directory's
+        // `dimensions/minecraft/<dimension>/` rather than staying
+        // in-memory-only. `None` from every in-memory caller, matching "no
+        // world directory reaches this constructor" everywhere else in this
+        // file.
+        world_dir: Option<PathBuf>,
     ) -> (Self, DuplexStream)
     where
         P: ServerProtocol + 'static,
@@ -1188,11 +1359,23 @@ impl IntegratedServer {
         // the same "clone before the move" shape every other `*_for_handle`
         // binding in this constructor already follows.
         let handle_portals = portals.clone();
+        // Issue #579: moved up from further down this function (where
+        // `conn_world_state`/`world_state_for_handle` are still cloned out at
+        // their original spot) — `WorldStateHandle::new` is `Self::default()`,
+        // so relocating it here changes no behaviour, and `with_nether` needs
+        // it (via `ticking`, below) to hand a Nether/End sibling's tick loop
+        // the same anchor set this connection publishes into.
+        let world_state = crate::world_state::WorldStateHandle::new();
         let source = Arc::new(with_nether(
             ChunkStore::for_integrated_view_radius(source, view_radius),
             view_radius,
             true,
             portals,
+            world_dir,
+            Some(crate::dimension_tick::DimensionTickContext {
+                world_state: world_state.clone(),
+                shutdown: Arc::clone(&shutdown),
+            }),
         ));
 
         // Issue #454: **mob seeding is off the critical path.**
@@ -1347,7 +1530,11 @@ impl IntegratedServer {
         // move the original out of reach of the tick task, and two stores is the bug
         // — a rule set on the connection has to be the rule the loop reads, and the
         // clock the loop advances has to be the clock the connection broadcasts.
-        let world_state = crate::world_state::WorldStateHandle::new();
+        //
+        // Issue #579: `world_state` itself is now built earlier, before
+        // `with_nether` — see that call's own comment for why a Nether/End
+        // sibling's tick loop needs the *same* handle this connection
+        // publishes anchors into.
         let conn_world_state = world_state.clone();
         // A third clone for the returned handle, so a caller (the persistence path,
         // a gate) reads and stamps the *same* store the loop advances.
@@ -1729,6 +1916,12 @@ impl IntegratedServer {
             // first connection is served — not a fresh one that gets restored
             // into only after some later point.
             portals,
+            // Issue #579: this world's own directory, so a Nether/End sibling
+            // built the first time a player steps through a portal gets a
+            // `RegionChunkSource` of its own under
+            // `dimensions/minecraft/<dimension>/`, a sibling of the overworld
+            // `region/` `persistent` above is already rooted at.
+            Some(world_dir.to_path_buf()),
         );
 
         let autosave_handle = save.clone();
@@ -2057,6 +2250,15 @@ impl IntegratedServer {
         // behalf of every accepted connection, none of whom chose the setting.
         // `chunk_store::integrated_capacity_for_view_radius` carries the argument
         // and the price list for the other side of the fork.
+        // Issue #579: `shutdown`/`lan_world_state` moved up from further down
+        // this function (where `tick_world_state`/`handle_world_state` are
+        // still cloned out at their original spot) — both constructors are
+        // side-effect-free, so relocating them changes no behaviour, and
+        // `with_nether` needs both (via `ticking`, below) to give a Nether/End
+        // sibling's tick loop the anchor set and shutdown race every other LAN
+        // background task already shares.
+        let shutdown = ShutdownSignal::new();
+        let lan_world_state = crate::world_state::WorldStateHandle::new();
         let source = Arc::new(with_nether(
             ChunkStore::for_view_radius(source, view_radius),
             view_radius,
@@ -2064,8 +2266,14 @@ impl IntegratedServer {
             // LAN worlds are not persistent yet (see `save: None` in the
             // `Self` literal below), so there is nothing on disk to restore.
             crate::portal::PortalIndex::new(),
+            // No world directory reaches this constructor, so a Nether/End
+            // sibling stays in-memory-only, same as the LAN overworld itself.
+            None,
+            Some(crate::dimension_tick::DimensionTickContext {
+                world_state: lan_world_state.clone(),
+                shutdown: Arc::clone(&shutdown),
+            }),
         ));
-        let shutdown = ShutdownSignal::new();
         let signal = shutdown.clone();
         // Shared across every accepted connection (like `protocol`/`source`
         // above) rather than one per connection, so two LAN players placing
@@ -2154,7 +2362,9 @@ impl IntegratedServer {
         // advances is the clock every connection broadcasts. `bind` used to give
         // each accepted socket its own `WorldAdminState` local — two LAN players
         // each had a private, divergent view, which is what #327 reported.
-        let lan_world_state = crate::world_state::WorldStateHandle::new();
+        //
+        // Issue #579: `lan_world_state` itself is now built earlier, before
+        // `with_nether` — see that call's own comment.
         let tick_world_state = lan_world_state.clone();
         let handle_world_state = lan_world_state.clone();
         // Built out here rather than inline in the call below for the reason every

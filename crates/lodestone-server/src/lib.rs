@@ -154,6 +154,16 @@ pub mod dragon;
 /// [`dimension::Dimension`], and because a host building a multi-dimension world
 /// constructs [`dimension::DimensionalSource`] itself.
 pub mod dimension;
+/// Background world-tick loops for a dimension nobody may be standing in
+/// (issue #579) — `crate::integrated`'s `with_nether` calls this the first
+/// time a dimension's sibling `ChunkSource` is built. Crate-private: its one
+/// entry point is consumed from `crate::integrated` alone.
+///
+/// The module itself is not `cfg`-gated (its context type is plain data,
+/// portable like the rest of `with_nether`'s signature); only its one
+/// function that actually spawns a loop is native-only, same as
+/// [`crate::tick::run_tick_loop`] itself.
+mod dimension_tick;
 /// Nether portal frame detection, ignition, destination search and the per-player
 /// transition counter (`docs/nether-portals.md`). Public for the same reason
 /// [`fire`] is: anything that writes a `nether_portal` block owes
