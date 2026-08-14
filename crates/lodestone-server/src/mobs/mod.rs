@@ -164,6 +164,12 @@ mod falling_blocks;
 // `tick_vehicles`.
 mod vehicles;
 
+// No re-export: every `impl MobSim` method in each is already `pub`. See
+// `mobs::dragon`/`mobs::end_crystal`'s own module docs for the pure
+// `crate::dragon` state machine each drives.
+mod dragon;
+mod end_crystal;
+
 // `pub(crate)`, unlike every sidecar module above: `crate::block_drops`,
 // `crate::random_tick`, `crate::tick` and `crate::server` all need
 // `tnt::is_tnt_block`/`TICK_TNT_PRIME`/`DEFAULT_FUSE_TIME` to recognise and
@@ -2097,6 +2103,18 @@ pub struct MobSim<'w> {
     /// gated the same way, and this crate compiles for `wasm32-unknown-unknown`).
     #[cfg(not(target_arch = "wasm32"))]
     workstation_claims: villager::WorkstationClaims,
+    /// Live ender dragons, keyed by network entity id — see [`TrackedDragon`]
+    /// and `mobs::dragon`'s own module doc for the phase/heal state each one
+    /// drives and exactly what is a real port vs. a simplification.
+    dragons: HashMap<i32, TrackedDragon>,
+    /// Live end crystals, keyed by network entity id — see [`TrackedCrystal`]
+    /// and `mobs::end_crystal`'s own module doc.
+    crystals: HashMap<i32, TrackedCrystal>,
+    /// The dragon's own phase-transition/crystal-rescan RNG rolls
+    /// (`random.nextInt(crystals+3)`, `.nextInt(10)`, ...), on its own stream
+    /// for [`tnt_rng`](Self::tnt_rng)'s reason: a dragon tick must not shift
+    /// which roll a mob spawn, a block drop, or anything else sees.
+    dragon_rng: SpawnRng,
 }
 
 /// One live `AbstractBoat` — wire identity, motion, and who is aboard.
@@ -2150,6 +2168,41 @@ struct TrackedTnt {
     /// down from [`tnt::DEFAULT_FUSE_TIME`]. Detonates the tick this reaches
     /// `0`, matching `if (fuse <= 0)` in `PrimedTnt.tick`.
     fuse: i32,
+}
+
+/// One live ender dragon — wire identity, position/yaw, health, the
+/// [`crate::dragon::phase::PhaseManager`] driving its phase, and the
+/// [`crate::dragon::crystal::NearestCrystal`] tracker its heal reads. See
+/// `mobs::dragon`'s own module doc for the per-tick behaviour and exactly
+/// which parts are a real vanilla port vs. a named simplification (flight is
+/// a simplified orbit, not vanilla's node-graph pathfinding).
+#[derive(Debug, Clone)]
+struct TrackedDragon {
+    uuid: Uuid,
+    position: Vec3,
+    /// Body yaw, in degrees — driven by the simplified orbit
+    /// (`mobs::dragon::tick_one_dragon`), not a real look-at-target
+    /// computation.
+    yaw: f32,
+    health: f32,
+    max_health: f32,
+    phase: crate::dragon::phase::PhaseManager,
+    nearest_crystal: crate::dragon::crystal::NearestCrystal,
+    /// `EnderDragon.getFightOrigin()` — the arena centre this dragon orbits
+    /// and measures egg/portal distances from.
+    fight_origin: Vec3,
+    /// The simplified orbit's current angle, in radians — this module's own
+    /// state, not a vanilla field (see `mobs::dragon`'s module doc).
+    orbit_angle: f64,
+}
+
+/// One live end crystal — wire identity and a fixed position. See
+/// `mobs::end_crystal`'s own module doc for why this tracks nothing else
+/// (no pillar to stand on, no cage, no beam-target metadata yet).
+#[derive(Debug, Clone, Copy)]
+struct TrackedCrystal {
+    uuid: Uuid,
+    position: Vec3,
 }
 
 /// One live `AbstractMinecart` — wire identity, kind, rail-following motion,
@@ -2324,6 +2377,9 @@ impl<'w> MobSim<'w> {
             pending_projectile_block_hits: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             workstation_claims: villager::WorkstationClaims::new(),
+            dragons: HashMap::new(),
+            crystals: HashMap::new(),
+            dragon_rng: SpawnRng::new(dragon::DRAGON_PHASE_SEED),
         }
     }
 
@@ -5423,6 +5479,8 @@ impl<'w> MobSim<'w> {
                 leash_link: None,
             });
         }
+        self.push_dragon_snapshots(&mut out);
+        self.push_end_crystal_snapshots(&mut out);
         out
     }
 }

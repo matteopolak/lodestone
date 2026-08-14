@@ -113,21 +113,39 @@ today" below — the honest answer is "nothing in production yet".
 
 ## What consumes this today
 
-**Nothing in production.** This module is self-contained and unit-tested but
-not wired into `crate::mobs::MobSim` — there is no dragon or end-crystal
-entity a real server spawns, and `MobSim::tick`/`MobSim::snapshots` do not
-call into `dragon::phase`/`dragon::crystal`/`dragon::fight` anywhere. This is
-named explicitly rather than left implicit (`CLAUDE.md`'s island rule): the
-phase state machine, crystal healing and fight controller are real,
-individually tested, and reach zero pixels until a follow-up wires them into
-`MobSim` as a new tracked-entity kind (the `TrackedTnt`/`TrackedMinecart`
-pattern — a plain struct in a `HashMap<i32, _>`, ticked in `MobSim::tick`,
-appended in `MobSim::snapshots`, **not** a full goal-driven `SimMob`, since a
-dragon's flight is not ground pathfinding). That wiring was not attempted in
-this change because `crates/lodestone-server/src/mobs/mod.rs` is a large,
-concurrently-edited shared file and the pure-module split above is real,
-substantial, independently valuable work that does not need to wait for it —
-see `HANDOFF.md`/the issue tracker for the follow-up.
+**`MobSim` can spawn, tick, damage and stream a dragon and its crystals — but
+nothing calls any of it from a running server yet.** `mobs/dragon.rs` and
+`mobs/end_crystal.rs` add `MobSim::spawn_dragon`/`spawn_end_crystal`,
+`tick_dragons` (drives `dragon::phase`/`dragon::crystal` with real inputs:
+crystal count and positions from `MobSim`'s own crystal map, nearest-player
+distance from `MobSim::players`), `damage_dragon` (the
+`on_sitting_damage`/`on_killing_blow` clauses), `dragon_boss_bar`, and
+`destroy_end_crystal`. Both kinds are plain `HashMap<i32, _>` entries — the
+same `TrackedTnt`/`TrackedMinecart` shape, not a goal-driven `SimMob`, since a
+dragon's flight is not ground pathfinding — and both are appended in
+`MobSim::snapshots()`, so a dragon or crystal that *is* spawned into a live
+sim is genuinely visible over the wire (see `mobs/dragon.rs`'s and
+`mobs/end_crystal.rs`'s own `a_dragon_is_streamed_and_visible`/
+`a_spawned_crystal_is_counted_and_streamed` tests).
+
+**The remaining gap is `crates/lodestone-server/src/tick.rs`, which this
+change does not touch** (off limits — a concurrent agent's file, same as
+`protocol.rs`). `tick_tnt`/`tick_vehicles`/`tick_minecarts` are all driven
+from one call each inside `tick::run_tick_loop`
+(e.g. `mobs.with(|sim| sim.tick_tnt(&|x, y, z| world.block_state(x, y, z)));`)
+— `tick_dragons` needs the identical one-line addition
+(`mobs.with(MobSim::tick_dragons)`, no world-state oracle needed since the
+simplified orbit does not collide with terrain), and something needs to call
+`MobSim::spawn_dragon`/`spawn_end_crystal` at least once (there is no
+`EndDragonFight`-driven "scan on load, spawn if missing" wiring yet — that is
+exactly the job `dragon::fight::scan_state`/`FightState` is *ready* to do
+once a caller owns a `FightState` per End-dimension world and drives it from
+somewhere with real chunk/block-entity access, which `MobSim` does not have).
+So: the phase state machine, crystal healing and fight controller are real,
+individually tested, and reachable from `MobSim` — but a dragon reaches zero
+pixels in a real game today because nothing yet calls `spawn_dragon` or
+`tick_dragons` in production. Named explicitly per `CLAUDE.md`'s island rule
+rather than left implicit.
 
 ## What a production wiring pass still needs from `protocol.rs`
 
