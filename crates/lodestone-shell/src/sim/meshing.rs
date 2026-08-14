@@ -185,6 +185,81 @@ impl Sim {
         self.terrain_and_world(|store, terrain| terrain.set_cutout_leaves(cutout_leaves, store));
     }
 
+    /// Reloads the block/model atlas and the classifier the mesh workers use
+    /// from whatever resource packs are currently selected
+    /// (`crate::resources::selected_packs`), respawning the worker pool and
+    /// force-remeshing every loaded column against the new atlas —
+    /// the sim-side half of a live resource-pack reload.
+    /// `crate::menu::packs::commit`'s own doc used to name this as the
+    /// missing piece ("this client has no live reload"); this is that piece.
+    ///
+    /// Called once per presented frame, like [`Self::set_cutout_leaves`], but
+    /// **the equality guard here is [`crate::resources::pack_generation`]
+    /// rather than a value comparison** — `set_selected_packs` bumps it, so
+    /// this is a no-op on every frame except the one after a real selection
+    /// change (or, once a pack-folder watch exists, a real file change).
+    ///
+    /// Also a no-op, loud once, on:
+    /// - the demo world (no `net`) — there is no server world to re-texture,
+    ///   and the demo palette never depends on a resource pack;
+    /// - a session with no vanilla atlas to begin with (a jar-less run,
+    ///   already on the demo-palette fallback) — swapping an atlas that does
+    ///   not exist needs a full re-classification, not a reload;
+    /// - a reload whose own `BlockResources::load(true)` falls back to the
+    ///   demo palette (an unreadable or corrupt pack) — the *previous*,
+    ///   working atlas is kept rather than silently downgrading a live
+    ///   session to the id space `Sim::refresh_mesh_policy`'s
+    ///   `id_spaces_agree` says a live session must never use.
+    ///
+    /// Returns the freshly loaded atlas on a real reload, so the caller
+    /// (`WindowApp::redraw`) knows to also swap the GPU-side atlas bind
+    /// groups and reattach the GUI atlas — this method has already forced
+    /// the world's own remesh, which is the one piece a GPU-only swap could
+    /// never reach (a rebuilt atlas moves every sprite's UVs, and baked
+    /// terrain geometry does not re-bake itself).
+    #[must_use]
+    pub fn reload_resource_pack_atlas(&mut self) -> Option<Arc<BlockAtlas>> {
+        let generation = crate::resources::pack_generation();
+        if generation == self.last_pack_generation {
+            return None;
+        }
+        self.last_pack_generation = generation;
+        if self.net.is_none() || self.vanilla_atlas.is_none() {
+            return None;
+        }
+        let resources = BlockResources::load(true);
+        let BlockResources {
+            classifier,
+            vanilla_atlas,
+            language,
+            banner: _,
+            // Deliberately not reloaded here — see the module-level note on
+            // why this reload's scope stops short of particles: `Particles`'
+            // own `(Sheet, frame) -> UV` table would need rebuilding in step
+            // with any new particle atlas, and drifting the two apart is
+            // exactly issue #45.
+            particle_atlas: _,
+        } = resources;
+        let Some(atlas) = vanilla_atlas else {
+            tracing::warn!(
+                target: "assets",
+                "resource pack reload fell back to the demo palette; keeping \
+                 the previous atlas rather than mid-session downgrading a \
+                 live server to the demo id space"
+            );
+            return None;
+        };
+        let worker_count = std::thread::available_parallelism()
+            .map(|n| n.get().max(1))
+            .unwrap_or(2);
+        self.terrain_and_world(|store, terrain| {
+            terrain.reload_classifier(store, worker_count, classifier);
+        });
+        self.language = language;
+        self.vanilla_atlas = Some(Arc::clone(&atlas));
+        Some(atlas)
+    }
+
     /// Re-snapshot and re-schedule one section. A section that snapshots to
     /// nothing is queued for GPU removal rather than left showing stale geometry.
     ///

@@ -388,6 +388,12 @@ impl Sim {
             vanilla_atlas: resources.vanilla_atlas,
             particle_atlas,
             language: resources.language,
+            // Seeded to the *current* generation, not `0`: `resources` above
+            // already reflects whatever pack selection was live the moment
+            // this session was built, so treating that as "already seen"
+            // is what stops the very first frame from redundantly redoing
+            // the reload `Sim::reload_resource_pack_atlas` exists for.
+            last_pack_generation: crate::resources::pack_generation(),
             teleport_count: 0,
             collide_against_live_world: true,
             asset_banner: resources.banner,

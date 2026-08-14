@@ -403,13 +403,34 @@ fn open_pack_source(path: &Path, kind: PackKind) -> Option<Box<dyn ResourceSourc
 /// [`selected_packs`] resolves on first use.
 static SELECTED_PACKS: std::sync::RwLock<Option<Vec<String>>> = std::sync::RwLock::new(None);
 
-/// Replaces the selected-pack order, highest priority first. Anything built
-/// after this call sees the new stack; see [`selected_pack_sources`] for which
-/// loaders that actually reaches.
+/// Bumped by every [`set_selected_packs`] call — the trigger a live reload
+/// polls for, since the stack itself carries no cheap "did this change"
+/// signal of its own (two `Vec<String>`s are only comparable by a full
+/// equality check, and the poller already needs an `Ordering::Relaxed`
+/// atomic load to be cheap enough to run every frame, exactly like
+/// `TerrainMesh::set_cutout_leaves`'s own equality guard).
+///
+/// See `crate::sim::Sim::reload_resource_pack_atlas` for the consumer.
+static PACK_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Replaces the selected-pack order, highest priority first, and bumps
+/// [`pack_generation`]. Anything built after this call sees the new stack;
+/// see [`selected_pack_sources`] for which loaders that actually reaches
+/// *without* a live reload, and `Sim::reload_resource_pack_atlas` for the one
+/// consumer that now polls the generation to reach the rest live.
 pub fn set_selected_packs(ids: Vec<String>) {
     if let Ok(mut guard) = SELECTED_PACKS.write() {
         *guard = Some(ids);
     }
+    PACK_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The current pack-selection generation. Changes exactly once per
+/// [`set_selected_packs`] call; never decreases; carries no meaning beyond
+/// (in)equality with a previously observed value.
+#[must_use]
+pub fn pack_generation() -> u64 {
+    PACK_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The current selected-pack order, highest priority first, seeding itself from
@@ -1298,6 +1319,32 @@ fn best_pack_in(cache_dir: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`pack_generation`] is the equality guard `Sim::reload_resource_pack_atlas`
+    /// polls every frame, so it must actually move on every
+    /// [`set_selected_packs`] call — a generation that never changes would make
+    /// that guard permanently "nothing changed" and the whole live-reload path
+    /// silently dead. `PACK_GENERATION` is process-global, so this only checks
+    /// monotonic increase across two calls made back to back, never an absolute
+    /// value — a fixed starting point would be flaky against any other test in
+    /// this binary that also calls `set_selected_packs`.
+    #[test]
+    fn pack_generation_strictly_increases_on_every_selection_change() {
+        let before = pack_generation();
+        set_selected_packs(vec!["a".to_string()]);
+        let after_one = pack_generation();
+        assert!(
+            after_one > before,
+            "generation did not move: before={before}, after_one={after_one}"
+        );
+        set_selected_packs(vec!["a".to_string(), "b".to_string()]);
+        let after_two = pack_generation();
+        assert!(
+            after_two > after_one,
+            "generation did not move on a second change: after_one={after_one}, \
+             after_two={after_two}"
+        );
+    }
 
     /// The vanilla load must carry a real `en_us.json` that resolves known keys,
     /// proving the shell's classifier and its translation table come from the

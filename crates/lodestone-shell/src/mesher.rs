@@ -2445,6 +2445,52 @@ impl TerrainMesh {
         }
     }
 
+    /// Respawns the worker pool against `classifier` — and therefore whatever
+    /// atlas it carries — and force-remeshes every currently loaded column
+    /// against it. The mesh-side half of a live resource-pack reload
+    /// (`crate::sim::Sim::reload_resource_pack_atlas` is the caller); same
+    /// "derive the loaded set from `uploaded_sections`, force every column"
+    /// shape as [`Self::set_cutout_leaves`] just above, for the same reason:
+    /// a fresh atlas moves every sprite's UVs, so re-submitting the *same*
+    /// baked geometry without re-meshing would leave the world sampling the
+    /// new atlas at the old atlas's coordinates — a visibly wrong texture,
+    /// not a missing one.
+    ///
+    /// Unlike `set_cutout_leaves` there is no cheap equality guard here:
+    /// `ShellClassifier` carries an `Arc<BlockAtlas>` with no `PartialEq`, and
+    /// the caller already gates this on the pack-selection generation
+    /// actually changing (`crate::resources::pack_generation`), so a second
+    /// guard here would only ever see `true`.
+    ///
+    /// The old pool's worker threads are joined by [`MeshScheduler`]'s own
+    /// `Drop` the moment the assignment below replaces `self.scheduler` — any
+    /// job still queued or in flight for the *old* atlas is simply abandoned;
+    /// every section it would have produced is re-submitted below against the
+    /// *new* one, so nothing is lost, only redone. `cutout_leaves` is read
+    /// off the outgoing scheduler and carried onto the new one so a live
+    /// pack reload cannot silently reset the user's FAST-leaves setting back
+    /// to vanilla's `true` default (`MeshScheduler::new`'s own).
+    pub fn reload_classifier(
+        &mut self,
+        store: &ChunkWorld,
+        worker_count: usize,
+        classifier: ShellClassifier,
+    ) {
+        let cutout_leaves = self.scheduler.cutout_leaves();
+        let mut scheduler = MeshScheduler::new(worker_count, classifier);
+        scheduler.set_cutout_leaves(cutout_leaves);
+        self.column_source = scheduler.column_source();
+        self.scheduler = scheduler;
+        let columns: std::collections::BTreeSet<(i32, i32)> = self
+            .uploaded_sections
+            .iter()
+            .map(|key| (key.cx, key.cz))
+            .collect();
+        for (cx, cz) in columns {
+            self.mesh_column_forced(store, cx, cz);
+        }
+    }
+
     fn mesh_column_inner(&mut self, store: &ChunkWorld, cx: i32, cz: i32, force: bool) {
         if !self.policy.id_spaces_agree {
             self.drops += 1;

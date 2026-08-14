@@ -140,17 +140,45 @@ than a hand-written `.rev()`.
   persist it and nothing can deselect it. Do not add an `enabled` flag for it —
   that would make the invariant representable-but-false.
 - **The scan is `PacksNav::reset`'s job**, called on entering the page. There is
-  no filesystem watcher.
+  no real filesystem watcher (see "What is deliberately not built" below for
+  the cheap interim that exists instead), and it only ever runs while this page
+  is showing.
 - **`discover`, `persist` and `open_pack_folder` are `#[cfg(test)]` forks**, not
   `cfg!(test)` early returns, so no unit test reads the developer's pack folder,
   rewrites their `resource_packs.json`, or spawns a file manager. Same for
   `resources::load_persisted_selection`. Keep that shape (`CLAUDE.md` §12.44).
-- **When the selection changes, nothing rebuilds live.** Each consumer picks it
-  up at its own next build: the block atlas and models per session
-  (`sim/build.rs`'s `BlockResources::load`, i.e. next world join), the GUI/item
-  atlases and friends when their owner is next constructed. `load_particle_atlas`
-  is the one exception — it caches in a `OnceLock` on purpose (two consumers must
-  share one object), so it keeps whatever stack was live at its first call.
+- **Fixed: a live session now reloads the world and the HUD/menu chrome without a
+  restart.** `resources::pack_generation` is a process-wide counter `commit`
+  bumps (via `set_selected_packs`) on every real selection change.
+  `Sim::reload_resource_pack_atlas`, polled once per presented frame from
+  `WindowApp::redraw` next to `Sim::set_cutout_leaves`, is a no-op unless that
+  counter moved since the last poll — the same equality-guard shape
+  `set_cutout_leaves` uses, so the per-frame poll costs one atomic load on every
+  frame except the one after a real change. On a real change it rebuilds
+  `BlockResources`, respawns `TerrainMesh`'s mesh-worker pool against the new
+  classifier (`TerrainMesh::reload_classifier`), and force-remeshes every
+  currently loaded column — the world-surface half, without which a rebuilt
+  atlas would move every sprite's UVs while already-baked terrain kept sampling
+  the old coordinates (a genuinely half-fixed defect: textures visibly wrong,
+  not merely stale). `RenderState::reload_block_atlas` then swaps the GPU-side
+  atlas/model/crack bind groups **in place** — never a fifth bind group, the
+  model shader is already at wgpu's 4-group floor — and `redraw` reattaches the
+  HUD's and menu's own `GuiAtlas`es (`HudRenderer::attach_gui`,
+  `MenuRenderer::attach_gui`, both already "replace whatever was bound"
+  installs). A session on the demo palette, or a reload whose own
+  `BlockResources::load(true)` itself falls back to the demo palette, is a
+  no-op — the previous, working atlas is kept rather than mid-session
+  downgrading a live server to an id space `Sim::refresh_mesh_policy`'s
+  `id_spaces_agree` says a live session must never use.
+
+  **Still not reached**, on purpose, and named rather than silently absent: the
+  particle **sheet** atlas's own pixels (only its pairing with the *new* block
+  atlas is kept live — re-stitching it needs `Particles`' `(Sheet, frame) -> UV`
+  table rebuilt in the same step, which is `Sim` state `RenderState` cannot
+  reach, and drifting the two apart is issue #45's exact trap), the item atlas,
+  and entity textures. `load_particle_atlas` is still the one exception that
+  caches in a `OnceLock` on purpose (two consumers must share one object), so it
+  keeps whatever stack was live at its first call regardless.
 - **A pack row is a list entry, not a button.** `draw_pack_entry` transcribes
   `TransferableSelectionList.PackEntry.extractContent` (`:136-219`): the 32×32
   `pack.png` mosaic at the content box's top-left, the name at `+34, +1`, up to two
@@ -205,7 +233,21 @@ than a hand-written `.rev()`.
     expression the *draw* uses — against the band. It was asked because of a
     separate "settings scrolling doesn't reach the end" report; whatever that is, it
     is not this band arithmetic.
-- **Filesystem watching**, and **live reload** on Done.
+- **A real filesystem watcher.** No file-watching crate exists in this
+  workspace, and one would need `#[cfg(not(target_arch = "wasm32"))]` gating
+  (`std::fs` returns `Err(Unsupported)` on wasm32 and has no watch API
+  natively either), debouncing (extracting an archive emits a burst of
+  events), and a `#[cfg(test)]` fork so a unit test can never start a
+  background thread as a side effect of merely running — three real costs for
+  a feature this screen gets most of the value of for free. Instead,
+  `MenuNav::refresh_open_resource_packs_screen` rescans the folder on window
+  **focus regain** (`WindowApp::window_event`'s `WindowEvent::Focused(true)`
+  arm) when this page is the one open — covering "extract or drop a pack in
+  with a file manager, alt-tab back" for zero new dependencies and zero
+  threading, at the cost of missing a drop that happens *without* switching
+  away. It calls `PacksNav::refresh_available`, not `PacksNav::reset`: the
+  latter re-derives the **persisted** order, which would silently discard an
+  unsaved in-screen reorder the instant the window regained focus.
 
 ## Configuration
 

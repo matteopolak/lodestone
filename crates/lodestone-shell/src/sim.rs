@@ -478,6 +478,14 @@ pub struct Sim {
     /// two use disjoint block-id spaces and must never be meshed with the wrong
     /// classifier.
     vanilla_atlas: Option<Arc<BlockAtlas>>,
+    /// The [`crate::resources::pack_generation`] value as of the last time
+    /// [`Sim::reload_resource_pack_atlas`] looked — an equality guard with
+    /// the same job as [`crate::mesher::TerrainMesh::set_cutout_leaves`]'s:
+    /// that method is polled every frame, and without this a resource-pack
+    /// reload (rebuilding the atlas, respawning the mesh worker pool,
+    /// re-meshing every loaded column) would run on *every* frame instead of
+    /// once per real pack-selection change.
+    last_pack_generation: u64,
     /// The stitched particle sheet, kept alive so `app.rs` can upload the *same*
     /// object to the GPU that the emitter's `(Sheet, frame) -> UV` table was
     /// built from — see [`Sim::particle_sheet_atlas`] and issue #45. `None` on
