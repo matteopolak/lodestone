@@ -8,6 +8,8 @@ use lodestone_model::{
     AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, DimensionId, LoginProfile,
     PackedMessageSignature, ResourceKey, ResourcePackResponseKind, ServerAddress, VersionAdapter,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use lodestone_model::{Text, TextColor, TextContent, TextStyle};
 use lodestone_net::{Connection, NetError, Transport};
 #[cfg(not(target_arch = "wasm32"))]
 use lodestone_net::{generate_shared_secret, rsa_encrypt};
@@ -153,6 +155,30 @@ pub(crate) struct Driver<T: Transport> {
 /// indistinguishable from the reference client.
 const CLIENT_BRAND: &str = "vanilla";
 
+/// The environment variable that opts a session in to secure (signed) chat.
+///
+/// **Off by default, and this is a mitigation rather than a preference.** A
+/// real server kicked the repo owner with a chat-validation failure the first
+/// time this client signed for real: an unsigned message a server merely marks
+/// unverified is strictly better than a signed one it rejects with a
+/// disconnect, so the whole path — key fetch, session announcement, and
+/// per-message signing — stays dormant unless a caller deliberately turns it
+/// on to work on it. Set to `1`/`true` to enable.
+#[cfg(not(target_arch = "wasm32"))]
+pub const SECURE_CHAT_ENV: &str = "LODESTONE_SECURE_CHAT";
+
+/// Whether this process opts in to signing chat — see [`SECURE_CHAT_ENV`].
+///
+/// Read at every call site rather than cached in a `OnceLock` so a test can
+/// set and clear it around one case without poisoning the rest of the binary.
+#[cfg(not(target_arch = "wasm32"))]
+fn secure_chat_enabled() -> bool {
+    matches!(
+        std::env::var(SECURE_CHAT_ENV).as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes")
+    )
+}
+
 /// A random per-message signing salt (`ClientAction::SendSignedChat::salt`).
 ///
 /// No new RNG dependency: `Uuid::new_v4()`'s bytes are already a CSPRNG draw
@@ -231,6 +257,85 @@ fn sign_chat_action(
             tracing::warn!(%error, "chat signing failed; sending unsigned");
             None
         }
+    }
+}
+
+/// Verifies one incoming signed chat message's signature against its
+/// sender's announced public key (issue #283's remaining half) —
+/// [`lodestone_auth::verify_signature`]'s one production call site.
+///
+/// `false` on any malformed input (a signature or last-seen entry that is
+/// not exactly [`lodestone_auth::SIGNATURE_BYTES`] long, or a public key that
+/// does not parse) rather than propagating an error: a server that sends a
+/// well-formed but forged signature and one that sends garbage bytes are the
+/// same case from the player's point of view — neither is trustworthy.
+///
+/// A free function for the same reason [`sign_chat_action`] is — it needs no
+/// live `Connection` to unit-test.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn verify_chat_message(
+    sender: uuid::Uuid,
+    session_id: uuid::Uuid,
+    public_key_der: &[u8],
+    message_index: i32,
+    raw_content: &str,
+    timestamp_millis: i64,
+    salt: i64,
+    last_seen: &[Vec<u8>],
+    signature: &[u8],
+) -> bool {
+    let Ok(signature) = <[u8; lodestone_auth::SIGNATURE_BYTES]>::try_from(signature) else {
+        return false;
+    };
+    let mut chain = Vec::with_capacity(last_seen.len());
+    for entry in last_seen {
+        let Ok(bytes) = <[u8; lodestone_auth::SIGNATURE_BYTES]>::try_from(entry.as_slice()) else {
+            return false;
+        };
+        chain.push(bytes);
+    }
+    let link = lodestone_auth::SignedMessageLink {
+        index: message_index,
+        sender,
+        session_id,
+    };
+    // Same `/ 1000` truncation `sign_chat_action` performs on the way out —
+    // the signed payload is built over epoch **seconds**; the wire (and
+    // `ChatAckInfo::timestamp_millis`) carries epoch **milliseconds**.
+    let timestamp_seconds = timestamp_millis / 1000;
+    lodestone_auth::verify_signature(
+        public_key_der,
+        &link,
+        raw_content,
+        timestamp_seconds,
+        salt,
+        &chain,
+        &signature,
+    )
+    .unwrap_or(false)
+}
+
+/// Vanilla's `chat.tag.not_secure` treatment (`ChatTrustLevel.NOT_SECURE`,
+/// `GuiMessageTag.chatNotSecure`): a light-grey `[Not Secure] ` prefix ahead
+/// of the message, matching `GuiMessageTag`'s own indicator colour
+/// (`0xD0D0D0`) since this client has no separate per-line tag/tooltip widget
+/// to draw vanilla's coloured bar in.
+///
+/// Vanilla also has a `MODIFIED` trust level (a signed message whose
+/// displayed text no longer contains what was signed) — not reproduced here;
+/// every message that is not verified reads as `NOT_SECURE`. See
+/// `ChatTrustLevel.evaluate` for the finer distinction this collapses.
+#[cfg(not(target_arch = "wasm32"))]
+fn tag_not_secure(text: Text) -> Text {
+    Text {
+        content: TextContent::Literal("[Not Secure] ".to_string()),
+        style: TextStyle {
+            color: Some(TextColor::Rgb(0x00D0_D0D0)),
+            ..TextStyle::default()
+        },
+        extra: vec![text],
+        ..Text::default()
     }
 }
 
@@ -804,7 +909,7 @@ impl<T: Transport> Driver<T> {
     /// query and `wait_for_chunk` methods instead.
     ///
     /// [`ChunkColumn`]: lodestone_world::ChunkColumn
-    async fn emit(&mut self, event: ClientEvent) -> Step {
+    async fn emit(&mut self, mut event: ClientEvent) -> Step {
         // Automatic protocol responses the driver injects in reaction to an
         // event, written in order before the event is surfaced. A single event
         // can produce more than one: a keep-alive both answers the heartbeat and
@@ -894,8 +999,15 @@ impl<T: Transport> Driver<T> {
                 // the rest of the session rather than ending it, the same
                 // choice `emit`'s other auto-responses make for a failure
                 // that is not fatal to the connection.
+                //
+                // Gated off by default behind `LODESTONE_SECURE_CHAT` — see
+                // [`secure_chat_enabled`]. Announcing a session commits this
+                // connection to the signed path on the server's side, so the
+                // mitigation has to skip the announcement too, not merely the
+                // per-message signing.
                 #[cfg(not(target_arch = "wasm32"))]
-                if self.chat_session.is_none()
+                if secure_chat_enabled()
+                    && self.chat_session.is_none()
                     && let Some(session) = self.auth_session.as_ref()
                 {
                     let access_token = session.access_token.clone();
@@ -1036,6 +1148,46 @@ impl<T: Transport> Driver<T> {
             }
         }
 
+        // Incoming signed-chat verification (issue #283's remaining half).
+        // Placed after every `PlayerListUpdate` this session has already
+        // folded (`self.read_model` below) so a sender's `INITIALIZE_CHAT`
+        // announced on an earlier packet is visible here — the ordering the
+        // wire itself guarantees (a server announces a session before
+        // sending chat signed with it). `ack.verified` starts `false` (see
+        // its own doc — the adapter fails closed) and is only ever raised
+        // here, never lowered; an unverified message is tagged in `text`
+        // itself, this client's stand-in for vanilla's separate
+        // `GuiMessageTag` widget (see `tag_not_secure`'s doc for why).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let ClientEvent::Chat {
+            sender: Some(sender_id),
+            ack: Some(info),
+            text,
+            ..
+        } = &mut event
+        {
+            let verified = (info.signature.len() == lodestone_auth::SIGNATURE_BYTES)
+                .then(|| self.read_model.chat_session_of(sender_id))
+                .flatten()
+                .is_some_and(|session| {
+                    verify_chat_message(
+                        *sender_id,
+                        session.session_id,
+                        &session.public_key,
+                        info.message_index,
+                        &info.raw_content,
+                        info.timestamp_millis,
+                        info.salt,
+                        &info.last_seen,
+                        &info.signature,
+                    )
+                });
+            info.verified = verified;
+            if !verified {
+                *text = tag_not_secure(std::mem::take(text));
+            }
+        }
+
         // Fold the (now uniformly lightweight) event into the read-model by
         // reference, then forward ownership to the event stream. Chunk data has
         // already been applied to the world through the `WorldSink`, so
@@ -1094,7 +1246,9 @@ impl<T: Transport> Driver<T> {
     /// `chat_session`. Every other action, and `SendChat` when there is no
     /// session (offline play, the key fetch hasn't completed, or it failed),
     /// passes through unchanged, so unsigned chat keeps working exactly as
-    /// it did before this existed. The signing itself is
+    /// it did before this existed. `chat_session` is only ever populated
+    /// behind [`secure_chat_enabled`], so with the opt-in unset this is the
+    /// identity function and every message goes out unsigned. The signing itself is
     /// [`sign_chat_action`], a free function so it is unit-testable without a
     /// live `Connection` — see this module's `tests`.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1369,6 +1523,107 @@ mod tests {
         assert_ne!(
             sig1, sig2,
             "identical content sent twice must sign differently (chain index advanced)"
+        );
+    }
+
+    /// Issue #283's discriminating pair for the *receiving* half: a message
+    /// whose signature is valid, and the same message with one byte of the
+    /// signature flipped — same sender, same session, same chain, same
+    /// content. A `verify_chat_message` that always returned `true` would
+    /// pass the first assertion and fail only the second; both must hold.
+    #[test]
+    fn verify_chat_message_accepts_valid_and_rejects_tampered() {
+        let (mut chat_session, public_key_der) = test_chat_session();
+        let sender = uuid::Uuid::from_u128(1);
+        let session_id = chat_session.session_id();
+
+        // Pairwise-distinct, non-round-number fields — the values a
+        // transposed pair of same-typed adjacent arguments could hide.
+        let last_seen_entry = [0x11u8; lodestone_auth::SIGNATURE_BYTES];
+        let last_seen = vec![last_seen_entry.to_vec()];
+        let timestamp_millis = 1_700_000_000_123i64;
+        let salt = 99_887_766i64;
+        let content = "hello world";
+
+        let (signature, index) = chat_session
+            .sign(content, timestamp_millis / 1000, salt, &[last_seen_entry])
+            .expect("signing must succeed")
+            .expect("a fresh session has chain left");
+
+        assert!(
+            verify_chat_message(
+                sender,
+                session_id,
+                &public_key_der,
+                index,
+                content,
+                timestamp_millis,
+                salt,
+                &last_seen,
+                &signature,
+            ),
+            "the genuinely signed message must verify"
+        );
+
+        let mut tampered = signature;
+        tampered[0] ^= 0xFF;
+        assert!(
+            !verify_chat_message(
+                sender,
+                session_id,
+                &public_key_der,
+                index,
+                content,
+                timestamp_millis,
+                salt,
+                &last_seen,
+                &tampered,
+            ),
+            "a single flipped signature byte must fail verification"
+        );
+    }
+
+    /// The unit trap `CLAUDE.md` names by name: the wire's timestamp is
+    /// epoch **millis**, but the signed payload is built over epoch
+    /// **seconds**. `verify_chat_message` performs the `/ 1000` internally —
+    /// this proves that conversion is load-bearing by showing what happens
+    /// without it, one level below `verify_chat_message` where the seam
+    /// actually lives.
+    #[test]
+    fn verify_signature_rejects_millis_where_seconds_are_expected() {
+        let (mut chat_session, public_key_der) = test_chat_session();
+        let sender = uuid::Uuid::from_u128(1);
+        let session_id = chat_session.session_id();
+        let link = lodestone_auth::SignedMessageLink::root(sender, session_id);
+
+        let timestamp_millis = 1_700_000_000_123i64;
+        let timestamp_seconds = timestamp_millis / 1000;
+        assert_ne!(
+            timestamp_seconds, timestamp_millis,
+            "the fixture must actually exercise two different i64 values"
+        );
+        let salt = 55_443_322i64;
+        let content = "unit trap";
+
+        let (signature, _index) = chat_session
+            .sign(content, timestamp_seconds, salt, &[])
+            .expect("signing must succeed")
+            .expect("a fresh session has chain left");
+
+        assert!(
+            lodestone_auth::verify_signature(
+                &public_key_der, &link, content, timestamp_seconds, salt, &[], &signature,
+            )
+            .expect("verify with the correct unit"),
+            "the real signed unit (seconds) must verify"
+        );
+        assert!(
+            !lodestone_auth::verify_signature(
+                &public_key_der, &link, content, timestamp_millis, salt, &[], &signature,
+            )
+            .expect("verify with the wrong unit"),
+            "millis passed where seconds belong must not verify — the two \
+             values differ and only one is what was actually signed"
         );
     }
 }
