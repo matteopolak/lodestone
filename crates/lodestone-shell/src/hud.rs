@@ -43,9 +43,6 @@ use item_icon::{ColourStream, IconAssets, IconRenderer, IconSink, SpecialIconDra
 
 use crate::overlay::{BossBarView, Sidebar};
 
-/// Text scale every HUD string is drawn at.
-pub(crate) const HUD_TEXT_SCALE: f32 = 2.0;
-
 /// Padding between a HUD panel's edge and its content.
 pub(crate) const HUD_MARGIN: f32 = 6.0;
 
@@ -110,12 +107,6 @@ const VITALS_ROW_PITCH: f32 = 10.0;
 /// around the text at any chat scale.
 const INPUT_STRIP_PAD: f32 = 2.0;
 
-/// Vertical pitch between two HUD text lines.
-#[must_use]
-pub(crate) fn hud_line_h() -> f32 {
-    (font::GLYPH_H as f32 + 2.0) * HUD_TEXT_SCALE
-}
-
 /// `DebugScreenOverlay.MARGIN_LEFT`/`MARGIN_RIGHT`/`MARGIN_TOP`, all `2`.
 ///
 /// `extractLines` spends them as `left = alignLeft ? 2 : guiWidth() - 2 - width`
@@ -128,16 +119,17 @@ pub(crate) fn hud_line_h() -> f32 {
 pub(crate) const DEBUG_MARGIN: f32 = 2.0;
 
 /// The F3 overlay's line pitch — vanilla's literal `int height = 9` in
-/// `DebugScreenOverlay.extractLines`, not [`hud_line_h`]'s `(GLYPH_H + 2) *
-/// HUD_TEXT_SCALE`.
+/// `DebugScreenOverlay.extractLines`.
 ///
 /// It is both the pitch (`top = 2 + height * i`) and the plate's own height
 /// (`fill(…, top - 1, …, top + height - 1, …)` spans exactly `height` rows), so
 /// consecutive plates tile with no seam and no overlap.
 ///
-/// The overlay used to use the HUD's pitch at the HUD's 2× text scale, which is
+/// The overlay used to draw at an ad-hoc HUD-wide pitch of double this, which is
 /// what "the text is way too big" was: exactly the mistake the XP level number's
-/// own comment records, one screen over.
+/// own comment records, one screen over. `docs/hud-text-scale.md` has the fuller
+/// history; the ad-hoc pitch itself is gone now that chat (its last consumer)
+/// draws at vanilla's own metrics too.
 pub(crate) const DEBUG_LINE_H: f32 = 9.0;
 
 /// The plate behind each F3 overlay line — vanilla's
@@ -161,10 +153,10 @@ pub(crate) const DEBUG_LINE_INK: [f32; 4] =
 /// (`PlayerTabOverlay.extractRenderState`, which advances `yo` by `9` per row and
 /// fills each slot `8` tall inside it).
 ///
-/// **Not [`hud_line_h`], and not at [`HUD_TEXT_SCALE`].** The tab overlay is a
+/// **Vanilla's own metrics, not an ad-hoc HUD-wide pitch.** The tab overlay is a
 /// vanilla *screen-space* draw in the already-`gui_scale`-divided logical canvas,
 /// exactly like the F3 overlay above, so it uses vanilla's own metrics at scale
-/// `1.0`. Drawing it at the HUD's 2× pitch is what "the text is way too big"
+/// `1.0`. Drawing it at double that pitch is what "the text is way too big"
 /// means, one screen over.
 pub(crate) const TAB_LINE_H: f32 = 9.0;
 
@@ -175,10 +167,10 @@ pub(crate) const TAB_TEXT_SCALE: f32 = 1.0;
 /// literal `9` (`int height = entriesCount * 9;`, and each row's `y` advances
 /// by that same `9` walking backwards from `bottom`).
 ///
-/// **Not [`hud_line_h`], and not at [`HUD_TEXT_SCALE`].** Exactly the same
+/// **Vanilla's own metrics, not an ad-hoc HUD-wide pitch.** Exactly the same
 /// exemption as [`TAB_LINE_H`]: this draws in the `gui_scale`-divided logical
-/// canvas at vanilla's own font metrics, not through the HUD's 2× pitch —
-/// which is what made the sidebar panel twice vanilla's size.
+/// canvas at vanilla's own font metrics — drawing it at double that pitch is
+/// what made the sidebar panel twice vanilla's size.
 pub(crate) const SIDEBAR_LINE_H: f32 = 9.0;
 
 /// The sidebar's text scale — vanilla metrics, so `1.0`. See [`SIDEBAR_LINE_H`].
@@ -1646,10 +1638,11 @@ pub fn heart_fill(i: usize, health: f32) -> Option<HeartFill> {
 /// something upstream can actually consume them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChatDisplayOptions {
-    /// `options.chat.scale` (`Options.java`), `0.0..=1.0`. A
-    /// pose-scale multiplier layered on top of this HUD's own fixed 2×
-    /// legibility factor — see the draw site in [`HudGeometry::build_inner`]
-    /// for how the two combine.
+    /// `options.chat.scale` (`Options.java`), `0.0..=1.0` — vanilla's
+    /// `ChatComponent.getScale`. This is the *entire* pose scale every chat
+    /// draw multiplies by ([`chat_pose_scale`]); there is no HUD-side factor
+    /// layered on top, matching `ChatComponent.extractRenderState`'s
+    /// `pose.scale(scale, scale)`.
     pub scale: f32,
     /// `options.chat.width` (`Options.java`), `0.0..=1.0`. Fed
     /// through [`chat_width_px`] (vanilla's `ChatComponent.getWidth`,
@@ -1717,15 +1710,17 @@ pub fn chat_height_px(pct: f32) -> f32 {
 }
 
 /// The scale factor every chat draw — scrollback, input line, suggestion popup
-/// — multiplies its geometry by: this HUD's own fixed legibility factor times
-/// the `chatScale` option, vanilla's `pose.scale(scale, scale)` layering.
+/// — multiplies its geometry by: vanilla's `chatScale` option alone
+/// (`ChatComponent.getScale`, `ChatComponent.java`), matching
+/// `ChatComponent.extractRenderState`'s `pose.scale(scale, scale)` with no
+/// further HUD-side factor.
 ///
 /// A free function rather than a local `let` because
 /// [`suggestion_layout`] is called from outside [`HudGeometry::build_inner`]
 /// (the pointer hit-test) and the two must resolve the same number.
 #[must_use]
 pub fn chat_pose_scale(opts: ChatDisplayOptions) -> f32 {
-    HUD_TEXT_SCALE * opts.scale.max(0.0)
+    opts.scale.max(0.0)
 }
 
 /// The top of the chat input line's glyph row, in logical-canvas pixels —
@@ -2069,10 +2064,6 @@ impl HudGeometry {
         let (w, h) = crate::menu::render::logical_canvas(gui_scale, width, height);
         let mut b = Builder::new(w, h, gui, items, models, font);
 
-        // `scale` is now only `chat_pose_scale`'s baseline — every other
-        // element in this function has been ported off the ambient pitch
-        // (see `docs/hud-text-scale.md` for the one remaining site).
-        let scale = HUD_TEXT_SCALE;
         let margin = HUD_MARGIN;
         let glyph_h = font::GLYPH_H as f32;
 
@@ -2088,9 +2079,9 @@ impl HudGeometry {
         // the same measure the draw itself uses — a restated constant would
         // misalign the moment the vanilla font is or is not loaded.
         //
-        // **Vanilla's own metrics, not the HUD's.** The overlay used to draw at
-        // `HUD_TEXT_SCALE` (2.0) with `hud_line_h()` (18 px), which is exactly
-        // the mistake the XP level number's own comment records one screen over:
+        // **Vanilla's own metrics, not an ad-hoc HUD-wide one.** The overlay
+        // used to draw at double vanilla's size, which is exactly the mistake
+        // the XP level number's own comment records one screen over:
         // this function already draws in the `gui_scale`-divided logical canvas,
         // so a ×2 on the text made it twice vanilla's size relative to
         // everything around it. `DebugScreenOverlay` draws at scale 1 with
@@ -2178,17 +2169,16 @@ impl HudGeometry {
         // once the box is closed; while it's open, the full history stays lit.
         //
         // `opts` is [`ChatDisplayOptions`] — see that type for the vanilla
-        // field each knob reproduces. `chat_pose_scale` folds this HUD's own
-        // fixed 2× legibility factor (`scale`, defined above — shared with the
-        // debug overlay) together with the `chatScale` option exactly the way
-        // vanilla layers its own pose scale on top of the font's native size
-        // (`pose.scale(scale, scale)`, `ChatComponent.java`): at the
-        // default `opts.scale == 1.0` this is byte-identical to the pre-options
-        // behaviour, so an untouched install looks exactly as it did before
-        // these fields existed.
+        // field each knob reproduces. `chat_pose_scale` is vanilla's own
+        // `chatScale` option alone, exactly as `ChatComponent.extractRenderState`
+        // applies it (`pose.scale(scale, scale)`, `ChatComponent.java`) — no
+        // further HUD-side factor. Called through the free function rather than
+        // recomputed inline so this draw and [`HudRenderer::suggestion_layout`]'s
+        // pointer hit-test (called from outside this function) cannot resolve
+        // two different numbers from two copies of the same formula.
         let chat_open = frame.chat_input.is_some();
         let opts = frame.chat_options;
-        let chat_pose_scale = scale * opts.scale.max(0.0);
+        let chat_pose_scale = chat_pose_scale(opts);
         // Vanilla's unscaled per-line stride is 9px
         // (`ChatComponent.MESSAGE_BOTTOM_TO_MESSAGE_TOP`/`messageHeight`,
         // `ChatComponent.java`); `glyph_h + 2.0` is this HUD's own 5×7
@@ -2259,19 +2249,37 @@ impl HudGeometry {
             // The highlighted suggestion, previewed in grey **behind** the
             // caret — `EditBox.extractRenderState`'s
             // `graphics.text(font, suggestion, cursorX - 1, textY, -8355712,
-            // this.textShadow)`. Two things a previous fix here got wrong,
-            // both because it measured the pen against `{input}_` instead of
-            // `input` alone:
+            // this.textShadow)`. Three things a previous fix here got wrong,
+            // all because it measured the pen against `{input}_` or against
+            // `font.width(value)` alone instead of vanilla's real `cursorX`:
             //
-            // 1. **`cursorX` is `font.width(value)` — the typed text alone.**
-            //    The caret contributes *no* advance in vanilla, because there
-            //    it is a separately blinking overlay rectangle, never part of
-            //    the measured string. Reserving the caret glyph's own width
-            //    (`{input}_`) landed the ghost one whole underscore-width too
-            //    far right, *permanently* — stable, and wrong: the owner's own
-            //    report was "it's supposed to be behind [the caret], not
-            //    pushing it to the right".
-            // 2. **The suggestion must be drawn *before* the caret, not
+            // 1. **`cursorX` is `font.width(value)` — the typed text alone,
+            //    not the text plus the caret glyph.** The caret contributes
+            //    *no* advance in vanilla, because there it is a separately
+            //    blinking overlay rectangle, never part of the measured
+            //    string. Reserving the caret glyph's own width (`{input}_`)
+            //    landed the ghost one whole underscore-width too far right,
+            //    *permanently* — stable, and wrong: the owner's own report
+            //    was "it's supposed to be behind [the caret], not pushing it
+            //    to the right".
+            // 2. **`cursorX` is `font.width(value) + 1`, not `font.width(value)`
+            //    alone.** `EditBox.extractWidgetRenderState` computes
+            //    `drawX += this.font.width(charSequence) + 1;` *before* setting
+            //    `cursorX = drawX` — a full pixel reserved after the typed text,
+            //    present in the **appended** (non-insert) case this shell always
+            //    hits (see the `!insert` note below). This crate's own menu
+            //    `EditBox` port already carries this exact `+ 1.0`
+            //    (`crates/lodestone-shell/src/menu/edit_box.rs`'s
+            //    `draw_state_with`); this draw site had not. Missing it made the
+            //    ghost (`cursorX - 1`) land one pixel *short* of vanilla's real
+            //    position — flush against, and in practice overlapping, the
+            //    typed text's last glyph — and made the caret (`cursorX`) sit
+            //    flush against the text instead of the one clear pixel vanilla
+            //    leaves for it. The two errors netted to the same wrong ghost
+            //    position from two different mistakes: reserving the caret's
+            //    width (error 1, since fixed) versus never reserving vanilla's
+            //    own one-pixel gap (error 2, fixed here).
+            // 3. **The suggestion must be drawn *before* the caret, not
             //    after**, so the caret glyph composites on top and the two
             //    overlap by design (`EditBox.java`'s render order is text →
             //    hint → suggestion → highlight → cursor). The previous fix
@@ -2285,12 +2293,25 @@ impl HudGeometry {
             // `ChatInput::push_char` caps a line at 256 — so the suggestion is
             // suppressed once the line is full, matching vanilla rather than
             // overlapping the last few glyphs.
+            //
+            // The `+ 1` gap is conditional in vanilla, not unconditional:
+            // `drawX += font.width(charSequence) + 1;` sits *inside*
+            // `if (!displayed.isEmpty())` (`EditBox.extractWidgetRenderState`),
+            // so an empty line reserves no pixel at all and `cursorX` stays at
+            // the text origin — `text_width("")` is already `0.0`, but adding
+            // `chat_pose_scale` unconditionally would still reserve a pixel
+            // vanilla does not for that one case, so the `is_empty` guard
+            // matters even though the width term alone would not have.
             let full = input.chars().count() >= 256;
+            let cursor_x = if input.is_empty() {
+                margin
+            } else {
+                margin + b.text_width(input, chat_pose_scale) + chat_pose_scale
+            };
             if !full && let Some(ghost) = frame.chat_suggestion_ghost {
-                let pen = margin + b.text_width(input, chat_pose_scale);
                 b.text(
                     ghost,
-                    pen - chat_pose_scale,
+                    cursor_x - chat_pose_scale,
                     input_y,
                     chat_pose_scale,
                     SUGGESTION_GHOST,
@@ -2303,17 +2324,12 @@ impl HudGeometry {
             // (`TextCursorUtils.extractAppendCursor`,
             // `TextCursorUtils.java`); `chat_caret_visible` blinks it at
             // vanilla's real 300ms rate (see [`HudFrame::chat_caret_visible`]).
-            // Its own pen is `margin + text_width(input)` — the same `cursorX`
-            // the ghost above measures from, with no `-1`: that offset is
-            // `EditBox`'s own, applied only to the suggestion.
+            // Drawn at `cursor_x` itself (vanilla's plain `cursorX`, the append
+            // form) — one pixel right of the ghost's `cursor_x - chat_pose_scale`,
+            // which is vanilla's own one-pixel gap between the two, not a
+            // restated offset.
             if frame.chat_caret_visible {
-                b.text(
-                    "_",
-                    margin + b.text_width(input, chat_pose_scale),
-                    input_y,
-                    chat_pose_scale,
-                    [1.0, 1.0, 1.0, 1.0],
-                );
+                b.text("_", cursor_x, input_y, chat_pose_scale, [1.0, 1.0, 1.0, 1.0]);
             }
         }
         // The scrollback stacks upward from here, so while the input is open this
@@ -5415,14 +5431,6 @@ mod tests {
             "vanilla's `int height = 9` is both the line pitch and the plate height"
         );
         assert_eq!(DEBUG_MARGIN, 2.0, "MARGIN_LEFT/RIGHT/TOP are all 2");
-        // The mistake this pair exists to prevent: reusing the HUD's own pitch,
-        // which is `(GLYPH_H + 2) * HUD_TEXT_SCALE` and twice vanilla's.
-        assert!(
-            DEBUG_LINE_H < hud_line_h(),
-            "the overlay draws at vanilla's metrics, not the HUD's ({} vs {})",
-            DEBUG_LINE_H,
-            hud_line_h()
-        );
     }
 
     /// Every ported line of the F3 overlay, character for character, against the
@@ -5835,6 +5843,97 @@ mod tests {
         );
     }
 
+    /// The regression this chat-scale fix can specifically introduce: the draw
+    /// (`HudGeometry::build_inner`) and the pointer hit-test
+    /// (`HudRenderer::suggestion_layout`, exercised headlessly here through the
+    /// same free functions it calls — a GPU-free `wgpu::Device` cannot be
+    /// constructed in this test, so this is the identical code path minus the
+    /// device handle) both resolve `chat_pose_scale`. Before this fix
+    /// `HudGeometry::build_inner` recomputed `HUD_TEXT_SCALE * opts.scale`
+    /// inline instead of calling [`chat_pose_scale`], so the two *could* have
+    /// drifted apart the moment either copy changed; now `build_inner` calls
+    /// the same function the hit-test does, structurally.
+    ///
+    /// Run at **two** non-coincident chat scales — `1.0` (default) and `0.5`
+    /// — because a bug that only shows up away from the default (say, a stray
+    /// `HUD_TEXT_SCALE` reintroduced on one side only) would pass at `1.0` if
+    /// the two formulas happened to agree there by construction and diverge
+    /// everywhere else.
+    #[test]
+    fn the_hit_test_rect_and_the_drawn_popup_agree_at_two_different_chat_scales() {
+        let stats = DebugStats::default();
+        let candidates = popup_candidates(12);
+        let (w, h) = (640u32, 480u32);
+
+        for chat_scale in [1.0_f32, 0.5] {
+            let opts = ChatDisplayOptions {
+                scale: chat_scale,
+                ..ChatDisplayOptions::default()
+            };
+            let base_frame = HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat_input: Some("ca"),
+                chat_caret_visible: false,
+                chat_options: opts,
+                ..HudFrame::new(&stats)
+            };
+            let control = HudGeometry::build(&base_frame, w, h);
+
+            let popup = SuggestionPopup {
+                line: "ca",
+                start: 0,
+                candidates: &candidates,
+                selected: 0,
+                offset: 0,
+                cursor: None,
+            };
+            let with = HudGeometry::build(
+                &HudFrame {
+                    chat_suggestions: Some(popup),
+                    ..base_frame
+                },
+                w,
+                h,
+            );
+
+            // The "hit-test region": exactly what `HudRenderer::suggestion_layout`
+            // computes (`logical_canvas` → `chat_pose_scale(opts)` →
+            // `suggestion_layout`), not a restatement.
+            let (cw, ch) =
+                crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
+            let pose = chat_pose_scale(opts);
+            let layout =
+                suggestion_layout(cw, ch, pose, &popup, |s| measure_text(None, s, pose));
+
+            // The "drawn region": every vertex the popup actually added.
+            let px = |x: f32| (x + 1.0) * 0.5 * cw;
+            let py = |y: f32| (1.0 - y) * 0.5 * ch;
+            let gutter = pose.max(1.0);
+            let mut outside = Vec::new();
+            for chunk in with.verts[control.verts.len()..].chunks(FLOATS_PER_VERTEX) {
+                let (x, y) = (px(chunk[0]), py(chunk[1]));
+                let inside_x = x >= layout.x - 0.5 && x <= layout.x + layout.w + 0.5;
+                let inside_y =
+                    y >= layout.y - gutter - 0.5 && y <= layout.y + layout.h + gutter + 0.5;
+                if !(inside_x && inside_y) {
+                    outside.push((x, y));
+                }
+            }
+            assert!(
+                outside.is_empty(),
+                "chat_scale {chat_scale}: {} of the popup's own vertices landed \
+                 outside the hit-test rect (x {}..{}, y {}..{}): {:?}",
+                outside.len(),
+                layout.x,
+                layout.x + layout.w,
+                layout.y - gutter,
+                layout.y + layout.h + gutter,
+                &outside[..outside.len().min(8)]
+            );
+        }
+    }
+
     /// `row_at` maps a pointer to the candidate the player is looking at.
     ///
     /// The inputs are chosen so the two plausible readings disagree: with
@@ -6073,23 +6172,131 @@ mod tests {
         };
         let geo = HudGeometry::build(&frame, w, h);
 
-        // Vanilla's `cursorX - 1`: `font.width("he")`, the typed text *alone*
-        // — no caret glyph folded in, unlike the formula this replaces
-        // (`font.width("he_")`).
-        let expected = to_ndc_x(HUD_MARGIN + measure_text(None, "he", pose) - pose);
-        let wrong_hypothesis =
+        // Vanilla's `cursorX - 1`, `cursorX` being `EditBox
+        // .extractWidgetRenderState`'s `drawX` *after* `drawX +=
+        // font.width(charSequence) + 1;` — the typed text's width, no caret
+        // glyph folded in (unlike the older, already-fixed `font.width("he_")`
+        // bug), **plus vanilla's own reserved pixel**, which the `- 1` then
+        // exactly cancels: `(font.width("he") + 1) - 1 == font.width("he")`.
+        // So the *correct* ghost position is flush with the raw text width —
+        // no further arithmetic on top of it, which is exactly the
+        // discriminating case: a formula that forgets vanilla's `+ 1` (this
+        // draw site's own bug until now) computes `font.width("he") - 1`
+        // instead, landing the ghost one pixel *short*, overlapping into the
+        // text's last glyph rather than sitting flush against it.
+        let expected = to_ndc_x(HUD_MARGIN + measure_text(None, "he", pose));
+        let missing_caret_width_hypothesis =
             to_ndc_x(HUD_MARGIN + measure_text(None, "he_", pose) - pose);
-        assert!(
-            (expected - wrong_hypothesis).abs() > 1e-3,
-            "sanity check on the reproduction: the two hypotheses must be \
-             discriminably far apart, or a coincidence could pass either way"
-        );
+        let missing_plus_one_hypothesis =
+            to_ndc_x(HUD_MARGIN + measure_text(None, "he", pose) - pose);
+        for (name, hypothesis) in [
+            ("the caret-width bug", missing_caret_width_hypothesis),
+            ("the missing `+ 1` bug", missing_plus_one_hypothesis),
+        ] {
+            assert!(
+                (expected - hypothesis).abs() > 1e-3,
+                "sanity check on the reproduction: {name}'s hypothesis must be \
+                 discriminably far from the correct one, or a coincidence could \
+                 pass either way"
+            );
+        }
         assert!(
             (ghost_min_x(&geo) - expected).abs() < 1e-4,
-            "ghost x (NDC) = {}, expected cursorX - 1 = {expected} (the old, \
-             wrong formula would have placed it at {wrong_hypothesis})",
+            "ghost x (NDC) = {}, expected cursorX - 1 = {expected} (the \
+             caret-width bug would have placed it at \
+             {missing_caret_width_hypothesis}, the missing-`+ 1` bug at \
+             {missing_plus_one_hypothesis})",
             ghost_min_x(&geo)
         );
+    }
+
+    /// **The owner's report**: "the inline completion (grey text) is missing
+    /// the pixel gap after the last character... it touches the regular text
+    /// which is wrong." Established by direct comparison against
+    /// `crates/lodestone-shell/src/menu/edit_box.rs`'s `draw_state_with`,
+    /// which already carries vanilla's `+ 1.0`
+    /// (`EditBox.extractWidgetRenderState`'s `drawX += font.width
+    /// (charSequence) + 1;`) — this draw site did not.
+    ///
+    /// **Why the assertion is against the text's own right edge, not the
+    /// caret.** A first attempt at this gate measured `caret_x - ghost_x` and
+    /// found it passed under a deliberate re-neuter of the `+ 1` fix —
+    /// because both the ghost (`cursor_x - pose`) and the caret (`cursor_x`)
+    /// move together with `cursor_x`, so the gap *between them* is `pose`
+    /// regardless of whether `cursor_x` itself carries vanilla's `+ 1`. The
+    /// bug is a shift of the whole `{ghost, caret}` pair relative to the
+    /// *text*, not a change in their separation from each other — so only a
+    /// measurement against the text's own (independently computed) right edge
+    /// can see it. Before the fix, `ghost_x` sat a full `pose` *before* the
+    /// text's right edge (overlapping the last glyph, `font.width(value) - 1`
+    /// instead of vanilla's `(font.width(value) + 1) - 1 ==
+    /// font.width(value)`); after it, `ghost_x` sits flush with the text's
+    /// right edge, matching `EditBox.java`'s own cancellation exactly — not a
+    /// visible pixel of daylight, but no longer overlapping into the glyph
+    /// either, which is the actual "touches" the report named.
+    #[test]
+    fn the_ghost_sits_flush_with_the_text_not_overlapping_its_last_glyph() {
+        let stats = DebugStats::default();
+        let (w, h) = (640u32, 480u32);
+        let pose = chat_pose_scale(ChatDisplayOptions::default());
+        let (logical_w, _) =
+            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
+        let to_px_x = |ndc_x: f32| (ndc_x + 1.0) * 0.5 * logical_w;
+
+        let ghost_min_px = |g: &HudGeometry| -> f32 {
+            let mut min_x = f32::INFINITY;
+            for chunk in g.verts.chunks(FLOATS_PER_VERTEX) {
+                if chunk[2..6] == SUGGESTION_GHOST {
+                    min_x = min_x.min(to_px_x(chunk[0]));
+                }
+            }
+            assert!(min_x.is_finite(), "no SUGGESTION_GHOST-coloured vertex found");
+            min_x
+        };
+
+        // Two pairwise-distinct inputs, different lengths, so a formula that
+        // (incorrectly) makes the offset depend on the text's own width
+        // cannot pass by coincidence at a single length.
+        for input in ["he", "cats"] {
+            let frame = HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat_input: Some(input),
+                chat_caret_visible: true,
+                chat_suggestion_ghost: Some("Allo"),
+                ..HudFrame::new(&stats)
+            };
+            let geo = HudGeometry::build(&frame, w, h);
+            let ghost_x = ghost_min_px(&geo);
+
+            // The text's own right edge, computed from the font's advance
+            // metric alone (`measure_text`) — not through `cursor_x`, the
+            // value the draw itself derives the ghost from, so this cannot
+            // pass by restating the code under test.
+            let text_right_edge = HUD_MARGIN + measure_text(None, input, pose);
+            let offset = ghost_x - text_right_edge;
+            // The bug this replaces: `font.width(value) - 1` (the missing
+            // `+ 1` never reserved, so the ghost lands one pixel *inside* the
+            // text's last glyph instead of flush with its advance edge). A
+            // constant, not a second measurement, so the two hypotheses can
+            // never coincide by construction (`0.0 - (-pose)` is always
+            // `pose`, well past the tolerance below).
+            let overlap_hypothesis = -pose;
+
+            assert!(
+                offset.abs() < pose * 0.25,
+                "input {input:?}: the ghost must sit flush with the text's own \
+                 right edge (vanilla's `(font.width(value) + 1) - 1 == \
+                 font.width(value)`), not offset from it: measured {offset:.3}px"
+            );
+            assert!(
+                (offset - overlap_hypothesis).abs() > pose * 0.5,
+                "input {input:?}: measured offset {offset:.3}px is too close to \
+                 the missing-`+ 1` bug's prediction of overlapping the text's \
+                 last glyph by {overlap_hypothesis:.3}px to discriminate the \
+                 fix from the bug it replaces"
+            );
+        }
     }
 
     /// The other half of the fix: the caret must draw **after** (on top of)
@@ -6190,7 +6397,7 @@ mod tests {
     #[test]
     fn a_long_line_with_no_spaces_hard_wraps_at_the_predicted_row_count() {
         let stats = DebugStats::default();
-        let line = "a".repeat(30);
+        let line = "a".repeat(70);
         let chat = [(line.as_str(), 0.0_f32)];
         let geo = HudGeometry::build(
             &HudFrame {
@@ -6205,23 +6412,31 @@ mod tests {
         // The default chat box is `chat_width_px(1.0) == 320`px wide (capped
         // at `b.w == 640`, so uncapped here). With no `VanillaFont` attached,
         // `Builder::legacy_width` falls back to `item_icon::text_w`:
-        // `(GLYPH_W + 1) * scale` per char, and
-        // the chat pose scale defaults to `scale(2.0) * chat_options.scale
-        // (1.0) == 2.0`, so each `a` costs `6 * 2.0 == 12`px. `floor(320 /
-        // 12) == 26` fit the first row; the remaining `30 - 26 == 4` spill to
-        // a second — two rows, not one, and not three.
+        // `(GLYPH_W + 1) * scale` per char, and the chat pose scale is
+        // vanilla's `chatScale` alone (`chat_pose_scale`,
+        // `ChatComponent.getScale`), `1.0` at the default, so each `a` costs
+        // `6 * 1.0 == 6`px. `floor(320 / 6) == 53` fit the first row; the
+        // remaining `70 - 53 == 17` spill to a second — two rows.
+        //
+        // 70 chars, not 30: at this HUD's now-deleted ad-hoc 2× pitch each
+        // `a` would have cost `12`px (`floor(320 / 12) == 26` per row), which
+        // wraps 70 chars into **three** rows (26 + 26 + 18), not two — a
+        // whole extra row, not a rounding-sized difference, so this input
+        // cannot coincide between the two hypotheses the way a shorter line
+        // could.
         //
         // `a`'s bitmap (`font::glyph_rows('a')`) lights `0+0+3+1+4+2+4 == 14`
         // pixels; each lit pixel is one quad (`ColourStream::glyph`)
-        // of 6 vertices, so all 30 `a`s cost
-        // `30 * 14 * 6 == 2520` vertices regardless of how they are split
+        // of 6 vertices, so all 70 `a`s cost
+        // `70 * 14 * 6 == 5880` vertices regardless of how they are split
         // across rows — the row *count* shows up only in the background
         // strips, one 6-vertex rect each.
         assert_eq!(
             geo.vertex_count(),
-            2520 + 2 * 6,
-            "expected exactly two wrapped rows' worth of geometry (one row would be \
-             2520 + 6, three would be 2520 + 18)"
+            5880 + 2 * 6,
+            "expected exactly two wrapped rows' worth of geometry at vanilla's \
+             chatScale-only pose (one row would be 5880 + 6, three — the \
+             deleted ad-hoc 2× pitch's prediction — would be 5880 + 18)"
         );
     }
 
@@ -6463,8 +6678,10 @@ mod tests {
 
     /// Proves `chat_options.height_pct_unfocused` is read as a genuine *cap*
     /// on visible rows, not just stored: at `0.0` (`chat_height_px(0.0) ==
-    /// 20`px against an `18`px default row) only one row fits, so a five-line
-    /// log must render identically to a one-line log, not five.
+    /// 20`px against a `9`px vanilla-metrics default row — vanilla's own
+    /// `messageHeight`, `ChatComponent.java`) exactly two rows fit
+    /// (`floor(20 / 9) == 2`), so a five-line log must render identically to
+    /// a two-line log, not five.
     #[test]
     fn chat_height_option_caps_the_number_of_visible_rows() {
         let stats = DebugStats::default();
@@ -6489,11 +6706,11 @@ mod tests {
             640,
             480,
         );
-        let one_line_uncapped = HudGeometry::build(
+        let two_lines_uncapped = HudGeometry::build(
             &HudFrame {
                 crosshair: false,
                 show_debug: false,
-                chat: &chat[4..],
+                chat: &chat[3..],
                 ..HudFrame::new(&stats)
             },
             640,
@@ -6501,8 +6718,9 @@ mod tests {
         );
         assert_eq!(
             capped.vertex_count(),
-            one_line_uncapped.vertex_count(),
-            "height_pct_unfocused == 0.0 must cap the scrollback to exactly one row"
+            two_lines_uncapped.vertex_count(),
+            "height_pct_unfocused == 0.0 must cap the scrollback to exactly two rows \
+             at vanilla's 9px row height"
         );
         let uncapped = HudGeometry::build(
             &HudFrame {

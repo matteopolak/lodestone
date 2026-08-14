@@ -20,9 +20,10 @@ Two halves:
 - **`HudGeometry::build_inner`**'s sidebar block lays that `Sidebar` out at
   vanilla's own metrics (`SIDEBAR_LINE_H = 9.0`, `SIDEBAR_TEXT_SCALE = 1.0`,
   both in `crates/lodestone-shell/src/hud.rs`) — **not** this function's
-  ambient `scale`/`line_h`, which is `HUD_TEXT_SCALE` (`2.0`) and this HUD's
-  own 18px stride. Using the ambient pitch was the bug: it rendered the panel
-  at twice vanilla's size, reported as "the scoreboard is way too big".
+  then-ambient `scale`/`line_h` (`HUD_TEXT_SCALE`, `2.0`, and this HUD's own
+  18px stride — both since deleted, see `docs/hud-text-scale.md`). Using the
+  ambient pitch was the bug: it rendered the panel at twice vanilla's size,
+  reported as "the scoreboard is way too big".
 
 Ported directly from `Hud.displayScoreboardSidebar`
 (`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`):
