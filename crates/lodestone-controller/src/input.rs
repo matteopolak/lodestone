@@ -32,24 +32,24 @@ pub enum Action {
 
 /// Vanilla's double-tap-forward-to-sprint window, in 20 Hz ticks.
 ///
-/// Read from `.cache/mc/26.2/client-src/net/minecraft/client/Options.java:631-640`:
+/// Read from `.cache/mc/26.2/client-src/net/minecraft/client/Options.java`:
 /// the `options.sprintWindow` slider is an `OptionInstance.IntRange(0, 10)` with
-/// default `7` (`0` disables double-tap sprint; `LocalPlayer.java:807` arms the
-/// timer with this value). Since issue #444 the value is exposed as a settings
+/// default `7` (`0` disables double-tap sprint; `LocalPlayer.java` arms the
+/// timer with this value). The value is exposed as a settings
 /// slider and pushed down each step by the shell; this constant is the **default**
 /// [`InputState::sprint_window_ticks`] boots with, so a caller that never calls
 /// [`InputState::set_sprint_window_ticks`] keeps vanilla's shipped behaviour.
 pub const SPRINT_TRIGGER_WINDOW_TICKS: u8 = 7;
 
-/// Vanilla's minimum food level to *start* a sprint (issue #200):
-/// `FoodData.hasEnoughFood()` is `foodLevel > 6.0` (`FoodData.java:92-94`), so
+/// Vanilla's minimum food level to *start* a sprint:
+/// `FoodData.hasEnoughFood()` is `foodLevel > 6.0` (`FoodData.java`), so
 /// exactly `6` does not qualify — the cutoff is strict, not inclusive.
 pub const MIN_FOOD_LEVEL_TO_SPRINT: i32 = 6;
 
 /// The set of currently-held actions plus accumulated, not-yet-consumed mouse
 /// motion. Cheap to copy; the platform layer owns one.
 ///
-/// `Default` is implemented manually rather than derived since issue #444:
+/// `Default` is implemented manually rather than derived:
 /// the derived value would boot [`Self::sprint_window_ticks`] to `0` (double-tap
 /// sprint disabled), which is not vanilla's shipped behaviour.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -64,7 +64,7 @@ pub struct InputState {
     /// Sprint latched on by a double-tap of forward, independent of the
     /// sprint key. Mirrors vanilla's persisted `LocalPlayer.isSprinting()`
     /// flag as set by the `sprintTriggerTime` branch of `aiStep`
-    /// (`LocalPlayer.java:802-814`): a *fresh* forward press while
+    /// (`LocalPlayer.java`): a *fresh* forward press while
     /// [`sprint_trigger_ticks`](Self::sprint_trigger_ticks) is still counting
     /// down latches this on, the same way holding the sprint key drives
     /// `sprint` above. [`movement_intent`] ORs the two together and applies
@@ -82,30 +82,30 @@ pub struct InputState {
     /// forward.
     sprint_latched: bool,
     /// Ticks remaining in the double-tap window armed by the last *fresh*
-    /// forward press (vanilla's `sprintTriggerTime`, `LocalPlayer.java:137`).
+    /// forward press (vanilla's `sprintTriggerTime`, `LocalPlayer.java`).
     /// Counts down once per [`InputState::tick`] call; a second fresh
     /// forward press while this is still nonzero triggers
     /// [`sprint_latched`](Self::sprint_latched). Sneaking or holding back
     /// cancels a pending window each tick, mirroring
-    /// `LocalPlayer.java:798-800` (vanilla also cancels while slowed by item
+    /// `LocalPlayer.java` (vanilla also cancels while slowed by item
     /// use — this crate has no such signal to check).
     sprint_trigger_ticks: u8,
     /// Raw physical hold state of the sneak key, tracked **separately** from
-    /// [`Self::sneak`] so a toggle-mode press can be told apart from a repeat
-    /// (issue #202). Unused while [`Self::toggle_sneak`] is off, where
+    /// [`Self::sneak`] so a toggle-mode press can be told apart from a repeat.
+    /// Unused while [`Self::toggle_sneak`] is off, where
     /// `sneak` already *is* the physical state and this would be redundant.
     sneak_key_down: bool,
     /// As [`Self::sneak_key_down`], for sprint.
     sprint_key_down: bool,
-    /// Vanilla's `key.sneak` toggle option (`Options::toggleCrouch`, issue
-    /// #202). A **config** flag, not per-key transient state — see
+    /// Vanilla's `key.sneak` toggle option (`Options::toggleCrouch`).
+    /// A **config** flag, not per-key transient state — see
     /// [`Self::set_toggle_modes`] and [`Self::release_all`], which preserves
     /// it exactly like [`Self::mouse_dx`]/[`Self::mouse_dy`].
     toggle_sneak: bool,
     /// As [`Self::toggle_sneak`], for `key.sprint`/`Options::toggleSprint`.
     toggle_sprint: bool,
-    /// Vanilla's `key.attack` toggle option (`Options.java:619-626`, issue
-    /// #444), carried through [`Self::set_toggle_modes`] and preserved across
+    /// Vanilla's `key.attack` toggle option (`Options.java`),
+    /// carried through [`Self::set_toggle_modes`] and preserved across
     /// [`Self::release_all`] exactly like [`Self::toggle_sneak`].
     ///
     /// **Not yet consumed by a press edge.** Attack/use flow through
@@ -117,15 +117,15 @@ pub struct InputState {
     /// even before every consumer exists.
     toggle_attack: bool,
     /// As [`Self::toggle_attack`], for `key.use`/`Options::toggleUse`
-    /// (`Options.java:627-629`).
+    /// (`Options.java`).
     toggle_use: bool,
-    /// The shell's **one-tick** auto-jump request (issue #444): ORed into the
+    /// The shell's **one-tick** auto-jump request: ORed into the
     /// jump intent by [`movement_intent`], then cleared by [`Self::tick`] at
     /// the end of the same physics tick it was consumed in.
     ///
-    /// Vanilla's `options.sprintWindow` (`Options.java:631-640`, issue #444) —
+    /// Vanilla's `options.sprintWindow` (`Options.java`) —
     /// how many 20 Hz ticks the double-tap-forward window stays armed. `0`
-    /// disables double-tap sprint (`LocalPlayer.java:807` arms
+    /// disables double-tap sprint (`LocalPlayer.java` arms
     /// `sprintTriggerTime` with this value). Pushed down once per `step` by
     /// the shell via [`Self::set_sprint_window_ticks`]; boots at
     /// [`SPRINT_TRIGGER_WINDOW_TICKS`].
@@ -164,7 +164,7 @@ impl Default for InputState {
 
 impl InputState {
     /// Sets vanilla's `key.sneak`/`key.sprint`/`key.attack`/`key.use` toggle
-    /// options (issues #202/#444 — `Options::toggleCrouch`/`toggleSprint`/
+    /// options (`Options::toggleCrouch`/`toggleSprint`/
     /// `toggleAttack`/`toggleUse`).
     ///
     /// A config setter rather than a constructor argument: the platform layer
@@ -186,7 +186,7 @@ impl InputState {
         self.toggle_use = toggle_use;
     }
 
-    /// Set vanilla's `options.sprintWindow` (issue #444) — the
+    /// Set vanilla's `options.sprintWindow` — the
     /// double-tap-forward window in 20 Hz ticks. `0` disables double-tap
     /// sprint. Pushed once per `step` by the shell, so a mid-session change
     /// from the settings screen applies on the very next tick.
@@ -196,11 +196,11 @@ impl InputState {
 
     /// Set or clear a held action.
     ///
-    /// # Toggle mode (issue #202)
+    /// # Toggle mode
     ///
     /// Sneak and sprint each have a vanilla option that turns the key from
     /// hold-to-activate into press-to-toggle — `ToggleKeyMapping::setDown`
-    /// (`ToggleKeyMapping.java:33-40`): a toggle-mode key's *effective* state
+    /// (`ToggleKeyMapping.java`): a toggle-mode key's *effective* state
     /// (`isDown()`) only changes on a physical **press** edge, where it flips;
     /// a physical **release** does nothing. [`Self::sneak`]/[`Self::sprint`]
     /// are that effective state — the same field every other reader in this
@@ -219,13 +219,13 @@ impl InputState {
                 // gating this on `canStartSprinting()`'s
                 // `input.hasForwardImpulse()` (false if back is also held,
                 // since the two cancel) and `!isMovingSlowly()` (sneaking).
-                // See `LocalPlayer.java:802-809`.
+                // See `LocalPlayer.java`.
                 if fresh_press && !self.back && !self.sneak {
                     if self.sprint_trigger_ticks > 0 {
                         self.sprint_latched = true;
                     } else {
-                        // Armed for the *configured* window (issue #444): 0 is
-                        // `LocalPlayer.java:807`'s "double-tap sprint disabled"
+                        // Armed for the *configured* window: 0 is
+                        // `LocalPlayer.java`'s "double-tap sprint disabled"
                         // value, so a fresh press arms with 0 and the next one
                         // never sees a live window.
                         self.sprint_trigger_ticks = self.sprint_window_ticks;
@@ -233,7 +233,7 @@ impl InputState {
                 }
                 // Releasing forward always ends an active double-tap sprint
                 // (vanilla: `shouldStopRunSprinting`'s `!hasForwardImpulse`
-                // branch, `LocalPlayer.java:919`) — clear the latch so a
+                // branch, `LocalPlayer.java`) — clear the latch so a
                 // later, unrelated forward press doesn't resume sprinting
                 // without a fresh trigger.
                 if !held {
@@ -272,7 +272,7 @@ impl InputState {
     /// Advance the double-tap-sprint timer by one 20 Hz physics tick.
     ///
     /// Mirrors `LocalPlayer.aiStep`'s per-tick handling of `sprintTriggerTime`
-    /// (`LocalPlayer.java:764-766` for the countdown, `:798-800` for the
+    /// (`LocalPlayer.java`, both for the countdown and for the
     /// sneak/back cancel). This crate touches no clock (see the
     /// `no_wasm_trap_symbols_are_confined` guard below), so the platform
     /// layer must call this once per fixed tick rather than this type ever
@@ -308,7 +308,7 @@ impl InputState {
     /// — it mirrors `KeyMapping.releaseAll()` calling `release()` on every
     /// mapping, and `ToggleKeyMapping.release()`'s `reset()` sets `isDown`
     /// `false` unconditionally regardless of toggle mode
-    /// (`ToggleKeyMapping.java:42-49`). [`Self::toggle_sneak`]/
+    /// (`ToggleKeyMapping.java`). [`Self::toggle_sneak`]/
     /// [`Self::toggle_sprint`]/[`Self::toggle_attack`]/[`Self::toggle_use`]
     /// and [`Self::sprint_window_ticks`] are preserved across the reset like
     /// [`Self::mouse_dx`]/[`Self::mouse_dy`] are: they are the *options*, not
@@ -334,7 +334,7 @@ impl InputState {
         self.sprint_window_ticks = options.4;
     }
 
-    /// Whether the jump key is currently held (issue #444).
+    /// Whether the jump key is currently held.
     #[must_use]
     pub fn jump(&self) -> bool {
         self.jump
@@ -368,7 +368,7 @@ impl InputState {
 ///
 /// **Auto-jump is deliberately not here.** This used to OR in an
 /// `auto_jump_requested` transient the shell set from its own simplified
-/// obstacle probe. Issue #201 removed that probe: the real detector is
+/// obstacle probe. That probe was removed: the real detector is
 /// `lodestone_physics`'s exact port of `LocalPlayer.updateAutoJump`, which arms
 /// `PlayerState::auto_jump_time` and spends it inside `tick_air` — so the forced
 /// jump never passes through an input at all, exactly as vanilla's
@@ -390,13 +390,13 @@ pub fn movement_intent(state: &InputState) -> MovementInput {
     }
 }
 
-/// [`movement_intent`], plus vanilla's food-level sprint gate (issue #200).
+/// [`movement_intent`], plus vanilla's food-level sprint gate.
 ///
 /// `LocalPlayer.canStartSprinting` requires `isSprintingPossible`, whose
 /// non-passenger branch is `hasEnoughFoodToDoExhaustiveManoeuvres()` —
 /// `foodData.hasEnoughFood() || abilities.mayfly`
-/// (`Player.java:1592-1594`), and `hasEnoughFood()` is `foodLevel > 6.0`
-/// (`FoodData.java:92-94`). So: sprint is allowed on empty/low food only while
+/// (`Player.java`), and `hasEnoughFood()` is `foodLevel > 6.0`
+/// (`FoodData.java`). So: sprint is allowed on empty/low food only while
 /// flight is permitted (creative/spectator), and otherwise cuts out at food
 /// level 6 and below, not just at 0.
 ///
@@ -446,7 +446,7 @@ pub fn sensitivity_factor(slider: f32) -> f32 {
 /// * The raw pixel deltas pass through the vanilla [`sensitivity_factor`] curve.
 /// * Yaw wraps to `[-180, 180)`; pitch is clamped to [`PITCH_LIMIT`].
 ///
-/// **No invert option** — see [`apply_look_inverted`] (issue #203), added
+/// **No invert option** — see [`apply_look_inverted`], added
 /// alongside rather than as a parameter here because this exact signature is
 /// called directly by `lodestone-shell`'s `sim.rs`, which this crate does not
 /// own and must not silently break.
@@ -461,13 +461,12 @@ pub fn apply_look(yaw: f32, pitch: f32, dx: f32, dy: f32, sensitivity: f32) -> (
     (yaw, pitch)
 }
 
-/// [`apply_look`], plus vanilla's `invertXMouse`/`invertYMouse` options
-/// (issue #203).
+/// [`apply_look`], plus vanilla's `invertXMouse`/`invertYMouse` options.
 ///
 /// `MouseHandler.turnPlayer` computes `xo`/`yo` (the raw delta already scaled
 /// by sensitivity) and negates *those* right before `Entity.turn`:
 /// `player.turn(invertMouseX ? -xo : xo, invertMouseY ? -yo : yo)`
-/// (`MouseHandler.java:372-374`) — negation is the last step, after the
+/// (`MouseHandler.java`) — negation is the last step, after the
 /// sensitivity curve, not before it. This negates `dx`/`dy` first and lets
 /// [`apply_look`] apply the (unsigned) [`sensitivity_factor`] afterwards, but
 /// the two orders agree numerically: the curve multiplies by a positive
@@ -526,7 +525,7 @@ mod tests {
         assert!(!movement_intent(&s).sprint, "no sprint while sneaking");
     }
 
-    /// #200: vanilla's cutoff is `foodLevel > 6` (`FoodData.java:93`), not `> 0`
+    /// Vanilla's cutoff is `foodLevel > 6` (`FoodData.java`), not `> 0`
     /// — a player at exactly 6 must not be able to start a sprint.
     #[test]
     fn sprint_is_gated_on_food_above_six() {
@@ -681,7 +680,7 @@ mod tests {
         assert!((pitch + PITCH_LIMIT).abs() < 1e-3);
     }
 
-    /// #203: `apply_look_inverted(.., false, false)` must be numerically
+    /// `apply_look_inverted(.., false, false)` must be numerically
     /// identical to plain [`apply_look`] — the option's *absence* changing
     /// nothing is the control every "inversion" test below leans on.
     #[test]
@@ -736,7 +735,7 @@ mod tests {
         assert_eq!(s.mouse_dx, 1.0);
     }
 
-    // -- toggle sneak/sprint (issue #202) ------------------------------------
+    // -- toggle sneak/sprint --------------------------------------------------
 
     #[test]
     fn hold_mode_is_the_default_and_matches_the_old_behaviour() {
