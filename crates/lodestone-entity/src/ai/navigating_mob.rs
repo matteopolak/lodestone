@@ -390,6 +390,23 @@ pub struct NavigatingMob<'w> {
     /// [`MobController::is_ordered_to_sit`] gives: the order survives the goal
     /// being preempted, the pose does not.
     in_sitting_pose: bool,
+    /// Host injection point: vanilla `PatrollingMonster.patrolling`. Drives
+    /// [`MobController::is_patrolling`].
+    patrolling: bool,
+    /// Host injection point: vanilla `PatrollingMonster.patrolLeader`. Drives
+    /// [`MobController::is_patrol_leader`].
+    patrol_leader: bool,
+    /// This mob's own current long-distance patrol waypoint, round-tripped
+    /// through [`LongDistancePatrolGoal`](super::goals::LongDistancePatrolGoal)
+    /// via [`MobController::patrol_target`]/[`MobController::set_patrol_target`]
+    /// — vanilla `PatrollingMonster.patrolTarget`.
+    patrol_target: Option<Vec3>,
+    /// Host injection point, refreshed once per tick for a non-leader only:
+    /// the patrol's shared waypoint, as the host resolves it from nearby
+    /// patrol leaders. Drives [`MobController::patrol_group_target`]; see that
+    /// method's own doc comment for why this exists instead of the census
+    /// `LongDistancePatrolGoal` cannot run itself.
+    patrol_group_target: Option<Vec3>,
     /// Self-damage requests this mob recorded via
     /// [`MobController::damage_self`], awaiting a host drain via
     /// [`take_self_damage`](Self::take_self_damage) — the
@@ -494,6 +511,10 @@ impl<'w> NavigatingMob<'w> {
             tame: false,
             ordered_to_sit: false,
             in_sitting_pose: false,
+            patrolling: false,
+            patrol_leader: false,
+            patrol_target: None,
+            patrol_group_target: None,
             self_damage: Vec::new(),
         }
     }
@@ -885,6 +906,57 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
+    /// Host injection point: vanilla `PatrollingMonster.setPatrolling`/the
+    /// `patrolling` side effect of `setPatrolLeader`/`setPatrolTarget`.
+    pub fn set_patrolling(&mut self, patrolling: bool) -> &mut Self {
+        self.patrolling = patrolling;
+        self
+    }
+
+    /// Host injection point: vanilla `PatrollingMonster.setPatrolLeader`.
+    /// **Does not** also set `patrolling` — unlike vanilla's own method, which
+    /// folds the two together — because the host here already calls
+    /// [`set_patrolling`](Self::set_patrolling) explicitly at spawn time; two
+    /// setters each doing one thing is more legible at the call site than one
+    /// that quietly does two.
+    pub fn set_patrol_leader(&mut self, leader: bool) -> &mut Self {
+        self.patrol_leader = leader;
+        self
+    }
+
+    /// Host injection point, refreshed once per tick for a non-leader: the
+    /// patrol's shared waypoint, resolved by the host from nearby patrol
+    /// leaders. See [`MobController::patrol_group_target`]'s own doc comment.
+    pub fn set_patrol_group_target(&mut self, target: Option<Vec3>) -> &mut Self {
+        self.patrol_group_target = target;
+        self
+    }
+
+    /// This mob's own current long-distance patrol waypoint, for a host that
+    /// wants to read back what [`LongDistancePatrolGoal`](super::goals::LongDistancePatrolGoal)
+    /// last chose — e.g. to resolve [`patrol_group_target`](Self::set_patrol_group_target)
+    /// for a *different* mob's follower this same tick.
+    #[must_use]
+    pub fn patrol_target(&self) -> Option<Vec3> {
+        self.patrol_target
+    }
+
+    /// Whether this mob is currently patrolling — vanilla
+    /// `PatrollingMonster.isPatrolling()`, exposed for a host census (e.g.
+    /// "which nearby mobs are patrol leaders").
+    #[must_use]
+    pub fn is_patrolling(&self) -> bool {
+        self.patrolling
+    }
+
+    /// Whether this mob leads its patrol — vanilla
+    /// `PatrollingMonster.isPatrolLeader()`, exposed for the same census
+    /// reason as [`is_patrolling`](Self::is_patrolling).
+    #[must_use]
+    pub fn is_patrol_leader(&self) -> bool {
+        self.patrol_leader
+    }
+
     /// Whether this mob is currently in the sitting **pose** —
     /// [`SitWhenOrderedToGoal`](super::goals::SitWhenOrderedToGoal)'s observable
     /// output, and the `0x01` `DATA_FLAGS_ID` bit the host publishes. Read this
@@ -1271,6 +1343,26 @@ impl MobController for NavigatingMob<'_> {
 
     fn set_in_sitting_pose(&mut self, sitting: bool) {
         self.in_sitting_pose = sitting;
+    }
+
+    fn is_patrolling(&self) -> bool {
+        self.patrolling
+    }
+
+    fn is_patrol_leader(&self) -> bool {
+        self.patrol_leader
+    }
+
+    fn patrol_target(&self) -> Option<Vec3> {
+        self.patrol_target
+    }
+
+    fn set_patrol_target(&mut self, target: Option<Vec3>) {
+        self.patrol_target = target;
+    }
+
+    fn patrol_group_target(&self) -> Option<Vec3> {
+        self.patrol_group_target
     }
 
     fn is_being_stared_at(&self) -> bool {

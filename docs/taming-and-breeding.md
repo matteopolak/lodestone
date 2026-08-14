@@ -316,9 +316,15 @@ producer-side arm, including the control that a **wild** mob streams no field at
 
 * **Adding a tameable species**: an arm in `tame_mechanism`, a row in `breeding_food`, and — if it
   should sit or follow — a roster entry with `SitWhenOrderedToGoal` and `FollowOwnerGoal` at that
-  species' own priorities and distances. Cat, parrot and the horse family are tameable through
-  `MobSim::interact` but are **in no roster at all**, so they get no goals: they can be owned, and a
-  tamed cat will not follow you until `roster` claims it.
+  species' own priorities and distances. **The wolf, the cat and the parrot all have one now** —
+  `lodestone_entity::ai::roster::neutral::WOLF` for the wolf,
+  `lodestone_entity::ai::roster::passive::{CAT, PARROT}` for the other two — so all three sit and
+  follow on a real mob. The horse family is still tameable through `MobSim::interact` but has **no**
+  roster entry, because `AbstractHorse` is not a `TamableAnimal` in vanilla and registers neither
+  `SitWhenOrderedToGoal` nor `FollowOwnerGoal` at all — there is nothing to add for it, not a gap.
+  See `roster::passive`'s own module doc for what remains disclosed-but-missing on the cat and parrot
+  tables (a cat's bed/chest goals, a parrot's shoulder-riding, neither species' wolf-style
+  `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal` because vanilla registers those for the wolf only).
 * **Adding a mechanism** (a llama's temper, a fox's trust, an axolotl's bucket): a `TameMechanism`
   variant, not a new constant on an existing one. The four existing mechanisms differ in trigger,
   roll shape *and* side effects, which is why the enum exists.

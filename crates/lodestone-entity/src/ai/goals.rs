@@ -1166,6 +1166,182 @@ impl Goal for EatBlockGoal {
     }
 }
 
+/// Steers a pillager patrol across the map, leader and followers alike.
+///
+/// Vanilla `PatrollingMonster.LongDistancePatrolGoal` (flag MOVE), registered
+/// at goal priority 4 for every `PatrollingMonster`
+/// (`monster/PatrollingMonster.java:40`) — the pillager only, today.
+///
+/// # What is ported, and what is not
+///
+/// * **The leader's own long-distance steering** is ported faithfully: the
+///   lateral-offset waypoint formula (`:181-187`) and the "close enough, pick
+///   a new far-off target" repick (`:178-179`) are both pure position
+///   arithmetic this seam can already answer through
+///   [`MobController::position`]/[`MobController::move_to`].
+/// * **The companion census is not, and cannot be without a new seam
+///   primitive.** Vanilla's own `findPatrolCompanions` (`:200-204`) is a
+///   `getEntitiesOfClass` query with no analogue on [`MobController`] — the
+///   trait hands goals answers about *this* mob, never a population (see
+///   `roster`'s own module doc, "not perception data"). So a **follower**
+///   never runs this goal's leader branch at all: instead of vanilla's
+///   leader-pushes-to-nearby-companions data flow, a follower here *pulls*
+///   [`MobController::patrol_group_target`] — the host's answer to "what does
+///   my patrol's leader currently want" — and then runs the **same**
+///   lateral-offset movement formula toward it, from its own position. The
+///   visible result is the same shape (a loose cluster marching toward one
+///   shared destination) through a different data path: vanilla's followers
+///   track the leader's *immediate* 10-block waypoint and go stale the moment
+///   they leave its search radius; these track the leader's *long-distance*
+///   target continuously, which is the more forgiving direction to diverge
+///   in — a straggler still knows where the patrol is headed.
+/// * **`moveRandomly`'s fallback** (`:206-212`) is ported, using this seam's
+///   own random draw in place of vanilla's `RandomSource`.
+/// * **Vanilla's `hasControllingPassenger()` clause is not modelled** — no
+///   passenger state crosses this seam (see `docs/pillager-patrols.md`).
+#[derive(Debug)]
+pub struct LongDistancePatrolGoal {
+    /// `speedModifier` — a non-leader's pace.
+    follower_speed: f64,
+    /// `leaderSpeedModifier` — faster than a follower's, so the leader does
+    /// not get boxed in by its own patrol.
+    leader_speed: f64,
+    /// Ticks remaining after a failed path attempt before this goal may run
+    /// again — vanilla's `NAVIGATION_FAILED_COOLDOWN` (200).
+    cooldown: i32,
+}
+
+impl LongDistancePatrolGoal {
+    /// Vanilla's `LongDistancePatrolGoal.NAVIGATION_FAILED_COOLDOWN`.
+    const NAVIGATION_FAILED_COOLDOWN: i32 = 200;
+    /// Vanilla's `closerToCenterThan(…, 10.0)` repick threshold, squared.
+    const REPICK_RANGE_SQR: f64 = 100.0;
+    /// The half-width of vanilla's `moveRandomly` candidate box
+    /// (`-8 + nextInt(16)`, i.e. `[-8, 7]`).
+    const RANDOM_MOVE_SPREAD: i32 = 16;
+    /// The half-width of `findPatrolTarget`'s far-off offset
+    /// (`-500 + nextInt(1000)`, i.e. `[-500, 499]`).
+    const FAR_TARGET_SPREAD: i32 = 1000;
+
+    /// Creates the goal with `(follower_speed, leader_speed)` — vanilla's own
+    /// constructor order is `(speedModifier, leaderSpeedModifier)`
+    /// (`PatrollingMonster.java:40`'s `new LongDistancePatrolGoal<>(this, 0.7,
+    /// 0.595)`), and `speedModifier` is what `tick` uses whenever `!patrolLeader`
+    /// — a follower. Worth naming explicitly because it reads backwards at a
+    /// glance: **the leader is the slower of the two** (`0.595` against a
+    /// follower's `0.7`), so stragglers can close the gap and the patrol stays
+    /// clustered instead of stringing out behind whoever is out front.
+    #[must_use]
+    pub fn new(follower_speed: f64, leader_speed: f64) -> Self {
+        Self {
+            follower_speed,
+            leader_speed,
+            cooldown: 0,
+        }
+    }
+}
+
+impl Goal for LongDistancePatrolGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if !mob.is_patrolling() || mob.attack_target().is_some() {
+            return false;
+        }
+        // A leader's own `patrol_target` must already exist — nothing else
+        // ever sets one for it. A **follower**'s does not yet exist on its
+        // very first usable tick: `tick`'s own adoption step is what copies
+        // `patrol_group_target` into `patrol_target`, and that step cannot
+        // run before `can_use` says yes. So a follower is usable the moment
+        // the host census hands it *either* value, matching vanilla's own
+        // shape where a follower's `hasPatrolTarget()` only ever becomes true
+        // because something external (there, the leader's tick; here, the
+        // host census) wrote it.
+        if mob.is_patrol_leader() {
+            mob.patrol_target().is_some()
+        } else {
+            mob.patrol_target().is_some() || mob.patrol_group_target().is_some()
+        }
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        self.can_use(mob)
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        if self.cooldown > 0 {
+            self.cooldown -= 1;
+            return;
+        }
+        if !mob.navigation_done() {
+            return;
+        }
+        let is_leader = mob.is_patrol_leader();
+        if !is_leader {
+            // Vanilla's leader pushes a near-term waypoint out to nearby
+            // companions; this pulls the leader's own long-distance target
+            // instead — see this goal's own doc comment for why.
+            if let Some(group_target) = mob.patrol_group_target() {
+                mob.set_patrol_target(Some(group_target));
+            }
+        }
+        let Some(target) = mob.patrol_target() else {
+            return;
+        };
+        let self_pos = mob.position();
+        if is_leader && distance_sqr(target, self_pos) < Self::REPICK_RANGE_SQR {
+            // `findPatrolTarget`: a fresh far-off offset from the mob's
+            // current position, not from the old target.
+            let dx = f64::from(mob.next_i32(Self::FAR_TARGET_SPREAD) - 500);
+            let dz = f64::from(mob.next_i32(Self::FAR_TARGET_SPREAD) - 500);
+            mob.set_patrol_target(Some(Vec3::new(self_pos.x + dx, self_pos.y, self_pos.z + dz)));
+            return;
+        }
+        // `distance.yRot(90.0F).scale(0.4)`: rotating the mob→target vector
+        // 90° around Y leaves Y untouched and maps `(x, z) -> (z, -x)`
+        // (`Vec3.yRot`'s own matrix at a quarter turn), then the rotated
+        // vector is shrunk to two-fifths and added back onto the target —
+        // this is the lateral wobble that keeps a patrol marching in a loose
+        // line rather than nose-to-tail.
+        let dist_x = self_pos.x - target.x;
+        let dist_z = self_pos.z - target.z;
+        let long_distance_target = Vec3::new(
+            target.x + dist_z * 0.4,
+            target.y,
+            target.z - dist_x * 0.4,
+        );
+        let to_target_x = long_distance_target.x - self_pos.x;
+        let to_target_z = long_distance_target.z - self_pos.z;
+        let len = to_target_x.hypot(to_target_z);
+        let move_target = if len > 1e-9 {
+            Vec3::new(
+                self_pos.x + to_target_x / len * 10.0,
+                self_pos.y,
+                self_pos.z + to_target_z / len * 10.0,
+            )
+        } else {
+            self_pos
+        };
+        let speed = if is_leader {
+            self.leader_speed
+        } else {
+            self.follower_speed
+        };
+        if !mob.move_to(move_target, speed) {
+            // `moveRandomly`.
+            let rx = f64::from(mob.next_i32(Self::RANDOM_MOVE_SPREAD) - 8);
+            let rz = f64::from(mob.next_i32(Self::RANDOM_MOVE_SPREAD) - 8);
+            mob.move_to(
+                Vec3::new(self_pos.x + rx, self_pos.y, self_pos.z + rz),
+                self.follower_speed,
+            );
+            self.cooldown = Self::NAVIGATION_FAILED_COOLDOWN;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::goal::GoalSelector;

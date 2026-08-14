@@ -70,7 +70,8 @@
 use super::goal::Goal;
 use super::goals::{
     AvoidEntityGoal, BreedGoal, FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal,
-    NearestAttackableTargetGoal, RandomLookAroundGoal, RandomStrollGoal, SwellGoal,
+    NearestAttackableTargetGoal, RandomLookAroundGoal, RandomStrollGoal, SitWhenOrderedToGoal,
+    SwellGoal,
 };
 
 pub mod hostile_melee;
@@ -354,6 +355,15 @@ pub fn nearest_attackable_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// differs.
 pub fn breed_1_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(BreedGoal::new(ctx.speed))
+}
+
+/// `SitWhenOrderedToGoal(this)` — the wolf, the cat and the parrot all register
+/// this at goal priority 2, and all three with no constructor arguments
+/// (`animal/wolf/Wolf.java`, `animal/feline/Cat.java:109`,
+/// `animal/parrot/Parrot.java:166`). One shared builder because the goal itself
+/// carries every per-species difference already — see its own doc comment.
+pub fn sit_when_ordered(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(SitWhenOrderedToGoal)
 }
 
 /// The registrations every species without a family entry gets: wander and look
