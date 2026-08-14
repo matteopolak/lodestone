@@ -616,8 +616,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   detection and spawn for the snow golem and the iron golem — given a just-placed
   carved pumpkin or jack o'lantern, does a valid `snow_block`/`iron_block` structure
   now exist around it, and if so, spawn the golem. Lives in
-  `crates/lodestone-server/src/mobs.rs` as `MobSim::try_construct_golem`, ported from
-  vanilla `CarvedPumpkinBlock.trySpawnGolem`
+  `crates/lodestone-server/src/mobs/mod.rs` as `MobSim::try_construct_golem` (the
+  pattern-matching internals it calls into are `mobs/golem.rs`, split out of the same
+  file since this doc was written), ported from vanilla
+  `CarvedPumpkinBlock.trySpawnGolem`
   (`.cache/mc/26.2/src/net/minecraft/world/level/block/CarvedPumpkinBlock.java`).
 - [`gpu/` module layout](./gpu-module-layout.md) —
   `crates/lodestone-shell/src/gpu.rs` was a single ~5,300-line file carrying eight
@@ -766,9 +768,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   re-parent, and the distance-based pull and snap physics for a leashed mob —
   vanilla `Leashable`/`LeadItem`
   (`.cache/mc/26.2/src/net/minecraft/world/entity/Leashable.java`,
-  `.../item/LeadItem.java`). Lives in `crates/lodestone-server/src/mobs.rs`:
-  `MobSim::try_leash`, `MobSim::try_leash_to_fence`, `MobSim::tick_leashes`, plus the
-  `LeashHolder`/`LeashOutcome` types and a `leash_holder` field on `SimMob`.
+  `.../item/LeadItem.java`). Lives in `crates/lodestone-server/src/mobs/mod.rs` (the
+  `mobs.rs` file split moved several other domains to sibling files under `mobs/`, but
+  leashing stayed in `mod.rs` — it is core `MobSim` tick logic, not a
+  per-entity-kind slice): `MobSim::try_leash`, `MobSim::try_leash_to_fence`,
+  `MobSim::tick_leashes`, plus the `LeashHolder`/`LeashOutcome` types and a
+  `leash_holder` field on `SimMob`.
 - [The light ramp: vanilla's lightmap curve](./light-ramp.md) — The scalar every
   terrain, fluid, entity and particle fragment multiplies its texel by, as a function
   of the server's packed sky/block light byte and the time of day. Vanilla calls it a
