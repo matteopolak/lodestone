@@ -128,17 +128,54 @@ dispatch.
   piggyback cadence. Lowering it makes ticket bookkeeping more tick-accurate
   at the cost of more frequent graph recomputes on hot read paths; raising it
   does the opposite.
-- **The mechanism is production-safe, but nothing currently grants a real
-  ticket in production.** `set_spawn_ticket`/`set_forced_ticket` are called
-  today only from tests. The natural spawn-ticket call site is
-  `crate::server`'s `ConfigurationFinished` join arm (where the real spawn
-  point is resolved via `crate::world_spawn::find_initial_spawn`), and that
-  arm operates over a generic `S: ChunkSource`-parameterised connection with
-  no concrete path to `ChunkStore`'s ticket handle without either the
-  unforwarded-trait-method trap described above or a signature change to a
-  public, cross-crate entry point (`serve_connection` and friends, consumed by
-  `crates/protocol/v770/tests` and `lodestone-shell`). This is the honest
-  remaining gap — see "Open work" below.
+- **Issue #619/#297: production now grants real tickets, through a threaded
+  handle rather than the trait-method route.** `crate::server`'s
+  `serve_connection_inner` (and every `serve_connection*` wrapper above it)
+  takes a `tickets: &TicketStoreHandle` parameter — the signature-change
+  option this doc used to describe as lower-risk, since it needs no new
+  `ChunkSource` trait method and no `DimensionalSource` change. Every
+  `IntegratedServer` join path (`open_in_memory`'s wasm32 arm,
+  `open_in_memory_with_mobs_using` — singleplayer and `open_persistent_with_mobs`
+  alike, `open_to_lan`, `publish`) passes the real handle
+  `ChunkStore::tickets()` returns; every pre-existing entry point (the
+  `_shared` compatibility wrappers, `serve_connection_with_plugin_channels`,
+  test harnesses) passes a fresh `TicketStoreHandle::default()`, exactly the
+  compatibility shape `server.rs` already uses for `BlockTickFeed`/
+  `ExplosionFeed`/`WorldStateHandle` and friends — a disconnected handle
+  nobody else reads, so no pre-existing caller's behaviour changed.
+  `IntegratedServer::tickets()` hands a host the same handle back for
+  inspection or a `/forceload`-shaped command.
+- **The world-spawn ticket is granted (and refreshed) from the connection
+  side, not from `run_tick_loop`.** `crate::server`'s `ConfigurationFinished`
+  arm grants `ticket_type::PLAYER_SPAWN` at the resolved world-spawn column,
+  radius `ticket::PLAYER_SPAWN_RADIUS` (3) — re-granting under the same
+  `(TicketOwner::Spawn, TicketKind::PlayerSpawn)` key on every join is a
+  refresh, not a second ticket. `PlayerTicketGuard::refresh_world_spawn`
+  (called from `serve_play`'s own `keep_alive_tick` timer, native only) is
+  vanilla's `Ready.keepAlive()`, moved to the one per-tick hook this crate
+  already has for a connected player rather than a new `tick.rs` insertion —
+  see `tick.rs`'s own off-limits status in `CLAUDE.md`'s hazard notes for why
+  that route was never on the table. On `wasm32`, which has no timer arm at
+  all, the spawn ticket is granted once at join and left to expire under
+  vanilla's own 20-"tick" (here: `TicketStore::tick`-unit) countdown; the
+  player's own `PLAYER_LOADING`/`PLAYER_SIMULATION` pair is unaffected
+  (`timeout: 0`).
+- **Per-player loading/simulation tickets replace `ViewTracker`'s implicit
+  residency role.** `TicketStoreHandle::grant_player` grants both at join
+  (`serve_connection_inner`, radius = the connection's own `view_radius`),
+  returning a `PlayerTicketGuard` `serve_play` owns for its whole lifetime.
+  `dispatch_play_packet`'s `PlayerMoved`/`ClientInformationChanged` arms call
+  `PlayerTicketGuard::move_to` whenever `ViewTracker::recenter`/
+  `set_view_radius` actually changed the tracked centre or radius (compared
+  before/after the call, not merely "a movement packet arrived") — this is
+  what makes "a chunk near two players stays loaded independent of either
+  one's view" real: two independent tickets under two independent
+  `TicketOwner::Player` ids both cover the shared column, and
+  `TicketStore::propagate`'s own min-over-all-active-tickets rule is what
+  keeps it resident until *both* have moved away.
+  `crates/lodestone-server/tests/ticket_residency_live.rs` is the live gate,
+  against a saved-then-reopened world, for a single connection's grant/move/
+  disconnect and for the two-connection union property.
 
 ## Configuration
 
@@ -163,21 +200,29 @@ stores stay separate.
 
 ## Open work
 
-- **Grant a real spawn ticket at join.** Wire `crate::server`'s
-  `ConfigurationFinished` arm (or a new, narrow accessor) to
-  `ChunkStore::set_spawn_ticket` once the connection knows the concrete store
-  type, or thread a `TicketStoreHandle` into the connection's existing
-  resource bundle (`BlockEntityHandle`, `MobHandle`, and friends are already
-  threaded that way) — the second is the lower-risk shape since it needs no
-  new trait method and no `DimensionalSource` change.
-- **Player-following loading/simulation tickets** (`docs/plans/
-  chunk-lifecycle.md`'s U5) — replacing `crate::server`'s `ViewTracker`'s
-  residency role with a per-player ticket pair. Same blocker as above:
-  `serve_connection`'s generic connection code has no concrete path to a
-  `ChunkStore`'s ticket handle today.
 - **A `FORCED`/`/forceload` command.** The ticket type and `ChunkStore::set_forced_ticket`
   already exist and are tested against a real saved world; only the command
   handler is missing.
 - **Ticket persistence** (vanilla's `TicketStorage` `SavedData`). Nothing here
   writes a ticket to disk — every `TicketStore` is rebuilt fresh at world
   open, so a `FORCED` ticket does not survive a restart yet.
+- **`portal.rs`'s ad-hoc parallel column pre-warm is not subsumable by this
+  module, and should not be routed through it.** `create_portal`'s 33×33
+  destination search calls `crate::chunk::generate_columns_parallel` directly
+  to fix a *throughput* problem (a fresh column costs ~909 ms, and the search
+  used to pay that serially, once per column, inside one unserviced window).
+  The ticket graph answers a different question — *should this column be
+  resident at all* — and has, by this module's own design (see "What this
+  deliberately does not port" in `ticket.rs`'s module doc), no scheduler, no
+  worker pool and no priority queue behind it: granting a ticket does not
+  generate anything, it only changes what `ChunkStore`'s eviction later
+  leaves alone. Wiring the portal search through a ticket grant would still
+  leave every column in the search generated **serially, on read**, the
+  moment the scan calls `block_state` — the exact defect the parallel
+  pre-warm exists to avoid. If the two are ever unified, the ticket graph's
+  *level* is the right input to a priority-aware version of
+  `crate::join_scheduler::ColumnPipeline`, not a replacement for the pre-warm
+  itself.
+- **`wasm32`'s world-spawn ticket has no refresh path.** See the note above:
+  a real gap on that one target, not a bug this work introduced, since
+  `serve_play`'s `wasm32` build has no timer arm to hang a refresh off.
