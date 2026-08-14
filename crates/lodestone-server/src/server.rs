@@ -9025,7 +9025,7 @@ where
                     sim.try_leash(
                         entity_id,
                         player_uuid,
-                        held.as_deref() == Some("minecraft:lead"),
+                        held.as_ref().is_some_and(|item| item.to_string() == "minecraft:lead"),
                         *game_mode == GameMode::Creative,
                     )
                 });
