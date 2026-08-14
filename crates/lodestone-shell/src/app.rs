@@ -48,7 +48,7 @@ use lodestone_render::window::attach_window;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::chat::ChatInput;
@@ -588,6 +588,21 @@ struct WindowApp {
     /// (`Screen.hasControlDown()`/`Minecraft.hasControlDown()`), which is a
     /// modifier read at drop time, not a `KeyMapping` of its own.
     ctrl_held: bool,
+    /// The live winit modifier state — Shift/Control/Alt/Super — updated from
+    /// `WindowEvent::ModifiersChanged` (`app::lifecycle`'s `window_event`).
+    ///
+    /// **This field's prior absence is what made Cmd+A/Cmd+V type letters
+    /// instead of acting.** Every real `winit::event::KeyEvent` carries no
+    /// modifier state of its own outside
+    /// this; without tracking it, `app::menus::menu_key_for` had no way to
+    /// distinguish Cmd+A from `a`, so a shortcut both failed to act *and*
+    /// typed the letter it was chording with. `shift_held`/`ctrl_held` above
+    /// are a narrower, older mechanism kept for their own two call sites
+    /// (container shift-click, `key.drop`'s hold-Ctrl-for-stack) — this field
+    /// is the general one `menu_key_for` and `handle_chat_key` consult for the
+    /// macOS-aware `EDIT_SHORTCUT_MODIFIER` shortcuts (select-all/copy/cut/
+    /// paste, `crate::menu::focus::EDIT_SHORTCUT_MODIFIER`).
+    modifiers: ModifiersState,
     /// Fractional carry for the hotbar mouse-wheel scroll (issue #203), so a
     /// `mouseWheelSensitivity` below 1.0 does not lose sub-notch scroll and
     /// above 1.0 can cross more than one slot per notch. Mirrors vanilla's
@@ -602,7 +617,6 @@ struct WindowApp {
     /// When the left button last pressed on the container screen, for
     /// [`DOUBLE_CLICK_WINDOW`]-based double-click detection.
     last_menu_click: Option<Instant>,
-    fps_ema: f32,
     last_log: Instant,
     /// The fog settings last uploaded to the renderer, so submerged fog is
     /// re-uploaded only when it actually changes (the player crossing a

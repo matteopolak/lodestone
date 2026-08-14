@@ -178,6 +178,10 @@ fn frame_interval(fps: u32) -> Duration {
     Duration::from_nanos(1_000_000_000 / u64::from(fps.max(1)))
 }
 
+/// The wall-clock window vanilla's own fps counter accumulates over — see
+/// [`FramePacer::record_presented_frame`].
+const FPS_WINDOW: Duration = Duration::from_secs(1);
+
 #[derive(Debug)]
 pub(crate) struct FramePacer {
     last_step: Instant,
@@ -192,6 +196,20 @@ pub(crate) struct FramePacer {
     last_input: Instant,
     focused: bool,
     occluded: bool,
+    /// Presented frames counted in the current one-second window — vanilla's
+    /// `Minecraft.frames`. See [`Self::record_presented_frame`].
+    frame_count: u32,
+    /// The start of the current counting window — vanilla's
+    /// `Minecraft.lastTime`. Advanced by whole [`FPS_WINDOW`]s so window
+    /// boundaries never drift with rounding.
+    fps_window_start: Instant,
+    /// The presented-frame count for the last **completed** window —
+    /// vanilla's static `Minecraft.fps`. `0` until one full window has
+    /// elapsed since [`Self::new`]. Unlike a reciprocal of a per-iteration
+    /// `dt`, this cannot report a rate the loop's actual presentation never
+    /// produced: it is a count of things that really happened, not a
+    /// derivative of how long one of them took.
+    reported_fps: u32,
 }
 
 impl FramePacer {
@@ -203,6 +221,9 @@ impl FramePacer {
             last_input: now,
             focused: true,
             occluded: false,
+            frame_count: 0,
+            fps_window_start: now,
+            reported_fps: 0,
         }
     }
 
@@ -305,6 +326,47 @@ impl FramePacer {
         }
     }
 
+    /// Record that this iteration actually presented a frame — call only once
+    /// a frame really reached the swapchain, never merely because
+    /// [`FrameStep::render`] said to try one; an acquire failure or an early
+    /// return (a menu screen owning the whole frame, GPU state not yet ready)
+    /// must not count.
+    ///
+    /// Ported from `Minecraft.runTick`'s `fpsUpdate` block
+    /// (`.cache/mc/26.2/client-src/net/minecraft/client/Minecraft.java`):
+    /// vanilla does not take a reciprocal of a frame time at all. It
+    /// increments a counter (`this.frames++`) once per presented frame and,
+    /// whenever wall-clock time has crossed a one-second boundary since the
+    /// last report (`Util.getMillis() >= this.lastTime + 1000L`), publishes
+    /// that counter as `fps` and starts a new window. That is structurally
+    /// immune to the class of bug this method exists to fix: a rate derived
+    /// from counting real events in real time cannot report a number those
+    /// events never produced, whereas `1.0 / dt` reports whatever the loop's
+    /// *own* `dt` happened to be — which, once a framerate cap makes the
+    /// event loop iterate far more often than it presents, is the interval
+    /// between iterations, not between presented frames.
+    ///
+    /// The `while` mirrors vanilla's `for (...; Util.getMillis() >=
+    /// this.lastTime + 1000L; this.frames = 0)`: a stall longer than one
+    /// window reports the frames actually presented in the first completed
+    /// window, then `0` for every further window the stall spans, exactly as
+    /// vanilla's loop re-triggers its own condition with `frames` reset.
+    pub(crate) fn record_presented_frame(&mut self, now: Instant) {
+        self.frame_count += 1;
+        while now.saturating_duration_since(self.fps_window_start) >= FPS_WINDOW {
+            self.reported_fps = self.frame_count;
+            self.frame_count = 0;
+            self.fps_window_start += FPS_WINDOW;
+        }
+    }
+
+    /// The presented-frame count for the last completed one-second window —
+    /// vanilla's static `Minecraft.fps`, read by [`WindowApp::redraw`] for the
+    /// debug overlay. See [`Self::record_presented_frame`].
+    pub(crate) fn fps(&self) -> u32 {
+        self.reported_fps
+    }
+
     /// How the event loop should wait after this iteration: spin while
     /// focused and uncapped (vsync paces us), sleep until the next scheduled
     /// deadline while capped, otherwise sleep briefly so a backgrounded
@@ -327,5 +389,65 @@ impl FramePacer {
         } else {
             ControlFlow::WaitUntil(now + BACKGROUND_POLL)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #570's discriminating input: a real cap, driven by an event
+    /// loop that iterates far faster than it presents. `dt` at 200 Hz is
+    /// ~5 ms, so the removed `1.0 / step.dt` implementation reported
+    /// something on the order of 200 — nowhere near a 10 fps cap, which is
+    /// exactly why the owner saw ~20,000 fps at a real 10 fps cap (their
+    /// loop spun even faster than this one). Prefer a counter over a
+    /// wall-clock duration per this repo's evidence standard: the clock here
+    /// is entirely synthetic, so the assertion is deterministic regardless of
+    /// machine load.
+    #[test]
+    fn a_ten_fps_cap_against_a_fast_loop_reports_the_cap_not_the_iteration_rate() {
+        let t0 = Instant::now();
+        let mut pacer = FramePacer::new(t0);
+        let loop_hz = 200.0_f64;
+        let cap = 10_u32;
+
+        // What the removed reciprocal-of-dt implementation would have
+        // reported for this exact input: the reciprocal of the interval
+        // between *iterations*, which is what `step.dt` measures once a cap
+        // makes most iterations not render. Computed from the loop rate
+        // itself, not simulated, because the old formula did not consult the
+        // pacer's schedule at all — that omission is the bug.
+        let old_hypothesis_fps = loop_hz;
+        assert!(
+            (old_hypothesis_fps - f64::from(cap)).abs() > 100.0,
+            "chosen input must discriminate the two hypotheses; old={old_hypothesis_fps} cap={cap}"
+        );
+
+        // Drive a 200 Hz loop under a 10 fps cap for a bit over two seconds,
+        // presenting (and counting) only the iterations `begin_frame` itself
+        // decided should render — exactly the `render == true` gate
+        // `redraw.rs` uses before calling `record_presented_frame`.
+        let iterations = (loop_hz * 2.2) as u32;
+        for i in 1..=iterations {
+            let now = t0 + Duration::from_secs_f64(f64::from(i) / loop_hz);
+            if pacer.begin_frame(now, Some(cap)).render {
+                pacer.record_presented_frame(now);
+            }
+        }
+
+        // Tolerance of 1 accounts for vanilla's own attribution quirk this
+        // method deliberately ports: the frame whose `now` lands exactly on a
+        // window boundary is counted (`frame_count += 1`) *before* the
+        // boundary check, so it is attributed to whichever window's report
+        // fires on that same call — occasionally the just-elapsed window
+        // rather than the new one. That is `Minecraft.runTick`'s own
+        // ordering, not a defect in this port.
+        let fps = pacer.fps();
+        assert!(
+            (cap.saturating_sub(1)..=cap + 1).contains(&fps),
+            "a completed one-second window under a {cap} fps cap should report \
+             ~{cap}, not the {loop_hz} Hz loop's own iteration rate; got {fps}"
+        );
     }
 }
