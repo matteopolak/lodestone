@@ -1565,7 +1565,7 @@ mod tests {
         }
     }
 
-    /// Issue #579: a Nether world and an End world must land in **different**
+    /// A Nether world and an End world must land in **different**
     /// region directories from the overworld and from each other, matching
     /// `.cache/mc/survival/world`'s own layout
     /// (`dimensions/minecraft/the_nether/region`,
