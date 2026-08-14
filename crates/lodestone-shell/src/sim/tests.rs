@@ -5781,3 +5781,85 @@ fn the_demo_world_never_reloads_even_after_a_real_selection_change() {
         "the generation was already observed by the call above"
     );
 }
+
+/// A total-drop condition must not be silent: `TerrainMesh::mesh_column_inner`
+/// drops **every** column once `MeshPolicy::id_spaces_agree` is false, and the
+/// state that produces it — a live session with no vanilla atlas — is exactly
+/// what `resources::asset_root` returning `None` (an unresolved pack root, the
+/// owner's reported "launched from outside the repo" case) or any other
+/// vanilla-load failure converges on. `with_demo_world` never even attempts a
+/// vanilla load (`BlockResources::load(false)`), so attaching a live net to it
+/// reproduces "a live session with no vanilla atlas" deterministically — no
+/// filesystem or `LODESTONE_ASSETS` manipulation needed to hit the same `Sim`
+/// state a real unresolved asset root produces.
+#[test]
+fn a_live_session_with_no_vanilla_atlas_fires_the_id_space_diagnostic_once() {
+    let mut sim = Sim::with_demo_world(test_config());
+    assert!(
+        sim.vanilla_atlas().is_none(),
+        "precondition: the demo-world build never attempts a vanilla load"
+    );
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    sim.attach_net(net);
+    sim.step(1.0 / 20.0);
+
+    assert!(
+        sim.warned_id_space_mismatch,
+        "a live session with no vanilla atlas must fire the one-time id-space \
+         diagnostic — every column is about to be dropped unmeshed"
+    );
+    assert!(
+        sim.stats.status.contains("TERRAIN NOT LOADING"),
+        "the debug overlay's own status line must name the total-drop \
+         condition instead of staying on whatever it last said, got {:?}",
+        sim.stats.status
+    );
+
+    // One-time, not per-frame: further polls must not re-trip anything (there
+    // is nothing to re-observe — `warned_id_space_mismatch` stays latched for
+    // the rest of this session, which is what keeps the log from repeating
+    // every frame the way the per-column warning already does).
+    for _ in 0..5 {
+        sim.step(1.0 / 20.0);
+    }
+    assert!(
+        sim.warned_id_space_mismatch,
+        "the latch must not un-set itself mid-session"
+    );
+}
+
+/// Control for the diagnostic above: an always-on warning would be exactly as
+/// useless as a silent one, so a session that actually resolves the vanilla
+/// pack must stay quiet. `client_config`'s `Mode::Window` is what reaches the
+/// real `BlockResources::load(true)` path (`with_demo_world`/`Mode::Headless`
+/// never attempts it), so this is the same live-load path
+/// `a_client_session_holds_only_the_live_world_never_offline_terrain` and its
+/// neighbours already depend on succeeding in this checkout.
+#[test]
+fn a_healthy_live_session_never_fires_the_id_space_diagnostic() {
+    use crate::net::NetUpdate;
+
+    let mut sim = Sim::new(client_config());
+    assert!(
+        sim.vanilla_atlas().is_some(),
+        "precondition: this checkout must resolve a real vanilla pack under \
+         .cache/mc/<ver> for the control to mean anything — banner: {:?}",
+        sim.asset_banner()
+    );
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    sim.poll_net();
+    sim.step(1.0 / 20.0);
+
+    assert!(
+        !sim.warned_id_space_mismatch,
+        "a session with a real vanilla atlas must never trip the id-space \
+         mismatch diagnostic"
+    );
+    assert!(
+        !sim.stats.status.contains("TERRAIN NOT LOADING"),
+        "the healthy control must not show the mismatch banner, got {:?}",
+        sim.stats.status
+    );
+}

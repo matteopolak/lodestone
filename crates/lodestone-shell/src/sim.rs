@@ -527,6 +527,14 @@ pub struct Sim {
     /// Debug-overlay line set when vanilla assets failed to load and the session
     /// fell back to the demo palette.
     asset_banner: Option<String>,
+    /// Whether [`Self::refresh_mesh_policy`] has already fired its one-time
+    /// `tracing::error!` for an id-space mismatch this session. Without this gate
+    /// a live session with no vanilla atlas would repeat the diagnostic every
+    /// frame — the exact per-column noise problem that diagnostic exists to
+    /// replace, one layer up. Reset by [`Self::end_session`] so a reconnect that
+    /// hits the same defect is warned again rather than staying silenced by the
+    /// previous session's flag.
+    warned_id_space_mismatch: bool,
     /// Test seam (normal play: always `true`): when `false`, death is treated as
     /// the terminal `SessionPhase::Ended` it used to be, reproducing the "stuck
     /// on the death screen forever" bug as the live gate's negative control. Never
@@ -1145,6 +1153,35 @@ impl Sim {
         } else {
             self.vanilla_atlas.is_none()
         };
+        // A condition that discards 100% of terrain must not be indistinguishable
+        // from an empty world. `TerrainMesh::mesh_column_inner`'s own
+        // `tracing::warn!` fires once *per dropped column* — thousands of
+        // identical lines at a real render distance, which reads as noise rather
+        // than as a cause, and it never names *why* the atlas is missing.
+        //
+        // Deliberately narrower than `!id_spaces_agree`: the "reverse" arm above
+        // (no `net`, a vanilla atlas present) is the ordinary pre-connection
+        // window of any windowed session — `Sim::new` loads the vanilla atlas
+        // eagerly at construction, before the player has joined anything, so
+        // `net` is `None` for real on every title screen. No column is ever
+        // meshed in that window (there is no world to dirty one), so it is inert
+        // by construction and would make this an always-on warning — exactly as
+        // useless as the silence it replaces. The one branch that can actually
+        // drop live terrain is a *live* session with no atlas.
+        if self.net.is_some() && self.vanilla_atlas.is_none() && !self.warned_id_space_mismatch {
+            self.warned_id_space_mismatch = true;
+            let reason = self.asset_banner.as_deref().unwrap_or(
+                "no reason recorded — no vanilla-load failure was captured to \
+                 explain the missing atlas",
+            );
+            tracing::error!(
+                target: "assets",
+                "every terrain column is about to be dropped unmeshed for the rest \
+                 of this session: the mesh classifier's block-id space does not \
+                 match the world it is meshing ({reason})"
+            );
+            self.status = format!("TERRAIN NOT LOADING — {reason}");
+        }
         let policy = MeshPolicy {
             sky_default,
             id_spaces_agree,

@@ -219,6 +219,9 @@ impl Sim {
         self.net = None;
 
         self.teleport_count = 0;
+        // A reconnect that hits the same id-space mismatch must warn again: see
+        // `Sim::warned_id_space_mismatch`'s own doc for why this is not left set.
+        self.warned_id_space_mismatch = false;
         // A death screen (issue #103) must not survive into the next session —
         // `reset_local_player` below clears the `Dead` marker itself, but this
         // field is plain `Sim` state, not an ECS component, so it needs its own
