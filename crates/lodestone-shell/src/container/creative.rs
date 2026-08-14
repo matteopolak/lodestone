@@ -480,14 +480,30 @@ pub fn creative_layout(
     let y = ((ch - CREATIVE_PANEL_H) * 0.5).max(8.0);
     let kind = creative_tab_kind(state.tab);
 
-    let grid = (0..CREATIVE_PAGE)
-        .map(|i| Rect {
-            x: x + GRID_X0 + (i % CREATIVE_COLS) as f32 * SLOT,
-            y: y + GRID_Y0 + (i / CREATIVE_COLS) as f32 * SLOT,
-            w: CELL,
-            h: CELL,
-        })
-        .collect();
+    // Empty on the inventory tab, exactly as `inventory`/`destroy` below are —
+    // and for the same reason: this rect set is the *generic item-picker*
+    // grid, which the draw loop already refuses to fill with icons on this
+    // tab (`kind != CreativeTabKind::Inventory` at this module's item-draw
+    // site). Leaving it populated left `creative_hit_test`'s grid check
+    // (which runs unconditionally, ahead of the `inventory` check) claiming
+    // cursor positions that are visually over the player's own armour/main
+    // slots — the generic grid's cells sit on the same `GRID_X0`/`SLOT`
+    // pitch this panel uses for the survival layout, so the two rect sets
+    // overlap. That produced a hover highlight at the *grid* cell's rect
+    // rather than the slot actually under the cursor: a "slot" appearing
+    // where the armour wells are, at the wrong offset from the pointer.
+    let grid = if kind == CreativeTabKind::Inventory {
+        Vec::new()
+    } else {
+        (0..CREATIVE_PAGE)
+            .map(|i| Rect {
+                x: x + GRID_X0 + (i % CREATIVE_COLS) as f32 * SLOT,
+                y: y + GRID_Y0 + (i / CREATIVE_COLS) as f32 * SLOT,
+                w: CELL,
+                h: CELL,
+            })
+            .collect()
+    };
     let hotbar = (0..CREATIVE_COLS)
         .map(|i| Rect {
             x: x + GRID_X0 + i as f32 * SLOT,
@@ -1613,5 +1629,95 @@ mod tests {
         // its result are moved off-screen by vanilla and omitted here.
         assert_eq!(layout.inventory.len(), 41);
         assert!(layout.destroy.is_some());
+    }
+
+    /// The discriminator for "creative's survival tab lays slots on a
+    /// uniform grid, so armour slots overlap": the generic item-picker grid
+    /// (`layout.grid`) must be empty on this tab, and no two of the tab's
+    /// own rects (armour, off-hand, main, hotbar, the trash slot) may
+    /// overlap each other. A slot-*count* check already passes under the
+    /// bug — `the_inventory_tab_has_no_scrollbar_and_no_title` above
+    /// asserts exactly that count and the bug does not change it — so this
+    /// checks the rects themselves, and collects every overlapping pair
+    /// rather than asserting inside the loop, so a regression reports how
+    /// many collisions it caused rather than only the first.
+    #[test]
+    fn no_two_slots_overlap_on_the_inventory_tab() {
+        let inventory = CREATIVE_TABS
+            .iter()
+            .position(|t| t.id == "minecraft:inventory")
+            .expect("the inventory tab is in the table");
+        let mut state = CreativeState::default();
+        state.select_tab(inventory);
+        let layout = creative_layout(&state, 0, 1, 1280, 720);
+
+        // The generic grid is what `creative_hit_test` used to claim ahead
+        // of the player's own slots — it must not exist on this tab at all.
+        assert!(
+            layout.grid.is_empty(),
+            "the inventory tab must draw no generic grid cells, got {}",
+            layout.grid.len()
+        );
+
+        fn overlaps(a: Rect, b: Rect) -> bool {
+            a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+        }
+
+        let mut rects: Vec<(String, Rect)> =
+            layout.inventory.iter().map(|(i, r)| (format!("inventory[{i}]"), *r)).collect();
+        if let Some(d) = layout.destroy {
+            rects.push(("destroy".to_string(), d));
+        }
+
+        let mut collisions = Vec::new();
+        for i in 0..rects.len() {
+            for j in (i + 1)..rects.len() {
+                if overlaps(rects[i].1, rects[j].1) {
+                    collisions.push((rects[i].0.clone(), rects[j].0.clone()));
+                }
+            }
+        }
+        assert!(
+            collisions.is_empty(),
+            "{} overlapping slot-rect pair(s) on the inventory tab: {collisions:?}",
+            collisions.len()
+        );
+    }
+
+    /// Vanilla's own `selectTab` coordinates
+    /// (`CreativeModeInventoryScreen.java`'s `SlotWrapper` loop), transcribed
+    /// against the panel origin: armour at menu indices `5..=8`
+    /// (`x = 54 + col * 54, y = 6 + row * 27`), off-hand at `45` (`35, 20`).
+    #[test]
+    fn armour_and_offhand_slots_sit_at_vanillas_own_coordinates() {
+        let inventory = CREATIVE_TABS
+            .iter()
+            .position(|t| t.id == "minecraft:inventory")
+            .expect("the inventory tab is in the table");
+        let mut state = CreativeState::default();
+        state.select_tab(inventory);
+        let layout = creative_layout(&state, 0, 1, 1280, 720);
+        let origin = (layout.panel.x, layout.panel.y);
+
+        let expected: [(usize, f32, f32); 5] = [
+            (5, 54.0, 6.0),
+            (6, 54.0, 33.0),
+            (7, 108.0, 6.0),
+            (8, 108.0, 33.0),
+            (45, 35.0, 20.0),
+        ];
+        for (index, dx, dy) in expected {
+            let rect = layout
+                .inventory
+                .iter()
+                .find(|(i, _)| *i == index)
+                .map(|(_, r)| *r)
+                .unwrap_or_else(|| panic!("menu slot {index} missing from the inventory tab layout"));
+            assert_eq!(
+                (rect.x - origin.0, rect.y - origin.1),
+                (dx, dy),
+                "menu slot {index} is at the wrong offset from the panel origin"
+            );
+        }
     }
 }
