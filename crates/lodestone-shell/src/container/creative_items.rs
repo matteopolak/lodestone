@@ -17,13 +17,15 @@
 //! - `hotbar`: 0
 //! - `search`: 0
 //! - `tools_and_utilities`: 145
-//! - `combat`: 77
-//! - `food_and_drinks`: 42
-//! - `ingredients`: 151
+//! - `combat`: 123 (77 base items + 46 `tipped_arrow` potion variants)
+//! - `food_and_drinks`: 180 (42 base items + 138 potion-item variants: 46 each of
+//!   `potion`/`splash_potion`/`lingering_potion`)
+//! - `ingredients`: 194 (151 base items + 43 `enchanted_book` variants, one per
+//!   enchantment at its own max level)
 //! - `spawn_eggs`: 89
 //! - `op_blocks`: 12
 //! - `inventory`: 0
-//! - **total: 1725**
+//! - **total: 1952**
 //!
 //! `hotbar`, `search` and `inventory` carry no literal list -- vanilla builds them at
 //! runtime (hotbar from saved hotbars, search from the union of every other tab's search-
@@ -71,17 +73,35 @@
 //!   `Items.LIGHT`) are both skipped as component-bearing (see below), but per the task's
 //!   instruction the plain base items `minecraft:test_block` and `minecraft:light` are
 //!   each emitted once, in the loops' place.
+//! - `generatePotionEffectTypes(...)` (combat: `Items.TIPPED_ARROW`; food_and_drinks:
+//!   `Items.POTION`/`Items.SPLASH_POTION`/`Items.LINGERING_POTION`, in that call order) --
+//!   one stack per registered `Potion`, in `minecraft:potion`'s own registration order
+//!   (`registries.json`'s `protocol_id`, confirmed to match `Potions.java`'s field
+//!   declaration order by a side-by-side read). `generateEnchantmentBookTypesOnlyMaxLevel`
+//!   (ingredients) -- one `minecraft:enchanted_book` per enchantment at its own max level,
+//!   alphabetical by registry path (`crate::generated_enchantments`' own doc explains why
+//!   that is the right order for a data-driven registry with no `registries.json` entry).
+//!   Both need `ItemStack` components this static `&'static [&'static str]` table cannot
+//!   carry, so each entry is instead the base item id plus a **synthetic `#<suffix>`
+//!   tag** -- `"minecraft:potion#swiftness"`, `"minecraft:enchanted_book#sharpness"` --
+//!   that [`super::creative::stack_of`] splits off and resolves into the real component
+//!   before building the stack. This keeps every existing consumer of `tab.items` (search
+//!   dedup, the `every_item_id_is_namespaced_lowercase_with_no_spaces` test, the page/grid
+//!   split) working unchanged: the suffix is still `minecraft:`-prefixed, still lowercase,
+//!   still space-free, and -- critically -- still a **distinct string per variant**, which
+//!   is what makes the search tab's `ItemStackLinkedSet`-style dedup treat each potion and
+//!   each book as its own entry rather than collapsing all 46 (or 43) into one.
 //!
 //! ## Deliberately skipped (component-bearing or registry-sweep families)
 //!
-//! These need `ItemStack` components (potion contents, firework duration, enchantment level,
-//! painting variant, ...) or a live registry sweep that this static table does not model.
-//! Each is dropped silently from the data below and recorded here instead:
+//! These need `ItemStack` components (firework duration, painting variant, ...) or a live
+//! registry sweep that this static table does not model. Each is dropped silently from the
+//! data below and recorded here instead:
 //!
 //! - `Raid.getOminousBannerInstance(...)` (functional_blocks) -- an ominous banner stack built
 //!   from the banner-pattern registry.
 //! - `search.acceptAll(tempItems)` (search tab) -- built at runtime from every other tab's
-//!   search-visible items.
+//!   search-visible items; unaffected by anything above since it unions whatever *is* here.
 //! - `generatePresetPaintings(...)` (functional_blocks: placeable variants; op_blocks: the
 //!   non-placeable variants under `hasPermissions()`) -- one stack per `PaintingVariant`,
 //!   sorted by area then width.
@@ -94,11 +114,23 @@
 //!   `SuspiciousEffectHolder`.
 //! - `generateOminousBottles(...)` (food_and_drinks) -- 5 `minecraft:ominous_bottle` stacks,
 //!   amplifier 0..=4.
-//! - `generatePotionEffectTypes(...)` (combat: tipped arrows; food_and_drinks: potion/splash
-//!   potion/lingering potion) -- one stack per registered `Potion`.
-//! - `generateEnchantmentBookTypesOnlyMaxLevel` / `AllLevels` (ingredients) -- one
-//!   `minecraft:enchanted_book` per enchantment (max level only for the tab itself, every
-//!   level for the search tab).
+//! - `generateEnchantmentBookTypesAllLevels` (search tab only) -- every level of every
+//!   enchantment, not just the max; the search tab only ever unions what the tables above
+//!   contain, so it shows the max-level book from `ingredients` and nothing finer.
+//! - **Enchanted-book stacks carry no live enchantment identity.** `minecraft:enchantment`
+//!   is data-driven, so its network registry id is assigned per-connection by
+//!   configuration-phase sync order -- there is no fixed id a static table could bake in
+//!   (see [`lodestone_data::enchantment`]'s module doc). Each of the 43 grid cells is
+//!   therefore a distinct, correctly-ordered `minecraft:enchanted_book` stack with **no**
+//!   `minecraft:stored_enchantments` component attached, which matches vanilla's own icon
+//!   (identical for every enchantment; only the tooltip text differs) but not its tooltip.
+//! - **Potion icon tinting does not reach the drawn pixel yet**, even though
+//!   [`super::creative::stack_of`] attaches the real, computed `potion_color` component
+//!   (see [`lodestone_data::potion`]). `lodestone_shell::hud::item_icon::sprite_layer_tint`
+//!   -- the one call site that resolves an item's tint for drawing -- still evaluates every
+//!   icon against `ItemTintContext::default()` (no stack in hand), a pre-existing gap that
+//!   `dyed_color` sits in identically today. Wiring a live stack through that call site is
+//!   the remaining step; it is shared with dye and out of this table's scope.
 //!
 //! ## How to change it
 //!
@@ -1636,6 +1668,56 @@ pub(crate) static CREATIVE_TABS: &[CreativeTab] = &[
             "minecraft:crossbow",
             "minecraft:arrow",
             "minecraft:spectral_arrow",
+            // `generatePotionEffectTypes(combat, potions, Items.TIPPED_ARROW, ...)`:
+            // one `minecraft:tipped_arrow` per `minecraft:potion` registry entry, in
+            // that registry's own order — see `creative_items.rs`'s module doc for
+            // the `#<potion path>` suffix convention and its outside source.
+            "minecraft:tipped_arrow#water",
+            "minecraft:tipped_arrow#mundane",
+            "minecraft:tipped_arrow#thick",
+            "minecraft:tipped_arrow#awkward",
+            "minecraft:tipped_arrow#night_vision",
+            "minecraft:tipped_arrow#long_night_vision",
+            "minecraft:tipped_arrow#invisibility",
+            "minecraft:tipped_arrow#long_invisibility",
+            "minecraft:tipped_arrow#leaping",
+            "minecraft:tipped_arrow#long_leaping",
+            "minecraft:tipped_arrow#strong_leaping",
+            "minecraft:tipped_arrow#fire_resistance",
+            "minecraft:tipped_arrow#long_fire_resistance",
+            "minecraft:tipped_arrow#swiftness",
+            "minecraft:tipped_arrow#long_swiftness",
+            "minecraft:tipped_arrow#strong_swiftness",
+            "minecraft:tipped_arrow#slowness",
+            "minecraft:tipped_arrow#long_slowness",
+            "minecraft:tipped_arrow#strong_slowness",
+            "minecraft:tipped_arrow#turtle_master",
+            "minecraft:tipped_arrow#long_turtle_master",
+            "minecraft:tipped_arrow#strong_turtle_master",
+            "minecraft:tipped_arrow#water_breathing",
+            "minecraft:tipped_arrow#long_water_breathing",
+            "minecraft:tipped_arrow#healing",
+            "minecraft:tipped_arrow#strong_healing",
+            "minecraft:tipped_arrow#harming",
+            "minecraft:tipped_arrow#strong_harming",
+            "minecraft:tipped_arrow#poison",
+            "minecraft:tipped_arrow#long_poison",
+            "minecraft:tipped_arrow#strong_poison",
+            "minecraft:tipped_arrow#regeneration",
+            "minecraft:tipped_arrow#long_regeneration",
+            "minecraft:tipped_arrow#strong_regeneration",
+            "minecraft:tipped_arrow#strength",
+            "minecraft:tipped_arrow#long_strength",
+            "minecraft:tipped_arrow#strong_strength",
+            "minecraft:tipped_arrow#weakness",
+            "minecraft:tipped_arrow#long_weakness",
+            "minecraft:tipped_arrow#luck",
+            "minecraft:tipped_arrow#slow_falling",
+            "minecraft:tipped_arrow#long_slow_falling",
+            "minecraft:tipped_arrow#wind_charged",
+            "minecraft:tipped_arrow#weaving",
+            "minecraft:tipped_arrow#oozing",
+            "minecraft:tipped_arrow#infested",
         ],
     },
     CreativeTab {
@@ -1687,6 +1769,147 @@ pub(crate) static CREATIVE_TABS: &[CreativeTab] = &[
             "minecraft:rabbit_stew",
             "minecraft:milk_bucket",
             "minecraft:honey_bottle",
+            // `generatePotionEffectTypes(consumables, potions, Items.POTION, ...)`,
+            // then `Items.SPLASH_POTION`, then `Items.LINGERING_POTION`, in that call
+            // order -- see the module doc for the `#<potion path>` suffix convention.
+            "minecraft:potion#water",
+            "minecraft:potion#mundane",
+            "minecraft:potion#thick",
+            "minecraft:potion#awkward",
+            "minecraft:potion#night_vision",
+            "minecraft:potion#long_night_vision",
+            "minecraft:potion#invisibility",
+            "minecraft:potion#long_invisibility",
+            "minecraft:potion#leaping",
+            "minecraft:potion#long_leaping",
+            "minecraft:potion#strong_leaping",
+            "minecraft:potion#fire_resistance",
+            "minecraft:potion#long_fire_resistance",
+            "minecraft:potion#swiftness",
+            "minecraft:potion#long_swiftness",
+            "minecraft:potion#strong_swiftness",
+            "minecraft:potion#slowness",
+            "minecraft:potion#long_slowness",
+            "minecraft:potion#strong_slowness",
+            "minecraft:potion#turtle_master",
+            "minecraft:potion#long_turtle_master",
+            "minecraft:potion#strong_turtle_master",
+            "minecraft:potion#water_breathing",
+            "minecraft:potion#long_water_breathing",
+            "minecraft:potion#healing",
+            "minecraft:potion#strong_healing",
+            "minecraft:potion#harming",
+            "minecraft:potion#strong_harming",
+            "minecraft:potion#poison",
+            "minecraft:potion#long_poison",
+            "minecraft:potion#strong_poison",
+            "minecraft:potion#regeneration",
+            "minecraft:potion#long_regeneration",
+            "minecraft:potion#strong_regeneration",
+            "minecraft:potion#strength",
+            "minecraft:potion#long_strength",
+            "minecraft:potion#strong_strength",
+            "minecraft:potion#weakness",
+            "minecraft:potion#long_weakness",
+            "minecraft:potion#luck",
+            "minecraft:potion#slow_falling",
+            "minecraft:potion#long_slow_falling",
+            "minecraft:potion#wind_charged",
+            "minecraft:potion#weaving",
+            "minecraft:potion#oozing",
+            "minecraft:potion#infested",
+            "minecraft:splash_potion#water",
+            "minecraft:splash_potion#mundane",
+            "minecraft:splash_potion#thick",
+            "minecraft:splash_potion#awkward",
+            "minecraft:splash_potion#night_vision",
+            "minecraft:splash_potion#long_night_vision",
+            "minecraft:splash_potion#invisibility",
+            "minecraft:splash_potion#long_invisibility",
+            "minecraft:splash_potion#leaping",
+            "minecraft:splash_potion#long_leaping",
+            "minecraft:splash_potion#strong_leaping",
+            "minecraft:splash_potion#fire_resistance",
+            "minecraft:splash_potion#long_fire_resistance",
+            "minecraft:splash_potion#swiftness",
+            "minecraft:splash_potion#long_swiftness",
+            "minecraft:splash_potion#strong_swiftness",
+            "minecraft:splash_potion#slowness",
+            "minecraft:splash_potion#long_slowness",
+            "minecraft:splash_potion#strong_slowness",
+            "minecraft:splash_potion#turtle_master",
+            "minecraft:splash_potion#long_turtle_master",
+            "minecraft:splash_potion#strong_turtle_master",
+            "minecraft:splash_potion#water_breathing",
+            "minecraft:splash_potion#long_water_breathing",
+            "minecraft:splash_potion#healing",
+            "minecraft:splash_potion#strong_healing",
+            "minecraft:splash_potion#harming",
+            "minecraft:splash_potion#strong_harming",
+            "minecraft:splash_potion#poison",
+            "minecraft:splash_potion#long_poison",
+            "minecraft:splash_potion#strong_poison",
+            "minecraft:splash_potion#regeneration",
+            "minecraft:splash_potion#long_regeneration",
+            "minecraft:splash_potion#strong_regeneration",
+            "minecraft:splash_potion#strength",
+            "minecraft:splash_potion#long_strength",
+            "minecraft:splash_potion#strong_strength",
+            "minecraft:splash_potion#weakness",
+            "minecraft:splash_potion#long_weakness",
+            "minecraft:splash_potion#luck",
+            "minecraft:splash_potion#slow_falling",
+            "minecraft:splash_potion#long_slow_falling",
+            "minecraft:splash_potion#wind_charged",
+            "minecraft:splash_potion#weaving",
+            "minecraft:splash_potion#oozing",
+            "minecraft:splash_potion#infested",
+            "minecraft:lingering_potion#water",
+            "minecraft:lingering_potion#mundane",
+            "minecraft:lingering_potion#thick",
+            "minecraft:lingering_potion#awkward",
+            "minecraft:lingering_potion#night_vision",
+            "minecraft:lingering_potion#long_night_vision",
+            "minecraft:lingering_potion#invisibility",
+            "minecraft:lingering_potion#long_invisibility",
+            "minecraft:lingering_potion#leaping",
+            "minecraft:lingering_potion#long_leaping",
+            "minecraft:lingering_potion#strong_leaping",
+            "minecraft:lingering_potion#fire_resistance",
+            "minecraft:lingering_potion#long_fire_resistance",
+            "minecraft:lingering_potion#swiftness",
+            "minecraft:lingering_potion#long_swiftness",
+            "minecraft:lingering_potion#strong_swiftness",
+            "minecraft:lingering_potion#slowness",
+            "minecraft:lingering_potion#long_slowness",
+            "minecraft:lingering_potion#strong_slowness",
+            "minecraft:lingering_potion#turtle_master",
+            "minecraft:lingering_potion#long_turtle_master",
+            "minecraft:lingering_potion#strong_turtle_master",
+            "minecraft:lingering_potion#water_breathing",
+            "minecraft:lingering_potion#long_water_breathing",
+            "minecraft:lingering_potion#healing",
+            "minecraft:lingering_potion#strong_healing",
+            "minecraft:lingering_potion#harming",
+            "minecraft:lingering_potion#strong_harming",
+            "minecraft:lingering_potion#poison",
+            "minecraft:lingering_potion#long_poison",
+            "minecraft:lingering_potion#strong_poison",
+            "minecraft:lingering_potion#regeneration",
+            "minecraft:lingering_potion#long_regeneration",
+            "minecraft:lingering_potion#strong_regeneration",
+            "minecraft:lingering_potion#strength",
+            "minecraft:lingering_potion#long_strength",
+            "minecraft:lingering_potion#strong_strength",
+            "minecraft:lingering_potion#weakness",
+            "minecraft:lingering_potion#long_weakness",
+            "minecraft:lingering_potion#luck",
+            "minecraft:lingering_potion#slow_falling",
+            "minecraft:lingering_potion#long_slow_falling",
+            "minecraft:lingering_potion#wind_charged",
+            "minecraft:lingering_potion#weaving",
+            "minecraft:lingering_potion#oozing",
+            "minecraft:lingering_potion#infested",
         ],
     },
     CreativeTab {
@@ -1847,6 +2070,52 @@ pub(crate) static CREATIVE_TABS: &[CreativeTab] = &[
             "minecraft:experience_bottle",
             "minecraft:trial_key",
             "minecraft:ominous_trial_key",
+            // `generateEnchantmentBookTypesOnlyMaxLevel(ingredients, enchantments, ...)`:
+            // one `minecraft:enchanted_book` per enchantment, at its own max level, in
+            // alphabetical registry-path order -- see the module doc.
+            "minecraft:enchanted_book#aqua_affinity",
+            "minecraft:enchanted_book#bane_of_arthropods",
+            "minecraft:enchanted_book#binding_curse",
+            "minecraft:enchanted_book#blast_protection",
+            "minecraft:enchanted_book#breach",
+            "minecraft:enchanted_book#channeling",
+            "minecraft:enchanted_book#density",
+            "minecraft:enchanted_book#depth_strider",
+            "minecraft:enchanted_book#efficiency",
+            "minecraft:enchanted_book#feather_falling",
+            "minecraft:enchanted_book#fire_aspect",
+            "minecraft:enchanted_book#fire_protection",
+            "minecraft:enchanted_book#flame",
+            "minecraft:enchanted_book#fortune",
+            "minecraft:enchanted_book#frost_walker",
+            "minecraft:enchanted_book#impaling",
+            "minecraft:enchanted_book#infinity",
+            "minecraft:enchanted_book#knockback",
+            "minecraft:enchanted_book#looting",
+            "minecraft:enchanted_book#loyalty",
+            "minecraft:enchanted_book#luck_of_the_sea",
+            "minecraft:enchanted_book#lunge",
+            "minecraft:enchanted_book#lure",
+            "minecraft:enchanted_book#mending",
+            "minecraft:enchanted_book#multishot",
+            "minecraft:enchanted_book#piercing",
+            "minecraft:enchanted_book#power",
+            "minecraft:enchanted_book#projectile_protection",
+            "minecraft:enchanted_book#protection",
+            "minecraft:enchanted_book#punch",
+            "minecraft:enchanted_book#quick_charge",
+            "minecraft:enchanted_book#respiration",
+            "minecraft:enchanted_book#riptide",
+            "minecraft:enchanted_book#sharpness",
+            "minecraft:enchanted_book#silk_touch",
+            "minecraft:enchanted_book#smite",
+            "minecraft:enchanted_book#soul_speed",
+            "minecraft:enchanted_book#sweeping_edge",
+            "minecraft:enchanted_book#swift_sneak",
+            "minecraft:enchanted_book#thorns",
+            "minecraft:enchanted_book#unbreaking",
+            "minecraft:enchanted_book#vanishing_curse",
+            "minecraft:enchanted_book#wind_burst",
         ],
     },
     CreativeTab {
@@ -2020,6 +2289,175 @@ mod tests {
                 position,
                 tab.id
             );
+        }
+    }
+
+    /// `minecraft:potion`'s own registration order, transcribed independently from
+    /// `.cache/mc/26.2/generated/reports/registries.json`'s `protocol_id` field — an
+    /// outside source, not derived from [`CREATIVE_TABS`] itself. Also cross-checked
+    /// by hand against `Potions.java`'s field declaration order.
+    const POTION_REGISTRY_ORDER: [&str; 46] = [
+        "water",
+        "mundane",
+        "thick",
+        "awkward",
+        "night_vision",
+        "long_night_vision",
+        "invisibility",
+        "long_invisibility",
+        "leaping",
+        "long_leaping",
+        "strong_leaping",
+        "fire_resistance",
+        "long_fire_resistance",
+        "swiftness",
+        "long_swiftness",
+        "strong_swiftness",
+        "slowness",
+        "long_slowness",
+        "strong_slowness",
+        "turtle_master",
+        "long_turtle_master",
+        "strong_turtle_master",
+        "water_breathing",
+        "long_water_breathing",
+        "healing",
+        "strong_healing",
+        "harming",
+        "strong_harming",
+        "poison",
+        "long_poison",
+        "strong_poison",
+        "regeneration",
+        "long_regeneration",
+        "strong_regeneration",
+        "strength",
+        "long_strength",
+        "strong_strength",
+        "weakness",
+        "long_weakness",
+        "luck",
+        "slow_falling",
+        "long_slow_falling",
+        "wind_charged",
+        "weaving",
+        "oozing",
+        "infested",
+    ];
+
+    /// `minecraft:enchantment`'s alphabetical file-listing order, transcribed
+    /// independently from `.cache/mc/26.2/client-src/data/minecraft/enchantment/*.json`'s
+    /// own filenames — see [`lodestone_data::enchantment`]'s module doc for why
+    /// alphabetical is the right order for a registry with no fixed
+    /// `registries.json` entry.
+    const ENCHANTMENT_ALPHABETICAL_ORDER: [&str; 43] = [
+        "aqua_affinity",
+        "bane_of_arthropods",
+        "binding_curse",
+        "blast_protection",
+        "breach",
+        "channeling",
+        "density",
+        "depth_strider",
+        "efficiency",
+        "feather_falling",
+        "fire_aspect",
+        "fire_protection",
+        "flame",
+        "fortune",
+        "frost_walker",
+        "impaling",
+        "infinity",
+        "knockback",
+        "looting",
+        "loyalty",
+        "luck_of_the_sea",
+        "lunge",
+        "lure",
+        "mending",
+        "multishot",
+        "piercing",
+        "power",
+        "projectile_protection",
+        "protection",
+        "punch",
+        "quick_charge",
+        "respiration",
+        "riptide",
+        "sharpness",
+        "silk_touch",
+        "smite",
+        "soul_speed",
+        "sweeping_edge",
+        "swift_sneak",
+        "thorns",
+        "unbreaking",
+        "vanishing_curse",
+        "wind_burst",
+    ];
+
+    fn tab(id: &str) -> &'static CreativeTab {
+        CREATIVE_TABS.iter().find(|t| t.id == id).unwrap_or_else(|| panic!("no tab {id}"))
+    }
+
+    /// The tail of `combat` is exactly one `minecraft:tipped_arrow#<path>` per
+    /// potion, in the registry's own order — asserted against
+    /// [`POTION_REGISTRY_ORDER`], not against anything this file itself computed.
+    #[test]
+    fn combat_tipped_arrow_variants_match_the_potion_registrys_own_order() {
+        let items = tab("minecraft:combat").items;
+        let tail = &items[items.len() - 46..];
+        let want: Vec<String> =
+            POTION_REGISTRY_ORDER.iter().map(|p| format!("minecraft:tipped_arrow#{p}")).collect();
+        let got: Vec<&str> = tail.to_vec();
+        assert_eq!(got, want, "combat's tipped_arrow tail must match the potion registry order exactly");
+    }
+
+    /// `food_and_drinks`' tail is 46 `minecraft:potion#*`, then 46
+    /// `minecraft:splash_potion#*`, then 46 `minecraft:lingering_potion#*` — the
+    /// exact call order `generatePotionEffectTypes` is invoked in — each block in
+    /// the registry's own order.
+    #[test]
+    fn food_and_drinks_potion_variants_match_call_order_and_registry_order() {
+        let items = tab("minecraft:food_and_drinks").items;
+        let tail = &items[items.len() - 138..];
+        let mut want = Vec::with_capacity(138);
+        for prefix in ["potion", "splash_potion", "lingering_potion"] {
+            want.extend(POTION_REGISTRY_ORDER.iter().map(|p| format!("minecraft:{prefix}#{p}")));
+        }
+        let got: Vec<&str> = tail.to_vec();
+        assert_eq!(got, want, "food_and_drinks' potion tail must match call order then registry order");
+    }
+
+    /// `ingredients`' tail is exactly one `minecraft:enchanted_book#<path>` per
+    /// enchantment, alphabetical — asserted against
+    /// [`ENCHANTMENT_ALPHABETICAL_ORDER`], an independent transcription of the
+    /// same file listing [`crate::generated_enchantments`]... the data crate's own
+    /// table was built from.
+    #[test]
+    fn ingredients_enchanted_book_variants_match_the_alphabetical_registry_order() {
+        let items = tab("minecraft:ingredients").items;
+        let tail = &items[items.len() - 43..];
+        let want: Vec<String> = ENCHANTMENT_ALPHABETICAL_ORDER
+            .iter()
+            .map(|e| format!("minecraft:enchanted_book#{e}"))
+            .collect();
+        let got: Vec<&str> = tail.to_vec();
+        assert_eq!(got, want, "ingredients' enchanted_book tail must match alphabetical registry-path order");
+    }
+
+    /// Every potion/tipped_arrow/enchanted_book synthetic entry is a **distinct**
+    /// string — the property the search tab's dedup depends on (see
+    /// `creative_items.rs`'s module doc: a repeated bare id would collapse every
+    /// potion into one search-tab entry).
+    #[test]
+    fn every_synthetic_variant_entry_is_unique_within_its_tab() {
+        for id in ["minecraft:combat", "minecraft:food_and_drinks", "minecraft:ingredients"] {
+            let items = tab(id).items;
+            let mut seen = std::collections::HashSet::new();
+            for item in items {
+                assert!(seen.insert(*item), "duplicate entry {item} in {id}");
+            }
         }
     }
 }

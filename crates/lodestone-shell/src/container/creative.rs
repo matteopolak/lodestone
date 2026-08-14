@@ -1041,14 +1041,48 @@ fn push_tab(
 /// components by hand, so the component *names* have exactly one transcription in the
 /// tree — the one the wire decoder already uses.
 fn stack_of(id: &str) -> Option<ItemStack> {
-    let item = id.parse::<Identifier>().ok()?;
+    // The `#<suffix>` convention `creative_items.rs`'s module doc names: a potion-family
+    // or enchanted-book entry is the base item id plus a tag this function resolves into
+    // the real component, because the static `&'static [&'static str]` table has nowhere
+    // else to carry it. `base` is always what `Identifier` must parse.
+    let (base, suffix) = id.split_once('#').map_or((id, None), |(b, s)| (b, Some(s)));
+    let item = base.parse::<Identifier>().ok()?;
     let mut model = lodestone_model::ItemStack::new(item, 1);
-    if let Some(proto) = lodestone_data::item_prototypes::model_prototype(id) {
+    if let Some(proto) = lodestone_data::item_prototypes::model_prototype(base) {
         model.components.max_stack_size = Some(proto.max_stack_size);
         model.components.max_damage = proto.max_damage;
         model.components.equippable = proto.equip_slot;
     }
+    if let Some(suffix) = suffix {
+        potion_color_for(base, suffix, &mut model);
+        // Enchanted books get no `minecraft:stored_enchantments` component here.
+        // `minecraft:enchantment` is data-driven, so its network registry id is
+        // assigned per-connection by configuration-phase sync order — there is no
+        // fixed id this static list-builder could attach that would be correct in
+        // any given session. See `creative_items.rs`'s module doc.
+    }
     Some(ItemStack::from(&model))
+}
+
+/// Attaches the real `minecraft:potion_contents` mix to a synthetic
+/// `"minecraft:<potion-family-item>#<potion path>"` list entry — the one piece of
+/// [`stack_of`] that *is* resolvable statically, because `minecraft:potion` (unlike
+/// `minecraft:enchantment`) is a fixed, built-in registry with no per-session id.
+///
+/// No-op for any `base` this suffix scheme is not used for, so a future suffix
+/// convention this function does not yet know about degrades to an untinted stack
+/// rather than a panic.
+fn potion_color_for(base: &str, suffix: &str, model: &mut lodestone_model::ItemStack) {
+    if !matches!(
+        base,
+        "minecraft:potion" | "minecraft:splash_potion" | "minecraft:lingering_potion" | "minecraft:tipped_arrow"
+    ) {
+        return;
+    }
+    let Some(potion) = lodestone_data::potion::potion_id(&format!("minecraft:{suffix}")) else {
+        return;
+    };
+    model.components.potion_color = Some(lodestone_data::potion::potion_color(Some(potion), None, &[]));
 }
 
 /// One consequence of a creative-screen click, in the order it must be applied.
@@ -1307,6 +1341,73 @@ pub fn creative_click(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The water-bottle control: `minecraft:potion#water` legitimately resolves to
+    /// the base potion colour (`water` carries no `MobEffectInstance` at all), so a
+    /// gate on this input alone could not distinguish "wired correctly" from
+    /// "always the default" — the next test is the pair that can.
+    #[test]
+    fn water_bottle_creative_entry_is_the_base_colour() {
+        let stack = stack_of("minecraft:potion#water").expect("a valid synthetic id");
+        assert_eq!(stack.potion_color(), Some(lodestone_data::potion::BASE_POTION_COLOR));
+    }
+
+    /// Two creative-menu potion entries whose expected colours are computed
+    /// independently by [`lodestone_data::potion::potion_color`] from
+    /// `MobEffects.java`'s own constants, and land far apart from each other and
+    /// from the water-bottle control — the discriminating pair, and the magnitude
+    /// check the module doc for `DESIGN.md`'s evidence standards calls for.
+    #[test]
+    fn swiftness_and_strong_harming_get_different_and_non_default_colours() {
+        let swiftness = stack_of("minecraft:potion#swiftness").expect("valid id");
+        let harming = stack_of("minecraft:splash_potion#strong_harming").expect("valid id");
+        let water = lodestone_data::potion::BASE_POTION_COLOR;
+
+        let sw = swiftness.potion_color().expect("swiftness carries a mixed colour");
+        let ha = harming.potion_color().expect("strong_harming carries a mixed colour");
+
+        let channel_delta = |a: u32, b: u32| {
+            let d = |s: u32| ((a >> s) & 0xFF) as i32 - ((b >> s) & 0xFF) as i32;
+            d(16).abs() + d(8).abs() + d(0).abs()
+        };
+        assert!(channel_delta(sw, ha) > 60, "swiftness and strong_harming must visibly differ");
+        assert!(channel_delta(sw, water) > 60, "swiftness must visibly differ from the water control");
+        assert!(channel_delta(ha, water) > 60, "strong_harming must visibly differ from the water control");
+    }
+
+    /// Every potion-family prefix (`potion`, `splash_potion`, `lingering_potion`,
+    /// `tipped_arrow`) resolves the same suffix to the same colour — the mix
+    /// depends only on the potion, never on which item carries it.
+    #[test]
+    fn every_potion_family_item_resolves_the_same_suffix_to_the_same_colour() {
+        let expect = stack_of("minecraft:potion#healing").unwrap().potion_color();
+        for prefix in ["splash_potion", "lingering_potion", "tipped_arrow"] {
+            let got = stack_of(&format!("minecraft:{prefix}#healing")).unwrap().potion_color();
+            assert_eq!(got, expect, "{prefix}#healing must match potion#healing's colour");
+        }
+    }
+
+    /// An enchanted-book creative entry parses to a valid stack of the right base
+    /// item and carries no crash-inducing garbage — but, per `creative_items.rs`'s
+    /// module doc, no live enchantment identity either, because
+    /// `minecraft:enchantment`'s network id is session-scoped and this list is
+    /// built with no session in hand.
+    #[test]
+    fn enchanted_book_creative_entry_parses_with_no_live_enchantment_id() {
+        let stack = stack_of("minecraft:enchanted_book#sharpness").expect("a valid synthetic id");
+        assert_eq!(stack.item().to_string(), "minecraft:enchanted_book");
+        assert!(stack.enchantments().is_empty());
+    }
+
+    /// A plain, unsuffixed id (every non-potion, non-book entry, and every tab
+    /// icon) is unaffected by the suffix-splitting logic — the regression control
+    /// for [`stack_of`]'s `split_once('#')` change.
+    #[test]
+    fn a_plain_id_with_no_suffix_is_unaffected() {
+        let stack = stack_of("minecraft:diamond_sword").expect("a valid id");
+        assert_eq!(stack.item().to_string(), "minecraft:diamond_sword");
+        assert_eq!(stack.potion_color(), None);
+    }
 
     #[test]
     fn every_tab_strip_position_is_unique() {
