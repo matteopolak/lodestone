@@ -155,6 +155,19 @@ pub struct ContainerFrame<'a> {
     /// jar-less run and by every existing caller. See
     /// [`with_trades`](Self::with_trades).
     pub trades_label: &'a str,
+    /// The anvil's rename box **value** — vanilla's `EditBox::getValue()`
+    /// (`AnvilScreen`'s `name` field). `None`/empty (the default) draws no
+    /// text in the box, which is every existing caller and every non-anvil
+    /// menu.
+    ///
+    /// There is no keyboard wiring to this widget yet (no focus, no cursor,
+    /// no per-keystroke state), so this can only ever be what vanilla's own
+    /// `slotChanged` sets it to on a fresh input — the slot-0 item's own
+    /// hover name — never a value the player has typed over it. A caller
+    /// with nothing typed yet is indistinguishable from vanilla at this
+    /// stage; a caller mid-edit is not, and that gap is real. See
+    /// [`with_anvil_name`](Self::with_anvil_name).
+    pub anvil_name: Option<&'a str>,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -181,6 +194,7 @@ impl<'a> ContainerFrame<'a> {
             trades: None,
             selected_trade: 0,
             trades_label: DEFAULT_TRADES_LABEL,
+            anvil_name: None,
         }
     }
 
@@ -205,6 +219,7 @@ impl<'a> ContainerFrame<'a> {
             trades: None,
             selected_trade: 0,
             trades_label: DEFAULT_TRADES_LABEL,
+            anvil_name: None,
         }
     }
 
@@ -345,6 +360,14 @@ impl<'a> ContainerFrame<'a> {
     #[must_use]
     pub fn with_trades_label(mut self, label: &'a str) -> Self {
         self.trades_label = label;
+        self
+    }
+
+    /// Attach the anvil rename box's current value — see
+    /// [`Self::anvil_name`]. `None` (the default) draws no text in the box.
+    #[must_use]
+    pub fn with_anvil_name(mut self, name: Option<&'a str>) -> Self {
+        self.anvil_name = name;
         self
     }
 }

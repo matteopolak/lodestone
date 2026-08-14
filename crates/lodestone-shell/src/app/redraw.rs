@@ -327,12 +327,21 @@ impl WindowApp {
         let held = hotbar_records
             .get(self.sim.selected_slot())
             .and_then(|record| record.as_ref())
-            .map(|record| (record.item.clone(), record.enchanted));
-        // The tuple's first element, re-derived rather than cloned: issue #154's
-        // spyglass FOV/vignette needs the bare location further down in this
-        // function (`ScreenEffects::scoping`), and the closure otherwise takes
-        // ownership of the whole tuple for the render source's lifetime.
-        let held_for_scoping = held.as_ref().map(|(loc, _)| loc.clone());
+            .map(|record| crate::gpu::MainHandItem {
+                item: record.item.clone(),
+                foil: record.enchanted,
+                // Mirrors `container::builder::icon_record` and the `HotbarSlot`
+                // built above — without these the first-person hand drew a dyed
+                // leather item's or a mixed potion's plain default colour even
+                // though the identical stack's hotbar icon showed the real one.
+                dyed_color: record.dyed_color,
+                potion_color: record.potion_color,
+            });
+        // The item id, re-derived rather than cloned: issue #154's spyglass
+        // FOV/vignette needs the bare location further down in this function
+        // (`ScreenEffects::scoping`), and the closure otherwise takes ownership
+        // of the whole record for the render source's lifetime.
+        let held_for_scoping = held.as_ref().map(|item| item.item.clone());
         render.set_main_hand_source(move || held.clone());
 
         // Block entities — chests (issue #23). **This install is what makes a
@@ -1140,6 +1149,21 @@ impl WindowApp {
             // `inventory_label` above; `ContainerFrame`'s own draw path is
             // what gates it on the screen actually being a merchant.
             let trades_label = crate::container::merchant_trades_label(self.sim.translator().as_ref());
+            // The anvil rename box's current value. Vanilla's `slotChanged`
+            // sets `EditBox::setValue` to the slot-0 item's own hover name
+            // whenever that slot changes; there is no keyboard wiring to this
+            // box yet (see `ContainerFrame::anvil_name`'s own doc comment), so
+            // this is always that default rather than anything the player
+            // typed over it. `None` off any non-anvil screen, matching every
+            // other special-layout-only field below.
+            let anvil_name = container_menu.and_then(|menu| {
+                if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Anvil) {
+                    return None;
+                }
+                menu.slot_item(0).map(|stack| {
+                    lodestone_game::item::styled_hover_name(stack, self.sim.translator().as_ref())
+                })
+            });
             // Does the recipe-book panel own the pointer this frame? The *click*
             // path has consulted this predicate before the container's own hit
             // test since the panel landed (`handle_recipe_panel_click`); the draw
@@ -1232,7 +1256,8 @@ impl WindowApp {
                     open_menu.as_ref().map_or(&[][..], |open| open.data.as_slice()),
                     self.sim.has_infinite_materials(),
                     self.sim.xp().map_or(0, |(level, _)| level),
-                );
+                )
+                .with_anvil_name(anvil_name.as_deref());
             // `render_with_icons_scaled`, **not** `render_scaled`: the latter
             // hardcodes `depth: None, models: None`, so `want_models` was always
             // false and `push_item_model` returned early. Flat sprite icons still
