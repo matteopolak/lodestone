@@ -231,6 +231,20 @@ fn canonical_model_name(type_path: &str) -> Option<&'static str> {
         // skeleton is the closest ported mesh. Unlike the drowned alias this is
         // deliberate and outlives no mesh — remove it when `bogged` is ported.
         "bogged" => return Some("skeleton"),
+        // `MinecartRenderer`/`AbstractMinecartRenderer`: every subclass shares
+        // vanilla's one `MinecartModel` cart-frame rig (`MinecartModel.
+        // createBodyLayer`) — the subclasses differ only in the block state
+        // vanilla displays *inside* the cart, which `gpu/moving_blocks.rs`'s
+        // `merge_minecart_contents` draws as a second, independent block-model
+        // pass, not a second corpus rig. Limited to the five entity types
+        // `lodestone_server::mobs::minecart::MinecartKind` actually spawns:
+        // `spawner_minecart` and `command_block_minecart` are real registry
+        // types this server never produces, and aliasing them ahead of that
+        // work would be an untested alias exactly like the ones
+        // `boat_model_name`'s own doc warns against.
+        "chest_minecart" | "furnace_minecart" | "tnt_minecart" | "hopper_minecart" => {
+            return Some("minecart");
+        }
         _ => {}
     }
     // The corpus first, then the boat family. Order matters both ways round:
@@ -4379,6 +4393,47 @@ mod tests {
         }
     }
 
+    /// The island this agent closed: `model_for_type` returned `None` for six
+    /// of the seven `minecraft:*_minecart` registry types (every one except
+    /// the plain `minecart`), so a chest/furnace/tnt/hopper minecart streamed
+    /// correctly and drew nothing — `resolve_animated` silently skips any
+    /// `type_path` with no baked model. All four now share the plain cart's
+    /// `"minecart"` rig, matching vanilla's `AbstractMinecartRenderer` reusing
+    /// one `MinecartModel` for every subclass.
+    ///
+    /// `spawner_minecart`/`command_block_minecart` are the negative control:
+    /// real registry types, deliberately **not** aliased because
+    /// `lodestone_server::mobs::minecart::MinecartKind` never spawns them — if
+    /// this assertion started passing for those two, either the server grew a
+    /// producer this render-side alias table does not know about, or the alias
+    /// match arm above was widened past what it documents.
+    #[test]
+    fn minecart_subclasses_share_the_plain_carts_frame() {
+        for ty in [
+            "minecart",
+            "chest_minecart",
+            "furnace_minecart",
+            "tnt_minecart",
+            "hopper_minecart",
+        ] {
+            let model = model_for_type(ty)
+                .unwrap_or_else(|| panic!("{ty} must resolve to the minecart corpus rig"));
+            assert_eq!(
+                model.name, "minecart",
+                "{ty} resolved to {} instead of the shared minecart rig",
+                model.name
+            );
+        }
+        for ty in ["spawner_minecart", "command_block_minecart"] {
+            assert!(
+                model_for_type(ty).is_none(),
+                "{ty} unexpectedly has a corpus model — this repo's server never spawns \
+                 it, so this control should still be None; if the server grew a producer, \
+                 add the alias and update this test's roster rather than deleting the control"
+            );
+        }
+    }
+
     /// Control for issue #523: `canonical_model_name` and `EntityModelSet::get`
     /// were switched from an O(90) linear `&str` scan to a `OnceLock`-cached
     /// `HashSet`/`HashMap` index. This re-derives the *old* linear scan from
@@ -4395,6 +4450,9 @@ mod tests {
             match type_path {
                 "player" => return Some("player_wide"),
                 "bogged" => return Some("skeleton"),
+                "chest_minecart" | "furnace_minecart" | "tnt_minecart" | "hopper_minecart" => {
+                    return Some("minecart");
+                }
                 _ => {}
             }
             entity_models()
