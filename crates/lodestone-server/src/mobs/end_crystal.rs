@@ -17,13 +17,13 @@
 //!   write) — both are single-tick side effects on the *world*, and this
 //!   struct tracks no block-state oracle to write through (the same class of
 //!   cut `tnt.rs`'s own doc names for fluid current).
-//! * **`showsBottom`/`beamTarget` are not modelled as fields yet** — they
-//!   need `MetadataField::CrystalShowBottom`/`CrystalBeamTarget`, which do
-//!   not exist in `crate::protocol` today (see `docs/dragon-fight.md`'s
-//!   "What a production wiring pass still needs" for the exact variants).
-//!   Every crystal here streams with `ShowBottom` at its vanilla default
-//!   (`true`) implicitly, by sending no metadata at all — see
-//!   `snapshots()`'s own comment at the crystal loop.
+//! * **`beamTarget` has a wire field (`MetadataField::CrystalBeamTarget`) but
+//!   no producer.** This crate has no obsidian pillars anywhere and no
+//!   respawn sequence wired to a real crystal (`crate::dragon::fight`'s own
+//!   module doc), so every crystal streams `CrystalBeamTarget(None)` — a real,
+//!   disclosed gap, not a silent stub. `CrystalShowBottom` **is** a real,
+//!   wired field now (always `true`, since a caged crystal is never spawned
+//!   here either) — see `push_end_crystal_snapshots`'s own comment.
 
 use lodestone_model::{ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
@@ -134,14 +134,16 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: Vec3::new(0.0, 0.0, 0.0),
-                // No `MetadataField::CrystalBeamTarget`/`CrystalShowBottom`
-                // variant exists yet (see this module's doc) — a crystal
-                // therefore streams with no metadata, which draws it at
-                // vanilla's own defaults (`ShowBottom = true`, no beam) since
-                // a client never receiving the field is indistinguishable
-                // from receiving the default. It draws; it just cannot show
-                // a heal beam yet.
-                metadata: Vec::new(),
+                // `CrystalShowBottom(true)` is real and unconditional — every
+                // crystal here draws its base, since a caged crystal is never
+                // spawned (no obsidian pillars anywhere, see this module's
+                // doc). `CrystalBeamTarget(None)` is real on the wire but has
+                // no `Some`-producing caller yet — see this module's doc for
+                // exactly why.
+                metadata: vec![
+                    crate::protocol::MetadataField::CrystalShowBottom(true),
+                    crate::protocol::MetadataField::CrystalBeamTarget(None),
+                ],
                 object_data: 0,
                 leash_link: None,
             });

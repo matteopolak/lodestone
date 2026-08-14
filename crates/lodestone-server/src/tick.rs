@@ -1104,6 +1104,10 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // immediately, not after waiting a full tick period for the loop below to
     // run once.
     mob_out.publish(mobs.with(|sim| sim.snapshots()));
+    // The `BOSS_EVENT` twin of the snapshot publish immediately above —
+    // see `LiveMobSource::publish_boss_bars`'s own doc for why this is a
+    // second call rather than folded into `publish` itself.
+    mob_out.publish_boss_bars(mobs.with(|sim| sim.boss_bars()));
 
     let mut next_tick_at = tokio::time::Instant::now();
     let mut last_overload_warning_at: Option<tokio::time::Instant> = None;
@@ -1473,6 +1477,10 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             });
         }
         mob_out.publish(mobs.with(|sim| sim.snapshots()));
+        // The `BOSS_EVENT` twin of the snapshot publish immediately above —
+        // see `LiveMobSource::publish_boss_bars`'s own doc for why this is a
+        // second call rather than folded into `publish` itself.
+        mob_out.publish_boss_bars(mobs.with(|sim| sim.boss_bars()));
         // Issue #425: `MobSim::tick` already calls `MobSim::explode` the
         // tick a creeper's own fuse completes (`1feed17`/`614acb8`), but
         // until now nothing read the detonation back out of the sim — see

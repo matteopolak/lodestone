@@ -302,12 +302,12 @@ impl<'w> MobSim<'w> {
     /// See `end_crystal::push_end_crystal_snapshots`'s own doc for why this
     /// is its own method rather than inlined.
     ///
-    /// **No `MetadataField::DragonPhase` yet** (see `docs/dragon-fight.md`),
-    /// so a dragon streams with empty metadata — visible, moving, and
-    /// health-bearing (a future `BOSS_EVENT` encoder reads
-    /// [`dragon_boss_bar`](Self::dragon_boss_bar) directly, not this
-    /// metadata list), but a client cannot yet distinguish its animation
-    /// phase.
+    /// Carries a real [`crate::protocol::MetadataField::DragonPhase`] now —
+    /// `d.phase.current().id()`, the same [`phase::PhaseManager`] this file's
+    /// own [`tick_one_dragon`] drives every tick. `EntityStreamer::sync`
+    /// diffs it exactly like every other snapshot field, so a phase
+    /// transition (holding pattern → strafing → sitting → …) reaches the
+    /// wire on the very next streaming pass after it happens.
     pub(super) fn push_dragon_snapshots(&self, out: &mut Vec<crate::protocol::EntitySnapshot>) {
         let mut ids: Vec<i32> = self.dragons.keys().copied().collect();
         ids.sort_unstable();
@@ -323,11 +323,51 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(d.yaw, 0.0),
                 head_yaw: d.yaw,
                 velocity: Vec3::new(0.0, 0.0, 0.0),
-                metadata: Vec::new(),
+                metadata: vec![crate::protocol::MetadataField::DragonPhase(d.phase.current().id())],
                 object_data: 0,
                 leash_link: None,
             });
         }
+    }
+
+    /// Every live dragon's [`crate::protocol::BossBarSnapshot`] — the input
+    /// [`crate::server::EntityStreamer`]'s boss-bar diff consumes to actually
+    /// put the health bar on a client's screen (`crate::dragon::fight`'s own
+    /// module doc names this crate's `BOSS_EVENT` encoder as the missing
+    /// half; it now exists, and this is its producer).
+    ///
+    /// # Two named simplifications
+    ///
+    /// * **The bar's id is the dragon's own entity uuid**, not a separate
+    ///   `Mth.createInsecureUUID` the way `EnderDragonFight.init` mints one.
+    ///   This sim tracks one bar per dragon 1:1 and nothing needs the two
+    ///   identities to differ — see [`crate::protocol::BossBarSnapshot::id`]'s
+    ///   own doc.
+    /// * **`dragon_killed` is hardcoded `false`.** `MobSim` tracks no
+    ///   `crate::dragon::fight::FightState` of its own (see
+    ///   [`dragon_boss_bar`](Self::dragon_boss_bar)'s own doc for why that is
+    ///   a caller-supplied parameter) and nothing here removes a dragon whose
+    ///   health reaches `0.0` — the same disclosed gap
+    ///   [`damage_dragon`](Self::damage_dragon)'s own doc names. The bar
+    ///   therefore empties out and stays visible rather than disappearing on
+    ///   death, which is at least consistent with the entity itself staying
+    ///   in the world.
+    #[must_use]
+    pub fn boss_bars(&self) -> Vec<crate::protocol::BossBarSnapshot> {
+        let mut ids: Vec<i32> = self.dragons.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(|id| {
+                let d = self.dragons.get(&id)?;
+                let bar = fight::boss_bar_value(false, d.health, d.max_health);
+                Some(crate::protocol::BossBarSnapshot {
+                    id: d.uuid,
+                    name: lodestone_model::Text::translate("entity.minecraft.ender_dragon", Vec::new()),
+                    progress: bar.progress,
+                    visible: bar.visible,
+                })
+            })
+            .collect()
     }
 }
 
