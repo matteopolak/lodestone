@@ -1,6 +1,7 @@
 //! Play-state packets for protocol 776.
 
 use lodestone_macros::{Decode, Encode, Packet};
+use uuid::Uuid;
 
 /// Clientbound `login` (game-join) packet.
 ///
@@ -132,6 +133,83 @@ pub struct ChatAck {
     /// Number of newly-acknowledged pending signed messages.
     #[mc(varint)]
     pub offset: i32,
+}
+
+/// Serverbound `chat_session_update` packet — announces (or re-announces)
+/// this client's chat-signing session to the server.
+///
+/// Wire layout mirrors `RemoteChatSession.Data.write` /
+/// `ProfilePublicKey.Data.write` exactly (`.cache/mc/26.2/src/net/minecraft/network/chat/RemoteChatSession.java`,
+/// `.../world/entity/player/ProfilePublicKey.java`): a 16-byte session UUID
+/// (`writeUUID`), a big-endian 64-bit `expires_at` (`writeInstant` = epoch
+/// **milliseconds**, not the epoch-seconds `SignedMessageBody.updateSignature`
+/// signs over — see `lodestone_auth::build_signature_payload`'s doc for that
+/// distinction), a varint-prefixed DER-encoded RSA public key
+/// (`writePublicKey` = `writeByteArray(key.getEncoded())`), then a
+/// varint-prefixed Mojang signature over that key (`writeByteArray`, the
+/// `/player/certificates` response's `publicKeySignatureV2`, forwarded
+/// verbatim — this client never re-signs it).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:chat_session_update", state = Play, bound = Server)]
+pub struct ChatSessionUpdate {
+    /// This client's chat-session UUID (`LocalChatSession::create`'s
+    /// client-generated `UUID.randomUUID()`).
+    pub session_id: Uuid,
+    /// Profile public key expiry, epoch milliseconds.
+    pub expires_at: i64,
+    /// DER-encoded (X.509 `SubjectPublicKeyInfo`) RSA public key, verbatim
+    /// from the `/player/certificates` response.
+    pub public_key: Vec<u8>,
+    /// Mojang's signature over `public_key` (`publicKeySignatureV2`),
+    /// verbatim.
+    pub key_signature: Vec<u8>,
+}
+
+/// One per-argument signature inside [`ChatCommandSigned`]
+/// (`ArgumentSignatures.Entry`).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct ArgumentSignatureEntry {
+    /// Argument name (max 16 chars, `ArgumentSignatures.MAX_ARGUMENT_NAME_LENGTH`).
+    #[mc(max = 16)]
+    pub name: String,
+    /// Signature over that argument's raw text.
+    pub signature: MessageSignature,
+}
+
+/// Serverbound `chat_command_signed` packet — sent instead of the plain
+/// [`ChatCommand`] only when the command being typed contains at least one
+/// argument the server's command tree declared signable
+/// (`ArgumentSignatures.signCommand`); every other command still goes through
+/// `chat_command`.
+///
+/// Wire layout (`ServerboundChatCommandSignedPacket`,
+/// `.cache/mc/26.2/src/net/minecraft/network/protocol/game/ServerboundChatCommandSignedPacket.java`):
+/// an unbounded string command (without the leading `/`, `readUtf()` with no
+/// explicit cap), a big-endian 64-bit timestamp (epoch milliseconds), a
+/// big-endian 64-bit salt, a varint-prefixed list of
+/// [`ArgumentSignatureEntry`] (`ArgumentSignatures`, vanilla caps this at 8 on
+/// decode — `MAX_ARGUMENT_COUNT`, not separately enforced by this encoder),
+/// then the same last-seen acknowledgement tail as [`ChatMessage`]: a varint
+/// offset, a fixed 3-byte (20-bit) acknowledged bit set, and a checksum byte.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:chat_command_signed", state = Play, bound = Server)]
+pub struct ChatCommandSigned {
+    /// Command text without the leading `/`.
+    pub command: String,
+    /// Client timestamp in epoch milliseconds.
+    pub timestamp: i64,
+    /// Random salt used for signing.
+    pub salt: i64,
+    /// Per-argument signatures.
+    pub argument_signatures: Vec<ArgumentSignatureEntry>,
+    /// Offset of the last-seen acknowledgement window.
+    #[mc(varint)]
+    pub last_seen_offset: i32,
+    /// Fixed 20-bit acknowledged bit set, packed into 3 bytes.
+    #[mc(fixed = 3)]
+    pub acknowledged: [u8; 3],
+    /// Acknowledgement checksum (`0` to ignore).
+    pub checksum: i8,
 }
 
 /// Clientbound `set_health` packet.
@@ -1359,4 +1437,92 @@ pub struct BlockEntityTagQuery {
     pub transaction_id: i32,
     /// Packed `BlockPos` long of the queried block.
     pub pos: i64,
+}
+
+#[cfg(test)]
+mod secure_chat_wire_tests {
+    use super::*;
+    use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
+
+    const CTX: Ctx = Ctx { version: 776 };
+
+    fn round_trip<T: Encode + Decode + PartialEq + std::fmt::Debug>(value: &T) {
+        let mut w = Writer::default();
+        value.encode(&mut w, CTX).expect("encode");
+        let bytes = w.into_vec();
+        let mut r = Reader::new(&bytes);
+        let decoded = T::decode(&mut r, CTX).expect("decode");
+        r.ensure_empty().expect("no trailing bytes");
+        assert_eq!(&decoded, value);
+    }
+
+    /// `ChatSessionUpdate` round-trips through its own `Encode`/`Decode`, and
+    /// its byte layout matches `RemoteChatSession.Data.write` field-by-field:
+    /// session UUID, expiry (i64), varint-prefixed public key, varint-prefixed
+    /// key signature. Pairwise-distinct field values (and public key /
+    /// signature of different lengths) so a transposition would be visible.
+    #[test]
+    fn chat_session_update_round_trips_and_matches_the_hand_written_layout() {
+        let session_id = Uuid::from_u128(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00);
+        let value = ChatSessionUpdate {
+            session_id,
+            expires_at: 1_700_000_000_123,
+            public_key: vec![0x30, 0x81, 0x9f, 0x02, 0x81, 0x81, 0x00],
+            key_signature: vec![0xAA, 0xBB, 0xCC],
+        };
+        round_trip(&value);
+
+        let mut w = Writer::default();
+        value.encode(&mut w, CTX).unwrap();
+        let bytes = w.into_vec();
+
+        let mut expected = Writer::default();
+        expected.uuid(session_id);
+        expected.i64(1_700_000_000_123);
+        expected.var_i32(7);
+        expected.bytes(&[0x30, 0x81, 0x9f, 0x02, 0x81, 0x81, 0x00]);
+        expected.var_i32(3);
+        expected.bytes(&[0xAA, 0xBB, 0xCC]);
+        assert_eq!(bytes, expected.into_vec());
+    }
+
+    /// `ChatCommandSigned` round-trips, including a non-empty
+    /// `argument_signatures` list, and matches
+    /// `ServerboundChatCommandSignedPacket.write`'s field order.
+    #[test]
+    fn chat_command_signed_round_trips_and_matches_the_hand_written_layout() {
+        let mut sig_bytes = [0u8; 256];
+        for (i, b) in sig_bytes.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let value = ChatCommandSigned {
+            command: "gamemode creative Notch".to_owned(),
+            timestamp: 1_700_000_000_123,
+            salt: 42,
+            argument_signatures: vec![ArgumentSignatureEntry {
+                name: "player".to_owned(),
+                signature: MessageSignature(sig_bytes),
+            }],
+            last_seen_offset: 3,
+            acknowledged: [0b0000_0001, 0, 0],
+            checksum: 7,
+        };
+        round_trip(&value);
+
+        let mut w = Writer::default();
+        value.encode(&mut w, CTX).unwrap();
+        let bytes = w.into_vec();
+
+        let mut expected = Writer::default();
+        expected.string("gamemode creative Notch");
+        expected.i64(1_700_000_000_123);
+        expected.i64(42);
+        expected.var_i32(1);
+        expected.string("player");
+        expected.bytes(&sig_bytes);
+        expected.var_i32(3);
+        expected.bytes(&[0b0000_0001, 0, 0]);
+        expected.i8(7);
+        assert_eq!(bytes, expected.into_vec());
+    }
 }

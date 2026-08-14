@@ -11,10 +11,12 @@
 //! (`FriendlyByteBuf.writeFixedBitSet`); with the eight actions below that is a
 //! single byte, bit `i` (LSB-first) selecting action ordinal `i`.
 //!
-//! Fields for unmodelled actions (`INITIALIZE_CHAT`, `UPDATE_LIST_ORDER`,
-//! `UPDATE_HAT`, and the profile-property list inside `ADD_PLAYER`) are decoded
-//! and discarded so the buffer stays aligned — a misparse there would leave
-//! trailing bytes, which the adapter rejects.
+//! Fields for unmodelled actions (`UPDATE_LIST_ORDER`, `UPDATE_HAT`) are
+//! decoded and discarded so the buffer stays aligned — a misparse there would
+//! leave trailing bytes, which the adapter rejects. `INITIALIZE_CHAT` is now
+//! kept (see [`RemoteChatSessionData`]) rather than discarded: this is the
+//! other player's announced chat-signing session, needed to eventually verify
+//! their signed messages.
 
 use lodestone_core::{
     Ctx, Decode, Error, Reader, Result, plain_text_from_nbt_component, read_network_nbt,
@@ -68,6 +70,16 @@ pub struct PlayerInfoEntry {
     /// update had no `ADD_PLAYER` action at all, which a merging fold must treat
     /// as "unchanged" rather than "no properties".
     pub properties: Option<Vec<ProfileProperty>>,
+    /// This player's announced chat-signing session, from `INITIALIZE_CHAT`.
+    /// `Some(None)` would be indistinguishable from "action absent" here, so
+    /// (matching every other action in this struct) `None` means the
+    /// `INITIALIZE_CHAT` bit was not set in this particular update; vanilla's
+    /// own field is `Optional<RemoteChatSession.Data>` because a player can
+    /// announce "no session" explicitly (the nullability boolean on the wire
+    /// reads `false`) — that inner case is folded into this same `None` since
+    /// no caller here needs to tell "never announced" from "announced empty"
+    /// apart.
+    pub chat_session: Option<RemoteChatSessionData>,
 }
 
 /// One profile property from `ADD_PLAYER`: a name, a value, and an optional
@@ -82,6 +94,31 @@ pub struct ProfileProperty {
     pub signature: Option<String>,
 }
 
+/// A player's announced chat-signing session (`RemoteChatSession.Data`):
+/// their session UUID and Mojang-issued public key, as broadcast by
+/// `INITIALIZE_CHAT`.
+///
+/// This is the *receiving* half of secure chat — the public key needed to
+/// verify messages from this player (`lodestone_auth::verify_signature`).
+/// Storing it does not by itself verify anything or mark a message as
+/// "secure" in any UI; a full per-sender chain validator
+/// (`RemoteChatSession`/`SignedMessageChain.Decoder`'s ordering and expiry
+/// rules) is not implemented here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteChatSessionData {
+    /// This player's chat-session UUID.
+    pub session_id: Uuid,
+    /// Public-key expiry, epoch milliseconds (`ProfilePublicKey.Data.expiresAt`,
+    /// `readInstant` = epoch millis).
+    pub expires_at: i64,
+    /// DER-encoded (X.509 `SubjectPublicKeyInfo`) RSA public key, verbatim.
+    pub public_key: Vec<u8>,
+    /// Mojang's signature over `public_key` (`signature_v2` on the wire —
+    /// `ProfilePublicKey.Data`'s codec field name — not independently verified
+    /// by this client; only the server checks it against Mojang's own key).
+    pub key_signature: Vec<u8>,
+}
+
 /// Clientbound `player_info_update` (id 70).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PlayerInfoUpdate {
@@ -89,28 +126,38 @@ pub struct PlayerInfoUpdate {
     pub entries: Vec<PlayerInfoEntry>,
 }
 
-/// Reads a VarInt-prefixed byte array, discarding the bytes. Used to skip the
-/// public-key blob and its signature inside a chat session.
-fn skip_byte_array(r: &mut Reader<'_>) -> Result<()> {
+/// Reads a VarInt-prefixed byte array.
+fn read_byte_array(r: &mut Reader<'_>) -> Result<Vec<u8>> {
     let len = r.var_i32()?;
     if len < 0 {
         return Err(Error::NegativeLength(len));
     }
-    r.bytes(len as usize)?;
-    Ok(())
+    Ok(r.bytes(len as usize)?.to_vec())
 }
 
-/// Consumes an optional `RemoteChatSession.Data` (`INITIALIZE_CHAT`): a
+/// Reads an optional `RemoteChatSession.Data` (`INITIALIZE_CHAT`): a
 /// nullability boolean, then, when present, the session UUID and a
 /// `ProfilePublicKey.Data` (an instant, the public key, and its signature).
-fn skip_chat_session(r: &mut Reader<'_>) -> Result<()> {
-    if r.bool()? {
-        let _session_id = r.uuid()?;
-        let _expires_at = r.i64()?;
-        skip_byte_array(r)?; // public key
-        skip_byte_array(r)?; // key signature
+///
+/// **Used to discard every field here** (`skip_byte_array`/`skip_chat_session`,
+/// before this fix) — the session UUID, expiry and public key were read off
+/// the wire purely to stay aligned and then thrown away, so no chat message
+/// from any other player could ever be verified client-side. The bytes were
+/// always correct; nothing carried them past this function.
+fn read_chat_session(r: &mut Reader<'_>) -> Result<Option<RemoteChatSessionData>> {
+    if !r.bool()? {
+        return Ok(None);
     }
-    Ok(())
+    let session_id = r.uuid()?;
+    let expires_at = r.i64()?;
+    let public_key = read_byte_array(r)?;
+    let key_signature = read_byte_array(r)?;
+    Ok(Some(RemoteChatSessionData {
+        session_id,
+        expires_at,
+        public_key,
+        key_signature,
+    }))
 }
 
 /// Reads the `ADD_PLAYER` action: the player name, then the profile-property
@@ -175,6 +222,7 @@ impl Decode for PlayerInfoUpdate {
                 latency: None,
                 display_name: None,
                 properties: None,
+                chat_session: None,
             };
             // Fields appear in Action ordinal order for whichever bits are set.
             if has(action::ADD_PLAYER) {
@@ -183,7 +231,7 @@ impl Decode for PlayerInfoUpdate {
                 entry.properties = Some(properties);
             }
             if has(action::INITIALIZE_CHAT) {
-                skip_chat_session(r)?;
+                entry.chat_session = read_chat_session(r)?;
             }
             if has(action::UPDATE_GAME_MODE) {
                 entry.game_mode = Some(r.var_i32()?);
@@ -305,6 +353,56 @@ mod tests {
             e.properties.as_deref(),
             Some(&[][..]),
             "ADD_PLAYER was present with zero properties -- Some(empty), not None"
+        );
+    }
+
+    /// `INITIALIZE_CHAT` used to be read purely to stay byte-aligned and then
+    /// discarded (the old `skip_chat_session`); this is the control that it is
+    /// now kept. Pairwise-distinct session UUID / expiry / public key /
+    /// signature bytes so a field transposition inside `read_chat_session`
+    /// would be visible, and a second entry with `INITIALIZE_CHAT` present but
+    /// the nullability boolean `false` so both directions of that boolean are
+    /// exercised in one test.
+    #[test]
+    fn initialize_chat_is_kept_not_discarded() {
+        let with_session = Uuid::from_u128(1);
+        let without_session = Uuid::from_u128(2);
+        let session_id = Uuid::from_u128(0xaabb_ccdd_eeff_0011_2233_4455_6677_8899);
+        let public_key: Vec<u8> = vec![0x30, 0x81, 0x9f, 0x02, 0x81, 0x81];
+        let key_signature: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        let expires_at: i64 = 1_700_000_000_123;
+
+        let mut w = Writer::default();
+        w.u8(1 << action::INITIALIZE_CHAT);
+        w.var_i32(2);
+        // Entry 1: a real chat session.
+        w.uuid(with_session);
+        w.bool(true);
+        w.uuid(session_id);
+        w.i64(expires_at);
+        w.var_i32(public_key.len() as i32);
+        w.bytes(&public_key);
+        w.var_i32(key_signature.len() as i32);
+        w.bytes(&key_signature);
+        // Entry 2: `INITIALIZE_CHAT` present but no session announced.
+        w.uuid(without_session);
+        w.bool(false);
+
+        let update: PlayerInfoUpdate = decode_exact(&w.into_vec());
+        assert_eq!(update.entries.len(), 2);
+
+        let session = update.entries[0]
+            .chat_session
+            .as_ref()
+            .expect("entry 1 announced a session");
+        assert_eq!(session.session_id, session_id);
+        assert_eq!(session.expires_at, expires_at);
+        assert_eq!(session.public_key, public_key);
+        assert_eq!(session.key_signature, key_signature);
+
+        assert_eq!(
+            update.entries[1].chat_session, None,
+            "the nullability boolean being false must decode to no session, not a default one"
         );
     }
 
