@@ -503,6 +503,53 @@ pub fn loading_frame_with_progress(
     text: &str,
     progress: crate::menu::loading::TerrainProgress,
 ) -> MenuFrame<'static> {
+    loading_frame_with_progress_and_grid(text, progress, None)
+}
+
+/// The gap between the chunk grid's bottom edge and the phase label above it,
+/// in logical pixels. Vanilla puts its own text *above* a grid centred on
+/// the screen (`LevelLoadingScreen.extractRenderState`:
+/// `textTop = yCenter - statusView.radius() * 2 - 9 * 3`); this frame instead
+/// keeps the existing label/bar/count block exactly where issue #449 put it
+/// (screen centre) and stacks the grid above *that* block, since this frame
+/// also draws a raw count line vanilla's screen does not. The two arrangements
+/// agree on the part that matters — the grid sits above the text, never
+/// overlapping the bar or the count — without re-deriving vanilla's own
+/// vertical arithmetic for a layout this frame no longer has.
+const CHUNK_GRID_GAP: f32 = 6.0;
+
+/// The chunk grid's vertical centre for a grid of the given `radius`, in the
+/// same "logical pixels from screen centre" convention [`MenuProgress::dy`]
+/// uses — placed so its bottom edge sits [`CHUNK_GRID_GAP`] above the phase
+/// label, for any radius.
+///
+/// A free function, not inlined into [`loading_frame_with_progress_and_grid`],
+/// so a layout gate can compute the same value the frame was built with
+/// instead of restating the arithmetic as a second, driftable copy.
+#[must_use]
+pub fn chunk_grid_dy(radius: u32) -> f32 {
+    let half =
+        crate::menu::loading::TerrainChunkGrid::diameter(radius) as f32 * super::CHUNK_CELL_SIZE
+            * 0.5;
+    LOADING_LABEL_DY - CHUNK_GRID_GAP - half
+}
+
+/// As [`loading_frame_with_progress`], but also carrying vanilla's
+/// `LevelLoadingScreen` chunk-status grid (issue #568) when one is available.
+///
+/// `grid` is `None` under exactly the conditions
+/// `Sim::terrain_chunk_grid` returns `None` for — no session, or no declared
+/// view radius yet — and a `None` here draws nothing extra, same as
+/// [`loading_frame_with_progress`] always did. The grid is genuinely real
+/// per-column state (see [`crate::menu::loading::ChunkCellStatus`]'s doc for
+/// what makes it so and why it has only two colours), never a scalar dressed
+/// up to look spatial.
+#[must_use]
+pub fn loading_frame_with_progress_and_grid(
+    text: &str,
+    progress: crate::menu::loading::TerrainProgress,
+    grid: Option<crate::menu::loading::TerrainChunkGrid>,
+) -> MenuFrame<'static> {
     MenuFrame {
         vanilla: true,
         // Default `MenuBackdrop::Panorama`, as [`loading_frame`] explains.
@@ -529,6 +576,10 @@ pub fn loading_frame_with_progress(
         progress: Some(super::MenuProgress {
             fraction: progress.fraction(),
             dy: 0.0,
+        }),
+        chunk_grid: grid.map(|grid| super::ChunkGridView {
+            dy: chunk_grid_dy(grid.radius),
+            grid,
         }),
         ..Default::default()
     }

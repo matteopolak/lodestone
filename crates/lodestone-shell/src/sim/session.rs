@@ -440,6 +440,7 @@ impl Sim {
     pub fn set_view_radius(&mut self, view_radius: u32) {
         self.expected_view_columns =
             Some(crate::menu::loading::TerrainProgress::expected_for_radius(view_radius));
+        self.expected_view_radius = Some(view_radius);
     }
 
     /// How much of the initial view has landed, or `None` when there is no
@@ -457,6 +458,47 @@ impl Sim {
             loaded: net.loaded_chunks().len(),
             expected,
         })
+    }
+
+    /// The loading screen's chunk-status grid (issue #568): real per-column
+    /// state for every column in the current view, or `None` under the same
+    /// conditions [`Self::terrain_progress`] is — no session, or no declared
+    /// view radius to size the grid from.
+    ///
+    /// Centred on the chunk under the player, the same column math
+    /// [`Self::terrain_loading`] uses — the two must agree about which chunk
+    /// is "the player's own", or the grid's centre cell and the dismissal
+    /// predicate would be pointing at different columns.
+    ///
+    /// Each cell reads [`crate::net::NetClient::is_chunk_loaded`] directly:
+    /// real, per-position, client-observed state, never synthesised from the
+    /// scalar count [`Self::terrain_progress`] reports. See
+    /// [`crate::menu::loading::ChunkCellStatus`]'s doc for why this has two
+    /// states rather than vanilla's twelve.
+    #[must_use]
+    pub fn terrain_chunk_grid(&self) -> Option<crate::menu::loading::TerrainChunkGrid> {
+        let net = self.net()?;
+        let radius = self.expected_view_radius?;
+        let position = self.player().position;
+        let pcx = (position.x.floor() as i32).div_euclid(16);
+        let pcz = (position.z.floor() as i32).div_euclid(16);
+        let diameter = crate::menu::loading::TerrainChunkGrid::diameter(radius) as i32;
+        let r = i32::try_from(radius).unwrap_or(i32::MAX);
+        let mut cells = Vec::with_capacity((diameter * diameter).max(0) as usize);
+        for z in 0..diameter {
+            for x in 0..diameter {
+                let pos = lodestone_client::ChunkPos {
+                    x: pcx - r + x,
+                    z: pcz - r + z,
+                };
+                cells.push(if net.is_chunk_loaded(pos) {
+                    crate::menu::loading::ChunkCellStatus::Full
+                } else {
+                    crate::menu::loading::ChunkCellStatus::Empty
+                });
+            }
+        }
+        Some(crate::menu::loading::TerrainChunkGrid { radius, cells })
     }
 
     /// The coarse session phase, for the menu state machine.

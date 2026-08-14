@@ -800,11 +800,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   proven against a real client. The actual gap was one level up: nothing in production
   ever *constructed* a `MobSim` or *ticked* it. `IntegratedServer`'s singleplayer path
   called `open_in_memory` (no entities), never `open_in_memory_with_entities`.
-- [Loading screen](./loading-screen.md) — The screen shown between a menu click and
-  a playable world: named connect phases while the session is established, then
-  `Loading terrain...` with a real progress bar while the initial view streams in.
-  Issue #449 — its value is diagnostic before it is cosmetic, because before it
-  there was no way to tell "still loading" from "broken".
+- [Loading screen](./loading-screen.md) — The screen shown between a menu click and a
+  playable world: named connect phases while the session is established, then `Loading
+  terrain...` with a real progress bar and a real per-chunk status grid while the
+  initial view streams in. Issue #449 (the bar) and issue #568 (the grid) — its value
+  is diagnostic before it is cosmetic, because before it there was no way to tell
+  "still loading" from "broken".
 - [Plugin-opened local menus](./local-menus.md) — `Bukkit.createInventory` +
   `Player.openInventory` for this codebase (issue
   [#145](https://github.com/matteopolak/lodestone/issues/145)): a plugin opens an

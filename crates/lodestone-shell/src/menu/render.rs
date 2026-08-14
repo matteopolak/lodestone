@@ -101,10 +101,11 @@ pub use dispatch::{frame_for, stamp_canvas_facts};
 pub use draw::{MenuGeometry, SpriteCut, build, geometry};
 pub use favicon::{FaviconMosaic, default_head_icon, favicon_mosaic, head_mosaic};
 pub use frame::{
-    AccountEntryView, Align, Arrow, FaviconCache, MenuBackdrop, MenuFrame, MenuLabel, MenuNotice,
-    MenuProgress,
+    AccountEntryView, Align, Arrow, CHUNK_CELL_EMPTY, CHUNK_CELL_FULL, CHUNK_CELL_SIZE,
+    ChunkGridView, FaviconCache, MenuBackdrop, MenuFrame, MenuLabel, MenuNotice, MenuProgress,
     MenuRow, PROGRESS_BAR_BG, PROGRESS_BAR_FG, PROGRESS_BAR_H, PROGRESS_BAR_W, PackEntryView,
-    ServerEntryView, TabEntryView, WorldEntryView, notice_rect, owns_frame,
+    ServerEntryView, TabEntryView, WorldEntryView, chunk_cell_colour, chunk_cell_origin,
+    notice_rect, owns_frame,
 };
 pub use measure::{
     EDIT_BOX_H, field_rect, field_row_rects, logical_canvas, menu_row_under, row_rect, text_px,
@@ -112,7 +113,8 @@ pub use measure::{
 pub use origin::{Origin, Slot};
 pub use renderer::MenuRenderer;
 pub use screens::{
-    command_block_frame, death_frame, loading_frame, loading_frame_with_progress, pause_frame,
+    chunk_grid_dy, command_block_frame, death_frame, loading_frame, loading_frame_with_progress,
+    loading_frame_with_progress_and_grid, pause_frame,
 };
 pub use server_list::{
     SERVER_LIST_ITEM_H, server_entry_icon_rect, server_list_footer_slot, server_list_max_scroll,

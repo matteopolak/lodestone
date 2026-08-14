@@ -4,9 +4,10 @@
 
 The screen shown between a menu click and a playable world: named connect
 phases while the session is established, then `Loading terrain...` with a real
-progress bar while the initial view streams in. Issue #449 — its value is
-diagnostic before it is cosmetic, because before it there was no way to tell
-"still loading" from "broken".
+progress bar and a real per-chunk status grid while the initial view streams
+in. Issue #449 (the bar) and issue #568 (the grid) — its value is diagnostic
+before it is cosmetic, because before it there was no way to tell "still
+loading" from "broken".
 
 ## How it works
 
@@ -149,6 +150,52 @@ denominator, never a percentage:
 vanilla's `LevelLoadingScreen` geometry — 200×2, centred, black track
 (`0xFF000000`), green fill (`0xFF00FF00`) at `round(fraction * 200)`.
 
+### The chunk-status grid (issue #568)
+
+Vanilla's `LevelLoadingScreen` also draws a square block of 2×2-px cells, one
+per chunk in the loading radius, coloured by `ChunkMap.getLatestStatus` — a
+**server-side generation stage** (`ChunkStatus.EMPTY` through `.FULL`, twelve
+of them), read in-process because vanilla's integrated server runs in the
+same JVM as the client (`MinecraftServer.createChunkLoadStatusView`). That is
+also why vanilla's grid is singleplayer-only.
+
+**First, the owner-reported check this issue asked for: the progress bar and
+the grid are both real, not derived from the seed.** Read from the 26.2
+decompile: `LevelLoadProgressTracker` accumulates real `start`/`update`/
+`finish` calls the server fires as it actually loads chunks
+(`MinecraftServer.prepareLevels`'s `LOAD_INITIAL_CHUNKS`/`LOAD_PLAYER_CHUNKS`
+stages), weighted by a real chunk count; the grid reads
+`ChunkMap.getLatestStatus` per cell, the chunk map's live generation state.
+Neither reads the seed. The seed only decides *what* eventually generates,
+not *how much has happened so far*.
+
+**This client cannot report the twelve stages, and the grid does not pretend
+to.** `ChunkColumn::from_generated` (`lodestone-server`) builds a column in
+one step — there is no intermediate stage to observe — and the client only
+ever learns "not here yet" or "here", identically for singleplayer and real
+multiplayer (unlike vanilla, whose in-process read has no multiplayer
+equivalent). So `crate::menu::loading::ChunkCellStatus` has exactly two
+variants, `Empty` and `Full`, drawn in exactly two of vanilla's own `COLORS`
+entries (`0x545454` and white) — real spatial information (which of *these*
+columns the client has actually received, and in what pattern), just coarser
+than vanilla's view. It is never synthesised from the scalar `TerrainProgress`
+count above; `Sim::terrain_chunk_grid` reads `NetClient::is_chunk_loaded` once
+per cell.
+
+Centred on the chunk under the player — the same column math
+`Sim::terrain_loading` uses, so the grid's centre cell and the screen's own
+dismissal predicate can never point at different columns. Radius is the same
+`Sim::set_view_radius` value the bar's denominator is squared from
+(`Sim::expected_view_radius`), so the two can never disagree about the size of
+"the initial view". `ChunkGridView` is the frame primitive (data plus a `dy`);
+`menu/render/draw.rs` draws one real quad per cell from `chunk_cell_origin`,
+vanilla's own `extractChunksForRendering` geometry (`size = 2`, `margin = 0`).
+
+**A full twelve-colour grid needs a server-side generation-stage feed this
+client does not have.** That is a real gap, not this issue's scope — it would
+need `lodestone-server` to track and report per-column generation stages the
+way vanilla's `ChunkMap` does, which nothing here currently models.
+
 ## How to change it, and the gotchas
 
 - **A phase with no emit site in `net.rs` is an island.** It will compile, test
@@ -167,12 +214,19 @@ vanilla's `LevelLoadingScreen` geometry — 200×2, centred, black track
   `terrain_progress()` returns `None` and the screen falls back to the bare
   phase label. **Wiring multiplayer's bar needs the server's actual view
   distance**, not our request.
-- **The per-chunk `ChunkStatus` grid is still absent**, and that is the issue's
-  headline bullet. Vanilla's `LevelLoadingScreen` colours a 2×2-px cell per
-  chunk from twelve `ChunkStatus` colours; nothing here exposes a per-column
-  status (only loaded/not-loaded), so the grid is blocked on issue #289's
-  ticket/loading pipeline. It must not be faked from the loaded set — that
-  would be a twelve-colour grid with two colours in it.
+- **The chunk grid draws two of vanilla's twelve colours, honestly, not all
+  twelve.** Adding a third `ChunkCellStatus` variant means adding a real
+  server-observable stage first — never repurposing `Empty`/`Full` to also
+  mean something in between, which would be exactly the "twelve-colour grid
+  with two colours in it" fabrication this feature was built to avoid. A
+  full-fidelity grid needs `lodestone-server` to track and report per-column
+  generation stages; nothing here does that yet.
+- **The grid and the bar share one radius and one centre column on purpose.**
+  `Sim::terrain_chunk_grid` reads the same `expected_view_radius` and the same
+  player-chunk math `Sim::terrain_loading` uses. A change to either column
+  computation must change both call sites together, or the grid's centre cell
+  and the screen's own dismissal predicate would silently point at different
+  chunks.
 - **`LEVEL_CHUNKS_LOAD_START` (game event 13) is still not decoded.**
   `crates/protocol/v770/src/adapter.rs`'s game-event match drops it in its
   terminal arm, so there is no "the server is about to stream" edge and

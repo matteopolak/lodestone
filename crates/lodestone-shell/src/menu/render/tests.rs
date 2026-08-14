@@ -840,6 +840,46 @@ fn colour_bounds(colour: &[f32], w: f32, h: f32, want: [f32; 4]) -> Option<(f32,
     seen.then_some((x0, y0, x1 - x0, y1 - y0))
 }
 
+/// As [`colour_bounds`], restricted to vertices whose logical-pixel `y` falls
+/// in `y_range`.
+///
+/// Vanilla's own `FULL` chunk-status colour is opaque white — the same
+/// [`LABEL`] colour every plain-text label in this file draws with, and the
+/// jar-less debug font (no [`crate::hud::VanillaFont`] attached, which is
+/// every headless test's path) emits one 1x1 px white [`Quads::rect`] per lit
+/// glyph pixel. So a bare [`colour_bounds`] for white unions a Full grid
+/// cell with whatever label text happens to be on screen — not a bug in the
+/// draw, just two unrelated things sharing vanilla's own colour. This keys on
+/// **position** instead, the same discriminator `CLAUDE.md` asks for, rather
+/// than trying to invent a colour vanilla does not use.
+fn colour_bounds_in_band(
+    colour: &[f32],
+    w: f32,
+    h: f32,
+    want: [f32; 4],
+    y_range: (f32, f32),
+) -> Option<(f32, f32, f32, f32)> {
+    let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+    let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+    let mut seen = false;
+    for v in colour.chunks_exact(STRIDE) {
+        if (2..6).any(|c| (v[c] - want[c - 2]).abs() > 1e-4) {
+            continue;
+        }
+        let py = (1.0 - v[1]) * 0.5 * h;
+        if py < y_range.0 - 0.5 || py > y_range.1 + 0.5 {
+            continue;
+        }
+        seen = true;
+        let px = (v[0] + 1.0) * 0.5 * w;
+        x0 = x0.min(px);
+        y0 = y0.min(py);
+        x1 = x1.max(px);
+        y1 = y1.max(py);
+    }
+    seen.then_some((x0, y0, x1 - x0, y1 - y0))
+}
+
 /// #376's rule applied to this screen: the discriminator for a hover overlay
 /// is **position**. A gate that proved "an overlay drew in a row" would pass
 /// on an overlay nailed to row 0.
@@ -5954,6 +5994,121 @@ fn the_loading_bar_fill_tracks_the_real_column_count() {
     assert!(
         colour_bounds(&v0, V_W, V_H, PROGRESS_BAR_FG).is_none(),
         "a zero-column view must draw no green fill"
+    );
+}
+
+/// The loading screen's chunk-status grid (issue #568) reaches geometry as
+/// **real per-cell colour**, not a uniform block that merely proves the grid
+/// drew *something*.
+///
+/// One cell is `Full` and the other eight of a 3x3 (`radius = 1`) grid are
+/// `Empty`. `colour_bounds` finds each vanilla status colour's own quad
+/// bounds by colour, not by a vertex-inside-a-fixed-rect probe (`CLAUDE.md`'s
+/// warning about the coverage helper enclosing-quad trap does not apply
+/// here: each cell is 2x2 px, far smaller than any probe rect could be, and
+/// this asks where the colour landed rather than whether a fixed rect is
+/// covered). The `Full` corner's box is predicted **exactly**, from the same
+/// `chunk_cell_origin` expression `draw::build` calls — a restated constant
+/// could drift from the draw and still pass, an evaluated call to the same
+/// function cannot. The `Empty` colour's box is the rest of the grid: the two
+/// boxes are at different positions, which is the discriminating property —
+/// a solid-colour grid (the negative control below) cannot produce this.
+#[test]
+fn the_chunk_grid_draws_two_real_statuses_at_two_different_cells() {
+    use crate::menu::loading::{ChunkCellStatus, TerrainChunkGrid, TerrainProgress};
+
+    let radius = 1u32;
+    let diameter = TerrainChunkGrid::diameter(radius);
+    assert_eq!(diameter, 3, "premise: a 3x3 grid, so 'one corner' is unambiguous");
+
+    let mut cells = vec![ChunkCellStatus::Empty; diameter * diameter];
+    cells[0] = ChunkCellStatus::Full; // (x=0, z=0), row-major x-fastest
+    let grid = TerrainChunkGrid { radius, cells };
+
+    let progress = TerrainProgress { loaded: 1, expected: 9 };
+    let frame = loading_frame_with_progress_and_grid("Loading terrain...", progress, Some(grid));
+    let v = geometry(&frame, V_W, V_H);
+
+    // The exact prediction: the same expression `draw::build` evaluates.
+    let dy = chunk_grid_dy(radius);
+    let center_x = V_W * 0.5;
+    let center_y = (V_H * 0.5 + dy).floor();
+    let (want_x, want_y) = chunk_cell_origin(center_x, center_y, diameter, 0, 0);
+
+    // Vanilla's `FULL` colour is opaque white, the same colour every plain
+    // label draws with under the jar-less debug font — see
+    // `colour_bounds_in_band`'s doc. Restricting to the grid's own predicted
+    // vertical band (well above the phase label, by `CHUNK_GRID_GAP`) is what
+    // lets this ask about the grid specifically rather than about "white
+    // anywhere on the frame".
+    let total = diameter as f32 * CHUNK_CELL_SIZE;
+    let band = (center_y - total * 0.5 - 0.5, center_y + total * 0.5 + 0.5);
+    let full = colour_bounds_in_band(&v, V_W, V_H, CHUNK_CELL_FULL, band)
+        .expect("the one Full cell must reach the colour stream");
+    let empty = colour_bounds_in_band(&v, V_W, V_H, CHUNK_CELL_EMPTY, band)
+        .expect("the eight Empty cells must reach the colour stream");
+
+    assert!(
+        (full.0 - want_x).abs() < 0.5 && (full.1 - want_y).abs() < 0.5,
+        "Full cell at {:?}, expected top-left ({want_x}, {want_y})",
+        full
+    );
+    assert!(
+        (full.2 - CHUNK_CELL_SIZE).abs() < 0.5 && (full.3 - CHUNK_CELL_SIZE).abs() < 0.5,
+        "Full cell should be exactly one {CHUNK_CELL_SIZE}x{CHUNK_CELL_SIZE} px cell, got {:?}",
+        full
+    );
+
+    // The two colours must occupy different **extents** — the discriminator
+    // this gate exists to check. Their bounding boxes can share a corner (the
+    // excluded cell sits at the grid's own corner, so its neighbours' boxes
+    // touch the same point) without sharing a *size*: a grid that drew one
+    // colour everywhere could not produce one cell-sized box and one
+    // grid-sized box at once.
+    assert!(
+        (full.2 - empty.2).abs() > 0.5 || (full.3 - empty.3).abs() > 0.5,
+        "Full at {full:?} and Empty at {empty:?} must not have the same extent"
+    );
+    // The Empty colour spans the rest of the 3x3 block: every row and column
+    // except the excluded corner still has an Empty cell reaching every edge,
+    // so its bounds equal the whole grid's — strictly larger than one cell.
+    let total = diameter as f32 * CHUNK_CELL_SIZE;
+    assert!(
+        (empty.2 - total).abs() < 0.5 && (empty.3 - total).abs() < 0.5,
+        "Empty should span the full {total}x{total} px grid minus one corner, got {:?}",
+        empty
+    );
+
+    // The negative control: a grid with only one status present must draw
+    // only that status's colour — proving the split above is conditional on
+    // real per-cell data, not a fixed two-colour pattern.
+    let uniform = TerrainChunkGrid {
+        radius,
+        cells: vec![ChunkCellStatus::Full; diameter * diameter],
+    };
+    let uniform_frame =
+        loading_frame_with_progress_and_grid("Loading terrain...", progress, Some(uniform));
+    let uv = geometry(&uniform_frame, V_W, V_H);
+    assert!(
+        colour_bounds(&uv, V_W, V_H, CHUNK_CELL_FULL).is_some(),
+        "an all-loaded grid must still draw the Full colour"
+    );
+    assert!(
+        colour_bounds(&uv, V_W, V_H, CHUNK_CELL_EMPTY).is_none(),
+        "an all-loaded grid must draw no Empty cell at all"
+    );
+
+    // And the frame-level negative control: no grid at all draws no Empty
+    // cell — `Full`'s own colour is skipped here because it coincides with
+    // vanilla's plain white label text (see `colour_bounds_in_band`'s doc),
+    // which the phase label draws with or without a grid, so it carries no
+    // information about the grid either way. `Empty`'s grey has no such
+    // coincidence in this frame, so its absence is the real control.
+    let none_frame = loading_frame_with_progress("Loading terrain...", progress);
+    let nv = geometry(&none_frame, V_W, V_H);
+    assert!(
+        colour_bounds(&nv, V_W, V_H, CHUNK_CELL_EMPTY).is_none(),
+        "no grid at all must draw no Empty cell"
     );
 }
 
