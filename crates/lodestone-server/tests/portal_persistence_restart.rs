@@ -341,15 +341,27 @@ async fn a_portal_survives_restart_in_both_dimensions_and_is_reused_not_duplicat
     );
 
     // The real terrain persisted too (region/ saves, not this change's own
-    // wiring, but load-bearing for the reuse check below: `find_exit_portal`
-    // re-validates every candidate against the live world).
+    // wiring). Checked with **targeted** reads at the exact cells — not a
+    // search — because `RegionChunkSource` has no `ChunkStore` cache in front
+    // of it here (this crate's own docs measure ~909 ms per column through
+    // that path), and the reuse/control checks below run a search touching
+    // hundreds of columns; doing that against the bare persistent source
+    // turned this test into a multi-minute disk-bound scan on first sight.
     for cell in &overworld_cells {
         let state = world2.block_state(cell.x, cell.y, cell.z);
         assert!(portal::is_portal(&state), "overworld cell {cell:?} lost its block: {state}");
     }
-    // The Nether's terrain is not real here (see the module doc), so it is
-    // rebuilt from the restored positions directly — what matters is that the
-    // *index* came from disk, not from this rebuild.
+    // The searches below run against cheap in-memory stand-ins instead,
+    // seeded from the disk-confirmed positions — the same substitution
+    // `nether_portal_round_trip.rs` makes throughout for portal *search*
+    // logic. What is under test past this point is whether the restored
+    // index changes `find_exit_portal`'s answer, not whether terrain I/O is
+    // fast; `world_persistence_round_trip.rs` already covers the terrain
+    // round trip itself.
+    let overworld_terrain2 = BlockMapWorld::new(Dimension::Overworld, 62, "minecraft:stone");
+    for cell in &overworld_cells {
+        overworld_terrain2.set_block(cell.x, cell.y, cell.z, &portal::portal_state(Axis::X));
+    }
     let nether_terrain2 = BlockMapWorld::new(Dimension::Nether, 31, "minecraft:netherrack");
     for cell in restored.cells(Dimension::Nether) {
         nether_terrain2.set_block(cell.x, cell.y, cell.z, &portal::portal_state(Axis::X));
@@ -362,7 +374,7 @@ async fn a_portal_survives_restart_in_both_dimensions_and_is_reused_not_duplicat
     // through the index.
     let overworld_origin = BlockPos::new(OVERWORLD_PORTAL.0 + 40, OVERWORLD_PORTAL.1, OVERWORLD_PORTAL.2 + 3);
     let reused = portal::find_exit_portal(
-        &world2,
+        &overworld_terrain2,
         Dimension::Overworld,
         Some(restored),
         overworld_origin,
@@ -375,14 +387,15 @@ async fn a_portal_survives_restart_in_both_dimensions_and_is_reused_not_duplicat
 
     // --- the control: without the restored index, the same trip misses and
     // production would build a duplicate --------------------------------
-    let missed = portal::find_exit_portal(&world2, Dimension::Overworld, None, overworld_origin);
+    let missed = portal::find_exit_portal(&overworld_terrain2, Dimension::Overworld, None, overworld_origin);
     assert_eq!(
         missed, None,
         "control premise failed: the fallback scan alone must not reach a \
          portal 40 blocks away, or this control proves nothing"
     );
-    let duplicate = portal::create_portal(&world2, Dimension::Overworld, overworld_origin, Axis::X)
-        .expect("control: with no index, production proceeds to build a fresh portal");
+    let duplicate =
+        portal::create_portal(&overworld_terrain2, Dimension::Overworld, overworld_origin, Axis::X)
+            .expect("control: with no index, production proceeds to build a fresh portal");
     assert!(
         duplicate
             .portal_cells
