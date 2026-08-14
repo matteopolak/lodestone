@@ -1039,10 +1039,11 @@ mod tests {
     /// string that biome's `VEGETAL_DECORATION` step actually reaches —
     /// `multiface_growth` (glow lichen, `MultifaceGrowthFeature` — never in
     /// #406's scope, present in nearly every biome), `tree: unsupported
-    /// trunk/foliage/size/provider` (a trunk/foliage placer combination this
-    /// engine has no `TrunkPlacerCfg`/`FoliagePlacerCfg` variant for — after
-    /// fancy oak, only mangrove and cherry still hit this), plus a shrinking
-    /// tail of features #406 never claimed (coral, `bamboo`,
+    /// trunk/foliage/size/provider` (a trunk/foliage/root placer combination
+    /// this engine has no `TrunkPlacerCfg`/`FoliagePlacerCfg`/`RootPlacerCfg`
+    /// variant for — now empty; mangrove and cherry, the last two biomes
+    /// that hit it, both closed), plus a shrinking tail of features #406
+    /// never claimed (coral, `bamboo`,
     /// `huge_*_mushroom`, `root_system`, cave-only `lush_caves` features,
     /// `simple_block: unsupported to_place`). Measured by running every
     /// reachable biome through `lodestone_worldgen::compose::build_biome_vegetation`
@@ -1070,10 +1071,17 @@ mod tests {
     /// jungle/sparse_jungle (the `fancy_oak_checked`/`fancy_oak_leaf_litter`
     /// branch every RandomSelector those biomes use also carries) and for
     /// birch_forest/forest/plains/… (oak's own `fancy_oak` branch, drawn
-    /// directly rather than through a selector). It stays for
-    /// `minecraft:mangrove_swamp` and `minecraft:cherry_grove`: mangrove's
-    /// and cherry's trunk/foliage/root placers are their own vanilla classes
-    /// with no variant here yet, not a fancy-oak case.
+    /// directly rather than through a selector).
+    ///
+    /// **The last two, `minecraft:cherry_grove` and `minecraft:mangrove_swamp`,
+    /// closed too**: `TrunkPlacerCfg::Cherry`/`FoliagePlacerCfg::Cherry` (cherry's
+    /// own `CherryTrunkPlacer`/`CherryFoliagePlacer`) and
+    /// `TrunkPlacerCfg::UpwardsBranching`/`FoliagePlacerCfg::RandomSpread` plus a
+    /// new `RootPlacerCfg::Mangrove` (`UpwardsBranchingTrunkPlacer`/
+    /// `RandomSpreadFoliagePlacer`/`MangroveRootPlacer`) close both. Neither was a
+    /// fancy-oak case — both species' placers were genuinely unported vanilla
+    /// classes, not a `RandomSelector` branch already closed by something else.
+    /// (`docs/worldgen-vegetation.md`'s "What it is" section carries the port detail.)
     ///
     /// **A floor, not a ceiling.** [`vegetation_gap_mismatches`] fails loudly
     /// in BOTH directions: a biome producing a reason NOT listed here (a new
@@ -1095,7 +1103,7 @@ mod tests {
         ("minecraft:bamboo_jungle", &["bamboo", "multiface_growth"]),
         ("minecraft:beach", &["multiface_growth"]),
         ("minecraft:birch_forest", &["multiface_growth"]),
-        ("minecraft:cherry_grove", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:cherry_grove", &["multiface_growth"]),
         ("minecraft:cold_ocean", &["multiface_growth"]),
         // dark_forest's `"tree: unsupported..."` entry is gone: fancy oak
         // (`d102eb1d`) closed the 10%-weight `fancy_oak_leaf_litter` branch,
@@ -1121,11 +1129,11 @@ mod tests {
         ("minecraft:jungle", &["bamboo", "multiface_growth"]),
         ("minecraft:lukewarm_ocean", &["multiface_growth"]),
         ("minecraft:lush_caves", &["block_column: unsupported layer/direction/predicate", "multiface_growth", "root_system"]),
-        // mangrove_swamp's `"tree: unsupported..."` entry is genuinely
-        // unported (not a fancy-oak case): the mangrove trunk/foliage/root
-        // placers are their own vanilla classes, with no `TrunkPlacerCfg`/
-        // `FoliagePlacerCfg` variant here yet.
-        ("minecraft:mangrove_swamp", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        // mangrove_swamp's `"tree: unsupported..."` entry is gone:
+        // `TrunkPlacerCfg::UpwardsBranching`/`FoliagePlacerCfg::RandomSpread`/
+        // `RootPlacerCfg::Mangrove` close mangrove/tall_mangrove's own trunk,
+        // foliage and root placers.
+        ("minecraft:mangrove_swamp", &["multiface_growth"]),
         ("minecraft:meadow", &["multiface_growth", "simple_block: unsupported to_place"]),
         ("minecraft:mushroom_fields", &["huge_brown_mushroom", "huge_red_mushroom", "multiface_growth"]),
         ("minecraft:ocean", &["multiface_growth"]),
