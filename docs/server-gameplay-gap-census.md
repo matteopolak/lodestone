@@ -43,13 +43,14 @@ nothing is named so the detector can be re-run.
 
 ## The four headline findings
 
-1. **The server simulates a great deal and gives the player almost none of it.** Weather,
-   sleep and the night-skip vote, brewing, furnaces, hoppers, composters, crop and sapling
-   growth, leaf decay, redstone dust/torches/repeaters/comparators/observers, sheep grazing,
-   creeper detonation, drowning, fall damage, the world border and player-to-player entity
-   visibility are all **reached** and correct. What is missing is the ordinary survival
-   loop: break a block and nothing drops, craft and the server never checks, and nothing
-   ever makes a sound.
+1. **Stale as of 2026-08-14 — the ordinary survival loop this bullet named as missing has
+   since landed.** Written when block breaking dropped nothing and the server never checked a
+   craft; both are now wired (§2, §3 — `block_drops.rs`, `crate::crafting`). What is missing
+   today is narrower: item ground collision (§2), server-side sound (§10, unchanged), and the
+   crafting/container-click trust boundary is only partly closed (§3). The server still
+   simulates weather, sleep, brewing, furnaces, hoppers, composters, crop/sapling growth, leaf
+   decay, redstone, sheep grazing, creeper detonation, drowning, fall damage, the world border
+   and player visibility correctly — that part of this bullet still holds.
 
 2. **The two most valuable findings are parity defects — fully-connected wires carrying the
    wrong value.** These are worse than absences because the feature looks done and
@@ -69,10 +70,11 @@ nothing is named so the detector can be re-run.
    "Wired into `IntegratedServer::bind`" reads as production wiring in a commit message and
    is not. Ranked in §12.
 
-4. **Two independent, mutually unaware spawn engines exist**, each with its own
-   incompatible `MobCategory` and its own separate `check_despawn` (§9). One has a caller
-   shape waiting for it; the other has never had a consumer in any crate and should
-   probably be deleted rather than finished.
+4. **Stale as of 2026-08-14 — one of the two spawn engines now has its driver.** `natural_spawn.rs`
+   landed and drives `mob_spawn.rs`'s cap/despawn engine from the production tick loop, with a
+   real per-species light/biome rule table (§9). `lodestone-entity/src/spawn.rs`, the other
+   engine, is confirmed still consumerless — the recommendation to delete it rather than finish
+   it stands, and is stronger now that the winner is proven out.
 
 ---
 
@@ -80,11 +82,11 @@ nothing is named so the detector can be re-run.
 
 | owner's words | verdict | one-line reason | issue |
 |---|---|---|---|
-| blocks dropping | **orphaned → in flight** | the loot roller, the item entity and the wire encoder all existed and none called the others; being joined now (§2) | [#337](https://github.com/matteopolak/lodestone/issues/337) |
-| crafting | **absent** | `PLACE_RECIPE` decodes to `Ignored`; the server trusts the client's claimed craft result (§3) | [#529](https://github.com/matteopolak/lodestone/issues/529) |
+| blocks dropping | **landed** (was orphaned → in flight) | the loot roller, the item entity and the wire encoder are now joined through `block_drops.rs` (§2, re-verdicted 2026-08-14) | [#337](https://github.com/matteopolak/lodestone/issues/337) closed by this |
+| crafting | **mostly landed** (was absent) | `PLACE_RECIPE` decodes for real and the server derives its own craft result via `crate::crafting`; the container-click trust boundary is still only partly closed (§3, re-verdicted 2026-08-14) | [#529](https://github.com/matteopolak/lodestone/issues/529) closed by this |
 | bubbles when I go in the water | **reached** | fully wired end to end, with a pixel gate. Not a gap — see §5 | [#267](https://github.com/matteopolak/lodestone/issues/267) closed |
-| mob spawning | **orphaned** | `mob_spawn.rs`'s cap engine has no driver; the only production spawn is a demo seeding (§9) | [#222](https://github.com/matteopolak/lodestone/issues/222), [#221](https://github.com/matteopolak/lodestone/issues/221), [#518](https://github.com/matteopolak/lodestone/issues/518) |
-| lighting | **parity defect** | all-`Missing` light on the wire; a 1,105-line `LightEngine` is reachable only from the shell's own worldgen (§8) | [#517](https://github.com/matteopolak/lodestone/issues/517) |
+| mob spawning | **landed** (was orphaned) | `natural_spawn.rs` now drives `mob_spawn.rs`'s cap engine with a real per-species light/biome table; spawner blocks and baby hitbox scale remain absent (§9, re-verdicted 2026-08-14) | [#222](https://github.com/matteopolak/lodestone/issues/222), [#221](https://github.com/matteopolak/lodestone/issues/221), [#518](https://github.com/matteopolak/lodestone/issues/518) closed by this |
+| lighting | **parity defect** | all-`Missing` light on the wire; a 1,105-line `LightEngine` is reachable only from the shell's own worldgen (§8) — not re-verified this pass | [#517](https://github.com/matteopolak/lodestone/issues/517) |
 
 **"Bubbles" was the surprise.** It was suspected to be an untracked island. It is neither
 untracked (the relevant tracked issues are all closed, and one is titled "HUD animations and
@@ -94,57 +96,84 @@ air-supply bubbles") nor an island. All three legs are live; see §5.
 
 ## 2. Block drops, item entities and pickup
 
+**Re-verdicted 2026-08-14 — nearly every row here has landed since this section was written.**
+The section's own closing paragraph called this "the island pattern at its most expensive";
+what actually happened next is the pattern's resolution — `block_drops.rs` (the "in flight" row
+below) was the missing wiring, and once it landed it pulled almost every other row in this table
+along with it. Only one row is still genuinely absent.
+
 | feature | vanilla source of truth | verdict | consumed by | evidence | issue |
 |---|---|---|---|---|---|
-| loot-table parse + roll | datapack `loot_table/**.json` | **orphaned** | nothing | `crates/lodestone-server/src/loot.rs` (1,551 lines), `roll_loot`. `grep -rn 'roll_loot\|LootTableResolver\|LootTableSet' --include='*.rs' crates/` → 3 hits: the `pub use` in `lib.rs` and two lines in `tests/loot_corpus.rs`. **Zero production consumers.** | [#337](https://github.com/matteopolak/lodestone/issues/337) |
-| bundled loot corpus | 1,113 block + 94 entity tables under `.cache/mc/26.2/src/data/minecraft/loot_table/` | **partial** | the drift gate | `crates/lodestone-server/assets/loot_table/` holds **5** block tables (`coal_ore`, `dirt`, `gravel`, `iron_ore`, `stone`) and **1** entity table (`zombie`). All 1,355 vanilla tables *parse* (`tests/loot_corpus.rs`); 6 are bundled. | [#337](https://github.com/matteopolak/lodestone/issues/337) |
-| block break → drop | `Block.popResource` | **in flight** | — | `apply_block_action`'s `StopDestroy` arm (`crates/lodestone-server/src/server.rs`) sets the cell to `AIR`, removes the block entity, and sends `encode_block_update`. No roll, no spawn. **A concurrent agent is closing this now** — `crates/lodestone-server/src/block_drops.rs` (559 lines) was uncommitted in the working tree at census time, and covers `block_loot_table_id`, `drop_block_loot` and `is_within_pickup_range`. No issue filed, to avoid duplicating it. | [#337](https://github.com/matteopolak/lodestone/issues/337) |
-| mob death → drop | `LivingEntity.dropFromLootTable` | **absent** | — | `MobSim::attack`'s kill path (`crates/lodestone-server/src/mobs/mod.rs`) does `self.mobs.retain(...)` and nothing else. `grep -n 'crate::loot\|loot::' crates/lodestone-server/src/mobs/` → **0 hits**. `apply_attack` (`crates/lodestone-server/src/server.rs`) discards the `AttackOutcome`, so `killed` is never inspected. | [#272](https://github.com/matteopolak/lodestone/issues/272) |
+| loot-table parse + roll | datapack `loot_table/**.json` | **landed and consumed** | `block_drops::drop_block_loot`, `mobs::drop_death_loot`, `structure_loot.rs` | `crate::block_drops::drop_block_loot` calls `LootTableSet::get`/`roll` at two production sites in `server.rs` (`StopDestroy`'s block-break arm); `MobSim::drop_death_loot` (`crates/lodestone-server/src/mobs/mod.rs`) rolls a mob's death table on the kill path; `structure_loot.rs` rolls chest loot for generated structures. No longer "3 hits, zero production consumers" — re-grep `LootTableSet::get\|\.roll(` in `crates/lodestone-server/src` to reconfirm. | [#337](https://github.com/matteopolak/lodestone/issues/337) closed by this |
+| bundled loot corpus | 1,113 block + 94 entity tables under `.cache/mc/26.2/src/data/minecraft/loot_table/` | **landed** | `block_drops`/`structure_loot`/`mobs` | `find crates/lodestone-server/assets/loot_table -name '*.json' \| wc -l` → **1,241** (was 6 at census time — essentially the full vanilla corpus, not a 6-table sample). | [#337](https://github.com/matteopolak/lodestone/issues/337) closed by this |
+| block break → drop | `Block.popResource` | **landed** | `apply_block_action`'s `StopDestroy` arm | `crate::block_drops::drop_block_loot` is called directly from `server.rs` (two call sites); `block_drops.rs` grew from the 559-line in-flight version to **1,450 lines**. | [#337](https://github.com/matteopolak/lodestone/issues/337) closed by this |
+| mob death → drop | `LivingEntity.dropFromLootTable` | **landed** | `MobSim`'s kill/reap path | `MobSim::drop_death_loot` (`crates/lodestone-server/src/mobs/mod.rs`) resolves `block_drops::mob_loot_table_id`, rolls it with a tick-and-position-seeded RNG, and spawns the result — called from `reap_dead` alongside the (pre-existing) `drop_death_experience`. `mobDrops` gamerule gates both, matching vanilla. | [#272](https://github.com/matteopolak/lodestone/issues/272) closed by this |
 | item entity lifecycle (age, despawn, pickup delay) | `ItemEntity.tick` | **reached** | `MobSim::tick` → `run_tick_loop` | `self.items.tick()`, `crates/lodestone-server/src/mobs/mod.rs` | [#215](https://github.com/matteopolak/lodestone/issues/215) closed |
 | item entity gravity / drag | `ItemEntity` | **reached** | same | `ItemMotion::tick`, `crates/lodestone-entity/src/item_entity.rs` | — |
-| item entity **ground collision** | `ItemEntity` | **absent** | — | `ItemMotion.on_ground` is never assigned `true` anywhere in `crates/lodestone-server/src/mobs/`, so the bounce branch is unreachable and every dropped item free-falls forever. `MobSim` already owns a `ChunkWorld` the pathfinder queries every tick. | [#533](https://github.com/matteopolak/lodestone/issues/533) |
-| item stack **merging** | `ItemEntity.mergeWithNeighbours` | **orphaned** | nothing | `ItemEntityRegistry::merge` and `try_merge` (both `crates/lodestone-entity/src/item_entity.rs`) have no call site outside their own unit tests | [#533](https://github.com/matteopolak/lodestone/issues/533) |
-| item **pickup** | `Player.aiStep`'s inflated AABB | **in flight** | — | `can_be_picked_up` (`crates/lodestone-entity/src/item_entity.rs`) had callers only in its own tests and `tests/projectile_and_item_registries.rs`'s `mobsim_tick_advances_a_registered_item_lifecycle_to_the_exact_predicted_counters`, never against a player position; no `encode_take_item_entity` existed in the trait or in v770. The in-flight `block_drops.rs` adds the geometry (`is_within_pickup_range`). The client half has been finished for a while: `crates/protocol/v770/src/adapter/entity.rs` decodes `TAKE_ITEM_ENTITY` into `lodestone_game::mining::PickupFeed`, and `entities.rs`'s `PickupAnimation`/`PickupAnimations` (`crates/lodestone-shell/src/entities.rs`) run the fly-to-collector animation. | — |
-| block-break validation (hardness, tool, range) | `ServerPlayerGameMode.incrementDestroyProgress` | **absent** | — | `apply_block_action`'s own doc (`crates/lodestone-server/src/server.rs`): "no hardness/timing validation … and no interaction-range or spawn-protection checks". `lodestone_data::hardness::hardness()` (`crates/lodestone-data/src/hardness.rs`) is read by `crates/lodestone-data/src/tool.rs`'s `mining` (the *client's* break-time predictor) and by nothing in `lodestone-server`. | [#531](https://github.com/matteopolak/lodestone/issues/531) |
+| item entity **ground collision** | `ItemEntity` | **still absent — re-verified, not stale** | — | The only two `ItemMotion.on_ground = true` assignments in `crates/lodestone-entity/src/item_entity.rs` are inside `#[cfg(test)] mod tests` (`item_falls_under_gravity_and_bounces_on_landing`, `ground_friction_slows_horizontal_more_than_air`). No production call site sets it. The bounce/friction branches are implemented and unit-tested but structurally unreachable outside a test — dropped items still free-fall in production. Do not flip this row without finding a *non-test* assignment. | [#533](https://github.com/matteopolak/lodestone/issues/533) |
+| item stack **merging** | `ItemEntity.mergeWithNeighbours` | **landed and consumed** | `MobSim::tick` (via `items.rs`) | `crates/lodestone-server/src/mobs/items.rs` has a real per-tick merge pass: reach-checked (`ITEM_MERGE_REACH_XZ`/`_Y`), calls `self.items.merge(to_id, from_id)`, and removes the absorbed item's wire identity from `item_state` so `snapshots()` stops streaming a ghost. Not a test call site. | [#533](https://github.com/matteopolak/lodestone/issues/533) closed by this |
+| item **pickup** | `Player.aiStep`'s inflated AABB | **landed** | `MobSim::tick` (items + orbs) → `server.rs` | `crate::block_drops::is_within_pickup_range` is called from production in both `mobs/items.rs` and `mobs/orbs.rs`; `ServerProtocol::encode_take_item_entity` has real production call sites in `server.rs` (four, covering both item and orb pickup). The client half was already finished (`TAKE_ITEM_ENTITY` decode, `PickupAnimation`). | — closed by this |
+| block-break validation (hardness, tool, range) | `ServerPlayerGameMode.incrementDestroyProgress` | **landed** | `apply_block_action` | New module `crates/lodestone-server/src/block_breaking.rs` (429 lines): `within_interaction_range`, `progress_per_tick` (reads `lodestone_data::hardness`), `PendingBreak::may_break_at` — all called from `server.rs`'s block-action handling, including the deferred-break `serve_play` path. The old "no hardness/timing validation" doc-comment quote this row was built on is gone from the current `server.rs`. | [#531](https://github.com/matteopolak/lodestone/issues/531) closed by this |
 
-**The shape worth noticing.** Three finished pieces sat one function call apart from each
-other for an entire session: a 1,551-line loot roller with a 1,355-table oracle gate, a
-server-side item entity already streamed to every client by `snapshots()`, and a client that
-already animates pickups. Nothing consumed anything. This is the island pattern at its most
-expensive — every part individually gated green, zero player-visible result.
+**What this leaves.** Of the original nine gaps, eight landed together once `block_drops.rs`
+shipped (loot rolling, the bundled corpus, block-break drops, mob death drops, item merging,
+item pickup, and block-break validation all depend on it directly or indirectly). **Item ground
+collision did not** — it has no dependency on loot at all, and remains a real, narrow gap: the
+physics function exists and is unit-tested, but nothing sets `on_ground` outside a test. That is
+the one row worth dispatching work against from this section today.
 
 ---
 
 ## 3. Crafting and the container-click trust boundary
 
+**Re-verdicted 2026-08-14 — server-side recipe resolution has landed; the crafting-station
+gap is now narrower than described.**
+
 | feature | verdict | evidence | issue |
 |---|---|---|---|
-| server resolves a recipe | **absent** | `grep -n 'recipe' crates/lodestone-server/src/protocol.rs` → **0 hits**. No `ServerBound` recipe variant, no `encode_update_recipes`. | [#529](https://github.com/matteopolak/lodestone/issues/529) |
-| `PLACE_RECIPE` | **absent** | decodes and is discarded: `V770ServerProtocol::decode` (`crates/protocol/v770/src/server_protocol.rs`), `let _ = decode_full::<…>(payload); ServerBound::Ignored` | [#529](https://github.com/matteopolak/lodestone/issues/529), [#266](https://github.com/matteopolak/lodestone/issues/266) |
-| container click | **partial, by design** | `apply_container_clicked` (`crates/lodestone-server/src/server.rs`) applies the client's own predicted per-slot diff rather than re-deriving `doClick`. Documented on `ServerBound`'s container-click variant (`crates/lodestone-server/src/protocol.rs`). Fine for window 0; for a crafting grid it means the client decides what it crafted. | [#529](https://github.com/matteopolak/lodestone/issues/529) |
-| client-side matcher | **orphaned** | `crates/lodestone-game/src/{recipe,recipe_json,menus}.rs` hold a real matcher, the `load_data_root` datapack loader and an indexed lookup. `RecipeBook::predicted_craft_result` (`menus.rs`) has **no callers anywhere in the repo**. | — |
-| crafting stations (anvil, loom, smithing, grindstone, enchanting) | **absent** server-side | `find crates/lodestone-server/src -iname '*anvil*' -o -iname '*loom*' -o -iname '*smithing*' -o -iname '*enchant*' -o -iname '*grindstone*'` → nothing. Only client menu *screens* exist (`ab2a3b06`). | [#150](https://github.com/matteopolak/lodestone/issues/150), [#253](https://github.com/matteopolak/lodestone/issues/253), [#254](https://github.com/matteopolak/lodestone/issues/254), [#255](https://github.com/matteopolak/lodestone/issues/255) |
+| server resolves a recipe | **landed** | New module `crates/lodestone-server/src/crafting.rs` (931 lines): `derive_result` (grid → result, called from `server.rs` for the live crafting-result preview), `place_recipe` (recipe-book placement), `recipe_at_index`/`recipe_book_entries` (the id space `encode_recipe_book_add` sends). `container_click.rs`'s own module doc says a grid write "routes ... through `crate::crafting::CraftingState::set_input`". No longer 0 hits in `protocol.rs`/`server.rs` for `recipe`. | [#529](https://github.com/matteopolak/lodestone/issues/529) closed by this |
+| `PLACE_RECIPE` | **landed** | `V770ServerProtocol::decode`'s `State::Play` arm for `play::serverbound::PLACE_RECIPE` (`crates/protocol/v770/src/server_protocol.rs`) is a real decode, not the old `ServerBound::Ignored` fall-through — a comment there cites issue #547. `server.rs` resolves it through `crate::crafting::recipe_at_index` + `place_recipe`. | [#529](https://github.com/matteopolak/lodestone/issues/529), [#266](https://github.com/matteopolak/lodestone/issues/266) closed by this |
+| container click | **partial, by design — unchanged** | `apply_container_clicked` (`crates/lodestone-server/src/server.rs`) still applies the client's own predicted per-slot diff rather than re-deriving `doClick`, but crafting-grid writes now also route through `CraftingState::set_input`/`derive_result`, so the server independently knows what a crafting grid *should* produce even though it still trusts the client's slot diff for window state. Re-check whether the two are cross-validated before calling this fully closed. | [#529](https://github.com/matteopolak/lodestone/issues/529) |
+| client-side matcher | **still orphaned, re-verified** | `RecipeBook::predicted_craft_result` (`crates/lodestone-game/src/menus.rs`) still has callers only in `crates/lodestone-game/tests/{crafting_menu,live_craft}.rs` — no production call site. This did **not** land alongside the server-side crafting work; the server built its own `crafting.rs` rather than calling into this. Worth asking whether that is deliberate (different id spaces) or a second matcher forming. | — |
+| crafting stations: anvil, smithing, enchanting | **landed server-side** | `crates/lodestone-server/src/{anvil,smithing,enchanting,enchantment_data}.rs` all exist now — real modules, not client screens. | [#150](https://github.com/matteopolak/lodestone/issues/150), [#254](https://github.com/matteopolak/lodestone/issues/254), [#255](https://github.com/matteopolak/lodestone/issues/255) closed by this |
+| crafting stations: loom, grindstone | **still absent, re-verified** | `find crates/lodestone-server/src -iname '*loom*' -o -iname '*grindstone*'` → nothing. Only these two of the original five station types remain unbuilt server-side. | [#253](https://github.com/matteopolak/lodestone/issues/253) |
 
 The matcher is version-free game logic, not shell code, so the server can call the same one.
-Do not write a second one.
+Do not write a second one. **This warning is now live, not hypothetical**: `lodestone-server`
+has its own `crafting.rs` matcher and `lodestone-game`'s `menus.rs` one is unused — check
+whether they agree before assuming one is a drop-in replacement for the other.
 
 ### Serverbound packets that decode and are then discarded
 
-Every variant in the `ServerBound` enum (`crates/lodestone-server/src/protocol.rs`) **does** have a real arm in
-`dispatch_play_packet`. The stranding happens one file upstream, in v770's `decode()`, which
-maps these wire packets straight to `ServerBound::Ignored` so they never become a distinct
-variant at all — a two-file join, not a one-file scan. All of the following are arms of
-`V770ServerProtocol::decode` in `crates/protocol/v770/src/server_protocol.rs`:
+**Re-verdicted 2026-08-14: 7 of the original 17 have landed real variants; 10 are still
+`ServerBound::Ignored`.** Checked mechanically — for each name below, whether
+`V770ServerProtocol::decode`'s arm ever constructs a variant other than `ServerBound::Ignored`
+(`crates/protocol/v770/src/server_protocol.rs`). Every variant in the `ServerBound` enum
+(`crates/lodestone-server/src/protocol.rs`) **does** have a real arm in `dispatch_play_packet`,
+so for the still-discarded ones the stranding remains one file upstream in v770's `decode()`, a
+two-file join rather than a one-file scan.
 
-`INTERACT` (right-click entity), `SWING`, `USE_ITEM` (eat/drink),
-`SPECTATOR_ACTION`, `TELEPORT_TO_ENTITY`, `CONTAINER_BUTTON_CLICK`,
-`CONTAINER_SLOT_STATE_CHANGED`, `PLACE_RECIPE`,
-`RECIPE_BOOK_CHANGE_SETTINGS`, `RECIPE_BOOK_SEEN_RECIPE`, `SELECT_TRADE`,
-`SET_BEACON`, `EDIT_BOOK`, `SIGN_UPDATE`, `RENAME_ITEM`,
-`PICK_ITEM_FROM_BLOCK`, `PICK_ITEM_FROM_ENTITY`.
+**Landed (construct a real `ServerBound` variant now):** `INTERACT` (right-click entity),
+`USE_ITEM` (eat/drink/bow-draw — `ServerBound::UseItem`), `CONTAINER_BUTTON_CLICK`,
+`PLACE_RECIPE` (issue #547, §3 above), `RENAME_ITEM`, `PICK_ITEM_FROM_BLOCK`,
+`PICK_ITEM_FROM_ENTITY`.
 
-`SWING` and `USE_ITEM` are the two most consequential: without them the server sees no arm
-swing to relay to other players and no eat/drink/bow-draw at all.
+**Still discarded, re-verified — real gaps, not stale claims:** `SWING`,
+`SPECTATOR_ACTION`, `TELEPORT_TO_ENTITY`, `CONTAINER_SLOT_STATE_CHANGED`,
+`RECIPE_BOOK_CHANGE_SETTINGS`, `RECIPE_BOOK_SEEN_RECIPE`, `SELECT_TRADE`, `SET_BEACON`,
+`EDIT_BOOK`, `SIGN_UPDATE`.
+
+**`SWING` is the one most worth flagging precisely: decoded but *deliberately* still
+`Ignored`, not merely unfinished.** The arm right above it explains why — melee-hit triggering
+is `ServerBound::Attack`'s job, by design, with `SWING`/`Interact` treated as the sibling that is
+"deliberately left" unconnected for that purpose. But that only covers the *attack* trigger; there
+is still no `encode_animate`/`ANIMATE` broadcast anywhere in `lodestone-server` (`grep -n
+encode_animate crates/lodestone-server/src/*.rs` is empty), so a plain arm swing (not attached to
+an attack) still does not relay to other players. The original claim "without SWING the server
+sees no arm swing to relay to other players" is therefore **still true**, just for a narrower
+reason than "the packet is discarded" — it is decoded, the discard is intentional for the attack
+path, and the relay gap is a separate, still-open thing. `USE_ITEM` landing is the real change:
+eat/drink/bow-draw now reaches the server.
 
 ---
 
@@ -281,20 +310,38 @@ unreachable.
 
 ## 9. Mob spawning — two engines, neither driving
 
+**Re-verdicted 2026-08-14 — this section's title claim is now wrong: `mob_spawn.rs`'s engine
+has a real driver.** A new module, `crates/lodestone-server/src/natural_spawn.rs` (1,442 lines),
+landed and is what closed most of the rows below. Its own module doc names exactly the two gaps
+this section described — "the driver `mob_spawn.rs`'s cap/despawn engine never had, plus the
+per-species placement table `lodestone_entity::spawn`'s `SpawnRule`/`SpawnEnvironment` seam never
+had an implementer for" — and cites issues #221 and #222 by number, so this is the closing work,
+not a coincidental rename. **The "two engines" framing at the bottom is still correct, though**:
+`lodestone-entity/src/spawn.rs` remains genuinely dead — see below.
+
 | feature | verdict | evidence | issue |
 |---|---|---|---|
-| natural spawn cycle | **orphaned** | `MobSim::run_spawn_cycle` and `census` (`crates/lodestone-server/src/mobs/mod.rs`) are written against `mob_spawn.rs`'s `SpawnState` and have **zero callers** outside `tests/mob_spawn.rs`. `MobSim::tick`'s own doc comment (`crates/lodestone-server/src/mobs/mod.rs`): "`despawn_pass` … has no production caller." | [#222](https://github.com/matteopolak/lodestone/issues/222) |
-| the only production spawn | **reached, but not vanilla** | `mobs::seed_demo_mobs` (`crates/lodestone-server/src/mobs/mod.rs`) ← `MobHandle::reseed` (same file) ← `crates/lodestone-server/src/integrated.rs`. Its own doc: "**not** vanilla natural spawning: there is no light-level, biome, or pack-size logic here." One-shot at world load. | [#222](https://github.com/matteopolak/lodestone/issues/222) |
-| despawn state machine | **partial** | `check_despawn` is reached for the idle-timer-reset half only (inside `MobSim::tick`, `crates/lodestone-server/src/mobs/mod.rs`, ← `tick::run_tick_loop`); the discard/cap half is not | [#222](https://github.com/matteopolak/lodestone/issues/222) |
-| per-species spawn rules | **absent** | `SpawnRule` **is not a trait and never has been** — two doc-comment mentions only (`crates/lodestone-entity/src/spawn.rs`); the real type is `SpawnConditions`. `SpawnEnvironment` exists (`spawn.rs`) with **zero** implementers. No per-species light/biome table exists. | [#221](https://github.com/matteopolak/lodestone/issues/221) |
-| biome spawn lists | **absent** | all 66 bundled biome documents carry `spawners` and `spawn_costs`. `grep -rn '"spawners"\|"spawn_costs"'` across every `.rs` under `crates/` → **0 hits**. `EmbeddedResolver::biome_document` loads the whole document; consumers read only `carvers` and two `features` steps. | [#518](https://github.com/matteopolak/lodestone/issues/518) |
-| spawn eggs, spawner blocks | **absent** | `apply_use_item_on`'s body has no "egg" or "spawner" hit. `BlockEntity` has four simulated variants; spawner is `Opaque`. An earlier commit's body: "not spawn eggs, not a spawner block, still not natural spawning." | [#224](https://github.com/matteopolak/lodestone/issues/224) |
-| candidate source | **orphaned** | `SpawnCandidateSource`'s only implementer tree-wide is a test mock (`tests/mob_spawn.rs`). `crates/lodestone-server/src/mobs/mod.rs` says it: "every current impl is a test mock." | [#222](https://github.com/matteopolak/lodestone/issues/222) |
-| Brain AI driver | **partial** | the seam is real and generic — `BrainGoal: impl Goal` (`crates/lodestone-entity/src/brain/driver.rs`) is installed by `roster::goals_for` (`crates/lodestone-entity/src/ai/roster/mod.rs`) and ticked by `MobSim::tick`. But `BRAIN_SPECIES` (`crates/lodestone-entity/src/brain/roster.rs`) has **zero overlap** with `DEMO_SPECIES` (`crates/lodestone-server/src/mobs/mod.rs`), the only species anything spawns. No live entity exercises it. | [#209](https://github.com/matteopolak/lodestone/issues/209) |
-| aging → hitbox scale | **partial** | breeding and age-up ticking are real (`crates/lodestone-server/src/mobs/mod.rs`, `crates/lodestone-entity/src/ai/navigating_mob.rs`); nothing shrinks a baby's collision box. `spawn_species` always uses the adult shape, and the one function that folds `minecraft:scale` into a `MobShape` — `resolve_mob_shape` (`mob_spawn.rs`) — is test-only. | [#237](https://github.com/matteopolak/lodestone/issues/237) |
-| sheep grazing | **reached** | `EatBlockGoal` → `pending_grazes` → `MobSim::take_grazes` → drained in `tick::run_tick_loop` (`crates/lodestone-server/src/tick.rs`), which mutates the world and publishes the change | [#238](https://github.com/matteopolak/lodestone/issues/238) closed here |
+| natural spawn cycle | **landed** | `crate::natural_spawn::NaturalSpawner` is constructed in `tick.rs` and `MobSim::run_spawn_cycle` is called from the production tick loop (`sim.run_spawn_cycle(&mut state, &mut natural_spawner, area.chunks())`, `crates/lodestone-server/src/tick.rs`), gated on the `spawn_mobs` game rule. A `tick.rs` comment: "Both engines were complete and driverless" — past tense. | [#222](https://github.com/matteopolak/lodestone/issues/222) closed by this |
+| the only production spawn | **superseded, not merely "not vanilla" anymore** | `seed_demo_mobs`/`MobHandle::reseed` still exist as the one-shot world-load seeding, but natural spawning now runs continuously beside it, driven by real light/biome/cap logic (below). A **third** spawn source also landed since this census: `crates/lodestone-worldgen/src/spawn_stage.rs` (`GenerationSpawn`, `spawn_candidates_for_chunk`) places animals during chunk generation itself — "a new world has animals" without needing the tick loop to run first. | [#222](https://github.com/matteopolak/lodestone/issues/222) |
+| despawn state machine | **landed for `mob_spawn.rs`'s own engine, re-verified** | `crate::mob_spawn::check_despawn` (not `lodestone_entity::spawn`'s) is called from `MobSim::tick` at two sites in `crates/lodestone-server/src/mobs/mod.rs`, one of them the real per-tick cap/discard pass, not just the idle-timer reset. | [#222](https://github.com/matteopolak/lodestone/issues/222) closed by this |
+| per-species spawn rules | **landed** | `natural_spawn.rs` has a real `pub struct SpawnRule` (`impl SpawnRule` block, transcribed from `SpawnPlacements.java` per its own doc) covering 51 species, each with a light/block/biome predicate, looked up by `spawn_rule(name)`. The census's exact claim — "no per-species light/biome table exists" — is what this module is. | [#221](https://github.com/matteopolak/lodestone/issues/221) closed by this |
+| biome spawn lists | **landed** | `natural_spawn.rs` reads `crate::worldgen_data::bundled_biome_spawners()` → `lodestone_worldgen::spawners::BiomeSpawners`, iterated per `MobCategory` (`worldgen_category`, same file). The module's own doc names the exact prior state: "parsed but consumerless until now." | [#518](https://github.com/matteopolak/lodestone/issues/518) closed by this |
+| spawn eggs | **landed** | `crate::spawn_egg::apply_spawn_egg` is called from `apply_use_item_on` in `server.rs` (new module `spawn_egg.rs`, 747 lines), with `NotSpawnEgg`/`Refused`/`Spawned` outcomes. | [#224](https://github.com/matteopolak/lodestone/issues/224) closed by this |
+| spawner blocks | **still absent, re-verified** | `server.rs`'s use-item-on handling has an explicit spawner guard whose own comment says "Nothing is modelled for a spawner yet" — it detects a spawner block entity only to refuse re-keying it, never to spawn anything. | [#224](https://github.com/matteopolak/lodestone/issues/224) |
+| candidate source | **landed** | `impl SpawnCandidateSource for NaturalSpawner` (`natural_spawn.rs`) is a real, non-test implementer driven by the production tick loop — not the test-mock-only state the census found. | [#222](https://github.com/matteopolak/lodestone/issues/222) closed by this |
+| Brain AI driver | **still partial, worth re-opening rather than closing** | `BRAIN_SPECIES` (`crates/lodestone-entity/src/brain/roster.rs`) still has zero overlap with `DEMO_SPECIES`, the one-shot seeding list. **But** `natural_spawn.rs`'s `SPAWN_RULES` table now includes several `BRAIN_SPECIES` names that were never reachable before — `armadillo`, `axolotl`, `camel`, `frog`, `goat`, `hoglin`, `piglin` all appear in both lists. Whether a naturally-spawned individual of one of those actually receives `roster::goals_for`'s brain goals (vs. spawning through a path that skips it) was not traced for this census pass — re-check `NaturalSpawner`'s spawn call against `MobSim::spawn_species`/`goals_for` before either closing or re-confirming this row. | [#209](https://github.com/matteopolak/lodestone/issues/209) |
+| aging → hitbox scale | **still absent, re-verified — not stale** | `resolve_mob_shape` (`mob_spawn.rs`) still has callers only inside its own `#[cfg(test)]` module (four call sites, all in the test block). Breeding/age-up ticking remains real; nothing shrinks a baby's collision box in production. | [#237](https://github.com/matteopolak/lodestone/issues/237) |
+| sheep grazing | **reached, unchanged** | `EatBlockGoal` → `pending_grazes` → `MobSim::take_grazes` → drained in `tick::run_tick_loop` (`crates/lodestone-server/src/tick.rs`) | [#238](https://github.com/matteopolak/lodestone/issues/238) closed here |
 
 ### The two engines
+
+**Still accurate, re-verified 2026-08-14.** `lodestone-entity/src/spawn.rs` did not become the
+implementer for anything — `natural_spawn.rs` built its own `SpawnRule` rather than adopting
+`spawn.rs`'s `SpawnConditions`/`SpawnEnvironment`, and grepped again, `check_despawn` at
+`crates/lodestone-entity/src/spawn.rs` still has zero non-test call sites (the despawn row above
+calls `mob_spawn.rs`'s own `check_despawn`, a different function of the same name). The
+recommendation below stands exactly as written — if anything, `natural_spawn.rs` landing
+*without* consuming `spawn.rs` is more evidence for deleting it, not less.
 
 | | `crates/lodestone-server/src/mob_spawn.rs` (660) | `crates/lodestone-entity/src/spawn.rs` (442) |
 |---|---|---|
@@ -302,12 +349,14 @@ unreachable.
 | despawn | its own `check_despawn` | its own `check_despawn` |
 | vocabulary | `SpawnState`, `SpawnCandidate`, `SpawnCandidateSource` | `DespawnDecision`, `DespawnCtx`, `SpawnConditions`, `SpawnSample` |
 | cross-reference | imports only `AttributeMap` and `MobShape` from `lodestone-entity`, never its `spawn` module | never imported by anything, in any crate |
-| history | actively developed | **one commit ever** — `32fb577d`, 2026-07-27, never touched again |
-| caller shape waiting for it | yes: `MobSim::run_spawn_cycle`/`census` | none, ever |
+| history | actively developed, now driven by `natural_spawn.rs` | **still one commit ever** — `32fb577d`, 2026-07-27, never touched again |
+| caller shape waiting for it | **filled**: `MobSim::run_spawn_cycle`/`census`, driven by `natural_spawn.rs` since this census | none, ever |
 
-**Wire `mob_spawn.rs`.** `lodestone-entity/src/spawn.rs` is a duplicate sketch of the same
-cap and despawn arithmetic with no consumer; deleting it removes a second, incompatible
-`MobCategory` from the tree, which is itself a latent trap.
+**Wire `mob_spawn.rs`.** Done — see above. `lodestone-entity/src/spawn.rs` is a duplicate sketch
+of the same cap and despawn arithmetic with no consumer; deleting it removes a second,
+incompatible `MobCategory` from the tree, which is itself a latent trap. This recommendation is
+now more urgent, not less: a second agent building on `spawn.rs` today would be building on the
+engine that lost.
 
 ---
 
