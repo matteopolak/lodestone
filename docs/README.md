@@ -1441,9 +1441,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Server-side login compression](./server-login-compression.md) —
   `lodestone-server` (via `V770ServerProtocol`) now enables zlib packet compression
   during login, the mechanical half of issue #273 ("server-side login has no
-  encryption or compression"). Encryption and the online-mode session-server ownership
-  check — the much larger half of #273 — remain **unimplemented**; see "Still
-  open" below.
+  encryption or compression"). The much larger half — encryption and the
+  online-mode session-server ownership check — is now implemented too; see
+  `docs/server-online-mode.md`.
+- [Server-side encryption and online-mode](./server-online-mode.md) — The other
+  half of issue #273: `lodestone-server` can now run the online-mode
+  RSA/AES-128-CFB8 handshake and verify a connecting client's identity against
+  Mojang's session server, mirroring the client-side join path `docs/accounts.md`
+  documents. `docs/server-login-compression.md` covers the compression half that
+  landed first; this doc covers what it called "the much larger half."
 - [Server-side plugin messaging: the channel registry and dispatch](./server-plugin-channels.md) —
   The server side of Minecraft's custom plugin-message machinery, in
   `crates/lodestone-server/src/plugin_channels.rs`: a registry of channels the server

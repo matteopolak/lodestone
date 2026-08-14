@@ -4,9 +4,9 @@
 
 `lodestone-server` (via `V770ServerProtocol`) now enables zlib packet
 compression during login, the mechanical half of issue #273 ("server-side
-login has no encryption or compression"). Encryption and the online-mode
-session-server ownership check — the much larger half of #273 — remain
-**unimplemented**; see "Still open" below.
+login has no encryption or compression"). The much larger half — encryption
+and the online-mode session-server ownership check — is now implemented too;
+see [`docs/server-online-mode.md`](./server-online-mode.md).
 
 ## How it works
 
