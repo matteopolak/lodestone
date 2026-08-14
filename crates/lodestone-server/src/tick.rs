@@ -2131,6 +2131,20 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                             mobs.with(|sim| {
                                 sim.spawn_tnt(position, crate::mobs::tnt::DEFAULT_FUSE_TIME);
                             });
+                        } else if let Some(kind) = crate::mobs::minecart::MinecartKind::from_item(&item_str) {
+                            // `MinecartDispenseItemBehavior` — a rail directly
+                            // ahead of the dispenser (or one under an
+                            // air-filled cell ahead) required, else the same
+                            // plain-toss fallback every other unmatched item
+                            // gets.
+                            match crate::redstone_dispenser::minecart_dispense(origin, face, &lookup) {
+                                crate::redstone_dispenser::MinecartDispense::Place { position } => {
+                                    mobs.with(|sim| {
+                                        sim.spawn_minecart(kind, position);
+                                    });
+                                }
+                                crate::redstone_dispenser::MinecartDispense::Fallback => toss = true,
+                            }
                         } else if item_str == crate::bone_meal::BONE_MEAL {
                             let target = face.relative(origin);
                             let target_state = lookup(target);
@@ -2614,6 +2628,17 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // one — the same one-tick latency `tick_vehicles`/`tick_falling_blocks`
         // already accept for their own effects.
         mobs.with(|sim| sim.tick_tnt(&|x, y, z| world.block_state(x, y, z)));
+
+        // Every live minecart, one tick — rail-following (or off-rail)
+        // physics, riding, and the furnace/TNT specials
+        // (`crate::mobs::minecart`'s own module doc). Beside `tick_tnt` for
+        // the same reason that call is beside `tick_vehicles`: this scope
+        // already holds the live world the collision shapes and rail states
+        // come from. A TNT minecart's detonation queues into
+        // `MobSim::pending_detonations` exactly as primed TNT's does, so it
+        // reaches the `take_detonations` drain above on the tick after this
+        // one, the same accepted one-tick latency.
+        mobs.with(|sim| sim.tick_minecarts(&|x, y, z| world.block_state(x, y, z)));
         });
 
         clock.record_tick(tick_start.elapsed());

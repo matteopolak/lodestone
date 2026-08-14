@@ -56,19 +56,19 @@
 //! | brush | brushes an armadillo ahead | no — entity query |
 //! | honeycomb | waxes a copper block ahead | no |
 //! | potion (water only, on mud-convertible ground) | places mud | no |
-//! | minecart family (6 items) | places a riding entity with real rail-following physics | **no** — this crate has no minecart entity or vehicle physics *at all*; `crate::mobs::TrackedVehicle`/`MobSim::spawn_vehicle` model only `AbstractBoat`, and `crate::redstone_rail`'s own module doc already names "this crate has none" of minecarts |
+//! | minecart family (5 items: plain, chest, hopper, furnace, TNT) | places a riding entity with real rail-following physics | **yes** ([`minecart_dispense`]) — `crate::mobs::minecart::MobSim::spawn_minecart`, wired into this arm in `tick.rs`'s `TICK_DISPENSER_FIRE` drain, the same shape the boat/TNT arms above already use |
 //! | every armor/trims/saddle/horse-armor/carpet/mob-head-banner item (`getDefaultDispenseMethod`'s `EQUIPPABLE` default, also the fallback when a wither skull or carved pumpkin's spawn check fails) | equips the first eligible `LivingEntity` standing on the cell ahead | **no** — needs an entity spatial query this crate has nowhere, *and* `crate::mobs::SimMob` carries no equipment-slot state to write into even if one were found; equipping a bystanding *player* instead would additionally need a player-position registry, which is not reachable from `tick.rs`'s scheduled-tick drain |
 //! | *(implicit default)* spawn egg (`itemStack.has(DataComponents.ENTITY_DATA)`, true for every real spawn egg) | spawns the named mob just outside the dispenser's own face | **yes** ([`spawn_egg_position`], reusing `crate::spawn_egg::entity_type_for_egg`/`y_offset`) |
 //! | *everything else* | `DefaultDispenseItemBehavior` — plain toss | **yes** ([`plain_toss`]) |
 //!
 //! So this module now models the shared mechanics (the `TRIGGERED` redstone
 //! state machine, the plain-toss math, and the dropper's container push) plus
-//! six of the ~35 special behaviours (spawn eggs, boats, TNT, bone meal, the
-//! fire-placement half of flint and steel, and — via `crate::hopper` — a
-//! dropper's container push); every skip above names its own missing
-//! mechanism rather than leaving "no" unexplained, per this issue's own trap
-//! about not treating "dispenser ejects an item" as done until the table is
-//! at least enumerated.
+//! seven of the ~35 special behaviours (spawn eggs, boats, minecarts, TNT,
+//! bone meal, the fire-placement half of flint and steel, and — via
+//! `crate::hopper` — a dropper's container push); every skip above names its
+//! own missing mechanism rather than leaving "no" unexplained, per this
+//! issue's own trap about not treating "dispenser ejects an item" as done
+//! until the table is at least enumerated.
 //!
 //! # What this needs of the execution model
 //!
@@ -442,6 +442,65 @@ pub fn boat_dispense(origin: BlockPos, face: Direction, boat_width: f64, block_s
     BoatDispense::Place {
         position: Vec3::new(spawn_x, spawn_y + y_offset, spawn_z),
         yaw: to_y_rot(face),
+    }
+}
+
+/// [`minecart_dispense`]'s outcome.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MinecartDispense {
+    /// `AbstractMinecart.createMinecart` — the caller spawns through
+    /// `crate::mobs::MobSim::spawn_minecart`.
+    Place { position: Vec3 },
+    /// Neither "a rail directly ahead" nor "air ahead over a rail one cell
+    /// down" matched — vanilla's own fallback is
+    /// `defaultDispenseItemBehavior.dispense`, i.e. [`plain_toss`].
+    Fallback,
+}
+
+/// `MinecartDispenseItemBehavior.execute` — placement is a **different**
+/// formula from [`boat_dispense`]'s, not a shared one: a minecart lands
+/// directly on a rail immediately ahead of the dispenser (`0.1` above a flat
+/// rail, `0.6` on a slope, both offsets from the *dispenser's own* floored Y
+/// plus the facing's step), or one cell lower when the cell ahead is air
+/// directly over a rail (`-0.4` over a sloped rail unless facing down,
+/// `-0.9` otherwise). Anything else — no rail ahead, and no rail-under-air —
+/// falls back to a plain toss, matching vanilla's own
+/// `defaultDispenseItemBehavior.dispense`.
+#[must_use]
+pub fn minecart_dispense(origin: BlockPos, face: Direction, block_state: &dyn Fn(BlockPos) -> String) -> MinecartDispense {
+    let (sx, sy, sz) = step(face);
+    let spawn_x = f64::from(origin.x) + 0.5 + sx * 1.125;
+    // `Math.floor(center.y) + direction.getStepY()` — `center.y` is
+    // `origin.y + 0.5`, whose floor is exactly `origin.y`.
+    let spawn_y = f64::from(origin.y) + sy;
+    let spawn_z = f64::from(origin.z) + 0.5 + sz * 1.125;
+
+    let front = face.relative(origin);
+    let front_state = block_state(front);
+    let y_offset = if crate::mobs::minecart::is_rail_block(&front_state) {
+        if crate::mobs::minecart::rail_shape(&front_state).is_some_and(crate::mobs::minecart::RailShape::is_slope) {
+            0.6
+        } else {
+            0.1
+        }
+    } else if crate::random_tick::is_air_variant(&front_state) {
+        let below = BlockPos::new(front.x, front.y - 1, front.z);
+        let below_state = block_state(below);
+        if !crate::mobs::minecart::is_rail_block(&below_state) {
+            return MinecartDispense::Fallback;
+        }
+        if face != Direction::Down
+            && crate::mobs::minecart::rail_shape(&below_state).is_some_and(crate::mobs::minecart::RailShape::is_slope)
+        {
+            -0.4
+        } else {
+            -0.9
+        }
+    } else {
+        return MinecartDispense::Fallback;
+    };
+    MinecartDispense::Place {
+        position: Vec3::new(spawn_x, spawn_y + y_offset, spawn_z),
     }
 }
 

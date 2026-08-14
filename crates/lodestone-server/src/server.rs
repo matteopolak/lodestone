@@ -6456,6 +6456,38 @@ where
         }
     }
 
+    // `MinecartItem.useOn` — a rail-targeted placement, checked ahead of the
+    // generic block-placement branch below for the same reason the spawn-egg
+    // arm above is: a minecart item is not a `BlockItem`, so that branch could
+    // never place one anyway, and vanilla's own `useOn` returns `FAIL` (not
+    // `PASS`) on a non-rail target — stop here rather than falling through to
+    // anything else, matching that refusal.
+    if let Some(item) = held_item.as_deref() {
+        if let Some(kind) = crate::mobs::minecart::MinecartKind::from_item(item) {
+            let clicked = source.block_state(pos.x, pos.y, pos.z);
+            if crate::mobs::minecart::is_rail_block(&clicked) {
+                let shape = crate::mobs::minecart::rail_shape(&clicked);
+                let position = crate::mobs::minecart::placement_position(pos, shape);
+                mobs.with(|sim| {
+                    sim.spawn_minecart(kind, position);
+                });
+                let native = hand_native;
+                if consume_one(inventory, native, game_mode) && game_mode != GameMode::Creative {
+                    let remainder = inventory.native(native).cloned();
+                    if let Some(menu_slot) = window_zero_menu_slot(native) {
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
+                        )
+                        .await?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+    }
+
     // Lighting a nether portal. **Ahead of the placement branch**, for the same
     // reason the `hand_use` block above is: `flint_and_steel` is not a block item,
     // so the placement branch below cannot reach it at all.
@@ -9792,6 +9824,56 @@ where
                     // Boarding consumes no item, and a refused board must not fall
                     // through to the taming chain — a boat is not tameable and the
                     // fall-through would only cost a wasted roll.
+                    return Ok(());
+                }
+                // **Minecarts, for the identical reason boats are checked first**:
+                // a minecart is not a `Mob` either, so `MobSim::interact`'s taming
+                // chain has no arm for one and a right-click would otherwise fall
+                // through to `Pass` and do nothing.
+                if let Some(kind) = mobs.with(|sim| sim.minecart_kind(entity_id)) {
+                    if kind.is_furnace() {
+                        // `MinecartFurnace.interact` — `addFuel` on coal/charcoal,
+                        // `itemStack.consume(1, player)` only on success.
+                        let held = inventory.selected_item().map(|stack| stack.item.to_string());
+                        if let Some(item) = held {
+                            let interacting_pos = player_pos.map_or_else(
+                                || {
+                                    mobs.with(|sim| sim.minecart_transform(entity_id))
+                                        .map_or(Vec3::new(0.0, 0.0, 0.0), |(p, _)| p)
+                                },
+                                |(x, y, z)| Vec3::new(x, y, z),
+                            );
+                            let fuelled = mobs.with(|sim| sim.add_minecart_fuel(entity_id, &item, interacting_pos));
+                            if fuelled {
+                                let native = usize::from(inventory.selected_hotbar_slot());
+                                if consume_one(inventory, native, *game_mode) {
+                                    let hotbar_slot = i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+                                    apply(
+                                        conn,
+                                        state,
+                                        proto.encode_container_slot(0, 0, hotbar_slot, inventory.native(native)),
+                                    )
+                                    .await?;
+                                }
+                            }
+                        }
+                    } else if kind.is_rideable() && !using_secondary_action {
+                        // `Minecart.interact` — `player.startRiding(this)`, the
+                        // same `SET_PASSENGERS` handoff the boat arm above uses.
+                        let boarded = mobs.with(|sim| sim.mount_minecart(entity_id, player_entity_id));
+                        if boarded {
+                            apply(
+                                conn,
+                                state,
+                                proto.encode_set_passengers(entity_id, &[LOCAL_PLAYER_ENTITY_ID]),
+                            )
+                            .await?;
+                        }
+                    }
+                    // Chest/hopper/TNT minecarts (and a sneak-click / already-seated
+                    // plain one) reach here with no modelled interaction — see
+                    // `crate::mobs::minecart`'s own module doc for why a container
+                    // minecart's slots have no menu wired to them yet.
                     return Ok(());
                 }
                 let held = inventory.selected_item().map(|stack| stack.item.clone());
