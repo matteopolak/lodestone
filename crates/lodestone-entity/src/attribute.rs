@@ -774,6 +774,22 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
             template: BaseTemplate::Mob,
             overrides: &[("max_health", 4.0), ("movement_speed", 0.2)],
         },
+        // `IronGolem.createAttributes()` (`animal/golem/IronGolem.java:91-98`)
+        // — also a bare `Mob` builder. `knockback_resistance` **1.0** is the
+        // one to notice: a golem cannot be knocked back at all, unlike every
+        // other mob in this table, and `step_height` **1.0** is a full block
+        // rather than the usual 0.6, so it walks straight over a single-block
+        // rise instead of needing to jump it.
+        "iron_golem" => TypeSpec {
+            template: BaseTemplate::Mob,
+            overrides: &[
+                ("max_health", 100.0),
+                ("movement_speed", 0.25),
+                ("knockback_resistance", 1.0),
+                ("attack_damage", 15.0),
+                ("step_height", 1.0),
+            ],
+        },
         // `Bee.createAttributes()` (`animal/bee/Bee.java:528-534`). An
         // `Animal` that also carries `ATTACK_DAMAGE`, like the rabbit below.
         "bee" => TypeSpec {

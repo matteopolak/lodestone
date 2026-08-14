@@ -67,16 +67,19 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   requirement driving [`docs/bevy-migration.md`](./bevy-migration.md).
 - [Benchmark harness](./benchmark-harness.md) — The criterion-based benchmark
   harness for epic [#78](https://github.com/matteopolak/lodestone/issues/78),
-  implemented for five crates so far: `lodestone-worldgen` (chunk generation,
+  implemented for six crates so far: `lodestone-worldgen` (chunk generation,
   sub-issues #84/#85), `lodestone-v770` (protocol decode throughput, sub-issues
   #137/#142/#146/#88), `lodestone-world` (client-side chunk loading — store
   insertion, heightmap decode, light propagation, light *application*, memory
-  footprint), `lodestone-entity` (mob simulation and pathfinding) and
-  `lodestone-physics` (movement integration, collision sweep, pose fit gate, crowd
-  push — sub-issues #115/#120/#124/#102). It is the concrete implementation of the
-  design recorded in [`docs/roadmap/benchmarks.md`](./roadmap/benchmarks.md) — that
-  doc is the *argument* for the shape; this one is *how it actually works* and how to
-  extend it.
+  footprint), `lodestone-entity` (mob simulation and pathfinding), `lodestone-physics`
+  (movement integration, collision sweep, pose fit gate, crowd push — sub-issues
+  #115/#120/#124/#102) and `lodestone-render` + `lodestone-shell` together
+  (render-submit counts and durations — sub-issues #106/#128/#133/#160, see ["The
+  render/entity batch"](#the-renderentity-batch-87-90-91-92-97-99-106-128-151-160)
+  below for the split between the two crates and what closed in the most recent pass).
+  It is the concrete implementation of the design recorded in
+  [`docs/roadmap/benchmarks.md`](./roadmap/benchmarks.md) — that doc is the
+  *argument* for the shape; this one is *how it actually works* and how to extend it.
 - [Migrating to `bevy_ecs`](./bevy-migration.md) — A staged plan for moving
   Lodestone's world/entity/session state onto `bevy_ecs`, so that third-party
   extensions are native Rust plugins with the same power as built-in code.
@@ -609,6 +612,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   disconnected from the bytes actually available. That last property is not
   hypothetical — this harness found it already violated on its first run (see "Bug
   found" below).
+- [Golem construction (issue #239)](./golem-construction.md) — Block-pattern
+  detection and spawn for the snow golem and the iron golem — given a just-placed
+  carved pumpkin or jack o'lantern, does a valid `snow_block`/`iron_block` structure
+  now exist around it, and if so, spawn the golem. Lives in
+  `crates/lodestone-server/src/mobs.rs` as `MobSim::try_construct_golem`, ported from
+  vanilla `CarvedPumpkinBlock.trySpawnGolem`
+  (`.cache/mc/26.2/src/net/minecraft/world/level/block/CarvedPumpkinBlock.java`).
 - [`gpu/` module layout](./gpu-module-layout.md) —
   `crates/lodestone-shell/src/gpu.rs` was a single ~5,300-line file carrying eight
   distinct render responsibilities (block outline, debug lines, per-frame stats,
@@ -752,6 +762,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   three settings sub-screens #392's plan always said would need a *different* list
   widget than this tree's other two (`OptionsList`, `KeyBindsList`) — vanilla's
   `ObjectSelectionList` — and this issue builds that third kind.
+- [Leashing (issue #236)](./leashing.md) — Lead attach/detach, the fence-anchor
+  re-parent, and the distance-based pull and snap physics for a leashed mob —
+  vanilla `Leashable`/`LeadItem`
+  (`.cache/mc/26.2/src/net/minecraft/world/entity/Leashable.java`,
+  `.../item/LeadItem.java`). Lives in `crates/lodestone-server/src/mobs.rs`:
+  `MobSim::try_leash`, `MobSim::try_leash_to_fence`, `MobSim::tick_leashes`, plus the
+  `LeashHolder`/`LeashOutcome` types and a `leash_holder` field on `SimMob`.
 - [The light ramp: vanilla's lightmap curve](./light-ramp.md) — The scalar every
   terrain, fluid, entity and particle fragment multiplies its texel by, as a function
   of the server's packed sky/block light byte and the time of day. Vanilla calls it a
@@ -1398,9 +1415,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   The measured state of protocol 776's **serverbound** `play` packets on the hosting
   side — what `V770ServerProtocol::decode` understands, what actually reaches a
   consumer in `lodestone-server`, and why those two numbers differ by more than 3×.
-  This is the record for GitHub issues #262, #264, #266, #268 and #270, whose bodies
-  all framed the gap as a decode gap. **That framing is stale**: decode is nearly
-  complete and connectedness is the real bar.
+  This is the record for the "server-side decode" issue family — five tracker
+  issues, one per packet-name grouping (movement/player-state, entity actions/combat,
+  inventory/container, world/block admin, connection lifecycle) — whose bodies all
+  originally framed the gap as a decode gap. **That framing is stale**: decode is
+  nearly complete and connectedness is the real bar.
 - [Session and HUD state as ECS components](./session-components.md) — The
   scoreboard, tab list, boss bars, menus, session phase, vitals, experience, the
   title/action-bar overlays, the HUD effect stack, the respawn counter and the
@@ -1917,11 +1936,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   warm column from **20,678 heap allocations to 87** — vegetation's own share from
   20,621 to 30 — while changing **not one byte** of generated world.
 - [Vegetal decoration: grass, flowers and trees](./worldgen-vegetation.md) —
-  `crates/lodestone-worldgen/src/feature/vegetation.rs` is the engine that places
-  grass, flowers and trees (oak, birch, spruce, plus spruce's own `pine` sibling)
-  during world generation — issue #406, epic #404's Phase 3. It is wired into
-  `OverworldGenerator::column` as the last composed stage, `VEGETAL_DECORATION`, right
-  after #295's ore-feature stage.
+  `crates/lodestone-worldgen/src/feature/vegetation/` (a module, split by U16 Phase B
+  into `mod`/`config`/`grid`/`ids`/`place`/`tree` — the old single `vegetation.rs`
+  file no longer exists) is the engine that places grass, flowers and trees during
+  world generation — issue #406, epic #404's Phase 3, extended by issue #428. It is
+  wired into `OverworldGenerator::column` as the last composed stage,
+  `VEGETAL_DECORATION`, right after #295's ore-feature stage, and — like the ore
+  stage — over a real 3×3 `center ± 1` neighbourhood
+  (`apply_vegetal_decoration_step_3x3_per_source`), not a single chunk in isolation: a
+  tree or grass patch near a chunk edge really does spill into the neighbour that
+  generates it, matching vanilla's own cross-chunk decoration spill.
 
 ---
 
@@ -2168,6 +2192,18 @@ of these caught the *brief* being wrong rather than the code.
   and its cost stated as a counter against the serve-path budget. Written 2026-08-08
   against `HEAD` `5f37fb83`; refines and partially supersedes issue **#514** (see
   [Relationship to #514](#relationship-to-514)).
+- [Villager economy and the Brain substrate](./plans/villager-economy.md) — The
+  implementation plan for the villager-economy arc — issues #231 (villager Brain
+  behaviours), #243 (professions and POI claiming), #244 (gossip), #245 (trades), #246
+  (reputation), #247 (curing), #240 (wandering trader) and #241 (raids and patrols)
+  — planned as one architecture rather than eight features. Its central findings:
+  the Brain substrate the issues assume is missing **already exists and runs in
+  production** (`lodestone_entity::brain`, driven through `BrainGoal` on the goal
+  scheduler), so the substrate decision is to *extend* it, not to build it; the
+  missing substrate is **POI state and the world-facts seam into `BrainMob`**; and the
+  26.2 jar ships trades, trade sets and the villager schedule as **plain data files
+  already on disk** under `.cache/mc/26.2/src/data/minecraft/`, which collapses what
+  the issues treat as the hardest extraction problem.
 - [Plan: world state — time, weather, sleeping, border, rules, difficulty, spawn, dimensions (epic #340)](./plans/world-state.md) —
   The implementation plan for epic #340's eight children (#323–#330): the
   server-authoritative world-state systems, each planned end-to-end from ECS placement
