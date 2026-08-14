@@ -4,6 +4,7 @@
 //! [`RenderState::prepare_first_person_hand`] for the vanilla parity notes
 //! and `docs/arm-swing-animation.md`.
 use lodestone_assets::ResourceLocation;
+use lodestone_data::entity_type::EntityType;
 use lodestone_render::{
     Camera, CameraUniform, EntityCameraUniform, GpuEntityModel, GpuModelMesh, ItemStateContext,
     entity::{
@@ -680,7 +681,11 @@ impl RenderState {
             return Some(FirstPersonHand::Special(draw));
         }
 
-        let entry = model_for_type("player")?;
+        // The bare arm is always the wide/default player rig — this call site
+        // has no per-player skin signal (see `model_for_type`'s own doc and
+        // `EntityDraw::model_type_path`'s slim-skin case, which this pass
+        // does not reach).
+        let entry = model_for_type(EntityType::Player)?;
         let mesh = self.entities.models.get(entry.name)?;
         let gpu = self.entities.gpu_models.get(entry.name)?;
         let texture = self.entities.textures.get(entry.name)?;

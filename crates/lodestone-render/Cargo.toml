@@ -46,6 +46,13 @@ glam.workspace = true
 lodestone-assets.workspace = true
 lodestone-model.workspace = true
 lodestone-world.workspace = true
+# `entity::model_for_type` takes an `EntityType` (issue #523's third pass) --
+# the generated 158-variant registry enum whose discriminant is the wire's own
+# id. `lodestone-data` depends on nothing but `lodestone-model`, is not a
+# protocol-version crate, and `lodestone-world`/`lodestone-shell`/
+# `lodestone-entity` already take it as a plain dependency for the same
+# version-free-census reason, so this does not touch `check-isolation`.
+lodestone-data.workspace = true
 winit = { workspace = true, optional = true }
 
 # Live-gate deps: optional, enabled only by `live-chunk-gate`. The gate connects
@@ -67,13 +74,9 @@ pollster.workspace = true
 png.workspace = true
 lodestone-model.workspace = true
 lodestone-testsupport.workspace = true
-# Test-only, and deliberately not a real dependency: `ModelSectionView`'s
-# `ao_occludes_at` defaults to `occludes_at` precisely so this crate needs no
-# block census, with the override supplied by `lodestone-shell` (the seam
-# `docs/model-smooth-lighting.md` argues for). `model_ao_corner_gate` reads the
-# census so its leaves/barrier scenes use real vanilla state ids rather than
-# hand-typed ones — version-free crate, so `check-isolation` stays clean.
-lodestone-data.workspace = true
+# `lodestone-data` moved to a real dependency above (issue #523); this
+# `model_ao_corner_gate`/census-reading use is unaffected, it just no longer
+# needs its own dev-only entry.
 # Same pin as every other bench site in the workspace (lodestone-world,
 # -worldgen, -physics, -entity, protocol/v770). `default-features = false` is
 # load-bearing: it drops plotters and criterion's own rayon.
