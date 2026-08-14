@@ -1816,7 +1816,7 @@ fn player_store<S: ChunkSource + ?Sized>(source: &S) -> Option<crate::player_dat
 /// [`persist_player`] would write and [`live_publish_player`] would mirror,
 /// without doing either — the construction half, factored out so both the
 /// two deliberate disk-write call sites and `serve_play`'s per-iteration
-/// live-publish (see [`crate::player_data::LiveSaveSlot`]) build the
+/// live-publish (see [`crate::live_save::LiveSaveSlot`]) build the
 /// identical snapshot from the identical arguments rather than risking two
 /// copies drifting.
 ///
@@ -1877,14 +1877,14 @@ fn persist_player(
 }
 
 /// Refreshes `live_save` with the current live state — see
-/// [`crate::player_data::LiveSaveSlot`]'s own doc comment. Cheap and
+/// [`crate::live_save::LiveSaveSlot`]'s own doc comment. Cheap and
 /// in-memory only (no disk I/O), unlike [`persist_player`]: `serve_play`
 /// calls this once per iteration of its own `select!` loop, not only at the
 /// two deliberate save points.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 fn live_publish_player(
-    live_save: &crate::player_data::LiveSaveSlot,
+    live_save: &crate::live_save::LiveSaveSlot,
     store: Option<&crate::player_data::PlayerDataStore>,
     uuid: uuid::Uuid,
     player_pos: Option<(f64, f64, f64)>,
@@ -2115,7 +2115,7 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
-        &crate::player_data::LiveSaveSlot::default(),
+        &crate::live_save::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2166,14 +2166,14 @@ pub(crate) async fn serve_connection_with_mob_events_shared<T, P, S, E>(
     // `run_tick_loop` ticks. See `serve_connection_inner`'s parameter comment.
     world: &crate::world_state::WorldStateHandle,
     // The player-save mirror `serve_play` publishes to every loop iteration —
-    // see `crate::player_data::LiveSaveSlot`'s own doc comment. `bind`'s
+    // see `crate::live_save::LiveSaveSlot`'s own doc comment. `bind`'s
     // per-connection LAN wrapper passes a fresh, connection-local
     // `LiveSaveSlot::default()` (a shared one would mix different players'
     // saves under concurrent LAN connections); `open_in_memory_with_mobs`'s
     // singleplayer connection passes the one handle `IntegratedServer::
     // shutdown` reads back, which is the whole point of threading this
     // through rather than defaulting it like every other feed above.
-    live_save: &crate::player_data::LiveSaveSlot,
+    live_save: &crate::live_save::LiveSaveSlot,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -2267,7 +2267,7 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
-        &crate::player_data::LiveSaveSlot::default(),
+        &crate::live_save::LiveSaveSlot::default(),
         access,
         peer_ip,
         // Issue #273: this wrapper predates online mode; offline, same as
@@ -2362,7 +2362,7 @@ where
         resource_packs,
         plugin_channels,
         world,
-        &crate::player_data::LiveSaveSlot::default(),
+        &crate::live_save::LiveSaveSlot::default(),
         #[cfg(not(target_arch = "wasm32"))]
         access,
         #[cfg(not(target_arch = "wasm32"))]
@@ -2446,7 +2446,7 @@ where
         resource_packs,
         plugin_channels,
         world,
-        &crate::player_data::LiveSaveSlot::default(),
+        &crate::live_save::LiveSaveSlot::default(),
         access,
         peer_ip,
         Some(online_mode),
@@ -2510,7 +2510,7 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
-        &crate::player_data::LiveSaveSlot::default(),
+        &crate::live_save::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2598,7 +2598,7 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
-        &crate::player_data::LiveSaveSlot::default(),
+        &crate::live_save::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2677,7 +2677,7 @@ where
         &ResourcePackPushFeed::default(),
         &PluginChannelRegistry::default(),
         world,
-        &crate::player_data::LiveSaveSlot::default(),
+        &crate::live_save::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2756,7 +2756,7 @@ where
         resource_packs,
         &PluginChannelRegistry::default(),
         world,
-        &crate::player_data::LiveSaveSlot::default(),
+        &crate::live_save::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2835,7 +2835,7 @@ where
         &ResourcePackPushFeed::default(),
         plugin_channels,
         world,
-        &crate::player_data::LiveSaveSlot::default(),
+        &crate::live_save::LiveSaveSlot::default(),
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
@@ -2940,13 +2940,13 @@ async fn serve_connection_inner<T, P, S, E>(
     // #328 were reported for.
     world: &crate::world_state::WorldStateHandle,
     // The continuously-refreshed player-save mirror `serve_play` publishes to
-    // every loop iteration — see [`crate::player_data::LiveSaveSlot`]'s own
+    // every loop iteration — see [`crate::live_save::LiveSaveSlot`]'s own
     // doc comment for the shutdown-cancellation race it exists to survive.
     // Same compatibility shape as every feed above: each pre-existing entry
     // point passes a fresh `LiveSaveSlot::default()`, which nothing reads;
     // `serve_connection_with_mob_events_shared` (singleplayer) carries the
     // one `IntegratedServer::shutdown` reads back.
-    live_save: &crate::player_data::LiveSaveSlot,
+    live_save: &crate::live_save::LiveSaveSlot,
     // Issue #336. Ops, whitelist and the two ban lists, consulted once at
     // `LoginStart`. Same compatibility shape as every feed above: each
     // pre-existing entry point passes a fresh, empty `AccessHandle::default()`,
@@ -11088,14 +11088,14 @@ async fn serve_play<T, P, S, E>(
     world: &crate::world_state::WorldStateHandle,
     // Issue #302's shutdown-cancellation gap. Published to once per iteration
     // of this function's own `select!` loop below — see
-    // `crate::player_data::LiveSaveSlot`'s own doc comment for why a
+    // `crate::live_save::LiveSaveSlot`'s own doc comment for why a
     // continuously-refreshed mirror exists at all: `IntegratedServer::
     // shutdown`'s connection-task race drops this whole function's future
     // mid-`.await` on an ordinary singleplayer quit, so the disconnect-save
     // arm below (the `conn.read_packet()` returning `Ok(None)` branch) is
     // structurally unreachable on that path, and only this mirror survives
     // the cancellation to be read back afterwards.
-    live_save: &crate::player_data::LiveSaveSlot,
+    live_save: &crate::live_save::LiveSaveSlot,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -12518,7 +12518,7 @@ where
             }
         }
         // Issue #302's shutdown-cancellation gap — see `live_publish_player`'s
-        // and `crate::player_data::LiveSaveSlot`'s own doc comments. Once per
+        // and `crate::live_save::LiveSaveSlot`'s own doc comments. Once per
         // iteration, after whichever arm above completed, so the mirror is at
         // most one packet or timer tick behind whatever the cancellation
         // below would otherwise drop entirely. Placed here rather than inside
@@ -12666,8 +12666,10 @@ async fn serve_play<T, P, S, E>(
     // this target has no `PlayerDataStore` at all — "there is no player store
     // in the browser", per this loop's own experience-restore comment below —
     // so there is nothing for `IntegratedServer::shutdown` to read back
-    // regardless.
-    live_save: &crate::player_data::LiveSaveSlot,
+    // regardless. `LiveSaveSlot::publish` is itself native-only (see its own
+    // doc comment), so this parameter is unused on this target by
+    // construction, not by oversight.
+    _live_save: &crate::live_save::LiveSaveSlot,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,

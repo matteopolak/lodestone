@@ -579,8 +579,16 @@ pub struct IntegratedServer {
     /// publishes to it every loop iteration, so it survives the cancellation
     /// that would otherwise drop the only copy of the session's last
     /// position, rotation and game mode. See
-    /// [`crate::player_data::LiveSaveSlot`]'s own doc comment.
-    live_save: crate::player_data::LiveSaveSlot,
+    /// [`crate::live_save::LiveSaveSlot`]'s own doc comment.
+    ///
+    /// On wasm32 [`Self::shutdown`]'s `take()` call is `cfg`'d out along with
+    /// every other native-only persistence read (`entity_storage`, `mobs`,
+    /// `portals`, `poi_storage`), so this field is genuinely never read on
+    /// that target — the field itself still has to exist there because
+    /// [`Self::open_in_memory_with_mobs`] and friends construct it
+    /// unconditionally.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    live_save: crate::live_save::LiveSaveSlot,
     /// The RCON listener task (issue #331), `Some` once
     /// [`start_rcon`](Self::start_rcon) has been called.
     ///
@@ -867,7 +875,7 @@ impl IntegratedServer {
                 // `shutdown` reading it back is a no-op — matching every
                 // other `None`/`default()` field above for a constructor with
                 // no `PlayerDataStore` reachable in the first place.
-                live_save: crate::player_data::LiveSaveSlot::default(),
+                live_save: crate::live_save::LiveSaveSlot::default(),
                 // No RCON listener (issue #331) unless the caller starts one
                 // explicitly with `start_rcon` — a listener needs a password
                 // and a command dispatch, which these constructors do not take.
@@ -1351,7 +1359,7 @@ impl IntegratedServer {
         // `world_state`/`world_state_for_handle` split just above, and for
         // the same reason (a clone made inside the `async move` below would
         // move the original out of the handle's reach).
-        let live_save = crate::player_data::LiveSaveSlot::new();
+        let live_save = crate::live_save::LiveSaveSlot::new();
         let conn_live_save = live_save.clone();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
@@ -2478,7 +2486,7 @@ impl IntegratedServer {
             // single shared slot would mix their saves. `shutdown` reading
             // this back is therefore a no-op here, same as every other
             // persistence field on this constructor.
-            live_save: crate::player_data::LiveSaveSlot::default(),
+            live_save: crate::live_save::LiveSaveSlot::default(),
             // Set by the `start_rcon` call just below when the caller asked for
             // one (issue #331). It needs a password, so it stays opt-in.
             #[cfg(not(target_arch = "wasm32"))]
