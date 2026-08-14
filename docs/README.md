@@ -1205,6 +1205,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `minecraft:world_clock`. This is what replaced three hardcoded, level-name-keyed
   guesses — chunk column height, sky-light presence, and which world clock is "the"
   day clock — with values the server actually declared.
+- [Registry types: generated enums instead of strings](./registry-types.md) — The
+  representation this codebase uses to name a registry entry — a block, an item, an
+  entity type — in memory and in generated tables. The answer is a **generated enum
+  whose discriminant is the registry id**, with the plugin case kept in a separate
+  wrapper type so it costs the built-in path nothing. `lodestone_data::block::Block`
+  is the first and, so far, only registry converted; this document records the
+  decision, what was rejected, what was measured, and the order the remaining
+  registries should follow.
 - [Resource Packs screen](./resource-packs-screen.md) —
   `SettingsPage::ResourcePacks` (issue #415): vanilla's `PackSelectionScreen`, two
   transferable columns over a real pack repository. **Available** on the left lists
@@ -1647,6 +1655,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `GAME_EVENT` codes — `START_RAINING` (1), `STOP_RAINING` (2), `RAIN_LEVEL_CHANGE`
   (7), `THUNDER_LEVEL_CHANGE` (8) — and the client turns two scalars in `0.0..=1.0`
   into:
+- [The workstation economy: anvil, grindstone, smithing table, enchanting table](./workstation-economy.md) —
+  The server-side maths and click wiring for the four cost-driven container screens
+  issues #253–#255 ask for: the anvil (repair-with-material, repair-by-combining,
+  rename, the prior-work penalty, the too-expensive cap), the grindstone (strip
+  enchantments to curses, combine-repair, a partial XP refund), the smithing table
+  (netherite upgrade, armour/tool trim) and the enchanting table (bookshelf power, the
+  three-slot level cost, weighted-random offers). `docs/container-cost-screens.md`
+  already covers the **client** half (menu shape, layout, background art, cost-number
+  rendering) — this is the half that was still missing: nothing server-side computed
+  a result, charged XP, or consumed an input.
 - [World Creation screen](./world-creation-screen.md) — `Screen::CreateWorld` (issue
   #190): vanilla's `CreateWorldScreen`, reached from the world list's "Create New
   World" button (`crates/lodestone-shell/src/menu/world_select.rs`'s

@@ -162,6 +162,13 @@ pub mod container_click;
 /// the corpus, and because `CraftingState` is named by the container plumbing.
 pub mod crafting;
 pub mod ecs;
+/// The workstation economy (anvil, grindstone, smithing table, enchanting
+/// table): the vanilla `minecraft:enchantment` registry census shared by all
+/// four, and each station's own cost/result formula.
+pub mod anvil;
+pub mod enchantment_data;
+pub mod enchanting;
+pub mod smithing;
 /// Issue #530: sounds, particles and level events the server owns. Public
 /// because `ServerProtocol`'s three new encoders name [`effects::WorldEffect`].
 pub mod effects;

@@ -770,6 +770,11 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             // Same story as `pot_decorations` above: this crate's component map
             // has no slot for an opaque NBT blob, so there is nothing to carry.
             custom_data: None,
+            // `repair_cost` is server-side-only bookkeeping (see its own doc on
+            // `lodestone_model::ItemComponents`) with no slot in this crate's
+            // component map — same "nothing to carry" story as `pot_decorations`
+            // and `custom_data` above.
+            repair_cost: 0,
             // See the doc above: not lossy, out of scope.
             has_unmodeled: false,
         };
@@ -1140,6 +1145,10 @@ mod tests {
                 // above: this crate's `ComponentValue` has no opaque-blob slot, so
                 // the conversion sets `None` either way.
                 custom_data: None,
+                // Server-side-only bookkeeping (see its own doc on
+                // `lodestone_model::ItemComponents`); not round-tripped for the
+                // same reason as `pot_decorations`/`custom_data` above.
+                repair_cost: 0,
                 has_unmodeled: false,
             },
         };

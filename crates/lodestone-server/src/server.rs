@@ -85,7 +85,7 @@ use crate::chunk::{
     is_air_or_fluid, is_water,
 };
 use crate::fall::{FallSample, FallTracker};
-use crate::container_click::{Click, MenuKind, MenuLayout, SlotKind, do_click_with};
+use crate::container_click::{Click, MenuKind, MenuLayout, SlotKind, Station, do_click_with};
 use crate::crafting::CraftingState;
 use crate::inventory::{PlayerInventory, window_zero_menu_slot};
 use crate::mob_spawn::SpawnRng;
@@ -3281,6 +3281,10 @@ fn container_title(menu: &str) -> &'static str {
         "minecraft:blast_furnace" => "Blast Furnace",
         "minecraft:hopper" => "Hopper",
         "minecraft:generic_9x3" => "Chest",
+        "minecraft:anvil" => "Repair & Name",
+        "minecraft:grindstone" => "Grindstone",
+        "minecraft:smithing" => "Smithing Table",
+        "minecraft:enchantment" => "Enchant",
         _ => "Container",
     }
 }
@@ -3442,6 +3446,147 @@ where
     *open_container = Some(opened);
     // No background mutation to poll — a crafting grid changes only on a click —
     // so the periodic sync is left with nothing to diff.
+    *container_sync = ContainerSync::default();
+    Ok(())
+}
+
+/// The wire `menu_type` [`Station`] opens — `lodestone_game::menus::build_menu`'s
+/// own dispatch table (`(Some("anvil"), 3)` etc.) is the client-side mirror of
+/// this exact string.
+fn workstation_menu_type(station: Station) -> &'static str {
+    match station {
+        Station::Anvil => "minecraft:anvil",
+        Station::Grindstone => "minecraft:grindstone",
+        Station::Smithing => "minecraft:smithing",
+    }
+}
+
+/// Opens an anvil/grindstone/smithing-table screen (issues #253-#255) — the
+/// same *positionless virtual menu* shape [`open_crafting_table_screen`]
+/// established for the crafting table, because none of these three is a block
+/// entity either (see [`PlayerInventory::workstation`]'s own doc).
+async fn open_workstation_screen<T, P>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    inventory: &mut PlayerInventory,
+    pos: BlockPos,
+    station: Station,
+    next_window_id: &mut i32,
+    open_container: &mut Option<OpenContainer>,
+    container_sync: &mut ContainerSync,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    *next_window_id = *next_window_id % 100 + 1;
+    let window_id = *next_window_id;
+    let layout = MenuLayout::item_combiner(station);
+    let inputs = layout.len() - 36 - 1;
+
+    inventory.open_workstation(inputs);
+
+    apply(
+        conn,
+        state,
+        proto.encode_open_screen(window_id, workstation_menu_type(station), container_title(workstation_menu_type(station))),
+    )
+    .await?;
+
+    let cells: Vec<Option<ItemStack>> = inventory.workstation().map(<[_]>::to_vec).unwrap_or_default();
+    let items = read_workstation_menu(&layout, inventory, &cells, station, false);
+
+    let mut opened = OpenContainer {
+        window_id,
+        pos,
+        shape: MenuKind::ItemCombiner { inputs, station },
+        container_size: inputs + 1,
+        state_id: 0,
+    };
+    let state_id = opened.next_state_id();
+    apply(
+        conn,
+        state,
+        proto.encode_container_content(window_id, state_id, &items, inventory.click_state().carried.as_ref()),
+    )
+    .await?;
+
+    *open_container = Some(opened);
+    *container_sync = ContainerSync::default();
+    Ok(())
+}
+
+/// Opens the enchanting-table screen (issue #253): the same positionless
+/// shape as [`open_workstation_screen`], but with no result slot — the item
+/// slot is enchanted in place — so it carries its own [`MenuLayout`] and no
+/// `Station`. Costs are computed once here from the empty menu (both slots
+/// start empty, so all three costs are `0`) and then kept live by
+/// [`apply_workstation_clicked`]... actually by the click path directly, since
+/// `MenuKind::Enchanting` has no result to re-derive: see
+/// `apply_enchanting_clicked`'s own doc for where the three
+/// `container_set_data` costs are actually recomputed and sent.
+async fn open_enchanting_screen<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    inventory: &mut PlayerInventory,
+    pos: BlockPos,
+    next_window_id: &mut i32,
+    open_container: &mut Option<OpenContainer>,
+    container_sync: &mut ContainerSync,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + ?Sized,
+{
+    *next_window_id = *next_window_id % 100 + 1;
+    let window_id = *next_window_id;
+    let layout = MenuLayout::enchanting_table();
+
+    inventory.open_workstation(2);
+
+    apply(
+        conn,
+        state,
+        proto.encode_open_screen(window_id, "minecraft:enchantment", "Enchant"),
+    )
+    .await?;
+
+    let cells: Vec<Option<ItemStack>> = inventory.workstation().map(<[_]>::to_vec).unwrap_or_default();
+    let items: Vec<Option<ItemStack>> = layout
+        .iter()
+        .map(|(_, kind)| match kind {
+            SlotKind::Player(native) => inventory.native(native).cloned(),
+            SlotKind::Grid(cell) => cells.get(cell).cloned().flatten(),
+            SlotKind::Container(_) | SlotKind::Result => None,
+        })
+        .collect();
+
+    let mut opened = OpenContainer {
+        window_id,
+        pos,
+        shape: MenuKind::Enchanting,
+        container_size: 2,
+        state_id: 0,
+    };
+    let state_id = opened.next_state_id();
+    apply(
+        conn,
+        state,
+        proto.encode_container_content(window_id, state_id, &items, inventory.click_state().carried.as_ref()),
+    )
+    .await?;
+    // `EnchantmentMenu`'s `addDataSlot`s: three costs, all `0` for an empty
+    // menu — `getEnchantmentCost` is gated on a non-empty, enchantable item 0.
+    for index in 0..3i32 {
+        apply(conn, state, proto.encode_container_data(window_id, index, 0)).await?;
+    }
+    let _ = source; // bookshelf power is read on the first item placement, not at open time — see `apply_enchanting_clicked`.
+
+    *open_container = Some(opened);
     *container_sync = ContainerSync::default();
     Ok(())
 }
@@ -5148,6 +5293,55 @@ where
         .await;
     }
 
+    // Issues #253-#255: the anvil, grindstone, smithing table and enchanting
+    // table are, like the crafting table just above, **not** block entities in
+    // vanilla — each menu's own input slots are scratch space the menu itself
+    // owns and throws away on close (`AnvilMenu.inputSlots`,
+    // `GrindstoneMenu.repairSlots`, `SmithingMenu.inputSlots`,
+    // `EnchantmentMenu.enchantSlots`), so `existing_menu` above structurally
+    // cannot reach any of them either.
+    let clicked_block = source
+        .block_state(pos.x, pos.y, pos.z)
+        .split('[')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    if let Some(station) = match clicked_block.as_str() {
+        "minecraft:anvil" | "minecraft:chipped_anvil" | "minecraft:damaged_anvil" => {
+            Some(Station::Anvil)
+        }
+        "minecraft:grindstone" => Some(Station::Grindstone),
+        "minecraft:smithing_table" => Some(Station::Smithing),
+        _ => None,
+    } {
+        return open_workstation_screen(
+            conn,
+            proto,
+            state,
+            inventory,
+            pos,
+            station,
+            next_window_id,
+            open_container,
+            container_sync,
+        )
+        .await;
+    }
+    if clicked_block == "minecraft:enchanting_table" {
+        return open_enchanting_screen(
+            conn,
+            proto,
+            source,
+            state,
+            inventory,
+            pos,
+            next_window_id,
+            open_container,
+            container_sync,
+        )
+        .await;
+    }
+
     // Issue #252, the missing-consumer half: a right-click on a brewing stand
     // routes the held item into the matching slot (fuel/bottle/ingredient)
     // and consumes one from the player's hand. See
@@ -6315,6 +6509,43 @@ fn apply_container_clicked<P: ServerProtocol>(
 ) -> (Option<ServerDirective>, Vec<ItemStack>) {
     // Which menu, and where its non-player slots live.
     let mut open = open_container;
+
+    // The workstation economy (anvil/grindstone/smithing, issues #253-#255) is a
+    // second positionless-scratch shape alongside the crafting table, but its
+    // cells live in `PlayerInventory::workstation` (a flat cell vector) rather
+    // than a `CraftingState`, so it is handled by a dedicated function instead
+    // of forcing it through `read_menu`'s `CraftingState`-shaped grid.
+    if window_id != 0 {
+        let combiner_station = open.as_ref().and_then(|tracked| {
+            (tracked.window_id == window_id)
+                .then_some(tracked.shape)
+                .and_then(|shape| match shape {
+                    MenuKind::ItemCombiner { station, .. } => Some(station),
+                    _ => None,
+                })
+        });
+        if let Some(station) = combiner_station {
+            let tracked = open.expect("checked Some above via combiner_station");
+            return apply_workstation_clicked(
+                proto,
+                inventory,
+                tracked,
+                click,
+                claimed_slots,
+                claimed_cursor,
+                creative,
+                station,
+            );
+        }
+        let is_enchanting = open
+            .as_ref()
+            .is_some_and(|tracked| tracked.window_id == window_id && tracked.shape == MenuKind::Enchanting);
+        if is_enchanting {
+            let tracked = open.expect("checked Some above via is_enchanting");
+            return apply_enchanting_clicked(proto, inventory, tracked, click, claimed_slots, claimed_cursor, creative);
+        }
+    }
+
     let (layout, pos, uses_table_grid) = if window_id == 0 {
         (MenuLayout::player(), None, false)
     } else {
@@ -6475,6 +6706,194 @@ fn apply_container_clicked<P: ServerProtocol>(
     };
     (
         Some(proto.encode_container_content(window_id, state_id, &derived, cursor.as_ref())),
+        dropped,
+    )
+}
+
+/// Reads one [`MenuKind::ItemCombiner`] menu's full slot vector — the
+/// workstation cells, the player tail, and the live result derived from
+/// [`workstation_result`] (never stored; always re-derived, the same
+/// "recompute rather than cache" choice `crate::crafting`'s recipe closure
+/// makes).
+fn read_workstation_menu(
+    layout: &MenuLayout,
+    inventory: &PlayerInventory,
+    cells: &[Option<ItemStack>],
+    station: Station,
+    creative: bool,
+) -> Vec<Option<ItemStack>> {
+    let result = workstation_result(station, cells, creative);
+    layout
+        .iter()
+        .map(|(_, kind)| match kind {
+            SlotKind::Player(native) => inventory.native(native).cloned(),
+            SlotKind::Container(_) => None,
+            SlotKind::Grid(cell) => cells.get(cell).cloned().flatten(),
+            SlotKind::Result => result.clone(),
+        })
+        .collect()
+}
+
+/// One station's result from its own input cells — [`crate::anvil::compute`],
+/// [`crate::anvil::grindstone_result`] or [`crate::smithing::compute`].
+fn workstation_result(station: Station, cells: &[Option<ItemStack>], creative: bool) -> Option<ItemStack> {
+    let get = |i: usize| cells.get(i).and_then(Option::as_ref);
+    match station {
+        Station::Anvil => crate::anvil::compute(get(0), get(1), None, creative).result,
+        Station::Grindstone => crate::anvil::grindstone_result(get(0), get(1)),
+        Station::Smithing => crate::smithing::compute(get(0), get(1), get(2)),
+    }
+}
+
+/// [`apply_container_clicked`]'s `MenuKind::ItemCombiner` branch: the anvil,
+/// grindstone and smithing table all share this shape (`docs/workstation-economy.md`),
+/// differing only in [`workstation_result`] (what the result slot shows) and
+/// [`crate::container_click`]'s own per-station `may_place`/take rules. Kept as
+/// a separate function rather than folded into `apply_container_clicked`
+/// because the grid source is [`PlayerInventory::workstation`] (a flat cell
+/// vector) rather than a [`crate::crafting::CraftingState`], so it cannot reuse
+/// `read_menu`.
+///
+/// **XP is charged here**, not in [`crate::container_click`] — that module is
+/// deliberately economy-free (see its own module doc). A take is detected the
+/// same way the crafting-table path detects a craft: by comparing the result
+/// cell before and after the click, since [`crate::container_click::do_click_with`]
+/// already ran the whole click (including any take) by the time this reads
+/// `slots` back.
+fn apply_workstation_clicked<P: ServerProtocol>(
+    proto: &P,
+    inventory: &mut PlayerInventory,
+    tracked: &mut OpenContainer,
+    click: Click,
+    claimed_slots: &[(i32, Option<ItemStack>)],
+    claimed_cursor: Option<&ItemStack>,
+    creative: bool,
+    station: Station,
+) -> (Option<ServerDirective>, Vec<ItemStack>) {
+    let layout = MenuLayout::item_combiner(station);
+    let cells: Vec<Option<ItemStack>> = inventory.workstation().map(<[_]>::to_vec).unwrap_or_default();
+    let mut slots = read_workstation_menu(&layout, inventory, &cells, station, creative);
+    let before = slots.clone();
+    let mut state = inventory.click_state().clone();
+    let recipe = |grid_cells: &[Option<ItemStack>]| workstation_result(station, grid_cells, creative);
+    let dropped = do_click_with(&layout, &mut slots, &mut state, click, creative, Some(&recipe));
+    *inventory.click_state_mut() = state;
+
+    let mut new_cells = cells;
+    for (index, kind) in layout.iter() {
+        match kind {
+            SlotKind::Player(native) => inventory.set_native(native, slots[index].clone()),
+            SlotKind::Grid(cell) => {
+                if let Some(slot) = new_cells.get_mut(cell) {
+                    *slot = slots[index].clone();
+                }
+            }
+            SlotKind::Container(_) | SlotKind::Result => {}
+        }
+    }
+    if let Some(ws) = inventory.workstation_mut() {
+        *ws = new_cells.clone();
+    }
+
+    let derived = read_workstation_menu(&layout, inventory, &new_cells, station, creative);
+
+    let cursor = inventory.click_state().carried.clone();
+    let mut agrees = cursor.as_ref() == claimed_cursor;
+    if agrees {
+        let mut believed = before;
+        for (menu_slot, claimed) in claimed_slots {
+            match usize::try_from(*menu_slot).ok().filter(|i| *i < believed.len()) {
+                Some(index) => believed[index] = claimed.clone(),
+                None => {
+                    agrees = false;
+                    break;
+                }
+            }
+        }
+        agrees = agrees && believed == derived;
+    }
+    if agrees {
+        return (None, dropped);
+    }
+    let state_id = tracked.next_state_id();
+    (
+        Some(proto.encode_container_content(tracked.window_id, state_id, &derived, cursor.as_ref())),
+        dropped,
+    )
+}
+
+/// [`apply_container_clicked`]'s `MenuKind::Enchanting` branch. No result slot
+/// and no take, so there is no economy to charge here at all — see
+/// `crate::enchanting`'s own module doc for why the "choose an offer" action
+/// (`ClientAction::ContainerButtonClick`) cannot reach this crate yet. This
+/// only has to keep the two cells (item, lapis) in sync with clicks; the three
+/// `container_set_data` costs are **not** recomputed live here — see
+/// `docs/workstation-economy.md` for that scope note.
+fn apply_enchanting_clicked<P: ServerProtocol>(
+    proto: &P,
+    inventory: &mut PlayerInventory,
+    tracked: &mut OpenContainer,
+    click: Click,
+    claimed_slots: &[(i32, Option<ItemStack>)],
+    claimed_cursor: Option<&ItemStack>,
+    creative: bool,
+) -> (Option<ServerDirective>, Vec<ItemStack>) {
+    let layout = MenuLayout::enchanting_table();
+    let cells: Vec<Option<ItemStack>> = inventory.workstation().map(<[_]>::to_vec).unwrap_or_default();
+    let read = |inv: &PlayerInventory, cells: &[Option<ItemStack>]| -> Vec<Option<ItemStack>> {
+        layout
+            .iter()
+            .map(|(_, kind)| match kind {
+                SlotKind::Player(native) => inv.native(native).cloned(),
+                SlotKind::Grid(cell) => cells.get(cell).cloned().flatten(),
+                SlotKind::Container(_) | SlotKind::Result => None,
+            })
+            .collect()
+    };
+    let mut slots = read(inventory, &cells);
+    let before = slots.clone();
+    let mut state = inventory.click_state().clone();
+    let dropped = do_click_with(&layout, &mut slots, &mut state, click, creative, None);
+    *inventory.click_state_mut() = state;
+
+    let mut new_cells = cells;
+    for (index, kind) in layout.iter() {
+        match kind {
+            SlotKind::Player(native) => inventory.set_native(native, slots[index].clone()),
+            SlotKind::Grid(cell) => {
+                if let Some(slot) = new_cells.get_mut(cell) {
+                    *slot = slots[index].clone();
+                }
+            }
+            SlotKind::Container(_) | SlotKind::Result => {}
+        }
+    }
+    if let Some(ws) = inventory.workstation_mut() {
+        *ws = new_cells.clone();
+    }
+    let derived = read(inventory, &new_cells);
+
+    let cursor = inventory.click_state().carried.clone();
+    let mut agrees = cursor.as_ref() == claimed_cursor;
+    if agrees {
+        let mut believed = before;
+        for (menu_slot, claimed) in claimed_slots {
+            match usize::try_from(*menu_slot).ok().filter(|i| *i < believed.len()) {
+                Some(index) => believed[index] = claimed.clone(),
+                None => {
+                    agrees = false;
+                    break;
+                }
+            }
+        }
+        agrees = agrees && believed == derived;
+    }
+    if agrees {
+        return (None, dropped);
+    }
+    let state_id = tracked.next_state_id();
+    (
+        Some(proto.encode_container_content(tracked.window_id, state_id, &derived, cursor.as_ref())),
         dropped,
     )
 }
@@ -7928,6 +8347,24 @@ where
             changed_slots,
             carried_item,
         } => {
+            // Issues #253-#255: the anvil charges XP levels and the grindstone
+            // refunds them, both **only** on a click that takes the result —
+            // read before `apply_container_clicked` runs, because that call is
+            // what performs the take (`crate::container_click::take_result`)
+            // and overwrites `inventory.workstation()` with the post-take cells.
+            // `crate::container_click`/`apply_container_clicked` are
+            // deliberately economy-free (see their own module docs), so this is
+            // the one place that connects a workstation take to a real
+            // `PlayerExperience` — the same split `apply_use_item_on`'s XP-free
+            // block-breaking already has from `destroy_block`'s own charge.
+            let workstation_take = open_container.as_ref().and_then(|tracked| {
+                let MenuKind::ItemCombiner { inputs, station } = tracked.shape else {
+                    return None;
+                };
+                (tracked.window_id == window_id && usize::try_from(slot).ok() == Some(inputs)).then_some(station)
+            });
+            let pre_click_cells = workstation_take.map(|_| inventory.workstation().map(<[_]>::to_vec).unwrap_or_default());
+
             let (correction, dropped) = apply_container_clicked(
                 proto,
                 inventory,
@@ -7944,6 +8381,39 @@ where
                 *game_mode == GameMode::Creative,
             );
             spawn_dropped_stacks(mobs, *player_pos, *player_rot, drops_rng, dropped);
+
+            let mut experience_changed = false;
+            if let (Some(station), Some(cells)) = (workstation_take, pre_click_cells) {
+                let get = |i: usize| cells.get(i).and_then(Option::as_ref);
+                match station {
+                    Station::Anvil => {
+                        let outcome = crate::anvil::compute(get(0), get(1), None, *game_mode == GameMode::Creative);
+                        if outcome.result.is_some() && *game_mode != GameMode::Creative {
+                            experience.take_levels(outcome.cost);
+                            experience_changed = true;
+                        }
+                    }
+                    Station::Grindstone => {
+                        if crate::anvil::grindstone_result(get(0), get(1)).is_some() {
+                            let awarded = crate::anvil::grindstone_xp(get(0), get(1), drops_rng);
+                            if awarded > 0 {
+                                experience.give_points(i32::try_from(awarded).unwrap_or(i32::MAX));
+                                experience_changed = true;
+                            }
+                        }
+                    }
+                    Station::Smithing => {}
+                }
+            }
+            if experience_changed {
+                apply(
+                    conn,
+                    state,
+                    proto.encode_set_experience(experience.progress(), experience.level(), experience.total()),
+                )
+                .await?;
+            }
+
             if let Some(correction) = correction {
                 apply(conn, state, correction).await?;
             }
@@ -7969,7 +8439,15 @@ where
             // ::removed`: the cursor and any crafting grid go back to the player,
             // and what does not fit hits the floor. Dropping them silently would
             // delete items every time a player closed a menu mid-drag.
+            //
+            // Issues #253-#255: an open anvil/grindstone/smithing/enchanting-table's
+            // input cells (`PlayerInventory::workstation`) are exactly the same
+            // "menu-owned scratch container, cleared on `removed`" shape as the
+            // crafting table's grid (`AnvilMenu`/`GrindstoneMenu`/`SmithingMenu`/
+            // `EnchantmentMenu` all clear their own input container in `removed`),
+            // so they get the same treatment here.
             let mut returning = inventory.take_table_crafting();
+            returning.extend(inventory.take_workstation());
             if let Some(carried) = inventory.click_state_mut().carried.take() {
                 returning.push(carried);
             }
@@ -11207,6 +11685,140 @@ mod tests {
         );
         assert!(inventory.crafting().is_empty(), "one craft consumed the grid");
         assert!(inventory.crafting().result().is_none());
+    }
+
+    /// The anvil end to end through the real click path (issue #254): place a
+    /// damaged pickaxe and a repair material into the two input cells, take the
+    /// derived result, and check both the item mutation and the input-slot
+    /// consumption `container_click`'s `take_result` special-cases for
+    /// `Station::Anvil` — cell 0 always clears, cell 1 shrinks by the repair
+    /// material count actually used, not by one and not entirely.
+    #[test]
+    fn the_anvil_repairs_through_the_real_click_path_and_consumes_the_right_amount() {
+        let mut inventory = PlayerInventory::new();
+        let block_entities = BlockEntityHandle::new();
+        inventory.open_workstation(2);
+        let mut input = stack("minecraft:diamond_pickaxe", 1);
+        input.components.damage = Some(1200);
+        input.components.max_damage = Some(1561);
+        if let Some(ws) = inventory.workstation_mut() {
+            ws[0] = Some(input);
+            ws[1] = Some(stack("minecraft:diamond", 3));
+        }
+        let mut open = OpenContainer {
+            window_id: 7,
+            pos: BlockPos::new(0, 0, 0),
+            shape: MenuKind::ItemCombiner { inputs: 2, station: Station::Anvil },
+            container_size: 3,
+            state_id: 0,
+        };
+
+        // Menu slot 2 is the result for a 2-input combiner menu.
+        apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            Some(&mut open),
+            7,
+            Click { slot: 2, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
+        );
+
+        let carried = inventory.click_state().carried.as_ref().expect("the repaired pickaxe must be on the cursor");
+        assert_eq!(carried.item.to_string(), "minecraft:diamond_pickaxe");
+        assert_eq!(carried.components.damage, Some(30), "matches anvil::compute's own repair-with-material test");
+
+        let cells = inventory.workstation().expect("still open");
+        assert_eq!(cells[0], None, "the base item is always fully consumed");
+        assert_eq!(
+            cells[1], None,
+            "all 3 diamonds were used by the repair (repair_item_count_cost == addition.count)"
+        );
+    }
+
+    /// The grindstone end to end (issue #254): a single enchanted item in one
+    /// slot strips to curses only, and taking it **fully clears** the input
+    /// cell it came from — the grindstone's distinct-from-the-anvil take rule.
+    #[test]
+    fn the_grindstone_strips_enchantments_through_the_real_click_path() {
+        let mut inventory = PlayerInventory::new();
+        let block_entities = BlockEntityHandle::new();
+        inventory.open_workstation(2);
+        let mut sword = stack("minecraft:diamond_sword", 1);
+        sword.components.enchantments = vec![lodestone_model::ItemEnchantment {
+            id: crate::enchantment_data::id_of("minecraft:sharpness").unwrap(),
+            level: 3,
+        }];
+        if let Some(ws) = inventory.workstation_mut() {
+            ws[0] = Some(sword);
+        }
+        let mut open = OpenContainer {
+            window_id: 7,
+            pos: BlockPos::new(0, 0, 0),
+            shape: MenuKind::ItemCombiner { inputs: 2, station: Station::Grindstone },
+            container_size: 3,
+            state_id: 0,
+        };
+
+        apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            Some(&mut open),
+            7,
+            Click { slot: 2, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
+        );
+
+        let carried = inventory.click_state().carried.as_ref().expect("must take a plain sword back");
+        assert!(carried.components.enchantments.is_empty(), "sharpness is not a curse and must be stripped");
+        let cells = inventory.workstation().expect("still open");
+        assert_eq!(cells[0], None, "grindstone always fully clears both inputs on take");
+        assert_eq!(cells[1], None);
+    }
+
+    /// The smithing table end to end (issue #255): a netherite upgrade through
+    /// the real click path, checking the generic shrink-by-1 take behaviour
+    /// (shared with the crafting table) applies to all three input cells.
+    #[test]
+    fn the_smithing_table_upgrades_to_netherite_through_the_real_click_path() {
+        let mut inventory = PlayerInventory::new();
+        let block_entities = BlockEntityHandle::new();
+        inventory.open_workstation(3);
+        if let Some(ws) = inventory.workstation_mut() {
+            ws[0] = Some(stack("minecraft:netherite_upgrade_smithing_template", 1));
+            ws[1] = Some(stack("minecraft:diamond_sword", 1));
+            ws[2] = Some(stack("minecraft:netherite_ingot", 1));
+        }
+        let mut open = OpenContainer {
+            window_id: 7,
+            pos: BlockPos::new(0, 0, 0),
+            shape: MenuKind::ItemCombiner { inputs: 3, station: Station::Smithing },
+            container_size: 4,
+            state_id: 0,
+        };
+
+        // Menu slot 3 is the result for a 3-input combiner menu.
+        apply_container_clicked(
+            &ContainerTagProto,
+            &mut inventory,
+            &block_entities,
+            Some(&mut open),
+            7,
+            Click { slot: 3, button: 0, click_type: 0 },
+            &[],
+            None,
+            false,
+        );
+
+        let carried = inventory.click_state().carried.as_ref().expect("must take the upgraded sword");
+        assert_eq!(carried.item.to_string(), "minecraft:netherite_sword");
+        let cells = inventory.workstation().expect("still open");
+        assert!(cells.iter().all(Option::is_none), "each of the three inputs was a stack of one and is now consumed");
     }
 
     /// A click against the connection's *open* non-zero window reaches both the

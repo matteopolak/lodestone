@@ -177,6 +177,23 @@ pub struct ItemComponents {
     /// Stored as bytes rather than a parsed `Nbt` so [`ItemComponents`] keeps its
     /// `Eq`: NBT carries floats, which are not `Eq`.
     pub custom_data: Option<Vec<u8>>,
+    /// `minecraft:repair_cost`: the anvil's "prior work penalty" counter —
+    /// vanilla's `AnvilMenu.calculateIncreasedRepairCost` doubles-and-adds-one
+    /// each time an item is worked, and the anvil's XP cost sums both
+    /// operands' values (`AnvilMenu.createResult`'s `tax`).
+    ///
+    /// **Server-side bookkeeping only.** The wire component exists
+    /// (`minecraft:repair_cost`, a bare VarInt) but this build's protocol
+    /// decoder currently only consumes it for byte-alignment and does not
+    /// surface it (see `crates/protocol/v770/src/adapter/inventory.rs`'s
+    /// "consumed for alignment" component group) — so a stack that arrived
+    /// over the wire always reports `0` here even if a real client sent a
+    /// worked item. Every stack this server itself produces (anvil/grindstone
+    /// output) sets this field directly in Rust, never through a decode, so
+    /// the anvil economy is internally consistent even though the value does
+    /// not yet round-trip through a real client. Defaults to `0`, matching
+    /// vanilla's own `getOrDefault(DataComponents.REPAIR_COST, 0)`.
+    pub repair_cost: u32,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.
