@@ -40,7 +40,7 @@ impl WindowApp {
     /// every other best-effort send in this app, e.g. `NetClient::send_action`
     /// itself).
     pub(super) fn send_menu_click(&mut self, click: Click) {
-        // Issue #145: a plugin-opened local menu has no server container, so its
+        // A plugin-opened local menu has no server container, so its
         // clicks are applied locally and **nothing is sent**. Checked before the
         // connection check on purpose — a local menu works with no connection at
         // all, so bailing on `net()` first would make plugin menus dead at the
@@ -165,7 +165,7 @@ impl WindowApp {
     /// trade-list buttons and act on it, returning whether it **consumed**
     /// the click — vanilla's `postButtonClick`
     /// (`MerchantScreen.java:61-65,74-82`): select the row, remember it, and
-    /// tell the server (issue #245's UI half).
+    /// tell the server (that fix's UI half).
     ///
     /// Given first refusal the same way
     /// [`Self::handle_recipe_panel_click`] is, and for the same reason: the
@@ -206,7 +206,7 @@ impl WindowApp {
     /// [`ClientAction::SetRecipeBookSettings`] and nothing in the shell ever
     /// constructed one (an outbound island, the `ClientAction::SetFlying`
     /// shape), while the inbound `RECIPE_BOOK_SETTINGS` fold landed in
-    /// `fd53995` and nothing read it. Issue #436.
+    /// `fd53995` and nothing read it. That fix.
     ///
     /// Sent directly rather than queued through `ActionQueue`, like
     /// `Sim::send_selected_slot`: this is a discrete click, not a per-tick
@@ -225,7 +225,7 @@ impl WindowApp {
         );
     }
 
-    /// Auto-fill the crafting grid for `id` (issue #163's "click a recipe to
+    /// Auto-fill the crafting grid for `id` (that fix's "click a recipe to
     /// fill the grid").
     ///
     /// Every click goes out through [`Self::send_menu_click`], i.e. the **same**
@@ -248,7 +248,7 @@ impl WindowApp {
     }
 
     /// A number-key / off-hand-key `SWAP` against the slot under the cursor
-    /// (issue #378 part 3).
+    /// (part 3).
     ///
     /// Vanilla's `AbstractContainerScreen.checkHotbarKeyPressed`
     /// (`AbstractContainerScreen.java:506-522`) guards on exactly two pieces of
@@ -300,9 +300,9 @@ impl WindowApp {
         );
         let MenuHit::Slot(index) = hit else { return };
         // Vanilla's `40` is the off-hand button and `do_swap`'s `button == 40` arm
-        // handles it. Since #382 freed `F` the off-hand binding does reach here;
+        // handles it. Since that fix freed `F` the off-hand binding does reach here;
         // note this is the **container** route only — the no-screen route is
-        // `send_offhand_swap` below, a different packet entirely (#385).
+        // `send_offhand_swap` below, a different packet entirely.
         let click = if button == OFFHAND_SWAP_BUTTON {
             Click::offhand_swap(index)
         } else if let Ok(hotbar) = u8::try_from(button) {
@@ -323,7 +323,7 @@ impl WindowApp {
     /// `else if` — duplicating either here would be a second copy that can
     /// drift from the one `container.rs` already tests. `Click::drop_one`/
     /// `drop_stack` and `do_throw` (`lodestone-game`) were built and tested
-    /// under #27 with zero producers before this; this is the first caller.
+    /// under that fix with zero producers before this; this is the first caller.
     pub(super) fn send_container_drop(&mut self, ctrl: bool) {
         // Same interception as `send_container_swap`. Vanilla's raw button number for a
         // throw is `0` for one item and `1` for the whole stack, which is what `ctrl`
@@ -416,7 +416,7 @@ impl WindowApp {
     /// decidable is in [`drop_selected_action`], testable without a window, a
     /// GPU or a live `Sim`.
     ///
-    /// # The local prediction is not optional (issue #436)
+    /// # The local prediction is not optional
     ///
     /// This used to be `send_action` and nothing else, and an owner reported the
     /// consequence: *"throwing out items with Q doesn't update the count in my
@@ -428,9 +428,8 @@ impl WindowApp {
     ///
     /// Two things about the shape below are deliberate:
     ///
-    /// * **Order.** Predict, then send, which is vanilla's
-    ///   (`LocalPlayer.java:316-317`: `removeFromSelected` on line 316, the packet
-    ///   on 317).
+    /// * **Order.** Predict, then send, which is vanilla's own order inside
+    ///   `LocalPlayer.removeFromSelected`.
     /// * **Inside the `if let`.** [`drop_selected_action`] already returns `None`
     ///   for a spectator, so putting the prediction here gives it that gate for
     ///   free rather than duplicating the game-mode check — a spectator predicts
@@ -453,7 +452,7 @@ impl WindowApp {
         }
     }
 
-    /// The off-hand key pressed in normal gameplay (issue #385).
+    /// The off-hand key pressed in normal gameplay.
     ///
     /// Thin by design: everything decidable is in [`offhand_swap_action`], which
     /// takes the game mode rather than reading it off `self`, so the whole

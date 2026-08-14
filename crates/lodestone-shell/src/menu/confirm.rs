@@ -4,7 +4,7 @@
 //! ## What it is
 //!
 //! `client/gui/screens/ConfirmScreen.java`, as far as this shell's frame model
-//! goes. Issue [#540](https://github.com/matteopolak/lodestone/issues/540) is what
+//! goes. That is what
 //! made it exist, and the reason is worth stating before the mechanics, because
 //! it is the whole design:
 //!
@@ -239,7 +239,7 @@ pub fn row_slot(row: usize) -> Slot {
 /// error rather than a silently harmless Yes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmRequest {
-    /// Delete the world in `dir_name` (issue #540). Carries the **folder** name,
+    /// Delete the world in `dir_name`. Carries the **folder** name,
     /// which is what [`crate::saves::delete_world_in`] resolves through
     /// [`crate::saves::world_dir_in`], and the display name only so the warning
     /// can quote it.
@@ -380,7 +380,7 @@ impl ConfirmNav {
 
     /// A click on row `row`.
     ///
-    /// Its own arm rather than "hover then Enter", for #391's reason — and here
+    /// Its own arm rather than "hover then Enter", for that fix's reason — and here
     /// the translation would be actively dangerous: a hover that moved focus onto
     /// the affirmative button would make the *next* Enter delete.
     pub fn click_row(&mut self, row: usize) -> ConfirmOutcome {

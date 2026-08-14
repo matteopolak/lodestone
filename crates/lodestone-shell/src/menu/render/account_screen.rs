@@ -481,7 +481,7 @@ fn accounts_hint_label(text: &str) -> MenuLabel {
 /// window and then onto the four button slots, so the order here — `shown` list
 /// rows, then Add / Select / Remove / Back — is load-bearing.
 /// `the_account_rows_are_in_the_order_click_assumes` is the guard, the same shape
-/// the settings and multiplayer screens carry against the same #391 bug.
+/// the settings and multiplayer screens carry against the same that fix bug.
 #[must_use]
 pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> MenuFrame<'static> {
     use super::accounts::{

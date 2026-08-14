@@ -166,7 +166,7 @@ trait BlockView {
     ///
     /// Keyed by state rather than by name because both bubble-column states share
     /// one name and differ only in this property; see
-    /// [`VersionAdapter::block_bubble_column_drag`]. Issue #199.
+    /// [`VersionAdapter::block_bubble_column_drag`]. That fix.
     fn bubble_column_of(&self, state: u32) -> Option<bool>;
 }
 
@@ -815,7 +815,7 @@ static DEFAULT_VERSION_DATA: OnceLock<Option<Arc<dyn VersionAdapter>>> = OnceLoc
 /// Infers the connected protocol's version data from the compiled-in family
 /// set, for callers of [`LiveCollision::new`] that have no better source.
 ///
-/// # Issue #42 — this used to be reached for *inside* `new`, not passed in
+/// # That fix — this used to be reached for *inside* `new`, not passed in
 ///
 /// `LiveCollision::new` used to call this itself whenever it wasn't handed a
 /// value, which made every `LiveCollision` in the process implicitly depend on
@@ -1005,7 +1005,7 @@ impl LiveCollision {
     /// see [`SectionGrid`] for why that is the producer's job rather than a
     /// conversion here.
     ///
-    /// `version` is a required parameter, not an inferred default (issue #42):
+    /// `version` is a required parameter, not an inferred default:
     /// the caller states what collision geometry this view has, rather than
     /// `new` reaching for [`inferred_version_data`] on its own. The production
     /// caller (`Sim::live_collision`) passes `inferred_version_data()`
@@ -1057,7 +1057,7 @@ impl LiveCollision {
     /// construction.
     ///
     /// `new` already requires `version` as a constructor parameter (issue
-    /// #42), so the only remaining use for this builder is *changing* it on an
+    /// That fix), so the only remaining use for this builder is *changing* it on an
     /// existing view — chiefly the "degraded view" test fixtures, which build
     /// a view with real data and then call `with_version_data(None)` to
     /// exercise the no-census fallback on the same states. Cheap either way —
@@ -1270,7 +1270,7 @@ impl LiveCollision {
     /// The boxes [`crate::raycast::raycast`] clips the view ray against in this
     /// cell — vanilla's `state.getShape(…).toAabbs()`, block-local, appended.
     ///
-    /// # Issue #375: this is what the ray takes instead of a boolean
+    /// # This is what the ray takes instead of a boolean
     ///
     /// The pick used to hand `raycast` an occupancy *predicate*
     /// ([`is_pickable`](Self::is_pickable)), so every pickable block was a unit
@@ -1783,7 +1783,7 @@ mod tests {
     /// A one-section live view (chunk `0,0`, `min_y = 0`) whose cells at
     /// `y_range` hold `state` and whose remaining cells are air.
     ///
-    /// Passes [`inferred_version_data`] explicitly (issue #42: `new` no longer
+    /// Passes [`inferred_version_data`] explicitly (`new` no longer
     /// reaches for it on its own) — the real census when the test binary is
     /// built `--features live` against a compiled family, `None` otherwise,
     /// exactly [`LiveCollision::new`]'s old implicit behaviour, now visible at
@@ -1964,7 +1964,7 @@ mod tests {
         // full cube" — and that premise is false and was never true here. The
         // fallback is `classify(state).occludes ? FULL_CUBE : NO_COLLISION`, and
         // `occludes` is derived from the **baked model geometry**
-        // (`BlockModels::face_occludes`, `block_models.rs:410-426`): a bottom
+        // (`StateModel::face_occludes`): a bottom
         // slab's up face has no quad at the cell boundary, so it does not occlude
         // and the fallback gives it *no collision at all*, i.e. `0.0`. Which is
         // the worse of the two bugs — you fall through the slab rather than
@@ -2454,7 +2454,7 @@ mod tests {
         })
     }
 
-    /// **Issue #375, against the real per-state census.** Reported from play:
+    /// **That fix, against the real per-state census.** Reported from play:
     /// flat blocks like leaf litter stayed highlighted and stayed targetable
     /// with the crosshair plainly above them, because the ray took a per-cell
     /// *boolean* and treated every pickable block as a unit cube.
@@ -2518,7 +2518,7 @@ mod tests {
 
             // **The reported bug.** A ray crossing the cell at eye height passes
             // 7/16 of a block above the plate: vanilla does not target it, and
-            // before #375 this hit.
+            // before that fix this hit.
             assert!(
                 cast(&view, [0.5, 4.5, 3.0], [0.0, 0.0, -1.0]).is_none(),
                 "{name}: a ray half a block above a 1/16-tall plate must miss"
@@ -2609,7 +2609,7 @@ mod tests {
     /// **The degraded tier still targets.** With no version census the outline
     /// falls back to "has baked model quads ⇒ a unit cube"
     /// ([`LiveCollision::outline_of`]), which is *coarse* — the whole point of
-    /// #375 is that a cube is the wrong shape — but it must never become "no
+    /// That fix is that a cube is the wrong shape — but it must never become "no
     /// target at all", and air must still not be targetable through it.
     ///
     /// Both halves matter: without the second, a fallback that returned a cube
@@ -2659,7 +2659,7 @@ mod tests {
         assert!(!fs.under_water(), "lava must not read as water: {fs:?}");
     }
 
-    /// **Issue #31, the world-species control.** A uniform pool — every cell
+    /// **That fix, the world-species control.** A uniform pool — every cell
     /// the same source, as the two spot checks above use — can satisfy every
     /// `fluid_at` assertion even if the resolver ignored the `level` property
     /// outright and hard-coded amount 8: the fixture never contains two
@@ -2745,7 +2745,7 @@ mod tests {
     /// — so an eye resting exactly on the surface plane counts as submerged.
     /// Pinned here because fog, overlay, sounds and pose all flip on it.
     ///
-    /// # Correction (found while closing issue #31, `fluid_at`)
+    /// # Correction (found while closing that fix, `fluid_at`)
     ///
     /// This test used to seed a column `0..=2` and assert the surface sat at the
     /// coarse full-cell plane `y = 3.0` (`2.0 + 1.0`). That was right *when it was
@@ -2810,7 +2810,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Issues #210 / #216: name-keyed scaffolding/powder-snow hooks, and
+    // Two closed fixes: name-keyed scaffolding/powder-snow hooks, and
     // `is_solid_face`'s same-fluid distinction. A minimal synthetic
     // `BlockView` — no vanilla pack needed, so these run in every ordinary
     // `cargo test`, unlike the `--features live` gates above.
@@ -2925,7 +2925,7 @@ mod tests {
         // Vanilla's `isSolidFace` only excludes the fluid asking the question
         // (`FlowingFluid.java:108`), so a *different* fluid's falling jet must
         // still see the sturdy face — the exact case the old "any fluid
-        // present -> false" shortcut got wrong (#216).
+        // present -> false" shortcut got wrong.
         const FULL_CUBE_LOCAL: &[BlockAabb] = &[BlockAabb {
             min: [0.0, 0.0, 0.0],
             max: [1.0, 1.0, 1.0],

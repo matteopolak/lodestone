@@ -15,7 +15,7 @@ pub struct CrackTarget {
     pub stage: u8,
 }
 
-/// Assembles the full per-frame `cracks` slice (issue #410): the local
+/// Assembles the full per-frame `cracks` slice: the local
 /// player's own dig, if any, plus one [`CrackTarget`] for every *other*
 /// player's active overlay in `overlays` — the enumeration
 /// `lodestone_game::mining::BlockDestructionOverlays::iter` exists for.
@@ -191,7 +191,7 @@ const LINE_WIDTH_REFERENCE_PX: f32 = 1920.0;
 /// write, alpha-blended) so it reads clearly over terrain without a second
 /// pass or z-fighting.
 ///
-/// ## Why triangles, not `LineList` (issue #364)
+/// ## Why triangles, not `LineList`
 ///
 /// An earlier version of this pass drew the 12 edges as `PrimitiveTopology::LineList`,
 /// which rasterizes at exactly one *physical* pixel regardless of resolution or

@@ -9,7 +9,7 @@
 //! world is capped at a few thousand sections and never runs live, so this was
 //! never the measured cost.
 //!
-//! The **model** (live-vanilla) path does not: issue #75 profiled a live
+//! The **model** (live-vanilla) path does not: That fix profiled a live
 //! session and found this same per-section-buffer shape responsible for 52.9%
 //! of main-thread CPU, rewriting *every* resident section's whole camera
 //! uniform every frame — thousands of `queue.write_buffer` calls for data that
@@ -116,7 +116,7 @@ pub const SKY_COLOR: [f32; 3] = [0.242_867, 0.462_361, 0.827_571];
 /// Fraction of the view distance at which fog begins.
 ///
 /// **This is vanilla's span expressed as a fraction, not a taste knob** (issue
-/// #388). Vanilla does not use a fraction at all:
+/// That fix). Vanilla does not use a fraction at all:
 /// `FogRenderer.setupFog` (`FogRenderer.java:198-200`) fades over an absolute
 /// band of `clamp(renderDistanceInBlocks / 10, 4, 64)` blocks ending at the view
 /// distance — see [`lodestone_render::fog::render_distance_fade_span`], which is
@@ -239,7 +239,7 @@ pub struct RenderState {
     depth: DepthBuffer,
     sections: HashMap<SectionKey, SectionGpu>,
     /// The packed path's group-0 binding 0: this frame's view-projection (and,
-    /// from issue #400 on, its fog), shared by every packed section and written
+    /// from that fix on, its fog), shared by every packed section and written
     /// **once** per frame. See `docs/section-camera-uniform.md`.
     packed_shared_cam_buffer: wgpu::Buffer,
     /// The one group-0 bind group every packed section draws through, over
@@ -248,7 +248,7 @@ pub struct RenderState {
     /// rebuilding this.
     packed_cam_bind_group: wgpu::BindGroup,
     /// Per-section world origins for the packed table, one arena slot each,
-    /// written at upload rather than per frame (issue #76). Allocated on every
+    /// written at upload rather than per frame. Allocated on every
     /// run — the packed table is empty in live play, and 2 MiB is cheaper than a
     /// second construction path.
     packed_origin_arena: SectionOriginArena,
@@ -261,7 +261,7 @@ pub struct RenderState {
     debug_lines_source: DebugLinesSource,
     entities: EntityRenderer,
     /// Render-frame counter driving the mob-fire billboard's texture
-    /// animation (issue #434) — see `prepare_flame`'s doc for why this counts
+    /// animation — see `prepare_flame`'s doc for why this counts
     /// render frames rather than the real 20 Hz game tick.
     flame_frame_counter: std::cell::Cell<u64>,
     /// Block-break debris **and** sheet particles (flame, smoke, crits,
@@ -277,7 +277,7 @@ pub struct RenderState {
     /// the sheet slots.
     ///
     /// Kept as a field, not dropped after building the bind group: `has_*`
-    /// needs it, and issue #45's whole lesson is that "the sheet texture is
+    /// needs it, and that fix's whole lesson is that "the sheet texture is
     /// installed" must be answerable from outside this module rather than
     /// inferred from pixels.
     particle_sheet_atlas: Option<GpuAtlas>,
@@ -296,13 +296,13 @@ pub struct RenderState {
     /// distance / eye-in-fluid state via [`RenderState::set_fog`].
     fog: FogSettings,
     /// The player's render distance in chunks, set with [`RenderState::set_fog`]
-    /// because the sky disc's gradient end is clamped to it (#399). Defaults to
+    /// because the sky disc's gradient end is clamped to it. Defaults to
     /// [`DEFAULT_RENDER_DISTANCE_CHUNKS`] alongside `fog`.
     render_distance_chunks: u32,
     /// Whether the per-frame terrain cull runs at all — vanilla's `smartCull`
     /// switch, and this client's false-cull diagnostic. `true` by default; set it
     /// with [`RenderState::set_terrain_culling`]. With it off, every resident
-    /// section submits a draw at every heading, which is the pre-#543 behaviour
+    /// section submits a draw at every heading, which is the pre-fix behaviour
     /// and the A/B arm the instruction harness measures against.
     terrain_culling: bool,
     /// The section occlusion graph (U3): one [`SectionVisibility`] per section
@@ -347,14 +347,14 @@ pub struct RenderState {
     /// default — is the plain held-item pose, so the eating bob is invisible until
     /// the shell wires it in via [`RenderState::set_item_use_source`].
     item_use: ItemUseSource,
-    /// Vanilla's `ItemInHandRenderer` swap state (issue #366): which held item is
+    /// Vanilla's `ItemInHandRenderer` swap state: which held item is
     /// *drawn* — which lags [`Self::main_hand`] across a hotbar change — and how far
     /// the hand is lowered.
     ///
     /// Stepped by [`RenderState::set_main_hand_source`], which is the shell's one
     /// per-frame `&mut self` hop; read by `prepare_first_person_hand` for both the
     /// item and the bare-arm branch. Its default is "fully equipped, empty hand", so
-    /// a caller that never installs a main-hand source sees exactly the pre-#366
+    /// a caller that never installs a main-hand source sees exactly the pre-fix
     /// behaviour.
     equip: first_person::HeldItemEquip,
     /// Vanilla bobs the hand with a *second, independent* application of
@@ -377,21 +377,21 @@ pub struct RenderState {
     /// [`RenderState::set_time_of_day_source`] — the same "unset means noon"
     /// convention [`SkyDarkenSource`] already uses.
     time_of_day: TimeOfDaySource,
-    /// The underwater/fire screen-overlay pass (issues #108, #112), built once
+    /// The underwater/fire screen-overlay pass, built once
     /// the vanilla `underwater.png`/`fire_1.png` textures are available. `None`
     /// — no `client.jar`, a headless test, or simply before
     /// [`RenderState::install_screen_effects`] runs — draws neither overlay,
     /// the same "no pass installed, nothing extra drawn" convention
     /// [`Self::sky`] uses.
     screen_effects: Option<lodestone_render::ScreenEffectRenderer>,
-    /// Billboarded entity/player nametags (issue #100). Always constructed —
+    /// Billboarded entity/player nametags. Always constructed —
     /// unlike [`Self::sky`]/[`Self::screen_effects`], there is no "install"
     /// step: [`NameTagRenderer::new`] loads its own jar-sourced font
     /// (fail-open to drawing nothing, same contract as
     /// [`crate::hud::vanilla_font::VanillaFont::shared`]), so nothing
     /// downstream needs to know whether it succeeded.
     nametag: NameTagRenderer,
-    /// Block-entity rigs — chests today (issue #23). Always constructed, like
+    /// Block-entity rigs — chests today. Always constructed, like
     /// [`Self::nametag`] and unlike [`Self::sky`]: it loads its own sheets from
     /// the jar and fail-opens to drawing nothing, so there is no install step for
     /// a caller to forget.
@@ -414,13 +414,13 @@ pub struct RenderState {
     /// `Sim::bell_source`; a bell always draws at rest, because the shake
     /// trigger has no producer yet.
     bell_source: BellSource,
-    /// Where this frame's shulker boxes come from (issue #23). Same "unset means
+    /// Where this frame's shulker boxes come from. Same "unset means
     /// draw nothing" convention as [`Self::skull_source`] — and here that
     /// degradation is a **hole**, not a missing decoration: a 26.2 shulker box has
     /// no block model of its own, so an unset source leaves an empty cell where
     /// every box is, exactly as chest does.
     shulker_source: ShulkerSource,
-    /// Where this frame's banners come from (issue #23). Same "unset means draw
+    /// Where this frame's banners come from. Same "unset means draw
     /// nothing" convention as [`Self::skull_source`], and here that degradation is
     /// merely a missing decoration: a banner's pole and cloth **are** drawn by this
     /// pass, but the block itself has no terrain model, so an unset source leaves a
@@ -438,7 +438,7 @@ pub struct RenderState {
     /// mesh: the fire and the logs are block models the terrain pass already
     /// draws, so an unset source leaves a complete campfire cooking nothing.
     campfire_source: CampfireSource,
-    /// Where this frame's moving pistons come from (issue #23). Consumed by
+    /// Where this frame's moving pistons come from. Consumed by
     /// [`Self::prepare_moving_blocks`] and the **model** pipeline, not by
     /// `prepare_block_entities` and not by the item path — a third destination, and
     /// the only source in this struct that shares a vertex buffer with falling
@@ -451,13 +451,13 @@ pub struct RenderState {
     /// and the same mild degradation — an enchanting table's own block model is
     /// complete, so an unset source leaves a table with no book floating over it.
     enchanting_table_source: EnchantingTableSource,
-    /// Where this frame's filled-map pictures come from (issue #184). Same "unset
+    /// Where this frame's filled-map pictures come from. Same "unset
     /// means draw nothing" convention as [`Self::skull_source`], and here the
     /// degradation is that a held `filled_map` falls back to its ordinary flat item
     /// model rather than showing a blank map, because the map branch declines
     /// before it builds any geometry.
     map_source: MapSource,
-    /// World-space sign text (issue #23). Always constructed, like
+    /// World-space sign text. Always constructed, like
     /// [`Self::nametag`]: it loads its own jar-sourced font and fail-opens to
     /// drawing nothing. A sign's *board* is a real block model (unlike chest
     /// or skull) and already draws through the ordinary terrain pass with no
@@ -478,7 +478,7 @@ pub struct RenderState {
     /// jar still gets a correctly darkened storm — it just gets no visible
     /// droplets, which is the honest degradation.
     weather: Option<lodestone_render::WeatherRenderer>,
-    /// The enchantment-glint pass (issue #452): the `GlintPipeline` plus an
+    /// The enchantment-glint pass: the `GlintPipeline` plus an
     /// uploaded non-sRGB `enchanted_glint_item.png` sheet and one shared group-0
     /// uniform buffer. `None` — no `client.jar`, a headless test, or simply
     /// before [`RenderState::install_glint`] runs — draws no second pass, so an
@@ -497,7 +497,7 @@ struct WoolPartAccum {
     tints: Vec<InstanceTint>,
 }
 
-/// One model type's uploaded flame-instance buffer for a frame (issue #434)
+/// One model type's uploaded flame-instance buffer for a frame
 /// — the mob-fire counterpart to [`WoolPartAccum`]/`ArmourDrawBatch`, simpler
 /// than either because the flame mesh has no per-part skeleton attachment:
 /// one buffer, one draw.
@@ -578,7 +578,7 @@ struct ArmourDrawBatch {
 }
 
 /// Which sheet an [`ArmourDrawBatch`] samples: a material's own armour sheet, or a
-/// smithing-table trim sprite drawn over it (issue #17).
+/// smithing-table trim sprite drawn over it.
 ///
 /// One enum rather than two parallel batch lists, because the two share
 /// everything else — the same four meshes, the same parts, the same wearer

@@ -1,12 +1,12 @@
 //! Resolving a command block the player is looking at into the data the edit
-//! screen opens with (issue #47's missing trigger, tracked on #436).
+//! screen opens with (a missing trigger, tracked as a follow-up).
 //!
 //! # What this closes
 //!
 //! `Screen::CommandBlockEdit`, `command_block::CommandBlockState` and
 //! `render::command_block_frame` landed in `c76510b` real and unit-tested, and
 //! **nothing opened them**: `UiState::open_command_block` and
-//! `MenuNav::open_command_block` had no production caller. Issue #436's ledger
+//! `MenuNav::open_command_block` had no production caller. That fix's ledger
 //! entry says the lift is "substantially bigger than the one-line hookup the
 //! issue brief anticipated, since the data to open the screen *with* does not
 //! exist yet either", citing `grep -rn "CommandBlock" crates/lodestone-model
@@ -84,7 +84,7 @@ const COMMAND_BLOCKS: [(&str, CommandBlockMode); 3] = [
 /// so passing a state id in resolved to an arbitrary block, and the effect was
 /// symmetrical and both halves player-visible: every real command block
 /// (states 9968, 14817, 14829) fell past `BLOCK_COUNT` and answered `None`, so
-/// the edit screen #442 wired up could never open in the game; while the three
+/// the edit screen that fix wired up could never open in the game; while the three
 /// *registry* ids reused as state ids answered `Some` — state 407 is
 /// `minecraft:cherry_leaves` (→ Redstone) and 668/669 are
 /// `minecraft:note_block` (→ Auto/Sequence), so right-clicking leaves or a note

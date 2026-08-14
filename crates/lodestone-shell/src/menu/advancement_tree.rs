@@ -1,4 +1,4 @@
-//! Vanilla's `TreeNodePosition` (issue #167): where each advancement widget sits
+//! Vanilla's `TreeNodePosition`: where each advancement widget sits
 //! in its tab's tree.
 //!
 //! # Why this has to exist

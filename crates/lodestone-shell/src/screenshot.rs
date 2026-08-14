@@ -1,4 +1,4 @@
-//! `key.screenshot` (issue #16): read the window's own swapchain texture back
+//! `key.screenshot`: read the window's own swapchain texture back
 //! and write it as a PNG. The one keybind in this client that ends at a file
 //! rather than at a packet — see `docs/keybindings.md`'s "Screenshot" section
 //! for the vanilla parity table and the two deliberate divergences.

@@ -1,4 +1,4 @@
-//! Vanilla's `SelectWorldScreen` (issue #397): its metrics, its
+//! Vanilla's `SelectWorldScreen`: its metrics, its
 //! header/footer layout block, and the world-list row rects.
 //!
 //! Named `world_list` rather than `world_select` on purpose: this module is a
@@ -10,7 +10,7 @@
 
 use super::*;
 
-// -- vanilla's `SelectWorldScreen` metrics (issue #397) ----------------------
+// -- vanilla's `SelectWorldScreen` metrics ----------------------
 //
 // Same rule as the block above: every number is transcribed from
 // `.cache/mc/26.2/client-src`, with the file and line named, in logical GUI
@@ -52,7 +52,7 @@ pub(super) const WORLD_LIST_ROW_W: f32 = 270.0;
 /// The list's `itemHeight`: the last argument of
 /// `super(minecraft, width, height, 0, 36)` (`WorldSelectionList.java:112`).
 ///
-/// **Public since the list learned to scroll** (issue #541), for
+/// **Public since the list learned to scroll**, for
 /// [`SERVER_LIST_ITEM_H`](super::SERVER_LIST_ITEM_H)'s reason: the keyboard
 /// scroll-into-view path in `nav.rs` has to turn a row index into a pixel top,
 /// and a second copy of `36.0` there is exactly how the draw and the hit-test
@@ -310,14 +310,14 @@ pub fn world_select_title_label() -> MenuLabel {
 /// `getFirstEntryY() + index * itemHeight - scrollAmount`,
 /// `repositionEntries` (`AbstractSelectionList.java:993-996`).
 ///
-/// **`scroll` is pixels, not rows** (issue #541), for the reason #445 settled one
+/// **`scroll` is pixels, not rows**, for the reason that fix settled one
 /// screen over: one wheel notch is `scrollRate = defaultEntryHeight / 2` = 18 px,
 /// and a row-quantised offset cannot represent that at all. Canvas-independent in
 /// the other axis: `list.getY()` is the content band's top, which
 /// `HeaderAndFooterLayout.arrangeElements` clamps to exactly the header height
 /// whenever the content is sized to `getContentHeight()`.
 ///
-/// The scroll term used to be absent, and its absence was the whole of #541 —
+/// The scroll term used to be absent, and its absence was the whole of that fix —
 /// worlds past the tenth were unreachable.
 #[must_use]
 pub fn world_list_row_top(index: usize, scroll: f32) -> f32 {
@@ -352,9 +352,9 @@ pub fn world_list_visible_rows(height: f32) -> usize {
 /// click can no longer land on a row that is not on screen — and, in the other
 /// direction, **a row scrolled out of view is not a tab stop either**, because
 /// `WorldSelectNav` scrolls focus into view rather than leaving a focusable row
-/// off-band. That was the one genuinely wrong behaviour #541 named.
+/// off-band. That was the one genuinely wrong behaviour that fix named.
 ///
-/// **A partial-overlap test, not `index < visible_rows`** (issue #541). The old
+/// **A partial-overlap test, not `index < visible_rows`**. The old
 /// form stood in for a scissor the draw did not have, so it rejected a row that
 /// was merely *partly* outside the band rather than let it paint over the footer.
 /// `draw_world_entry` runs inside [`Quads::with_clip`] now, and with a pixel
@@ -370,7 +370,7 @@ pub fn world_list_row_visible(index: usize, height: f32, scroll: f32) -> bool {
     top + WORLD_LIST_ITEM_H >= list_top && top <= list_bottom
 }
 
-/// This screen's list as the generic [`widget::ListSpec`] (issue #541) — what
+/// This screen's list as the generic [`widget::ListSpec`] — what
 /// `MenuNav::active_list` hands the scrollbar draw and the wheel arm.
 ///
 /// The band and the pitch are derived from the same three values the draw uses
@@ -463,7 +463,7 @@ pub fn world_list_row_left(width: f32) -> f32 {
 }
 
 /// The rect of world-list row `index` at a `width`-wide canvas, scrolled by
-/// `scroll` **pixels** (issue #541).
+/// `scroll` **pixels**.
 #[must_use]
 pub fn world_list_row_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
     (

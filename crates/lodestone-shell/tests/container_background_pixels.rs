@@ -1,5 +1,5 @@
-//! Pixel gate: **the container screen looks like vanilla (issue #51), and the
-//! hotbar dims behind it (issue #61's leftover).**
+//! Pixel gate: **the container screen looks like vanilla, and the
+//! hotbar dims behind it (that fix's leftover).**
 //!
 //! Two claims, two negative controls, per `CLAUDE.md`'s evidence standard
 //! ("prove pixels changed... with a negative control that must fail the same
@@ -16,7 +16,7 @@
 //!
 //! A real [`HudRenderer`] draws one bright hotbar item into the target first —
 //! standing in for "the HUD, which draws unconditionally behind a
-//! world-following screen" (issue #61). [`ContainerRenderer`] then draws on top,
+//! world-following screen". [`ContainerRenderer`] then draws on top,
 //! **after** the HUD, exactly as `app.rs`'s per-frame draw now orders the two
 //! passes. With a menu open, the container's full-canvas dim gradient must
 //! darken that hotbar pixel. The negative control is the same two-pass sequence

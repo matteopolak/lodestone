@@ -1,5 +1,5 @@
 //! Fetching **our own** skin after sign-in, and getting it onto the screen in
-//! the same session (issue #62).
+//! the same session.
 //!
 //! ## What it is
 //!

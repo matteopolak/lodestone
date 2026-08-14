@@ -39,7 +39,7 @@ fn main() -> anyhow::Result<()> {
         CliOutcome::Run(mut config) => {
             let _chrome_guard = init_logging();
             // Fold `options.json` into the argv-parsed config, for the settings
-            // that live in both (issue #443). An explicit flag still wins for
+            // that live in both. An explicit flag still wins for
             // this run; everything else takes the persisted value, so the
             // consumers in `sim`/`app` read the resolved number without knowing
             // a settings screen exists. Must happen before `app::run`, which

@@ -128,7 +128,7 @@ pub use crate::asset_objects::ASSET_ROOT_ENV;
 #[derive(Debug)]
 pub struct ShellAudio {
     engine: AudioEngine,
-    /// The sound-subtitle captions (issue #198). Fed here rather than at each
+    /// The sound-subtitle captions. Fed here rather than at each
     /// caller because this struct's two `play_*` methods are the single choke
     /// point every sound in the client passes through — captions cannot drift out
     /// of sync with what is audible if they are recorded where playing happens.

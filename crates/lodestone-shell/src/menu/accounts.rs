@@ -92,7 +92,7 @@ use crate::offline_identity::{OfflineIdentity, offline_uuid};
 /// still doesn't and why fixing it here first (a new screen, not shared
 /// code) does not fix it there too.
 ///
-/// **A count, not a measurement**, and that is the residual gap #402 records:
+/// **A count, not a measurement**, and that is the residual gap that fix records:
 /// this module has no canvas, so it cannot ask how many 36 px rows actually fit
 /// between the header and the footer. `render::accounts_row_visible` is the
 /// second half — it refuses to *draw* a row that would overlap the footer band,
@@ -466,7 +466,7 @@ impl AccountsNav {
 
     /// Whether the name editor is open — the predicate `nav.rs` routes a click
     /// on this screen through, so a click on the field is caret placement rather
-    /// than "save the form" (#391's shape).
+    /// than "save the form" (that fix's shape).
     #[must_use]
     pub fn is_editing_name(&self) -> bool {
         self.state.borrow().name_edit.is_some()
@@ -732,8 +732,8 @@ impl AccountsNav {
                     //
                     // `highlighted` has to move with it, or the hover fix opens a
                     // new gap in the other direction: a click reached here through
-                    // `MenuNav::click`'s `hover` + `Enter` fall-through
-                    // (`nav.rs:1724-1725`), so with hover no longer writing
+                    // `MenuNav::click`'s `hover` + `Enter` fall-through,
+                    // so with hover no longer writing
                     // `highlighted`, clicking account 3 would sign in as 3 while
                     // leaving Remove and the Delete key aimed at whatever the
                     // keyboard last highlighted. That is the same class of bug as
@@ -962,7 +962,7 @@ fn handle_key_mid_flow(st: &mut State, key: MenuKey) -> AccountsSignal {
         // (`MenuNav::click`'s default translation). Cancel is the only control on
         // the screen while a sign-in is in flight, so "activate the focused
         // widget" and "cancel" are the same verb — without this the button would
-        // draw, highlight, and do nothing, which is #391's shape.
+        // draw, highlight, and do nothing, which is that fix's shape.
         MenuKey::Escape | MenuKey::Enter => {
             if let SignIn::Requesting { cancel, .. } | SignIn::Waiting { cancel, .. } = &st.sign_in {
                 cancel.store(true, Ordering::Relaxed);
@@ -1131,7 +1131,7 @@ fn pump_locked(sign_in: SignIn) -> (SignIn, Option<(Option<String>, Option<Accou
 /// and falls back to the error's own `Display` (via `#[error(...)]`) for
 /// everything else. `AuthError` is `#[non_exhaustive]`, so this **must**
 /// have a wildcard arm regardless — which is exactly what made it safe to
-/// write *before* issue #65 landed [`lodestone_auth::AuthError::Xsts`] and
+/// write *before* that fix landed [`lodestone_auth::AuthError::Xsts`] and
 /// [`lodestone_auth::XstsErrorKind`] concurrently in this same session: this
 /// function did not need to know their names to render something reasonable
 /// in the meantime, and giving `Xsts` its own arm now that it exists is a
@@ -1155,7 +1155,7 @@ pub fn describe_auth_error(e: &lodestone_auth::AuthError) -> String {
 /// Describes a failure from [`lodestone_auth::login::finish_interactive`],
 /// which now does what `run_device_code_login`/`finish_ms_token` used to
 /// hand-roll as two separate calls (deriving the session, then saving the
-/// refresh token) — see issue #73 and `docs/accounts.md`. Keeping the same
+/// refresh token) — see that fix and `docs/accounts.md`. Keeping the same
 /// two distinct messages those two calls used to produce, rather than
 /// collapsing to one, because `secrets.save_refresh_token` can only ever fail
 /// with [`lodestone_auth::AuthError::Keychain`]/[`lodestone_auth::AuthError::Cache`]
@@ -1206,7 +1206,7 @@ fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
                 return;
             }
         };
-        // Issue #446: reqwest is built with `rustls-no-provider`, so
+        // Reqwest is built with `rustls-no-provider`, so
         // `Client::new()` panics unless a rustls crypto provider is installed.
         // Idempotent, and deliberately adjacent to the construction it protects.
         lodestone_auth::install_crypto_provider();
@@ -1234,7 +1234,7 @@ fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
                 Ok(Some(ms_token)) => {
                     // Was two hand-rolled calls (`session_from_ms_token` then
                     // `secrets.save_refresh_token`) duplicating
-                    // `login::finish_interactive`'s own composition — issue #73.
+                    // `login::finish_interactive`'s own composition — That fix.
                     // The `metadata` argument is scratch: this thread's real
                     // metadata lives on the render thread and is written back
                     // through `AccountsNav::pump`, not here, so the upsert
@@ -1255,7 +1255,7 @@ fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
                             return;
                         }
                     };
-                    // Issue #62: the profile now carries its skin, so fetch it
+                    // The profile now carries its skin, so fetch it
                     // here — this is the only place in the process with both the
                     // services profile and an HTTP client. Never fatal: every
                     // failure inside is a `warn!`, because a dead texture CDN
@@ -1318,7 +1318,7 @@ fn run_browser_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
                 return;
             }
         };
-        // Issue #446, as above: `rustls-no-provider` makes this a runtime panic
+        // That fix, as above: `rustls-no-provider` makes this a runtime panic
         // without an installed provider.
         lodestone_auth::install_crypto_provider();
         let client = reqwest::Client::new();
@@ -1394,7 +1394,7 @@ async fn finish_ms_token(
 ) {
     // Was two hand-rolled calls (`session_from_ms_token` then
     // `secrets.save_refresh_token`) duplicating `login::finish_interactive`'s
-    // own composition — issue #73. `scratch` is discarded for the same reason
+    // own composition — That fix. `scratch` is discarded for the same reason
     // `run_device_code_login` discards its own: this thread's real metadata
     // lives on the render thread and is written back through
     // `AccountsNav::pump`, never here.
@@ -1415,7 +1415,7 @@ async fn finish_ms_token(
                 // only thing that makes a session-derivation failure
                 // diagnosable after the fact. A credential-*save* failure
                 // (`AuthError::Keychain`/`AuthError::Cache`) does not warn here,
-                // matching the pre-#73 behaviour where that step had no log
+                // matching the pre-fix behaviour where that step had no log
                 // line of its own.
                 use lodestone_auth::AuthError as E;
                 if !matches!(e, E::Keychain(_) | E::Cache(_)) {
@@ -1425,7 +1425,7 @@ async fn finish_ms_token(
                 return;
             }
         };
-    // Issue #62, as in `run_device_code_login` — both flows reach the same
+    // That fix, as in `run_device_code_login` — both flows reach the same
     // services profile, so both fetch. Never fatal.
     crate::skin_fetch::fetch_own_skin(client, &session.profile).await;
     let now = SystemTime::now()
@@ -1481,7 +1481,7 @@ async fn cancellable_sleep(secs: u64, cancel: &AtomicBool) -> bool {
 /// the three desktop platforms this client targets without adding to the
 /// dependency graph for a single call site.
 ///
-/// `pub(crate)` since issue #415: `super::telemetry`'s Privacy Statement/Give
+/// `pub(crate)` since that fix: `super::telemetry`'s Privacy Statement/Give
 /// Feedback buttons reuse this rather than duplicating it, since opening a
 /// URL has nothing account-specific about it.
 /// **A unit test must never reach the OS handoff, and one did — it reached a
@@ -1837,8 +1837,8 @@ mod tests {
     #[test]
     fn clicking_an_account_selects_it_and_moves_what_remove_acts_on() {
         // The other direction of the hover fix, and the reason it is not just a
-        // deleted line. `MenuNav::click` reaches this screen as `hover` + `Enter`
-        // (`nav.rs:1724-1725`); now that `hover` no longer writes `highlighted`,
+        // deleted line. `MenuNav::click` reaches this screen as `hover` + `Enter`;
+        // now that `hover` no longer writes `highlighted`,
         // `Enter` must, or Remove and Delete stay aimed at a row the player is no
         // longer looking at.
         let path = temp_path("click-selects");
@@ -2439,7 +2439,7 @@ mod tests {
         // The two rows of the editor's frame, through the path `MenuNav::click`
         // routes to (`nav.rs`'s `Screen::Accounts` arm). Row 0 is an
         // always-focused field: clicking it used to arrive as `hover` + `Enter`
-        // and therefore *save*, which is #391's shape on a sixth screen.
+        // and therefore *save*, which is that fix's shape on a sixth screen.
         let (nav, path) = nav_with_offline("click", &[], Some("Steve"));
         let offline_file = path.parent().unwrap().join("offline.json");
         let offline_row = nav.rows().len() - 1;

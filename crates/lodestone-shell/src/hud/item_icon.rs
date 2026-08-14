@@ -81,7 +81,7 @@ use std::sync::Arc;
 
 use glam::Mat4;
 // `font::metrics` used to be imported here for `LINE_HEIGHT`, which the stack
-// count's vertical anchor was derived from. Issue #384 replaced that derivation
+// count's vertical anchor was derived from. That fix replaced that derivation
 // with vanilla's own constant (`COUNT_TOP`), so nothing in this module needs the
 // font's metrics any more — see `COUNT_RIGHT`'s doc comment for why a derived
 // anchor was the defect rather than the off-by-one.
@@ -122,7 +122,7 @@ pub struct ItemIcon {
     pub max_damage: Option<u32>,
     /// Whether the stack should draw the enchantment glint. Fill it with
     /// [`stack_has_foil`] rather than by hand — it was hardcoded `false` at every
-    /// producer until issue #452, which is why nothing glinted.
+    /// producer until that fix, which is why nothing glinted.
     pub enchanted: bool,
 }
 
@@ -549,8 +549,7 @@ pub(crate) fn draw_item_icon_popped(
     }
 }
 
-/// Where a stack count's **right edge** sits, in slot-local GUI pixels
-/// (issue #384).
+/// Where a stack count's **right edge** sits, in slot-local GUI pixels.
 ///
 /// `GuiGraphicsExtractor.itemCount` (`:947-952`, and identically
 /// `SpectatorGui.java:79`):
@@ -675,8 +674,8 @@ fn push_special_icon(
 /// visibly dark. They are not.
 ///
 /// Forwarding `tint_byte / 255` therefore scales in the wrong space and pulls
-/// every factor toward 1.0 — the wash-out #452 warns about, and the same
-/// gamma-vs-linear trap #171 measured arriving from the data side. Under sRGB's
+/// every factor toward 1.0 — the wash-out that fix warns about, and the same
+/// gamma-vs-linear trap that fix measured arriving from the data side. Under sRGB's
 /// pure-power model the correction is exact and, usefully, **texel-independent**,
 /// so it belongs here on the tint and not in the shader:
 ///
@@ -2483,7 +2482,7 @@ mod pop_tests {
         }
     }
 
-    /// An untinted layer is exactly white — the pre-#452 behaviour, which must
+    /// An untinted layer is exactly white — the pre-fix behaviour, which must
     /// survive for the ~97% of items that declare no tint at all. A conversion
     /// applied unconditionally would darken every item in the game.
     #[test]

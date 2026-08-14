@@ -128,7 +128,7 @@ fn clear_color_tracked_matches_the_fog_colour_at_the_same_tick() {
     assert_ne!(to_bytes(clear_midnight), to_bytes(SKY_COLOR));
 }
 
-/// Issue #388. [`FOG_START_FRACTION`] is the shell's last fraction-shaped
+/// That fix. [`FOG_START_FRACTION`] is the shell's last fraction-shaped
 /// fog knob — `sim::fog_for_render_distance` still multiplies by it instead
 /// of calling
 /// [`FogSettings::for_render_distance`](lodestone_render::fog::FogSettings::for_render_distance).
@@ -277,8 +277,7 @@ fn every_humanoid_armour_sheet_decodes_from_the_real_jar() {
     assert_eq!(sheets.len(), 17, "expected 9 humanoid + 8 leggings sheets");
 }
 
-/// Banner masks resolve, and they resolve under **the key the draw site derives**
-/// (issue #23).
+/// Banner masks resolve, and they resolve under **the key the draw site derives**.
 ///
 /// `resolve_banner` hands back `BannerLayerDraw::sprite` as a full
 /// `minecraft:entity/banner/<id>` location, while `BannerPatternAtlas` keys on the
@@ -328,7 +327,7 @@ fn banner_masks_resolve_under_the_key_the_draw_site_derives() {
     assert_eq!(base.color, DyeColor::Red.gamma_rgb());
 }
 
-/// The trim-sprite loader against the real jar (issue #17) — the entry point that
+/// The trim-sprite loader against the real jar — the entry point that
 /// did not exist while `lodestone_assets::trim` had zero callers.
 ///
 /// Asserts the two things that would silently produce untrimmed armour: that the

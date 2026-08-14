@@ -51,7 +51,7 @@ impl std::fmt::Display for LaunchError {
 }
 
 /// Start singleplayer: an integrated server in-process, with the client speaking
-/// to it over an in-memory duplex (issue #287).
+/// to it over an in-memory duplex.
 ///
 /// This is vanilla's own architecture — one client, one dispatch, a different
 /// transport — and the whole of it is three steps:
@@ -76,7 +76,7 @@ impl std::fmt::Display for LaunchError {
 /// successful return means a server is running and a client is talking to it —
 /// though login is asynchronous, so "running" is proven by the session reaching
 /// `Screen::Playing`, not by this returning `Ok`.
-/// `world_dir` is where this world saves (issue #468); `None` opens a
+/// `world_dir` is where this world saves; `None` opens a
 /// throwaway in-memory world, which is what a test that must leave nothing
 /// behind asks for. [`crate::saves::default_world_dir`] is what the menu
 /// passes — see that module for the "one implicit world" product decision.
@@ -100,7 +100,7 @@ pub(crate) fn launch_singleplayer(
     ))
 }
 
-/// Vanilla's own seed rule (issue #190's queued patch) —
+/// Vanilla's own seed rule (that fix's queued patch) —
 /// `WorldOptions.parseSeed`/`randomSeed()`
 /// (`.cache/mc/26.2/client-src/net/minecraft/world/level/levelgen/
 /// WorldOptions.java:75-89`): trim, empty means a fresh random `i64`, a valid

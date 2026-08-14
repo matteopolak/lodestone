@@ -1,5 +1,5 @@
 //! Pixel gate: the anvil, grindstone, smithing table and enchanting table
-//! (issues #253-#255) draw their **own real background art**, not the
+//! draw their **own real background art**, not the
 //! generic-chest panel every one of them silently fell back to before
 //! `Menu::special_layout` existed.
 //!

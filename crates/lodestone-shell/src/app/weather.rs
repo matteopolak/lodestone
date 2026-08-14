@@ -129,7 +129,7 @@ impl WeatherTracker {
 ///   lookup per distinct biome holder id.
 ///
 /// **This doc used to say the probe answered every column from that one light
-/// sample, and it was wrong.** It was written before issue #25 added the real
+/// sample, and it was wrong.** It was written before that fix added the real
 /// per-column biome lookup, which put three world locks back on the per-column
 /// path — 441 × 3 acquisitions per rainy frame, contended against the chunk
 /// streaming writer — while both this comment and `redraw.rs`'s repeated the cheap
@@ -168,7 +168,7 @@ pub(super) struct ShellWeatherProbe {
     /// not a lock held across the frame) — needed for the per-column biome
     /// lookup [`Self::biome_precipitation`] does. `None` before login.
     pub(super) handle: Option<Arc<lodestone_client::ClientHandle>>,
-    /// Every biome's declared climate (issue #25), published once at `Login`
+    /// Every biome's declared climate, published once at `Login`
     /// by [`crate::net::forward`]'s `BiomeClimates` arm. `None` off a live
     /// connection.
     pub(super) biome_climates: Option<crate::net::SharedBiomeClimates>,
@@ -314,7 +314,7 @@ impl ProbeMemo {
         )?;
         let climate = self.climate(biome, || climate(biome))?;
         // `worldgen::SEA_LEVEL` (63), not a second `63` constant — see the
-        // #25 report's own note to grep for one before adding a duplicate.
+        // That fix report's own note to grep for one before adding a duplicate.
         let temperature = lodestone_render::weather::height_adjusted_temperature(
             climate.temperature?,
             y,
@@ -403,7 +403,7 @@ impl lodestone_render::WeatherProbe for ShellWeatherProbe {
         if !self.sky_visible {
             return lodestone_render::Precipitation::None;
         }
-        // Issue #25: the biome climate lane now reaches the client
+        // The biome climate lane now reaches the client
         // (`ClientEvent::BiomeClimates`, decoded and folded via
         // `net::BiomeClimateCell`), so this resolves a real per-column
         // answer instead of hardcoding `Rain`. Every unresolved hop still
@@ -499,7 +499,8 @@ mod tests {
     };
 
     /// Biome holder id whose climate rains (temperature 0.8 — the value the real
-    /// registry entry carries, `protocol/v770/tests/registry_data.rs:228`).
+    /// registry entry carries, per `v770`'s own
+    /// `biome_sky_colours_resolve_by_holder_id` fixture).
     const WARM_BIOME: u32 = 1;
     /// Biome holder id whose climate snows (temperature 0.0, below vanilla's
     /// `warmEnoughToRain` 0.15 at `Biome.java:176`).
@@ -515,7 +516,7 @@ mod tests {
     /// the real thing; only `ShellWeatherProbe`'s `sky_visible` early-out and its
     /// two `?`s on absent wiring are outside the gate.
     ///
-    /// `handle.rs:411-425` documents `section_at`/`sections_at` as taking the
+    /// `ClientHandle::section_at`/`ClientHandle::sections_at` are documented as taking the
     /// internal world lock **exactly once**, which is what makes
     /// `section_fetches` a count of world locks rather than of function calls.
     struct CountingWorld {

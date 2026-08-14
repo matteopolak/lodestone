@@ -1,5 +1,5 @@
 //! Pixel gate: a woolly sheep must draw **more** silhouette than the same
-//! sheep sheared (issue #53) — driven through the real
+//! sheep sheared — driven through the real
 //! [`RenderState::render`] path, the same call `app.rs`'s frame loop makes.
 //!
 //! `lodestone-render`'s own `sheep_wool_pixels.rs` proves the mesh/tint/pose

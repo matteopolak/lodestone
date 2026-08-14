@@ -41,7 +41,7 @@ impl Sim {
     /// sound is still heard rather than dropped) — the same "audible, not
     /// silent" preference the live gate encodes.
     ///
-    /// Issue #36: there is no `NetClient::entity_snapshots()` any more — the
+    /// There is no `NetClient::entity_snapshots()` any more — the
     /// render-side fold this now reads, [`Self::entity_draws`], is the same
     /// `fold_entities` output every entity pixel gate reads, so a missing id
     /// (no connection, or a track the fold has not spawned yet) falls through
@@ -95,7 +95,7 @@ impl Sim {
         });
     }
 
-    /// This frame's sound-subtitle caption rows (issue #198), already translated
+    /// This frame's sound-subtitle caption rows, already translated
     /// against the loaded language table.
     ///
     /// Empty when audio is disabled or nothing is live, so the caller can assign
@@ -162,7 +162,7 @@ impl Sim {
     /// Advance the music clock by however many 20 Hz ticks have elapsed, and start
     /// a track if vanilla's `MusicManager` says to.
     ///
-    /// This is the call that stopped `#135`'s selector being an island: the whole
+    /// This is the call that stopped `that fix`'s selector being an island: the whole
     /// biome table, the delay constants and the streaming resolve were built,
     /// tested and reached nothing, because nothing called them.
     ///

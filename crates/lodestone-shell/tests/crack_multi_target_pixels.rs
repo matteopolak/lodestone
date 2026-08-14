@@ -1,5 +1,5 @@
 //! Pixel gate: `CrackPipeline`/`RenderState::render_with_crack` must draw
-//! **every** target in the `cracks` slice, not just the first (issue #410).
+//! **every** target in the `cracks` slice, not just the first.
 //!
 //! # The reported defect
 //!
@@ -39,7 +39,7 @@
 //! * **both together**: both clusters must be lit, at bounding boxes that do not
 //!   overlap the empty-scene baseline and do not overlap each other — this is
 //!   the one assertion a single-target implementation cannot pass, since the
-//!   pre-#410 pipeline accepted at most one `CrackTarget` and had nothing to
+//!   pre-fix pipeline accepted at most one `CrackTarget` and had nothing to
 //!   store a second in.
 //! * `stats.cracks_drawn` corroborates the pixel count non-visually at each
 //!   step (0 / 1 / 1 / 2), per CLAUDE.md's "measure by location, never by frame
@@ -271,7 +271,7 @@ fn two_crack_targets_both_reach_pixels_at_distinct_positions() {
     assert_eq!(left_only_drawn, 1, "one target must draw exactly one crack");
     assert_eq!(right_only_drawn, 1, "one target must draw exactly one crack");
     // The one assertion a single-target pipeline cannot pass: two targets
-    // supplied together must both draw. Before #410 this was structurally
+    // supplied together must both draw. Before that fix this was structurally
     // impossible (`crack: Option<CrackTarget>` had room for one).
     assert_eq!(
         both_drawn, 2,

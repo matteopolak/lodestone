@@ -288,7 +288,7 @@ fn entry_from_json(v: &serde_json::Value) -> Option<ServerEntry> {
 ///
 /// `LODESTONE_DATA_DIR` overrides the platform default; see the module docs.
 ///
-/// **This is an accessor, not an implementation** (issue #67). The platform
+/// **This is an accessor, not an implementation**. The platform
 /// lookup lives once, in [`lodestone_auth::paths::data_dir`], and this crate
 /// already depends on `lodestone-auth` for the login chain — so a second copy
 /// here bought nothing and risked the two drifting apart. They were verified
@@ -299,7 +299,7 @@ fn entry_from_json(v: &serde_json::Value) -> Option<ServerEntry> {
 ///
 /// The accessor stays because [`servers_path`] and `crate::config` both want a
 /// shell-side name for it; that this lives in the *server-list* module is a
-/// separate tidy-up, not part of #67.
+/// separate tidy-up, not part of that fix.
 #[must_use]
 pub fn data_dir() -> PathBuf {
     lodestone_auth::paths::data_dir()
@@ -475,11 +475,11 @@ mod tests {
 
     #[test]
     fn the_shell_data_dir_is_the_auth_one_and_not_a_second_copy() {
-        // This is the guard against issue #67 recurring. The per-platform
+        // This is the guard against that fix recurring. The per-platform
         // branches, the `LODESTONE_DATA_DIR` override and the no-environment
         // fallback are all tested beside the real implementation, in
         // `lodestone-auth`'s `paths` module — duplicating those assertions here
-        // would recreate exactly the drift #67 was about, one layer up.
+        // would recreate exactly the drift that fix was about, one layer up.
         //
         // What only *this* crate can assert is that it has not grown a second
         // implementation again: if someone reintroduces a local platform lookup,

@@ -34,7 +34,7 @@
 //!   variant), so there is nothing to read. Checked, not assumed. Enchantment
 //!   lines are absent for a different reason: `ItemEnchantment::id` is a
 //!   *session-scoped numeric registry id* with no name table on the client, so a
-//!   line for it would read "Enchantment #12" — a fabrication, which this module
+//!   line for it would read "Enchantment that fix" — a fabrication, which this module
 //!   declines the same way `menu::options` declines a row it cannot honour.
 //!
 //! ## Dependencies

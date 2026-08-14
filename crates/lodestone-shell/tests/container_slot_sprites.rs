@@ -1,6 +1,6 @@
-//! Are #376's sprites reachable? (the asset question, answered by measurement)
+//! Are that fix's sprites reachable? (the asset question, answered by measurement)
 //!
-//! Issue #376 needs two sprite families: the empty-slot placeholders
+//! That fix needs two sprite families: the empty-slot placeholders
 //! `container/slot/*` and the hover-highlight pair
 //! `container/slot_highlight_{back,front}`. The record said **"neither family is in
 //! any atlas this client builds today"**, which reads as an asset-loading job.

@@ -1,4 +1,4 @@
-//! The recipe-book panel (issue #163): geometry, hit test and paged contents.
+//! The recipe-book panel: geometry, hit test and paged contents.
 //!
 //! Split out of `container.rs` verbatim.
 
@@ -15,7 +15,7 @@ use super::layout::{Rect, panel_origin_with_scale, slot_layout};
 use super::FLOATS_PER_VERTEX;
 
 // ---------------------------------------------------------------------------
-// Recipe-book panel (issue #163)
+// Recipe-book panel
 // ---------------------------------------------------------------------------
 //
 // The toggle button + browsable panel (search box, category tabs, a paged
@@ -674,7 +674,7 @@ pub const RECIPE_SPRITE_TAB_SELECTED: &str = "recipe_book/tab_selected";
 /// Both states are now real: [`RECIPE_SPRITE_FILTER_ENABLED`] is the other
 /// half, picked by [`RecipeBookPanelLayout::filtering`]. This doc used to say
 /// the disabled art was "the only state this client has" — true when written
-/// and stale since the filter became modelled (issue #436's
+/// and stale since the filter became modelled (that fix's
 /// `SessionRecipeBookSettings` island).
 pub const RECIPE_SPRITE_FILTER: &str = "recipe_book/filter_disabled";
 /// The same cycle-button in its **Craftable** state —

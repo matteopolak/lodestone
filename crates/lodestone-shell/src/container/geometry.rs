@@ -52,7 +52,7 @@ pub struct ContainerGeometry {
     pub(crate) special: Vec<SpecialIconDraw>,
     /// Flat `[x, y, u, v, r, g, b, a]` per vertex sampling
     /// [`ContainerBackground`]'s atlas — vanilla's real `container/*.png` panel
-    /// art (issue #51). Empty unless a background was supplied; drawn on its
+    /// art. Empty unless a background was supplied; drawn on its
     /// own pipeline (a different atlas than [`item_verts`](Self::item_verts))
     /// in its own pass, **before** the chrome pass, so the panel/well fills
     /// this stream would otherwise draw are suppressed in favour of the real
@@ -91,7 +91,7 @@ pub struct ContainerGeometry {
     /// How many leading vertices of [`verts`](Self::verts) belong to the **slot**
     /// stratum, i.e. everything except the carried stack's own count and
     /// durability bar. The remainder is drawn last, above the carried stack's
-    /// icon (issue #377).
+    /// icon.
     ///
     /// Equal to [`vertex_count`](Self::vertex_count) when nothing is carried, so
     /// the fourth range is simply empty.
@@ -238,7 +238,7 @@ impl ContainerGeometry {
         let x = x + super::layout::recipe_book_panel_shift(w, layout.width, frame.book_open);
         let mut b = Builder::new(w, h, font);
 
-        // Vanilla's own dim behind an open container screen (issue #61's
+        // Vanilla's own dim behind an open container screen (that fix's
         // leftover). `AbstractContainerScreen::isInGameUi()` overrides `true`
         // (`AbstractContainerScreen.java:535-538`), which routes
         // `Screen::extractBackground` to `extractTransparentBackground`
@@ -248,7 +248,7 @@ impl ContainerGeometry {
         // ARGB (192,16,16,16) top to (208,16,16,16) bottom.
         //
         // This is what dims the HUD hotbar for free: the HUD draws unconditionally
-        // behind any world-following screen (issue #61's `hud_follows_world`),
+        // behind any world-following screen (that fix's `hud_follows_world`),
         // and `app.rs` now draws this container pass *after* the HUD pass, so
         // this gradient paints straight over it — draw order, not a per-element
         // alpha (see `docs/container-screen.md`).
@@ -262,7 +262,7 @@ impl ContainerGeometry {
         );
         let dim_floats = b.verts.len();
 
-        // Vanilla's real `container/*.png` art (issue #51), if attached. `None`
+        // Vanilla's real `container/*.png` art, if attached. `None`
         // degrades to the flat programmatic panel this screen has always drawn
         // — the jar-less path and the negative control the pixel gate leans on.
         let bg_quads = background.and_then(|bg| bg.quads(menu, x, y));
@@ -287,7 +287,7 @@ impl ContainerGeometry {
             );
         }
         // The furnace family's lit-flame and burn-progress bars, and the
-        // brewing stand's fuel/brew/bubble bars (issue #28). Vanilla draws
+        // brewing stand's fuel/brew/bubble bars. Vanilla draws
         // both in `extractBackground`, immediately after the panel blit and
         // before any slot content, so they belong in this same "under
         // items" bucket — gated on a background being attached for the same
@@ -566,7 +566,7 @@ impl ContainerGeometry {
         }
 
         // The merchant's trade list and its second "Trades" label (issue
-        // #245's UI half) — see `super::merchant`'s module doc. A no-op for
+        // That fix's UI half) — see `super::merchant`'s module doc. A no-op for
         // every other screen, and for a merchant screen with no offers
         // received yet (`frame.trades` is `None`).
         draw_merchant_trades(
@@ -598,7 +598,7 @@ impl ContainerGeometry {
             }
         }
 
-        // The drag preview (issue #378 part 2), resolved once for the whole frame.
+        // The drag preview (part 2), resolved once for the whole frame.
         // `plan` is keyed by menu index below; `remainder` is what the cursor
         // would keep. Both come out of `Menu::quick_craft_plan` — the release
         // path's own arithmetic — so the preview cannot show a split the release
@@ -695,7 +695,7 @@ impl ContainerGeometry {
         // carried item and nowhere else on the screen
         // (`AbstractContainerScreen.java:126`).
         //
-        // It has to be a stratum and not merely "appended last" (issue #377).
+        // It has to be a stratum and not merely "appended last".
         // Append order only settles two of the four cases, because the GUI item
         // passes run **model first, then flat sprites** — the model pass is the
         // only one that needs a depth attachment and a pass's attachments are
@@ -839,7 +839,7 @@ const COST_DISABLED_GREEN: [f32; 4] = [64.0 / 255.0, 127.0 / 255.0, 16.0 / 255.0
 
 /// Draws the merchant screen's trade list: the second "Trades" label, and
 /// each visible offer's cost/result icons, discount strikethrough and trade
-/// arrow (issue #245's UI half) — `MerchantScreen.extractLabels`/
+/// arrow (that fix's UI half) — `MerchantScreen.extractLabels`/
 /// `extractContents` (`MerchantScreen.java:86-99,167-219`). A no-op for any
 /// screen without [`SpecialLayout::Merchant`], or a merchant screen with no
 /// offers yet (`frame.trades` is `None`) — every existing caller.
@@ -1063,7 +1063,7 @@ fn draw_enchanting_costs(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFram
     }
 }
 
-/// Everything one frame's drag preview needs, resolved once (issue #378 part 2).
+/// Everything one frame's drag preview needs, resolved once (part 2).
 ///
 /// Deliberately **not** a recomputation of the split: `cells` is
 /// [`Menu::quick_craft_plan`]'s output verbatim and `remainder` is

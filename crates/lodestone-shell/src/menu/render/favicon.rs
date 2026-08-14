@@ -39,7 +39,7 @@ pub fn head_mosaic(rgba: &[u8], width: usize, height: usize) -> Option<FaviconMo
     rgba_mosaic(rgba, width, height)
 }
 
-/// A placeholder head icon used until skins are implemented (issue #62): a
+/// A placeholder head icon used until skins are implemented: a
 /// flat skin-tone square with a darker hairline band across the top eighth
 /// and two single-pixel eyes, at [`HEAD_SIZE`]×[`HEAD_SIZE`].
 ///
@@ -47,7 +47,7 @@ pub fn head_mosaic(rgba: &[u8], width: usize, height: usize) -> Option<FaviconMo
 /// not know or care that [`DEFAULT_HEAD_RGBA`] is hand-authored pixels rather
 /// than a downloaded skin — it is exactly the same call a real skin's decoded
 /// face region would go through. Swapping this default out for
-/// `head_mosaic(&decoded_skin_face, 8, 8)` once issue #62 lands a skin
+/// `head_mosaic(&decoded_skin_face, 8, 8)` once that fix lands a skin
 /// fetch is the entire change; nothing in [`MenuRow`], [`draw_widget`]'s
 /// icon-drawing branch, or the geometry builder needs to move.
 #[must_use]

@@ -12,7 +12,7 @@
 //! shared [`SectionOriginArena`], and a draw selects it by dynamic offset. A
 //! remesh of an already-resident coord reuses that coord's slot rather than
 //! leaking it — the origin is a pure function of the [`SectionKey`], so it
-//! never actually changes. Issue #75 profiled the shape this replaced at 52.9%
+//! never actually changes. That fix profiled the shape this replaced at 52.9%
 //! of main-thread CPU; see `docs/section-camera-uniform.md`.
 //!
 //! # Why the accessors lend rather than re-upload
@@ -196,7 +196,7 @@ impl RenderState {
 
     /// Upload a packed full-cube section (the demo path).
     ///
-    /// Mirrors the model path above since issue #76: the section's world origin
+    /// Mirrors the model path above since that fix: the section's world origin
     /// is written **once**, here, into a slot of the shared
     /// [`packed_origin_arena`](Self::packed_origin_arena), and a remesh of an
     /// already-resident coord reuses that slot rather than leaking it — the
@@ -252,7 +252,7 @@ impl RenderState {
     /// Remove a section (e.g. an unloaded chunk).
     pub fn remove_section(&mut self, key: &SectionKey) {
         // Drop its occlusion-graph entry too, or the graph is the one structure
-        // here that only ever grows — the same shape as the leak issue #479 fixed
+        // here that only ever grows — the same shape as the leak that fix fixed
         // for `model.sections` and the origin arena. An absent coord reads as open
         // to the walk, so over-removing draws more and never less.
         self.forget_section_visibility(key.coord());

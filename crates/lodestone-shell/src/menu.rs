@@ -5,8 +5,8 @@
 //!
 //! | module | what it owns |
 //! |---|---|
-//! | [`command_block`] | the command block edit screen (issue #47) |
-//! | [`confirm`] | vanilla's `ConfirmScreen`, the gate an irreversible action passes through (issue #540) |
+//! | [`command_block`] | the command block edit screen |
+//! | [`confirm`] | vanilla's `ConfirmScreen`, the gate an irreversible action passes through |
 //! | [`nav`] | selection, the add/edit form, what a keypress means |
 //! | [`options`] | the whole settings tree, unsupported controls disabled |
 //! | [`render`] | layout + a self-contained GPU pipeline |
@@ -32,7 +32,7 @@
 //! integrated server in-process and connect to it over a local transport — the
 //! *same* client and dispatch as multiplayer, a different transport.
 //! [`SessionKind::Multiplayer`] connects to a remote address. Both are now real
-//! (issue #287): `app.rs`'s `launch_singleplayer` starts
+//! `app.rs`'s `launch_singleplayer` starts
 //! `lodestone_server::IntegratedServer` on an in-memory duplex and the same
 //! client speaks to it, so there is one client and one dispatch, differing only
 //! in transport. A build with no version family compiled in has no server
@@ -40,11 +40,11 @@
 //! doing nothing.
 
 pub mod accounts;
-/// Vanilla 26.2's advancement tree as data (issue #167) — 126 advancements over
+/// Vanilla 26.2's advancement tree as data — 126 advancements over
 /// 5 roots, extracted from the data pack's own JSONs. Read by
 /// [`advancements`] and positioned by [`advancement_tree`].
 pub mod advancement_data;
-/// Vanilla's `TreeNodePosition` (issue #167): the tidy-tree layout that decides
+/// Vanilla's `TreeNodePosition`: the tidy-tree layout that decides
 /// where each advancement widget sits. 26.2's JSON carries no `x`/`y`, so this
 /// has to be run client-side — see the module doc.
 pub mod advancement_tree;
@@ -94,23 +94,23 @@ pub enum Screen {
     /// The add/edit form for one server entry. Reached from
     /// [`Screen::ServerList`]; Escape returns there **without** saving.
     ServerEdit,
-    /// The singleplayer world list (issue #397): vanilla's `SelectWorldScreen`.
+    /// The singleplayer world list: vanilla's `SelectWorldScreen`.
     /// Reached from [`Screen::MainMenu`] via [`nav::MainButton::Singleplayer`] —
     /// which is vanilla's own wiring, where the title screen's Singleplayer button
     /// opens this screen rather than launching anything; Escape (or the screen's
     /// own Back button) returns there.
     ///
-    /// **This doc used to say the list holds "exactly one" world** — #287's
+    /// **This doc used to say the list holds "exactly one" world** —
     /// [`world_select::BUNDLED_WORLD`], a fixed seed regenerated every launch and
     /// never written to disk — and that world creation was present and disabled.
-    /// Both were true when written and neither has been since #190 and #468: the
+    /// Both were true when written and neither has been true since two later fixes: the
     /// list is one row per directory in `saves/`, Create New World creates one, it
-    /// **scrolls** (#541) and Delete removes one through [`Screen::Confirm`]
-    /// (#540). Its **Play
+    /// **scrolls** and Delete removes one through [`Screen::Confirm`]
+    /// Its **Play
     /// Selected World** button is live and starts a real session; see
     /// [`world_select`] for the row's geometry and the launch chain.
     WorldSelect,
-    /// The account list (issue #66): saved Microsoft accounts plus the
+    /// The account list: saved Microsoft accounts plus the
     /// always-present offline entry, and the device-code sign-in flow that
     /// adds a new account. Reached from [`Screen::MainMenu`] via
     /// [`nav::MainButton::Accounts`]; Escape (or the screen's own Cancel
@@ -118,7 +118,7 @@ pub enum Screen {
     /// [`nav::MainButton::Accounts`]'s docs for why real Minecraft has
     /// nothing equivalent to reproduce.
     Accounts,
-    /// The settings screen — vanilla's whole `OptionsScreen` tree (issue #55),
+    /// The settings screen — vanilla's whole `OptionsScreen` tree,
     /// nine pages of it, with every control present and the majority this
     /// client does not honour drawn inactive (118 of 143 outside a world, 119
     /// inside one — the root's Online button is the one row whose liveness
@@ -149,7 +149,7 @@ pub enum Screen {
     /// A container or the player inventory is open over the world: pointer
     /// released and gameplay input frozen while the world keeps rendering.
     Container,
-    /// The command block edit screen (issue #47): vanilla's
+    /// The command block edit screen: vanilla's
     /// `CommandBlockEditScreen` — pointer released and gameplay input frozen
     /// over the still-rendering world, the same shape as [`Screen::Chat`] and
     /// [`Screen::Container`] (vanilla's own `isInGameUi() == true`). Opened by
@@ -168,7 +168,7 @@ pub enum Screen {
     /// This doc used to read "**Nothing yet calls `open_command_block`**:
     /// there is no command-block-entity NBT decode anywhere in this
     /// workspace, so there is no real right-click trigger for it". True when
-    /// written, and stale as of issue #436's island sweep. The first half is
+    /// written, and stale as of that fix's island sweep. The first half is
     /// *still literally true* — there is no typed decode in `lodestone-model`
     /// or `crates/protocol` — but the conclusion did not follow:
     /// [`crate::command_block_source`] reads the payload straight off the
@@ -190,7 +190,7 @@ pub enum Screen {
     /// deliberately **not** an [`render::owns_frame`] screen, because that set
     /// clears the frame and would stop the world rendering behind it.
     Paused,
-    /// The local player died (issue #103): vanilla's `DeathScreen` — the "You
+    /// The local player died: vanilla's `DeathScreen` — the "You
     /// Died!" title, the server's death message, a score line, and two
     /// buttons (Respawn / Title Screen). Reachable from every live gameplay
     /// screen (`Playing`, `Chat`, `Container`, `Paused` — vanilla replaces
@@ -213,7 +213,7 @@ pub enum Screen {
     /// A session failed to establish or ended unexpectedly. `error()` carries the
     /// human-readable reason; the only ways forward are back to the menu or quit.
     Error,
-    /// The end-poem/credits roll (issue #192): vanilla's `WinScreen`, shown
+    /// The end-poem/credits roll: vanilla's `WinScreen`, shown
     /// after the dragon fight and exiting the End through the exit portal.
     ///
     /// **What this is not**: vanilla's `WinScreen` auto-scrolls a ~1500-word
@@ -240,7 +240,7 @@ pub enum Screen {
     /// frame, the same way it already reconciles `Sim::is_dead()` into the
     /// death screen. See `docs/credits-screen.md` for the full chain.
     Credits,
-    /// The Social Interactions screen (issue #189): vanilla's
+    /// The Social Interactions screen: vanilla's
     /// `SocialInteractionsScreen`, an online-player list with a per-player
     /// Hide/Show-in-Chat toggle and a Report button. Reached from the pause
     /// menu's Player Reporting icon button
@@ -254,7 +254,7 @@ pub enum Screen {
     /// inactive regardless of session kind: it needs secure chat signing,
     /// which does not exist here (see [`social`]'s module docs).
     Social,
-    /// The Statistics screen (issue #188): vanilla's `StatsScreen`. Reached
+    /// The Statistics screen: vanilla's `StatsScreen`. Reached
     /// from the pause menu's Statistics button
     /// ([`nav::PauseButton::Statistics`], now live); Escape or the screen's
     /// own Done button returns to [`Screen::Paused`].
@@ -270,7 +270,7 @@ pub enum Screen {
     /// say every value read zero because nothing decoded the packet; that was
     /// true and is not any more.
     Statistics,
-    /// The Advancements screen (issue #167): vanilla's `AdvancementsScreen`.
+    /// The Advancements screen: vanilla's `AdvancementsScreen`.
     /// Reached from the pause menu's Advancements button
     /// ([`nav::PauseButton::Advancements`], now live); Escape returns to
     /// [`Screen::Paused`].
@@ -280,10 +280,10 @@ pub enum Screen {
     /// nothing decodes `UPDATE_ADVANCEMENTS`. Same trade [`Screen::Statistics`]
     /// made, and the same honest zero: see [`advancements`]'s module docs.
     Advancements,
-    /// The World Creation screen (issue #190): vanilla's `CreateWorldScreen`,
+    /// The World Creation screen: vanilla's `CreateWorldScreen`,
     /// reduced to one flat hand-placed list (see [`create_world`]'s module
     /// docs for why). Reached from [`Screen::WorldSelect`]'s "Create New
-    /// World" button — issue #397 left it present-and-disabled for exactly
+    /// World" button — That fix left it present-and-disabled for exactly
     /// this issue; Escape or the screen's own Cancel button returns to
     /// [`Screen::WorldSelect`].
     ///
@@ -298,7 +298,7 @@ pub enum Screen {
     /// allow-cheats remain decorative (no session-setup wiring consumes them
     /// yet). See [`create_world`]'s module docs for the current split.
     CreateWorld,
-    /// Vanilla's `ConfirmScreen` (issue #540): a question, a warning naming what
+    /// Vanilla's `ConfirmScreen`: a question, a warning naming what
     /// is at risk, and two buttons. Reached from [`Screen::WorldSelect`]'s
     /// **Delete** button; Escape, its own Cancel button and its affirmative
     /// button all return to [`Screen::WorldSelect`].
@@ -330,7 +330,7 @@ impl Screen {
     /// of restating a count.
     /// `render::tests::owns_frame_agrees_with_frame_for_on_every_screen` asserted
     /// a literal `12` and went red the moment [`Screen::WorldSelect`] landed
-    /// (#397) — which is `CLAUDE.md`'s staleness class, in the one place it is
+    /// — which is `CLAUDE.md`'s staleness class, in the one place it is
     /// most annoying: a test that is *about* completeness, made incomplete by the
     /// thing it was meant to notice.
     ///
@@ -395,7 +395,7 @@ pub struct UiState {
     /// reason.
     death_message: Option<String>,
     /// Which step of establishing a session [`Screen::Connecting`] is naming —
-    /// issue #449. Only read on that screen; reset by [`Self::begin`] so a
+    /// That fix. Only read on that screen; reset by [`Self::begin`] so a
     /// second session never inherits the previous one's last phase.
     connect_phase: loading::ConnectPhase,
 }
@@ -453,7 +453,7 @@ impl UiState {
         self.screen == Screen::Paused
     }
 
-    /// Whether the Advancements screen (issue #167) is up.
+    /// Whether the Advancements screen is up.
     ///
     /// Its own predicate rather than an `owns_frame` membership, because it draws
     /// as an **overlay** through `ContainerRenderer` rather than through
@@ -489,7 +489,7 @@ impl UiState {
         self.screen == Screen::Container
     }
 
-    /// Whether the command block edit screen (issue #47) is open over the
+    /// Whether the command block edit screen is open over the
     /// world.
     #[must_use]
     pub fn is_command_block_open(&self) -> bool {
@@ -540,14 +540,14 @@ impl UiState {
                 | Screen::WorldSelect
                 | Screen::Settings
                 | Screen::Accounts
-                // Issue #540. A confirmation opened from the world list is a
+                // That fix. A confirmation opened from the world list is a
                 // pre-session menu screen exactly as the list it sits over is:
                 // no world is loaded, and the menu renderer owns the frame.
                 | Screen::Confirm
         )
     }
 
-    /// Whether the singleplayer world list is showing (issue #397).
+    /// Whether the singleplayer world list is showing.
     #[must_use]
     pub fn is_world_select(&self) -> bool {
         self.screen == Screen::WorldSelect
@@ -588,12 +588,12 @@ impl UiState {
         self.error = None;
         self.screen = Screen::Connecting;
         // A fresh session starts at the first phase, never at whatever the
-        // previous one got stuck on (issue #449).
+        // previous one got stuck on.
         self.connect_phase = loading::ConnectPhase::Connecting;
     }
 
     /// Record which connect step the session task has reached, so
-    /// [`Screen::Connecting`] can name it (issue #449). Driven from real
+    /// [`Screen::Connecting`] can name it. Driven from real
     /// `NetUpdate::ConnectPhase` boundaries — see [`loading::ConnectPhase`] for
     /// why there are only three and not vanilla's full six.
     pub fn set_connect_phase(&mut self, phase: loading::ConnectPhase) {
@@ -608,7 +608,7 @@ impl UiState {
 
     /// Enter the local dev world directly (the shell's `worldgen` stand-in).
     /// Distinct from [`SessionKind::Singleplayer`], which starts a real
-    /// integrated server (#287); this is a no-session Playing state with no
+    /// integrated server; this is a no-session Playing state with no
     /// server behind it, reached only from a `--headless`/dev entry point rather
     /// than from any menu button.
     pub fn enter_dev_world(&mut self) {
@@ -643,7 +643,7 @@ impl UiState {
         // Ignore failures once we've already left for the menu, so a trailing
         // error from a shutting-down session doesn't resurrect the error screen.
         //
-        // `Screen::Death` is included (issue #103): a live server holds a dead
+        // `Screen::Death` is included: a live server holds a dead
         // player with no chunk stream until it respawns, so a disconnect while
         // the death screen is up is a real failure the player needs to see,
         // not something that silently strands them on a screen whose Respawn
@@ -663,13 +663,13 @@ impl UiState {
                     | Screen::Death
                     | Screen::Error
                     // Same reasoning as `Screen::Death` above: a disconnect
-                    // while Social Interactions is open (#189) must not
+                    // while Social Interactions is open must not
                     // silently strand the player on a screen backed by a
                     // session that no longer exists.
                     | Screen::Social
-                    // Same reasoning, for Statistics (#188).
+                    // Same reasoning, for Statistics.
                     | Screen::Statistics
-                    // And for Advancements (#167), whose tree is data-pack data
+                    // And for Advancements, whose tree is data-pack data
                     // but whose *progress* belongs to a session.
                     | Screen::Advancements
             )
@@ -720,7 +720,7 @@ impl UiState {
         }
     }
 
-    /// Open the singleplayer world list (issue #397). Only from the title
+    /// Open the singleplayer world list. Only from the title
     /// screen, matching [`open_server_list`](Self::open_server_list)'s
     /// reasoning: a stray call must never pull the player out of a world.
     ///
@@ -729,7 +729,7 @@ impl UiState {
     /// `SelectWorldScreen`; nothing in vanilla starts a world straight off the
     /// title. The launch is one screen further in: **Play Selected World**
     /// produces [`nav::MenuAction::Singleplayer`], which `app.rs` turns into a
-    /// real integrated-server session (#287). Between #397 and #287 that action
+    /// real integrated-server session. For a long stretch that action
     /// had no producer at all and was kept as exactly this seam.
     pub fn open_world_select(&mut self) {
         if self.screen == Screen::MainMenu {
@@ -810,7 +810,7 @@ impl UiState {
         self.settings_return == Screen::Paused
     }
 
-    /// Open the Social Interactions screen (issue #189) from the pause
+    /// Open the Social Interactions screen from the pause
     /// menu's Player Reporting button. Only from [`Screen::Paused`] — vanilla
     /// has no title-screen entry point for it at all (there is no session to
     /// list players from before one exists), so unlike
@@ -830,7 +830,7 @@ impl UiState {
         }
     }
 
-    /// Open the Statistics screen (issue #188) from the pause menu's
+    /// Open the Statistics screen from the pause menu's
     /// Statistics button. Only from [`Screen::Paused`] — same reasoning as
     /// [`Self::open_social_from_pause`]: vanilla has no title-screen entry
     /// point, there being no session to have accrued any stats in before one
@@ -848,7 +848,7 @@ impl UiState {
         }
     }
 
-    /// Open the Advancements screen (issue #167) from the pause menu's
+    /// Open the Advancements screen from the pause menu's
     /// Advancements button. Only from [`Screen::Paused`], for the same reason
     /// [`Self::open_statistics_from_pause`] is: vanilla has no title-screen entry
     /// point for it.
@@ -865,7 +865,7 @@ impl UiState {
         }
     }
 
-    /// Open the World Creation screen (issue #190) from the world list's
+    /// Open the World Creation screen from the world list's
     /// "Create New World" button. Only from [`Screen::WorldSelect`] — same
     /// reasoning as every other `open_*_from_*`: a stray call must not pull
     /// the player out of wherever they actually are.
@@ -875,7 +875,7 @@ impl UiState {
         }
     }
 
-    /// Open the confirmation screen (issue #540) from the world list's
+    /// Open the confirmation screen from the world list's
     /// **Delete** button. Only from [`Screen::WorldSelect`] — same guard as every
     /// other `open_*`, and load-bearing here rather than merely tidy: a stray
     /// call must never put a *delete confirmation* over a screen the player is
@@ -944,7 +944,7 @@ impl UiState {
         }
     }
 
-    /// Open the command block edit screen (issue #47) over the world. Only
+    /// Open the command block edit screen over the world. Only
     /// from [`Screen::Playing`], matching [`open_chat`](Self::open_chat)/
     /// [`open_container`](Self::open_container)'s own guard.
     ///
@@ -1040,7 +1040,7 @@ impl UiState {
             Screen::Social => self.close_social(),
             // Same reasoning as `Screen::Social` immediately above.
             Screen::Statistics => self.close_statistics(),
-            // Same reasoning again, for Advancements (#167).
+            // Same reasoning again, for Advancements.
             Screen::Advancements => self.close_advancements(),
             // Same reasoning again — back to the world list.
             Screen::CreateWorld => self.close_create_world(),
@@ -1077,7 +1077,7 @@ impl UiState {
     }
 
     /// Leave a live session for the title screen — the pause menu's "Quit to
-    /// Title" button, and (issue #103) the death screen's "Title Screen"
+    /// Title" button, and the death screen's "Title Screen"
     /// button. Only from [`Screen::Paused`] or [`Screen::Death`], matching
     /// every other "leave a screen" guard here: a stray call must never cut a
     /// live session out from under the player who didn't ask for it.
@@ -1097,7 +1097,7 @@ impl UiState {
         }
     }
 
-    /// Show the end-poem/credits screen (issue #192): vanilla's `WinScreen`,
+    /// Show the end-poem/credits screen: vanilla's `WinScreen`,
     /// reached by exiting the End through the exit portal after the dragon
     /// fight. Valid from the same live-gameplay screens as [`Self::die`] —
     /// mirroring that guard rather than inventing a different one, since both
@@ -1123,7 +1123,7 @@ impl UiState {
         }
     }
 
-    /// The local player died (issue #103): show the death screen. Valid from
+    /// The local player died: show the death screen. Valid from
     /// every live gameplay screen — `Playing`, `Chat`, `Container`, `Paused`
     /// — matching vanilla, which replaces whatever screen is open the instant
     /// the death packet lands (`ClientPacketListener` sets the death screen
@@ -1504,7 +1504,7 @@ mod tests {
         }
     }
 
-    /// Issue #397. The world list opens only from the title and unwinds back to
+    /// That fix. The world list opens only from the title and unwinds back to
     /// it — one level, like every other menu screen.
     #[test]
     fn the_world_list_opens_from_the_title_and_unwinds_to_it() {
@@ -1538,7 +1538,7 @@ mod tests {
     fn singleplayer_from_the_menu_enters_the_offline_world() {
         // The dev-world entry point, which is **not** a menu button: the menu's
         // Singleplayer button opens the world list, and Play Selected World
-        // there starts a real integrated server (#287). This asserts only that
+        // there starts a real integrated server. This asserts only that
         // `enter_dev_world` still lands in a session-less Playing state.
         let mut ui = UiState::new();
         ui.enter_dev_world();
@@ -1770,7 +1770,7 @@ mod tests {
         assert!(ui.error().is_none());
     }
 
-    // -- the death screen (issue #103) -------------------------------------
+    // -- the death screen -------------------------------------
 
     #[test]
     fn die_reaches_the_death_screen_from_every_live_gameplay_screen_and_carries_the_message() {
@@ -1848,7 +1848,7 @@ mod tests {
         assert!(ui.error().is_none(), "this is not a failure, so no reason");
     }
 
-    /// Issue #192: `show_credits` reaches `Screen::Credits` from every live
+    /// `show_credits` reaches `Screen::Credits` from every live
     /// gameplay screen `die` also reaches from, and a stray call from
     /// anywhere else (the menu, an error screen) is a no-op — same shape as
     /// every other `open_*`/`show_*` guard in this file.
@@ -1870,7 +1870,7 @@ mod tests {
 
     /// `quit_to_title` from the credits screen is the same teardown as from
     /// pause/death — reused rather than a fourth copy of "clear session state
-    /// and go to the title", per issue #192's own scope (the trigger is out
+    /// and go to the title", per that fix's own scope (the trigger is out
     /// of this crate's ownership; the exit is not, and it should not need a
     /// new mechanism).
     #[test]

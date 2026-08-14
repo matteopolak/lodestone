@@ -268,7 +268,7 @@ impl ThirdPersonBodyState {
             count: 1,
             foil: false,
             // The local third-person body does not draw its own nametag
-            // (issue #100 scope: other entities/players, not the camera's
+            // (scope: other entities/players, not the camera's
             // own body) — a deliberate gap, not an oversight; see
             // `docs/entity-nametags.md`.
             name_tag: None,
@@ -445,7 +445,7 @@ impl std::fmt::Debug for ItemUseSource {
 /// landed. The **only** missing link was that nothing told the renderer what the
 /// player was holding.
 ///
-/// The value is the item id **plus the enchantment-foil flag** (issue #452): the
+/// The value is the item id **plus the enchantment-foil flag**: the
 /// held item's glint second pass is gated on it, so the source has to carry it
 /// from the hotbar record that already computed it (`app/redraw.rs` builds it
 /// from `stack_has_foil`), rather than re-derive it here where there is no stack.
@@ -499,7 +499,7 @@ impl std::fmt::Debug for ThirdPersonBodySource {
     }
 }
 
-/// Where this frame's block entities (chests, issue #23) come from.
+/// Where this frame's block entities (chests, that fix) come from.
 ///
 /// A `Fn(Vec3) -> Vec<ChestSpawn>` taking the **camera position**, because
 /// vanilla's own gate is per-block-entity distance from the camera
@@ -608,7 +608,7 @@ impl std::fmt::Debug for BellSource {
 /// Where this frame's shulker boxes come from — same shape as [`SkullSource`],
 /// and the thinnest of the family: the closure needs no partial tick and no
 /// animation map at all, because a shulker box's whole appearance is a function
-/// of its block state (issue #23).
+/// of its block state.
 #[derive(Default)]
 pub struct ShulkerSource(
     #[allow(clippy::type_complexity)]
@@ -686,7 +686,7 @@ impl std::fmt::Debug for SignSource {
     }
 }
 
-/// Where this frame's filled-map pictures come from (issue #184).
+/// Where this frame's filled-map pictures come from.
 ///
 /// Unlike the block-entity sources this takes a **map id** rather than an eye
 /// position, because a map is keyed by id and not by where it is: the same map
@@ -718,7 +718,7 @@ impl std::fmt::Debug for MapSource {
     }
 }
 
-/// Where this frame's banners come from (issue #23) — the same shape as
+/// Where this frame's banners come from — the same shape as
 /// [`ShulkerSource`], but the closure must be re-installed every frame for
 /// [`BellSource`]'s reason: it captures the game tick and the partial tick, and a
 /// stale one freezes every banner's sway.
@@ -744,7 +744,7 @@ impl std::fmt::Debug for BannerSource {
     }
 }
 
-/// Where this frame's enchanting-table books come from (issue #23) — the same
+/// Where this frame's enchanting-table books come from — the same
 /// shape as [`LecternSource`], sharing its very mesh, but it must be
 /// **re-installed every frame** for [`BellSource`]'s reason and more strongly:
 /// it captures the animation fold *and* the partial tick, and all four animated
@@ -777,7 +777,7 @@ impl std::fmt::Debug for EnchantingTableSource {
     }
 }
 
-/// Where this frame's campfire cooking items come from (issue #23).
+/// Where this frame's campfire cooking items come from.
 ///
 /// **The odd one out of this family**: every other block-entity source above
 /// feeds `prepare_block_entities` and the entity pipeline, and this one feeds
@@ -812,7 +812,7 @@ impl std::fmt::Debug for CampfireSource {
     }
 }
 
-/// Where this frame's moving pistons come from (issue #23) — vanilla's
+/// Where this frame's moving pistons come from — vanilla's
 /// `PistonHeadRenderer`.
 ///
 /// **The odd one out twice over.** Like [`CampfireSource`] it does not feed

@@ -55,7 +55,7 @@
 //!
 //! **This list said "two systems" and named two while the code registered
 //! three, and `drive_placement` was registered in no schedule at all** — found
-//! by #436's island sweep. Prose and code agreed with each other and both were
+//! by that fix's island sweep. Prose and code agreed with each other and both were
 //! wrong, which is why nothing looked amiss: the only `add_systems` naming
 //! `drive_placement` lived in `tests/place_intent.rs`'s hand-built `Schedule`,
 //! so a plugin's `PlaceIntent` sat unconsumed forever while `BreakIntent`
@@ -573,7 +573,7 @@ pub fn drive_mining(
     mut mining: ResMut<MiningPredictor>,
     mut particles: ResMut<ParticleSim>,
     mut queue: ResMut<ActionQueue>,
-    // Issue #109's veto registry. `Option`, so this system is unchanged for a
+    // That fix's veto registry. `Option`, so this system is unchanged for a
     // client that installed no plugin.
     vetoes: Option<Res<ActionVetoes>>,
     mut players: Query<
@@ -682,7 +682,7 @@ pub fn drive_mining(
     // `None` for every slot anyway. That is the pre-fix behaviour exactly.
     // `Menus::player_native` rather than `player().player_native(..)`: the one
     // inventory is owned by the *open container's* menu while a screen is up
-    // (issue #373), so reading window 0's menu here returned a stale stack and
+    // so reading window 0's menu here returned a stale stack and
     // mined at the wrong speed with a tool picked up inside a chest. It also
     // drops the whole-menu clone this comment complains about.
     let held = menus
@@ -700,7 +700,7 @@ pub fn drive_mining(
         submersion.0.eye_in_water,
     );
 
-    // Issue #109's block-break veto, asked *before* `continue_` advances the dig
+    // That fix's block-break veto, asked *before* `continue_` advances the dig
     // state machine — a plugin that finds out afterward is too late, which is the
     // whole complaint the issue opens with. A denial aborts any live dig via the
     // same idempotent `stop()` every other early return above uses, so a
@@ -740,8 +740,8 @@ pub fn drive_mining(
             .0
             .breaking_block(hit.block, id_value, [1.0; 3], particle_face(face));
     }
-    // Issue #360: the debris burst at the moment a block actually breaks.
-    // Issue #387: keyed on **destruction**, not on the `StopDestroy` packet.
+    // The debris burst at the moment a block actually breaks.
+    // Keyed on **destruction**, not on the `StopDestroy` packet.
     //
     // This is the local **prediction** half of vanilla's
     // `MultiPlayerGameMode.destroyBlock` (`MultiPlayerGameMode.java:113-145`):
@@ -761,7 +761,7 @@ pub fn drive_mining(
     // `Mining::start`'s `progress_per_tick() >= 1.0` branch emits
     // `StartDestroy` and nothing more, because the block is already gone, so
     // grass, saplings and flowers threw no debris at all while stone did
-    // (issue #387, reported from play). `Mining::take_destroyed` is the funnel:
+    // (reported from play). `Mining::take_destroyed` is the funnel:
     // both `start`'s instant-break branch and `continue_`'s progress-reached-1.0
     // branch latch it, so keying on it removes the class instead of
     // special-casing one-shot blocks.
@@ -887,7 +887,7 @@ pub fn drive_placement(
     net: Res<NetHandle>,
     version: Res<VersionData>,
     chunk_world: Res<ChunkWorld>,
-    // Issue #423: the write side of the split. The read handle above is for the
+    // The write side of the split. The read handle above is for the
     // re-mesh; only this one may touch the store — a system that took only
     // `Res<ChunkWorld>` compiles nowhere in `drive_placement`'s role.
     write: Res<ChunkWorldWrite>,
@@ -897,7 +897,7 @@ pub fn drive_placement(
     mut terrain: ResMut<TerrainMesh>,
     mut audio: ResMut<AudioEngine>,
     mut queue: ResMut<ActionQueue>,
-    // Issue #109's veto registry -- see `drive_mining`'s own parameter.
+    // That fix's veto registry -- see `drive_mining`'s own parameter.
     vetoes: Option<Res<ActionVetoes>>,
     mut commands: Commands,
     mut players: Query<
@@ -967,7 +967,7 @@ pub fn drive_placement(
 
     // `Menus::player_native`, never `player().player_native(..)`: the one
     // inventory is owned by the *open container's* menu while a screen is up
-    // — the exact fix `drive_mining`'s own docs describe for issue #373,
+    // — the exact fix `drive_mining`'s own docs describe for that fix,
     // generalised to placement.
     let main = menus
         .and_then(|menus| menus.0.player_native(slot.0))
@@ -1019,7 +1019,7 @@ pub fn drive_placement(
     // same reason `PlacementFacts` gives — but here there is only ever one
     // guard (`placement`, already held as a system parameter), so the two
     // reads are already disjoint by construction rather than by ordering.
-    // Issue #109's block-place veto, asked *before* `use_on` -- which threads the
+    // That fix's block-place veto, asked *before* `use_on` -- which threads the
     // block-prediction `sequence` counter and so cannot be called speculatively
     // and then discarded (`docs/baritone-port.md` §3.6 forbids forking that
     // counter outright). Denying here leaves the counter untouched.
@@ -1128,7 +1128,7 @@ impl Plugin for InteractPlugin {
         app.add_systems(
             GameTick,
             // `drive_placement` was defined but registered in **no** schedule
-            // until #436's island sweep found it: its only `add_systems` was a
+            // until that fix's island sweep found it: its only `add_systems` was a
             // hand-built `Schedule` in `tests/place_intent.rs`. A plugin's
             // `PlaceIntent` therefore sat unconsumed forever while `BreakIntent`
             // worked. Player impact was nil — human placement goes through

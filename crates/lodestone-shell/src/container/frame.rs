@@ -139,7 +139,7 @@ pub struct ContainerFrame<'a> {
     /// suppress the hovered slot *and* park the carried stack, so the suppression
     /// has to be specific to hovered-slot resolution. That is this field.
     pub hover_blocked: bool,
-    /// The open merchant's trade list (issue #245's UI half) — `None` (the
+    /// The open merchant's trade list (that fix's UI half) — `None` (the
     /// default) draws no trade rows, which is every existing caller (a
     /// merchant screen with no offers yet, or any non-merchant menu). See
     /// [`with_trades`](Self::with_trades) and `super::merchant`.
@@ -310,7 +310,7 @@ impl<'a> ContainerFrame<'a> {
     }
 
     /// Attach the in-progress paint-drag so the screen draws vanilla's **live
-    /// preview** (issue #378 part 2): in every painted cell, a 50%-white wash and
+    /// preview** (part 2): in every painted cell, a 50%-white wash and
     /// the provisional stack the release would leave there, with a clamped count
     /// in yellow; and on the cursor, the count it would be left holding.
     ///
@@ -357,7 +357,7 @@ impl<'a> ContainerFrame<'a> {
 /// with [`lodestone_model::Text::to_plain_string`] consults the model's tiny
 /// built-in stub table (fourteen chat/death keys — `text.rs`'s
 /// `default_translation`), which has no `container.*` entry, so the key falls
-/// through to itself and **the raw key is what the panel draws** (issue #52).
+/// through to itself and **the raw key is what the panel draws**.
 ///
 /// This is the same read-boundary resolution the chat feed, the tab list and the
 /// scoreboard sidebar already do; the container screen was the one HUD surface
@@ -426,7 +426,7 @@ pub fn merchant_title(
         // `fallback` (not a `with` argument): `merchant.level.N`'s pattern
         // takes no placeholder, it *is* the word. Carrying the known-good
         // English word here means a jar-less run or a stub table still shows
-        // "Novice", not the raw key `merchant.level.1` — issue #52's defect
+        // "Novice", not the raw key `merchant.level.1` — that fix's defect
         // class, avoidable here because the word is a fixed five-entry table
         // rather than server-authored prose.
         let level = lodestone_model::Text {
@@ -466,7 +466,7 @@ pub fn merchant_trades_label(translate: &dyn Fn(&str) -> Option<String>) -> Stri
 /// `x = 8`.
 ///
 /// Resolved through the language table for the same reason [`menu_title`] is: a
-/// raw `container.crafting` on screen is issue #52's defect class.
+/// raw `container.crafting` on screen is that fix's defect class.
 #[must_use]
 pub fn player_inventory_title(translate: &dyn Fn(&str) -> Option<String>) -> String {
     menu_title(

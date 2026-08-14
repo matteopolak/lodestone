@@ -1,7 +1,7 @@
 //! Pixel gate: a **remote** entity reporting bit `0x01` of the shared-flags
 //! byte must show the mob-fire billboard on screen, and clearing that bit (or
 //! never reporting it) must draw byte-identically to no flame pass at all
-//! (issue #434, player report: "mobs dont show flames yet").
+//! (player report: "mobs dont show flames yet").
 //!
 //! # Why this needs the render path, not just a unit test
 //!
@@ -98,7 +98,7 @@ fn world_with_two_tracked_zombies(feet: glam::Vec3) -> World {
         world.run_schedule(NetIngest);
     }
 
-    // Issue #36: read the ingest components `apply_entity_spawn` already wrote
+    // Read the ingest components `apply_entity_spawn` already wrote
     // directly, rather than a hand-built `EntitySnapshot` — same as
     // `Sim::fold_entities` does live.
     fold_entities(&mut world);

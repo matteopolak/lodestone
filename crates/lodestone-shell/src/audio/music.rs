@@ -1,4 +1,4 @@
-//! Driving vanilla's `MusicManager` from the shell — the call site `#135` did not
+//! Driving vanilla's `MusicManager` from the shell — the call site `that fix` did not
 //! have, and without which the selector it built was an island.
 //!
 //! # What this is
@@ -32,7 +32,7 @@
 //!
 //! [`ShellAudio::start_music`] resolves a stream and drops it, because
 //! `lodestone_audio`'s `Mixer` has no streaming-voice API. This module closes the
-//! *selection and request* path — which is what `#451` specifies and gates — and
+//! *selection and request* path — which is what `that fix` specifies and gates — and
 //! the last mile stays open. See `docs/music-selection.md`.
 
 use std::time::Duration;
@@ -86,7 +86,7 @@ pub(crate) struct ShellMusic {
     gain: f32,
     /// Every track a tick has asked to start, in order.
     ///
-    /// This is the observable `#451`'s gate is written against — "the engine
+    /// This is the observable `that fix`'s gate is written against — "the engine
     /// received exactly one play request for a named identifier" — and the reason
     /// it is a **count of named requests** and not a duration is that a "music
     /// started within N ms" assertion is the sequential-duration trap that has
@@ -290,7 +290,7 @@ mod tests {
     ///
     /// Every other gate in this module drives `ShellMusic` directly, and all of
     /// them pass identically whether or not anything in the shell ever calls it —
-    /// that is precisely the closed loop that left `#135`'s selector reaching no
+    /// that is precisely the closed loop that left `that fix`'s selector reaching no
     /// speakers with a green suite. The observable that distinguishes "wired" from
     /// "unwired" is the *existence of the call*, and neither call site is reachable
     /// from a unit test: `draw_menu` needs a window and a swapchain, and the
@@ -298,7 +298,7 @@ mod tests {
     ///
     /// So this is the same scanner shape `lodestone-sound`'s
     /// `the_music_modules_cannot_reach_a_device_or_a_clock` uses, inverted to
-    /// assert presence. It is the negative control `#451` describes ("remove the
+    /// assert presence. It is the negative control `that fix` describes ("remove the
     /// call site and observe zero") made into a standing gate: delete either call
     /// and this fails by name.
     ///
@@ -397,7 +397,7 @@ mod tests {
     /// Control: with `in_world` true and an **empty** `BackgroundMusic` there is
     /// nothing to select, so the same tick must produce **zero** requests.
     ///
-    /// This is the negative control `#451` asks for, in the form the code allows:
+    /// This is the negative control `that fix` asks for, in the form the code allows:
     /// removing the *call site* is what it describes, and driving the same call
     /// with a situation that selects nothing is the assertable equivalent — it
     /// proves the request came from the selection and not from the act of ticking.

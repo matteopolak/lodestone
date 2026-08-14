@@ -50,7 +50,7 @@ pub struct RenderStats {
     /// section carries `mesh: None`, so it never reaches
     /// [`sections_drawn`](Self::sections_drawn) while still issuing a draw.
     /// Measured 189 `sections_drawn` against 195 uploads and 304 `draw_calls`
-    /// before culling existed (issue #543) — a single combined invariant reads
+    /// before culling existed — a single combined invariant reads
     /// as a cull bug on a perfectly healthy frame.
     pub water_sections_drawn: usize,
     /// Water sections culled this frame, all three reasons summed (the split is
@@ -64,7 +64,7 @@ pub struct RenderStats {
     /// frame — one per arena block actually drawn from, plus one for each section
     /// that fell back to a dedicated buffer.
     ///
-    /// This is the number issue #543's second half moves: before the shared mesh
+    /// This is the number that fix's second half moves: before the shared mesh
     /// arena it was exactly `sections_drawn + water_sections_drawn` (every section
     /// bound its own two buffers), and it should now be in the low tens
     /// regardless of render distance. A value that tracks `sections_drawn` again
@@ -101,7 +101,7 @@ pub struct RenderStats {
     /// stitched **particle sheet** (flame, smoke, crits, splashes) rather than
     /// the block-model atlas that terrain debris comes from.
     ///
-    /// Its own counter because of issue #45: the particle pass used to bind one
+    /// Its own counter because the particle pass used to bind only one
     /// texture, so sheet particles resolved, uploaded, drew — and sampled
     /// *block* texels at particle-sheet coordinates. `particles_drawn` was
     /// perfectly healthy throughout. Read together with
@@ -136,7 +136,7 @@ pub struct RenderStats {
     /// invisible in **both** counters at once.
     pub campfire_items_drawn: usize,
     /// Filled-map pictures drawn this frame — the held one counts 1, plus one per
-    /// item frame carrying a map (issue #184).
+    /// item frame carrying a map.
     ///
     /// Its own counter for the reason [`item_drops_drawn`](Self::item_drops_drawn)
     /// has one, plus one specific to maps: a map whose colour grid is entirely
@@ -146,7 +146,7 @@ pub struct RenderStats {
     pub filled_maps_drawn: usize,
     /// Banner **pattern layers** drawn this frame — one per mask per banner, so a
     /// plain undyed banner counts 1 (its `base`) and a heavily decorated one up to
-    /// 17 (issue #23).
+    /// 17.
     ///
     /// Its own counter because a banner's pole and cloth draw through the ordinary
     /// opaque batch and are therefore already counted in `block_entities_drawn`: a
@@ -168,14 +168,14 @@ pub struct RenderStats {
     pub armour_layers_drawn: usize,
     /// Armour **trims** drawn this frame — one per `(wearer, slot)` carrying a
     /// `minecraft:trim`, so a leather piece counts 1 even though its armour is 2
-    /// layers (issue #17).
+    /// layers.
     ///
     /// Its own counter because a trim is subtle by design: a gold-trimmed diamond
     /// chestplate whose trim never reached the pipeline looks like a plain
     /// chestplate, which is a perfectly plausible thing for a mob to be wearing.
     pub armour_trims_drawn: usize,
     /// Sheep wool layers drawn this frame — one per unsheared sheep whose
-    /// wool attached to its own body (issue #53). Mirrors
+    /// wool attached to its own body. Mirrors
     /// [`armour_layers_drawn`](Self::armour_layers_drawn)'s role: a sheared
     /// sheep, a non-sheep quadruped with `wool: Some(..)` (should never
     /// happen — see `docs/entity-rendering.md`'s pig/cow trap), and a missing
@@ -183,7 +183,7 @@ pub struct RenderStats {
     /// at zero, so a broken wool attach cannot hide behind "nothing rendered
     /// at all".
     pub wool_layers_drawn: usize,
-    /// Mob-fire billboards drawn this frame (issue #434) — one per on-fire,
+    /// Mob-fire billboards drawn this frame — one per on-fire,
     /// frustum-visible entity whose type has a baked flame mesh. Zero with no
     /// vanilla pack (no flame texture) or when no entity currently has
     /// `EntityDraw::on_fire` set — see `RenderState::prepare_flame`'s doc for
@@ -261,36 +261,36 @@ pub struct RenderStats {
     /// also what the block pass's clear-vs-load choice keys off, so a wrong
     /// value here is not just a missing counter, it is a missing frame clear.
     pub sky_drawn: bool,
-    /// Whether the underwater overlay (issue #108) drew this frame — a pass
+    /// Whether the underwater overlay drew this frame — a pass
     /// is installed, first-person, not spectator, and
     /// `ScreenEffects::eye_in_water` was true.
     pub underwater_overlay_drawn: bool,
-    /// Whether the fire overlay (issue #112) drew this frame — same gating as
+    /// Whether the fire overlay drew this frame — same gating as
     /// [`underwater_overlay_drawn`](Self::underwater_overlay_drawn), keyed on
     /// `ScreenEffects::on_fire` instead.
     pub fire_overlay_drawn: bool,
-    /// Whether the pumpkin overlay (issue #185) drew this frame — same gating
+    /// Whether the pumpkin overlay drew this frame — same gating
     /// as [`underwater_overlay_drawn`](Self::underwater_overlay_drawn), keyed
     /// on `ScreenEffects::wearing_pumpkin` instead.
     pub pumpkin_overlay_drawn: bool,
-    /// Whether the spyglass overlay (issue #154) drew this frame — same
+    /// Whether the spyglass overlay drew this frame — same
     /// first-person/spectator gating as
     /// [`pumpkin_overlay_drawn`](Self::pumpkin_overlay_drawn), keyed on
     /// `ScreenEffects::scoping`.
     pub spyglass_overlay_drawn: bool,
-    /// Whether the freeze overlay (issue #139) drew this frame — **not**
+    /// Whether the freeze overlay drew this frame — **not**
     /// first-person-gated (see `ScreenEffects::any_active`'s doc), keyed on
     /// `ScreenEffects::freeze_percent > 0.0`.
     pub freeze_overlay_drawn: bool,
-    /// Whether the confusion overlay (issue #144) drew this frame — not
+    /// Whether the confusion overlay drew this frame — not
     /// first-person-gated, keyed on `ScreenEffects::nausea_intensity > 0.0`
     /// **and** `ScreenEffects::portal_intensity <= 0.0` (portal takes
     /// priority — `Hud.java:300-302`).
     pub confusion_overlay_drawn: bool,
-    /// Whether the portal overlay (issue #149) drew this frame — not
+    /// Whether the portal overlay drew this frame — not
     /// first-person-gated, keyed on `ScreenEffects::portal_intensity > 0.0`.
     pub portal_overlay_drawn: bool,
-    /// Block-entity rigs drawn this frame (issue #23) — chests today.
+    /// Block-entity rigs drawn this frame — chests today.
     ///
     /// Its own counter, not folded into `entities_drawn`, for the reason
     /// [`item_drops_drawn`](Self::item_drops_drawn) and
@@ -312,7 +312,7 @@ pub struct RenderStats {
     /// `gpu/block_entities.rs`), so `block_entities_drawn == 0` is ambiguous on
     /// its own. Zero here means no jar; 22 means every stem resolved.
     pub block_entity_sheets_loaded: usize,
-    /// Sign-text vertices uploaded this frame (issue #23), six per glyph ink
+    /// Sign-text vertices uploaded this frame, six per glyph ink
     /// run across both sides of every installed [`lodestone_render::SignSpawn`].
     /// The exact, non-pixel-based corroboration a pixel gate needs alongside
     /// [`block_entities_drawn`](Self::block_entities_drawn): a sign's *board*
@@ -322,10 +322,10 @@ pub struct RenderStats {
     /// `0`, which is why a pixel gate must also install real text to tell
     /// them apart).
     pub sign_text_vertices: u32,
-    /// Mining-crack overlays actually drawn this frame (issue #410) — one per
+    /// Mining-crack overlays actually drawn this frame — one per
     /// [`CrackTarget`](crate::gpu::CrackTarget) in the slice passed to
     /// [`RenderState::render_with_crack`](crate::gpu::RenderState::render_with_crack)
-    /// whose target block resolved to real geometry. Before #410 the pipeline
+    /// whose target block resolved to real geometry. Before that fix the pipeline
     /// accepted at most one target, so this could never exceed `1`; a live
     /// frame with two players digging different blocks now reports `2`, which
     /// is the number a single-target regression cannot produce.
@@ -348,8 +348,8 @@ pub struct RenderStats {
     /// Healthy value: `1` (packed-only or model-only frame) or `2` (both paths
     /// drew this frame — packed table plus live model terrain, entering each
     /// exactly once). A value that scales with `sections_drawn` means the
-    /// per-section bind-group shape issue #75/#76 removed has come back — the
-    /// measured counterpart to issue #128's "bind-group count independent of
+    /// per-section bind-group shape those fixes removed has come back — the
+    /// measured counterpart to that fix's "bind-group count independent of
     /// section count" ask, rather than a code-reading argument for it.
     pub terrain_camera_bind_group_switches: usize,
 }

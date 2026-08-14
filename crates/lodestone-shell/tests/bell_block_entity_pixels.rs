@@ -1,6 +1,6 @@
 //! Pixel gate: a bell's body must **draw**, in its own screen rect, through
 //! the real [`RenderState::render`] path — the same call `app.rs`'s frame
-//! loop makes (issue #23, the third block-entity type after chest and
+//! loop makes (the third block-entity type after chest and
 //! skull).
 //!
 //! # Why this gate is the whole point of the change

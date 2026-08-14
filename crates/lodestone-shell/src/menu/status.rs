@@ -488,7 +488,7 @@ impl StatusCache {
     }
 
     /// Discards every cached result for `entries` and probes them all again —
-    /// what the player asked for with F5 or the Refresh button (#396).
+    /// what the player asked for with F5 or the Refresh button.
     ///
     /// Not the same as [`Self::refresh`], and the difference is the whole reason
     /// this exists: that one *skips* any address it already has a result for, so
@@ -921,7 +921,7 @@ mod tests {
         );
     }
 
-    /// #421: the "who's online" tooltip is the sample's names, plus vanilla's
+    /// That fix: the "who's online" tooltip is the sample's names, plus vanilla's
     /// `multiplayer.status.and_more` — "... and N more ..." — when the sample is
     /// short of the reported online count (`ServerStatusPinger.java:90-110`).
     #[test]

@@ -122,7 +122,7 @@ const ASSUMED_FPS: f64 = 60.0;
 /// Setting `LODESTONE_MESH_FILL_TICK_SPEED=0` sends `gamerule
 /// random_tick_speed 0` as soon as the session is in-world, which makes
 /// `RandomTickScheduler::tick_chunk` return at its `tick_speed == 0` guard
-/// (`random_tick.rs:347`) **before** reaching
+/// **before** reaching
 /// `section_has_randomly_ticking_block` — the 4096-block-per-section string
 /// scan that the profile attributes 97.6% of the server tick thread to.
 ///
@@ -263,7 +263,7 @@ fn standing_still_the_whole_render_distance_meshes_and_we_report_how_long_it_too
 
     while start.elapsed() < DEADLINE {
         frame += 1;
-        // The app's frame, in the app's order (`app/redraw.rs:32..101`).
+        // The app's frame, in the app's order (`WindowApp::redraw`).
         sim.step(FRAME_DT);
         let _ = sim.drain_removals();
         let drained = sim.drain_meshes();

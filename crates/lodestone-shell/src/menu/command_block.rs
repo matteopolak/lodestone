@@ -1,4 +1,4 @@
-//! The command block edit screen (issue #47): vanilla's
+//! The command block edit screen: vanilla's
 //! `AbstractCommandBlockEditScreen`/`CommandBlockEditScreen` —
 //! `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/
 //! {AbstractCommandBlockEditScreen,CommandBlockEditScreen}.java`.
@@ -42,15 +42,15 @@
 //!   still have no decode arm** (`crates/protocol/**` is off-limits to this
 //!   crate), no real server's tree ever reaches a live client — every caller
 //!   in this shell passes `None`, and [`complete`]/[`highlight`] degrade
-//!   honestly to no candidates / no colouring rather than pretending. Named on
-//!   [#436](https://github.com/matteopolak/lodestone/issues/436).
+//!   honestly to no candidates / no colouring rather than pretending, and that
+//!   gap is tracked as a follow-up.
 //! - **Nothing yet opens this screen from a real interaction.** There is no
 //!   command-block-entity NBT decode anywhere in this workspace (`grep -rn
 //!   "CommandBlock" crates/lodestone-model crates/lodestone-server` finds
 //!   nothing but this file and the protocol test that encodes the outbound
 //!   packet), so there is no data to open it *with* yet either. See
 //!   [`CommandBlockOpen`] for the shape a future right-click handler would
-//!   construct, and #436 for the second, separate island this leaves.
+//!   construct, and that fix for the second, separate island this leaves.
 //!
 //! ## Dependencies
 //!
@@ -447,7 +447,7 @@ impl CommandBlockState {
         complete(tree, self.command.value())
     }
 
-    /// The Tab key (issue #471 step 2): splice the top locally-computed
+    /// The Tab key (step 2): splice the top locally-computed
     /// candidate into the command field, replacing everything from the
     /// completion's own `start`. Returns whether the field changed.
     ///

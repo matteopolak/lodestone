@@ -1,5 +1,5 @@
 //! Pixel gate: a **sheet** particle must be textured from the particle sheet,
-//! not from the block atlas (issue #45).
+//! not from the block atlas.
 //!
 //! # The bug, and why every existing gate was blind to it
 //!
@@ -510,7 +510,7 @@ fn flame_particles_are_textured_from_the_particle_sheet_not_the_block_atlas() {
 
     // The control **is** the pre-fix renderer: the particle pass's sheet slot
     // bound to the block-model atlas, which is exactly what `gpu.rs` did before
-    // issue #45 was fixed. Reconstructed through the same public API rather than
+    // That fix was fixed. Reconstructed through the same public API rather than
     // described, so it is executed and observed on every run.
     let mut control = RenderState::new(device, queue, format, W, H, Some(&blocks));
     control.install_particle_sheet_atlas(device, queue, block_stitch);

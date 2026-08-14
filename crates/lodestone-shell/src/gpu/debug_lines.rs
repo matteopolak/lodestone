@@ -80,7 +80,7 @@ fn push_box(out: &mut Vec<DebugLineVertex>, min: [f32; 3], max: [f32; 3], color:
 }
 
 /// F3+B: one wireframe box per entity, plus a short forward ray from eye height
-/// showing where it is looking (issue #197).
+/// showing where it is looking.
 ///
 /// The box comes from the **jar-derived** dimension census
 /// (`lodestone_data::entity_dimensions`), scaled by the draw's own `scale`, and
@@ -150,7 +150,7 @@ pub fn entity_hitbox_vertices(draws: &[crate::entities::EntityDraw]) -> Vec<Debu
     out
 }
 
-/// F3+G: the borders of the chunk the player is standing in (issue #197).
+/// F3+G: the borders of the chunk the player is standing in.
 ///
 /// Vanilla's `LevelRenderer.renderChunkBorders` draws the column's own edges
 /// plus a horizontal ring at each section boundary. This draws the four corner

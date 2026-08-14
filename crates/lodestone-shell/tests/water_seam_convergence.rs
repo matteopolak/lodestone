@@ -1,4 +1,4 @@
-//! Issue #389, on the mesher live terrain actually uses.
+//! That fix, on the mesher live terrain actually uses.
 //!
 //! **The report:** distant water is visibly blocky along chunk boundaries — "you
 //! can see where the chunks are" — and it corrects itself as the player
@@ -26,7 +26,7 @@
 //! # Controls, all executed
 //!
 //! * **The stale mesh.** The absent-neighbour measurement is taken through
-//!   `ColumnSource::Complete`, which is the pre-#389 code verbatim: it had no
+//!   `ColumnSource::Complete`, which is the pre-fix code verbatim: it had no
 //!   other option. So the "before" number is measured, not asserted from theory.
 //! * **The fixture.** Water on *both* sides of the seam is asserted against the
 //!   world data before anything is meshed. A fixture without it cannot exercise
@@ -303,7 +303,7 @@ fn a_water_seam_converges_on_the_neighbour_present_answer() {
     let models = load_models(&root);
     let (water, air) = water_and_air(&root);
 
-    // The stale mesh, taken through `ColumnSource::Complete` — the pre-#389 code
+    // The stale mesh, taken through `ColumnSource::Complete` — the pre-fix code
     // verbatim, which had no other option.
     let (stale_label, stale, stale_box) = measure(
         &seam_world(air, water, East::Absent),

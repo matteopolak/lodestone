@@ -1,5 +1,5 @@
 //! Pixel gate: the block-hit outline is not merely *present* but *thick
-//! enough to read* (issue #364).
+//! enough to read*.
 //!
 //! `gpu.rs`'s own `block_outline_draws_visible_edges` (in the crate's inline
 //! test module) already proves the outline pass changes pixels — it passes
@@ -252,7 +252,7 @@ fn block_outline_is_thicker_than_one_physical_pixel() {
 
     // The actual legibility assertion. A `PrimitiveTopology::LineList` line
     // rasterizes at exactly one physical pixel of thickness regardless of
-    // resolution (mode of the old `outline.rs`, issue #364) — GPU
+    // resolution (mode of the old `outline.rs`, that fix) — GPU
     // rasterizers only occasionally cover a second pixel row/column at a
     // sub-pixel edge straddle, so an honest measurement of that geometry
     // tops out at 1, rarely 2. Vanilla's real (non-debug) hit outline uses

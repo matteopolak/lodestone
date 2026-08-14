@@ -1,4 +1,4 @@
-//! Issue #415's acceptance condition, end to end: real packs on disk reach the
+//! That fix's acceptance condition, end to end: real packs on disk reach the
 //! **production** [`lodestone_assets::ResourceManager`] stack, in the right
 //! priority direction.
 //!

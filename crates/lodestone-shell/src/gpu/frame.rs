@@ -69,7 +69,7 @@ impl RenderState {
     }
 
     /// Like [`render`](Self::render), but also draws the progressive mining-crack
-    /// overlay for every target in `cracks` (issue #410: other players' digs, not
+    /// overlay for every target in `cracks` (other players' digs, not
     /// just the local player's own). Each follows its own block's real model
     /// geometry (slabs/stairs/crosses), not a synthetic cube.
     pub fn render_with_crack(
@@ -95,7 +95,7 @@ impl RenderState {
     }
 
     /// Like [`render`](Self::render), but also drives the underwater/fire
-    /// screen-overlay pass (issues #108, #112) from `screen_effects`. A
+    /// screen-overlay pass from `screen_effects`. A
     /// separate method rather than a new required parameter on
     /// [`render`](Self::render)/[`render_with_crack`](Self::render_with_crack)
     /// so the ~15 existing call sites across the test suite need no change —
@@ -127,7 +127,7 @@ impl RenderState {
     /// [`render_with_effects`](Self::render_with_effects) together — the shape
     /// `app.rs`'s real per-frame call site needs (mining and the overlays are
     /// both possible at once). `cracks` may hold any number of targets: the
-    /// local player's own dig, any number of other players' (issue #410), or
+    /// local player's own dig, any number of other players', or
     /// none at all (an empty slice costs nothing extra — see `render_inner`).
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -166,7 +166,7 @@ impl RenderState {
         cracks: &[CrackTarget],
         screen_effects: ScreenEffects,
     ) -> RenderStats {
-        // Issues #144/#149's shared world-projection "spinning" warp — see
+        // Shared world-projection "spinning" warp fix — see
         // `Camera::view_projection_warped`'s doc for why injecting it here,
         // at the single upstream source every world-space uniform below is
         // rewritten from, reaches the same scope vanilla's own
@@ -194,21 +194,21 @@ impl RenderState {
             .to_cols_array_2d();
 
         // This frame's fog **and** its `sky_darken` lane, hoisted above both
-        // terrain paths so they physically cannot disagree (issue #400). It used
+        // terrain paths so they physically cannot disagree. It used
         // to be computed inside the `if let Some(model)` below, which is why the
         // packed path had no way to reach it.
         let fog = self.fog_with_clock(camera.position);
 
         // The packed sections' shared camera buffer: **one** write, not one per
-        // section. Until issue #76 this was a `queue.write_buffer` per resident
+        // section. Until that fix this was a `queue.write_buffer` per resident
         // packed section, every frame, rewriting the whole 80-byte uniform just
-        // to re-aim the camera — the same shape issue #75 profiled at 52.9% of
+        // to re-aim the camera — the same shape that fix profiled at 52.9% of
         // main-thread CPU on the model path, left in place here because the
         // packed table only ever holds the demo world. Each section's origin is
         // written once, at upload (`upload_packed_section`), and selected at draw
         // time by a dynamic offset.
         //
-        // Carries the real fog since issue #400: the same `FogUniform` the model
+        // Carries the real fog since that fix: the same `FogUniform` the model
         // path gets, so the demo world and every headless gate now fade with
         // distance and darken at night instead of rendering at a permanent noon.
         update_model_shared_camera_buffer(
@@ -227,7 +227,7 @@ impl RenderState {
         // constant for the section's life, so there is nothing left to
         // rewrite here. This replaced a `queue.write_buffer` per *section*
         // per frame (up to ~4000/frame at the `sections=3880` measured in
-        // issue #75's profile); see the module doc.
+        // that fix's profile); see the module doc.
         if let Some(model) = &self.model {
             update_model_shared_camera_buffer(queue, &model.shared_cam_buffer, view_proj, fog);
         }
@@ -261,7 +261,7 @@ impl RenderState {
         // installed) the occlusion graph's reachable set — see
         // `lodestone_render::cull`. Before this, every resident section issued a
         // draw at every heading: 19,024 instructions per section, 17.7M per frame
-        // at the shipped render distance 8 (issue #543).
+        // at the shipped render distance 8.
         //
         // Deliberately *not* the warped `view_proj` above: the nausea/portal warp
         // is a post-projection screen distortion with no live producer, and
@@ -313,14 +313,14 @@ impl RenderState {
             None => entities,
         };
 
-        // Nametag vertices (issue #100), same "upload before the pass opens"
+        // Nametag vertices, same "upload before the pass opens"
         // constraint as outline/debug-lines above. Reads the same
         // (possibly body-extended) `entities` slice; the local third-person
         // body's own draw always carries `name_tag: None`
         // (`ThirdPersonBodyState::into_draw`), so this is a no-op for it.
         let name_tag_counts = self.nametag.prepare(queue, &view_proj, camera, entities);
 
-        // Sign text (issue #23), same "upload before the pass opens"
+        // Sign text, same "upload before the pass opens"
         // constraint. Not derived from `entities` — a sign is a *block*,
         // gathered from the world's block-entity records exactly like
         // `block_entity_source`/`skull_source` below, just with no cull or
@@ -342,12 +342,12 @@ impl RenderState {
         // usual reason: no buffer creation mid-pass.
         let armour_batches = self.prepare_armour(device, camera, entities, &mut stats);
 
-        // The sheep wool layer (issue #53), over the same instances, for the
+        // The sheep wool layer, over the same instances, for the
         // same reason armour is: no buffer creation mid-pass, and never posed
         // off a pose the body pass did not also draw.
         let wool_batches = self.prepare_wool(device, camera, entities, &mut stats);
 
-        // The mob-fire billboard (issue #434), over the same instances, for
+        // The mob-fire billboard, over the same instances, for
         // the same reason armour/wool are: no buffer creation mid-pass.
         let flame_batches = self.prepare_flame(device, camera, entities, &mut stats);
 
@@ -357,7 +357,7 @@ impl RenderState {
         // the only thing that puts an orb on screen.
         let orb_batches = self.prepare_orbs(device, camera, entities, &mut stats);
 
-        // Block entities (chests, issue #23). Not derived from `entities` — a
+        // Block entities (chests, that fix). Not derived from `entities` — a
         // chest is a *block*, gathered from the world's block-entity records by
         // the installed source — but uploaded here for the same reason as
         // everything above: buffers cannot be created mid-pass.
@@ -385,7 +385,7 @@ impl RenderState {
         // with items. Prepared here for the reason everything here is: buffers
         // cannot be created mid-pass.
         let moving_block_mesh = self.prepare_moving_blocks(device, camera, entities, &mut stats);
-        // Maps in item frames (issue #184). Built here rather than inside the pass
+        // Maps in item frames. Built here rather than inside the pass
         // for the reason above — it creates a texture and a bind group — and kept
         // separate from `item_mesh` because it draws with a different group 1.
         let framed_maps = self.prepare_framed_maps(device, queue, camera, entities);
@@ -421,7 +421,7 @@ impl RenderState {
 
         // Build every mining-crack overlay mesh before the pass (buffers can't be
         // created mid-pass) — one per entry in `cracks`, not just the local
-        // player's own dig (issue #410: `CrackPipeline` used to draw at most one
+        // player's own dig (`CrackPipeline` used to draw at most one
         // target, so another player's crack overlay had nowhere to go even
         // though `SessionBlockDestruction` already carried it). Each follows its
         // own target block's real model geometry; an air or unknown state, an
@@ -484,7 +484,7 @@ impl RenderState {
         // rim.
         stats.sky_drawn = if let Some(sky) = &self.sky {
             // The disc's *centre* colour is `self.fog.sky_color`, not
-            // `self.clear`. Those two were the same value until #96's biome tint:
+            // `self.clear`. Those two were the same value until that fix's biome tint:
             // the shell sets the clear colour from `FogSettings::color`, so
             // reading the clear here made the disc centre and the horizon
             // structurally identical and a per-biome tint had nowhere to enter.
@@ -575,7 +575,7 @@ impl RenderState {
                     continue;
                 }
                 // One bind group for the whole packed table; the section is
-                // selected by the dynamic offset of its origin slot (issue #76).
+                // selected by the dynamic offset of its origin slot.
                 bind_terrain_camera(
                     &mut pass,
                     &self.packed_cam_bind_group,
@@ -741,7 +741,7 @@ impl RenderState {
                     let Some(model) = self.entities.armour_model(batch.slot) else {
                         continue;
                     };
-                    // A material sheet or a trim sprite (issue #17) — the same
+                    // A material sheet or a trim sprite — the same
                     // pipeline, the same mesh and the same parts, differing only in
                     // which bind group lands at group 1. A trim batch is always
                     // ordered after its slot's own layers, which is what lets the
@@ -769,7 +769,7 @@ impl RenderState {
                 }
             }
 
-            // The sheep wool layer (issue #53), right after armour and before
+            // The sheep wool layer, right after armour and before
             // dropped items. Through the **base** entity pipeline (`Less`),
             // not `armour_pipeline` (`LessEqual`) — wool has no second layer
             // at the same inflation to correct z-fighting for, so copying
@@ -794,7 +794,7 @@ impl RenderState {
                 }
             }
 
-            // The mob-fire billboard (issue #434), right after wool and
+            // The mob-fire billboard, right after wool and
             // before block entities — cutout with depth write on, same as
             // every other opaque-cutout entity layer in this pass.
             if !flame_batches.is_empty() {
@@ -815,7 +815,7 @@ impl RenderState {
                 }
             }
 
-            // Block entities (chests, issue #23) — after the mob layers and
+            // Block entities (chests, that fix) — after the mob layers and
             // **before translucent water**, exactly where the mobs sit and for
             // the same reason: this pass is opaque-cutout with depth write on, so
             // drawing it after water would paint a submerged chest over the water
@@ -854,7 +854,7 @@ impl RenderState {
                 }
             }
 
-            // Banner pattern layers (issue #23/#174), immediately after the
+            // Banner pattern layers, immediately after the
             // opaque block entities whose depth they sit on.
             //
             // Three things about this loop are load-bearing and none of them fits
@@ -890,7 +890,7 @@ impl RenderState {
                 }
             }
 
-            // Sign text (issue #23), right after the block entities and
+            // Sign text, right after the block entities and
             // before translucent water — a sign's board is real terrain
             // (unlike a chest, it has a genuine block model), so by this
             // point in the pass it is already in the depth buffer for the
@@ -1020,7 +1020,7 @@ impl RenderState {
                     }
                 }
 
-                // Filled maps hanging in item frames (issue #184). Same pipeline
+                // Filled maps hanging in item frames. Same pipeline
                 // and same three shared bind groups as the dropped items above,
                 // with **group 1 swapped** to the map's own 128×128 texture — the
                 // model shader is at the 4-group floor, so a map texture has to
@@ -1048,7 +1048,7 @@ impl RenderState {
                 // on (so the block face is already in the depth buffer) and
                 // before translucent water. One draw call per target — the local
                 // player's own dig and any number of other players' (issue
-                // #410) — each independently textured with its own destroy-stage
+                // That fix) — each independently textured with its own destroy-stage
                 // sprite; the pipeline's negative depth bias pulls every one of
                 // them toward the camera so its texels win the depth test
                 // against its own coplanar face without z-fighting;
@@ -1195,7 +1195,7 @@ impl RenderState {
             // everything real that was drawn this frame.
             self.debug_lines.draw(&mut pass, debug_line_count);
 
-            // Nametags (issue #100) last of all, real depth-tested against
+            // Nametags last of all, real depth-tested against
             // this same terrain+entity depth buffer — see `gpu/nametag.rs`'s
             // module doc for the normal/see-through split and their exact
             // depth settings.
@@ -1209,8 +1209,7 @@ impl RenderState {
             self.draw_first_person_hand(&mut encoder, view, hand, &mut stats);
         }
 
-        // The screen overlays (issues #108, #112, #185, #139, #154, #144,
-        // #149): their own `Load` passes (see
+        // The screen overlays, each from its own closed fix: their own `Load` passes (see
         // `ScreenEffectRenderer::draw_underwater`'s doc — they must not erase
         // the world/hand just drawn), run last, matching vanilla's own order
         // (`GameRenderer.java:568-577`: the hand, then

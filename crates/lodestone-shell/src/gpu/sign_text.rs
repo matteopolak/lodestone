@@ -1,4 +1,4 @@
-//! World-space sign text (issue #23's sign scope): coloured quads placed by
+//! World-space sign text (that fix's sign scope): coloured quads placed by
 //! [`lodestone_render::sign_text_transform`], reusing `gpu/nametag.rs`'s
 //! jar-sourced font loader and ink-run layout rather than reinventing either
 //! — [`super::nametag::layout_ink_runs`]/[`super::nametag::load_font`] are
@@ -84,7 +84,7 @@ pub(super) struct SignTextRenderer {
     /// `None` off a jar-less run — same fail-open contract as
     /// [`super::nametag::NameTagRenderer::font`].
     font: Option<RasterFont>,
-    /// Ink-run layouts, persisted across frames (issue #527 (b)) — sign text
+    /// Ink-run layouts, persisted across frames — sign text
     /// changes only on a block-entity update, so the texel walk must not run
     /// per frame either. Shares [`super::nametag::InkLayoutCache`] for the same
     /// reason this file already shares `layout_ink_runs`.

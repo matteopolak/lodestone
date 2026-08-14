@@ -13,7 +13,7 @@
 //! crate owns it, reconciled against vanilla). Vanilla's block-interaction reach
 //! is 4.5 blocks from the eye; [`REACH`] matches.
 //!
-//! # Issue #375 — a cell is not a cube
+//! # That fix — a cell is not a cube
 //!
 //! This used to take an `is_solid(x, y, z) -> bool` occupancy predicate, so
 //! **every pickable block was a unit cube to the hit test** while the selection
@@ -211,7 +211,7 @@ pub fn raycast(
     let mut boxes = Vec::new();
 
     // A generous cap so a degenerate ray can never loop forever. `+1` over the
-    // pre-#375 bound because the origin cell is now visited too.
+    // pre-fix bound because the origin cell is now visited too.
     for _ in 0..(reach.ceil() as i32 * 3 + 9) {
         if let Some(hit) = clip_cell(origin, d, reach, voxel, &pick_boxes, &mut boxes) {
             return Some(hit);
@@ -507,7 +507,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Issue #375: thin and multi-box outlines
+    // Thin and multi-box outlines
     // -----------------------------------------------------------------------
     //
     // Every box below is hand-transcribed from 26.2's own source, so the
@@ -543,7 +543,7 @@ mod tests {
 
     /// **The reported bug.** A horizontal ray through the flat block's *cell* at
     /// eye height passes well above its box, so vanilla does not target it — and
-    /// before #375 this hit, because the cell was tested as a unit cube.
+    /// before that fix this hit, because the cell was tested as a unit cube.
     ///
     /// The pair below the miss is the magnitude control: the transition is
     /// bracketed either side of `1/16`, so neither "reject everything" (which
@@ -588,7 +588,7 @@ mod tests {
         );
     }
 
-    /// **The negative control, kept live.** The pre-#375 hit test is still
+    /// **The negative control, kept live.** The pre-fix hit test is still
     /// expressible — it is [`cubes`], one unit cube per occupied cell — so the
     /// bug can be re-run rather than described. Both rays the test above asserts
     /// *miss* were run against it and asserted `is_none()`; both failed
@@ -634,7 +634,7 @@ mod tests {
 
     /// **The face comes from the box, not from the cell.** A ray angled down into
     /// the flat block's cell crosses the cell's `z = 1` boundary first — which is
-    /// the face the pre-#375 traversal reported, together with a
+    /// the face the pre-fix traversal reported, together with a
     /// `place_position` one cell *south* of the litter instead of above it — and
     /// then meets the litter box from above.
     ///
@@ -727,7 +727,7 @@ mod tests {
         );
     }
 
-    /// The ray must keep walking after a cell whose boxes it misses. Pre-#375 it
+    /// The ray must keep walking after a cell whose boxes it misses. Pre-that fix it
     /// could not: the first *occupied* cell ended the cast.
     #[test]
     fn a_missed_thin_box_does_not_stop_the_ray_reaching_the_block_behind_it() {

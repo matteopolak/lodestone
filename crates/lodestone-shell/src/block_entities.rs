@@ -3,7 +3,7 @@
 //! chest-lid animation state that no other layer has anywhere to put.
 //!
 //! This is the **consumer end** of a chain that already existed and reached
-//! nothing (issue #23). Before this module the chain stopped one hop short of
+//! nothing. Before this module the chain stopped one hop short of
 //! pixels at every link:
 //!
 //! ```text
@@ -20,11 +20,11 @@
 //! ```
 //!
 //! The fourth row is the client's own right-click prediction
-//! ([`crate::sim::write_predicted_block`], issue #381) and it is **not** a packet:
+//! ([`crate::sim::write_predicted_block`], that fix) and it is **not** a packet:
 //! it is what stops a placed chest from being a hole for one server round trip.
 //! See `docs/block-placement-prediction.md`.
 //!
-//! # There are **four** creation routes, not two (issue #374)
+//! # There are **four** creation routes, not two
 //!
 //! The first version of that diagram listed only the chunk packet and
 //! `block_entity_data`, which was accurate and read as exhaustive. It was not:
@@ -42,10 +42,10 @@
 //! as its creation half: without it, breaking a chest would leave a stale record
 //! and this module would keep drawing a chest in empty air.
 //!
-//! #374 wired that into the two *packet* arms only, which left the same bug on the
+//! That fix wired that into the two *packet* arms only, which left the same bug on the
 //! **prediction** side — the client wrote no state at all on a right-click, so a
 //! chest you placed did not exist locally until `BLOCK_UPDATE` came back (issue
-//! #381). [`crate::sim::write_predicted_block`] closes it with the same pair, and
+//! That fix). [`crate::sim::write_predicted_block`] closes it with the same pair, and
 //! the removal half is what corrects a placement the server refuses.
 //!
 //! # Why the block-entity list is the candidate set, and the block state is the
@@ -60,7 +60,7 @@
 //!   to `minecraft:chest` — measured, in
 //!   [`lodestone_data::block_entity_types`]' census. (That census now exists, so
 //!   the older reason given here — "the shell has no block-entity-type table" —
-//!   is stale as of issue #374; the type is still the wrong question.)
+//!   is stale as of that fix; the type is still the wrong question.)
 //! * The NBT payload is `Nbt::End` for a chest the server sent no data for,
 //!   which is the common case.
 //!
@@ -686,7 +686,7 @@ fn chest_material(state_id: u32) -> Option<ChestMaterial> {
 /// Split out of [`chest_spawns`] so a gate can drive the real gather against a
 /// real [`World`] without a live `ClientHandle`: this is the loop that reads
 /// `chunk.block_entities`, and therefore the loop that saw nothing at all before
-/// issue #374 was fixed. Everything `chest_spawns` adds on top of this and
+/// That fix was fixed. Everything `chest_spawns` adds on top of this and
 /// [`chest_spawn`] is lock handling and a light sample.
 #[must_use]
 pub fn chest_candidates(
@@ -1673,7 +1673,7 @@ pub fn sign_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SignSpawn> {
 }
 
 /// The block's own dye colour, for a **standing** banner — `white_banner` →
-/// `DyeColor::White` (issue #23).
+/// `DyeColor::White`.
 ///
 /// The base colour is the *block*, not a state property: vanilla ships sixteen
 /// separate banner blocks. Grepping for a `color` property here finds nothing and
@@ -1832,7 +1832,7 @@ fn banner_spawn(
     })
 }
 
-/// Every banner to draw this frame (issue #23).
+/// Every banner to draw this frame.
 ///
 /// `game_time` and `partial_tick` are both needed and both come from the caller:
 /// `banner_phase` mixes the block position into the tick so two adjacent banners
@@ -2985,7 +2985,7 @@ mod sign_tests {
     }
 }
 
-/// Shulker boxes (issue #23) — kept in its own module beside `bell_tests` for the
+/// Shulker boxes — kept in its own module beside `bell_tests` for the
 /// same reason: this file is shared across every block-entity family.
 #[cfg(test)]
 mod shulker_tests {

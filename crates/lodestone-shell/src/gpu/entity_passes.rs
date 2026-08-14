@@ -311,7 +311,7 @@ fn push_armour_instances(
 impl RenderState {
 
     /// The trim sprite this wearer's `slot` should draw over its armour, or `None`
-    /// for an untrimmed piece, an unknown pattern/material, or no pack (issue #17).
+    /// for an untrimmed piece, an unknown pattern/material, or no pack.
     ///
     /// The `wearer_asset_id` argument to `trim_sprite_id` is the **armour's own**
     /// material id, not the trim's, and it is load-bearing:
@@ -347,7 +347,7 @@ impl RenderState {
     /// and record draw/cull counts. Runs before the render pass so every GPU
     /// buffer it creates outlives the pass that reads it.
     ///
-    /// # Why this plans twice (issue #98's hurt overlay)
+    /// # Why this plans twice (that fix's hurt overlay)
     ///
     /// `plan_entities` groups by model and drops the input order, so a
     /// per-entity flag cannot be zipped back onto a batch afterwards — and
@@ -417,7 +417,7 @@ impl RenderState {
         let mut groups: Vec<(bool, u8, Option<String>, Option<&'static str>, Vec<_>)> = Vec::new();
         for e in entities {
             // `resolve_posed`, not `resolve`, and this is the *only* call site that
-            // needs it (issue #380): the pitch selects the **placement**, and a
+            // needs it: the pitch selects the **placement**, and a
             // projectile placed by the mob matrix draws 1.501 blocks high and
             // mirrored. For every mob the extra argument changes nothing — a mob's
             // pitch is head tracking and arrives through `e.anim`, not through the
@@ -561,7 +561,7 @@ impl RenderState {
     ///
     /// # What is deliberately not handled
     ///
-    /// * **Trims are handled here now** (issue #17), and the note this bullet used
+    /// * **Trims are handled here now**, and the note this bullet used
     ///   to carry was stale in all three of its claims: `minecraft:trim` *is*
     ///   decoded (`read_component_patch`'s own arm), `net::entity_snapshot` no
     ///   longer exists (`entities::resolve_entity_facts` lifts it beside the dye),
@@ -740,7 +740,7 @@ impl RenderState {
     }
 
     /// Resolve this frame's on-fire entities into per-model-type flame
-    /// instance buffers (issue #434 — player report: "mobs dont show flames
+    /// instance buffers (— player report: "mobs dont show flames
     /// yet"). One [`FlameBatch`] per distinct `EntityDraw::type_path` that has
     /// at least one on-fire, frustum-visible instance this frame.
     ///
@@ -939,7 +939,7 @@ impl RenderState {
             .collect()
     }
 
-    /// Sheep wool layers (issue #53), over the same instances `prepare_entities`
+    /// Sheep wool layers, over the same instances `prepare_entities`
     /// resolved — same resolver, same `AnimInput`, so wool can never be posed
     /// off a different pose than the body it grows out of. Mirrors
     /// [`prepare_armour`](Self::prepare_armour) exactly, minus the per-slot/
@@ -1054,7 +1054,7 @@ impl RenderState {
             .collect()
     }
 
-    /// Resolve this frame's block entities (chests, issue #23) into per-part
+    /// Resolve this frame's block entities (chests, that fix) into per-part
     /// instance buffers, frustum-culled and batched by `(model, sheet)`.
     ///
     /// # The one thing that is *not* like `prepare_entities`
@@ -1429,7 +1429,7 @@ impl RenderState {
                 .filter_map(|spawn| self.block_entities.models.resolve_enchanting_table(spawn)),
         );
 
-        // Banners (issue #23). `resolve_banner` returns three things at once: the
+        // Banners. `resolve_banner` returns three things at once: the
         // pole/bar `body` and the swaying `flag` are ordinary opaque instances that
         // join the batch above, while `layers` is an **ordered** list of masks that
         // cannot be batched at all — see [`BannerLayerDrawBatch`].

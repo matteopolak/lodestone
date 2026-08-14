@@ -1,4 +1,4 @@
-//! Pixel gate: the underwater/fire overlay pass (issues #108, #112) reaches
+//! Pixel gate: the underwater/fire overlay pass reaches
 //! the screen through the **shell's real render path**
 //! (`RenderState::render_with_effects`/`render_with_crack_and_effects`), not
 //! just `ScreenEffectRenderer` in isolation.
@@ -268,7 +268,7 @@ fn underwater_overlay_reaches_the_screen_through_render_with_effects() {
 
 /// The fire overlay, through the real `render_with_effects` path, must
 /// change rows matching its real two-quad geometry's predicted vertical
-/// extent (`fire_overlay_vertical_extent`, issue #420) — not the retired
+/// extent (`fire_overlay_vertical_extent`, that fix) — not the retired
 /// hardcoded bottom-35% strip — and must leave rows above that extent
 /// unchanged. Checks row bands against a predicted boundary, not a
 /// frame-average — the same discipline `CLAUDE.md` asks for after the
@@ -313,7 +313,7 @@ fn fire_overlay_reaches_its_predicted_extent_through_render_with_effects() {
     let not_burning_pixels = target.read_texels(device, queue);
 
     // Row bands, predicted from the real geometry's own constants rather
-    // than a restated decimal (issue #420 replaced a hardcoded
+    // than a restated decimal (replaced a hardcoded
     // `FIRE_STRIP_TOP = -0.3` bottom-35% strip with vanilla's real two-quad
     // transform).
     let (_predicted_min_ndc, predicted_max_ndc) = fire_overlay_vertical_extent();
@@ -562,7 +562,7 @@ fn freeze_confusion_and_portal_survive_third_person_unlike_the_others() {
     assert!(!stats.confusion_overlay_drawn, "confusion must lose to portal when both are positive");
 }
 
-/// The pumpkin overlay (issue #185) covers the full NDC screen like the
+/// The pumpkin overlay covers the full NDC screen like the
 /// underwater overlay (see `pumpkin_overlay_triangles`'s doc), so toggling
 /// `wearing_pumpkin` with the pass installed must change essentially the
 /// whole frame, through the real `RenderState::render_with_effects` path —

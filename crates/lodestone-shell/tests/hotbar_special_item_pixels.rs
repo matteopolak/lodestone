@@ -1,5 +1,5 @@
 //! Pixel gate: a **chest** item in the hotbar must draw its real block-entity
-//! geometry (issue #369).
+//! geometry.
 //!
 //! The bug this exists to hold shut was an island of the ordinary kind.
 //! `lodestone-assets` classified chest, shulker box, banner, shield and the rest
@@ -264,7 +264,7 @@ fn projected_bbox(pose: Mat4, lo: Vec3, hi: Vec3) -> (f32, f32, f32, f32) {
     out
 }
 
-/// The `base` sprite fallback #369 offered as the cheap option **cannot draw
+/// The `base` sprite fallback that fix offered as the cheap option **cannot draw
 /// anything**, for the whole family and not just for chest.
 ///
 /// This is the measurement that decided the approach, so it is a test and not a
