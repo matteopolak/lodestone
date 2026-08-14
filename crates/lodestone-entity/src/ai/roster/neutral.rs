@@ -142,13 +142,11 @@
 //! [#233]: https://github.com/matteopolak/lodestone/issues/233
 
 use crate::ai::goal::Goal;
-use crate::ai::goals::{
-    FollowOwnerGoal, FollowParentGoal, PanicGoal, SitWhenOrderedToGoal, TemptGoal,
-};
+use crate::ai::goals::{FollowOwnerGoal, FollowParentGoal, PanicGoal, TemptGoal};
 
 use super::{
     Registration, Selector, SpeciesContext, breed_1_0, float_goal, hurt_by_target,
-    look_at_player_8, melee_attack, random_look_around, stroll,
+    look_at_player_8, melee_attack, random_look_around, sit_when_ordered, stroll,
 };
 
 /// Every species this family claims. Iterated by `roster`'s invariant gates.
@@ -350,12 +348,34 @@ pub const BEE: &[Registration] = &[
 /// and drops it back to `8.0`. `FOLLOW_RANGE` is the `Mob.createMobAttributes`
 /// default `16.0` (`Mob.java:167`), which sizes the pack-alert box.
 ///
-/// **Eight of the twenty rows need an owner**, and no ownership model exists
-/// tree-wide — not on `MobController`, not on `SimMob`, and not even
-/// expressibly, because `PlayerPerception` carries a position and a held item but
-/// no player identity to be owned *by*. `SitWhenOrderedToGoal`, `FollowOwnerGoal`,
-/// `BegGoal`, `OwnerHurtByTargetGoal`, `OwnerHurtTargetGoal` and both
-/// `NonTameRandomTargetGoal`s are all `Missing` for that one reason.
+/// **Eight of the twenty rows needed an owner**, and until `lodestone_server`
+/// grew one (`PlayerIdentity` at the perception seam, plus `MobController::
+/// owner_position`/`is_tame`/`is_ordered_to_sit`) all eight were `Missing` for
+/// that single reason. `SitWhenOrderedToGoal` and `FollowOwnerGoal` are now
+/// built on it and appear below as real rows — the ownership half of the gap
+/// is closed for those two.
+///
+/// The other six are still `Missing`, but **not for the reason above anymore**,
+/// and re-reading this comment instead of the table is exactly the kind of
+/// staleness this repo's evidence standards warn about:
+///
+/// * `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal` read `owner.getLastHurtByMob()`
+///   and `owner.getLastHurtMob()` (`ai/goal/target/OwnerHurtByTargetGoal.java`,
+///   `OwnerHurtTargetGoal.java`) — **who last hurt the owner** and **who the
+///   owner last hurt**. Ownership can name the owner now; nothing produces
+///   either fact. The player half needs the attacker's `PlayerIdentity` threaded
+///   through `MobSim::attack`'s caller (`crate::server::apply_attack`, which
+///   today passes only a `Vec3` for knockback), and the "a mob hurt the owner"
+///   half has no producer at all — player damage is not resolved through
+///   `MobSim`. Both rows stay `Missing` at their own table entries below, with
+///   this reasoning repeated there rather than assumed from this paragraph.
+/// * `BegGoal` and `Wolf.WolfAvoidEntityGoal(Llama)` both gate on `isTame()`
+///   (`ai/goal/BegGoal.java`, `animal/wolf/Wolf.java:678`), which is answerable
+///   today — but neither has a goal *type* in this crate yet (begging for food,
+///   and fleeing a llama with a strength-gated roll), so they are `Missing` for
+///   an ordinary "we have no such goal" reason now, not an ownership one.
+/// * Both `NonTameRandomTargetGoal`s gate on `!isTame()` and otherwise pick a
+///   random same-class target — also answerable, also no goal type here yet.
 ///
 /// Pack aggro is `HurtByTargetGoal(this).setAlertOthers()` at target priority 3,
 /// and the ownership gap reaches into it too:
@@ -378,9 +398,10 @@ pub const WOLF: &[Registration] = &[
     Registration::goal(2, "SitWhenOrderedToGoal", sit_when_ordered),
     // `Wolf.WolfAvoidEntityGoal<>(this, Llama.class, 24.0F, 1.5, 1.5)`
     // (`:666-696`). Not merely an `AvoidEntityGoal` with a 24-block radius: its
-    // `canUse` requires `!wolf.isTame()` (`:678`) and rolls against the llama's
-    // strength (`:681-683`). Without the tame flag, ours would make a *tamed*
-    // wolf flee too, so this waits on the owner model rather than shipping half.
+    // `canUse` requires `!wolf.isTame()` (`:678`, answerable now through
+    // `MobController::is_tame`) and rolls against the llama's strength
+    // (`:681-683`). The remaining gap is a goal *type*: no llama-strength roll
+    // exists in this crate, not the tame flag.
     Registration::missing(Selector::Goal, 3, "Wolf.WolfAvoidEntityGoal(Llama)"),
     Registration::missing(Selector::Goal, 4, "LeapAtTargetGoal"),
     // `MeleeAttackGoal(this, 1.0, true)`.
@@ -394,7 +415,21 @@ pub const WOLF: &[Registration] = &[
     Registration::missing(Selector::Goal, 9, "BegGoal"),
     Registration::goal(10, "LookAtPlayerGoal(Player)", look_at_player_8),
     Registration::goal(10, "RandomLookAroundGoal", random_look_around),
+    // `OwnerHurtByTargetGoal` (`ai/goal/target/OwnerHurtByTargetGoal.java`):
+    // targets whoever `owner.getLastHurtByMob()` names. Ownership can resolve
+    // the owner now; nothing produces "who last hurt the owner" — a player's
+    // incoming damage is not resolved through `MobSim` at all, so there is no
+    // call site here to read it from. See this table's own doc for the fuller
+    // account.
     Registration::missing(Selector::Target, 1, "OwnerHurtByTargetGoal"),
+    // `OwnerHurtTargetGoal` (`ai/goal/target/OwnerHurtTargetGoal.java`): targets
+    // whoever `owner.getLastHurtMob()` names, i.e. joins a fight the owner
+    // started. `MobSim::attack` — this crate's own melee-resolution entry point
+    // — already takes the attacker's `Vec3` for knockback, but not their
+    // `PlayerIdentity`, so a wolf here cannot tell "the owner just hit this"
+    // from "some other player did". Threading identity through needs a change
+    // at `crate::server::apply_attack`'s call site, which this unit does not
+    // own; see this table's own doc for the fuller account.
     Registration::missing(Selector::Target, 2, "OwnerHurtTargetGoal"),
     // `.setAlertOthers()` — the pack half is `Missing`; see this table's doc.
     Registration::target(3, "HurtByTargetGoal", hurt_by_target),
@@ -428,12 +463,6 @@ fn panic_1_5(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// `TemptGoal(this, 1.25, BEE_FOOD, false)` (`animal/bee/Bee.java:178`).
 fn tempt_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(TemptGoal::new(ctx.speed * 1.25))
-}
-
-/// `SitWhenOrderedToGoal(this)` (`animal/wolf/Wolf.java`, goal priority 2).
-/// Takes no speed — it stops navigation rather than driving it.
-fn sit_when_ordered(_ctx: &SpeciesContext) -> Box<dyn Goal> {
-    Box::new(SitWhenOrderedToGoal)
 }
 
 /// `FollowOwnerGoal(this, 1.0, 10.0F, 2.0F)` — the wolf's follow distances.

@@ -234,6 +234,58 @@ pub trait MobController {
         let _ = sitting;
     }
 
+    /// Whether this mob is part of an active pillager patrol — vanilla
+    /// `PatrollingMonster.isPatrolling()`.
+    ///
+    /// Defaults to `false`.
+    fn is_patrolling(&self) -> bool {
+        false
+    }
+
+    /// Whether this mob leads its patrol — vanilla
+    /// `PatrollingMonster.isPatrolLeader()`. Only a leader repicks its own
+    /// far-off waypoint once it arrives; see
+    /// [`LongDistancePatrolGoal`](super::goals::LongDistancePatrolGoal)'s own
+    /// doc comment for why a follower's movement is driven by
+    /// [`patrol_group_target`](MobController::patrol_group_target) instead.
+    ///
+    /// Defaults to `false`.
+    fn is_patrol_leader(&self) -> bool {
+        false
+    }
+
+    /// This mob's own current long-distance patrol waypoint — vanilla
+    /// `PatrollingMonster.getPatrolTarget()`.
+    ///
+    /// Defaults to `None`, vanilla's `hasPatrolTarget() == false` state.
+    fn patrol_target(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// Records a newly chosen patrol waypoint — vanilla
+    /// `PatrollingMonster.setPatrolTarget`/`findPatrolTarget`, called both when
+    /// a leader picks a fresh far-off target and when a follower adopts
+    /// [`patrol_group_target`](MobController::patrol_group_target).
+    fn set_patrol_target(&mut self, target: Option<Vec3>) {
+        let _ = target;
+    }
+
+    /// For a **non-leader**: the patrol's shared waypoint, as the host
+    /// resolves it by searching nearby patrol leaders. Vanilla's own
+    /// `LongDistancePatrolGoal.tick` runs this search itself
+    /// (`findPatrolCompanions`, a `getEntitiesOfClass` query) and *pushes* its
+    /// current near-term waypoint out to every companion it finds; this crate
+    /// has no "find nearby entities of a class" query on this seam at all — it
+    /// hands goals answers, never populations — so the direction is reversed: a
+    /// follower *pulls* its leader's long-distance target from the host here
+    /// instead. See [`LongDistancePatrolGoal`](super::goals::LongDistancePatrolGoal)
+    /// for the full account of what that changes.
+    ///
+    /// Defaults to `None`.
+    fn patrol_group_target(&self) -> Option<Vec3> {
+        None
+    }
+
     /// Performs a melee attack against `target`.
     fn attack(&mut self, target: Vec3) {
         let _ = target;

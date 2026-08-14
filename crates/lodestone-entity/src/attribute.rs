@@ -866,6 +866,32 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
                 ("attack_damage", 3.0),
             ],
         },
+        // `Cat.createAttributes()` (`animal/feline/Cat.java:286-288`). A
+        // `TamableAnimal`, same reason the wolf's arm above is: the supplier
+        // chain calls `Animal.createAnimalAttributes()` directly, since
+        // `TamableAnimal` declares no `createAttributes` of its own.
+        "cat" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 10.0),
+                ("movement_speed", 0.3),
+                ("attack_damage", 3.0),
+            ],
+        },
+        // `Parrot.createAttributes()` (`animal/parrot/Parrot.java:173-179`).
+        // The only species in this table with both `flying_speed` and
+        // `attack_damage` set alongside a sub-default `movement_speed` — a
+        // parrot walks slowly (`0.2`, against the registry default `0.7`)
+        // but flies at a comparable clip (`0.4`).
+        "parrot" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 6.0),
+                ("flying_speed", 0.4),
+                ("movement_speed", 0.2),
+                ("attack_damage", 3.0),
+            ],
+        },
         _ => return None,
     };
     Some(spec)

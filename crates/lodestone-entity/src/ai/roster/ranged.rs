@@ -78,6 +78,7 @@ use super::{
     look_at_player_6, look_at_player_8, nearest_attackable_target, random_look_around, stroll,
 };
 use crate::ai::goal::{Flag, FlagSet, Goal};
+use crate::ai::goals::LongDistancePatrolGoal;
 use crate::ai::mob::{MobController, ProjectileKind, ProjectileLaunch, distance_sqr};
 
 // -- shared aiming constants -------------------------------------------------
@@ -651,6 +652,16 @@ fn crossbow_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// pillager bolts hit twice as hard as vanilla's.
 const CROSSBOW_CHARGE_TICKS: i32 = 25;
 
+/// `PatrollingMonster.LongDistancePatrolGoal<>(this, 0.7, 0.595)`
+/// (`monster/PatrollingMonster.java:40`) — `(speedModifier, leaderSpeedModifier)`,
+/// the same kind of `MOVEMENT_SPEED` multiplier every other builder in this
+/// roster scales by `ctx.speed`. [`LongDistancePatrolGoal::new`]'s own doc
+/// comment has the counterintuitive part: the *leader* is the slower of the
+/// two figures.
+fn patrol_goal(ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(LongDistancePatrolGoal::new(ctx.speed * 0.7, ctx.speed * 0.595))
+}
+
 // -- tables ------------------------------------------------------------------
 
 /// `monster/Blaze.java:44-52`. No `super.registerGoals()` call, so this is the
@@ -734,10 +745,21 @@ pub const WITCH: &[Registration] = &[
 ///
 /// The crossbow row is [`crossbow_attack`]; read its doc comment for what is exact
 /// (the projectile and its launch speed) and what is a stand-in (the charge-state
-/// machine, replaced by a fixed interval).
+/// machine, replaced by a fixed interval). The inherited
+/// `PatrollingMonster.LongDistancePatrolGoal` row is [`patrol_goal`] — the one
+/// row in the inherited chain that is real rather than raid machinery, because
+/// it is patrol machinery instead; `docs/pillager-patrols.md` has the full
+/// account, including what the goal itself does not port.
 pub const PILLAGER: &[Registration] = &[
     // -- inherited from PatrollingMonster / Raider --
-    Registration::missing(Selector::Goal, 4, "PatrollingMonster.LongDistancePatrolGoal"),
+    // Issue #241a: pillager patrols. This row was `Missing` alongside the
+    // witch's identical one — both inherit `PatrollingMonster.registerGoals`
+    // — but the pillager is the *only* species vanilla's `PatrolSpawner`
+    // ever spawns (`level/levelgen/PatrolSpawner.java`), so it is the only
+    // one that needs the goal to be real. `docs/pillager-patrols.md` has the
+    // full account of what `patrol_goal`'s underlying
+    // `LongDistancePatrolGoal` does and does not port.
+    Registration::goal(4, "PatrollingMonster.LongDistancePatrolGoal", patrol_goal),
     Registration::missing(Selector::Goal, 1, "Raider.ObtainRaidLeaderBannerGoal"),
     Registration::missing(Selector::Goal, 3, "PathfindToRaidGoal"),
     Registration::missing(Selector::Goal, 4, "Raider.RaiderMoveThroughVillageGoal"),
@@ -866,6 +888,7 @@ mod tests {
     use crate::ai::goal::GoalSelector;
     use crate::ai::goals_for;
     use crate::ai::navigating_mob::NavigatingMob;
+    use crate::ai::roster::Coverage;
     use crate::ai::roster::probe::SpeedProbe;
     use crate::pathfinding::{Aabb, MobShape, PathType, PathWorld};
 
@@ -1219,13 +1242,15 @@ mod tests {
     /// `MobSim::spawn_species` calls.
     #[test]
     fn both_species_install_goals_through_the_production_entry_point() {
-        // The witch builds 7 of its 13 rows and the pillager 7 of its 16 — every
+        // The witch builds 7 of its 13 rows and the pillager 8 of its 16 — every
         // `Modelled` row and no `Missing` or `CoveredBy` one, which is what makes the
         // raid rows honest bookkeeping rather than silently-registered no-ops. The
         // pillager's second `LookAtPlayerGoal` is `CoveredBy`, so 16 rows minus 8
-        // uncovered gives 7 and not 8.
+        // uncovered gives 8: issue #241a's `LongDistancePatrolGoal` row is the one
+        // that moved from `Missing` to `Modelled` and is why the pillager's count is
+        // no longer the same as the witch's identical inherited-row count.
         for (species, expected_built) in
-            [("blaze", 6), ("snow_golem", 4), ("witch", 7), ("pillager", 7)]
+            [("blaze", 6), ("snow_golem", 4), ("witch", 7), ("pillager", 8)]
         {
             let ctx = SpeciesContext::new(0.23);
             let built = goals_for(species, &ctx);
@@ -1360,6 +1385,111 @@ mod tests {
             mob.launches().is_empty(),
             "a removed bow goal must not shoot; got {:?}",
             mob.launches()
+        );
+    }
+
+    // -- issue #241a: pillager patrols ---------------------------------------
+
+    /// The pillager's roster row installs a real, reachable
+    /// `LongDistancePatrolGoal` — the structural fact a table entry alone
+    /// cannot prove, per this module's own "not a fake" discipline above.
+    #[test]
+    fn the_pillagers_table_installs_a_reachable_patrol_goal() {
+        let table = lookup("pillager").expect("pillager has a table");
+        let row = table
+            .iter()
+            .find(|r| r.vanilla == "PatrollingMonster.LongDistancePatrolGoal")
+            .expect("the row must exist");
+        assert!(
+            matches!(row.coverage, Coverage::Modelled(_)),
+            "the row exists but is not Modelled: {:?}",
+            row.coverage
+        );
+        assert_eq!(row.priority, 4, "PatrollingMonster.java:40's own priority");
+        assert_eq!(row.selector, Selector::Goal);
+    }
+
+    /// A leader with a real `NavigatingMob` walks toward its own
+    /// `patrol_target`, driven by [`patrol_goal`] — the exact builder the
+    /// pillager's roster row installs, held alone in the selector so a
+    /// sibling goal (the pillager also gets a `RandomStrollGoal`) cannot be
+    /// the thing actually moving the mob.
+    #[test]
+    fn a_patrol_leader_walks_toward_its_own_target() {
+        let world = Flat;
+        let mut mob = real_mob(&world, Vec3::new(0.0, 0.0, 0.0), 0.3);
+        mob.set_patrolling(true);
+        mob.set_patrol_leader(true);
+        let far_target = Vec3::new(60.0, 0.0, 0.0);
+        mob.set_patrol_target(Some(far_target));
+
+        let mut ai = GoalSelector::new();
+        ai.add(4, patrol_goal(&SpeciesContext::new(0.3)));
+
+        let gap = |p: Vec3| (p.x - far_target.x).abs();
+        let before = gap(mob.position());
+        for _ in 0..400 {
+            mob.tick(&mut ai);
+        }
+        let after = gap(mob.position());
+        assert!(
+            after < before,
+            "a patrolling leader with a real target 60 blocks out should have \
+             closed the gap over 400 ticks; started {before}, ended {after}"
+        );
+
+        // Control: the identical goal, alone, on a mob never marked
+        // patrolling. With only this one goal in the selector, zero movement
+        // is a direct read of `LongDistancePatrolGoal::can_use`'s own gate —
+        // no sibling goal can supply a false positive here.
+        let mut idle = real_mob(&world, Vec3::new(0.0, 0.0, 0.0), 0.3);
+        idle.set_patrol_leader(true);
+        idle.set_patrol_target(Some(far_target));
+        let mut idle_ai = GoalSelector::new();
+        idle_ai.add(4, patrol_goal(&SpeciesContext::new(0.3)));
+        for _ in 0..400 {
+            idle.tick(&mut idle_ai);
+        }
+        assert!(
+            (idle.position().x - 0.0).abs() < 1e-9,
+            "control: a mob with a target but `is_patrolling() == false` must \
+             not move under `LongDistancePatrolGoal::can_use`'s own gate; it \
+             moved to x={}",
+            idle.position().x
+        );
+    }
+
+    /// A **follower** (`is_patrol_leader() == false`) with no target of its
+    /// own adopts whatever [`MobController::patrol_group_target`] reports —
+    /// the host-census pull this goal substitutes for vanilla's
+    /// leader-pushes-to-companions census (see `LongDistancePatrolGoal`'s own
+    /// doc comment in `goals.rs`) — and then walks toward it. Same isolation
+    /// as the leader test: [`patrol_goal`] alone in the selector.
+    #[test]
+    fn a_patrol_follower_adopts_and_walks_toward_the_group_target() {
+        let world = Flat;
+        let mut mob = real_mob(&world, Vec3::new(0.0, 0.0, 0.0), 0.3);
+        mob.set_patrolling(true);
+        // Deliberately *not* a leader, and no `patrol_target` of its own —
+        // everything must come from `patrol_group_target`.
+        let group_target = Vec3::new(-60.0, 0.0, 0.0);
+        mob.set_patrol_group_target(Some(group_target));
+
+        let mut ai = GoalSelector::new();
+        ai.add(4, patrol_goal(&SpeciesContext::new(0.3)));
+
+        let gap = |p: Vec3| (p.x - group_target.x).abs();
+        let before = gap(mob.position());
+        for _ in 0..400 {
+            mob.tick(&mut ai);
+        }
+        let after = gap(mob.position());
+        assert!(
+            after < before,
+            "a follower fed only a group target 60 blocks out (in the *other* \
+             direction from the leader test above, so a direction bug cannot \
+             pass both) should have closed the gap over 400 ticks; started \
+             {before}, ended {after}"
         );
     }
 }

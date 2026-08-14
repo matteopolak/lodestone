@@ -89,7 +89,7 @@ use lodestone_entity::{
     seen_percent,
 };
 use lodestone_model::PathType as CensusPathType;
-use lodestone_model::{BlockPos, Identifier, ResourceKey, Rotation, Vec3};
+use lodestone_model::{BlockPos, Difficulty, Identifier, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::chunk::{AIR, ChunkColumn, ChunkSource};
@@ -1167,6 +1167,12 @@ const BREED_DISTANCE_SQR: f64 = 9.0;
 const FOLLOW_PARENT_RANGE: f64 = 8.0;
 const FOLLOW_PARENT_RANGE_Y: f64 = 4.0;
 
+/// `LongDistancePatrolGoal.findPatrolCompanions`'s search box,
+/// `getBoundingBox().inflate(16.0)` (`monster/PatrollingMonster.java:203`).
+/// Isotropic in vanilla (one `inflate` argument covers all three axes), unlike
+/// [`FOLLOW_PARENT_RANGE`]'s horizontal/vertical split.
+const PATROL_COMPANION_RANGE: f64 = 16.0;
+
 /// The species a given species flees, i.e. the `avoidClass` of each vanilla
 /// `AvoidEntityGoal` registration. This is **perception data, not a goal set** —
 /// it answers "is that thing a threat to me", which is what
@@ -1210,6 +1216,15 @@ fn avoided_species(species: &str) -> &'static [&'static str] {
 /// | pig | `pig_food.json` | `carrot`, `potato`, `beetroot` |
 /// | chicken | `chicken_food.json` | `wheat_seeds`, `melon_seeds`, `pumpkin_seeds`, `beetroot_seeds`, `torchflower_seeds`, `pitcher_pod` |
 /// | rabbit | `rabbit_food.json` | `carrot`, `golden_carrot`, `dandelion` |
+/// | cat | `cat_food.json` | `cod`, `salmon` |
+///
+/// The cat is the one row here that is not a farm animal: `Cat.CatTemptGoal`
+/// (`animal/feline/Cat.java:106`) is constructed with the very same
+/// `#cat_food` tag `tame_mechanism`/`breeding_food` already use for it, so
+/// this row and those two agree by construction rather than by luck. Contrast
+/// [`breeding_food`]'s own doc comment, which names the wolf as the species
+/// where tempt and tame/breed *diverge* — the cat is the ordinary case, the
+/// wolf is the exception.
 ///
 /// **This is an interim table and should be replaced, not extended.** Roster
 /// unit B2 owns a *generated* item-tag table following the
@@ -1237,6 +1252,12 @@ fn tempt_food(species: &str) -> &'static [&'static str] {
             "pitcher_pod",
         ],
         "rabbit" => &["carrot", "golden_carrot", "dandelion"],
+        // `#cat_food` — the same two items `tame_mechanism("cat")` and
+        // `breeding_food("cat")` already use. `lodestone_entity`'s
+        // `roster::passive::CAT` installs the goal this feeds
+        // (`Cat.CatTemptGoal(CAT_FOOD)`); without this arm the row was
+        // installed on a real mob but never reached by real perception.
+        "cat" => &["cod", "salmon"],
         // Not a mistake: most species have no food tag, and an empty slice
         // keeps `TemptGoal` correctly inert for them rather than tempting them
         // with anything.
@@ -2219,6 +2240,62 @@ impl<'w> SimMob<'w> {
         self.mob.is_in_sitting_pose()
     }
 
+    /// Whether this mob is part of an active pillager patrol — vanilla
+    /// `PatrollingMonster.isPatrolling()`. Kept only on the [`NavigatingMob`]
+    /// (unlike [`tame`](Self::tame)/[`owner`](Self::owner)): nothing outside the
+    /// AI seam and [`MobSim`]'s own patrol census reads it, so there is no
+    /// second host-side record to keep in sync.
+    #[must_use]
+    pub fn is_patrolling(&self) -> bool {
+        self.mob.is_patrolling()
+    }
+
+    /// Whether this mob leads its patrol — vanilla
+    /// `PatrollingMonster.isPatrolLeader()`.
+    #[must_use]
+    pub fn is_patrol_leader(&self) -> bool {
+        self.mob.is_patrol_leader()
+    }
+
+    /// This mob's own current long-distance patrol waypoint — vanilla
+    /// `PatrollingMonster.getPatrolTarget()`.
+    #[must_use]
+    pub fn patrol_target(&self) -> Option<Vec3> {
+        self.mob.patrol_target()
+    }
+
+    /// Marks this mob as patrolling (or not) — vanilla
+    /// `PatrollingMonster.setPatrolling`.
+    pub fn set_patrolling(&mut self, patrolling: bool) -> &mut Self {
+        self.mob.set_patrolling(patrolling);
+        self
+    }
+
+    /// Marks this mob as its patrol's leader (or not) — vanilla
+    /// `PatrollingMonster.setPatrolLeader`. Does not also set
+    /// [`patrolling`](Self::set_patrolling); see [`NavigatingMob::set_patrol_leader`]'s
+    /// own doc comment for why the two are separate calls here.
+    pub fn set_patrol_leader(&mut self, leader: bool) -> &mut Self {
+        self.mob.set_patrol_leader(leader);
+        self
+    }
+
+    /// Sets this mob's own long-distance patrol waypoint — vanilla
+    /// `PatrollingMonster.setPatrolTarget`/`findPatrolTarget`.
+    pub fn set_patrol_target(&mut self, target: Option<Vec3>) -> &mut Self {
+        self.mob.set_patrol_target(target);
+        self
+    }
+
+    /// Feeds a non-leader the patrol group's shared waypoint, as
+    /// [`MobSim`]'s own per-tick census resolves it. See
+    /// [`MobController::patrol_group_target`]'s own doc comment for why this
+    /// exists.
+    pub fn set_patrol_group_target(&mut self, target: Option<Vec3>) -> &mut Self {
+        self.mob.set_patrol_group_target(target);
+        self
+    }
+
     /// `AbstractHorse.getTemper()` — how close this horse is to accepting a
     /// rider. Always `0` outside the horse family.
     #[must_use]
@@ -2967,6 +3044,18 @@ pub struct MobSim<'w> {
     /// the motion is [`lodestone_physics::vehicle`]'s, shared with the client so
     /// a boat we *watch* and a boat we *ride* cannot disagree about a slab.
     vehicles: HashMap<i32, TrackedVehicle>,
+    /// Vanilla `PatrolSpawner.nextTick` — ticks remaining before the next
+    /// patrol-spawn attempt, decremented once per
+    /// [`run_patrol_spawn_cycle`](Self::run_patrol_spawn_cycle) call
+    /// regardless of whether it does anything, exactly as vanilla's
+    /// `CustomSpawner.tick` decrements its own countdown every world tick.
+    patrol_next_tick: i32,
+    /// The `random.nextInt(…)` draws [`run_patrol_spawn_cycle`](Self::run_patrol_spawn_cycle)
+    /// makes, on its own stream for the same isolation reason
+    /// [`tame_rng`](Self::tame_rng) is separate from every other roll: a
+    /// patrol-spawn attempt must not shift which roll a mob spawn, a despawn
+    /// pass or a tame attempt sees.
+    patrol_rng: SpawnRng,
 }
 
 /// One live `AbstractBoat` — wire identity, motion, and who is aboard.
@@ -3079,6 +3168,12 @@ impl<'w> MobSim<'w> {
             breed_rng: SpawnRng::new(BREED_XP_SEED),
             mob_drops: true,
             vehicles: HashMap::new(),
+            // Vanilla's own field default (`private int nextTick;`, never
+            // explicitly initialised, so Java's `0`) — the very first call
+            // sees `nextTick <= 0` and may attempt a patrol on tick one,
+            // subject to every other gate still applying.
+            patrol_next_tick: 0,
+            patrol_rng: SpawnRng::new(PATROL_SPAWN_SEED),
         }
     }
 
@@ -3092,6 +3187,25 @@ impl<'w> MobSim<'w> {
     /// between attempts is also asserting how many draws each mechanism makes.
     pub fn set_tame_rng(&mut self, rng: SpawnRng) -> &mut Self {
         self.tame_rng = rng;
+        self
+    }
+
+    /// Replaces the RNG [`run_patrol_spawn_cycle`](Self::run_patrol_spawn_cycle)
+    /// draws from — the injection point a patrol-spawn gate needs, for the same
+    /// reason [`set_tame_rng`](Self::set_tame_rng) exists.
+    pub fn set_patrol_rng(&mut self, rng: SpawnRng) -> &mut Self {
+        self.patrol_rng = rng;
+        self
+    }
+
+    /// Overwrites [`tick_count`](Self::tick_count) directly — the injection
+    /// point a gate needs to stage the sim past
+    /// [`run_patrol_spawn_cycle`](Self::run_patrol_spawn_cycle)'s timeline
+    /// gate without actually ticking 120,000 times. Mirrors
+    /// [`SimMob::set_temper`]'s reason: staging state a real playthrough
+    /// would only reach by repetition.
+    pub fn set_tick_count(&mut self, tick_count: u64) -> &mut Self {
+        self.tick_count = tick_count;
         self
     }
 
@@ -3922,6 +4036,7 @@ impl<'w> MobSim<'w> {
         let mut partner = vec![None; n];
         let mut parent = vec![None; n];
         let mut owner = vec![None; n];
+        let mut patrol_group = vec![None; n];
 
         // --- persistent anger (issue #458, primitive 1) --------------------
         //
@@ -4069,6 +4184,16 @@ impl<'w> MobSim<'w> {
                 }
                 None => {}
             }
+
+            // --- patrol group target ---------------------------------------
+            // Issue #241a. A leader never reads this — it computes its own
+            // fresh target from `LongDistancePatrolGoal` itself; only a
+            // non-leading, still-patrolling member needs the host's census.
+            // See `nearest_patrol_leader_target`'s own doc comment for why
+            // this cannot reuse `nearest_by`.
+            if me.is_patrolling() && !me.is_patrol_leader() {
+                patrol_group[i] = nearest_patrol_leader_target(&self.mobs, pos, me.id);
+            }
         }
 
         for (i, m) in self.mobs.iter_mut().enumerate() {
@@ -4087,7 +4212,8 @@ impl<'w> MobSim<'w> {
                 .set_no_action_time(m.no_action_time)
                 .set_love_partner_candidate(partner[i])
                 .set_parent_candidate(parent[i])
-                .set_owner(owner[i]);
+                .set_owner(owner[i])
+                .set_patrol_group_target(patrol_group[i]);
         }
     }
 
@@ -5180,6 +5306,149 @@ impl<'w> MobSim<'w> {
             state.record(m.category);
         }
         state
+    }
+
+    /// Runs one patrol-spawn tick — the vanilla `PatrolSpawner` port
+    /// (`level/levelgen/PatrolSpawner.java`, 92 lines). Meant to be called
+    /// once per server tick, mirroring vanilla's `CustomSpawner.tick`: the
+    /// internal countdown is decremented every call regardless of whether
+    /// anything ends up spawning, so calling this less often than once a
+    /// tick would make patrols rarer than vanilla rather than merely
+    /// checked less often.
+    ///
+    /// `world` is the terrain a spawn candidate is checked against, and it
+    /// must be a *live, player-following* snapshot — not this sim's own
+    /// static `self.world` — because a patrol spawns near a **player**, and
+    /// `self.world` is a fixed footprint around wherever `mob_area` was when
+    /// the world opened. Feeding `self.world` here would reproduce the exact
+    /// bug natural spawning already had and fixed: patrols would work near
+    /// spawn and stop working entirely once a player walked away from it.
+    /// The caller should hand in the same snapshot `crate::natural_spawn`
+    /// already builds each cycle.
+    ///
+    /// `spawn_patrols` is the game rule of the same name; `is_bright_outside`
+    /// is vanilla's `ServerLevel.isBrightOutside()` — day and not thundering
+    /// — collapsed to a caller-supplied bool because no weather state crosses
+    /// this seam yet.
+    ///
+    /// Returns the number of pillagers actually spawned this call (`0` on
+    /// almost every call — vanilla's own interval is roughly once every
+    /// 12000–13200 ticks per world, i.e. every 10–11 minutes).
+    ///
+    /// # Disclosed, not modelled
+    ///
+    /// `docs/pillager-patrols.md` has the full account; the summary:
+    ///
+    /// * **No spectator filter and no village-proximity check.** Neither a
+    ///   spectator flag nor a POI/village census exists on this seam.
+    /// * **No block-light check** (`checkPatrollingMonsterSpawnRules`'s
+    ///   `getBrightness(BLOCK, pos) > 8 ? false : …`). [`ChunkWorld`] carries
+    ///   block *identity*, not light — the same limit `natural_spawn`'s
+    ///   caller-supplied light cache exists to work around for the mobs that
+    ///   need it, which this method does not have access to.
+    /// * **`isValidEmptySpawnBlock` is approximated** as "two blocks of open
+    ///   air above the surface", with no fluid-state check.
+    /// * [`patrol_group_size`] approximates `getCurrentDifficultyAt(pos)
+    ///   .getEffectiveDifficulty()`, a continuous formula this crate has no
+    ///   moon-phase or accumulated regional-difficulty state to compute, with
+    ///   a per-[`Difficulty`]-enum constant.
+    pub fn run_patrol_spawn_cycle(
+        &mut self,
+        world: &ChunkWorld,
+        spawn_patrols: bool,
+        is_bright_outside: bool,
+        difficulty: Difficulty,
+    ) -> usize {
+        self.patrol_next_tick -= 1;
+        if self.patrol_next_tick > 0 {
+            return 0;
+        }
+        // Vanilla re-arms the countdown *before* any of the gates below can
+        // reject the attempt (`this.nextTick = this.nextTick + 12000 +
+        // random.nextInt(1200)`, unconditionally, immediately after the `<=
+        // 0` check) — so a rejected attempt still waits a full interval
+        // before the next one, rather than retrying every tick.
+        self.patrol_next_tick += 12_000 + self.patrol_rng.next_int(1_200);
+        if !spawn_patrols || !is_bright_outside {
+            return 0;
+        }
+        if self.tick_count < PATROL_TIMELINE_GATE {
+            return 0;
+        }
+        if self.patrol_rng.next_int(5) != 0 {
+            return 0;
+        }
+        if self.players.is_empty() {
+            return 0;
+        }
+        let player_pos = self.players
+            [self.patrol_rng.next_int(self.players.len() as i32) as usize]
+            .perception
+            .position;
+
+        let sign_x = if self.patrol_rng.next_int(2) == 0 {
+            -1.0
+        } else {
+            1.0
+        };
+        let sign_z = if self.patrol_rng.next_int(2) == 0 {
+            -1.0
+        } else {
+            1.0
+        };
+        let dx = f64::from(24 + self.patrol_rng.next_int(24)) * sign_x;
+        let dz = f64::from(24 + self.patrol_rng.next_int(24)) * sign_z;
+        let mut spawn_x = (player_pos.x + dx).floor() as i32;
+        let mut spawn_z = (player_pos.z + dz).floor() as i32;
+
+        let group_size = patrol_group_size(difficulty);
+        let pillager: ResourceKey = "minecraft:pillager".parse().expect("valid key");
+        let mut spawned = 0;
+        for i in 0..group_size {
+            // `NaturalSpawner.isValidEmptySpawnBlock` + this method's own
+            // "not modelled" note: a surface exists and there are two open
+            // cells above it. `None`/`false` both mean "no valid cell here".
+            let spawn_ok = surface_y(world, spawn_x, spawn_z).filter(|&surface| {
+                !world.is_solid(spawn_x, surface + 1, spawn_z)
+                    && !world.is_solid(spawn_x, surface + 2, spawn_z)
+            });
+            if let Some(surface) = spawn_ok {
+                let pos = Vec3::new(
+                    f64::from(spawn_x) + 0.5,
+                    f64::from(surface + 1),
+                    f64::from(spawn_z) + 0.5,
+                );
+                let mob = self.spawn_species(pillager.clone(), pos);
+                let id = mob.id;
+                mob.set_category(MobCategory::Monster);
+                self.get_mut(id)
+                    .expect("just spawned")
+                    .set_patrolling(true);
+                if i == 0 {
+                    // `findPatrolTarget`: `-500 + nextInt(1000)` on both
+                    // axes, offset from the mob's *own* spawn position.
+                    let tx = f64::from(self.patrol_rng.next_int(1_000) - 500);
+                    let tz = f64::from(self.patrol_rng.next_int(1_000) - 500);
+                    let leader = self.get_mut(id).expect("just spawned");
+                    leader.set_patrol_leader(true);
+                    leader.set_patrol_target(Some(Vec3::new(pos.x + tx, pos.y, pos.z + tz)));
+                }
+                spawned += 1;
+            } else if i == 0 {
+                // The leader's own spawn attempt failed — vanilla abandons
+                // the whole group rather than trying a different member
+                // first (`PatrolSpawner.java:44-47`'s `break`).
+                break;
+            }
+            spawn_x += self.patrol_rng.next_int(5) - self.patrol_rng.next_int(5);
+            spawn_z += self.patrol_rng.next_int(5) - self.patrol_rng.next_int(5);
+        }
+        // A follower spawned this same call has no group target until
+        // `feed_perception` next runs its patrol census — a one-tick startup
+        // lag, not a correctness gap: `LongDistancePatrolGoal::can_use`
+        // requires `patrol_target().is_some()`, so it simply does not fire
+        // until then.
+        spawned
     }
 
     /// Registers a ballistic projectile (arrow, snowball, ender pearl, …) at
@@ -7141,6 +7410,21 @@ const TAME_ROLL_SEED: u64 = 0x5441_4d45_5f52_4f4c;
 /// [`TAME_ROLL_SEED`] for why it is separate.
 const BREED_XP_SEED: u64 = 0x4252_4545_445f_5850;
 
+/// Default seed for [`MobSim::patrol_rng`]. See [`TAME_ROLL_SEED`] for why it
+/// is separate.
+const PATROL_SPAWN_SEED: u64 = 0x5041_5452_4f4c_5f52;
+
+/// The `early_game.json` timeline's `gameplay/can_pillager_patrol_spawn` gate,
+/// transcribed as a plain tick count rather than read from a general timeline
+/// engine — this crate has no `EnvironmentAttributes`/timeline reader at all,
+/// and building one is out of scope for one boolean keyframe.
+/// `.cache/mc/26.2/src/data/minecraft/timeline/early_game.json`'s track has
+/// exactly two keyframes: `false` at tick `0`, `true` at tick `120000`, and
+/// no in-between ramp, so a single threshold constant reproduces it exactly —
+/// unlike [`patrol_group_size`], which approximates a genuinely continuous
+/// vanilla formula.
+const PATROL_TIMELINE_GATE: u64 = 120_000;
+
 /// The entity-type key every experience orb streams as.
 ///
 /// Named rather than numeric for [`item_entity_type`]'s reason, which that function's
@@ -7208,6 +7492,24 @@ fn nearest_by<T>(
             }
         })
         .min_by(|a, b| dist_sqr(*a, from).total_cmp(&dist_sqr(*b, from)))
+}
+
+/// The [`SimMob::patrol_target`] of the nearest **other**, patrol-*leading*
+/// mob within [`PATROL_COMPANION_RANGE`] blocks of `from`, if any.
+///
+/// A `nearest_by`-shaped query that cannot reuse [`nearest_by`] itself: the
+/// distance test there is against the *same* field the function returns, but
+/// here the distance test is against a candidate's **position** (vanilla's
+/// `getBoundingBox().inflate(16.0)`) while the value a follower actually wants
+/// back is that candidate's **patrol target** — a different field. See
+/// [`MobController::patrol_group_target`](lodestone_entity::ai::MobController::patrol_group_target)
+/// for why a follower needs this at all rather than running its own census.
+fn nearest_patrol_leader_target(mobs: &[SimMob<'_>], from: Vec3, exclude_id: i32) -> Option<Vec3> {
+    mobs.iter()
+        .filter(|m| m.id != exclude_id && m.is_patrol_leader())
+        .filter(|m| dist_sqr(m.position(), from) <= PATROL_COMPANION_RANGE * PATROL_COMPANION_RANGE)
+        .min_by(|a, b| dist_sqr(a.position(), from).total_cmp(&dist_sqr(b.position(), from)))
+        .and_then(SimMob::patrol_target)
 }
 
 // NOTE: this module owns `ChunkWorld` + `MobSim`; the acceptance gate lives in
@@ -7409,11 +7711,37 @@ impl EntitySource for MobHandle {
 /// The highest solid-block Y at `(x, z)` within `world`'s loaded vertical
 /// range, or `None` if the whole column reads air (or is unloaded) — the
 /// ground a freshly seeded mob should stand on. A linear scan from the top
-/// down; only ever called at seed time (a handful of calls, not per-tick), so
-/// this is not a hot path.
+/// down; called only where a mob is placed rather than every tick — at seed
+/// time, and from [`MobSim::run_patrol_spawn_cycle`], which itself only
+/// reaches this on the rare tick a patrol attempt actually fires — so this is
+/// not a hot path either way.
 fn surface_y(world: &ChunkWorld, x: i32, z: i32) -> Option<i32> {
     let top = world.min_y + world.height - 1;
     (world.min_y..=top).rev().find(|&y| world.is_solid(x, y, z))
+}
+
+/// Approximates `AbstractRaid`-free `getCurrentDifficultyAt(pos)
+/// .getEffectiveDifficulty()` for [`MobSim::run_patrol_spawn_cycle`]'s group
+/// size, `(int) Math.ceil(effectiveDifficulty) + 1`
+/// (`level/levelgen/PatrolSpawner.java:40`).
+///
+/// Vanilla's effective difficulty is a continuous value accumulated per
+/// region over real playtime plus the current moon phase
+/// (`LocalDifficulty`), roughly `0.75` (fresh Peaceful/Easy world) up to
+/// `6.75` (long-played Hard, full moon). This crate tracks neither the
+/// accumulation nor the moon phase, so each [`Difficulty`] enum value stands
+/// in for a fixed point roughly in the middle of its own real range —
+/// disclosed in [`MobSim::run_patrol_spawn_cycle`]'s own doc comment, and
+/// picked so `ceil(value) + 1` lands on a group size vanilla actually
+/// produces at that difficulty rather than an edge value.
+fn patrol_group_size(difficulty: Difficulty) -> i32 {
+    let effective: f64 = match difficulty {
+        Difficulty::Peaceful => 0.0,
+        Difficulty::Easy => 1.0,
+        Difficulty::Normal => 2.0,
+        Difficulty::Hard => 3.0,
+    };
+    effective.ceil() as i32 + 1
 }
 
 /// Seeds `count` zombies in a ring of radius 6 blocks around `(center_x,
@@ -8395,6 +8723,12 @@ mod hostility_category_tests {
         ("pig", false),
         ("chicken", false),
         ("rabbit", false),
+        // `EntityType.Builder.of(Cat::new, MobCategory.CREATURE)` and
+        // `EntityType.Builder.of(Parrot::new, MobCategory.CREATURE)`
+        // (`EntityTypes.java`) — issue #229's cat and parrot, neither ever
+        // `MONSTER` however their taming interaction goes.
+        ("cat", false),
+        ("parrot", false),
         // neutral — all four are non-`MONSTER` *or* conditionally hostile;
         // enderman and zombified_piglin are registered `MONSTER`, bee and wolf
         // `CREATURE`. Hostility-on-sight is a separate axis the roster owns.
