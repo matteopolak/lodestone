@@ -149,6 +149,33 @@ times too large at every size.
 `render::nine_slice_borders_come_from_the_mcmeta_not_a_constant` pins the 3-vs-1
 split against a synthetic pack that repeats those two values.
 
+**Fixed: `GuiScaling::geometry`'s `NineSlice` arm ignored the sprite's real pixel
+dimensions, so a higher-resolution pack under inherited (unchanged) `.mcmeta`
+lost its right and bottom borders** — issue #561, "the bottom and right borders
+… are missing", reproduced with Faithful 32×. A 200×20 declared button whose real
+PNG is also 200×20 (vanilla, and every 1× pack) never showed this: left/top slices
+measure from the origin and still land on border pixels regardless. A 400×40
+Faithful PNG under the base game's unchanged 200×20 metadata does not — right and
+bottom source rects were computed as absolute pixel offsets in *declared* space
+(`nine_slice_geometry`'s `nw - br`, `nh - bb`) and read at those same *raw* pixel
+coordinates against the *real*, larger texture: the interior fill, not the border.
+Vanilla itself never hits this, because `GuiGraphicsExtractor.blitNineSlicedSprite`
+never computes an absolute source pixel at all — every source coordinate is a
+**fraction** of the declared size (`textureX / spriteWidth`), and `getU`/`getV`
+apply that fraction to the atlas UV span, which spans the sprite's *real* pixel
+width regardless of what the declared numbers say. The fix reproduces that split
+explicitly: destination rects and the tile-repeat step stay in declared (GUI-pixel)
+units exactly as before — a border is always drawn at a fixed on-screen thickness
+regardless of resolution — while every *source* rect is the same declared-space
+quantity multiplied by `sprite_w / declared_w` (or the `h` equivalent), landing on
+the real border pixels instead of the texture's middle. A 1× pack has ratio `1.0`
+and is byte-identical to before. `crates/lodestone-assets/src/gui.rs`'s own unit
+tests assert the **source** rects at a 2× ratio directly (a 1× fixture cannot tell
+correct from broken — the discriminating input is a pack whose declared and real
+sizes differ), since the pre-fix code already emitted nine plausible-looking quads
+with wrong sources, so a check that only counts quads or verifies destination
+tiling would have passed the whole time.
+
 ### Where the textures come from
 
 `resources::load_menu_gui_atlas` stitches `gui/sprites/**` plus the two **loose**

@@ -130,30 +130,50 @@ This is also the first reader of `ServerBound::InteractEntity::using_secondary_a
   the corpus lookup must run **before** the suffix rules or the literal corpus name
   `"chest_boat"` resolves to the plain `boat` rig.
   `crates/lodestone-render/tests/boat_model_resolution.rs` gates all three.
-* **A placed boat now renders 1.126 blocks too high, and it is a rendering bug, not a
-  placement one.** Traced end to end while chasing *"it's floating way above the water and i
-  cant enter it"*: the raytrace's hit point (`crate::boat::clip`), the position stored on
+* **Fixed: a placed boat used to render 1.126 blocks too high, and it was a rendering bug,
+  not a placement one.** Traced end to end while chasing *"it's floating way above the water
+  and i cant enter it"*: the raytrace's hit point (`crate::boat::clip`), the position stored on
   `MobSim::spawn_vehicle`, the `ADD_ENTITY` bytes `V770ServerProtocol` encodes, and the
-  `Position` component `lodestone_ecs::ingest::apply_entity_spawn` writes on the client are all
-  the identical, correct value — verified by reading each hop, not assumed. The gap is one
+  `Position` component `lodestone_ecs::ingest::apply_entity_spawn` writes on the client were all
+  the identical, correct value — verified by reading each hop, not assumed. The gap was one
   step later, in `lodestone_render::entity`: `EntityModelSet::resolve_animated` (called for
   every entity from `crate::gpu::entity_passes` in `lodestone-shell`, boats included, since a
-  boat matches no `projectile_pitch_offset_deg` name) always places through
+  boat matches no `projectile_pitch_offset_deg` name) always placed through
   `dying_entity_model_matrix`, which lifts by the `LivingEntityRenderer`-style
   `MODEL_FEET_OFFSET` (`1.501`). Vanilla's boat never goes through `LivingEntityRenderer` at
   all — `AbstractBoatRenderer.submit` does its own `poseStack.translate(0.0F, 0.375F, 0.0F)`
-  before the yaw rotate and the `scale(-1, -1, 1)` flip, with no `1.501` lift anywhere. Since a
-  Y-axis rotation cannot touch the Y component, the two placements differ by exactly one
-  constant: the boat model draws `1.501 − 0.375 = 1.126` blocks above its real position.
-  The interaction ray does not share this bug — `Sim::update_entity_target` in
+  before the yaw rotate and the `scale(-1, -1, 1)` flip (plus a trailing `rotateY(90°)` this
+  doc's earlier draft missed, needed because the hull's length runs along local `+X`), with no
+  `1.501` lift anywhere. Since a Y-axis rotation cannot touch the Y component, the two
+  placements differed by exactly one constant: the boat model drew `1.501 − 0.375 = 1.126`
+  blocks above its real position.
+
+  **The census: every non-projectile, non-living corpus model had this bug, not just boats.**
+  `chest_boat`, `raft`, `chest_raft` and `minecart` all go through the same
+  `dying_entity_model_matrix` path and, per `AbstractMinecartRenderer.submit`
+  (`AbstractMinecartRenderer.java:37-69`), also carry a small `0.375` bob with no `1.501` lift —
+  no `USE_ITEM` producer places a minecart yet (see the family table below), but the render-side
+  bug was there waiting regardless. `end_crystal` is a related but **separate, still-open**
+  defect: `EndCrystalRenderer` has no `scale(-1, -1, 1)` flip at all
+  (`EndCrystalRenderer.java:27-36`), so it is not a small variant of this fix — whether the
+  corpus geometry was even authored for the flipped frame needs its own investigation, and it
+  keeps the living lift for now. `armor_stand` was never in this census: `ArmorStand extends
+  LivingEntity` in vanilla and keeps the `1.501` lift correctly.
+
+  The fix is `lodestone_render::entity::{non_living_vehicle_placement,
+  non_living_vehicle_matrix}` — the second name-keyed switch beside
+  `projectile_pitch_offset_deg`, giving `boat`/`chest_boat`/`raft`/`chest_raft` a `0.375` bob
+  plus the trailing `90°` spin and `minecart` the same bob with none, both routed through
+  `EntityModelSet::resolve_animated`'s new `EntityInstance::new_non_living` arm. Pinned by
+  `crates/lodestone-render/tests/non_living_entity_placement.rs`, which
+  `boat_model_resolution.rs` never could: it gates only *which* rig resolves, never *where* it
+  is placed.
+
+  The interaction ray never shared this bug — `Sim::update_entity_target` in
   `lodestone-shell/src/sim/step.rs` builds its hitbox from the raw `Position` component and
-  `VersionData::entity_facts` dimensions, the same correct value the server sent — so the
-  boat's actual clickable box sits at the water, 1.126 blocks below where the model is drawn.
-  A player aiming at what they see is aiming at empty air, which is the second half of the
-  report. Fixing this needs a boat-specific placement matrix in `lodestone-render` (the same
-  shape `projectile_model_matrix` already is for arrows/tridents), not a change anywhere in
-  this doc's own module or in `lodestone-entity`; `boat_model_resolution.rs`'s existing gates
-  only check *which* rig resolves, never its placement, so nothing caught this.
+  `VersionData::entity_facts` dimensions, the same correct value the server sent — so once the
+  model's placement matches, "can't enter it" is fixed for free: the clickable box and the
+  drawn hull now sit at the same place.
 * **Every wood species draws the oak hull.** Each corpus entry carries a single
   `EntityTexture::Fixed` (`entity/boat/oak`, `entity/chest_boat/oak`, `entity/boat/bamboo`,
   `entity/chest_boat/bamboo`), and vanilla's species *is* a texture rather than geometry, so a
