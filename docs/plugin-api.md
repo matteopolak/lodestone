@@ -619,6 +619,66 @@ implemented by both the vanilla interpreter and a plugin, dispatched imperativel
 against those two blockers rather than closing it, since the decision names dependencies that do not
 exist yet rather than settling something implementable now.
 
+**Correction: the block-write half of that blocker closed after this paragraph was written** — see
+"Block read/write, persistent data, plugin config, and bulk edit" below. Custom world generation stays
+open on generator *selection* alone now, since a `dyn ChunkGenerator` still has no dispatch point to be
+selected from.
+
+### Block read/write, persistent data, plugin config, and bulk edit
+
+Four sibling pieces of work, landed together because the later ones build on the earlier ones: a plugin
+config convention (small and self-contained), the block read/write API, a persistent data container, and
+a bulk-edit region API layered on top of the block write API.
+
+**The packaged block read/write API is closed.** `lodestone_world::World` gained
+`block_state_at(x, y, z) -> Option<u32>` (the read half `set_block` never had), and
+`set_block_with_physics(x, y, z, state, physics: bool) -> Option<u32>` — exactly the
+`set_block(pos, state, physics)` shape asked for, returning the previous state (what an undo history
+captures). `physics: false` is exactly the existing `set_block`; `physics: true` additionally queues the
+six orthogonally-adjacent positions onto a new `pending_physics_updates` queue (mirroring the existing
+`pending_relight` queue's "record rather than act on" shape) for a future block-tick/neighbour-update
+system that **does not exist yet** — this ships the `false` path now with the queue as the TODO anchor
+for the `true` path, per the original scope note, rather than pretending physics is simulated. A plugin
+reaches this through the same `ChunkWorldWrite`/`ChunkWorld` split every other block writer uses; no new
+resource or dependency was needed.
+
+**The plugin config/data-directory convention and the persistent data container's non-persistent half are
+closed**, in a new crate,
+[`crates/plugins/lodestone-plugin-support`](../crates/plugins/lodestone-plugin-support). `paths`/`config`
+mirror `JavaPlugin.getDataFolder()`/`getConfig()`, built on `lodestone_auth::paths::data_dir` (the
+platform-data-directory implementation this codebase already settled on — this does not reimplement
+per-OS directory discovery a third time). `persistent_data` is a `HashMap`-backed
+`EntityDataStore`/`ChunkDataStore` pair, namespaced `"<plugin>:<key>"` → `serde_json::Value`, deliberately
+never decoding into named fields — see that module's own doc for why (the exact "static name list
+excludes an undecoded field" hazard `CLAUDE.md` names). The persistent (survives-a-restart) half stays
+out of scope, as originally scoped, pending world persistence existing at all. Real consumer:
+`tests/drives_through_a_real_schedule.rs` runs a real `bevy_ecs::App` with `lodestone_ecs::CorePlugin` +
+`PersistentDataPlugin` + a toy system on `GameTick`, with a negative control (an entity spawned partway
+through only accumulates its own ticks) proving the system genuinely runs every tick rather than once.
+See [`docs/plugin-data-and-config.md`](./plugin-data-and-config.md).
+
+**The bulk-edit (WorldEdit-class) region API is closed**, in a second new crate,
+[`crates/plugins/lodestone-worldedit`](../crates/plugins/lodestone-worldedit) — "a *second* plugin,
+conceptually... not a server feature," per the original scope note, so nothing here lives in
+`lodestone-world`/`lodestone-ecs` beyond the batched write primitive
+(`World::fill_region`/`fill_region_capturing`, grouping writes by chunk instead of paying a `HashMap`
+lookup per block). Re-derived rather than assumed: the open scoping question was whether a batched entry
+point was needed "to avoid re-acquiring the chunk lock per block" — there is exactly **one** lock for the
+whole store, taken once by whoever calls `ChunkWorldWrite::write()`, so the lock was never the per-block
+cost; the repeated hashmap lookup was, and `fill_region`/`fill_region_capturing` remove it. Measured
+(release build, 128×128×128 = 2,097,152 blocks): **43.8 ms** (~20.9 ns/block), `#[ignore]`d per
+`CLAUDE.md`'s duration-measurement guidance rather than asserted as a CI regression gate — see
+[`docs/worldedit-plugin.md`](./worldedit-plugin.md) for the full measurement and the `EditSession`
+undo/redo design built on top.
+
+**What was re-verified as still blocked, not attempted this pass:** entity spawn/despawn and custom
+entity type registration both target `crates/lodestone-server/**`
+(`MobSim::remove_mob`/`spawn_plugin_mob` do not exist; `IntegratedServer` hands out no `MobHandle`), a
+file cluster this pass does not own and which had unrelated concurrent edits in flight while this was
+checked. The brokered patches recorded on their tracking issues (and, for custom entity types, verbatim
+in [`docs/custom-entity-types.md`](./custom-entity-types.md)) are current as of this re-verification —
+both issues' own comments record this explicitly so the claim does not go stale silently.
+
 ### The four concrete gaps, verified against the current tree
 
 `docs/baritone-port.md` §7 named four gaps as prerequisites for a Baritone-class plugin. All four were

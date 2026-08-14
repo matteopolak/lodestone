@@ -1,0 +1,44 @@
+# Shared, non-engine conveniences every native plugin otherwise reimplements for
+# itself: a per-plugin data directory and config file, and an
+# in-memory namespaced key-value store attachable to an entity or a chunk
+# (the non-persistent half of a persistent data container — see
+# `src/persistent_data.rs` for why the persistent half is out of scope here).
+#
+# `MIT OR Apache-2.0`, the workspace default — no `crates/plugins/README.md`
+# licensing-table row needed, matching `lodestone-event-logger`.
+[package]
+name = "lodestone-plugin-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `lodestone_auth::paths::data_dir()` — the one platform-data-directory
+# implementation this codebase already settled on (`lodestone-shell` calls the
+# same function). This crate does not reimplement it a third time.
+lodestone-auth = { workspace = true }
+# The plugin ABI: `Resource`, `Component` access through `Query`/`Res`/`ResMut`,
+# and (for the entity half of the data store) `lodestone_ecs::entity::MinecraftEntityId`
+# as the key a plugin already has in hand from any entity query.
+lodestone-ecs = { workspace = true }
+# `ChunkPos` — the key for the chunk half of the persistent data container.
+lodestone-world = { workspace = true }
+# Config/value serialization. `serde_json::Value` is the store's value type
+# precisely because it round-trips whatever a plugin puts in without this
+# crate needing to know its shape — see `persistent_data.rs`'s module doc for
+# why that matters for the NBT-shaped hazard `CLAUDE.md` names.
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Direct, in addition to `lodestone-ecs`'s re-export: `#[derive(Resource)]`
+# below emits absolute `bevy_ecs::` paths, which only resolve if this crate has
+# `bevy_ecs` in its own dependency graph under that exact name.
+# `docs/plugin-api.md`'s "how to change it" documents this trap;
+# `crates/plugins/lodestone-autopilot/Cargo.toml` hit it first.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

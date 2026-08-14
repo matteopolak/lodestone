@@ -402,6 +402,18 @@ pub struct World {
     /// never drains this pays a bounded [`PENDING_RELIGHT_CAP`] entries and gets
     /// exactly the previous behaviour.
     pub(crate) pending_relight: Vec<[i32; 3]>,
+    /// Absolute block positions whose orthogonal neighbours are owed
+    /// vanilla's `Block.updateNeighborsAt` fan-out, queued by
+    /// [`set_block_with_physics`](World::set_block_with_physics) when called
+    /// with `physics: true` and drained by
+    /// [`drain_pending_physics_updates`](World::drain_pending_physics_updates).
+    ///
+    /// Mirrors [`pending_relight`](Self::pending_relight)'s shape on purpose:
+    /// there is no block-tick/neighbour-update system yet (Tier 4,
+    /// `docs/backlog.md`), so this is the same "record rather than act on"
+    /// deferral, bounded by [`PENDING_PHYSICS_CAP`] for the same reason —  a
+    /// host that never drains it must not grow a list for the whole session.
+    pub(crate) pending_physics_updates: Vec<[i32; 3]>,
 }
 
 /// Ceiling on [`World`]'s pending-relight queue. A host that writes blocks and
@@ -410,6 +422,12 @@ pub struct World {
 /// this large is a bulk world edit whose light the next chunk resend carries
 /// anyway.
 pub const PENDING_RELIGHT_CAP: usize = 8192;
+
+/// Ceiling on [`World`]'s pending-physics-update queue, mirroring
+/// [`PENDING_RELIGHT_CAP`]'s reasoning: nothing drains this yet, so it must
+/// not grow unbounded for a host that never calls
+/// [`World::drain_pending_physics_updates`].
+pub const PENDING_PHYSICS_CAP: usize = 8192;
 
 impl World {
     /// Creates an empty world.
@@ -487,6 +505,99 @@ impl World {
         self.queue_relight(x, y, z);
     }
 
+    /// Reads the block-state id at absolute world coordinates, or `None` if
+    /// the owning chunk is not loaded or `y` falls outside the column's
+    /// height range — the read half of [`set_block`](Self::set_block), and
+    /// what a bulk-edit undo history captures before overwriting a
+    /// position.
+    #[must_use]
+    pub fn block_state_at(&self, x: i32, y: i32, z: i32) -> Option<u32> {
+        let pos = ChunkPos::from_block(x, z);
+        let chunk = self.chunks.get(&pos)?;
+        let sx = (x & 15) as usize;
+        let sz = (z & 15) as usize;
+        chunk.column.section_index(y)?;
+        Some(chunk.column.get_block(sx, y, sz))
+    }
+
+    /// The packaged plugin block write API:
+    /// `set_block(pos, state, physics)`, with a `physics: bool` matching
+    /// Bukkit's `Block.setType`/`setBlockData(data, applyPhysics)` split.
+    ///
+    /// Returns the previous state at that position (or `None` under the same
+    /// no-op conditions [`set_block`](Self::set_block) has — chunk not
+    /// loaded, `y` out of range), which is what makes this the primitive a
+    /// bulk editor's undo history is built on: capturing the old value and
+    /// doing the write is one call instead of two, so there is no window in
+    /// which a re-entrant plugin system could observe the write without the
+    /// undo record for it.
+    ///
+    /// `physics: false` is exactly [`set_block`](Self::set_block) — a raw
+    /// write, silent beyond relighting, the shape a world editor or a custom
+    /// generator wants so a large fill does not cascade thousands of
+    /// redundant neighbour updates (`docs/backlog.md`'s Tier 4 naming block
+    /// ticks and neighbour updates as unbuilt).
+    ///
+    /// `physics: true` additionally queues the six orthogonally adjacent
+    /// positions onto [`pending_physics_updates`](Self::pending_physics_updates)
+    /// — vanilla's `Block.updateNeighborsAt` fan-out — for a future
+    /// block-tick/neighbour-update system to drain. **That system does not
+    /// exist yet**, so today `physics: true` differs from `physics: false`
+    /// only in what gets queued, never in what a plugin observes; this ships
+    /// the "false path now, a clearly marked TODO anchor for the true path"
+    /// scope this API is meant to have, not a claim that physics is
+    /// simulated.
+    pub fn set_block_with_physics(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: u32,
+        physics: bool,
+    ) -> Option<u32> {
+        let previous = self.block_state_at(x, y, z);
+        self.set_block(x, y, z, state);
+        if physics && previous.is_some() {
+            for [dx, dy, dz] in [
+                [1, 0, 0],
+                [-1, 0, 0],
+                [0, 1, 0],
+                [0, -1, 0],
+                [0, 0, 1],
+                [0, 0, -1],
+            ] {
+                self.queue_physics_update(x + dx, y + dy, z + dz);
+            }
+        }
+        previous
+    }
+
+    /// Records `(x, y, z)` as owed a neighbour update, mirroring
+    /// [`queue_relight`](Self::queue_relight)'s cap-then-drop shape.
+    ///
+    /// Public for the same reason `queue_relight` is: not every write that
+    /// wants physics consequences goes through
+    /// [`set_block_with_physics`](Self::set_block_with_physics).
+    pub fn queue_physics_update(&mut self, x: i32, y: i32, z: i32) {
+        if self.pending_physics_updates.len() < PENDING_PHYSICS_CAP {
+            self.pending_physics_updates.push([x, y, z]);
+        }
+    }
+
+    /// Drains and returns every position queued by
+    /// [`queue_physics_update`](Self::queue_physics_update) /
+    /// [`set_block_with_physics`](Self::set_block_with_physics).
+    ///
+    /// There is no block-tick system yet to hand these to, so a caller today
+    /// can only report or discard them — draining rather than "running" them
+    /// is what keeps that honest, matching
+    /// [`run_pending_relight`](Self::run_pending_relight)'s naming contrast
+    /// deliberately: that one *does* have somewhere to send its work, this
+    /// one does not.
+    pub fn drain_pending_physics_updates(&mut self) -> Vec<[i32; 3]> {
+        std::mem::take(&mut self.pending_physics_updates)
+    }
+
     /// Records `(x, y, z)` for the next
     /// [`run_pending_relight`](World::run_pending_relight), which is vanilla's
     /// `LevelChunk.setBlockState` calling `getLightEngine().checkBlock(pos)`.
@@ -548,6 +659,119 @@ impl World {
                 base_y | i32::from(ly),
                 base_z | i32::from(lz),
             );
+        }
+    }
+
+    /// Fills every loaded block within the axis-aligned box `[min, max]`
+    /// (inclusive both ends, either corner order) with `state` — the batched
+    /// write primitive a WorldEdit-class bulk-edit plugin needs, so a region
+    /// fill does not pay a `HashMap` lookup and a `section_index` bounds
+    /// check per block the way a naive loop over [`set_block`](Self::set_block)
+    /// would.
+    ///
+    /// Groups writes by the chunk they land in — one `HashMap::get_mut` per
+    /// touched column instead of one per block — which is the efficiency
+    /// question that actually matters here ("does the chunk-world resource
+    /// need a batched-write entry point... to avoid re-acquiring the [lock]
+    /// per block"). There is exactly **one** lock for the whole store
+    /// ([`lodestone_ecs::ChunkWorldWrite`], the `Resource` wrapping this
+    /// type), acquired once by the caller before this runs, so the lock
+    /// itself was never the per-block cost here — the repeated hashmap
+    /// lookup was, and this removes it.
+    ///
+    /// Returns the number of blocks actually written (unloaded chunks and
+    /// out-of-range sections are skipped silently, matching
+    /// [`set_block`](Self::set_block)'s own no-op contract), which is what a
+    /// caller measuring lock-hold time against `docs/world-unification.md`'s
+    /// `LockHolds` mechanism divides by to get a per-block figure.
+    ///
+    /// Relight is queued per written position, capped at
+    /// [`PENDING_RELIGHT_CAP`] exactly as every other write path here is —
+    /// a fill large enough to blow the cap already has its light carried by
+    /// the next chunk resend, per that constant's own doc comment.
+    pub fn fill_region(&mut self, min: [i32; 3], max: [i32; 3], state: u32) -> usize {
+        let mut written = 0usize;
+        self.fill_region_impl(min, max, state, |_, _, _, _| written += 1);
+        written
+    }
+
+    /// [`fill_region`](Self::fill_region), additionally returning every
+    /// written position's **previous** state — `(x, y, z, previous_state)` —
+    /// so a caller can build an undo record in the same batched pass instead
+    /// of a separate read loop before the write.
+    ///
+    /// This is what a WorldEdit-class plugin's `EditSession` (layered on top
+    /// of this crate rather than built here — "WorldEdit itself is a
+    /// plugin... not a server feature") uses for its undo stack: one call
+    /// captures exactly what
+    /// [`set_block_with_physics`](Self::set_block_with_physics)'s return
+    /// value would have, for every block in the region, without the
+    /// `HashMap`-lookup-per-block cost a loop calling that method once per
+    /// position would pay.
+    pub fn fill_region_capturing(
+        &mut self,
+        min: [i32; 3],
+        max: [i32; 3],
+        state: u32,
+    ) -> Vec<(i32, i32, i32, u32)> {
+        let mut captured = Vec::new();
+        self.fill_region_impl(min, max, state, |x, y, z, previous| {
+            captured.push((x, y, z, previous));
+        });
+        captured
+    }
+
+    /// Shared batched-write loop behind [`fill_region`](Self::fill_region) and
+    /// [`fill_region_capturing`](Self::fill_region_capturing): groups by chunk
+    /// (one `HashMap::get_mut` per touched column, not per block) and calls
+    /// `on_write(x, y, z, previous_state)` for every position actually
+    /// written — the two public methods differ only in what they do with
+    /// that callback.
+    fn fill_region_impl(
+        &mut self,
+        min: [i32; 3],
+        max: [i32; 3],
+        state: u32,
+        mut on_write: impl FnMut(i32, i32, i32, u32),
+    ) {
+        let (min_x, max_x) = (min[0].min(max[0]), min[0].max(max[0]));
+        let (min_y, max_y) = (min[1].min(max[1]), min[1].max(max[1]));
+        let (min_z, max_z) = (min[2].min(max[2]), min[2].max(max[2]));
+
+        let mut relight = Vec::new();
+
+        for cx in (min_x >> 4)..=(max_x >> 4) {
+            for cz in (min_z >> 4)..=(max_z >> 4) {
+                let pos = ChunkPos::new(cx, cz);
+                let Some(chunk) = self.chunks.get_mut(&pos) else {
+                    continue;
+                };
+                let x_lo = min_x.max(cx << 4);
+                let x_hi = max_x.min((cx << 4) | 15);
+                let z_lo = min_z.max(cz << 4);
+                let z_hi = max_z.min((cz << 4) | 15);
+                for y in min_y..=max_y {
+                    if chunk.column.section_index(y).is_none() {
+                        continue;
+                    }
+                    for x in x_lo..=x_hi {
+                        for z in z_lo..=z_hi {
+                            let sx = (x & 15) as usize;
+                            let sz = (z & 15) as usize;
+                            let previous = chunk.column.get_block(sx, y, sz);
+                            chunk.column.set_block(sx, y, sz, state);
+                            on_write(x, y, z, previous);
+                            if relight.len() < PENDING_RELIGHT_CAP {
+                                relight.push([x, y, z]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for [x, y, z] in relight {
+            self.queue_relight(x, y, z);
         }
     }
 
@@ -1369,6 +1593,208 @@ mod tests {
             &before,
             "an out-of-column y must leave the column untouched"
         );
+    }
+
+    #[test]
+    fn block_state_at_reads_back_what_set_block_wrote() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(0, 0);
+        world.load(pos, sample_chunk());
+
+        assert_eq!(
+            world.block_state_at(5, 70, 9),
+            Some(0),
+            "an untouched loaded cell reads back the default state, not None"
+        );
+        world.set_block(5, 70, 9, 42);
+        assert_eq!(world.block_state_at(5, 70, 9), Some(42));
+        assert_eq!(
+            world.block_state_at(100, 64, 100),
+            None,
+            "an unloaded chunk must read back None, not a default 0 that could \
+             be confused with a real air read"
+        );
+        assert_eq!(
+            world.block_state_at(0, 320, 0),
+            None,
+            "y outside the column must read back None like set_block's own no-op"
+        );
+    }
+
+    #[test]
+    fn set_block_with_physics_false_behaves_exactly_like_set_block() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(0, 0);
+        world.load(pos, sample_chunk());
+
+        let previous = world.set_block_with_physics(5, 70, 9, 42, false);
+        assert_eq!(previous, Some(0), "previous state at a fresh cell is air");
+        assert_eq!(world.block_state_at(5, 70, 9), Some(42));
+        assert!(
+            world.drain_pending_physics_updates().is_empty(),
+            "physics: false must queue nothing — this is the bulk-editor path \
+             that must not cascade neighbour updates"
+        );
+    }
+
+    #[test]
+    fn set_block_with_physics_true_queues_the_six_neighbours_and_returns_the_old_state() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(0, 0);
+        world.load(pos, sample_chunk());
+        world.set_block(5, 70, 9, 7); // seed a known previous state
+
+        let previous = world.set_block_with_physics(5, 70, 9, 42, true);
+        assert_eq!(previous, Some(7), "must return the state it overwrote");
+        assert_eq!(world.block_state_at(5, 70, 9), Some(42));
+
+        let mut queued = world.drain_pending_physics_updates();
+        queued.sort_unstable();
+        let mut expected = vec![
+            [4, 70, 9],
+            [6, 70, 9],
+            [5, 69, 9],
+            [5, 71, 9],
+            [5, 70, 8],
+            [5, 70, 10],
+        ];
+        expected.sort_unstable();
+        assert_eq!(
+            queued, expected,
+            "must queue exactly the six orthogonal neighbours, matching \
+             vanilla's Block.updateNeighborsAt fan-out"
+        );
+        assert!(
+            world.drain_pending_physics_updates().is_empty(),
+            "draining must actually empty the queue, not merely read it"
+        );
+    }
+
+    #[test]
+    fn set_block_with_physics_on_an_unloaded_chunk_queues_nothing() {
+        let mut world = World::new();
+        let previous = world.set_block_with_physics(100, 64, 100, 9, true);
+        assert_eq!(previous, None);
+        assert!(
+            world.drain_pending_physics_updates().is_empty(),
+            "a no-op write must not fabricate neighbour-update work for a \
+             chunk that was never touched"
+        );
+    }
+
+    #[test]
+    fn fill_region_writes_every_cell_in_the_box_across_multiple_chunks() {
+        let mut world = World::new();
+        world.load(ChunkPos::new(0, 0), sample_chunk());
+        world.load(ChunkPos::new(1, 0), sample_chunk());
+
+        // Spans chunk (0,0) and (1,0): x runs 14..=17.
+        let written = world.fill_region([14, 60, 0], [17, 61, 1], 5);
+        assert_eq!(written, 4 * 2 * 2, "4 x-cells * 2 y-cells * 2 z-cells");
+
+        for x in 14..=17 {
+            for y in 60..=61 {
+                for z in 0..=1 {
+                    assert_eq!(
+                        world.block_state_at(x, y, z),
+                        Some(5),
+                        "cell ({x},{y},{z}) must be filled"
+                    );
+                }
+            }
+        }
+        // Just outside the box on every axis must be untouched.
+        assert_eq!(world.block_state_at(13, 60, 0), Some(0));
+        assert_eq!(world.block_state_at(18, 60, 0), Some(0));
+        assert_eq!(world.block_state_at(14, 59, 0), Some(0));
+        assert_eq!(world.block_state_at(14, 60, 2), Some(0));
+    }
+
+    #[test]
+    fn fill_region_accepts_either_corner_order() {
+        let mut world = World::new();
+        world.load(ChunkPos::new(0, 0), sample_chunk());
+
+        // max given before min on every axis — must still fill forward.
+        let written = world.fill_region([5, 70, 5], [2, 68, 2], 9);
+        assert_eq!(written, 4 * 3 * 4);
+        assert_eq!(world.block_state_at(2, 68, 2), Some(9));
+        assert_eq!(world.block_state_at(5, 70, 5), Some(9));
+    }
+
+    #[test]
+    fn fill_region_capturing_returns_every_previous_state_and_still_writes() {
+        let mut world = World::new();
+        world.load(ChunkPos::new(0, 0), sample_chunk());
+        world.set_block(1, 60, 1, 3);
+        world.set_block(1, 60, 2, 4);
+        // (1, 60, 3) is left as default (0 / air).
+
+        let mut captured = world.fill_region_capturing([1, 60, 1], [1, 60, 3], 9);
+        captured.sort_unstable();
+        let mut expected = vec![(1, 60, 1, 3), (1, 60, 2, 4), (1, 60, 3, 0)];
+        expected.sort_unstable();
+        assert_eq!(
+            captured, expected,
+            "must report exactly the previous state at each written position"
+        );
+
+        for z in 1..=3 {
+            assert_eq!(world.block_state_at(1, 60, z), Some(9), "the write must still happen");
+        }
+    }
+
+    /// A large synthetic fill's lock-hold time (here, wall time under the one
+    /// write borrow a real caller would hold via `ChunkWorldWrite::write()`
+    /// for the whole call — there is no separate per-chunk lock to measure,
+    /// since the store has exactly one), measured before calling the batched
+    /// write primitive done.
+    /// `#[ignore]`d per `CLAUDE.md`'s duration-measurement guidance (a timing
+    /// gathered on a shared, possibly-loaded machine is not a reliable CI
+    /// assertion) — run explicitly with `--ignored --nocapture` and read the
+    /// printed number, which is what gets quoted in `docs/worldedit-plugin.md`
+    /// rather than asserted here as a regression gate. The one hard
+    /// assertion left in is a wide sanity ceiling, not a tight bound.
+    #[test]
+    #[ignore = "duration measurement — run explicitly, see doc comment"]
+    fn fill_region_lock_hold_time_on_a_large_synthetic_fill() {
+        let mut world = World::new();
+        // 9x9 columns x 24 sections = a full 384-tall chunk stack, radius 4.
+        for cx in -4..=4 {
+            for cz in -4..=4 {
+                world.load(ChunkPos::new(cx, cz), sample_chunk());
+            }
+        }
+        // 144 x 320 x 144 ~= 6.6M blocks would be excessive for a unit test;
+        // a representative large WorldEdit-class fill is closer to the
+        // classic "//set stone" over a 128x128 area a few sections tall.
+        let min = [-64, -64, -64];
+        let max = [63, 63, 63]; // 128^3 = 2,097,152 blocks
+        let start = std::time::Instant::now();
+        let written = world.fill_region(min, max, 1);
+        let elapsed = start.elapsed();
+        eprintln!(
+            "fill_region: {written} blocks written in {elapsed:?} \
+             ({:.1} ns/block)",
+            elapsed.as_nanos() as f64 / written.max(1) as f64
+        );
+        assert!(written > 0, "control: the fill must have written something");
+        // A wide sanity ceiling, not a regression gate: two million single-
+        // threaded HashMap-and-palette block writes finishing inside ten
+        // seconds on any machine this runs on by hand.
+        assert!(
+            elapsed.as_secs() < 10,
+            "fill_region took implausibly long: {elapsed:?} for {written} blocks"
+        );
+    }
+
+    #[test]
+    fn fill_region_skips_unloaded_chunks_without_panicking() {
+        let mut world = World::new();
+        // No chunk loaded anywhere.
+        let written = world.fill_region([0, 0, 0], [31, 5, 31], 3);
+        assert_eq!(written, 0);
+        assert!(world.is_empty());
     }
 
     #[test]
