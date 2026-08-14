@@ -155,7 +155,7 @@ impl TextColor {
     /// This colour's 24-bit RGB value, packed as `0x00rrggbb`.
     ///
     /// The sixteen named values are vanilla's own, transcribed from
-    /// `TextColor.java:18-33` in 26.2. **Do not look for them in
+    /// `TextColor.java` in 26.2. **Do not look for them in
     /// `ChatFormatting`**: in 26.2 that enum's constructor is
     /// `ChatFormatting(final char code)` and carries *no colour at all* — the
     /// obvious place to check is empty, and its emptiness looks like "vanilla
@@ -188,7 +188,7 @@ impl TextColor {
             Self::LightPurple => 0x00ff_55ff, // 16733695
             Self::Yellow => 0x00ff_ff55,      // 16777045
             Self::White => 0x00ff_ffff,       // 16777215
-            // `TextColor(final int value)` masks with 16777215 (`TextColor.java:37`),
+            // `TextColor(final int value)` masks with 16777215 (`TextColor.java`),
             // so a hex colour carrying stray high bits is truncated, not rejected.
             Self::Rgb(value) => value & 0x00ff_ffff,
         }
@@ -405,7 +405,7 @@ impl Text {
     ///
     /// ```text
     /// Text::translate("container.crafting", vec![]).to_plain_string()
-    ///     == "container.crafting"      // the raw key, on screen (issue #52)
+    ///     == "container.crafting"      // the raw key, on screen
     /// ```
     ///
     /// Safe uses are (a) a tree with no `translate` nodes at all — notably the
