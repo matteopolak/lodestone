@@ -119,6 +119,20 @@ impl V770Adapter {
                             })
                             .collect()
                     }),
+                    // Issue #283's real gap: this used to be dropped here —
+                    // `entry.chat_session` was decoded (see
+                    // `PlayerInfoEntry::chat_session`'s own doc) and had
+                    // nowhere to go, so no consumer could ever verify a
+                    // signed message from this player. `key_signature` is
+                    // deliberately not carried further; see
+                    // `lodestone_model::event::ChatSessionInfo`'s doc.
+                    chat_session: entry.chat_session.map(|session| {
+                        lodestone_model::event::ChatSessionInfo {
+                            session_id: session.session_id,
+                            public_key: session.public_key,
+                            expires_at: session.expires_at,
+                        }
+                    }),
                 })
                 .collect();
             return Ok(vec![Directive::Emit(ClientEvent::PlayerListUpdate {

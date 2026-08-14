@@ -11,7 +11,12 @@ impl V770Adapter {
             let mut reader = Reader::new(payload);
             let global_index = reader.var_i32().map_err(dec_err)?;
             let sender = reader.uuid().map_err(dec_err)?;
-            let _index = reader.var_i32().map_err(dec_err)?;
+            // `SignedMessageLink.index` — this message's position in the
+            // sender's signing chain. Used to be discarded (`let _index`);
+            // now carried through `ChatAckInfo::message_index` so the client
+            // driver can reconstruct the exact link a signature verification
+            // has to hash (issue #283).
+            let message_index = reader.var_i32().map_err(dec_err)?;
             let signature = if reader.bool().map_err(dec_err)? {
                 reader.bytes(256).map_err(dec_err)?.to_vec()
             } else {
@@ -19,8 +24,11 @@ impl V770Adapter {
             };
             // SignedMessageBody.Packed: raw content, timestamp, salt, last-seen.
             let content = reader.string(256).map_err(dec_err)?;
-            let _timestamp = reader.i64().map_err(dec_err)?;
-            let _salt = reader.i64().map_err(dec_err)?;
+            // Epoch **milliseconds** on the wire — see `ChatAckInfo::timestamp_millis`'s
+            // own doc for why this used to be discarded (`let _timestamp`) and
+            // is now carried verbatim rather than pre-converted.
+            let timestamp_millis = reader.i64().map_err(dec_err)?;
+            let salt = reader.i64().map_err(dec_err)?;
             // Resolve the packed last-seen list against the signature cache and
             // push it — plus this message's own signature — back in, mirroring
             // vanilla's `handlePlayerChat`. The push keeps the client's cache id
@@ -48,9 +56,14 @@ impl V770Adapter {
             // plain signed message carries only its raw content. The decorated
             // component keeps its colour/style tree; the raw content is a bare
             // string.
+            //
+            // `raw_content` below keeps a copy of the *signed* string
+            // regardless of which arm wins: a signature is always hashed over
+            // this exact text, never over the server's decorated form, so a
+            // verifier needs it even when `text` came from `unsigned`.
             let text = match unsigned {
                 Some(component) => Text::from_nbt(&component),
-                None => Text::literal(content),
+                None => Text::literal(content.clone()),
             };
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text,
@@ -63,6 +76,15 @@ impl V770Adapter {
                     signature,
                     global_index,
                     was_shown,
+                    message_index,
+                    timestamp_millis,
+                    salt,
+                    raw_content: content,
+                    last_seen: last_seen.iter().map(|sig| sig.as_bytes().to_vec()).collect(),
+                    // Fail-closed — see `ChatAckInfo::verified`'s own doc.
+                    // Only `lodestone_client::driver`'s `emit` can raise this,
+                    // since only it holds the sender's public key.
+                    verified: false,
                 }),
             })]);
         }
