@@ -34,10 +34,12 @@ reimplementation gets wrong:
   `rect_px(x - 1, y - 1, tw + 2, DEBUG_LINE_H, …)` — the same rectangle.
 - **The overlay draws at scale 1.0**, in the same `gui_scale`-divided logical
   canvas the rest of the HUD lays its constants into. It must **not** pick up
-  `HUD_TEXT_SCALE` or `hud_line_h()`; doing so is what "the text is way too big"
-  was, and it is the same double-apply the XP level number's own comment records
-  one screen over. `debug_overlay_plate_and_ink_match_vanillas_fill_literals`
-  pins `DEBUG_LINE_H < hud_line_h()` for that reason.
+  any ad-hoc HUD-wide pitch; doing so is what "the text is way too big" was,
+  and it is the same double-apply the XP level number's own comment records
+  one screen over. That ambient pitch (`HUD_TEXT_SCALE`/`hud_line_h()`) no
+  longer exists at all — chat, its last consumer, was ported to vanilla's own
+  `chatScale` metrics too (`docs/hud-text-scale.md`) — so there is nothing left
+  for a reimplementation to pick up by mistake.
 - **Empty strings are skipped but still advance `i`.** That is what makes a `""`
   a group separator rather than an empty plate — `Strings.isNullOrEmpty` guards
   both of vanilla's passes and the index keeps counting.
@@ -367,8 +369,11 @@ All three are `hud.rs` unit tests, no adapter needed:
 - `debug_overlay_plate_and_ink_match_vanillas_fill_literals` — transcribes
   `extractLines`' two signed Java `int` colours (`-1873784752`, `-2039584`) and
   **unpacks them in the test** rather than restating four floats, so a channel
-  swap or a dropped alpha fails. Also pins the pitch, the margin, and
-  `DEBUG_LINE_H < hud_line_h()`.
+  swap or a dropped alpha fails. Also pins the pitch and the margin. It used to
+  additionally pin `DEBUG_LINE_H < hud_line_h()` as a negative control against
+  the ad-hoc HUD-wide pitch; that pitch was deleted outright once chat (its
+  last consumer) moved to vanilla's own metrics, so there is no longer a
+  second pitch to compare against.
 - `debug_overlay_ported_lines_match_vanillas_format_strings` — all nine ported
   lines, character for character, at `[-0.5, 70.25, 88.75]`, yaw `405`, in
   `minecraft:the_nether`, with hitboxes **on** and borders **off**. Each

@@ -345,3 +345,290 @@ fn the_title_block_sits_where_vanillas_pose_translate_puts_it() {
          subtitle={subtitle_top:.2}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Chat: the last consumer of the ambient `HUD_TEXT_SCALE` pitch this file's
+// header describes.
+//
+// # Why this section exists
+//
+// `chat_pose_scale` (`crates/lodestone-shell/src/hud.rs`) used to be
+// `HUD_TEXT_SCALE * opts.scale`, i.e. `2.0` at the vanilla-legal default
+// `chatScale == 1.0` — the same double-apply the title/subtitle/action bar
+// above already had fixed. Vanilla's own chat pose scale
+// (`ChatComponent.getScale`, `.cache/mc/26.2/client-src/net/minecraft/client/
+// gui/components/ChatComponent.java`) is `chatScale` **alone**:
+// `extractRenderState`'s `pose.scale(scale, scale)` where `scale =
+// (float)this.getScale()`. `chat_pose_scale` is now `opts.scale.max(0.0)`,
+// and `HUD_TEXT_SCALE`/`hud_line_h` — no longer having any caller — are
+// deleted outright.
+//
+// Three vanilla clauses, verified independently rather than assumed to share
+// one derivation (`CLAUDE.md`'s "enumerate the clauses" rule — the first two
+// look right in a screenshot on their own; only a wrapping message exposes a
+// wrong width):
+//
+// | clause | vanilla | ours |
+// |---|---|---|
+// | line pitch | `messageHeight == 9`, scaled by `chatScale` (`ChatComponent.extractRenderState`'s `entryHeight` inside `pose.scale`) | `chat_line_h` |
+// | panel width | `getWidth(pct) = floor(pct * 280 + 40)`, **not** scaled by `chatScale` (computed outside the pose transform, in real screen pixels) | `chat_width_px` |
+// | panel height | `getHeight(pct) = floor(pct * 160 + 20)`, likewise unscaled | `chat_height_px` |
+//
+// The width/height clauses were already correct before this fix (they never
+// read `chat_pose_scale` at all), which is exactly why the panel's *edges*
+// never looked wrong in a screenshot while its *text* was 2x too big — the
+// magnitude species of vacuous test would have missed that split entirely.
+mod chat_scale {
+    use super::{canvas, ink_height, quiet, FB_H, FB_W, STRIDE};
+    use lodestone::chat::Candidate;
+    use lodestone::hud::{
+        chat_pose_scale, suggestion_layout, ChatDisplayOptions, DebugStats, HudFrame, HudGeometry,
+        SuggestionPopup,
+    };
+
+    /// Every vertex in `verts` whose colour matches `color` within `eps`,
+    /// divided by 6 (`ColourStream::rect`'s own quad size) — the number of
+    /// *quads* painted that colour. Row backgrounds are the only geometry in
+    /// a quiet chat frame painted flat black at a fractional alpha (glyph ink
+    /// is `[0.92, 0.94, 1.0]`, never black), so this counts scrollback rows
+    /// without needing to know their y positions ahead of time.
+    fn quads_with_color(verts: &[f32], color: [f32; 4], eps: f32) -> usize {
+        let hits = verts
+            .chunks(STRIDE)
+            .filter(|v| {
+                (v[2] - color[0]).abs() < eps
+                    && (v[3] - color[1]).abs() < eps
+                    && (v[4] - color[2]).abs() < eps
+                    && (v[5] - color[3]).abs() < eps
+            })
+            .count();
+        assert_eq!(hits % 6, 0, "a partial quad matched — the colour is not quad-exclusive");
+        hits / 6
+    }
+
+    /// **Clause 1: line pitch.** Predicts vanilla's `messageHeight == 9` at
+    /// the default `chatScale == 1.0` from `ChatComponent`'s own literal, not
+    /// from this crate's `chat_line_h` formula (which would make the
+    /// assertion circular), and states the double-applied wrong hypothesis
+    /// explicitly so the tolerance cannot straddle both.
+    #[test]
+    fn chat_row_pitch_matches_vanillas_message_height_at_default_scale() {
+        let stats = DebugStats::default();
+        let mut f = quiet(&stats);
+        let chat = [("hi", 0.0_f32)];
+        f.chat = &chat;
+        let measured = ink_height("chat row", &f);
+
+        let vanilla = 9.0_f32; // `ChatComponent`'s literal `messageHeight`.
+        let doubled = 18.0_f32; // the deleted `HUD_TEXT_SCALE` baseline's prediction.
+        assert!(
+            (measured - vanilla).abs() < 2.0,
+            "a single chat row must be vanilla's messageHeight-tall row \
+             (9px at chatScale 1.0): measured {measured:.2}"
+        );
+        assert!(
+            (measured - doubled).abs() > 4.0,
+            "measured {measured:.2} is too close to the deleted ad-hoc \
+             double-applied pitch ({doubled}px) to discriminate the fix from \
+             the bug it replaces"
+        );
+    }
+
+    /// **Clauses 2 and 3: panel width and height**, read directly out of the
+    /// background rect's own NDC corners rather than through `chat_width_px`/
+    /// `chat_height_px` — the same helpers the draw uses — so a shared bug in
+    /// either could not cancel itself out (mirrors
+    /// `chat_width_option_sizes_the_box_to_the_predicted_pixel_width` in
+    /// `hud.rs`, from outside the crate). Chat is **open** (`chat_input`
+    /// `Some`) so `height_pct_focused` (default `1.0`) governs the box, and a
+    /// single short line is the only geometry, so the input strip's own rect
+    /// is `verts[0..STRIDE*6]`.
+    #[test]
+    fn chat_panel_width_and_height_match_vanillas_getwidth_getheight_formulas() {
+        let stats = DebugStats::default();
+        let chat = [("hi", 0.0_f32)];
+        let frame = HudFrame {
+            crosshair: false,
+            show_debug: false,
+            chat: &chat,
+            chat_input: Some(""),
+            chat_caret_visible: false,
+            ..HudFrame::new(&stats)
+        };
+        let (cw, _ch) = canvas();
+        let geo = HudGeometry::build(&frame, FB_W, FB_H);
+        assert!(!geo.verts.is_empty(), "the input strip must paint");
+
+        // Vanilla's own formulas, recomputed independently of `chat_width_px`/
+        // `chat_height_px`.
+        let want_w = (1.0_f32 * 280.0 + 40.0).floor(); // 320
+        let want_h = (1.0_f32 * 160.0 + 20.0).floor(); // 180
+        assert!(want_w <= cw, "premise: a 320px box must fit the {cw}px canvas");
+
+        // The input strip's own rect: vertex 0 is `(x0, y0)`, vertex 1 is
+        // `(x1, y0)` (`ColourStream::rect`'s first triangle) — its width in
+        // NDC converts back with `(x1_ndc + 1) * cw / 2`.
+        let x1_px = (geo.verts[STRIDE] + 1.0) * 0.5 * cw;
+        assert!(
+            (x1_px - want_w).abs() < 1e-2,
+            "chat panel width must be vanilla's `getWidth(1.0) == 320`px \
+             (unscaled by chatScale — computed outside `pose.scale` in \
+             `ChatComponent.java`), got {x1_px:.2}"
+        );
+
+        // Height is asserted through the row cap it produces, not through a
+        // second raw-vertex offset: at vanilla's real 9px row pitch, a 180px
+        // box holds `floor(180 / 9) == 20` rows, not `floor(180 / 18) == 10`
+        // (the doubled hypothesis) and not `floor(180 / 9) - epsilon`. Fifteen
+        // short lines therefore must all be visible uncapped; a
+        // twenty-five-line log must be capped to exactly twenty.
+        let want_rows = (want_h / 9.0_f32).floor() as usize;
+        assert_eq!(want_rows, 20, "sanity: vanilla's own arithmetic");
+
+        let make = |n: usize| -> HudGeometry {
+            let lines: Vec<(&str, f32)> = (0..n).map(|_| ("x", 0.0_f32)).collect();
+            HudGeometry::build(
+                &HudFrame {
+                    crosshair: false,
+                    show_debug: false,
+                    chat: &lines,
+                    chat_input: Some(""),
+                    chat_caret_visible: false,
+                    ..HudFrame::new(&stats)
+                },
+                FB_W,
+                FB_H,
+            )
+        };
+        let bg = [0.0_f32, 0.0, 0.0, 0.5]; // `chat_bg_opacity` default 0.5, `alpha` 1.0.
+        // 15 rows fit uncapped (< 20); the input strip itself is drawn with a
+        // *different* rect covering the same colour family only if
+        // `chat_bg_opacity` happens to equal the row alpha, which it does
+        // here by construction — so it is counted too, and both sides of the
+        // comparison below include it identically, cancelling out.
+        let fifteen = quads_with_color(&make(15).verts, bg, 1e-4);
+        let twenty_five = quads_with_color(&make(25).verts, bg, 1e-4);
+        assert_eq!(
+            fifteen, 16,
+            "15 lines under the 20-row cap plus the input strip must all paint \
+             (16 background quads), not silently truncated"
+        );
+        assert_eq!(
+            twenty_five, 21,
+            "25 lines must cap at vanilla's `floor(180 / 9) == 20` rows plus \
+             the input strip (21 background quads), not `floor(180 / 18) == \
+             10` (11 with the strip) — the doubled-pitch hypothesis"
+        );
+    }
+
+    /// **The wrapping case.** A single-word (no spaces) line long enough that
+    /// vanilla's real per-glyph advance and the deleted ad-hoc pitch's advance
+    /// predict *different row counts*, not just different pixel widths within
+    /// one row — CLAUDE.md's warning that porting only the line-height and
+    /// panel-width clauses "looks right in a screenshot and is wrong the
+    /// moment a message wraps". With no `VanillaFont` attached (this test
+    /// harness is jar-less), `Builder::text_width` falls back to
+    /// `item_icon::text_w`: `(GLYPH_W + 1) * scale == 6 * scale` per
+    /// character.
+    ///
+    /// At the fixed `chat_pose_scale == 1.0`: `floor(320 / 6) == 53` chars
+    /// fit a row, so 70 chars wrap into **2** rows (53 + 17). At the deleted
+    /// double-applied pitch (`scale == 2.0`, advance `12`px):
+    /// `floor(320 / 12) == 26` chars fit a row, so 70 chars would wrap into
+    /// **3** (26 + 26 + 18) — a whole extra row, not a rounding-sized
+    /// difference.
+    #[test]
+    fn a_long_wrapping_line_hard_wraps_at_vanillas_chatscale_alone_row_count() {
+        let stats = DebugStats::default();
+        let line = "a".repeat(70);
+        let chat = [(line.as_str(), 0.0_f32)];
+        let frame = HudFrame {
+            crosshair: false,
+            show_debug: false,
+            chat: &chat,
+            ..HudFrame::new(&stats)
+        };
+        let geo = HudGeometry::build(&frame, FB_W, FB_H);
+        let bg = [0.0_f32, 0.0, 0.0, 0.5];
+        let rows = quads_with_color(&geo.verts, bg, 1e-4);
+        assert_eq!(
+            rows, 2,
+            "70 'a's at vanilla's chatScale-alone advance (6px/char) must wrap \
+             into exactly 2 rows (53 + 17); 3 would be the deleted ad-hoc \
+             2x-pitch hypothesis's prediction (26 + 26 + 18)"
+        );
+    }
+
+    /// **The hit-test/drawn-region regression this fix can specifically
+    /// introduce.** `suggestion_layout` is called both from the draw
+    /// (`HudGeometry::build_inner`) and from `HudRenderer::suggestion_layout`
+    /// (the pointer hit-test, `crates/lodestone-shell/src/app/menus.rs`'s
+    /// `WindowApp::suggestion_row_under_cursor`) — exercised here through the
+    /// identical free function a GPU-free test can reach, at **two**
+    /// non-coincident chat scales so a bug that only shows away from the
+    /// default cannot hide behind an accidental agreement at `1.0`.
+    #[test]
+    fn hit_test_rect_and_drawn_popup_agree_at_two_chat_scales() {
+        let stats = DebugStats::default();
+        let candidates: Vec<Candidate> = (0..12)
+            .map(|i| Candidate { text: format!("cand{i:02}"), tooltip: None })
+            .collect();
+
+        for chat_scale in [1.0_f32, 0.5] {
+            let opts = ChatDisplayOptions { scale: chat_scale, ..ChatDisplayOptions::default() };
+            let base = HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat_input: Some("ca"),
+                chat_caret_visible: false,
+                chat_options: opts,
+                ..HudFrame::new(&stats)
+            };
+            let control = HudGeometry::build(&base, FB_W, FB_H);
+            let popup = SuggestionPopup {
+                line: "ca",
+                start: 0,
+                candidates: &candidates,
+                selected: 0,
+                offset: 0,
+                cursor: None,
+            };
+            let with = HudGeometry::build(
+                &HudFrame { chat_suggestions: Some(popup), ..base },
+                FB_W,
+                FB_H,
+            );
+            assert!(with.verts.len() > control.verts.len(), "the popup must add geometry");
+
+            let (cw, ch) = canvas();
+            let pose = chat_pose_scale(opts);
+            // No font attached here (jar-less harness), so the same fallback
+            // measure the draw itself falls back to.
+            let layout = suggestion_layout(cw, ch, pose, &popup, |s| {
+                s.chars().count() as f32 * 6.0 * pose
+            });
+
+            let px = |x: f32| (x + 1.0) * 0.5 * cw;
+            let py = |y: f32| (1.0 - y) * 0.5 * ch;
+            let gutter = pose.max(1.0);
+            let mut outside = Vec::new();
+            for chunk in with.verts[control.verts.len()..].chunks(STRIDE) {
+                let (x, y) = (px(chunk[0]), py(chunk[1]));
+                let inside = x >= layout.x - 0.5
+                    && x <= layout.x + layout.w + 0.5
+                    && y >= layout.y - gutter - 0.5
+                    && y <= layout.y + layout.h + gutter + 0.5;
+                if !inside {
+                    outside.push((x, y));
+                }
+            }
+            assert!(
+                outside.is_empty(),
+                "chat_scale {chat_scale}: {} popup vertices landed outside the \
+                 hit-test rect: {:?}",
+                outside.len(),
+                &outside[..outside.len().min(8)]
+            );
+        }
+    }
+}
