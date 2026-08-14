@@ -222,6 +222,21 @@ Editing, and reading the tree:
   test run are **two observations at two different moments**. **Before reporting a red `main`, re-run at
   the committed sha in an isolated worktree.** When *you* neuter something, keep the window short and
   restore by `cp` from a scratchpad backup **with an md5 check** — never `git checkout`.
+- **But "pre-existing" means "not caused by my change"; it does NOT mean "not a bug", and conflating the two
+  is how real defects survive a whole session.** Three instances in one day, each disclaimed by several
+  agents in turn, each real: two `lightning::tests` failures (genuine test defects — an RNG search space too
+  small, then a fixture bug it unmasked), and **~29 end-to-end `lodestone-v770` failures** that turned out to
+  be a live regression from inserting `SetCompression` into the login directive sequence. Every agent
+  correctly proved the failure was not theirs — the worktree check above works — and then moved on, so the
+  correct half of the procedure licensed skipping the rest.
+
+  **The discriminator is one command: re-run a single failing test alone, single-threaded.** A contention or
+  resource artefact needs load to reproduce; a real defect fails alone. The v770 case failed alone in
+  **0.00 s** with an immediate assertion failure, which is unambiguous — nothing about it was environmental,
+  and a count that moves with load (42 under load, 29 quiet) is *not* evidence of flakiness when the
+  individual failures are deterministic. So: **disclaim ownership if you like, but run the one command before
+  calling a failure environmental**, and say which you established — "not mine" and "not a bug" are two
+  claims and the second needs its own evidence.
 - **A clean log for *your* files, in a build someone else broke, is not evidence your files are clean —
   unless you prove the compiler got that far.** The control is cheap: **plant a deliberate type error in your
   own lib file, and a second inside your own crate's test file, then check which ones come back.** Both cases
