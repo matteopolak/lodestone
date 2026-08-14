@@ -140,8 +140,8 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   #503](https://github.com/matteopolak/lodestone/issues/503): whether
   `BlockEntityRegistry`'s unfiltered 20 Hz scan is a **second, CPU-side,
   distance-dependent** cause of the game degrading as you walk from spawn. The
-  cold-column mechanism is real and costs **610 column regenerations per tick** past a
-  threshold, but it is flat in distance — what crosses the threshold is registry
+  cold-column mechanism was real and cost **610 column regenerations per tick** past a
+  threshold, but it was flat in distance — what crossed the threshold was registry
   size, not travel.
 - [Block outline and interaction shapes](./block-outline-shapes.md) —
   Per-block-state `BlockStateBase.getShape` (the **outline**) and

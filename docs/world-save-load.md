@@ -113,6 +113,20 @@ Every control below was **run and observed**, not described:
 
 ## How to change it, and the gotchas
 
+- **`RegionChunkSource::load` goes through a small open-region cache, not straight to disk (issue #509).**
+  Before this, every column load did `std::fs::read` + `RegionFile::parse` — a full-file read plus a
+  second full-file copy inside `parse`'s own `bytes.to_vec()` — even though `ChunkStore` streams hundreds
+  of columns out of the same handful of region files (361 loads against 4 distinct files on a cold join at
+  the shipped `render_distance = 8`). `RegionCache` (in `region_source.rs`, capacity 16) keeps already-
+  parsed `RegionFile`s keyed by `(rx, rz)`; a hit is an `Arc` clone, and only a genuine miss touches disk.
+  `RegionFile::parse_owned` (in `lodestone-anvil`) is the other half — it takes ownership of an
+  already-read `Vec<u8>` instead of copying a borrowed slice, so `read_from_file` no longer pays for two
+  full-file copies on every miss either. **The cache is invalidated, never patched, after a write**
+  (`WorldSaveHandle::save_region` calls `RegionCache::invalidate` right after the atomic rename) — the
+  file on disk and the parsed struct must never be allowed to diverge silently. `PersistenceStats::
+  region_files_read`/`region_bytes_read` are the counters to read if this needs re-measuring; they bump
+  only on a cache miss, so `region_files_read == distinct region files touched` is the post-fix invariant
+  (pre-fix it equalled `loaded_from_disk`, one read per column).
 - **Packing is non-spanning.** `64 / bits` entries per long with the high bits
   left as padding, *not* a dense bit stream. This is the one that silently
   corrupts a world: every palette of 16 or fewer entries reads identically under
