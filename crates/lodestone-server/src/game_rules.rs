@@ -326,6 +326,9 @@ pub const MOB_GRIEFING: &str = "mob_griefing";
 pub const RANDOM_TICK_SPEED: &str = "random_tick_speed";
 /// `GameRules.SPAWN_MOBS` — pre-26.2's `doMobSpawning`.
 pub const SPAWN_MOBS: &str = "spawn_mobs";
+/// `GameRules.SPAWN_PATROLS`. Read by `crate::tick::run_tick_loop`'s
+/// patrol-spawn pass (`MobSim::run_patrol_spawn_cycle`).
+pub const SPAWN_PATROLS: &str = "spawn_patrols";
 /// `GameRules.KEEP_INVENTORY`.
 pub const KEEP_INVENTORY: &str = "keep_inventory";
 
@@ -475,6 +478,13 @@ impl GameRules {
     #[must_use]
     pub fn spawn_mobs(&self) -> bool {
         self.boolean(SPAWN_MOBS)
+    }
+
+    /// `spawn_patrols` — whether pillager patrols spawn. Read by
+    /// `crate::tick::run_tick_loop`'s patrol-spawn pass.
+    #[must_use]
+    pub fn spawn_patrols(&self) -> bool {
+        self.boolean(SPAWN_PATROLS)
     }
 
     /// `keep_inventory` — whether a player keeps their items through death.

@@ -307,6 +307,12 @@ impl WorldStateHandle {
         self.with(|state| state.rules.mob_drops())
     }
 
+    /// `spawn_patrols` — whether pillager patrols spawn.
+    #[must_use]
+    pub fn spawn_patrols(&self) -> bool {
+        self.with(|state| state.rules.spawn_patrols())
+    }
+
     /// Whether mobs vanilla marks `notInPeaceful` may exist — false on `Peaceful`.
     ///
     /// Difficulty's **first** real consumer: before this, nothing read the stored
