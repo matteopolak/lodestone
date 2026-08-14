@@ -153,7 +153,7 @@ pub mod vehicle;
 pub mod veto;
 
 /// Re-exported so plugin authors never need to match `bevy_app`'s version by
-/// hand (azalea does the same at `azalea/src/lib.rs:63-64`).
+/// hand (azalea does the same in `azalea/src/lib.rs`).
 pub use bevy_app as app;
 /// Re-exported so plugin authors never need to match `bevy_ecs`'s version by
 /// hand.
