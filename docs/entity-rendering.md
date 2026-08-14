@@ -93,20 +93,33 @@ Three things about it worth knowing before changing it:
   costs a few dozen extra decodes at startup and needs no change for a new variant.
   A reference the pack does not ship falls back to the model sheet.
 
-**A tamed wolf still draws its wild sheet, and that is an input gap, not a
-rendering one.** Vanilla's tame bit is `TamableAnimal.DATA_FLAGS_ID & 4`; **no field
-of `lodestone_model::EntityMetadataUpdate` carries it**, so the client cannot know a
-wolf is tamed, and `entity_variant_sheet` pins `WolfState::Wild`. Closing it needs a
-field on `EntityMetadataUpdate`, a `v770` decode gated on the entity being a
-`TamableAnimal`, an ECS component and ingest arm, and then one extra argument to
-`entity_variant_sheet` plus one more grouping key. It is deliberately not inferred
-from anything else — a plausible guess would make the eventual real signal
-indistinguishable from a bug.
-`a_tamed_wolf_still_resolves_to_its_wild_sheet_because_the_flag_never_arrives`
-asserts that state, so **the day the flag lands that test fails** and whoever lands
-it has to thread it rather than discovering later that the collar never appeared.
-26.2 also ships a `_baby` axis (`WolfVariants.register` builds six identifiers, not
-three) which `WolfState` does not model at all.
+**A tamed wolf still draws its wild sheet, and the gap has moved.** This was
+written when the claim was "no field of `EntityMetadataUpdate` carries the
+tame bit" — that is now false and was corrected in `entity.rs` (issue #235):
+`EntityMetadataUpdate::tamed`/`sitting` exist, and `v770`'s
+`read_entity_metadata` populates both under `MetadataClass::Tamable`, and
+`SimMob::snapshot` sends them for wolf/cat/parrot/ocelot. The remaining gap
+is entirely downstream of the wire: no `crates/lodestone-ecs` component
+folds `EntityMetadataUpdate::tamed` (`ingest.rs::apply_entity_metadata` has
+no arm for it — this is per-entity state, so it belongs in `ingest`, not
+`session`, per this repo's router table), and the shell's draw call site
+(`crates/lodestone-shell/src/entities.rs`) still calls the plain
+`entity_variant_sheet`, which has no parameter to receive it.
+
+The render-side half of the fix now exists:
+`entity_variant_sheet_for(model_name, variant, tamed: bool)` actually
+selects `WolfState::Tame`/`Wild` from that last argument, tested by
+`entity_variant_sheet_for_resolves_the_tame_sheet_when_told_the_wolf_is_tamed`.
+The plain `entity_variant_sheet` (every current production caller) is left
+alone — still always `Wild` — because none of those callers has the bit to
+pass, and changing its signature would break them for a flag they cannot
+supply yet;
+`a_tamed_wolf_still_resolves_to_its_wild_sheet_through_the_plain_entry_point`
+pins that. Whoever adds the ECS component and the shell-side read swaps the
+call at the draw site from `entity_variant_sheet` to `entity_variant_sheet_for`
+and passes the component's value — no further change to `entity.rs` should be
+needed. 26.2 also ships a `_baby` axis (`WolfVariants.register` builds six
+identifiers, not three) which `WolfState` does not model at all.
 
 ### Pose
 

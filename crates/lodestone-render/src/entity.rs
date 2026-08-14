@@ -555,18 +555,35 @@ pub fn entity_texture_candidates(model_name: &str) -> &'static [&'static str] {
 /// its own answer to "does this key/ordinal actually reach us", and guessing one
 /// wrong produces a confidently wrong skin rather than a missing one.
 ///
-/// # The wolf's tame state is **not** lifted, and that is a real gap
+/// # The wolf's tame state: the wire now carries it, nothing upstream reads it yet
 ///
-/// [`WolfState`] is pinned to [`WolfState::Wild`] here. Vanilla's tame bit is
-/// `TamableAnimal.DATA_FLAGS_ID & 4`, and no field on
-/// [`EntityMetadataUpdate`](lodestone_model::EntityMetadataUpdate) carries it — so
-/// there is nothing to read, and the client cannot currently know a wolf is tamed.
-/// Pinning `Wild` is the honest answer: it is what an untamed wolf looks like and
-/// what every wolf looked like before this function existed. When the flag is
-/// decoded, this becomes one extra argument here plus one extra grouping key at the
-/// draw site; it is deliberately *not* faked from anything else (a wolf with a
-/// nametag, say), because a plausible-looking guess would make the eventual real
-/// signal impossible to tell from a bug.
+/// **This was stale as of issue #235's audit and is corrected here.** The wire
+/// *does* carry vanilla's tame bit today:
+/// [`EntityMetadataUpdate`](lodestone_model::EntityMetadataUpdate) declares
+/// `tamed: Option<bool>` and `sitting: Option<bool>`, `v770`'s
+/// `read_entity_metadata` populates both from `TamableAnimal.DATA_FLAGS_ID`'s
+/// low bits under `MetadataClass::Tamable`, and `SimMob::snapshot`
+/// (`crates/lodestone-server/src/mobs/mod.rs`) pushes them for wolf/cat/parrot/
+/// ocelot. So the claim this doc used to make — "no field ... carries it" — is
+/// false; the actual gap moved one layer down.
+///
+/// **What is still missing, and it is outside this file:** nothing folds
+/// `EntityMetadataUpdate::tamed` into a per-entity ECS component
+/// (`crates/lodestone-ecs/src/ingest.rs::apply_entity_metadata` has arms for
+/// `flags`/`pose`/`health`/`variant`/etc. but none for `tamed`/`sitting`, and
+/// `crates/lodestone-ecs/src/entity.rs` has no `Tamed`/`Sitting` component to
+/// fold it into), and the shell's draw-time call site
+/// (`crates/lodestone-shell/src/entities.rs`) still calls the plain
+/// [`entity_variant_sheet`], which cannot see it either way. Both are a
+/// different crate's file.
+///
+/// [`entity_variant_sheet_for`] is the render-side half of the actual fix:
+/// it takes the tame bit as a parameter rather than pinning [`WolfState::Wild`]
+/// internally, so a future caller with a real component to read needs no
+/// further change here — see its own doc for the wiring a follow-up needs.
+/// [`entity_variant_sheet`] itself is left alone (still always `Wild`) because
+/// its production callers cannot supply the bit today; changing its signature
+/// would break every one of them for a flag they have no source for yet.
 ///
 /// [`WolfCoat`]: lodestone_assets::entity::WolfCoat
 /// [`WolfState`]: lodestone_assets::entity::WolfState
@@ -578,19 +595,49 @@ pub fn entity_variant_sheet(
     model_name: &str,
     variant: &lodestone_model::EntityVariant,
 ) -> Option<&'static str> {
-    let axis = variant_axis(model_name, variant)?;
+    entity_variant_sheet_for(model_name, variant, false)
+}
+
+/// [`entity_variant_sheet`], plus the one bit that function cannot yet
+/// receive: whether the entity is tamed (vanilla `TamableAnimal.DATA_FLAGS_ID
+/// & 4`, decoded into
+/// [`EntityMetadataUpdate::tamed`](lodestone_model::EntityMetadataUpdate::tamed)
+/// today — see [`entity_variant_sheet`]'s own doc for the wire/ECS chain and
+/// exactly which piece downstream still has to change to reach this
+/// parameter with a real value). Only `"wolf"` reads it; every other model
+/// ignores it, matching [`entity_variant_sheet`]'s existing per-model table.
+///
+/// **The remaining wiring, for whoever picks this up**: a `Tamed(bool)`
+/// component in `crates/lodestone-ecs/src/entity.rs`, folded from
+/// `EntityMetadataUpdate::tamed` in
+/// `crates/lodestone-ecs/src/ingest.rs::apply_entity_metadata` (an `ingest`
+/// arm, not `session` — this is per-entity state, not a local-player scalar,
+/// per this repo's router table), then read at the
+/// `crates/lodestone-shell/src/entities.rs` draw-grouping call site and
+/// passed here instead of the plain [`entity_variant_sheet`]. The wolf's
+/// `sitting` bit has the same shape and no consumer yet either, but is not
+/// part of this function's texture axis (vanilla renders a sitting wolf via
+/// pose, not a different sheet).
+#[must_use]
+pub fn entity_variant_sheet_for(
+    model_name: &str,
+    variant: &lodestone_model::EntityVariant,
+    tamed: bool,
+) -> Option<&'static str> {
+    let axis = variant_axis(model_name, variant, tamed)?;
     let entry = entity_models()
         .into_iter()
         .find(|entry| entry.name == model_name)?;
     Some(entry.texture.resolve(axis))
 }
 
-/// Lifts a wire variant onto the [`lodestone_assets`] texture axis this model's
-/// corpus entry selects on. See [`entity_variant_sheet`] for the table and for why
-/// the wolf's state is pinned.
+/// Lifts a wire variant (plus the tame bit, for a wolf) onto the
+/// [`lodestone_assets`] texture axis this model's corpus entry selects on. See
+/// [`entity_variant_sheet`] for the table and for the wolf tame-state wiring.
 fn variant_axis(
     model_name: &str,
     variant: &lodestone_model::EntityVariant,
+    tamed: bool,
 ) -> Option<lodestone_assets::entity::EntityVariant> {
     use lodestone_assets::entity::{EntityVariant as Axis, Temperature, WolfCoat, WolfState};
 
@@ -619,7 +666,7 @@ fn variant_axis(
             };
             Some(Axis::Wolf {
                 coat,
-                state: WolfState::Wild,
+                state: if tamed { WolfState::Tame } else { WolfState::Wild },
             })
         }
         "pig" | "cow" | "chicken" => {
@@ -5124,19 +5171,23 @@ mod tests {
 
     /// **The tame gap, pinned as a fact rather than left as a comment.**
     ///
-    /// The client has no tame bit: no field of `EntityMetadataUpdate` carries
-    /// `TamableAnimal.DATA_FLAGS_ID & 4`, so [`entity_variant_sheet`] pins
-    /// `WolfState::Wild` and a tamed wolf draws its wild sheet. This asserts that
-    /// deliberate state, which means the day the flag is decoded **this test fails**
-    /// and whoever lands it has to thread the state through rather than discovering
-    /// later that the collar never appeared.
+    /// [`entity_variant_sheet`] (the plain, 2-argument entry point every
+    /// production caller still uses) has no way to *receive* a tame bit, so
+    /// it must always pin `WolfState::Wild` — not because the wire carries
+    /// nothing (it does, see [`entity_variant_sheet`]'s own doc), but because
+    /// nothing upstream of its callers folds that wire field into anything
+    /// this function's signature can see. This asserts that deliberate
+    /// pinning; if it starts failing, `entity_variant_sheet` gained a way to
+    /// see the bit without gaining a parameter for it, which would be a
+    /// second, undocumented path — fix the signature instead of this
+    /// assertion.
     ///
     /// The corpus already knows the tame sheet, and the assertion names it, so the
     /// gate cannot pass by the tame path merely being unimplemented in the corpus.
     /// 26.2 also ships a `_baby` axis (`WolfVariants.register` builds six
     /// identifiers, not three) which `WolfState` does not model at all.
     #[test]
-    fn a_tamed_wolf_still_resolves_to_its_wild_sheet_because_the_flag_never_arrives() {
+    fn a_tamed_wolf_still_resolves_to_its_wild_sheet_through_the_plain_entry_point() {
         use lodestone_assets::entity::{EntityVariant as Axis, WolfCoat, WolfState};
         use lodestone_model::EntityVariant as Wire;
 
@@ -5165,14 +5216,39 @@ mod tests {
         assert_eq!(
             got,
             Some(wild),
-            "the wire carries no tame bit, so every wolf must resolve wild"
+            "the plain entry point has no tame parameter, so it must resolve wild"
         );
         assert_ne!(
             got,
             Some(tame),
-            "if this now fails, the tame flag has become available: thread it into \
-             `variant_axis` and into the draw-grouping key rather than deleting this \
-             assertion"
+            "if this now fails, `entity_variant_sheet` gained a tame source of its \
+             own rather than `entity_variant_sheet_for` gaining a caller — thread \
+             the ECS component through instead of changing this function's pin"
+        );
+    }
+
+    /// The other half of the tame gap: [`entity_variant_sheet_for`] — the
+    /// function that *can* see a tame bit — actually uses it. This is the
+    /// positive proof the render-side fix works; what remains (an ECS
+    /// component and a shell call site, both outside this crate) is named in
+    /// [`entity_variant_sheet`]'s own doc comment.
+    #[test]
+    fn entity_variant_sheet_for_resolves_the_tame_sheet_when_told_the_wolf_is_tamed() {
+        use lodestone_model::EntityVariant as Wire;
+
+        let key = Wire::Keyed("minecraft:ashen".parse().unwrap());
+        let wild = entity_variant_sheet_for("wolf", &key, false);
+        let tame = entity_variant_sheet_for("wolf", &key, true);
+        assert_eq!(wild, Some("entity/wolf/wolf_ashen"));
+        assert_eq!(tame, Some("entity/wolf/wolf_ashen_tame"));
+        assert_ne!(wild, tame, "the tame parameter must actually change the sheet");
+        // A non-wolf model ignores the parameter entirely, matching
+        // `entity_variant_sheet`'s existing per-model table (only `"wolf"`
+        // has a `WolfState` axis at all).
+        let pig_key = Wire::Keyed("minecraft:cold".parse().unwrap());
+        assert_eq!(
+            entity_variant_sheet_for("pig", &pig_key, false),
+            entity_variant_sheet_for("pig", &pig_key, true),
         );
     }
 
