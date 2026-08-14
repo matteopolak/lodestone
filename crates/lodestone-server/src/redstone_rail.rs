@@ -16,11 +16,12 @@
 //! chain of same-orientation powered rails up to 8 cells away (through
 //! boosters) eventually reaches one that does**
 //! (`PoweredRailBlock.findPoweredRailSignal`/`isSameRailWithPower`,
-//! `PoweredRailBlock.java:30-125`). Activator rail's *launching* behaviour
-//! (throwing a riding minecart into the air) is a separate, unmodelled
-//! concern — it needs a minecart, which this crate has none of (see
-//! `crate::redstone_rail`'s sibling doc note on [`crate::redstone`]'s own
-//! module doc, and issue #11). This module is the `POWERED` tracking only.
+//! `PoweredRailBlock.java:30-125`). Activator rail's own *activation* effect
+//! — `AbstractMinecart.activateMinecart` (a plain minecart ejects its rider,
+//! a TNT minecart primes) — is now modelled, in
+//! `crate::mobs::minecart::apply_activation`; this module's own `POWERED`
+//! tracking is what feeds it the rail's activation state each tick. This
+//! module remains the `POWERED` tracking only.
 //!
 //! Neither block is a redstone **signal source** — `PoweredRailBlock`
 //! overrides no `ownSignal`, so it never appears in
