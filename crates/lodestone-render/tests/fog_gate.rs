@@ -68,7 +68,7 @@ fn white_quad() -> ModelMesh {
         light: 0xFF,
         tint: 255,
         anim: 0,
-        _pad: 0,
+        cutout_bypass: 0,
         tint_rgb_override: [0, 0, 0, 0],
     };
     ModelMesh {

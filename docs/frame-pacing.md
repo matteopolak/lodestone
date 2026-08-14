@@ -104,46 +104,60 @@ this module exists to fix.
 `app::tests::the_unfocused_frame_schedule_does_not_drift_below_its_target` keeps
 the naive gate as a live control and requires it to be observed *failing*.
 
-### There is no frame-rate option, and the plumbing for one is already here
+### Max Framerate, VSync and Reduce FPS When are live
 
-`SurfaceTarget` can switch the swapchain's present mode at runtime
-(`set_present_mode`) and remembers the mode `Surface::get_default_config` chose at
-bring-up (`default_present_mode`). Nothing in the shell calls either today.
+Vanilla's `framerateLimit`/`enableVsync`/`inactivityFpsLimit` rows are wired now,
+both onto persisted `Options` fields and onto real consumers — this section used
+to describe the plumbing sitting unused; it now describes what reads it.
 
-That is deliberate. A boolean `UNCAP FRAMERATE` row lived on the options screen
-for a while, added so the F3 `fps=` figure could be a **measurement** rather than a
-readout of the display's refresh rate — vsynced, every frame that fits inside the
-refresh interval reports the same number, so the counter cannot tell a 2× speedup
-from a 20% one. Issue #382 deleted it as a bespoke debug affordance. Vanilla's real
-equivalent is **Max Framerate** (`Options.framerateLimit`, a slider whose top notch
-is `Unlimited`), and that is what should land here instead.
+**VSync** (`Options::enable_vsync`) drives `SurfaceTarget`'s present mode, exactly
+the way the deleted `unlock_framerate` debug knob (issue #382) did:
+`WindowApp::sync_vsync_present_mode` polls the option once per presented frame
+(`app/redraw.rs`, right before the View Bobbing push) and hands
+`SurfaceTarget::set_present_mode` either `default_present_mode()` (on — the
+adapter's own remembered `Fifo`, not `wgpu::PresentMode::AutoVsync`, which
+resolves to `FifoRelaxed` wherever that exists and would quietly change default
+presentation everywhere that mode is advertised) or `AutoNoVsync` (off — never a
+concrete `Immediate`/`Mailbox`, which is a validation error on an adapter that
+does not advertise it; `AutoNoVsync` simply degrades to `Fifo`). The equality
+guard inside `set_present_mode` is what makes the per-frame poll safe:
+`surface.configure` recreates the swapchain, so only the frame the option
+actually flips pays for a rebuild.
 
-Two details are load-bearing for whoever writes it:
+**Max Framerate** (`Options::framerate_limit`, raw fps `10..=260`, `260` = the
+`UNLIMITED_FRAMERATE_CUTOFF` sentinel) and **Reduce FPS When**
+(`Options::inactivity_fps_limit`, `Minimized`/`Afk`) both feed
+`app::pacing::effective_target_fps`, vanilla's `FramerateLimitTracker` minus the
+`WINDOW_ICONIFIED`/`OUT_OF_LEVEL_MENU` branches — this pacer already throttles an
+occluded/unfocused window unconditionally (the table above), so those two vanilla
+branches are subsumed by a mechanism that predates the option. What is new is the
+AFK clock: `Afk` (vanilla's default) additionally drops to `min(limit, 30)` fps
+after 60 s with no real key/mouse input and to a flat `10` after 600 s
+(`FramePacer::record_input`, hooked from `app/lifecycle.rs`'s `window_event` on
+`KeyboardInput`/`MouseInput`/`MouseWheel` — deliberately not `CursorMoved`,
+mirroring vanilla's own `onInputReceived` call sites). `Minimized` never reduces
+for idle input, matching vanilla's own gate on the AFK clock.
 
-- **Off must restore the *remembered* mode, not `AutoVsync`.** Those are not the
-  same: `AutoVsync` resolves to `FifoRelaxed` wherever that exists, which permits
-  tearing on a late frame, while the default config picks plain `Fifo`. Restoring
-  by name would quietly change the default presentation on every platform that
-  has `FifoRelaxed`. `SurfaceTarget` stores `default_present_mode` for this.
-- **`AutoNoVsync`, never a concrete `Immediate`/`Mailbox`.** A concrete mode the
-  adapter does not advertise is a validation error; `AutoNoVsync` degrades to
-  `Fifo` and simply stays capped. (wgpu's Metal backend does advertise
-  `Immediate` on macOS — `wgpu-hal/src/metal/adapter.rs` gates it on
-  `OsFeatures::display_sync()` — so it resolves to that here.)
-- **Do not "optimise away" the equality guard inside
-  `SurfaceTarget::set_present_mode`.** `surface.configure` *recreates the
-  swapchain*, so that guard is what makes it safe to call the setter from a
-  per-frame poll at all. The deleted knob did exactly that, and polling was the
-  right shape: the menu layer is pure and GPU-free by design, and threading a
-  `wgpu::Device` into it to save one `PresentMode` comparison per frame would be
-  a bad trade.
+**Composes with VSync, is not gated by it**: vanilla applies
+`FramerateLimiter.limitDisplayFPS` whenever `framerateLimit < 260`
+unconditionally, vsync on or off, and this client reproduces that rather than
+inventing a precedence between the two options.
 
-Note an uncapped present mode only removes *our* cap on a **focused** window.
-Everything in the table above still holds: an unfocused window is still throttled
-to `UNFOCUSED_FPS`, and an occluded one still presents nothing. Neither of those is
-vsync, and neither should follow a frame-rate setting — the occluded case in
-particular exists to stop `acquire()` stalling, which uncapping would make worse
-rather than better.
+`FramePacer::begin_frame(now, target_fps)` schedules against an **absolute**
+deadline exactly like the unfocused table below, generalised: `target_fps` of
+`None` means "no schedule, vsync/the compositor paces a focused window"
+(unchanged from before either option existed); any `Some(fps)` — a real cap while
+focused, or the always-at-least-`UNFOCUSED_FPS` unfocused case — paces against
+`next_render`. **This is not a busy-wait**: `FramePacer::control_flow` reports
+`ControlFlow::WaitUntil(next_render)` whenever a cap applies to a focused window,
+not `ControlFlow::Poll` — without it, a `framerateLimit` below the refresh rate
+would still spin the event loop at 100% of a core calling `begin_frame` every
+iteration only to find `render == false` most of the time.
+
+Note a cap only removes *our* pacing on a **focused** window's presentation rate;
+the tick rate is never touched (`step.dt` is computed before either option is
+read), and an unfocused/occluded window's own throttle (below) still applies,
+tightened further by an explicit lower cap rather than overridden by it.
 
 ## How to change it
 
@@ -165,25 +179,30 @@ rather than better.
 
 ## Configuration
 
-The pacing itself is all compile-time constants — `MAX_TICKS_PER_UPDATE`,
-`TICK_SECS`, `UNFOCUSED_FPS`, `BACKGROUND_POLL`, none of them settings.
+The catch-up/schedule shape is compile-time constants — `MAX_TICKS_PER_UPDATE`,
+`TICK_SECS`, `UNFOCUSED_FPS`, `BACKGROUND_POLL` — but three real runtime
+settings now feed the schedule itself, all in
+[`Options`](../crates/lodestone-shell/src/config.rs) and all on the Video
+settings page: `framerate_limit` (raw fps `10..=260`, default `120`,
+`UNLIMITED_FRAMERATE_CUTOFF = 260` = "Unlimited"), `enable_vsync` (default
+`true`), and `inactivity_fps_limit` (`Minimized`/`Afk`, default `Afk`). See
+`app::pacing::effective_target_fps` and `WindowApp::sync_vsync_present_mode` for
+where each is read.
 
-**No runtime knobs.** There is no frame-rate setting of any kind: the
-`unlock_framerate` boolean that used to live in
-[`Options`](../crates/lodestone-shell/src/config.rs) was deleted by #382, and the
-real thing (vanilla's Max Framerate) has not landed. See
-[Main menu](./main-menu.md) for where a video-settings screen would go.
-
-An install that toggled the old knob still has `"unlock_framerate": true` sitting
-in its `options.json`. That is harmless — `Options::from_json` reads the keys it
-knows and ignores the rest, which
+An install that toggled the old, deleted `unlock_framerate` debug knob (#382)
+still has `"unlock_framerate": true` sitting in its `options.json`. That is
+harmless — `Options::from_json` reads the keys it knows and ignores the rest,
+which
 `config::tests::an_unknown_key_in_the_file_is_ignored_rather_than_failing_the_load`
 pins, so a stale key can never cost `gui_scale` or the keybinds table.
 
 ## Dependencies
 
-- `winit` — `ControlFlow`, and the `Focused` / `Occluded` window events that feed
-  the pacer.
+- `winit` — `ControlFlow`, and the `Focused` / `Occluded` / `KeyboardInput` /
+  `MouseInput` / `MouseWheel` window events that feed the pacer (the last three
+  reset the AFK clock).
 - `crate::sim::Sim` — `step(dt)` and `tick_count()`; the pacer only supplies `dt`.
 - `lodestone_render::SurfaceTarget` — owns the swapchain configuration, so the
   present mode is set through it rather than from `app.rs` directly.
+- `crate::config::{Options, InactivityFpsLimit}` — the three persisted fields
+  above.

@@ -173,6 +173,18 @@ impl Sim {
         self.terrain_and_world(|store, terrain| terrain.remesh_around(store, block));
     }
 
+    /// Push vanilla's **See-Through Leaves** option down from the menu layer
+    /// — `options.cutoutLeaves`, `false` (FAST) means leaves render solid.
+    ///
+    /// Called once per presented frame like [`Self::set_view_bobbing`], but
+    /// unlike every one of that family's siblings this one can be genuinely
+    /// expensive: [`TerrainMesh::set_cutout_leaves`]'s own equality guard is
+    /// what keeps an unconditional per-frame call from re-meshing the whole
+    /// loaded world every frame — see that method's doc.
+    pub fn set_cutout_leaves(&mut self, cutout_leaves: bool) {
+        self.terrain_and_world(|store, terrain| terrain.set_cutout_leaves(cutout_leaves, store));
+    }
+
     /// Re-snapshot and re-schedule one section. A section that snapshots to
     /// nothing is queued for GPU removal rather than left showing stale geometry.
     ///

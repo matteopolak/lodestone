@@ -594,7 +594,7 @@ pub fn flame_mesh(width: f32, height: f32) -> (Vec<ModelVertex>, Vec<u32>) {
                 light: 0,
                 tint: 255,
                 anim: 0,
-                _pad: 0,
+                cutout_bypass: 0,
                 tint_rgb_override: [0, 0, 0, 0],
             });
         }

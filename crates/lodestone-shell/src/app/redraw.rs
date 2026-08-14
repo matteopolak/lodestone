@@ -24,7 +24,8 @@ impl WindowApp {
         // clamped to vanilla's ten-tick catch-up budget, so a long stall is
         // dropped rather than replayed in a burst.
         let frame_start = Instant::now();
-        let step = self.pacer.begin_frame(frame_start);
+        let target_fps = self.current_target_fps(frame_start);
+        let step = self.pacer.begin_frame(frame_start, target_fps);
         let dt = step.dt;
         // `Runner::Winit`: the host event loop drives this driver's `App`
         // itself, once per `RedrawRequested`, by calling `update()` directly
@@ -61,6 +62,13 @@ impl WindowApp {
             return;
         }
 
+        // Vanilla's VSync option (`options.vsync`). Polled every presented
+        // frame, before either draw path, for the same reason View Bobbing
+        // just below is: `MenuNav` owns the pure `Options`, and
+        // `set_present_mode`'s equality guard is what makes a per-frame poll
+        // safe against a GPU setter — only the frame the option actually
+        // flips pays for a swapchain rebuild.
+        self.sync_vsync_present_mode();
         // Vanilla's View Bobbing option, pushed down before either draw path
         // because the toggle lives on a menu screen and should take effect while
         // that screen is still showing. Polled per frame rather than fired on the
@@ -73,6 +81,10 @@ impl WindowApp {
         // is on. Pushed every frame for `set_view_bobbing`'s reason.
         self.sim
             .set_damage_tilt_strength(self.nav.damage_tilt_strength());
+        // Vanilla's See-Through Leaves option. Polled per frame like View
+        // Bobbing above, but `Sim::set_cutout_leaves`'s own equality guard is
+        // what keeps this affordable — see that method's doc.
+        self.sim.set_cutout_leaves(self.nav.options().cutout_leaves);
         // Vanilla's eleven `soundSource.*` sliders, pushed beside View Bobbing and
         // **before** `draw_menu`'s early return on purpose: the sliders live on the
         // Sound settings page, so a player dragging Master must hear the menu music
@@ -1473,5 +1485,49 @@ impl WindowApp {
             self.last_log = Instant::now();
             println!("{}", self.sim.stats.one_line());
         }
+    }
+
+    /// This frame's `app::pacing::effective_target_fps` — the live
+    /// `framerateLimit`/`inactivityFpsLimit` folded with how long since the
+    /// last real input, at `now`. `None` means "no cap": a focused window
+    /// lets vsync/the compositor pace it, exactly as before either option
+    /// existed.
+    ///
+    /// Called from both [`Self::redraw`] (to decide whether to render) and
+    /// `about_to_wait` (to decide how the event loop should wait) — see
+    /// `app::pacing::FramePacer::control_flow`'s doc for why the second call
+    /// is what keeps a low cap from becoming a busy-wait.
+    pub(super) fn current_target_fps(&self, now: Instant) -> Option<u32> {
+        crate::app::pacing::effective_target_fps(
+            self.nav.options().framerate_limit,
+            self.nav.options().inactivity_fps_limit,
+            self.pacer.idle_secs(now),
+        )
+    }
+
+    /// Vanilla's `options.vsync` (`Options.java:511-513`, default `true`).
+    /// Polled every presented frame rather than pushed on toggle — see
+    /// `docs/frame-pacing.md` and the deleted `unlock_framerate` debug knob
+    /// this reuses the exact reasoning (and the exact `SurfaceTarget` API) of.
+    ///
+    /// `true` restores the adapter's **remembered** default
+    /// (`SurfaceTarget::default_present_mode`, almost always `Fifo`) rather
+    /// than `wgpu::PresentMode::AutoVsync` — those are not the same:
+    /// `AutoVsync` resolves to `FifoRelaxed` wherever it exists, which
+    /// permits tearing on a late frame, while the default config vanilla
+    /// picks is plain `Fifo`. `false` is `AutoNoVsync`, never a concrete
+    /// `Immediate`/`Mailbox` an adapter might not advertise — `AutoNoVsync`
+    /// degrades to `Fifo` and simply stays capped, which is the safe failure
+    /// mode for an option a player can flip on a GPU nobody has tested.
+    fn sync_vsync_present_mode(&mut self) {
+        let (Some(gpu), Some(target)) = (self.gpu.as_ref(), self.target.as_mut()) else {
+            return;
+        };
+        let mode = if self.nav.options().enable_vsync {
+            target.default_present_mode()
+        } else {
+            wgpu::PresentMode::AutoNoVsync
+        };
+        target.set_present_mode(gpu.device(), mode);
     }
 }

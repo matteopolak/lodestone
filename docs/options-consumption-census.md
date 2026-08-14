@@ -60,16 +60,21 @@ non-`keybinds` field of `config::Options` has a row that reaches it.
 
 ## The census
 
-### Wired (44 option rows, 40 distinct options)
+### Wired (49 option rows, 45 distinct options)
 
-Counts, because three different ones get conflated here: **66 live *cells*** outside
-a world (65 inside — the root's Online button is the one that changes), of which
-**44 are option rows**, 9 are Done buttons and 13 are working nav buttons; those 44
-rows carry **40 distinct options**, because four are placed on two pages each. All
+Counts, because three different ones get conflated here: **71 live *cells*** outside
+a world (70 inside — the root's Online button is the one that changes), of which
+**49 are option rows**, 9 are Done buttons and 13 are working nav buttons; those 49
+rows carry **45 distinct options**, because four are placed on two pages each. All
 three numbers are asserted by `the_disabled_majority_is_the_point_and_it_is_measured`
 and `the_root_online_button_is_the_one_row_that_changes_with_in_world`, so they
 cannot drift here without a build failure — quote them from a test run, not from
 this paragraph.
+
+**Five of the 45 landed in the video-settings/leaves session**:
+`framerateLimit`, `enableVsync`, `inactivityFpsLimit`, `graphicsPreset` and
+`cutoutLeaves` — see the table below and
+[`docs/frame-pacing.md`](./frame-pacing.md) for the first three.
 
 | option | page(s) | type | vanilla default | consumer |
 |---|---|---|---|---|
@@ -95,6 +100,11 @@ this paragraph.
 | `fov` | **Root** | slider `IntRange(30, 110)`, label "Normal"/"Quake Pro"/int | `70` | `camera_rig::build_camera` → the projection matrix, via `Sim::set_fov_y_degrees` |
 | `glintSpeed` / `glintStrength` | Accessibility | slider `UnitDouble`, label `percentValueOrOffLabel` | `0.5` / `0.75` | **three** sites — `RenderState::set_glint_options` (world + hand) and `IconRenderer::set_glint_options` on *both* `HudRenderer` and `ContainerRenderer` (GUI icons) |
 | `cloudStatus` | Video | cycle, 3 states, label **is** the value | `FANCY` | `SkyFrame::with_cloud_status`, via `RenderState::set_cloud_status` |
+| `framerateLimit` | Video | slider `IntRange(1,26)` over `fps/10` | `120` fps (`260` = Unlimited) | `app::pacing::effective_target_fps` → `FramePacer::begin_frame`'s schedule |
+| `enableVsync` | Video | toggle | `true` | `WindowApp::sync_vsync_present_mode` → `SurfaceTarget::set_present_mode` |
+| `inactivityFpsLimit` | Video | cycle, 2 states, label **is** the value | `AFK` | `app::pacing::effective_target_fps`'s AFK clock (`FramePacer::record_input`/`idle_secs`) |
+| `graphicsPreset` | Video | slider `SliderableEnum`, 4 states | `FANCY` | `MenuNav::apply_graphics_preset` — writes `renderDistance`/`cloudStatus`/`cutoutLeaves`, the three of vanilla's seventeen this client has consumers for |
+| `cutoutLeaves` | Video | toggle | `true` | `mesher::SnapshotModelView::force_opaque_at` → `ModelVertex::cutout_bypass` → `model.wgsl`'s cutout discard; `Sim::set_cutout_leaves` forces a remesh of every loaded column on change |
 
 **Four** options appear on **two pages each** — that is vanilla's own shape, one
 `OptionInstance` placed on two screens, so editing either row moves the other's label
@@ -166,8 +176,8 @@ groupings are still the right map of *which* subsystem each row belongs to.
 | group | options | blocked on |
 |---|---|---|
 | **Audio** | ~~all 11 `soundSource.*`~~, `soundDevice`, `directionalAudio`, `musicFrequency`, `musicToast` | **superseded — see kind A above.** The eleven volume sliders are **fully live since 2026-08-09**, `CategoryVolumes::set_user` through to the row. `soundDevice` (device enumeration) and `musicFrequency`/`musicToast` are separate and smaller |
-| **Window / display** | `fullscreen`, `exclusiveFullscreen`, `fullscreenResolution`, `enableVsync`, `framerateLimit`, `inactivityFpsLimit`, `preferredGraphicsBackend` | runtime window and surface reconfiguration |
-| **Renderer quality** | `graphicsPreset`, `gamma`, `mipmapLevels`, `ambientOcclusion`, `biomeBlendRadius`, `particles`, ~~`cloudStatus`~~, `cloudRange`, `entityShadows`, `entityDistanceScaling`, `improvedTransparency`, `textureFiltering`, `maxAnisotropyBit`, `weatherRadius`, `chunkSectionFadeInTime`, `vignette` | `cloudStatus` is **fully live since 2026-08-09**, all three states; the rest each need their own renderer knob, and several are whole features |
+| **Window / display** | `fullscreen`, `exclusiveFullscreen`, `fullscreenResolution`, ~~`enableVsync`~~, ~~`framerateLimit`~~, ~~`inactivityFpsLimit`~~, `preferredGraphicsBackend` | `enableVsync`/`framerateLimit`/`inactivityFpsLimit` are **fully live** — see [`docs/frame-pacing.md`](./frame-pacing.md). `fullscreen`/`exclusiveFullscreen`/`fullscreenResolution` are deliberately **not**: this client has no exclusive-fullscreen support at all (no winit `Fullscreen::Exclusive` call anywhere), and `fullscreenResolution`'s own vanilla value set — a lazily-populated list of the monitor's real video modes — has nothing to attach to without it. Wiring the resolution row alone, with no fullscreen mode for it to apply *in*, would be exactly the half-fix `CLAUDE.md` warns against; `preferredGraphicsBackend` needs a restart-time backend choice this client's `wgpu` init does not expose yet |
+| **Renderer quality** | ~~`graphicsPreset`~~, `gamma`, `mipmapLevels`, `ambientOcclusion`, `biomeBlendRadius`, `particles`, ~~`cloudStatus`~~, `cloudRange`, `entityShadows`, `entityDistanceScaling`, `improvedTransparency`, `textureFiltering`, `maxAnisotropyBit`, `weatherRadius`, `chunkSectionFadeInTime`, `vignette`, ~~`cutoutLeaves`~~ | `cloudStatus` is **fully live since 2026-08-09**, all three states; `graphicsPreset` and `cutoutLeaves` are **fully live** — `MenuNav::apply_graphics_preset` writes `renderDistance`/`cloudStatus`/`cutoutLeaves` (the three of vanilla's seventeen preset fields this client has consumers for) and leaves `CUSTOM` alone, matching vanilla's own `switch`; the rest each need their own renderer knob, and several are whole features |
 | **Post-process / screen effects** | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale`, ~~`damageTiltStrength`~~, ~~`glintSpeed`~~, ~~`glintStrength`~~ | `damageTiltStrength` is **live** — its consumer had been honoured all along; the two glint rows are **fully live since 2026-08-09** at all three glint sites; the three `*EffectScale` rows are kind **B** (the effect they scale is itself an island) and are the group's whole remainder |
 | **Distances** | ~~`renderDistance`~~, `simulationDistance`, ~~`fov`~~, ~~`sensitivity`~~ | `renderDistance`, `sensitivity` and `fov` are all live — `fov` **fully since 2026-08-09** (`camera_rig::build_camera` takes the degrees instead of pinning `FOV_Y_DEGREES`, and the row is on the **root** page); `simulationDistance` is kind **C** and the group's only remainder |
 | **Chat behaviour** | `chatVisibility`, `chatLinks`, `chatLinksPrompt`, `chatDelay`, `autoSuggestions`, `hideMatchedNames`, `onlyShowSecureChat`, `saveChatDrafts`, `reducedDebugInfo` | chat *behaviour* rather than chat *appearance*; the appearance half is now wired |
@@ -519,3 +529,79 @@ and `toggleUse` do. `discreteMouseScroll` goes through the wheel handler,
 consumer (see its row), and the last two have no consumer to reach. So "unblock that one line and wire all six" is not a plan that exists —
 each tier is separate work, and the bottom tier should be closed as won't-do until
 a subsystem exists rather than given a row.
+
+## Video settings and the leaves render pass (this session)
+
+Five rows, two unrelated fixes sharing a page.
+
+**`framerateLimit`/`enableVsync`/`inactivityFpsLimit`** were rows with real
+ranges/labels and **zero consumers anywhere else in the crate** — the same kind A
+shape as the fifteen above, except the "consumer" did not exist yet rather than
+running on a hardcoded constant. All three now feed `app::pacing`: see
+[`docs/frame-pacing.md`](./frame-pacing.md) for the schedule, the AFK clock and
+why a focused cap sleeps (`ControlFlow::WaitUntil`) instead of spinning.
+
+**`graphicsPreset`/`cutoutLeaves`** are the other half, and the fix was mostly in
+`lodestone-render`, not `menu/**`. The reported bug — Fast does not make leaves
+opaque — traced to two separate facts, neither of which is a mesher `if`:
+
+- `StateModel::occludes`/`face_occludes` (`crates/lodestone-render/src/
+  block_models.rs`) are baked **once**, at `BlockModels::build`, from real
+  per-face sprite-alpha sampling. They answer *face culling*, and `cutoutLeaves`
+  does not change vanilla's culling at all — only which render pass a leaf goes
+  through. So the fix leaves occlusion alone entirely; branching there was the
+  half-fix that would have changed nothing visible.
+- The model shader (`crates/lodestone-render/src/shaders/model.wgsl`) has
+  exactly **one** opaque pipeline, and its fragment shader's cutout discard
+  (`tex.a < 0.5`) ran unconditionally for every non-translucent quad — Solid and
+  Cutout `RenderLayer`s already built byte-identical pipelines
+  (`ModelPipeline::for_layer`). Vanilla's FAST leaves are not "cutout with
+  culling on"; they draw through the *solid* pass, which never runs the alpha
+  test, so the same texture's holes paint solid.
+
+The chosen fix is a **pass-level bypass**, not a second bake: `ModelVertex`'s
+unused padding byte (renamed `cutout_bypass`) rides the existing `Uint8x4`
+vertex attribute at no bind-group cost (the four-bind-group floor this repo
+tracks), reaches the shader as a new flat `VsOut` field, and skips the discard
+per-quad when set. `mesher::SnapshotModelView::force_opaque_at` sets it only for
+`BlockModels::is_leaves(id)` (vanilla's own eleven `LeavesBlock`s, not derived
+from `RenderLayer::Cutout` — grass, panes and a dozen other cutout blocks must
+not go opaque) **and** the live `cutoutLeaves == false`. Rejected: baking a
+second, alpha-forced copy of every leaf sprite into the atlas — it would need a
+second atlas region (or a whole second `BlockModels::build` keyed on the
+setting) for a result the pass-level bypass gets for free, since the RGB
+already sitting under a "hole" texel is exactly what vanilla's FAST also paints.
+
+`graphicsPreset` writes `renderDistance`/`cloudStatus`/`cutoutLeaves` — the
+three of vanilla's seventeen preset fields this client has real consumers for
+— and leaves the other fourteen alone (`biomeBlendRadius`, `simulationDistance`,
+`particles`, `mipmapLevels`, `entityShadows`, `menuBackgroundBlurriness`,
+`cloudRange`, `improvedTransparency`, `weatherRadius`, `maxAnisotropyBit`,
+`textureFiltering`, `prioritizeChunkUpdates`, `entityDistanceScaling`,
+`ambientOcclusion`); writing a row with nothing behind it to consume the value
+is the fabrication this doc's "departure 1" already names. `CUSTOM` writes
+nothing, matching vanilla's own `switch` (no `CUSTOM` case). **Known gap, not
+silently dropped**: vanilla's `setGraphicsPresetToCustom` — hand-tweaking
+`renderDistance` after picking FAST resets the Preset row to Custom — has no
+counterpart here, so the Preset row can read "Fast" after a value it placed has
+been hand-moved.
+
+Toggling `cutoutLeaves` (directly, or via the preset) forces a remesh of every
+currently-loaded column — `TerrainMesh::set_cutout_leaves`, guarded by an
+equality check so the unconditional per-frame poll
+(`Sim::set_cutout_leaves(self.nav.options().cutout_leaves)` in `app/redraw.rs`)
+does not re-mesh the world every frame — vanilla's own
+`operateOnLevelExtractor(LevelExtractor::allChanged)` for this option.
+
+**Left deliberately unwired: `fullscreen`, `exclusiveFullscreen`,
+`fullscreenResolution`.** This client has no exclusive-fullscreen support at
+all — no `winit::window::Fullscreen` call anywhere in the shell — and
+`fullscreenResolution`'s vanilla value set is a lazily-populated list of the
+*real monitor's* video modes with no meaning outside exclusive fullscreen.
+Wiring the resolution row without first building fullscreen support would be
+a settings row that appears to work and does nothing, the exact "half-fix"
+shape this document's kind-A/B distinction exists to catch. Left for a
+follow-up that also has to decide the browser question (wasm has no exclusive-
+fullscreen equivalent — the browser Fullscreen API is a different shape
+entirely), which is more scope than a video-settings pass should absorb on its
+own.

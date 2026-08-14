@@ -270,7 +270,7 @@ fn measure(models: &BlockModels, fill: u32, air: u32) -> Measured {
          reads as air and would silently remove occluders from the AO rings"
     );
 
-    let mesh: ModelMesh = mesh_snapshot_models(&snap, models);
+    let mesh: ModelMesh = mesh_snapshot_models(&snap, models, true);
     assert!(
         mesh.quad_count() > 0,
         "a solid section of non-occluding blocks must emit interior faces — if this is 0 the \

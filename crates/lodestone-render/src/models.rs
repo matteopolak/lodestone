@@ -136,8 +136,37 @@ pub struct ModelVertex {
     /// unchanged): the shader reads it as `packed.z` and, when non-zero, offsets
     /// the sampled V by the slot's per-frame amount to advance the animation.
     pub anim: u8,
-    /// Padding to keep the struct `4`-byte aligned and `Pod`-friendly.
-    pub _pad: u8,
+    /// `0` for "run the fragment shader's ordinary cutout discard" (every
+    /// caller before this field had meaning); nonzero skips it, so the fully
+    /// sampled texel — including whatever colour sits under an alpha hole —
+    /// paints solid.
+    ///
+    /// This is vanilla's `options.cutoutLeaves == false` (FAST): vanilla does
+    /// not achieve solid leaves by editing the texture or the geometry, it
+    /// renders leaves through the *solid* render pass, which simply never
+    /// runs the alpha test — so the RGB already sitting under a "hole" texel
+    /// is what paints, exactly as it does here. [`crate::model_pipeline`]
+    /// only ever builds **one** opaque pipeline (the shader's cutout discard
+    /// is unconditional otherwise — see `model.wgsl`'s `fs_main`), so this is
+    /// the pass-level bypass the render side needs without a second pipeline
+    /// or a second bake: a per-vertex flag rather than a per-draw-call
+    /// setting, because leaves share one section's opaque mesh with every
+    /// other block and are not their own draw call.
+    ///
+    /// Set only by `mesher::mesh_models` for a quad whose block is one of
+    /// `BlockModels::is_leaves` **and** the live `cutout_leaves` option is
+    /// off (`mesher::ModelSectionView::force_opaque_at`). Every other
+    /// caller — GUI items, the held/dropped-item mesh, entities, fluids,
+    /// headless tests — leaves this `0` and keeps rendering exactly as
+    /// before this field existed, the same "additive, defaults to inert"
+    /// shape [`Self::tint_rgb_override`]'s doc argues for.
+    ///
+    /// Was padding (`_pad`) before this — same byte, same stride, no vertex
+    /// layout change: a new *meaning* for an existing wire position, not a
+    /// new one. It still costs nothing against the render crate's four-bind-
+    /// group floor for the same reason [`Self::tint_rgb_override`] does not:
+    /// a vertex attribute, not a bind group.
+    pub cutout_bypass: u8,
     /// A **real, position-resolved** biome tint colour, or an untinted/inert
     /// sentinel — see [`Self::tint_rgb_override`]. `tint` above still indexes
     /// the frame-shared palette (group 2) for [`TintKind::Constant`]/
@@ -165,8 +194,8 @@ impl ModelVertex {
     /// input.
     ///
     /// Four attributes over the 32-byte stride: position (`Float32x3`), UV
-    /// (`Float32x2`), AO (`Float32`), and the packed `light`/`tint`/`anim`/pad
-    /// tail as one `Uint8x4`. Locations `0..=3`.
+    /// (`Float32x2`), AO (`Float32`), and the packed `light`/`tint`/`anim`/
+    /// `cutout_bypass` tail as one `Uint8x4`. Locations `0..=3`.
     ///
     /// This is the layout [`crate::entity_pipeline`] builds its own
     /// **instance** buffer's attributes on top of, starting at location `4`
@@ -561,6 +590,22 @@ pub trait ModelSectionView {
         true
     }
 
+    /// Whether the block at section-local `(x, y, z)` should skip the model
+    /// shader's cutout discard entirely and render every sampled texel
+    /// opaque — vanilla's `options.cutoutLeaves == false` (FAST), which draws
+    /// leaves through the *solid* render pass rather than the alpha-tested
+    /// one. See [`ModelVertex::cutout_bypass`] for why this is a per-vertex
+    /// flag and not a second pipeline.
+    ///
+    /// Defaults to `false` (run the ordinary cutout discard), so every
+    /// existing [`ModelSectionView`] implementation — tests, GUI items —
+    /// needs no change to keep compiling and keeps rendering exactly as
+    /// before this method existed.
+    fn force_opaque_at(&self, x: usize, y: usize, z: usize) -> bool {
+        let _ = (x, y, z);
+        false
+    }
+
     /// The **real**, position-resolved colour for a biome-dependent quad at
     /// section-local `(x, y, z)`, or `None` to fall back to the frame-shared
     /// palette's plains-default colour at that `slot` — exactly today's
@@ -761,6 +806,10 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                 // for a non-opaque cell carries real light, so the
                 // approximation errs bright rather than black.
                 let own_is_full_cube = view.occludes_at(x as i32, y as i32, z as i32);
+                // Vanilla's FAST leaves: real per-block, not per-quad, matching
+                // `ambient_occlusion_at` above — a block either renders through
+                // the solid pass or it does not.
+                let force_opaque = view.force_opaque_at(x, y, z);
                 for quad in quads {
                     if let Some(cf) = quad.cullface {
                         let nrm = face_of_direction(cf).normal();
@@ -823,6 +872,7 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                         [x as f32, y as f32, z as f32],
                         corners,
                         tint_rgb_override,
+                        force_opaque,
                     );
                 }
             }
@@ -870,6 +920,7 @@ fn emit_baked_quad(
     origin: [f32; 3],
     corners: [(f32, u8); 4],
     tint_rgb_override: Option<[u8; 3]>,
+    force_opaque: bool,
 ) {
     let base = mesh.vertices.len() as u32;
     let shade = face_shade(quad);
@@ -878,6 +929,7 @@ fn emit_baked_quad(
         Some([r, g, b]) => [r, g, b, 255],
         None => [0, 0, 0, 0],
     };
+    let cutout_bypass = u8::from(force_opaque);
     for i in 0..4 {
         let p = quad.positions[i];
         let (ao_factor, light) = corners[i];
@@ -888,7 +940,7 @@ fn emit_baked_quad(
             light,
             tint,
             anim: quad.anim,
-            _pad: 0,
+            cutout_bypass,
             tint_rgb_override,
         });
     }
@@ -958,7 +1010,7 @@ pub fn mesh_item_quads(quads: &[BakedQuad], pose: Mat4, gui_light: GuiLight) -> 
                 light: GUI_ITEM_LIGHT,
                 tint,
                 anim: quad.anim,
-                _pad: 0,
+                cutout_bypass: 0,
                 // GUI/inventory icons always render vanilla's fixed default
                 // tint (never the world biome the player happens to stand
                 // in — an item in your hotbar does not change colour), so
@@ -1026,7 +1078,7 @@ pub fn mesh_moving_block_quads(quads: &[BakedQuad], pose: Mat4, light: u8) -> Mo
                 light,
                 tint,
                 anim: quad.anim,
-                _pad: 0,
+                cutout_bypass: 0,
                 // No biome override: `MovingBlockRenderState` does carry a
                 // `biome`, but resolving it needs the position-keyed biome grid
                 // the terrain mesher owns and this path has no access to. The
@@ -1465,12 +1517,17 @@ pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
                 // module docs on `mesh_fluids`.
                 let corners = [(1.0, light); 4];
                 for quad in &quads {
+                    // Fluids never carry `force_opaque`: `cutoutLeaves` is a
+                    // leaves-only option, and water/lava are `Translucent`
+                    // geometry the model shader's cutout discard never
+                    // touches in the first place.
                     emit_baked_quad(
                         mesh,
                         quad,
                         [x as f32, y as f32, z as f32],
                         corners,
                         tint_rgb_override,
+                        false,
                     );
                 }
             }
@@ -2085,6 +2142,7 @@ mod tests {
             [0.0, 0.0, 0.0],
             [(1.0, 0xF0), (0.2, 0x00), (1.0, 0xF0), (0.2, 0x00)],
             None,
+            false,
         );
         assert_eq!(cut_02.indices, vec![0, 1, 2, 2, 3, 0]);
 
@@ -2096,8 +2154,105 @@ mod tests {
             [0.0, 0.0, 0.0],
             [(0.2, 0x00), (1.0, 0xF0), (0.2, 0x00), (1.0, 0xF0)],
             None,
+            false,
         );
         assert_eq!(cut_13.indices, vec![1, 2, 3, 3, 0, 1]);
+    }
+
+    #[test]
+    fn force_opaque_sets_the_cutout_bypass_byte_on_every_emitted_vertex() {
+        // The render-side half of the leaves fix: a quad emitted with
+        // `force_opaque = true` must carry a nonzero `cutout_bypass` on all
+        // four vertices, and `false` must carry a zero one — the fragment
+        // shader's `in.cutout_bypass != 0u` gate reads exactly this byte.
+        let quad = cube_face(Direction::Up, None);
+
+        let mut opaque = ModelMesh::default();
+        emit_baked_quad(
+            &mut opaque,
+            &quad,
+            [0.0, 0.0, 0.0],
+            [(1.0, 0xF0); 4],
+            None,
+            true,
+        );
+        assert!(
+            opaque.vertices.iter().all(|v| v.cutout_bypass != 0),
+            "force_opaque=true must set cutout_bypass on every vertex, got {:?}",
+            opaque.vertices.iter().map(|v| v.cutout_bypass).collect::<Vec<_>>()
+        );
+
+        let mut cutout = ModelMesh::default();
+        emit_baked_quad(
+            &mut cutout,
+            &quad,
+            [0.0, 0.0, 0.0],
+            [(1.0, 0xF0); 4],
+            None,
+            false,
+        );
+        assert!(
+            cutout.vertices.iter().all(|v| v.cutout_bypass == 0),
+            "force_opaque=false must leave cutout_bypass zero, got {:?}",
+            cutout.vertices.iter().map(|v| v.cutout_bypass).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn mesh_models_reads_force_opaque_per_block_from_the_view() {
+        // The mesher-level control: a `ModelSectionView` whose
+        // `force_opaque_at` reports `true` must produce a mesh where every
+        // vertex carries the bypass, proving `mesh_models` actually reads the
+        // trait method rather than always passing `false` through. The
+        // default-`false` population (every existing view) is the negative
+        // control this needs — see the sibling struct below.
+        struct AlwaysOpaque;
+        impl ModelSectionView for AlwaysOpaque {
+            fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+                static QUAD: std::sync::OnceLock<Vec<BakedQuad>> = std::sync::OnceLock::new();
+                if x == 0 && y == 0 && z == 0 {
+                    QUAD.get_or_init(|| vec![cube_face(Direction::Up, None)])
+                } else {
+                    &[]
+                }
+            }
+            fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+                false
+            }
+            fn force_opaque_at(&self, _x: usize, _y: usize, _z: usize) -> bool {
+                true
+            }
+        }
+        let mesh = mesh_models(&AlwaysOpaque);
+        assert!(!mesh.vertices.is_empty(), "premise: the fixture block meshed");
+        assert!(
+            mesh.vertices.iter().all(|v| v.cutout_bypass != 0),
+            "a view reporting force_opaque_at=true must reach every emitted vertex"
+        );
+
+        // Control: the default `force_opaque_at` (unimplemented here) is
+        // `false`, so the identical fixture through a view that does not
+        // override it must emit zero.
+        struct DefaultOpacity;
+        impl ModelSectionView for DefaultOpacity {
+            fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+                static QUAD: std::sync::OnceLock<Vec<BakedQuad>> = std::sync::OnceLock::new();
+                if x == 0 && y == 0 && z == 0 {
+                    QUAD.get_or_init(|| vec![cube_face(Direction::Up, None)])
+                } else {
+                    &[]
+                }
+            }
+            fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+                false
+            }
+        }
+        let control = mesh_models(&DefaultOpacity);
+        assert!(!control.vertices.is_empty(), "premise: the fixture block meshed");
+        assert!(
+            control.vertices.iter().all(|v| v.cutout_bypass == 0),
+            "the default force_opaque_at must leave cutout_bypass at zero"
+        );
     }
 
     // --- GUI item meshing ------------------------------------------------

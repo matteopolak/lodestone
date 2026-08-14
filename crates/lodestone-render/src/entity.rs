@@ -871,7 +871,7 @@ pub(crate) fn push_part_quads(
                 light: ENTITY_FULLBRIGHT,
                 tint: 255,
                 anim: 0,
-                _pad: 0,
+                cutout_bypass: 0,
                 // No biome tint on entities (see `models` module docs' D1
                 // note: entities share `ModelVertex`'s layout but carry no
                 // tint), so this override is always inert.
@@ -2859,7 +2859,7 @@ pub fn experience_orb_mesh(icon: u32) -> (Vec<ModelVertex>, Vec<u32>) {
             light: 0,
             tint: 255,
             anim: 0,
-            _pad: 0,
+            cutout_bypass: 0,
             tint_rgb_override: [0, 0, 0, 0],
         })
         .collect();

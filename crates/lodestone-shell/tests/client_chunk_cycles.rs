@@ -835,7 +835,7 @@ fn measure_draw_submission(
             let Some(snap) = snapshot_section(world, key) else {
                 continue;
             };
-            let opaque = mesh_snapshot_models(&snap, models);
+            let opaque = mesh_snapshot_models(&snap, models, true);
             let water = mesh_snapshot_fluids(&snap, models).water;
             let has_geometry = opaque.quad_count() > 0 || water.quad_count() > 0;
             // Sections with **no** geometry are uploaded too, and that is the
@@ -1358,7 +1358,7 @@ fn client_chunk_path_cycle_attribution() {
     // per-cell optimisation pays.
     let s3_models = measure_median(5, || {
         for snap in &snapshots {
-            black_box(mesh_snapshot_models(snap, models));
+            black_box(mesh_snapshot_models(snap, models, true));
         }
     });
     let s3_fluids = measure_median(5, || {
@@ -1403,7 +1403,7 @@ fn client_chunk_path_cycle_attribution() {
     });
     let meshed_quads: usize = snapshots
         .iter()
-        .map(|s| mesh_snapshot_models(s, models).quad_count())
+        .map(|s| mesh_snapshot_models(s, models, true).quad_count())
         .sum();
 
     // -- S3c: the biome-tint term, isolated from the mesh loop --------------

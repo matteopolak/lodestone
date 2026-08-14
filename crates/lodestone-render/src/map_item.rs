@@ -143,7 +143,7 @@ pub fn map_quad_mesh(pose: Mat4, light: u8) -> ModelMesh {
                 light,
                 tint: 255,
                 anim: 0,
-                _pad: 0,
+                cutout_bypass: 0,
                 tint_rgb_override: [0, 0, 0, 0],
             }
         })

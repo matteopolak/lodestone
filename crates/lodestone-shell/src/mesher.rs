@@ -869,6 +869,9 @@ struct SnapshotModelView<'a> {
     /// see [`SnapshotFluidView::tint`] for why this is a `RefCell` and what makes
     /// it safe.
     tint: RefCell<BlendedTintCursor>,
+    /// The live `options.cutoutLeaves` value this snapshot was meshed against —
+    /// see [`Self::force_opaque_at`].
+    cutout_leaves: bool,
 }
 
 /// Split a signed section coordinate into a neighbour offset (`dx ∈ {-1,0,1}`)
@@ -1033,6 +1036,24 @@ impl ModelSectionView for SnapshotModelView<'_> {
         self.models.occludes(id)
     }
 
+    /// Vanilla's FAST leaves (`options.cutoutLeaves == false`): real per-face
+    /// occlusion is untouched — `occludes_at`/`ambient_occlusion_at` above
+    /// still answer from the block's *actual*, cutout-textured geometry, so a
+    /// leaf still does not cull its neighbours' faces or block ambient
+    /// occlusion, matching vanilla (the preset is a render-pass choice, not a
+    /// shape change). This is the render-only half:
+    /// [`BlockModels::is_leaves`] is vanilla's own `LeavesBlock` list, not a
+    /// derivation from [`crate::block_models::RenderLayer`] (see that
+    /// method's doc for why the layer alone is the wrong predicate — grass,
+    /// panes and a dozen other `Cutout` blocks must **not** go opaque here).
+    fn force_opaque_at(&self, x: usize, y: usize, z: usize) -> bool {
+        if self.cutout_leaves {
+            return false;
+        }
+        let id = self.snapshot.at(0, 0, 0).get_block(x, y, z);
+        self.models.is_leaves(id)
+    }
+
     /// Vanilla's ambient-occlusion occluder test, `getShadeBrightness == 0.2F`
     /// — a **collision** predicate, not the `occludes_at` culling one above.
     ///
@@ -1114,13 +1135,22 @@ impl ModelSectionView for SnapshotModelView<'_> {
 /// cross-plants, slabs, stairs and translucent blocks render as their true
 /// geometry instead of synthetic full cubes. Pure and thread-safe like
 /// [`mesh_snapshot`].
+///
+/// `cutout_leaves` is vanilla's `options.cutoutLeaves` (`true` = FANCY/
+/// FABULOUS's see-through holes, `false` = FAST's solid leaves) — see
+/// [`SnapshotModelView::force_opaque_at`].
 #[must_use]
-pub fn mesh_snapshot_models(snapshot: &SectionSnapshot, models: &BlockModels) -> ModelMesh {
+pub fn mesh_snapshot_models(
+    snapshot: &SectionSnapshot,
+    models: &BlockModels,
+    cutout_leaves: bool,
+) -> ModelMesh {
     let view = SnapshotModelView {
         snapshot,
         models,
         light: SnapshotLight::new(snapshot),
         tint: RefCell::new(BlendedTintCursor::new(BLEND_RADIUS)),
+        cutout_leaves,
     };
     mesh_models(&view)
 }
@@ -1422,7 +1452,10 @@ pub struct Meshed {
 
 #[cfg(not(target_arch = "wasm32"))]
 enum Job {
-    Mesh(SectionSnapshot),
+    /// A snapshot plus the `options.cutoutLeaves` value it was submitted
+    /// under — see [`MeshScheduler::submit`]'s doc for why the value travels
+    /// with the job rather than being read by the worker from shared state.
+    Mesh(SectionSnapshot, bool),
 }
 
 /// Mesh one snapshot. **The single meshing body, shared by both schedulers.**
@@ -1432,7 +1465,7 @@ enum Job {
 /// thread and the browser's in-frame drain must not be able to produce *different
 /// geometry*. A forked copy is a defect that shows up as a browser world that is
 /// subtly wrong rather than as a build failure, and no `cargo check` could see it.
-fn mesh_one(snap: SectionSnapshot, classifier: &ShellClassifier) -> Meshed {
+fn mesh_one(snap: SectionSnapshot, classifier: &ShellClassifier, cutout_leaves: bool) -> Meshed {
     let _span = tracing::info_span!(
         "mesh_section",
         cx = snap.key.cx, cz = snap.key.cz, si = snap.key.si,
@@ -1441,7 +1474,7 @@ fn mesh_one(snap: SectionSnapshot, classifier: &ShellClassifier) -> Meshed {
     // the demo classifier has none → mesh through the packed full-cube path.
     let mesh = match classifier.models() {
         Some(models) => {
-            let mut opaque = mesh_snapshot_models(&snap, models);
+            let mut opaque = mesh_snapshot_models(&snap, models, cutout_leaves);
             let fluids = mesh_snapshot_fluids(&snap, models);
             // Lava is opaque and full-bright: fold it into the opaque pass. Water
             // is translucent and drawn separately.
@@ -1499,6 +1532,11 @@ pub struct MeshScheduler {
     workers: Vec<JoinHandle<()>>,
     pending: usize,
     column_source: ColumnSource,
+    /// The live `options.cutoutLeaves` value, stamped onto each [`Job::Mesh`]
+    /// at [`Self::submit`] time (a plain field, not shared state: `submit`
+    /// already needs `&mut self`, and a worker thread never reads this field
+    /// at all — only the value its own job carried).
+    cutout_leaves: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1545,11 +1583,14 @@ impl MeshScheduler {
             let classifier = classifier.clone();
             workers.push(thread::spawn(move || {
                 loop {
-                    let snap = match rx.recv() {
-                        Ok(Job::Mesh(snap)) => snap,
+                    let (snap, cutout_leaves) = match rx.recv() {
+                        Ok(Job::Mesh(snap, cutout_leaves)) => (snap, cutout_leaves),
                         Err(_) => break,
                     };
-                    if result_tx.send(mesh_one(snap, &classifier)).is_err() {
+                    if result_tx
+                        .send(mesh_one(snap, &classifier, cutout_leaves))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -1562,7 +1603,23 @@ impl MeshScheduler {
             workers,
             pending: 0,
             column_source,
+            cutout_leaves: true,
         }
+    }
+
+    /// Sets the `options.cutoutLeaves` value future [`Self::submit`] calls
+    /// stamp onto their jobs. Does **not** itself re-mesh anything already
+    /// queued or uploaded — see `Sim::set_cutout_leaves` for the caller that
+    /// forces a remesh of every loaded column, vanilla's own
+    /// `operateOnLevelExtractor(LevelExtractor::allChanged)`.
+    pub fn set_cutout_leaves(&mut self, value: bool) {
+        self.cutout_leaves = value;
+    }
+
+    /// The `options.cutoutLeaves` value new jobs are currently stamped with.
+    #[must_use]
+    pub fn cutout_leaves(&self) -> bool {
+        self.cutout_leaves
     }
 
     /// Whether the world this pool meshes has all its columns already. See
@@ -1582,7 +1639,11 @@ impl MeshScheduler {
         // Crossbeam MPMC — lock-free send, workers compete on the shared
         // receiver. No round-robin: the channel distributes by which worker
         // finishes its current job first (true work-stealing).
-        if self.job_tx.send(Job::Mesh(snapshot)).is_err() {
+        if self
+            .job_tx
+            .send(Job::Mesh(snapshot, self.cutout_leaves))
+            .is_err()
+        {
             self.pending -= 1;
         }
     }
@@ -1715,6 +1776,12 @@ pub struct MeshScheduler {
     ready: Vec<Meshed>,
     classifier: ShellClassifier,
     column_source: ColumnSource,
+    /// The live `options.cutoutLeaves` value. Read at **mesh** time (inside
+    /// [`Self::drain`]/[`Self::drain_blocking`]) rather than stamped at
+    /// submit time like the native scheduler's `Job` — there is only one
+    /// thread here, so nothing can race a queued snapshot's meshing against a
+    /// toggle the way the native pool's workers could.
+    cutout_leaves: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1744,6 +1811,7 @@ impl MeshScheduler {
             ready: Vec::new(),
             classifier,
             column_source,
+            cutout_leaves: true,
         }
     }
 
@@ -1751,6 +1819,17 @@ impl MeshScheduler {
     #[must_use]
     pub fn column_source(&self) -> ColumnSource {
         self.column_source
+    }
+
+    /// See the native scheduler's method of the same name.
+    pub fn set_cutout_leaves(&mut self, value: bool) {
+        self.cutout_leaves = value;
+    }
+
+    /// See the native scheduler's method of the same name.
+    #[must_use]
+    pub fn cutout_leaves(&self) -> bool {
+        self.cutout_leaves
     }
 
     /// Queue a snapshot for meshing. O(1) — no meshing happens here.
@@ -1776,7 +1855,7 @@ impl MeshScheduler {
         let mut out = std::mem::take(&mut self.ready);
         let deadline = crate::platform::Instant::now() + BROWSER_MESH_BUDGET;
         while let Some(snap) = self.queue.pop_front() {
-            out.push(mesh_one(snap, &self.classifier));
+            out.push(mesh_one(snap, &self.classifier, self.cutout_leaves));
             if crate::platform::Instant::now() >= deadline {
                 break;
             }
@@ -1798,7 +1877,7 @@ impl MeshScheduler {
             let Some(snap) = self.queue.pop_front() else {
                 break;
             };
-            let meshed = mesh_one(snap, &self.classifier);
+            let meshed = mesh_one(snap, &self.classifier, self.cutout_leaves);
             self.ready.push(meshed);
         }
         std::mem::take(&mut self.ready)
@@ -2334,6 +2413,36 @@ impl TerrainMesh {
     pub fn mesh_column_forced(&mut self, store: &ChunkWorld, cx: i32, cz: i32) {
         let force = self.all_absent_neighbours_departed(store, cx, cz);
         self.mesh_column_inner(store, cx, cz, force);
+    }
+
+    /// Sets `options.cutoutLeaves` and, only on a real change, re-meshes
+    /// every currently-loaded column with the new value — vanilla's own
+    /// `operateOnLevelExtractor(LevelExtractor::allChanged)` for this option.
+    ///
+    /// **The equality guard is load-bearing, not an optimisation.** Called
+    /// every frame ([`crate::sim::Sim::set_cutout_leaves`]'s own doc), so
+    /// without it every frame would re-mesh every loaded column — the
+    /// present-mode poll's exact reasoning, applied to a far more expensive
+    /// operation.
+    ///
+    /// Derives "every currently-loaded column" from
+    /// [`Self::uploaded_sections`]'s keys rather than tracking a separate
+    /// column set: that field is already every `SectionKey` this session has
+    /// handed out for GPU upload and not yet had removed (its own doc), so a
+    /// second list would be one more thing that could drift from it.
+    pub fn set_cutout_leaves(&mut self, value: bool, store: &ChunkWorld) {
+        if self.scheduler.cutout_leaves() == value {
+            return;
+        }
+        self.scheduler.set_cutout_leaves(value);
+        let columns: std::collections::BTreeSet<(i32, i32)> = self
+            .uploaded_sections
+            .iter()
+            .map(|key| (key.cx, key.cz))
+            .collect();
+        for (cx, cz) in columns {
+            self.mesh_column_forced(store, cx, cz);
+        }
     }
 
     fn mesh_column_inner(&mut self, store: &ChunkWorld, cx: i32, cz: i32, force: bool) {

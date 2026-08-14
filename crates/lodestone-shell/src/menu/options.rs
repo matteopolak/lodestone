@@ -432,6 +432,35 @@ pub enum LiveOption {
     /// `(caption, value) -> value.caption()`, which discards the caption it is
     /// handed, so vanilla's button reads "Fancy" rather than "Clouds: Fancy".
     CloudStatus,
+    /// `options.framerateLimit` → [`crate::config::Options::framerate_limit`].
+    /// An `IntRange(1, 26).xmap(*10)` like [`Self::RenderDistance`], through
+    /// [`INT_RANGE_SLIDERS`]'s existing `"framerateLimit"` row — making the
+    /// row live does not move the handle a player was already looking at.
+    ///
+    /// Reaches `app::pacing::effective_target_fps`, folded per-frame with
+    /// [`Self::InactivityFpsLimit`]'s AFK clock.
+    FramerateLimit,
+    /// `options.vsync` → [`crate::config::Options::enable_vsync`]. A plain
+    /// boolean (composes with its caption, unlike [`Self::CloudStatus`]).
+    /// Reaches `WindowApp::sync_vsync_present_mode`.
+    EnableVsync,
+    /// `options.inactivityFpsLimit` →
+    /// [`crate::config::Options::inactivity_fps_limit`]. Two states,
+    /// `Minimized`/`Afk`. **Discards its caption**, like [`Self::CloudStatus`]
+    /// — vanilla's stringifier is `(caption, value) -> value.caption()`
+    /// (`Options.java:177`) — so [`Self::value_is_the_whole_label`] covers it
+    /// too.
+    InactivityFpsLimit,
+    /// `options.graphics.preset` → [`crate::config::Options::graphics_preset`].
+    /// A `SliderableEnum` over four values (`Fast, Fancy, Fabulous, Custom`),
+    /// placed and dragged by index rather than through [`SliderRange`] — see
+    /// [`graphics_preset_slider_fraction`]/[`graphics_preset_from_fraction`]
+    /// for why this is a third shape alongside [`Self::unit_double`] and
+    /// [`Self::int_range`].
+    GraphicsPreset,
+    /// `options.cutoutLeaves` → [`crate::config::Options::cutout_leaves`]. A
+    /// plain boolean; see that field's doc for the render-side consumer.
+    CutoutLeaves,
 }
 
 impl LiveOption {
@@ -490,7 +519,17 @@ impl LiveOption {
             // so returning it here would pin every handle to the far right.
             | LiveOption::Fov
             // A three-state cycle, not a slider at all.
-            | LiveOption::CloudStatus => None,
+            | LiveOption::CloudStatus
+            // `FramerateLimit` is the third `IntRange`, `RenderDistance`'s
+            // reason again.
+            | LiveOption::FramerateLimit
+            | LiveOption::EnableVsync
+            // A two-state cycle, `CloudStatus`'s shape.
+            | LiveOption::InactivityFpsLimit
+            // A four-value `SliderableEnum`, placed by index — see
+            // `graphics_preset_slider_fraction`, not this table.
+            | LiveOption::GraphicsPreset
+            | LiveOption::CutoutLeaves => None,
         }
     }
 
@@ -538,7 +577,12 @@ impl LiveOption {
             | LiveOption::MouseWheelSensitivity
             | LiveOption::ChatColors
             | LiveOption::Fov
-            | LiveOption::CloudStatus => None,
+            | LiveOption::CloudStatus
+            | LiveOption::FramerateLimit
+            | LiveOption::EnableVsync
+            | LiveOption::InactivityFpsLimit
+            | LiveOption::GraphicsPreset
+            | LiveOption::CutoutLeaves => None,
         }
     }
 
@@ -553,9 +597,17 @@ impl LiveOption {
     /// live option here goes through `genericValueLabel`, `percentValueLabel` or
     /// `pixelValueLabel`, all three of which compose, which is why
     /// [`Cell::label`] composes by default.
+    ///
+    /// `InactivityFpsLimit`'s stringifier is the identical shape
+    /// (`(caption, value) -> value.caption()`, `Options.java:177`), so it joins
+    /// `CloudStatus` here — vanilla's "Reduce FPS when" button reads "AFK" or
+    /// "Minimized" alone.
     #[must_use]
     fn value_is_the_whole_label(self) -> bool {
-        matches!(self, LiveOption::CloudStatus)
+        matches!(
+            self,
+            LiveOption::CloudStatus | LiveOption::InactivityFpsLimit
+        )
     }
 
     /// This option's `IntRange` bounds, for the ones built on one.
@@ -569,6 +621,7 @@ impl LiveOption {
             LiveOption::RenderDistance => "renderDistance",
             LiveOption::SprintWindow => "sprintWindow",
             LiveOption::Fov => "fov",
+            LiveOption::FramerateLimit => "framerateLimit",
             _ => return None,
         };
         INT_RANGE_SLIDERS
@@ -783,6 +836,16 @@ impl Cell {
         // existed.
         if spec.live == Some(LiveOption::RenderDistance) {
             return Some(render_distance_slider_fraction(options.render_distance));
+        }
+        // `framerateLimit`'s `IntRange(1, 26)` over `fps / 10` — same shape as
+        // the arm above, same reason.
+        if spec.live == Some(LiveOption::FramerateLimit) {
+            return Some(framerate_limit_slider_fraction(options.framerate_limit));
+        }
+        // `graphicsPreset`'s `SliderableEnum`, placed by index rather than
+        // through `SliderRange` — see `graphics_preset_slider_fraction`.
+        if spec.live == Some(LiveOption::GraphicsPreset) {
+            return Some(graphics_preset_slider_fraction(options.graphics_preset));
         }
         // Same shape, for `sprintWindow`'s `IntRange(0, 10)` (issue #444): the
         // handle must track the live tick count, not the frozen default 7.
@@ -1300,6 +1363,52 @@ pub fn fov_slider_fraction(degrees: u32) -> f32 {
     range.to_slider_value(i32::try_from(degrees).unwrap_or(range.min))
 }
 
+/// `framerateLimit`'s slider fraction from the real, persisted fps value.
+///
+/// The fourth of the identical trio (see [`render_distance_slider_fraction`],
+/// [`sprint_window_slider_fraction`], [`fov_slider_fraction`]) — but the *one*
+/// with an `xmap` between the stored value and the bucket
+/// [`SliderRange`] operates on: `INT_RANGE_SLIDERS`'s `"framerateLimit"` row is
+/// `IntRange(1, 26)` over `fps / 10`, not over `fps` itself
+/// (`Options.java:126`). Dividing before handing it to `to_slider_value` is
+/// what keeps the handle and the stored fps agreeing about which bucket `120`
+/// (the default) lands in — bucket `12`, handle at `11.5 / 26`.
+#[must_use]
+pub fn framerate_limit_slider_fraction(fps: u32) -> f32 {
+    let range = INT_RANGE_SLIDERS
+        .iter()
+        .find(|(a, _, _)| *a == "framerateLimit")
+        .map_or(SliderRange { min: 1, max: 26 }, |(_, r, _)| *r);
+    range.to_slider_value(i32::try_from(fps / 10).unwrap_or(range.min))
+}
+
+/// `graphicsPreset`'s slider fraction from the real, persisted preset —
+/// `SliderableEnum.toSliderValue`'s `values.indexOf(value) / (size - 1)`
+/// (`OptionInstance.java:490`), endpoints pinned exactly like
+/// [`graphics_preset_default_fraction`] already does for the inactive row.
+#[must_use]
+pub fn graphics_preset_slider_fraction(preset: crate::config::GraphicsPreset) -> f32 {
+    let index = crate::config::GraphicsPreset::ORDER
+        .iter()
+        .position(|p| *p == preset)
+        .unwrap_or(0);
+    index as f32 / (crate::config::GraphicsPreset::ORDER.len() - 1) as f32
+}
+
+/// The inverse of [`graphics_preset_slider_fraction`] — the **drag** write
+/// side. Vanilla's `SliderableValueSet` default `fromSliderValue`
+/// (`OptionInstance.java:303-309`, `IntRangeBase`'s, which `SliderableEnum`
+/// inherits): `floor(map(slider, 0, 1, 0, size))`, clamping a `slider >= 1.0`
+/// down first so the top of the track cannot floor *past* the last index.
+#[must_use]
+pub fn graphics_preset_from_fraction(fraction: f32) -> crate::config::GraphicsPreset {
+    use crate::config::GraphicsPreset;
+    let f = fraction.clamp(0.0, 0.999_999);
+    let count = GraphicsPreset::ORDER.len();
+    let index = ((f * count as f32).floor() as usize).min(count - 1);
+    GraphicsPreset::ORDER[index]
+}
+
 /// `mouseWheelSensitivity`'s slider fraction from the real, live config
 /// value — the one place this module inverts vanilla's own stringifier
 /// rather than restating a table.
@@ -1566,6 +1675,38 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
             lodestone_render::CloudStatus::Fast => "Fast".to_string(),
             lodestone_render::CloudStatus::Fancy => "Fancy".to_string(),
         },
+        // `value == 260 ? genericValueLabel(caption, "Unlimited") :
+        // genericValueLabel(caption, "%s fps" % value)` (`Options.java:120-125`,
+        // `en_us.json`'s `options.framerate`/`options.framerateLimit.max`).
+        LiveOption::FramerateLimit => {
+            if options.framerate_limit >= crate::config::UNLIMITED_FRAMERATE_CUTOFF {
+                "Unlimited".to_string()
+            } else {
+                format!("{} fps", options.framerate_limit)
+            }
+        }
+        LiveOption::EnableVsync => {
+            if options.enable_vsync { "ON" } else { "OFF" }.to_string()
+        }
+        // `InactivityFpsLimit.caption()` — "AFK"/"Minimized"
+        // (`en_us.json`'s `options.inactivityFpsLimit.afk`/`.minimized`). The
+        // whole label, not a value half: see
+        // [`LiveOption::value_is_the_whole_label`].
+        LiveOption::InactivityFpsLimit => match options.inactivity_fps_limit {
+            crate::config::InactivityFpsLimit::Minimized => "Minimized".to_string(),
+            crate::config::InactivityFpsLimit::Afk => "AFK".to_string(),
+        },
+        // `Component.translatable(value.getKey())` — `en_us.json`'s
+        // `options.graphics.fast`/`.fancy`/`.fabulous`/`.custom`.
+        LiveOption::GraphicsPreset => match options.graphics_preset {
+            crate::config::GraphicsPreset::Fast => "Fast".to_string(),
+            crate::config::GraphicsPreset::Fancy => "Fancy".to_string(),
+            crate::config::GraphicsPreset::Fabulous => "Fabulous".to_string(),
+            crate::config::GraphicsPreset::Custom => "Custom".to_string(),
+        },
+        LiveOption::CutoutLeaves => {
+            if options.cutout_leaves { "ON" } else { "OFF" }.to_string()
+        }
     }
 }
 
@@ -1701,11 +1842,15 @@ static VIDEO: &[Entry] = &[
     head("Display"),
     big(slider("fullscreenResolution", "Fullscreen Resolution")),
     pair(
-        slider("framerateLimit", "Max Framerate"),
-        cycle("enableVsync", "VSync"),
+        live_slider("framerateLimit", "Max Framerate", LiveOption::FramerateLimit),
+        live_cycle("enableVsync", "VSync", LiveOption::EnableVsync),
     ),
     pair(
-        cycle("inactivityFpsLimit", "Reduce FPS when"),
+        live_cycle(
+            "inactivityFpsLimit",
+            "Reduce FPS when",
+            LiveOption::InactivityFpsLimit,
+        ),
         live_cycle("guiScale", "GUI Scale", LiveOption::GuiScale),
     ),
     pair(
@@ -1717,7 +1862,7 @@ static VIDEO: &[Entry] = &[
         cycle("preferredGraphicsBackend", "Graphics API"),
     ),
     head("Quality & Performance"),
-    big(slider("graphicsPreset", "Preset")),
+    big(live_slider("graphicsPreset", "Preset", LiveOption::GraphicsPreset)),
     pair(
         slider("biomeBlendRadius", "Biome Blend"),
         // Live since issue #443 — see `LiveOption::RenderDistance`. Its
@@ -1753,7 +1898,7 @@ static VIDEO: &[Entry] = &[
         slider("cloudRange", "Cloud Distance"),
     ),
     pair(
-        cycle("cutoutLeaves", "See-Through Leaves"),
+        live_cycle("cutoutLeaves", "See-Through Leaves", LiveOption::CutoutLeaves),
         cycle("improvedTransparency", "Improved Transparency"),
     ),
     pair(
@@ -3731,7 +3876,15 @@ mod tests {
                 // *is* vanilla's 70, so no screenshot could show the difference at
                 // the default).
                 LiveOption::Fov,
+                // Video page, `VIDEO`'s first `pair`: Max Framerate then VSync.
+                LiveOption::FramerateLimit,
+                LiveOption::EnableVsync,
+                // Second `pair`: Reduce FPS When, then GUI Scale.
+                LiveOption::InactivityFpsLimit,
                 LiveOption::GuiScale,
+                // The Quality & Performance grid's own `big` row, before the
+                // pairs it can write three of — see `MenuNav::apply_graphics_preset`.
+                LiveOption::GraphicsPreset,
                 // Video page, on the Quality & Performance grid, next to the
                 // (still inactive) Biome Blend — issue #443.
                 LiveOption::RenderDistance,
@@ -3739,6 +3892,9 @@ mod tests {
                 // three-state Clouds cycle, whose `SkyFrame::with_cloud_status`
                 // consumer had zero production callers.
                 LiveOption::CloudStatus,
+                // The `(cutoutLeaves, improvedTransparency)` pair's first half —
+                // the leaves-render-pass fix's own row.
+                LiveOption::CutoutLeaves,
                 LiveOption::ToggleSneak,
                 LiveOption::ToggleSprint,
                 LiveOption::ToggleAttack,
@@ -3847,17 +4003,19 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 44 live option
-        // *rows* (40 distinct options, four of them placed twice — the three
+        // The count itself, not just the ratio's ingredients: 49 live option
+        // *rows* (45 distinct options, four of them placed twice — the three
         // Chat/Accessibility ones plus `showSubtitles` on Sound and
-        // Accessibility, so 44 - 4 == 40)
+        // Accessibility, so 49 - 4 == 45 — the video-settings/leaves session's
+        // five, framerateLimit/enableVsync/inactivityFpsLimit/graphicsPreset/
+        // cutoutLeaves, are each placed once)
         // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid,
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
         // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 66, "outside a world: {live:?}");
+        assert_eq!(live.len(), 71, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -3879,12 +4037,14 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        // 66, not 62: `showSubtitles` is live on **both** the pages vanilla places
+        // 71, not 62: `showSubtitles` is live on **both** the pages vanilla places
         // it on (Sound and Accessibility), and three chat options are on two pages
         // each. The kind A batch added fifteen — the eleven volume buses, the
-        // root's FOV, both glint sliders and Clouds.
-        assert_eq!(outside.len(), 66);
-        assert_eq!(inside.len(), 65, "one fewer: the root's Online button");
+        // root's FOV, both glint sliders and Clouds — and the video-settings/
+        // leaves session added five more: framerateLimit, enableVsync,
+        // inactivityFpsLimit, graphicsPreset, cutoutLeaves.
+        assert_eq!(outside.len(), 71);
+        assert_eq!(inside.len(), 70, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -4732,6 +4892,14 @@ mod tests {
         LiveOption::GlintSpeed,
         LiveOption::GlintStrength,
         LiveOption::CloudStatus,
+        // Video settings: `framerateLimit`/`enableVsync`/`inactivityFpsLimit`
+        // were rows with zero consumers anywhere else in the crate; `cutoutLeaves`
+        // and `graphicsPreset` are the leaves-render-pass fix's own two rows.
+        LiveOption::FramerateLimit,
+        LiveOption::EnableVsync,
+        LiveOption::InactivityFpsLimit,
+        LiveOption::GraphicsPreset,
+        LiveOption::CutoutLeaves,
     ];
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
@@ -4795,12 +4963,18 @@ mod tests {
                 | LiveOption::Fov
                 | LiveOption::GlintSpeed
                 | LiveOption::GlintStrength
-                | LiveOption::CloudStatus => {}
+                | LiveOption::CloudStatus
+                | LiveOption::FramerateLimit
+                | LiveOption::EnableVsync
+                | LiveOption::InactivityFpsLimit
+                | LiveOption::GraphicsPreset
+                | LiveOption::CutoutLeaves => {}
             }
         }
         // 25 before the kind A batch, plus eleven sound buses, FOV, both glint
-        // parameters and Clouds.
-        assert_eq!(ALL.len(), 40, "forty distinct live options");
+        // parameters and Clouds, plus the five video-settings/leaves rows this
+        // session wired.
+        assert_eq!(ALL.len(), 45, "forty-five distinct live options");
         // And the eleven indices are all of them, none repeated: `SoundVolume` is
         // a *payload* variant, so neither the compiler nor the match above can see
         // a missing or duplicated index, and a duplicate would silently leave one
@@ -5375,13 +5549,15 @@ mod tests {
             nav.click_row(scale_row),
             SettingsOutcome::Cycle(LiveOption::GuiScale)
         );
-        // Its left-hand neighbour is `inactivityFpsLimit`, which we do not
-        // honour: clicking it must do **nothing**, not fall through to whatever
-        // Enter last meant. This is the assertion #391 would have failed.
+        // `fullscreen` is still inert: clicking it must do **nothing**, not
+        // fall through to whatever Enter last meant. This is the assertion
+        // #391 would have failed. (`inactivityFpsLimit`, GUI Scale's former
+        // left-hand neighbour, went live alongside the rest of the video
+        // settings and is exercised by its own gate now.)
         let neighbour = visible
             .iter()
-            .position(|c| matches!(c.cell, Cell::Option(s) if s.accessor == "inactivityFpsLimit"))
-            .expect("the same row's first column");
+            .position(|c| matches!(c.cell, Cell::Option(s) if s.accessor == "fullscreen"))
+            .expect("Video still carries an inert fullscreen row");
         assert_eq!(nav.click_row(neighbour), SettingsOutcome::None);
         // And a click past the end of the frame must be inert rather than
         // reaching the keyboard path — the other half of #391's fix.

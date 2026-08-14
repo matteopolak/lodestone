@@ -224,6 +224,14 @@ struct VsOut {
     // a different grass green per section, but a constant/redstone tint
     // never needs to vary and is cheaper to leave in the palette.
     @location(5) @interpolate(flat) tint_rgb_override: vec4<u32>,
+    // `ModelVertex::cutout_bypass`, `packed.w` -- nonzero skips the cutout
+    // discard below entirely, painting the fully sampled texel (including
+    // whatever colour sits under an alpha hole) solid. Vanilla's
+    // `options.cutoutLeaves == false` (FAST): leaves draw through the solid
+    // pass, which never runs the alpha test at all, rather than through any
+    // per-material "opaque leaves" state. A new vertex attribute costs
+    // nothing against the four-bind-group floor -- it is not a bind group.
+    @location(6) @interpolate(flat) cutout_bypass: u32,
 };
 
 @vertex
@@ -248,6 +256,7 @@ fn vs_main(
     out.anim_idx = packed.z;
     out.world = world;
     out.tint_rgb_override = tint_rgb_override;
+    out.cutout_bypass = packed.w;
     return out;
 }
 
@@ -265,8 +274,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         tex = mix(a, b, slot.blend);
     }
     // Cutout: drop near-transparent texels (cross-plants, leaves) so they render
-    // correctly on the opaque pass.
-    if (tex.a < 0.5) {
+    // correctly on the opaque pass -- unless this quad opted out
+    // (`cutout_bypass != 0`, vanilla's FAST leaves: the solid pass never runs
+    // this test at all, so the sampled texel simply paints, holes included).
+    if (in.cutout_bypass == 0u && tex.a < 0.5) {
         discard;
     }
     // Per-quad tint. `tint_rgb_override.a != 0` means the mesher already

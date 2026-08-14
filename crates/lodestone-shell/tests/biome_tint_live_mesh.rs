@@ -254,7 +254,7 @@ fn live_mesh_snapshot_models_tints_two_biomes_differently() {
         "fixture premise: every neighbour column is loaded"
     );
 
-    let live_mesh = mesh_snapshot_models(&snap, &models);
+    let live_mesh = mesh_snapshot_models(&snap, &models, true);
     assert!(live_mesh.quad_count() > 0, "fixture must actually mesh something");
 
     let desert_top = tint_on_top_face(&live_mesh, 2.0, 2.0);
@@ -316,7 +316,7 @@ fn live_mesh_snapshot_models_tints_two_biomes_differently() {
         ColumnSource::Complete,
     );
     let uniform_snap = uniform_outcome.any().expect("uniform world snapshots as Ready");
-    let uniform_mesh = mesh_snapshot_models(&uniform_snap, &models);
+    let uniform_mesh = mesh_snapshot_models(&uniform_snap, &models, true);
     let a = tint_on_top_face(&uniform_mesh, 2.0, 2.0);
     let b = tint_on_top_face(&uniform_mesh, 13.0, 13.0);
     assert_eq!(
@@ -394,10 +394,10 @@ fn live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the
     // Meshed *before* `snap` is consumed below (`with_biome_names` takes
     // `self` by value) — this is the control, run first so its result owes
     // nothing to the live table computed afterward.
-    let fallback_mesh = mesh_snapshot_models(&snap, &models);
+    let fallback_mesh = mesh_snapshot_models(&snap, &models, true);
 
     let live_snap = snap.with_biome_names(std::sync::Arc::from(live_names));
-    let live_mesh = mesh_snapshot_models(&live_snap, &models);
+    let live_mesh = mesh_snapshot_models(&live_snap, &models, true);
     assert!(live_mesh.quad_count() > 0, "fixture must actually mesh something");
 
     let at_desert_id = tint_on_top_face(&live_mesh, 2.0, 2.0);
