@@ -4,8 +4,8 @@
 //! This is the data half of every block-surface sound. Without it a client can
 //! decode and route `LEVEL_EVENT` 2001 perfectly and still be silent, because
 //! the packet carries a **block-state id and nothing else**: vanilla's
-//! `LevelEventHandler` `case 2001` looks the sound up locally from
-//! `Block.stateById(data).getSoundType()` (`LevelEventHandler.java:283-291`).
+//! `LevelEventHandler.levelEvent` `case 2001` looks the sound up locally from
+//! `Block.stateById(data).getSoundType()`.
 //! That is exactly the state lodestone was in — see `docs/sound-playback.md`.
 //!
 //! # Data source: interrogate the real jar
@@ -25,7 +25,7 @@
 //! `SoundType.TWISTING_VINES` — the only static carrying `pitch = 0.5F`, and
 //! assigned to **no block**: `Blocks.TWISTING_VINES`,
 //! `TWISTING_VINES_PLANT` and their kin all pass
-//! `SoundType.WEEPING_VINES` instead (`Blocks.java:4626-4640`). A reader
+//! `SoundType.WEEPING_VINES` instead. A reader
 //! pairing constants to blocks by name would have shipped a 0.5 pitch on
 //! twisting vines. Similarly `HARD_CROP` reuses `WOOD`'s four sounds with
 //! `CROP_PLANTED` for placement, and `GLOW_LICHEN` reuses `GRASS`'s four with
@@ -68,8 +68,8 @@
 //!   lets a caller skip it instead.
 //! * **The volume and pitch here are the `SoundType`'s own**, not what vanilla
 //!   passes to the sound manager. Both the break path
-//!   (`LevelEventHandler.java:288-289`) and the placement path
-//!   (`BlockItem.java:87`) scale them: see
+//!   (`LevelEventHandler.levelEvent`) and the placement path
+//!   (`BlockItem.place`) scale them: see
 //!   [`BlockSoundType::break_or_place_volume`].
 //! * Only **one** block is per-state rather than per-block:
 //!   `minecraft:decorated_pot`, whose `CRACKED` states swap the break sound for
@@ -117,8 +117,8 @@ impl BlockSoundType {
     /// Vanilla's volume for a break or place sound: `(volume + 1.0) / 2.0`.
     ///
     /// The identical expression appears in **both** vanilla call sites —
-    /// `LevelEventHandler.java:288` (`case 2001`, the break) and
-    /// `BlockItem.java:87` (placement) — so it belongs here rather than being
+    /// `LevelEventHandler.levelEvent` (`case 2001`, the break) and
+    /// `BlockItem.place` (placement) — so it belongs here rather than being
     /// retyped at each consumer. For the 124 sound types with `volume = 1.0` this
     /// is `1.0`; for `ANVIL` it is `0.65`.
     #[must_use]

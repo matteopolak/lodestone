@@ -7,7 +7,7 @@
 //!
 //! # What is being anchored
 //!
-//! `LevelEventHandler`'s `case 2001` (`LevelEventHandler.java:283-291`) plays
+//! `LevelEventHandler.levelEvent`'s `case 2001` plays
 //! `Block.stateById(data).getSoundType().getBreakSound()` at
 //! `(soundType.getVolume() + 1.0F) / 2.0F` and `soundType.getPitch() * 0.8F`. The
 //! packet carries only the state id, so the sound is a **local lookup** — which
@@ -348,7 +348,7 @@ fn value_dedup_collapses_nothing() {
 /// `SoundType.java` declares **127** `public static final SoundType` constants
 /// and only 126 are reachable from a block state. The dead one is
 /// `TWISTING_VINES`, the only static with `pitch = 0.5F`; twisting vines
-/// themselves use `WEEPING_VINES` (`Blocks.java:4626-4640`). This asserts the
+/// themselves use `WEEPING_VINES` (`Blocks.TWISTING_VINES`). This asserts the
 /// consequence — no state anywhere carries pitch `0.5` — which is the exact value
 /// a name-matched hand transcription of that file would have shipped.
 #[test]
@@ -628,8 +628,8 @@ fn hard_crop_places_with_the_crop_sound_not_the_wood_one() {
 }
 
 /// Vanilla's break/place scaling, predicted from constants outside the code under
-/// test: `(volume + 1) / 2` and `pitch * 0.8` (`LevelEventHandler.java:288-289`,
-/// `BlockItem.java:87`). Asserted on all three volume/pitch populations, so a
+/// test: `(volume + 1) / 2` and `pitch * 0.8` (`LevelEventHandler.levelEvent`,
+/// `BlockItem.place`). Asserted on all three volume/pitch populations, so a
 /// transposed multiplier cannot pass by landing on 1.0 everywhere.
 #[test]
 fn break_and_place_scaling_matches_vanilla_for_every_population() {
