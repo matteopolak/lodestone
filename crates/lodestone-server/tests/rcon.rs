@@ -194,3 +194,52 @@ async fn an_authed_command_with_no_sink_installed_is_refused() {
 
     server.shutdown().await;
 }
+
+/// The module's one-write rule, driven exactly as vanilla's `RconClient`
+/// drives it: **one `read()` call**, not the `read_exact`-in-two-steps every
+/// other test here uses through `AsyncRconClient`/`decode_rcon_response`
+/// (both of which would tolerate a length prefix and a body arriving as two
+/// separate reads, so neither can see this bug class).
+///
+/// A single `TcpStream::read` on a fresh connection returns whatever is
+/// available when the kernel wakes it, so this is only a faithful control
+/// when the whole frame really did arrive as one contiguous write: a
+/// response split across two `write_all` calls on loopback reliably shows up
+/// as two deliveries once there is any scheduling gap between them (proven
+/// by hand against a deliberately split `write_frame` while writing this
+/// test — the single `read()` below returned only the first partial frame
+/// and every subsequent assertion failed). That is the failure this test
+/// exists to catch: a response built and sent as more than one `write_all`
+/// looks identical to a correct implementation under `read_exact`, and only
+/// a single-syscall read can tell the two apart.
+#[tokio::test]
+async fn one_write_delivers_the_whole_auth_response_to_a_single_read() {
+    let (server, addr) = rcon_server(CommandDispatch::none());
+
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect");
+    stream
+        .write_all(&rcon_frame(11, 3, "hunter2"))
+        .await
+        .expect("send auth frame");
+
+    // Vanilla's AUTH_RESPONSE for a correct password: length 10, this id,
+    // type 2 (TYPE_AUTH_RESPONSE), empty payload, two null bytes — 14 bytes
+    // on the wire in total. No delay before the read: waiting first would
+    // give a genuinely split write time to finish arriving and defeat the
+    // control (checked by hand — a delayed read passes even against a
+    // deliberately split `write_frame`, because both writes are long since
+    // sitting in the receive buffer by the time it runs). Racing the read
+    // against the write is what makes a split show up as a short read.
+    let mut buf = [0u8; 64];
+    let n = stream.read(&mut buf).await.expect("one read");
+
+    assert_eq!(n, 14, "the whole AUTH_RESPONSE frame must land in one read");
+    assert_eq!(&buf[0..4], &10i32.to_le_bytes(), "body length");
+    assert_eq!(&buf[4..8], &11i32.to_le_bytes(), "echoed request id");
+    assert_eq!(&buf[8..12], &2i32.to_le_bytes(), "TYPE_AUTH_RESPONSE");
+    assert_eq!(&buf[12..14], &[0, 0], "null-terminated empty payload");
+
+    server.shutdown().await;
+}
