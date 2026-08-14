@@ -146,6 +146,22 @@ before — so a LAN player heard no server-caused sounds at all.
 (`app/session.rs`) → `NetClient::publish_to_lan` → the net thread's own loop, which calls
 `IntegratedServer::publish` on the handle it already holds.
 
+### A failed publish must not disconnect the session
+
+`IntegratedServer::publish` returning `Err` — already published, or a bind
+failure — used to be reported through `NetUpdate::Error`, and `Sim::poll_net`'s
+arm for that variant unconditionally ends the session
+(`SessionPhase::Ended(SessionEnd::failed(..))`), the same terminal state a
+real server kick reaches. Nothing about the net thread's own loop actually
+left — `publish_rx`'s `while let Ok(port) = publish_rx.try_recv()` stays
+inside `run_async`'s outer `loop {}`, and the connection this update rides on
+is exactly as alive after it as before — so a second press of Open to LAN read
+as a client-side session failure and tore down a perfectly healthy connection.
+`NetUpdate::LanPublishError` now carries the same message through the ordinary
+local-chat path (`Sim::push_local_chat`) instead — the same mechanism
+`NetUpdate::LanOpened`'s success case already uses for "Local game hosted on
+port N" — and never touches `SessionPhase`.
+
 ### It publishes the live handle in place — issue #562
 
 This used to reopen the world: `open_current_world_to_lan` called `Sim::end_session` and then
@@ -278,9 +294,17 @@ explicit flush described above.
   [`docs/server-online-mode.md`](./server-online-mode.md), a `reqwest::Client` the shell already
   owns one of for account sign-in) threaded into whichever caller builds the `LanConfig` — not a
   change to this crate.
-* **The button is always present**, where vanilla hides the whole half-width row on a remote
-  server. `PauseButton::enabled` is a pure function of the variant at every call site, so the
-  "there is nothing of ours to publish" case is stated in chat instead.
+* **Fixed**: the button used to be present unconditionally, including after the world was
+  already published — a second press produced `IntegratedServer::publish`'s
+  `AlreadyExists` error, which used to reach the player as a full disconnect
+  (see "The shell caller" below) and, even once that was fixed, left an
+  action with nothing left to do still on screen. `MenuNav::pause_buttons`
+  now omits the row once `Sim::is_lan_published()` is true. The "no world of
+  ours to publish at all" case (a multiplayer session, or the button pressed
+  before a hosted session exists) is still stated in chat rather than by
+  hiding the row — that case is about *what kind of session this is*, not
+  about publish state, and `PauseButton::enabled` stays a pure function of
+  the variant.
 * **The LAN world has no mob population.** `open_to_lan` seeds no `MobSim` (its own comment
   says so); the tick loop ticks whatever is there, and nothing puts anything there.
 * **The query listener's reported player count comes from the shared `PlayerRegistry`**, so an

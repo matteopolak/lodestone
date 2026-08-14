@@ -62,13 +62,20 @@ Three consequences that a layout built from memory gets wrong:
 
 ### Which Options row, and why
 
-Vanilla forks here. `minecraft.hasSingleplayerServer()` splits the row into
-Options + Open to LAN (`PauseScreen.java:157-159`); only the `else` branch gives
-Options the full 204 px (`PauseScreen.java:161-163`). This client has **no
-integrated server at all** (see [`main-menu.md`](./main-menu.md) and
-`menu.rs`'s module docs), so `hasSingleplayerServer()` is unconditionally false
-for it and the full-width branch is the correct one to reproduce. If an
-integrated server ever lands, this is one of the places that has to fork too.
+**Stale as of issue #535: this client now hosts its own worlds, so the fork
+below is real and the row is no longer fixed.** Vanilla forks on
+`minecraft.hasSingleplayerServer()`, splitting the row into Options + Open to
+LAN (`PauseScreen.java:157-159`) or giving Options the full 204 px alone
+(`PauseScreen.java:161-163`). This client forks on a different, narrower
+condition — whether the hosted world is *published* — because it has no
+`MultiplayerOptionsScreen` unpublish/toggle form behind the button, unlike
+vanilla's: once published, a second press of Open to LAN has nothing left to
+do, so `MenuNav::pause_buttons` omits the row entirely rather than leaving it
+present-and-broken. See [`open-to-lan.md`](./open-to-lan.md#the-shell-caller)
+for the full trace and `PauseButton::OpenToLan`'s own doc for why this is an
+*omission* rather than a disabled row. `pause_menu_grid_with`'s `published`
+argument picks between the two arrangements; `pause_slot`/`pause_block` do
+too, each caching one arranged grid per state.
 
 The last button is `CommonComponents.disconnectButtonLabel(isLocalServer)` in
 vanilla — "Save and Quit to Title" locally, "Disconnect" remotely
