@@ -25,9 +25,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   — `crates/lodestone-shell/src/menu/accounts.rs` draws the account list, every
   saved account plus an always-present offline entry, and drives its own device-code
   sign-in.
-- [Advancements screen](./advancements-screen.md) — Vanilla's `AdvancementsScreen`
-  (issue #167), reached from the pause menu's Advancements button: five tabs, the real
-  26.2 advancement tree, connector lines, frames, icons, a tiled per-tab background,
+- [Advancements screen](./advancements-screen.md) — Vanilla's `AdvancementsScreen`,
+  reached from the pause menu's Advancements button: five tabs, the real 26.2
+  advancement tree, connector lines, frames, icons, a tiled per-tab background,
   panning, and the full hover tooltip. The tree *shape* comes off the data pack; the
   *progress* comes off the wire, so completed advancements really do draw their
   obtained frames.
@@ -133,8 +133,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (see [Bell](#bell)), the shulker box (see [Shulker box](#shulker-box)),
   standing/wall/hanging sign text, the banner with its pattern layers, the lectern's
   book (see [Lectern](#lectern)), the enchanting table's floating book (see
-  [Enchanting table](#enchanting-table)) and the food on a campfire (see
-  [Campfire](#campfire), which is the one type here that draws no cuboid rig at all).
+  [Enchanting table](#enchanting-table)), the food on a campfire (see
+  [Campfire](#campfire), which is the one type here that draws no cuboid rig at all),
+  the piston head (see [Piston head](#piston-head), which draws whole moving *block*
+  models rather than a cuboid rig) and the decorated pot's base plus its four
+  independently-sherded sides (see [Decorated pot](#decorated-pot)).
 - [The block-entity scan is a cold-column term, but not a distance one](./block-entity-tick-distance.md) —
   The measured resolution of the block-entity lead in [issue
   #503](https://github.com/matteopolak/lodestone/issues/503): whether
@@ -426,6 +429,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   travel, `/execute in`, end-gateway teleport). **That one is fixed**; the diagnosis
   is kept below because it is the best record of how it failed and of the trap that
   hid it.
+- [The ender dragon fight](./dragon-fight.md) — The server-side state for the ender
+  dragon boss fight: the eleven-phase flight/combat state machine, end-crystal beam
+  healing, and the `EndDragonFight` controller (persisted "already defeated" flag,
+  scan-on-load, boss-bar progress value, the exit-portal block geometry, and the
+  four-crystal respawn sequence). Lives at `crates/lodestone-server/src/dragon/`,
+  ported from 26.2's decompiled `EnderDragon`/`EnderDragonPhaseManager`/`EndCrystal`/
+  `EnderDragonFight`/`DragonRespawnStage` under
+  `.cache/mc/26.2/src/net/minecraft/world/entity/boss/enderdragon/` and
+  `.../world/level/dimension/end/`.
 - [Dropped items](./dropped-items.md) — The render path for `minecraft:item`
   entities — the stacks lying on the ground after a block breaks or a mob dies. Item
   entities are *not* cuboid part rigs, so none of the entity pipeline applies to them:
@@ -896,6 +908,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   the `translate`-node resolver that expands it, and where command feedback, colours
   and italics come from. This is the doc to read before adding a message anywhere, and
   before assuming a translation table needs building — most of this already exists.
+- [Minecarts](./minecart.md) — The `minecraft:minecart` entity family — plain,
+  chest, hopper, furnace and TNT minecarts — plus rail-following physics, riding,
+  and the placement producers (item use on a rail, and a dispenser). A port of
+  `AbstractMinecart`/`OldMinecartBehavior` and the three subclass overrides
+  (`Minecart`, `MinecartFurnace`, `MinecartTNT`), living in
+  `crates/lodestone-server/src/mobs/minecart.rs`.
 - [Mob block perception](./mob-block-perception.md) — The seam that lets a mob AI
   goal ask what block it is standing on. `MobController` declared 33 methods and not
   one read a block, so every vanilla goal whose predicate consults the world was
@@ -967,8 +985,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Moving block models](./moving-block-models.md) — The render path for a block's
   own geometry drawn somewhere other than its own cell — vanilla's
   `SubmitNodeCollector.submitMovingBlock`. It is a **seam with more than one intended
-  producer**, not a falling-block feature: falling sand and gravel use it, and so does
-  `PistonHeadRenderer` — the piston head and the block it pushes.
+  producer**, not a falling-block feature: falling sand and gravel use it, so does
+  `PistonHeadRenderer` — the piston head and the block it pushes — and so does
+  `TntRenderer`, primed TNT's block model.
 - [The multi-protocol seam: constructing an adapter for the protocol it negotiated](./multi-protocol-seam.md) —
   The change that lets one `crates/protocol/vNNN` crate serve several protocol
   revisions instead of exactly one. Unit U2 of epic #343's dispatch plan
@@ -1329,9 +1348,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   chat-signing key pair ([`lodestone_auth::fetch_key_pair`]) and signing outgoing chat
   messages with it ([`lodestone_auth::ChatSession`]), plus the wire shapes needed to
   carry a session announcement and a signed message ( [`ChatSessionUpdate`],
-  [`ChatCommandSigned`] in `crates/protocol/v770/src/packets/game.rs`) and to keep
-  (rather than discard) another player's announced session ( [`RemoteChatSessionData`]
-  in `crates/protocol/v770/src/packets/player_info.rs`).
+  [`ChatCommandSigned`] in `crates/protocol/v770/src/packets/game.rs`), **and** the
+  receiving half: keeping another player's announced session (
+  [`RemoteChatSessionData`] in `crates/protocol/v770/src/packets/player_info.rs`,
+  carried through to [`lodestone_model::event::ChatSessionInfo`] and
+  [`lodestone_game::tablist::RemoteChatSession`]) and verifying their signed messages
+  against it ([`Driver`]'s `emit`, via [`verify_signature`]).
 - [Served session liveness: keep-alive, time-of-day, and view streaming](./served-session-liveness.md) —
   The three things that make a served session (singleplayer over `memory_pair`, or
   open-to-LAN over TCP) survive, keep time, and follow the player, instead of being a
@@ -2090,15 +2112,18 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (`apply_vegetal_decoration_step_3x3_per_source`), not a single chunk in isolation: a
   tree or grass patch near a chunk edge really does spill into the neighbour that
   generates it, matching vanilla's own cross-chunk decoration spill.
-- [Overworld world-type selection](./worldgen-world-type-selection.md) —
-  `worldgen_data::WorldType` (`crates/lodestone-server/src/worldgen_data.rs`), a
-  parameter that picks which bundled overworld `noise_settings` document and
-  density-function set a generator uses. Before issue #519 the overworld's settings
-  were a hardcoded `OnceLock`, so the `amplified` and `large_biomes`
-  `noise_settings`/`density_function` documents — bundled and byte-identical to the
-  jar — were unreachable from any code path. `WorldType` closes that gap for the two
-  presets that need no new engine: `Overworld` (the pre-existing default), `Amplified`
-  and `LargeBiomes`.
+- [World preset generator selection](./worldgen-world-type-selection.md) —
+  `crates/lodestone-server/src/worldgen_data.rs`'s entry points for building a chunk
+  source from any of the seven bundled `world_preset/*.json` documents:
+  `worldgen_data::WorldType` (`Overworld`/`Amplified`/`LargeBiomes`, all three sharing
+  `OverworldGenerator`) plus three standalone entry points —
+  `single_biome_generator`/`single_biome_chunk_source`, `flat_generator`/
+  `flat_chunk_source`, and `debug_generator`/`debug_chunk_source`. Before issue #519
+  only the plain overworld was reachable, from a hardcoded `OnceLock`; the other six
+  presets' `noise_settings`, density functions and layer/grid data were bundled and
+  byte-identical to the jar but reached by nothing but their own drift gate. All seven
+  are now generated by real, individually-verified code. What is **not** landed here
+  is a way for a player to pick one — see "How to change it".
 
 ---
 
