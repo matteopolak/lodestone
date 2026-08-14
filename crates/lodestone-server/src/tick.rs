@@ -2639,6 +2639,15 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // reaches the `take_detonations` drain above on the tick after this
         // one, the same accepted one-tick latency.
         mobs.with(|sim| sim.tick_minecarts(&|x, y, z| world.block_state(x, y, z)));
+
+        // The ender dragon's phase machine and its crystals' healing proc.
+        // Unlike its neighbours above this needs no block reads: every input
+        // the phase machine consumes — the live crystal count and the nearest
+        // player's distance — comes from `MobSim` itself, so it takes no world
+        // closure. Without this line the whole fight is inert: `spawn_dragon`
+        // and the phase transitions are reachable only from tests, which is
+        // exactly the island shape `CLAUDE.md` opens with.
+        mobs.with(super::mobs::MobSim::tick_dragons);
         });
 
         clock.record_tick(tick_start.elapsed());
