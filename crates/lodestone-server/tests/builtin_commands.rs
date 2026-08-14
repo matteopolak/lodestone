@@ -1278,3 +1278,276 @@ fn defaultgamemode_writes_the_store_a_new_join_reads() {
         .expect("root matched");
     assert_eq!(state.default_game_mode(), GameMode::Spectator);
 }
+
+// ---------------------------------------------------------------------------
+// /execute
+// ---------------------------------------------------------------------------
+//
+// The substrate tests above (`a_rewrite_modifier_replaces_the_source_the_executor_runs_for`,
+// `a_fork_modifier_runs_the_deepest_executor_once_per_produced_source`) already
+// prove the *mechanism* against a synthetic tree. These prove `/execute`'s own
+// registration wires that mechanism up correctly, and per this crate's own
+// evidence standard, every one of them predicts a rewritten answer that a
+// caller-position/caller-entity reading of the same text would get wrong —
+// never merely "the command succeeded".
+
+/// `execute as <other> run kill` must kill the *other* player, never the
+/// caller — the one discriminating property `/execute`'s whole design exists
+/// for. A single effect, aimed at bob's uuid and not alice's, is the only
+/// passing shape.
+#[test]
+fn execute_as_targets_the_rewritten_source_not_the_caller() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let outcome = run(&commands, &GameRulesHandle::new(), &players, &alice, "execute as bob run kill")
+        .expect("root matched");
+    assert_eq!(
+        outcome.effects,
+        [DirectedEffect::new(uuid(2), Effect::Kill)],
+        "the kill must land on bob (uuid 2), never on alice (uuid 1): {:?}",
+        outcome.effects
+    );
+}
+
+/// `execute at <x> positioned <y>` lands somewhere **neither raw coordinate
+/// would**: not bob's own position, not alice's `positioned` offset applied
+/// to her own spot, and not the literal `1 1 1` either. That three-way
+/// distinctness is the point — a version that silently ignored `at` (offset
+/// from alice) or silently ignored `positioned` (bob's bare position) would
+/// each produce one of the *other* two answers, not this one.
+#[test]
+fn execute_at_then_positioned_lands_where_neither_raw_coordinate_would() {
+    use lodestone_server::Effect;
+    let commands = ServerCommands::new();
+    let alice = source(1, "alice");
+    let players = roster(); // bob is at (5, 64, 0)
+
+    let outcome = run(
+        &commands,
+        &GameRulesHandle::new(),
+        &players,
+        &alice,
+        "execute at bob positioned ~1 ~1 ~1 run setblock ~ ~ ~ minecraft:stone",
+    )
+    .expect("root matched");
+
+    let Some(Effect::SetBlock { pos, .. }) = outcome.effects.first().map(|d| d.effect.clone()) else {
+        panic!("expected exactly one SetBlock effect: {:?}", outcome.effects);
+    };
+    assert_eq!(pos, (6, 65, 1), "bob's own (5, 64, 0) plus the relative (1, 1, 1) offset");
+    assert_ne!(pos, (5, 64, 0), "must not be bob's raw position (an `at`-with-no-`positioned` bug)");
+    assert_ne!(pos, (1, 65, 1), "must not be alice's own position offset by the same delta (an `at`-ignored bug)");
+    assert_ne!(pos, (1, 1, 1), "must not be the literal offset read as absolute");
+}
+
+/// Two `positioned` hops in a row compose: the second's `~`-relative offset is
+/// resolved against the position the *first* left behind, not against
+/// alice's own spot. Every one of the six numbers involved, and both
+/// candidate wrong answers, are pairwise distinct so no transposition or
+/// dropped hop can pass by coincidence. Written with explicit decimal points
+/// on the first hop's absolute literal so `Vec3Arg`'s centre correction (an
+/// absolute `x`/`z` with no decimal point gains `+0.5`, `y` never does — see
+/// `lodestone_command_mc::position`'s own module doc) does not shift the
+/// expected value away from a literal reading, matching this file's own
+/// `tp_targets_location_resolves_against_the_source_never_the_target`.
+#[test]
+fn execute_positioned_composes_sequential_relative_offsets() {
+    use lodestone_server::Effect;
+    let commands = ServerCommands::new();
+    let alice = source(1, "alice"); // (0, 64, 0)
+    let players = roster();
+
+    let outcome = run(
+        &commands,
+        &GameRulesHandle::new(),
+        &players,
+        &alice,
+        "execute positioned 1.0 2.0 11.0 positioned ~5 ~0 ~-4 run setblock ~ ~ ~ minecraft:stone",
+    )
+    .expect("root matched");
+
+    let Some(Effect::SetBlock { pos, .. }) = outcome.effects.first().map(|d| d.effect.clone()) else {
+        panic!("expected exactly one SetBlock effect: {:?}", outcome.effects);
+    };
+    assert_eq!(pos, (6, 2, 7), "(1, 2, 11) plus the second hop's (5, 0, -4) offset");
+    assert_ne!(pos, (1, 2, 11), "must not be the first `positioned`'s raw literal (second hop dropped)");
+    assert_ne!(pos, (5, 64, -4), "must not be the offset applied to alice's own position (first hop dropped)");
+}
+
+/// `align xz` floors only the axes it names — a second `positioned` hop with
+/// a fractional relative offset reveals whether the fraction from *before*
+/// the align survived. `y` is left alone by `align xz`, so only `x`/`z`
+/// differ from the no-align hypothesis, and this asserts both.
+#[test]
+fn execute_align_floors_only_the_named_axes() {
+    use lodestone_server::Effect;
+    let commands = ServerCommands::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let outcome = run(
+        &commands,
+        &GameRulesHandle::new(),
+        &players,
+        &alice,
+        "execute positioned 1.7 64.9 11.3 align xz positioned ~0.9 ~0.05 ~0.9 run setblock ~ ~ ~ minecraft:stone",
+    )
+    .expect("root matched");
+
+    let Some(Effect::SetBlock { pos, .. }) = outcome.effects.first().map(|d| d.effect.clone()) else {
+        panic!("expected exactly one SetBlock effect: {:?}", outcome.effects);
+    };
+    // x: floor(1.7) = 1.0, + 0.9 = 1.9, floored by `setblock` to 1.
+    // z: floor(11.3) = 11.0, + 0.9 = 11.9, floored by `setblock` to 11.
+    assert_eq!(pos, (1, 64, 11));
+    // Without `align`, x would be floor(1.7 + 0.9) = floor(2.6) = 2 and z
+    // would be floor(11.3 + 0.9) = floor(12.2) = 12 — both one higher.
+    assert_ne!(pos.0, 2, "x must be floored by align before the second offset, not after");
+    assert_ne!(pos.2, 12, "z must be floored by align before the second offset, not after");
+}
+
+/// `facing <pos>` aims the source at a point that is not straight ahead of
+/// its default rotation, then `^0 ^0 ^5` (five blocks *forward*) walks
+/// straight to it — the discriminating property is that this only lands on
+/// the aimed-at point *because* `facing` changed the rotation `^` resolves
+/// against; at the unrotated default (yaw 0) the same `^0 ^0 ^5` would land
+/// at `(0, 64, 5)` instead. Written with explicit decimal points so `Vec3Arg`'s
+/// centre correction does not shift the aimed-at point half a block away from
+/// the literal reading (see `execute_positioned_composes_sequential_relative_offsets`'s
+/// own comment for why that matters here).
+#[test]
+fn execute_facing_changes_the_rotation_that_relative_local_coordinates_use() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let alice = source(1, "alice"); // (0, 64, 0), default yaw 0 / pitch 0
+    let players = roster();
+
+    let outcome = run(
+        &commands,
+        &GameRulesHandle::new(),
+        &players,
+        &alice,
+        "execute facing 5.0 64.0 0.0 run tp @s ^0 ^0 ^5",
+    )
+    .expect("root matched");
+
+    let [DirectedEffect { target, effect: Effect::Teleport { x, y, z, .. } }] = outcome.effects.as_slice() else {
+        panic!("expected exactly one Teleport effect: {:?}", outcome.effects);
+    };
+    assert_eq!(*target, uuid(1));
+    assert!((x - 5.0).abs() < 1e-6, "facing (5, 64, 0) then walking 5 forward must land on it: {outcome:?}");
+    assert!((y - 64.0).abs() < 1e-6, "{outcome:?}");
+    assert!(z.abs() < 1e-6, "{outcome:?}");
+}
+
+/// `execute if entity <selector>` gates the chain — a selector that matches
+/// nobody must produce **no effect at all** (not an error, not a no-op
+/// success with a stray effect), and one that matches must let the chain run
+/// exactly as if the condition were absent.
+#[test]
+fn execute_if_entity_gates_whether_the_chained_command_runs() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let alice = source(1, "alice");
+    let players = roster();
+
+    let matches = run(
+        &commands,
+        &GameRulesHandle::new(),
+        &players,
+        &alice,
+        "execute if entity @a[name=carol] run kill",
+    )
+    .expect("root matched");
+    assert_eq!(matches.effects, [DirectedEffect::new(uuid(1), Effect::Kill)], "carol exists: the chain must run");
+
+    let no_match = run(
+        &commands,
+        &GameRulesHandle::new(),
+        &players,
+        &alice,
+        "execute if entity @a[name=nobody] run kill",
+    )
+    .expect("root matched");
+    assert!(no_match.effects.is_empty(), "no player named 'nobody': the chain must not run: {no_match:?}");
+
+    let inverted = run(
+        &commands,
+        &GameRulesHandle::new(),
+        &players,
+        &alice,
+        "execute unless entity @a[name=carol] run kill",
+    )
+    .expect("root matched");
+    assert!(inverted.effects.is_empty(), "carol exists, so `unless entity carol` must not run: {inverted:?}");
+}
+
+/// The bare form (`if`/`unless` with nothing chained after it) reports
+/// pass/fail **on its own**, through the same node's own executor rather than
+/// its fork modifier — the one case
+/// `crate::commands::registrar::Dispatcher::dispatch`'s terminal-modifier
+/// skip exists for. A fork-only implementation would either silently succeed
+/// with no feedback (if the modifier ran and emptied the source set) or panic
+/// looking for a redirect target with nothing after it; neither is vanilla's
+/// answer, which is a real pass/fail message carrying the match count.
+#[test]
+fn execute_if_unless_entity_bare_reports_pass_or_fail_with_a_count() {
+    let commands = ServerCommands::new();
+    let alice = source(1, "alice");
+    let players = roster(); // four players total
+
+    let passes = run(&commands, &GameRulesHandle::new(), &players, &alice, "execute if entity @a")
+        .expect("root matched");
+    assert!(passes.response.is_ran(), "{passes:?}");
+    assert!(
+        passes.response.lines().iter().any(|line| line.contains('4')),
+        "the pass message must carry the match count (4): {passes:?}"
+    );
+
+    let fails = run(&commands, &GameRulesHandle::new(), &players, &alice, "execute unless entity @a")
+        .expect("root matched");
+    assert!(!fails.response.is_ran(), "four players exist, so `unless entity @a` must fail: {fails:?}");
+
+    let empty_passes =
+        run(&commands, &GameRulesHandle::new(), &players, &alice, "execute unless entity @a[name=nobody]")
+            .expect("root matched");
+    assert!(empty_passes.response.is_ran(), "{empty_passes:?}");
+}
+
+/// `run <command>` redirects to the **whole tree's root**, not merely back to
+/// `execute`'s own children — so a second, independent `execute` chain nested
+/// inside the first is ordinary syntax, and the outer chain's rewritten
+/// source (here, `as bob`) is what the inner chain's `@s` and `at` resolve
+/// against. Predicted end-to-end: `as bob` makes the acting entity bob
+/// (without moving alice's own position); the nested `at @s` then moves the
+/// source to *bob's own* roster position (5, 64, 0); the final `tp @s ~1 ~1
+/// ~1` both targets bob (not alice) and offsets from that moved position, not
+/// from alice's original (0, 64, 0).
+#[test]
+fn execute_run_reenters_the_root_so_execute_nests() {
+    use lodestone_server::{DirectedEffect, Effect};
+    let commands = ServerCommands::new();
+    let alice = source(1, "alice");
+    let players = roster(); // bob is at (5, 64, 0)
+
+    let outcome = run(
+        &commands,
+        &GameRulesHandle::new(),
+        &players,
+        &alice,
+        "execute as bob run execute at @s run tp @s ~1 ~1 ~1",
+    )
+    .expect("root matched");
+
+    assert_eq!(
+        outcome.effects,
+        [DirectedEffect::new(
+            uuid(2),
+            Effect::Teleport { x: 6.0, y: 65.0, z: 1.0, yaw: None, pitch: None }
+        )],
+        "targets bob and offsets from bob's own (5, 64, 0), not alice's (0, 64, 0): {outcome:?}"
+    );
+}

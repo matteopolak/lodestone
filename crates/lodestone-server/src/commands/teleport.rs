@@ -8,15 +8,17 @@
 //! # `/tp` and `/teleport` are two independently-built trees, not a redirect
 //!
 //! Vanilla registers `teleport` fully and then redirects `tp` to it
-//! (`Commands::redirect`). [`super::registrar::Registrar::redirect`] exists
-//! but has **no production caller yet** — every built-in here is a plain,
-//! self-contained tree — and this command is not the place to be the first:
-//! a redirect changes which node the dispatch walk's argument-depth
-//! accounting sees, and getting that wrong would be a `/tp`-shaped panic
-//! rather than a `/tp`-shaped teleport. So this registers the same subtree
-//! twice, under both names. No captured fixture pins either command's wire
-//! shape (see `crate::commands`' module doc — only the original four have
-//! one), so the duplication costs nothing this crate is gated on.
+//! (`Commands::redirect`). [`super::registrar::Registrar::redirect`] had **no
+//! production caller at the time this command was written** — every built-in
+//! here was a plain, self-contained tree — and this command was not the place
+//! to be the first: a redirect changes which node the dispatch walk's
+//! argument-depth accounting sees, and getting that wrong would be a
+//! `/tp`-shaped panic rather than a `/tp`-shaped teleport. So this registers
+//! the same subtree twice, under both names, rather than reworking it once
+//! `crate::commands::execute` became `redirect`'s first real caller. No
+//! captured fixture pins either command's wire shape (see `crate::commands`'
+//! module doc — only the original four have one), so the duplication costs
+//! nothing this crate is gated on.
 //!
 //! # `<location>` resolves against the **command source**, never the target
 //!

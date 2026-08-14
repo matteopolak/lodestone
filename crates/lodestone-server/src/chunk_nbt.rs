@@ -1168,6 +1168,34 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
                 ],
             )
         }
+        // `BaseCommandBlock.save` plus `CommandBlockEntity.saveAdditional`'s
+        // own three extra booleans, folded into one field list the way every
+        // other entry in this match already folds its block's own save
+        // method in. `LastOutput`/`LastExecution` are written only when their
+        // own governing flag is set, matching vanilla's own conditional
+        // `output.storeNullable`/`output.putLong` calls exactly.
+        BlockEntity::CommandBlock(data) => {
+            let mut fields = vec![
+                ("Command".to_owned(), Nbt::String(data.command.clone())),
+                ("SuccessCount".to_owned(), Nbt::Int(data.success_count)),
+                ("TrackOutput".to_owned(), Nbt::Byte(i8::from(data.track_output))),
+                ("UpdateLastExecution".to_owned(), Nbt::Byte(i8::from(data.update_last_execution))),
+                ("powered".to_owned(), Nbt::Byte(i8::from(data.powered))),
+                ("conditionMet".to_owned(), Nbt::Byte(i8::from(data.condition_met))),
+                ("auto".to_owned(), Nbt::Byte(i8::from(data.auto))),
+            ];
+            if data.track_output {
+                if let Some(last_output) = &data.last_output {
+                    fields.push(("LastOutput".to_owned(), Nbt::String(last_output.clone())));
+                }
+            }
+            if data.update_last_execution {
+                if let Some(last_execution) = data.last_execution {
+                    fields.push(("LastExecution".to_owned(), Nbt::Long(last_execution)));
+                }
+            }
+            ("minecraft:command_block", fields)
+        }
     };
 
     let mut fields = vec![
@@ -1330,6 +1358,37 @@ fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)> {
                     crate::block_entities::CONTAINER_9X3_SIZE,
                 ),
             }
+        }
+        // The inverse of the `BlockEntity::CommandBlock` arm above — note the
+        // block-entity type `id` here is always `minecraft:command_block`
+        // regardless of which of the three command-block *blocks* it came
+        // from (see that arm's own comment).
+        "minecraft:command_block" => {
+            let track_output = int_field(nbt, "TrackOutput").unwrap_or(1) != 0;
+            let update_last_execution = int_field(nbt, "UpdateLastExecution").unwrap_or(1) != 0;
+            let last_execution = if update_last_execution {
+                match field(nbt, "LastExecution") {
+                    Some(Nbt::Long(v)) => Some(*v),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            BlockEntity::CommandBlock(crate::command_block::CommandBlockData {
+                command: string_field(nbt, "Command").unwrap_or_default().to_owned(),
+                success_count: int_field(nbt, "SuccessCount").unwrap_or(0),
+                track_output,
+                last_output: if track_output {
+                    string_field(nbt, "LastOutput").map(str::to_owned)
+                } else {
+                    None
+                },
+                powered: int_field(nbt, "powered").unwrap_or(0) != 0,
+                auto: int_field(nbt, "auto").unwrap_or(0) != 0,
+                condition_met: int_field(nbt, "conditionMet").unwrap_or(0) != 0,
+                update_last_execution,
+                last_execution,
+            })
         }
         _ => BlockEntity::Opaque {
             id: id.to_owned(),

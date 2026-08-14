@@ -90,6 +90,13 @@ pub enum BlockEntity {
     /// The vanilla id and the full NBT compound are preserved verbatim so the entity
     /// round-trips through a save/load cycle unchanged.
     Opaque { id: String, nbt: Nbt },
+    /// `minecraft:command_block`/`chain_command_block`/`repeating_command_block`
+    /// (issue #48's remainder). The mode is derived from the block itself
+    /// (`crate::command_block::mode_for_block`), never stored here — see that
+    /// module's own doc for the data model, the pure tick semantics ported
+    /// from vanilla, and — importantly — exactly how far command blocks got in
+    /// this pass and what still has to wire them into a running tick loop.
+    CommandBlock(crate::command_block::CommandBlockData),
 }
 
 /// Slot count of vanilla's `generic_9x3` menu — a chest, trapped chest or
@@ -166,6 +173,11 @@ impl BlockEntity {
             BlockEntity::Hopper(_) => "minecraft:hopper",
             BlockEntity::BrewingStand(_) => "minecraft:brewing_stand",
             BlockEntity::Container { id, .. } | BlockEntity::Opaque { id, .. } => id,
+            // `BlockEntityTypes.COMMAND_BLOCK` is the one registry entry
+            // `CommandBlockEntity`'s constructor names regardless of which of
+            // the three command-block *blocks* it is attached to — unlike
+            // `Furnace`, there is no per-instance kind to switch on here.
+            BlockEntity::CommandBlock(_) => "minecraft:command_block",
         }
     }
 
@@ -181,7 +193,7 @@ impl BlockEntity {
             // scope note in the module doc no longer covers these three.
             BlockEntity::Container { slots, .. } => Some(slots),
             BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
-            | BlockEntity::Opaque { .. } => {
+            | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_) => {
                 None
             }
         }
@@ -231,7 +243,11 @@ impl BlockEntity {
             } else {
                 "minecraft:generic_9x3"
             }),
-            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. } => None,
+            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            // A command block opens its own dedicated GUI
+            // (`Player.openCommandBlock`), not an `AbstractContainerMenu` —
+            // there is no vanilla menu identifier for it at all.
+            | BlockEntity::CommandBlock(_) => None,
         }
     }
 
@@ -248,7 +264,8 @@ impl BlockEntity {
             BlockEntity::Furnace(f) => vec![f.input().cloned(), f.fuel().cloned(), f.output().cloned()],
             BlockEntity::Hopper(h) => h.slots().to_vec(),
             BlockEntity::Container { slots, .. } => slots.clone(),
-            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. } => Vec::new(),
+            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            | BlockEntity::CommandBlock(_) => Vec::new(),
         }
     }
 
@@ -278,7 +295,8 @@ impl BlockEntity {
                     *cell = item;
                 }
             }
-            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. } => {}
+            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            | BlockEntity::CommandBlock(_) => {}
         }
     }
 
@@ -295,7 +313,8 @@ impl BlockEntity {
         match self {
             BlockEntity::Furnace(f) => (0..4).map(|i| f.container_data(i)).collect(),
             BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
-            | BlockEntity::Container { .. } | BlockEntity::Opaque { .. } => {
+            | BlockEntity::Container { .. } | BlockEntity::Opaque { .. }
+            | BlockEntity::CommandBlock(_) => {
                 Vec::new()
             }
         }
@@ -320,7 +339,11 @@ impl BlockEntity {
             BlockEntity::Hopper(_) => {
                 debug_assert!(false, "hoppers are ticked via tick_hopper, not this path");
             }
-            BlockEntity::Container { .. } | BlockEntity::Opaque { .. } => {}
+            // A command block is driven by scheduled redstone/chain ticks
+            // (`crate::command_block::{on_power_changed, tick,
+            // next_chain_position}`), never by a plain once-a-tick advance —
+            // see that module's own doc for why nothing calls those yet.
+            BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_) => {}
         }
     }
 }
@@ -372,6 +395,18 @@ pub fn block_entity_for_item(item: &str) -> Option<(&'static str, BlockEntity)> 
         "minecraft:dropper" => Some((
             "minecraft:dropper",
             BlockEntity::container_of_size("minecraft:dropper", CONTAINER_3X3_SIZE),
+        )),
+        "minecraft:command_block" => Some((
+            "minecraft:command_block",
+            BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new()),
+        )),
+        "minecraft:chain_command_block" => Some((
+            "minecraft:chain_command_block",
+            BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new()),
+        )),
+        "minecraft:repeating_command_block" => Some((
+            "minecraft:repeating_command_block",
+            BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new()),
         )),
         _ => None,
     }
