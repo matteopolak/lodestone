@@ -516,4 +516,172 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert!(!hits[0].is_arrow, "a snowball is not AbstractArrow's family");
     }
+
+    /// A thrown splash potion, lingering potion, ender pearl and experience
+    /// bottle each stop at a wall — the report this guards is "a thrown
+    /// potion phases through every block".
+    ///
+    /// Each case fires diagonally, fast enough (4-7.5 blocks/tick — well
+    /// past `POTION_SHOOT_POWER`'s real `0.5`, chosen specifically to
+    /// discriminate the sweep from a point check, not to model a real
+    /// throw) that the segment's own *endpoint* has already passed clean
+    /// through the far side of the target block. A collision test that only
+    /// asks "is the destination point solid" would report **no hit** on
+    /// every one of these four cases — asserted explicitly below as the
+    /// wrong hypothesis this gate must fail against — while the real
+    /// [`first_solid_along`]/[`block_entry`] sweep finds the exact entry
+    /// point along the segment. Positions, entry axis and entry fraction are
+    /// all derived analytically from the segment/box slab test (the same
+    /// maths [`block_entry`] implements), not guessed.
+    #[test]
+    fn thrown_potions_and_their_throwable_siblings_stop_at_a_diagonal_wall_not_just_their_endpoint() {
+        struct Case {
+            entity_type: &'static str,
+            from: Vec3,
+            delta: Vec3,
+            cell: BlockPos,
+            axis: redstone_target::HitAxis,
+            frac: Vec3,
+        }
+        let cases = [
+            Case {
+                entity_type: "minecraft:splash_potion",
+                from: Vec3::new(0.0, 1.5, 0.0),
+                delta: Vec3::new(4.0, 0.0, 3.0),
+                cell: BlockPos::new(2, 1, 1),
+                axis: redstone_target::HitAxis::X,
+                frac: Vec3::new(0.0, 0.5, 0.5),
+            },
+            Case {
+                entity_type: "minecraft:lingering_potion",
+                from: Vec3::new(0.0, 1.5, 0.0),
+                delta: Vec3::new(3.0, 0.0, 5.0),
+                cell: BlockPos::new(1, 1, 2),
+                axis: redstone_target::HitAxis::Z,
+                frac: Vec3::new(0.2, 0.5, 0.0),
+            },
+            Case {
+                entity_type: "minecraft:ender_pearl",
+                from: Vec3::new(0.0, 1.5, 0.0),
+                delta: Vec3::new(6.0, 0.0, 4.0),
+                cell: BlockPos::new(4, 1, 3),
+                axis: redstone_target::HitAxis::Z,
+                frac: Vec3::new(0.5, 0.5, 0.0),
+            },
+            Case {
+                entity_type: "minecraft:experience_bottle",
+                from: Vec3::new(0.0, 1.5, 0.0),
+                delta: Vec3::new(5.0, 0.0, 4.5),
+                cell: BlockPos::new(3, 1, 3),
+                axis: redstone_target::HitAxis::Z,
+                frac: Vec3::new(1.0 / 3.0, 0.5, 0.0),
+            },
+        ];
+
+        let mut mismatches: Vec<String> = Vec::new();
+        for case in &cases {
+            // The wrong hypothesis, checked first: a point test at the
+            // segment's endpoint must NOT already see the wall — otherwise
+            // this case fails to discriminate sweep-vs-point at all.
+            let end = case.from + case.delta;
+            let end_cell = BlockPos::new(
+                end.x.floor() as i32,
+                end.y.floor() as i32,
+                end.z.floor() as i32,
+            );
+            if end_cell == case.cell {
+                mismatches.push(format!(
+                    "{}: fixture bug — endpoint {:?} already lands in the target cell, \
+                     so this case cannot discriminate a swept test from a naive one",
+                    case.entity_type, end
+                ));
+                continue;
+            }
+
+            let mut world = ChunkWorld::new(-4, 24);
+            world.set_solid(case.cell.x, case.cell.y, case.cell.z, true);
+            let mut sim = MobSim::new(&world);
+            sim.spawn_projectile(
+                case.entity_type.parse().expect("valid key"),
+                Projectile::throwable(case.from, case.delta),
+            );
+            let removed = sim.resolve_projectile_impacts();
+            if removed != 1 {
+                mismatches.push(format!(
+                    "{}: expected exactly 1 removal (the block impact), got {removed}",
+                    case.entity_type
+                ));
+                continue;
+            }
+            let hits = sim.take_projectile_block_hits();
+            if hits.len() != 1 {
+                mismatches.push(format!(
+                    "{}: expected exactly 1 recorded block hit, got {}",
+                    case.entity_type,
+                    hits.len()
+                ));
+                continue;
+            }
+            let hit = hits[0];
+            if hit.pos != case.cell {
+                mismatches.push(format!(
+                    "{}: struck cell {:?}, predicted {:?}",
+                    case.entity_type, hit.pos, case.cell
+                ));
+            }
+            if hit.axis != case.axis {
+                mismatches.push(format!(
+                    "{}: entry axis {:?}, predicted {:?}",
+                    case.entity_type, hit.axis, case.axis
+                ));
+            }
+            let frac_err = (hit.frac.x - case.frac.x).abs()
+                + (hit.frac.y - case.frac.y).abs()
+                + (hit.frac.z - case.frac.z).abs();
+            if frac_err > 1e-6 {
+                mismatches.push(format!(
+                    "{}: entry frac {:?}, predicted {:?} (err {frac_err})",
+                    case.entity_type, hit.frac, case.frac
+                ));
+            }
+            if hit.is_arrow {
+                mismatches.push(format!(
+                    "{}: flagged as an arrow-family hit, which none of these are",
+                    case.entity_type
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "thrown-projectile block collision mismatches:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    /// The negative control for the test above: the identical diagonal
+    /// splash-potion throw down a corridor with **no** solid block anywhere
+    /// on the segment must not stop early and must not be removed. Without
+    /// this, a detector that always reports a hit (or always fails open)
+    /// would pass the wall test above vacuously.
+    #[test]
+    fn a_splash_potion_thrown_down_an_open_corridor_is_not_stopped() {
+        let world = ChunkWorld::new(-4, 24); // no solid cells set anywhere
+        let mut sim = MobSim::new(&world);
+        sim.spawn_projectile(
+            "minecraft:splash_potion".parse().expect("valid key"),
+            Projectile::throwable(Vec3::new(0.0, 1.5, 0.0), Vec3::new(4.0, 0.0, 3.0)),
+        );
+        let removed = sim.resolve_projectile_impacts();
+        assert_eq!(removed, 0, "an open corridor must not stop the potion");
+        assert!(
+            sim.take_projectile_block_hits().is_empty(),
+            "an open corridor must record no block hit"
+        );
+        assert_eq!(
+            sim.projectile_count(),
+            1,
+            "the potion must still be tracked — the control that proves the detector \
+             would have fired had a wall actually been there"
+        );
+    }
 }
