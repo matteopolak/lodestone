@@ -398,6 +398,7 @@ impl Sim {
             teleport_count: 0,
             collide_against_live_world: true,
             asset_banner: resources.banner,
+            warned_id_space_mismatch: false,
             recover_from_death: true,
             death_message: None,
             won: false,
