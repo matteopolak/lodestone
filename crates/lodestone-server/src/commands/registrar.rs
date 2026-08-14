@@ -294,13 +294,30 @@ impl<'a> Ctx<'a> {
         // nodes appear on `parsed.nodes` — literals contribute no value. So the
         // key's index among the argument nodes of the in-scope prefix is its
         // index into the value list.
+        //
+        // The **last**, not first, matching occurrence: `/execute`'s redirect
+        // cycle (every non-forking modifier redirects back into `execute`'s own
+        // children) means the *same* `NodeId` — e.g. `positioned`'s `pos`
+        // argument — can appear more than once in one parsed path
+        // (`execute positioned 1 2 3 positioned ~5 ~ ~ run …`). Every modifier
+        // is invoked with `depth` set to exactly its own occurrence's position
+        // (`index + 1` in `Dispatcher::dispatch`'s walk), so "the value for
+        // this key within the in-scope prefix" must mean the *closest*
+        // occurrence to that depth, not the first one ever parsed — otherwise
+        // a second `positioned` silently re-reads the first one's value.
+        // Measured: without this, `execute positioned 1.0 2.0 11.0 positioned
+        // ~5 ~0 ~-4 run …` resolved to `(1, 2, 11)` — the second hop's
+        // coordinates were parsed correctly but never read.
         let index = self
             .parsed
             .nodes
             .iter()
             .take(self.depth)
             .filter(|node| self.argument_nodes.contains(node))
-            .position(|node| *node == key.node)
+            .enumerate()
+            .filter(|(_, node)| **node == key.node)
+            .map(|(i, _)| i)
+            .last()
             .unwrap_or_else(|| {
                 panic!(
                     "argument key {key:?} names a node that is not on the executing path within \
