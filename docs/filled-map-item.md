@@ -1,8 +1,8 @@
-# Filled map item rendering (issue #184) — the wire and the fold are landed, the renderer is not
+# Filled map item rendering — the wire and the fold are landed, the renderer is not
 
 ## What it is
 
-Issue #184 asks for the filled map item's own visual: the generated
+This covers the filled map item's own visual: the generated
 per-map pixel texture, player/marker icons, and the border frame, whether
 held, in an item frame, or shown as a GUI icon.
 
@@ -58,7 +58,7 @@ send it and this client silently drops it as an unrecognised play packet,
 the same as any other undecoded id.
 
 This is a **different** gap from the item components this session found
-missing for #171/#174 (`minecraft:potion_contents`, `minecraft:banner_patterns`
+missing separately (`minecraft:potion_contents`, `minecraft:banner_patterns`
 land as opaque-but-present `ComponentValue::Opaque` blobs — the item stack
 carries the byte, just not a typed reading of it). A filled map's pixel data
 is not carried by the item stack at all; it lives in its own packet, keyed
@@ -104,7 +104,7 @@ per-instance texture as an *addition* to this same base icon, not a
 replacement for it.
 
 `minecraft:map_color`'s tint (like `minecraft:potion`'s, see
-`docs/item-variants.md`/#171's scoping) is a per-instance value in principle
+`docs/item-variants.md`'s scoping) is a per-instance value in principle
 (vanilla derives a map's average terrain colour for the icon border), but
 with no packet decoding the per-instance data at all, there is nothing to
 compute it from yet — it correctly falls back to the tint's `default`, the
@@ -139,8 +139,9 @@ session that had no budget to do it properly:
 
 ### Two stale pointers, corrected
 
-* **The held-item pose does not wait on "#54/#57".** There is no issue #54, and #57
-  is bow-draw arm poses. The real seam is `ItemVariants::resolve`'s
+* **The held-item pose does not wait on the previously-cited blockers.** One
+  referenced a nonexistent issue, and the other was bow-draw arm poses —
+  unrelated. The real seam is `ItemVariants::resolve`'s
   `display_context` branch, which `spyglass_in_hand` already uses — 26 of 26.2's
   items name a different model in the hand than in the slot, and that fork is
   already built.

@@ -32,9 +32,9 @@ the two consequences that make this a *doctrine* — a constraint on the whole c
 than a description of one corner of it.
 
 **1. Wishes are expressed in observation vocabulary, never wire vocabulary.**
-`BreakIntent { pos: BlockPos, face: BlockFace }` (`crates/lodestone-ecs/src/player.rs:249-256`) is
+`BreakIntent { pos: BlockPos, face: BlockFace }` (`crates/lodestone-ecs/src/player.rs`) is
 the two facts a mouse ray hit carries — nothing else. No `sequence`, no dig-state id, no `Hand`, no
-raw `ClientAction`. `PlaceIntent { pos, face }` (`crates/lodestone-ecs/src/player.rs:367-377`)
+raw `ClientAction`. `PlaceIntent { pos, face }` (`crates/lodestone-ecs/src/player.rs`)
 mirrors it exactly for placement, down to the same two fields; its own docs state the rule
 explicitly ("exactly the two facts a mouse ray hit carries"). A plugin never speaks the packet's
 language — it speaks the mouse's.
@@ -42,30 +42,30 @@ language — it speaks the mouse's.
 **2. Exactly one system owns each machine.**
 The dig state machine, the prediction `sequence` counter and the post-break cooldown are internal
 state of one consumer system, not an API anyone calls. `MiningPredictor(pub Mining)`
-(`crates/lodestone-shell/src/interact.rs:179`) and `PlacementPredictor(pub Placement)`
-(`crates/lodestone-shell/src/interact.rs:184`) are private machines that only `drive_mining`
-(`crates/lodestone-shell/src/interact.rs:500`) and `drive_placement`
-(`crates/lodestone-shell/src/interact.rs:791`) touch. A plugin cannot reach either resource — it
+and `PlacementPredictor(pub Placement)`
+(both `crates/lodestone-shell/src/interact.rs`) are private machines that only `drive_mining`
+and `drive_placement`
+(same file) touch. A plugin cannot reach either resource — it
 depends on `lodestone-ecs`, never on `lodestone-shell` — so there is structurally one writer, not a
 convention that could be violated by a second one.
 
 **3. Refusal is always observable.**
 `BreakOutcome(pub BreakStatus)` and `PlaceOutcome { status, generation }`
-(`crates/lodestone-ecs/src/player.rs:281`, `:404-411`) are *always-present* components —
+(`crates/lodestone-ecs/src/player.rs`) are *always-present* components —
 `spawn_local_player`/`reset_local_player` insert the `Default` on every entity, so a plugin can
 poll on the very first tick without first checking whether the shell has ever run with an intent
 installed at all. Rejections are typed (`BreakRejection`/`PlaceRejection`,
-`crates/lodestone-ecs/src/player.rs:305-321`, `:451-474`), not a silent no-op. Placement is a
-one-shot verb, so `PlaceOutcome::generation` (`player.rs:409-411`) is bumped by exactly one every
-time `drive_placement` resolves an attempt (`crates/lodestone-shell/src/interact.rs:839`,
+same file), not a silent no-op. Placement is a
+one-shot verb, so `PlaceOutcome::generation` (`player.rs`) is bumped by exactly one every
+time `drive_placement` resolves an attempt (`crates/lodestone-shell/src/interact.rs`,
 `outcome.generation += 1;`) — the counter a late poller needs to tell "the result of the attempt I
 just made" from "an attempt from several ticks ago I never read."
 
 **4. Human input outranks installed intent, per verb, with no handshake.**
 `drive_mining` computes `human_attacking = attacking.0 && dead.is_none()`
-(`crates/lodestone-shell/src/interact.rs:530`) and only falls through to a plugin's `BreakIntent`
-when that is false (`:535-557`). `drive_placement` returns immediately `if using_item.0`
-(`crates/lodestone-shell/src/interact.rs:828`), before even reading `PlaceIntent`. Neither checks
+(`crates/lodestone-shell/src/interact.rs`) and only falls through to a plugin's `BreakIntent`
+when that is false. `drive_placement` returns immediately `if using_item.0`
+(same file), before even reading `PlaceIntent`. Neither checks
 for a plugin and asks it to back off — a real player's own attack/use button always wins, and a
 plugin's intent left behind after it stops running simply loses every tick the human is active.
 There is no handshake because there is nothing to negotiate: priority is a per-tick predicate, not
@@ -73,21 +73,21 @@ a lock.
 
 **5. Lifecycle encodes verb shape.**
 A dig is continuous — `BreakIntent` stays installed for the whole multi-tick duration, and *the
-plugin* removes it when it wants to stop (`crates/lodestone-ecs/src/player.rs:351`, "the plugin
+plugin* removes it when it wants to stop (`crates/lodestone-ecs/src/player.rs`, "the plugin
 removes it itself when it wants to stop"). A placement is one-shot — *the shell* removes
 `PlaceIntent` the instant `drive_placement` resolves an attempt
-(`crates/lodestone-shell/src/interact.rs:838`, `commands.entity(entity).remove::<PlaceIntent>();`),
+(`crates/lodestone-shell/src/interact.rs`, `commands.entity(entity).remove::<PlaceIntent>();`),
 whatever the result, and that removal is itself the acknowledgement: one insertion is one attempt,
 so a plugin never has to guess whether a leftover component is still pending or long since
 processed.
 
 **The precedent these five clauses generalise from is movement, and it is fully converted, not
-partially.** `crates/lodestone-controller/src/ecs.rs:704`'s
+partially.** `crates/lodestone-controller/src/ecs.rs`'s
 `exactly_one_system_writes_movement_intent` is a contract test, not a unit test — it builds the
 real shipped `GameTick` schedule under `ScheduleBuildSettings { ambiguity_detection:
 LogLevel::Error }` and asserts the schedule *itself* has no unordered conflicting writer of
 `MovementIntent`. Its negative control, `a_second_unordered_intent_writer_fails_the_ambiguity_check`
-(`ecs.rs:712`), adds a rogue second writer with no explicit order and asserts the same build then
+(same file), adds a rogue second writer with no explicit order and asserts the same build then
 *fails* — proof the detector would have caught the thing it exists to catch, not just that the
 happy path is quiet. This is the proof that movement is already fully converted to clause 2, and it
 is the shape `BreakIntent`/`PlaceIntent` (clauses 1, 3, 4, 5 above) were built to match.
@@ -124,10 +124,10 @@ not policy to defend.
 
 The five clauses above describe the *plugin* path for breaking and placing blocks. The *human*
 path does not use it. `drive_mining`'s `human_attacking` branch reads `Attacking`
-(`crates/lodestone-shell/src/interact.rs:151`) and `RayTarget`
-(`crates/lodestone-shell/src/interact.rs:122`) — both shell-only resources set by mouse input, not
+and `RayTarget`
+(both `crates/lodestone-shell/src/interact.rs`) — both shell-only resources set by mouse input, not
 `BreakIntent`. `drive_placement`'s human path is `Sim::use_item_live`
-(`crates/lodestone-shell/src/sim/actions.rs:506`), which runs `Placement::use_on` directly, also
+(`crates/lodestone-shell/src/sim/actions.rs`), which runs `Placement::use_on` directly, also
 never touching `PlaceIntent`. Both converge one level lower, at the same `MiningPredictor`/
 `Placement::use_on` machines a plugin's intent resolves into (clause 2) — so a human dig and a
 plugin dig run the identical predictor, but only the plugin one arrives through the observable,
@@ -149,7 +149,7 @@ look like winning because nothing can contest a path it never joins.
 
 A plugin is `impl bevy_app::Plugin`, added with `App::add_plugins`. `lodestone-ecs` re-exports
 `bevy_app` and `bevy_ecs` as `lodestone_ecs::{app, ecs}` so a plugin author never has to match
-versions by hand (`crates/lodestone-ecs/src/lib.rs:47-50`) — the same trick azalea uses
+versions by hand (`crates/lodestone-ecs/src/lib.rs`'s `pub use bevy_app as app`/`pub use bevy_ecs as ecs`) — the same trick azalea uses
 (`azalea/src/lib.rs:63-64`).
 
 **Schedule and set labels a plugin orders against today** (`crates/lodestone-ecs/src/{schedules,sets}.rs`):
@@ -269,8 +269,8 @@ document's brief — a plugin driving the player. `docs/bevy-migration.md` §6 s
 analogous to azalea's `SendGamePacketEvent`. No `SendAction` message type exists in
 `crates/lodestone-ecs/src/` today (`grep -rn SendAction crates/lodestone-ecs` is empty). The only
 egress that exists right now is off-ECS: `lodestone_client::ClientHandle::send_action`
-(`crates/lodestone-client/src/handle.rs:69`) and `lodestone_shell::net::NetClient::send_action`
-(`crates/lodestone-shell/src/net.rs:413`), both of which take a `ClientAction` directly and both of
+(`crates/lodestone-client/src/handle.rs`) and `lodestone_shell::net::NetClient::send_action`
+(`crates/lodestone-shell/src/net.rs`), both of which take a `ClientAction` directly and both of
 which predate the ECS entirely. A plugin cannot reach either from inside a system today because
 neither is a bevy resource — this is one of the concrete Stage 2/6 deliverables (§4 below).
 
@@ -296,7 +296,7 @@ assumed from the stage numbering:
 - **The sanctioned egress exists, as a resource rather than a message — and this
   is now the settled shape, not an open question (issue #181, closed).**
   `player.rs`'s `ActionQueue(pub Vec<ClientAction>)` is `app.init_resource`'d
-  (`player.rs:530`) and drained every tick by the driver
+  and drained every tick by the driver
   (`sim.rs::Sim::drain_action_queue`, `resource_mut::<ActionQueue>()`). A plugin
   system can push a `ClientAction` onto it via `ResMut<ActionQueue>` today — the
   capability `docs/bevy-migration.md` §6 asked for (`MessageWriter<SendAction>`)
@@ -758,7 +758,7 @@ since changed.** `24af787` moved them to a public function,
 (`crates/lodestone-model/src/adapter.rs`), returning a `BlockPhysics { friction, speed_factor,
 jump_factor, bounce_restitution, stuck_multiplier, climbable }` struct — the same six fields, now one
 call instead of six private match statements, and callable by anything depending on `lodestone-model`,
-which every plugin already does. `collision.rs`'s `physics_at` (`collision.rs:293`) is now a thin
+which every plugin already does. `collision.rs`'s `physics_at` is now a thin
 caller of it, not the owner: `v.name_of(...).map_or(DEFAULT_BLOCK_PHYSICS, block_physics)`. This is
 still deliberately **not** a `VersionAdapter` method — the data is name-keyed and stable across
 versions, not state-keyed, so putting it behind the version seam would be the over-engineering §"how
@@ -931,7 +931,7 @@ cheaper substitute for the other is the mistake `docs/bevy-migration.md` warns a
 | `MovementIntent` (analog), `LookIntent` | Stage 2 | **done, both** — closed in `0d82ab4`; see the "four concrete gaps" section above, updated |
 | `TickSet::Intent` ordering anchor | Stage 2 (recommended) | **done** — closed in `0d82ab4`; `crates/lodestone-ecs/src/sets.rs`'s `TickSet` is now `Input, Intent, Physics, Predict, Animate, Send`, and `crates/plugins/lodestone-autopilot` is a real plugin ordered against it |
 | health/hunger/effects/inventory/tab-list/scoreboard as components | Stage 3 | **done** — landed as `b2baf02`, after this row was written; see the correction note above and [`docs/session-components.md`](./session-components.md) |
-| exactly-one-writer ambiguity gate (`ambiguity_detection: Error`) | Stage 3 | **done** — `crates/lodestone-ecs/src/session.rs:681` |
+| exactly-one-writer ambiguity gate (`ambiguity_detection: Error`) | Stage 3 | **done** — `crates/lodestone-ecs/src/session.rs`'s `exactly_one_system_writes_each_session_component` |
 | chunk world as a `Resource` with batched snapshot reads | Stage 4 | **done** — `lodestone_ecs::ChunkWorld` (`crates/lodestone-ecs/src/chunks.rs`), a `Clone`-able handle over one shared `lodestone_world::World`; `crates/plugins/lodestone-autopilot` reads it via `Res<ChunkWorld>` to snapshot a `lodestone_nav::SnapshotView` for search |
 | `SendAction` message / `MessageWriter<SendAction>` egress | unassigned | **decided (issue #181, closed): `ActionQueue` wins, `SendAction` will not be built** — `player.rs`'s `ActionQueue(Vec<ClientAction>)` resource landed with Stage 2 and is reachable from a plugin system via `ResMut<ActionQueue>`; see the correction note above. The ordering/observability a `MessageWriter` would have given for free turned out to be unavailable from a buffered `Message` for this specific egress anyway (synchronous suppression needs a drain-time hook, not a next-tick reader), so `EgressFilters` (#157) delivers the same properties directly on the `Vec` instead |
 | raw-packet observation (`RawPacket` message) | unassigned | **gap — re-verified: `grep -rn RawPacket crates` is still empty** |
@@ -1175,7 +1175,7 @@ It snapshots two things, and the second one is why:
 **On its first run the chain half found that `TickSet::Intent` and `ExtractSet::Debug` are declared
 but never chained.** The `0d82ab4` rows above describe both as landing "between `Input` and `Physics`"
 and "between `Entities` and `Hud`" respectively. The variants landed and these changelog rows landed;
-`CorePlugin`'s two `configure_sets` calls (`plugin.rs:80-84`, `plugin.rs:108`) were never updated. So
+`CorePlugin::build`'s two `configure_sets` calls for `GameTick` and `Extract` (`plugin.rs`) were never updated. So
 both are **published ordering anchors carrying no ordering guarantee** — a plugin writing
 `.in_set(TickSet::Intent)`, which `crates/plugins/lodestone-autopilot` does and which
 `TickSet::Intent`'s own doc comment instructs, gets no relation to `TickSet::Physics` at all and may
@@ -1186,6 +1186,13 @@ What the gate cannot see is written into its own module doc: a sixth anchor enum
 file (`ANCHOR_ENUMS` is a hardcoded list — the docs-index gate's `docs/plans/` failure mode exactly),
 semantic changes that keep a name, and whether this changelog was actually updated. It makes a
 reviewer look; it cannot read prose.
+
+> **Found stale during citation cleanup, not corrected here:** `grep -rn KNOWN_UNCHAINED
+> crates/lodestone-ecs/src` now returns nothing, and `CorePlugin::build`'s current
+> `configure_sets(GameTick, ...)` and `configure_sets(Extract, ...)` calls in `plugin.rs`
+> both already include `TickSet::Intent` and `ExtractSet::Debug` in their `.chain()` tuples.
+> This paragraph's claim that the two sets are "declared but never chained" looks resolved
+> against the current tree; left for a content re-audit rather than silently edited here.
 
 ## See also
 

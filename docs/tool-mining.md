@@ -376,7 +376,7 @@ external source (here, the registry-order dump) disagrees.
   `crates/lodestone-model/src/adapter.rs`).
 - `lodestone_model::VersionAdapter::{block_hardness, tool_mining}` — the route
   a consumer that only holds a `&dyn VersionAdapter` (`lodestone-shell`,
-  `lodestone-physics`) has to either census. Since issue #361, a consumer that
+  `lodestone-physics`) has to either census. A consumer that
   can add a plain data dependency instead — `lodestone-server` in particular —
   may depend on `lodestone-data` directly rather than go through the trait; it
   is the same census either way, so this is no longer a "second, divergent"
@@ -385,7 +385,7 @@ external source (here, the registry-order dump) disagrees.
   pull in wire-format code for a data question.
 - `crates/lodestone-data/src/hardness.rs` — the pre-existing per-state
   hardness census this module reuses for `requires_correct_tool` (moved out of
-  `lodestone-v770` by issue #361; see `docs/lodestone-data-crate.md`).
+  `lodestone-v770`; see `docs/lodestone-data-crate.md`).
 - `crates/lodestone-data/src/block_states.rs` — `block_name`/`block_type_name`
   and the state↔block-name relationship the registry table cross-checks.
 - `lodestone-game::mining` (`BreakInputs`, `Mining`) — the eventual consumer

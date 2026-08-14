@@ -148,7 +148,7 @@ copying it exactly would silently defeat that. **If the shell's `data_dir()`
 ever changes, this copy must change with it** — there is no test that can
 catch drift between two independent implementations in two crates.
 
-**Issue #67 re-diagnosed:** it proposed hoisting this to `lodestone-core`
+**Re-diagnosed:** it was proposed hoisting this to `lodestone-core`
 because "both crates already depend on it" — checked against the committed
 `Cargo.toml`s, false: `lodestone-core` is a narrowly-scoped protocol-codec
 crate with no platform-directory business, and neither crate depended on it
@@ -166,13 +166,13 @@ this crate's ownership; see the issue for the prepared patch.
 
 [`paths::profiles_path()`] is `data_dir().join("profiles.json")`.
 [`paths::legacy_token_cache_path()`] is `data_dir().join("ms_token.json")` —
-the exact filename the pre-#64 code used, so migration finds it.
+the exact filename the prior code used, so migration finds it.
 
-### Migrating a pre-#64 install: `cache` + `migrate`
+### Migrating a legacy install: `cache` + `migrate`
 
 Before this work, `cache::default_cache_path()` returned one fixed path and
 `cache::save()` wrote the refresh token there as plain JSON — the two things
-issue #64 exists to fix. `cache.rs` now keeps only what a one-time migration
+this change exists to fix. `cache.rs` now keeps only what a one-time migration
 needs:
 
 - `cache::load_legacy_cache(path)` — read-only.
@@ -214,7 +214,7 @@ opt-in in this codebase.
   to the `SecretStore` trait and implement it on both `KeychainStore` and
   `MemoryStore` — the trait is the whole contract, and a real-keychain
   `#[ignore]`d test belongs next to the existing one in `store.rs`.
-- **Wiring this into the actual join flow (issue #65): done — see
+- **Wiring this into the actual join flow: done — see
   "Join-flow wiring" below.** `login::try_cached_session` +
   `login::finish_interactive` are the composition this bullet used to say
   didn't exist yet.
@@ -242,9 +242,9 @@ opt-in in this codebase.
   fails loudly (re-add the account) instead of pretending to protect a
   secret it structurally cannot.
 
-## Join-flow wiring (issue #65)
+## Join-flow wiring
 
-Two pieces landed to turn the storage from issue #64 into an actual
+Two pieces landed to turn the account storage into an actual
 authenticated join: [`login`], the composition layer inside `lodestone-auth`,
 and the `Directive::BeginEncryption` handling inside `lodestone-client`'s
 driver, which is where the RSA/AES handshake and the session-server call
@@ -252,8 +252,8 @@ actually happen.
 
 ### `lodestone-auth::login` — cached-refresh-then-interactive composition
 
-`docs/accounts.md`'s own "how to change it" section (issue #64's write-up)
-sketched the sequence a connect path would need; [`login`] is that sequence,
+`docs/accounts.md`'s own "how to change it" section sketched the sequence a
+connect path would need; [`login`] is that sequence,
 built so nothing in it blocks:
 
 - [`login::try_cached_session`] tries the selected account's cached refresh
@@ -282,7 +282,7 @@ built so nothing in it blocks:
   fallback.
 
 Nothing here drives a poll loop for the caller. A terminal front end can
-`.wait()` the `PendingLogin`; a future GUI (issue #66) can `.poll_once()` from
+`.wait()` the `PendingLogin`; a future GUI screen can `.poll_once()` from
 a timer and show `pending.prompt()` — `login` doesn't care which.
 
 ### Typed XSTS / refresh error taxonomy
@@ -469,7 +469,7 @@ That last link is the owner's own interactive check, against a real online-mode
 server with the account signed in. No test in this repo may reach
 `sessionserver.mojang.com`, and none does.
 
-## The account list screen (issue #66)
+## The account list screen
 
 `crates/lodestone-shell/src/menu/accounts.rs`'s `AccountsNav` draws the account
 list — every account from `AccountsMetadata`, most-recently-used first, plus a
@@ -477,11 +477,11 @@ synthetic offline entry always appended last — and drives Add/Select/Remove/
 Cancel plus its own device-code sign-in sub-flow. See `docs/main-menu.md` for
 where the screen sits in the menu state machine and how it's rendered.
 
-### `finish_interactive`, not a hand-rolled copy (issue #73)
+### `finish_interactive`, not a hand-rolled copy
 
 It doesn't need `try_cached_session` at all — that resumes an *existing*
-selected account's session for a connect attempt, which is issue #65's job
-(net.rs/sim.rs), not this screen's.
+selected account's session for a connect attempt, which is the connect path's
+job (net.rs/sim.rs), not this screen's.
 
 For "Add account", both worker threads (`run_device_code_login` and the
 loopback flow's `finish_ms_token`) now call
@@ -546,12 +546,12 @@ Its failure renders as an ordinary typed-error message on the sign-in screen
 
 ### What isn't built
 
-No skin fetch (issue #62) — every row's head icon is
+No skin fetch yet — every row's head icon is
 [`render::default_head_icon`], a hand-authored placeholder pixel grid, not a
 downloaded texture. It is deliberately written so the swap is a data change:
 [`render::head_mosaic`] takes raw RGBA bytes and dimensions, exactly the shape
 a decoded skin PNG would be in, so nothing about the row, the draw call, or
-the geometry builder needs to change once #62 lands a real fetch. No mouse
+the geometry builder needs to change once a real fetch lands. No mouse
 wheel scrolling (keyboard Up/Down only, matching every other row-stack screen
 in this menu). No credential form of any kind, by design — see the module's
 own doc comment.
@@ -567,7 +567,7 @@ own doc comment.
 - `RUST_LOG`/`tracing-subscriber` filtering controls whether the
   `AccountSecrets::open()` fallback warning and the migration `info!` line
   are visible — nothing here is gated behind a separate flag.
-- `LODESTONE_MS_CLIENT_ID` (issue #65) — the registered Azure public-client id
+- `LODESTONE_MS_CLIENT_ID` — the registered Azure public-client id
   to authenticate as. Required for any interactive sign-in or refresh;
   [`login::resolve_client_id`] returns a typed error rather than falling back
   to Mojang's own launcher id. See "The client-id gap" above.
@@ -598,13 +598,13 @@ own doc comment.
 - `reqwest`/`tokio` — already crate dependencies for the OAuth chain;
   `migrate::migrate_legacy_cache` and `login` reuse them rather than adding
   anything new.
-- `lodestone-client` (issue #65, new edge) now depends on `lodestone-auth` and
+- `lodestone-client` (a new edge) now depends on `lodestone-auth` and
   `reqwest` directly (both native-only, mirroring `lodestone-auth`'s own
   gating) — the first real dependent this crate has ever had; before this
   change the only references outside `lodestone-auth` itself were comments in
   `lodestone-net/src/crypto.rs`. `lodestone-shell` also gained a direct
   `lodestone-auth` (plus `reqwest`) dependency for the same reason
-  `menu/accounts.rs` (issue #66) needs the interactive flow and the keychain
+  `menu/accounts.rs` needs the interactive flow and the keychain
   store directly, not just an already-authenticated `Session`.
 
 [`store`]: ../crates/lodestone-auth/src/store.rs

@@ -32,8 +32,8 @@
 > their original `crate::sim::`/`lodestone::sim::` path from
 > `block_entities.rs` and an external integration test. One real complication
 > surfaced here that the test-module move never hit: another agent's
-> in-flight, uncommitted work (`Sim::difficulty`/`Sim::block_destruction_stage_at`,
-> issues #410/#411) landed directly in the shared `sim.rs` between this
+> in-flight, uncommitted work (`Sim::difficulty`/`Sim::block_destruction_stage_at`)
+> landed directly in the shared `sim.rs` between this
 > session's own commits, sitting immediately adjacent to the extraction
 > boundary. Committed via the private-index/`commit-tree` route rather than a
 > pathspec commit of the whole file, so the split shipped without also
@@ -125,7 +125,7 @@
 >
 > **The field count in "What is left on `Sim`, and why" below is stale in the
 > optimistic direction, and has been since seams 4–7 landed.** It says 15.
-> A fresh count against `sim.rs:377-597`, taken for a later architecture
+> A fresh count against the `Sim` struct definition in `sim.rs`, taken for a later architecture
 > review (issue-tracker-independent work, `PlaceIntent`/re-mesh-seam/audio
 > triage), found **28** — regrowth had outpaced dissolution, not the other
 > way round. None of the 28 are seam-4-through-7 leftovers; they are fields
@@ -135,7 +135,8 @@
 > `view_bobbing`, `invert_mouse_x`/`invert_mouse_y`, `toggle_sneak`/
 > `toggle_sprint`, `chest_lids`, `pickups` — camera/animation/HUD-adjacent
 > state that Stage 5 never looked at, plus two options-menu bools and two
-> issue-driven additions (`chest_lids` for #23, `pickups` for #365). **Not
+> issue-driven additions (`chest_lids` for chest-lid animation, `pickups` for
+> item pickups). **Not
 > all rot** — several are the deliberate, documented single-consumer shape
 > this doc's own "Not blocked, just not done" table already describes for
 > `config`/`stats`/`status` — but the count itself was wrong for as long as
@@ -592,7 +593,7 @@ caller. `build_camera` hardcoded the standing
 `PLAYER_EYE_HEIGHT`, so the swimming work had pre-biased the *feet* `Y` by
 `eye_height - PLAYER_EYE_HEIGHT` at the call site. Arithmetically identical — the
 camera consumes `position` solely as the eye — but the argument named `feet` was not
-the feet whenever a non-standing pose was active (`Avatar.java:22-36`: `0.4`
+the feet whenever a non-standing pose was active (`Avatar.POSES`: `0.4`
 swimming, `1.27` crouching, `1.62` standing). The eye height is now a parameter and
 `Sim::camera` passes `interp.eye_height`; the three `camera_rig` unit tests pass
 `PLAYER_EYE_HEIGHT` explicitly. The swim-camera gate's number is unchanged, which is

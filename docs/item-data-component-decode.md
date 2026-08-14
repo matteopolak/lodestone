@@ -5,7 +5,7 @@
 How protocol 776 clientbound item stacks have their `DataComponentPatch` decoded, which of
 26.2's 111 data-component types this build consumes, and the type-level contract a caller
 must honour when a component it does not model ends a packet early. All of it lives in
-`read_component_patch` / `read_item_stack` in `crates/protocol/v770/src/adapter.rs`.
+`read_component_patch` / `read_item_stack` in `crates/protocol/v770/src/adapter/inventory.rs`.
 
 `docs/armour-trim-decode.md` first recorded why skipping an unknown component is impossible;
 this doc is the general case, the census, and the contract.
