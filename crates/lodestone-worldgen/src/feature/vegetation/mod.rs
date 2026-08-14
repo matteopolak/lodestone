@@ -1675,7 +1675,7 @@ mod tests {
             },
             decorators: Vec::new(),
         };
-        for seed in [1u64, 99] {
+        for seed in [1i64, 99] {
             let mut grid = grid_with_flat_ground(-64, 384, 69);
             let tags = VegTags::default();
             let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(seed));
@@ -1880,7 +1880,7 @@ mod tests {
             stump_decorators: Vec::new(),
             log_decorators: Vec::new(),
         };
-        for seed in [1u64, 7, 42] {
+        for seed in [1i64, 7, 42] {
             let mut grid = grid_with_flat_ground(-64, 384, 69);
             let tags = VegTags::default();
             let mut random = LegacyRandomSource::new(seed);
