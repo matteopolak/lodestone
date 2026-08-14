@@ -1609,6 +1609,66 @@ fn render_feet(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> Vec3 {
     from.feet.lerp(to.feet, alpha(clock))
 }
 
+/// The local player's seat position **this frame**, derived from the
+/// vehicle's own per-frame interpolated draw pose — [`render_feet`]/
+/// [`render_yaw`], the exact functions the vehicle is drawn from — rather
+/// than its raw tick-boundary [`lodestone_ecs::entity::Position`]. See
+/// [`crate::sim::camera::Sim::interpolated_player`]'s doc for why the two
+/// disagree and what that disagreement looks like on screen: the vehicle's
+/// on-screen mesh eases toward a target over a real-time window and, under
+/// sustained movement, never fully catches up to it; the tick-boundary target
+/// itself has no such lag.
+///
+/// `vehicle_network_id` is [`lodestone_ecs::session::Riding`]'s payload;
+/// `own_network_id` is [`lodestone_ecs::session::ServerEntityId`]'s, used
+/// only to resolve which of the vehicle's [`lodestone_ecs::entity::Passengers`]
+/// seats is ours — the same lookup
+/// `lodestone_ecs::player::pin_passenger_to_vehicle` does, repeated here
+/// because that function computes a *tick-boundary* seat and this one needs a
+/// *per-frame* one, off a different position input.
+///
+/// # Declines rather than guesses, mirroring `pin_passenger_to_vehicle`
+///
+/// `None` when any link is missing: the vehicle has no [`EntityIndex`] entry
+/// yet (not spawned client-side), no interpolation track
+/// ([`InterpFrom`]/[`InterpTo`]/[`InterpClock`]) yet, no
+/// [`lodestone_ecs::entity::EntityKind`], or [`lodestone_ecs::VersionData`]
+/// holds no adapter or no facts for its type. The caller falls back to the
+/// tick-boundary seat in every such case, so declining here never strands the
+/// player somewhere invented.
+pub(crate) fn riding_render_seat(
+    world: &World,
+    vehicle_network_id: i32,
+    own_network_id: Option<i32>,
+) -> Option<Vec3> {
+    let index = world.get_resource::<EntityIndex>()?;
+    let vehicle = index.get(vehicle_network_id)?;
+    let from = world.get::<InterpFrom>(vehicle)?;
+    let to = world.get::<InterpTo>(vehicle)?;
+    let clock = world.get::<InterpClock>(vehicle)?;
+    let kind = world.get::<lodestone_ecs::entity::EntityKind>(vehicle)?;
+    let version = world.get_resource::<lodestone_ecs::VersionData>()?;
+    let facts = version.entity_facts(&kind.0)?;
+    let passengers = world.get::<lodestone_ecs::entity::Passengers>(vehicle);
+    // `Entity.getDefaultPassengerAttachmentPoint`: `vehicle.getPassengers().indexOf(passenger)`,
+    // the same degenerate-case-agrees reasoning `pin_passenger_to_vehicle`'s
+    // own doc gives for defaulting to seat 0.
+    let seat_index = own_network_id
+        .and_then(|own| passengers.and_then(|list| list.0.iter().position(|id| *id == own)))
+        .unwrap_or(0);
+
+    let feet = render_feet(from, to, clock);
+    let yaw = render_yaw(from, to, clock);
+    let seat = lodestone_ecs::riding::player_seat_position(
+        Vec3d::new(f64::from(feet.x), f64::from(feet.y), f64::from(feet.z)),
+        yaw,
+        kind.0.path(),
+        facts.dimensions.height,
+        seat_index,
+    );
+    Some(Vec3::new(seat.x as f32, seat.y as f32, seat.z as f32))
+}
+
 /// The currently-drawn body yaw, taking the shortest arc so a wrap across 360°
 /// (e.g. 350°→10°) turns +20° rather than −340°.
 fn render_yaw(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
@@ -1665,6 +1725,7 @@ fn render_anim(
     arm_pose: ArmPoseChoice,
     aggressive: bool,
     crouching: bool,
+    is_passenger: bool,
 ) -> AnimInput {
     let body = render_yaw(from, to, clock);
     let head = clamp_head_to_body(body, render_head_yaw(from, to, clock), MAX_HEAD_YAW);
@@ -1679,6 +1740,7 @@ fn render_anim(
         arm_pose: arm_pose.pose,
         arm_pose_left_hand: arm_pose.left_hand,
         crouching,
+        is_passenger,
     }
 }
 
@@ -2057,7 +2119,24 @@ pub fn extract_entity_draws(
     // bridged the same way `variants` is. It is the last hop of issue #235's
     // chain: without it `variant_sheet` below has no source for the tame bit
     // and a tamed wolf draws the wild sheet forever.
-    tameds: Query<&lodestone_ecs::entity::Tamed>,
+    //
+    // Paired with `vehicles` in one tuple parameter rather than two separate
+    // ones: `bevy_ecs`'s `SystemParam` tuple impl tops out at 16 top-level
+    // parameters, and this function was already at that ceiling before
+    // `vehicles` needed to be added — nesting a tuple-of-`SystemParam` here
+    // is itself one `SystemParam`, so it stays under the limit without
+    // touching any of the other fifteen.
+    //
+    // `Vehicle` lives on the ingest entity too (`ingest::apply_entity_passengers`
+    // folds it from `SET_PASSENGERS`'s reverse edge), bridged the same way
+    // `tameds` is. Its mere *presence* is the sit-pose switch: a rider's own
+    // network id never appears on its own entity, only the vehicle's it
+    // names, so "is riding" is "does this component exist" for any tracked
+    // (non-local) entity. See `AnimInput::is_passenger`.
+    (tameds, vehicles): (
+        Query<&lodestone_ecs::entity::Tamed>,
+        Query<&lodestone_ecs::entity::Vehicle>,
+    ),
     tracks: Query<(
         &MinecraftEntityId,
         &RenderKind,
@@ -2183,6 +2262,16 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| poses.get(entity).ok())
             .is_some_and(|pose| pose.0 == lodestone_model::EntityPose::Crouching);
+        // `Entity.isPassenger()`. `false` for an entity that has never been
+        // named as a rider by `SET_PASSENGERS` (`Vehicle` absent) — see
+        // `vehicles`'s own doc above. This is the local-player-*excluded* half
+        // of the sit pose: the local player never has an ingest entity of its
+        // own to carry `Vehicle`, and gets the same bit from
+        // `lodestone_ecs::session::Riding` instead — see `Sim::body_anim`.
+        let is_passenger = index
+            .get(id.0)
+            .and_then(|entity| vehicles.get(entity).ok())
+            .is_some();
         // `0.0` (and hence a bit-identical `pose_swelling` to `pose`, per that
         // function's own doc) for every non-creeper — `fuse` is `None` — and
         // for a creeper whose fuse has never moved off idle. Vanilla's own
@@ -2280,6 +2369,7 @@ pub fn extract_entity_draws(
                 arm_pose,
                 aggressive,
                 crouching,
+                is_passenger,
             ),
             name_tag: name_tag.0.clone(),
             hurt,
@@ -6140,6 +6230,275 @@ mod tests {
             interp.world().resource::<PickupAnimations>().is_empty(),
             "the animation must still expire, or an out-of-range collector leaks one \
              entry per pickup for the whole session"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // `riding_render_seat` — the local player's per-frame seat while riding
+    // -----------------------------------------------------------------------
+
+    /// A minimal [`lodestone_model::VersionAdapter`] that answers exactly one
+    /// question — the vehicle's base box height — mirroring
+    /// `lodestone_ecs::player`'s own `HeightOnlyAdapter` test double (that one
+    /// cannot be reused here: it is private to a different crate).
+    #[derive(Debug)]
+    struct SeatHeightAdapter {
+        height: f32,
+    }
+
+    impl lodestone_model::VersionAdapter for SeatHeightAdapter {
+        fn protocol_version(&self) -> i32 {
+            0
+        }
+
+        fn minecraft_versions(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn supports(&self, _protocol: i32) -> bool {
+            false
+        }
+
+        fn entity_facts(
+            &self,
+            _entity_type: &lodestone_model::ResourceKey,
+        ) -> Option<lodestone_model::EntityFacts> {
+            Some(lodestone_model::EntityFacts {
+                dimensions: lodestone_model::EntityBaseDimensions {
+                    width: 1.375,
+                    height: self.height,
+                },
+                pushes_players: false,
+            })
+        }
+
+        fn begin_login(
+            &self,
+            _profile: &lodestone_model::LoginProfile,
+            _server: &lodestone_model::ServerAddress,
+        ) -> Result<Vec<lodestone_model::Directive>, lodestone_model::AdapterError> {
+            unreachable!("SeatHeightAdapter answers entity_facts only")
+        }
+
+        fn handle_packet(
+            &self,
+            _world: &mut dyn lodestone_model::WorldSink,
+            _state: lodestone_model::ConnectionState,
+            _packet_id: i32,
+            _payload: &[u8],
+        ) -> Result<Vec<lodestone_model::Directive>, lodestone_model::AdapterError> {
+            unreachable!("SeatHeightAdapter answers entity_facts only")
+        }
+
+        fn encode_action(
+            &self,
+            _state: lodestone_model::ConnectionState,
+            _action: &lodestone_model::ClientAction,
+        ) -> Result<Option<(i32, Vec<u8>)>, lodestone_model::AdapterError> {
+            unreachable!("SeatHeightAdapter answers entity_facts only")
+        }
+    }
+
+    const RIDING_VEHICLE_ID: i32 = 42;
+    const RIDING_OWN_ID: i32 = 7;
+    /// A plain boat's real box height (`EntityTypes`' boat block,
+    /// `sized(1.375F, 0.5625F)`) — the same constant
+    /// `lodestone_ecs::riding`'s own `a_raft_seats_higher_than_a_boat_of_the_same_box`
+    /// test cites.
+    const RIDING_BOAT_HEIGHT: f32 = 0.5625;
+
+    /// A world with a tracked `"oak_boat"` vehicle carrying an interpolation
+    /// track (`InterpFrom` at `from_x`, `InterpTo` at `to_x`, both `y = 64`,
+    /// `z = 0`, no yaw change) and a `VersionData` that answers its height —
+    /// everything [`riding_render_seat`] needs, built the way
+    /// `extract_entity_draws`'s own `tracks` query expects a vehicle to look.
+    fn world_with_boat_track(from_x: f32, to_x: f32, clock_t: f32) -> World {
+        let mut world = World::new();
+        world.insert_resource(EntityIndex::default());
+        world.insert_resource(lodestone_ecs::VersionData(Some(Box::new(SeatHeightAdapter {
+            height: RIDING_BOAT_HEIGHT,
+        }))));
+        let vehicle = world
+            .spawn((
+                lodestone_ecs::entity::EntityKind(
+                    "oak_boat".parse().expect("valid entity type key"),
+                ),
+                InterpFrom {
+                    feet: Vec3::new(from_x, 64.0, 0.0),
+                    yaw: 0.0,
+                    head_yaw: 0.0,
+                    pitch: 0.0,
+                },
+                InterpTo {
+                    feet: Vec3::new(to_x, 64.0, 0.0),
+                    yaw: 0.0,
+                    head_yaw: 0.0,
+                    pitch: 0.0,
+                },
+                InterpClock {
+                    t: clock_t,
+                    age: 0.0,
+                },
+                lodestone_ecs::entity::Passengers(vec![RIDING_OWN_ID]),
+            ))
+            .id();
+        world
+            .resource_mut::<EntityIndex>()
+            .insert(RIDING_VEHICLE_ID, vehicle);
+        world
+    }
+
+    /// **The core claim of the fix**: the seat tracks the vehicle's own
+    /// per-frame *eased* position, not its raw tick-boundary target — so a
+    /// vehicle still mid-ease (`clock.t` short of the full window) seats the
+    /// player short of the target too, exactly matching wherever the vehicle
+    /// itself is drawn this frame.
+    ///
+    /// Both hypotheses are predicted and both are checked: the right one
+    /// (`render_feet`'s halfway point) and the wrong one this bug actually
+    /// shipped (`InterpTo.feet`, the un-eased target) — so this fails if the
+    /// fix regresses back to reading the raw target, not just if the seat
+    /// moves at all.
+    #[test]
+    fn the_seat_tracks_the_vehicles_eased_position_not_its_raw_target() {
+        // Halfway through the ease: `alpha(clock) == 0.5`, so the vehicle is
+        // drawn at x = (0 + 10) / 2 = 5.0 this frame, not at its x = 10.0
+        // target.
+        let world = world_with_boat_track(0.0, 10.0, INTERP_WINDOW * 0.5);
+        let seat = riding_render_seat(&world, RIDING_VEHICLE_ID, Some(RIDING_OWN_ID))
+            .expect("every link is present");
+
+        // The right hypothesis: seated on the vehicle's eased x.
+        assert!(
+            (seat.x - 5.0).abs() < 1e-4,
+            "seat.x was {}, want ~5.0 (the eased position, alpha 0.5 between 0 and 10)",
+            seat.x
+        );
+        // The wrong hypothesis this bug shipped: seated on the raw target.
+        assert!(
+            (seat.x - 10.0).abs() > 4.0,
+            "seat.x was {} — indistinguishable from the un-eased InterpTo target (10.0), \
+             which is the exact regression this test exists to catch",
+            seat.x
+        );
+
+        // The seat height: `Boat.rideHeight` = height / 3 = 0.5625 / 3 =
+        // 0.1875, minus the player's own 0.6 vehicle attachment
+        // (`riding::PLAYER_VEHICLE_ATTACHMENT_Y`) — `lodestone_ecs::riding`'s
+        // own arithmetic, cited rather than restated.
+        let expected_y = 64.0 + RIDING_BOAT_HEIGHT / 3.0 - 0.6;
+        assert!(
+            (seat.y - expected_y).abs() < 1e-4,
+            "seat.y was {}, want {expected_y}",
+            seat.y
+        );
+    }
+
+    /// At a tick boundary (`clock.t == 0`, freshly re-anchored) the eased
+    /// position collapses onto `InterpFrom`, which is where a fresh report
+    /// re-anchors it to the *previously drawn* position — so this is also the
+    /// frame every existing (pre-fix) tick-level gate would have looked
+    /// identical to a per-frame one, per `CLAUDE.md`'s note that tick-aligned
+    /// sampling is exactly where two interpolation tracks coincide.
+    #[test]
+    fn at_a_fresh_reanchor_the_seat_sits_at_the_old_drawn_position() {
+        let world = world_with_boat_track(3.0, 10.0, 0.0);
+        let seat = riding_render_seat(&world, RIDING_VEHICLE_ID, Some(RIDING_OWN_ID))
+            .expect("every link is present");
+        assert!(
+            (seat.x - 3.0).abs() < 1e-4,
+            "seat.x was {}, want 3.0 (InterpFrom, at clock.t == 0)",
+            seat.x
+        );
+    }
+
+    /// Every "decline rather than guess" case
+    /// [`riding_render_seat`]'s own doc lists, checked directly rather than
+    /// only through the positive test's absence.
+    #[test]
+    fn riding_render_seat_declines_rather_than_guesses() {
+        // Not riding anything this client has ever heard of: no `EntityIndex`
+        // entry for the vehicle id at all.
+        let not_tracked = World::new();
+        assert!(
+            riding_render_seat(&not_tracked, RIDING_VEHICLE_ID, Some(RIDING_OWN_ID)).is_none(),
+            "an untracked vehicle id must not be guessed at"
+        );
+
+        // Tracked, but no `VersionData` — the adapter that would answer the
+        // vehicle's height is simply absent (e.g. before login).
+        let mut no_version = World::new();
+        no_version.insert_resource(EntityIndex::default());
+        let vehicle = no_version
+            .spawn((
+                lodestone_ecs::entity::EntityKind(
+                    "oak_boat".parse().expect("valid entity type key"),
+                ),
+                InterpFrom {
+                    feet: Vec3::ZERO,
+                    yaw: 0.0,
+                    head_yaw: 0.0,
+                    pitch: 0.0,
+                },
+                InterpTo {
+                    feet: Vec3::ZERO,
+                    yaw: 0.0,
+                    head_yaw: 0.0,
+                    pitch: 0.0,
+                },
+                InterpClock { t: 0.0, age: 0.0 },
+            ))
+            .id();
+        no_version
+            .resource_mut::<EntityIndex>()
+            .insert(RIDING_VEHICLE_ID, vehicle);
+        assert!(
+            riding_render_seat(&no_version, RIDING_VEHICLE_ID, Some(RIDING_OWN_ID)).is_none(),
+            "no VersionData means no real height to seat against, and must not fabricate one"
+        );
+
+        // Tracked, `VersionData` present, but the vehicle's interpolation
+        // track has not been inserted yet (spawned this frame, `spawn_track`
+        // has not run) — a real gap `extract_entity_draws` cannot hit
+        // (`InterpFrom`/`InterpTo`/`InterpClock` are inserted atomically with
+        // `MinecraftEntityId` by `spawn_track`) but the caller can, the one
+        // frame the vehicle's `AddEntity` has arrived and its own render
+        // track has not spawned yet.
+        let mut no_track = World::new();
+        no_track.insert_resource(EntityIndex::default());
+        no_track.insert_resource(lodestone_ecs::VersionData(Some(Box::new(SeatHeightAdapter {
+            height: RIDING_BOAT_HEIGHT,
+        }))));
+        let bare_vehicle = no_track
+            .spawn(lodestone_ecs::entity::EntityKind(
+                "oak_boat".parse().expect("valid entity type key"),
+            ))
+            .id();
+        no_track
+            .resource_mut::<EntityIndex>()
+            .insert(RIDING_VEHICLE_ID, bare_vehicle);
+        assert!(
+            riding_render_seat(&no_track, RIDING_VEHICLE_ID, Some(RIDING_OWN_ID)).is_none(),
+            "a vehicle with no interpolation track yet must not be guessed at"
+        );
+    }
+
+    /// A seat index past the end of `Passengers` — or `Passengers` absent
+    /// entirely — must fall back to seat 0 rather than panicking, the same
+    /// degenerate-case-agrees contract `pin_passenger_to_vehicle` documents.
+    #[test]
+    fn an_unresolvable_seat_index_falls_back_to_seat_zero() {
+        let world = world_with_boat_track(0.0, 0.0, 0.0);
+        // `RIDING_OWN_ID` is not in this vehicle's `Passengers([RIDING_OWN_ID])`
+        // list under a *different* id, so the lookup misses and must default
+        // to 0 rather than panicking or guessing a later seat.
+        let seat = riding_render_seat(&world, RIDING_VEHICLE_ID, Some(9999))
+            .expect("every link is still present; only the seat lookup misses");
+        let expected_y = 64.0 + RIDING_BOAT_HEIGHT / 3.0 - 0.6;
+        assert!(
+            (seat.y - expected_y).abs() < 1e-4,
+            "an unresolved seat index must land on seat 0's height, got {}",
+            seat.y
         );
     }
 }

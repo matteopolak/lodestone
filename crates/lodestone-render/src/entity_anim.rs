@@ -492,6 +492,18 @@ pub struct AnimInput {
     /// forward body pitch, the lowered head, and the legs stepping back — which
     /// vanilla applies *after* the attack swing and *before* the idle arm bob.
     pub crouching: bool,
+    /// Vanilla's `HumanoidRenderState.isPassenger`, i.e. `Entity.isPassenger()`
+    /// — riding any vehicle (boat, minecart, horse, …), not a `Pose` variant.
+    /// There is no `Pose.SITTING` for a mounted rider: `Player.updatePlayerPose`
+    /// has no riding case, so this has to be threaded in as its own bit rather
+    /// than read off [`Self::crouching`]'s pose accessor.
+    ///
+    /// Drives [`Skeleton::pose`]'s [`AnimFamily::Humanoid`] passenger branch —
+    /// the folded knees and the arms dropped to rest on them — which vanilla
+    /// applies *before* the item-pose block, so a using-item passenger's arms
+    /// still take the item pose on top rather than being pinned to the sit
+    /// rotation.
+    pub is_passenger: bool,
 }
 
 impl AnimInput {
@@ -507,6 +519,7 @@ impl AnimInput {
         arm_pose: ArmPose::Empty,
         arm_pose_left_hand: false,
         crouching: false,
+        is_passenger: false,
     };
 }
 
@@ -1017,6 +1030,44 @@ impl Skeleton {
                 set_y_rot(poses, s.left_leg, -0.005);
                 set_z_rot(poses, s.right_leg, 0.005);
                 set_z_rot(poses, s.left_leg, -0.005);
+
+                // `HumanoidModel.setupAnim`'s `isPassenger` branch
+                // (`HumanoidModel.java`), transcribed exactly:
+                //
+                // ```java
+                // if (state.isPassenger) {
+                //    this.rightArm.xRot += -PI / 5;   this.leftArm.xRot += -PI / 5;
+                //    this.rightLeg.xRot = -1.4137167F; this.leftLeg.xRot = -1.4137167F;
+                //    this.rightLeg.yRot = PI / 10;     this.leftLeg.yRot = -PI / 10;
+                //    this.rightLeg.zRot = 0.07853982F; this.leftLeg.zRot = -0.07853982F;
+                // }
+                // ```
+                //
+                // Placed exactly where vanilla places it: **after** the walk-swing
+                // legs above (which it wholly overwrites — a riding leg has no walk
+                // cycle) and **before** `pose_arms_for_item` below (the arms only
+                // *add*, so a using-item passenger's item pose still lands on top of
+                // the sit rotation rather than being erased by it — vanilla's own
+                // `poseRightArm`/`poseLeftArm` run after this block and assign over
+                // whatever it left).
+                if input.is_passenger {
+                    if let Some(i) = s.right_arm {
+                        poses[i].x_rot += -std::f32::consts::PI / 5.0;
+                    }
+                    if let Some(i) = s.left_arm {
+                        poses[i].x_rot += -std::f32::consts::PI / 5.0;
+                    }
+                    if let Some(i) = s.right_leg {
+                        poses[i].x_rot = -1.413_716_7;
+                        poses[i].y_rot = std::f32::consts::PI / 10.0;
+                        poses[i].z_rot = 0.078_539_82;
+                    }
+                    if let Some(i) = s.left_leg {
+                        poses[i].x_rot = -1.413_716_7;
+                        poses[i].y_rot = -std::f32::consts::PI / 10.0;
+                        poses[i].z_rot = -0.078_539_82;
+                    }
+                }
 
                 // Vanilla's ordering exactly: `setupAnim` poses the arms for the
                 // item *after* the walk swing and *before* `setupAttackAnimation`
@@ -2266,6 +2317,90 @@ mod tests {
             crouched_early[arm].z_rot,
             crouched_later[arm].z_rot
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The riding sit pose (`HumanoidModel.setupAnim`'s `state.isPassenger`
+    // branch)
+    // -----------------------------------------------------------------------
+
+    /// **The expected values are `HumanoidModel.java`'s own literals**, not a
+    /// restatement of the port: arms `+= -PI/5` (an add), legs `xRot =
+    /// -1.4137167F` / `yRot = ±PI/10` / `zRot = ±0.07853982F` (all three
+    /// assignments). Predicting the assign/add split matters here exactly as it
+    /// does for the crouch test above: a plausible-but-wrong "add to the legs
+    /// too" implementation would leave the walk swing summed in underneath, and
+    /// this is the test that would catch it.
+    #[test]
+    fn the_sit_pose_matches_vanillas_humanoid_setup_anim_constants() {
+        let skel = skeleton_for("player_wide");
+        let idx = |n: &str| skel.index_of(n).unwrap_or_else(|| panic!("no {n}"));
+        let rest = skel.posed(&AnimInput::REST);
+        // Fed with a non-zero walk swing so the legs test is discriminating: if
+        // the sit pose only *added* its rotation (the wrong hypothesis), the
+        // walking legs' own swing would still be present underneath, which the
+        // exact-value assertions below would catch as a non-zero residual.
+        let walking = AnimInput {
+            limb_swing: 10.0,
+            limb_swing_amount: 1.0,
+            ..AnimInput::REST
+        };
+        let seated = skel.posed(&AnimInput {
+            is_passenger: true,
+            ..walking
+        });
+
+        for arm in ["right_arm", "left_arm"] {
+            let i = idx(arm);
+            let walking_only = skel.posed(&walking)[i].x_rot;
+            assert!(
+                (seated[i].x_rot - walking_only - (-std::f32::consts::PI / 5.0)).abs() < 1e-5,
+                "{arm} pitch moved by {}, want += -PI/5",
+                seated[i].x_rot - walking_only
+            );
+        }
+
+        let right_leg = idx("right_leg");
+        assert!(
+            (seated[right_leg].x_rot - (-1.413_716_7)).abs() < 1e-5,
+            "right leg pitch {} != -1.4137167 (assignment, not the walk swing)",
+            seated[right_leg].x_rot
+        );
+        assert!(
+            (seated[right_leg].y_rot - std::f32::consts::PI / 10.0).abs() < 1e-5,
+            "right leg yaw {}",
+            seated[right_leg].y_rot
+        );
+        assert!(
+            (seated[right_leg].z_rot - 0.078_539_82).abs() < 1e-5,
+            "right leg roll {}",
+            seated[right_leg].z_rot
+        );
+
+        let left_leg = idx("left_leg");
+        assert!(
+            (seated[left_leg].x_rot - (-1.413_716_7)).abs() < 1e-5,
+            "left leg pitch {} != -1.4137167",
+            seated[left_leg].x_rot
+        );
+        assert!(
+            (seated[left_leg].y_rot - (-std::f32::consts::PI / 10.0)).abs() < 1e-5,
+            "left leg yaw {}",
+            seated[left_leg].y_rot
+        );
+        assert!(
+            (seated[left_leg].z_rot - (-0.078_539_82)).abs() < 1e-5,
+            "left leg roll {}",
+            seated[left_leg].z_rot
+        );
+
+        // The control: `is_passenger: false` must be bit-identical to `REST`, or
+        // the assertions above are measuring something other than the flag.
+        let standing = skel.posed(&AnimInput {
+            is_passenger: false,
+            ..AnimInput::REST
+        });
+        assert_eq!(standing, rest, "is_passenger: false must change nothing");
     }
 
     // -----------------------------------------------------------------------
