@@ -137,6 +137,10 @@ pub enum ClientActionKind {
     SendCommand,
     /// [`ClientAction::ChatAck`].
     ChatAck,
+    /// [`ClientAction::SendSignedChat`].
+    SendSignedChat,
+    /// [`ClientAction::AnnounceChatSession`].
+    AnnounceChatSession,
     /// [`ClientAction::Move`].
     Move,
     /// [`ClientAction::KeepAliveResponse`].
@@ -273,6 +277,8 @@ impl From<&ClientAction> for ClientActionKind {
             ClientAction::SendChat { .. } => Self::SendChat,
             ClientAction::SendCommand { .. } => Self::SendCommand,
             ClientAction::ChatAck { .. } => Self::ChatAck,
+            ClientAction::SendSignedChat { .. } => Self::SendSignedChat,
+            ClientAction::AnnounceChatSession { .. } => Self::AnnounceChatSession,
             ClientAction::Move { .. } => Self::Move,
             ClientAction::KeepAliveResponse { .. } => Self::KeepAliveResponse,
             ClientAction::Respawn => Self::Respawn,
