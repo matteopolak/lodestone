@@ -61,6 +61,17 @@
 //!   therefore fails for RCON exactly as it does in vanilla
 //!   (`getPlayerOrException`), rather than silently doing nothing.
 //!
+//!   **`/summon` is also unreachable from RCON**, for the same reason
+//!   `/setblock`/`/fill` are: it needs a resource this listener does not carry.
+//!   `CommandWorld::mobs` is `None` here (RCON builds no `MobHandle`), which the
+//!   command refuses honestly rather than spawning into a throwaway sim nothing
+//!   ticks or streams — see that field's own doc for why `None` is the correct
+//!   answer rather than a `MobHandle::default()`. `/tp` is **not** in this
+//!   list: a teleport is an ordinary directed [`Effect`](crate::Effect) exactly
+//!   like `/gamemode <target>`, so `/tp <targets> <location>` reaches a
+//!   connected player fine over RCON — only the bare, caller-implicit form
+//!   (`/tp <location>`) fails, and only because the console has no body to move.
+//!
 //! # Configuration
 //!
 //! [`RconConfig`] holds the bind address, the password, the built-in command
@@ -426,7 +437,13 @@ const RCON_PERMISSION_LEVEL: u8 = 4;
 #[cfg(not(target_arch = "wasm32"))]
 fn run_command(config: &RconConfig, command: &str) -> CommandResponse {
     let candidates = config.players.as_ref().map(crate::PlayerRegistry::candidates).unwrap_or_default();
-    let world = CommandWorld { rules: &config.world, players: &candidates, state: &config.world };
+    // `mobs: None` — RCON has no `MobHandle` in scope at all (see
+    // `crate::commands::registrar::CommandWorld::mobs`'s own doc for why that
+    // is the honest answer rather than a throwaway sim), so `/summon` refuses
+    // over RCON exactly as `/setblock`/`/fill` already do for a different
+    // missing resource.
+    let world =
+        CommandWorld { rules: &config.world, players: &candidates, state: &config.world, mobs: None };
     let source = CommandSource::console(
         RCON_NAME,
         crate::commands::overworld_dimension(),

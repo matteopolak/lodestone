@@ -176,6 +176,19 @@ pub struct CommandWorld<'a> {
     /// [`RuleStore`] too — see [`super::overworld_dimension`]'s neighbours for the
     /// production wiring, which passes one handle for both fields.
     pub state: &'a crate::world_state::WorldStateHandle,
+    /// `/summon`'s synchronous single-mob spawn entry point — `MobHandle::with`
+    /// plus `MobSim::spawn_species`, both already `pub` on the mob simulation's
+    /// own handle, so this crate needs no new API there at all.
+    ///
+    /// `Option` because not every caller has one: RCON's `run_command` builds a
+    /// [`CommandWorld`] with no chunk source or player registry either (see that
+    /// module's own doc for the up-to-date roster of what RCON can and cannot
+    /// run), and handing `/summon` a `MobHandle::default()` there would spawn
+    /// into a throwaway sim nothing ticks or streams — an island, not a
+    /// degradation. `None` is the honest answer for that caller; a live
+    /// connection's `ChatCommand` arm always has the real handle in scope and
+    /// passes `Some`.
+    pub mobs: Option<&'a crate::mobs::MobHandle>,
 }
 
 /// Read/write access to the world's game rules, abstracted over *which* store.

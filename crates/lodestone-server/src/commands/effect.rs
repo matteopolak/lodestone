@@ -136,6 +136,26 @@ pub enum Effect {
     SetRespawnPoint {
         pos: lodestone_model::BlockPos,
     },
+    /// `/tp`/`/teleport` — an ordinary directed effect, unlike `SetBlock`/
+    /// `Broadcast`: a teleport can genuinely target *any* connected player, not
+    /// just the caller, so it travels the same per-uuid outbox
+    /// `SetGameMode`/`Kill` already use.
+    ///
+    /// `yaw`/`pitch` are `None` to mean "keep the target's current facing" —
+    /// resolved at *application* time by whichever connection actually applies
+    /// the effect (its own for a self-teleport, the target's own for a
+    /// directed one), because that is the only place a live `player_rot` for
+    /// that specific connection is ever in scope. A command executor
+    /// structurally cannot resolve this itself for anyone but the caller: see
+    /// `crate::commands::source::PlayerCandidate`, which carries a position but
+    /// no rotation.
+    Teleport {
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: Option<f32>,
+        pitch: Option<f32>,
+    },
 }
 
 /// An [`Effect`] plus who it is for.
