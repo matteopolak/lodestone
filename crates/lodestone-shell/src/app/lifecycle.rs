@@ -72,6 +72,19 @@ impl ApplicationHandler for WindowApp {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Vanilla's `FramerateLimitTracker::onInputReceived`, called from
+        // `KeyboardHandler.java:419` and three sites in `MouseHandler.java`
+        // (key press, mouse press, scroll) — deliberately **not**
+        // `CursorMoved`, which vanilla never routes through it. Resets the AFK
+        // clock `inactivityFpsLimit` reads (`app::pacing::effective_target_fps`).
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+        ) {
+            self.pacer.record_input(Instant::now());
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -913,10 +926,17 @@ impl ApplicationHandler for WindowApp {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
-        // Spin while focused (vsync paces the loop); otherwise sleep in short
-        // `BACKGROUND_POLL` slices so a backgrounded window stops burning a core
-        // yet still wakes far more often than the 20 Hz tick needs.
-        event_loop.set_control_flow(self.pacer.control_flow(Instant::now()));
+        // Spin while focused and uncapped (vsync paces the loop); sleep until the
+        // next scheduled deadline while `framerateLimit`/`inactivityFpsLimit`
+        // cap a focused window (see `FramePacer::control_flow`'s doc — this is
+        // what keeps a low cap from becoming a busy-wait); otherwise sleep in
+        // short `BACKGROUND_POLL` slices so a backgrounded window stops burning
+        // a core yet still wakes far more often than the 20 Hz tick needs.
+        let now = Instant::now();
+        event_loop.set_control_flow(
+            self.pacer
+                .control_flow(now, self.current_target_fps(now)),
+        );
     }
 }
 

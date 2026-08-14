@@ -506,7 +506,7 @@ fn a_long_stall_is_clamped_not_replayed() {
     let stall = Duration::from_secs(60);
     let t0 = Instant::now();
     let mut pacer = FramePacer::new(t0);
-    let step = pacer.begin_frame(t0 + stall);
+    let step = pacer.begin_frame(t0 + stall, None);
 
     assert!(
         (step.dt - MAX_CATCHUP_SECS).abs() < 1e-12,
@@ -571,7 +571,7 @@ fn a_normal_frame_is_untouched_by_the_clamp() {
     let t0 = Instant::now();
     let mut pacer = FramePacer::new(t0);
     let frame = Duration::from_micros(16_667); // 60 fps
-    let step = pacer.begin_frame(t0 + frame);
+    let step = pacer.begin_frame(t0 + frame, None);
     assert!(
         (step.dt - frame.as_secs_f64()).abs() < 1e-9,
         "60 fps frame was altered: {}",
@@ -581,7 +581,7 @@ fn a_normal_frame_is_untouched_by_the_clamp() {
     // And a 4 fps frame — the rate an occluded window degrades to — must
     // still deliver all 250 ms, i.e. five whole ticks, not be truncated.
     let mut pacer = FramePacer::new(t0);
-    let step = pacer.begin_frame(t0 + Duration::from_millis(250));
+    let step = pacer.begin_frame(t0 + Duration::from_millis(250), None);
     let mut sim = pacing_sim();
     assert_eq!(ticks_for(&mut sim, step.dt), 5);
 }
@@ -598,7 +598,7 @@ fn an_unfocused_window_keeps_ticking_and_presents_at_thirty_fps() {
     let mut ticks = 0u64;
     // One simulated second at a 120 Hz loop rate.
     for i in 1..=120u32 {
-        let step = pacer.begin_frame(t0 + Duration::from_secs_f64(f64::from(i) / 120.0));
+        let step = pacer.begin_frame(t0 + Duration::from_secs_f64(f64::from(i) / 120.0), None);
         if step.render {
             rendered += 1;
         }
@@ -652,7 +652,7 @@ fn paced_frames(loop_hz: u32, iters: u32) -> u32 {
     let mut n = 0;
     for i in 1..=iters {
         let now = t0 + Duration::from_secs_f64(f64::from(i) / f64::from(loop_hz));
-        if pacer.begin_frame(now).render {
+        if pacer.begin_frame(now, None).render {
             n += 1;
         }
     }
@@ -703,12 +703,12 @@ fn coming_back_from_a_stall_resumes_the_rate_rather_than_replaying_a_backlog() {
     // Two minutes with no iterations at all, then a tight 120 Hz loop for
     // half a second.
     let resume = t0 + Duration::from_secs(120);
-    assert!(pacer.begin_frame(resume).render, "the first frame back draws");
+    assert!(pacer.begin_frame(resume, None).render, "the first frame back draws");
 
     let mut after = 0;
     for i in 1..=60u32 {
         if pacer
-            .begin_frame(resume + Duration::from_secs_f64(f64::from(i) / 120.0))
+            .begin_frame(resume + Duration::from_secs_f64(f64::from(i) / 120.0), None)
             .render
         {
             after += 1;
@@ -731,7 +731,7 @@ fn an_occluded_window_skips_presenting_entirely_but_still_ticks() {
     let mut sim = pacing_sim();
     let mut ticks = 0u64;
     for i in 1..=120u32 {
-        let step = pacer.begin_frame(t0 + Duration::from_secs_f64(f64::from(i) / 120.0));
+        let step = pacer.begin_frame(t0 + Duration::from_secs_f64(f64::from(i) / 120.0), None);
         assert!(!step.render, "occluded windows must not acquire a drawable");
         ticks += ticks_for(&mut sim, step.dt);
     }
@@ -743,7 +743,7 @@ fn an_occluded_window_skips_presenting_entirely_but_still_ticks() {
     // Control: the identical loop with occlusion cleared *does* render, so
     // the assertion above is testing occlusion and not a dead pacer.
     pacer.set_occluded(false);
-    let step = pacer.begin_frame(t0 + Duration::from_secs(2));
+    let step = pacer.begin_frame(t0 + Duration::from_secs(2), None);
     assert!(step.render, "clearing occlusion must restore presentation");
 }
 
@@ -751,11 +751,11 @@ fn an_occluded_window_skips_presenting_entirely_but_still_ticks() {
 fn focus_selects_the_control_flow_without_ever_stopping_the_loop() {
     let t0 = Instant::now();
     let mut pacer = FramePacer::new(t0);
-    assert!(matches!(pacer.control_flow(t0), ControlFlow::Poll));
+    assert!(matches!(pacer.control_flow(t0, None), ControlFlow::Poll));
     assert!(pacer.focused());
 
     pacer.set_focused(false);
-    match pacer.control_flow(t0) {
+    match pacer.control_flow(t0, None) {
         ControlFlow::WaitUntil(at) => {
             let slice = at.saturating_duration_since(t0);
             assert!(
@@ -767,6 +767,113 @@ fn focus_selects_the_control_flow_without_ever_stopping_the_loop() {
         other => panic!("unfocused must sleep, not spin or wait forever: {other:?}"),
     }
     assert!(!pacer.focused());
+}
+
+#[test]
+fn a_focused_capped_window_is_paced_by_a_wait_not_a_spin() {
+    // The busy-wait failure mode the brief names explicitly: a `framerateLimit`
+    // below the refresh rate must not turn into `ControlFlow::Poll` calling
+    // `begin_frame` every iteration only to find `render == false` — that is a
+    // spin loop wearing a frame cap's clothes. `control_flow` must instead
+    // report a real `WaitUntil` deadline once a cap is in effect.
+    let t0 = Instant::now();
+    let mut pacer = FramePacer::new(t0);
+    assert!(
+        matches!(pacer.control_flow(t0, None), ControlFlow::Poll),
+        "uncapped and focused: vsync paces us, unchanged from before this option"
+    );
+    match pacer.control_flow(t0, Some(30)) {
+        ControlFlow::WaitUntil(_) => {}
+        other => panic!("a focused window with a real cap must sleep, not poll: {other:?}"),
+    }
+}
+
+#[test]
+fn a_focused_cap_presents_at_the_capped_rate_not_every_iteration() {
+    // Drive a 120 Hz loop (a display comfortably above the cap) with
+    // `target_fps = Some(30)` and count presented frames over one simulated
+    // second — the same counting shape `an_unfocused_window_keeps_ticking_and_
+    // presents_at_thirty_fps` already uses, applied to the *focused* path this
+    // test adds.
+    let t0 = Instant::now();
+    let mut pacer = FramePacer::new(t0);
+    let mut rendered = 0u32;
+    for i in 1..=120u32 {
+        let now = t0 + Duration::from_secs_f64(f64::from(i) / 120.0);
+        if pacer.begin_frame(now, Some(30)).render {
+            rendered += 1;
+        }
+    }
+    assert!(
+        (30..=31).contains(&rendered),
+        "a focused 30 fps cap against a 120 Hz loop should present ~30 frames, got {rendered}"
+    );
+
+    // Negative control: the same loop with no cap presents every iteration —
+    // proving the 30-vs-120 gap above is the cap's doing, not some other
+    // throttle this pacer already applies while focused.
+    let mut uncapped = FramePacer::new(t0);
+    let mut all_rendered = 0u32;
+    for i in 1..=120u32 {
+        let now = t0 + Duration::from_secs_f64(f64::from(i) / 120.0);
+        if uncapped.begin_frame(now, None).render {
+            all_rendered += 1;
+        }
+    }
+    assert_eq!(
+        all_rendered, 120,
+        "uncapped and focused must render every iteration — the control that \
+         makes the capped count above meaningful"
+    );
+}
+
+#[test]
+fn effective_target_fps_matches_vanillas_framerate_limit_tracker() {
+    use crate::app::pacing::effective_target_fps;
+    use crate::config::InactivityFpsLimit;
+
+    // Unlimited (260) and not idle: no cap at all.
+    assert_eq!(effective_target_fps(260, InactivityFpsLimit::Afk, 0.0), None);
+    // A real cap, not idle: the raw limit, unaffected by the AFK machinery.
+    assert_eq!(
+        effective_target_fps(120, InactivityFpsLimit::Afk, 0.0),
+        Some(120)
+    );
+    // `Minimized` never reduces for idle input, however long — only `Afk`
+    // does (`FramerateLimitTracker.java:37`'s own gate).
+    assert_eq!(
+        effective_target_fps(120, InactivityFpsLimit::Minimized, 10_000.0),
+        Some(120)
+    );
+    // SHORT_AFK: `min(limit, 30)` past 60 s idle, vanilla's own formula
+    // (`FramerateLimitTracker.java:31`) — a limit *above* 30 gets capped down.
+    assert_eq!(
+        effective_target_fps(120, InactivityFpsLimit::Afk, 90.0),
+        Some(30)
+    );
+    // ...and a limit already *below* 30 is not raised by it.
+    assert_eq!(
+        effective_target_fps(20, InactivityFpsLimit::Afk, 90.0),
+        Some(20)
+    );
+    // Unlimited base, still SHORT_AFK: the 30 cap applies with nothing to
+    // `min` it against.
+    assert_eq!(
+        effective_target_fps(260, InactivityFpsLimit::Afk, 90.0),
+        Some(30)
+    );
+    // LONG_AFK: flatly 10 past 600 s, vanilla's own `LONG_AFK_LIMIT`
+    // (`FramerateLimitTracker.java:30`), regardless of the raw limit.
+    assert_eq!(
+        effective_target_fps(120, InactivityFpsLimit::Afk, 700.0),
+        Some(10)
+    );
+    // Right at the boundary must not have crossed it yet (`>`, not `>=`,
+    // mirroring vanilla's own `afkTimeMillis > 60000L`).
+    assert_eq!(
+        effective_target_fps(120, InactivityFpsLimit::Afk, 60.0),
+        Some(120)
+    );
 }
 
 // -- key dispatch and precedence ----------------------------------------

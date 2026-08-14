@@ -569,6 +569,19 @@ pub struct StateModel {
     /// `blockState.getLightEmission() == 0` half has no data source in this
     /// crate yet and is not applied — see that field's doc for what is missing.
     pub ambient_occlusion: bool,
+    /// Whether this state is one of vanilla's eleven `LeavesBlock`s (the same
+    /// real, vanilla-sourced list [`FLUID_OVERLAY_LEAVES_BLOCKS`] already
+    /// carries for the water-overlay decal), i.e. the population
+    /// `options.cutoutLeaves` gates.
+    ///
+    /// **Deliberately not derived from [`Self::layer`].** Grass, ferns, glass
+    /// panes and a dozen other blocks are `RenderLayer::Cutout` too, and
+    /// vanilla's FAST preset does not make *those* solid — only leaves. A
+    /// layer-based predicate would have turned every cutout block opaque, not
+    /// the one population the option names. Consumed by
+    /// `mesher::SnapshotModelView::force_opaque_at` through
+    /// [`BlockModels::is_leaves`].
+    pub is_leaves: bool,
 }
 
 impl StateModel {
@@ -583,6 +596,7 @@ impl StateModel {
             particle_uv: None,
             particle_tint: None,
             ambient_occlusion: true,
+            is_leaves: false,
         }
     }
 }
@@ -1661,6 +1675,8 @@ impl BlockModels {
                         .map(unpack_rgb);
                     let layer = block_layer(&sprite_rects, &quads);
                     let face_occludes = face_occlusion(&sprite_rects, &quads);
+                    let is_leaves = resolved
+                        .is_some_and(|r| FLUID_OVERLAY_LEAVES_BLOCKS.contains(&r.block.path()));
                     StateModel {
                         quads,
                         occludes: face_occludes.iter().all(|o| *o),
@@ -1669,6 +1685,7 @@ impl BlockModels {
                         particle_uv,
                         particle_tint,
                         ambient_occlusion,
+                        is_leaves,
                     }
                 }
                 _ => StateModel::empty(),
@@ -2082,6 +2099,13 @@ impl BlockModels {
     #[must_use]
     pub fn ambient_occlusion(&self, state_id: u32) -> bool {
         self.state(state_id).ambient_occlusion
+    }
+
+    /// Whether this state is one of vanilla's `LeavesBlock`s — see
+    /// [`StateModel::is_leaves`].
+    #[must_use]
+    pub fn is_leaves(&self, state_id: u32) -> bool {
+        self.state(state_id).is_leaves
     }
 
     /// Normalised atlas UVs `[u0, v0, u1, v1]` of a state's `#particle` sprite —

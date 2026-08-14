@@ -136,6 +136,139 @@ pub fn cloud_status_from_name(name: &str) -> Option<lodestone_render::CloudStatu
     }
 }
 
+/// Vanilla's `InactivityFpsLimit` (`InactivityFpsLimit.java`), the `options.
+/// inactivityFpsLimit` cycle — "Reduce FPS when" `Minimized`/`AFK`.
+///
+/// `Minimized` reduces the frame rate only while the OS reports the window
+/// iconified; `Afk` additionally runs vanilla's own idle clock
+/// (`FramerateLimitTracker`'s `SHORT_AFK`/`LONG_AFK`, 30 fps after a minute of
+/// no input and 10 after ten). This client's window already throttles an
+/// unfocused/occluded window unconditionally (`app::pacing::FramePacer`'s
+/// table, which predates this option), so what this field actually gates is
+/// the AFK half — see [`crate::app::pacing::effective_target_fps`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InactivityFpsLimit {
+    /// `options.inactivityFpsLimit.minimized` — reduce only when iconified.
+    Minimized,
+    /// `options.inactivityFpsLimit.afk` — vanilla's own default.
+    #[default]
+    Afk,
+}
+
+/// Vanilla's `InactivityFpsLimit.getSerializedName` — the string `options.json`
+/// stores [`Options::inactivity_fps_limit`] as. Same reasoning as
+/// [`cloud_status_name`]: a name, not an ordinal, so the file stays
+/// hand-editable and immune to a future variant insertion.
+#[must_use]
+pub fn inactivity_fps_limit_name(value: InactivityFpsLimit) -> &'static str {
+    match value {
+        InactivityFpsLimit::Minimized => "minimized",
+        InactivityFpsLimit::Afk => "afk",
+    }
+}
+
+/// The inverse of [`inactivity_fps_limit_name`]. `None` for anything else,
+/// which [`Options::from_json`] turns into vanilla's `Afk` default.
+#[must_use]
+pub fn inactivity_fps_limit_from_name(name: &str) -> Option<InactivityFpsLimit> {
+    match name {
+        "minimized" => Some(InactivityFpsLimit::Minimized),
+        "afk" => Some(InactivityFpsLimit::Afk),
+        _ => None,
+    }
+}
+
+/// Vanilla's `Options.UNLIMITED_FRAMERATE_CUTOFF` (`Options.java:119`): the
+/// stored `framerateLimit` value at and above which `Minecraft.runTick`
+/// (`Minecraft.java:1331-1333`) never calls `FramerateLimiter.limitDisplayFPS`
+/// at all — "Unlimited" is a *sentinel value*, not a special-cased "no limit"
+/// state, and `260` is chosen so the row's own `IntRange(1, 26).xmap(*10)`
+/// makes it the slider's last bucket.
+pub const UNLIMITED_FRAMERATE_CUTOFF: u32 = 260;
+
+/// Vanilla's `framerateLimit` floor — `Codec.intRange(10, 260)`
+/// (`Options.java:127`). The slider's own `IntRange(1, 26)` pre-image floor
+/// (bucket `1`) maps to this through the `*10` xmap.
+pub const MIN_FRAMERATE_LIMIT: u32 = 10;
+
+/// Vanilla's shipped default `framerateLimit`, `120` (`Options.java:128`) —
+/// bucket `12` of `26` through the same xmap
+/// [`menu::options::INT_RANGE_SLIDERS`](crate::menu::options::INT_RANGE_SLIDERS)
+/// already carried for the inactive row.
+pub const DEFAULT_FRAMERATE_LIMIT: u32 = 120;
+
+/// Vanilla's `GraphicsPreset` (`GraphicsPreset.java`) — the "Quality &
+/// Performance" preset slider: `Fast`, `Fancy`, `Fabulous`, `Custom`, in that
+/// declaration order (the order [`crate::menu::options::LiveOption::
+/// GraphicsPreset`]'s slider visits, matching `SliderableEnum.toSliderValue`'s
+/// `values.indexOf`).
+///
+/// `GraphicsPreset::apply` (`GraphicsPreset.java:36-107`) writes **seventeen**
+/// vanilla quality options; this client only has real consumers for three of
+/// them ([`Options::render_distance`], [`Options::cloud_status`],
+/// [`Options::cutout_leaves`]), so [`crate::menu::nav::MenuNav::apply_graphics_preset`]
+/// writes those three and no others — see that function's doc for the numbers
+/// and for why `Custom` writes nothing (vanilla's own `switch` has no `CUSTOM`
+/// arm).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphicsPreset {
+    /// `GraphicsPreset.FAST`.
+    Fast,
+    /// `GraphicsPreset.FANCY` — vanilla's shipped default.
+    Fancy,
+    /// `GraphicsPreset.FABULOUS`.
+    Fabulous,
+    /// `GraphicsPreset.CUSTOM` — the state every individually-changed quality
+    /// option should settle into (vanilla's `setGraphicsPresetToCustom`).
+    /// Nothing in this client writes it automatically yet; see
+    /// [`Options::graphics_preset`]'s doc for the gap.
+    Custom,
+}
+
+impl Default for GraphicsPreset {
+    fn default() -> Self {
+        GraphicsPreset::Fancy
+    }
+}
+
+impl GraphicsPreset {
+    /// The four variants in `GraphicsPreset.values()`'s declaration order —
+    /// the order both the slider and [`graphics_preset_name`]/
+    /// [`graphics_preset_from_name`] key off.
+    pub const ORDER: [GraphicsPreset; 4] = [
+        GraphicsPreset::Fast,
+        GraphicsPreset::Fancy,
+        GraphicsPreset::Fabulous,
+        GraphicsPreset::Custom,
+    ];
+}
+
+/// `GraphicsPreset.getSerializedName` — the string `options.json` stores
+/// [`Options::graphics_preset`] as. A name, not an ordinal, for
+/// [`cloud_status_name`]'s reason.
+#[must_use]
+pub fn graphics_preset_name(value: GraphicsPreset) -> &'static str {
+    match value {
+        GraphicsPreset::Fast => "fast",
+        GraphicsPreset::Fancy => "fancy",
+        GraphicsPreset::Fabulous => "fabulous",
+        GraphicsPreset::Custom => "custom",
+    }
+}
+
+/// The inverse of [`graphics_preset_name`]. `None` for anything else, which
+/// [`Options::from_json`] turns into vanilla's `Fancy` default.
+#[must_use]
+pub fn graphics_preset_from_name(name: &str) -> Option<GraphicsPreset> {
+    match name {
+        "fast" => Some(GraphicsPreset::Fast),
+        "fancy" => Some(GraphicsPreset::Fancy),
+        "fabulous" => Some(GraphicsPreset::Fabulous),
+        "custom" => Some(GraphicsPreset::Custom),
+        _ => None,
+    }
+}
+
 /// Vanilla's eleven `SoundSource` names, in `SoundSource` declaration order —
 /// the strings `SoundSource.getName()` returns.
 ///
@@ -534,6 +667,58 @@ pub struct Options {
     /// `Off` is a variant of `lodestone_render::CloudStatus` rather than a skip in
     /// the shell's pass; that enum's own doc records why.
     pub cloud_status: lodestone_render::CloudStatus,
+    /// Vanilla's **Max Framerate** option (`options.framerateLimit`,
+    /// `Options.java:120-130`): `Codec.intRange(10, 260)`, default `120`, where
+    /// `260` ([`UNLIMITED_FRAMERATE_CUTOFF`]) means "Unlimited" — a sentinel
+    /// value, not a special enum state (`Minecraft.runTick`'s own
+    /// `if (framerateLimit < 260)` gate).
+    ///
+    /// This is the **raw stored fps**, not the slider's `1..=26` pre-image —
+    /// see `menu::options::INT_RANGE_SLIDERS`'s `"framerateLimit"` row for the
+    /// `*10` xmap between the two.
+    ///
+    /// Consumed by [`crate::app::pacing::effective_target_fps`], which folds
+    /// this together with [`Self::inactivity_fps_limit`]'s AFK clock into one
+    /// target the frame pacer schedules against — see that function's doc for
+    /// why the two compose rather than one overriding the other.
+    pub framerate_limit: u32,
+    /// Vanilla's **VSync** option (`options.vsync`, `Options.java:511-513`),
+    /// default `true`. Vanilla's `onChange` calls
+    /// `Minecraft.invalidateSurfaceConfiguration()`; this client's equivalent
+    /// is `WindowApp::sync_vsync_present_mode`, which polls this field once per
+    /// presented frame and hands it to
+    /// `lodestone_render::SurfaceTarget::set_present_mode` — see that method's
+    /// doc for why polling a pure field into a GPU setter is safe here (the
+    /// equality guard inside it).
+    ///
+    /// **Composes with [`Self::framerate_limit`], it does not gate it**:
+    /// vanilla applies `FramerateLimiter.limitDisplayFPS` whenever
+    /// `framerateLimit < 260` **unconditionally**, vsync on or off
+    /// (`Minecraft.java:1331-1333` has no vsync check at all) — the two are
+    /// independent throttles the client is subject to simultaneously, and this
+    /// client reproduces that rather than inventing a precedence between them.
+    pub enable_vsync: bool,
+    /// Vanilla's **Reduce FPS when** option (`options.inactivityFpsLimit`).
+    /// See [`InactivityFpsLimit`]'s own doc for what it actually gates here.
+    pub inactivity_fps_limit: InactivityFpsLimit,
+    /// Vanilla's **Preset** slider (`options.graphics.preset`,
+    /// `Options.java:158-166`), default `Fancy`. See [`GraphicsPreset`]'s doc
+    /// for the three fields this client's preset actually writes, and why.
+    pub graphics_preset: GraphicsPreset,
+    /// Vanilla's **See-Through Leaves** option (`options.cutoutLeaves`,
+    /// `Options.java:213-218`), default `true` (holes visible — vanilla's
+    /// FANCY/FABULOUS behaviour).
+    ///
+    /// `false` is vanilla's FAST behaviour: leaves render through the *solid*
+    /// pass, which skips the alpha test entirely, so the same cutout texture's
+    /// holes paint solid instead of see-through. Reaches
+    /// `lodestone_render::models::ModelVertex::cutout_bypass` through
+    /// `mesher::SnapshotModelView::force_opaque_at` — see that field's doc for
+    /// why this is a per-vertex render-pass bypass rather than a second
+    /// occlusion bake. Changing this forces a remesh of every loaded column
+    /// (`Sim::set_cutout_leaves`), matching vanilla's own
+    /// `operateOnLevelExtractor(LevelExtractor::allChanged)`.
+    pub cutout_leaves: bool,
 }
 
 impl Default for Options {
@@ -573,6 +758,11 @@ impl Default for Options {
             // `CloudStatus::default()` is `Fancy`, vanilla's own default — named
             // through `Default` rather than spelled out so the two cannot drift.
             cloud_status: lodestone_render::CloudStatus::default(),
+            framerate_limit: DEFAULT_FRAMERATE_LIMIT,
+            enable_vsync: true,
+            inactivity_fps_limit: InactivityFpsLimit::default(),
+            graphics_preset: GraphicsPreset::default(),
+            cutout_leaves: true,
         }
     }
 }
@@ -781,6 +971,39 @@ impl Options {
             .and_then(serde_json::Value::as_str)
             .and_then(cloud_status_from_name)
             .unwrap_or_default();
+        // Clamped to vanilla's own `Codec.intRange(10, 260)` — a mangled file
+        // must not be able to produce a limit below the floor, and rounding to
+        // the nearest `*10` bucket keeps a hand-edited value that fell between
+        // two buckets from silently teleporting the slider handle.
+        let framerate_limit = obj
+            .get("framerate_limit")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .map(|v| (v / 10 * 10).clamp(MIN_FRAMERATE_LIMIT, UNLIMITED_FRAMERATE_CUTOFF))
+            .unwrap_or(DEFAULT_FRAMERATE_LIMIT);
+        // Absent or malformed is **on** — vanilla's own default
+        // (`Options.java:511`), `view_bobbing`'s reason.
+        let enable_vsync = obj
+            .get("enable_vsync")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let inactivity_fps_limit = obj
+            .get("inactivity_fps_limit")
+            .and_then(serde_json::Value::as_str)
+            .and_then(inactivity_fps_limit_from_name)
+            .unwrap_or_default();
+        let graphics_preset = obj
+            .get("graphics_preset")
+            .and_then(serde_json::Value::as_str)
+            .and_then(graphics_preset_from_name)
+            .unwrap_or_default();
+        // Absent or malformed is **on** — vanilla's own default
+        // (`Options.java:213`), `view_bobbing`'s reason again: a mangled file
+        // must not silently switch a player onto FAST's solid leaves.
+        let cutout_leaves = obj
+            .get("cutout_leaves")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
         Self {
             gui_scale,
             keybinds,
@@ -814,6 +1037,11 @@ impl Options {
             glint_speed,
             glint_strength,
             cloud_status,
+            framerate_limit,
+            enable_vsync,
+            inactivity_fps_limit,
+            graphics_preset,
+            cutout_leaves,
         }
     }
 
@@ -973,6 +1201,27 @@ impl Options {
                 "cloud_status".into(),
                 cloud_status_name(self.cloud_status).into(),
             );
+        }
+        if self.framerate_limit != default.framerate_limit {
+            obj.insert("framerate_limit".into(), self.framerate_limit.into());
+        }
+        if !self.enable_vsync {
+            obj.insert("enable_vsync".into(), false.into());
+        }
+        if self.inactivity_fps_limit != default.inactivity_fps_limit {
+            obj.insert(
+                "inactivity_fps_limit".into(),
+                inactivity_fps_limit_name(self.inactivity_fps_limit).into(),
+            );
+        }
+        if self.graphics_preset != default.graphics_preset {
+            obj.insert(
+                "graphics_preset".into(),
+                graphics_preset_name(self.graphics_preset).into(),
+            );
+        }
+        if !self.cutout_leaves {
+            obj.insert("cutout_leaves".into(), false.into());
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());

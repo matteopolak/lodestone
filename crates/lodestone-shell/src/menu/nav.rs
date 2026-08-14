@@ -3639,6 +3639,26 @@ impl MenuNav {
                 self.cycle_cloud_status(1);
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::FramerateLimit) => {
+                self.step_framerate_limit(1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::EnableVsync) => {
+                self.toggle_enable_vsync();
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::InactivityFpsLimit) => {
+                self.cycle_inactivity_fps_limit(1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::GraphicsPreset) => {
+                self.step_graphics_preset(1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::CutoutLeaves) => {
+                self.toggle_cutout_leaves();
+                MenuAction::None
+            }
         }
     }
 
@@ -3704,6 +3724,129 @@ impl MenuNav {
             .unwrap_or(0) as i32;
         let next = (index + delta).rem_euclid(ORDER.len() as i32) as usize;
         self.options.cloud_status = ORDER[next];
+        self.persist_options();
+    }
+
+    /// Steps `framerateLimit` by one bucket (10 fps) and wraps, then persists.
+    ///
+    /// Wraps in the `[10, 260]` domain rather than saturating, for
+    /// [`Self::step_render_distance`]'s reason: this is a click-only control
+    /// (a *drag* goes through [`Self::set_live_slider`] instead), and a value
+    /// parked at "Unlimited" has to be able to come back down.
+    fn step_framerate_limit(&mut self, delta: i32) {
+        use crate::config::{MIN_FRAMERATE_LIMIT, UNLIMITED_FRAMERATE_CUTOFF};
+        let buckets = (UNLIMITED_FRAMERATE_CUTOFF - MIN_FRAMERATE_LIMIT) / 10 + 1;
+        let offset = (self.options.framerate_limit - MIN_FRAMERATE_LIMIT) / 10;
+        let wrapped = (offset as i32 + delta).rem_euclid(buckets as i32) as u32;
+        self.options.framerate_limit = MIN_FRAMERATE_LIMIT + wrapped * 10;
+        self.persist_options();
+    }
+
+    /// Flips `options.vsync` and saves immediately, same eager-persistence
+    /// rule as [`Self::toggle_chat_colors`]. The live consumer is
+    /// `WindowApp::sync_vsync_present_mode`, which polls this field every
+    /// presented frame rather than being pushed from here — see that method's
+    /// doc for why a poll is the safe shape against a GPU setter.
+    fn toggle_enable_vsync(&mut self) {
+        self.options.enable_vsync = !self.options.enable_vsync;
+        self.persist_options();
+    }
+
+    /// Cycles `inactivityFpsLimit` through its two declared states
+    /// (`Minimized`, `Afk`) and wraps, then persists. Same shape as
+    /// [`Self::cycle_cloud_status`], two states instead of three.
+    fn cycle_inactivity_fps_limit(&mut self, delta: i32) {
+        use crate::config::InactivityFpsLimit;
+        const ORDER: [InactivityFpsLimit; 2] =
+            [InactivityFpsLimit::Minimized, InactivityFpsLimit::Afk];
+        let index = ORDER
+            .iter()
+            .position(|s| *s == self.options.inactivity_fps_limit)
+            .unwrap_or(0) as i32;
+        let next = (index + delta).rem_euclid(ORDER.len() as i32) as usize;
+        self.options.inactivity_fps_limit = ORDER[next];
+        self.persist_options();
+    }
+
+    /// Steps `graphicsPreset` through `GraphicsPreset::ORDER` and wraps, then
+    /// applies it — [`Self::apply_graphics_preset`] — and persists.
+    ///
+    /// The apply happens **every** step, `Custom` included, matching vanilla:
+    /// `Options::applyGraphicsPreset` calls `value.apply(minecraft)`
+    /// unconditionally, and `GraphicsPreset.apply`'s `switch` simply has no
+    /// `CUSTOM` case, so applying `Custom` is a real call that writes nothing
+    /// — not a skipped call. [`Self::apply_graphics_preset`] mirrors that
+    /// shape rather than special-casing `Custom` at this call site.
+    fn step_graphics_preset(&mut self, delta: i32) {
+        use crate::config::GraphicsPreset;
+        let index = GraphicsPreset::ORDER
+            .iter()
+            .position(|p| *p == self.options.graphics_preset)
+            .unwrap_or(0) as i32;
+        let next = (index + delta).rem_euclid(GraphicsPreset::ORDER.len() as i32) as usize;
+        self.options.graphics_preset = GraphicsPreset::ORDER[next];
+        self.apply_graphics_preset();
+        self.persist_options();
+    }
+
+    /// Vanilla's `GraphicsPreset::apply` (`GraphicsPreset.java:36-107`), the
+    /// three fields of its seventeen this client has real consumers for.
+    ///
+    /// | preset | `renderDistance` | `cloudStatus` | `cutoutLeaves` |
+    /// |---|---|---|---|
+    /// | `Fast` | 8 | `Fast` | `false` |
+    /// | `Fancy` | 16 | `Fancy` | `true` |
+    /// | `Fabulous` | 32 | `Fancy` | `true` |
+    /// | `Custom` | — | — | — |
+    ///
+    /// `Custom` writes nothing, matching vanilla's own `switch` (no `CUSTOM`
+    /// arm — see [`Self::step_graphics_preset`]'s doc). The fourteen fields
+    /// this client does not have a consumer for at all
+    /// (`biomeBlendRadius`, `simulationDistance`, `particles`,
+    /// `mipmapLevels`, `entityShadows`, `menuBackgroundBlurriness`,
+    /// `cloudRange`, `improvedTransparency`, `weatherRadius`,
+    /// `maxAnisotropyBit`, `textureFiltering`, `prioritizeChunkUpdates`,
+    /// `entityDistanceScaling`, `ambientOcclusion`) are left alone — writing
+    /// them would move a settings-row *label* with nothing behind it to
+    /// consume the new value, the exact fabrication `docs/`'s "departure 1"
+    /// exists to name rather than hide.
+    ///
+    /// Never resets a hand-picked `render_distance`/`cloud_status`/
+    /// `cutout_leaves` back to `Custom` on its own: vanilla's
+    /// `setGraphicsPresetToCustom` (called from each of those options'
+    /// individual `onChange`) has no counterpart here yet, so choosing FAST
+    /// and then hand-tweaking Render Distance leaves the Preset row reading
+    /// "Fast" even though the value it placed has moved — a known,
+    /// documented gap rather than a silent one.
+    fn apply_graphics_preset(&mut self) {
+        use crate::config::GraphicsPreset;
+        use lodestone_render::CloudStatus;
+        match self.options.graphics_preset {
+            GraphicsPreset::Fast => {
+                self.options.render_distance = 8;
+                self.options.cloud_status = CloudStatus::Fast;
+                self.options.cutout_leaves = false;
+            }
+            GraphicsPreset::Fancy => {
+                self.options.render_distance = 16;
+                self.options.cloud_status = CloudStatus::Fancy;
+                self.options.cutout_leaves = true;
+            }
+            GraphicsPreset::Fabulous => {
+                self.options.render_distance = 32;
+                self.options.cloud_status = CloudStatus::Fancy;
+                self.options.cutout_leaves = true;
+            }
+            GraphicsPreset::Custom => {}
+        }
+    }
+
+    /// Flips `options.cutoutLeaves` and saves immediately, same eager-persistence
+    /// rule as [`Self::toggle_chat_colors`]. See
+    /// [`crate::config::Options::cutout_leaves`]'s doc for the render-side
+    /// consumer and why toggling it forces a remesh.
+    fn toggle_cutout_leaves(&mut self) {
+        self.options.cutout_leaves = !self.options.cutout_leaves;
         self.persist_options();
     }
 
@@ -3779,11 +3922,29 @@ impl MenuNav {
                         crate::config::MAX_FOV as i32,
                     ) as u32;
                 }
-                // `int_range` only answers for the three above; a fourth would
+                // `framerateLimit`'s bucket is `fps / 10` (`INT_RANGE_SLIDERS`'s
+                // own row), so the value this bucket map returns has to be
+                // multiplied back before it is a real fps.
+                LiveOption::FramerateLimit => {
+                    self.options.framerate_limit = (value.max(1) as u32 * 10).clamp(
+                        crate::config::MIN_FRAMERATE_LIMIT,
+                        crate::config::UNLIMITED_FRAMERATE_CUTOFF,
+                    );
+                }
+                // `int_range` only answers for the four above; a fifth would
                 // have to add its own write here, and falling through to
                 // `false` is the honest result until it does.
                 _ => return false,
             }
+            self.persist_options();
+            return true;
+        }
+        // `graphicsPreset`'s `SliderableEnum`, the third shape alongside
+        // `UnitDouble` and `IntRange` above — see
+        // `menu::options::graphics_preset_from_fraction`.
+        if live == LiveOption::GraphicsPreset {
+            self.options.graphics_preset = crate::menu::options::graphics_preset_from_fraction(f);
+            self.apply_graphics_preset();
             self.persist_options();
             return true;
         }
@@ -6136,8 +6297,11 @@ mod tests {
             "nor persist it off — that is what survived the restart in #391"
         );
 
-        // …and the row beside it, which we do not honour, does nothing.
-        let inert = settings_row(&mut nav, &mut ui, is_option("inactivityFpsLimit"));
+        // …and a still-inert row on the same page does nothing.
+        // (`inactivityFpsLimit`, this test's former inert row, went live
+        // alongside the rest of the video settings and is exercised by its own
+        // gate now; `fullscreen` is still unwired.)
+        let inert = settings_row(&mut nav, &mut ui, is_option("fullscreen"));
         assert_ne!(inert, scale, "premise: they are different rows");
         assert_eq!(nav.click(&mut ui, inert), MenuAction::None);
         assert_eq!(

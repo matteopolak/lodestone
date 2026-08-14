@@ -185,7 +185,7 @@ fn vertex(position: [f32; 3], uv: [f32; 2]) -> ModelVertex {
         light: 0xFF,
         tint: 255,
         anim: 0,
-        _pad: 0,
+        cutout_bypass: 0,
         tint_rgb_override: [0, 0, 0, 0],
     }
 }
