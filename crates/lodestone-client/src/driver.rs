@@ -981,9 +981,28 @@ impl<T: Transport> Driver<T> {
                 self.awaiting_player_load = true;
                 self.forget_previous_dimension(dimension);
             }
+            // **Only a message that carried a signature advances the window.**
+            // `ChatAckInfo::signature` is empty when the wire's optional
+            // signature was absent, and `ack` is `Some` either way — the
+            // decoder reports the packet, not a judgement about it.
+            //
+            // Both peers count the same messages or the window desyncs, and
+            // both count *signed* ones only: the server calls
+            // `LastSeenMessagesValidator.addPending` under
+            // `if (signature != null)` in `ServerGamePacketListenerImpl`, and
+            // vanilla's own client mirrors it with the same null check around
+            // `ClientPacketListener.markMessageAsProcessed` in
+            // `ChatListener.handlePlayerChatMessage`. Counting an unsigned
+            // `PLAYER_CHAT` here — a message from a player with no chat
+            // session, or this client's own message echoed back while it sends
+            // unsigned — advances our offset past a server count that never
+            // moved. The server then throws `ValidationException` ("Advanced
+            // last seen window by N messages, but expected at most M") from
+            // `applyOffset` and disconnects with
+            // `multiplayer.disconnect.chat_validation_failed`.
             ClientEvent::Chat {
                 ack: Some(info), ..
-            } => {
+            } if !info.signature.is_empty() => {
                 // Burst valve (vanilla's `markMessageAsProcessed`): record the
                 // signed message and, if more than 64 are now pending, flush
                 // immediately rather than waiting for the next tick. A filtered

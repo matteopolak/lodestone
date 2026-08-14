@@ -7,9 +7,12 @@ chat-signing key pair ([`lodestone_auth::fetch_key_pair`]) and signing
 outgoing chat messages with it ([`lodestone_auth::ChatSession`]), plus the
 wire shapes needed to carry a session announcement and a signed message
 ( [`ChatSessionUpdate`], [`ChatCommandSigned`] in
-`crates/protocol/v770/src/packets/game.rs`) and to keep (rather than discard)
-another player's announced session ( [`RemoteChatSessionData`] in
-`crates/protocol/v770/src/packets/player_info.rs`).
+`crates/protocol/v770/src/packets/game.rs`), **and** the receiving half:
+keeping another player's announced session
+( [`RemoteChatSessionData`] in `crates/protocol/v770/src/packets/player_info.rs`,
+carried through to [`lodestone_model::event::ChatSessionInfo`] and
+[`lodestone_game::tablist::RemoteChatSession`]) and verifying their signed
+messages against it ([`Driver`]'s `emit`, via [`verify_signature`]).
 
 Before this, none of it existed: every outgoing chat message went out via
 `ChatMessage::unsigned`, which hard-codes `salt: 0, signature: None`, and
@@ -30,7 +33,64 @@ is explicitly not:
 | message signed over the real last-seen chain | done — [`Driver::maybe_sign_chat`]/[`sign_chat_action`] turns an outgoing [`ClientAction::SendChat`] into [`ClientAction::SendSignedChat`], signing over [`lodestone_game::chat_ack::LastSeenTracker`]'s *current* window (`generate_and_apply_update`), not a stale or cached one |
 | signature on the wire in the right field order | done — v770's adapter encodes `SendSignedChat` into `ChatMessage` with a real signature and non-zero timestamp/salt/ack fields; `crates/protocol/v770/tests/chat_dispatch.rs`'s `send_signed_chat_encodes_millis_timestamp_and_ack_fields_in_order` asserts the exact byte layout, and `announce_chat_session_encodes_uuid_millis_key_then_signature` does the same for `chat_session_update` |
 | offline play still sends unsigned | done — `chat_session` stays `None` without an `auth_session` (or if the key fetch fails), and `maybe_sign_chat` passes `SendChat` through unchanged in that case; every pre-existing `SendChat` test in `lodestone-client`'s `tests/driver.rs` exercises exactly that path and stayed green |
-| a real server accepting a signed message | **unverifiable from this repo** — no test here reaches a real session server or a real game server, so this is traced, not tested |
+| a real server accepting a signed message | **still unverified** — reaching it needs an *online-mode* server and a real Mojang-issued key, and the local oracle runs offline. See "The chat-validation kick" below for what a real server *did* tell us. |
+
+## The chat-validation kick, and why signing is off by default
+
+**Signing is gated behind `LODESTONE_SECURE_CHAT` and defaults to off**
+([`SECURE_CHAT_ENV`] in `lodestone-client/src/driver.rs`). It was turned on by
+default when this first landed, and a real server disconnected the repo owner
+with *"Chat message validation failure"*. That mitigation is separate from the
+fix below and is still in force.
+
+**The fault was not in the signature.** `build_signature_payload` was
+re-derived independently from `PlayerChatMessage.updateSignature` →
+`SignedMessageLink.updateSignature` → `SignedMessageBody.updateSignature` →
+`LastSeenMessages.updateSignature` and is byte-for-byte correct, including the
+epoch-**seconds** timestamp. Vanilla never emits
+`multiplayer.disconnect.chat_validation_failed` for a bad signature at all:
+`ServerGamePacketListenerImpl` raises it from exactly two places, both
+`LastSeenMessagesValidator.ValidationException` — `unpackAndApplyLastSeen` and
+`handleChatAck`. It is an **acknowledgement-bookkeeping** failure, not a
+cryptographic one.
+
+**What actually broke.** Both peers must count the same messages in the
+last-seen window, and both count *signed* ones only — the server calls
+`addPending` under `if (signature != null)`, and vanilla's client mirrors that
+null check around `markMessageAsProcessed` in
+`ChatListener.handlePlayerChatMessage`. This client had no such guard: v770's
+adapter reports `ack: Some(..)` for **every** `PLAYER_CHAT` with an empty
+`signature` when the wire's optional signature is absent, and the driver fed
+all of them to the tracker. Every unsigned `PLAYER_CHAT` — a player with no
+chat session, or *this client's own message echoed back while it sent
+unsigned* — advanced our offset past a server count that never moved.
+
+**Why signing exposed a pre-existing bug.** `ChatMessage::unsigned` hard-codes
+`last_seen_offset: 0`, an empty bitset and `checksum: 0`, and `0` is vanilla's
+`LastSeenMessages.Update.IGNORE_CHECKSUM`. Unsigned chat therefore transmitted
+no real acknowledgement at all and could never trip the validator; the drift
+accumulated invisibly. The signed path transmits the real offset, bitset and a
+real non-zero checksum, so the very first signed message published the drift.
+
+**Measured against the live vanilla 26.2 oracle** (offline mode, `:25570`),
+with a raw probe sharing no code with this tree:
+
+| probe | server's own log |
+|---|---|
+| `chat_ack` with `offset = 5`, nothing tracked | `Advanced last seen window by 5 messages, but expected at most 0` → `lost connection: Chat message validation failure` |
+| send one unsigned chat, read the echo | `PLAYER_CHAT` echo carried **no signature** (`[Not Secure] <probe> …`), i.e. exactly the message class we were miscounting |
+| then `chat_ack` with `offset = 1` | `Advanced last seen window by 1 messages, but expected at most 0` → same disconnect |
+
+One unsigned message is enough. The fix is the missing guard, placed where
+vanilla places it — in the driver's `ClientEvent::Chat` arm, not in the
+adapter, because the decoder should report the packet rather than judge it (and
+the incoming-verification path wants `ack` present for unsigned messages so it
+can mark them unverified).
+
+**Before flipping the default back on**, the remaining unverified link is
+whether a real server accepts our *signature*. That needs an online-mode
+server and a genuine Mojang key; the offline oracle cannot answer it, and no
+test here may reach the session servers or the owner's keychain.
 
 ## How it works
 
@@ -302,3 +362,5 @@ acceptance is the one link nothing here can reach.
 [`sign_chat_action`]: ../crates/lodestone-client/src/driver.rs
 [`ClientEvent::Login`]: ../crates/lodestone-model/src/event.rs
 [`lodestone_client::ClientBuilder::online_session`]: ../crates/lodestone-client/src/builder.rs
+
+[`SECURE_CHAT_ENV`]: ../crates/lodestone-client/src/driver.rs
