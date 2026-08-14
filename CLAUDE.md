@@ -751,6 +751,28 @@ actually resolve to, and is it the one production uses?"** — a test double *co
 most dangerous kind. Also ask: **does any server-side counter accumulate past this gate's lifetime?** and
 **does the input actually contain the structure the code under test exists to handle?** (§12.43)
 
+**The worst instance so far shipped a totally silent hang, and every gate in the corpus used a fresh world.**
+The owner's saved worlds served **0 chunks in 240 s — no error, no disconnect, no panic**. The cause was a
+**self-deadlock**: `run_tick_loop` holds the scheduled-tick queue mutex across its whole tick section, that
+section calls `world.column`, and for a *saved* chunk that reaches `ScheduledTickHandle::restore` → back into
+`with` → `Mutex::lock`. **`std::sync::Mutex` is not reentrant**, so the tick thread parked forever and the
+join wedged before its first chunk batch.
+
+Two things to carry:
+
+- **A lock held across a call into a subsystem that can call back into you is a self-deadlock waiting for the
+  right input.** Grep what the guarded section calls, transitively, before widening a critical section. The
+  fix here was to stage the loaded ticks behind a second mutex and merge them inside `with`, with a fixed
+  lock order.
+- **The discriminating input was "a saved chunk carrying a pending tick"** — `load` returns early when the
+  chunk is not on disk and `restore` returns early when it has no ticks, so *only* saved content with pending
+  ticks reaches the re-entry. Every singleplayer gate created a **fresh** world, so the whole corpus was blind
+  by construction; a fresh persistent directory was **not** enough either (18 chunks arrived fine). Note the
+  controls that localised it: in-memory 23 chunks, fresh-on-disk 18 chunks, the owner's save 0.
+
+And the diagnostic worth remembering: a wedged process yields nothing to a log or a test, but **`sample` on
+the hung pid printed the whole re-entrant stack**. Reach for it before theorising about a hang.
+
 **The sharpest form of that reciprocal: a gate that uses an *unimplemented* thing as its negative stand-in
 goes vacuous the moment someone implements it.** Measured — modelling `minecraft:custom_data` and
 `minecraft:repair_cost` silently voided **six** gates at once: three used `custom_data` as their "an
