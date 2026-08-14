@@ -169,6 +169,14 @@ makes it safe — and leaves the index clean, so **do not run `git reset` after 
 - **It commits *working-tree* content, so a path you name carries whatever is in it** — an accepted cost, not
   a blocker. **Name only paths in your own assigned cluster** and `git diff -- <path>` before naming it.
   **Do not block on another agent**; only a **mid-keystroke** file is worth waiting on.
+- **But the cost is not only mis-attribution: carrying *half* of someone's cross-file change breaks `main`.**
+  Measured — a `tick.rs` commit swept in a concurrent agent's dispenser hunk whose *other* half lived in
+  `redstone_dispenser.rs` and `hopper.rs`, files the committer did not own. One half landed, the tree went
+  red, and the honest fix (committing the pair) is exactly the thing the ownership rule forbids; it took the
+  other agent committing minutes later to restore green. So **after committing a contended shared file,
+  check the tree still compiles at HEAD** — not just that your own paths are intact — and if you have broken
+  it this way, say so immediately rather than reaching for the other agent's files. The trap is that every
+  individual rule was followed: the paths were disclosed, the index was clean, the sha was read back.
 - **The index is shared: never leave work staged** — another agent's commit in the gap harvests it under
   their message, and one shell invocation is not an atomic transaction. `git add` "to see the diff" is the
   most expensive way to look; `git diff -- <paths>` touches nothing.
