@@ -483,6 +483,11 @@ impl PlayerRegistry {
                     // `Player` does not override `getAddEntityPacket`, so the
                     // Object Data field is `0`.
                     object_data: 0,
+                    // `Leashable` is never implemented by `Player` in vanilla — a
+                    // player cannot be the *leashed* end of a lead, only a holder
+                    // (see `crates/lodestone-server/src/mobs/mod.rs`'s
+                    // `LeashHolder::Player`).
+                    leash_link: None,
                 })
                 .collect(),
         }

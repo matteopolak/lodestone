@@ -4302,6 +4302,31 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
+    /// `ClientboundSetEntityLinkPacket.write`: `writeInt(sourceId)` then
+    /// `writeInt(destId)` — both **plain big-endian `i32`s**, not VarInts (issue
+    /// #236). Ported from `write`/`read` rather than the constructor or the field
+    /// declaration, per this crate's own rule for a record whose fields share a
+    /// type: here all three orders happen to agree (constructor takes
+    /// `(sourceEntity, destEntity)`, fields declare `sourceId` then `destId`,
+    /// `write` emits `sourceId` then `destId`), so there is no transposition to
+    /// guard against on *this* packet — but the fixture still picks
+    /// pairwise-distinct ids, because "this particular packet's orders happen to
+    /// coincide" is not a reason to weaken the general habit.
+    ///
+    /// `target_id` is `None` for vanilla's own `destId == 0` sentinel
+    /// (`Leashable.dropLeash`/`removeLeash` pass a `null` `destEntity`, which the
+    /// constructor turns into `0` before `write` ever runs) — a real client never
+    /// has an entity id `0` to confuse this with; `LOCAL_PLAYER_ENTITY_ID` is `1`.
+    fn encode_set_entity_link(&self, source_id: i32, target_id: Option<i32>) -> ServerDirective {
+        let mut w = Writer::default();
+        w.i32(source_id);
+        w.i32(target_id.unwrap_or(0));
+        ServerDirective::Send {
+            packet_id: play::clientbound::SET_ENTITY_LINK,
+            payload: w.into_vec(),
+        }
+    }
+
     fn encode_keep_alive(&self, id: i64) -> ServerDirective {
         // `KeepAlive` (`packets::common`) is identical on the wire in both
         // directions, so the same bidirectional struct this module's

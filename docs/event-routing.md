@@ -159,8 +159,20 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-**27 of 132** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
+**26 of 132** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
 consumer, which is a normal state for a from-scratch client.
+
+> **`EntityLeashed` left the list when a leashed mob's rope was wired (issue
+> #236).** The variant carries a wire entity id (the holder), not a scalar, so
+> it is per-entity `ingest` state — `ingest::apply_entity_leash` folds it into
+> a `Leashed` component, and `player::push_leash_lines` (`ExtractSet::Debug`)
+> turns that into a world-space line each frame. The consumer sat one layer
+> below the decode the whole time: `v770`'s adapter already emitted this event
+> from `SET_ENTITY_LINK`, and nothing in the ECS claimed it until now.
+> `crates/lodestone-server/src/protocol.rs`'s own `EntitySnapshot::leash_link`
+> and `ServerProtocol::encode_set_entity_link` are the *server*-side half of
+> the same issue and are outside this table's scope (it only covers
+> `ClientEvent`, the clientbound-decode side).
 
 > **`EntityStatus` left the list when mob death animations were wired.** It is worth
 > reading as a template for a *partially* claimed event: the variant carries Mojang's

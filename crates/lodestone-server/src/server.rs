@@ -445,6 +445,15 @@ impl EntityStreamer {
                     if !entity.metadata.is_empty() {
                         directives.push(proto.encode_set_entity_data(entity.id, &entity.metadata));
                     }
+                    // Issue #236: an already-leashed mob must show its rope to a
+                    // client that only just spawned it — a client that joined, or
+                    // walked back into view range, after the attach — not only to
+                    // whoever was connected at attach time. Mirrors the metadata
+                    // arm immediately above: sent once here, on spawn, whenever
+                    // `leash_link` is already `Some`.
+                    if entity.leash_link.is_some() {
+                        directives.push(proto.encode_set_entity_link(entity.id, entity.leash_link));
+                    }
                     self.last_sent.insert(entity.id, entity.clone());
                 }
                 Some(prev) if prev != entity => {
@@ -456,6 +465,12 @@ impl EntityStreamer {
                     // of whether position/rotation also changed this tick.
                     if prev.metadata != entity.metadata {
                         directives.push(proto.encode_set_entity_data(entity.id, &entity.metadata));
+                    }
+                    // Issue #236: covers both a fresh attach (`None` → `Some`) and
+                    // a detach (`Some` → `None`) — `encode_set_entity_link` itself
+                    // decides how to spell "no holder" on the wire.
+                    if prev.leash_link != entity.leash_link {
+                        directives.push(proto.encode_set_entity_link(entity.id, entity.leash_link));
                     }
                     self.last_sent.insert(entity.id, entity.clone());
                 }
@@ -11833,6 +11848,7 @@ mod tests {
     const UPDATE: i32 = 2;
     const REMOVE: i32 = 3;
     const METADATA: i32 = 4;
+    const LINK: i32 = 5;
 
     impl ServerProtocol for TagProto {
         fn decode(&self, _s: State, _id: i32, _p: &[u8]) -> ServerBound {
@@ -11888,6 +11904,15 @@ mod tests {
                     .collect(),
             }
         }
+        fn encode_set_entity_link(&self, source_id: i32, target_id: Option<i32>) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: LINK,
+                // `255` as the "no target" byte: every id this test file uses is
+                // small and positive, so it cannot collide with a real target and
+                // stays visually distinct from `0`, which is also a plausible id.
+                payload: vec![source_id as u8, target_id.map_or(255, |id| id as u8)],
+            }
+        }
     }
 
     fn snap(id: i32, x: f64) -> EntitySnapshot {
@@ -11901,6 +11926,7 @@ mod tests {
             velocity: Vec3::new(0.0, 0.0, 0.0),
             metadata: Vec::new(),
             object_data: 0,
+            leash_link: None,
         }
     }
 
@@ -12025,6 +12051,71 @@ mod tests {
         let _ = s.sync(&TagProto, &[snapshot.clone()]);
         let out = s.sync(&TagProto, &[snapshot]);
         assert!(out.is_empty(), "unchanged metadata must not re-send: {out:?}");
+    }
+
+    /// [`snap`] with a `leash_link` already set — issue #236.
+    fn snap_leashed(id: i32, x: f64, target: i32) -> EntitySnapshot {
+        EntitySnapshot { leash_link: Some(target), ..snap(id, x) }
+    }
+
+    /// **The discriminating case.** A mob that is *already* leashed by the time
+    /// a client first spawns it — a fresh join, or walking back into view range
+    /// after the attach happened — must still get the rope: `ADD` followed by
+    /// `LINK`. A test that only ever leashes a mob the streamer has already sent
+    /// once (an `UPDATE`-path attach) would pass under a fix that only patched
+    /// the update branch and left the spawn branch blind, which is exactly the
+    /// "partial fix that looks complete during testing" this issue's own report
+    /// warns about — nobody would notice until a *second* client joined late.
+    #[test]
+    fn a_mob_already_leashed_on_spawn_sends_add_then_link() {
+        let mut s = EntityStreamer::default();
+        // Pairwise-distinct ids (10, 0, 77): a transposition of `source_id` and
+        // `target_id` inside the encoder would otherwise be invisible — the
+        // wire-shape reason this repo's own CLAUDE.md gives for two adjacent
+        // same-typed fields.
+        let out = s.sync(&TagProto, &[snap_leashed(10, 0.0, 77)]);
+        assert_eq!(out.len(), 2, "expected ADD then LINK, got {out:?}");
+        assert_eq!(sent(&out[0]), (ADD, [10u8].as_slice()));
+        assert_eq!(sent(&out[1]), (LINK, [10u8, 77u8].as_slice()));
+    }
+
+    /// A fresh attach — `None` on the first sync, `Some` on the second — must
+    /// send `UPDATE` then `LINK`, with the link payload carrying the real
+    /// target rather than the "no holder" sentinel.
+    #[test]
+    fn attaching_a_leash_after_spawn_sends_update_then_link() {
+        let mut s = EntityStreamer::default();
+        let _ = s.sync(&TagProto, &[snap(10, 0.0)]);
+        let out = s.sync(&TagProto, &[snap_leashed(10, 0.0, 77)]);
+        assert_eq!(out.len(), 2, "expected UPDATE then LINK, got {out:?}");
+        assert_eq!(sent(&out[0]), (UPDATE, [10u8].as_slice()));
+        assert_eq!(sent(&out[1]), (LINK, [10u8, 77u8].as_slice()));
+    }
+
+    /// A detach — `Some` then `None` — must send `UPDATE` then `LINK` again,
+    /// this time carrying the "no holder" sentinel (`255` in this test
+    /// protocol's own encoding), proving the diff fires on the way down too,
+    /// not only on the way up.
+    #[test]
+    fn detaching_a_leash_sends_update_then_link_with_no_target() {
+        let mut s = EntityStreamer::default();
+        let _ = s.sync(&TagProto, &[snap_leashed(10, 0.0, 77)]);
+        let out = s.sync(&TagProto, &[snap(10, 0.0)]);
+        assert_eq!(out.len(), 2, "expected UPDATE then LINK, got {out:?}");
+        assert_eq!(sent(&out[0]), (UPDATE, [10u8].as_slice()));
+        assert_eq!(sent(&out[1]), (LINK, [10u8, 255u8].as_slice()));
+    }
+
+    /// Negative control: re-syncing the same `leash_link` (still `Some`, same
+    /// target) must emit nothing extra beyond position/rotation — proving the
+    /// branch is a real diff, matching the metadata family's own control.
+    #[test]
+    fn unchanged_leash_link_emits_no_extra_link_on_resync() {
+        let mut s = EntityStreamer::default();
+        let snapshot = snap_leashed(10, 0.0, 77);
+        let _ = s.sync(&TagProto, &[snapshot.clone()]);
+        let out = s.sync(&TagProto, &[snapshot]);
+        assert!(out.is_empty(), "unchanged leash_link must not re-send LINK: {out:?}");
     }
 
     // -- container screens (Job 1: OPEN_SCREEN/CONTAINER_SET_CONTENT/SLOT/DATA) --

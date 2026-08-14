@@ -167,6 +167,20 @@ pub struct EntitySnapshot {
     /// a dropped item with no reported stack: every wire green, the wrong value
     /// travelling it.
     pub object_data: i32,
+    /// The wire entity id this entity is leashed to, or `None` when it carries no
+    /// lead (issue #236) — vanilla `Leashable.LeashData.leashHolder`, resolved to
+    /// an id by [`crate::mobs::MobSim::snapshots`] (a player uuid resolves through
+    /// the connected-player list; a leashed mob resolves to its own already-wire
+    /// id; a fence-knot holder has no entity to resolve to yet and stays `None` —
+    /// see `LeashHolder::Fence`'s own doc comment).
+    ///
+    /// Diffed by [`crate::server::EntityStreamer::sync`] exactly like `metadata`:
+    /// a spawn with `Some` emits [`ServerProtocol::encode_set_entity_link`] right
+    /// after the `ADD_ENTITY` (and its metadata, if any), and an update where this
+    /// changed emits it again. That spawn-time emission is what makes an
+    /// already-leashed mob show its rope to a client that joins or re-enters view
+    /// range late — not just to whoever witnessed the attach.
+    pub leash_link: Option<i32>,
 }
 
 /// One connected player as the tab list carries them (issue #438) — the
@@ -1670,6 +1684,31 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes `SET_ENTITY_LINK` — vanilla `ClientboundSetEntityLinkPacket`,
+    /// which draws the rope between a leashed mob and its holder (issue #236).
+    /// `source_id` is the leashed entity; `target_id` is `None` for a detach
+    /// (vanilla's own sentinel: `write` sends the holder's id or `0` when there
+    /// is none, `Leashable.dropLeash`/`removeLeash`'s
+    /// `new ClientboundSetEntityLinkPacket(entity, null)`) and `Some` for an
+    /// attach, carrying the holder's own wire entity id (a player or another
+    /// leashed mob — see [`EntitySnapshot::leash_link`] for how each resolves).
+    ///
+    /// [`crate::server::EntityStreamer::sync`] is the one caller, and calls this
+    /// exactly like [`encode_set_entity_data`](Self::encode_set_entity_data):
+    /// once on spawn when [`EntitySnapshot::leash_link`] is `Some` — which is
+    /// what puts a rope on a mob a client only just entered view range of,
+    /// mirroring `ServerEntity`'s own pairing-time
+    /// `sendToTrackingPlayers(entity, new ClientboundSetEntityLinkPacket(entity,
+    /// leashable.getLeashHolder()))` — and again on any update where the field
+    /// changed, covering both a fresh attach and a detach.
+    ///
+    /// The default emits nothing, so a protocol family with no leash support
+    /// need not override it and a leashed mob simply draws no rope there.
+    fn encode_set_entity_link(&self, source_id: i32, target_id: Option<i32>) -> ServerDirective {
+        let _ = (source_id, target_id);
+        ServerDirective::None
+    }
+
     /// Encodes a `SET_ENTITY_DATA` metadata update for an arbitrary entity id,
     /// given every [`MetadataField`] that entity currently wants
     /// synced — not a hardcoded single field for a hardcoded entity id, the
@@ -2589,6 +2628,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_set_passengers(vehicle_id, passenger_ids)
     }
 
+    fn encode_set_entity_link(&self, source_id: i32, target_id: Option<i32>) -> ServerDirective {
+        (**self).encode_set_entity_link(source_id, target_id)
+    }
+
     fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
         (**self).encode_set_entity_data(entity_id, fields)
     }
@@ -2917,6 +2960,12 @@ mod tests {
         fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
             send(700 + entity_id * 10 + fields.len() as i32)
         }
+        // Overridden for the same reason `encode_set_entity_data` above is: the
+        // trait default emits nothing, so a missing forward on the box would pass
+        // a parity assertion built on the default alone.
+        fn encode_set_entity_link(&self, source_id: i32, target_id: Option<i32>) -> ServerDirective {
+            send(750 + source_id * 10 + target_id.unwrap_or(-1))
+        }
         fn encode_explode(&self, centre: Vec3, radius: f32) -> ServerDirective {
             send(800 + centre.x as i32 + radius as i32)
         }
@@ -3040,6 +3089,7 @@ mod tests {
             velocity: Vec3::new(0.0, 0.0, 0.0),
             metadata: Vec::new(),
             object_data: 0,
+            leash_link: None,
         }
     }
 
@@ -3115,6 +3165,10 @@ mod tests {
         assert_eq!(
             boxed.encode_set_entity_data(9, &fields),
             direct.encode_set_entity_data(9, &fields)
+        );
+        assert_eq!(
+            boxed.encode_set_entity_link(9, Some(11)),
+            direct.encode_set_entity_link(9, Some(11))
         );
         assert_eq!(
             boxed.encode_explode(Vec3::new(1.0, 2.0, 3.0), 3.0),

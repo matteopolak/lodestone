@@ -402,6 +402,42 @@ pub struct MobState {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Baby(pub bool);
 
+/// Whether the entity is tamed — `TamableAnimal.DATA_FLAGS_ID & 4`
+/// ([`lodestone_model::event::EntityMetadataUpdate::tamed`]), decoded by the
+/// v770 adapter and, until this component existed, dropped on the floor: the
+/// wire carried the bit end to end and nothing folded it into per-entity
+/// state, so the shell's draw call site had no source to read (issue #235).
+///
+/// **Absent** until the first report, like [`Baby`] and [`CreeperSwellDir`] —
+/// which for a mob that was already tame when it entered view range is not
+/// "forever", because `SimMob::snapshot` (`crates/lodestone-server/src/
+/// mobs/mod.rs`) pushes `TamableFlags` unconditionally whenever `self.tame`
+/// is set, not only on the tick taming happens, so a join or a re-enter of
+/// view range still carries the bit on the spawn's own metadata.
+///
+/// Only the tame bit is a component here, not the sitting bit alongside it:
+/// `entity_variant_sheet_for`'s texture axis only reads tame (vanilla renders
+/// a sitting wolf via pose, not a different sheet), so a `Sitting` component
+/// has no consumer yet — add it only alongside whatever render path first
+/// needs it, per this repo's island rule.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tamed(pub bool);
+
+/// The wire entity id this entity is leashed to, or `None` when it carries no
+/// lead — [`lodestone_model::event::ClientEvent::EntityLeashed`]'s
+/// `holder_id`, decoded from `SET_ENTITY_LINK` (issue #236).
+///
+/// **Absent** until the first report, like [`Tamed`] — but unlike `Tamed`,
+/// that first report is not necessarily "the tick the attach happened":
+/// `EntityStreamer::sync` (`crates/lodestone-server/src/server.rs`) also
+/// emits `SET_ENTITY_LINK` on **spawn** whenever the mob is already leashed,
+/// so a mob that was leashed before this client joined or walked into view
+/// range still carries the bit on arrival. A fresh attach (`None` → `Some`)
+/// and a detach (`Some` → a different value or `None`) are both plain
+/// `insert`-replaces, the same latched-boolean shape [`MobState`] documents.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Leashed(pub Option<i32>);
+
 /// A creeper's fuse direction — `Creeper.DATA_SWELL_DIR`
 /// ([`lodestone_model::event::EntityMetadataUpdate::creeper_swell_dir`]), `-1`
 /// while idle or backing off, `1` while counting up to detonation. **Absent**

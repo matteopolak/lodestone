@@ -77,7 +77,7 @@ use lodestone_physics::{
     Vec3d, compute_fluid_state, tick_among_entities,
 };
 
-use crate::entity::Attributes;
+use crate::entity::{Attributes, EntityIndex, Leashed, Position};
 use crate::schedules::{Extract, GameTick};
 use crate::sets::{ExtractSet, TickSet};
 
@@ -971,6 +971,82 @@ pub struct DebugLines(pub Vec<DebugLine>);
 /// rather than a member of the set.
 pub fn clear_debug_lines(mut lines: ResMut<DebugLines>) {
     lines.0.clear();
+}
+
+/// `Extract` / `ExtractSet::Debug`: one [`DebugLine`] per leashed mob, from the
+/// mob's own [`Position`] to its holder's — the last hop of issue #236's
+/// chain, closed through the cheapest channel already wired to the screen
+/// every frame.
+///
+/// # Why `DebugLines` and not a dedicated render pass
+///
+/// [`DebugLines`] is a generic per-frame world-space geometry channel — its
+/// own doc names a pathfinder route and a reachability probe as existing
+/// uses — and its render pass (`lodestone_shell::gpu`'s `DebugLineRenderer`)
+/// already runs unconditionally, every frame, regardless of any F3 toggle:
+/// gating, where it exists (the hitbox/chunk-border overlays), lives in the
+/// *systems that choose to populate the channel*, not in the channel or its
+/// pipeline. So a system here that always pushes a line for every leashed
+/// mob is genuinely always visible, at zero additional GPU-pipeline wiring —
+/// no new bind group, shader or `app.rs` install call, all of which sit in
+/// choke-point files this pass has no need to touch.
+///
+/// **This is a disclosed simplification, not vanilla parity.** No catenary
+/// sag (`Leashable.tickLeash`'s per-segment curve), no rope texture — a
+/// straight, flat-coloured line — and both endpoints are the raw
+/// (non-interpolated) tick position, so a leashed mob's rope can lag its
+/// eased render position by up to one tick. A future pass that wants
+/// vanilla's actual rope needs a real pipeline in `lodestone-render`/
+/// `lodestone_shell::gpu`, not this channel; this is what makes the leash
+/// **visible** rather than invisible, which is the gap issue #236 reported.
+///
+/// # Resolving the holder's position
+///
+/// [`Leashed`] carries a wire entity id, resolved through [`EntityIndex`]
+/// exactly as every other id-addressed ingest fold resolves one. Two shapes,
+/// tried in order: `positions` (another leashed-capable mob, or any other
+/// entity with a [`Position`]), then `local_player` (`With<LocalPlayer>`,
+/// reading [`PhysicsState`] instead) — because the local player's own ingest
+/// entity deliberately carries **no** [`Position`] component
+/// (`apply_local_player_login`'s own doc explains why: it would be a second
+/// copy of `PhysicsState`), which is the common case for "a player holds the
+/// mob's lead".
+pub fn push_leash_lines(
+    index: Res<EntityIndex>,
+    leashed: Query<(&Position, &Leashed)>,
+    positions: Query<&Position>,
+    local_player: Query<&PhysicsState, With<LocalPlayer>>,
+    mut lines: ResMut<DebugLines>,
+) {
+    // A plain leather-brown, in the same ballpark as vanilla's `lead.png` —
+    // there is no per-texel sampling to match since this pass has no texture
+    // at all, so one flat colour is the whole of "what a lead looks like" here.
+    const LEAD_COLOR: [f32; 4] = [0.42, 0.29, 0.16, 1.0];
+    for (position, leashed) in &leashed {
+        let Some(holder_id) = leashed.0 else {
+            continue;
+        };
+        let Some(holder_entity) = index.get(holder_id) else {
+            continue;
+        };
+        let holder_pos = if let Ok(holder_position) = positions.get(holder_entity) {
+            holder_position.0
+        } else if let Ok(physics) = local_player.get(holder_entity) {
+            let p = physics.0.position;
+            lodestone_model::Vec3::new(p.x, p.y, p.z)
+        } else {
+            // Holder resolved to an `Entity` (it is indexed) but has neither
+            // shape of position component yet — e.g. a spawn/login batch
+            // whose ordering has not landed this component this tick.
+            // Skipping for one frame is honest; a stale guess would not be.
+            continue;
+        };
+        lines.0.push(DebugLine {
+            start: Vec3d::new(position.0.x, position.0.y, position.0.z),
+            end: Vec3d::new(holder_pos.x, holder_pos.y, holder_pos.z),
+            color: LEAD_COLOR,
+        });
+    }
 }
 
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1908,6 +1984,12 @@ impl Plugin for LocalPlayerPlugin {
                 .before(ExtractSet::Hud),
         );
         app.add_systems(Extract, clear_debug_lines.before(ExtractSet::Debug));
+        // Issue #236: the leash-rope substitute described on `push_leash_lines`'s
+        // own doc. `.in_set(ExtractSet::Debug)`, not merely `.after` the clear —
+        // same requirement every writer into `DebugLines` has, per that set's own
+        // doc, so this system's push cannot land before the clear by luck of
+        // registration order.
+        app.add_systems(Extract, push_leash_lines.in_set(ExtractSet::Debug));
 
         // `.chain()` reproduces `LocalPlayer.aiStep`'s three-part ordering around
         // `super.aiStep()`, and the order is observable rather than cosmetic:
@@ -2654,6 +2736,80 @@ mod tests {
             "the clear must have run before the plugin's write"
         );
         assert_eq!(lines[0].end, Vec3d::new(2.0, 0.0, 0.0));
+    }
+
+    /// [`push_leash_lines`] (issue #236): a mob leashed to another indexed
+    /// entity (a mob-to-mob lead, or any entity carrying [`Position`]) draws
+    /// exactly one line, from the leashed mob's own position to the holder's.
+    #[test]
+    fn push_leash_lines_draws_a_line_to_an_indexed_holder() {
+        let mut app = App::new();
+        app.add_plugins((crate::CorePlugin, LocalPlayerPlugin));
+        let mob = app
+            .world_mut()
+            .spawn((
+                Position(lodestone_model::Vec3::new(1.0, 2.0, 3.0)),
+                Leashed(Some(99)),
+            ))
+            .id();
+        let holder = app
+            .world_mut()
+            .spawn(Position(lodestone_model::Vec3::new(4.0, 5.0, 6.0)))
+            .id();
+        app.world_mut().resource_mut::<EntityIndex>().insert(99, holder);
+
+        app.world_mut().run_schedule(Extract);
+
+        let lines = &app.world().resource::<DebugLines>().0;
+        assert_eq!(lines.len(), 1, "expected exactly one line for one leashed mob: {lines:?}");
+        assert_eq!(lines[0].start, Vec3d::new(1.0, 2.0, 3.0));
+        assert_eq!(lines[0].end, Vec3d::new(4.0, 5.0, 6.0));
+        let _ = mob;
+    }
+
+    /// The common case in practice: the holder is the local player, whose
+    /// ingest entity carries no [`Position`] at all — the fallback
+    /// [`push_leash_lines`]'s own doc names.
+    #[test]
+    fn push_leash_lines_resolves_a_local_player_holder_through_physics_state() {
+        let mut app = App::new();
+        app.add_plugins((crate::CorePlugin, LocalPlayerPlugin));
+        app.world_mut().spawn((
+            Position(lodestone_model::Vec3::new(1.0, 2.0, 3.0)),
+            Leashed(Some(1)),
+        ));
+        let local = spawn_local_player(app.world_mut(), PlayerState::at(Vec3d::new(10.0, 11.0, 12.0), 0.0));
+        app.world_mut().resource_mut::<EntityIndex>().insert(1, local);
+
+        app.world_mut().run_schedule(Extract);
+
+        let lines = &app.world().resource::<DebugLines>().0;
+        assert_eq!(lines.len(), 1, "expected one line to the local-player holder: {lines:?}");
+        assert_eq!(lines[0].end, Vec3d::new(10.0, 11.0, 12.0));
+    }
+
+    /// Negative control: an entity with no [`Leashed`] component at all, and
+    /// one explicitly `Leashed(None)`, must both draw nothing — proving the
+    /// system is a real filter and not "one line per entity that has ever had
+    /// a position".
+    #[test]
+    fn push_leash_lines_emits_nothing_for_an_unleashed_mob() {
+        let mut app = App::new();
+        app.add_plugins((crate::CorePlugin, LocalPlayerPlugin));
+        app.world_mut()
+            .spawn(Position(lodestone_model::Vec3::new(1.0, 2.0, 3.0)));
+        app.world_mut().spawn((
+            Position(lodestone_model::Vec3::new(4.0, 5.0, 6.0)),
+            Leashed(None),
+        ));
+
+        app.world_mut().run_schedule(Extract);
+
+        assert!(
+            app.world().resource::<DebugLines>().0.is_empty(),
+            "no leash means no line: {:?}",
+            app.world().resource::<DebugLines>().0
+        );
     }
 
     /// **Depth Strider, the routing gate.** `docs/swimming.md` tracked this as
