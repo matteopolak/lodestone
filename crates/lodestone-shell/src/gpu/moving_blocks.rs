@@ -78,6 +78,14 @@ use super::{RenderState, RenderStats};
 /// [`EntityDraw::type_path`] carries it (bare path, no namespace).
 pub(super) const FALLING_BLOCK_TYPE_PATH: &str = "falling_block";
 
+/// `EntityTypes.TNT`'s registry path, as [`EntityDraw::type_path`] carries it.
+///
+/// `TntRenderer` is the same shape as `FallingBlockRenderer` — no `bakeLayer`
+/// call, a block model posed by hand — so primed TNT belongs in this file
+/// beside the falling block rather than in the cuboid-rig entity pass. See
+/// [`merge_primed_tnt`] for the deviations from vanilla this port accepts.
+pub(super) const PRIMED_TNT_TYPE_PATH: &str = "tnt";
+
 /// `FallingBlockEntity`'s hitbox height — `EntityTypes.FALLING_BLOCK` is
 /// `0.98 × 0.98`.
 ///
@@ -109,6 +117,33 @@ const FALLING_BLOCK_HEIGHT: f32 = 0.98;
 #[must_use]
 fn falling_block_pose(feet: glam::Vec3) -> glam::Mat4 {
     glam::Mat4::from_translation(feet - glam::Vec3::new(0.5, 0.0, 0.5))
+}
+
+/// `TntRenderer.submit`'s pose, minus the fuse-driven scale swell (see this
+/// module's own doc for why that piece is not ported).
+///
+/// Vanilla, in `poseStack` call order:
+///
+/// ```text
+/// translate(0, 0.5, 0)
+/// [scale(s, s, s) — swell in the last 10 ticks, not ported]
+/// mulPose(YP.rotationDegrees(-90))
+/// translate(-0.5, -0.5, 0.5)
+/// mulPose(YP.rotationDegrees(90))
+/// ```
+///
+/// on top of the entity's own `translate(x, y, z)`. Composed in the same
+/// order rather than hand-simplified — the two `Ry` calls do **not** cancel,
+/// because a translation sits between them, and the whole point of writing
+/// out every term is that a reader can check this against `TntRenderer.java`
+/// line for line instead of trusting an algebraic shortcut.
+#[must_use]
+fn primed_tnt_pose(feet: glam::Vec3) -> glam::Mat4 {
+    glam::Mat4::from_translation(feet)
+        * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0))
+        * glam::Mat4::from_rotation_y((-90.0f32).to_radians())
+        * glam::Mat4::from_translation(glam::Vec3::new(-0.5, -0.5, 0.5))
+        * glam::Mat4::from_rotation_y(90.0f32.to_radians())
 }
 
 /// `PistonMovingBlockEntity.getExtendedProgress` — the **signed** fraction of a
@@ -204,6 +239,10 @@ impl RenderState {
         let frustum = camera.frustum();
         let mut combined = ModelMesh::default();
         self.merge_falling_blocks(model, entities, &frustum, &mut combined, stats);
+        // A third producer of the same shape as the falling block: no rig, a
+        // block model posed by hand. See `merge_primed_tnt`'s own doc for why
+        // primed TNT belongs here rather than in the entity pass.
+        self.merge_primed_tnt(model, entities, &frustum, &mut combined, stats);
         // The second producer, sharing this buffer for the same reason the campfire
         // shares the item one — the placement is in the vertices, so there is
         // nothing to batch on.
@@ -299,6 +338,96 @@ impl RenderState {
                 MovingBlock {
                     state_id,
                     transform: falling_block_pose(draw.feet),
+                    light,
+                },
+                combined,
+            ) {
+                stats.moving_blocks_drawn += 1;
+            }
+        }
+    }
+
+    /// Merge every primed TNT entity on screen — vanilla's `TntRenderer`, minus
+    /// two pieces named below.
+    ///
+    /// # Why this is the entity render path's missing hop
+    ///
+    /// Primed TNT physics (the 80-tick fuse, the launch impulse, gravity, drag,
+    /// bounce) is server/physics work and lands correct regardless of this
+    /// function; this is only the last hop, placing the already-correct entity
+    /// on screen. `TntRenderer` has no `bakeLayer` call and poses an existing
+    /// block model, exactly like `FallingBlockRenderer` — it is not a cuboid
+    /// rig, so it cannot go through the entity pipeline's `resolve_animated`
+    /// (which silently skips any `type_path` with no baked model, `"tnt"`
+    /// included) and belongs beside [`merge_falling_blocks`] instead.
+    ///
+    /// # State id: hardcoded, not read off the wire
+    ///
+    /// Unlike a falling block, whose block state is genuinely variable (sand,
+    /// gravel, concrete powder, …) and arrives in the spawn packet's Object
+    /// Data field, `PrimedTnt.blockState` is always `Blocks.TNT.defaultBlockState()`
+    /// in practice and nothing on our wire carries it — so this looks the
+    /// default state up directly with [`lodestone_data::block_states::state_id`]
+    /// rather than routing through [`EntityDraw::block_state`], which exists
+    /// for the *variable* case and would be one more hop for a constant.
+    ///
+    /// # Two named deviations from `TntRenderer`, both because the fuse count
+    /// has no client-side home yet
+    ///
+    /// * **No swell scale.** Vanilla scales the block up during the last 10
+    ///   ticks of the fuse (`TntRenderer.getSwellAmount`). `EntityDraw` carries
+    ///   no fuse value — `PrimedTnt.DATA_FUSE_ID` is decoded server-side
+    ///   (`lodestone_server::mobs::tnt`) and put on the wire as metadata index
+    ///   8, but nothing on this side of the wire folds it into an ingest
+    ///   component yet (`metadata_class` has no `Tnt` arm), so there is nothing
+    ///   to read here. A static, un-swelling block is the identity case of the
+    ///   swell formula (`getSwellAmount` at a fuse this function cannot see is
+    ///   indistinguishable from "not yet swelling"), not a fabricated value.
+    /// * **No white "isLit" flash.** Same root cause: vanilla blinks
+    ///   `submitWhiteSolidBlock`'s overlay on/off every 5 ticks of the fuse,
+    ///   and [`MovingBlock`] carries no tint/overlay channel at all today — see
+    ///   its own doc for why (this seam's producers so far have been fully
+    ///   opaque, un-tinted geometry). Adding one is a `lodestone-render`
+    ///   change, out of scope here.
+    ///
+    /// Both are cosmetic: the block that draws is the *correct* one, at the
+    /// *correct* pose, for the whole 80-tick fuse — the swell and the flash
+    /// are polish on top of a real TNT block rather than the difference
+    /// between a TNT block and nothing.
+    fn merge_primed_tnt(
+        &self,
+        model: &ModelRenderer,
+        entities: &[EntityDraw],
+        frustum: &Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        let Some(state_id) = lodestone_data::block_states::state_id("minecraft:tnt") else {
+            return;
+        };
+        for draw in entities {
+            if draw.type_path != PRIMED_TNT_TYPE_PATH {
+                continue;
+            }
+            if !frustum.intersects_aabb(
+                draw.feet - glam::Vec3::splat(1.0),
+                draw.feet + glam::Vec3::splat(1.0),
+            ) {
+                continue;
+            }
+            // Sampled at the same height `primed_tnt_pose` renders the block
+            // centred on (`translate(0, 0.5, 0)` above the entity's feet), not
+            // at the feet themselves — the same reasoning `FALLING_BLOCK_HEIGHT`
+            // documents: a resting block's feet cell can read as solid (dark)
+            // right as it is about to draw there.
+            let light = self
+                .entity_light
+                .sample(draw.feet + glam::Vec3::new(0.0, 0.5, 0.0));
+            if self.merge_moving_block(
+                model,
+                MovingBlock {
+                    state_id,
+                    transform: primed_tnt_pose(draw.feet),
                     light,
                 },
                 combined,
@@ -651,6 +780,47 @@ mod tests {
             d > 0.5,
             "control failed: the two poses are {d} apart, so the corner-vs-centre \
              distinction the gate above rests on is not being measured"
+        );
+    }
+
+    /// `primed_tnt_pose` rotates the block about its own centre, half a block
+    /// above the entity's feet, and the rotation genuinely happens.
+    ///
+    /// Two properties, computed rather than assumed (values cross-checked
+    /// against a standalone Python transcription of the same four-matrix
+    /// chain, not derived from this file):
+    ///
+    /// * The block-local cube centre `(0.5, 0.5, 0.5)` — the one point every
+    ///   term of `TntRenderer.submit`'s rotate-about-centre dance keeps fixed —
+    ///   lands at exactly `feet + (0, 0.5, 0)`. Getting only the outer
+    ///   `translate(0, 0.5, 0)` right and dropping the dance would still pass a
+    ///   test that only checked this point, which is why the second assertion
+    ///   exists.
+    /// * Local `(1, 0, 0)` lands at `feet + (0.5, 0.0, -0.5)`, not at
+    ///   `feet + (0.5, 0.0, 0.5)` — the value an implementation that kept only
+    ///   `translate(-0.5, -0.5, 0.5)` and dropped both `Ry` calls would produce.
+    ///   The two disagree on `z`'s sign, which a "some pose was produced"
+    ///   check cannot see but this one does.
+    #[test]
+    fn the_primed_tnt_pose_rotates_about_its_own_centre_half_a_block_above_the_feet() {
+        let feet = glam::Vec3::new(4.0, 70.0, 9.0);
+        let pose = primed_tnt_pose(feet);
+
+        let centre = pose.transform_point3(glam::Vec3::splat(0.5));
+        let expected_centre = feet + glam::Vec3::new(0.0, 0.5, 0.0);
+        assert!(
+            (centre - expected_centre).length() < 1e-4,
+            "block centre landed at {centre}, expected {expected_centre}"
+        );
+
+        let rotated = pose.transform_point3(glam::Vec3::new(1.0, 0.0, 0.0));
+        let expected_rotated = feet + glam::Vec3::new(0.5, 0.0, -0.5);
+        let unrotated_wrong = feet + glam::Vec3::new(0.5, 0.0, 0.5);
+        assert!(
+            (rotated - expected_rotated).length() < 1e-4,
+            "local (1,0,0) landed at {rotated}, expected {expected_rotated} \
+             (got the no-rotation hypothesis {unrotated_wrong} instead: the two \
+             `Ry` calls did not fire)"
         );
     }
 
