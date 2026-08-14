@@ -118,7 +118,23 @@ Generic bounds are not an obstacle: the whole file uses one shallow, repetitive 
 types, no HRTBs and no `where Self:` chains, so a moved helper repeats its bounds verbatim and nothing
 more.
 
-### 2. `crates/lodestone-server/src/mobs.rs` — 10,552 lines — **SPLIT NOW**, and do it *first*
+### 2. `crates/lodestone-server/src/mobs.rs` — 10,552 lines — **DONE, and still not finished**
+
+**Landed within minutes of this plan's own commit** — literally: `refactor(mobs): rename mobs.rs
+to mobs/mod.rs` (`8f62d012`) landed at 02:22:49 on 2026-08-14, and this file's own commit
+(`b1d88b28`) landed at 02:24:20 the same morning, 91 seconds later. The "SPLIT NOW" verdict below
+was already executed by another agent before this plan reached `main`; nobody came back to
+re-verdict it. `refactor(mobs): split species-keyed tables into mobs/species.rs` (`2ea08277`)
+followed, and by 2026-08-14 (re-verified) `crates/lodestone-server/src/mobs/` holds
+`block_ids.rs` (89 lines), `items.rs` (238), `golem.rs` (366), `world.rs` (424),
+`falling_blocks.rs` (442), `lightning.rs` (464 — new content, not part of this split),
+`projectiles.rs` (519), `vehicles.rs` (601), `species.rs` (740) and `orbs.rs` (824) — essentially
+the exact seam list below. **`mod.rs` itself is still 7,305 lines**, the largest single file in
+the split and still the biggest piece of `MobSim`'s `impl` block; the extraction moved the
+easy, dependency-free wins out but did not touch the file that motivated this entry. Re-run the
+14-day commit-touch measurement before deciding whether `mod.rs` itself now needs its own split —
+this section's contention figures predate the split and are no longer a measurement of the
+current file.
 
 48 commits in 14 days, 17 of them shared with `server.rs`. Lower contention than `server.rs` but a
 **much** cleaner seam, which is why it should go first: it is the rehearsal that proves the method
