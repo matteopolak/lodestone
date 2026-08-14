@@ -60,6 +60,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
+use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::RegionChunkSource;
 use lodestone_server::{ChunkColumn, ChunkSource};
 
@@ -135,7 +136,7 @@ fn a_real_mojang_server_can_read_the_region_file_we_wrote() {
     let _ = std::fs::remove_dir_all(&world_dir);
     std::fs::create_dir_all(&world_dir).expect("create fixture world dir");
 
-    let world = RegionChunkSource::new(EmptyWorld, &world_dir, MIN_Y, HEIGHT)
+    let world = RegionChunkSource::new(EmptyWorld, &world_dir, Dimension::Overworld, MIN_Y, HEIGHT)
         .expect("open persistent world");
 
     // Every probe: what we place, and where. Chunk (0,0) and chunk (1,2) both

@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::RegionChunkSource;
 use lodestone_server::{ChunkColumn, ChunkSource, TickPriority};
 
@@ -96,7 +97,7 @@ fn tempdir(name: &str) -> PathBuf {
 }
 
 fn open(dir: &Path) -> RegionChunkSource<Flat> {
-    RegionChunkSource::new(Flat, dir, MIN_Y, HEIGHT).expect("open world")
+    RegionChunkSource::new(Flat, dir, Dimension::Overworld, MIN_Y, HEIGHT).expect("open world")
 }
 
 /// Writes a world whose chunk `SAVED_CHUNK` exists on disk **and carries a
