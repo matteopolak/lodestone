@@ -314,12 +314,15 @@ the commands registered on top of them.
   not one. `<location>` resolves `~`/`^` against the **command source**'s own
   position, never a target's — vanilla's `Vec3Argument.getCoordinates(source)`,
   confirmed against `TeleportCommand.java`. `<rotation>` is two plain
-  `brigadier:float` nodes rather than `minecraft:rotation` (no `RotationArg`
-  parser exists yet), the same documented approximation
-  `world_spawn_commands`'s `/spawnpoint` angle already makes. `/tp` and
-  `/teleport` are two independently-built trees rather than a `redirect` —
-  `Registrar::redirect` has no production caller yet and this was not the
-  place to be the first.
+  `brigadier:float` nodes rather than `minecraft:rotation` — no `RotationArg`
+  parser existed at the time this was written; one now does
+  (`lodestone_command_mc::RotationArg`, built for `/execute rotated`), but
+  `/tp` itself has not been reworked to use it — the same documented
+  approximation `world_spawn_commands`'s `/spawnpoint` angle already makes.
+  `/tp` and `/teleport` are two independently-built trees rather than a
+  `redirect` — `Registrar::redirect` had no production caller at the time and
+  this was not the place to be the first; `crate::commands::execute` is that
+  caller now.
 
   **There is no bare, `@s`-free `/tp <entity>` self-form.** Vanilla's tree has
   `<location>`, `<destination>` and `<targets>` as three *simultaneous*
@@ -383,6 +386,111 @@ the commands registered on top of them.
   `forceGameMode` enforcement of already-connected players — this crate models
   no such rule and has no cross-connection game-mode push wired to this
   command.
+
+#### `/execute`
+
+`crate::commands::execute` (`ExecuteCommand.java`). The parser needed no
+changes at all: every branch point in vanilla's own tree offers at most one
+*argument* child alongside its literal children, so the one ambiguity
+`lodestone_command::CommandTree::parse` cannot resolve (multiple simultaneous
+argument children — `/tp`'s own gap, see that command's module doc) never
+engages here.
+
+Built: `as`, `at`, `positioned` (+ `as`), `rotated` (redirect only), `facing`
+(`<pos>` and `entity <targets> <anchor>`), `align`, `anchored`, `in`
+(single-hosted-dimension census), `run`, and `if`/`unless entity`/`if`/`unless
+dimension`. Each subcommand is one [`Registrar::modifier`] rewriting the one
+[`CommandSource`] flowing through it, redirected back to `execute`'s own
+children — the modifier/fork substrate this document already named as "built
+before `/execute` needs it" now has its first production caller.
+
+`run <command>` carries **no modifier at all**: `registrar.redirect(run_node,
+registrar.root())`, matching vanilla's own `literal("run")
+.redirect(dispatcher.getRoot())`. With nothing to apply, the current (possibly
+forked) source set passes straight through into a full re-parse of the whole
+tree, which is what makes `execute as Steve run kill` affect Steve and not the
+caller, and what makes nesting a second `execute` inside `run` ordinary syntax
+rather than a special case.
+
+`if`/`unless` needed one small change to `Dispatcher::dispatch`: vanilla's
+`addConditional` attaches **both** a fork modifier (`execute if entity @a run
+…`) and an executor (`execute if entity @a` alone) to the same condition node,
+and real Brigadier's `ContextChain` only ever runs the fork when there is a
+further stage. The dispatch walk now skips a node's own modifier when that
+node is *also* the parsed path's terminal node and carries its own executor —
+see that function's own doc comment for the failure mode it closes (a fork
+that empties the source set before the bare form's pass/fail message ever
+gets to run).
+
+Not built, each naming its own missing subsystem: `rotated as`/`at`'s rotation
+transfer (`PlayerCandidate` carries no rotation — the identical gap `/tp`'s own
+module doc names), `store`/`if score` (no scoreboard), `if data`/`items`
+(no NBT storage or container-slot query reachable from a command), `if
+predicate` (no loot-predicate engine), `stopwatch` (no stopwatch registry),
+`if block`/`biome`/`blocks`/`loaded` (no read-only block/biome/chunk-residency
+query on `CommandWorld`, which today only ever *writes* blocks), `on
+<relation>` (no entity-relationship query on the mob simulation), the
+`execute summon` modifier form (unnecessary as its own subtree — `/summon` is
+already a root command reachable through `run`), and `positioned over
+<heightmap>` (no heightmap query). `crate::commands::execute`'s own module doc
+is the up-to-date source for this list.
+
+Tested in `crates/lodestone-server/tests/builtin_commands.rs`, each assertion
+predicting a rewritten answer a caller-position/caller-entity reading of the
+same text would get wrong — `execute as bob run kill` targets bob and not the
+caller; `execute at bob positioned ~1 ~1 ~1` lands somewhere none of `at`
+alone, `positioned` alone, or the literal offset would; `execute facing 5 64 0
+run tp @s ^0 ^0 ^5` only lands on the aimed-at point because `facing` actually
+rewrote the rotation `^` resolves against.
+
+#### Command blocks
+
+`crate::command_block` (`CommandBlockEntity.java`/`BaseCommandBlock.java`/
+`CommandBlock.java`) and `BlockEntity::CommandBlock` in
+`crate::block_entities`. **Before this, there was no command-block block
+entity at all** — placing one wrote nothing but a plain block. Now placing
+`minecraft:command_block`/`chain_command_block`/`repeating_command_block`
+creates a real, persisted `CommandBlockData` (command text, mode derived from
+the block itself rather than stored, conditional/"Always Active" flags,
+output tracking, success count), and it round-trips through chunk NBT
+(`chunk_nbt.rs`'s `Command`/`SuccessCount`/`TrackOutput`/`LastOutput`/
+`powered`/`conditionMet`/`auto`/`UpdateLastExecution`/`LastExecution` fields,
+field-for-field against `BaseCommandBlock.save`/`CommandBlockEntity
+.saveAdditional`).
+
+The pure tick/redstone-edge math is ported and unit-tested against the
+decompiled source: `on_power_changed`/`on_automatic_changed` reproduce
+`CommandBlock.setPoweredAndUpdate`/`CommandBlockEntity.setAutomatic`'s
+rising/falling-edge rules. The one easy-to-guess-wrong rule, caught by this
+unit's own tests rather than assumed: `setPoweredAndUpdate` excludes only the
+**"Always Active" toggle** and `Mode.SEQUENCE`, not `Mode.AUTO` itself — a
+repeating command block that is *not* "Always Active" still schedules off its
+own redstone rising edge exactly like an impulse block, and only the toggle
+(handled separately by `on_automatic_changed`) makes it self-sufficient. `tick`
+reproduces `CommandBlock.tick`'s three-mode branch, including the one-cycle-
+stale condition a repeating block's own polling produces, and
+`next_chain_position`/`chain_link_present`/`chain_link_should_run` are
+`CommandBlock.executeChain`'s walk, one hop at a time.
+
+**Two hops remain before a command block runs end-to-end, and neither is this
+module:**
+
+1. **The wire decode.** `SET_COMMAND_BLOCK`/`SET_COMMAND_MINECART` still
+   decode into a discarded value in `crates/protocol/v770/src
+   /server_protocol.rs` — outside this unit's ownership. A real client's
+   command-block GUI has nowhere to write a command yet.
+2. **Scheduling into the tick loop.** `tick.rs` already has the exact
+   precedent (`crate::redstone_dispenser`'s `TICK_DISPENSER_FIRE` scheduled-
+   tick kind, drained with the live `block_entities`/`mobs` handles already in
+   scope there); wiring a `command:tick` kind the same way, plus threading a
+   `ServerCommands`/`CommandWorld` into that drain so a command block can
+   actually call `ServerCommands::run`, is real, bounded, additive work not
+   attempted in this pass to keep `tick.rs`'s shared-file surface small
+   alongside `/execute`.
+
+So: the data model and the tick math are real and tested against vanilla;
+nothing yet *calls* them from a running server. `crate::command_block`'s own
+module doc is the up-to-date source for exactly what is left.
 
 Per-command wire parity for the original four is asserted against
 `crates/protocol/v770/tests/fixtures/command_tree_creative.hex` — 30,248 bytes and
@@ -559,11 +667,20 @@ built-in listed above, not only the original four.
 
 Still open, and each is now additive rather than blocked:
 
-* **`/execute`, command blocks, functions and datapacks.** The modifier/fork
-  substrate `/execute` needs is built and gated; what is left is the
-  subcommand tree itself. `SET_COMMAND_BLOCK`/`SET_COMMAND_MINECART` still
-  decode into `ServerBound::Ignored`, so a command block's NBT cannot be set
-  over the wire, let alone tick. None of this was started.
+* **`/execute`'s larger conditions/`store`, functions and datapacks.**
+  `/execute`'s core chain (`as`/`at`/`positioned`/`rotated`/`facing`/`align`/
+  `anchored`/`in`/`run`, plus `if`/`unless entity`/`dimension`) is built — see
+  this document's own `#### /execute` section. `store`, `if score`/`data`/
+  `predicate`/`items`/`block`/`biome`/`blocks`/`loaded`, `on <relation>` and
+  `stopwatch` each need a subsystem this server does not have yet (scoreboard,
+  NBT storage, a loot-predicate engine, a read-only block/chunk query on
+  `CommandWorld`, entity-relationship queries); functions/datapacks remain
+  entirely unattempted, as scoped. **Command blocks have a real data model and
+  tested tick math now** (`crate::command_block`) but are not yet reachable
+  from a real client (`SET_COMMAND_BLOCK`/`SET_COMMAND_MINECART` still decode
+  into `ServerBound::Ignored`, outside this unit's file ownership) or driven
+  by the tick loop (`tick.rs` wiring is scoped but not built) — see this
+  document's own `#### Command blocks` section for exactly what is left.
 * **`/publish`** (the Open-to-LAN port command) is a separate, LAN-specific
   issue and was not attempted here.
 * **`/xp query`** parses and resolves its target, then refuses rather than
@@ -611,7 +728,9 @@ Still open, and each is now additive rather than blocked:
   handing stacks over, so `/give @s diamond_sword 3` produces three
   single-item stacks — but `add` may then merge them into one slot of 3. That is a
   pre-existing inventory limitation, not a command one.
-* **Command blocks** do not tick; **functions and datapacks** are unimplemented.
+* **Command blocks** have a data model and tick math (`crate::command_block`)
+  but nothing schedules them yet — see `#### Command blocks` above.
+  **Functions and datapacks** are unimplemented.
 
 ## Dependencies
 

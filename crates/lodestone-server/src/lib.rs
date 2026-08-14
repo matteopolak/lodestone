@@ -132,6 +132,7 @@ mod chunk_blocks;
 pub mod chunk_nbt;
 mod chunk_store;
 mod command;
+mod command_block;
 /// The built-in server command tree (`/gamerule`, …) — issue #48. **Was an
 /// orphan file, never declared and therefore never compiled**; see
 /// `docs/game-rules.md`.

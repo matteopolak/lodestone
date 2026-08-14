@@ -64,15 +64,21 @@
 //! version-free `ArgumentParser`, `GameMode`, `ItemStack`), `lodestone-data`
 //! (the item and entity-type name censuses), `uuid`.
 
+pub mod anchor;
 pub mod block;
+pub mod dimension;
 pub mod entity;
 pub mod entity_type;
 pub mod game_mode;
 pub mod item;
 pub mod position;
+pub mod rotation;
+pub mod swizzle;
 pub mod time;
 
+pub use anchor::{AnchorInput, EntityAnchorArg};
 pub use block::{BlockArg, BlockInput};
+pub use dimension::{DimensionArg, HOSTED_DIMENSIONS};
 pub use entity::{
     Bounds, EntityArg, EntitySelector, SelectorOrder, SelectorPosition, SelectorPredicate,
 };
@@ -80,6 +86,8 @@ pub use entity_type::{EntityTypeArg, EntityTypeInput};
 pub use game_mode::GameModeArg;
 pub use item::{ItemArg, ItemInput};
 pub use position::{BlockPosArg, Coordinate, Coordinates, Vec3Arg};
+pub use rotation::{Rotation2, RotationArg};
+pub use swizzle::{Axes, SwizzleArg};
 pub use time::TimeArg;
 
 use lodestone_command::{

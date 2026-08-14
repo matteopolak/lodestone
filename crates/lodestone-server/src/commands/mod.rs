@@ -59,11 +59,12 @@
 //! this shape for plugin commands and matching it is deliberate: two dispatchers
 //! over one tree library should not disagree about where a callback lives.
 //!
-//! The *other* half of Brigadier — [`Registrar::modifier`] and the fork set — is
-//! built now even though `/execute` is a later unit, and that is the reason a port
-//! was chosen over a signature-driven macro. A function signature is a list; the
-//! vanilla command set is a graph. With the modifier substrate in from day one,
-//! `/execute` is purely additive and the commands built before it need no rework.
+//! The *other* half of Brigadier — [`Registrar::modifier`] and the fork set — was
+//! built ahead of `/execute` (`crate::commands::execute`, which now uses it), and
+//! that is the reason a port was chosen over a signature-driven macro. A function
+//! signature is a list; the vanilla command set is a graph. With the modifier
+//! substrate in from day one, `/execute` landed purely additively and the
+//! commands built before it needed no rework.
 //!
 //! # Effects, and why executors do not act directly
 //!
@@ -123,6 +124,7 @@ pub mod effect;
 /// `/effect give` and `/effect clear` — the producer that makes
 /// [`crate::mob_effects`] reachable from a running game.
 mod effect_command;
+mod execute;
 mod experience;
 mod gamemode;
 mod gamerule;
@@ -233,16 +235,18 @@ impl ServerCommands {
         weather::register(&mut registrar);
         default_gamemode::register(&mut registrar);
         help::register(&mut registrar);
+        execute::register(&mut registrar);
         Self::from_registrar(registrar)
     }
 
     /// Assemble from a [`Registrar`] the caller populated itself.
     ///
     /// The seam a gate uses to exercise the *substrate* rather than the shipped
-    /// commands — the modifier/fork machinery has no production caller until
-    /// `/execute` lands, and something has to drive it or it is an island of
-    /// exactly the kind this module was. Also the shape a plugin-registered
-    /// built-in would take.
+    /// commands. The modifier/fork machinery had no production caller before
+    /// `/execute` (`crate::commands::execute`) landed and used it — before
+    /// that, something had to drive it here or it was an island of exactly
+    /// the kind this module was. Also the shape a plugin-registered built-in
+    /// would take.
     #[must_use]
     pub fn from_registrar(registrar: Registrar) -> Self {
         let parts = registrar.finish();

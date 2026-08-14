@@ -537,6 +537,26 @@ impl Dispatcher<'_> {
     ///   refusal is recorded and the remaining sources still run. `execute as @a
     ///   run give @s …` must not stop at the first player whose inventory is
     ///   full.
+    ///
+    /// # A node's own modifier is skipped when *that node* is the terminal one
+    ///
+    /// This is `/execute`'s `if`/`unless`: vanilla attaches **both**
+    /// `.fork(execute, modifier)` *and* `.executes(numericConditionalHandler)`
+    /// to the same condition node (`ExecuteCommand::addConditional`), and real
+    /// Brigadier's `ContextChain` only ever invokes one of the two — the fork
+    /// modifier fires exclusively when the chain **continues** to a further
+    /// stage (`execute if entity @a run …`), and a terminal match instead runs
+    /// the node's own `command` callback directly against the *original*,
+    /// unfiltered context (`execute if entity @a` alone). A plain "apply every
+    /// modifier found along the path" walk cannot see that distinction — it
+    /// would filter the source (or drop it entirely when the condition fails)
+    /// *before* the terminal executor got a chance to report its own
+    /// pass/fail message, silently turning a failed `unless`/`if` into an
+    /// empty success instead of `commands.execute.conditional.fail`. So: when
+    /// a node is both the parsed path's last node *and* carries its own
+    /// executor, its modifier is not applied here at all — the executor runs
+    /// against the single incoming source unchanged, exactly as `execute if
+    /// entity <nothing>`'s own handler expects to see it.
     pub(super) fn dispatch(
         &self,
         world: &CommandWorld<'_>,
@@ -547,8 +567,12 @@ impl Dispatcher<'_> {
         let mut forked = false;
         let mut feedback: Vec<String> = Vec::new();
         let mut effects: Vec<DirectedEffect> = Vec::new();
+        let last_index = parsed.nodes.len().wrapping_sub(1);
 
         for (index, node) in parsed.nodes.iter().enumerate() {
+            if index == last_index && self.executors.contains_key(node) {
+                continue;
+            }
             let Some(modifier) = self.modifiers.get(node) else { continue };
             let node_forks = self.forks.contains(node);
             forked |= node_forks;
