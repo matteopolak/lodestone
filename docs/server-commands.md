@@ -320,6 +320,26 @@ the commands registered on top of them.
   `/teleport` are two independently-built trees rather than a `redirect` —
   `Registrar::redirect` has no production caller yet and this was not the
   place to be the first.
+
+  **There is no bare, `@s`-free `/tp <entity>` self-form.** Vanilla's tree has
+  `<location>`, `<destination>` and `<targets>` as three *simultaneous*
+  argument children of `teleport`, which needs the ambiguity-preserving
+  backtracking `lodestone_command::CommandTree::parse`'s own doc comment says
+  it deliberately does not implement — "argument children are tried in
+  insertion order and the **first** success wins", no retry across siblings
+  when that branch turns out incomplete. A bare name is valid syntax for both
+  the single-entity `<destination>` and the multi-entity `<targets>`, so
+  whichever is registered first always wins outright regardless of what
+  follows, and no ordering satisfies both `/tp Steve` (self) and
+  `/tp Steve ~5 ~ ~` (move Steve) — measured live: an isolated worktree run
+  of the vanilla-tree-shaped first draft failed exactly the two tests
+  exercising a `<targets>`-prefixed bare name, both with zero effects
+  produced. The shipped tree drops the top-level bare `<destination>` node so
+  `<targets>` always wins that position; self-to-entity is reached with an
+  explicit `@s` (`/tp @s Steve`) instead, which cannot collide with
+  `<location>`'s numeric/`~`/`^` grammar. A disclosed reduction from
+  vanilla's own tree, with its own control test asserting the bare form stays
+  refused.
 * **`/summon` — no new mob-sim capability, an API-shape gap.**
   `crate::mobs::MobHandle::with` and `crate::mobs::MobSim::spawn_species`
   were already `pub`; what was missing was a way for a command executor to
