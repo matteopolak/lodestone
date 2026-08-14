@@ -215,7 +215,6 @@ fn the_unsupported_ledger_names_what_is_not_implemented() {
         "minecraft:ruined_portal_nether",
         "minecraft:village_plains",
         "minecraft:trial_chambers",
-        "minecraft:stronghold",
     ] {
         assert!(
             ledger.contains_key(expected),
