@@ -120,7 +120,7 @@ pub fn make_infinite(mut lifecycle: ItemLifecycle) -> ItemLifecycle {
 /// as much as fits into `to` (capped at `to.max_stack_size`). Only the
 /// surviving `to` side picks up the other's state, exactly like
 /// `ItemEntity.merge(toItem, toStack, fromItem, fromStack)`
-/// (`ItemEntity.java:261-267`): `to.pickup_delay` becomes
+/// (the four-argument overload): `to.pickup_delay` becomes
 /// `max(to.pickup_delay, from.pickup_delay)` and `to.age` becomes
 /// `min(to.age, from.age)` (vanilla resets the survivor to the younger of the
 /// two ages). `from` keeps its own `age`/`pickup_delay` unchanged — vanilla
@@ -163,7 +163,7 @@ pub struct TrackedItem {
 }
 
 /// The live set of dropped-item lifecycles a driver advances once per server
-/// tick — the seam issue #215 was missing. `ItemLifecycle` and [`try_merge`]
+/// tick — the seam that was missing. `ItemLifecycle` and [`try_merge`]
 /// implement the rules correctly, but nothing owned a *collection* of them
 /// across ticks or turned [`ItemLifecycle::should_despawn`] into an actual
 /// removal.
@@ -210,7 +210,7 @@ impl ItemEntityRegistry {
 
     /// Advances every tracked item's age/pickup-delay counters one tick
     /// ([`ItemLifecycle::tick`]) and removes any that reach [`DESPAWN_AGE`]
-    /// this tick (`ItemEntity.java:188`, `this.age >= 6000`), returning their
+    /// this tick (`ItemEntity.tick`, `this.age >= 6000`), returning their
     /// ids so the caller can remove the matching world entity.
     pub fn tick(&mut self) -> Vec<i32> {
         for e in &mut self.entries {
@@ -401,7 +401,7 @@ mod tests {
         // `to` is the older stack, `from` is younger and has a smaller
         // pickup_delay — this distinguishes "to always wins" (a bug this test
         // catches) from vanilla's real per-field rule
-        // (`ItemEntity.java:261-267`): only `to.age`/`to.pickup_delay` move,
+        // (the four-argument `ItemEntity.merge` overload): only `to.age`/`to.pickup_delay` move,
         // and `to.age` becomes the *minimum* of the two, not `to`'s own value.
         let to = ItemLifecycle {
             age: 500,
@@ -469,7 +469,7 @@ mod tests {
         assert!((ground.velocity.x - 0.5 * 0.98 * 0.6).abs() < 1e-12);
     }
 
-    // -- ItemEntityRegistry: the #215 driver ---------------------------
+    // -- ItemEntityRegistry: the per-tick driver ---------------------------
 
     #[test]
     fn registry_tick_despawns_only_the_item_that_reaches_despawn_age() {

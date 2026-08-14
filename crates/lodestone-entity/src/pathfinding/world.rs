@@ -99,15 +99,15 @@ impl Aabb {
 /// asks and is deliberately blind to which block it is: `grass_block`, `stone`
 /// and `dirt` are one `Blocked`. But several vanilla goals branch on identity —
 /// a sheep eats grass and not stone — so they were inexpressible at the
-/// [`MobController`](crate::ai::MobController) seam, which is issue #456: the
+/// [`MobController`](crate::ai::MobController) seam: the
 /// trait declared 33 methods and not one read a block.
 ///
 /// # Why booleans rather than a block id or a `PathType`-style enum
 ///
 /// Vanilla's own tests are **predicates over tags**, not equality against a
 /// block: `EatBlockGoal`'s is `state.is(BlockTags.EDIBLE_FOR_SHEEP)`
-/// (`ai/goal/EatBlockGoal.java:16`) beside `state.is(Blocks.GRASS_BLOCK)`
-/// (`:34`). Two independent predicates that can hold together, so an enum would
+/// (its `IS_EDIBLE` field) beside `state.is(Blocks.GRASS_BLOCK)`
+/// (`EatBlockGoal.canUse`). Two independent predicates that can hold together, so an enum would
 /// have to enumerate the combinations. A block id would drag a registry into
 /// `lodestone-entity`, which the whole `PathWorld` seam exists to avoid, and
 /// would put tag resolution in the goal — the wrong side, exactly as with
@@ -124,13 +124,13 @@ impl Aabb {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlockCues {
     /// The block is in `#minecraft:edible_for_sheep`
-    /// (`tags/BlockTags.java:110`) — what a sheep grazes when it is standing
+    /// (`BlockTags.EDIBLE_FOR_SHEEP`) — what a sheep grazes when it is standing
     /// *in* it (`short_grass` and friends), consumed by
-    /// `EatBlockGoal`'s `IS_EDIBLE` (`ai/goal/EatBlockGoal.java:16`).
+    /// `EatBlockGoal`'s `IS_EDIBLE` field.
     pub edible_for_sheep: bool,
     /// The block is exactly `minecraft:grass_block` — what a sheep grazes when
     /// standing *on* it, and the only cue whose vanilla test is block equality
-    /// rather than a tag (`ai/goal/EatBlockGoal.java:34`, `:71`).
+    /// rather than a tag (`EatBlockGoal.canUse` and `EatBlockGoal.tick`).
     pub grass_block: bool,
 }
 

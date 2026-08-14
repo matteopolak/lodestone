@@ -13,7 +13,7 @@ use lodestone_model::Vec3;
 ///
 /// # This trait deliberately overlaps [`MobController`], and that has a cost
 ///
-/// `NavigatingMob` implements **both** (issue #209), and the two declare
+/// `NavigatingMob` implements **both**, and the two declare
 /// same-named methods: `position`, `next_i32`, `next_f32`, `in_water`, `move_to`,
 /// `navigation_done`, `stop_navigation`, `look_at`. On a type implementing both,
 /// every call to one of those is `E0034 multiple applicable items in scope` and

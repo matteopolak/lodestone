@@ -54,7 +54,7 @@ impl MobCategory {
     /// The categories that participate in natural spawning, in vanilla order —
     /// every category except [`Misc`](MobCategory::Misc), which never spawns
     /// naturally and has no cap. Moved here from
-    /// `lodestone_server::mob_spawn` (issue #518's dedup) so the one
+    /// `lodestone_server::mob_spawn`, to deduplicate it, so the one
     /// [`MobCategory`] the integrated server's spawn driver iterates lives
     /// beside the category it names.
     pub const SPAWNING: [MobCategory; 7] = [

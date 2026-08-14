@@ -23,7 +23,7 @@
 //! # Scope: this is the plumbing, not the behaviour packages
 //!
 //! Every brain species here gets the same generic CORE+IDLE [`scaffold`]. That is
-//! deliberate and it is what issue #209 asks for — the *composition*, proven with
+//! deliberate and it is what this seam asks for — the *composition*, proven with
 //! the scaffold `behaviors.rs` already ships. The per-species behaviour packages
 //! (a villager's profession schedule and trading availability, a warden's
 //! vibration sensor and anger, a piglin's barter and hoglin hunt) are separate
