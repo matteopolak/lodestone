@@ -2058,6 +2058,11 @@ pub struct MobSim<'w> {
     /// own doc for why this reuses `crate::poi_storage::PoiRecord` rather
     /// than a parallel claim table, and for what is deliberately not built
     /// (no on-disk persistence, no block-event hook).
+    ///
+    /// Native-only, same as [`villager::WorkstationClaims`] itself — see
+    /// that type's own doc for why (it reuses `crate::poi_storage`, which is
+    /// gated the same way, and this crate compiles for `wasm32-unknown-unknown`).
+    #[cfg(not(target_arch = "wasm32"))]
     workstation_claims: villager::WorkstationClaims,
 }
 
@@ -2217,6 +2222,7 @@ impl<'w> MobSim<'w> {
             lightning_bolts: HashMap::new(),
             pending_lightning_fires: Vec::new(),
             pending_projectile_block_hits: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             workstation_claims: villager::WorkstationClaims::new(),
         }
     }
@@ -2711,6 +2717,7 @@ impl<'w> MobSim<'w> {
     /// that function's own doc for the cost it is bounding). 100 ticks is a
     /// scope choice, not a transcribed vanilla constant: nothing in this
     /// codebase ports `AssignProfessionFromJobSite`'s own interval.
+    #[cfg(not(target_arch = "wasm32"))]
     const JOB_SEARCH_INTERVAL_TICKS: i32 = 100;
 
     /// One villager-profession pass (issue #243): throttled job search for
@@ -2723,6 +2730,12 @@ impl<'w> MobSim<'w> {
     /// claimed under (destroyed, or replaced with a different workstation
     /// type) releases its ticket and goes back to unemployed on the very
     /// next call.
+    ///
+    /// Native-only (issue #243's wasm scope note) — see
+    /// [`villager::WorkstationClaims`]'s own doc. A villager spawned in a
+    /// `wasm32` (browser singleplayer) world keeps whatever profession it
+    /// already had and simply never claims a new one.
+    #[cfg(not(target_arch = "wasm32"))]
     fn tick_villager_professions(&mut self) {
         let world = self.world;
         let claims = &mut self.workstation_claims;
@@ -3087,6 +3100,7 @@ impl<'w> MobSim<'w> {
         // it runs before the increment below.
         self.tick_orbs(&view);
         self.tick_leashes();
+        #[cfg(not(target_arch = "wasm32"))]
         self.tick_villager_professions();
 
         self.tick_count += 1;

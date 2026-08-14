@@ -49,13 +49,27 @@
 //!   villager reports `minecraft:plains` regardless of where it stands —
 //!   `VillagerType.byBiome` is real vanilla logic this module does not port.
 //!   Cosmetic only; profession and workstation claiming do not depend on it.
+//! - **[`WorkstationClaims`]/[`find_and_claim_workstation`] are native-only**,
+//!   `#[cfg(not(target_arch = "wasm32"))]` — they reuse
+//!   `crate::poi_storage::PoiRecord`, and `crate::poi_storage` itself is
+//!   gated the same way in `lib.rs` (a `std::fs` region-file module). This
+//!   crate compiles for `wasm32-unknown-unknown` (`scripts/wasm-check.sh`'s
+//!   `CRATES` list — the browser's own singleplayer path links it), so an
+//!   ungated `use crate::poi_storage::PoiRecord` here would break that build
+//!   exactly the way `crate::portal`'s POI conversion functions once did
+//!   (see `docs/point-of-interest-storage.md`'s own account of that break).
+//!   `Profession`, the block/POI/profession tables and leveling are plain
+//!   data with no such dependency and stay available on every target — only
+//!   the claim ledger itself, and the search that uses it, are narrowed.
 
 use std::collections::HashMap;
 use std::str::FromStr;
 
 use lodestone_model::{BlockPos, ResourceKey};
 
+#[cfg(not(target_arch = "wasm32"))]
 use super::ChunkWorld;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::poi_storage::PoiRecord;
 
 pub mod trades;
@@ -199,11 +213,15 @@ pub fn bare_block_id(state: &str) -> &str {
 /// [`crate::poi_storage::max_tickets`] already carries every profession POI
 /// type's cap (`1`, transcribed from `PoiTypes.bootstrap`) — this module
 /// invents no new occupancy math.
+///
+/// Native-only — see this module's own doc for why.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default)]
 pub struct WorkstationClaims {
     records: HashMap<(i32, i32, i32), PoiRecord>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl WorkstationClaims {
     #[must_use]
     pub fn new() -> Self {
@@ -272,6 +290,9 @@ impl WorkstationClaims {
 /// `O(radius^3)` per idle villager per search. A villager standing well
 /// outside a real workstation's reach simply will not find it — an honest,
 /// disclosed narrowing, not a silent one.
+///
+/// Native-only — see this module's own doc for why.
+#[cfg(not(target_arch = "wasm32"))]
 pub const SEARCH_RADIUS: i32 = 16;
 
 /// Runs one job search from `origin`: a nearest-first scan of `world` for a
@@ -283,6 +304,9 @@ pub const SEARCH_RADIUS: i32 = 16;
 /// wider disclosed gap it belongs to); nearest-first is a defensible,
 /// deterministic stand-in that a two-villager/one-workstation contention
 /// test can still observe cleanly.
+///
+/// Native-only — see this module's own doc for why.
+#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn find_and_claim_workstation(
     origin: BlockPos,
