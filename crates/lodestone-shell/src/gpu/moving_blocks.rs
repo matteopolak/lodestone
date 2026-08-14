@@ -1034,33 +1034,77 @@ mod tests {
     /// subtype's real default offset (chest 8, furnace/TNT 6, hopper 1) and
     /// checked against the pose's own output — not merely "some offset was
     /// applied", but the exact vanilla arithmetic.
+    ///
+    /// **The term is scaled by `0.75`, not added raw**, and that is not a
+    /// rounding artefact — it falls straight out of `AbstractMinecartRenderer.
+    /// submit`'s own call order:
+    ///
+    /// ```text
+    /// poseStack.scale(0.75F, 0.75F, 0.75F);                    // call 1
+    /// poseStack.translate(-0.5F, (displayOffset - 8) / 16.0F, 0.5F); // call 2
+    /// poseStack.mulPose(Axis.YP.rotationDegrees(90.0F));        // call 3
+    /// ```
+    ///
+    /// `PoseStack.Pose.scale`/`translate`/`mulPose` all **post-multiply** the
+    /// running pose matrix by the new transform (`this.pose.scale(...)`,
+    /// `this.pose.mul(matrix)` in `PoseStack.java`), so the composed matrix is
+    /// `Scale ∘ Translate ∘ Rotate` in call order — the *first*-called
+    /// transform ends up *outermost*, wrapping everything called after it.
+    /// `scale(0.75)` is called **before** `translate`, so the translate's own
+    /// output is itself scaled by `0.75` once the whole chain is applied; this
+    /// is the identical composition rule `primed_tnt_pose`'s own passing test
+    /// already relies on (`translate(0, 0.5, 0)` called before two `mulPose`
+    /// calls stays un-rotated by them for the same reason, in reverse).
+    /// `minecart_content_pose` transcribes that call order faithfully
+    /// (`scale * translate * spin`, left to right, matching Java top to
+    /// bottom) — so this test's *expectation*, not the pose function, was the
+    /// bug: it asserted a flat, unscaled `(displayOffset - 8) / 16` term,
+    /// which is what a translate called *after* (or with no) scale would
+    /// produce, not what vanilla's own order actually does.
+    ///
+    /// Chest's own offset (`8`) makes `(8 - 8) / 16 == 0`, so it agrees under
+    /// *both* the right and the wrong reading — exactly the coincident-input
+    /// trap this repo's own evidence standards warn about. Hopper's offset
+    /// (`1`) is what discriminates: raw would give `-0.4375`, scaled gives
+    /// `0.75 * -0.4375 = -0.328125`, and it was hopper alone that caught the
+    /// original wrong expectation.
+    ///
+    /// Mismatches are collected and asserted once, not `assert!`ed per arm —
+    /// an assert inside the sequence stops at the first failure, and with
+    /// three arms that means the second and third never run.
     #[test]
     fn the_display_offset_term_matches_vanillas_displayoffset_minus_8_over_16() {
         let feet = glam::Vec3::ZERO;
-        let y_for = |offset: i32| minecart_content_pose(feet, 0.0, offset).transform_point3(glam::Vec3::ZERO).y;
-        let chest_y = y_for(8);
-        let hopper_y = y_for(1);
-        let furnace_y = y_for(6);
+        let y_for = |offset: i32| {
+            minecart_content_pose(feet, 0.0, offset).transform_point3(glam::Vec3::ZERO).y
+        };
+        // (name, displayOffset, expected y = bob + 0.75 * (displayOffset - 8) / 16)
+        let cases = [("chest", 8), ("hopper", 1), ("furnace/TNT", 6)];
 
+        let mut mismatches = Vec::new();
+        let mut ys = Vec::new();
+        for (name, offset) in cases {
+            let got = y_for(offset);
+            let expected = 0.375 + 0.75 * (f64::from(offset) - 8.0) / 16.0;
+            ys.push(got);
+            if (f64::from(got) - expected).abs() >= 1e-5 {
+                mismatches.push(format!(
+                    "{name} (offset {offset}): got {got}, expected {expected} \
+                     (bob + 0.75 * (displayOffset - 8) / 16)"
+                ));
+            }
+        }
         assert!(
-            (chest_y - 0.375).abs() < 1e-5,
-            "chest (offset 8): expected bob-only 0.375, got {chest_y}"
-        );
-        assert!(
-            (hopper_y - (0.375 + (1.0 - 8.0) / 16.0)).abs() < 1e-5,
-            "hopper (offset 1): got {hopper_y}, expected {}",
-            0.375 + (1.0 - 8.0) / 16.0
-        );
-        assert!(
-            (furnace_y - (0.375 + (6.0 - 8.0) / 16.0)).abs() < 1e-5,
-            "furnace/TNT (offset 6): got {furnace_y}, expected {}",
-            0.375 + (6.0 - 8.0) / 16.0
+            mismatches.is_empty(),
+            "{} of {} minecart content offsets are wrong: {mismatches:#?}",
+            mismatches.len(),
+            cases.len()
         );
         // Distinct, not coincidentally equal — the offset term genuinely has to
         // vary the height, or this whole gate is measuring the bob alone.
-        assert_ne!(chest_y, hopper_y);
-        assert_ne!(chest_y, furnace_y);
-        assert_ne!(hopper_y, furnace_y);
+        assert_ne!(ys[0], ys[1], "chest and hopper landed on the same height");
+        assert_ne!(ys[0], ys[2], "chest and furnace landed on the same height");
+        assert_ne!(ys[1], ys[2], "hopper and furnace landed on the same height");
     }
 
     /// A synthetic top-face quad, block-local `0..1` space — the same shape
