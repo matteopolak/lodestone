@@ -138,7 +138,7 @@ pub struct SessionSpawnPoint(pub lodestone_game::levelstate::SpawnPoint);
 
 /// The server's reported game-rule values, from `ClientEvent::GameRulesChanged`.
 ///
-/// **Not** issue #327's typed registry — that is a server-side 59-rule table and
+/// **Not** a typed registry — that would be a server-side 59-rule table and
 /// is not built. This holds raw wire strings with typed accessors over the top;
 /// see [`lodestone_game::levelstate::GameRuleValues`] for why absence is kept
 /// distinct from `false` (the packet is request/response, not broadcast, so an
@@ -175,8 +175,7 @@ pub struct SessionMaps(pub lodestone_game::maps::MapStore);
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct SessionAdvancements(pub lodestone_game::advancement::AdvancementStore);
 
-/// The local player's statistics counters, from `ClientEvent::StatisticsAwarded`
-/// (issue #26).
+/// The local player's statistics counters, from `ClientEvent::StatisticsAwarded`.
 ///
 /// `award_stats` had no decode at all before this, which is why
 /// `lodestone_shell::menu::stats` renders from `StatsSnapshot::default()` — an
@@ -190,7 +189,7 @@ pub struct SessionStatistics(pub lodestone_game::progress::Statistics);
 
 /// The server's recipe-book sync -- unlocks, the ghost preview, and the property
 /// sets -- from `recipe_book_add`/`remove`, `place_ghost_recipe` and
-/// `update_recipes` (issue #26).
+/// `update_recipes`.
 ///
 /// **Not** the recipe corpus (that is `RecipeRegistry`), and note 26.x identifies
 /// a recipe by a per-session `RecipeDisplayId` `i32` rather than an `Identifier`,
@@ -200,8 +199,7 @@ pub struct SessionStatistics(pub lodestone_game::progress::Statistics);
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct SessionRecipeBook(pub lodestone_game::recipe_sync::RecipeBookSync);
 
-/// The open merchant's trade list, from `ClientEvent::MerchantOffersReceived`
-/// (issue #26).
+/// The open merchant's trade list, from `ClientEvent::MerchantOffersReceived`.
 ///
 /// Session state rather than per-entity state about the villager: it is a *menu*,
 /// the same as every other container event, and it dies with the screen.
@@ -210,7 +208,7 @@ pub struct SessionRecipeBook(pub lodestone_game::recipe_sync::RecipeBookSync);
 pub struct SessionTrades(pub lodestone_game::trades::TradeOffers);
 
 /// The server's own registry orders by holder id, from the `*RegistryNames`
-/// events (issue #26 / the enchantment half).
+/// events (the enchantment half).
 ///
 /// `minecraft:enchantment` today. The table was already decoded by
 /// `ClientRegistries::entry_names` and never left the version crate, so
@@ -222,7 +220,7 @@ pub struct SessionRegistryOrder(pub lodestone_game::registry_order::RegistryOrde
 
 /// Server debug feeds and NBT query replies, from the `debug_*`, `debug_sample`,
 /// `game_test_highlight_pos`, `test_instance_block_status` and `tag_query`
-/// packets (issue #26).
+/// packets.
 ///
 /// Empty on every ordinary session and that is correct, not a defect: the server
 /// sends nothing on a debug feed until the client asks with
@@ -231,15 +229,14 @@ pub struct SessionRegistryOrder(pub lodestone_game::registry_order::RegistryOrde
 pub struct SessionDebugFeeds(pub lodestone_game::debug_feeds::DebugFeedStore);
 
 /// What the server has announced about itself: links, report details, chat
-/// completions, tick rate and the open dialog (issue #26).
+/// completions, tick rate and the open dialog.
 ///
 /// See [`lodestone_game::serverinfo::ServerInfoStore`]. Everything in it is
 /// server-authored and untrusted.
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct SessionServerInfo(pub lodestone_game::serverinfo::ServerInfoStore);
 
-/// Tracked waypoints — vanilla's locator bar — from `ClientEvent::WaypointUpdated`
-/// (issue #26).
+/// Tracked waypoints — vanilla's locator bar — from `ClientEvent::WaypointUpdated`.
 ///
 /// See [`lodestone_game::waypoints::WaypointStore`], and note the position is a
 /// four-way precision degradation rather than an `Option`.
@@ -275,7 +272,7 @@ pub struct SessionMenus(pub lodestone_game::menus::Menus);
 /// the breaking entity's id, not by *this* session, but there is exactly one
 /// copy of it client-side, same as a boss-bar set).
 ///
-/// **Drawing it is a separate piece of work (issue #410).** The renderer's
+/// **Drawing it is a separate piece of work.** The renderer's
 /// single-target `CrackTarget`/`CrackPipeline` (`lodestone_shell::gpu`) only
 /// ever draws the local player's own dig; painting *other* players' cracks
 /// needs that pipeline to accept more than one target, which is a rendering
@@ -385,7 +382,7 @@ pub struct ServerGameMode(pub Option<GameMode>);
 /// guessed as `Normal`, the same convention [`Vitals`]/[`ServerGameMode`] use.
 ///
 /// Nothing in the shell reads this yet — showing it in the F3 overlay / pause
-/// menu is tracked separately as issue #411, since that is a text/HUD change
+/// menu is tracked separately, since that is a text/HUD change
 /// in files outside this routing fix's scope.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ServerDifficulty(pub Option<(Difficulty, bool)>);
@@ -395,8 +392,8 @@ pub struct ServerDifficulty(pub Option<(Difficulty, bool)>);
 ///
 /// # Why this exists at all: it was a complete island
 ///
-/// `ClientEvent::AbilitiesChanged` was decoded correctly at
-/// `crates/protocol/v770/src/adapter.rs:3301`, unit-tested at the protocol layer,
+/// `ClientEvent::AbilitiesChanged` was decoded correctly in
+/// `lodestone_v770::adapter::V770Adapter::handle_play_player`, unit-tested at the protocol layer,
 /// round-tripped in `lodestone-model`'s own tests — and consumed **nowhere**.
 /// `grep -c AbilitiesChanged` returned `0` in both this crate's `ingest.rs` and
 /// the shell's `sim.rs`. That is the exact defect class `CLAUDE.md` §1 names, and
@@ -412,7 +409,7 @@ pub struct ServerDifficulty(pub Option<(Difficulty, bool)>);
 /// # `flying` is state, `may_fly` is permission
 ///
 /// They are separate wire bits and must not be collapsed. `may_fly` gates the
-/// client's double-tap toggle (`LocalPlayer.aiStep`, `LocalPlayer.java:825`);
+/// client's double-tap toggle (`LocalPlayer.aiStep`'s `abilities.mayfly` check);
 /// `flying` is whether flight is engaged right now, and the server both reports
 /// it and accepts our echo of it (`ServerboundPlayerAbilities`). A client that
 /// sets `flying` without `may_fly` desyncs and gets corrected.
@@ -478,14 +475,14 @@ impl Default for Abilities {
 pub struct ServerDimension(pub Option<DimensionId>);
 
 /// The **dimension type** the local player's dimension points at, as the server
-/// declared it in the Configuration `registry_data` (issue #288). `None` before
+/// declared it in the Configuration `registry_data`. `None` before
 /// login, and `None` on a server whose registry did not resolve.
 ///
 /// # Why this is not derivable from [`ServerDimension`]
 ///
 /// [`ServerDimension`] holds a *level* id; this holds the registry entry that
 /// level's geometry and lighting rules come from. Deriving one from the other is
-/// the name match issue #34 filed: a data pack can point `mypack:mine` at the
+/// exactly the mistake a name match makes: a data pack can point `mypack:mine` at the
 /// vanilla overworld type, or give `minecraft:overworld` a 1024-tall custom type.
 /// The two are folded together in [`apply_local_player_state`] off two events
 /// the adapter emits back to back, so they can never disagree about *when* they
@@ -494,12 +491,12 @@ pub struct ServerDimension(pub Option<DimensionId>);
 /// **`None` must not be read as "the overworld".** It means the server said
 /// nothing usable, and every consumer has to state its own fallback — see
 /// `lodestone_shell::mesher::sky_default_for_dimension`, which keeps its
-/// pre-#288 name match for exactly this case.
+/// original name match for exactly this case.
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct ServerDimensionType(pub Option<DimensionTypeInfo>);
 
 /// Every biome's `minecraft:visual/sky_color` as the server declared it in the
-/// Configuration `registry_data`, **indexed by biome holder id** (issue #96).
+/// Configuration `registry_data`, **indexed by biome holder id**.
 ///
 /// Packed `0x00RR_GGBB` in sRGB bytes; `None` at a holder id whose biome
 /// declares no sky colour (the Nether and End biomes) or whose entry did not
@@ -733,7 +730,7 @@ pub fn apply_game_rules(batch: Res<IngestBatch>, mut rules: Query<&mut SessionGa
     }
 }
 
-/// `IngestSet::Apply`: `StatisticsAwarded` -> [`SessionStatistics`] (issue #26).
+/// `IngestSet::Apply`: `StatisticsAwarded` -> [`SessionStatistics`].
 pub fn apply_statistics(batch: Res<IngestBatch>, mut stats: Query<&mut SessionStatistics>) {
     for event in batch.events() {
         for mut table in &mut stats {
@@ -742,7 +739,7 @@ pub fn apply_statistics(batch: Res<IngestBatch>, mut stats: Query<&mut SessionSt
     }
 }
 
-/// `IngestSet::Apply`: the recipe-book family -> [`SessionRecipeBook`] (issue #26).
+/// `IngestSet::Apply`: the recipe-book family -> [`SessionRecipeBook`].
 pub fn apply_recipe_book_sync(batch: Res<IngestBatch>, mut books: Query<&mut SessionRecipeBook>) {
     for event in batch.events() {
         for mut store in &mut books {
@@ -751,7 +748,7 @@ pub fn apply_recipe_book_sync(batch: Res<IngestBatch>, mut books: Query<&mut Ses
     }
 }
 
-/// `IngestSet::Apply`: `MerchantOffersReceived` -> [`SessionTrades`] (issue #26).
+/// `IngestSet::Apply`: `MerchantOffersReceived` -> [`SessionTrades`].
 pub fn apply_trades(batch: Res<IngestBatch>, mut trades: Query<&mut SessionTrades>) {
     for event in batch.events() {
         for mut store in &mut trades {
@@ -769,7 +766,7 @@ pub fn apply_registry_order(batch: Res<IngestBatch>, mut orders: Query<&mut Sess
     }
 }
 
-/// `IngestSet::Apply`: the `debug_*` family -> [`SessionDebugFeeds`] (issue #26).
+/// `IngestSet::Apply`: the `debug_*` family -> [`SessionDebugFeeds`].
 pub fn apply_debug_feeds(batch: Res<IngestBatch>, mut feeds: Query<&mut SessionDebugFeeds>) {
     for event in batch.events() {
         for mut store in &mut feeds {
@@ -778,8 +775,7 @@ pub fn apply_debug_feeds(batch: Res<IngestBatch>, mut feeds: Query<&mut SessionD
     }
 }
 
-/// `IngestSet::Apply`: the server-metadata family -> [`SessionServerInfo`]
-/// (issue #26).
+/// `IngestSet::Apply`: the server-metadata family -> [`SessionServerInfo`].
 pub fn apply_server_info(batch: Res<IngestBatch>, mut info: Query<&mut SessionServerInfo>) {
     for event in batch.events() {
         for mut store in &mut info {
@@ -788,7 +784,7 @@ pub fn apply_server_info(batch: Res<IngestBatch>, mut info: Query<&mut SessionSe
     }
 }
 
-/// `IngestSet::Apply`: `WaypointUpdated` -> [`SessionWaypoints`] (issue #26).
+/// `IngestSet::Apply`: `WaypointUpdated` -> [`SessionWaypoints`].
 pub fn apply_waypoints(batch: Res<IngestBatch>, mut waypoints: Query<&mut SessionWaypoints>) {
     for event in batch.events() {
         for mut store in &mut waypoints {
@@ -891,7 +887,7 @@ pub fn apply_local_player_state(
         ) in &mut players
         {
             match event {
-                // Issue #288. Emitted immediately *before* `Login`/`Respawned`
+                // Emitted immediately *before* `Login`/`Respawned`
                 // by the adapter, off the same packet's dimension-type holder id.
                 //
                 // Assigned unconditionally, `None` included: an unresolvable
@@ -905,7 +901,7 @@ pub fn apply_local_player_state(
                 } => {
                     dimension_type.0 = info.clone();
                 }
-                // Issue #96. Assigned unconditionally for the same reason the
+                // Assigned unconditionally for the same reason the
                 // arm above is: an empty table must **clear** the previous one.
                 // A server switch that sends a registry set without biomes has
                 // to stop tinting, not keep painting the last world's sky.
@@ -932,17 +928,17 @@ pub fn apply_local_player_state(
                     dimension.0 = Some(dim.clone());
                     game_mode.0 = Some(*mode);
                     alive.0 = true;
-                    // Issue #390. The two entity-metadata-fed fields go back to
+                    // The two entity-metadata-fed fields go back to
                     // "no reading yet", because a respawn is a **brand-new
                     // player entity on both sides**: `PlayerList.respawn` does
-                    // `new ServerPlayer(...)` (`PlayerList.java:393`) and
+                    // `new ServerPlayer(...)` and
                     // vanilla's *client* likewise builds a fresh `LocalPlayer`
                     // via `gameMode.createPlayer`
-                    // (`ClientPacketListener.handleRespawn`, `:1286`) and only
+                    // (in `ClientPacketListener.handleRespawn`) and only
                     // copies the old id onto it. Its synched data therefore
                     // starts at `Entity`'s own defaults —
                     // `entityDataBuilder.define(DATA_AIR_SUPPLY_ID,
-                    // getMaxAirSupply())` (`Entity.java:319`, i.e. 300) and
+                    // getMaxAirSupply())` (i.e. 300) and
                     // shared flags 0 — so nothing in the dead entity's last
                     // metadata survives. We keep one long-lived entity instead
                     // of respawning ours, which is exactly why the clear has to
@@ -1003,7 +999,7 @@ pub fn apply_local_player_state(
                 // A runtime `/gamemode`. `Login`/`Respawned` above carry a mode
                 // too, so all three writers of `ServerGameMode` sit together.
                 ClientEvent::GameModeChanged { game_mode: mode } => game_mode.0 = Some(*mode),
-                // #191. Assigned as a **whole record**, never field-by-field:
+                // Assigned as a **whole record**, never field-by-field:
                 // vanilla's `Abilities.apply(Packed)` overwrites every field from
                 // one packet, so a server that clears `mayfly` clears it here too.
                 // Merging fields would let a stale `may_fly: true` outlive the
@@ -1137,7 +1133,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             SessionMaps::default(),
             SessionAdvancements::default(),
         ));
-        // A third `insert`: issue #26's four new stores, again only because the
+        // A third `insert`: four more stores, again only because the
         // tuple `Bundle` impls stop at arity 15.
         entity.insert((
             SessionStatistics::default(),
@@ -1345,8 +1341,8 @@ pub struct TitleOverlay(pub lodestone_game::player_state::TitleState);
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct ActionBarOverlay(pub lodestone_game::player_state::ActionBar);
 
-/// The held-item name highlight (issue #126): vanilla's `Hud.tick`
-/// (`Hud.java:1190-1203`) timer for the label that appears above the hotbar
+/// The held-item name highlight: vanilla's `Hud.tick`
+/// timer for the label that appears above the hotbar
 /// when the selected item's *identity* changes. See
 /// [`lodestone_game::player_state::HeldItemHighlight`]'s own doc for why this
 /// is keyed on item id + hover name rather than slot index — switching
@@ -1877,7 +1873,7 @@ mod tests {
     /// A `World` carrying **both** halves of the fold — the session scalars and
     /// the per-entity ingest that owns [`Vitals::air`]/[`Vitals::on_fire`].
     ///
-    /// [`session_app`] alone cannot express issue #390: `air` and `on_fire` are
+    /// [`session_app`] alone cannot express the respawn-clears-vitals case: `air` and `on_fire` are
     /// written only by `crate::ingest::apply_local_player_air_supply` /
     /// `apply_local_player_on_fire`, which are registered by `IngestPlugin`. A
     /// test that reached the drowned state by assigning `Vitals` directly would
@@ -1903,7 +1899,7 @@ mod tests {
         }
     }
 
-    /// Issue #390: **a respawn clears the two entity-metadata-fed vitals.**
+    /// **A respawn clears the two entity-metadata-fed vitals.**
     ///
     /// Reported from play — after drowning, the bubble row rendered *completely
     /// empty* until the server's next metadata packet arrived with 300, which is
@@ -2051,7 +2047,7 @@ mod tests {
         }
     }
 
-    /// Issue #288: the registry-driven dimension type must reach
+    /// The registry-driven dimension type must reach
     /// [`ServerDimensionType`] **through the schedule**, and must move on a
     /// portal trip the same way [`ServerDimension`] does.
     ///
@@ -2169,9 +2165,10 @@ mod tests {
     /// failure* rather than a race whose outcome depends on registration order.
     ///
     /// azalea logs the same check at `Warn` (`AmbiguityLoggerPlugin`,
-    /// `azalea-client/src/client.rs:246-262`); an error is right here because the
+    /// `azalea-client/src/client.rs`); an error is right here because the
     /// invariant is the point of the stage, not a diagnostic.
-    /// #191's routing control. The decode has been correct since v770 landed and
+    ///
+    /// The `AbilitiesChanged` routing control. The decode has been correct since v770 landed and
     /// the event still reached **nothing**, because `SharedState::apply` forwards
     /// only what `ingest::handles_event` or [`handles_event`] lists. This pair —
     /// "someone claims it, and it is the right someone" — is the check that has
@@ -2205,7 +2202,7 @@ mod tests {
         assert!(!crate::ingest::handles_event(&mode));
     }
 
-    /// #96's routing control, the fifth instance of the same pair.
+    /// The `BiomeVisuals` routing control, the fifth instance of the same pair.
     ///
     /// The per-biome sky tint was blocked for two sessions on exactly one missing
     /// link: the decoded colours never crossed the version-free seam. Once they
@@ -2230,7 +2227,7 @@ mod tests {
         );
     }
 
-    /// Issue #96: the biome sky-colour table must reach
+    /// The biome sky-colour table must reach
     /// [`ServerBiomeSkyColors`] **through the schedule**, keep its holder-id
     /// indexing, and be *replaced* rather than merged.
     ///
@@ -2376,7 +2373,7 @@ mod tests {
         assert!(!after.flying);
     }
 
-    /// A runtime `/gamemode` must reach `ServerGameMode`, which before #191 was
+    /// A runtime `/gamemode` must reach `ServerGameMode`, which before this was
     /// written only by `Login`/`Respawned`.
     #[test]
     fn a_runtime_game_mode_change_reaches_the_component() {
