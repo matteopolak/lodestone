@@ -452,16 +452,25 @@ impl WindowApp {
     /// port of `Inventory.removeFromSelected`; see `docs/container-clicks.md` for
     /// why the container-screen `Q` ([`Self::send_container_drop`]) never had this
     /// bug.
-    pub(super) fn send_drop_selected(&self, ctrl: bool) {
+    pub(super) fn send_drop_selected(&mut self, ctrl: bool) {
         let Some(net) = self.sim.net() else { return };
         let game_mode = net
             .shared_handle()
             .get()
             .cloned()
             .and_then(|handle| handle.game_mode());
-        if let Some(action) = drop_selected_action(game_mode, ctrl) {
-            net.predict_drop_selected(self.sim.selected_slot(), ctrl);
-            net.send_action(action);
+        let Some(action) = drop_selected_action(game_mode, ctrl) else {
+            return;
+        };
+        // Vanilla's `Minecraft.handleKeybinds` swings the main hand only when
+        // `Player.drop` reports it actually dropped something, so an empty slot
+        // is silent. `predict_drop_selected` is our answer to the same question,
+        // which is why the swing hangs off its return value rather than off the
+        // keypress: pressing the key on an empty hotbar slot must not animate.
+        let dropped = net.predict_drop_selected(self.sim.selected_slot(), ctrl);
+        net.send_action(action);
+        if dropped {
+            self.sim.swing_hand();
         }
     }
 
