@@ -59,14 +59,13 @@ impl JavaRandom {
     /// in the crate; every test uses [`Self::new`] instead.
     #[must_use]
     pub fn from_entropy() -> Self {
-        // `web_time`, not `std::time`: `SystemTime::now()` traps on wasm32, and this is
-        // the crate's one clock-seeded entry point. Identical on native.
-        use web_time::{SystemTime, UNIX_EPOCH};
+        // `lodestone_time::epoch_duration`, not `SystemTime::now()`: the latter traps
+        // on wasm32, and this is the crate's one clock-seeded entry point. Identical
+        // on native — see `lodestone_time`'s crate docs.
+        let d = lodestone_time::epoch_duration();
         // Truncating the nanosecond count into 64 bits is exactly what we want
         // from a clock seed; the LCG masks it to 48 bits immediately anyway.
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| i64::try_from(d.as_nanos() & u128::from(u64::MAX)).unwrap_or(i64::MAX));
+        let nanos = i64::try_from(d.as_nanos() & u128::from(u64::MAX)).unwrap_or(i64::MAX);
         Self::new(nanos)
     }
 
