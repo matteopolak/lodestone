@@ -1108,51 +1108,51 @@ impl OverworldGenerator {
         let base_x = cx * 16;
         let base_z = cz * 16;
 
-        let t_aquifer_start = web_time::Instant::now();
+        let t_aquifer_start = lodestone_time::Instant::now();
         let aquifer = self.build_aquifer(cx, cz);
         // Issue #514's S3, inside the *aquifer* timing bucket rather than given one
         // of its own: for a chunk with no adaptation-bearing start in reach this is
         // a store read and an empty `Vec`, and the per-block cost it can add lands
         // in `shape` where it belongs.
         let beard = self.beardifier_for(cx, cz);
-        let t_shape_start = web_time::Instant::now();
+        let t_shape_start = lodestone_time::Instant::now();
         let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
         let heights = self.heights_from_field(&field);
-        let t_biome_start = web_time::Instant::now();
+        let t_biome_start = lodestone_time::Instant::now();
         // Issue #512: same two-line shape as `pre_ore_stage_uncached` — the 4x4x4
         // grid is sampled and the 16 surface quarts are read out of it, so this
         // timing bucket now covers 96x the samples it used to. That is the point
         // of measuring it here.
         let biome_cells = self.biome_cells_stage(base_x, base_z);
         let biome_quarts = self.biome_stage(&biome_cells, &heights);
-        let t_surface_start = web_time::Instant::now();
+        let t_surface_start = lodestone_time::Instant::now();
         let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
-        let t_materialize_start = web_time::Instant::now();
+        let t_materialize_start = lodestone_time::Instant::now();
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
-        let t_carve_start = web_time::Instant::now();
+        let t_carve_start = lodestone_time::Instant::now();
         let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
         // The same stage `pre_ore_stage_uncached` runs; timed inside the carve
         // bucket rather than given one of its own, because for a chunk with no
         // structure in reach it is a single early return.
         let world = self.structure_place_stage(cx, cz, world);
-        let t_ore_start = web_time::Instant::now();
+        let t_ore_start = lodestone_time::Instant::now();
         let world = self.ore_stage(cx, cz, world, &heights);
-        let t_vegetation_start = web_time::Instant::now();
+        let t_vegetation_start = lodestone_time::Instant::now();
         // `Arc::new` rather than a store lookup: this path builds its own world
         // locally (it is the per-stage timing split, not the memoised serve path),
         // so wrapping it is a pointer move, not a copy. `vegetation_stage` takes
         // the shared form because in `column` the centre's post-ore grid really is
         // shared — see there.
         let (world, block_entities) = self.vegetation_stage(cx, cz, Arc::new(world));
-        let t_top_layer_start = web_time::Instant::now();
+        let t_top_layer_start = lodestone_time::Instant::now();
         // Issue #404's U2. This call is why `StageTimes` grew a field rather
         // than folding another stage into `intern`: `top_layer_stage` is the
         // first stage cheap enough that its cost had to be *measured* to be
         // believed, and `docs/plans/worldgen-parity.md` §6 predicts <5% for it.
         let (world, _) = self.top_layer_stage(cx, cz, world, &biome_quarts);
-        let t_intern_start = web_time::Instant::now();
+        let t_intern_start = lodestone_time::Instant::now();
         let col = self.intern_from_dense(world, biome_quarts, biome_cells, block_entities);
-        let t_end = web_time::Instant::now();
+        let t_end = lodestone_time::Instant::now();
 
         (
             col,
