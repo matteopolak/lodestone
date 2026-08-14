@@ -8,7 +8,11 @@
 // `.y` is 0/1 enabled. `fog_eye.w` / `fog_end_enabled.w` are vanilla's second,
 // independent **environmental** term's start/end (measured spherically) —
 // two lanes that were unused before issue #401 (F2/F3), so this struct did
-// not grow.
+// not grow to add those. `fog_ambient_light.rgb` is a later, genuine growth —
+// see its own comment below — and does not cost a bind group: growing one
+// group's uniform buffer is unrelated to the 4-bind-group floor, which limits
+// how many *groups* this shader binds (still four: camera, atlas, palette,
+// anim).
 //
 // Shared by every section drawn this frame — written once per frame, not once
 // per section (see `ModelSharedCameraUniform`'s doc for the profile that made
@@ -18,6 +22,13 @@ struct Camera {
     fog_eye: vec4<f32>,
     fog_color_start: vec4<f32>,
     fog_end_enabled: vec4<f32>,
+    // `rgb` = this frame's dimension `AMBIENT_LIGHT_COLOR` (`crate::light::
+    // OVERWORLD_AMBIENT_LIGHT` when unset) — the floor `lightmap_color` seeds
+    // its accumulator with before either light half is added. `w` unused.
+    // Mirrors `lodestone_render::fog::FogUniform::ambient_light` exactly;
+    // see that field's doc for why grey-everywhere was wrong (the Nether's
+    // and End's real floors are markedly *brighter* than the overworld's).
+    fog_ambient_light: vec4<f32>,
 };
 
 // A section's world-space origin, bound at group 0 binding 1 with a dynamic
@@ -79,15 +90,17 @@ fn not_gamma_vec3(c: vec3<f32>) -> vec3<f32> {
 // brightness setting yet; 0.0 is vanilla's `Moody`, 1.0 its `Bright`.
 const BRIGHTNESS_FACTOR: f32 = 0.5;
 
-// `EnvironmentAttributes.AMBIENT_LIGHT_COLOR` for the overworld, which
-// `DimensionTypes.java:36` sets to -16119286 == 0x0A0A0A -- grey 10/255, *not*
-// black. `lightmap.fsh` seeds its accumulator with it (`color =
+// `EnvironmentAttributes.AMBIENT_LIGHT_COLOR` for the *current* dimension --
+// grey `0x0A0A0A` in the overworld, warm brown `0x302821` in the Nether, sage
+// `0x3F473F` in the End. `lightmap.fsh` seeds its accumulator with it (`color =
 // max(AmbientColor, nightVisionColor)`) before adding either light half, so an
-// unlit surface is not pure black in vanilla: it reads 0.0935 after the
-// `not_gamma` mix. Grey, so it stays a scalar constant here; the Nether's
-// 0x302821 and the End's 0x3F473F are not, and are part of the per-dimension
-// colour pass.
-const AMBIENT_LIGHT: f32 = 0.039215688;
+// unlit surface is not pure black in vanilla. Rides `camera.fog_ambient_light`
+// (see that field's comment) rather than a scalar constant now, because the
+// Nether's and End's floors are not grey and are markedly *brighter* than the
+// overworld's -- hardcoding the overworld's value here under-lit both of them.
+fn ambient_light() -> vec3<f32> {
+    return camera.fog_ambient_light.rgb;
+}
 
 // Vanilla's warm torch tint, `EnvironmentAttributes.BLOCK_LIGHT_TINT`
 // (`0xFFFFD88C`), and its `BlockFactor` (`blockLightFlicker + 1.4`, flicker
@@ -132,7 +145,7 @@ fn lightmap_color(sky_level: f32, block_level: f32) -> vec3<f32> {
     let block_brightness = light_brightness(block_level) * BLOCK_FACTOR;
     let block_mix = 0.9 * parabolic_mix_factor(block_level);
     let block_light_color = mix(BLOCK_LIGHT_TINT, vec3<f32>(1.0, 1.0, 1.0), block_mix);
-    var color = vec3<f32>(AMBIENT_LIGHT, AMBIENT_LIGHT, AMBIENT_LIGHT)
+    var color = ambient_light()
         + sky_light_color() * sky_brightness
         + block_light_color * block_brightness;
     color = clamp(color, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));

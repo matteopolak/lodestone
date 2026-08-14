@@ -67,15 +67,17 @@ fn fog_with_clock_carries_the_night_track_gate_a() {
     // Noon: the track's flat white region, so our own base colour must
     // survive untouched. This is the discriminating row that a fix which
     // darkens fog at *every* tick (not just night) would fail.
-    let noon = RenderState::fog_uniform_for(&fog, 6000, 1.0, [0.0, 0.0, 0.0]);
+    let overworld_ambient = lodestone_render::light::OVERWORLD_AMBIENT_LIGHT;
+    let noon = RenderState::fog_uniform_for(&fog, 6000, 1.0, overworld_ambient, [0.0, 0.0, 0.0]);
     assert_close("noon", byte_of(&noon), [135, 181, 235]);
 
     // Midnight: the "too extreme" complaint's root cause.
-    let midnight = RenderState::fog_uniform_for(&fog, 18000, 0.24, [0.0, 0.0, 0.0]);
+    let midnight =
+        RenderState::fog_uniform_for(&fog, 18000, 0.24, overworld_ambient, [0.0, 0.0, 0.0]);
     assert_close("midnight", byte_of(&midnight), [9, 12, 20]);
 
     // Dusk, exactly on the first night keyframe.
-    let dusk = RenderState::fog_uniform_for(&fog, 13670, 0.5, [0.0, 0.0, 0.0]);
+    let dusk = RenderState::fog_uniform_for(&fog, 13670, 0.5, overworld_ambient, [0.0, 0.0, 0.0]);
     assert_close("dusk", byte_of(&dusk), [6, 8, 20]);
 
     // The sky-darken lane is untouched by this change and must still ride
@@ -112,6 +114,7 @@ fn clear_color_tracked_matches_the_fog_colour_at_the_same_tick() {
             &FogSettings::for_render_distance(SKY_COLOR, 8),
             tick,
             1.0,
+            lodestone_render::light::OVERWORLD_AMBIENT_LIGHT,
             [0.0, 0.0, 0.0],
         );
         let fog_rgb = [fog.color_start[0], fog.color_start[1], fog.color_start[2]];

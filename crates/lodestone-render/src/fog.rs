@@ -584,7 +584,7 @@ pub fn apply_fog_gamma(color: [f32; 3], fog_color: [f32; 3], factor: f32) -> [f3
 /// GPU uniform for the fog pass: the eye's world position (so the shader can
 /// measure each fragment's view distance) plus the fog colour and range.
 ///
-/// Laid out as three `vec4`s for std140 uniform alignment. `enabled` is `0.0`
+/// Laid out as four `vec4`s for std140 uniform alignment. `enabled` is `0.0`
 /// or `1.0`; the shader multiplies the computed factor by it so a disabled fog
 /// costs one multiply rather than a divergent branch.
 #[repr(C)]
@@ -602,6 +602,22 @@ pub struct FogUniform {
     /// not by this constructor); `w` = `environmental_end` (measured
     /// spherically in the shader).
     pub end_enabled: [f32; 4],
+    /// `rgb` = this frame's dimension `AMBIENT_LIGHT_COLOR` — the floor
+    /// `lightmap.fsh` seeds its accumulator with before either light half is
+    /// added (`crate::light::light_color_from_levels`'s `ambient` parameter).
+    /// Grey in the overworld, warm brown in the Nether, sage in the End; see
+    /// `crate::light::OVERWORLD_AMBIENT_LIGHT` and `rgb24_to_channels`. `w`
+    /// unused. Set by callers after [`new`](Self::new), exactly like
+    /// `end_enabled`'s sky-darken lane — `new` has no dimension to ask, so it
+    /// defaults this to the overworld's own value (see that function's doc).
+    ///
+    /// This is a **fourth** `vec4`, not a reused spare lane: every lane of the
+    /// first three was already spoken for (`docs/fog.md`'s "previously-free
+    /// lanes" note), and growing this struct's byte size does not cost a bind
+    /// group — the 4-bind-group floor in `CLAUDE.md` limits how many *groups*
+    /// a shader binds, not the size of one group's uniform buffer, and fog
+    /// already rides group 0 for exactly that reason.
+    pub ambient_light: [f32; 4],
 }
 
 impl FogUniform {
@@ -610,6 +626,13 @@ impl FogUniform {
     /// value with only the environmental pair populated (nothing currently
     /// constructs one, but nothing should silently disable it either) must
     /// still fog.
+    ///
+    /// [`FogUniform::ambient_light`] defaults to the overworld's own
+    /// `AMBIENT_LIGHT_COLOR` (`crate::light::OVERWORLD_AMBIENT_LIGHT`) — the
+    /// same "safe, not brighter than before" default every other unset source
+    /// in this codebase uses (compare `SkyDarkenSource`'s `1.0`/permanent-noon
+    /// default). A caller with a real dimension overwrites it after
+    /// construction, exactly like the sky-darken lane.
     #[must_use]
     pub fn new(settings: &FogSettings, eye: [f32; 3]) -> Self {
         let enabled = if settings.end > settings.start
@@ -619,6 +642,7 @@ impl FogUniform {
         } else {
             0.0
         };
+        let ambient = crate::light::OVERWORLD_AMBIENT_LIGHT;
         Self {
             eye: [eye[0], eye[1], eye[2], settings.environmental_start],
             color_start: [
@@ -628,6 +652,7 @@ impl FogUniform {
                 settings.start,
             ],
             end_enabled: [settings.end, enabled, 0.0, settings.environmental_end],
+            ambient_light: [ambient[0], ambient[1], ambient[2], 0.0],
         }
     }
 
@@ -1203,8 +1228,13 @@ mod tests {
     }
 
     #[test]
-    fn uniform_is_48_bytes_three_vec4s() {
-        assert_eq!(std::mem::size_of::<FogUniform>(), 48);
+    fn uniform_is_64_bytes_four_vec4s() {
+        // Grew by one `vec4` (`ambient_light`) when the per-dimension
+        // `AMBIENT_LIGHT_COLOR` was added — every original lane was already
+        // spoken for, so this is a genuine size change, not a reused lane.
+        // See `FogUniform::ambient_light`'s doc for why that does not cost a
+        // bind group.
+        assert_eq!(std::mem::size_of::<FogUniform>(), 64);
     }
 
     #[test]

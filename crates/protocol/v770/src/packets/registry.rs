@@ -139,12 +139,19 @@ impl Decode for RegistryData {
 ///
 /// # Which fields, and why not all of them
 ///
-/// 26.2's `DimensionType` record has 16 components. These ten are the ones a
-/// consumer exists (or is one step away) for; the six omitted ones —
-/// `infiniburn`, `monster_settings`, `skybox`, `cardinal_light`, `attributes`,
-/// `timelines` — are each a nested registry-reference structure whose only
-/// consumers are systems this client does not have. They stay in the raw NBT and
-/// are dropped. Add a field here when something reads it, not before.
+/// 26.2's `DimensionType` record has 16 components. These eleven are the ones a
+/// consumer exists (or is one step away) for; the five omitted ones —
+/// `infiniburn`, `monster_settings`, `skybox`, `cardinal_light`, `timelines` —
+/// are each a nested registry-reference structure whose only consumers are
+/// systems this client does not have. They stay in the raw NBT and are dropped.
+/// Add a field here when something reads it, not before.
+///
+/// `attributes` is no longer fully in that list: it is a generic, many-keyed
+/// `EnvironmentAttributeMap` (fog colour, ambient sounds, bed rules, dripstone
+/// particles, …) and only one key of it — `minecraft:visual/ambient_light_color`
+/// — has a consumer, so only that one key is lifted out (see
+/// [`Self::ambient_light_color`]). The rest of the compound stays in the raw
+/// NBT and is dropped, exactly like the five fields above.
 ///
 /// # Two field names that are *not* what older records say
 ///
@@ -192,6 +199,27 @@ pub struct DimensionType {
     /// Baseline light every block receives regardless of exposure — `0.0`
     /// overworld, `0.1` Nether, `0.25` End.
     pub ambient_light: f32,
+    /// `attributes`' `minecraft:visual/ambient_light_color`, packed `0xRRGGBB` —
+    /// the colour `lightmap.fsh` seeds its accumulator with before either light
+    /// half is added (`Lightmap.render` via `LightmapRenderStateExtractor.
+    /// extract`, reading `EnvironmentAttributes.AMBIENT_LIGHT_COLOR`). **Not**
+    /// the same quantity as [`Self::ambient_light`] above, which only ever
+    /// blends a *lerp fraction* into `Lightmap.getBrightness` and is not what
+    /// the GPU lightmap texture actually uses.
+    ///
+    /// Grey `0x0a0a0a` in the overworld, warm brown `0x302821` in the Nether,
+    /// sage `0x3f473f` in the End (`.cache/mc/26.2/client-src/data/minecraft/
+    /// dimension_type/*.json`) — **not** a small, dark-in-every-dimension
+    /// constant: the Nether's and End's floors are both markedly *brighter*
+    /// than the overworld's grey, which is why hardcoding the overworld's value
+    /// everywhere under-lit both of them.
+    ///
+    /// `None` when the entry's `attributes` compound is absent or does not
+    /// carry this key — vanilla's own registered default for the attribute is
+    /// black (`-16777216`), and every built-in dimension type sets it
+    /// explicitly, so `None` in practice means a non-vanilla dimension that
+    /// genuinely did not set one, not a decode failure.
+    pub ambient_light_color: Option<u32>,
     /// The `minecraft:world_clock` entry this dimension's day/night cycle
     /// follows, when it has one.
     ///
@@ -237,6 +265,7 @@ impl DimensionType {
             height: required_i32(fields, "height")?,
             logical_height: required_i32(fields, "logical_height")?,
             ambient_light: required_f32(fields, "ambient_light")?,
+            ambient_light_color: dimension_ambient_light_color(fields),
             default_clock: match field(fields, "default_clock") {
                 None => None,
                 Some(Nbt::String(name)) => Some(name.clone()),
@@ -562,6 +591,31 @@ fn biome_sky_color(value: &Nbt) -> Option<u32> {
     match field(attributes, "minecraft:visual/sky_color")? {
         Nbt::String(hex) => parse_hex_rgb(hex),
         // `ARGB::opaque` puts `0xFF` in the top byte; the palette is RGB only.
+        Nbt::Int(packed) => Some((*packed as u32) & 0x00FF_FFFF),
+        Nbt::Compound(entry) => match field(entry, "argument")? {
+            Nbt::String(hex) => parse_hex_rgb(hex),
+            Nbt::Int(packed) => Some((*packed as u32) & 0x00FF_FFFF),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `DimensionType::ambient_light_color`'s decode: `attributes` →
+/// `minecraft:visual/ambient_light_color`, same shape as [`biome_sky_color`]
+/// (`AttributeTypes.RGB_COLOR` is `ExtraCodecs.STRING_RGB_COLOR` for every
+/// user of it, not just biomes) — a hex string on the wire, an int or the
+/// `{ modifier, argument }` form both legal for a data pack to author.
+///
+/// Confirmed against a real captured `dimension_type` payload
+/// (`tests/fixtures/registry_data_dimension_type.hex`): the Nether's entry
+/// carries the NBT string `"#302821"` at exactly this key.
+fn dimension_ambient_light_color(fields: &[(String, Nbt)]) -> Option<u32> {
+    let Nbt::Compound(attributes) = field(fields, "attributes")? else {
+        return None;
+    };
+    match field(attributes, "minecraft:visual/ambient_light_color")? {
+        Nbt::String(hex) => parse_hex_rgb(hex),
         Nbt::Int(packed) => Some((*packed as u32) & 0x00FF_FFFF),
         Nbt::Compound(entry) => match field(entry, "argument")? {
             Nbt::String(hex) => parse_hex_rgb(hex),
