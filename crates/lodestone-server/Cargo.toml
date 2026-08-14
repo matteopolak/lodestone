@@ -132,6 +132,18 @@ tokio = { workspace = true }
 # the whole `region_source` module is `cfg`-gated off there rather than
 # compiled against a filesystem that would fail at runtime.
 lodestone-anvil = { path = "../lodestone-anvil" }
+# Issue #273's online-mode half: `has_joined`, the server-side session-server
+# check, and the `AuthError` type `ServerError::AuthServiceUnavailable` wraps.
+# Target-gated for the same reason as `lodestone-anvil` above and as
+# `lodestone-auth`'s own native-only modules: the session-server call is an
+# HTTPS request through `reqwest`, and a browser singleplayer world never
+# reaches online mode (there is no server to authenticate to).
+lodestone-auth = { path = "../lodestone-auth" }
+# The HTTP client type `OnlineModeConfig::http` carries and
+# `lodestone_auth::has_joined` takes. Same workspace entry (and same
+# `rustls-no-provider` + `install_crypto_provider` requirement) `lodestone-auth`
+# itself already builds against — see that crate's `tls` module.
+reqwest = { workspace = true }
 
 # --- wasm32 target dependencies ---
 # `wasm32-unknown-unknown` cannot build `mio` (hence tokio's `net`), so tokio
@@ -161,6 +173,14 @@ tokio = { workspace = true, features = ["test-util"] }
 serde_json = { workspace = true }
 lodestone-client = { path = "../lodestone-client" }
 lodestone-model = { path = "../lodestone-model" }
+# Issue #273's online-mode test (`server::tests`, the `LoginStart` ->
+# `EncryptionResponse` sequence): the only real `ServerProtocol` implementor
+# with actual online-mode wire support, and its packet types, to drive a
+# faithful handshake rather than a hand-rolled wire format that could drift
+# from the real one. Dev-only: `lodestone-v770`'s own *normal* dependency on
+# this crate (for the `ServerProtocol` trait it implements) is not a cycle
+# here, since a dev-dependency is excluded from the normal build graph.
+lodestone-v770 = { path = "../protocol/v770" }
 # `tests/chunk_nbt_vanilla_oracle.rs` opens a real 26.2 `.mca` directly, rather
 # than through this crate's own loader, so the oracle reads the file with
 # something other than the code under test.
