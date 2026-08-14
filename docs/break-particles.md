@@ -42,6 +42,19 @@ block-state write with no `levelEvent` call, while 2001 lives on the *separate*
 original report (#360). So the burst for our own break has to be predicted locally, exactly
 as vanilla's client does.
 
+**The block state itself is predicted at the same latch, since issue #596.** Vanilla's
+`destroyBlock` does not just spawn the burst — it first sets the cell to air *locally and
+synchronously* (`level.setBlock(pos, .., 11)`, before the burst call above even runs), so a
+real client never shows a completed break animation and then a laggy wait for the block to
+actually vanish. `drive_mining` mirrors that on the same `Mining::take_destroyed()` tick that
+throws the burst: it writes air through `ChunkWorldWrite` (the same
+`write_predicted_block` + `TerrainMesh::remesh_around` pair `drive_placement` already used for
+its own predicted edit) before reading `id_value` for the burst's colour. See
+`tests/mining_destroy_burst.rs`'s `an_instant_break_predicts_air_locally_with_no_server_round_trip`
+and `a_completed_dig_predicts_air_locally_on_the_finishing_tick` — both run against a harness
+whose fake server end is never driven, so a passing assertion can only be the local write, not
+an ack arriving late.
+
 **Key that prediction on destruction, not on a packet (#387).** Vanilla's client has one
 destroy funnel, `MultiPlayerGameMode.destroyBlock(pos)`, and **four** call sites reach it:
 the two creative branches, `startDestroyBlock`'s instant-break branch

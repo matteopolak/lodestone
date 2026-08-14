@@ -515,8 +515,17 @@ impl ApplicationHandler for WindowApp {
             // step is scaled by `mouseWheelSensitivity` (issue #203) through
             // the same fractional accumulator vanilla's `ScrollWheelHandler`
             // uses, so sensitivity below 1.0 can take more than one notch to
-            // move a slot and sensitivity above 1.0 can cross several in one
-            // notch — not just a threshold on the existing ±1 step.
+            // move a slot.
+            //
+            // **`accumulate_scroll`'s magnitude is not the slot count** (issue
+            // #597): `getNextScrollWheelSelection` (`ScrollWheelHandler.java`)
+            // collapses it to its sign, so the hotbar always advances exactly
+            // one slot per scroll event no matter how many whole notches that
+            // event's accumulator crossed — see `hotbar_scroll_step`'s own
+            // docs. Passing the raw magnitude through was the owner's "scroll
+            // a bit, nothing; scroll more, jumps six slots" report: a single
+            // large trackpad `PixelDelta` event can cross several whole
+            // notches at once.
             // The creative grid scrolls by whole rows (issue #158). Its own arm
             // and placed first, because none of the arms below can see it: the
             // hotbar's is gated on `accepts_gameplay_input`, which an open
@@ -532,7 +541,7 @@ impl ApplicationHandler for WindowApp {
             WindowEvent::MouseWheel { delta, .. } if self.ui.accepts_gameplay_input() => {
                 let dy = wheel_notches(delta);
                 let scaled = scale_scroll(dy, self.nav.discrete_mouse_scroll(), self.nav.mouse_wheel_sensitivity());
-                let step = accumulate_scroll(&mut self.scroll_accum, scaled);
+                let step = hotbar_scroll_step(accumulate_scroll(&mut self.scroll_accum, scaled));
                 if step != 0 {
                     self.sim.cycle_slot(-step);
                 }

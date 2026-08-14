@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use lodestone::interact::{Attacking, MiningPredictor, NetHandle, ParticleSim, RayTarget};
+use lodestone::mesher::{MeshScheduler, TerrainMesh};
 use lodestone::particles::Particles;
 use lodestone_client::{
     ClientBuilder, ConnectionState, Directive, LoginProfile, ServerAddress, VersionAdapter,
@@ -243,6 +244,14 @@ impl Harness {
             }
         }
 
+        // The chunk store's read/write halves, named from the *client's* `Arc`
+        // so a write through one and a read through the other see each
+        // other — `drive_mining` now takes both, for the local block-edit
+        // prediction (issue #596), the same pair `place_intent.rs`'s
+        // harness already installs for `drive_placement`.
+        let chunk_world = client.chunk_world();
+        let chunk_world_write = client.chunk_world_write();
+
         let shared: lodestone::net::SharedHandle = Arc::new(OnceLock::new());
         shared
             .set(Arc::clone(&client))
@@ -250,6 +259,8 @@ impl Harness {
         {
             let mut world = ecs.write();
             world.insert_resource(NetHandle(Some(shared)));
+            world.insert_resource(chunk_world);
+            world.insert_resource(chunk_world_write);
             let mut schedule = Schedule::new(GameTick);
             schedule.add_systems(lodestone::interact::drive_mining);
             world.add_schedule(schedule);
@@ -297,6 +308,13 @@ fn build_resources(world: &mut EcsWorld) {
     world.insert_resource(ParticleSim(Particles::new(None)));
     world.insert_resource(ActionQueue::default());
     world.insert_resource(VersionData(Some(Box::new(OneBlockVersion))));
+    // `drive_mining`'s local block-edit prediction (issue #596) needs a mesh
+    // scheduler to re-mesh through; a `Demo` classifier is the same
+    // GPU-free choice `place_intent.rs`'s harness makes for `drive_placement`.
+    world.insert_resource(TerrainMesh::new(MeshScheduler::new(
+        1,
+        lodestone::blocks::ShellClassifier::Demo(lodestone::blocks::DemoClassifier),
+    )));
 }
 
 /// One entity carrying both halves of the local player's component set, same
