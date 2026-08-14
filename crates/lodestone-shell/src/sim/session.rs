@@ -941,6 +941,23 @@ impl Sim {
         })
     }
 
+    /// The open merchant's trade list, if any server has sent one this
+    /// session — [`lodestone_ecs::SessionTrades`], the same
+    /// `MerchantOffersReceived -> TradeOffers` fold every other session
+    /// scalar in this file reads (issue #245's UI half). Empty (never `None`
+    /// — see [`lodestone_game::trades::TradeOffers::new`]) off a live
+    /// connection or before any merchant screen has opened, which is what
+    /// lets `app.rs` build a [`crate::container::ContainerFrame`] with
+    /// [`crate::container::ContainerFrame::with_trades`] unconditionally
+    /// rather than guarding on a connection first.
+    #[must_use]
+    pub fn trades(&self) -> lodestone_game::trades::TradeOffers {
+        self.read(|w| {
+            w.get::<lodestone_ecs::SessionTrades>(self.local)
+                .map_or_else(lodestone_game::trades::TradeOffers::new, |trades| trades.0.clone())
+        })
+    }
+
     /// Close the open server menu: clear it locally **and** tell the server.
     ///
     /// # Both halves are required, and the local one is why this takes `&mut self`
@@ -1276,6 +1293,24 @@ impl Sim {
                 open,
                 filtering,
             });
+        }
+    }
+
+    /// Select a merchant trade row — vanilla's `ServerboundSelectTradePacket`
+    /// (`MerchantScreen.postButtonClick`, `MerchantScreen.java:61-65`), sent
+    /// when the player clicks a trade-list row (issue #245's UI half).
+    ///
+    /// [`ClientAction::SelectTrade`] was already encoded by every protocol
+    /// family with no shell caller anywhere — the outbound-island shape
+    /// `ClientAction::SetFlying` was caught in. Best-effort like
+    /// [`Self::send_recipe_book_settings`] — a closed session drops it. Note
+    /// this does **not** locally move items into the payment slots the way
+    /// vanilla's `MerchantMenu.tryMoveItems` does — that needs the offer list
+    /// cross-referenced against the player's own inventory contents, which is
+    /// prediction work for a later unit, not this send.
+    pub fn send_select_trade(&self, index: i32) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SelectTrade { index });
         }
     }
 

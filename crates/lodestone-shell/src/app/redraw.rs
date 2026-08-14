@@ -1021,16 +1021,40 @@ impl WindowApp {
             );
         }
         let open_menu = self.sim.open_menu();
+        // The open merchant's trade list (issue #245's UI half), read once
+        // per frame and reused both for the composed title below and for
+        // `ContainerFrame::with_trades` — see `Sim::trades`'s own doc for why
+        // this is cheap and safe to read unconditionally (empty, never a
+        // guard-needing `None`, off a live merchant screen).
+        let trades = self.sim.trades();
         let player_menu;
         let (container_menu, container_title) = if let Some(open) = open_menu.as_ref() {
             // Through the language table, not `Text::to_plain_string` — the
             // server sends `translate("container.crafting")`, and the model's
             // stub table has no `container.*` key, so flattening it directly put
             // the raw key on screen (issue #52). See `container::menu_title`.
-            (
-                Some(&open.menu),
-                crate::container::menu_title(&open.title, self.sim.translator().as_ref()),
-            )
+            //
+            // The merchant screen composes a level badge into the title
+            // itself (`MerchantScreen.extractLabels`) rather than merely
+            // moving the anchor — `container::merchant_title` is the whole
+            // reason `menu_type_title_anchor` no longer excludes it. Keyed
+            // off `open.menu.special_layout()`, not the wire `menu_type`
+            // string: if the server ever sends a `merchant` menu whose size
+            // does not match `MerchantMenu`'s three slots, `Menus::build_menu`
+            // has already fallen back to a plain generic container, and this
+            // must agree with that fallback rather than re-deriving it.
+            let title = if open.menu.special_layout() == Some(lodestone_game::menu::SpecialLayout::Merchant)
+            {
+                crate::container::merchant_title(
+                    &open.title,
+                    trades.villager_level(),
+                    trades.show_progress(),
+                    self.sim.translator().as_ref(),
+                )
+            } else {
+                crate::container::menu_title(&open.title, self.sim.translator().as_ref())
+            };
+            (Some(&open.menu), title)
         } else if self.ui.is_container_open() {
             player_menu = self.sim.player_menu();
             // **"Crafting"**, not "Inventory" (issue #370). `InventoryScreen`
@@ -1056,6 +1080,11 @@ impl WindowApp {
             // (`Inventory.java:55`), so there is no server component to resolve.
             let inventory_label =
                 crate::container::player_inventory_label(self.sim.translator().as_ref());
+            // `merchant.trades` — "Trades", the merchant screen's second label
+            // (issue #245's UI half). Computed unconditionally like
+            // `inventory_label` above; `ContainerFrame`'s own draw path is
+            // what gates it on the screen actually being a merchant.
+            let trades_label = crate::container::merchant_trades_label(self.sim.translator().as_ref());
             // Does the recipe-book panel own the pointer this frame? The *click*
             // path has consulted this predicate before the container's own hit
             // test since the panel landed (`handle_recipe_panel_click`); the draw
@@ -1085,6 +1114,14 @@ impl WindowApp {
             // preview cannot show a split the release will not produce.
             let container_frame = ContainerFrame::new(container_menu, &container_title)
                 .with_inventory_label(&inventory_label)
+                // The trade list and which row is selected (issue #245's UI
+                // half) — `Sim::trades` returns an empty (never absent) store
+                // off a non-merchant screen, and `draw_merchant_trades` only
+                // ever draws when `menu.special_layout()` is `Merchant`, so
+                // this is unconditional like `with_menu_type` below rather
+                // than guarded on the screen kind here.
+                .with_trades(Some(&trades), self.merchant_selected)
+                .with_trades_label(&trades_label)
                 .with_cursor(Some([self.cursor.0, self.cursor.1]))
                 // The hovered slot's tooltip. This is the *only* caller that
                 // enables it, which is deliberate — see `ContainerFrame::tooltips`

@@ -740,12 +740,18 @@ impl Menus {
 /// `lodestone-shell` to draw the right panel and slot positions. Three of
 /// these screens have a real button-driven sub-feature this pass does not
 /// model — the loom's pattern grid, the stonecutter's recipe list, and (not
-/// yet added here at all) the beacon's power/effect buttons and the
-/// villager's trade list — because each needs data this tree does not carry
-/// yet (a banner-pattern/recipe registry, or a whole trade-offer packet).
-/// The slots themselves need none of that: they are the same "accept
-/// anything, let the server's `container_set_slot` correct a wrong guess"
-/// order already established above.
+/// yet added here at all) the beacon's power/effect buttons — because each
+/// needs data this tree does not carry yet (a banner-pattern/recipe registry,
+/// or beacon-specific `container_set_data` properties). The slots themselves
+/// need none of that: they are the same "accept anything, let the server's
+/// `container_set_slot` correct a wrong guess" order already established
+/// above.
+///
+/// The villager's trade list is no longer in that list: [`Menu::merchant`]
+/// builds the real `MerchantMenu` shape (issue #245's UI half), and the trade
+/// *offers* themselves — the seven-row scrollable list, not menu slots at all
+/// — arrive separately as [`crate::trades::TradeOffers`] and are drawn by
+/// `lodestone_shell::container::merchant`.
 fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
     let is_crafting =
         menu_type.is_some_and(|key| key.namespace() == "minecraft" && key.path() == "crafting");
@@ -777,6 +783,11 @@ fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
         // Not one of #28's own named containers — found while documenting
         // it (see `SpecialLayout::Hopper`'s doc comment).
         (Some("hopper"), 5) => Menu::hopper(),
+        // The merchant/trading screen (#245's UI half). `container_size == 3`
+        // matches `MerchantMenu`'s two payment slots plus its take-only
+        // result — see `Menu::merchant`'s doc comment for what is and is not
+        // modelled.
+        (Some("merchant"), 3) => Menu::merchant(),
         _ => Menu::generic(container_size),
     }
 }
@@ -973,6 +984,74 @@ mod tests {
         }));
         let opened = menus.opened().expect("container open");
         assert_eq!(opened.slot_count(), 45);
+        assert!(
+            opened.may_place(2, &game_stack("minecraft:diamond", 1)),
+            "a mismatched size must not get the take-only result slot"
+        );
+    }
+
+    /// `build_menu` must select [`Menu::merchant`] for a real
+    /// `minecraft:merchant` open (issue #245's UI half), checked through the
+    /// same `ScreenOpened` -> `ContainerContent` path as the item-combiner
+    /// screens above — not by calling `Menu::merchant` directly, so this
+    /// proves the *dispatch*, not just the constructor. This is the "real
+    /// path" half of the merchant screen's island control: a client that
+    /// never routed `minecraft:merchant` to the real shape would still pass
+    /// every one of `Menu::merchant`'s own unit tests.
+    #[test]
+    fn build_menu_selects_the_merchant_shape_for_a_real_open() {
+        let mut menus = Menus::new();
+        assert!(menus.apply(&ClientEvent::ScreenOpened {
+            window_id: 7,
+            menu_type: key("minecraft:merchant"),
+            title: Text::literal("Villager"),
+        }));
+        assert!(menus.apply(&ClientEvent::ContainerContent {
+            window_id: 7,
+            state_id: 1,
+            items: vec![None; 3 + 36],
+            carried_item: None,
+        }));
+        let opened = menus.opened().expect("container open");
+        assert_eq!(
+            opened.special_layout(),
+            Some(SpecialLayout::Merchant),
+            "a real minecraft:merchant open must build the merchant shape, \
+             not fall through to a plain generic container"
+        );
+        assert!(
+            !opened.may_place(2, &game_stack("minecraft:diamond", 1)),
+            "the merchant's result slot (index 2) must be take-only"
+        );
+        assert!(
+            opened.may_place(0, &game_stack("minecraft:emerald", 1)),
+            "the merchant's payment slots must accept anything (no server \
+             predicate data to check against client-side)"
+        );
+    }
+
+    /// Control for the test above: a size the server never actually sends
+    /// for a merchant (real `MerchantMenu`s are always 3 container slots)
+    /// must **not** get the merchant shape — `build_menu` falls back to a
+    /// plain generic container, the same size-guard the anvil/grindstone/
+    /// smithing control above exercises.
+    #[test]
+    fn control_merchant_menu_type_with_the_wrong_size_falls_back_to_generic() {
+        let mut menus = Menus::new();
+        assert!(menus.apply(&ClientEvent::ScreenOpened {
+            window_id: 7,
+            menu_type: key("minecraft:merchant"),
+            title: Text::literal("Villager"),
+        }));
+        assert!(menus.apply(&ClientEvent::ContainerContent {
+            window_id: 7,
+            state_id: 1,
+            items: vec![None; 9 + 36], // not the real 3-slot merchant size
+            carried_item: None,
+        }));
+        let opened = menus.opened().expect("container open");
+        assert_eq!(opened.slot_count(), 45);
+        assert_eq!(opened.special_layout(), None);
         assert!(
             opened.may_place(2, &game_stack("minecraft:diamond", 1)),
             "a mismatched size must not get the take-only result slot"

@@ -5,6 +5,7 @@
 
 use lodestone_game::menu::{Menu, MenuKind};
 use lodestone_game::recipe::RecipeBook;
+use lodestone_game::trades::TradeOffers;
 
 use crate::hud::VanillaFont;
 
@@ -138,6 +139,22 @@ pub struct ContainerFrame<'a> {
     /// suppress the hovered slot *and* park the carried stack, so the suppression
     /// has to be specific to hovered-slot resolution. That is this field.
     pub hover_blocked: bool,
+    /// The open merchant's trade list (issue #245's UI half) — `None` (the
+    /// default) draws no trade rows, which is every existing caller (a
+    /// merchant screen with no offers yet, or any non-merchant menu). See
+    /// [`with_trades`](Self::with_trades) and `super::merchant`.
+    pub trades: Option<&'a TradeOffers>,
+    /// Which trade row is selected — vanilla's `MerchantScreen.shopItem`,
+    /// which trade's out-of-stock overlay and progress bar (if any) show, and
+    /// the index the next `SELECT_TRADE` send carries. `0` (the default)
+    /// matches vanilla's own initial value.
+    pub selected_trade: usize,
+    /// Vanilla's `merchant.trades` second label, resolved through the
+    /// language table exactly as [`inventory_label`](Self::inventory_label)
+    /// is — `"Trades"` (the default) is `en_us.json`'s value, drawn on a
+    /// jar-less run and by every existing caller. See
+    /// [`with_trades`](Self::with_trades).
+    pub trades_label: &'a str,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -161,6 +178,9 @@ impl<'a> ContainerFrame<'a> {
             tooltips: None,
             book_open: false,
             hover_blocked: false,
+            trades: None,
+            selected_trade: 0,
+            trades_label: DEFAULT_TRADES_LABEL,
         }
     }
 
@@ -182,6 +202,9 @@ impl<'a> ContainerFrame<'a> {
             tooltips: None,
             book_open: false,
             hover_blocked: false,
+            trades: None,
+            selected_trade: 0,
+            trades_label: DEFAULT_TRADES_LABEL,
         }
     }
 
@@ -306,6 +329,24 @@ impl<'a> ContainerFrame<'a> {
         self.drag = drag;
         self
     }
+
+    /// Attach the open merchant's trade list and which row is selected — see
+    /// [`Self::trades`]/[`Self::selected_trade`]. `None` (the default from
+    /// [`new`](Self::new)) draws no trade rows.
+    #[must_use]
+    pub fn with_trades(mut self, trades: Option<&'a TradeOffers>, selected: usize) -> Self {
+        self.trades = trades;
+        self.selected_trade = selected;
+        self
+    }
+
+    /// Override the merchant's "Trades" label with a translated one — see
+    /// [`Self::trades_label`].
+    #[must_use]
+    pub fn with_trades_label(mut self, label: &'a str) -> Self {
+        self.trades_label = label;
+        self
+    }
 }
 
 /// Resolve an open menu's server-authored title into the plain string
@@ -338,6 +379,82 @@ pub fn menu_title(
 /// [`ContainerFrame::inventory_label`] carries when no caller supplies a
 /// translated one.
 const DEFAULT_INVENTORY_LABEL: &str = "Inventory";
+
+/// `en_us.json`'s value for `merchant.trades` — the fallback
+/// [`ContainerFrame::trades_label`] carries when no caller supplies a
+/// translated one.
+const DEFAULT_TRADES_LABEL: &str = "Trades";
+
+/// Vanilla's `merchant.level.1`..`merchant.level.5` — `VillagerData`'s level
+/// names, `en_us.json:5727-5731`. Index `0` is level `1` ("Novice").
+const MERCHANT_LEVEL_WORDS: [&str; 5] = ["Novice", "Apprentice", "Journeyman", "Expert", "Master"];
+
+/// Vanilla's `merchant.title` — the level-badge combined title
+/// (`MerchantScreen.extractLabels`, `MerchantScreen.java:86-95`):
+///
+/// ```java
+/// if (traderLevel > 0 && traderLevel <= 5 && this.menu.showProgressBar()) {
+///    Component titleAndLevel = Component.translatable("merchant.title", this.title,
+///       Component.translatable("merchant.level." + traderLevel));
+///    ...
+/// } else {
+///    ... this.title ...
+/// }
+/// ```
+///
+/// `merchant.title` is `"%s - %s"` (`en_us.json:5732`) — a genuinely nested
+/// translation, the villager's own name as the first argument and a *second*
+/// translated component (the level word) as the second, which is why this
+/// goes through [`lodestone_game::text::resolve_to_string`] rather than a
+/// local `format!`: a renamed villager's name can itself carry styling or a
+/// further translate node (a custom-named villager from a command block, for
+/// instance), and only the resolver preserves that.
+///
+/// `trader_level` outside `1..=5`, or `show_progress` false, draws the bare
+/// name — vanilla's own `else` branch, not a missing case here.
+#[must_use]
+pub fn merchant_title(
+    base_title: &lodestone_model::Text,
+    trader_level: i32,
+    show_progress: bool,
+    translate: &dyn Fn(&str) -> Option<String>,
+) -> String {
+    if show_progress
+        && let Ok(index) = usize::try_from(trader_level)
+        && let Some(word) = index.checked_sub(1).and_then(|i| MERCHANT_LEVEL_WORDS.get(i))
+    {
+        // `fallback` (not a `with` argument): `merchant.level.N`'s pattern
+        // takes no placeholder, it *is* the word. Carrying the known-good
+        // English word here means a jar-less run or a stub table still shows
+        // "Novice", not the raw key `merchant.level.1` — issue #52's defect
+        // class, avoidable here because the word is a fixed five-entry table
+        // rather than server-authored prose.
+        let level = lodestone_model::Text {
+            content: lodestone_model::TextContent::Translate {
+                key: format!("merchant.level.{trader_level}"),
+                with: vec![],
+                fallback: Some((*word).to_owned()),
+            },
+            ..lodestone_model::Text::default()
+        };
+        let composed =
+            lodestone_model::Text::translate("merchant.title", vec![base_title.clone(), level]);
+        menu_title(&composed, translate)
+    } else {
+        menu_title(base_title, translate)
+    }
+}
+
+/// Vanilla's `merchant.trades` — the merchant screen's second label, "Trades"
+/// (`MerchantScreen.java:49,99`), resolved the same way
+/// [`player_inventory_label`] resolves `container.inventory`.
+#[must_use]
+pub fn merchant_trades_label(translate: &dyn Fn(&str) -> Option<String>) -> String {
+    menu_title(
+        &lodestone_model::Text::translate("merchant.trades", vec![]),
+        translate,
+    )
+}
 
 /// The player inventory screen's own title: **"Crafting"**, not "Inventory".
 ///
@@ -431,6 +548,24 @@ pub struct LabelLayout {
 /// [`slot_layout`]).
 #[must_use]
 pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
+    // The merchant's `inventoryLabelX` is `107`, not `8`
+    // (`MerchantScreen.java:58`'s constructor sets `this.inventoryLabelX =
+    // 107`), the one screen in this whole family whose player-inventory
+    // section is not left-aligned with the panel — see
+    // `SpecialLayout::Merchant`'s doc comment. `title_x`/`title_y` here are
+    // placeholders past what [`menu_type_title_anchor`]'s own `merchant`
+    // branch always overrides (checked unconditionally at every real call
+    // site, `container/geometry.rs`'s `build_inner`), so getting them wrong
+    // here would never actually draw wrong — only a caller that skips that
+    // second call would see it, which is why they still match the plain
+    // generic default rather than being left at a nonsense value.
+    if menu.special_layout() == Some(lodestone_game::menu::SpecialLayout::Merchant) {
+        return LabelLayout {
+            title_x: 8.0,
+            title_y: 6.0,
+            inventory: Some([107.0, layout.height - 94.0]),
+        };
+    }
     match menu.kind() {
         MenuKind::Player => LabelLayout {
             title_x: 97.0,
@@ -485,13 +620,19 @@ pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
 /// rather than listed as no-ops, and `crafting` is absent because
 /// `label_layout`'s own `craft_layout()` branch already places it at `29`.
 ///
-/// **`beacon` and `merchant` are excluded on purpose.** Both draw at a different
-/// `imageWidth` (230 and 276) with their own background art, and
-/// `MerchantScreen.extractLabels` composes trade-level text into the title
-/// rather than merely moving the anchor (`MerchantScreen.java:85-98`). Neither
-/// has a case in [`background_kind`] or [`slot_layout`], so an anchor alone would
-/// place correct text over a still-wrong-shaped panel. They belong with their
-/// own layout work.
+/// **`beacon` is excluded on purpose.** It draws at a different `imageWidth`
+/// (`230`) with its own background art and has no case in [`background_kind`]
+/// or [`slot_layout`], so an anchor alone would place correct text over a
+/// still-wrong-shaped panel. It belongs with its own layout work.
+///
+/// **`merchant` has its own branch below, not a table row.** Two things set it
+/// apart from the "centred" family: its centring formula has a `49` offset
+/// vanilla's own default centring does not (`MerchantScreen.java:94`:
+/// `49 + this.imageWidth / 2 - this.font.width(this.title) / 2`, vs. the
+/// plain `(imageWidth - width) / 2` the furnace family etc. use), and its
+/// *title text itself* is composed from the trader's level
+/// ([`merchant_title`]) before it ever reaches this function — this function
+/// only ever repositions [`ContainerFrame::title`], never rewrites it.
 #[must_use]
 pub fn menu_type_title_anchor(
     menu_type: Option<&lodestone_model::ResourceKey>,
@@ -514,6 +655,14 @@ pub fn menu_type_title_anchor(
         // than a new divergence.
         let text_width = font.map_or(0.0, |f| f.width(title, 1.0));
         return Some([((layout.width - text_width) / 2.0).floor(), 6.0]);
+    }
+    if key.path() == "merchant" {
+        // `MerchantScreen.java:90-94` — the same `49 +` offset in both the
+        // level-badge and bare-name branches, which is why this is unaffected
+        // by which form `title` (already composed by [`merchant_title`])
+        // actually is.
+        let text_width = font.map_or(0.0, |f| f.width(title, 1.0));
+        return Some([(49.0 + layout.width / 2.0 - text_width / 2.0).floor(), 6.0]);
     }
     match key.path() {
         "anvil" => Some([60.0, 6.0]),

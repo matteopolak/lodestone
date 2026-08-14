@@ -72,6 +72,7 @@ impl WindowApp {
             advancements_drag: None,
             advancement_feed: super::advancements_screen::AdvancementsFeed::default(),
             hosted_world: None,
+            merchant_selected: 0,
         }
     }
 

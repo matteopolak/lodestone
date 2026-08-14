@@ -197,9 +197,17 @@ fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
                 slots.push(slot(i, 44.0 + i as f32 * SLOT, 20.0));
             }
         }
+        // `MerchantMenu.java:42-44` — two payment slots then a take-only
+        // result. The trade **list** to their left is not a slot at all; see
+        // `super::merchant`.
+        (SpecialLayout::Merchant, 3) => {
+            slots.push(slot(0, 136.0, 37.0));
+            slots.push(slot(1, 162.0, 37.0));
+            slots.push(slot(2, 220.0, 37.0));
+        }
         _ => return None,
     }
-    // Every one of these calls `addStandardInventorySlots(inventory, 8,
+    // Every one of these calls `addStandardInventorySlots(inventory, x,
     // main_y)` with a **fixed** `main_y` — `84.0` for every screen except the
     // hopper, whose real panel is *shorter* (`imageHeight = 133`, not `166`)
     // and whose own constructor passes `51` (`HopperMenu.java:27`), not `84`.
@@ -212,9 +220,23 @@ fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
     } else {
         84.0
     };
-    let hotbar_y = append_main_inventory(&mut slots, container_size, main_y);
+    // `x = 8` for every screen but the merchant, whose player section starts
+    // at `x = 108` (`MerchantMenu.java:45`) — see `append_main_inventory_at`.
+    let main_x = if special == SpecialLayout::Merchant {
+        108.0
+    } else {
+        8.0
+    };
+    // `176` for every screen but the merchant, whose panel is `276` wide
+    // (`MerchantScreen.java:57`'s `super(menu, inventory, title, 276, 166)`).
+    let width = if special == SpecialLayout::Merchant {
+        276.0
+    } else {
+        176.0
+    };
+    let hotbar_y = append_main_inventory_at(&mut slots, container_size, main_x, main_y);
     Some(SlotLayout {
-        width: 176.0,
+        width,
         height: hotbar_y + 24.0,
         slots,
     })
@@ -225,19 +247,31 @@ fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
 /// arrangement shared by every screen that shows the player's own inventory
 /// below its container-specific slots. Returns the hotbar's y so callers can
 /// size their panel around it.
-fn append_main_inventory(slots: &mut Vec<SlotRect>, base: usize, main_y: f32) -> f32 {
+///
+/// `main_x` is the left edge of the grid — `8.0` for every screen but the
+/// merchant, whose `addStandardInventorySlots(inventory, 108, 84)` starts its
+/// player section at `x = 108` (`MerchantMenu.java:45`); see
+/// [`append_main_inventory`] for the `x = 8` convenience every other caller
+/// still uses.
+fn append_main_inventory_at(slots: &mut Vec<SlotRect>, base: usize, main_x: f32, main_y: f32) -> f32 {
     for i in 0..27 {
         slots.push(slot(
             base + i,
-            8.0 + (i % 9) as f32 * SLOT,
+            main_x + (i % 9) as f32 * SLOT,
             main_y + (i / 9) as f32 * SLOT,
         ));
     }
     let hotbar_y = main_y + 58.0;
     for i in 0..9 {
-        slots.push(slot(base + 27 + i, 8.0 + i as f32 * SLOT, hotbar_y));
+        slots.push(slot(base + 27 + i, main_x + i as f32 * SLOT, hotbar_y));
     }
     hotbar_y
+}
+
+/// [`append_main_inventory_at`] at vanilla's usual `x = 8` — every screen
+/// except the merchant.
+fn append_main_inventory(slots: &mut Vec<SlotRect>, base: usize, main_y: f32) -> f32 {
+    append_main_inventory_at(slots, base, 8.0, main_y)
 }
 
 fn player_layout() -> SlotLayout {

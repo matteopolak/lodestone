@@ -72,6 +72,11 @@ pub struct ContainerBackground {
     /// [`SpecialLayout::Dispenser`]'s doc comment.
     dispenser: ResourceLocation,
     hopper: ResourceLocation,
+    /// `textures/gui/container/villager.png` (issue #245's UI half) — a
+    /// `512×256` sheet, not `256×256` like every sheet above; the atlas
+    /// placement is unaffected (see [`Self::quads`]'s `whole_panel_sized`),
+    /// only the sub-rect grabbed from it (`276×166`) differs.
+    merchant: ResourceLocation,
     /// The creative screen's three sheets (issue #158) — `tab_items`,
     /// `tab_item_search`, `tab_inventory`. Same family as every sheet above:
     /// loose `textures/gui/container/**` art with no `.mcmeta` and no
@@ -116,6 +121,9 @@ pub(super) enum BackgroundKind {
     Dispenser,
     /// `176×133`, not `166` — see [`SpecialLayout::Hopper`]'s doc comment.
     Hopper,
+    /// `276×166`, not `176×166` — see [`SpecialLayout::Merchant`]'s doc
+    /// comment.
+    Merchant,
 }
 
 /// Mirrors [`slot_layout`]'s own dispatch, **including** its
@@ -158,6 +166,7 @@ pub(super) fn background_kind(menu: &Menu) -> BackgroundKind {
         Some(SpecialLayout::Cartography) => return BackgroundKind::Cartography,
         Some(SpecialLayout::Dispenser) => return BackgroundKind::Dispenser,
         Some(SpecialLayout::Hopper) => return BackgroundKind::Hopper,
+        Some(SpecialLayout::Merchant) => return BackgroundKind::Merchant,
         None => {}
     }
     match menu.kind() {
@@ -216,6 +225,11 @@ impl ContainerBackground {
         // list's doc comment (see `SpecialLayout::Hopper`).
         let hopper = ResourceLocation::new("minecraft", "gui/container/hopper")
             .expect("hardcoded location is always valid");
+        // The merchant/trading screen (issue #245's UI half): a `512×256`
+        // sheet, unlike every sheet above — see the `merchant` field's own doc
+        // comment for why that needs no special handling here.
+        let merchant = ResourceLocation::new("minecraft", "gui/container/villager")
+            .expect("hardcoded location is always valid");
         // The creative screen's three sheets (issue #158). Unlike the tab-button
         // and scroller art — which is `gui/sprites/**` and rides `GUI_SPRITES`
         // below — these are loose `gui/container/**` textures, so they need their
@@ -261,6 +275,7 @@ impl ContainerBackground {
         builder.load(manager, &cartography_table)?;
         builder.load(manager, &dispenser)?;
         builder.load(manager, &hopper)?;
+        builder.load(manager, &merchant)?;
         builder.load(manager, &creative_items)?;
         builder.load(manager, &creative_search)?;
         builder.load(manager, &creative_inventory)?;
@@ -305,6 +320,7 @@ impl ContainerBackground {
             cartography_table,
             dispenser,
             hopper,
+            merchant,
             creative_items,
             creative_search,
             creative_inventory,
@@ -534,6 +550,7 @@ impl ContainerBackground {
             BackgroundKind::Cartography => whole_panel(&self.cartography_table),
             BackgroundKind::Dispenser => whole_panel(&self.dispenser),
             BackgroundKind::Hopper => whole_panel_sized(&self.hopper, 176.0, 133.0),
+            BackgroundKind::Merchant => whole_panel_sized(&self.merchant, 276.0, 166.0),
             BackgroundKind::Generic { rows } => {
                 let top_h = (rows * 18 + 17) as f32;
                 let (top_min, top_max) = uv(&self.generic, [0.0, 0.0, 176.0, top_h])?;

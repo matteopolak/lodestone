@@ -20,8 +20,10 @@ use super::player_preview::PlayerAvatar;
 use super::{
     BG_FLOATS_PER_VERTEX, BLAST_FURNACE_BURN_PROGRESS, BLAST_FURNACE_LIT_PROGRESS,
     BREWING_BREW_PROGRESS, BREWING_BUBBLES, BREWING_FUEL_LENGTH, CELL, FLOATS_PER_VERTEX,
-    FURNACE_BURN_PROGRESS, FURNACE_LIT_PROGRESS, HIGHLIGHT, HIGHLIGHT_INSET, SLOT,
-    SLOT_HIGHLIGHT_BACK, SLOT_HIGHLIGHT_FRONT, SMOKER_BURN_PROGRESS, SMOKER_LIT_PROGRESS,
+    FURNACE_BURN_PROGRESS, FURNACE_LIT_PROGRESS, HIGHLIGHT, HIGHLIGHT_INSET,
+    MERCHANT_DISCOUNT_STRIKETHROUGH, MERCHANT_OUT_OF_STOCK, MERCHANT_TRADE_ARROW,
+    MERCHANT_TRADE_ARROW_OUT_OF_STOCK, SLOT, SLOT_HIGHLIGHT_BACK, SLOT_HIGHLIGHT_FRONT,
+    SMOKER_BURN_PROGRESS, SMOKER_LIT_PROGRESS,
 };
 
 /// Geometry for the container overlay: coloured chrome plus, when an item atlas
@@ -563,6 +565,14 @@ impl ContainerGeometry {
             b.label(frame.inventory_label, x + lx, y + ly, 1.0, label_colour);
         }
 
+        // The merchant's trade list and its second "Trades" label (issue
+        // #245's UI half) — see `super::merchant`'s module doc. A no-op for
+        // every other screen, and for a merchant screen with no offers
+        // received yet (`frame.trades` is `None`).
+        draw_merchant_trades(
+            &mut b, menu, frame, assets, background, font, x, y, label_colour,
+        );
+
         // The anvil's XP cost and the enchanting table's three level costs —
         // `docs/container-cost-screens.md`'s "What is not yet wired" gap,
         // closed. Both are drawn from `frame.cost_data` alongside the two
@@ -826,6 +836,111 @@ const COST_RED: [f32; 4] = [1.0, 96.0 / 255.0, 96.0 / 255.0, 1.0];
 /// `ARGB.opaque((col & 16711422) >> 1)` of the enabled green applied to the
 /// row's other text — the cost number reuses the same halved constant).
 const COST_DISABLED_GREEN: [f32; 4] = [64.0 / 255.0, 127.0 / 255.0, 16.0 / 255.0, 1.0];
+
+/// Draws the merchant screen's trade list: the second "Trades" label, and
+/// each visible offer's cost/result icons, discount strikethrough and trade
+/// arrow (issue #245's UI half) — `MerchantScreen.extractLabels`/
+/// `extractContents` (`MerchantScreen.java:86-99,167-219`). A no-op for any
+/// screen without [`SpecialLayout::Merchant`], or a merchant screen with no
+/// offers yet (`frame.trades` is `None`) — every existing caller.
+///
+/// The real payment/result slots (menu indices `0..3`) are **not** drawn
+/// here — they are ordinary [`Menu`] slots and already draw through the loop
+/// above this function's one call site, the same as every other screen's
+/// slots. This only draws the trade *list*, which vanilla itself calls "fake
+/// items" because they are not slots at all.
+#[allow(clippy::too_many_arguments)]
+fn draw_merchant_trades(
+    b: &mut Builder<'_>,
+    menu: &Menu,
+    frame: &ContainerFrame<'_>,
+    assets: &IconAssets<'_>,
+    background: Option<&ContainerBackground>,
+    font: Option<&VanillaFont>,
+    x: f32,
+    y: f32,
+    label_colour: [f32; 4],
+) {
+    if menu.special_layout() != Some(SpecialLayout::Merchant) {
+        return;
+    }
+    let Some(trades) = frame.trades else { return };
+
+    // `merchant.trades` — `MerchantScreen.java:98-99`:
+    // `5 - font.width(TRADES_LABEL) / 2 + 48`, i.e. centred on local x = 53.
+    let trades_width = font.map_or(0.0, |f| f.width(frame.trades_label, 1.0));
+    let trades_x = (53.0 - trades_width / 2.0).floor();
+    b.label(frame.trades_label, x + trades_x, y + 6.0, 1.0, label_colour);
+
+    let offers = trades.offers();
+    for (i, offer) in offers.iter().enumerate().take(super::merchant::OFFER_ROWS) {
+        let row = super::merchant::row_layout(i);
+        let adjusted_a = super::merchant::adjusted_cost_a_count(offer);
+        if let Some(stack) = super::merchant::cost_item_stack(offer.cost_a.0, adjusted_a) {
+            b.draw_stack(assets, &stack, x + row.cost_a[0], y + row.cost_a[1]);
+        }
+        // The discount strikethrough — vanilla draws two icons (base and
+        // adjusted price) side by side when they differ
+        // (`extractAndDecorateCostA`, `MerchantScreen.java:229-240`); this
+        // draws the adjusted price alone plus the strikethrough sprite,
+        // which shows the same fact (a demand discount is active) without a
+        // second overlapping icon.
+        if offer.cost_a.1 != adjusted_a
+            && let Some(bg) = background
+            && let Some(q) = bg.sprite_quad(
+                MERCHANT_DISCOUNT_STRIKETHROUGH,
+                x + row.strikethrough[0],
+                y + row.strikethrough[1],
+                super::merchant::STRIKETHROUGH_W,
+                super::merchant::STRIKETHROUGH_H,
+            )
+        {
+            b.bg_sprite(q);
+        }
+        if let Some((id, count)) = offer.cost_b
+            && let Some(stack) = super::merchant::cost_item_stack(id, count)
+        {
+            b.draw_stack(assets, &stack, x + row.cost_b[0], y + row.cost_b[1]);
+        }
+        if let Some(result) = &offer.result {
+            let stack = ItemStack::from(result);
+            b.draw_stack(assets, &stack, x + row.result[0], y + row.result[1]);
+        }
+        if let Some(bg) = background {
+            let arrow_id = if offer.out_of_stock {
+                MERCHANT_TRADE_ARROW_OUT_OF_STOCK
+            } else {
+                MERCHANT_TRADE_ARROW
+            };
+            if let Some(q) = bg.sprite_quad(
+                arrow_id,
+                x + row.arrow[0],
+                y + row.arrow[1],
+                super::merchant::ARROW_W,
+                super::merchant::ARROW_H,
+            ) {
+                b.bg_sprite(q);
+            }
+        }
+    }
+
+    // The out-of-stock overlay is drawn once, for the **selected** row only
+    // (`extractBackground`, `MerchantScreen.java:107-119`) — a fixed panel
+    // position, not one per row.
+    if let Some(bg) = background
+        && let Some(selected) = offers.get(frame.selected_trade)
+        && selected.out_of_stock
+        && let Some(q) = bg.sprite_quad(
+            MERCHANT_OUT_OF_STOCK,
+            x + super::merchant::OUT_OF_STOCK_X,
+            y + super::merchant::OUT_OF_STOCK_Y,
+            super::merchant::OUT_OF_STOCK_W,
+            super::merchant::OUT_OF_STOCK_H,
+        )
+    {
+        b.bg_sprite(q);
+    }
+}
 
 /// Draws the anvil's XP level cost and the enchanting table's three per-row
 /// level costs, from `frame.cost_data` — the last hop

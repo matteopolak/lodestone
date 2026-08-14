@@ -45,6 +45,9 @@ mod frame;
 mod geometry;
 mod input;
 mod layout;
+/// The merchant/trading screen's own trade-list layout, prices and click
+/// hit-test (issue #245's UI half) — see `docs/merchant-screen.md`.
+pub mod merchant;
 /// The inventory avatar (the player standing in the panel, head tracking the
 /// cursor) — see `docs/inventory-player-preview.md`. The pose arithmetic lives in
 /// `lodestone_render::gui_entity`; this is the GPU half.
@@ -64,7 +67,7 @@ pub use creative::{
 };
 pub use frame::{
     ContainerFrame, LabelLayout, label_layout, menu_title, menu_type_title_anchor,
-    player_inventory_label, player_inventory_title,
+    merchant_title, merchant_trades_label, player_inventory_label, player_inventory_title,
 };
 pub use geometry::ContainerGeometry;
 pub use input::{MenuButton, MenuContext, MenuInput, MenuKey};
@@ -134,6 +137,15 @@ const BREWING_FUEL_LENGTH: &str = "container/brewing_stand/fuel_length";
 const BREWING_BREW_PROGRESS: &str = "container/brewing_stand/brew_progress";
 const BREWING_BUBBLES: &str = "container/brewing_stand/bubbles";
 
+/// The merchant screen's own sprites (issue #245's UI half),
+/// `MerchantScreen.java:21-29`. The experience-bar trio and the scroller pair
+/// are not drawn yet — see `container::merchant`'s module doc for what is
+/// modelled and what is a named gap.
+const MERCHANT_OUT_OF_STOCK: &str = "container/villager/out_of_stock";
+const MERCHANT_TRADE_ARROW: &str = "container/villager/trade_arrow";
+const MERCHANT_TRADE_ARROW_OUT_OF_STOCK: &str = "container/villager/trade_arrow_out_of_stock";
+const MERCHANT_DISCOUNT_STRIKETHROUGH: &str = "container/villager/discount_strikethrough";
+
 /// Every GUI sprite [`ContainerBackground`] stitches alongside the three panel
 /// sheets: the hover-highlight pair and the five empty-slot placeholders the
 /// player inventory declares.
@@ -161,6 +173,10 @@ const GUI_SPRITES: &[&str] = &[
     BREWING_FUEL_LENGTH,
     BREWING_BREW_PROGRESS,
     BREWING_BUBBLES,
+    MERCHANT_OUT_OF_STOCK,
+    MERCHANT_TRADE_ARROW,
+    MERCHANT_TRADE_ARROW_OUT_OF_STOCK,
+    MERCHANT_DISCOUNT_STRIKETHROUGH,
 ];
 
 /// [`GUI_SPRITES`] plus the creative screen's 28 tab buttons and 2 scroller
