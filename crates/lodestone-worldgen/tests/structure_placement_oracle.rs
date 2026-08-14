@@ -9,25 +9,31 @@
 //!
 //! # What is gated, and what is deliberately not
 //!
-//! Five bundled structure sets are **closed** under the generators that exist
-//! today: `shipwrecks`, `ocean_ruins`, `buried_treasures`, `ocean_monuments` and —
-//! as of S7 — `mineshafts`. Every structure they can place has a decidable start
-//! (biome-valid implies start-valid for all five), so for those the placement answer
-//! is exactly vanilla's and both directions are checkable:
+//! Six bundled structure sets are **closed** under the generators that exist
+//! today: `shipwrecks`, `ocean_ruins`, `buried_treasures`, `ocean_monuments`,
+//! `mineshafts` (S7) and — now — `ruined_portals`. Every structure they can
+//! place has a decidable start (biome-valid implies start-valid for all six:
+//! `RuinedPortalStructure.findGenerationPoint`, like the other five, always
+//! returns `Optional.of(...)`), so for those the placement answer is exactly
+//! vanilla's and both directions are checkable:
 //!
-//! * **Positive** — every one of the fixture's 77 closed-set starts is produced
+//! * **Positive** — every one of the fixture's 86 closed-set starts is produced
 //!   by this engine at exactly that chunk.
 //! * **Negative** — over a 64×64 chunk window that the oracle world has generated
 //!   essentially completely (4,080 of 4,096 chunks), this engine produces *no*
 //!   closed-set start the oracle does not have. Without this half the positive
 //!   test is satisfied by an engine that starts a shipwreck in every chunk.
 //!
-//! The remaining fixture starts (ruined portals, jigsaw structures) are **not**
-//! gated: their sets are open — a structure whose piece generator has not landed
-//! cannot have its start validity decided, so this engine's answer for those sets
-//! is a superset by construction. `StructureRegistry::unsupported` names every one,
+//! The remaining fixture starts (jigsaw structures) are **not** gated: their
+//! sets are open — a structure whose piece generator has not landed cannot have
+//! its start validity decided, so this engine's answer for those sets is a
+//! superset by construction. `StructureRegistry::unsupported` names every one,
 //! and this file asserts that ledger is non-empty rather than letting an
 //! accidentally-empty implementation look complete.
+//!
+//! `ruined_portal_nether` shares its `type` id with the six overworld ids this
+//! file gates, but the oracle census has no Nether chunks in scope here — its
+//! own ledger row is asserted below alongside the others.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -57,6 +63,12 @@ const CLOSED_SET_STRUCTURES: &[&str] = &[
     "minecraft:monument",
     "minecraft:mineshaft",
     "minecraft:mineshaft_mesa",
+    "minecraft:ruined_portal",
+    "minecraft:ruined_portal_desert",
+    "minecraft:ruined_portal_jungle",
+    "minecraft:ruined_portal_mountain",
+    "minecraft:ruined_portal_ocean",
+    "minecraft:ruined_portal_swamp",
 ];
 
 /// The negative sweep's window: `x in -32..32`, `z in -48..16`. Chosen because
@@ -195,7 +207,12 @@ fn the_unsupported_ledger_names_what_is_not_implemented() {
     let ledger = generator.structure_ledger();
     assert!(!ledger.is_empty(), "structure data loaded but nothing is named unsupported");
     for expected in [
-        "minecraft:ruined_portal",
+        // `ruined_portal_nether` shares its `type` id with the six overworld
+        // ids `CLOSED_SET_STRUCTURES` gates below, but its own `structure_id`
+        // (the ledger's key) is `ruined_portal_nether` — it is refused
+        // wholesale by `StructureKind::parse` because its one setup is
+        // `placement: in_nether`.
+        "minecraft:ruined_portal_nether",
         "minecraft:village_plains",
         "minecraft:trial_chambers",
         "minecraft:stronghold",
@@ -244,8 +261,10 @@ fn closed_set_starts_match_the_vanilla_survival_world() {
     // actually contain the structures this test is about, or it measures nothing.
     assert_eq!(
         expected.len(),
-        77,
-        "the oracle census for the five closed sets is 77 starts (31 + mineshaft's 46); got {}",
+        86,
+        "the oracle census for the six closed sets is 86 starts (31 + mineshaft's 46 + \
+         ruined_portal's 9: ruined_portal x4, ruined_portal_mountain x1, \
+         ruined_portal_ocean x4); got {}",
         expected.len()
     );
 
@@ -311,8 +330,10 @@ fn no_extra_closed_set_starts_over_the_oracle_window() {
         .count();
     // Precondition again: a window with no closed-set start in it would make the
     // "no extras" assertion true for an engine that places nothing.
-    // 12 before S7 plus mineshaft's 6 inside the window.
-    assert_eq!(expected_in_window, 18, "window census changed");
+    // 12 before S7, mineshaft's 6, and ruined_portal's 4 inside the window
+    // (`ruined_portal` at (7,-37), `ruined_portal_ocean` at (-17,13), (-16,-16)
+    // and (2,6); the other 5 oracle ruined-portal starts sit outside `WINDOW`).
+    assert_eq!(expected_in_window, 22, "window census changed");
 
     assert!(
         extra.is_empty(),
@@ -324,4 +345,51 @@ fn no_extra_closed_set_starts_over_the_oracle_window() {
         ours_in_window, expected_in_window,
         "we produced {ours_in_window} closed-set starts in the window, vanilla has {expected_in_window}"
     );
+}
+
+/// A real chest, at the real seed, in both oracle `buried_treasure` chunks —
+/// not just a start with an empty piece list.
+///
+/// The fixture only carries `(id, cx, cz)`, not per-block ground truth, so this
+/// cannot check the chest's exact Y the way the start-position tests above do;
+/// what it checks is that `structure_place_stage` actually reaches the
+/// placement-time refinement end to end (surface, carve and structure
+/// composed together for a real seed), landing the chest at the piece's own
+/// fixed column (`chunkBlockX(9)`, `chunkBlockZ(9)`) and nowhere else in it.
+#[test]
+#[ignore = "runs the full pre-ore pipeline for two real chunks; not milliseconds"]
+fn buried_treasure_chests_place_a_real_chest_in_both_oracle_chunks() {
+    let generator = generator();
+    for (cx, cz) in [(10, 33), (52, -10)] {
+        let column = generator.column(cx, cz);
+        let chest = "minecraft:chest[facing=north,type=single,waterlogged=false]";
+        let mut found: Vec<i32> = Vec::new();
+        for y in column.min_y()..(column.min_y() + column.height()) {
+            if column.block_state(9, y, 9) == chest {
+                found.push(y);
+            }
+        }
+        assert_eq!(
+            found.len(),
+            1,
+            "chunk ({cx},{cz}) has {} chests at its own column, expected exactly 1: {found:?}",
+            found.len()
+        );
+        // Nowhere else in the 16x16 footprint carries one — the piece is a
+        // single point, not a spread.
+        let mut elsewhere = 0;
+        for lx in 0..16usize {
+            for lz in 0..16usize {
+                if (lx, lz) == (9, 9) {
+                    continue;
+                }
+                for y in column.min_y()..(column.min_y() + column.height()) {
+                    if column.block_state(lx, y, lz) == chest {
+                        elsewhere += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(elsewhere, 0, "chunk ({cx},{cz}) has a chest outside its own column");
+    }
 }

@@ -8,10 +8,12 @@ template's palette and the world, and the generation stage that writes the resul
 into a chunk. Phase **S2** of issue #514 — S0 staged the chunk statuses, S1
 decided *where* structures go, and until this landed nothing wrote a block.
 
-Three structure types place real blocks now: **shipwreck** (both `shipwreck` and
+Four structure types place real blocks now: **shipwreck** (both `shipwreck` and
 `shipwreck_beached`), **ocean ruin** (`ocean_ruin_cold`, `ocean_ruin_warm`, both
-the single ruin and the large cluster) and **igloo** (including the ladder shaft
-and basement). Every gap is named in
+the single ruin and the large cluster), **igloo** (including the ladder shaft
+and basement) and — landed with the same engine, S8 — **ruined portal** (all six
+overworld setups: `ruined_portal`, `_desert`, `_jungle`, `_mountain`, `_ocean`,
+`_swamp`). Every gap is named in
 [`StructureRegistry::unsupported`](../crates/lodestone-worldgen/src/structure/mod.rs)
 rather than left silent — see [Gaps](#gaps-all-on-the-ledger).
 
@@ -36,8 +38,8 @@ Files:
 | file | holds |
 |---|---|
 | `structure/template.rs` | the NBT reader, `BlockState`, `Rotation`/`Mirror`, `transform`, `place` |
-| `structure/processor.rs` | `BlockIgnore`, `BlockRot`, `Rule` |
-| `structure/mod.rs` | the piece generators (`shipwreck_pieces`, `ocean_ruin_pieces`, `igloo_pieces`) and the `TemplateStore` |
+| `structure/processor.rs` | `BlockIgnore`, `BlockRot`, `Rule`, and (S8) `BlockAge`, `LavaSubmerged`, `BlackstoneReplace` |
+| `structure/mod.rs` | the piece generators (`shipwreck_pieces`, `ocean_ruin_pieces`, `igloo_pieces`, `ruined_portal_piece`) and the `TemplateStore` |
 | `overworld/structures.rs` | `structure_place_stage`, the write into the chunk grid |
 
 ### Where the write happens, and why there
@@ -85,6 +87,16 @@ picks the palette.
 
 ## How to change it
 
+* **A piece has three ways to reach the grid now, not two.** [`StructurePiece::blocks`]
+  is an eager, start-time list (every coded piece: mineshaft, the S5 pieces, a
+  ruined portal's *drips and vines* would be this if they were ported).
+  [`StructurePiece::placement`] is a template placed by `structure_place_stage`.
+  [`StructurePiece::refine`] is new in S8: a [`PieceRefinement`] the placement
+  stage runs against the **real**, already-surfaced-and-carved per-chunk grid,
+  for the one case (`buried_treasure`'s chest) whose termination condition is a
+  *material* distinction that does not exist yet at start time. Reach for
+  `blocks` first; reach for `refine` only when the piece's own logic needs to
+  read a material the pre-surface `_WG` shape cannot represent.
 * **Adding a template-driven structure**: add a `StructureKind` variant, list its
   templates in `template_ids` (they are loaded eagerly and a missing one demotes
   the kind to unsupported), and write its `*_pieces` function beside the other
@@ -143,10 +155,11 @@ picks the palette.
 | `block_entity:append_loot` | a `capped` archaeology rule *does* place its `suspicious_sand`/`suspicious_gravel` block (ocean ruins, trail ruins, desert pyramid) and its `append_loot` table **is** bundled, but **nothing in the game brushes**: no `brushable_block` block entity and no brush interaction. The blocker is gameplay-side, not in worldgen. Corrected in S6 — the earlier wording blamed worldgen |
 | `template:block_entity_nbt` | **132 bundled templates** carry a chest/barrel/dispenser/decorated pot whose `LootTable` lives in that *block's own* `nbt` compound (village 62, bastion 26, trial_chambers 19, ruined_portal 13, ancient_city 10, pillager_outpost 2). A **different mechanism** from a `structure_block` DATA marker, and the one `lodestone_server::structure_loot` does not read: the blocks are placed and the containers are empty. Replaced `template:data_markers`, which named the three structures whose markers **do** get rolled |
 | ~~`template:mirrored_shape`~~ | **Gone as of S7.** It said a rail `shape` was not remapped under a mirror, which was true and inert while nothing placed a rail. A mineshaft corridor places one and its EAST/WEST orientations carry a real `CLOCKWISE_90`, so `BlockState::{rotate, mirror}` grew `BaseRailBlock`'s two tables and `structure_coded_place.rs` now asserts the row's **absence** — see [`worldgen-structure-mineshaft.md`](./worldgen-structure-mineshaft.md) |
-| `minecraft:ruined_portal` | still `Unsupported`, and the blocker list is now measured rather than estimated (`RuinedPortalStructure` 269 lines + `RuinedPortalPiece` 346). It needs: a **`Setup` list** parsed off the structure JSON with a weighted pick; the **template at stub time** (its size decides the bounding box, and the rotation/mirror/template draws all happen *before* the biome check, so it needs a `Stub` variant that owns a half-used random, exactly as jigsaw does); a **`findSuitableY`** that walks four corner columns for "3 of 4 corners opaque"; four processors (**`block_age`**, `protected_block`, `lava_submerged`, `blackstone_replace`) plus `rule` with `random_block_match`; and **`spreadNetherrack`**, a 29×29 apron off one shared stream in scan order that writes across chunk borders from the centre chunk only. `is_replaceable_at` is the existing world read, and the `BlockKind`-at-position the apron's obsidian/lava test needs **now exists** (`StartContext::block_kind_at`, landed with mineshaft), so that item is off the list |
+| `minecraft:ruined_portal_nether` | the Nether-side setup of the *same* `type` id the six overworld `ruined_portal*` ids share — refused wholesale at parse time (`StructureKind::parse`) because its one setup is `placement: in_nether`, whose Y-finding branch, Nether sea level and dimension wiring are all unverified here. The overworld ids came **off** this ledger in S8 |
+| `coded:ruined_portal_terrain_skirt` | `ruined_portal`'s own template places (frame position, orientation, decay, mossiness, the `blackstone_replace` swap — all four `makeSettings` rules, in vanilla's own order), but `RuinedPortalPiece.postProcess`'s *second* half is not ported: `spreadNetherrack` (the netherrack the portal sits in and spills down from), `addNetherrackDripColumnsBelowPortal` and the vine/leaf overgrowth pass. A faithful port needs the template's own placed cells available for `canBlockBeReplacedByNetherrackOrMagma`'s box-interior overlap test, which no piece here computes before placement time |
 | `minecraft:stronghold` | pieces are **coded** and generated **eagerly**, the same architecture mineshaft landed in S7 (`structure/mineshaft.rs`'s `Shaft` and `View`), plus `ConcentricRingsStructurePlacement`, which S1 already finished. 1,766 lines and ~14 piece types |
 | `minecraft:monument` | pieces are **coded**, not templated (~2,000 lines of `OceanMonumentPieces`). Placement and the 29-block biome survey are complete; only the pieces are missing, and this row did not exist until S5 went looking for it |
-| `coded:buried_treasure_chest` | `buried_treasure` produces a start and a bounding box and places **zero blocks**. `postProcess` walks a cursor down from the ocean floor until the block *below* is sandstone/stone/andesite/granite/diorite, then writes five neighbours and one chest. **Not just a missing `BlockKind` read**: the sand it burrows through is a *surface-rule* product and the granite/diorite/andesite are *ore-blob* products, so the answer exists only at a stage the eager start pass sits above. Pre-surface, every solid block is `BlockKind::Stone`, so the walk would stop immediately and put the chest on top of the beach |
+| ~~`coded:buried_treasure_chest`~~ | **Gone as of S8.** `buried_treasure`'s chest now places: `PieceRefinement::BuriedTreasureChest` defers the walk from the eager start pass (where every solid block is one undifferentiated `BlockKind::Stone`) to `structure_place_stage`, which runs at the **end** of `pre_ore_stage` — after this chunk's own surface and carve passes have already written sand, sandstone and every other real material into the grid. The walk, the five-neighbour fill and the chest placement all read/write that real `DenseBlockGrid` directly; see `overworld::structures::place_buried_treasure_chest`. Loot is still empty (no worldgen container-loot driver, same as every other structure's chests — `coded:chests`/`template:block_entity_nbt`), and the facing is `north` unconditionally, the same simplification `coded:chest_reorient` already names for every other coded chest |
 | `dimension:nether_structures` | **The composition half closed**: `NetherGenerator` runs starts / refs / beardifier / place, so `bastion_remnant` places real blocks — 89 pieces and 15,405 bastion-only blocks at chunk (8, 7), against 0 in a structure-free control (`tests/nether_structures.rs`). `nether_fossil` places too as of S7 — 14 bone templates plus a coin-flip dried ghast, and the only structure whose `beard_thin` flattening is observable outside a jigsaw. Two gaps remain: `fortress` and `ruined_portal_nether` have no piece generator (own rows here) so they yield advisory starts with zero blocks; and **nothing serves the dimension** — `EmbeddedResolver` hardcodes the Overworld documents and `OverworldChunkSource` is the only chunk source, so a portal trip still does not land there (#330). The row is kept because the per-structure rows cannot say the dimension-level thing |
 | `coded:chests` | a coded piece's containers (`desert_pyramid` ×4, `jungle_temple` 2 chests + 2 dispensers) place their **block** and carry their table and roll seed on `StructurePiece::loot`, but nothing reads that list: `structure_loot` resolves loot from a template's raw bytes and a coded piece has no template |
 | `coded:chest_reorient` | `StructurePiece.reorient` picks a chest's `facing` from its four horizontal neighbours' render-solidity *as written so far*; no block-state read exists on `StartContext`, so a coded chest keeps `facing=north`. Cosmetic |

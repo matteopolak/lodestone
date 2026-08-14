@@ -395,6 +395,29 @@ pub enum Processor {
         /// `limit`, as the constant it always is in the bundled data.
         limit: i32,
     },
+    /// `BlockAgeProcessor(mossiness)` — ruined portals' decay: stone/stone-bricks
+    /// crack or moss over, stairs/slabs/walls moss, obsidian occasionally chills
+    /// to crying obsidian. Five independent `state.is(...)` arms, each its own
+    /// roll; see [`Self::process`] for the per-arm probabilities, transcribed from
+    /// `BlockAgeProcessor.processBlock`.
+    BlockAge {
+        /// `mossiness` — the structure `Setup`'s own field, not a constant.
+        mossiness: f32,
+    },
+    /// `LavaSubmergedBlockProcessor` — a block placed where the *pre-structure*
+    /// world already held lava, and whose own shape is not a full cube (a stair,
+    /// a slab, a wall run), is put back to full lava instead of leaving a
+    /// part-block poking out of a lava pool.
+    LavaSubmerged,
+    /// `BlackstoneReplaceProcessor.INSTANCE` — the nether-side ruined-portal
+    /// variant's stone-to-blackstone swap. Unconditional per block (no roll), and
+    /// carries `facing`/`half`/`type` across the replacement when the source had
+    /// them. Bundled with the overworld sets too (`replace_with_blackstone`
+    /// exists as a `Setup` field) even though none of the six overworld ids sets
+    /// it `true` today — `ruined_portal_nether` is the one that does, and it is
+    /// out of scope (see the structure's module doc), so this arm is untested
+    /// against a live placement and is exercised only by its own unit tests.
+    BlackstoneReplace,
 }
 
 impl Processor {
@@ -479,6 +502,54 @@ impl Processor {
             // the identity. All of its work is in `finalizeProcessing`, which is
             // [`Self::finalize`].
             Self::Capped { .. } => Some(block),
+            Self::BlockAge { mossiness } => {
+                let mut random = LegacyRandomSource::new(get_seed(block.pos[0], block.pos[1], block.pos[2]));
+                let name = block.state.name.as_str();
+                let new_state = if matches!(
+                    name,
+                    "minecraft:stone_bricks" | "minecraft:stone" | "minecraft:chiseled_stone_bricks"
+                ) {
+                    block_age_full_stone(&mut random, *mossiness)
+                } else if is_stairs(name) {
+                    block_age_stairs(&block.state, &mut random, *mossiness)
+                } else if is_slab(name) {
+                    (random.next_float() < *mossiness).then(|| block_age_mossy(&block.state, "minecraft:mossy_stone_brick_slab"))
+                } else if is_wall(name) {
+                    (random.next_float() < *mossiness).then(|| block_age_mossy(&block.state, "minecraft:mossy_stone_brick_wall"))
+                } else if name == "minecraft:obsidian" {
+                    (random.next_float() < 0.15).then(|| BlockState::of("minecraft:crying_obsidian"))
+                } else {
+                    None
+                };
+                Some(match new_state {
+                    Some(state) => ProcessedBlock { pos: block.pos, state },
+                    None => block,
+                })
+            }
+            Self::LavaSubmerged => {
+                let existing = ctx.world.block_at(block.pos[0], block.pos[1], block.pos[2]);
+                let was_lava = existing.split_once('[').map_or(existing, |(n, _)| n) == "minecraft:lava";
+                if was_lava && !is_probably_full_cube(&block.state.name) {
+                    Some(ProcessedBlock {
+                        pos: block.pos,
+                        state: BlockState::of("minecraft:lava"),
+                    })
+                } else {
+                    Some(block)
+                }
+            }
+            Self::BlackstoneReplace => {
+                let Some(replacement) = blackstone_replacement(&block.state.name) else {
+                    return Some(block);
+                };
+                let mut state = BlockState::of(replacement);
+                for key in ["facing", "half", "type"] {
+                    if let Some(value) = block.state.properties.get(key) {
+                        state.properties.insert(key.to_string(), value.clone());
+                    }
+                }
+                Some(ProcessedBlock { pos: block.pos, state })
+            }
         }
     }
 
@@ -568,6 +639,147 @@ impl Processor {
     pub fn structure_block() -> Self {
         Self::BlockIgnore(vec!["minecraft:structure_block".to_string()])
     }
+}
+
+/// `BlockAgeProcessor.maybeReplaceFullStoneBlock` — stone/stone-bricks/chiseled
+/// crack or moss. **Both** candidate arrays are built unconditionally before the
+/// mossiness roll picks one, exactly as `NON_MOSSY_REPLACEMENTS`/
+/// `MOSSY_REPLACEMENTS`'s local-array construction does in Java (the
+/// non-mossy branch's own `getRandomFacingStairs` call still draws two values
+/// even when the mossy branch is the one that ends up chosen) — so the draw
+/// order here is `[full-block roll] [non-mossy stairs facing] [non-mossy stairs
+/// half] [mossy stairs facing] [mossy stairs half] [mossiness roll] [array
+/// index]`, seven draws deep on the branch that does not bail out at the first
+/// roll.
+fn block_age_full_stone(random: &mut LegacyRandomSource, mossiness: f32) -> Option<BlockState> {
+    if random.next_float() >= 0.5 {
+        return None;
+    }
+    let non_mossy = [
+        BlockState::of("minecraft:cracked_stone_bricks"),
+        random_facing_stairs(random, "minecraft:stone_brick_stairs"),
+    ];
+    let mossy = [
+        BlockState::of("minecraft:mossy_stone_bricks"),
+        random_facing_stairs(random, "minecraft:mossy_stone_brick_stairs"),
+    ];
+    Some(pick_mossy_or_not(random, mossiness, &non_mossy, &mossy))
+}
+
+/// `BlockAgeProcessor.maybeReplaceStairs` — a stairs block either stays, or
+/// becomes one of two non-mossy slabs or a mossy stairs/slab pair. The mossy
+/// stairs replacement copies `blockState`'s own properties
+/// (`withPropertiesOf`) rather than drawing a fresh facing — stairs and
+/// mossy-stairs are the same block class, so every property the source has a
+/// value for exists on the target too.
+fn block_age_stairs(state: &BlockState, random: &mut LegacyRandomSource, mossiness: f32) -> Option<BlockState> {
+    if random.next_float() >= 0.5 {
+        return None;
+    }
+    let mut mossy_stairs = state.clone();
+    mossy_stairs.name = "minecraft:mossy_stone_brick_stairs".to_string();
+    let mossy = [mossy_stairs, BlockState::of("minecraft:mossy_stone_brick_slab")];
+    let non_mossy = [
+        BlockState::of("minecraft:stone_slab"),
+        BlockState::of("minecraft:stone_brick_slab"),
+    ];
+    Some(pick_mossy_or_not(random, mossiness, &non_mossy, &mossy))
+}
+
+/// `BlockAgeProcessor.maybeReplaceSlab`/`maybeReplaceWall` — one roll, `state`'s
+/// own properties carried onto the mossy block of the same class.
+fn block_age_mossy(state: &BlockState, new_name: &str) -> BlockState {
+    let mut moss = state.clone();
+    moss.name = new_name.to_string();
+    moss
+}
+
+/// `getRandomFacingStairs(random, stairBlock)` — `Direction.Plane.HORIZONTAL`'s
+/// own face order is `[NORTH, EAST, SOUTH, WEST]`
+/// (`Direction.java`'s `Plane.HORIZONTAL` array literal, not the direction's
+/// `2D data value` order `coded::Facing` uses), then `Half.values()` is
+/// `[TOP, BOTTOM]`.
+fn random_facing_stairs(random: &mut LegacyRandomSource, name: &str) -> BlockState {
+    const FACES: [&str; 4] = ["north", "east", "south", "west"];
+    const HALVES: [&str; 2] = ["top", "bottom"];
+    let facing = FACES[random.next_int_bounded(4).clamp(0, 3) as usize];
+    let half = HALVES[random.next_int_bounded(2).clamp(0, 1) as usize];
+    BlockState::parse(&format!("{name}[facing={facing},half={half}]"))
+}
+
+/// `getRandomBlock(random, nonMossyBlocks, mossyBlocks)` — one `nextFloat()`
+/// against `mossiness`, then one `nextInt(2)` over whichever two-element array
+/// was picked.
+fn pick_mossy_or_not(
+    random: &mut LegacyRandomSource,
+    mossiness: f32,
+    non_mossy: &[BlockState; 2],
+    mossy: &[BlockState; 2],
+) -> BlockState {
+    let chosen = if random.next_float() < mossiness { mossy } else { non_mossy };
+    let index = random.next_int_bounded(2).clamp(0, 1) as usize;
+    chosen[index].clone()
+}
+
+/// `state.is(BlockTags.STAIRS)` / `SLABS` / `WALLS`, approximated by naming
+/// convention rather than a real tag table (this crate has none) — exact for
+/// every vanilla stairs/slab/wall id, which is the whole domain
+/// [`Processor::BlockAge`] is ever handed (a ruined-portal template's palette).
+fn is_stairs(name: &str) -> bool {
+    name.ends_with("_stairs")
+}
+fn is_slab(name: &str) -> bool {
+    name.ends_with("_slab")
+}
+fn is_wall(name: &str) -> bool {
+    name.ends_with("_wall")
+}
+
+/// `Block.isShapeFullBlock(state.getShape(...))`, approximated with a denylist
+/// of block-id substrings that are never a full cube — this crate has no
+/// collision-shape table (that lives in `lodestone-data`, which worldgen does
+/// not depend on). Exact for every full-cube id [`Processor::LavaSubmerged`]
+/// can be handed by the processor chain ahead of it (stone/stone-bricks
+/// variants, obsidian, gold block, netherrack, magma block) and approximate
+/// only at the handful of partial shapes a `RuleProcessor`/[`Processor::BlockAge`]
+/// upstream of this one can introduce (stairs, slabs, walls, bars).
+fn is_probably_full_cube(name: &str) -> bool {
+    const NOT_FULL: &[&str] = &[
+        "stairs", "slab", "wall", "fence", "gate", "trapdoor", "door", "pane", "bars", "carpet",
+        "pressure_plate", "button", "torch", "ladder", "vine", "chain", "lantern", "campfire",
+        "rail", "anvil", "lily_pad", "repeater", "comparator", "rod", "bed", "banner", "sign",
+        "flower", "mushroom", "coral", "sapling", "bush", "leaves", "snow_layer", "candle",
+        "cake", "web", "air", "chest", "barrel", "scaffolding", "lever", "grindstone",
+        "cauldron", "bell", "conduit", "flower_pot", "skull", "head",
+    ];
+    !NOT_FULL.iter().any(|s| name.contains(s))
+}
+
+/// `BlackstoneReplaceProcessor`'s replacement map — a stone-family block id to
+/// its blackstone counterpart. `None` for anything not in vanilla's table,
+/// which the processor keeps unchanged.
+fn blackstone_replacement(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "minecraft:cobblestone" | "minecraft:mossy_cobblestone" => "minecraft:blackstone",
+        "minecraft:stone" => "minecraft:polished_blackstone",
+        "minecraft:stone_bricks" | "minecraft:mossy_stone_bricks" => "minecraft:polished_blackstone_bricks",
+        "minecraft:cobblestone_stairs" | "minecraft:mossy_cobblestone_stairs" => "minecraft:blackstone_stairs",
+        "minecraft:stone_stairs" => "minecraft:polished_blackstone_stairs",
+        "minecraft:stone_brick_stairs" | "minecraft:mossy_stone_brick_stairs" => {
+            "minecraft:polished_blackstone_brick_stairs"
+        }
+        "minecraft:cobblestone_slab" | "minecraft:mossy_cobblestone_slab" => "minecraft:blackstone_slab",
+        "minecraft:smooth_stone_slab" | "minecraft:stone_slab" => "minecraft:polished_blackstone_slab",
+        "minecraft:stone_brick_slab" | "minecraft:mossy_stone_brick_slab" => {
+            "minecraft:polished_blackstone_brick_slab"
+        }
+        "minecraft:stone_brick_wall" | "minecraft:mossy_stone_brick_wall" => "minecraft:polished_blackstone_brick_wall",
+        "minecraft:cobblestone_wall" | "minecraft:mossy_cobblestone_wall" => "minecraft:blackstone_wall",
+        "minecraft:chiseled_stone_bricks" => "minecraft:chiseled_polished_blackstone",
+        "minecraft:cracked_stone_bricks" => "minecraft:cracked_polished_blackstone_bricks",
+        "minecraft:iron_bars" => "minecraft:iron_chain",
+        _ => return None,
+    })
 }
 
 /// `Util.toShuffledList(IntStream.range(0, n), random)` — the **int** overload,
@@ -937,6 +1149,151 @@ mod tests {
         let mut none = build();
         zero.finalize([16, 64, 0], [20, 60, 4], -195_764_831, &originals, &mut none, &world);
         assert_eq!(none, before);
+    }
+
+    /// `BlockAgeProcessor` at `mossiness=0.0` never produces a mossy variant —
+    /// the discriminating end of the probability range, not a plausible middle
+    /// value. Also the negative-space case: `minecraft:diorite` matches none of
+    /// the five `state.is(...)` arms and must pass through untouched.
+    #[test]
+    fn block_age_at_zero_mossiness_never_moss_and_leaves_other_blocks_alone() {
+        let processor = Processor::BlockAge { mossiness: 0.0 };
+        let world = Air;
+        let ctx = ctx(&world, None);
+        let mut saw_a_change = false;
+        for i in 0..200 {
+            let out = processor
+                .process(&ctx, at([i, 70, 3], "minecraft:stone_bricks"))
+                .expect("kept");
+            assert!(
+                !out.state.name.contains("mossy"),
+                "mossiness 0.0 produced {}",
+                out.state.name
+            );
+            saw_a_change |= out.state.name != "minecraft:stone_bricks";
+        }
+        // Some positions still roll below the 0.5 "leave it alone" gate and
+        // become cracked/slab variants — mossiness 0.0 only forbids *moss*.
+        assert!(saw_a_change, "no position rolled a non-mossy decay variant");
+        assert_eq!(
+            processor
+                .process(&ctx, at([0, 70, 0], "minecraft:diorite"))
+                .expect("kept")
+                .state
+                .name,
+            "minecraft:diorite"
+        );
+    }
+
+    /// At `mossiness=1.0` every full-stone-block replacement that fires is
+    /// mossy, and the position-seeded stream is reproducible.
+    #[test]
+    fn block_age_at_full_mossiness_only_ever_mosses() {
+        let processor = Processor::BlockAge { mossiness: 1.0 };
+        let world = Air;
+        let ctx = ctx(&world, None);
+        let mut replaced = 0;
+        for i in 0..200 {
+            let pos = [i, 64, -7];
+            let first = processor.process(&ctx, at(pos, "minecraft:stone")).expect("kept");
+            let again = processor.process(&ctx, at(pos, "minecraft:stone")).expect("kept");
+            assert_eq!(first, again, "position {i} is not reproducible");
+            if first.state.name != "minecraft:stone" {
+                replaced += 1;
+                assert!(
+                    first.state.name == "minecraft:mossy_stone_bricks"
+                        || first.state.name.starts_with("minecraft:mossy_stone_brick_stairs"),
+                    "mossiness 1.0 produced a non-mossy replacement: {}",
+                    first.state.name
+                );
+            }
+        }
+        assert!((60..140).contains(&replaced), "replaced {replaced}/200 at the ~50% gate");
+    }
+
+    /// A stairs block's mossy replacement keeps the source's own `facing`
+    /// (`withPropertiesOf`), rather than drawing a fresh one.
+    #[test]
+    fn block_age_stairs_carries_its_own_facing_into_the_mossy_variant() {
+        let processor = Processor::BlockAge { mossiness: 1.0 };
+        let world = Air;
+        let ctx = ctx(&world, None);
+        for facing in ["north", "east", "south", "west"] {
+            let source = BlockState::parse(&format!("minecraft:stone_brick_stairs[facing={facing},half=bottom]"));
+            for i in 0..50 {
+                let out = processor
+                    .process(
+                        &ctx,
+                        ProcessedBlock {
+                            pos: [i, 80, 12],
+                            state: source.clone(),
+                        },
+                    )
+                    .expect("kept");
+                if out.state.name == "minecraft:mossy_stone_brick_stairs" {
+                    assert_eq!(out.state.properties.get("facing").map(String::as_str), Some(facing));
+                    assert_eq!(out.state.properties.get("half").map(String::as_str), Some("bottom"));
+                }
+            }
+        }
+    }
+
+    /// `LavaSubmergedBlockProcessor`: a non-full shape placed where the
+    /// pre-structure world held lava goes back to lava; a full block, or a
+    /// non-lava world, is untouched.
+    #[test]
+    fn lava_submerged_reclaims_only_non_full_shapes_over_lava() {
+        struct Lava;
+        impl WorldRead for Lava {
+            fn block_at(&self, _x: i32, _y: i32, _z: i32) -> &str {
+                "minecraft:lava[level=0]"
+            }
+        }
+        let processor = Processor::LavaSubmerged;
+        let over_lava = Lava;
+        let stairs = processor
+            .process(&ctx(&over_lava, None), at([0, 60, 0], "minecraft:stone_brick_stairs"))
+            .expect("kept");
+        assert_eq!(stairs.state.name, "minecraft:lava");
+        let full_block = processor
+            .process(&ctx(&over_lava, None), at([0, 60, 0], "minecraft:obsidian"))
+            .expect("kept");
+        assert_eq!(full_block.state.name, "minecraft:obsidian");
+        let over_air = Air;
+        let stairs_over_air = processor
+            .process(&ctx(&over_air, None), at([0, 60, 0], "minecraft:stone_brick_stairs"))
+            .expect("kept");
+        assert_eq!(stairs_over_air.state.name, "minecraft:stone_brick_stairs");
+    }
+
+    /// `BlackstoneReplaceProcessor`: named table entries swap and carry
+    /// `facing`/`half`/`type`; anything else, including a block with no entry,
+    /// passes through.
+    #[test]
+    fn blackstone_replace_swaps_the_table_and_carries_orientation() {
+        let processor = Processor::BlackstoneReplace;
+        let world = Air;
+        let ctx = ctx(&world, None);
+        let cobble = processor
+            .process(&ctx, at([0, 0, 0], "minecraft:cobblestone"))
+            .expect("kept");
+        assert_eq!(cobble.state.name, "minecraft:blackstone");
+        let stairs = processor
+            .process(
+                &ctx,
+                ProcessedBlock {
+                    pos: [0, 0, 0],
+                    state: BlockState::parse("minecraft:stone_brick_stairs[facing=east,half=top]"),
+                },
+            )
+            .expect("kept");
+        assert_eq!(stairs.state.name, "minecraft:polished_blackstone_brick_stairs");
+        assert_eq!(stairs.state.properties.get("facing").map(String::as_str), Some("east"));
+        assert_eq!(stairs.state.properties.get("half").map(String::as_str), Some("top"));
+        let untouched = processor
+            .process(&ctx, at([0, 0, 0], "minecraft:oak_planks"))
+            .expect("kept");
+        assert_eq!(untouched.state.name, "minecraft:oak_planks");
     }
 
     /// `Util.toShuffledList`'s int overload is a permutation and costs `n - 1`

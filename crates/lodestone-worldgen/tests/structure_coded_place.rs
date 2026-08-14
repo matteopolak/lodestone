@@ -294,10 +294,17 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
     for id in [
         "minecraft:stronghold",
         "minecraft:monument",
-        "minecraft:ruined_portal",
+        // The Nether-side variant only — the six overworld `ruined_portal*`
+        // ids came off the ledger once the structure's own generator landed.
+        "minecraft:ruined_portal_nether",
     ] {
         assert!(ledger.contains_key(id), "{id} should still be ledgered");
     }
+    assert!(
+        !ledger.contains_key("minecraft:ruined_portal"),
+        "minecraft:ruined_portal has a generator now and must not be ledgered: {:?}",
+        ledger.get("minecraft:ruined_portal")
+    );
     // Every deviation is named, not just the absences.
     for key in [
         "coded:average_ground_height",
@@ -307,6 +314,7 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         "coded:chest_reorient",
         "coded:decoration_random",
         "coded:buried_treasure_chest",
+        "coded:ruined_portal_terrain_skirt",
         "dimension:nether_structures",
         "mineshaft:post_process_scope",
         "mineshaft:pre_surface_world_reads",

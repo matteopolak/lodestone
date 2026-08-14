@@ -166,7 +166,7 @@ control:
 | jungle temple | the same exactly-equal-to-predicted count over a signature set with no other source in a jungle (`chiseled_stone_bricks`, `cobblestone_stairs`, `lever`, `repeater`, `sticky_piston`, `dispenser`, `tripwire`/`_hook`, `chest`), control **0**. `mossy_cobblestone` is deliberately excluded — the temple's commonest block, but not uniquely its |
 | coded containers | each piece's `loot` list carries vanilla's table ids in vanilla's order, four **distinct** roll seeds (two equal seeds would mean a re-seed), and a chest/dispenser block surviving in the piece's *final* state at that position |
 | reproducibility | two independently constructed generators produce byte-identical block lists |
-| ledger | `swamp_hut`, `desert_pyramid` and `jungle_pyramid` are **absent** from the ledger; `mineshaft`, `stronghold`, `monument`, `ruined_portal` are present; every `coded:` deviation row is present; `template:data_markers` is **gone** and `template:block_entity_nbt` carries its measured 132 |
+| ledger | `swamp_hut`, `desert_pyramid` and `jungle_pyramid` are **absent** from the ledger; `mineshaft`, `stronghold`, `monument` are present, and — as of S8 — so is `minecraft:ruined_portal_nether` in place of the six overworld `ruined_portal*` ids, which landed via the template engine (`worldgen-structure-templates.md`), not this one; every `coded:` deviation row is present; `template:data_markers` is **gone** and `template:block_entity_nbt` carries its measured 132 |
 
 Neither structure appears in the oracle world's generated area, so the chunks come from the placement
 engine (itself gated against that oracle by S1), walked outward in rings until the biome filter lets one
@@ -190,7 +190,6 @@ computed from outside constants and the measurement is required to land on one. 
 ## What is still coded and not here
 
 `stronghold` (1,766 lines), which needs **eager piece generation**; `monument` (1,988), pieces only;
-`ruined_portal` (its own vertical placement plus `spreadNetherrack`'s 29×29 cross-chunk apron);
 `nether_fossil`, `fortress`, `end_city`, `mansion`. Each is named on
 `StructureRegistry::unsupported`.
 
@@ -199,15 +198,26 @@ architecture, not a third generator on the `coded::Builder` seam, so it lives in
 `structure/mineshaft.rs` — see [`worldgen-structure-mineshaft.md`](./worldgen-structure-mineshaft.md).
 `stronghold` is the same shape and is the natural next user of `Shaft` and `View`.
 
-**`buried_treasure` is on that list too, and it did not look like it.** It produces a start and a real
-bounding box and places **zero blocks**: `BuriedTreasurePieces.postProcess` walks a cursor down until the
-block *below* it is sandstone/stone/andesite/granite/diorite, then writes up to five neighbours and one
-chest. Every one of those decisions is a `getBlockState`, and the blocker is **not** the missing accessor
-it was first recorded as: `StartContext::block_kind_at` exists now (mineshaft needed it), and it answers
-a *shape* question. The sand this walk burrows through is a surface-rule product and the
-granite/diorite/andesite are ore-blob products, both of which run after the eager start pass, so
-pre-surface every solid block is one `Stone` and the walk would terminate on its first iteration.
-Ledgered as `coded:buried_treasure_chest`.
+**`ruined_portal` is not on this list any more, and it never really belonged on it — see S8's own
+correction.** Its own vertical placement, template pick, rotation/mirror and processor chain (gold-gone,
+lava swap, `block_age`, `protected_block`, `lava_submerged`, `blackstone_replace`) landed via the
+**template** engine (`worldgen-structure-templates.md`), the same architecture shipwreck/ocean
+ruin/igloo use, because a ruined portal *is* a template piece with extra processors — not a coded one.
+What remains uncoded is only `spreadNetherrack`'s terrain skirt and the drip/vine passes, ledgered as
+`coded:ruined_portal_terrain_skirt`.
+
+**`buried_treasure` is on this file's list for a different reason, and its own fix landed a third way.**
+It produces a start and a real bounding box, and used to place **zero blocks**:
+`BuriedTreasurePieces.postProcess` walks a cursor down until the block *below* it is
+sandstone/stone/andesite/granite/diorite, then writes up to five neighbours and one chest — a
+**material** distinction (sand and sandstone are surface-rule products; granite/diorite/andesite are
+ore-blob products) that does not exist yet at the eager start pass's pre-surface `_WG` stage, where every
+solid block is one `Stone`. Neither `coded::Builder` (start-time, same pre-surface limit) nor the template
+engine (no template) fit, so S8 added a third seam instead:
+[`crate::structure::PieceRefinement`], which `structure_place_stage` runs against the chunk's **real**,
+already-surfaced-and-carved grid at *placement* time. See `overworld::structures::place_buried_treasure_chest`
+and `worldgen-structure-templates.md`'s own note on the three ways a piece now reaches the grid. The
+`coded:buried_treasure_chest` ledger row is gone.
 
 ## Dependencies
 

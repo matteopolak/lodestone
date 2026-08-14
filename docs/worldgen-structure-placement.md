@@ -77,8 +77,10 @@ placeholder box — and `OverworldGenerator::structure_starts` filters those out
 because vanilla reloads a start with no children as `INVALID`, which is worse
 than absent.
 
-Four sets are **closed** — every structure they can place has a decidable start,
-so for those the answer is exactly vanilla's:
+**This table was written at S1 and undercounts as of S7/S8 — six sets are
+closed now, not four** (mineshaft landed in S7, ruined_portal's six overworld
+ids in S8); every structure a closed set can place has a decidable start, so
+for those the answer is exactly vanilla's:
 
 | set | structures | oracle starts (seed −195764831) |
 |---|---|---|
@@ -86,6 +88,8 @@ so for those the answer is exactly vanilla's:
 | `ocean_ruins` | ocean_ruin_cold, ocean_ruin_warm | 16 |
 | `buried_treasures` | buried_treasure | 2 |
 | `ocean_monuments` | monument | 2 |
+| `mineshafts` | mineshaft, mineshaft_mesa | 46 |
+| `ruined_portals` (overworld ids only — `ruined_portal_nether` is refused, see below) | ruined_portal, `_desert`, `_jungle`, `_mountain`, `_ocean`, `_swamp` | 9 |
 
 ## Evidence
 
@@ -93,11 +97,12 @@ so for those the answer is exactly vanilla's:
 `tests/support/structure_starts_survival.txt` — 102 starts read out of the
 per-chunk `structures.starts` NBT of `.cache/mc/survival`, a world the real 26.2
 server generated months before this engine existed. Nothing in the fixture passed
-through this repo's encoder.
+through this repo's encoder. Re-run the test file for the current counts rather
+than trusting this doc's — the table above already drifted once.
 
-* **Positive**: all 31 closed-set starts are reproduced at exactly their chunk.
+* **Positive**: all 86 closed-set starts are reproduced at exactly their chunk.
 * **Negative**: over a 64×64-chunk window the oracle world has generated
-  4,080/4,096 of, this engine produces **exactly** the 12 closed-set starts
+  4,080/4,096 of, this engine produces **exactly** the 22 closed-set starts
   vanilla has there and no others. Without this half the positive test is
   satisfied by an engine that starts a shipwreck in every chunk.
 * The ledger test asserts the ledger is non-empty and names the structures the
@@ -208,7 +213,7 @@ file ownership:
    fn biome_tag(&self, id: &str) -> Value { self.try_json(&format!("tags/worldgen/biome/{}", strip(id))) }
    ```
 
-2. `chunk_nbt.rs:466` — the empty `structures{References:{}, starts:{}}` compound
+2. `chunk_nbt::structures_to_nbt` (`chunk_nbt.rs`) — the empty `structures{References:{}, starts:{}}` compound
    becomes real NBT: `starts` from `structure_starts` (`id`, `ChunkX`, `ChunkZ`,
    `references`, `Children` — each child `id`/`BB`/`O`/`GD` plus `Template` for
    template pieces), `References` from `structure_references` (structure id →

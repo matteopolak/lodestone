@@ -42,9 +42,16 @@
 //! empty piece list, and its id is named in
 //! [`StructureRegistry::unsupported`]. That is the `collect_unsupported` pattern
 //! this crate already uses for features (`feature/vegetation/config.rs`):
-//! legible silence, never a silent skip. Four sets are *closed* — every structure
-//! they can place has a real generator, so for those the start set is exactly
-//! vanilla's:
+//! legible silence, never a silent skip.
+//!
+//! **This paragraph used to stop at S1 and went stale for four landings in a
+//! row** — jigsaw (S4), the coded pieces (S5), mineshaft (S7) and ruined_portal
+//! all shipped after it was written, and nothing here said so until this
+//! sentence. Read the ledger (`StructureRegistry::unsupported`) or the oracle
+//! test (`tests/structure_placement_oracle.rs`) before citing a structure as
+//! unimplemented; both are re-verified in CI, this paragraph is not. Seven sets
+//! are *closed* today — every structure they can place has a real generator, so
+//! for those the start set is exactly vanilla's:
 //!
 //! | set | structures | oracle starts (seed −195764831) |
 //! |---|---|---|
@@ -52,19 +59,36 @@
 //! | `ocean_ruins` | ocean_ruin_cold, ocean_ruin_warm | 16 |
 //! | `buried_treasures` | buried_treasure | 2 |
 //! | `ocean_monuments` | monument | 2 |
+//! | `mineshafts` | mineshaft, mineshaft_mesa | 46 |
+//! | `ruined_portals` (overworld ids only) | ruined_portal, `_desert`, `_jungle`, `_mountain`, `_ocean`, `_swamp` | 9 |
 //! | `igloos` | igloo | — |
 //!
-//! Everything else waits on S2's remainder (ruined_portal — its own vertical
-//! placement, air pocket and blackstone/lava processors), S4 (jigsaw: villages,
-//! trail_ruins, trial_chambers, ancient_city, pillager_outpost) or S5 (coded
-//! pieces: mineshaft, stronghold, desert_pyramid, monument, …).
+//! **Also landed, with a real piece generator, but not counted as a closed set**
+//! because a jigsaw structure's own *pool graph* can still refuse an individual
+//! start (a missing pool alias, an unsupported processor): villages, ancient
+//! city, pillager outpost, trail ruins, trial chambers and — in the Nether —
+//! bastion remnant. See [`jigsaw`] for the assembly, `docs/worldgen-jigsaw.md`
+//! for what a [`jigsaw::JigsawConfig`] refuses to model, and
+//! `tests/structure_jigsaw.rs` for the oracle's own coverage of each.
+//!
+//! **What genuinely remains**: `stronghold` (placement math only —
+//! [`placement`]'s `ConcentricRingsStructurePlacement` — no piece generator;
+//! `StrongholdPieces.java` is ~1,800 lines and the oracle world at
+//! `.cache/mc/survival` contains none to verify against), `monument`
+//! (`OceanMonumentPieces.java` is ~2,000 lines of coded rooms), and
+//! `ruined_portal_nether` (the Nether-side setup of the *same* `type` id
+//! `ruined_portals` overworld already covers — refused wholesale, see
+//! [`StructureKind::parse`]). `ruined_portal`'s own frame is real but its
+//! `spreadNetherrack` terrain skirt is not — `coded:ruined_portal_terrain_skirt`
+//! on the ledger.
 //!
 //! **S2 landed the template engine** ([`template`], [`processor`]): shipwreck,
-//! ocean ruin and igloo now build real piece lists out of the bundled `.nbt`
-//! templates and write blocks — see [`docs/worldgen-structure-templates.md`] for
-//! the whole path, including which vanilla behaviours are deliberately absent.
-//! `monument` still reports `pieces_complete: false`; its pieces are coded, not
-//! templated.
+//! ocean ruin, igloo and (S8) ruined_portal build real piece lists out of the
+//! bundled `.nbt` templates and write blocks — see
+//! [`docs/worldgen-structure-templates.md`] for the whole path, including which
+//! vanilla behaviours are deliberately absent. `monument` still reports
+//! `pieces_complete: false`; its pieces are coded, not templated, and have not
+//! landed.
 //!
 //! [`docs/worldgen-structure-templates.md`]: ../../../../docs/worldgen-structure-templates.md
 //!
@@ -129,8 +153,8 @@ use crate::density::Resolver;
 use jigsaw::{JigsawConfig, JigsawStub};
 use placement::{Placement, PlacementKind};
 use pool::PoolStore;
-use processor::Processor;
-use template::{Mirror, PlaceSettings, Rotation, StructureTemplate};
+use processor::{PosTest, Processor, ProcessorRule, RuleTest};
+use template::{BlockState, Mirror, PlaceSettings, Rotation, StructureTemplate};
 
 /// The concrete random every structure's per-chunk stream is —
 /// `WorldgenRandom` over a legacy LCG, seeded by
@@ -491,6 +515,39 @@ pub struct StructurePiece {
     /// (`Beardifier.java:75`: rigid box, `groundLevelDelta` 0, no junctions), not
     /// an absence of behaviour. See [`beardifier::PieceBeard`].
     pub beard: Option<beardifier::PieceBeard>,
+    /// A **placement-time** refinement — work that reads the real per-chunk
+    /// [`DenseBlockGrid`](crate::dense_grid::DenseBlockGrid) as
+    /// [`crate::overworld::OverworldGenerator::structure_place_stage`] writes it,
+    /// rather than [`Self::blocks`]'s eager start-time list. `None` for every
+    /// piece above; [`PieceRefinement::BuriedTreasureChest`] is the first and
+    /// only user — see its own doc for why buried treasure's chest needs this
+    /// and no other coded piece does.
+    pub refine: Option<PieceRefinement>,
+}
+
+/// A piece kind whose blocks cannot be decided at start time and are instead
+/// resolved when [`crate::overworld::OverworldGenerator::structure_place_stage`]
+/// places the piece — the one point in this engine's pipeline where a
+/// structure's own chunk has already been through surface rules and carvers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PieceRefinement {
+    /// `BuriedTreasurePieces.postProcess`'s walk-down-to-stone-then-place-chest.
+    ///
+    /// Every other coded piece in this crate resolves its blocks eagerly, from
+    /// [`StartContext`]'s pre-surface `_WG` shape (see `coded:buried_treasure_chest`'s
+    /// predecessor row on the ledger, now removed). Buried treasure cannot: its
+    /// termination condition is "the block below is sandstone, stone, andesite,
+    /// granite or diorite" — a **material** distinction that, pre-surface, does
+    /// not exist yet (every solid cell is one undifferentiated
+    /// [`crate::aquifer::BlockKind::Stone`]). So this variant defers the whole
+    /// walk to placement time, where the piece's own origin chunk's real
+    /// [`DenseBlockGrid`](crate::dense_grid::DenseBlockGrid) — sand, sandstone
+    /// and all — already exists, because `structure_place_stage` runs at the
+    /// **end** of `pre_ore_stage`, after this chunk's own surface and carve
+    /// passes. The piece's start position is unchanged (`chunkBlockX(9)`,
+    /// literal Y 90, `chunkBlockZ(9)`, matching vanilla's own pre-`postProcess`
+    /// box) — only the chest's *placement* is deferred, not its start.
+    BuriedTreasureChest,
 }
 
 /// The decoded templates one registry can place, keyed by template id
@@ -749,6 +806,28 @@ const NETHER_FOSSILS: &[&str] = &[
     "minecraft:nether_fossils/fossil_14",
 ];
 
+/// `RuinedPortalStructure.STRUCTURE_LOCATION_PORTALS`.
+const RUINED_PORTAL_TEMPLATES: [&str; 10] = [
+    "minecraft:ruined_portal/portal_1",
+    "minecraft:ruined_portal/portal_2",
+    "minecraft:ruined_portal/portal_3",
+    "minecraft:ruined_portal/portal_4",
+    "minecraft:ruined_portal/portal_5",
+    "minecraft:ruined_portal/portal_6",
+    "minecraft:ruined_portal/portal_7",
+    "minecraft:ruined_portal/portal_8",
+    "minecraft:ruined_portal/portal_9",
+    "minecraft:ruined_portal/portal_10",
+];
+
+/// `RuinedPortalStructure.STRUCTURE_LOCATION_GIANT_PORTALS` — the 5%-weighted
+/// alternative to [`RUINED_PORTAL_TEMPLATES`].
+const RUINED_PORTAL_GIANT_TEMPLATES: [&str; 3] = [
+    "minecraft:ruined_portal/giant_portal_1",
+    "minecraft:ruined_portal/giant_portal_2",
+    "minecraft:ruined_portal/giant_portal_3",
+];
+
 /// `IglooPieces`' three templates, with their `PIVOTS` and `OFFSETS`.
 const IGLOO_PARTS: [(&str, [i32; 3], [i32; 3]); 3] = [
     ("minecraft:igloo/top", [3, 5, 5], [0, 0, 0]),
@@ -846,9 +925,100 @@ pub enum StructureKind {
         /// is a start with no blocks rather than no start.
         blocking: HashSet<String>,
     },
+    /// `minecraft:ruined_portal` — the six overworld ids (`ruined_portal` and its
+    /// `_desert`/`_jungle`/`_mountain`/`_ocean`/`_swamp` siblings), one weighted
+    /// list of [`RuinedPortalSetup`]s each. `ruined_portal_nether` carries this
+    /// same `type` id but is refused at parse time (see
+    /// [`StructureKind::parse`]) — nothing here can place a Nether-side portal.
+    RuinedPortal {
+        /// The document's `setups`, in file order — `Setup::weight` is read
+        /// relative to their sum, not normalised at parse time, exactly as
+        /// vanilla's own weighted pick does.
+        setups: Vec<RuinedPortalSetup>,
+        /// `#minecraft:features_cannot_replace`, resolved once at parse time
+        /// (the piece generator has no `&dyn Resolver` in reach) — every
+        /// setup's `ProtectedBlockProcessor` reads the same fixed tag.
+        features_cannot_replace: Arc<HashSet<String>>,
+    },
     /// A structure `type` whose generator has not landed. Carries the type id so
     /// the ledger can name it.
     Unsupported(String),
+}
+
+/// `RuinedPortalPiece.VerticalPlacement`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerticalPlacement {
+    /// `on_land_surface`.
+    OnLandSurface,
+    /// `partly_buried`.
+    PartlyBuried,
+    /// `on_ocean_floor`.
+    OnOceanFloor,
+    /// `in_mountain`.
+    InMountain,
+    /// `underground`.
+    Underground,
+    /// `in_nether` — parsed for completeness (so an unrecognised placement
+    /// string is a real parse failure and not this one by accident), but no
+    /// bundled overworld setup ever names it; the one document that does
+    /// (`ruined_portal_nether`) is refused wholesale before a
+    /// [`RuinedPortalSetup`] carrying this variant is ever built.
+    InNether,
+}
+
+impl VerticalPlacement {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "on_land_surface" => Self::OnLandSurface,
+            "partly_buried" => Self::PartlyBuried,
+            "on_ocean_floor" => Self::OnOceanFloor,
+            "in_mountain" => Self::InMountain,
+            "underground" => Self::Underground,
+            "in_nether" => Self::InNether,
+            _ => return None,
+        })
+    }
+}
+
+/// `RuinedPortalStructure.Setup` — one weighted entry of a `ruined_portal*.json`
+/// document's `setups` list.
+#[derive(Debug, Clone)]
+pub struct RuinedPortalSetup {
+    placement: VerticalPlacement,
+    air_pocket_probability: f32,
+    mossiness: f32,
+    overgrown: bool,
+    vines: bool,
+    can_be_cold: bool,
+    replace_with_blackstone: bool,
+    weight: f32,
+}
+
+/// `RuinedPortalPiece.Properties` — resolved once, in `findGenerationPoint`,
+/// and carried unchanged into the piece.
+#[derive(Debug, Clone, Copy)]
+struct RuinedPortalProperties {
+    cold: bool,
+    mossiness: f32,
+    air_pocket: bool,
+    overgrown: bool,
+    vines: bool,
+    replace_with_blackstone: bool,
+}
+
+/// Everything `findGenerationPoint` decides before the biome filter — the whole
+/// `Structure.GenerationStub`'s payload for this kind, since (unlike jigsaw or
+/// nether_fossil) nothing further is drawn once the biome check passes. See
+/// [`Stub::RuinedPortal`].
+struct RuinedPortalStub {
+    position: [i32; 3],
+    template_id: &'static str,
+    rotation: Rotation,
+    mirror: Mirror,
+    pivot: [i32; 3],
+    placement: VerticalPlacement,
+    properties: RuinedPortalProperties,
+    features_cannot_replace: Arc<HashSet<String>>,
 }
 
 /// `Structure.GenerationStub` — the generation point, plus whatever a kind needs
@@ -880,6 +1050,12 @@ enum Stub {
     /// then fails its biome check has already spent its whole stream, and any other
     /// order would be a different world.
     Eager([i32; 3], Vec<StructurePiece>),
+    /// A ruined portal's fully-decided construction data. Its own variant rather
+    /// than reusing [`Self::Continued`]: nothing draws after the biome check for
+    /// this kind (`findGenerationPoint` decides template, rotation, mirror, Y and
+    /// every `Properties` field before returning), so there is no live random
+    /// stream left to carry.
+    RuinedPortal(Box<RuinedPortalStub>),
 }
 
 impl Stub {
@@ -890,6 +1066,7 @@ impl Stub {
             | Self::Eager(position, _)
             | Self::Continued(position, _) => *position,
             Self::Jigsaw(stub) => stub.position,
+            Self::RuinedPortal(stub) => stub.position,
         }
     }
 }
@@ -946,6 +1123,34 @@ impl StructureKind {
                 // config we refuse must say *why*, not just "jigsaw".
                 Err(why) => Self::Unsupported(format!("minecraft:jigsaw — {why}")),
             },
+            "minecraft:ruined_portal" => {
+                let setups = parse_ruined_portal_setups(value);
+                // `ruined_portal_nether` carries this exact `type` id and its one
+                // setup is `placement: in_nether` — refused wholesale rather than
+                // silently mis-Y'd, because `findSuitableY`'s `IN_NETHER` branch,
+                // the Nether's own sea level and its beard/step wiring are all
+                // unverified here (see the module doc's "out of scope" note).
+                if setups.is_empty()
+                    || setups.iter().any(|s| s.placement == VerticalPlacement::InNether)
+                {
+                    Self::Unsupported(
+                        "minecraft:ruined_portal — in_nether placement is out of scope".to_string(),
+                    )
+                } else {
+                    let mut features_cannot_replace = HashSet::new();
+                    let mut seen = HashSet::new();
+                    crate::compose::resolve_block_tag(
+                        resolver,
+                        "minecraft:features_cannot_replace",
+                        &mut features_cannot_replace,
+                        &mut seen,
+                    );
+                    Self::RuinedPortal {
+                        setups,
+                        features_cannot_replace: Arc::new(features_cannot_replace),
+                    }
+                }
+            }
             other => Self::Unsupported(other.to_string()),
         }
     }
@@ -975,6 +1180,15 @@ impl StructureKind {
             }
             Self::Igloo => IGLOO_PARTS.iter().map(|(id, _, _)| *id).collect(),
             Self::NetherFossil { .. } => NETHER_FOSSILS.to_vec(),
+            // Every one of the 13 portal templates is a candidate at every
+            // start (the pick is a single `nextInt` over the whole family), so
+            // all 13 are loaded eagerly regardless of which setups this id
+            // actually carries.
+            Self::RuinedPortal { .. } => RUINED_PORTAL_TEMPLATES
+                .iter()
+                .chain(RUINED_PORTAL_GIANT_TEMPLATES.iter())
+                .copied()
+                .collect(),
             // A jigsaw structure's templates are named by its *pools*, and there
             // are hundreds of them — `PoolStore::load` pulls each one in as it
             // parses the element that names it, so there is no static list here.
@@ -1004,7 +1218,85 @@ impl StructureKind {
         seed: i64,
         ctx: &dyn StartContext,
         pools: &PoolStore,
+        templates: &TemplateStore,
     ) -> Option<Stub> {
+        if let Self::RuinedPortal { setups, features_cannot_replace } = self {
+            // The third kind whose generation point costs RNG, and — unlike
+            // jigsaw and nether_fossil — the *last* one: every draw
+            // `RuinedPortalStructure.findGenerationPoint` makes (setup, air
+            // pocket, template, rotation, mirror, Y) happens here, so nothing is
+            // left to draw once the biome check passes. See [`RuinedPortalStub`].
+            let mut random = structure_random(seed, cx, cz);
+            let setup = pick_ruined_portal_setup(setups, &mut random);
+            let air_pocket = ruined_portal_sample(&mut random, setup.air_pocket_probability);
+            let giant = random.next_float() < 0.05;
+            let template_id = if giant {
+                RUINED_PORTAL_GIANT_TEMPLATES[random.next_int_bounded(3).clamp(0, 2) as usize]
+            } else {
+                RUINED_PORTAL_TEMPLATES[random.next_int_bounded(10).clamp(0, 9) as usize]
+            };
+            let template = templates.get(template_id)?;
+            let rotation = Rotation::random(&mut random);
+            let mirror = if random.next_float() < 0.5 { Mirror::None } else { Mirror::FrontBack };
+            let size = template.size();
+            let pivot = [size[0] / 2, 0, size[2] / 2];
+            let (base_x, base_z) = (cx * 16, cz * 16);
+            let box_settings = PlaceSettings {
+                rotation,
+                mirror,
+                pivot,
+                processors: Vec::new(),
+                waterlogging: true,
+            };
+            // `template.getBoundingBox(basePosition, rotation, pivot, mirror)` at
+            // the chunk's own Y=0 — the box's Y span does not depend on the
+            // translation, only its X/Z corners do, and those are what
+            // `findSuitableY` samples columns under.
+            let box_ = template.bounding_box([base_x, 0, base_z], &box_settings);
+            // `BoundingBox.getCenter()`: `min + (max - min + 1) / 2`, not the
+            // arithmetic mean — see the type's own doc.
+            let center_x = box_.min[0] + (box_.max[0] - box_.min[0] + 1) / 2;
+            let center_z = box_.min[2] + (box_.max[2] - box_.min[2] + 1) / 2;
+            let heightmap = if setup.placement == VerticalPlacement::OnOceanFloor {
+                HeightmapKind::OceanFloorWg
+            } else {
+                HeightmapKind::WorldSurfaceWg
+            };
+            // `chunkGenerator.getBaseHeight(...) - 1`: `first_occupied_height` is
+            // already `getBaseHeight - 1`, so no further offset here — the same
+            // convention `find_generation_point`'s other arms already use.
+            let surface_y = ctx.first_occupied_height(center_x, center_z, heightmap);
+            let y_span = size[1];
+            let projected_y = ruined_portal_find_suitable_y(
+                &mut random,
+                setup.placement,
+                air_pocket,
+                surface_y,
+                y_span,
+                box_,
+                ctx,
+            );
+            let origin = [base_x, projected_y, base_z];
+            let cold = setup.can_be_cold
+                && is_cold_biome(&ctx.biome_at_quart(origin[0] >> 2, origin[1] >> 2, origin[2] >> 2));
+            return Some(Stub::RuinedPortal(Box::new(RuinedPortalStub {
+                position: origin,
+                template_id,
+                rotation,
+                mirror,
+                pivot,
+                placement: setup.placement,
+                properties: RuinedPortalProperties {
+                    cold,
+                    mossiness: setup.mossiness,
+                    air_pocket,
+                    overgrown: setup.overgrown,
+                    vines: setup.vines,
+                    replace_with_blackstone: setup.replace_with_blackstone,
+                },
+                features_cannot_replace: Arc::clone(features_cannot_replace),
+            })));
+        }
         if let Self::Jigsaw(config) = self {
             // The one kind whose generation point costs RNG. See [`Stub`].
             return jigsaw::begin(
@@ -1129,7 +1421,10 @@ impl StructureKind {
                 Some([middle_x, y, middle_z])
             }
             // Handled by `find_stub` before this function is reached.
-            Self::Jigsaw(_) | Self::Mineshaft { .. } | Self::NetherFossil { .. } => None,
+            Self::Jigsaw(_)
+            | Self::Mineshaft { .. }
+            | Self::NetherFossil { .. }
+            | Self::RuinedPortal { .. } => None,
             Self::Unsupported(_) => {
                 // No generator, so no honest generation point — and therefore no
                 // honest biome-check Y either. Sea level is used deliberately
@@ -1209,6 +1504,12 @@ impl StructureKind {
                 &mut *random,
             ));
         }
+        if let Self::RuinedPortal { .. } = self {
+            let Stub::RuinedPortal(stub) = stub else {
+                return None;
+            };
+            return Some(ruined_portal_piece(*stub, templates));
+        }
         match self {
             Self::Shipwreck { beached } => {
                 let mut random = structure_random(seed, cx, cz);
@@ -1266,23 +1567,25 @@ impl StructureKind {
                     placement: None,
                     extra_placements: Vec::new(),
                     // `BuriedTreasurePiece.postProcess` walks down to stone and
-                    // places one chest plus up to five *neighbour* blocks, and
-                    // every one of those decisions is a `level.getBlockState` on
-                    // the six neighbours of a walking cursor. `StartContext` has
-                    // no block-state read (only [`StartContext::is_replaceable_at`],
-                    // which answers air-or-fluid and cannot tell sandstone from
-                    // granite), so the walk's terminating condition cannot be
-                    // evaluated. Ledgered as `coded:buried_treasure_chest`.
+                    // places one chest plus up to five *neighbour* blocks, and the
+                    // walk's terminating condition is a **material** distinction
+                    // (sandstone/stone/andesite/granite/diorite) `StartContext`'s
+                    // pre-surface shape cannot make. Deferred to placement time
+                    // instead of resolved here — see [`PieceRefinement::BuriedTreasureChest`].
                     blocks: None,
                     loot: Vec::new(),
                     beard: None,
+                    refine: Some(PieceRefinement::BuriedTreasureChest),
                 }])
             }
             // `OceanMonumentPieces` is ~1,400 lines of coded pieces, not
             // templates, so it is S5's and not S2's.
             Self::OceanMonument { .. } | Self::Unsupported(_) => None,
             // Handled above, before the match, because they consume `stub`.
-            Self::Jigsaw(_) | Self::Mineshaft { .. } | Self::NetherFossil { .. } => None,
+            Self::Jigsaw(_)
+            | Self::Mineshaft { .. }
+            | Self::NetherFossil { .. }
+            | Self::RuinedPortal { .. } => None,
         }
     }
 
@@ -1294,10 +1597,18 @@ impl StructureKind {
             // Every template-driven kind adds at least one piece, so biome-valid
             // implies start-valid — but an empty list means a template failed to
             // load, which is `Unknown` (named on the ledger), not `Invalid`.
+            // `RuinedPortalStructure.findGenerationPoint` always returns
+            // `Optional.of(...)`, exactly like the three above — but its own
+            // template lookup already ran inside `find_stub` (it needs the
+            // template's size before the biome check, to find a suitable Y), so
+            // an empty list here can only mean that lookup failed on a
+            // template this store nonetheless reports as loaded, which is the
+            // same "ledgered, not invalid" shape as the others.
             Self::Shipwreck { .. }
             | Self::OceanRuin { .. }
             | Self::Igloo
-            | Self::NetherFossil { .. } => match pieces {
+            | Self::NetherFossil { .. }
+            | Self::RuinedPortal { .. } => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Unknown,
             },
@@ -1344,6 +1655,147 @@ impl StructureKind {
 /// up would sink every template one block into the ground.
 pub(crate) fn free_height(ctx: &dyn StartContext, x: i32, z: i32, heightmap: HeightmapKind) -> i32 {
     ctx.first_occupied_height(x, z, heightmap) + 1
+}
+
+/// `RuinedPortalStructure.findGenerationPoint`'s weighted setup pick: **one**
+/// `nextFloat()` regardless of how many setups there are (not one per
+/// candidate), matching `RuinedPortalStructure`'s own loop — a single-setup id
+/// (`_desert`, `_jungle`, `_ocean`, `_swamp`) draws nothing here at all.
+fn pick_ruined_portal_setup<'a>(
+    setups: &'a [RuinedPortalSetup],
+    random: &mut StructureRandom,
+) -> &'a RuinedPortalSetup {
+    if setups.len() <= 1 {
+        return &setups[0];
+    }
+    let total: f32 = setups.iter().map(|s| s.weight).sum();
+    let mut pick = random.next_float();
+    for setup in setups {
+        pick -= setup.weight / total;
+        if pick < 0.0 {
+            return setup;
+        }
+    }
+    // Vanilla throws `IllegalStateException` here; both bundled multi-setup
+    // ids (`ruined_portal`, `ruined_portal_mountain`) weight their two setups
+    // 0.5/0.5, so the loop above always returns before falling off the end.
+    setups.last().unwrap_or(&setups[0])
+}
+
+/// `RuinedPortalStructure.sample` — a probability of exactly `0.0` or `1.0`
+/// costs **no** draw; anything in between is one `nextFloat()`. Getting this
+/// wrong would shift every draw after it for the two setups whose
+/// `air_pocket_probability` is not one of the two extremes
+/// (`ruined_portal_mountain`'s `on_land_surface` arm is `0.5`).
+fn ruined_portal_sample(random: &mut StructureRandom, probability: f32) -> bool {
+    if probability == 0.0 {
+        false
+    } else if probability == 1.0 {
+        true
+    } else {
+        random.next_float() < probability
+    }
+}
+
+/// The vanilla biomes whose *base* temperature is below the `0.15`
+/// `warmEnoughToRain` threshold — `Biome::coldEnoughToSnow`'s answer wherever
+/// the height-adjustment term is inert (`pos.y <= seaLevel + 17`, true for
+/// every ruined-portal placement except a rare `in_mountain` one). Approximates
+/// `coldEnoughToSnow` by biome id rather than by the real per-biome
+/// `ClimateSettings`/noise model, which this crate has no access to through
+/// [`StartContext`]. The only observable effect of a wrong answer is which of
+/// two lava-replacement rules a `cold`-eligible setup's portal gets
+/// (netherrack unconditionally, or magma 20% of the time) — a decayed-block
+/// cosmetic, not the structure's position, orientation or piece list.
+const COLD_ENOUGH_TO_SNOW_BIOMES: &[&str] = &[
+    "minecraft:snowy_plains",
+    "minecraft:snowy_taiga",
+    "minecraft:snowy_slopes",
+    "minecraft:snowy_beach",
+    "minecraft:ice_spikes",
+    "minecraft:frozen_peaks",
+    "minecraft:jagged_peaks",
+    "minecraft:grove",
+    "minecraft:frozen_river",
+    "minecraft:frozen_ocean",
+    "minecraft:deep_frozen_ocean",
+];
+
+fn is_cold_biome(id: &str) -> bool {
+    COLD_ENOUGH_TO_SNOW_BIOMES.contains(&id)
+}
+
+/// `RuinedPortalStructure.findSuitableY` — for `ON_LAND_SURFACE`/`ON_OCEAN_FLOOR`
+/// this is `surfaceYAtCenter` outright; every other overworld placement seeds
+/// `newY` from one draw, then walks it down from there until at least three of
+/// the box's four bottom corners sit on ground the placement's own heightmap
+/// calls opaque, or the walk runs out at `minY + 15`.
+fn ruined_portal_find_suitable_y(
+    random: &mut StructureRandom,
+    placement: VerticalPlacement,
+    air_pocket: bool,
+    surface_y_at_center: i32,
+    y_span: i32,
+    box_: BoundingBox,
+    ctx: &dyn StartContext,
+) -> i32 {
+    let min_y = ctx.min_y() + 15;
+    let mut y = match placement {
+        VerticalPlacement::InNether => {
+            // Unreachable through this engine's registry — `StructureKind::parse`
+            // refuses every `in_nether` setup — but transcribed so the match is
+            // total and the branch reads the same as vanilla's.
+            if air_pocket {
+                next_int_between(random, 32, 100)
+            } else if random.next_float() < 0.5 {
+                next_int_between(random, 27, 29)
+            } else {
+                next_int_between(random, 29, 100)
+            }
+        }
+        VerticalPlacement::InMountain => {
+            random_within_interval(random, 70, surface_y_at_center - y_span)
+        }
+        VerticalPlacement::Underground => {
+            random_within_interval(random, min_y, surface_y_at_center - y_span)
+        }
+        VerticalPlacement::PartlyBuried => {
+            surface_y_at_center - y_span + next_int_between(random, 2, 8)
+        }
+        VerticalPlacement::OnLandSurface | VerticalPlacement::OnOceanFloor => surface_y_at_center,
+    };
+    let corners = [
+        [box_.min[0], box_.min[2]],
+        [box_.max[0], box_.min[2]],
+        [box_.min[0], box_.max[2]],
+        [box_.max[0], box_.max[2]],
+    ];
+    let is_opaque = |x: i32, at_y: i32, z: i32| {
+        let kind = ctx.block_kind_at(x, at_y, z);
+        if placement == VerticalPlacement::OnOceanFloor {
+            kind == BlockKind::Stone
+        } else {
+            kind != BlockKind::Air
+        }
+    };
+    while y > min_y {
+        let solid = corners.iter().filter(|c| is_opaque(c[0], y, c[1])).count();
+        if solid >= 3 {
+            return y;
+        }
+        y -= 1;
+    }
+    y
+}
+
+/// `Mth.randomBetweenInclusive(random, minPreferred, max)` when
+/// `minPreferred < max`, else `max` — `getRandomWithinInterval`.
+fn random_within_interval(random: &mut StructureRandom, min_preferred: i32, max: i32) -> i32 {
+    if min_preferred < max {
+        next_int_between(random, min_preferred, max)
+    } else {
+        max
+    }
 }
 
 /// `Util.getRandom(array, random)`.
@@ -1486,6 +1938,106 @@ fn nether_fossil_pieces<R: RandomSource>(
         }
     }
     vec![piece]
+}
+
+/// `RuinedPortalStructure.findGenerationPoint`'s `builder -> { ... }` closure —
+/// the one piece this kind ever builds, from data [`Self::find_stub`] already
+/// decided. Nothing here draws random.
+///
+/// # What this places, and what it deliberately does not
+///
+/// The template placement itself is complete: every `RuleProcessor` rule
+/// (`gold_block` → 30% air, the lava swap, the non-cold `netherrack` → 7%
+/// magma), [`Processor::BlockAge`]'s decay, [`Processor::ProtectedBlocks`],
+/// [`Processor::LavaSubmerged`] and (when a setup asks for it)
+/// [`Processor::BlackstoneReplace`] all run, in `makeSettings`'s own order.
+///
+/// **`RuinedPortalPiece.postProcess`'s *second* half is not ported**:
+/// `spreadNetherrack` (the netherrack skirt a portal sits in), `plusNetherrackDripColumnsBelowPortal`
+/// and the vine/leaf overgrowth pass. Those read the world *as the template just
+/// wrote it* at positions well outside the piece's own box — this engine's other
+/// coded-piece deviations (see `coded:decoration_random` on the ledger) already
+/// establish the pattern for porting a postProcess pass onto an eager start-time
+/// builder, but doing it faithfully needs the template's own placed cells
+/// available for a box-interior overlap test, which no piece here computes until
+/// placement time. Ledgered as `coded:ruined_portal_terrain_skirt` rather than
+/// guessed at. The frame's position, orientation, materials and decay are real;
+/// only the environmental blending around it is missing.
+fn ruined_portal_piece(stub: RuinedPortalStub, templates: &TemplateStore) -> Vec<StructurePiece> {
+    let Some(template) = templates.get(stub.template_id) else {
+        return Vec::new();
+    };
+    let ignore = if stub.properties.air_pocket {
+        Processor::structure_block()
+    } else {
+        Processor::structure_and_air()
+    };
+    let mut rules = vec![
+        rule_random_replace("minecraft:gold_block", 0.3, "minecraft:air"),
+        ruined_portal_lava_rule(stub.placement, stub.properties.cold),
+    ];
+    if !stub.properties.cold {
+        rules.push(rule_random_replace("minecraft:netherrack", 0.07, "minecraft:magma_block"));
+    }
+    let mut processors = vec![
+        ignore,
+        Processor::Rule(rules),
+        Processor::BlockAge { mossiness: stub.properties.mossiness },
+        Processor::ProtectedBlocks(Arc::clone(&stub.features_cannot_replace)),
+        Processor::LavaSubmerged,
+    ];
+    if stub.properties.replace_with_blackstone {
+        processors.push(Processor::BlackstoneReplace);
+    }
+    let settings = PlaceSettings {
+        rotation: stub.rotation,
+        mirror: stub.mirror,
+        pivot: stub.pivot,
+        processors,
+        waterlogging: true,
+    };
+    vec![template_piece(
+        "minecraft:ruined_portal",
+        stub.template_id,
+        template,
+        stub.position,
+        settings,
+    )]
+}
+
+/// `getBlockReplaceRule(source, probability, target)` —
+/// `RandomBlockMatchTest(source, probability)` against `AlwaysTrue`.
+fn rule_random_replace(source: &str, probability: f32, target: &str) -> ProcessorRule {
+    ProcessorRule {
+        input: RuleTest::RandomBlockMatch(source.to_string(), probability),
+        location: RuleTest::AlwaysTrue,
+        position: PosTest::AlwaysTrue,
+        output: BlockState::of(target),
+    }
+}
+
+/// `getBlockReplaceRule(source, target)` — the unconditional two-argument
+/// overload, `BlockMatchTest` against `AlwaysTrue`.
+fn rule_replace(source: &str, target: &str) -> ProcessorRule {
+    ProcessorRule {
+        input: RuleTest::BlockMatch(source.to_string()),
+        location: RuleTest::AlwaysTrue,
+        position: PosTest::AlwaysTrue,
+        output: BlockState::of(target),
+    }
+}
+
+/// `RuinedPortalPiece.getLavaProcessorRule` — `on_ocean_floor` unconditionally
+/// swaps lava for magma; every other placement swaps to netherrack when the
+/// setup came out cold, or rolls a 20% magma chance when it did not.
+fn ruined_portal_lava_rule(placement: VerticalPlacement, cold: bool) -> ProcessorRule {
+    if placement == VerticalPlacement::OnOceanFloor {
+        rule_replace("minecraft:lava", "minecraft:magma_block")
+    } else if cold {
+        rule_replace("minecraft:lava", "minecraft:netherrack")
+    } else {
+        rule_random_replace("minecraft:lava", 0.2, "minecraft:magma_block")
+    }
 }
 
 /// `OceanRuinStructure.generatePieces` → `OceanRuinPieces.addPieces`.
@@ -1836,6 +2388,7 @@ fn template_piece(
         // the field S4's pool pieces fill, and leaving it out of the constructor
         // would make that a wider change than it needs to be.
         beard: None,
+        refine: None,
     }
 }
 
@@ -2263,6 +2816,20 @@ impl StructureRegistry {
                     .into(),
             );
             unsupported.insert(
+                "coded:ruined_portal_terrain_skirt".into(),
+                "`RuinedPortalPiece.postProcess`'s *second* half is not ported: \
+                 `spreadNetherrack`, `addNetherrackDripColumnsBelowPortal` and the \
+                 vine/leaf overgrowth pass. The template placement itself (frame \
+                 position, orientation, decay, mossiness, the blackstone swap) is \
+                 real; what is missing is the netherrack the portal would otherwise \
+                 sit in and spill down from, plus vine/leaf growth on its own \
+                 blocks. A faithful port needs the template's own placed cells \
+                 available for `canBlockBeReplacedByNetherrackOrMagma`'s \
+                 box-interior overlap test, which no piece here computes before \
+                 placement time — see `ruined_portal_piece`'s own doc"
+                    .into(),
+            );
+            unsupported.insert(
                 "coded:buried_treasure_chest".into(),
                 "`buried_treasure` places a start and a bounding box but **zero blocks**. \
                  `BuriedTreasurePieces.postProcess` walks a cursor down from the ocean \
@@ -2525,7 +3092,7 @@ impl StructureRegistry {
         ctx: &dyn StartContext,
     ) -> Option<StructureStart> {
         let def = self.structures.get(structure_id)?;
-        let stub = def.kind.find_stub(cx, cz, self.seed, ctx, &self.pools)?;
+        let stub = def.kind.find_stub(cx, cz, self.seed, ctx, &self.pools, &self.templates)?;
         let position = stub.position();
         // `Structure.isValidBiome`: the biome at the *stub position*, quart-wise,
         // including Y. Using y = 0 (or the surface) instead is the "y = 0 trap"
@@ -2577,6 +3144,31 @@ impl StructureRegistry {
             }
         }
     }
+}
+
+/// `RuinedPortalStructure.Setup.CODEC` — the `setups` array of a
+/// `ruined_portal*.json` document. A malformed entry (a missing field, an
+/// unrecognised `placement` string) is dropped rather than defaulted, so a
+/// typo in the data reads as "one fewer setup" rather than a silently wrong
+/// weight or placement.
+fn parse_ruined_portal_setups(value: &Value) -> Vec<RuinedPortalSetup> {
+    value["setups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            Some(RuinedPortalSetup {
+                placement: VerticalPlacement::parse(s["placement"].as_str()?)?,
+                air_pocket_probability: s["air_pocket_probability"].as_f64()? as f32,
+                mossiness: s["mossiness"].as_f64()? as f32,
+                overgrown: s["overgrown"].as_bool()?,
+                vines: s["vines"].as_bool()?,
+                can_be_cold: s["can_be_cold"].as_bool()?,
+                replace_with_blackstone: s["replace_with_blackstone"].as_bool()?,
+                weight: s["weight"].as_f64()? as f32,
+            })
+        })
+        .collect()
 }
 
 /// Resolves a `biomes`-shaped holder-set — a `"#tag"` reference, a bare id, or a
@@ -2681,5 +3273,272 @@ mod tests {
         assert!(!box_at(-13).is_close_to_chunk(0, 0, 12));
         assert!(box_at(27).is_close_to_chunk(0, 0, 12));
         assert!(!box_at(28).is_close_to_chunk(0, 0, 12));
+    }
+
+    /// A flat column at a fixed solid height, for [`ruined_portal_find_suitable_y`]
+    /// — every `(x, z)` reads the same [`BlockKind`] up to `surface`, air above.
+    struct FlatColumn {
+        surface: i32,
+    }
+    impl StartContext for FlatColumn {
+        fn first_occupied_height(&self, _x: i32, _z: i32, _h: HeightmapKind) -> i32 {
+            self.surface
+        }
+        fn biome_at_quart(&self, _qx: i32, _qy: i32, _qz: i32) -> String {
+            "minecraft:plains".into()
+        }
+        fn sea_level(&self) -> i32 {
+            63
+        }
+        fn min_y(&self) -> i32 {
+            -64
+        }
+        fn block_kind_at(&self, _x: i32, y: i32, _z: i32) -> BlockKind {
+            if y <= self.surface { BlockKind::Stone } else { BlockKind::Air }
+        }
+    }
+
+    /// `RuinedPortalStructure.sample` — the two extremes draw nothing and the
+    /// probability decides deterministically; a middle value draws exactly one
+    /// `nextFloat()` and gives a real mixture, not all-or-nothing.
+    #[test]
+    fn ruined_portal_sample_extremes_are_draw_free() {
+        let mut random = structure_random(1, 0, 0);
+        assert!(!ruined_portal_sample(&mut random, 0.0));
+        assert!(ruined_portal_sample(&mut random, 1.0));
+        // Both extremes drew nothing, so the stream is exactly where it started.
+        let mut untouched = structure_random(1, 0, 0);
+        assert_eq!(random.next_int_bounded(1_000_000), untouched.next_int_bounded(1_000_000));
+
+        let mut trues = 0;
+        for seed in 0..200i64 {
+            let mut r = structure_random(seed, 3, -5);
+            if ruined_portal_sample(&mut r, 0.5) {
+                trues += 1;
+            }
+        }
+        assert!((40..160).contains(&trues), "0.5 sampled true {trues}/200 times");
+    }
+
+    /// `findSuitableY`'s `ON_LAND_SURFACE`/`ON_OCEAN_FLOOR` arms draw nothing and
+    /// are exactly `surfaceYAtCenter` — no search needed because the flat
+    /// column is already solid there.
+    #[test]
+    fn find_suitable_y_at_surface_placements_is_exactly_the_sampled_surface() {
+        let ctx = FlatColumn { surface: 80 };
+        let box_ = BoundingBox { min: [0, 0, 0], max: [7, 0, 7] };
+        for placement in [VerticalPlacement::OnLandSurface, VerticalPlacement::OnOceanFloor] {
+            let mut random = structure_random(7, 2, -3);
+            let untouched = structure_random(7, 2, -3);
+            let y = ruined_portal_find_suitable_y(&mut random, placement, false, 80, 5, box_, &ctx);
+            assert_eq!(y, 80, "{placement:?} did not land on the surface");
+            // And no draw happened getting there.
+            let mut a = random;
+            let mut b = untouched;
+            assert_eq!(a.next_int_bounded(1_000_000), b.next_int_bounded(1_000_000));
+        }
+    }
+
+    /// `in_mountain`/`underground`/`partly_buried` seed `newY` from a draw before
+    /// the search loop ever runs; over a column that is solid **everywhere** the
+    /// loop's first check always succeeds, so the returned value is exactly that
+    /// seed — predicted here from the same arithmetic the function itself uses
+    /// (`random_within_interval`/`next_int_between`), on an independently-seeded
+    /// but identically-positioned stream, rather than assumed to land on a round
+    /// number.
+    #[test]
+    fn find_suitable_y_below_ground_placements_return_the_seeded_y_unmodified() {
+        struct AlwaysSolid;
+        impl StartContext for AlwaysSolid {
+            fn first_occupied_height(&self, _x: i32, _z: i32, _h: HeightmapKind) -> i32 {
+                80
+            }
+            fn biome_at_quart(&self, _qx: i32, _qy: i32, _qz: i32) -> String {
+                "minecraft:plains".into()
+            }
+            fn sea_level(&self) -> i32 {
+                63
+            }
+            fn min_y(&self) -> i32 {
+                -64
+            }
+            fn block_kind_at(&self, _x: i32, _y: i32, _z: i32) -> BlockKind {
+                BlockKind::Stone
+            }
+        }
+        let ctx = AlwaysSolid;
+        let box_ = BoundingBox { min: [0, 0, 0], max: [7, 0, 7] };
+        let surface = 80;
+        let y_span = 5;
+
+        let mut expect_in_mountain = structure_random(11, -4, 6);
+        let expected_in_mountain = random_within_interval(&mut expect_in_mountain, 70, surface - y_span);
+        let mut random = structure_random(11, -4, 6);
+        let y = ruined_portal_find_suitable_y(
+            &mut random,
+            VerticalPlacement::InMountain,
+            false,
+            surface,
+            y_span,
+            box_,
+            &ctx,
+        );
+        assert_eq!(y, expected_in_mountain);
+
+        let mut expect_underground = structure_random(11, -4, 6);
+        let expected_underground =
+            random_within_interval(&mut expect_underground, ctx.min_y() + 15, surface - y_span);
+        let mut random = structure_random(11, -4, 6);
+        let y = ruined_portal_find_suitable_y(
+            &mut random,
+            VerticalPlacement::Underground,
+            false,
+            surface,
+            y_span,
+            box_,
+            &ctx,
+        );
+        assert_eq!(y, expected_underground);
+
+        let mut expect_buried = structure_random(11, -4, 6);
+        let expected_buried = surface - y_span + next_int_between(&mut expect_buried, 2, 8);
+        let mut random = structure_random(11, -4, 6);
+        let y = ruined_portal_find_suitable_y(
+            &mut random,
+            VerticalPlacement::PartlyBuried,
+            false,
+            surface,
+            y_span,
+            box_,
+            &ctx,
+        );
+        assert_eq!(y, expected_buried);
+    }
+
+    /// The weighted setup pick draws exactly one `nextFloat()` regardless of
+    /// list length, and both entries of a 50/50 split are reachable.
+    #[test]
+    fn pick_ruined_portal_setup_is_one_draw_and_reaches_both_entries() {
+        let setups = vec![
+            RuinedPortalSetup {
+                placement: VerticalPlacement::Underground,
+                air_pocket_probability: 1.0,
+                mossiness: 0.2,
+                overgrown: false,
+                vines: false,
+                can_be_cold: true,
+                replace_with_blackstone: false,
+                weight: 0.5,
+            },
+            RuinedPortalSetup {
+                placement: VerticalPlacement::OnLandSurface,
+                air_pocket_probability: 0.5,
+                mossiness: 0.2,
+                overgrown: false,
+                vines: false,
+                can_be_cold: true,
+                replace_with_blackstone: false,
+                weight: 0.5,
+            },
+        ];
+        let mut seen_underground = false;
+        let mut seen_surface = false;
+        for seed in 0..200i64 {
+            let mut random = structure_random(seed, 4, 9);
+            let picked = pick_ruined_portal_setup(&setups, &mut random);
+            match picked.placement {
+                VerticalPlacement::Underground => seen_underground = true,
+                VerticalPlacement::OnLandSurface => seen_surface = true,
+                other => panic!("picked a placement not in the list: {other:?}"),
+            }
+        }
+        assert!(seen_underground && seen_surface, "the 50/50 split favoured one entry only");
+    }
+
+    /// `getLavaProcessorRule`: `on_ocean_floor` always swaps to magma; elsewhere
+    /// a cold setup swaps unconditionally to netherrack and a warm one only
+    /// rolls magma sometimes — the three branches of vanilla's own `if`.
+    #[test]
+    fn ruined_portal_lava_rule_picks_the_right_branch() {
+        let ocean = ruined_portal_lava_rule(VerticalPlacement::OnOceanFloor, false);
+        assert!(matches!(ocean.input, RuleTest::BlockMatch(ref s) if s == "minecraft:lava"));
+        assert_eq!(ocean.output.name, "minecraft:magma_block");
+
+        let cold = ruined_portal_lava_rule(VerticalPlacement::Underground, true);
+        assert!(matches!(cold.input, RuleTest::BlockMatch(ref s) if s == "minecraft:lava"));
+        assert_eq!(cold.output.name, "minecraft:netherrack");
+
+        let warm = ruined_portal_lava_rule(VerticalPlacement::Underground, false);
+        assert!(matches!(warm.input, RuleTest::RandomBlockMatch(ref s, p) if s == "minecraft:lava" && p == 0.2));
+        assert_eq!(warm.output.name, "minecraft:magma_block");
+    }
+
+    /// `makeSettings`'s processor chain, assembled from a hand-built stub: the
+    /// ignore processor tracks `air_pocket`, the non-cold netherrack→magma rule
+    /// is present only when `!cold`, and `BlackstoneReplace` is appended only
+    /// when the setup asked for it — four independent on/off facts, not one.
+    #[test]
+    fn ruined_portal_piece_assembles_the_documented_processor_chain() {
+        struct OnePortalTemplate;
+        impl Resolver for OnePortalTemplate {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                unreachable!()
+            }
+            fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+                (id == "minecraft:ruined_portal/portal_1").then(|| {
+                    std::fs::read(
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("../lodestone-server/assets/structure/ruined_portal/portal_1.nbt"),
+                    )
+                    .expect("bundled portal_1.nbt")
+                })
+            }
+        }
+        let mut templates = TemplateStore::default();
+        let failures = templates.load(&OnePortalTemplate, &["minecraft:ruined_portal/portal_1"]);
+        assert!(failures.is_empty(), "{failures:?}");
+
+        let make = |cold: bool, blackstone: bool| RuinedPortalStub {
+            position: [0, 70, 0],
+            template_id: "minecraft:ruined_portal/portal_1",
+            rotation: Rotation::None,
+            mirror: Mirror::None,
+            pivot: [0, 0, 0],
+            placement: VerticalPlacement::Underground,
+            properties: RuinedPortalProperties {
+                cold,
+                mossiness: 0.2,
+                air_pocket: true,
+                overgrown: false,
+                vines: false,
+                replace_with_blackstone: blackstone,
+            },
+            features_cannot_replace: Arc::new(HashSet::new()),
+        };
+
+        let warm = ruined_portal_piece(make(false, false), &templates);
+        let settings = &warm[0].placement.as_ref().expect("template piece").settings;
+        assert_eq!(settings.processors.len(), 5, "no blackstone processor expected");
+        assert!(
+            matches!(&settings.processors[0], Processor::BlockIgnore(v) if v.len() == 1 && v[0] == "minecraft:structure_block")
+        );
+        let Processor::Rule(rules) = &settings.processors[1] else {
+            panic!("second processor must be the rule chain");
+        };
+        assert_eq!(rules.len(), 3, "gold + lava + non-cold netherrack rule");
+
+        let cold = ruined_portal_piece(make(true, false), &templates);
+        let Processor::Rule(rules) = &cold[0].placement.as_ref().unwrap().settings.processors[1] else {
+            panic!("second processor must be the rule chain");
+        };
+        assert_eq!(rules.len(), 2, "cold setups skip the non-cold netherrack rule");
+
+        let blackstone = ruined_portal_piece(make(false, true), &templates);
+        let bs_settings = &blackstone[0].placement.as_ref().unwrap().settings;
+        assert_eq!(bs_settings.processors.len(), 6, "blackstone processor appended");
+        assert!(matches!(bs_settings.processors[5], Processor::BlackstoneReplace));
     }
 }
