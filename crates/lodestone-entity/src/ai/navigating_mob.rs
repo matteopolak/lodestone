@@ -35,44 +35,39 @@ use crate::pathfinding::{
 };
 
 /// Vanilla `Animal::setInLove`'s love-mode duration, in ticks
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/animal/Animal.java:174`,
-/// `this.inLove = 600;`).
+/// (`this.inLove = 600;`).
 pub const LOVE_TICKS: i32 = 600;
 
-/// Vanilla `AgeableMob.BABY_START_AGE`
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/AgeableMob.java:31`). The
+/// Vanilla `AgeableMob::BABY_START_AGE`. The
 /// age timer a freshly bred (or otherwise spawned) baby starts at; it counts
 /// up by one every tick until it reaches `0` (adult).
 pub const BABY_START_AGE: i32 = -24_000;
 
-/// Vanilla `Animal.PARENT_AGE_AFTER_BREEDING`
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/animal/Animal.java:44`).
+/// Vanilla `Animal::PARENT_AGE_AFTER_BREEDING`.
 /// The post-breeding cooldown applied to both parents' age timer; it counts
 /// down by one every tick until it reaches `0` (breedable again).
 pub const PARENT_AGE_AFTER_BREEDING: i32 = 6000;
 
-/// Vanilla `Creeper.DEFAULT_MAX_SWELL`
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/monster/Creeper.java:51`,
-/// `private static final short DEFAULT_MAX_SWELL = 30;`). The fuse length in
+/// Vanilla `Creeper::DEFAULT_MAX_SWELL`
+/// (`private static final short DEFAULT_MAX_SWELL = 30;`). The fuse length in
 /// ticks: [`swell`](NavigatingMob::swell) climbs by
 /// [`swell_dir`](MobController::swell_dir) once per [`advance`](NavigatingMob::advance)
 /// call, and reaching this value is detonation
-/// (`Creeper.java:144-146`, `explodeCreeper()`).
+/// (`Creeper::tick`, `explodeCreeper()`).
 pub const MAX_SWELL: i32 = 30;
 
-/// How long a mob remembers who hurt it, in ticks. Vanilla `LivingEntity.tick`
+/// How long a mob remembers who hurt it, in ticks. Vanilla `LivingEntity::baseTick`
 /// clears `lastHurtByMob` once the record ages past this
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/LivingEntity.java:493`,
-/// `else if (this.tickCount - this.lastHurtByMobTimestamp > 100)`), which is
+/// (`else if (this.tickCount - this.lastHurtByMobTimestamp > 100)`), which is
 /// what bounds `HurtByTargetGoal`'s retaliation window
-/// (`ai/goal/target/HurtByTargetGoal.java:34-36` reads exactly that pair).
+/// (`HurtByTargetGoal::canUse` reads exactly that pair).
 pub const LAST_HURT_BY_TICKS: i32 = 100;
 
 /// How long a mob stays panicked after taking damage, in ticks. Vanilla's
-/// `PanicGoal.shouldPanic` (`ai/goal/PanicGoal.java:61-63`) tests
+/// `PanicGoal::shouldPanic` tests
 /// `getLastDamageSource() != null`, and `getLastDamageSource` self-clears once
 /// the stamp ages past this
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/LivingEntity.java:1420-1421`,
+/// (`LivingEntity::getLastDamageSource`,
 /// `if (this.level().getGameTime() - this.lastDamageStamp > 40L)`).
 ///
 /// Note this is a **different, shorter** window than [`LAST_HURT_BY_TICKS`]:
@@ -85,24 +80,22 @@ pub const PANIC_DAMAGE_TICKS: i32 = 40;
 /// Vanilla's base `FOLLOW_RANGE` attribute value, in blocks — the range at
 /// which a mob acquires an attack target.
 ///
-/// `Mob.createMobAttributes()` sets it to `16.0` for **every** mob
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/Mob.java:166-168`,
-/// `LivingEntity.createLivingAttributes().add(Attributes.FOLLOW_RANGE, 16.0)`).
+/// `Mob::createMobAttributes` sets it to `16.0` for **every** mob
+/// (`LivingEntity.createLivingAttributes().add(Attributes.FOLLOW_RANGE, 16.0)`).
 /// Note the *registry* default on the attribute itself is `32.0`
-/// (`ai/attributes/Attributes.java:51`) and is the wrong number to copy: no
+/// (`Attributes::FOLLOW_RANGE`) and is the wrong number to copy: no
 /// living entity ever uses it, because the mob supplier always overrides it.
 /// Species that raise it do so in their own `createAttributes` — zombie and
-/// its subclasses `35.0` (`monster/zombie/Zombie.java:133`), blaze `48.0`
-/// (`monster/Blaze.java:55`), enderman `64.0` (`monster/EnderMan.java:118`) —
+/// its subclasses `35.0` (`Zombie::createAttributes`), blaze `48.0`
+/// (`Blaze::createAttributes`), enderman `64.0` (`EnderMan::createAttributes`) —
 /// which is why this is only the *default* and a host is expected to feed the
 /// real per-species value with [`set_follow_range`](NavigatingMob::set_follow_range).
 pub const DEFAULT_FOLLOW_RANGE: f64 = 16.0;
 
 /// The floor vanilla puts under the target-acquisition range, in blocks:
-/// `TargetingConditions.test` compares against
-/// `Math.max(this.range * modifier, 2.0)`
-/// (`ai/targeting/TargetingConditions.java:83`, whose `2.0` is that file's
-/// `MIN_VISIBILITY_DISTANCE_FOR_INVISIBLE_TARGET`). It exists so an invisible
+/// `TargetingConditions::test` compares against
+/// `Math.max(this.range * modifier, 2.0)`, whose `2.0` is that class's
+/// `MIN_VISIBILITY_DISTANCE_FOR_INVISIBLE_TARGET`. It exists so an invisible
 /// target is still attackable at point-blank range; the floor applies
 /// unconditionally, so a mob whose `FOLLOW_RANGE` is *below* `2.0` still
 /// acquires at `2.0`.
@@ -151,8 +144,8 @@ pub struct NavigatingMob<'w> {
     last_look: Option<Vec3>,
     jumping: bool,
     attacks: Vec<Vec3>,
-    /// Projectile launches a ranged goal asked for, awaiting a host drain
-    /// (issue #227). The mirror of [`attacks`](Self::attacks): this crate can
+    /// Projectile launches a ranged goal asked for, awaiting a host drain.
+    /// The mirror of [`attacks`](Self::attacks): this crate can
     /// resolve neither into a real world effect, so both accumulate here for
     /// whoever owns the entity ids.
     launches: Vec<ProjectileLaunch>,
@@ -198,13 +191,12 @@ pub struct NavigatingMob<'w> {
     /// partner's identity or of creating a new entity, only of the *event*
     /// happening).
     bred: bool,
-    /// Vanilla `AgeableMob.age`
-    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/AgeableMob.java:37`):
+    /// Vanilla `AgeableMob::age`:
     /// negative while a baby (ticks up toward `0`), positive as the
     /// post-breeding parent cooldown (ticks down toward `0`), `0` for an
     /// adult with no cooldown. [`MobController::is_baby`] is `age < 0`.
     age: i32,
-    /// Vanilla `AgeableMob.AGE_LOCKED`: freezes [`age`](Self::age) from
+    /// Vanilla `AgeableMob::AGE_LOCKED`: freezes [`age`](Self::age) from
     /// advancing at all while `true`. The golden-dandelion interaction that
     /// sets this in vanilla is not implemented here, but the freeze itself is
     /// honoured so a host that does implement it gets correct behaviour.
@@ -215,32 +207,32 @@ pub struct NavigatingMob<'w> {
     /// [`MobController::parent_position`], the same host-computes-the-filter
     /// shape as [`partner_candidate`](Self::partner_candidate).
     parent_candidate: Option<Vec3>,
-    /// Vanilla `Creeper.swellDir` (`DATA_SWELL_DIR`, defaults to `-1` —
-    /// `Creeper.java:100`, `entityData.define(DATA_SWELL_DIR, -1)`). Set by
+    /// Vanilla `Creeper::swellDir` (`DATA_SWELL_DIR`, defaults to `-1` —
+    /// `Creeper::defineSynchedData`, `entityData.define(DATA_SWELL_DIR, -1)`). Set by
     /// [`SwellGoal`](super::goals::SwellGoal) through
     /// [`MobController::set_swell_dir`], or forced to `1` every
     /// [`advance`](Self::advance) while [`ignited`](Self::ignited) is `true`
-    /// (`Creeper.java:129-131`). `> 0` climbs [`swell`](Self::swell) toward
+    /// (`Creeper::tick`). `> 0` climbs [`swell`](Self::swell) toward
     /// [`MAX_SWELL`]; `<= 0` lets it fall back toward zero.
     swell_dir: i32,
-    /// Vanilla `Creeper.swell`: the live fuse counter, integrated once per
+    /// Vanilla `Creeper::swell`: the live fuse counter, integrated once per
     /// tick in [`advance`](Self::advance) unconditionally — exactly like
     /// [`age`](Self::age)/[`love_ticks`](Self::love_ticks) — regardless of
     /// whether any goal ran this tick. This is the entity's own `tick()`
-    /// (`Creeper.java:126-151`), distinct from `SwellGoal`, which only ever
+    /// (`Creeper::tick`), distinct from `SwellGoal`, which only ever
     /// decides the *direction*.
     swell: i32,
-    /// Vanilla `Creeper.isIgnited()` / `DATA_IS_IGNITED`. `true` forces
+    /// Vanilla `Creeper::isIgnited` / `DATA_IS_IGNITED`. `true` forces
     /// [`swell_dir`](Self::swell_dir) to `1` every tick regardless of what
     /// [`SwellGoal`](super::goals::SwellGoal) would otherwise choose
-    /// (`Creeper.java:129-131`). Set by [`ignite`](Self::ignite); no
+    /// (`Creeper::tick`). Set by [`ignite`](Self::ignite); no
     /// production caller wires a flint-and-steel/fire-charge interaction to
-    /// it yet (`Creeper.java:210-228`'s `mobInteract`) — that is a separate,
+    /// it yet (`Creeper::mobInteract`) — that is a separate,
     /// disclosed gap, not modelled here.
     ignited: bool,
     /// Drained by [`take_detonated`](Self::take_detonated): `true` for
     /// exactly one call, the tick [`swell`](Self::swell) first reaches
-    /// [`MAX_SWELL`] (`Creeper.java:144-146`, `explodeCreeper()`). Mirrors
+    /// [`MAX_SWELL`] (`Creeper::tick`, `explodeCreeper()`). Mirrors
     /// [`bred`](Self::bred)'s "flag the host drains" shape — this seam has no
     /// notion of triggering an explosion, only of the *event* happening.
     detonated: bool,
@@ -253,7 +245,7 @@ pub struct NavigatingMob<'w> {
     /// [`partner_candidate`](Self::partner_candidate): `lodestone-entity` has
     /// no concept of a *player*, let alone a population of them, so vanilla's
     /// `level.getNearestPlayer(lookAtContext, mob, x, eyeY, z)`
-    /// (`ai/goal/LookAtPlayerGoal.java:62`) is the host's search to run. The
+    /// (`LookAtPlayerGoal::canUse`) is the host's search to run. The
     /// goal still applies its own `lookDistance` cut-off on top, so a host
     /// that over-reports is merely wasteful, not wrong.
     nearest_player: Option<Vec3>,
@@ -263,8 +255,7 @@ pub struct NavigatingMob<'w> {
     /// [`TemptGoal`](super::goals::TemptGoal).
     ///
     /// The host owns **both** halves of vanilla's test: the range (an
-    /// attribute, `Attributes.TEMPT_RANGE`, default `10.0` —
-    /// `ai/attributes/Attributes.java:107`) and the item predicate, which in
+    /// attribute, `Attributes::TEMPT_RANGE`, default `10.0`) and the item predicate, which in
     /// 26.2 is an item *tag* per species (`pig_food` is 3 items,
     /// `chicken_food` is 6) rather than the single item older versions used.
     /// Resolving those tags is a data-generation job this crate deliberately
@@ -277,13 +268,14 @@ pub struct NavigatingMob<'w> {
     ///
     /// Vanilla's avoid set is per-species and per-goal-instance (a creeper
     /// registers two separate `AvoidEntityGoal`s, `Ocelot` and `Cat`, both at
-    /// `6.0F` — `monster/Creeper.java:67-68`), so the *class filter* is the
+    /// `6.0F` — `Creeper::registerGoals`), so the *class filter* is the
     /// host's, exactly like the temptation predicate above.
     avoid_threat: Option<Vec3>,
-    /// Host injection point: vanilla `Mob.noActionTime`
-    /// (`Mob.java:717`, `this.noActionTime++`, reset to `0` at `:707`/`:711`).
-    /// Read by [`RandomStrollGoal`](super::goals::RandomStrollGoal)'s idle
-    /// suppression, which yields at `>= 100` (`ai/goal/RandomStrollGoal.java:43`).
+    /// Host injection point: vanilla `Mob::noActionTime`
+    /// (`Mob::serverAiStep`'s `this.noActionTime++`, reset to `0` in
+    /// `Mob::checkDespawn`). Read by
+    /// [`RandomStrollGoal`](super::goals::RandomStrollGoal)'s idle
+    /// suppression, which yields at `>= 100` (`RandomStrollGoal::canUse`).
     ///
     /// Injected rather than counted here because the *reset* conditions are
     /// the host's: vanilla zeroes it when a player is within the immune
@@ -302,7 +294,7 @@ pub struct NavigatingMob<'w> {
     last_hurt_by: Option<Vec3>,
     /// Ticks remaining on [`last_hurt_by`](Self::last_hurt_by). Vanilla stores
     /// the *timestamp* and compares against `tickCount`
-    /// (`LivingEntity.java:493`); a countdown is the same thing with no need
+    /// (`LivingEntity::baseTick`); a countdown is the same thing with no need
     /// for a shared clock, and it decays in `advance` alongside
     /// [`love_ticks`](Self::love_ticks) for the same reason — vanilla ages it
     /// every tick regardless of whether any goal ran.
@@ -311,7 +303,7 @@ pub struct NavigatingMob<'w> {
     /// ([`PANIC_DAMAGE_TICKS`]). Set by [`note_hurt`](Self::note_hurt) for
     /// **every** hit, including one with no identifiable attacker, because
     /// vanilla's `shouldPanic` reads the damage *source* rather than the
-    /// attacking mob (`ai/goal/PanicGoal.java:61-63`). Read by
+    /// attacking mob (`PanicGoal::shouldPanic`). Read by
     /// [`MobController::is_panicking`].
     damage_ticks: i32,
     /// This mob's `FOLLOW_RANGE` attribute value, in blocks — the range cut
@@ -326,8 +318,7 @@ pub struct NavigatingMob<'w> {
     /// `LookAtPlayerGoal` (its original consumer) lives in the goal — so a
     /// `find_nearest_target` that returned it raw would make every hostile mob
     /// in the world target the player from any distance. Vanilla's cut is
-    /// `TargetGoal.getFollowDistance()`, i.e. exactly this attribute
-    /// (`ai/goal/target/TargetGoal.java:74-76`).
+    /// `TargetGoal::getFollowDistance`, i.e. exactly this attribute.
     follow_range: f64,
     /// Host injection point: the entity this mob holds a live persistent grudge
     /// against, or `None`. Drives [`MobController::angry_target`] — see that
@@ -413,7 +404,7 @@ pub struct NavigatingMob<'w> {
     /// [`attacks`](Self::attacks)/[`launches`](Self::launches) shape, for the
     /// same reason: health lives on the host, so this crate can only record
     /// the *intent*. The bee's sting self-destruct is the production consumer
-    /// (`animal/Bee.java:374-379`).
+    /// (`Bee::customServerAiStep`).
     self_damage: Vec<f32>,
 }
 
@@ -532,11 +523,12 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Replaces the mob's collision body — the host's hook for
-    /// vanilla `LivingEntity.refreshDimensions()`, called when
+    /// vanilla `LivingEntity::refreshDimensions`, called when
     /// [`set_age`](Self::set_age) crosses the baby/adult boundary and the
-    /// host recomputes its species' dimensions for the new state (vanilla
-    /// `AgeableMob.setAge` → `this.refreshDimensions()`,
-    /// `.cache/mc/26.2/src/net/minecraft/world/entity/AgeableMob.java:189`).
+    /// host recomputes its species' dimensions for the new state. Vanilla's
+    /// `AgeableMob::setAge` flips `DATA_BABY_ID` rather than calling
+    /// `refreshDimensions()` itself; the call happens indirectly, through
+    /// `AgeableMob::onSyncedDataUpdated` reacting to that flag changing.
     ///
     /// Updates the hitbox only. [`PathNavigator`](super::super::pathfinding::navigation::PathNavigator)
     /// keeps the width it was constructed with — rebuilding it here would
@@ -585,7 +577,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Drains the projectile launches recorded since the last call — the
-    /// [`take_new_attacks`](Self::take_new_attacks) shape, for issue #227's
+    /// [`take_new_attacks`](Self::take_new_attacks) shape, for
     /// ranged goals.
     ///
     /// **A host that never calls this turns every ranged goal into an island.**
@@ -604,10 +596,10 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Drains the blocks eaten since the last call — the
-    /// [`take_new_attacks`](Self::take_new_attacks) shape, for issue #456's
+    /// [`take_new_attacks`](Self::take_new_attacks) shape, for
     /// block-perception goals.
     ///
-    /// **A host that never calls this makes grazing an island** (issue #238):
+    /// **A host that never calls this makes grazing an island**:
     /// `EatBlockGoal` runs, the eat animation plays out, the sheep's head goes
     /// down, and no grass ever turns to dirt. The host owes two things per
     /// drained entry — the world mutation described on
@@ -797,8 +789,8 @@ impl<'w> NavigatingMob<'w> {
         self.swell
     }
 
-    /// Marks the mob ignited (vanilla `Creeper.ignite()`,
-    /// `Creeper.java:264-266`), forcing its swell direction to climb every
+    /// Marks the mob ignited (vanilla `Creeper::ignite`),
+    /// forcing its swell direction to climb every
     /// tick regardless of what [`SwellGoal`](super::goals::SwellGoal) would
     /// otherwise pick from proximity alone. See the `ignited` field's own doc
     /// comment for the interaction (flint-and-steel) that would call this in
@@ -832,7 +824,7 @@ impl<'w> NavigatingMob<'w> {
     /// visited budget (`floor(follow_range * 16)`). Leaving it at
     /// [`DEFAULT_FOLLOW_RANGE`] is correct for most species and *wrong for the
     /// zombie family*, whose `35.0` is more than twice it
-    /// (`monster/zombie/Zombie.java:133`).
+    /// (`Zombie::createAttributes`).
     pub fn set_follow_range(&mut self, blocks: f64) -> &mut Self {
         self.follow_range = blocks;
         self
@@ -990,11 +982,11 @@ impl<'w> NavigatingMob<'w> {
     /// `attacker`.
     ///
     /// This is one call for vanilla's two separate records, because one hit
-    /// writes both: `LivingEntity.hurt` sets `lastDamageSource`
-    /// (`LivingEntity.java:1268-1269`) — which is what
+    /// writes both: `LivingEntity::hurtServer` sets `lastDamageSource`
+    /// directly — which is what
     /// [`PanicGoal`](super::goals::PanicGoal) reads — *and*, when the source
-    /// has a living attacker, `setLastHurtByMob`
-    /// (`LivingEntity.java:1358`), which is what
+    /// has a living attacker, calls `LivingEntity::resolveMobResponsibleForDamage`,
+    /// which calls `setLastHurtByMob`, which is what
     /// [`HurtByTargetGoal`](super::goals::HurtByTargetGoal) reads. They then
     /// expire on **different** timers ([`PANIC_DAMAGE_TICKS`] vs
     /// [`LAST_HURT_BY_TICKS`]), so both are tracked separately here.
@@ -1050,10 +1042,10 @@ impl<'w> NavigatingMob<'w> {
                 self.age -= 1;
             }
         }
-        // Vanilla `LivingEntity.tick` ages both damage records every tick with
+        // Vanilla ages both damage records every tick with
         // no goal involvement: `lastHurtByMob` is dropped past 100 ticks
-        // (`LivingEntity.java:493`) and `getLastDamageSource` self-clears past
-        // 40 (`LivingEntity.java:1420-1421`). Same "integrate unconditionally"
+        // (`LivingEntity::baseTick`) and `getLastDamageSource` self-clears past
+        // 40 (`LivingEntity::getLastDamageSource`). Same "integrate unconditionally"
         // placement as the age/love/swell counters above, and for the same
         // reason — a goal that stops running must not freeze the timer that
         // ends it.
@@ -1066,7 +1058,7 @@ impl<'w> NavigatingMob<'w> {
         if self.damage_ticks > 0 {
             self.damage_ticks -= 1;
         }
-        // Vanilla `Creeper.tick()` (`Creeper.java:126-151`): runs every tick
+        // Vanilla `Creeper::tick`: runs every tick
         // regardless of whether `SwellGoal` (or anything else) is currently
         // running, exactly like the age/love integration above. `ignited`
         // overrides whatever direction the goal picked.
@@ -1137,9 +1129,9 @@ impl MobController for NavigatingMob<'_> {
     ///
     /// **Scope cut, disclosed:** vanilla is
     /// `isInWater() && getFluidHeight(WATER) > getFluidJumpThreshold()`
-    /// (`ai/goal/FloatGoal.java:18`), where `isInWater` is a bounding-box
-    /// sweep (`Entity.java:1605-1607`, `wasTouchingWater`) and the threshold is
-    /// `getEyeHeight() < 0.4 ? 0.0 : 0.4` (`Entity.java:3692-3694`). This
+    /// (`FloatGoal::canUse`), where `isInWater` is a bounding-box
+    /// sweep (`Entity::isInWater`, `wasTouchingWater`) and the threshold is
+    /// `getEyeHeight() < 0.4 ? 0.0 : 0.4` (`Entity::getFluidJumpThreshold`). This
     /// composition has no fluid-height model at all — `PathWorld` exposes
     /// per-cell classification and collision tops, not fluid levels — so the
     /// feet cell being water stands in for both halves. The practical
@@ -1150,7 +1142,7 @@ impl MobController for NavigatingMob<'_> {
     fn in_water(&self) -> bool {
         let (x, y, z) = self.feet_block();
         // `is_water` rather than matching `base_path_type` directly: the seam
-        // gives hosts an override for exactly this question (`world.rs:146-150`)
+        // gives hosts an override for exactly this question (`PathWorld::is_water`)
         // and its own default is the `PathType::Water` match anyway, so going
         // through it honours a host that classifies waterlogged blocks.
         self.world.is_water(x, y, z)
@@ -1158,7 +1150,7 @@ impl MobController for NavigatingMob<'_> {
 
     /// Whether the mob's feet cell holds lava. Same world-derived,
     /// injection-free shape as [`in_water`](MobController::in_water); vanilla's
-    /// `isInLava` (`Entity.java:1748-1750`) has no height threshold, so this
+    /// `Entity::isInLava` has no height threshold, so this
     /// side is faithful rather than cut.
     fn in_lava(&self) -> bool {
         let (x, y, z) = self.feet_block();
@@ -1271,17 +1263,15 @@ impl MobController for NavigatingMob<'_> {
         self.attack_target = target;
     }
 
-    /// Vanilla `NearestAttackableTargetGoal.findTarget` for the `Player.class`
-    /// registration: `level.getNearestPlayer(targetConditions, mob, …)`
-    /// (`ai/goal/target/NearestAttackableTargetGoal.java:74`), whose range cut
-    /// is `TargetingConditions.test`
-    /// (`ai/targeting/TargetingConditions.java:81-88`) — a full 3-D
+    /// Vanilla `NearestAttackableTargetGoal::findTarget` for the `Player.class`
+    /// registration: `level.getNearestPlayer(targetConditions, mob, …)`,
+    /// whose range cut
+    /// is `TargetingConditions::test` — a full 3-D
     /// `distanceToSqr` against `max(range * visibility, 2.0)`, with `range` =
-    /// `TargetGoal.getFollowDistance()` = the `FOLLOW_RANGE` attribute
-    /// (`ai/goal/target/TargetGoal.java:74-76`).
+    /// `TargetGoal::getFollowDistance` = the `FOLLOW_RANGE` attribute.
     ///
     /// **This used to return `self.attack_target` — the field the goal calling
-    /// it exists to write** (issue #455). `NearestAttackableTargetGoal::can_use`
+    /// it exists to write.** `NearestAttackableTargetGoal::can_use`
     /// asks this and `start` writes the answer back, so the only production
     /// writers of `attack_target` were that goal and `HurtByTargetGoal`: the
     /// loop could not bootstrap and no mob ever attacked unprovoked. The data
@@ -1303,14 +1293,14 @@ impl MobController for NavigatingMob<'_> {
     ///   `no_passive_species_can_acquire_a_target` gates it.
     /// * **Line of sight — not implemented, and deliberately not faked.**
     ///   Vanilla's is `mob.getSensing().hasLineOfSight(target)`
-    ///   (`TargetingConditions.java:90`), a `level.clip` ray from eye to eye.
-    ///   That is a **ray** query, not the local block lookup issue #456 adds:
-    ///   it walks arbitrarily many blocks over up to `follow_range`, so neither
-    ///   a neighbourhood snapshot nor a single `PathWorld` cue can answer it.
-    ///   Omitting it errs *permissive* — a mob acquires through a wall it should
-    ///   not see through — which is the honest direction here, since the
-    ///   alternative (a `false` default) would leave the very island this
-    ///   method was fixed to close. Tracked separately; see the issue thread.
+    ///   (`TargetingConditions::test`), a `level.clip` ray from eye to eye.
+    ///   That is a **ray** query, not the local block lookup the block-cue
+    ///   seam adds: it walks arbitrarily many blocks over up to
+    ///   `follow_range`, so neither a neighbourhood snapshot nor a single
+    ///   `PathWorld` cue can answer it. Omitting it errs *permissive* — a mob
+    ///   acquires through a wall it should not see through — which is the
+    ///   honest direction here, since the alternative (a `false` default)
+    ///   would leave the very island this method was fixed to close.
     fn find_nearest_target(&mut self) -> Option<Vec3> {
         let player = self.nearest_player?;
         // `modifier` is `target.getVisibilityPercent(targeter)`, which is 1.0
@@ -1370,7 +1360,7 @@ impl MobController for NavigatingMob<'_> {
     }
 
     /// Answered from the [`PathWorld`] this mob already borrows for
-    /// pathfinding — the whole reason issue #456's seam needs no world handle on
+    /// pathfinding — the whole reason the block-cue seam needs no world handle on
     /// [`MobController`] and no per-tick block feed.
     fn block_cues_at_feet(&self) -> BlockCues {
         let p = self.block_position();
@@ -1391,8 +1381,8 @@ impl MobController for NavigatingMob<'_> {
     }
 
     fn teleport_to(&mut self, target: Vec3) {
-        // Vanilla `Entity.teleportTo` rewrites position immediately and zeroes
-        // velocity (`Entity.java:1513-1515`); the path is abandoned because a
+        // Vanilla `Entity::teleportTo` rewrites position immediately;
+        // the path is abandoned because a
         // stale route to the old location is worse than none. Position is
         // written directly — the same "one-shot instant" treatment
         // `apply_knockback` gives an impulse — and the next `advance()` (path
@@ -1442,10 +1432,9 @@ impl MobController for NavigatingMob<'_> {
 
     fn breed(&mut self) {
         // Vanilla `Animal::finalizeSpawnChildFromBreeding` calls
-        // `resetLove()` on both parents immediately
-        // (`.cache/mc/26.2/src/net/minecraft/world/entity/animal/Animal.java:227-228`).
-        // The age cooldown (`setAge(PARENT_AGE_AFTER_BREEDING)`, same file
-        // line 225-226) and the child itself are the host's job — this seam
+        // `resetLove()` on both parents immediately.
+        // The age cooldown (`setAge(PARENT_AGE_AFTER_BREEDING)`, the same
+        // method) and the child itself are the host's job — this seam
         // has no notion of the partner's identity or of creating an entity —
         // so the host applies `set_age(PARENT_AGE_AFTER_BREEDING)` to both
         // parents itself after observing `take_bred()`.
@@ -1469,7 +1458,7 @@ impl MobController for NavigatingMob<'_> {
         self.swell_dir = dir;
     }
 
-    /// Yes — this is the one production type that can drive a brain (issue #209).
+    /// Yes — this is the one production type that can drive a brain.
     ///
     /// Every other implementor of [`MobController`] in this workspace is a test
     /// double, and each one inherits the `None` default. That is what forces a
@@ -1480,11 +1469,11 @@ impl MobController for NavigatingMob<'_> {
     }
 }
 
-/// The Brain-system half of the composition (issue #209).
+/// The Brain-system half of the composition.
 ///
 /// # Why this is the same struct and not a `BrainNavigatingMob`
 ///
-/// Issue #209 asks for "a `BrainMob` implementation over the real
+/// The brief this closes asks for "a `BrainMob` implementation over the real
 /// navigator/world (mirroring `NavigatingMob`)". Mirroring it would have meant a
 /// second struct duplicating the pathfinder, the follower, the fluid
 /// classification and the whole host-injection field set — and, worse, a second
@@ -2004,7 +1993,7 @@ mod tests {
         );
     }
 
-    // ---- Breeding / aging (issues #234, #237) -----------------------------
+    // ---- Breeding / aging ---------------------------------------------------
     //
     // These are driver-level: a real `GoalSelector` runs a real `BreedGoal`
     // against two real `NavigatingMob`s. The only "host" logic here is the
@@ -2031,7 +2020,7 @@ mod tests {
     fn breed_goal_drives_two_navigating_mobs_to_a_predicted_tick() {
         // Two in-love animals, 2 blocks apart (distSqr=4 < BreedGoal's 9.0
         // range) on open ground, each running the production `BreedGoal`.
-        // Vanilla's own timer (`BreedGoal.java:57`, `loveTime >=
+        // Vanilla's own timer (`BreedGoal::tick`, `loveTime >=
         // adjustedTickDelay(60)`) is exactly `BreedGoal::BREED_TIME` (60) in
         // `goals.rs` — so this predicts the *tick*, not just "eventually":
         // both `can_use` on tick 1 (already in range, no travel needed), so
@@ -2074,8 +2063,8 @@ mod tests {
             }
         }
         // Vanilla resets love on both parents immediately
-        // (`Animal.java:227-228`) — proven through the seam, not asserted by
-        // calling `breed()` again.
+        // (`Animal::finalizeSpawnChildFromBreeding`) — proven through the seam,
+        // not asserted by calling `breed()` again.
         assert!(!a.is_in_love(), "breeding must end this mob's love mode");
         assert!(!b.is_in_love(), "breeding must end this mob's love mode");
     }
@@ -2131,7 +2120,7 @@ mod tests {
         assert!(!mob.is_in_love());
 
         // A baby's age counts up from BABY_START_AGE to 0 at one tick per
-        // tick (`AgeableMob.java:207-212`), so growing up takes exactly
+        // tick (`AgeableMob::aiStep`), so growing up takes exactly
         // `-BABY_START_AGE` advances — predicted, not just "eventually 0".
         mob.set_age(-10);
         assert!(mob.is_baby());
@@ -2229,7 +2218,7 @@ mod tests {
         );
     }
 
-    // ---- Knockback (issue #12) --------------------------------------------
+    // ---- Knockback ----------------------------------------------------------
 
     #[test]
     fn apply_knockback_displaces_position_and_reports_the_impulse_as_velocity() {
@@ -2278,12 +2267,11 @@ mod tests {
         );
     }
 
-    // ---- Issue #458, primitives 2-5: gaze / teleport / self-damage / ownership
+    // ---- Gaze / teleport / self-damage / ownership primitives ---------------
 
     #[test]
     fn is_in_view_cone_implements_vanillas_exact_tolerance() {
-        // Hand-computed from `LivingEntity.isLookingAtMe`
-        // (`LivingEntity.java:1756-1775`): accept iff
+        // Hand-computed from `LivingEntity::isLookingAtMe`: accept iff
         // `look · dir > 1.0 - coneSize / (adjustForDistance ? dist : 1.0)`.
         // Every case below is a closed-form dot and distance, so the expected
         // verdict is exact rather than a re-derivation of the code.
@@ -2317,7 +2305,7 @@ mod tests {
     }
 
     /// The boundary at the enderman's own parameters (`coneSize` `0.025`,
-    /// `adjustForDistance` `true` — `EnderMan.java:210`), re-derived from the
+    /// `adjustForDistance` `true` — `EnderMan::isBeingStaredBy`), re-derived from the
     /// formula itself rather than guessed: at 10 blocks the threshold is
     /// `1.0 - 0.025 / 10.0 = 0.9975` exactly, so a dot of `0.998` is just
     /// inside the cone and `0.997` is just outside it.
@@ -2330,7 +2318,7 @@ mod tests {
     fn is_in_view_cone_boundary_at_the_endermans_own_cone_size() {
         let eye = Vec3::new(0.0, 0.0, 0.0);
         let look = Vec3::new(0.0, 0.0, 1.0);
-        const CONE_SIZE: f64 = 0.025; // EnderMan.java:210
+        const CONE_SIZE: f64 = 0.025; // EnderMan::isBeingStaredBy
         const DIST: f64 = 10.0;
         // threshold = 1.0 - CONE_SIZE / DIST = 0.9975
 
@@ -2562,7 +2550,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Perception seam (issue #441, plan unit A1).
+    // Perception seam.
     //
     // Every goal below had a **constant-false `can_use` in production** before
     // this seam existed, because `impl MobController for NavigatingMob` left
@@ -2624,7 +2612,7 @@ mod tests {
             (aabb.min_y.floor() as i32) <= -1
         }
         // Deliberately *not* overridden: the seam's own default is the
-        // `PathType::Water` match (`pathfinding/world.rs:146-150`), which is
+        // `PathType::Water` match (`PathWorld::is_water`), which is
         // what `in_water` calls through, so leaving it default keeps this
         // fixture from being able to fake the answer.
     }
@@ -2638,8 +2626,9 @@ mod tests {
     /// `[float, look_at_player, hurt_by_target, tempt, avoid_entity, panic]`.
     ///
     /// `LookAtPlayerGoal` is built with `probability == 1.0` so its
-    /// `next_f32() >= probability` pre-roll (`goals.rs:130`, vanilla's `0.02F`
-    /// default at `ai/goal/LookAtPlayerGoal.java:26`) cannot make this test
+    /// `next_f32() >= probability` pre-roll (this crate's
+    /// `LookAtPlayerGoal::can_use`, vanilla's `0.02F`
+    /// default at `LookAtPlayerGoal::DEFAULT_PROBABILITY`) cannot make this test
     /// flaky in either direction — a probability roll is not what is under
     /// test here, the perception read behind it is.
     fn six_verdicts(mob: &mut NavigatingMob<'_>) -> [bool; 6] {
@@ -2659,28 +2648,29 @@ mod tests {
     #[test]
     fn all_six_perception_starved_goals_fire_on_a_real_navigating_mob() {
         // Water at the mob's feet cell drives `FloatGoal` with no injection at
-        // all — vanilla `ai/goal/FloatGoal.java:18`.
+        // all — vanilla `FloatGoal::canUse`.
         let world = FluidArena::with((0, 0, 0), PathType::Water);
         let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
 
         // Each of the remaining five, at a distance vanilla would accept:
         //  * player 3 blocks away, inside `LookAtPlayerGoal`'s 8.0
-        //    (`monster/Creeper.java:70`, `LookAtPlayerGoal(Player, 8.0F)`);
+        //    (`Creeper::registerGoals`'s `LookAtPlayerGoal(Player, 8.0F)`);
         //  * attacker 2 blocks away — `HurtByTargetGoal` has no range gate of
-        //    its own (`ai/goal/target/HurtByTargetGoal.java:33-40` tests only
+        //    its own (`HurtByTargetGoal::canUse` tests only
         //    the timestamp and non-null attacker);
-        //  * tempter 4 blocks away, inside `Attributes.TEMPT_RANGE`'s default
-        //    `10.0` (`ai/attributes/Attributes.java:107`);
+        //  * tempter 4 blocks away, inside `Attributes::TEMPT_RANGE`'s default
+        //    `10.0`;
         //  * threat 3 blocks away, inside the `6.0F` every vanilla
-        //    `AvoidEntityGoal` registration uses (`monster/Creeper.java:67-68`,
-        //    `monster/skeleton/AbstractSkeleton.java:79`,
-        //    `monster/spider/Spider.java:59`).
+        //    `AvoidEntityGoal` registration uses (`Creeper::registerGoals`,
+        //    `AbstractSkeleton::registerGoals`,
+        //    `Spider::registerGoals`).
         mob.set_nearest_player(Some(Vec3::new(3.5, 0.0, 0.5)))
             .set_temptation(Some(Vec3::new(4.5, 0.0, 0.5)))
             .set_avoid_threat(Some(Vec3::new(-2.5, 0.0, 0.5)))
             // One hit records both the retaliation target and the panic
-            // window, exactly as vanilla's single `hurt` call writes both
-            // records (`LivingEntity.java:1268-1269` and `:1358`).
+            // window, exactly as vanilla's single `hurtServer` call writes both
+            // records (`LivingEntity::hurtServer` and
+            // `LivingEntity::resolveMobResponsibleForDamage`).
             .note_hurt(Some(Vec3::new(2.5, 0.0, 0.5)));
 
         let got = six_verdicts(&mut mob);
@@ -2714,7 +2704,7 @@ mod tests {
 
     #[test]
     fn lava_alone_floats_a_mob_and_water_alone_does_too() {
-        // `FloatGoal`'s condition is a disjunction (`FloatGoal.java:18`), so a
+        // `FloatGoal`'s condition is a disjunction (`FloatGoal::canUse`), so a
         // test that only ever sets water cannot tell `in_water() || in_lava()`
         // from `in_water()` — one arm could be dead. Drive each arm alone.
         let lava = FluidArena::with((0, 0, 0), PathType::Lava);
@@ -2743,12 +2733,12 @@ mod tests {
         let world = FluidArena::with((0, 0, 0), PathType::Water);
         let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
         let mut ai = GoalSelector::new();
-        // Vanilla registers `FloatGoal` at priority 1 on a creeper
-        // (`monster/Creeper.java:66`) and 9 on a bee (`animal/bee/Bee.java:191`);
-        // the absolute number is private to one mob's set, so 0 is fine here.
+        // Vanilla registers `FloatGoal` at priority 1 on a creeper and 9 on a
+        // bee (both in their own `registerGoals`); the absolute number is
+        // private to one mob's set, so 0 is fine here.
         ai.add(0, Box::new(FloatGoal));
 
-        // `tick` is 0.8-probability per tick (`FloatGoal.java:28`), so a
+        // `tick` is 0.8-probability per tick (`FloatGoal::tick`), so a
         // handful of ticks makes a miss vanishingly unlikely; 20 is generous.
         let mut jumped = false;
         for _ in 0..20 {
@@ -2789,8 +2779,8 @@ mod tests {
 
         let mut ai = GoalSelector::new();
         // Vanilla puts `HurtByTargetGoal` at target-priority 1 everywhere it
-        // appears (`monster/zombie/Zombie.java:124`,
-        // `monster/zombie/ZombifiedPiglin.java:75`).
+        // appears (`Zombie::addBehaviourGoals`,
+        // `ZombifiedPiglin::addBehaviourGoals`).
         ai.add(0, Box::new(HurtByTargetGoal::new()));
 
         mob.tick(&mut ai);
@@ -2801,7 +2791,7 @@ mod tests {
         );
 
         // Vanilla forgets the attacker past `LAST_HURT_BY_TICKS`
-        // (`LivingEntity.java:493`). Prove the decay is real and lands on the
+        // (`LivingEntity::baseTick`). Prove the decay is real and lands on the
         // predicted tick rather than merely "eventually": one `note_hurt`
         // followed by exactly that many `advance`s must clear it, and one
         // fewer must not.
@@ -2826,7 +2816,8 @@ mod tests {
     #[test]
     fn panic_expires_on_its_own_shorter_window_while_retaliation_persists() {
         // The two records decay independently and on *different* timers
-        // (40 vs 100 — `LivingEntity.java:1420-1421` and `:493`). A single
+        // (40 vs 100 — `LivingEntity::getLastDamageSource` and
+        // `LivingEntity::baseTick`). A single
         // shared timer would satisfy "panics then stops panicking", so the
         // discriminating assertion is that at tick 40 the mob has stopped
         // panicking *and is still hunting*.
@@ -2854,8 +2845,8 @@ mod tests {
     #[test]
     fn attacker_less_damage_panics_without_giving_the_mob_anything_to_chase() {
         // Vanilla's panic reads the damage *source*, not the attacking mob
-        // (`ai/goal/PanicGoal.java:61-63` vs
-        // `ai/goal/target/HurtByTargetGoal.java:35`), so fall damage panics a
+        // (`PanicGoal::shouldPanic` vs
+        // `HurtByTargetGoal::canUse`), so fall damage panics a
         // cow and gives it no retaliation target. `note_hurt(None)` is that
         // case; without this test the two records could be one field.
         let world = FluidArena::dry();
@@ -2879,12 +2870,12 @@ mod tests {
         // fire for this — the goal simply behaved wrong.
         //
         // Vanilla: `checkNoActionTime && mob.getNoActionTime() >= 100`
-        // (`ai/goal/RandomStrollGoal.java:43`). Predict the boundary rather
+        // (`RandomStrollGoal::canUse`). Predict the boundary rather
         // than asserting a direction: 99 must still allow, 100 must suppress.
         let world = FluidArena::dry();
 
         // `interval(1)` makes the goal's own `next_i32(interval) != 0` roll
-        // (`goals.rs`, vanilla `RandomStrollGoal.java:47`) deterministic, so
+        // (`goals.rs`, vanilla `RandomStrollGoal::canUse`) deterministic, so
         // the only variable left is the idle suppression.
         let mut allowed = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
         allowed.set_no_action_time(99);
@@ -2897,11 +2888,11 @@ mod tests {
         suppressed.set_no_action_time(100);
         assert!(
             !RandomStrollGoal::new(1.0).with_interval(1).can_use(&mut suppressed),
-            "no_action_time 100 must suppress stroll (RandomStrollGoal.java:43)"
+            "no_action_time 100 must suppress stroll (RandomStrollGoal::canUse)"
         );
     }
 
-    // ── per-mob RNG seed gates (issue #463) ──────────────────────────
+    // ── per-mob RNG seed gates ──────────────────────────────────────
 
     /// Divergence gate: two mobs at the same position with different seeds
     /// produce different stroll targets on the very first call — the mobs do
