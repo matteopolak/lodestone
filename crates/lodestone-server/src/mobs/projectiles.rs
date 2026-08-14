@@ -8,10 +8,12 @@
 
 use lodestone_entity::DamageFlags;
 use lodestone_entity::projectile::{Projectile, TrackedProjectile};
-use lodestone_model::{ResourceKey, Vec3};
+use lodestone_model::{BlockPos, ResourceKey, Vec3};
 use uuid::Uuid;
 
-use super::{ChunkWorld, MobSim, ProjectileMeta};
+use crate::redstone_target::HitAxis;
+
+use super::{ChunkWorld, MobSim, ProjectileMeta, ProjectileBlockHit};
 
 /// One projectile impact [`MobSim::resolve_projectile_impacts`] found, staged
 /// before resolution because the search borrows the mob list immutably and
@@ -82,6 +84,58 @@ fn first_solid_along(world: &ChunkWorld, from: Vec3, delta: Vec3) -> Option<f64>
         }
     }
     None
+}
+
+/// Where along the segment the ray enters `cell`'s own unit box, which face
+/// axis it entered through, and the hit point's fractional position within
+/// the cell — vanilla `BlockHitResult.getDirection().getAxis()` plus
+/// `Mth.frac(hitLocation.{x,y,z})`, both needed by
+/// `crate::redstone_target::redstone_strength` (issue #322) and neither of
+/// which [`first_solid_along`]'s coarse quarter-block sampling can answer:
+/// that function only asks "is there a solid cell by this point", not "which
+/// face did the ray cross to get there".
+///
+/// The exact per-axis slab test, replicated from
+/// [`lodestone_entity::projectile::clip_aabb`] rather than widening that
+/// function's signature to report an axis no other caller needs — this is
+/// the only call site that cares which face won, because it is the only one
+/// asking a block (rather than an entity hitbox) which side was struck.
+#[must_use]
+fn block_entry(from: Vec3, delta: Vec3, cell: BlockPos) -> Option<(f64, HitAxis, Vec3)> {
+    let min = Vec3::new(f64::from(cell.x), f64::from(cell.y), f64::from(cell.z));
+    let max = Vec3::new(min.x + 1.0, min.y + 1.0, min.z + 1.0);
+    let mut enter = 0.0_f64;
+    let mut enter_axis = HitAxis::Y;
+    let mut exit = 1.0_f64;
+    for (axis, o, d, lo, hi) in [
+        (HitAxis::X, from.x, delta.x, min.x, max.x),
+        (HitAxis::Y, from.y, delta.y, min.y, max.y),
+        (HitAxis::Z, from.z, delta.z, min.z, max.z),
+    ] {
+        if d.abs() < 1e-12 {
+            if o < lo || o > hi {
+                return None;
+            }
+            continue;
+        }
+        let t1 = (lo - o) / d;
+        let t2 = (hi - o) / d;
+        let (near, far) = if t1 <= t2 { (t1, t2) } else { (t2, t1) };
+        if near > enter {
+            enter = near;
+            enter_axis = axis;
+        }
+        exit = exit.min(far);
+        if enter > exit {
+            return None;
+        }
+    }
+    if enter > 1.0 || exit < 0.0 {
+        return None;
+    }
+    let hit_point = from + delta.scale(enter);
+    let frac = Vec3::new(hit_point.x - min.x, hit_point.y - min.y, hit_point.z - min.z);
+    Some((enter, enter_axis, frac))
 }
 
 impl<'w> MobSim<'w> {
@@ -188,6 +242,11 @@ impl<'w> MobSim<'w> {
         // the search reads both the projectile set and the mobs.
         let mut hits: Vec<ProjectileHit> = Vec::new();
         let mut spent: Vec<i32> = Vec::new();
+        // Issue #322: every block impact this pass finds, precise face/frac
+        // included — `resolve_projectile_impacts`'s own "before `spent` is
+        // consumed" ordering doesn't change here, only what is recorded
+        // alongside a block hit rather than only its projectile's removal.
+        let mut block_hits: Vec<ProjectileBlockHit> = Vec::new();
         for tracked in self.projectiles.iter() {
             let from = tracked.projectile.position;
             let delta = tracked.projectile.velocity;
@@ -232,12 +291,36 @@ impl<'w> MobSim<'w> {
                         origin: from,
                     });
                 }
-                (_, Some(_)) => spent.push(tracked.id),
+                (_, Some(block_t)) => {
+                    // Issue #322: record the exact face/frac this block was
+                    // struck at — `first_solid_along`'s own `block_t` is only
+                    // precise to a quarter block, so the cell it lands in is
+                    // trusted (that quarter-block cannot straddle two cells)
+                    // but the *face* is recomputed exactly via `block_entry`
+                    // against that one cell, the same slab test
+                    // `clip_aabb` runs for an entity hitbox.
+                    let coarse_hit = from + delta.scale(block_t);
+                    let cell = super::lightning::floor_block_pos(coarse_hit);
+                    if let Some((_, axis, frac)) = block_entry(from, delta, cell) {
+                        let path = meta.map(|m| m.entity_type.path().to_owned()).unwrap_or_default();
+                        block_hits.push(ProjectileBlockHit {
+                            pos: cell,
+                            axis,
+                            frac,
+                            // `AbstractArrow`'s family — `Trident` extends it
+                            // too (`ThrownTrident extends AbstractArrow`),
+                            // unlike every other throwable this crate spawns.
+                            is_arrow: matches!(path.as_str(), "arrow" | "spectral_arrow" | "trident"),
+                        });
+                    }
+                    spent.push(tracked.id);
+                }
                 // Nothing on this segment, or a mob further along it than the
                 // block that stopped the projectile first.
                 _ => {}
             }
         }
+        self.pending_projectile_block_hits.extend(block_hits);
 
         let removed = hits.len() + spent.len();
         for hit in hits {
@@ -314,4 +397,123 @@ impl<'w> MobSim<'w> {
         self.projectiles.get(id).map(|p| p.position)
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::redstone_target;
+
+    /// A cell whose unit box is `x: 5..6, y: 1..2, z: 5..6` — every test
+    /// below fires at this one cell from a different direction/offset.
+    fn target_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-4, 24);
+        world.set_solid(5, 1, 5, true);
+        world
+    }
+
+    /// **The discriminating gate for issue #322.** Two arrows struck at
+    /// different points on the *same* face of the *same* block must produce
+    /// different [`ProjectileBlockHit::frac`]s and therefore different
+    /// [`redstone_target::redstone_strength`] readings — not merely "a hit
+    /// registered", which a gate checking only `hits.len() == 1` cannot tell
+    /// apart from a wrongly-centred one. Both levels are derived from the
+    /// formula, not guessed: a dead-centre top-face hit is `15`
+    /// (`a_dead_centre_hit_reads_fifteen_on_every_axis`'s own value), and a
+    /// quarter-offset one is exactly `8`
+    /// (`a_quarter_offset_hit_derives_to_eight_not_a_round_number`'s own
+    /// value) — cross-validated against `redstone_target`'s pre-existing
+    /// pinned test rather than invented here.
+    #[test]
+    fn two_distinct_impact_points_on_a_target_yield_two_distinct_power_levels() {
+        let world = target_world();
+
+        // Dead centre of the top face (`frac_x = frac_z = 0.5`), fired
+        // straight down from above.
+        let mut centred = MobSim::new(&world);
+        centred.spawn_projectile(
+            "minecraft:arrow".parse().expect("valid key"),
+            Projectile::arrow(Vec3::new(5.5, 3.0, 5.5), Vec3::new(0.0, -2.0, 0.0)),
+        );
+        let removed = centred.resolve_projectile_impacts();
+        assert_eq!(removed, 1, "the arrow must be consumed by the block hit");
+        let centred_hits = centred.take_projectile_block_hits();
+        assert_eq!(centred_hits.len(), 1, "exactly one block hit must be recorded");
+        let centred_hit = centred_hits[0];
+        assert_eq!(centred_hit.pos, BlockPos::new(5, 1, 5));
+        assert_eq!(centred_hit.axis, redstone_target::HitAxis::Y, "struck the top face");
+        let centred_strength = redstone_target::redstone_strength(
+            centred_hit.axis,
+            centred_hit.frac.x,
+            centred_hit.frac.y,
+            centred_hit.frac.z,
+        );
+        assert_eq!(centred_strength, 15, "a dead-centre hit must read the formula's own maximum");
+
+        // A quarter of the way off-centre along X (`frac_x = 0.75`), same
+        // face, same cell, same axis — only the lateral offset differs.
+        let mut offset = MobSim::new(&world);
+        offset.spawn_projectile(
+            "minecraft:arrow".parse().expect("valid key"),
+            Projectile::arrow(Vec3::new(5.75, 3.0, 5.5), Vec3::new(0.0, -2.0, 0.0)),
+        );
+        let removed = offset.resolve_projectile_impacts();
+        assert_eq!(removed, 1);
+        let offset_hits = offset.take_projectile_block_hits();
+        assert_eq!(offset_hits.len(), 1);
+        let offset_hit = offset_hits[0];
+        assert_eq!(offset_hit.pos, BlockPos::new(5, 1, 5));
+        assert_eq!(offset_hit.axis, redstone_target::HitAxis::Y);
+        let offset_strength = redstone_target::redstone_strength(
+            offset_hit.axis,
+            offset_hit.frac.x,
+            offset_hit.frac.y,
+            offset_hit.frac.z,
+        );
+        assert_eq!(offset_strength, 8, "a quarter-offset hit must derive to 8, not 15 and not 0");
+
+        assert_ne!(
+            centred_strength, offset_strength,
+            "two distinct impact points on the same block must yield two distinct power levels"
+        );
+    }
+
+    /// The struck face's own axis is excluded from the fraction that decides
+    /// the reading — a hit on the **west/east** face (`X` axis) must read the
+    /// `Y`/`Z` fractions, not `X`'s. Distinguishes a producer that always
+    /// reports the *travel* axis from one that reports the *face* axis; here
+    /// they coincide (the arrow travels along X and strikes the X face), so
+    /// this is the companion `Z`-face gate: an arrow travelling along `+Z`
+    /// must report [`redstone_target::HitAxis::Z`], not `Y` or `X`.
+    #[test]
+    fn a_side_face_hit_reports_its_own_axis() {
+        let world = target_world();
+        let mut sim = MobSim::new(&world);
+        sim.spawn_projectile(
+            "minecraft:arrow".parse().expect("valid key"),
+            Projectile::arrow(Vec3::new(5.5, 1.5, 4.0), Vec3::new(0.0, 0.0, 2.0)),
+        );
+        sim.resolve_projectile_impacts();
+        let hits = sim.take_projectile_block_hits();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].axis, redstone_target::HitAxis::Z, "travelled and struck along Z");
+        assert!(hits[0].is_arrow, "minecraft:arrow is AbstractArrow's own family");
+    }
+
+    /// A thrown (non-arrow) projectile that stops against a block is still
+    /// recorded, but [`ProjectileBlockHit::is_arrow`] must be `false` — the
+    /// bit `redstone_target::activation_duration` uses to pick 8 vs 20 ticks.
+    #[test]
+    fn a_non_arrow_block_hit_is_not_flagged_as_an_arrow() {
+        let world = target_world();
+        let mut sim = MobSim::new(&world);
+        sim.spawn_projectile(
+            "minecraft:snowball".parse().expect("valid key"),
+            Projectile::throwable(Vec3::new(5.5, 1.5, 4.0), Vec3::new(0.0, 0.0, 2.0)),
+        );
+        sim.resolve_projectile_impacts();
+        let hits = sim.take_projectile_block_hits();
+        assert_eq!(hits.len(), 1);
+        assert!(!hits[0].is_arrow, "a snowball is not AbstractArrow's family");
+    }
 }
