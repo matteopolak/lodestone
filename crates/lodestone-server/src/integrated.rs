@@ -280,7 +280,7 @@ pub fn demo_mob_count(requested: usize) -> usize {
 /// [`IntegratedServer::open_persistent_with_mobs`]) so a portal lit in an
 /// earlier session is not rebuilt as a duplicate.
 ///
-/// # Issue #579: `world_dir`/`ticking`
+/// # `world_dir`/`ticking`
 ///
 /// `world_dir` is `Some` only for a world with somewhere on disk to persist
 /// to ([`IntegratedServer::open_persistent_with_mobs`]) — passing it makes a
@@ -289,7 +289,7 @@ pub fn demo_mob_count(requested: usize) -> usize {
 /// `<world_dir>/dimensions/minecraft/<dimension>/region`, exactly the
 /// sibling directory of the overworld's own `RegionChunkSource` that
 /// `open_persistent_with_mobs` already builds. `None` (every in-memory
-/// constructor) keeps a sibling exactly as before this issue: a bare
+/// constructor) keeps a sibling exactly as it was before this: a bare
 /// `ChunkStore` over the generator, gone the moment the `DimensionalSource`
 /// holding it is dropped.
 ///
@@ -300,8 +300,8 @@ pub fn demo_mob_count(requested: usize) -> usize {
 /// a sibling, which some of that constructor's own callers rely on for
 /// deterministic block-entity state. When `Some`, the first build of each
 /// sibling also starts that dimension's own background tick loop — see
-/// [`crate::dimension_tick`] for why a *second* loop is what closes issue
-/// #579's "a dimension nobody is standing in never ticks" gap, and why doing
+/// [`crate::dimension_tick`] for why a *second* loop is what closes the
+/// "a dimension nobody is standing in never ticks" gap, and why doing
 /// it here (inside the once-per-dimension memoized factory
 /// [`crate::dimension::DimensionalSource::sibling`] already guards) is what
 /// keeps the loop from being started twice.
@@ -349,7 +349,7 @@ where
     DimensionalSource::with_siblings(overworld, Dimension::Overworld, factory, portals)
 }
 
-/// The native half of issue #579's sibling wiring: starts `dimension`'s own
+/// The native half of the sibling-ticking wiring: starts `dimension`'s own
 /// tick loop when `ticking` carries a context. A free function rather than an
 /// inline `#[cfg(not(target_arch = "wasm32"))]` block inside `with_nether`'s
 /// closure so neither target leaves `ticking` unused in the other's build —
@@ -973,10 +973,10 @@ impl IntegratedServer {
             // `with_nether` took one as a parameter.
             crate::portal::PortalIndex::new(),
             // No world directory, so a sibling stays in-memory-only — same as
-            // every dimension was before issue #579.
+            // every dimension was before this wiring existed.
             None,
             // This constructor's own contract is "spawns no tick loop" (see
-            // the `block_entities`/`mobs` comments just below) — issue #579's
+            // the `block_entities`/`mobs` comments just below) — this
             // sibling loop must not silently start one the first time a test
             // built on this constructor lights a portal.
             None,
@@ -1142,7 +1142,7 @@ impl IntegratedServer {
             None,
             // Same reasoning: no `poi/` set either, so a fresh index.
             crate::portal::PortalIndex::new(),
-            // Issue #579: no world directory, so a Nether/End sibling stays
+            // No world directory, so a Nether/End sibling stays
             // in-memory-only, same as everything else this constructor opens.
             None,
         )
@@ -1200,7 +1200,7 @@ impl IntegratedServer {
         // empty one is exactly as cheap to construct as `None` would be to
         // unwrap.
         portals: crate::portal::PortalIndex,
-        // Issue #579. `Some` only from `open_persistent_with_mobs`: the same
+        // `Some` only from `open_persistent_with_mobs`: the same
         // directory its own `RegionChunkSource` is already rooted at, handed
         // down so a Nether/End sibling built later (on the first portal trip)
         // gets its **own** `RegionChunkSource` under that directory's
@@ -1375,7 +1375,7 @@ impl IntegratedServer {
         // the same "clone before the move" shape every other `*_for_handle`
         // binding in this constructor already follows.
         let handle_portals = portals.clone();
-        // Issue #579: moved up from further down this function (where
+        // Moved up from further down this function (where
         // `conn_world_state`/`world_state_for_handle` are still cloned out at
         // their original spot) — `WorldStateHandle::new` is `Self::default()`,
         // so relocating it here changes no behaviour, and `with_nether` needs
@@ -1547,7 +1547,7 @@ impl IntegratedServer {
         // — a rule set on the connection has to be the rule the loop reads, and the
         // clock the loop advances has to be the clock the connection broadcasts.
         //
-        // Issue #579: `world_state` itself is now built earlier, before
+        // `world_state` itself is now built earlier, before
         // `with_nether` — see that call's own comment for why a Nether/End
         // sibling's tick loop needs the *same* handle this connection
         // publishes anchors into.
@@ -1932,7 +1932,7 @@ impl IntegratedServer {
             // first connection is served — not a fresh one that gets restored
             // into only after some later point.
             portals,
-            // Issue #579: this world's own directory, so a Nether/End sibling
+            // This world's own directory, so a Nether/End sibling
             // built the first time a player steps through a portal gets a
             // `RegionChunkSource` of its own under
             // `dimensions/minecraft/<dimension>/`, a sibling of the overworld
@@ -2266,7 +2266,7 @@ impl IntegratedServer {
         // behalf of every accepted connection, none of whom chose the setting.
         // `chunk_store::integrated_capacity_for_view_radius` carries the argument
         // and the price list for the other side of the fork.
-        // Issue #579: `shutdown`/`lan_world_state` moved up from further down
+        // `shutdown`/`lan_world_state` moved up from further down
         // this function (where `tick_world_state`/`handle_world_state` are
         // still cloned out at their original spot) — both constructors are
         // side-effect-free, so relocating them changes no behaviour, and
@@ -2379,7 +2379,7 @@ impl IntegratedServer {
         // each accepted socket its own `WorldAdminState` local — two LAN players
         // each had a private, divergent view, which is what #327 reported.
         //
-        // Issue #579: `lan_world_state` itself is now built earlier, before
+        // `lan_world_state` itself is now built earlier, before
         // `with_nether` — see that call's own comment.
         let tick_world_state = lan_world_state.clone();
         let handle_world_state = lan_world_state.clone();
