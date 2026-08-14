@@ -209,6 +209,22 @@ makes it safe — and leaves the index clean, so **do not run `git reset` after 
   verdict that depends on the count**; an unconditional `echo "(clean)"` is its own vacuous control.
 - Staging **hunks** (`git add -p`, or a filtered `git diff` applied with `git apply --cached`) is how you
   commit into a file someone else is editing — but it stops *you* shipping their lines, not them yours.
+- **And hunk staging followed by a pathspec commit is self-defeating, because the pathspec form ignores the
+  index — the very property that makes it safe everywhere else.** Measured: an agent carefully isolated its
+  command-block hunks from a concurrent TNT feature in four shared files, then committed with
+  `git commit -m … -- <paths>`, which took the *working tree* and swept the TNT hunks in regardless. The
+  other agent's next commit then reverted the command-block hunks by reconstructing those files from a stale
+  base, and a third commit had to restore them. **If you have staged hunks, commit them through the index**
+  — the `GIT_INDEX_FILE` + `commit-tree` route below — and never with a pathspec. Choose one mechanism per
+  commit: pathspec *or* index, never both.
+- **The reciprocal, from the other agent in that same collision: a private-index reconstruction must be built
+  from *current* `HEAD`, not from a snapshot you captured earlier.** Between capturing its base and committing,
+  the other feature landed; the reconstruction was therefore a tree in which that feature did not exist, and
+  committing it **reverted a landed feature** in four files. The compare-and-swap in `update-ref` did not help,
+  because it protects the *parent*, not the tree. **The tell is `git show --stat` reporting pure deletions for
+  files you were adding to** — check that before believing a reconstruction, and recover with a follow-up
+  commit, never an amend. Both agents here disclosed the incident from their own side, which is the only
+  reason it was untangled rather than silently kept.
 
 **`GIT_INDEX_FILE` + `commit-tree` is the escape hatch, and its only use is partial-file granularity.**
 Two traps: **`git write-tree` against a missing index writes the EMPTY tree, silently, and that commit
