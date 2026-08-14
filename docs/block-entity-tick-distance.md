@@ -5,8 +5,13 @@
 The measured resolution of the block-entity lead in
 [issue #503](https://github.com/matteopolak/lodestone/issues/503): whether `BlockEntityRegistry`'s
 unfiltered 20 Hz scan is a **second, CPU-side, distance-dependent** cause of the game degrading as you
-walk from spawn. The cold-column mechanism is real and costs **610 column regenerations per tick** past a
-threshold, but it is flat in distance — what crosses the threshold is registry size, not travel.
+walk from spawn. The cold-column mechanism was real and cost **610 column regenerations per tick** past a
+threshold, but it was flat in distance — what crossed the threshold was registry size, not travel.
+
+**Fixed in issue #504.** The sections below through "How to change it" are kept as the diagnosis record
+(the numbers are still real measurements of the pre-fix code, at the shas noted); see
+["Landed (issue #504)"](#landed-issue-504) near the end for what actually shipped, why that shape rather
+than the cheaper one, and what changed in the counters.
 
 The verdict is split, and the split is the useful part:
 
@@ -153,10 +158,7 @@ because `drive_tick_loop` passed `BlockEntityHandle::default()` — an empty reg
 it, and the claim is now false in that file too. This is the *world* species of vacuity in miniature: an
 exemplary comment, correct about the input it was pointed at, wrong about production.
 
-## How to change it
-
-**Not fixed here — this is a diagnosis.** The fix is a gameplay-semantics decision, not a performance
-tweak, so it is filed rather than landed.
+## How to change it (pre-fix framing, kept for context)
 
 The vanilla-correct shape: **vanilla ticks block entities per *loaded chunk*** (`LevelChunk`'s own
 tick list, driven by the chunk map), not from one global registry. Bounding the scan by the loaded/view
@@ -164,25 +166,60 @@ set fixes both halves at once — the CPU cliff *and* the unbounded scan — and
 registry, so it does not hit `restore_block_entities`' "a furnace must keep smelting" objection. It does
 change behaviour: a furnace far from every player would stop advancing, which is what vanilla does.
 
-Cheaper alternatives, if the semantics are contentious:
+**This is the shape that shipped** — see the next section.
 
-- **Make the probe non-generating.** A `block_state_if_resident`-shaped read that answers `None` on a miss
-  and leaves the hopper's `enabled` at its last value. Removes the cold generation without changing which
-  entities tick. Smallest patch; costs a stale redstone lock for a hopper nobody is near.
-- **Cache the redstone lock.** `HopperBlock.checkPoweredState` already writes `ENABLED` on every neighbour
-  change, so the tick loop does not need to *read* the world at 20 Hz — it needs to be *told* on change.
-  This is the closest to what vanilla actually does with the flag.
+## Landed (issue #504)
 
-Gotchas for whoever takes it:
+The vanilla-correct fix above is what landed, not the cheaper "non-generating probe" alternative that
+would have left a hopper's `enabled` flag stuck at its last observed value — that is not a state vanilla
+ever puts a hopper in, so it was rejected even though it would have been a smaller patch.
 
-- **The five arms in `chunk_store.rs` include two that characterise the defect** (the over-capacity arm
-  and the over-capacity band of the curve). A fix turns them red **by design**. Rewrite them against the
-  new bound; do not relax them.
-- **Do not "fix" this by giving the registry an unload path on `ChunkStore` eviction.**
-  `restore_block_entities` documents why: eviction is a *cache* event, the column comes back a moment
-  later, and dropping live state on it rewinds the world every time a chunk leaves the cache.
-- **A count is the instrument, not a duration.** This machine reproduces a worldgen wall-clock figure to
-  only 10.8%; every count above was byte-identical across three runs.
+**The mechanism:** [`ChunkSource`][chunk-rs] gained `is_column_resident(cx, cz) -> bool`, defaulted to
+`true` (every source with no bounded cache has nothing to refuse) and overridden only by
+[`ChunkStore`][cs] — a plain `HashMap` lookup, no generation, and deliberately **no** `last_used` bump (a
+residency *check* must not buy a column another lap of LRU life it did not earn, which is exactly the
+"wrong prediction, kept" trap the diagnosis above found once already).
+`BlockEntityRegistry::tick_all_with_hopper_lock` in [`block_entities.rs`][be] gained an `is_loaded`
+predicate alongside the existing `enabled` one; a position `is_loaded` rejects is skipped **before**
+`enabled` — and therefore `world.block_state` — is ever called, for every block-entity kind, not only
+hoppers. `tick.rs`'s one production call site passes `world.is_column_resident(pos.x >> 4, pos.z >> 4)`.
+
+**The counters, before and after**, all as counts rather than timings per this doc's own rule:
+
+| scenario | pre-#504 | post-#504 |
+|---|---|---|
+| one hopper 1,600 blocks out, 52 ticks | 1 remote generation | **0** |
+| same hopper, zero-capacity store | 52 remote generations | **0** |
+| same hopper at 64 to 16,000,000 blocks out | 1 at every band | **0** at every band |
+| registry over the store's ceiling (600 hoppers) | 610.4 cold columns/tick, 31,739 remote generations | **0**, at both the under- and over-capacity bands |
+| a hopper *inside* the loaded tick area | (already worked) | still transfers — the positive control that `is_loaded` is a real gate, not `false` in disguise |
+
+**The five `chunk_store.rs` arms were rewritten against the new bound, not relaxed**, exactly as this
+doc's own "gotchas" section below said they would need to be. Old name → new name, for anyone who followed
+a citation here before the fix:
+
+- `a_walked_away_hopper_costs_one_column_generation_not_one_per_tick` → `a_walked_away_hopper_never_reaches_the_store`
+- `without_retention_a_remote_hopper_is_a_cold_column_every_single_tick` → `a_hopper_inside_the_tick_area_still_transfers_once_the_chunk_is_loaded` (repurposed as the positive control the new gate needs, rather than the old zero-capacity negative control, which no longer distinguishes anything once residency gates the read regardless of capacity)
+- `the_registry_scan_costs_the_same_at_every_distance_from_the_tick_area` → same name, prediction changed from 1 to 0 at every band
+- `an_over_capacity_store_makes_the_polled_column_cold_every_pass` → `a_tight_capacity_no_longer_makes_the_remote_hopper_cold`
+- `the_miss_rate_crosses_from_zero_to_one_when_the_registry_outgrows_the_store` → `the_registry_outgrowing_the_store_no_longer_moves_the_miss_rate`
+
+Plus two new gates: `is_column_resident_reports_true_only_for_a_cached_column_and_never_generates` in
+`chunk_store.rs` (the primitive alone, no tick loop), and
+`tick_all_with_hopper_lock_never_calls_enabled_for_an_unloaded_hopper` in `block_entities.rs` — the direct
+counter-based control proving `enabled` (production's `world.block_state` probe) is never invoked for a
+rejected position, independent of any store or generator.
+
+**What did not change:** `restore_block_entities`' "a furnace must keep smelting" invariant — the registry
+still has no eviction, only the *tick* is now gated by residency, not the entity's presence in the map. A
+furnace that scrolls back into view resumes with whatever state it was last in, exactly as before.
+
+Gotchas that carried through from the diagnosis and are still true:
+
+- **Do not give the registry an unload path on `ChunkStore` eviction.** Still exactly the trap
+  `restore_block_entities` names — eviction is a cache event, not a "this world state is gone" event.
+- **A count is the instrument, not a duration.** Every figure in the table above is a counter read from
+  `PersistenceStats`/`CountingSource`-style instrumentation, never a wall clock.
 
 ## Configuration
 
@@ -207,3 +244,5 @@ Gotchas for whoever takes it:
 [481]: https://github.com/matteopolak/lodestone/issues/481
 [477]: https://github.com/matteopolak/lodestone/issues/477
 [cs]: ../crates/lodestone-server/src/chunk_store.rs
+[chunk-rs]: ../crates/lodestone-server/src/chunk.rs
+[be]: ../crates/lodestone-server/src/block_entities.rs
