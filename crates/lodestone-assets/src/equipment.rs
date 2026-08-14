@@ -19,7 +19,8 @@
 //!
 //! Vanilla bakes the humanoid armour mesh set **twice**, at two different
 //! `CubeDeformation`s, and hands the *inner* one to the legs slot only
-//! (`LayerDefinitions.java:162-163`, `HumanoidModel.java:129-144`):
+//! (`LayerDefinitions`'s `OUTER_ARMOR_DEFORMATION`/`INNER_ARMOR_DEFORMATION`,
+//! consumed by `HumanoidModel.createArmorMeshSet`):
 //!
 //! ```text
 //! OUTER_ARMOR_DEFORMATION = new CubeDeformation(1.0F)   // head, chest, feet
@@ -33,15 +34,15 @@
 //! There are two further per-cube adjustments on top of the slot inflation, both
 //! read from source rather than eyeballed:
 //!
-//! * **legs are `-0.1` texels thinner than their slot** — `createBaseArmorMesh`
+//! * **legs are `-0.1` texels thinner than their slot** — `HumanoidModel.createBaseArmorMesh`
 //!   re-adds `right_leg`/`left_leg` with `g.extend(-0.1F)`
-//!   (`HumanoidModel.java:146-160`, the constant is `LEGGINGS_OVERLAY_SCALE`).
+//!   (the constant is `HumanoidModel.LEGGINGS_OVERLAY_SCALE`).
 //!   So the *effective* inflations are: head `1.0`, chest `1.0`, legs-slot legs
 //!   `0.4`, legs-slot body `0.5`, feet `0.9`.
 //! * **the helmet keeps `head`'s `hat` child at `+0.5`** — the head slot uses
 //!   `retainPartsAndChildren({"head"})`, which retains a part *with its
-//!   children*, and `hat` is authored at `g.extend(0.5F)`
-//!   (`HumanoidModel.java:93`). Measured against 26.2's own sheets, the texels
+//!   children*, and `hat` is authored at `g.extend(0.5F)` in
+//!   `HumanoidModel.createMesh`. Measured against 26.2's own sheets, the texels
 //!   that cube unwraps onto (`x ∈ [32, 64)`, `y ∈ [0, 16)` of a 64×32 armour
 //!   sheet) are **fully transparent in all nine humanoid armour textures**, so
 //!   it contributes zero pixels — it is kept because vanilla keeps it, not
@@ -51,10 +52,9 @@
 //!
 //! An armour item does not name its texture. It carries
 //! `minecraft:equippable`, whose `assetId` is a key into the
-//! `equipment_asset` registry (`Equippable.java`, `ArmorMaterials.java`), and
+//! `equipment_asset` registry (`Equippable`, `ArmorMaterials`), and
 //! the client reads `assets/<ns>/equipment/<asset>.json` for a per-**layer-type**
-//! list of texture layers. `EquipmentClientInfo.Layer.getTextureLocation`
-//! (`EquipmentClientInfo.java:105-107`) then builds
+//! list of texture layers. `EquipmentClientInfo.getTextureLocation` then builds
 //! `textures/entity/equipment/<layer_type>/<texture>.png`.
 //!
 //! **`assetId` is not on the wire and not in the item-prototype census** (see
@@ -86,27 +86,27 @@ use crate::entity::{Deformation, EntityModelDef, PartDef};
 use crate::entity_models::humanoid_root;
 
 /// `LayerDefinitions.OUTER_ARMOR_DEFORMATION` — `new CubeDeformation(1.0F)`,
-/// used for the head, chest and feet slots (`LayerDefinitions.java:162`).
+/// used for the head, chest and feet slots.
 pub const OUTER_ARMOUR_INFLATION: f32 = 1.0;
 
-/// `LayerDefinitions.INNER_ARMOUR_DEFORMATION` — `new CubeDeformation(0.5F)`,
-/// used for the **legs slot only** (`LayerDefinitions.java:163`).
+/// `LayerDefinitions.INNER_ARMOR_DEFORMATION` — `new CubeDeformation(0.5F)`,
+/// used for the **legs slot only**.
 ///
 /// This is the value a single-inflation port loses, and losing it is what makes
 /// leggings clip through the chestplate.
 pub const INNER_ARMOUR_INFLATION: f32 = 0.5;
 
 /// `HumanoidModel.LEGGINGS_OVERLAY_SCALE` — the extra `-0.1F` every armour
-/// mesh's *legs* carry relative to their slot inflation
-/// (`HumanoidModel.java:33`, applied at `HumanoidModel.java:146-160`).
+/// mesh's *legs* carry relative to their slot inflation, applied in
+/// `HumanoidModel.createBaseArmorMesh`.
 pub const LEGGINGS_OVERLAY_INFLATION: f32 = -0.1;
 
 /// `HumanoidModel.HAT_OVERLAY_SCALE` — the helmet's `hat` child sits `+0.5`
-/// texels outside the head cube (`HumanoidModel.java:32`, `:93`).
+/// texels outside the head cube, in `HumanoidModel.createMesh`.
 pub const HAT_OVERLAY_INFLATION: f32 = 0.5;
 
 /// Armour sheets are **64×32**, not the 64×64 a modern player skin uses
-/// (`LayerDefinitions.java:174` — `LayerDefinition.create(mesh, 64, 32)`).
+/// (`LayerDefinitions.createRoots` — `LayerDefinition.create(mesh, 64, 32)`).
 ///
 /// Getting this wrong halves every V coordinate and paints the legs with the
 /// head's pixels, which looks like a texture-resolution bug rather than a mesh
@@ -123,7 +123,7 @@ pub const ARMOUR_SHEET_HEIGHT: u32 = 32;
 pub const UNDYED_LEATHER_RGB: [u8; 3] = [0xA0, 0x65, 0x40];
 
 /// The four humanoid armour slots, i.e. exactly
-/// `EquipmentSlot.Type.HUMANOID_ARMOR` (`EquipmentSlot.java:15-19`).
+/// `EquipmentSlot.Type.HUMANOID_ARMOR`.
 ///
 /// **`Body` and `Saddle` are not here and must not be folded in.** `BODY` is
 /// `ANIMAL_ARMOR` (wolf armour, horse armour) and `SADDLE` is its own type;
@@ -144,7 +144,7 @@ pub enum ArmourSlot {
 
 impl ArmourSlot {
     /// All four slots, in `HumanoidArmorLayer.submit`'s own draw order
-    /// (chest, legs, feet, head — `HumanoidArmorLayer.java:48-52`).
+    /// (chest, legs, feet, head).
     ///
     /// The order matters for coplanar layers: it is the order vanilla submits
     /// in, so a renderer that walks this array draws in vanilla's sequence.
@@ -158,7 +158,7 @@ impl ArmourSlot {
     /// The slot's `CubeDeformation`: [`INNER_ARMOUR_INFLATION`] for
     /// [`Legs`](Self::Legs), [`OUTER_ARMOUR_INFLATION`] for the rest.
     ///
-    /// `HumanoidModel.createArmorMeshSet` (`HumanoidModel.java:129-144`) picks
+    /// `HumanoidModel.createArmorMeshSet` picks
     /// `innerDeformation` for the legs mesh and `outerDeformation` for head,
     /// chest and feet.
     #[must_use]
@@ -173,7 +173,7 @@ impl ArmourSlot {
     ///
     /// `HumanoidArmorLayer.usesInnerModel` is `slot == LEGS`, and the layer type
     /// follows it: leggings read `humanoid_leggings`, everything else `humanoid`
-    /// (`HumanoidArmorLayer.java:66-74`). Baby rigs use a third type,
+    /// (`HumanoidArmorLayer.usesInnerModel`). Baby rigs use a third type,
     /// `humanoid_baby`, which this crate does not model — see
     /// [`ArmourLayerType`].
     #[must_use]
@@ -191,7 +191,7 @@ impl ArmourSlot {
     /// that part's already-animated matrix, so the names have to collide.
     ///
     /// Transcribed from `HumanoidModel.ADULT_ARMOR_PARTS_PER_SLOT`
-    /// (`HumanoidModel.java:44-54`), with `head`'s `hat` child added because the
+    /// (`HumanoidModel.ADULT_ARMOR_PARTS_PER_SLOT`'s own initializer), with `head`'s `hat` child added because the
     /// head slot uses `retainPartsAndChildren` rather than `retainExactParts`.
     #[must_use]
     pub const fn part_names(self) -> &'static [&'static str] {
@@ -206,7 +206,7 @@ impl ArmourSlot {
 
 /// An `EquipmentClientInfo.LayerType` — the sub-directory an equipment texture
 /// lives in and the key its layer list is stored under
-/// (`EquipmentClientInfo.java:109-128`).
+/// (`EquipmentClientInfo.LayerType`).
 ///
 /// Only the two humanoid-armour types are modelled. `humanoid_baby` (a
 /// completely different mesh, `createBabyArmorMesh`), `wings` (elytra),
@@ -386,8 +386,8 @@ pub const ARMOUR_ASSETS: &[ArmourAsset] = &[
 /// # Why every humanoid-slot item is *not* here
 ///
 /// 26.2 has 38 items in a `HUMANOID_ARMOR` slot; only these 29 have an
-/// `assetId`, and `HumanoidArmorLayer.shouldRender` requires one
-/// (`HumanoidArmorLayer.java:38-45`). The other nine are drawn by other layers
+/// `assetId`, and `HumanoidArmorLayer.shouldRender` requires one.
+/// The other nine are drawn by other layers
 /// entirely: `carved_pumpkin` and the seven skulls by `CustomHeadLayer` (a block
 /// or skull model on the head, not an armour mesh), and `elytra` by `WingsLayer`
 /// with its own `ElytraModel`. Listing them here would draw a *helmet-shaped*
@@ -439,7 +439,7 @@ pub fn armour_asset(id: &str) -> Option<&'static ArmourAsset> {
 /// The slot returned is the item's *own* declared slot. A caller should compare
 /// it against the slot the server actually put the item in and draw only on a
 /// match — that is `HumanoidArmorLayer.shouldRender`'s `equippable.slot() ==
-/// slot` test (`HumanoidArmorLayer.java:42-44`), and it is what stops a helmet
+/// slot` test, and it is what stops a helmet
 /// dropped into a boots slot by a plugin from rendering as a boot.
 #[must_use]
 pub fn armour_item(item_path: &str) -> Option<(ArmourSlot, &'static ArmourAsset)> {
@@ -450,8 +450,7 @@ pub fn armour_item(item_path: &str) -> Option<(ArmourSlot, &'static ArmourAsset)
 }
 
 /// The in-jar texture path for one layer of one layer type — vanilla's
-/// `EquipmentClientInfo.Layer.getTextureLocation`
-/// (`EquipmentClientInfo.java:105-107`), with the namespace fixed to
+/// `EquipmentClientInfo.getTextureLocation`, with the namespace fixed to
 /// `minecraft` because every layer in [`ARMOUR_ASSETS`] is unnamespaced.
 #[must_use]
 pub fn armour_texture_path(layer: &ArmourLayer, layer_type: ArmourLayerType) -> String {
@@ -463,8 +462,7 @@ pub fn armour_texture_path(layer: &ArmourLayer, layer_type: ArmourLayerType) -> 
 }
 
 /// Clear the cubes of every child not named in `keep`, recursing into the ones
-/// that were cleared — vanilla's `PartDefinition.retainPartsAndChildren`
-/// (`PartDefinition.java:55-62`).
+/// that were cleared — vanilla's `PartDefinition.retainPartsAndChildren`.
 ///
 /// A retained part keeps **its whole subtree**, which is the difference from
 /// [`retain_exact`] and the reason a helmet carries `hat`.
@@ -479,7 +477,7 @@ fn retain_with_children(part: &mut PartDef, keep: &[&str]) {
 
 /// Clear the cubes of every child not named in `keep`, and clear the entire
 /// subtree of the ones that *are* — vanilla's
-/// `PartDefinition.retainExactParts` (`PartDefinition.java:64-73`), where a
+/// `PartDefinition.retainExactParts`, where a
 /// retained part is `clearRecursively()`d so only its own cubes survive.
 fn retain_exact(part: &mut PartDef, keep: &[&str]) {
     for (name, child) in &mut part.children {
@@ -493,7 +491,7 @@ fn retain_exact(part: &mut PartDef, keep: &[&str]) {
 }
 
 /// Empty every descendant's cube list, keeping this part's own — vanilla's
-/// `PartDefinition.clearRecursively` (`PartDefinition.java:37-43`).
+/// `PartDefinition.clearRecursively`.
 fn clear_subtree(part: &mut PartDef) {
     for (_, child) in &mut part.children {
         child.cubes.clear();
@@ -501,7 +499,7 @@ fn clear_subtree(part: &mut PartDef) {
     }
 }
 
-/// `HumanoidModel.createBaseArmorMesh(g)` (`HumanoidModel.java:146-160`): the
+/// `HumanoidModel.createBaseArmorMesh(g)`: the
 /// shared humanoid mesh at inflation `g`, with **both legs re-added at
 /// `g.extend(-0.1)`**.
 ///
@@ -526,7 +524,7 @@ fn base_armour_root(inflation: f32) -> PartDef {
 /// [`inflation`](ArmourSlot::inflation), pruned to the slot's parts, on a
 /// **64×32** sheet.
 ///
-/// Mirrors `HumanoidModel.createArmorMeshSet` (`HumanoidModel.java:129-144`)
+/// Mirrors `HumanoidModel.createArmorMeshSet`
 /// one slot at a time. The four results are the `ArmorModelSet` record vanilla
 /// hands to `HumanoidArmorLayer`.
 #[must_use]

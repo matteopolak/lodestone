@@ -304,7 +304,7 @@ fn creeper_body_north_uv_matches_hand_derived_vanilla_unwrap() {
 }
 
 /// Vanilla composes part rotation as `rotationZYX(zRot, yRot, xRot)` = `Rz*Ry*Rx`
-/// (`ModelPart.translateAndRotate`, client 26.2 line 166), applied *after* the
+/// (`ModelPart.translateAndRotate`, client 26.2), applied *after* the
 /// pivot translation. The order only matters when two or more axes rotate at
 /// once — which is exactly the shape of a spider leg (both `yRot` and `zRot`
 /// nonzero via `offsetAndRotation`). This test hand-derives two multi-axis
@@ -582,7 +582,7 @@ fn part_bake_recomposes_to_the_whole_model_bake() {
 }
 
 // ---------------------------------------------------------------------------
-// Sheep wool layer (issue #53)
+// Sheep wool layer
 // ---------------------------------------------------------------------------
 //
 // `sheep_wool_model` is deliberately *not* registered in `entity_models()`: like
@@ -778,7 +778,7 @@ fn sheep_wool_tint_matches_vanilla_color_lerper() {
 }
 
 // ============================================================================
-// Projectile rigs (issue #380)
+// Projectile rigs
 // ============================================================================
 
 /// The arrow's box unwrap, computed independently from vanilla's
@@ -854,8 +854,8 @@ fn arrow_cross_north_uv_matches_hand_derived_vanilla_unwrap() {
 ///
 /// `LayerDefinition.create(mesh.transformed(pose -> pose.scaled(0.9F)), 32, 32)`
 /// reads as "scale every part", but `PartDefinition.transformed` applies the
-/// function to *its own* pose and copies children untouched
-/// (`PartDefinition.java:95-99`), so it is the **root** pose that carries the
+/// function to *its own* pose and copies children untouched,
+/// so it is the **root** pose that carries the
 /// 0.9. Modelling it as a per-part 0.9 on each of the three children instead would
 /// look identical for `cross_1`/`cross_2` and put the fletching in the wrong place,
 /// because `back`'s pivot at `x = -11` would then not be scaled by it.
@@ -988,9 +988,9 @@ fn posed_all(model: &EntityModelDef, flip_y: bool) -> Vec<PosedVertex> {
 ///
 /// # Why this test exists rather than a Y-flip pixel gate
 ///
-/// Issue #380 specified a two-direction long-axis pixel test and warned, correctly,
-/// that such a test cannot catch a wrong `scale(1, -1, 1)`, since `ArrowModel` is
-/// symmetric under `y → −y`. The conclusion drawn from that — "so resolving the
+/// A two-direction long-axis pixel test cannot catch a wrong `scale(1, -1, 1)`,
+/// since `ArrowModel` is symmetric under `y → −y`. The conclusion drawn from
+/// that — "so resolving the
 /// flip needs a texel comparison against a captured vanilla frame, or a live
 /// oracle" — does not follow, and this test is why. The flip is **not observable at
 /// all** on this rig, so no frame and no oracle could settle it: a vanilla frame

@@ -373,8 +373,8 @@ pub fn flow_angle(flow: [f64; 2]) -> f32 {
 /// otherwise (air, multiple boxes, or a box that doesn't span the full
 /// footprint — stairs, fences, walls, panes).
 ///
-/// This is the scoped subset of vanilla's `Shapes.blockOccludes`
-/// (`Shapes.java:244`), which the doc comment on
+/// This is the scoped subset of vanilla's `Shapes.blockOccludes`,
+/// which the doc comment on
 /// [`crate`][crate]'s `FluidSectionView::partial_occluder_y_range_at`
 /// consumer explains the derivation for. `boxes` should come from the
 /// neighbour's **outline** shape — `VersionAdapter::block_outline` /

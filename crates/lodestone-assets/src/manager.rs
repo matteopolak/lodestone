@@ -38,19 +38,20 @@ impl ResourceManager {
     /// from the record definitions rather than a summary of a call site:
     ///
     /// - `FallbackResourceManager.getResource` walks `for (int i =
-    ///   fallbacks.size() - 1; i >= 0; i--)` (`FallbackResourceManager.java:65`),
-    ///   and `push` appends (`:55`) — so the **last** pack handed to
+    ///   fallbacks.size() - 1; i >= 0; i--)`,
+    ///   and `pushInternal` appends — so the **last** pack handed to
     ///   `MultiPackResourceManager` wins. That is [`Self::new`]'s order, and
     ///   [`Self::read`]'s own `.iter().rev()` matches it exactly.
     /// - `PackSelectionModel`'s constructor does
     ///   `this.selected = Lists.newArrayList(repository.getSelectedPacks());
-    ///   Collections.reverse(this.selected);` (`PackSelectionModel.java:36-37`),
-    ///   and its `commit` reverses back (`:52`) — so the **first** row of the
-    ///   Selected column is the last pack in the stack, i.e. the winner.
+    ///   Collections.reverse(this.selected);`,
+    ///   and its `commit` (via `updateRepoSelectedList`) reverses back — so the
+    ///   **first** row of the Selected column is the last pack in the stack,
+    ///   i.e. the winner.
     ///
     /// Vanilla's built-in pack is `Pack.Position.BOTTOM` with a fixed position,
-    /// which `Position.insert` places at index 0 of the repository order
-    /// (`Pack.java:145-157`) — the bottom row of the UI column and the bottom of
+    /// which `Position.insert` places at index 0 of the repository order —
+    /// the bottom row of the UI column and the bottom of
     /// the stack, consistently.
     ///
     /// So: hand this the UI's own top-to-bottom order and the reversal is done

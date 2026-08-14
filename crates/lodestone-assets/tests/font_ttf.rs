@@ -1,7 +1,7 @@
 //! Hermetic gates for the `ttf` glyph provider
 //! ([`lodestone_assets::font::FontLoader::load`]'s `ProviderDef::Ttf` arm and
 //! the [`lodestone_assets::font::Glyph::Ttf`]/[`TtfGlyph`] it produces), the
-//! last box on issue #187's "full Unicode text" scope — `unihex` and bidi
+//! last box in "full Unicode text" scope — `unihex` and bidi
 //! already landed.
 //!
 //! # Why the fixture is hand-built rather than a real font file

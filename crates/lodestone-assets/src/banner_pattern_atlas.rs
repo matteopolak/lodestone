@@ -1,4 +1,4 @@
-//! The real banner-pattern mask atlas (issue #174's remaining gap) —
+//! The real banner-pattern mask atlas —
 //! `assets/minecraft/textures/entity/banner/*.png`, discovered the way
 //! vanilla itself discovers them, not by a hand-transcribed filename list.
 //!

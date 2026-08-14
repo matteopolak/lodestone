@@ -645,7 +645,7 @@ pub fn biome_effects(id: &str) -> Option<&'static BiomeEffects> {
 /// Vanilla's biome-tint smoothing kernel: a `(2*radius+1)²` box average of a
 /// per-position colour, sampled at `radius`-many neighbours on each side of
 /// `(x, z)` at a fixed height. Matches `ClientLevel.calculateBlockTint`
-/// (`ClientLevel.java:1012-1034`) exactly, including its per-channel integer
+/// exactly, including its per-channel integer
 /// (floor) division — `sample` should already be vanilla's un-blended
 /// `ColorResolver.getColor` for one position (i.e. one [`Colormaps::resolve`]
 /// call), and this function performs the averaging **around** it, matching
@@ -658,7 +658,7 @@ pub fn biome_effects(id: &str) -> Option<&'static BiomeEffects> {
 /// tint (a single-sample world) diverge only in what `sample` does, not in
 /// this function's control flow.
 ///
-/// The default `biomeBlendRadius` is `2` (`Options.java:472`,
+/// The default `biomeBlendRadius` is `2` (`Options.biomeBlendRadius`'s
 /// `new OptionInstance.IntRange(0, 7, false), 2, …`), giving the vanilla
 /// default 5x5 = 25-sample average this crate's callers should use unless a
 /// video setting says otherwise (this client has no such setting yet, so `2`
@@ -681,11 +681,11 @@ pub fn blend_box<F: FnMut(i32, i32) -> Rgb>(x: i32, z: i32, radius: i32, mut sam
     ((r / count) << 16) | ((g / count) << 8) | (b / count)
 }
 
-/// Vanilla's default biome-blend radius (`Options.java:472`). See
+/// Vanilla's default biome-blend radius (`Options.biomeBlendRadius`). See
 /// [`blend_box`]'s doc for why this is the only reachable value right now.
 pub const DEFAULT_BLEND_RADIUS: i32 = 2;
 
-/// The largest `biomeBlendRadius` vanilla's option exposes — `Options.java:472`'s
+/// The largest `biomeBlendRadius` vanilla's option exposes — its
 /// `new OptionInstance.IntRange(0, 7, false)`. It bounds [`BlendRowCursor`]'s
 /// window, which is why that type needs no allocation.
 pub const MAX_BLEND_RADIUS: i32 = 7;
@@ -703,8 +703,8 @@ const MAX_BLEND_WIDTH: usize = (2 * MAX_BLEND_RADIUS + 1) as usize;
 /// *column* sums yields the same `Rgb` for **5** new `sample` calls per step
 /// instead of 25. `mesh_fluids` and `mesh_models` both iterate `y → z → x` with
 /// `x` innermost (`models.rs`), which is exactly the order this exploits. The
-/// biome tint was still ~63% of `mesh_fluids`'s per-cell cost after issue #542's
-/// three commits (`DESIGN.md` §12.124), and this is where that goes.
+/// biome tint was still ~63% of `mesh_fluids`'s per-cell cost after an earlier
+/// optimisation pass (`DESIGN.md` §12.124), and this is where that goes.
 ///
 /// # Why it is bit-identical, not merely close
 ///

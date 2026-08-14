@@ -1,6 +1,6 @@
 //! The `textures` profile property: base64 → JSON → a typed skin declaration,
 //! including the **wide/slim model** every player rig needs and nothing in this
-//! workspace decoded before (issue #62).
+//! workspace decoded before.
 //!
 //! # Where the record definition comes from
 //!
@@ -18,9 +18,7 @@
 //! | `minecraft/MinecraftProfileTexture` | each value's fields: `url: String` and `metadata: Map<String, String>`, read through `getMetadata(key)` |
 //!
 //! and the *consumer* is 26.2's own source, which is available:
-//! `SkinManager.registerTextures`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/resources/SkinManager.java:109-116`)
-//! does exactly
+//! `SkinManager.registerTextures` does exactly
 //!
 //! ```text
 //! model = PlayerModelType.byLegacyServicesName(skinInfo.getMetadata("model"));
@@ -144,7 +142,7 @@ impl PlayerModelType {
     /// property, and the exact inverse of
     /// [`by_legacy_services_name`](Self::by_legacy_services_name).
     ///
-    /// Exists so a *producer* of that spelling (the skin cache issue #62's fetch
+    /// Exists so a *producer* of that spelling (the skin cache's fetch
     /// writes, `<data_dir>/skin.model`) cannot pick the wrong one of the two
     /// names this type carries. Reaching for
     /// [`serialized_name`](Self::serialized_name) there writes `"wide"`, which

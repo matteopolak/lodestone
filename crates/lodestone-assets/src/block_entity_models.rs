@@ -452,8 +452,7 @@ pub fn bell_model() -> EntityModelDef {
     }
 }
 
-/// A standing banner's pole and cross-bar — `BannerModel.createBodyLayer(true)`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/model/object/banner/BannerModel.java:24-35`):
+/// A standing banner's pole and cross-bar — `BannerModel.createBodyLayer(true)`:
 ///
 /// ```text
 /// pole  texOffs(44, 0)  addBox(-1, -42, -1,  2, 42, 2)  pose ZERO
@@ -464,8 +463,8 @@ pub fn bell_model() -> EntityModelDef {
 /// is `createBodyLayer(false)`, a second entry later with different box
 /// origins for `bar` and no `pole` at all). Draws through the ordinary
 /// opaque block-entity batcher with [`BlockEntityModelEntry::texture`]'s
-/// sheet (`entity/banner/banner_base` — vanilla's `Sheets.BANNER_BASE`,
-/// `Sheets.java:52`), the *wood/cloth* texture, not a pattern mask; the
+/// sheet (`entity/banner/banner_base` — vanilla's `Sheets.BANNER_BASE`),
+/// the *wood/cloth* texture, not a pattern mask; the
 /// coloured pattern masks are a wholly separate translucent draw list (see
 /// `lodestone_render::block_entity`'s banner doc) reusing the *flag* mesh,
 /// never this one.
@@ -495,8 +494,7 @@ pub fn banner_body_model() -> EntityModelDef {
     }
 }
 
-/// A standing banner's cloth — `BannerFlagModel.createFlagLayer(true)`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/model/object/banner/BannerFlagModel.java:21-30`):
+/// A standing banner's cloth — `BannerFlagModel.createFlagLayer(true)`:
 ///
 /// ```text
 /// flag  texOffs(0, 0)  addBox(-10, 0, -2,  20, 40, 1)  pose offset(0, -44, 0)
@@ -596,8 +594,8 @@ pub fn banner_wall_flag_model() -> EntityModelDef {
     }
 }
 
-/// A shulker box's shell — `ShulkerModel.createBoxLayer()`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/model/monster/shulker/ShulkerModel.java:27-46`):
+/// A shulker box's shell — `ShulkerModel.createBoxLayer()`, via the shared
+/// `ShulkerModel.createShellMesh()`:
 ///
 /// ```text
 /// lid   texOffs(0,  0)  addBox(-8, -16, -8,  16, 12, 16)  pose offset(0, 24, 0)
