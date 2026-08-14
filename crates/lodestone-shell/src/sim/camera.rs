@@ -229,10 +229,44 @@ impl Sim {
     /// [`Self::camera`] and [`Self::third_person_body_state`] so the eye and
     /// the third-person body it stands next to never disagree about where
     /// "here" is.
+    ///
+    /// # Riding overrides the whole tick-to-tick ease
+    ///
+    /// `lodestone_ecs::player::pin_passenger_to_vehicle` snaps
+    /// [`PhysicsState::position`] to the vehicle's raw, tick-boundary
+    /// [`lodestone_ecs::entity::Position`] once per 20 Hz tick — the same
+    /// value the vehicle's own [`crate::entities::InterpTo`] is re-anchored
+    /// toward. But the vehicle's **drawn** position does not jump to that
+    /// value; it eases into it over `entities`'s `INTERP_WINDOW` (150 ms of
+    /// real time, continuously re-anchored on every fresh report — see that
+    /// module's docs), which under sustained movement never fully catches up
+    /// to its own target. A tick-to-tick blend of the *pinned* (target)
+    /// position therefore reaches each new seat well before the vehicle's own
+    /// on-screen mesh does, and the two visibly disagree at every frame that
+    /// is not a tick boundary — the reported "the player should be attached to
+    /// the boat, but they seem to lag behind" / "super choppy when I move".
+    ///
+    /// Vanilla does not have this seam at all: a passenger's screen position
+    /// is composed directly from the vehicle's **already-interpolated**
+    /// render transform (`EntityRenderDispatcher` renders a passenger as a
+    /// child of the vehicle it just placed), never from a second,
+    /// independently-clocked position track. [`Self::riding_seat_this_frame`]
+    /// reproduces that: it reads the vehicle's per-frame eased feet/yaw off
+    /// the *same* [`crate::entities::InterpFrom`]/[`crate::entities::InterpTo`]/
+    /// [`crate::entities::InterpClock`] the vehicle is drawn from, and derives
+    /// the seat from those — so the rider and the vehicle share one clock and
+    /// cannot disagree between frames the way two separately-clocked eases
+    /// can. When it returns `None` (not riding, or any link in the chain is
+    /// not yet resolvable — see its own doc), this falls back to the ordinary
+    /// tick-to-tick ease, unchanged from before this existed.
     #[must_use]
     fn interpolated_player(&self) -> PlayerState {
-        let a = f64::from(self.clock().interp_alpha);
         let mut interp = self.player();
+        if let Some(feet) = self.riding_seat_this_frame() {
+            interp.position = Vec3d::new(f64::from(feet.x), f64::from(feet.y), f64::from(feet.z));
+            return interp;
+        }
+        let a = f64::from(self.clock().interp_alpha);
         let prev = self.prev_position();
         interp.position = Vec3d::new(
             prev.x + (interp.position.x - prev.x) * a,
@@ -240,6 +274,25 @@ impl Sim {
             prev.z + (interp.position.z - prev.z) * a,
         );
         interp
+    }
+
+    /// The local player's on-screen seat this frame, if currently riding a
+    /// vehicle whose interpolation track has actually reached the shell.
+    ///
+    /// `None` covers both "not riding" ([`Riding`] absent or `None`) and every
+    /// "decline rather than guess" case [`crate::entities::riding_render_seat`]
+    /// documents — the vehicle not spawned client-side yet, no interpolation
+    /// track on it, or no [`VersionData`]/no facts for its type. The caller's
+    /// fallback in every such case is the tick-boundary seat
+    /// `pin_passenger_to_vehicle` already pins, so declining here never leaves
+    /// the player somewhere invented.
+    #[must_use]
+    fn riding_seat_this_frame(&self) -> Option<glam::Vec3> {
+        self.read(|w| {
+            let vehicle_id = w.get::<Riding>(self.local)?.0?;
+            let own_id = w.get::<ServerEntityId>(self.local).and_then(|id| id.0);
+            crate::entities::riding_render_seat(w, vehicle_id, own_id)
+        })
     }
 
     /// Build the **true first-person eye** camera for the given viewport
@@ -717,6 +770,17 @@ impl Sim {
             // `PlayerState::pose` as the tail of every tick — so this reads
             // it directly rather than re-deriving a crouch from input.
             crouching: interp.pose == lodestone_physics::pose::Pose::Crouching,
+            // `Entity.isPassenger()`. The local player has no `Vehicle`
+            // component the way a tracked remote entity does (see
+            // `entities::extract_entity_draws`'s own doc on why) — it is the
+            // one entity `session::Riding` exists to answer this for instead,
+            // and that is already the source `Self::riding_seat_this_frame`
+            // reads to derive the camera's own seat, so the two cannot
+            // disagree about "am I riding" even though they answer two
+            // different questions from it.
+            is_passenger: self.read(|w| {
+                w.get::<Riding>(self.local).is_some_and(|riding| riding.0.is_some())
+            }),
         }
     }
 }
