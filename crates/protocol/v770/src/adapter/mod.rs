@@ -103,6 +103,8 @@ use crate::packets::time::SetTime;
 use lodestone_data::particle_types::particle_type_name;
 use lodestone_data::sound_events::sound_event;
 
+mod connection;
+
 /// Protocol version implemented by this adapter.
 pub const PROTOCOL: i32 = 776;
 
@@ -299,7 +301,6 @@ impl Default for MovementSendState {
         }
     }
 }
-
 impl V770Adapter {
     /// Creates a new adapter with the overworld chunk shape as its default.
     #[must_use]
@@ -538,7 +539,6 @@ impl V770Adapter {
         Ok(packet)
     }
 }
-
 impl Default for V770Adapter {
     fn default() -> Self {
         Self::new()
@@ -2679,172 +2679,12 @@ fn decode_damage_event(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
-/// The `minecraft:block` registry's wire key
-/// (`Registries.BLOCK = createRegistryKey("block")`), matching the
-/// `minecraft:worldgen/biome` precedent in `packets/registry.rs`'s
-/// `ClientRegistries::BIOME` — the registry's own resource key, not a name we
-/// invent.
-const BLOCK_REGISTRY_KEY: &str = "minecraft:block";
-
-/// Decodes `update_tags` (issue #296), shared by the Configuration and Play
-/// states — `ClientboundUpdateTagsPacket` is a `ClientCommonPacketListener`
-/// packet with one wire shape used in both
-/// (`.cache/mc/26.2/src/net/minecraft/network/protocol/common/ClientboundUpdateTagsPacket.java`):
-///
-/// ```text
-/// VarInt registry_count
-/// registry_count * {
-///     String registry_key           // e.g. "minecraft:block"
-///     VarInt tag_count
-///     tag_count * {
-///         String tag_name           // without the leading '#'
-///         VarInt id_count
-///         id_count * VarInt element_id
-///     }
-/// }
-/// ```
-///
-/// (`FriendlyByteBuf::readMap`/`TagNetworkSerialization.NetworkPayload::read`/
-/// `readIntIdList`.) Every registry's tags are consumed to stay byte-aligned
-/// through the whole packet — including ones this crate has no census for,
-/// e.g. `minecraft:item` (see `lodestone-data`'s `tool.rs` module docs: there
-/// is no `ITEM_TAGS` table today, so nothing consumes an item-tag override
-/// yet) — but only the `minecraft:block` registry's decoded table is
-/// installed anywhere, via [`lodestone_data::tool::set_block_tag_overrides`].
-/// Vanilla always sends the complete non-empty tag set per registry, never a
-/// delta, so a decoded `minecraft:block` entry replaces the whole override
-/// table; a packet that does not mention `minecraft:block` at all leaves
-/// whatever was installed before untouched.
-fn decode_update_tags(payload: &[u8]) -> Result<(), AdapterError> {
-    let mut reader = Reader::new(payload);
-    let registry_count = reader.var_i32().map_err(dec_err)?;
-    let registry_count = usize::try_from(registry_count)
-        .map_err(|_| AdapterError::Decode(format!("invalid registry count {registry_count}")))?;
-    for _ in 0..registry_count {
-        let registry_key = reader.string(32767).map_err(dec_err)?;
-        let is_block_registry = registry_key == BLOCK_REGISTRY_KEY;
-        let tag_count = reader.var_i32().map_err(dec_err)?;
-        let tag_count = usize::try_from(tag_count)
-            .map_err(|_| AdapterError::Decode(format!("invalid tag count {tag_count}")))?;
-        let mut block_tags = is_block_registry.then(HashMap::new);
-        for _ in 0..tag_count {
-            let tag_name = reader.string(32767).map_err(dec_err)?;
-            let id_count = reader.var_i32().map_err(dec_err)?;
-            let id_count = usize::try_from(id_count)
-                .map_err(|_| AdapterError::Decode(format!("invalid tag id count {id_count}")))?;
-            // Read every id as `i32` regardless of registry, to stay
-            // byte-aligned through registries this crate does not model
-            // (`minecraft:item` and friends); only the block registry's ids
-            // are ever narrowed to `u16` (`block_tag_members`'s key space),
-            // and a raw id too large for that (never observed in a real
-            // registry, which tops out in the low thousands) is dropped from
-            // that one tag rather than failing the whole packet.
-            let mut raw_ids = Vec::with_capacity(id_count.min(4096));
-            for _ in 0..id_count {
-                raw_ids.push(reader.var_i32().map_err(dec_err)?);
-            }
-            if let Some(map) = block_tags.as_mut() {
-                let mut ids: Vec<u16> = raw_ids
-                    .into_iter()
-                    .filter_map(|raw| u16::try_from(raw).ok())
-                    .collect();
-                ids.sort_unstable();
-                map.insert(tag_name, ids);
-            }
-        }
-        if let Some(map) = block_tags {
-            lodestone_data::tool::set_block_tag_overrides(map);
-        }
-    }
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(())
-}
-
-/// Decodes a clientbound `custom_payload`: a channel identifier followed by
-/// however many bytes remain in the packet (`ClientboundCustomPayloadPacket`).
-/// Shared by the Configuration and Play states — issue #301 found
-/// Configuration had no arm for this at all; only Play did.
-///
-/// Only `minecraft:brand` gets a specially-typed codec in vanilla (a single
-/// UTF-8 string); every other channel is `DiscardedPayload`, which just
-/// consumes whatever bytes remain in the packet. Carrying the raw bytes for
-/// every channel (rather than special-casing brand) loses nothing and avoids
-/// guessing at channel-specific shapes this adapter cannot verify.
-fn decode_custom_payload(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let channel = reader.string(32767).map_err(dec_err)?;
-    let channel = parse_key(&channel, "custom payload channel")?;
-    let remaining = reader.remaining();
-    let data = reader.bytes(remaining).map_err(dec_err)?.to_vec();
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![Directive::Emit(ClientEvent::CustomPayload {
-        channel,
-        data,
-    })])
-}
-
-/// Decodes a clientbound `custom_query` (Login state only): a VarInt
-/// transaction id, a channel identifier, then however many bytes remain
-/// (`ClientboundCustomQueryPacket`). This is the older, pre-`custom_payload`
-/// plugin-message mechanism (historically Forge/FML's login handshake); even
-/// vanilla's own reference client never interprets a payload — every channel
-/// decodes to `DiscardedQueryPayload`, which just skips the remaining bytes —
-/// and unconditionally answers with no payload
-/// (`ClientHandshakePacketListenerImpl.handleCustomQuery`:
-/// `new ServerboundCustomQueryAnswerPacket(transactionId, null)`, no channel
-/// check, no UI). This mirrors that exactly: decode to stay byte-aligned,
-/// answer `None`, surface no event — there is nothing to observe that
-/// vanilla itself does not already discard silently.
-fn decode_custom_query(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let transaction_id = reader.var_i32().map_err(dec_err)?;
-    let _channel = reader.string(32767).map_err(dec_err)?;
-    let remaining = reader.remaining();
-    reader.bytes(remaining).map_err(dec_err)?;
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![send(
-        login::serverbound::CUSTOM_QUERY_ANSWER,
-        &CustomQueryAnswer {
-            transaction_id,
-            payload: None,
-        },
-    )?])
-}
-
-/// Decodes a clientbound `cookie_request`: a single identifier key, no other
-/// fields (`ClientboundCookieRequestPacket`, `ClientCookiePacketListener`).
-/// Shared by the Login, Configuration and Play states — issue #291's
-/// "aren't handled in `handle_login` at all" applied equally to
-/// `handle_configuration`, which also had no arm for this before now, only
-/// `handle_play` did.
-fn decode_cookie_request(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let key = reader.string(32767).map_err(dec_err)?;
-    let key = parse_key(&key, "cookie")?;
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![Directive::Emit(ClientEvent::CookieRequested { key })])
-}
-
 /// Builds a [`Directive::Send`] from a packet id and an encodable body.
 fn send<T: Encode>(packet_id: i32, packet: &T) -> Result<Directive, AdapterError> {
     Ok(Directive::Send {
         packet_id,
         payload: encode_body(packet)?,
     })
-}
-
-/// Decodes an NBT text-component disconnect reason into plain text, falling back
-/// to a generic message when the component carries no text.
-fn nbt_reason_text(payload: &[u8]) -> Result<Text, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let component =
-        read_network_nbt(&mut reader).map_err(|err| AdapterError::Decode(err.to_string()))?;
-    let reason = Text::from_nbt(&component);
-    if reason.to_plain_string().is_empty() {
-        Ok(Text::literal("Disconnected"))
-    } else {
-        Ok(reason)
-    }
 }
 
 /// Maps a decode error to the adapter's decode-error variant.
@@ -3608,210 +3448,976 @@ fn tab_game_mode(id: i32) -> Option<GameMode> {
     }
 }
 
+/// Registry ids of `minecraft:slot_display`, from `SlotDisplays.java`'s
+/// registration order (and cross-checked against `registries.json`).
+///
+/// A **built-in** registry, so these ids are fixed by the jar rather than synced
+/// during Configuration — the same reason `MAP_DECORATION_TYPE_IDS` is a table.
+mod slot_display {
+    pub const EMPTY: i32 = 0;
+    pub const ANY_FUEL: i32 = 1;
+    pub const WITH_ANY_POTION: i32 = 2;
+    pub const ONLY_WITH_COMPONENT: i32 = 3;
+    pub const ITEM: i32 = 4;
+    pub const ITEM_STACK: i32 = 5;
+    pub const TAG: i32 = 6;
+    pub const DYED: i32 = 7;
+    pub const SMITHING_TRIM: i32 = 8;
+    pub const WITH_REMAINDER: i32 = 9;
+    pub const COMPOSITE: i32 = 10;
+}
+
+/// What walking a `SlotDisplay` yielded.
+///
+/// `complete == false` means the walk hit something this adapter does not model
+/// and **the reader's position is no longer trustworthy** — the caller must
+/// abandon the whole packet rather than continue. Same convention as
+/// [`read_component_patch`]'s second return value, and for the same reason: a
+/// nested union with per-entry codecs cannot be skipped generically, so partial
+/// progress is the honest outcome and silently continuing would misread every
+/// following field.
+#[derive(Debug, Default)]
+struct SlotDisplayItems {
+    /// Item registry ids this display can show, in encounter order.
+    items: Vec<i32>,
+    /// Whether the walk consumed the display exactly.
+    complete: bool,
+}
+
+impl SlotDisplayItems {
+    fn incomplete() -> Self {
+        Self {
+            items: Vec::new(),
+            complete: false,
+        }
+    }
+}
+
+/// Walks one `SlotDisplay` (`SlotDisplay.STREAM_CODEC`), collecting the item ids
+/// it can display.
+///
+/// # This is a byte-exact walk, not a skip
+///
+/// `SlotDisplay` is a **recursive** registry-dispatched union of eleven variants,
+/// four of which contain further `SlotDisplay`s and one of which
+/// (`composite`) contains a list of them. There is no length prefix anywhere, so
+/// there is no way to skip one without decoding it — which is why every consumer
+/// of `RecipeDisplay` in this crate had to wait for this function, and why the
+/// five recipe packets landed together.
+///
+/// `depth` bounds the recursion: a malicious or corrupt payload could otherwise
+/// nest `composite` indefinitely and blow the stack. Vanilla's own nesting is two
+/// or three deep in practice.
+fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayItems, AdapterError> {
+    // 16 is far above vanilla's own two-or-three and well below anything that
+    // threatens the stack. Returning `incomplete` rather than erroring keeps a
+    // hostile payload a dropped packet instead of a disconnect.
+    if depth > 16 {
+        return Ok(SlotDisplayItems::incomplete());
+    }
+    let kind = reader.var_i32().map_err(dec_err)?;
+    let mut items = Vec::new();
+    match kind {
+        slot_display::EMPTY | slot_display::ANY_FUEL => {}
+        slot_display::ITEM => {
+            items.push(reader.var_i32().map_err(dec_err)?);
+        }
+        slot_display::ITEM_STACK => {
+            // `ItemStackTemplate.STREAM_CODEC`: item id, count, then a
+            // `DataComponentPatch` — which is exactly what `read_component_patch`
+            // walks, including its bail-out on an unmodeled component type.
+            let item_id = reader.var_i32().map_err(dec_err)?;
+            let _count = reader.var_i32().map_err(dec_err)?;
+            let name = item_name(item_id).unwrap_or("minecraft:air");
+            let (_components, complete) = read_component_patch(reader, name)?;
+            if !complete {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+            items.push(item_id);
+        }
+        slot_display::TAG => {
+            // `TagKey.streamCodec` is one `Identifier` string. The tag's *members*
+            // are not on the wire, so there is no item id to collect — a consumer
+            // that needs one resolves the tag itself.
+            let _tag = reader.string(32767).map_err(dec_err)?;
+        }
+        slot_display::WITH_ANY_POTION => {
+            let inner = read_slot_display(reader, depth + 1)?;
+            if !inner.complete {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+            items.extend(inner.items);
+        }
+        slot_display::ONLY_WITH_COMPONENT => {
+            let inner = read_slot_display(reader, depth + 1)?;
+            if !inner.complete {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+            // `DataComponentType.STREAM_CODEC` is a bare VarInt registry id.
+            let _component_type = reader.var_i32().map_err(dec_err)?;
+            items.extend(inner.items);
+        }
+        slot_display::DYED | slot_display::WITH_REMAINDER => {
+            // Two `SlotDisplay`s. For `dyed` they are (dye, target); for
+            // `with_remainder` (input, remainder). Both halves are walked because
+            // both must be consumed — only the first carries the item a recipe
+            // panel wants, but skipping the second is not an option (no length
+            // prefix).
+            let first = read_slot_display(reader, depth + 1)?;
+            if !first.complete {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+            let second = read_slot_display(reader, depth + 1)?;
+            if !second.complete {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+            items.extend(first.items);
+        }
+        slot_display::SMITHING_TRIM => {
+            for _ in 0..3 {
+                let inner = read_slot_display(reader, depth + 1)?;
+                if !inner.complete {
+                    return Ok(SlotDisplayItems::incomplete());
+                }
+                items.extend(inner.items);
+            }
+            // `TrimPattern.STREAM_CODEC` is `ByteBufCodecs.holder`: `0` means an
+            // inline `TrimPattern` follows, which this adapter does not model, so
+            // that case abandons the packet rather than guessing at its length.
+            let holder = reader.var_i32().map_err(dec_err)?;
+            if holder == 0 {
+                return Ok(SlotDisplayItems::incomplete());
+            }
+        }
+        slot_display::COMPOSITE => {
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count).map_err(|_| {
+                AdapterError::Decode(format!("invalid composite slot display count {count}"))
+            })?;
+            for _ in 0..count {
+                let inner = read_slot_display(reader, depth + 1)?;
+                if !inner.complete {
+                    return Ok(SlotDisplayItems::incomplete());
+                }
+                items.extend(inner.items);
+            }
+        }
+        // An id outside the built-in table means a modded registry entry whose
+        // payload shape is unknown. The reader cannot go on.
+        _ => return Ok(SlotDisplayItems::incomplete()),
+    }
+    Ok(SlotDisplayItems {
+        items,
+        complete: true,
+    })
+}
+
+/// Walks one `RecipeDisplay` and returns the item ids of its **result** slot.
+///
+/// The result is what a recipe panel and a toast both key on; the ingredient
+/// slots are walked only because they must be consumed. Returns `None` when the
+/// walk hit something unmodeled, with the same "abandon the packet" contract as
+/// [`read_slot_display`].
+///
+/// Variant ids are `RecipeDisplays.java`'s registration order: shapeless, shaped,
+/// furnace, stonecutter, smithing.
+fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<Vec<i32>>, AdapterError> {
+    let kind = reader.var_i32().map_err(dec_err)?;
+    // Each variant is a fixed sequence of `SlotDisplay`s plus, for two of them,
+    // some scalars. `result_index` is which of the walked displays is the result,
+    // and `station_last` is true for every variant because `craftingStation` is
+    // always the final `SlotDisplay`.
+    let mut walked: Vec<Vec<i32>> = Vec::new();
+    let walk = |reader: &mut Reader<'_>, walked: &mut Vec<Vec<i32>>| -> Result<bool, AdapterError> {
+        let display = read_slot_display(reader, 0)?;
+        if !display.complete {
+            return Ok(false);
+        }
+        walked.push(display.items);
+        Ok(true)
+    };
+    let result_index = match kind {
+        // crafting_shapeless: list<SlotDisplay> ingredients, result, station.
+        0 => {
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count).map_err(|_| {
+                AdapterError::Decode(format!("invalid shapeless ingredient count {count}"))
+            })?;
+            for _ in 0..count {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            let ingredients = walked.len();
+            for _ in 0..2 {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            ingredients
+        }
+        // crafting_shaped: width, height, list<SlotDisplay>, result, station.
+        1 => {
+            let _width = reader.var_i32().map_err(dec_err)?;
+            let _height = reader.var_i32().map_err(dec_err)?;
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count).map_err(|_| {
+                AdapterError::Decode(format!("invalid shaped ingredient count {count}"))
+            })?;
+            for _ in 0..count {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            let ingredients = walked.len();
+            for _ in 0..2 {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            ingredients
+        }
+        // furnace: ingredient, fuel, result, station, duration, experience.
+        2 => {
+            for _ in 0..4 {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            let _duration = reader.var_i32().map_err(dec_err)?;
+            let _experience = reader.f32().map_err(dec_err)?;
+            2
+        }
+        // stonecutter: input, result, station.
+        3 => {
+            for _ in 0..3 {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            1
+        }
+        // smithing: template, base, addition, result, station.
+        4 => {
+            for _ in 0..5 {
+                if !walk(reader, &mut walked)? {
+                    return Ok(None);
+                }
+            }
+            3
+        }
+        _ => return Ok(None),
+    };
+    Ok(walked.get(result_index).cloned().or(Some(Vec::new())))
+}
+
+/// Reads a `DebugSubscription.Update`'s dispatch head: the subscription's
+/// registry id resolved to its identifier, then `ByteBufCodecs.optional`'s
+/// present-flag, then the rest of the payload as opaque bytes.
+///
+/// The payload is opaque because the value codec is chosen per registry entry and
+/// the seventeen registered ones share no shape — one (`dedicated_server_tick_time`)
+/// has a `null` value codec and throws if it is ever sent this way. See
+/// `lodestone_game::debug_feeds`' module doc.
+fn read_debug_update(
+    reader: &mut Reader<'_>,
+) -> Result<(ResourceKey, Option<Vec<u8>>), AdapterError> {
+    let subscription = read_debug_subscription_key(reader)?;
+    let present = reader.bool().map_err(dec_err)?;
+    let value = if present {
+        Some(reader.remaining_bytes().to_vec())
+    } else {
+        None
+    };
+    Ok((subscription, value))
+}
+
+/// Reads a `minecraft:debug_subscription` registry id and resolves it.
+///
+/// An unknown id is a decode **error** rather than a synthetic key: the id is the
+/// dispatch discriminant, so not knowing it means the bytes after it cannot be
+/// attributed, and inventing `lodestone:unknown_7` would let two different feeds
+/// collide in the store.
+fn read_debug_subscription_key(reader: &mut Reader<'_>) -> Result<ResourceKey, AdapterError> {
+    let id = reader.var_i32().map_err(dec_err)?;
+    let name = crate::stat_debug_registries::debug_subscription_name(id).ok_or_else(|| {
+        AdapterError::Decode(format!("unknown debug_subscription registry id {id}"))
+    })?;
+    parse_key(name, "debug subscription")
+}
+
+/// Decodes `ClientboundAwardStatsPacket`: a VarInt-counted map of
+/// `(stat_type id, value id) -> count`.
+///
+/// `Stat.STREAM_CODEC` is `registry(STAT_TYPE).dispatch(Stat::getType,
+/// StatType::streamCodec)`, so the **second** id's registry depends on the first:
+/// a value under `minecraft:mined` is a block, under `minecraft:killed` an entity
+/// type, and under `minecraft:custom` one of the 77 custom stats. Resolving it
+/// with one fixed table would silently mislabel every category but one.
+///
+/// An id this build cannot resolve yields `value: None` rather than an error — the
+/// count is still correct and vanilla's own General tab is entirely
+/// `minecraft:custom`, which we always resolve.
+fn decode_award_stats(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    use crate::stat_debug_registries::{
+        StatValueRegistry, custom_stat_name, stat_type_name, stat_value_registry,
+    };
+
+    let mut reader = Reader::new(payload);
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("invalid award_stats count {count}")))?;
+    let mut stats = Vec::with_capacity(count.min(4096));
+    for _ in 0..count {
+        let type_id = reader.var_i32().map_err(dec_err)?;
+        let value_id = reader.var_i32().map_err(dec_err)?;
+        let stat_count = reader.var_i32().map_err(dec_err)?;
+        let type_name = stat_type_name(type_id).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown stat_type registry id {type_id}"))
+        })?;
+        let value_name = match stat_value_registry(type_id) {
+            Some(StatValueRegistry::CustomStat) => custom_stat_name(value_id),
+            Some(StatValueRegistry::Item) => item_name(value_id),
+            Some(StatValueRegistry::EntityType) => entity_type_name(value_id),
+            // `block_type_name` indexes the `minecraft:block` *registry* (one id
+            // per block type, registration order), which is what a `minecraft:mined`
+            // stat value is — not a palette state id. `block_name` would be the
+            // wrong table here and would resolve every id to an unrelated block.
+            Some(StatValueRegistry::Block) => {
+                u32::try_from(value_id).ok().and_then(block_type_name)
+            }
+            None => None,
+        };
+        stats.push(StatAward {
+            stat_type: parse_key(type_name, "stat type")?,
+            value: match value_name {
+                Some(name) => Some(parse_key(name, "stat value")?),
+                None => None,
+            },
+            count: stat_count,
+        });
+    }
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::StatisticsAwarded {
+        stats,
+    })])
+}
+
+/// Consumes a `HolderSet<Item>` (`Ingredient.CONTENTS_STREAM_CODEC`) and returns
+/// the explicit item ids, or an empty list for the tag form.
+///
+/// Same wire shape as [`read_block_holder_set`], one registry over: a VarInt where
+/// `0` means a tag identifier follows and `n` means `n - 1` explicit ids.
+fn read_item_holder_set(reader: &mut Reader<'_>) -> Result<Vec<i32>, AdapterError> {
+    let discriminator = reader.var_i32().map_err(dec_err)?;
+    if discriminator == 0 {
+        let _tag = reader.string(32767).map_err(dec_err)?;
+        return Ok(Vec::new());
+    }
+    let count = usize::try_from(discriminator - 1)
+        .map_err(|_| AdapterError::Decode(format!("invalid item set size {discriminator}")))?;
+    let mut items = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        items.push(reader.var_i32().map_err(dec_err)?);
+    }
+    Ok(items)
+}
+
+/// Decodes `ClientboundRecipeBookAddPacket`.
+///
+/// **The trailing `replace: bool` sits after the entry list**, so the list cannot
+/// be taken as opaque trailing bytes — the whole reason this packet waited for
+/// [`read_slot_display`]. Each entry is a `RecipeDisplayEntry` then an `i8` flags
+/// byte (bit 0 notification, bit 1 highlight).
+///
+/// `RecipeDisplayEntry`'s `group` field is `ByteBufCodecs.OPTIONAL_VAR_INT`: a
+/// single VarInt where `0` is absent and a present value `v` is written `v + 1` —
+/// **not** the usual bool-then-value optional. A bool-prefixed reader would
+/// mis-frame every entry after the first.
+fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("invalid recipe_book_add count {count}")))?;
+    let mut entries = Vec::with_capacity(count.min(4096));
+    for _ in 0..count {
+        let display_id = reader.var_i32().map_err(dec_err)?;
+        let Some(result_items) = read_recipe_display(&mut reader)? else {
+            return Ok(Vec::new());
+        };
+        // `OPTIONAL_VAR_INT`, not a bool-prefixed optional.
+        let _group = reader.var_i32().map_err(dec_err)?;
+        let _category = reader.var_i32().map_err(dec_err)?;
+        if reader.bool().map_err(dec_err)? {
+            let requirement_count = reader.var_i32().map_err(dec_err)?;
+            let requirement_count = usize::try_from(requirement_count).map_err(|_| {
+                AdapterError::Decode(format!(
+                    "invalid crafting requirement count {requirement_count}"
+                ))
+            })?;
+            for _ in 0..requirement_count {
+                let _ingredient = read_item_holder_set(&mut reader)?;
+            }
+        }
+        let flags = reader.i8().map_err(dec_err)?;
+        entries.push(RecipeBookEntry {
+            display_id,
+            result_items,
+            notification: flags & 0x01 != 0,
+            highlight: flags & 0x02 != 0,
+        });
+    }
+    let replace = reader.bool().map_err(dec_err)?;
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::RecipeBookAdded {
+        entries,
+        replace,
+    })])
+}
+
+/// Decodes `ClientboundUpdateRecipesPacket`: the property sets, then the
+/// stonecutter list.
+///
+/// Despite the name this is **not** the recipe corpus — it is the per-slot "which
+/// items are valid here" sets vanilla's screens grey out against, plus the
+/// stonecutter's own input→result pairs. A `RecipePropertySet` is a VarInt-counted
+/// list of item registry ids and needs no display walk; the stonecutter half does.
+fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let set_count = reader.var_i32().map_err(dec_err)?;
+    let set_count = usize::try_from(set_count)
+        .map_err(|_| AdapterError::Decode(format!("invalid property set count {set_count}")))?;
+    let mut item_sets = Vec::with_capacity(set_count.min(256));
+    for _ in 0..set_count {
+        let key = reader.string(32767).map_err(dec_err)?;
+        let item_count = reader.var_i32().map_err(dec_err)?;
+        let item_count = usize::try_from(item_count)
+            .map_err(|_| AdapterError::Decode(format!("invalid property item count {item_count}")))?;
+        let mut items = Vec::with_capacity(item_count.min(4096));
+        for _ in 0..item_count {
+            items.push(reader.var_i32().map_err(dec_err)?);
+        }
+        item_sets.push((parse_key(&key, "recipe property set")?, items));
+    }
+    let stonecutter_count = reader.var_i32().map_err(dec_err)?;
+    let stonecutter_count = usize::try_from(stonecutter_count).map_err(|_| {
+        AdapterError::Decode(format!("invalid stonecutter count {stonecutter_count}"))
+    })?;
+    let mut stonecutter_results = Vec::with_capacity(stonecutter_count.min(4096));
+    for _ in 0..stonecutter_count {
+        // `SingleInputEntry`: an `Ingredient` (HolderSet<Item>) then a
+        // `SlotDisplay` — a bare display, not a whole `RecipeDisplay`.
+        let _input = read_item_holder_set(&mut reader)?;
+        let display = read_slot_display(&mut reader, 0)?;
+        if !display.complete {
+            // Emit what was decoded before the unmodeled entry rather than the
+            // whole packet: the property sets above are complete and independently
+            // useful, and they are the half a screen actually reads.
+            return Ok(vec![Directive::Emit(
+                ClientEvent::RecipePropertySetsUpdated {
+                    item_sets,
+                    stonecutter_results,
+                },
+            )]);
+        }
+        stonecutter_results.push(display.items);
+    }
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(
+        ClientEvent::RecipePropertySetsUpdated {
+            item_sets,
+            stonecutter_results,
+        },
+    )])
+}
+
+/// Decodes `ClientboundMerchantOffersPacket`.
+///
+/// # The two traps
+///
+/// **Five of `MerchantOffer`'s fields are big-endian `i32`s, not VarInts** —
+/// `uses`, `maxUses`, `xp`, `specialPriceDiff` and `demand` are all `writeInt`.
+/// Almost every other integer in this protocol is a VarInt, so a
+/// VarInt-by-default reader gets all five wrong *and* desynchronises everything
+/// after them.
+///
+/// **The trailing scalars come after the offer list.** `villagerLevel`,
+/// `villagerXp`, `showProgress` and `canRestock` are all past the offers, so they
+/// are unreachable without parsing every `MerchantOffer` — including each
+/// `ItemCost`'s `DataComponentExactPredicate`, which is a VarInt-counted list of
+/// typed components. That list is `EMPTY` for every vanilla trade; a non-empty one
+/// is unmodeled here and abandons the packet rather than guessing at its length.
+fn decode_merchant_offers(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let window_id = reader.var_i32().map_err(dec_err)?;
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("invalid merchant offer count {count}")))?;
+    let mut offers = Vec::with_capacity(count.min(64));
+    for _ in 0..count {
+        let Some(cost_a) = read_item_cost(&mut reader)? else {
+            return Ok(Vec::new());
+        };
+        // **This was the bug.** It read `.stack` off the old struct and dropped
+        // the completeness flag, so an offer whose result carried an unmodeled
+        // component left the reader parked mid-payload and the loop went on to
+        // read this offer's remaining eight fields — and then the *next* offer —
+        // out of that component's interior. On a plugin server stamping
+        // `minecraft:custom_data` on every trade result, that is one warning per
+        // offer followed by an over-read blamed on framing. An offer list has no
+        // per-entry length prefix and the trailing `villagerLevel`/`villagerXp`
+        // scalars sit past it, so there is nothing to resynchronise to: the only
+        // correct move is to abandon the packet, exactly as a non-empty
+        // `DataComponentExactPredicate` does two lines up.
+        let result = match read_item_stack(&mut reader)? {
+            DecodedStack::Complete(stack) => stack,
+            DecodedStack::Partial(_) => return Ok(Vec::new()),
+        };
+        let cost_b = if reader.bool().map_err(dec_err)? {
+            match read_item_cost(&mut reader)? {
+                Some(cost) => Some(cost),
+                None => return Ok(Vec::new()),
+            }
+        } else {
+            None
+        };
+        let out_of_stock = reader.bool().map_err(dec_err)?;
+        // The five `writeInt` fields. Not VarInts.
+        let uses = reader.i32().map_err(dec_err)?;
+        let max_uses = reader.i32().map_err(dec_err)?;
+        let xp = reader.i32().map_err(dec_err)?;
+        let special_price_diff = reader.i32().map_err(dec_err)?;
+        let price_multiplier = reader.f32().map_err(dec_err)?;
+        let demand = reader.i32().map_err(dec_err)?;
+        offers.push(ModelMerchantOffer {
+            cost_a,
+            cost_b,
+            result,
+            out_of_stock,
+            uses,
+            max_uses,
+            xp,
+            special_price_diff,
+            price_multiplier,
+            demand,
+        });
+    }
+    let villager_level = reader.var_i32().map_err(dec_err)?;
+    let villager_xp = reader.var_i32().map_err(dec_err)?;
+    let show_progress = reader.bool().map_err(dec_err)?;
+    let can_restock = reader.bool().map_err(dec_err)?;
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::MerchantOffersReceived {
+        window_id,
+        offers,
+        villager_level,
+        villager_xp,
+        show_progress,
+        can_restock,
+    })])
+}
+
+/// Reads one `ItemCost`: item registry id, count, then a
+/// `DataComponentExactPredicate`.
+///
+/// Returns `None` when the predicate is non-empty, which this adapter does not
+/// model — see [`decode_merchant_offers`]'s doc. `EMPTY` (a zero count) is what
+/// every vanilla trade sends.
+fn read_item_cost(reader: &mut Reader<'_>) -> Result<Option<(i32, i32)>, AdapterError> {
+    let item_id = reader.var_i32().map_err(dec_err)?;
+    let count = reader.var_i32().map_err(dec_err)?;
+    let predicate_count = reader.var_i32().map_err(dec_err)?;
+    if predicate_count != 0 {
+        return Ok(None);
+    }
+    Ok(Some((item_id, count)))
+}
+
+/// Decodes `ClientboundTrackedWaypointPacket` and its hand-written
+/// `TrackedWaypoint.write`.
+///
+/// The position is a four-way tagged union, not an optional: `EMPTY` carries
+/// nothing, `VEC3I` three VarInts, `CHUNK` two, and `AZIMUTH` one f32 bearing.
+/// Vanilla degrades to the coarser forms with distance, so a decoder that treated
+/// anything but `VEC3I` as "no position" would blank the locator bar at range.
+fn decode_waypoint(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let operation = match reader.var_i32().map_err(dec_err)? {
+        0 => WaypointOperation::Track,
+        1 => WaypointOperation::Untrack,
+        2 => WaypointOperation::Update,
+        other => {
+            return Err(AdapterError::Decode(format!(
+                "unknown waypoint operation {other}"
+            )));
+        }
+    };
+    let id = if reader.bool().map_err(dec_err)? {
+        WaypointId::Entity(reader.uuid().map_err(dec_err)?)
+    } else {
+        WaypointId::Named(reader.string(32767).map_err(dec_err)?)
+    };
+    let style = parse_key(&reader.string(32767).map_err(dec_err)?, "waypoint style")?;
+    let color = if reader.bool().map_err(dec_err)? {
+        // `ByteBufCodecs.RGB_COLOR` is a plain big-endian int.
+        #[allow(clippy::cast_sign_loss)]
+        Some(reader.i32().map_err(dec_err)? as u32)
+    } else {
+        None
+    };
+    let position = match reader.var_i32().map_err(dec_err)? {
+        0 => WaypointPosition::Empty,
+        1 => WaypointPosition::Exact(BlockPos {
+            x: reader.var_i32().map_err(dec_err)?,
+            y: reader.var_i32().map_err(dec_err)?,
+            z: reader.var_i32().map_err(dec_err)?,
+        }),
+        2 => WaypointPosition::Chunk(ChunkPos {
+            x: reader.var_i32().map_err(dec_err)?,
+            z: reader.var_i32().map_err(dec_err)?,
+        }),
+        3 => WaypointPosition::Azimuth(reader.f32().map_err(dec_err)?),
+        other => {
+            return Err(AdapterError::Decode(format!(
+                "unknown waypoint position type {other}"
+            )));
+        }
+    };
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::WaypointUpdated {
+        operation,
+        waypoint: TrackedWaypoint {
+            id,
+            style,
+            color,
+            position,
+        },
+    })])
+}
+
+/// Decodes `ClientboundShowDialogPacket`'s Play-state form.
+///
+/// The field is `ByteBufCodecs.holder(Registries.DIALOG, …)`: a VarInt where `0`
+/// means "an inline value follows" and `n > 0` means registry id `n - 1` with no
+/// further bytes. **The off-by-one is the trap** — reading the raw VarInt as the
+/// id would reference the wrong dialog for every entry.
+///
+/// The inline form is a `Dialog`, which is an NBT `Codec` union of six types with
+/// nested body/input/action trees — a schema, not a `StreamCodec` — so it is
+/// carried as raw network-NBT bytes for a renderer to parse.
+fn decode_show_dialog(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let holder = reader.var_i32().map_err(dec_err)?;
+    let (registry_id, inline) = if holder == 0 {
+        (None, Some(reader.remaining_bytes().to_vec()))
+    } else {
+        (Some(holder - 1), None)
+    };
+    Ok(vec![Directive::Emit(ClientEvent::DialogShown {
+        registry_id,
+        inline,
+    })])
+}
+
+/// `minecraft:map_decoration_type` registry paths by numeric id, from
+/// `.cache/mc/26.2/generated/reports/registries.json`.
+///
+/// A **built-in** registry, so the ids are fixed by the jar rather than synced
+/// during Configuration (`MapDecorationType.STREAM_CODEC` is
+/// `ByteBufCodecs.holderRegistry`, a bare VarInt registry id). That is why a
+/// table is correct here where it would be a guess for a dynamic registry — see
+/// [`TRIM_MATERIAL_IDS`] for the contrast.
+const MAP_DECORATION_TYPE_IDS: &[&str] = &[
+    "player",
+    "frame",
+    "red_marker",
+    "blue_marker",
+    "target_x",
+    "target_point",
+    "player_off_map",
+    "player_off_limits",
+    "mansion",
+    "monument",
+    "banner_white",
+    "banner_orange",
+    "banner_magenta",
+    "banner_light_blue",
+    "banner_yellow",
+    "banner_lime",
+    "banner_pink",
+    "banner_gray",
+    "banner_light_gray",
+    "banner_cyan",
+    "banner_purple",
+    "banner_blue",
+    "banner_brown",
+    "banner_green",
+    "banner_red",
+    "banner_black",
+    "red_x",
+    "village_desert",
+    "village_plains",
+    "village_savanna",
+    "village_snowy",
+    "village_taiga",
+    "jungle_temple",
+    "swamp_hut",
+    "trial_chambers",
+];
+
+/// Decodes `ClientboundMapItemDataPacket` (id 51).
+///
+/// Wire shape, from the record's own `STREAM_CODEC`: a VarInt `MapId`, a `byte`
+/// scale, a `bool` locked, `Optional<List<MapDecoration>>`, then
+/// `MapPatch.STREAM_CODEC`'s optional.
+///
+/// Two traps in the patch codec, both from `MapItemSavedData.MapPatch.read`:
+///
+/// * the field order on the wire is **width, height, startX, startY** — *not*
+///   the record's declaration order (`startX, startY, width, height`); and
+/// * the optional has **no boolean tag**. A `width` of zero *is* the absent
+///   case, so the four position bytes and the colour array are only present when
+///   the first byte is non-zero. Reading a leading `bool` here consumes the width.
+fn decode_map_item_data(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let map_id = reader.var_i32().map_err(dec_err)?;
+    let scale = reader.i8().map_err(dec_err)?;
+    let locked = reader.bool().map_err(dec_err)?;
+    let decorations = if reader.bool().map_err(dec_err)? {
+        let count = reader.var_i32().map_err(dec_err)?;
+        let count = usize::try_from(count)
+            .map_err(|_| AdapterError::Decode(format!("invalid map decoration count {count}")))?;
+        let mut list = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            let type_id = reader.var_i32().map_err(dec_err)?;
+            let path = usize::try_from(type_id)
+                .ok()
+                .and_then(|index| MAP_DECORATION_TYPE_IDS.get(index))
+                .ok_or_else(|| {
+                    AdapterError::Decode(format!("unknown map decoration type id {type_id}"))
+                })?;
+            let x = reader.i8().map_err(dec_err)?;
+            let y = reader.i8().map_err(dec_err)?;
+            let rot = reader.i8().map_err(dec_err)?;
+            let name = if reader.bool().map_err(dec_err)? {
+                Some(Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?))
+            } else {
+                None
+            };
+            list.push(MapDecoration {
+                kind: parse_key(path, "map decoration type")?,
+                x,
+                y,
+                // Vanilla's own record constructor masks this, so the client
+                // never sees a rotation outside 0..=15.
+                #[allow(clippy::cast_sign_loss)]
+                rotation: (rot as u8) & 15,
+                name,
+            });
+        }
+        Some(list)
+    } else {
+        None
+    };
+    let width = reader.u8().map_err(dec_err)?;
+    let color_patch = if width == 0 {
+        None
+    } else {
+        let height = reader.u8().map_err(dec_err)?;
+        let start_x = reader.u8().map_err(dec_err)?;
+        let start_y = reader.u8().map_err(dec_err)?;
+        let colors = reader.var_bytes(1 << 16).map_err(dec_err)?.to_vec();
+        let expected = usize::from(width) * usize::from(height);
+        if colors.len() != expected {
+            return Err(AdapterError::Decode(format!(
+                "map patch {width}x{height} carries {} colour bytes, expected {expected}",
+                colors.len()
+            )));
+        }
+        Some(MapPatch {
+            start_x,
+            start_y,
+            width,
+            height,
+            colors,
+        })
+    };
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::MapItemData {
+        map_id,
+        scale,
+        locked,
+        decorations,
+        color_patch,
+    })])
+}
+
+/// Reads one `ItemStackTemplate` (`ItemStackTemplate.STREAM_CODEC`).
+///
+/// **Not** the same shape as an `ItemStack`: the template writes the item holder
+/// *first* and the count second, where `ItemStack.OPTIONAL_STREAM_CODEC` leads
+/// with the count and uses `<= 0` as the empty sentinel. A template is never
+/// empty (its constructor rejects air and count 0), so there is no sentinel and
+/// no `Option`.
+fn read_item_stack_template(reader: &mut Reader<'_>) -> Result<ItemStack, AdapterError> {
+    let item_id = reader.var_i32().map_err(dec_err)?;
+    let name = item_name(item_id)
+        .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = u32::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
+    let (components, complete) = read_component_patch(reader, name)?;
+    if !complete {
+        return Err(AdapterError::Decode(format!(
+            "advancement icon {name} carries an unmodeled item component, so the rest of the packet is unreadable"
+        )));
+    }
+    Ok(ItemStack {
+        item: parse_key(name, "item")?,
+        count,
+        components,
+    })
+}
+
+/// Decodes `ClientboundUpdateAdvancementsPacket` (id 130).
+///
+/// Wire shape, from the packet's own reader: a `bool` reset, a list of
+/// `AdvancementHolder`, a collection of removed identifiers, a map of
+/// identifier → `AdvancementProgress`, then a `bool` showAdvancements.
+///
+/// `DisplayInfo`'s field order is **the wire's, not the datapack schema's**, and
+/// the two differ (a vendored `minecraft-data` 1.21.9 schema disagrees with 26.2
+/// here): `serializeToNetwork` writes title, description, icon, frame ordinal,
+/// then a **raw big-endian `int`** flag word (`writeInt`, not a byte), then the
+/// background identifier only when bit 0 is set, then x and y as floats.
+/// `announceChat` is not on the wire at all — vanilla's reader hardcodes
+/// `false` — so bit 1 is `showToast` and bit 2 is `hidden` with nothing between.
+fn decode_update_advancements(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let reset = reader.bool().map_err(dec_err)?;
+
+    let added_count = read_count(&mut reader, "advancement")?;
+    let mut added = Vec::with_capacity(added_count.min(4096));
+    for _ in 0..added_count {
+        let id = reader.string(32767).map_err(dec_err)?;
+        let id = parse_key(&id, "advancement")?;
+        let parent = if reader.bool().map_err(dec_err)? {
+            let parent = reader.string(32767).map_err(dec_err)?;
+            Some(parse_key(&parent, "advancement parent")?)
+        } else {
+            None
+        };
+        let display = if reader.bool().map_err(dec_err)? {
+            let title = Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?);
+            let description = Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?);
+            let icon = read_item_stack_template(&mut reader)?;
+            let ordinal = reader.var_i32().map_err(dec_err)?;
+            let frame = AdvancementFrame::from_ordinal(ordinal).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown advancement frame ordinal {ordinal}"))
+            })?;
+            let flags = reader.i32().map_err(dec_err)?;
+            let background = if flags & 1 != 0 {
+                let texture = reader.string(32767).map_err(dec_err)?;
+                Some(parse_key(&texture, "advancement background")?)
+            } else {
+                None
+            };
+            let x = reader.f32().map_err(dec_err)?;
+            let y = reader.f32().map_err(dec_err)?;
+            Some(AdvancementDisplay {
+                title,
+                description,
+                icon,
+                frame,
+                background,
+                show_toast: flags & 2 != 0,
+                hidden: flags & 4 != 0,
+                x,
+                y,
+            })
+        } else {
+            None
+        };
+        let group_count = read_count(&mut reader, "requirement group")?;
+        let mut requirements = Vec::with_capacity(group_count.min(4096));
+        for _ in 0..group_count {
+            let names = read_count(&mut reader, "requirement")?;
+            let mut group = Vec::with_capacity(names.min(4096));
+            for _ in 0..names {
+                group.push(reader.string(32767).map_err(dec_err)?);
+            }
+            requirements.push(group);
+        }
+        let sends_telemetry_event = reader.bool().map_err(dec_err)?;
+        added.push(AdvancementEntry {
+            id,
+            parent,
+            display,
+            requirements,
+            sends_telemetry_event,
+        });
+    }
+
+    let removed_count = read_count(&mut reader, "removed advancement")?;
+    let mut removed = Vec::with_capacity(removed_count.min(4096));
+    for _ in 0..removed_count {
+        let id = reader.string(32767).map_err(dec_err)?;
+        removed.push(parse_key(&id, "removed advancement")?);
+    }
+
+    let progress_count = read_count(&mut reader, "advancement progress")?;
+    let mut progress = Vec::with_capacity(progress_count.min(4096));
+    for _ in 0..progress_count {
+        let id = reader.string(32767).map_err(dec_err)?;
+        let id = parse_key(&id, "advancement progress")?;
+        let criteria_count = read_count(&mut reader, "criterion")?;
+        let mut criteria = Vec::with_capacity(criteria_count.min(4096));
+        for _ in 0..criteria_count {
+            let name = reader.string(32767).map_err(dec_err)?;
+            // `CriterionProgress` is a nullable `Instant`: a presence bool then,
+            // if set, epoch millis as a big-endian long (`writeInstant`).
+            let obtained = if reader.bool().map_err(dec_err)? {
+                Some(reader.i64().map_err(dec_err)?)
+            } else {
+                None
+            };
+            criteria.push((name, obtained));
+        }
+        progress.push((id, criteria));
+    }
+
+    let show_advancements = reader.bool().map_err(dec_err)?;
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::AdvancementsUpdated {
+        reset,
+        added,
+        removed,
+        progress,
+        show_advancements,
+    })])
+}
+
+/// A VarInt collection length, rejected rather than truncated when negative.
+fn read_count(reader: &mut Reader<'_>, what: &str) -> Result<usize, AdapterError> {
+    let count = reader.var_i32().map_err(dec_err)?;
+    usize::try_from(count).map_err(|_| AdapterError::Decode(format!("invalid {what} count {count}")))
+}
+
+/// Dispatches a clientbound Play-state packet by trying each already-split
+/// domain first, then falling back to the packets not yet split out of this
+/// file. Exactly one branch ever recognises a given `packet_id` (the wire ids
+/// are disjoint by construction).
 impl V770Adapter {
-    /// Handles a clientbound packet while in the login state.
-    fn handle_login(&self, packet_id: i32, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        if packet_id == login::clientbound::LOGIN_COMPRESSION {
-            let body: LoginCompression = decode_body(payload)?;
-            return Ok(vec![Directive::SetCompression(body.threshold)]);
-        }
-        if packet_id == login::clientbound::LOGIN_FINISHED {
-            // Validate the profile decodes, then acknowledge and advance.
-            let _profile: LoginFinished = decode_body(payload)?;
-            return Ok(vec![
-                send(login::serverbound::LOGIN_ACKNOWLEDGED, &LoginAcknowledged)?,
-                Directive::SetState(ConnectionState::Configuration),
-                send(
-                    configuration::serverbound::CLIENT_INFORMATION,
-                    &ClientInformation::default(),
-                )?,
-            ]);
-        }
-        if packet_id == login::clientbound::HELLO {
-            let request: EncryptionRequest = decode_body(payload)?;
-            // Hand the driver the protocol-shaped crypto inputs; it performs the
-            // key exchange and session auth and asks us back to frame the reply.
-            return Ok(vec![Directive::BeginEncryption {
-                server_id: request.server_id,
-                public_key: request.public_key,
-                verify_token: request.challenge,
-                should_authenticate: request.should_authenticate,
-            }]);
-        }
-        if packet_id == login::clientbound::LOGIN_DISCONNECT {
-            let body: LoginDisconnect = decode_body(payload)?;
-            return Ok(vec![Directive::Disconnect(Text::literal(body.reason))]);
-        }
-        if packet_id == login::clientbound::COOKIE_REQUEST {
-            // Issue #291: this state had no arm at all before now, a
-            // different code path from the Play-state one below.
-            return decode_cookie_request(payload);
-        }
-        if packet_id == login::clientbound::CUSTOM_QUERY {
-            // Issue #301: zero decode existed for this at all. See
-            // `decode_custom_query`'s own doc for why the reply is
-            // unconditionally empty, matching vanilla's own client.
-            return decode_custom_query(payload);
-        }
-        Ok(Vec::new())
-    }
-
-    /// Handles a clientbound packet while in the configuration state.
-    fn handle_configuration(
-        &self,
-        packet_id: i32,
-        payload: &[u8],
-    ) -> Result<Vec<Directive>, AdapterError> {
-        if packet_id == configuration::clientbound::SELECT_KNOWN_PACKS {
-            return Ok(vec![send(
-                configuration::serverbound::SELECT_KNOWN_PACKS,
-                &ServerboundKnownPacks { packs: Vec::new() },
-            )?]);
-        }
-        if packet_id == configuration::clientbound::REGISTRY_DATA {
-            // Issue #288: this arm did not exist, so 29 registries a join hit
-            // the `Ok(Vec::new())` fall-through below and dimension heights, sky
-            // light and the day clock were all hardcoded by level name instead.
-            //
-            // Decoded with a trailing-byte check, like every other packet here:
-            // a registry we do not model still has to consume its payload
-            // exactly, or a silently-wrong `Optional<Tag>` framing would go
-            // unnoticed until the one registry we *do* read happened to sort
-            // after it.
-            let data: RegistryData = decode_full(payload)?;
-            self.apply_registry_data(data);
-            return Ok(Vec::new());
-        }
-        if packet_id == configuration::clientbound::FINISH_CONFIGURATION {
-            return Ok(vec![
-                send(
-                    configuration::serverbound::FINISH_CONFIGURATION,
-                    &FinishConfiguration,
-                )?,
-                Directive::SetState(ConnectionState::Play),
-            ]);
-        }
-        if packet_id == configuration::clientbound::KEEP_ALIVE {
-            let keep_alive: KeepAlive = decode_body(payload)?;
-            return Ok(vec![send(
-                configuration::serverbound::KEEP_ALIVE,
-                &keep_alive,
-            )?]);
-        }
-        if packet_id == configuration::clientbound::PING {
-            let ping: Pong = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::Ping { id: ping.id })]);
-        }
-        if packet_id == configuration::clientbound::UPDATE_TAGS {
-            // Issue #296: block/item tags were always hardcoded from the
-            // vanilla census; this installs the server's own `minecraft:block`
-            // tag set as an override — see `decode_update_tags`'s own doc for
-            // the wire shape and `lodestone_data::tool`'s module docs for why
-            // the override is process-wide.
-            decode_update_tags(payload)?;
-            return Ok(Vec::new());
-        }
-        if packet_id == configuration::clientbound::COOKIE_REQUEST {
-            // Issue #291: also missing here, not just in `handle_login` — the
-            // issue named Login and Play explicitly; Configuration had the
-            // identical gap.
-            return decode_cookie_request(payload);
-        }
-        if packet_id == configuration::clientbound::CUSTOM_PAYLOAD {
-            // Issue #301: only `handle_play` decoded this before now; a
-            // server that sends plugin messages during Configuration (the
-            // vanilla mod-handshake window, before `minecraft:brand` is even
-            // announced by some servers) hit the fall-through below and lost
-            // the message entirely.
-            return decode_custom_payload(payload);
-        }
-        if packet_id == configuration::clientbound::RESOURCE_PACK_PUSH {
-            // Issue #294: `handle_play` decoded this before now; vanilla
-            // servers commonly push a required resource pack during
-            // Configuration, before the client reaches Play, and the
-            // fall-through below dropped it silently. Wire format is
-            // identical in both states.
-            let mut reader = Reader::new(payload);
-            let id = reader.uuid().map_err(dec_err)?;
-            let url = reader.string(32767).map_err(dec_err)?;
-            let hash = reader.string(40).map_err(dec_err)?;
-            let required = reader.bool().map_err(dec_err)?;
-            let has_prompt = reader.bool().map_err(dec_err)?;
-            let prompt = if has_prompt {
-                let component = read_network_nbt(&mut reader).map_err(dec_err)?;
-                Some(Text::from_nbt(&component))
-            } else {
-                None
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::ResourcePackPushed {
-                id,
-                url,
-                hash,
-                required,
-                prompt,
-            })]);
-        }
-        if packet_id == configuration::clientbound::RESOURCE_PACK_POP {
-            // Issue #294, same story as `RESOURCE_PACK_PUSH` just above: the
-            // pop for a pack pushed during Configuration never arrived at the
-            // client before now.
-            let mut reader = Reader::new(payload);
-            let has_id = reader.bool().map_err(dec_err)?;
-            let id = if has_id {
-                Some(reader.uuid().map_err(dec_err)?)
-            } else {
-                None
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::ResourcePackPopped { id })]);
-        }
-        if packet_id == configuration::clientbound::STORE_COOKIE {
-            // Same gap as the two above, found by the same scan: the
-            // configuration-phase `minecraft:store_cookie` fell through and was
-            // lost, while `handle_play` decoded it. Format is state-independent.
-            let mut reader = Reader::new(payload);
-            let key = reader.string(32767).map_err(dec_err)?;
-            let key = parse_key(&key, "cookie")?;
-            let cookie_payload = reader.var_bytes(5120).map_err(dec_err)?.to_vec();
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::CookieStored {
-                key,
-                payload: cookie_payload,
-            })]);
-        }
-        if packet_id == configuration::clientbound::TRANSFER {
-            // Same gap: `minecraft:transfer` is valid in Configuration (a
-            // redirect during the handshake), but only `handle_play` decoded
-            // it before now. Format is state-independent.
-            let mut reader = Reader::new(payload);
-            let host = reader.string(32767).map_err(dec_err)?;
-            let port = reader.var_i32().map_err(dec_err)?;
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::TransferRequested {
-                host,
-                port,
-            })]);
-        }
-        if packet_id == configuration::clientbound::CODE_OF_CONDUCT {
-            return Ok(vec![send(
-                configuration::serverbound::ACCEPT_CODE_OF_CONDUCT,
-                &AcceptCodeOfConduct,
-            )?]);
-        }
-        if packet_id == configuration::clientbound::DISCONNECT {
-            return Ok(vec![Directive::Disconnect(nbt_reason_text(payload)?)]);
-        }
-        Ok(Vec::new())
-    }
-
-    /// Handles a clientbound packet while in the play state.
     fn handle_play(
         &self,
         world: &mut dyn WorldSink,
         packet_id: i32,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
+        let mut directives = self.handle_play_connection(packet_id, payload)?;
+        if !directives.is_empty() {
+            return Ok(directives);
+        }
         if packet_id == play::clientbound::LOGIN {
             let body: GameLogin = decode_body(payload)?;
             // `dimension_type` is the registry holder id; `dimension` is the
@@ -3916,16 +4522,6 @@ impl V770Adapter {
                 }),
             ]);
         }
-        if packet_id == play::clientbound::KEEP_ALIVE {
-            let keep_alive: KeepAlive = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::KeepAlive {
-                id: keep_alive.id,
-            })]);
-        }
-        if packet_id == play::clientbound::PING {
-            let ping: Pong = decode_body(payload)?;
-            return Ok(vec![Directive::Emit(ClientEvent::Ping { id: ping.id })]);
-        }
         if packet_id == play::clientbound::CHUNK_BATCH_START {
             // Empty packet; it only marks the start of a batch for rate timing.
             Reader::new(payload).ensure_empty().map_err(dec_err)?;
@@ -3943,23 +4539,6 @@ impl V770Adapter {
                     desired_chunks_per_tick,
                 },
             )?]);
-        }
-        if packet_id == play::clientbound::START_CONFIGURATION {
-            // The server is pulling us back into configuration mid-session
-            // (resource-pack/datapack reload, `transfer`). Acknowledge on the
-            // play protocol, then switch state so subsequent packets decode as
-            // configuration. The packet body is empty.
-            Reader::new(payload).ensure_empty().map_err(dec_err)?;
-            return Ok(vec![
-                send(
-                    play::serverbound::CONFIGURATION_ACKNOWLEDGED,
-                    &ConfigurationAcknowledged,
-                )?,
-                Directive::SetState(ConnectionState::Configuration),
-            ]);
-        }
-        if packet_id == play::clientbound::DISCONNECT {
-            return Ok(vec![Directive::Disconnect(nbt_reason_text(payload)?)]);
         }
         if packet_id == play::clientbound::PLAYER_CHAT {
             let mut reader = Reader::new(payload);
@@ -5434,92 +6013,6 @@ impl V770Adapter {
                 values,
             })]);
         }
-        if packet_id == play::clientbound::TRANSFER {
-            let mut reader = Reader::new(payload);
-            let host = reader.string(32767).map_err(dec_err)?;
-            let port = reader.var_i32().map_err(dec_err)?;
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::TransferRequested {
-                host,
-                port,
-            })]);
-        }
-        if packet_id == play::clientbound::COOKIE_REQUEST {
-            return decode_cookie_request(payload);
-        }
-        if packet_id == play::clientbound::STORE_COOKIE {
-            let mut reader = Reader::new(payload);
-            let key = reader.string(32767).map_err(dec_err)?;
-            let key = parse_key(&key, "cookie")?;
-            let cookie_payload = reader.var_bytes(5120).map_err(dec_err)?.to_vec();
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::CookieStored {
-                key,
-                payload: cookie_payload,
-            })]);
-        }
-        if packet_id == play::clientbound::RESOURCE_PACK_PUSH {
-            let mut reader = Reader::new(payload);
-            let id = reader.uuid().map_err(dec_err)?;
-            let url = reader.string(32767).map_err(dec_err)?;
-            let hash = reader.string(40).map_err(dec_err)?;
-            let required = reader.bool().map_err(dec_err)?;
-            let has_prompt = reader.bool().map_err(dec_err)?;
-            let prompt = if has_prompt {
-                let component = read_network_nbt(&mut reader).map_err(dec_err)?;
-                Some(Text::from_nbt(&component))
-            } else {
-                None
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::ResourcePackPushed {
-                id,
-                url,
-                hash,
-                required,
-                prompt,
-            })]);
-        }
-        if packet_id == play::clientbound::RESOURCE_PACK_POP {
-            let mut reader = Reader::new(payload);
-            let has_id = reader.bool().map_err(dec_err)?;
-            let id = if has_id {
-                Some(reader.uuid().map_err(dec_err)?)
-            } else {
-                None
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::ResourcePackPopped { id })]);
-        }
-        if packet_id == play::clientbound::CUSTOM_PAYLOAD {
-            return decode_custom_payload(payload);
-        }
-        if packet_id == play::clientbound::SERVER_DATA {
-            let mut reader = Reader::new(payload);
-            let motd_nbt = read_network_nbt(&mut reader).map_err(dec_err)?;
-            let motd = Text::from_nbt(&motd_nbt);
-            let has_icon = reader.bool().map_err(dec_err)?;
-            let icon = if has_icon {
-                let remaining = reader.remaining();
-                Some(reader.var_bytes(remaining).map_err(dec_err)?.to_vec())
-            } else {
-                None
-            };
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::ServerDataReceived {
-                motd,
-                icon,
-            })]);
-        }
-        if packet_id == play::clientbound::PONG_RESPONSE {
-            // `ClientboundPongResponsePacket` (the `net.minecraft.network.
-            // protocol.ping` one), distinct from the `PING`/`ClientEvent::Ping`
-            // pair handled above.
-            let mut reader = Reader::new(payload);
-            let time = reader.i64().map_err(dec_err)?;
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::PongReceived { time })]);
-        }
         if packet_id == play::clientbound::DELETE_CHAT {
             // `MessageSignature.Packed`: a VarInt `id + 1`; `0` is followed by
             // a full 256-byte signature, any other value is `id - 1` into the
@@ -5575,40 +6068,12 @@ impl V770Adapter {
                 at_entity,
             })]);
         }
-        if packet_id == play::clientbound::UPDATE_TAGS {
-            // Same wire shape and override as the Configuration-state arm
-            // (issue #296) — vanilla can resend tags in Play too (e.g. a
-            // reload), and `ClientCommonPacketListener::handleUpdateTags` is
-            // shared by both states in the decompiled source.
-            decode_update_tags(payload)?;
-            return Ok(Vec::new());
-        }
-        if packet_id == play::clientbound::BUNDLE_DELIMITER {
-            // No fields: `ClientboundBundleDelimiterPacket` extends
-            // `BundleDelimiterPacket`, which overrides neither a reader nor a
-            // writer (`.cache/mc/26.2/client-src/net/minecraft/network/protocol/
-            // BundleDelimiterPacket.java`) — vanilla's own pipeline
-            // (`BundlerInfo.java`) never puts a body on the wire for it either;
-            // it is purely a toggle the pipeline uses to group the packets
-            // between two delimiters into one atomic apply. Issue #299: before
-            // this arm, `BUNDLE_DELIMITER` fell through to the catch-all below
-            // and decoded to zero directives, silently and safely (each real
-            // packet is still independently length-framed by the transport, so
-            // nothing about framing was ever at risk) — the actual gap was that
-            // the atomicity guarantee itself did not exist. See
-            // `Directive::BundleDelimiter`'s own doc for why pairing the two
-            // delimiters happens above this crate, not here.
-            let reader = Reader::new(payload);
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::BundleDelimiter]);
-        }
         if packet_id == play::clientbound::MAP_ITEM_DATA {
             return decode_map_item_data(payload);
         }
         if packet_id == play::clientbound::UPDATE_ADVANCEMENTS {
             return decode_update_advancements(payload);
         }
-
         // ---- issue #26: the remaining clientbound set ----------------------
         //
         // Every layout below was read off the record definition in
@@ -5729,19 +6194,6 @@ impl V770Adapter {
                 relative,
             })]);
         }
-        if packet_id == play::clientbound::LOW_DISK_SPACE_WARNING {
-            // `StreamCodec.unit(INSTANCE)`: zero bytes. `ensure_empty` is the
-            // whole decode, and it is worth keeping — a non-empty body would mean
-            // the id table is wrong, not that the packet grew a field.
-            Reader::new(payload).ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::LowDiskSpaceWarning)]);
-        }
-        if packet_id == play::clientbound::CUSTOM_REPORT_DETAILS {
-            return decode_custom_report_details(payload);
-        }
-        if packet_id == play::clientbound::SERVER_LINKS {
-            return decode_server_links(payload);
-        }
         if packet_id == play::clientbound::WAYPOINT {
             return decode_waypoint(payload);
         }
@@ -5846,1019 +6298,8 @@ impl V770Adapter {
         if packet_id == play::clientbound::MERCHANT_OFFERS {
             return decode_merchant_offers(payload);
         }
-        // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())
     }
-}
-
-/// Registry ids of `minecraft:slot_display`, from `SlotDisplays.java`'s
-/// registration order (and cross-checked against `registries.json`).
-///
-/// A **built-in** registry, so these ids are fixed by the jar rather than synced
-/// during Configuration — the same reason `MAP_DECORATION_TYPE_IDS` is a table.
-mod slot_display {
-    pub const EMPTY: i32 = 0;
-    pub const ANY_FUEL: i32 = 1;
-    pub const WITH_ANY_POTION: i32 = 2;
-    pub const ONLY_WITH_COMPONENT: i32 = 3;
-    pub const ITEM: i32 = 4;
-    pub const ITEM_STACK: i32 = 5;
-    pub const TAG: i32 = 6;
-    pub const DYED: i32 = 7;
-    pub const SMITHING_TRIM: i32 = 8;
-    pub const WITH_REMAINDER: i32 = 9;
-    pub const COMPOSITE: i32 = 10;
-}
-
-/// What walking a `SlotDisplay` yielded.
-///
-/// `complete == false` means the walk hit something this adapter does not model
-/// and **the reader's position is no longer trustworthy** — the caller must
-/// abandon the whole packet rather than continue. Same convention as
-/// [`read_component_patch`]'s second return value, and for the same reason: a
-/// nested union with per-entry codecs cannot be skipped generically, so partial
-/// progress is the honest outcome and silently continuing would misread every
-/// following field.
-#[derive(Debug, Default)]
-struct SlotDisplayItems {
-    /// Item registry ids this display can show, in encounter order.
-    items: Vec<i32>,
-    /// Whether the walk consumed the display exactly.
-    complete: bool,
-}
-
-impl SlotDisplayItems {
-    fn incomplete() -> Self {
-        Self {
-            items: Vec::new(),
-            complete: false,
-        }
-    }
-}
-
-/// Walks one `SlotDisplay` (`SlotDisplay.STREAM_CODEC`), collecting the item ids
-/// it can display.
-///
-/// # This is a byte-exact walk, not a skip
-///
-/// `SlotDisplay` is a **recursive** registry-dispatched union of eleven variants,
-/// four of which contain further `SlotDisplay`s and one of which
-/// (`composite`) contains a list of them. There is no length prefix anywhere, so
-/// there is no way to skip one without decoding it — which is why every consumer
-/// of `RecipeDisplay` in this crate had to wait for this function, and why the
-/// five recipe packets landed together.
-///
-/// `depth` bounds the recursion: a malicious or corrupt payload could otherwise
-/// nest `composite` indefinitely and blow the stack. Vanilla's own nesting is two
-/// or three deep in practice.
-fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayItems, AdapterError> {
-    // 16 is far above vanilla's own two-or-three and well below anything that
-    // threatens the stack. Returning `incomplete` rather than erroring keeps a
-    // hostile payload a dropped packet instead of a disconnect.
-    if depth > 16 {
-        return Ok(SlotDisplayItems::incomplete());
-    }
-    let kind = reader.var_i32().map_err(dec_err)?;
-    let mut items = Vec::new();
-    match kind {
-        slot_display::EMPTY | slot_display::ANY_FUEL => {}
-        slot_display::ITEM => {
-            items.push(reader.var_i32().map_err(dec_err)?);
-        }
-        slot_display::ITEM_STACK => {
-            // `ItemStackTemplate.STREAM_CODEC`: item id, count, then a
-            // `DataComponentPatch` — which is exactly what `read_component_patch`
-            // walks, including its bail-out on an unmodeled component type.
-            let item_id = reader.var_i32().map_err(dec_err)?;
-            let _count = reader.var_i32().map_err(dec_err)?;
-            let name = item_name(item_id).unwrap_or("minecraft:air");
-            let (_components, complete) = read_component_patch(reader, name)?;
-            if !complete {
-                return Ok(SlotDisplayItems::incomplete());
-            }
-            items.push(item_id);
-        }
-        slot_display::TAG => {
-            // `TagKey.streamCodec` is one `Identifier` string. The tag's *members*
-            // are not on the wire, so there is no item id to collect — a consumer
-            // that needs one resolves the tag itself.
-            let _tag = reader.string(32767).map_err(dec_err)?;
-        }
-        slot_display::WITH_ANY_POTION => {
-            let inner = read_slot_display(reader, depth + 1)?;
-            if !inner.complete {
-                return Ok(SlotDisplayItems::incomplete());
-            }
-            items.extend(inner.items);
-        }
-        slot_display::ONLY_WITH_COMPONENT => {
-            let inner = read_slot_display(reader, depth + 1)?;
-            if !inner.complete {
-                return Ok(SlotDisplayItems::incomplete());
-            }
-            // `DataComponentType.STREAM_CODEC` is a bare VarInt registry id.
-            let _component_type = reader.var_i32().map_err(dec_err)?;
-            items.extend(inner.items);
-        }
-        slot_display::DYED | slot_display::WITH_REMAINDER => {
-            // Two `SlotDisplay`s. For `dyed` they are (dye, target); for
-            // `with_remainder` (input, remainder). Both halves are walked because
-            // both must be consumed — only the first carries the item a recipe
-            // panel wants, but skipping the second is not an option (no length
-            // prefix).
-            let first = read_slot_display(reader, depth + 1)?;
-            if !first.complete {
-                return Ok(SlotDisplayItems::incomplete());
-            }
-            let second = read_slot_display(reader, depth + 1)?;
-            if !second.complete {
-                return Ok(SlotDisplayItems::incomplete());
-            }
-            items.extend(first.items);
-        }
-        slot_display::SMITHING_TRIM => {
-            for _ in 0..3 {
-                let inner = read_slot_display(reader, depth + 1)?;
-                if !inner.complete {
-                    return Ok(SlotDisplayItems::incomplete());
-                }
-                items.extend(inner.items);
-            }
-            // `TrimPattern.STREAM_CODEC` is `ByteBufCodecs.holder`: `0` means an
-            // inline `TrimPattern` follows, which this adapter does not model, so
-            // that case abandons the packet rather than guessing at its length.
-            let holder = reader.var_i32().map_err(dec_err)?;
-            if holder == 0 {
-                return Ok(SlotDisplayItems::incomplete());
-            }
-        }
-        slot_display::COMPOSITE => {
-            let count = reader.var_i32().map_err(dec_err)?;
-            let count = usize::try_from(count).map_err(|_| {
-                AdapterError::Decode(format!("invalid composite slot display count {count}"))
-            })?;
-            for _ in 0..count {
-                let inner = read_slot_display(reader, depth + 1)?;
-                if !inner.complete {
-                    return Ok(SlotDisplayItems::incomplete());
-                }
-                items.extend(inner.items);
-            }
-        }
-        // An id outside the built-in table means a modded registry entry whose
-        // payload shape is unknown. The reader cannot go on.
-        _ => return Ok(SlotDisplayItems::incomplete()),
-    }
-    Ok(SlotDisplayItems {
-        items,
-        complete: true,
-    })
-}
-
-/// Walks one `RecipeDisplay` and returns the item ids of its **result** slot.
-///
-/// The result is what a recipe panel and a toast both key on; the ingredient
-/// slots are walked only because they must be consumed. Returns `None` when the
-/// walk hit something unmodeled, with the same "abandon the packet" contract as
-/// [`read_slot_display`].
-///
-/// Variant ids are `RecipeDisplays.java`'s registration order: shapeless, shaped,
-/// furnace, stonecutter, smithing.
-fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<Vec<i32>>, AdapterError> {
-    let kind = reader.var_i32().map_err(dec_err)?;
-    // Each variant is a fixed sequence of `SlotDisplay`s plus, for two of them,
-    // some scalars. `result_index` is which of the walked displays is the result,
-    // and `station_last` is true for every variant because `craftingStation` is
-    // always the final `SlotDisplay`.
-    let mut walked: Vec<Vec<i32>> = Vec::new();
-    let walk = |reader: &mut Reader<'_>, walked: &mut Vec<Vec<i32>>| -> Result<bool, AdapterError> {
-        let display = read_slot_display(reader, 0)?;
-        if !display.complete {
-            return Ok(false);
-        }
-        walked.push(display.items);
-        Ok(true)
-    };
-    let result_index = match kind {
-        // crafting_shapeless: list<SlotDisplay> ingredients, result, station.
-        0 => {
-            let count = reader.var_i32().map_err(dec_err)?;
-            let count = usize::try_from(count).map_err(|_| {
-                AdapterError::Decode(format!("invalid shapeless ingredient count {count}"))
-            })?;
-            for _ in 0..count {
-                if !walk(reader, &mut walked)? {
-                    return Ok(None);
-                }
-            }
-            let ingredients = walked.len();
-            for _ in 0..2 {
-                if !walk(reader, &mut walked)? {
-                    return Ok(None);
-                }
-            }
-            ingredients
-        }
-        // crafting_shaped: width, height, list<SlotDisplay>, result, station.
-        1 => {
-            let _width = reader.var_i32().map_err(dec_err)?;
-            let _height = reader.var_i32().map_err(dec_err)?;
-            let count = reader.var_i32().map_err(dec_err)?;
-            let count = usize::try_from(count).map_err(|_| {
-                AdapterError::Decode(format!("invalid shaped ingredient count {count}"))
-            })?;
-            for _ in 0..count {
-                if !walk(reader, &mut walked)? {
-                    return Ok(None);
-                }
-            }
-            let ingredients = walked.len();
-            for _ in 0..2 {
-                if !walk(reader, &mut walked)? {
-                    return Ok(None);
-                }
-            }
-            ingredients
-        }
-        // furnace: ingredient, fuel, result, station, duration, experience.
-        2 => {
-            for _ in 0..4 {
-                if !walk(reader, &mut walked)? {
-                    return Ok(None);
-                }
-            }
-            let _duration = reader.var_i32().map_err(dec_err)?;
-            let _experience = reader.f32().map_err(dec_err)?;
-            2
-        }
-        // stonecutter: input, result, station.
-        3 => {
-            for _ in 0..3 {
-                if !walk(reader, &mut walked)? {
-                    return Ok(None);
-                }
-            }
-            1
-        }
-        // smithing: template, base, addition, result, station.
-        4 => {
-            for _ in 0..5 {
-                if !walk(reader, &mut walked)? {
-                    return Ok(None);
-                }
-            }
-            3
-        }
-        _ => return Ok(None),
-    };
-    Ok(walked.get(result_index).cloned().or(Some(Vec::new())))
-}
-
-/// Reads a `DebugSubscription.Update`'s dispatch head: the subscription's
-/// registry id resolved to its identifier, then `ByteBufCodecs.optional`'s
-/// present-flag, then the rest of the payload as opaque bytes.
-///
-/// The payload is opaque because the value codec is chosen per registry entry and
-/// the seventeen registered ones share no shape — one (`dedicated_server_tick_time`)
-/// has a `null` value codec and throws if it is ever sent this way. See
-/// `lodestone_game::debug_feeds`' module doc.
-fn read_debug_update(
-    reader: &mut Reader<'_>,
-) -> Result<(ResourceKey, Option<Vec<u8>>), AdapterError> {
-    let subscription = read_debug_subscription_key(reader)?;
-    let present = reader.bool().map_err(dec_err)?;
-    let value = if present {
-        Some(reader.remaining_bytes().to_vec())
-    } else {
-        None
-    };
-    Ok((subscription, value))
-}
-
-/// Reads a `minecraft:debug_subscription` registry id and resolves it.
-///
-/// An unknown id is a decode **error** rather than a synthetic key: the id is the
-/// dispatch discriminant, so not knowing it means the bytes after it cannot be
-/// attributed, and inventing `lodestone:unknown_7` would let two different feeds
-/// collide in the store.
-fn read_debug_subscription_key(reader: &mut Reader<'_>) -> Result<ResourceKey, AdapterError> {
-    let id = reader.var_i32().map_err(dec_err)?;
-    let name = crate::stat_debug_registries::debug_subscription_name(id).ok_or_else(|| {
-        AdapterError::Decode(format!("unknown debug_subscription registry id {id}"))
-    })?;
-    parse_key(name, "debug subscription")
-}
-
-/// Decodes `ClientboundAwardStatsPacket`: a VarInt-counted map of
-/// `(stat_type id, value id) -> count`.
-///
-/// `Stat.STREAM_CODEC` is `registry(STAT_TYPE).dispatch(Stat::getType,
-/// StatType::streamCodec)`, so the **second** id's registry depends on the first:
-/// a value under `minecraft:mined` is a block, under `minecraft:killed` an entity
-/// type, and under `minecraft:custom` one of the 77 custom stats. Resolving it
-/// with one fixed table would silently mislabel every category but one.
-///
-/// An id this build cannot resolve yields `value: None` rather than an error — the
-/// count is still correct and vanilla's own General tab is entirely
-/// `minecraft:custom`, which we always resolve.
-fn decode_award_stats(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    use crate::stat_debug_registries::{
-        StatValueRegistry, custom_stat_name, stat_type_name, stat_value_registry,
-    };
-
-    let mut reader = Reader::new(payload);
-    let count = reader.var_i32().map_err(dec_err)?;
-    let count = usize::try_from(count)
-        .map_err(|_| AdapterError::Decode(format!("invalid award_stats count {count}")))?;
-    let mut stats = Vec::with_capacity(count.min(4096));
-    for _ in 0..count {
-        let type_id = reader.var_i32().map_err(dec_err)?;
-        let value_id = reader.var_i32().map_err(dec_err)?;
-        let stat_count = reader.var_i32().map_err(dec_err)?;
-        let type_name = stat_type_name(type_id).ok_or_else(|| {
-            AdapterError::Decode(format!("unknown stat_type registry id {type_id}"))
-        })?;
-        let value_name = match stat_value_registry(type_id) {
-            Some(StatValueRegistry::CustomStat) => custom_stat_name(value_id),
-            Some(StatValueRegistry::Item) => item_name(value_id),
-            Some(StatValueRegistry::EntityType) => entity_type_name(value_id),
-            // `block_type_name` indexes the `minecraft:block` *registry* (one id
-            // per block type, registration order), which is what a `minecraft:mined`
-            // stat value is — not a palette state id. `block_name` would be the
-            // wrong table here and would resolve every id to an unrelated block.
-            Some(StatValueRegistry::Block) => {
-                u32::try_from(value_id).ok().and_then(block_type_name)
-            }
-            None => None,
-        };
-        stats.push(StatAward {
-            stat_type: parse_key(type_name, "stat type")?,
-            value: match value_name {
-                Some(name) => Some(parse_key(name, "stat value")?),
-                None => None,
-            },
-            count: stat_count,
-        });
-    }
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![Directive::Emit(ClientEvent::StatisticsAwarded {
-        stats,
-    })])
-}
-
-/// Consumes a `HolderSet<Item>` (`Ingredient.CONTENTS_STREAM_CODEC`) and returns
-/// the explicit item ids, or an empty list for the tag form.
-///
-/// Same wire shape as [`read_block_holder_set`], one registry over: a VarInt where
-/// `0` means a tag identifier follows and `n` means `n - 1` explicit ids.
-fn read_item_holder_set(reader: &mut Reader<'_>) -> Result<Vec<i32>, AdapterError> {
-    let discriminator = reader.var_i32().map_err(dec_err)?;
-    if discriminator == 0 {
-        let _tag = reader.string(32767).map_err(dec_err)?;
-        return Ok(Vec::new());
-    }
-    let count = usize::try_from(discriminator - 1)
-        .map_err(|_| AdapterError::Decode(format!("invalid item set size {discriminator}")))?;
-    let mut items = Vec::with_capacity(count.min(1024));
-    for _ in 0..count {
-        items.push(reader.var_i32().map_err(dec_err)?);
-    }
-    Ok(items)
-}
-
-/// Decodes `ClientboundRecipeBookAddPacket`.
-///
-/// **The trailing `replace: bool` sits after the entry list**, so the list cannot
-/// be taken as opaque trailing bytes — the whole reason this packet waited for
-/// [`read_slot_display`]. Each entry is a `RecipeDisplayEntry` then an `i8` flags
-/// byte (bit 0 notification, bit 1 highlight).
-///
-/// `RecipeDisplayEntry`'s `group` field is `ByteBufCodecs.OPTIONAL_VAR_INT`: a
-/// single VarInt where `0` is absent and a present value `v` is written `v + 1` —
-/// **not** the usual bool-then-value optional. A bool-prefixed reader would
-/// mis-frame every entry after the first.
-fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let count = reader.var_i32().map_err(dec_err)?;
-    let count = usize::try_from(count)
-        .map_err(|_| AdapterError::Decode(format!("invalid recipe_book_add count {count}")))?;
-    let mut entries = Vec::with_capacity(count.min(4096));
-    for _ in 0..count {
-        let display_id = reader.var_i32().map_err(dec_err)?;
-        let Some(result_items) = read_recipe_display(&mut reader)? else {
-            return Ok(Vec::new());
-        };
-        // `OPTIONAL_VAR_INT`, not a bool-prefixed optional.
-        let _group = reader.var_i32().map_err(dec_err)?;
-        let _category = reader.var_i32().map_err(dec_err)?;
-        if reader.bool().map_err(dec_err)? {
-            let requirement_count = reader.var_i32().map_err(dec_err)?;
-            let requirement_count = usize::try_from(requirement_count).map_err(|_| {
-                AdapterError::Decode(format!(
-                    "invalid crafting requirement count {requirement_count}"
-                ))
-            })?;
-            for _ in 0..requirement_count {
-                let _ingredient = read_item_holder_set(&mut reader)?;
-            }
-        }
-        let flags = reader.i8().map_err(dec_err)?;
-        entries.push(RecipeBookEntry {
-            display_id,
-            result_items,
-            notification: flags & 0x01 != 0,
-            highlight: flags & 0x02 != 0,
-        });
-    }
-    let replace = reader.bool().map_err(dec_err)?;
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![Directive::Emit(ClientEvent::RecipeBookAdded {
-        entries,
-        replace,
-    })])
-}
-
-/// Decodes `ClientboundUpdateRecipesPacket`: the property sets, then the
-/// stonecutter list.
-///
-/// Despite the name this is **not** the recipe corpus — it is the per-slot "which
-/// items are valid here" sets vanilla's screens grey out against, plus the
-/// stonecutter's own input→result pairs. A `RecipePropertySet` is a VarInt-counted
-/// list of item registry ids and needs no display walk; the stonecutter half does.
-fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let set_count = reader.var_i32().map_err(dec_err)?;
-    let set_count = usize::try_from(set_count)
-        .map_err(|_| AdapterError::Decode(format!("invalid property set count {set_count}")))?;
-    let mut item_sets = Vec::with_capacity(set_count.min(256));
-    for _ in 0..set_count {
-        let key = reader.string(32767).map_err(dec_err)?;
-        let item_count = reader.var_i32().map_err(dec_err)?;
-        let item_count = usize::try_from(item_count)
-            .map_err(|_| AdapterError::Decode(format!("invalid property item count {item_count}")))?;
-        let mut items = Vec::with_capacity(item_count.min(4096));
-        for _ in 0..item_count {
-            items.push(reader.var_i32().map_err(dec_err)?);
-        }
-        item_sets.push((parse_key(&key, "recipe property set")?, items));
-    }
-    let stonecutter_count = reader.var_i32().map_err(dec_err)?;
-    let stonecutter_count = usize::try_from(stonecutter_count).map_err(|_| {
-        AdapterError::Decode(format!("invalid stonecutter count {stonecutter_count}"))
-    })?;
-    let mut stonecutter_results = Vec::with_capacity(stonecutter_count.min(4096));
-    for _ in 0..stonecutter_count {
-        // `SingleInputEntry`: an `Ingredient` (HolderSet<Item>) then a
-        // `SlotDisplay` — a bare display, not a whole `RecipeDisplay`.
-        let _input = read_item_holder_set(&mut reader)?;
-        let display = read_slot_display(&mut reader, 0)?;
-        if !display.complete {
-            // Emit what was decoded before the unmodeled entry rather than the
-            // whole packet: the property sets above are complete and independently
-            // useful, and they are the half a screen actually reads.
-            return Ok(vec![Directive::Emit(
-                ClientEvent::RecipePropertySetsUpdated {
-                    item_sets,
-                    stonecutter_results,
-                },
-            )]);
-        }
-        stonecutter_results.push(display.items);
-    }
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![Directive::Emit(
-        ClientEvent::RecipePropertySetsUpdated {
-            item_sets,
-            stonecutter_results,
-        },
-    )])
-}
-
-/// Decodes `ClientboundMerchantOffersPacket`.
-///
-/// # The two traps
-///
-/// **Five of `MerchantOffer`'s fields are big-endian `i32`s, not VarInts** —
-/// `uses`, `maxUses`, `xp`, `specialPriceDiff` and `demand` are all `writeInt`.
-/// Almost every other integer in this protocol is a VarInt, so a
-/// VarInt-by-default reader gets all five wrong *and* desynchronises everything
-/// after them.
-///
-/// **The trailing scalars come after the offer list.** `villagerLevel`,
-/// `villagerXp`, `showProgress` and `canRestock` are all past the offers, so they
-/// are unreachable without parsing every `MerchantOffer` — including each
-/// `ItemCost`'s `DataComponentExactPredicate`, which is a VarInt-counted list of
-/// typed components. That list is `EMPTY` for every vanilla trade; a non-empty one
-/// is unmodeled here and abandons the packet rather than guessing at its length.
-fn decode_merchant_offers(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let window_id = reader.var_i32().map_err(dec_err)?;
-    let count = reader.var_i32().map_err(dec_err)?;
-    let count = usize::try_from(count)
-        .map_err(|_| AdapterError::Decode(format!("invalid merchant offer count {count}")))?;
-    let mut offers = Vec::with_capacity(count.min(64));
-    for _ in 0..count {
-        let Some(cost_a) = read_item_cost(&mut reader)? else {
-            return Ok(Vec::new());
-        };
-        // **This was the bug.** It read `.stack` off the old struct and dropped
-        // the completeness flag, so an offer whose result carried an unmodeled
-        // component left the reader parked mid-payload and the loop went on to
-        // read this offer's remaining eight fields — and then the *next* offer —
-        // out of that component's interior. On a plugin server stamping
-        // `minecraft:custom_data` on every trade result, that is one warning per
-        // offer followed by an over-read blamed on framing. An offer list has no
-        // per-entry length prefix and the trailing `villagerLevel`/`villagerXp`
-        // scalars sit past it, so there is nothing to resynchronise to: the only
-        // correct move is to abandon the packet, exactly as a non-empty
-        // `DataComponentExactPredicate` does two lines up.
-        let result = match read_item_stack(&mut reader)? {
-            DecodedStack::Complete(stack) => stack,
-            DecodedStack::Partial(_) => return Ok(Vec::new()),
-        };
-        let cost_b = if reader.bool().map_err(dec_err)? {
-            match read_item_cost(&mut reader)? {
-                Some(cost) => Some(cost),
-                None => return Ok(Vec::new()),
-            }
-        } else {
-            None
-        };
-        let out_of_stock = reader.bool().map_err(dec_err)?;
-        // The five `writeInt` fields. Not VarInts.
-        let uses = reader.i32().map_err(dec_err)?;
-        let max_uses = reader.i32().map_err(dec_err)?;
-        let xp = reader.i32().map_err(dec_err)?;
-        let special_price_diff = reader.i32().map_err(dec_err)?;
-        let price_multiplier = reader.f32().map_err(dec_err)?;
-        let demand = reader.i32().map_err(dec_err)?;
-        offers.push(ModelMerchantOffer {
-            cost_a,
-            cost_b,
-            result,
-            out_of_stock,
-            uses,
-            max_uses,
-            xp,
-            special_price_diff,
-            price_multiplier,
-            demand,
-        });
-    }
-    let villager_level = reader.var_i32().map_err(dec_err)?;
-    let villager_xp = reader.var_i32().map_err(dec_err)?;
-    let show_progress = reader.bool().map_err(dec_err)?;
-    let can_restock = reader.bool().map_err(dec_err)?;
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![Directive::Emit(ClientEvent::MerchantOffersReceived {
-        window_id,
-        offers,
-        villager_level,
-        villager_xp,
-        show_progress,
-        can_restock,
-    })])
-}
-
-/// Reads one `ItemCost`: item registry id, count, then a
-/// `DataComponentExactPredicate`.
-///
-/// Returns `None` when the predicate is non-empty, which this adapter does not
-/// model — see [`decode_merchant_offers`]'s doc. `EMPTY` (a zero count) is what
-/// every vanilla trade sends.
-fn read_item_cost(reader: &mut Reader<'_>) -> Result<Option<(i32, i32)>, AdapterError> {
-    let item_id = reader.var_i32().map_err(dec_err)?;
-    let count = reader.var_i32().map_err(dec_err)?;
-    let predicate_count = reader.var_i32().map_err(dec_err)?;
-    if predicate_count != 0 {
-        return Ok(None);
-    }
-    Ok(Some((item_id, count)))
-}
-
-/// Decodes `ClientboundCustomReportDetailsPacket`: at most 32 `(title,
-/// description)` string pairs, titles capped at 128 chars and descriptions at
-/// 4096.
-fn decode_custom_report_details(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let count = reader.var_i32().map_err(dec_err)?;
-    let count = usize::try_from(count).map_err(|_| {
-        AdapterError::Decode(format!("invalid custom_report_details count {count}"))
-    })?;
-    if count > 32 {
-        return Err(AdapterError::Decode(format!(
-            "custom_report_details carries {count} entries, over the wire's 32 limit"
-        )));
-    }
-    let mut details = Vec::with_capacity(count);
-    for _ in 0..count {
-        let title = reader.string(128).map_err(dec_err)?;
-        let description = reader.string(4096).map_err(dec_err)?;
-        details.push((title, description));
-    }
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![Directive::Emit(ClientEvent::CustomReportDetails {
-        details,
-    })])
-}
-
-/// Decodes `ClientboundServerLinksPacket`.
-///
-/// Each entry is `ByteBufCodecs.either(KnownLinkType, Component)` then the URL,
-/// and **`true` selects `Left`, which is the known-type id** — not the custom
-/// component. Getting that polarity backwards produces a decode that succeeds
-/// while reading a VarInt as the start of an NBT blob, which is why it is called
-/// out here and gated in `tests/remaining_clientbound.rs`.
-fn decode_server_links(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let count = reader.var_i32().map_err(dec_err)?;
-    let count = usize::try_from(count)
-        .map_err(|_| AdapterError::Decode(format!("invalid server_links count {count}")))?;
-    let mut links = Vec::with_capacity(count.min(256));
-    for _ in 0..count {
-        let kind = if reader.bool().map_err(dec_err)? {
-            ServerLinkKind::Known(reader.var_i32().map_err(dec_err)?)
-        } else {
-            let component = read_network_nbt(&mut reader).map_err(dec_err)?;
-            ServerLinkKind::Custom(Text::from_nbt(&component))
-        };
-        let url = reader.string(32767).map_err(dec_err)?;
-        links.push(ServerLink { kind, url });
-    }
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![Directive::Emit(ClientEvent::ServerLinksReceived {
-        links,
-    })])
-}
-
-/// Decodes `ClientboundTrackedWaypointPacket` and its hand-written
-/// `TrackedWaypoint.write`.
-///
-/// The position is a four-way tagged union, not an optional: `EMPTY` carries
-/// nothing, `VEC3I` three VarInts, `CHUNK` two, and `AZIMUTH` one f32 bearing.
-/// Vanilla degrades to the coarser forms with distance, so a decoder that treated
-/// anything but `VEC3I` as "no position" would blank the locator bar at range.
-fn decode_waypoint(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let operation = match reader.var_i32().map_err(dec_err)? {
-        0 => WaypointOperation::Track,
-        1 => WaypointOperation::Untrack,
-        2 => WaypointOperation::Update,
-        other => {
-            return Err(AdapterError::Decode(format!(
-                "unknown waypoint operation {other}"
-            )));
-        }
-    };
-    let id = if reader.bool().map_err(dec_err)? {
-        WaypointId::Entity(reader.uuid().map_err(dec_err)?)
-    } else {
-        WaypointId::Named(reader.string(32767).map_err(dec_err)?)
-    };
-    let style = parse_key(&reader.string(32767).map_err(dec_err)?, "waypoint style")?;
-    let color = if reader.bool().map_err(dec_err)? {
-        // `ByteBufCodecs.RGB_COLOR` is a plain big-endian int.
-        #[allow(clippy::cast_sign_loss)]
-        Some(reader.i32().map_err(dec_err)? as u32)
-    } else {
-        None
-    };
-    let position = match reader.var_i32().map_err(dec_err)? {
-        0 => WaypointPosition::Empty,
-        1 => WaypointPosition::Exact(BlockPos {
-            x: reader.var_i32().map_err(dec_err)?,
-            y: reader.var_i32().map_err(dec_err)?,
-            z: reader.var_i32().map_err(dec_err)?,
-        }),
-        2 => WaypointPosition::Chunk(ChunkPos {
-            x: reader.var_i32().map_err(dec_err)?,
-            z: reader.var_i32().map_err(dec_err)?,
-        }),
-        3 => WaypointPosition::Azimuth(reader.f32().map_err(dec_err)?),
-        other => {
-            return Err(AdapterError::Decode(format!(
-                "unknown waypoint position type {other}"
-            )));
-        }
-    };
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![Directive::Emit(ClientEvent::WaypointUpdated {
-        operation,
-        waypoint: TrackedWaypoint {
-            id,
-            style,
-            color,
-            position,
-        },
-    })])
-}
-
-/// Decodes `ClientboundShowDialogPacket`'s Play-state form.
-///
-/// The field is `ByteBufCodecs.holder(Registries.DIALOG, …)`: a VarInt where `0`
-/// means "an inline value follows" and `n > 0` means registry id `n - 1` with no
-/// further bytes. **The off-by-one is the trap** — reading the raw VarInt as the
-/// id would reference the wrong dialog for every entry.
-///
-/// The inline form is a `Dialog`, which is an NBT `Codec` union of six types with
-/// nested body/input/action trees — a schema, not a `StreamCodec` — so it is
-/// carried as raw network-NBT bytes for a renderer to parse.
-fn decode_show_dialog(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let holder = reader.var_i32().map_err(dec_err)?;
-    let (registry_id, inline) = if holder == 0 {
-        (None, Some(reader.remaining_bytes().to_vec()))
-    } else {
-        (Some(holder - 1), None)
-    };
-    Ok(vec![Directive::Emit(ClientEvent::DialogShown {
-        registry_id,
-        inline,
-    })])
-}
-
-/// `minecraft:map_decoration_type` registry paths by numeric id, from
-/// `.cache/mc/26.2/generated/reports/registries.json`.
-///
-/// A **built-in** registry, so the ids are fixed by the jar rather than synced
-/// during Configuration (`MapDecorationType.STREAM_CODEC` is
-/// `ByteBufCodecs.holderRegistry`, a bare VarInt registry id). That is why a
-/// table is correct here where it would be a guess for a dynamic registry — see
-/// [`TRIM_MATERIAL_IDS`] for the contrast.
-const MAP_DECORATION_TYPE_IDS: &[&str] = &[
-    "player",
-    "frame",
-    "red_marker",
-    "blue_marker",
-    "target_x",
-    "target_point",
-    "player_off_map",
-    "player_off_limits",
-    "mansion",
-    "monument",
-    "banner_white",
-    "banner_orange",
-    "banner_magenta",
-    "banner_light_blue",
-    "banner_yellow",
-    "banner_lime",
-    "banner_pink",
-    "banner_gray",
-    "banner_light_gray",
-    "banner_cyan",
-    "banner_purple",
-    "banner_blue",
-    "banner_brown",
-    "banner_green",
-    "banner_red",
-    "banner_black",
-    "red_x",
-    "village_desert",
-    "village_plains",
-    "village_savanna",
-    "village_snowy",
-    "village_taiga",
-    "jungle_temple",
-    "swamp_hut",
-    "trial_chambers",
-];
-
-/// Decodes `ClientboundMapItemDataPacket` (id 51).
-///
-/// Wire shape, from the record's own `STREAM_CODEC`: a VarInt `MapId`, a `byte`
-/// scale, a `bool` locked, `Optional<List<MapDecoration>>`, then
-/// `MapPatch.STREAM_CODEC`'s optional.
-///
-/// Two traps in the patch codec, both from `MapItemSavedData.MapPatch.read`:
-///
-/// * the field order on the wire is **width, height, startX, startY** — *not*
-///   the record's declaration order (`startX, startY, width, height`); and
-/// * the optional has **no boolean tag**. A `width` of zero *is* the absent
-///   case, so the four position bytes and the colour array are only present when
-///   the first byte is non-zero. Reading a leading `bool` here consumes the width.
-fn decode_map_item_data(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let map_id = reader.var_i32().map_err(dec_err)?;
-    let scale = reader.i8().map_err(dec_err)?;
-    let locked = reader.bool().map_err(dec_err)?;
-    let decorations = if reader.bool().map_err(dec_err)? {
-        let count = reader.var_i32().map_err(dec_err)?;
-        let count = usize::try_from(count)
-            .map_err(|_| AdapterError::Decode(format!("invalid map decoration count {count}")))?;
-        let mut list = Vec::with_capacity(count.min(1024));
-        for _ in 0..count {
-            let type_id = reader.var_i32().map_err(dec_err)?;
-            let path = usize::try_from(type_id)
-                .ok()
-                .and_then(|index| MAP_DECORATION_TYPE_IDS.get(index))
-                .ok_or_else(|| {
-                    AdapterError::Decode(format!("unknown map decoration type id {type_id}"))
-                })?;
-            let x = reader.i8().map_err(dec_err)?;
-            let y = reader.i8().map_err(dec_err)?;
-            let rot = reader.i8().map_err(dec_err)?;
-            let name = if reader.bool().map_err(dec_err)? {
-                Some(Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?))
-            } else {
-                None
-            };
-            list.push(MapDecoration {
-                kind: parse_key(path, "map decoration type")?,
-                x,
-                y,
-                // Vanilla's own record constructor masks this, so the client
-                // never sees a rotation outside 0..=15.
-                #[allow(clippy::cast_sign_loss)]
-                rotation: (rot as u8) & 15,
-                name,
-            });
-        }
-        Some(list)
-    } else {
-        None
-    };
-    let width = reader.u8().map_err(dec_err)?;
-    let color_patch = if width == 0 {
-        None
-    } else {
-        let height = reader.u8().map_err(dec_err)?;
-        let start_x = reader.u8().map_err(dec_err)?;
-        let start_y = reader.u8().map_err(dec_err)?;
-        let colors = reader.var_bytes(1 << 16).map_err(dec_err)?.to_vec();
-        let expected = usize::from(width) * usize::from(height);
-        if colors.len() != expected {
-            return Err(AdapterError::Decode(format!(
-                "map patch {width}x{height} carries {} colour bytes, expected {expected}",
-                colors.len()
-            )));
-        }
-        Some(MapPatch {
-            start_x,
-            start_y,
-            width,
-            height,
-            colors,
-        })
-    };
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![Directive::Emit(ClientEvent::MapItemData {
-        map_id,
-        scale,
-        locked,
-        decorations,
-        color_patch,
-    })])
-}
-
-/// Reads one `ItemStackTemplate` (`ItemStackTemplate.STREAM_CODEC`).
-///
-/// **Not** the same shape as an `ItemStack`: the template writes the item holder
-/// *first* and the count second, where `ItemStack.OPTIONAL_STREAM_CODEC` leads
-/// with the count and uses `<= 0` as the empty sentinel. A template is never
-/// empty (its constructor rejects air and count 0), so there is no sentinel and
-/// no `Option`.
-fn read_item_stack_template(reader: &mut Reader<'_>) -> Result<ItemStack, AdapterError> {
-    let item_id = reader.var_i32().map_err(dec_err)?;
-    let name = item_name(item_id)
-        .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
-    let count = reader.var_i32().map_err(dec_err)?;
-    let count = u32::try_from(count)
-        .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
-    let (components, complete) = read_component_patch(reader, name)?;
-    if !complete {
-        return Err(AdapterError::Decode(format!(
-            "advancement icon {name} carries an unmodeled item component, so the rest of the packet is unreadable"
-        )));
-    }
-    Ok(ItemStack {
-        item: parse_key(name, "item")?,
-        count,
-        components,
-    })
-}
-
-/// Decodes `ClientboundUpdateAdvancementsPacket` (id 130).
-///
-/// Wire shape, from the packet's own reader: a `bool` reset, a list of
-/// `AdvancementHolder`, a collection of removed identifiers, a map of
-/// identifier → `AdvancementProgress`, then a `bool` showAdvancements.
-///
-/// `DisplayInfo`'s field order is **the wire's, not the datapack schema's**, and
-/// the two differ (a vendored `minecraft-data` 1.21.9 schema disagrees with 26.2
-/// here): `serializeToNetwork` writes title, description, icon, frame ordinal,
-/// then a **raw big-endian `int`** flag word (`writeInt`, not a byte), then the
-/// background identifier only when bit 0 is set, then x and y as floats.
-/// `announceChat` is not on the wire at all — vanilla's reader hardcodes
-/// `false` — so bit 1 is `showToast` and bit 2 is `hidden` with nothing between.
-fn decode_update_advancements(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let reset = reader.bool().map_err(dec_err)?;
-
-    let added_count = read_count(&mut reader, "advancement")?;
-    let mut added = Vec::with_capacity(added_count.min(4096));
-    for _ in 0..added_count {
-        let id = reader.string(32767).map_err(dec_err)?;
-        let id = parse_key(&id, "advancement")?;
-        let parent = if reader.bool().map_err(dec_err)? {
-            let parent = reader.string(32767).map_err(dec_err)?;
-            Some(parse_key(&parent, "advancement parent")?)
-        } else {
-            None
-        };
-        let display = if reader.bool().map_err(dec_err)? {
-            let title = Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?);
-            let description = Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?);
-            let icon = read_item_stack_template(&mut reader)?;
-            let ordinal = reader.var_i32().map_err(dec_err)?;
-            let frame = AdvancementFrame::from_ordinal(ordinal).ok_or_else(|| {
-                AdapterError::Decode(format!("unknown advancement frame ordinal {ordinal}"))
-            })?;
-            let flags = reader.i32().map_err(dec_err)?;
-            let background = if flags & 1 != 0 {
-                let texture = reader.string(32767).map_err(dec_err)?;
-                Some(parse_key(&texture, "advancement background")?)
-            } else {
-                None
-            };
-            let x = reader.f32().map_err(dec_err)?;
-            let y = reader.f32().map_err(dec_err)?;
-            Some(AdvancementDisplay {
-                title,
-                description,
-                icon,
-                frame,
-                background,
-                show_toast: flags & 2 != 0,
-                hidden: flags & 4 != 0,
-                x,
-                y,
-            })
-        } else {
-            None
-        };
-        let group_count = read_count(&mut reader, "requirement group")?;
-        let mut requirements = Vec::with_capacity(group_count.min(4096));
-        for _ in 0..group_count {
-            let names = read_count(&mut reader, "requirement")?;
-            let mut group = Vec::with_capacity(names.min(4096));
-            for _ in 0..names {
-                group.push(reader.string(32767).map_err(dec_err)?);
-            }
-            requirements.push(group);
-        }
-        let sends_telemetry_event = reader.bool().map_err(dec_err)?;
-        added.push(AdvancementEntry {
-            id,
-            parent,
-            display,
-            requirements,
-            sends_telemetry_event,
-        });
-    }
-
-    let removed_count = read_count(&mut reader, "removed advancement")?;
-    let mut removed = Vec::with_capacity(removed_count.min(4096));
-    for _ in 0..removed_count {
-        let id = reader.string(32767).map_err(dec_err)?;
-        removed.push(parse_key(&id, "removed advancement")?);
-    }
-
-    let progress_count = read_count(&mut reader, "advancement progress")?;
-    let mut progress = Vec::with_capacity(progress_count.min(4096));
-    for _ in 0..progress_count {
-        let id = reader.string(32767).map_err(dec_err)?;
-        let id = parse_key(&id, "advancement progress")?;
-        let criteria_count = read_count(&mut reader, "criterion")?;
-        let mut criteria = Vec::with_capacity(criteria_count.min(4096));
-        for _ in 0..criteria_count {
-            let name = reader.string(32767).map_err(dec_err)?;
-            // `CriterionProgress` is a nullable `Instant`: a presence bool then,
-            // if set, epoch millis as a big-endian long (`writeInstant`).
-            let obtained = if reader.bool().map_err(dec_err)? {
-                Some(reader.i64().map_err(dec_err)?)
-            } else {
-                None
-            };
-            criteria.push((name, obtained));
-        }
-        progress.push((id, criteria));
-    }
-
-    let show_advancements = reader.bool().map_err(dec_err)?;
-    reader.ensure_empty().map_err(dec_err)?;
-    Ok(vec![Directive::Emit(ClientEvent::AdvancementsUpdated {
-        reset,
-        added,
-        removed,
-        progress,
-        show_advancements,
-    })])
-}
-
-/// A VarInt collection length, rejected rather than truncated when negative.
-fn read_count(reader: &mut Reader<'_>, what: &str) -> Result<usize, AdapterError> {
-    let count = reader.var_i32().map_err(dec_err)?;
-    usize::try_from(count).map_err(|_| AdapterError::Decode(format!("invalid {what} count {count}")))
 }
 
 impl VersionAdapter for V770Adapter {
@@ -6912,7 +6353,6 @@ impl VersionAdapter for V770Adapter {
             }
         }
     }
-
     fn encode_action(
         &self,
         state: ConnectionState,
@@ -7734,7 +7174,6 @@ impl VersionAdapter for V770Adapter {
             _ => Ok(None),
         }
     }
-
     fn build_encryption_response(
         &self,
         encrypted_secret: &[u8],
