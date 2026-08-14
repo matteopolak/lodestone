@@ -4,8 +4,10 @@
 
 `crates/lodestone-core/src/lib.rs` now exports `encode_body`, `decode_body`,
 `decode_body_exact`, and `unpack_degrees` — the substance of four small helpers that used to
-be hand-copied, byte-for-byte, at the top of `crates/protocol/{v47,v340,v735,v770}/src/adapter.rs`.
-Each version crate keeps a same-named local wrapper that is now one line.
+be hand-copied, byte-for-byte, at the top of each version crate's adapter
+(`crates/protocol/{v47,v340,v735}/src/adapter.rs`; `v770`'s equivalent now lives in
+`crates/protocol/v770/src/adapter/mod.rs`, since that crate's adapter was later split into a
+directory module). Each version crate keeps a same-named local wrapper that is now one line.
 
 A protocol-architecture survey identified these as safe to share because they carry no
 version-specific behavior and touch no enforced invariant (folder-level deletability, or the
