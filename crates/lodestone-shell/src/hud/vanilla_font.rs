@@ -45,8 +45,9 @@
 //!   headless and demo paths have no jar, and `hud/item_icon.rs`'s pixel gates
 //!   assert against the fixed-width fallback.
 //! * **Bold, italic, underline, strikethrough and obfuscated *are* drawn**, in
-//!   [`draw_legacy`](VanillaFont::draw_legacy) — see [`legacy_run`](VanillaFont::legacy_run)
-//!   and [`glyph_styled`](VanillaFont::glyph_styled). This used to be the one
+//!   [`draw_legacy`](VanillaFont::draw_legacy) — see
+//!   [`resolve_legacy`](VanillaFont::resolve_legacy) and
+//!   [`glyph_styled`](VanillaFont::glyph_styled). This used to be the one
 //!   documented gap in this module (issue #117): the metrics existed
 //!   (`Font::advance_bold`, `metrics::ITALIC_SHEAR`) and `§l`/`§o`/`§n`/`§m`/`§k`
 //!   were parsed for **width** (`Font::legacy_width`), but the draw side treated
@@ -64,9 +65,26 @@
 //!   three sheets nor `unifont.zip` cover: astral-plane emoji, and anything a
 //!   `ttf` provider would have supplied. See [`jar_manager`] for why this needs
 //!   the asset-object store and not just the jar.
-//! * **Right-to-left text is still drawn left-to-right.** Arabic and Hebrew
-//!   codepoints now have glyphs, so they draw instead of boxing, but nothing
-//!   here reorders a bidi run or shapes a cursive join.
+//! * **A unihex glyph's shadow now lags by its own 0.5 px, not the sheet
+//!   default's 1 px.** [`draw_legacy`](VanillaFont::draw_legacy) and
+//!   [`draw_spans`](VanillaFont::draw_spans) used to add one offset before
+//!   either pass began, which was only correct because every glyph shared it;
+//!   [`draw_resolved`](VanillaFont::draw_resolved) now looks up
+//!   [`Font::shadow_offset`](lodestone_assets::font::Font::shadow_offset)
+//!   per glyph, matching bold's second pass (already per-glyph via
+//!   `Font::bold_offset`) rather than trailing it.
+//! * **Right-to-left runs are now reordered for display; shaping is not.**
+//!   [`bidi_reorder`] applies the paragraph-level and explicit-embedding rules
+//!   of the Unicode Bidirectional Algorithm (UAX #9) to lay Arabic/Hebrew runs
+//!   right-to-left among any surrounding LTR text, mirroring vanilla's
+//!   `Language.getVisualOrder` (`Bidi`-backed). It reorders **codepoints**, not
+//!   glyphs: Arabic's per-position joining forms (isolated/initial/medial/
+//!   final) are not selected, so a reordered Arabic run draws its isolated-form
+//!   glyphs in the right left-to-right screen order rather than the wrong one,
+//!   but does not yet cursively join them. Every draw entry point
+//!   ([`draw`](VanillaFont::draw), [`draw_legacy`](VanillaFont::draw_legacy),
+//!   [`draw_spans`](VanillaFont::draw_spans), [`draw_plain`](VanillaFont::draw_plain))
+//!   reorders before laying out glyphs, so a caller never sees the bidi step.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -105,8 +123,9 @@ pub fn text_color_rgb(color: TextColor) -> [f32; 3] {
 /// A legacy colour code or `§r` resets every one of these to `false`
 /// (`apply_legacy_code` in `lodestone-model/src/text.rs:626-644`: "a legacy
 /// colour code resets all formatting to just that colour"); this type carries
-/// no colour of its own for that reason — [`legacy_run`](VanillaFont::legacy_run)
-/// tracks colour separately and clears both together.
+/// no colour of its own for that reason —
+/// [`resolve_legacy`](VanillaFont::resolve_legacy) tracks colour separately
+/// and clears both together.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct GlyphStyle {
     bold: bool,
@@ -122,6 +141,93 @@ impl GlyphStyle {
     fn has_effect(self) -> bool {
         self.underline || self.strikethrough
     }
+}
+
+/// One decoded, drawable glyph: its visible character, active style and
+/// resolved colour — everything
+/// [`draw_resolved`](VanillaFont::draw_resolved) needs to lay it out. Built by
+/// [`resolve_legacy`](VanillaFont::resolve_legacy)/
+/// [`resolve_spans`](VanillaFont::resolve_spans) in **logical** (source)
+/// order, then permuted in place by [`bidi_reorder_glyphs`] into **visual**
+/// (left-to-right screen) order before any drawing happens. `Copy` because
+/// [`bidi_reorder_glyphs`] rebuilds the list by indexing rather than moving.
+#[derive(Debug, Clone, Copy)]
+struct ResolvedGlyph {
+    ch: char,
+    style: GlyphStyle,
+    rgb: [f32; 3],
+}
+
+/// Reorders `glyphs` in place for display, applying the Unicode
+/// Bidirectional Algorithm (UAX #9) to the codepoints it already holds —
+/// vanilla's `Language.getVisualOrder`. A no-op for the overwhelmingly common
+/// case (every built-in string, most chat) where every character is ASCII,
+/// since a default-LTR paragraph with no bidi classes beyond `L`/neutral
+/// reorders to itself; the full algorithm only runs once a non-ASCII
+/// character is actually present.
+///
+/// **This reorders codepoints, not glyphs.** Arabic's per-position joining
+/// forms (isolated/initial/medial/final) are not selected — a reordered
+/// Arabic run draws its isolated-form glyphs in the correct left-to-right
+/// screen order, but does not cursively join them. Shaping is a separate,
+/// unimplemented pass; see this module's own doc.
+fn bidi_reorder_glyphs(glyphs: &mut Vec<ResolvedGlyph>) {
+    if glyphs.len() < 2 {
+        return;
+    }
+    // Checked on `glyphs` directly, before building `text`, so the
+    // overwhelmingly common all-ASCII case (every frame's worth of Latin
+    // chat and every built-in string) pays for an `all()` scan and nothing
+    // else — no allocation, no `unicode_bidi::BidiInfo` construction.
+    if glyphs.iter().all(|g| g.ch.is_ascii()) {
+        return;
+    }
+    let text: String = glyphs.iter().map(|g| g.ch).collect();
+    let order = bidi_visual_order(&text);
+    if order.iter().enumerate().all(|(i, &j)| i == j) {
+        return;
+    }
+    let original = std::mem::take(glyphs);
+    glyphs.extend(order.into_iter().map(|i| original[i]));
+}
+
+/// The **char**-index permutation that puts `text`'s codepoints into
+/// left-to-right screen order per UAX #9: `order[visual_position]` is the
+/// logical (source) char index that belongs there.
+///
+/// `unicode_bidi`'s own levels and ranges are byte-indexed (a multi-byte
+/// codepoint repeats its level across its bytes); `BidiInfo::reorder_visual`
+/// implements rule L2 over an arbitrary per-*unit* level array and is
+/// documented to want exactly one [`unicode_bidi::Level`] per codepoint for
+/// that reason, which `BidiInfo::reordered_levels_per_char` (rule L1 already
+/// applied) provides directly — so this needs no manual byte-to-char mapping
+/// of its own.
+fn bidi_visual_order(text: &str) -> Vec<usize> {
+    use unicode_bidi::BidiInfo;
+
+    let bidi_info = BidiInfo::new(text, None);
+    if bidi_info.paragraphs.len() > 1 {
+        // An embedded hard paragraph break (e.g. a multi-line kick reason).
+        // UAX #9 never reorders paragraphs relative to each other, only the
+        // characters inside one, so each is resolved independently against
+        // its own substring and the results are concatenated in source
+        // order. This recurses at most once per paragraph: a paragraph's own
+        // `range` spans exactly one paragraph, so the recursive call always
+        // hits the `len() <= 1` arm below.
+        let mut order = Vec::with_capacity(text.chars().count());
+        let mut char_base = 0usize;
+        for para in &bidi_info.paragraphs {
+            let slice = &text[para.range.clone()];
+            order.extend(bidi_visual_order(slice).into_iter().map(|i| i + char_base));
+            char_base += slice.chars().count();
+        }
+        return order;
+    }
+    let Some(para) = bidi_info.paragraphs.first() else {
+        return Vec::new();
+    };
+    let levels = bidi_info.reordered_levels_per_char(para, para.range.clone());
+    BidiInfo::reorder_visual(&levels)
 }
 
 /// Vanilla's missing-glyph box: a 5×8 hollow rectangle with a 1 px edge, advance
@@ -288,11 +394,15 @@ impl VanillaFont {
 
     /// Draw `s` with its vanilla drop shadow, the string's top-left at `(x, y)`.
     ///
-    /// Two passes: the shadow copy first, offset `+1` logical pixel on **both**
-    /// axes at 25 % of the colour, then the text. Drawing the whole string's
-    /// shadow before any of its glyphs is what keeps a following glyph's ink on
-    /// top of the previous glyph's shadow, which is what vanilla's two-layer
-    /// batch does.
+    /// Two passes: the shadow copy first, at 25 % of the colour, then the text.
+    /// Drawing the whole string's shadow before any of its glyphs is what keeps
+    /// a following glyph's ink on top of the previous glyph's shadow, which is
+    /// what vanilla's two-layer batch does. The shadow's offset is **per
+    /// glyph** (`Font::shadow_offset`) rather than one constant for the whole
+    /// string: 1 logical pixel on both axes for a sheet glyph, 0.5 for a
+    /// unihex one (drawn at oversample 2), so a string mixing scripts gets
+    /// each glyph's own shadow lag rather than the sheet default applied to
+    /// every codepoint.
     /// # This honours `§` codes, and that is not a convenience
     ///
     /// There is no non-decomposing string draw in vanilla to be faithful to.
@@ -321,7 +431,7 @@ impl VanillaFont {
 
     /// Draw a `§`-coded string with its drop shadow. Colour codes recolour the
     /// following run, `§r` resets to `base`, and format codes draw real
-    /// geometry — see [`legacy_run`](Self::legacy_run).
+    /// geometry — see [`resolve_legacy`](Self::resolve_legacy).
     pub(crate) fn draw_legacy(
         &self,
         cs: &mut ColourStream<'_>,
@@ -332,9 +442,10 @@ impl VanillaFont {
         base: [f32; 3],
         alpha: f32,
     ) {
-        let off = font_metrics::SHADOW_OFFSET * scale;
-        self.legacy_run(cs, s, x + off, y + off, scale, base, alpha, true);
-        self.legacy_run(cs, s, x, y, scale, base, alpha, false);
+        let mut glyphs = self.resolve_legacy(s, base);
+        bidi_reorder_glyphs(&mut glyphs);
+        self.draw_resolved(cs, &glyphs, x, y, scale, alpha, true);
+        self.draw_resolved(cs, &glyphs, x, y, scale, alpha, false);
     }
 
     /// Draw a list of styled spans with its drop shadow.
@@ -363,33 +474,22 @@ impl VanillaFont {
         base: [f32; 3],
         alpha: f32,
     ) {
-        let off = font_metrics::SHADOW_OFFSET * scale;
-        self.spans_run(cs, spans, x + off, y + off, scale, base, alpha, true);
-        self.spans_run(cs, spans, x, y, scale, base, alpha, false);
+        let mut glyphs = self.resolve_spans(spans, base);
+        bidi_reorder_glyphs(&mut glyphs);
+        self.draw_resolved(cs, &glyphs, x, y, scale, alpha, true);
+        self.draw_resolved(cs, &glyphs, x, y, scale, alpha, false);
     }
 
-    /// One unshadowed pass over a styled span list. Mirrors
-    /// [`legacy_run`](Self::legacy_run) exactly — same `glyph_styled` primitive,
-    /// same `shadow` colour scaling so both passes walk identical geometry, same
-    /// `position == 0` rule for where an effect bar's left edge starts — and
-    /// differs only in where the style comes from. `position` counts glyphs
-    /// across the whole span *list*, not per span, because vanilla's
-    /// `position == 0` check (`Font.java:274`) is about the first glyph of the
-    /// rendered line and a span boundary is not a line boundary.
-    #[allow(clippy::too_many_arguments)]
-    fn spans_run(
-        &self,
-        cs: &mut ColourStream<'_>,
-        spans: &[TextSpan],
-        x: f32,
-        y: f32,
-        scale: f32,
-        base: [f32; 3],
-        alpha: f32,
-        shadow: bool,
-    ) {
-        let mut cursor = x;
-        let mut position = 0usize;
+    /// Decodes a styled span list into [`ResolvedGlyph`]s, in **logical**
+    /// (source) order — the non-drawing half of what used to be `spans_run`'s
+    /// body. `position` in the old single-pass version counted glyphs across
+    /// the whole span list rather than resetting per span
+    /// (`Font.java:274`'s `position == 0` check is about the first glyph of
+    /// the *line*), and that is preserved here too: it is
+    /// [`draw_resolved`](Self::draw_resolved) that now assigns `position`,
+    /// over the final (bidi-reordered) glyph order.
+    fn resolve_spans(&self, spans: &[TextSpan], base: [f32; 3]) -> Vec<ResolvedGlyph> {
+        let mut out = Vec::with_capacity(spans.iter().map(|s| s.text.len()).sum());
         for span in spans {
             let style = GlyphStyle {
                 bold: span.style.bold.unwrap_or(false),
@@ -399,13 +499,9 @@ impl VanillaFont {
                 obfuscated: span.style.obfuscated.unwrap_or(false),
             };
             let rgb = span.style.color.map_or(base, text_color_rgb);
-            let c = [rgb[0], rgb[1], rgb[2], alpha];
-            let c = if shadow { shadow_of(c) } else { c };
-            for ch in span.text.chars() {
-                cursor += self.glyph_styled(cs, ch, cursor, y, scale, c, style, position == 0);
-                position += 1;
-            }
+            out.extend(span.text.chars().map(|ch| ResolvedGlyph { ch, style, rgb }));
         }
+        out
     }
 
     /// Draw `s` with **no** drop shadow, the string's top-left at `(x, y)`.
@@ -429,32 +525,29 @@ impl VanillaFont {
         scale: f32,
         c: [f32; 4],
     ) {
-        self.legacy_run(cs, s, x, y, scale, [c[0], c[1], c[2]], c[3], false);
+        let mut glyphs = self.resolve_legacy(s, [c[0], c[1], c[2]]);
+        bidi_reorder_glyphs(&mut glyphs);
+        self.draw_resolved(cs, &glyphs, x, y, scale, c[3], false);
     }
 
-    /// One unshadowed pass over a `§`-coded string. `shadow` scales every run's
-    /// colour, so the two passes walk identical geometry. Format codes now
-    /// carry real geometry (issue #117): `style` tracks the five flags across
-    /// the run exactly as `Font::legacy_width` already tracks bold for
-    /// measurement, with the same reset rule
+    /// Decodes a `§`-coded string into [`ResolvedGlyph`]s, in **logical**
+    /// (source) order — the non-drawing half of what used to be `legacy_run`'s
+    /// body. Format codes carry real geometry (issue #117): `style` tracks the
+    /// five flags across the run exactly as `Font::legacy_width` already
+    /// tracks bold for measurement, with the same reset rule
     /// (`apply_legacy_code`, `lodestone-model/src/text.rs:626-644`) — a colour
     /// code or `§r` clears every flag, not just the one it names.
-    #[allow(clippy::too_many_arguments)]
-    fn legacy_run(
-        &self,
-        cs: &mut ColourStream<'_>,
-        s: &str,
-        x: f32,
-        y: f32,
-        scale: f32,
-        base: [f32; 3],
-        alpha: f32,
-        shadow: bool,
-    ) {
-        let mut cursor = x;
+    ///
+    /// `§` control pairs are consumed here and never become a
+    /// [`ResolvedGlyph`], which is what keeps them out of
+    /// [`bidi_reorder_glyphs`]: the Unicode Bidirectional Algorithm reorders
+    /// **visible** text, and vanilla's own `Language.getVisualOrder` likewise
+    /// runs over an already-decomposed `FormattedCharSequence`, not a raw
+    /// `§`-coded string.
+    fn resolve_legacy(&self, s: &str, base: [f32; 3]) -> Vec<ResolvedGlyph> {
+        let mut out = Vec::with_capacity(s.len());
         let mut rgb = base;
         let mut style = GlyphStyle::default();
-        let mut position = 0usize;
         let mut chars = s.chars();
         while let Some(ch) = chars.next() {
             if ch == '\u{00a7}' {
@@ -481,10 +574,44 @@ impl VanillaFont {
                 }
                 continue;
             }
-            let c = [rgb[0], rgb[1], rgb[2], alpha];
+            out.push(ResolvedGlyph { ch, style, rgb });
+        }
+        out
+    }
+
+    /// One pass — shadow or main — over an already-resolved, already
+    /// bidi-reordered glyph list. The shared drawing half of what used to be
+    /// `legacy_run`/`spans_run`'s bodies: both decoders now agree on
+    /// [`ResolvedGlyph`], so there is exactly one place glyphs turn into
+    /// quads, walked in **visual** order — `position == 0` is therefore the
+    /// first glyph drawn left-to-right on screen, matching `Font.java:274`
+    /// even for a right-to-left run.
+    fn draw_resolved(
+        &self,
+        cs: &mut ColourStream<'_>,
+        glyphs: &[ResolvedGlyph],
+        x: f32,
+        y: f32,
+        scale: f32,
+        alpha: f32,
+        shadow: bool,
+    ) {
+        let mut cursor = x;
+        for (position, g) in glyphs.iter().enumerate() {
+            let c = [g.rgb[0], g.rgb[1], g.rgb[2], alpha];
             let c = if shadow { shadow_of(c) } else { c };
-            cursor += self.glyph_styled(cs, ch, cursor, y, scale, c, style, position == 0);
-            position += 1;
+            // Per-glyph shadow offset (`Font::shadow_offset`): 1 px for a
+            // sheet glyph, 0.5 for a unihex one, looked up by this glyph's
+            // own codepoint rather than assumed uniform across the string —
+            // a fixed offset added once, before either pass, was only
+            // correct when every glyph shared it.
+            let (gx, gy) = if shadow {
+                let off = self.raster.font().shadow_offset(g.ch as u32) * scale;
+                (cursor + off, y + off)
+            } else {
+                (cursor, y)
+            };
+            cursor += self.glyph_styled(cs, g.ch, gx, gy, scale, c, g.style, position == 0);
         }
     }
 
@@ -494,13 +621,14 @@ impl VanillaFont {
     // what let `§7` reach a quad: `glyph_styled` with a default `GlyphStyle` is
     // byte-identical to the old `glyph` (zero bold offset, no obfuscation
     // substitution, no italic shear, `has_effect()` false), so nothing was lost
-    // by routing every string through `legacy_run`.
+    // by routing every string through `resolve_legacy`.
 
     /// Draw one glyph honouring `style`, with the line's top-left at
-    /// `(x, y)`. `first` is whether this is the very first glyph of the
-    /// **run** (not the string overall — `legacy_run` restarts its own
-    /// counter each pass), matching `Font.java:274`'s `position == 0` check
-    /// for where the underline/strikethrough bar's left edge starts.
+    /// `(x, y)`. `first` is whether this is the very first glyph
+    /// [`draw_resolved`](Self::draw_resolved) draws (`draw_resolved` restarts
+    /// its own counter each pass, over the bidi-reordered — i.e. **visual**
+    /// — glyph order), matching `Font.java:274`'s `position == 0` check for
+    /// where the underline/strikethrough bar's left edge starts.
     ///
     /// Returns the advance in device pixels, computed from `ch`'s **own**
     /// glyph — even when `style.obfuscated` swaps in a different codepoint's
@@ -898,6 +1026,64 @@ mod tests {
         );
         // The 8-bit value vanilla writes, for the avoidance of doubt.
         assert_eq!((s[0] * 255.0) as u8, 63);
+    }
+
+    /// Pure right-to-left text (no LTR characters at all) auto-detects an RTL
+    /// paragraph and reverses as one run: the leftmost glyph on screen
+    /// (visual position 0) is the **last** logical character. Values are the
+    /// `unicode-bidi` crate's own output for this input, not a hand-derived
+    /// guess — `unicode-bidi` is an outside implementation of UAX #9, so this
+    /// is the "captured bytes from an independent source" species of
+    /// expected value, not `decode(encode(x)) == x`.
+    #[test]
+    fn bidi_reverses_a_pure_rtl_run() {
+        // ' Hebrew alef, bet, gimel.
+        let order = bidi_visual_order("\u{5d0}\u{5d1}\u{5d2}");
+        assert_eq!(order, [2, 1, 0]);
+    }
+
+    /// A discriminating input: LTR text immediately followed by RTL text,
+    /// with **no separator** between the two runs (a bare space is itself
+    /// direction-neutral and would leave open whether its own placement,
+    /// rather than the run boundary, produced the answer). The LTR run keeps
+    /// its logical order and the RTL run reverses in place after it — this
+    /// is the case a same-direction-only fixture (all-LTR or all-RTL) cannot
+    /// exercise, matching CLAUDE.md's own point about pairwise-distinct
+    /// fixtures.
+    #[test]
+    fn bidi_reorders_a_mixed_ltr_then_rtl_run() {
+        let order = bidi_visual_order("abc\u{5d0}\u{5d1}\u{5d2}");
+        assert_eq!(order, [0, 1, 2, 5, 4, 3]);
+    }
+
+    /// [`bidi_reorder_glyphs`] must leave pure-ASCII glyph lists untouched
+    /// (the fast path this module's doc promises), and must actually permute
+    /// a mixed-script list rather than merely running without panicking.
+    #[test]
+    fn bidi_reorder_glyphs_permutes_only_when_needed() {
+        fn glyph(ch: char) -> ResolvedGlyph {
+            ResolvedGlyph {
+                ch,
+                style: GlyphStyle::default(),
+                rgb: [1.0, 1.0, 1.0],
+            }
+        }
+
+        let mut ascii: Vec<ResolvedGlyph> = "abc".chars().map(glyph).collect();
+        bidi_reorder_glyphs(&mut ascii);
+        assert_eq!(
+            ascii.iter().map(|g| g.ch).collect::<String>(),
+            "abc",
+            "pure ASCII must not be reordered"
+        );
+
+        let mut mixed: Vec<ResolvedGlyph> = "ab\u{5d0}\u{5d1}".chars().map(glyph).collect();
+        bidi_reorder_glyphs(&mut mixed);
+        assert_eq!(
+            mixed.iter().map(|g| g.ch).collect::<String>(),
+            "ab\u{5d1}\u{5d0}",
+            "the trailing Hebrew run must reverse in place after the LTR run"
+        );
     }
 }
 

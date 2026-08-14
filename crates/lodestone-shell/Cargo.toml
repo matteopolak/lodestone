@@ -160,6 +160,13 @@ bytemuck = { workspace = true }
 # a `cfg`.
 lodestone-time = { workspace = true }
 
+# Unicode Bidirectional Algorithm (UAX #9) for `hud::vanilla_font::bidi`: lays
+# Arabic/Hebrew runs right-to-left among LTR text before glyph layout. Pure
+# Rust, no dependencies of its own with the default features (see the
+# workspace manifest's own comment) — `just wasm-check` is still the gate that
+# actually proves it, since a clean `cargo check` says nothing about wasm32.
+unicode-bidi = { workspace = true }
+
 # Logging, errors, ids. `tokio` and the file-writing/OS-probing crates are in the
 # target sections below.
 tracing = { workspace = true }

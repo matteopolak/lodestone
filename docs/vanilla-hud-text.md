@@ -62,10 +62,14 @@ one HUD element whose colour is per-draw rather than per-texel. A textured path
 would be fewer vertices but needs a new pipeline, a new upload, and a new attach
 point in `app.rs`.
 
-The shadow is **two passes over the whole string**: the offset copy first at
-`SHADOW_OFFSET` (+1 logical px on both axes) and 25 % of the colour, then the text.
-Whole-string-first is what keeps a following glyph's ink on top of the previous
-glyph's shadow, matching vanilla's two-layer batch.
+The shadow is **two passes over the whole (already decoded and bidi-reordered)
+glyph list**: the offset copy first, at 25 % of the colour, then the text.
+Whole-list-first is what keeps a following glyph's ink on top of the previous
+glyph's shadow, matching vanilla's two-layer batch. The offset is **per glyph**
+(`Font::shadow_offset`, looked up in `draw_resolved`) — `SHADOW_OFFSET` (1
+logical px on both axes) for a sheet glyph, half that for a unihex one — not
+one constant added before either pass began; see
+[Unihex glyphs](./unihex-font-glyphs.md).
 
 `shadow_of` takes the quarter in **gamma space** (`ARGB.scaleRGB(color, 0.25F)` →
 `0xFF3F3F3F`, 63/255). The HUD's colour convention is sRGB 0..1 written verbatim
@@ -75,17 +79,20 @@ a grey outline instead of vanilla's near-black one.
 
 ### Styling
 
-`legacy_run` (the `§`-coded path `draw_legacy`/`text_legacy` use — chat, the
+`resolve_legacy` (the `§`-coded path `draw_legacy`/`text_legacy` use — chat, the
 action bar, the held-item name, container tooltips once they exist) tracks a
 `GlyphStyle { bold, italic, underline, strikethrough, obfuscated }` across the
 run alongside the existing colour tracking, with the same reset rule
 `lodestone-model`'s `apply_legacy_code` already uses: a colour code or `§r`
 clears every flag, not just the one it names
-(`lodestone-model/src/text.rs:626-644`). Each glyph is then drawn by
-`glyph_styled`, which — unlike the plain path's `glyph` — also emits the
-underline/strikethrough bar and reports a bold-adjusted advance, so it runs
-for **every** character `legacy_run` visits, ink or not (a space still needs
-its underline segment and its bold-widened advance).
+(`lodestone-model/src/text.rs:626-644`), and resolves each character into a
+`ResolvedGlyph` rather than drawing it immediately — decoding and drawing are
+now two separate passes, with `bidi_reorder_glyphs` (UAX #9) running between
+them. `draw_resolved` then draws each glyph via `glyph_styled`, which — unlike
+the plain path's `glyph` — also emits the underline/strikethrough bar and
+reports a bold-adjusted advance, so it runs for **every** resolved character,
+ink or not (a space still needs its underline segment and its bold-widened
+advance).
 
 All five rules are transcribed from `.cache/mc/26.2/client-src`, not
 invented:
@@ -94,8 +101,8 @@ invented:
   redraw the *same* glyph a second time, offset `+metrics::BOLD_OFFSET` in x —
   not a font-weight variant. Applies independently to the shadow pass and the
   main pass (each gets its own doubled draw), which falls out for free here
-  because the two passes are already two separate `legacy_run` calls with
-  different `(x, y)`. The advance also grows by `BOLD_OFFSET`
+  because the two passes are already two separate `draw_resolved` calls with
+  different per-glyph `(x, y)`. The advance also grows by `BOLD_OFFSET`
   (`GlyphInfo.getAdvance(bold)`, `GlyphInfo.java:6-8`) for *every* glyph,
   drawable or not.
 - **Italic** (`BakedSheetGlyph.shearTop`/`shearBottom`,
@@ -157,7 +164,7 @@ site was converted from the free `text_w` to `b.text_width`.
   `HudGeometry::build` stays jar-free and byte-deterministic on purpose; use
   `build_with_font` when you want vanilla text from pure geometry.
 - **Bold, italic, underline, strikethrough and obfuscated draw real geometry**
-  (issue #117), in `VanillaFont::legacy_run`/`glyph_styled`/`draw_ink` — see
+  (issue #117), in `VanillaFont::resolve_legacy`/`glyph_styled`/`draw_ink` — see
   [Styling](#styling) below. This used to be the module's one documented gap: the
   metrics existed (`Font::advance_bold`, `metrics::ITALIC_SHEAR`) and
   `Font::legacy_width` already zero-widthed `§k`/`§l`/`§m`/`§n`/`§o` correctly for
@@ -175,7 +182,22 @@ site was converted from the free `text_w` to `b.text_width`.
   boxes: astral-plane emoji and anything only a `ttf` provider would supply. Two
   traps live there and not here: it needs the **asset-object store** above the jar
   (the jar's `font/include/unifont.json` is an empty stub), and bold/shadow offsets
-  are **per glyph** — 0.5 for a unihex glyph, 1.0 for a sheet one.
+  are **per glyph** — 0.5 for a unihex glyph, 1.0 for a sheet one, and both
+  `VanillaFont::glyph_styled` (bold) and `draw_resolved` (shadow) now look the
+  offset up per glyph rather than assuming the sheet default for the whole string.
+- **Right-to-left runs are reordered for display; shaping is not.**
+  `VanillaFont::draw`/`draw_legacy`/`draw_spans`/`draw_plain` all decode into a
+  `Vec<ResolvedGlyph>` first (`resolve_legacy`/`resolve_spans`), then run
+  `bidi_reorder_glyphs` — the Unicode Bidirectional Algorithm (UAX #9), via the
+  `unicode-bidi` crate — over that already-decomposed list before any glyph is
+  drawn, matching vanilla's `Language.getVisualOrder` (which likewise reorders a
+  decomposed `FormattedCharSequence`, never a raw `§`-coded string). This gets
+  codepoint order right — an Arabic or Hebrew run now lays out right-to-left among
+  surrounding LTR text — but does **not** select Arabic's per-position joining
+  forms (isolated/initial/medial/final), so a reordered run draws its
+  isolated-form glyphs rather than a cursively joined one. `bidi_reorder_glyphs`
+  is a cheap no-op for pure-ASCII input (checked before touching `unicode_bidi` at
+  all), which is the overwhelming majority of HUD strings.
 - **`§` pairs are zero-width in both fonts.** `hud::strip_legacy` exists so the
   fallback measure does not over-count by two characters per code and push centred
   lines left.
