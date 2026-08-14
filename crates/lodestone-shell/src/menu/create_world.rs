@@ -2,23 +2,76 @@
 //! reached from [`super::world_select`]'s "Create New World" button, which
 //! issue #397 deliberately left present-and-disabled for this issue to build.
 //!
+//! ## Tabs (issue #564/#567)
+//!
+//! This screen used to be one flat hand-placed list, with a module doc arguing
+//! at length that vanilla's three `GridLayoutTab`s (`GameTab`/`WorldTab`/
+//! `MoreTab`, `CreateWorldScreen.java`) were not worth building to hold a
+//! handful of fields that get real support. Issue #567 is the owner saying
+//! otherwise: *"the UI is wrong — we need it to match the real vanilla UI for
+//! it (which has tabs, etc.)"* — and by the time that issue was filed, #564 had
+//! already landed the tab widget itself for Statistics (`widget.rs`'s
+//! `TAB_SPRITES`/`tab_underline_colour`/`tab_label_dy`, `layout.rs`'s
+//! `tab_bar_geometry`/`tab_bar_row_rect`, `render/frame.rs`'s `MenuRow::tab` +
+//! [`super::render::TabEntryView`], `render/draw.rs`'s `draw_tab`). This screen
+//! is that widget's **second** consumer, exactly as #564 asked for: one widget,
+//! two screens, rather than two bespoke tab strips that could drift apart.
+//!
+//! Vanilla's three tabs, and where each field landed:
+//!
+//! - **Game** (`createWorld.tab.game.title`): [`NAME_FIELD`], [`GAME_MODE_ROW`],
+//!   [`DIFFICULTY_ROW`], [`ALLOW_CHEATS_ROW`] — vanilla's `GameTab` also has an
+//!   Experiments button this client has no experiments screen for, left absent
+//!   rather than drawn inert.
+//! - **World** (`createWorld.tab.world.title`): [`SEED_FIELD`],
+//!   [`WORLD_TYPE_ROW`], [`STRUCTURES_ROW`], [`BONUS_CHEST_ROW`] — vanilla's
+//!   `WorldTab` also has a "Customize Type" button this client has no
+//!   preset-editor screen for, left absent the same way. [`WORLD_TYPE_ROW`]
+//!   itself (issue #519's UI half) is real — cycles all seven bundled
+//!   presets and collects the choice — but **decorative for all seven**: see
+//!   [`WorldTypePreset`]'s own doc for exactly which entry points exist and
+//!   which single hop (outside `lodestone-server`, in `net.rs`) is still
+//!   missing to make three of them do something.
+//! - **More** (`createWorld.tab.more.title`): nothing. Vanilla's `MoreTab` is
+//!   three buttons (Game Rules, Experiments, Data Packs), and none of the three
+//!   models exist here — no game-rule table, no experiments screen, no
+//!   data-pack loader. The tab itself is still real: selectable, its own real
+//!   [`TabEntryView`](super::render::TabEntryView), just empty. That is the
+//!   honest state rather than a lie — vanilla's own More tab is never disabled
+//!   for having nothing built under it, unlike Statistics's Items/Mobs, which
+//!   vanilla disables **because the underlying list is empty**
+//!   (`StatsScreen.setTabActiveStateAndTooltip`). Nothing here is
+//!   data-driven-empty; it is feature-not-yet-built, and disabling the tab
+//!   would misrepresent that as vanilla's own behaviour.
+//! - [`ONLINE_MODE_ROW`] has no vanilla tab at all — see its own doc on why it
+//!   exists — and is placed on **World**, after Bonus Chest: it is a
+//!   network-exposure setting for the world being created, which is closer in
+//!   kind to World's own "how does this world generate/behave" fields than to
+//!   Game's account-permission fields.
+//!
+//! **Not ported: per-tab keyboard focus order.** Vanilla's `MenuTabBar` is
+//! itself focusable, in tab-order group 0 ahead of the content
+//! (`CreateWorldScreen`'s own `GROUP_BOTTOM = 1` on the footer), so a keyboard
+//! player can Tab onto the bar and use Left/Right to switch tabs — the same
+//! divergence `stats.rs`'s own focus test already documents for Statistics's
+//! bar. This screen's tab bar is fully **clickable** (all three tabs switch
+//! content; Statistics only has one live tab to click) but not yet reachable
+//! by Tab — [`CreateWorldNav::click_row`] is the only way to switch. A
+//! keyboard player can still reach and use everything on the tab that is
+//! showing; only the bar itself is mouse-only, matching the scope cut
+//! `stats.rs` already made for the same widget.
+//!
 //! ## What is and is not vanilla geometry
 //!
-//! `CreateWorldScreen` is 828 lines with three `GridLayoutTab`s (Game/World/
-//! More) inside a `MenuTabBar`, `WorldCreationUiState` (326 lines) tracking a
-//! world-type preset list, data packs, game rules and a temp save folder on
-//! disk. None of that fits this pipeline or this client: there is still no
-//! `LevelStorageSource` (`world_select`'s own module docs), no data-pack
-//! loader, and no game-rule model. Building the tab/preset machinery to hold
-//! a handful of fields that do get real menu-side support (name, seed, game
-//! mode, difficulty, structures, bonus chest, cheats) would be geometry in
-//! service of nothing — the same call [`super::key_binds`] and
-//! [`super::social`] already made for their own non-`OptionsList` screens,
-//! extended to layout instead of to widget shape: **one flat list, hand-
-//! placed**, not vanilla's tabs. This is the same legitimate move
-//! `docs/ui-framework.md` already names — `TitleScreen` itself uses no
-//! layout class and hand-centres — extended one step further, to a screen
-//! that skips a *sub-*structure rather than layout entirely.
+//! `WorldCreationUiState` (326 lines) tracks a world-type preset list, data
+//! packs, game rules and a temp save folder on disk that this client has no
+//! model for at all — see the per-tab breakdown above for exactly which
+//! fields that leaves out. The fields that *do* get real menu-side support
+//! (name, seed, game mode, difficulty, structures, bonus chest, cheats) are
+//! hand-placed within each tab's own flat column — the same legitimate move
+//! [`super::key_binds`] and [`super::social`] already make for their own
+//! non-`OptionsList` screens, extended to *within-tab* layout rather than to
+//! widget shape.
 //!
 //! ## Wired vs. decorative
 //!
@@ -28,8 +81,9 @@
 //!   [`super::world_select`]'s search field and [`super::nav::EditForm`]
 //!   already use), cycling Game Mode/Difficulty and toggling Structures/
 //!   Bonus Chest/Allow Cheats (real, in-memory [`WorldCreationConfig`]
-//!   state), and the Hardcore→Hard difficulty lock (`GameTab.java`'s own
-//!   rule: selecting Hardcore forces and disables the difficulty cycle).
+//!   state), the Hardcore→Hard difficulty lock (`GameTab.java`'s own
+//!   rule: selecting Hardcore forces and disables the difficulty cycle), and
+//!   switching between Game/World/More by clicking the tab bar.
 //! - **Wired since — the seed.** This section used to say "nothing
 //!   downstream reads any field of it yet"; that queued patch landed
 //!   (`72cb451`, `d65d593`). `apply_create_world` turns
@@ -40,12 +94,7 @@
 //!   used verbatim, free text hashed with Java's `String.hashCode`, empty
 //!   means fresh random) — into the `i64`
 //!   `lodestone_server::worldgen_data::overworld_chunk_source(seed)` wants,
-//!   in place of `BUNDLED_WORLD.seed`. Proved end to end by `app.rs`'s
-//!   `resolved_seeds_from_different_world_creation_configs_generate_different_terrain`:
-//!   two different typed seeds resolved through the *production* path
-//!   generate different real terrain at the same coordinate, and the same
-//!   seed reproduces byte-identically — not merely different `i64`s, which
-//!   would be the isolated-unit species of this gate.
+//!   in place of `BUNDLED_WORLD.seed`.
 //! - **Wired since — Online Mode.** Not vanilla (no `CreateWorldScreen`
 //!   control ties online-mode to a per-world setting in the real game), and
 //!   the one field on this struct that is not merely collected: `true` makes
@@ -59,15 +108,42 @@
 //!   real, but nothing downstream reads any of them: they need deeper
 //!   session-setup wiring (server-side initial state) than the seed's
 //!   one-parameter threading, and are left as documented follow-up.
+//! - **Decorative — world type.** Cycles all seven bundled presets for real
+//!   (issue #519's generator half landed all seven; this is their UI). Three
+//!   (`Normal`/`LargeBiomes`/`Amplified`) have a reachable generator and are
+//!   only missing the `net.rs` threading hop; four more are additionally
+//!   blocked on a `lodestone-server` re-export. See [`WorldTypePreset`]'s own
+//!   doc.
 //! - **Decorative — the world name and the "will be saved in" folder.**
 //!   There is still no `LevelStorageSource` (`world_select`'s own module
 //!   docs, unchanged by this issue), so a name is collected and shown but
 //!   nothing is ever written to a folder of that name.
+//!
+//! ## Two index spaces, and why there are two
+//!
+//! [`CreateWorldWidgets`]' focus ids (`NAME_FIELD == 0` through `CANCEL_ROW ==
+//! 10`) are **stable** — [`super::focus::FocusSet`] and every method that takes
+//! a "row" by that name (`click_focus` in the tests below, [`activate`]) means
+//! one of these. [`CreateWorldNav::click_row`]/[`CreateWorldNav::hover_row`]
+//! take a **different** number: the index into [`frame`]'s own `MenuFrame::
+//! rows`, which is what `app.rs`'s `menu_row_at`/`render::menu_row_under` hit-
+//! test against and what `nav.rs`'s `Screen::CreateWorld` arms forward
+//! verbatim. The two coincided by construction before tabs existed (every
+//! focus id had exactly one row, in order); now `rows` is three tab rows, then
+//! whichever tab's own content rows, then the two footer rows — a length and
+//! an offset that both depend on [`CreateWorldNav::active_tab`]. Confusing the
+//! two is the exact island shape `CLAUDE.md` warns about: a row that resolves
+//! to a real, focusable, testable widget by focus id and reaches no pixels (or
+//! the *wrong* pixels) because the click routing was handed a focus id instead
+//! of a frame row, or vice versa. [`CreateWorldNav::frame_row_for_focus_id`]/
+//! [`CreateWorldNav::focus_id_for_frame_row`] are the one pair of functions
+//! that convert between them; nothing else should restate the arithmetic.
 
 use super::edit_box::EditBox;
 use super::focus::{FocusChildren, FocusSet, FocusTarget, KeyEvent, KeyOutcome};
+use super::layout;
 use super::nav::MenuKey;
-use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
+use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot, TabEntryView};
 use super::widget::Widget;
 
 // -- vanilla captions, verbatim from en_us.json --------------------------
@@ -99,9 +175,138 @@ pub const ALLOW_CHEATS_LABEL: &str = "Allow Cheats";
 pub const ONLINE_MODE_LABEL: &str = "Online Mode (Open to LAN)";
 /// `selectWorld.create`, reused verbatim for this screen's own submit button
 /// — vanilla uses the same string for both (`CreateWorldScreen.java`'s
-/// `createButton`, `:145-149`).
+/// `createButton`).
 pub const CREATE_LABEL: &str = "Create New World";
 pub const CANCEL_LABEL: &str = "Cancel";
+/// `selectWorld.mapType` — vanilla's own label for the World Type cycle
+/// button (`WorldTab.java`'s `typeButton`, `CreateWorldScreen.java`).
+pub const WORLD_TYPE_LABEL: &str = "World Type";
+
+/// `createWorld.tab.game.title`/`.world.title`/`.more.title`, verbatim from
+/// `en_us.json` — this screen's own tab bar (issue #567), built from the same
+/// shared widget [`super::stats::TAB_LABELS`] uses.
+pub const TAB_LABELS: [&str; 3] = ["Game", "World", "More"];
+pub const GAME_TAB: usize = 0;
+pub const WORLD_TAB: usize = 1;
+pub const MORE_TAB: usize = 2;
+
+/// The pixel rect of tab `index` (into [`TAB_LABELS`]) at canvas `width` —
+/// resolves through the same shared [`layout::tab_bar_row_rect`]
+/// `stats::tab_row_rect` does, so the two screens' tab bars cannot drift
+/// apart on geometry. See [`super::render::TabEntryView::index`]'s own doc on
+/// why a `Slot` cannot express this row's *width*, let alone its `x`.
+#[must_use]
+pub fn tab_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+    layout::tab_bar_row_rect(index, TAB_LABELS.len(), width)
+}
+
+/// The fixed focus ids that live on tab `tab`, in the order they appear top to
+/// bottom within it. [`MORE_TAB`] has none — see the module docs on why that
+/// is honest rather than a shortcut. The one definition [`frame`]'s row
+/// construction, [`CreateWorldNav::switch_tab`]'s initial-focus pick, and the
+/// frame-row/focus-id conversion below all read from, so a field moved to a
+/// different tab only has to move here.
+#[must_use]
+fn content_rows_for_tab(tab: usize) -> &'static [usize] {
+    match tab {
+        GAME_TAB => &[NAME_FIELD, GAME_MODE_ROW, DIFFICULTY_ROW, ALLOW_CHEATS_ROW],
+        WORLD_TAB => &[
+            SEED_FIELD,
+            WORLD_TYPE_ROW,
+            STRUCTURES_ROW,
+            BONUS_CHEST_ROW,
+            ONLINE_MODE_ROW,
+        ],
+        _ => &[],
+    }
+}
+
+/// `WorldCreationUiState.WorldTypeEntry`/`WorldPreset`, narrowed to the seven
+/// bundled `world_preset/*.json` documents (issue #519's generator half) —
+/// vanilla's own preset list has a customizable "Buffet"/`FLAT`-family branch
+/// this client does not model, so this enum is the seven fixed presets rather
+/// than an open list.
+///
+/// ## Backend wiring — three of seven, and which three
+///
+/// [`Self::caption`] is real for all seven (`generator.minecraft.*`,
+/// verbatim). **Selecting one is decorative for all seven today** — see
+/// `docs/worldgen-world-type-selection.md`'s own "How to change it" table for
+/// exactly which entry point each preset needs:
+///
+/// - [`Self::Normal`]/[`Self::LargeBiomes`]/[`Self::Amplified`] are
+///   **backend-ready and not yet threaded**: their generators
+///   (`lodestone_server::overworld_chunk_source_of_type`) are already `pub`
+///   at the server crate's root, verified end to end
+///   (`crates/lodestone-server/tests/world_type_selection.rs`), and reachable
+///   from this crate with no `lodestone-server` change at all — the
+///   remaining hop is `net.rs`'s single `overworld_chunk_source(seed)` call
+///   site (`Origin::Integrated`'s own construction), which this issue
+///   deliberately left untouched: that file had a live, unrelated concurrent
+///   edit in flight this session (`net::NetUpdate::LanPublishError`), and a
+///   new `Origin::Integrated` field is exactly the shared-struct collision
+///   shape `CLAUDE.md` warns about. Tracked as the first item of the
+///   follow-up issue this module's own doc links.
+/// - [`Self::SingleBiomeSurface`]/[`Self::Flat`]/[`Self::FlatAllDimensions`]/
+///   [`Self::DebugAllBlockStates`] are **blocked on a `lodestone-server`
+///   change**: their entry points
+///   (`single_biome_chunk_source`/`flat_chunk_source`/`debug_chunk_source`)
+///   are real and individually verified, but not yet re-exported from that
+///   crate's root — `crates/lodestone-server/src/lib.rs` is off limits to
+///   this agent (another is live in it), so this cannot be closed from here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorldTypePreset {
+    #[default]
+    Normal,
+    LargeBiomes,
+    Amplified,
+    SingleBiomeSurface,
+    Flat,
+    FlatAllDimensions,
+    DebugAllBlockStates,
+}
+
+impl WorldTypePreset {
+    /// `generator.minecraft.<id>`, verbatim from `en_us.json`.
+    #[must_use]
+    pub fn caption(self) -> &'static str {
+        match self {
+            WorldTypePreset::Normal => "Default",
+            WorldTypePreset::LargeBiomes => "Large Biomes",
+            WorldTypePreset::Amplified => "AMPLIFIED",
+            WorldTypePreset::SingleBiomeSurface => "Single Biome",
+            WorldTypePreset::Flat => "Superflat",
+            WorldTypePreset::FlatAllDimensions => "Flat All Dimensions",
+            WorldTypePreset::DebugAllBlockStates => "Debug Mode",
+        }
+    }
+
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            WorldTypePreset::Normal => WorldTypePreset::LargeBiomes,
+            WorldTypePreset::LargeBiomes => WorldTypePreset::Amplified,
+            WorldTypePreset::Amplified => WorldTypePreset::SingleBiomeSurface,
+            WorldTypePreset::SingleBiomeSurface => WorldTypePreset::Flat,
+            WorldTypePreset::Flat => WorldTypePreset::FlatAllDimensions,
+            WorldTypePreset::FlatAllDimensions => WorldTypePreset::DebugAllBlockStates,
+            WorldTypePreset::DebugAllBlockStates => WorldTypePreset::Normal,
+        }
+    }
+
+    /// Whether the launch path builds this preset's own generator rather than
+    /// silently falling back to [`Self::Normal`] — see this type's own doc.
+    /// Not consulted by anything yet (the launch path is not threaded at
+    /// all), but named now so the wiring patch does not have to invent the
+    /// question.
+    #[must_use]
+    pub fn is_backend_wired(self) -> bool {
+        matches!(
+            self,
+            WorldTypePreset::Normal | WorldTypePreset::LargeBiomes | WorldTypePreset::Amplified
+        )
+    }
+}
 
 /// `WorldCreationUiState.SelectedGameMode`, narrowed to the three a player
 /// actually picks from this button (`GameTab.java`'s own cycle — `DEBUG`,
@@ -175,6 +380,10 @@ pub struct WorldCreationConfig {
     /// hashes it (`WorldOptions.java`'s own `parseSeed`), which this menu
     /// layer has no reason to reimplement ahead of a consumer that needs it.
     pub seed: String,
+    /// **Decorative for every value** — see [`WorldTypePreset`]'s own doc for
+    /// exactly which three of the seven presets already have a real,
+    /// reachable generator and which hop is still missing for them.
+    pub world_type: WorldTypePreset,
     pub game_mode: WorldGameMode,
     pub difficulty: WorldDifficulty,
     pub generate_structures: bool,
@@ -206,6 +415,7 @@ impl Default for WorldCreationConfig {
         Self {
             name: DEFAULT_NAME.to_string(),
             seed: String::new(),
+            world_type: WorldTypePreset::default(),
             game_mode: WorldGameMode::default(),
             // `Difficulty.NORMAL` — `WorldCreationUiState.java`.
             difficulty: WorldDifficulty::Normal,
@@ -231,32 +441,80 @@ pub const STRUCTURES_ROW: usize = 4;
 pub const BONUS_CHEST_ROW: usize = 5;
 pub const ALLOW_CHEATS_ROW: usize = 6;
 pub const ONLINE_MODE_ROW: usize = 7;
-pub const CREATE_ROW: usize = 8;
-pub const CANCEL_ROW: usize = 9;
-const ROW_COUNT: usize = 10;
+pub const WORLD_TYPE_ROW: usize = 8;
+pub const CREATE_ROW: usize = 9;
+pub const CANCEL_ROW: usize = 10;
+const ROW_COUNT: usize = 11;
 
 const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
 
-/// Every row's rect, hand-placed (see the module docs). Two text fields, five
-/// button-shaped rows, a two-button footer — [`row_slot`] is the single
-/// definition every one of `Self::adding`'s seeded rects,
-/// [`super::render`]'s draw and `app.rs`'s hit-test all read, so they cannot
-/// drift apart the way a restated constant could.
+/// Every row's rect, hand-placed within its own tab (see the module docs).
+/// Two text fields, seven button-shaped rows, a two-button footer —
+/// [`row_slot`] is the single definition every one of `Self::new`'s seeded
+/// rects, [`super::render`]'s draw and `app.rs`'s hit-test all read, so they
+/// cannot drift apart the way a restated constant could.
+///
+/// Rows that share a *local* position within their own tab (Name and Seed are
+/// both their tab's first row; Game Mode and Structures are both second, and
+/// so on — see [`content_rows_for_tab`]) share one `Slot` here, because the
+/// two tabs are never on screen at once: [`frame`] only ever builds rows for
+/// the *active* tab, so there is exactly one live consumer of any given `dy`
+/// at a time.
 #[must_use]
 pub fn row_slot(row: usize) -> Slot {
     const FIELD_W: f32 = 200.0;
     const X: f32 = -(FIELD_W / 2.0);
-    const TOP: f32 = 32.0;
-    const ROW_H: f32 = 22.0;
+    // Clear of the tab bar's own underline (`layout::TAB_BAR_HEIGHT`, 24 px)
+    // plus a little breathing room, the same margin `stats.rs`'s `HEADER_
+    // HEIGHT` reasoning uses for why the *default* header height put a label
+    // crossing the divider.
+    const TOP: f32 = layout::TAB_BAR_HEIGHT + 16.0;
+    const ROW_H: f32 = 24.0;
+    // World now has one more row than Game (five vs. four, since #519's
+    // world-type selector landed on World only), so the two tabs' local
+    // indices no longer line up 1:1 the way they did when every row paired
+    // with exactly one sibling. Named per-tab instead of paired, still one
+    // `match` arm per **local row position** so the two tabs' rows that do
+    // share a `dy` (never shown at once, so sharing costs nothing) stay
+    // visibly paired rather than restated at the same number twice.
     match row {
-        NAME_FIELD => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP, w: FIELD_W, h: super::render::EDIT_BOX_H },
-        SEED_FIELD => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP + ROW_H, w: FIELD_W, h: super::render::EDIT_BOX_H },
-        GAME_MODE_ROW => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP + ROW_H * 2.0 + 8.0, w: FIELD_W, h: super::render::EDIT_BOX_H },
-        DIFFICULTY_ROW => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP + ROW_H * 3.0 + 8.0, w: FIELD_W, h: super::render::EDIT_BOX_H },
-        STRUCTURES_ROW => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP + ROW_H * 4.0 + 8.0, w: FIELD_W, h: super::render::EDIT_BOX_H },
-        BONUS_CHEST_ROW => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP + ROW_H * 5.0 + 8.0, w: FIELD_W, h: super::render::EDIT_BOX_H },
-        ALLOW_CHEATS_ROW => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP + ROW_H * 6.0 + 8.0, w: FIELD_W, h: super::render::EDIT_BOX_H },
-        ONLINE_MODE_ROW => Slot { origin: Origin::ScreenTop, dx: X, dy: TOP + ROW_H * 7.0 + 8.0, w: FIELD_W, h: super::render::EDIT_BOX_H },
+        // Local row 0: Name / Seed.
+        NAME_FIELD | SEED_FIELD => {
+            Slot { origin: Origin::ScreenTop, dx: X, dy: TOP, w: FIELD_W, h: super::render::EDIT_BOX_H }
+        }
+        // Local row 1: Game Mode / World Type.
+        GAME_MODE_ROW | WORLD_TYPE_ROW => Slot {
+            origin: Origin::ScreenTop,
+            dx: X,
+            dy: TOP + ROW_H,
+            w: FIELD_W,
+            h: super::render::EDIT_BOX_H,
+        },
+        // Local row 2: Difficulty / Structures.
+        DIFFICULTY_ROW | STRUCTURES_ROW => Slot {
+            origin: Origin::ScreenTop,
+            dx: X,
+            dy: TOP + ROW_H * 2.0,
+            w: FIELD_W,
+            h: super::render::EDIT_BOX_H,
+        },
+        // Local row 3: Allow Cheats / Bonus Chest.
+        ALLOW_CHEATS_ROW | BONUS_CHEST_ROW => Slot {
+            origin: Origin::ScreenTop,
+            dx: X,
+            dy: TOP + ROW_H * 3.0,
+            w: FIELD_W,
+            h: super::render::EDIT_BOX_H,
+        },
+        // Local row 4: World-only — Online Mode. Game's four rows end at
+        // local row 3, so this has no Game-side sibling to pair with.
+        ONLINE_MODE_ROW => Slot {
+            origin: Origin::ScreenTop,
+            dx: X,
+            dy: TOP + ROW_H * 4.0,
+            w: FIELD_W,
+            h: super::render::EDIT_BOX_H,
+        },
         CREATE_ROW => Slot {
             origin: Origin::Settings(super::options::Placement::Footer { index: 0, count: 2 }),
             dx: 0.0,
@@ -289,6 +547,7 @@ pub struct CreateWorldWidgets {
     pub bonus_chest: Widget,
     pub allow_cheats: Widget,
     pub online_mode: Widget,
+    pub world_type: Widget,
     pub create: Widget,
     pub cancel: Widget,
 }
@@ -304,6 +563,7 @@ impl FocusChildren for CreateWorldWidgets {
             BONUS_CHEST_ROW => &self.bonus_chest as &dyn FocusTarget,
             ALLOW_CHEATS_ROW => &self.allow_cheats as &dyn FocusTarget,
             ONLINE_MODE_ROW => &self.online_mode as &dyn FocusTarget,
+            WORLD_TYPE_ROW => &self.world_type as &dyn FocusTarget,
             CREATE_ROW => &self.create as &dyn FocusTarget,
             CANCEL_ROW => &self.cancel as &dyn FocusTarget,
             _ => return None,
@@ -320,6 +580,7 @@ impl FocusChildren for CreateWorldWidgets {
             BONUS_CHEST_ROW => &mut self.bonus_chest as &mut dyn FocusTarget,
             ALLOW_CHEATS_ROW => &mut self.allow_cheats as &mut dyn FocusTarget,
             ONLINE_MODE_ROW => &mut self.online_mode as &mut dyn FocusTarget,
+            WORLD_TYPE_ROW => &mut self.world_type as &mut dyn FocusTarget,
             CREATE_ROW => &mut self.create as &mut dyn FocusTarget,
             CANCEL_ROW => &mut self.cancel as &mut dyn FocusTarget,
             _ => return None,
@@ -340,29 +601,37 @@ pub enum CreateWorldOutcome {
     Create(WorldCreationConfig),
 }
 
-/// This screen's live state: its widgets, its focus, and the config they
-/// collect.
+/// This screen's live state: its widgets, its focus, its config, and which
+/// tab is showing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreateWorldNav {
     pub widgets: CreateWorldWidgets,
     focus: FocusSet,
     config: WorldCreationConfig,
+    /// Which of [`TAB_LABELS`] is currently showing (issue #567). Starts at
+    /// [`GAME_TAB`] — vanilla's own `MenuTabBar.builder(..).addTabs(GameTab,
+    /// WorldTab, MoreTab)` order, and the tab `CreateWorldScreen.
+    /// setInitialFocus` would land on if it ran (it does not — see the
+    /// module docs on why keyboard tab-order is not ported).
+    active_tab: usize,
     /// Which button row the mouse is over, if any — separate from keyboard
     /// focus for [`super::nav::EditForm::hovered`]'s exact reason (this
     /// screen has the same shape: two [`EditBox`]es plus five button rows).
+    /// Carries a **focus id**, not a frame-row index — see the module docs'
+    /// "two index spaces" section.
     ///
-    /// **This is the whole of issue #567's reported bug.** `CreateWorld`
-    /// already reaches [`super::render::stamp_canvas_facts`] through
-    /// `render::frame_for`'s own `frame.map` — every screen's frame does,
-    /// unconditionally, unless its arm returns `None` the way in-world
-    /// `Settings` deliberately does — so `cursor`/`gui_scale`/
-    /// `panorama_speed`/`list` were never the gap here, unlike the two
-    /// earlier instances of this defect shape. What was missing is this
-    /// field: nothing on this screen ever recorded *which* row the cursor
-    /// was over, so [`frame`]'s `MenuFrame::hovered` stayed `None`
-    /// unconditionally and `widget.hovered` (`render::draw_widget`) was
-    /// `false` for every row, every frame — no outline, ever, regardless of
-    /// where the mouse was.
+    /// **This is the whole of issue #567's reported hover bug**, fixed before
+    /// the tabs half: `CreateWorld` already reaches
+    /// [`super::render::stamp_canvas_facts`] through `render::frame_for`'s own
+    /// `frame.map` — every screen's frame does, unconditionally, unless its
+    /// arm returns `None` the way in-world `Settings` deliberately does — so
+    /// `cursor`/`gui_scale`/`panorama_speed`/`list` were never the gap here,
+    /// unlike the two earlier instances of this defect shape. What was
+    /// missing was this field: nothing on this screen ever recorded *which*
+    /// row the cursor was over, so [`frame`]'s `MenuFrame::hovered` stayed
+    /// `None` unconditionally and `widget.hovered` (`render::draw_widget`)
+    /// was `false` for every row, every frame — no outline, ever, regardless
+    /// of where the mouse was.
     hovered: Option<usize>,
 }
 
@@ -397,6 +666,7 @@ impl CreateWorldNav {
             bonus_chest: button(BONUS_CHEST_ROW, toggle_label(BONUS_CHEST_LABEL, config.bonus_chest)),
             allow_cheats: button(ALLOW_CHEATS_ROW, toggle_label(ALLOW_CHEATS_LABEL, config.allow_cheats)),
             online_mode: button(ONLINE_MODE_ROW, toggle_label(ONLINE_MODE_LABEL, config.online_mode)),
+            world_type: button(WORLD_TYPE_ROW, cycle_label(WORLD_TYPE_LABEL, config.world_type.caption())),
             create: button(CREATE_ROW, CREATE_LABEL),
             cancel: button(CANCEL_ROW, CANCEL_LABEL),
         };
@@ -405,12 +675,21 @@ impl CreateWorldNav {
             focus.add_renderable_widget(row);
         }
         focus.set_initial_focus(&mut widgets, NAME_FIELD);
-        Self {
+        let mut nav = Self {
             widgets,
             focus,
             config,
+            active_tab: GAME_TAB,
             hovered: None,
-        }
+        };
+        // Game is active from the start, so this deactivates World's four
+        // fields (Seed/Structures/Bonus Chest/Online Mode) — matching what a
+        // fresh vanilla screen shows (only the current tab's controls can
+        // take focus) — and folds in the (inactive, at the default game mode)
+        // hardcore lock.
+        nav.sync_tab_visibility();
+        nav.apply_hardcore_lock();
+        nav
     }
 
     #[must_use]
@@ -423,41 +702,45 @@ impl CreateWorldNav {
         self.focus.focused()
     }
 
-    /// The mouse moved over row `row` — mirrors
-    /// [`super::nav::EditForm::hover_row`] exactly, including its reason: a
-    /// field row (`NAME_FIELD`/`SEED_FIELD`) does nothing here, so hovering
-    /// the Seed field while typing in Name cannot steal the caret out from
-    /// under the player (vanilla's `ContainerEventHandler` moves focus only
-    /// from a *click* or Tab traversal, never from hover — `EditBox` itself
-    /// has no hover highlight at all). Every other row records only
-    /// [`Self::hovered`], which is what lets the mouse travel to Create
-    /// without touching whichever field currently has the keyboard.
-    pub fn hover_row(&mut self, row: usize) {
-        match row {
-            NAME_FIELD | SEED_FIELD => {}
-            GAME_MODE_ROW | DIFFICULTY_ROW | STRUCTURES_ROW | BONUS_CHEST_ROW
-            | ALLOW_CHEATS_ROW | ONLINE_MODE_ROW | CREATE_ROW | CANCEL_ROW => {
-                self.hovered = Some(row);
-            }
-            _ => {}
-        }
+    #[must_use]
+    pub fn active_tab(&self) -> usize {
+        self.active_tab
     }
 
-    /// The row the mouse is over, for [`super::render::MenuFrame::hovered`].
-    #[must_use]
-    pub fn hovered(&self) -> Option<usize> {
-        self.hovered
+    /// Sets every widget's `active` flag from [`Self::active_tab`] alone —
+    /// the difficulty row is the one exception, folded into
+    /// [`Self::apply_hardcore_lock`] instead, since it has a *second* gate
+    /// (the hardcore lock) that must combine with tab membership rather than
+    /// override it. `FocusTarget::takes_focus` reads `is_active()`, so this
+    /// is what keeps Tab traversal inside the showing tab without touching
+    /// [`FocusSet`]'s own registries at all — an inactive widget is simply
+    /// never offered.
+    fn sync_tab_visibility(&mut self) {
+        let game = self.active_tab == GAME_TAB;
+        let world = self.active_tab == WORLD_TAB;
+        self.widgets.name.widget.active = game;
+        self.widgets.game_mode.active = game;
+        self.widgets.allow_cheats.active = game;
+        self.widgets.seed.widget.active = world;
+        self.widgets.structures.active = world;
+        self.widgets.bonus_chest.active = world;
+        self.widgets.online_mode.active = world;
+        self.widgets.world_type.active = world;
     }
 
     /// Difficulty is locked to Hard and its own row inactive while Hardcore
     /// is selected — `GameTab.java`'s own rule (selecting Hardcore forces
-    /// and disables the difficulty cycle; every other mode leaves it live).
+    /// and disables the difficulty cycle; every other mode leaves it live) —
+    /// **and** while a tab other than Game is showing, folded into the same
+    /// flag rather than a second field: both are "can this row take focus or
+    /// a click right now", so they combine with `&&` instead of one silently
+    /// overriding the other whichever was applied last.
     fn apply_hardcore_lock(&mut self) {
         let hardcore = self.config.game_mode == WorldGameMode::Hardcore;
         if hardcore {
             self.config.difficulty = WorldDifficulty::Hard;
         }
-        self.widgets.difficulty.active = !hardcore;
+        self.widgets.difficulty.active = self.active_tab == GAME_TAB && !hardcore;
         self.widgets.difficulty.message =
             cycle_label(DIFFICULTY_LABEL, difficulty_caption(self.config.difficulty));
     }
@@ -468,7 +751,112 @@ impl CreateWorldNav {
         self.widgets.bonus_chest.message = toggle_label(BONUS_CHEST_LABEL, self.config.bonus_chest);
         self.widgets.allow_cheats.message = toggle_label(ALLOW_CHEATS_LABEL, self.config.allow_cheats);
         self.widgets.online_mode.message = toggle_label(ONLINE_MODE_LABEL, self.config.online_mode);
+        self.widgets.world_type.message = cycle_label(WORLD_TYPE_LABEL, self.config.world_type.caption());
         self.apply_hardcore_lock();
+    }
+
+    /// Switches [`Self::active_tab`] to `tab` — a no-op for the tab already
+    /// showing or an out-of-range index (`TAB_LABELS.len()` is 3; a click
+    /// hit-testing onto a row beyond the tab bar never reaches this, but a
+    /// direct call should still be inert rather than panic). Clears any
+    /// button hover (the hovered row is about to disappear from the frame)
+    /// and moves keyboard focus onto the new tab's first field, mirroring
+    /// vanilla's own tab switch (`TabManager.setCurrentTab`, which calls
+    /// `setInitialFocus` on the new tab) — or clears focus entirely on
+    /// [`MORE_TAB`], which has nothing to focus.
+    fn switch_tab(&mut self, tab: usize) {
+        if tab >= TAB_LABELS.len() || tab == self.active_tab {
+            return;
+        }
+        self.active_tab = tab;
+        self.hovered = None;
+        self.sync_tab_visibility();
+        self.apply_hardcore_lock();
+        match content_rows_for_tab(tab).first() {
+            Some(&first) => self.focus.set_initial_focus(&mut self.widgets, first),
+            None => self.focus.clear_focus(&mut self.widgets),
+        }
+    }
+
+    /// The index into [`frame`]'s `MenuFrame::rows` that focus id `id`
+    /// currently resolves to, given [`Self::active_tab`] — `None` if `id`
+    /// belongs to a tab that is not showing. The inverse of
+    /// [`Self::focus_id_for_frame_row`]; see the module docs' "two index
+    /// spaces" section for why both exist.
+    ///
+    /// `pub` (rather than test-only) because `nav.rs`'s own integration tests
+    /// drive this screen the way the app does — through frame-row clicks —
+    /// and need this same conversion to name a row without hand-deriving the
+    /// tab-count offset a second time.
+    #[must_use]
+    pub fn frame_row_for_focus_id(&self, id: usize) -> Option<usize> {
+        let content = content_rows_for_tab(self.active_tab);
+        if id == CREATE_ROW {
+            return Some(TAB_LABELS.len() + content.len());
+        }
+        if id == CANCEL_ROW {
+            return Some(TAB_LABELS.len() + content.len() + 1);
+        }
+        content
+            .iter()
+            .position(|&x| x == id)
+            .map(|local| TAB_LABELS.len() + local)
+    }
+
+    /// The focus id row `frame_row` (an index into [`frame`]'s own
+    /// `MenuFrame::rows`) currently means, given [`Self::active_tab`] —
+    /// `None` for a tab-bar row (`frame_row < TAB_LABELS.len()`, handled by
+    /// the caller instead — see [`Self::click_row`]) or an index past the
+    /// footer. The inverse of [`Self::frame_row_for_focus_id`].
+    #[must_use]
+    fn focus_id_for_frame_row(&self, frame_row: usize) -> Option<usize> {
+        let local = frame_row.checked_sub(TAB_LABELS.len())?;
+        let content = content_rows_for_tab(self.active_tab);
+        if local < content.len() {
+            return Some(content[local]);
+        }
+        match local - content.len() {
+            0 => Some(CREATE_ROW),
+            1 => Some(CANCEL_ROW),
+            _ => None,
+        }
+    }
+
+    /// The mouse moved over frame row `row` (an index into `frame(..).rows`
+    /// — see the module docs' "two index spaces" section). A tab-bar row
+    /// records nothing here: [`super::render::draw`]'s own `MenuRow::tab` arm
+    /// derives tab hover straight from `MenuFrame::cursor` and the tab's own
+    /// rect (the same thing that already made Statistics's tab bar highlight
+    /// correctly with no `Screen::Statistics` arm in `MenuNav::hover` at
+    /// all), so recording it a second way here would be a second, and
+    /// possibly disagreeing, source of truth.
+    ///
+    /// A field row (`NAME_FIELD`/`SEED_FIELD`) does nothing here either —
+    /// mirrors [`super::nav::EditForm::hover_row`] exactly, including its
+    /// reason: hovering the Seed field while typing in Name cannot steal the
+    /// caret out from under the player (vanilla's `ContainerEventHandler`
+    /// moves focus only from a *click* or Tab traversal, never from hover —
+    /// `EditBox` itself has no hover highlight at all). Every other row
+    /// records only [`Self::hovered`], which is what lets the mouse travel to
+    /// Create without touching whichever field currently has the keyboard.
+    pub fn hover_row(&mut self, row: usize) {
+        if row < TAB_LABELS.len() {
+            return;
+        }
+        let Some(focus_id) = self.focus_id_for_frame_row(row) else {
+            return;
+        };
+        match focus_id {
+            NAME_FIELD | SEED_FIELD => {}
+            _ => self.hovered = Some(focus_id),
+        }
+    }
+
+    /// The focus id the mouse is over, for [`super::render::MenuFrame::hovered`]
+    /// (via [`frame`]'s own conversion through [`Self::frame_row_for_focus_id`]).
+    #[must_use]
+    pub fn hovered(&self) -> Option<usize> {
+        self.hovered
     }
 
     fn activate(&mut self, row: usize) -> CreateWorldOutcome {
@@ -505,6 +893,11 @@ impl CreateWorldNav {
                 self.refresh_labels();
                 CreateWorldOutcome::Handled
             }
+            WORLD_TYPE_ROW => {
+                self.config.world_type = self.config.world_type.next();
+                self.refresh_labels();
+                CreateWorldOutcome::Handled
+            }
             CREATE_ROW => {
                 self.config.name = self.widgets.name.value().to_string();
                 self.config.seed = self.widgets.seed.value().to_string();
@@ -515,28 +908,41 @@ impl CreateWorldNav {
         }
     }
 
-    /// A click on row `row` — mirrors [`super::world_select::WorldSelectNav::click_row`]'s
-    /// own reasoning (#391's shape): a click focuses a field or presses a
-    /// button, and neither is "hover then Enter".
+    /// A click on frame row `row` (an index into `frame(..).rows` — see the
+    /// module docs). Mirrors
+    /// [`super::world_select::WorldSelectNav::click_row`]'s own reasoning
+    /// (#391's shape): a click focuses a field, presses a button, or — new
+    /// for issue #567 — switches the active tab, and none of those is "hover
+    /// then Enter".
     pub fn click_row(&mut self, row: usize) -> CreateWorldOutcome {
-        if row == NAME_FIELD || row == SEED_FIELD {
-            self.focus.set_focused(&mut self.widgets, Some(row));
+        if row < TAB_LABELS.len() {
+            self.switch_tab(row);
+            return CreateWorldOutcome::Handled;
+        }
+        let Some(focus_id) = self.focus_id_for_frame_row(row) else {
+            return CreateWorldOutcome::Handled;
+        };
+        if focus_id == NAME_FIELD || focus_id == SEED_FIELD {
+            self.focus.set_focused(&mut self.widgets, Some(focus_id));
             return CreateWorldOutcome::Handled;
         }
         let active = self
             .widgets
-            .get(row)
+            .get(focus_id)
             .is_some_and(super::focus::FocusTarget::is_active);
         if !active {
             return CreateWorldOutcome::Handled;
         }
-        self.focus.set_focused(&mut self.widgets, Some(row));
-        self.activate(row)
+        self.focus.set_focused(&mut self.widgets, Some(focus_id));
+        self.activate(focus_id)
     }
 
     /// One key, routed through the same `Escape` → field → navigation →
     /// screen order [`super::nav::EditForm::handle_key`] already documents
-    /// and cites `Screen.keyPressed`'s own order for.
+    /// and cites `Screen.keyPressed`'s own order for. Tab traversal stays
+    /// within the showing tab's own fields plus the always-active footer —
+    /// see [`Self::sync_tab_visibility`]'s own doc on why that needs no
+    /// special case here: [`FocusSet`] already skips an inactive widget.
     pub fn handle_key(&mut self, key: MenuKey) -> CreateWorldOutcome {
         if key == MenuKey::Escape {
             return CreateWorldOutcome::Cancel;
@@ -576,19 +982,17 @@ fn toggle_label(caption: &str, on: bool) -> String {
     format!("{caption}: {}", if on { "ON" } else { "OFF" })
 }
 
-/// Builds the whole World Creation frame.
+/// Builds the whole World Creation frame: the tab bar plus whichever tab's
+/// own rows are active, plus the always-present Create/Cancel footer.
 ///
-/// ## The Name/Seed fields used to reach no pixels at all
+/// ## No separate title label — the same call `stats.rs` already made
 ///
-/// `rows` used to start at [`GAME_MODE_ROW`] and never mention
-/// [`NAME_FIELD`]/[`SEED_FIELD`] — an island of exactly the shape `CLAUDE.md`
-/// warns about: [`CreateWorldWidgets::name`]/`seed` are real, focusable,
-/// typeable `EditBox`es (every test above this function drives them and
-/// passes), but nothing in the render output ever carried one, so the screen
-/// drew two floating labels over an otherwise blank strip and the actual
-/// boxes — background, typed text, caret, hint — never appeared. Fixed by
-/// giving each field its own [`MenuRow`] with a real `edit: Some(..)`, the
-/// same shape [`super::Screen::ServerEdit`]'s form already uses.
+/// Vanilla draws no heading above `CreateWorldScreen`'s tab bar either — the
+/// bar's own background (`CreateWorldScreen.TAB_HEADER_BACKGROUND`) *is* the
+/// header, exactly as `stats.rs`'s own doc explains for the same widget. This
+/// used to draw `"Create New World"` as a centred label at `dy: 12`, which is
+/// the vanilla string for the *button* that opens this screen
+/// (`selectWorld.create`), not a real vanilla heading on the screen itself.
 #[must_use]
 pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     let focused = nav.focused();
@@ -611,26 +1015,82 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
         ..Default::default()
     };
 
-    let rows = vec![
-        field_row(&nav.widgets.name, NAME_FIELD),
-        field_row(&nav.widgets.seed, SEED_FIELD),
-        widget_row(&nav.widgets.game_mode, GAME_MODE_ROW),
-        widget_row(&nav.widgets.difficulty, DIFFICULTY_ROW),
-        widget_row(&nav.widgets.structures, STRUCTURES_ROW),
-        widget_row(&nav.widgets.bonus_chest, BONUS_CHEST_ROW),
-        widget_row(&nav.widgets.allow_cheats, ALLOW_CHEATS_ROW),
-        widget_row(&nav.widgets.online_mode, ONLINE_MODE_ROW),
-        widget_row(&nav.widgets.create, CREATE_ROW),
-        widget_row(&nav.widgets.cancel, CANCEL_ROW),
-    ];
-    // Every focus id used above (`NAME_FIELD == 0` through `CANCEL_ROW == 9`,
-    // see their own doc comments) is *also* its row's index in `rows`, so the
-    // row cursor and the widget cursor are one number — no restated list to
-    // drift from it. A field row's own highlight is its caret, drawn by
-    // `draw_edit_box` off the box's `focused` flag rather than off
-    // `MenuFrame::selected`, so this needs no special case for it the way the
-    // pre-fix version did.
-    let selected = focused.unwrap_or(usize::MAX);
+    let active_tab = nav.active_tab();
+    let content = content_rows_for_tab(active_tab);
+    let mut rows = Vec::with_capacity(TAB_LABELS.len() + content.len() + 2);
+    rows.extend(TAB_LABELS.iter().enumerate().map(|(index, &label)| MenuRow {
+        label: label.to_string(),
+        // Every tab is real and clickable — unlike Statistics's Items/Mobs,
+        // nothing here is data-driven-empty; see the module docs on why More
+        // is `enabled` even though it has no rows of its own.
+        enabled: true,
+        tab: Some(TabEntryView {
+            index,
+            count: TAB_LABELS.len(),
+            selected: index == active_tab,
+        }),
+        ..Default::default()
+    }));
+    for &id in content {
+        rows.push(match id {
+            NAME_FIELD => field_row(&nav.widgets.name, NAME_FIELD),
+            SEED_FIELD => field_row(&nav.widgets.seed, SEED_FIELD),
+            GAME_MODE_ROW => widget_row(&nav.widgets.game_mode, GAME_MODE_ROW),
+            DIFFICULTY_ROW => widget_row(&nav.widgets.difficulty, DIFFICULTY_ROW),
+            STRUCTURES_ROW => widget_row(&nav.widgets.structures, STRUCTURES_ROW),
+            BONUS_CHEST_ROW => widget_row(&nav.widgets.bonus_chest, BONUS_CHEST_ROW),
+            ALLOW_CHEATS_ROW => widget_row(&nav.widgets.allow_cheats, ALLOW_CHEATS_ROW),
+            ONLINE_MODE_ROW => widget_row(&nav.widgets.online_mode, ONLINE_MODE_ROW),
+            WORLD_TYPE_ROW => widget_row(&nav.widgets.world_type, WORLD_TYPE_ROW),
+            // `content_rows_for_tab` is the only producer of these ids; a new
+            // entry there needs a matching arm here, and an out-of-sync pair
+            // is a compile-time `unreachable!()` away from being caught the
+            // first time a test actually visits the new row rather than
+            // silently drawing a blank one.
+            _ => unreachable!("content_rows_for_tab produced an id `frame` has no arm for: {id}"),
+        });
+    }
+    rows.push(widget_row(&nav.widgets.create, CREATE_ROW));
+    rows.push(widget_row(&nav.widgets.cancel, CANCEL_ROW));
+
+    let selected = focused
+        .and_then(|id| nav.frame_row_for_focus_id(id))
+        .unwrap_or(usize::MAX);
+    let hovered = nav.hovered().and_then(|id| nav.frame_row_for_focus_id(id));
+
+    let mut labels = Vec::new();
+    // `CommonLayouts.labeledElement` draws a real, visible label above each
+    // field in vanilla (`CreateWorldScreen.java`) — only the active tab's own
+    // field label(s) are emitted, matching the row itself only being emitted
+    // for the active tab.
+    if active_tab == GAME_TAB {
+        labels.push(MenuLabel {
+            text: NAME_LABEL.to_string(),
+            origin: Origin::ScreenTop,
+            dx: -100.0,
+            dy: row_slot(NAME_FIELD).dy - 10.0,
+            align: Align::Left,
+            colour: super::widget::ACTIVE_LABEL,
+            scale: 1.0,
+        });
+    }
+    if active_tab == WORLD_TAB {
+        // The seed field's own visible label — `SEED_LABEL`
+        // (`selectWorld.enterSeed`, "Seed for the world generator"). This
+        // used to be missing entirely: only the *hint* text
+        // (`SEED_INFO`/`selectWorld.seedInfo`) was drawn, and as a permanent
+        // notice rather than vanilla's `EditBox.hint` ghost text — see the
+        // `notice` doc below.
+        labels.push(MenuLabel {
+            text: SEED_LABEL.to_string(),
+            origin: Origin::ScreenTop,
+            dx: -100.0,
+            dy: row_slot(SEED_FIELD).dy - 10.0,
+            align: Align::Left,
+            colour: super::widget::ACTIVE_LABEL,
+            scale: 1.0,
+        });
+    }
 
     MenuFrame {
         rows,
@@ -640,54 +1100,15 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
         // row the mouse was over (see `CreateWorldNav::hovered`'s own doc) —
         // so `render::draw_widget`'s `widget.hovered` was `false` for every
         // row, every frame, and no button ever drew its hover outline.
-        hovered: nav.hovered(),
+        hovered,
         vanilla: true,
-        labels: vec![
-            MenuLabel {
-                text: "Create New World".to_string(), // selectWorld.title vanilla reuses selectWorld.create as this screen's own heading (`CreateWorldScreen.java`'s `TITLE`, `Component.translatable("selectWorld.create")`).
-                origin: Origin::ScreenTop,
-                dx: 0.0,
-                dy: 12.0,
-                align: Align::Centre,
-                colour: super::widget::ACTIVE_LABEL,
-                scale: 1.0,
-            },
-            // `CommonLayouts.labeledElement` draws a real, visible label above
-            // each field in vanilla (`CreateWorldScreen.java`) — this is
-            // that label, not narration. `10.0` above the field's own `dy`
-            // mirrors the offset already used for the name field below.
-            MenuLabel {
-                text: NAME_LABEL.to_string(),
-                origin: Origin::ScreenTop,
-                dx: -100.0,
-                dy: 22.0,
-                align: Align::Left,
-                colour: super::widget::ACTIVE_LABEL,
-                scale: 1.0,
-            },
-            // The seed field's own visible label — `SEED_LABEL`
-            // (`selectWorld.enterSeed`, "Seed for the world generator"). This
-            // used to be missing entirely: only the *hint* text
-            // (`SEED_INFO`/`selectWorld.seedInfo`) was drawn, and as a
-            // permanent notice rather than vanilla's `EditBox.hint` ghost text
-            // — see the removed `notice` field below.
-            MenuLabel {
-                text: SEED_LABEL.to_string(),
-                origin: Origin::ScreenTop,
-                dx: -100.0,
-                dy: 44.0,
-                align: Align::Left,
-                colour: super::widget::ACTIVE_LABEL,
-                scale: 1.0,
-            },
-        ],
-        // No `notice` here any more. Vanilla shows `SEED_INFO` in exactly one
-        // place — `seedEdit.setHint(SEED_EMPTY_HINT)`
-        // (`CreateWorldScreen.java`), ghost text drawn only while the box
-        // is empty and unfocused. `CreateWorldNav::new` already sets
-        // `seed.hint`, so a permanent notice here was drawing the same string
-        // vanilla only ever shows conditionally — a duplicate, not a second
-        // real label.
+        labels,
+        // No `notice` here. Vanilla shows `SEED_INFO` in exactly one place —
+        // `seedEdit.setHint(SEED_EMPTY_HINT)` (`CreateWorldScreen.java`),
+        // ghost text drawn only while the box is empty and unfocused.
+        // `CreateWorldNav::new` already sets `seed.hint`, so a permanent
+        // notice here would draw the same string vanilla only ever shows
+        // conditionally — a duplicate, not a second real label.
         ..Default::default()
     }
 }
@@ -696,11 +1117,41 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
 mod tests {
     use super::*;
 
+    /// Test convenience: activate focus id `id` the way a player does —
+    /// switch to whichever tab holds it (a no-op if it is already showing,
+    /// and a no-op for `CREATE_ROW`/`CANCEL_ROW`, which belong to no tab),
+    /// then click its resolved frame row. Keeps the tests below reading by
+    /// **focus id**, which is what they are actually about, without hand-
+    /// deriving a frame-row index at every call site — see the module docs'
+    /// "two index spaces" section for why the two differ at all.
+    impl CreateWorldNav {
+        fn click_focus(&mut self, id: usize) -> CreateWorldOutcome {
+            if let Some(tab) = (0..TAB_LABELS.len()).find(|&t| content_rows_for_tab(t).contains(&id)) {
+                self.switch_tab(tab);
+            }
+            let row = self
+                .frame_row_for_focus_id(id)
+                .unwrap_or_else(|| panic!("focus id {id} has no frame row on tab {}", self.active_tab));
+            self.click_row(row)
+        }
+
+        fn hover_focus(&mut self, id: usize) {
+            if let Some(tab) = (0..TAB_LABELS.len()).find(|&t| content_rows_for_tab(t).contains(&id)) {
+                self.switch_tab(tab);
+            }
+            let row = self
+                .frame_row_for_focus_id(id)
+                .unwrap_or_else(|| panic!("focus id {id} has no frame row on tab {}", self.active_tab));
+            self.hover_row(row);
+        }
+    }
+
     #[test]
     fn defaults_match_vanillas_own() {
         let config = WorldCreationConfig::default();
         assert_eq!(config.name, "New World");
         assert_eq!(config.seed, "");
+        assert_eq!(config.world_type, WorldTypePreset::Normal);
         assert_eq!(config.game_mode, WorldGameMode::Survival);
         assert_eq!(config.difficulty, WorldDifficulty::Normal);
         assert!(config.generate_structures);
@@ -710,17 +1161,18 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_nav_starts_focused_on_the_name_field_with_the_default_value() {
+    fn a_fresh_nav_starts_on_the_game_tab_focused_on_the_name_field() {
         let nav = CreateWorldNav::new();
+        assert_eq!(nav.active_tab(), GAME_TAB);
         assert_eq!(nav.focused(), Some(NAME_FIELD));
         assert_eq!(nav.widgets.name.value(), "New World");
         assert_eq!(nav.widgets.seed.value(), "");
     }
 
     #[test]
-    fn typing_reaches_the_focused_field() {
+    fn typing_reaches_the_focused_field_and_the_seed_field_lives_on_the_world_tab() {
         let mut nav = CreateWorldNav::new();
-        // Clear the default and type a real name.
+        // Clear the default and type a real name, on the Game tab.
         for _ in 0.."New World".len() {
             nav.handle_key(MenuKey::Backspace);
         }
@@ -729,8 +1181,23 @@ mod tests {
         }
         assert_eq!(nav.widgets.name.value(), "My World");
 
+        // Tab from Name must **not** land on Seed — the two are on different
+        // tabs now (a real vanilla divergence: `GameTab` and `WorldTab` are
+        // different `Screen` children in the real client too, so a keyboard
+        // Tab never crossed between them there either). It lands on this
+        // tab's next control instead.
         nav.handle_key(MenuKey::Tab);
-        assert_eq!(nav.focused(), Some(SEED_FIELD));
+        assert_eq!(
+            nav.focused(),
+            Some(GAME_MODE_ROW),
+            "Tab must stay within the Game tab's own fields"
+        );
+        assert_eq!(nav.widgets.seed.value(), "", "Seed must be untouched — it was never reached");
+
+        // Reaching Seed is a tab click, then a field click — exactly what a
+        // player does.
+        nav.click_focus(SEED_FIELD);
+        assert_eq!(nav.active_tab(), WORLD_TAB);
         for ch in "12345".chars() {
             nav.handle_key(MenuKey::Char(ch));
         }
@@ -743,11 +1210,11 @@ mod tests {
     fn game_mode_cycles_through_all_three_and_wraps() {
         let mut nav = CreateWorldNav::new();
         assert_eq!(nav.config().game_mode, WorldGameMode::Survival);
-        nav.click_row(GAME_MODE_ROW);
+        nav.click_focus(GAME_MODE_ROW);
         assert_eq!(nav.config().game_mode, WorldGameMode::Creative);
-        nav.click_row(GAME_MODE_ROW);
+        nav.click_focus(GAME_MODE_ROW);
         assert_eq!(nav.config().game_mode, WorldGameMode::Hardcore);
-        nav.click_row(GAME_MODE_ROW);
+        nav.click_focus(GAME_MODE_ROW);
         assert_eq!(nav.config().game_mode, WorldGameMode::Survival, "wraps");
     }
 
@@ -758,57 +1225,58 @@ mod tests {
         // "forced" assertion below is meaningful — it would fail if
         // `apply_hardcore_lock` did nothing, rather than passing by
         // coincidence because the default already happened to be Hard.
-        nav.click_row(DIFFICULTY_ROW); // Normal -> Hard
-        nav.click_row(DIFFICULTY_ROW); // Hard -> Peaceful (wraps)
-        nav.click_row(DIFFICULTY_ROW); // Peaceful -> Easy
+        nav.click_focus(DIFFICULTY_ROW); // Normal -> Hard
+        nav.click_focus(DIFFICULTY_ROW); // Hard -> Peaceful (wraps)
+        nav.click_focus(DIFFICULTY_ROW); // Peaceful -> Easy
         assert_eq!(nav.config().difficulty, WorldDifficulty::Easy);
 
-        nav.click_row(GAME_MODE_ROW); // Survival -> Creative
-        nav.click_row(GAME_MODE_ROW); // Creative -> Hardcore
+        nav.click_focus(GAME_MODE_ROW); // Survival -> Creative
+        nav.click_focus(GAME_MODE_ROW); // Creative -> Hardcore
         assert_eq!(nav.config().difficulty, WorldDifficulty::Hard, "forced");
         assert!(!nav.widgets.difficulty.active, "row must be inactive while locked");
 
         // Clicking a disabled row does nothing — the same rule every other
         // present-and-disabled control in this tree follows.
-        nav.click_row(DIFFICULTY_ROW);
+        nav.click_focus(DIFFICULTY_ROW);
         assert_eq!(nav.config().difficulty, WorldDifficulty::Hard, "unchanged");
 
         // Leaving Hardcore unlocks it again, at whatever it was left on.
-        nav.click_row(GAME_MODE_ROW); // Hardcore -> Survival
+        nav.click_focus(GAME_MODE_ROW); // Hardcore -> Survival
         assert!(nav.widgets.difficulty.active, "unlocked outside Hardcore");
     }
 
     #[test]
-    fn the_three_toggles_flip_independently() {
+    fn the_three_toggles_flip_independently_across_two_tabs() {
         let mut nav = CreateWorldNav::new();
         assert!(nav.config().generate_structures);
-        nav.click_row(STRUCTURES_ROW);
+        nav.click_focus(STRUCTURES_ROW); // World tab
         assert!(!nav.config().generate_structures);
         assert!(!nav.config().bonus_chest, "untouched");
         assert!(!nav.config().allow_cheats, "untouched");
 
-        nav.click_row(BONUS_CHEST_ROW);
+        nav.click_focus(BONUS_CHEST_ROW); // World tab
         assert!(nav.config().bonus_chest);
-        nav.click_row(ALLOW_CHEATS_ROW);
+        nav.click_focus(ALLOW_CHEATS_ROW); // Game tab — crosses back
         assert!(nav.config().allow_cheats);
         assert!(!nav.config().generate_structures, "still off from the first click");
     }
 
-    /// Same shape as `the_three_toggles_flip_independently`, kept separate
-    /// because `online_mode` is wired (see its own doc) rather than
-    /// decorative like the other three — this is the pair the toggle's own
-    /// gate needs: the default stays off, and clicking flips only this field.
+    /// Same shape as `the_three_toggles_flip_independently_across_two_tabs`,
+    /// kept separate because `online_mode` is wired (see its own doc) rather
+    /// than decorative like the other three — this is the pair the toggle's
+    /// own gate needs: the default stays off, and clicking flips only this
+    /// field.
     #[test]
     fn online_mode_defaults_off_and_toggles_independently() {
         let mut nav = CreateWorldNav::new();
         assert!(!nav.config().online_mode);
-        nav.click_row(ONLINE_MODE_ROW);
+        nav.click_focus(ONLINE_MODE_ROW);
         assert!(nav.config().online_mode);
         assert!(!nav.config().allow_cheats, "neighbour untouched");
         assert!(!nav.config().bonus_chest, "neighbour untouched");
         assert!(nav.config().generate_structures, "neighbour untouched (default on)");
 
-        nav.click_row(ONLINE_MODE_ROW);
+        nav.click_focus(ONLINE_MODE_ROW);
         assert!(!nav.config().online_mode, "toggles back off");
     }
 
@@ -821,11 +1289,11 @@ mod tests {
         for ch in "Overworld".chars() {
             nav.handle_key(MenuKey::Char(ch));
         }
-        nav.handle_key(MenuKey::Tab);
+        nav.click_focus(SEED_FIELD);
         for ch in "42".chars() {
             nav.handle_key(MenuKey::Char(ch));
         }
-        let outcome = nav.click_row(CREATE_ROW);
+        let outcome = nav.click_focus(CREATE_ROW);
         let CreateWorldOutcome::Create(config) = outcome else {
             panic!("expected CreateWorldOutcome::Create, got {outcome:?}");
         };
@@ -838,7 +1306,7 @@ mod tests {
     #[test]
     fn cancel_and_escape_both_ask_to_leave() {
         let mut nav = CreateWorldNav::new();
-        assert_eq!(nav.click_row(CANCEL_ROW), CreateWorldOutcome::Cancel);
+        assert_eq!(nav.click_focus(CANCEL_ROW), CreateWorldOutcome::Cancel);
 
         let mut nav2 = CreateWorldNav::new();
         assert_eq!(nav2.handle_key(MenuKey::Escape), CreateWorldOutcome::Cancel);
@@ -849,7 +1317,7 @@ mod tests {
         // #391's shape, on this screen too: clicking Structures must not
         // touch Bonus Chest.
         let mut nav = CreateWorldNav::new();
-        nav.click_row(STRUCTURES_ROW);
+        nav.click_focus(STRUCTURES_ROW);
         assert!(!nav.config().generate_structures);
         assert!(!nav.config().bonus_chest, "neighbour untouched");
     }
@@ -867,43 +1335,65 @@ mod tests {
         let mut nav = CreateWorldNav::new();
         nav.widgets.seed.set_value("1234");
         let f = frame(&nav);
-        assert_eq!(f.rows.len(), ROW_COUNT, "one row per focus id, 1:1");
-        assert!(f.rows[NAME_FIELD].field, "row 0 is a text field");
-        assert!(f.rows[SEED_FIELD].field, "row 1 is a text field");
-        let name_edit = f.rows[NAME_FIELD]
+        // Game tab: three tab rows, then Name/GameMode/Difficulty/AllowCheats,
+        // then Create/Cancel.
+        assert_eq!(f.rows.len(), TAB_LABELS.len() + 4 + 2);
+        let name_row = TAB_LABELS.len();
+        assert!(f.rows[name_row].field, "the Name row is a text field");
+        let name_edit = f.rows[name_row]
             .edit
             .as_ref()
             .expect("the name row must carry its EditBox, or nothing draws");
         assert_eq!(name_edit.value(), "New World");
-        let seed_edit = f.rows[SEED_FIELD]
+        // The control: a button row must not spuriously carry one too, or
+        // this assertion would be vacuously satisfied by every row.
+        let game_mode_row = name_row + 1;
+        assert!(
+            f.rows[game_mode_row].edit.is_none(),
+            "a button row must not carry an EditBox"
+        );
+        assert!(!f.rows[game_mode_row].field);
+
+        // Seed lives on the World tab.
+        nav.click_focus(SEED_FIELD);
+        let f = frame(&nav);
+        let seed_row = TAB_LABELS.len();
+        assert!(f.rows[seed_row].field, "the Seed row is a text field");
+        let seed_edit = f.rows[seed_row]
             .edit
             .as_ref()
             .expect("the seed row must carry its EditBox, or nothing draws");
         assert_eq!(seed_edit.value(), "1234");
-        // The control: a button row must not spuriously carry one too, or
-        // this assertion would be vacuously satisfied by every row.
-        assert!(
-            f.rows[GAME_MODE_ROW].edit.is_none(),
-            "a button row must not carry an EditBox"
-        );
-        assert!(!f.rows[GAME_MODE_ROW].field);
     }
 
     #[test]
-    fn both_fields_get_their_own_vanilla_label_and_the_seed_hint_is_not_duplicated() {
+    fn both_fields_get_their_own_vanilla_label_on_their_own_tab_and_the_seed_hint_is_not_duplicated() {
         // `CreateWorldScreen.java` wraps each field in
         // `CommonLayouts.labeledElement` — a real, drawn label, not
-        // narration. Both must be present, in vanilla's own strings.
-        let nav = CreateWorldNav::new();
+        // narration. Each is present on its own tab, and **absent** on the
+        // other — the control that catches a label emitted unconditionally
+        // regardless of which tab is showing.
+        let mut nav = CreateWorldNav::new();
         let f = frame(&nav);
         assert!(
             f.labels.iter().any(|l| l.text == NAME_LABEL),
-            "missing the name field's own label"
+            "missing the name field's own label on the Game tab"
         );
         assert!(
+            !f.labels.iter().any(|l| l.text == SEED_LABEL),
+            "the seed label must not appear while the Game tab is showing"
+        );
+
+        nav.click_focus(SEED_FIELD);
+        let f = frame(&nav);
+        assert!(
             f.labels.iter().any(|l| l.text == SEED_LABEL),
-            "missing the seed field's own label — this used to be absent \
-             entirely, with only the *hint* text drawn"
+            "missing the seed field's own label on the World tab — this used \
+             to be absent entirely, with only the *hint* text drawn"
+        );
+        assert!(
+            !f.labels.iter().any(|l| l.text == NAME_LABEL),
+            "the name label must not appear while the World tab is showing"
         );
         // `SEED_INFO` must appear as the box's own hint, and *not* also as a
         // second, permanent label/notice — vanilla shows it in exactly one
@@ -920,29 +1410,148 @@ mod tests {
     }
 
     #[test]
-    fn every_row_resolves_on_screen_at_the_smallest_canvas() {
+    fn every_row_resolves_on_screen_at_the_smallest_canvas_on_every_tab() {
         let (w, h) = (
             crate::config::MIN_SCALED_WIDTH as f32,
             crate::config::MIN_SCALED_HEIGHT as f32,
         );
-        for row in 0..ROW_COUNT {
-            let (x, y, rw, rh) = row_slot(row).resolve(w, h);
-            assert!(
-                x >= 0.0 && y >= 0.0 && x + rw <= w && y + rh <= h,
-                "row {row} at ({x}, {y}) size {rw}x{rh} on {w}x{h}"
-            );
+        // Collected across all three tabs and asserted once, per `CLAUDE.md`'s
+        // "collect mismatches, do not assert inside the loop" — an `assert!`
+        // per row would report only the *first* off-screen row, not every one.
+        let mut offenders = Vec::new();
+        for tab in 0..TAB_LABELS.len() {
+            let mut nav = CreateWorldNav::new();
+            nav.switch_tab(tab);
+            for &row in content_rows_for_tab(tab)
+                .iter()
+                .chain([&CREATE_ROW, &CANCEL_ROW])
+            {
+                let (x, y, rw, rh) = row_slot(row).resolve(w, h);
+                if !(x >= 0.0 && y >= 0.0 && x + rw <= w && y + rh <= h) {
+                    offenders.push(format!(
+                        "tab {tab} row {row} at ({x}, {y}) size {rw}x{rh} on {w}x{h}"
+                    ));
+                }
+            }
         }
+        assert!(offenders.is_empty(), "off-screen rows: {offenders:#?}");
     }
 
     #[test]
     fn the_footer_buttons_do_not_overlap_the_content_rows() {
         let (w, h) = (854.0, 480.0);
-        let (_, content_bottom, _, _) = row_slot(ONLINE_MODE_ROW).resolve(w, h);
+        // `ONLINE_MODE_ROW` is the deepest row of either tab (World's local
+        // row 4; Game's four rows end one row shallower) — the one to check
+        // against, since it is closest to the footer.
+        let (_, content_bottom, _, ch) = row_slot(ONLINE_MODE_ROW).resolve(w, h);
         let (_, footer_y, _, _) = row_slot(CREATE_ROW).resolve(w, h);
         assert!(
-            footer_y >= content_bottom,
-            "footer at {footer_y} must sit at or below the last content row's bottom {content_bottom}"
+            footer_y >= content_bottom + ch,
+            "footer at {footer_y} must sit at or below the last content row's bottom {}",
+            content_bottom + ch
         );
+    }
+
+    // -- the tab bar (issues #564/#567) --------------------------------------
+
+    #[test]
+    fn the_frame_carries_three_real_clickable_tab_rows() {
+        let nav = CreateWorldNav::new();
+        let f = frame(&nav);
+        for (index, &label) in TAB_LABELS.iter().enumerate() {
+            let row = &f.rows[index];
+            assert_eq!(row.label, label);
+            let view = row.tab.expect("a tab-bar row must carry a TabEntryView");
+            assert_eq!(view.index, index);
+            assert_eq!(view.count, TAB_LABELS.len());
+            assert_eq!(view.selected, index == GAME_TAB);
+            // Unlike Statistics's Items/Mobs, every tab here is real — see
+            // the module docs on why More is enabled with nothing under it.
+            assert!(row.enabled, "{label} must be a real, clickable tab");
+        }
+    }
+
+    #[test]
+    fn clicking_a_tab_switches_active_tab_and_the_frames_content() {
+        let mut nav = CreateWorldNav::new();
+        assert_eq!(nav.click_row(WORLD_TAB), CreateWorldOutcome::Handled);
+        assert_eq!(nav.active_tab(), WORLD_TAB);
+        let f = frame(&nav);
+        // World's first content row is Seed, a field — Game's own first row
+        // (Name) must not still be present anywhere in `rows`.
+        let first_content = &f.rows[TAB_LABELS.len()];
+        assert!(first_content.field, "World's first row is the Seed field");
+        assert!(
+            !f.rows.iter().any(|r| r.label == NAME_LABEL),
+            "Game's Name field must not appear while World is showing"
+        );
+
+        assert_eq!(nav.click_row(MORE_TAB), CreateWorldOutcome::Handled);
+        assert_eq!(nav.active_tab(), MORE_TAB);
+        let f = frame(&nav);
+        assert_eq!(
+            f.rows.len(),
+            TAB_LABELS.len() + 2,
+            "More has no content rows, only the tab bar and the footer"
+        );
+
+        // Clicking the tab already showing is a no-op, not a crash and not a
+        // focus reset.
+        nav.click_row(GAME_TAB);
+        nav.click_focus(GAME_MODE_ROW);
+        let before = nav.focused();
+        assert_eq!(nav.click_row(GAME_TAB), CreateWorldOutcome::Handled);
+        assert_eq!(nav.focused(), before, "re-clicking the active tab must not move focus");
+    }
+
+    #[test]
+    fn switching_tabs_moves_keyboard_focus_onto_the_new_tabs_first_field_or_clears_it() {
+        let mut nav = CreateWorldNav::new();
+        assert_eq!(nav.focused(), Some(NAME_FIELD), "premise");
+
+        nav.click_row(WORLD_TAB);
+        assert_eq!(nav.focused(), Some(SEED_FIELD), "World's first field takes focus");
+
+        nav.click_row(MORE_TAB);
+        assert_eq!(nav.focused(), None, "More has nothing to focus");
+
+        nav.click_row(GAME_TAB);
+        assert_eq!(nav.focused(), Some(NAME_FIELD), "back to Game's first field");
+    }
+
+    #[test]
+    fn a_field_inactive_on_another_tab_cannot_be_reached_by_tab_traversal() {
+        // The control for `sync_tab_visibility`: with the Game tab showing,
+        // repeatedly pressing Tab must never land on a World-tab-only id.
+        let mut nav = CreateWorldNav::new();
+        let world_only = [
+            SEED_FIELD,
+            WORLD_TYPE_ROW,
+            STRUCTURES_ROW,
+            BONUS_CHEST_ROW,
+            ONLINE_MODE_ROW,
+        ];
+        for _ in 0..8 {
+            nav.handle_key(MenuKey::Tab);
+            if let Some(focused) = nav.focused() {
+                assert!(
+                    !world_only.contains(&focused),
+                    "Tab traversal reached World-only id {focused} while the Game tab was showing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hovering_a_tab_row_records_nothing_hover_is_derived_from_the_cursor_at_draw_time() {
+        // See `hover_row`'s own doc: a tab-bar row's hover comes from
+        // `MenuFrame::cursor` at draw time, not from this bookkeeping — so
+        // this must be a true no-op, not merely "does not crash".
+        let mut nav = CreateWorldNav::new();
+        nav.hover_row(GAME_TAB);
+        assert_eq!(nav.hovered(), None);
+        nav.hover_row(WORLD_TAB);
+        assert_eq!(nav.hovered(), None);
     }
 
     // -- hover (issue #567) --------------------------------------------------
@@ -961,16 +1570,17 @@ mod tests {
     #[test]
     fn hovering_a_button_row_reaches_the_frame() {
         let mut nav = CreateWorldNav::new();
-        nav.hover_row(CREATE_ROW);
+        nav.hover_focus(CREATE_ROW);
         assert_eq!(nav.hovered(), Some(CREATE_ROW));
+        let create_frame_row = nav.frame_row_for_focus_id(CREATE_ROW).unwrap();
         assert_eq!(
             frame(&nav).hovered,
-            Some(CREATE_ROW),
+            Some(create_frame_row),
             "MenuFrame::hovered must carry the row render::draw_widget outlines"
         );
 
         // A second hover replaces the first — only one row highlights at once.
-        nav.hover_row(CANCEL_ROW);
+        nav.hover_focus(CANCEL_ROW);
         assert_eq!(nav.hovered(), Some(CANCEL_ROW));
     }
 
@@ -982,20 +1592,27 @@ mod tests {
     #[test]
     fn hovering_a_field_row_does_nothing() {
         let mut nav = CreateWorldNav::new();
-        nav.hover_row(NAME_FIELD);
+        nav.hover_focus(NAME_FIELD);
         assert_eq!(nav.hovered(), None, "a field row is not a hoverable button");
-        nav.hover_row(SEED_FIELD);
+
+        nav.switch_tab(WORLD_TAB);
+        nav.hover_focus(SEED_FIELD);
         assert_eq!(nav.hovered(), None);
 
         // And it must not clobber a real hover already recorded, the same
         // property `hover_row`'s own doc argues protects the *focused* field
         // from a stray mouse move — here it is the *hover* state's turn not
-        // to be reset by passing over a field.
-        nav.hover_row(CREATE_ROW);
-        nav.hover_row(NAME_FIELD);
+        // to be reset by passing over a field. Deliberately kept on **one**
+        // tab throughout: switching tabs legitimately clears hover (the
+        // previously-hovered row leaves `frame.rows` entirely — see
+        // `switch_tab`'s own doc), which is a different property from the one
+        // this test names, and `hover_focus`'s tab-following would otherwise
+        // exercise that instead.
+        nav.hover_focus(STRUCTURES_ROW);
+        nav.hover_focus(SEED_FIELD);
         assert_eq!(
             nav.hovered(),
-            Some(CREATE_ROW),
+            Some(STRUCTURES_ROW),
             "moving the mouse back over a field must not clear a button's hover"
         );
     }
@@ -1004,8 +1621,12 @@ mod tests {
     /// a gap here is exactly how issue #567 shipped: `hover_row` existed on
     /// `EditForm` and on other screens, but `CreateWorldNav` had no such
     /// method at all, so no row on this screen could ever be hovered.
+    /// Collected across all seven and asserted once (not `assert!` inside the
+    /// loop), so a single broken row is not the only one this test can ever
+    /// report.
     #[test]
     fn every_button_row_can_be_hovered() {
+        let mut offenders = Vec::new();
         for row in [
             GAME_MODE_ROW,
             DIFFICULTY_ROW,
@@ -1013,12 +1634,92 @@ mod tests {
             BONUS_CHEST_ROW,
             ALLOW_CHEATS_ROW,
             ONLINE_MODE_ROW,
+            WORLD_TYPE_ROW,
             CREATE_ROW,
             CANCEL_ROW,
         ] {
             let mut nav = CreateWorldNav::new();
-            nav.hover_row(row);
-            assert_eq!(nav.hovered(), Some(row), "row {row} did not record hover");
+            nav.hover_focus(row);
+            if nav.hovered() != Some(row) {
+                offenders.push(row);
+            }
         }
+        assert!(offenders.is_empty(), "rows that did not record hover: {offenders:?}");
+    }
+
+    // -- world type (issue #519's UI half) -----------------------------------
+
+    #[test]
+    fn world_type_defaults_to_normal_and_cycles_through_all_seven() {
+        let mut nav = CreateWorldNav::new();
+        assert_eq!(nav.config().world_type, WorldTypePreset::Normal);
+        let order = [
+            WorldTypePreset::LargeBiomes,
+            WorldTypePreset::Amplified,
+            WorldTypePreset::SingleBiomeSurface,
+            WorldTypePreset::Flat,
+            WorldTypePreset::FlatAllDimensions,
+            WorldTypePreset::DebugAllBlockStates,
+            WorldTypePreset::Normal, // wraps
+        ];
+        for expect in order {
+            nav.click_focus(WORLD_TYPE_ROW);
+            assert_eq!(nav.config().world_type, expect);
+        }
+    }
+
+    #[test]
+    fn every_preset_caption_is_vanillas_own_generator_string() {
+        // `generator.minecraft.<id>`, verbatim from `en_us.json` — not
+        // re-derived here, quoted from the jar's own strings so a typo cannot
+        // silently pass by looking plausible.
+        assert_eq!(WorldTypePreset::Normal.caption(), "Default");
+        assert_eq!(WorldTypePreset::LargeBiomes.caption(), "Large Biomes");
+        assert_eq!(WorldTypePreset::Amplified.caption(), "AMPLIFIED");
+        assert_eq!(WorldTypePreset::SingleBiomeSurface.caption(), "Single Biome");
+        assert_eq!(WorldTypePreset::Flat.caption(), "Superflat");
+        assert_eq!(WorldTypePreset::FlatAllDimensions.caption(), "Flat All Dimensions");
+        assert_eq!(WorldTypePreset::DebugAllBlockStates.caption(), "Debug Mode");
+    }
+
+    #[test]
+    fn exactly_the_three_backend_ready_presets_report_wired() {
+        // The control this needs: not "some report true", but *exactly* the
+        // three `docs/worldgen-world-type-selection.md` names as reachable
+        // with no `lodestone-server` change (`overworld_chunk_source_of_type`
+        // already `pub` at that crate's root) — collected, not asserted
+        // inside the loop, so a wrong-by-one set is still fully reported.
+        let wired: Vec<WorldTypePreset> = [
+            WorldTypePreset::Normal,
+            WorldTypePreset::LargeBiomes,
+            WorldTypePreset::Amplified,
+            WorldTypePreset::SingleBiomeSurface,
+            WorldTypePreset::Flat,
+            WorldTypePreset::FlatAllDimensions,
+            WorldTypePreset::DebugAllBlockStates,
+        ]
+        .into_iter()
+        .filter(|p| p.is_backend_wired())
+        .collect();
+        assert_eq!(
+            wired,
+            vec![
+                WorldTypePreset::Normal,
+                WorldTypePreset::LargeBiomes,
+                WorldTypePreset::Amplified,
+            ]
+        );
+    }
+
+    #[test]
+    fn world_type_only_reachable_on_the_world_tab() {
+        let mut nav = CreateWorldNav::new();
+        assert_eq!(nav.active_tab(), GAME_TAB, "premise");
+        nav.click_focus(WORLD_TYPE_ROW);
+        assert_eq!(
+            nav.active_tab(),
+            WORLD_TAB,
+            "clicking World Type must switch to the tab that holds it"
+        );
     }
 }

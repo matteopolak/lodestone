@@ -92,21 +92,17 @@ pub const TAB_LABELS: [&str; 3] = ["General", "Items", "Mobs"];
 pub const GENERAL_TAB: usize = 0;
 
 /// The pixel rect of tab `index` (into [`TAB_LABELS`]) at canvas `width` —
-/// vanilla's `MenuTabBar.arrangeElements` (`MenuTabBar.java`), via
-/// [`layout::tab_bar_geometry`]. The one definition [`super::render::row_rect`]
-/// (the draw, the hover, and `app.rs`'s click hit-test) and the draw's own
-/// hover check both resolve a tab's position from — see
+/// vanilla's `MenuTabBar.arrangeElements` (`MenuTabBar.java`), via the shared
+/// [`layout::tab_bar_row_rect`] (issue #567's generalisation: this screen's own
+/// wrapper used to inline the arithmetic directly, which is what
+/// [`super::render::row_rect`]'s `MenuRow::tab` arm called into by name —
+/// harmless while Statistics was the only consumer, and a hard-coded
+/// dependency the moment Create New World became a second one). See
 /// [`super::render::TabEntryView::index`]'s own doc on why a `Slot` cannot
 /// express this row's *width*, let alone its `x`.
 #[must_use]
 pub fn tab_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
-    let (start_x, tab_width) = layout::tab_bar_geometry(width, TAB_LABELS.len());
-    (
-        start_x + tab_width * index as f32,
-        0.0,
-        tab_width,
-        layout::TAB_BAR_HEIGHT,
-    )
+    layout::tab_bar_row_rect(index, TAB_LABELS.len(), width)
 }
 
 /// The row index of Done — vanilla's `layout.addToFooter(Button.builder(
@@ -559,12 +555,37 @@ pub struct StatsNav {
     /// selection itself, which that split did not touch — so the two had to be
     /// found separately.
     focused: bool,
+    /// Whether the mouse is over Done — the same "no `Screen::Statistics` arm
+    /// in `MenuNav::hover`" gap issue #567 found and fixed on Create New
+    /// World, found here while auditing this screen for the same defect
+    /// shape: [`frame`] never set `MenuFrame::hovered`, so Done never drew a
+    /// hover outline regardless of where the mouse was. The tab bar itself
+    /// needs no equivalent field — see [`hover_row`]'s own doc, the same
+    /// reasoning `create_world.rs`'s `CreateWorldNav::hover_row` documents:
+    /// a `MenuRow::tab` row derives its hover straight from `MenuFrame::cursor`
+    /// at draw time.
+    hovered: Option<usize>,
 }
 
 impl StatsNav {
     pub fn reset(&mut self) {
         self.scroll = 0.0;
         self.focused = false;
+        self.hovered = None;
+    }
+
+    /// The mouse moved over row `row`. Only [`DONE_ROW`] can record hover —
+    /// there is nothing else on this screen `MenuFrame::hovered` drives a
+    /// highlight for (the General list has no per-row control, and the tab
+    /// bar's own hover is geometry-derived, not this field).
+    pub fn hover_row(&mut self, row: usize) {
+        self.hovered = (row == DONE_ROW).then_some(DONE_ROW);
+    }
+
+    /// The row the mouse is over, for [`super::render::MenuFrame::hovered`].
+    #[must_use]
+    pub fn hovered(&self) -> Option<usize> {
+        self.hovered
     }
 
     /// The offset, in pixels.
@@ -712,6 +733,7 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
         enabled: index == GENERAL_TAB,
         tab: Some(TabEntryView {
             index,
+            count: TAB_LABELS.len(),
             selected: index == GENERAL_TAB,
         }),
         ..Default::default()
@@ -724,6 +746,11 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
         // an out-of-range accident. It used to be a hard `0`, i.e. Done, which
         // is the player report [`StatsNav::focused`] documents.
         selected: if nav.focused() { DONE_ROW } else { usize::MAX },
+        // The same gap issue #567 found and fixed on Create New World: this
+        // used to be left at its `..Default::default()` of `None`
+        // unconditionally, so Done never drew a hover outline no matter where
+        // the cursor was.
+        hovered: nav.hovered(),
         vanilla: true,
         // No `labels` — this screen draws no separate heading; see this
         // function's own doc on why vanilla has none either.
@@ -945,10 +972,53 @@ mod tests {
             assert_eq!(row.label, label);
             let view = row.tab.expect("a tab-bar row must carry a TabEntryView");
             assert_eq!(view.index, index);
+            assert_eq!(view.count, TAB_LABELS.len(), "{label} carries this bar's own tab count");
             let live = index == GENERAL_TAB;
             assert_eq!(row.enabled, live, "{label} active state");
             assert_eq!(view.selected, live, "{label} selected state");
         }
+    }
+
+    // -- Done's hover outline -------------------------------------------------
+
+    /// The same defect shape issue #567 found and fixed on Create New World:
+    /// `frame` never set `MenuFrame::hovered`, so Done never drew its hover
+    /// outline no matter where the cursor was. `hover_row` is `MenuNav::hover`'s
+    /// `Screen::Statistics` arm, wired in `nav.rs`.
+    #[test]
+    fn hovering_done_reaches_the_frame() {
+        let mut nav = StatsNav::default();
+        assert_eq!(nav.hovered(), None);
+        assert_eq!(frame(&nav, &StatsSnapshot::default()).hovered, None);
+
+        nav.hover_row(DONE_ROW);
+        assert_eq!(nav.hovered(), Some(DONE_ROW));
+        assert_eq!(
+            frame(&nav, &StatsSnapshot::default()).hovered,
+            Some(DONE_ROW),
+            "MenuFrame::hovered must carry Done so render::draw_widget outlines it"
+        );
+    }
+
+    /// The control: this screen has nothing else `hover_row` can highlight —
+    /// a tab-bar row's hover comes from `MenuFrame::cursor` at draw time (see
+    /// `hover_row`'s own doc), not from this bookkeeping.
+    #[test]
+    fn hovering_a_non_done_row_records_nothing() {
+        let mut nav = StatsNav::default();
+        for row in 1..=TAB_LABELS.len() {
+            nav.hover_row(row);
+            assert_eq!(nav.hovered(), None, "row {row} must not record hover");
+        }
+    }
+
+    #[test]
+    fn reset_clears_hover_too() {
+        let mut nav = StatsNav::default();
+        nav.hover_row(DONE_ROW);
+        assert_eq!(nav.hovered(), Some(DONE_ROW));
+        nav.reset();
+        assert_eq!(nav.hovered(), None);
     }
 
     #[test]
