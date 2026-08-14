@@ -1,4 +1,4 @@
-//! Plugin command registration and dispatch (issues #118, #119, #122): a
+//! Plugin command registration and dispatch: a
 //! [`CommandRegistry`] resource a plugin populates in its `Plugin::build`, an
 //! argument tree per command, per-node permission gating, and tab completion.
 //!
@@ -49,10 +49,9 @@
 //!
 //! ## Why the registry is here and not in `lodestone-server`
 //!
-//! Issue #118 says the registry should be "server-side, since that is where
-//! command *execution* semantics live". That was the right instinct about
-//! semantics and is the wrong crate, for a reason the issue could not have
-//! known:
+//! The instinct that the registry should be "server-side, since that is where
+//! command *execution* semantics live" is right about semantics and wrong about
+//! the crate, for a reason that instinct could not have known:
 //!
 //! - **`lodestone-server` deliberately does not depend on `lodestone-ecs`**, and
 //!   says so in its own manifest ("Deliberately NOT `lodestone-ecs`, despite
@@ -63,9 +62,9 @@
 //!   would be unreachable by every plugin that can currently exist.
 //!
 //! So the registry lives where the plugin API lives. It is a plain
-//! `Resource` with no client-specific state, so a future server `App` — or
-//! #48's dispatcher — inserts the same resource and calls the same
-//! [`dispatch`]. Nothing here knows or cares which side it is on.
+//! `Resource` with no client-specific state, so a future server `App` — or a
+//! future `/execute`-context dispatcher — inserts the same resource and calls
+//! the same [`dispatch`]. Nothing here knows or cares which side it is on.
 //!
 //! ## What is NOT wired, stated plainly
 //!
@@ -93,8 +92,9 @@
 //!
 //! - **A handler is stored per [`lodestone_command::NodeId`] in a side table on
 //!   [`RegisteredCommand`], not on the tree node.** `lodestone-command` has no
-//!   execution model on purpose (issue #48 will want to define one differently),
-//!   so keep handlers out of it. The cost is that `on_execute` must set the
+//!   execution model on purpose (a future `/execute`-context dispatcher will want
+//!   to define one differently), so keep handlers out of it. The cost is that
+//!   `on_execute` must set the
 //!   node's `executable` flag *and* insert into the table; [`PluginCommand::on_execute`]
 //!   does both and is the only way to do either.
 //! - **Dispatch resolves the handler by walking the parsed path backwards.** A
@@ -148,21 +148,22 @@ use crate::sets::TickSet;
 
 /// Who is running a command.
 ///
-/// # The `/execute` gap (issue #123)
+/// # The `/execute` gap
 ///
 /// This is deliberately **only** an identity — a subject and a display name. It
-/// is *not* a vanilla `CommandSourceStack`, and that is why issue #123 cannot be
-/// closed by this work. Vanilla's `/execute as <selector> at <selector> run
-/// <command>` rewrites a *context*: executor entity, position, rotation,
-/// dimension, anchor, plus `store`/`if`/`unless` result propagation. None of
-/// those fields exist here, and inventing them without #48's dispatcher to
+/// is *not* a vanilla `CommandSourceStack`, and that is why a real `/execute`
+/// cannot be closed by this work. Vanilla's `/execute as <selector> at
+/// <selector> run <command>` rewrites a *context*: executor entity, position,
+/// rotation, dimension, anchor, plus `store`/`if`/`unless` result propagation.
+/// None of those fields exist here, and inventing them without a dispatcher to
 /// consume them would be a context object with no context-rewriter — an island
 /// of exactly the shape this repo's `CLAUDE.md` warns about.
 ///
-/// What this type does give #123 is the *seam*: [`dispatch`] takes the source by
-/// reference and never reads it except to resolve permissions, so a future
-/// `/execute` can substitute a different subject without touching the registry
-/// or the tree. Widening this struct is additive when #48 lands.
+/// What this type does give `/execute` is the *seam*: [`dispatch`] takes the
+/// source by reference and never reads it except to resolve permissions, so a
+/// future `/execute` can substitute a different subject without touching the
+/// registry or the tree. Widening this struct is additive when that dispatcher
+/// lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSource {
     pub subject: PermissionSubject,
@@ -347,7 +348,7 @@ impl PluginCommand {
         self
     }
 
-    /// The permission gating the **whole** command — #118's "a permission node
+    /// The permission gating the **whole** command — "a permission node
     /// gating the whole tree". Applied to the root literal, so subtree pruning
     /// makes the entire command invisible and unusable in one step.
     pub fn permission(&mut self, permission: impl Into<String>) -> &mut Self {
@@ -370,7 +371,7 @@ impl PluginCommand {
         self.tree.add_argument(parent, name, argument_type)
     }
 
-    /// Gate one node, and everything under it (issue #122).
+    /// Gate one node, and everything under it.
     pub fn require_permission(&mut self, node: NodeId, permission: impl Into<String>) -> &mut Self {
         self.tree.require_permission(node, permission);
         self
@@ -475,7 +476,7 @@ pub enum CommandDispatchError {
     UnknownCommand { name: String },
     /// The command was found and the input did not parse. Carries the
     /// underlying error, which is [`ParseErrorKind::NoPermission`] when the
-    /// reason was a gate (issue #122).
+    /// reason was a permission gate.
     Parse(ParseError),
     /// A node parsed as executable but had no handler — a registration bug that
     /// [`CommandRegistry::register`] would normally have caught, reachable only
@@ -502,8 +503,8 @@ impl CommandDispatchError {
         }
     }
 
-    /// Was this a permission refusal? Distinguishes #122's gate from every
-    /// other parse failure, for a caller that wants to log or count them.
+    /// Was this a permission refusal? Distinguishes a permission gate from
+    /// every other parse failure, for a caller that wants to log or count them.
     pub fn is_permission_denied(&self) -> bool {
         matches!(
             self,
@@ -523,7 +524,7 @@ impl std::fmt::Display for CommandDispatchError {
 
 impl std::error::Error for CommandDispatchError {}
 
-/// The registry a plugin populates — issue #118's `CommandRegistry`.
+/// The registry a plugin populates.
 #[derive(Resource, Default)]
 pub struct CommandRegistry {
     /// Canonical name (lower-cased) → command.
@@ -638,8 +639,8 @@ impl std::fmt::Debug for PlayerDirectory {
     }
 }
 
-/// An argument that parses a player name and suggests whoever is online —
-/// issue #119's "player name".
+/// An argument that parses a player name and suggests whoever is online — a
+/// "player name" argument shape.
 ///
 /// **Lenient**, not strict: vanilla accepts an offline player's name in most
 /// commands, and the suggestion list is only who happens to be in the tab list
@@ -652,7 +653,7 @@ pub fn player_argument(directory: &PlayerDirectory) -> Arc<dyn ArgumentType> {
     })))
 }
 
-/// An argument over a fixed, closed set — issue #119's "block id" shape.
+/// An argument over a fixed, closed set — a "block id" argument shape.
 ///
 /// **Strict**: a value outside the set fails at parse rather than reaching the
 /// handler. For a closed registry that is what you want; a typo'd block id
@@ -762,8 +763,8 @@ pub fn dispatch(
     Ok(handler(&mut invocation))
 }
 
-/// Tab completions for a partially-typed command, gated per node (#122's
-/// suggestion half).
+/// Tab completions for a partially-typed command, gated per node (the
+/// permission-gate's suggestion half).
 ///
 /// Takes `&World` rather than `&mut World`: suggesting never runs a handler.
 /// A node the subject cannot use is **silently** absent, together with its

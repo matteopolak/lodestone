@@ -1,4 +1,4 @@
-//! The plugin event bus (issue #104): a typed, version-free `Message` mirror
+//! The plugin event bus: a typed, version-free `Message` mirror
 //! of every [`ClientEvent`] the client decodes, for a plugin that wants to
 //! *observe* the event stream directly rather than poll component state
 //! after the fact.
@@ -11,9 +11,10 @@
 //! be exactly the staleness factory `CLAUDE.md` calls this repo's
 //! most-documented defect class: two enums drift, and nothing forces the
 //! second one to grow a variant when the first one does. `docs/bevy-migration.md`
-//! §5.1's original `RawPacket` proposal is the version-*opaque* half of issue
-//! #104 (wire bytes, still unbuilt); this is the version-*free*, already-decoded
-//! half, and it costs nothing extra to keep in sync because it is not a copy —
+//! §5.1's original `RawPacket` proposal is the version-*opaque* half of the
+//! plugin event bus (wire bytes, still unbuilt); this is the version-*free*,
+//! already-decoded half, and it costs nothing extra to keep in sync because it
+//! is not a copy —
 //! it is `ClientEvent` itself, one field deep.
 //!
 //! # Why this cannot become a sixth silent-drop router

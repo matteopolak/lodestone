@@ -134,9 +134,9 @@ pub struct Pose(pub EntityPose);
 pub struct Health(pub f32);
 
 /// Ticks remaining in the current hurt-flash window — vanilla's `hurtTime`
-/// countdown. `LivingEntity.handleDamageEvent` (`LivingEntity.java:2044-2049`,
-/// folding [`lodestone_model::ClientEvent::EntityDamaged`]) and
-/// `LivingEntity.animateHurt` (`LivingEntity.java:1873-1876`, folding
+/// countdown. `LivingEntity.handleDamageEvent` (folding
+/// [`lodestone_model::ClientEvent::EntityDamaged`]) and
+/// `LivingEntity.animateHurt` (folding
 /// [`lodestone_model::ClientEvent::EntityHurtAnimation`]) both reset the
 /// identical pair of fields — `hurtDuration = 10; hurtTime = hurtDuration;` —
 /// so one countdown here covers both reports. [`crate::ingest::tick_hurt_time`]
@@ -294,20 +294,20 @@ impl AttackSwing {
 }
 
 /// How long an entity has been *using* an item, and with which hand — the state
-/// behind a bow draw or a crossbow wind (issue #57).
+/// behind a bow draw or a crossbow wind.
 ///
 /// # The server does not send the counter, so we keep our own
 ///
 /// `LivingEntity`'s synced flags byte carries only a **boolean**: bit 0 is "an
 /// item is in use", bit 1 is which hand. `useItemRemaining` is *never* synced.
-/// Vanilla's own client does exactly what this type does — `onSyncedDataUpdated`
-/// (`LivingEntity.java:3521-3529`) seeds its countdown the moment the bit flips
+/// Vanilla's own client does exactly what this type does — `LivingEntity.onSyncedDataUpdated`
+/// seeds its countdown the moment the bit flips
 /// on, and ticks it locally.
 ///
 /// # Counting up, not down
 ///
 /// Vanilla counts `useItemRemaining` **down** from `getUseDuration`, then derives
-/// `getTicksUsingItem() = duration - remaining` (`LivingEntity.java:3594`) — and
+/// `LivingEntity.getTicksUsingItem() = duration - remaining` — and
 /// `getTicksUsingItem` is what every pose and every draw-power formula actually
 /// reads. So [`ticks`](Self::ticks) counts **up** from zero, which is that same
 /// quantity without needing `getUseDuration`. That matters: the duration is a
@@ -342,8 +342,8 @@ impl ItemUse {
     /// zero and produce a bow that is permanently un-drawn while looking, from the
     /// byte alone, perfectly correct. So the counter only resets on a **rising
     /// edge** (`!was_using && now using`) or on the hand changing, which vanilla
-    /// treats the same way — `startUsingItem` is guarded by `!this.isUsingItem()`
-    /// (`LivingEntity.java:3500`).
+    /// treats the same way — `LivingEntity.startUsingItem` is guarded by
+    /// `!this.isUsingItem()`.
     pub fn apply_flags(&mut self, using: bool, off_hand: bool) {
         let restart = (using && !self.using) || (using && off_hand != self.off_hand);
         if restart {
@@ -368,7 +368,7 @@ impl ItemUse {
 }
 
 /// The mob-flags byte's decoded state — today just **aggressive**, vanilla's
-/// `Mob.isAggressive()` (issue #379).
+/// `Mob.isAggressive()`.
 ///
 /// # Why this is not a field on [`ItemUse`]
 ///
@@ -406,7 +406,7 @@ pub struct Baby(pub bool);
 /// ([`lodestone_model::event::EntityMetadataUpdate::tamed`]), decoded by the
 /// v770 adapter and, until this component existed, dropped on the floor: the
 /// wire carried the bit end to end and nothing folded it into per-entity
-/// state, so the shell's draw call site had no source to read (issue #235).
+/// state, so the shell's draw call site had no source to read.
 ///
 /// **Absent** until the first report, like [`Baby`] and [`CreeperSwellDir`] —
 /// which for a mob that was already tame when it entered view range is not
@@ -425,7 +425,7 @@ pub struct Tamed(pub bool);
 
 /// The wire entity id this entity is leashed to, or `None` when it carries no
 /// lead — [`lodestone_model::event::ClientEvent::EntityLeashed`]'s
-/// `holder_id`, decoded from `SET_ENTITY_LINK` (issue #236).
+/// `holder_id`, decoded from `SET_ENTITY_LINK`.
 ///
 /// **Absent** until the first report, like [`Tamed`] — but unlike `Tamed`,
 /// that first report is not necessarily "the tick the attach happened":

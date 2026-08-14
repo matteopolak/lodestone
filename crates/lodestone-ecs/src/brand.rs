@@ -1,4 +1,4 @@
-//! Issue #301 — the built-in `minecraft:brand` channel, installed in the
+//! The built-in `minecraft:brand` channel, installed in the
 //! *production* plugin set.
 //!
 //! # What it is
@@ -49,8 +49,8 @@
 //! [`ServerBrandChannelPlugin::build`] — or give it its own plugin and add that
 //! to `lodestone_app::client_app`. Do **not** reach for `ChannelRegistry`
 //! (`lodestone-client`): that is a passive fold an *embedder* drives by hand and
-//! has no call site inside the client, which is why it was the wrong half of
-//! #301 to build on.
+//! has no call site inside the client, which is why it was the wrong half to
+//! build on.
 //!
 //! # Configuration
 //!
