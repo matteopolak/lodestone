@@ -114,16 +114,26 @@
 //! `lodestone-command-mc` (the Minecraft argument types), `lodestone-model` (the
 //! version-free `ArgumentParser`), and [`crate::game_rules`].
 
+mod block_commands;
+mod chat_commands;
+mod clear;
+mod difficulty;
 pub mod effect;
 /// `/effect give` and `/effect clear` — the producer that makes
 /// [`crate::mob_effects`] reachable from a running game.
 mod effect_command;
+mod experience;
 mod gamemode;
 mod gamerule;
 mod give;
+mod help;
+mod kill;
 pub mod registrar;
+mod seed;
 pub mod source;
+mod time;
 pub mod wire;
+mod world_spawn_commands;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -205,6 +215,16 @@ impl ServerCommands {
         gamemode::register(&mut registrar);
         give::register(&mut registrar);
         effect_command::register(&mut registrar);
+        time::register(&mut registrar);
+        difficulty::register(&mut registrar);
+        seed::register(&mut registrar);
+        world_spawn_commands::register(&mut registrar);
+        kill::register(&mut registrar);
+        experience::register(&mut registrar);
+        clear::register(&mut registrar);
+        block_commands::register(&mut registrar);
+        chat_commands::register(&mut registrar);
+        help::register(&mut registrar);
         Self::from_registrar(registrar)
     }
 

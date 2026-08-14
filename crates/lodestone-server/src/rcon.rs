@@ -426,7 +426,7 @@ const RCON_PERMISSION_LEVEL: u8 = 4;
 #[cfg(not(target_arch = "wasm32"))]
 fn run_command(config: &RconConfig, command: &str) -> CommandResponse {
     let candidates = config.players.as_ref().map(crate::PlayerRegistry::candidates).unwrap_or_default();
-    let world = CommandWorld { rules: &config.world, players: &candidates };
+    let world = CommandWorld { rules: &config.world, players: &candidates, state: &config.world };
     let source = CommandSource::console(
         RCON_NAME,
         crate::commands::overworld_dimension(),
@@ -434,9 +434,34 @@ fn run_command(config: &RconConfig, command: &str) -> CommandResponse {
     );
     match config.builtins.run(&world, &source, command) {
         Some(outcome) => {
-            if let Some(players) = config.players.as_ref() {
-                for directed in outcome.effects {
-                    players.push_effect(directed.target, directed.effect);
+            for directed in outcome.effects {
+                match directed.effect {
+                    // `/say`/`/me` need no player *target* at all — see this
+                    // module's own doc for why they are the one self-targeted
+                    // effect kind RCON can still deliver: unlike `SetBlock`/
+                    // `Fill` (which need a chunk source RCON does not have) and
+                    // `SetRespawnPoint` (a connection-local variable), a
+                    // broadcast only needs the registry this function already
+                    // holds.
+                    crate::commands::Effect::Broadcast { sender, message } => {
+                        if let Some(players) = config.players.as_ref() {
+                            players.say(&sender, &message);
+                        }
+                    }
+                    // `SetBlock`/`Fill`/`SetRespawnPoint` are dropped here by
+                    // construction: they are always targeted at the console's
+                    // own (nonexistent) uuid or refuse outright before reaching
+                    // this point (`/setblock`/`/fill`'s own `ctx.source.uuid()`
+                    // guard), so this arm exists only so a future one added to
+                    // `Effect` is not silently queued at a target nobody reads.
+                    crate::commands::Effect::SetBlock { .. }
+                    | crate::commands::Effect::Fill { .. }
+                    | crate::commands::Effect::SetRespawnPoint { .. } => {}
+                    effect => {
+                        if let Some(players) = config.players.as_ref() {
+                            players.push_effect(directed.target, effect);
+                        }
+                    }
                 }
             }
             outcome.response

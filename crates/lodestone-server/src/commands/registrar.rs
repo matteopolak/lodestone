@@ -166,6 +166,16 @@ pub struct CommandWorld<'a> {
     /// `ChatCommand` arm in `crate::server`, which synthesises the caller's own
     /// entry when there is no registry, so `@s` works in singleplayer.
     pub players: &'a [PlayerCandidate],
+    /// The world's difficulty, clock and spawn — `/time`, `/difficulty` and
+    /// `/setworldspawn`'s read/write surface.
+    ///
+    /// A concrete `&WorldStateHandle` rather than a second trait object: unlike
+    /// [`Self::rules`] (which a test may back with a bare [`crate::game_rules::GameRulesHandle`]
+    /// that has no clock or difficulty at all), every one of these three commands
+    /// needs the same production store, and `WorldStateHandle` already implements
+    /// [`RuleStore`] too — see [`super::overworld_dimension`]'s neighbours for the
+    /// production wiring, which passes one handle for both fields.
+    pub state: &'a crate::world_state::WorldStateHandle,
 }
 
 /// Read/write access to the world's game rules, abstracted over *which* store.
@@ -306,6 +316,21 @@ impl<'a> Ctx<'a> {
     /// Ask for `effect` to be applied to `target`.
     pub fn effect(&mut self, target: uuid::Uuid, effect: Effect) {
         self.effects.push(DirectedEffect::new(target, effect));
+    }
+
+    /// Every top-level command literal this source's permission level may see —
+    /// `/help`'s listing.
+    ///
+    /// Reuses [`lodestone_command::CommandTree::suggest_filtered`] at an empty
+    /// prefix rather than a hand-maintained name list: the tree is the one
+    /// source of truth for "what is registered", and a second list here is
+    /// exactly the parity hazard this crate's own module doc warns about for a
+    /// wire tree — a name added to one and not the other.
+    #[must_use]
+    pub fn root_command_names(&self) -> Vec<String> {
+        let mut names = self.tree.suggest_filtered("", &level_filter(self.source.permission_level));
+        names.sort();
+        names
     }
 
     /// Resolve an entity selector against the roster, from this source.
