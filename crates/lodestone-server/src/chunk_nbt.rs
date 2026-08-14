@@ -615,27 +615,24 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
         };
 
         let y_base = min_y + section_index * SECTION_EDGE as i32;
-        for (cell, &index) in indices.iter().enumerate() {
-            let index = index as usize;
-            let Some(state) = states.get(index) else {
-                return Err(Error::PaletteIndexOutOfRange {
-                    index,
-                    len: states.len(),
-                    y: i32::from(y),
-                });
-            };
-            // The section's own `(y << 8) | (z << 4) | x` order, which is
-            // `ChunkColumn`'s layout restricted to one 16-row window.
-            let ly = cell >> 8;
-            let lz = (cell >> 4) & 15;
-            let lx = cell & 15;
-            column.set_block(
-                lx as i32,
-                y_base + ly as i32,
-                lz as i32,
-                state,
-            );
+        // Validate every index against the section's own (small) palette
+        // before the bulk write below, which trusts `indices` and does not
+        // bounds-check — one fast pass over up to 4096 `u16`s, not a scan of
+        // anything proportional to the column-wide palette.
+        if let Some(&bad_index) = indices.iter().find(|&&index| index as usize >= states.len()) {
+            return Err(Error::PaletteIndexOutOfRange {
+                index: bad_index as usize,
+                len: states.len(),
+                y: i32::from(y),
+            });
         }
+        // Interns this section's *local* palette into the column-wide one once
+        // per distinct state (dozens at most), then writes all 4096 cells from
+        // that remap — not once-per-cell through `ChunkColumn::set_block`,
+        // which used to make every loaded column ~98,304 linear scans of the
+        // column-wide palette. See `ChunkColumn::set_section_from_local_palette`.
+        let local: Vec<&str> = states.iter().map(String::as_str).collect();
+        column.set_section_from_local_palette(y_base, &local, &indices);
 
         // Biomes: every section's full 4×4×4 container, into the column's 3-D
         // grid (issue #512). Reading only section 0's y=0 layer — what this did
@@ -1368,5 +1365,100 @@ pub fn extras_from_nbt(nbt: &Nbt) -> ChunkExtras {
             .iter()
             .filter_map(saved_tick_from_nbt)
             .collect(),
+    }
+}
+
+/// Counter-based proof for the load-path defect this module used to have
+/// (issue #510): `column_from_nbt` called `ChunkColumn::set_block` once per
+/// cell — 98,304 per column — each a linear scan of the *column-wide* palette.
+/// `ChunkColumn::set_section_from_local_palette` interns a section's own
+/// (small) local palette once per distinct state instead.
+///
+/// Uses the same real, vanilla-written region file
+/// `tests/chunk_nbt_vanilla_oracle.rs` uses as its outside source — a fixture
+/// this crate's own encoder produced could not tell a real defect from a
+/// self-consistent misunderstanding of it. `#[ignore]`d for the same reason
+/// that oracle is: it requires `.cache/mc/survival/world`, which is not repo
+/// state.
+#[cfg(test)]
+mod intern_bound_tests {
+    use std::path::{Path, PathBuf};
+
+    use lodestone_core::{Reader, read_named_nbt};
+
+    use super::column_from_nbt;
+    use crate::chunk::{intern_calls, reset_intern_calls};
+
+    fn region_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../.cache/mc/survival/world/dimensions/minecraft/overworld/region/r.0.0.mca",
+        )
+    }
+
+    /// A real column's `intern` calls must be bounded by its distinct states
+    /// per section — never by its cell count, 98,304 — which is the exact
+    /// gate issue #510 names. The second assertion is the control: run
+    /// against the pre-fix cell-by-cell path (`set_block` called once per
+    /// cell) and it fails, because `calls == 98_304` for every populated
+    /// column regardless of how few distinct states it holds.
+    #[test]
+    #[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+    fn loading_a_real_column_interns_by_distinct_state_not_by_cell() {
+        let bytes = std::fs::read(region_path()).expect("read the real region file");
+        let region = lodestone_anvil::region::RegionFile::parse(&bytes).expect("parse region");
+
+        const MIN_Y: i32 = -64;
+        const HEIGHT: i32 = 384;
+        const CELLS_PER_COLUMN: u64 = 16 * 16 * 384;
+
+        let mut columns_checked = 0usize;
+        let mut total_calls = 0u64;
+        let mut max_calls = 0u64;
+        for local_z in 0..32u8 {
+            for local_x in 0..32u8 {
+                let Some(raw) = region
+                    .read_chunk_nbt_bytes(local_x, local_z)
+                    .expect("read chunk")
+                else {
+                    continue;
+                };
+                let mut reader = Reader::new(&raw);
+                let (_, nbt) = read_named_nbt(&mut reader).expect("decode chunk nbt");
+
+                reset_intern_calls();
+                let column = column_from_nbt(&nbt, MIN_Y, HEIGHT).expect("decode column");
+                let calls = intern_calls();
+
+                let distinct_states = column.raw_palette().len() as u64;
+                let sections = column.section_count() as u64;
+                let bound = distinct_states * sections;
+
+                assert!(
+                    calls <= bound,
+                    "chunk ({local_x}, {local_z}): {calls} intern calls exceeds the \
+                     distinct-states-per-section bound ({distinct_states} states x {sections} \
+                     sections = {bound}) — the load path is scanning per cell again"
+                );
+                assert!(
+                    calls < CELLS_PER_COLUMN,
+                    "chunk ({local_x}, {local_z}): {calls} intern calls is not below the old \
+                     per-cell cost ({CELLS_PER_COLUMN}); this is the control arm and it must fail \
+                     under the pre-fix cell-by-cell path, where calls == {CELLS_PER_COLUMN} for \
+                     every populated column"
+                );
+                total_calls += calls;
+                max_calls = max_calls.max(calls);
+                columns_checked += 1;
+            }
+        }
+        assert!(
+            columns_checked > 100,
+            "expected a populated real region; found {columns_checked} columns"
+        );
+        eprintln!(
+            "intern calls: {columns_checked} columns, mean {:.1}, max {max_calls}, old per-column \
+             cost would have been {CELLS_PER_COLUMN}",
+            total_calls as f64 / columns_checked as f64
+        );
     }
 }

@@ -182,7 +182,20 @@ palette without crossing the protocol-family feature seam, which is what took
   copied an older version of it ("the lowest id sharing the block name") and became
   silent callers when the real one was corrected at `43a6e030`; one of them failed
   as a 30-second live timeout rather than a mismatch. If you need the id for a
-  state string, call the function.
+  state string, call the function. `lodestone-server`'s `mobs::block_ids` used to
+  keep a third hand-rolled inverse (a 32,366-entry `HashMap<String, u32>` built
+  once from a per-state formatted string, for the pathfinder's terrain adapter);
+  it is gone, and `block_state_id`/`block_state_id_or_default` are now both
+  one-line calls into `state_id` itself.
+- **`state_id_resolves_redstone_dust_by_power_not_to_the_lowest_id`** (this
+  crate's own `block_states` test module) is the regression gate for the tiered
+  fallback: `minecraft:redstone_wire[power=7]` must resolve to the state whose
+  `power` is `7`, not to id 4011 (this block's lowest id, `power=0`) — the answer
+  every caller got before `state_id` existed, for *every* power value, because a
+  server-emitted dust string never names the other four connection properties and
+  so never exact-matched anything. Any change to the tiers should keep this
+  discriminating: an input where "lowest id" and "default plus overrides" agree
+  would pass either implementation and prove nothing.
 - **`block_registry` has no lookup-API wrapper file** — same as before the
   move. It is reached directly as `crate::generated_block_registry::*` from
   `block_states.rs` and `tool.rs`, the only two consumers.

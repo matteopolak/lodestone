@@ -497,6 +497,104 @@ impl Default for BlockStateTable {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The discriminating case for issue #511: a partial-property lookup on a
+    /// block with many states must land on the *named* state, not on the
+    /// lowest id sharing the block's name.
+    ///
+    /// Redstone dust is the case that shipped wrong. Before `state_id`
+    /// existed, `lodestone-v770`'s hand-rolled scan fell back to the lowest
+    /// id sharing a block name whenever the caller's property set did not
+    /// exactly match a real state — which, for a block this server only ever
+    /// partially describes (`minecraft:redstone_wire[power=N]`, never the
+    /// other four connection properties), was *every* update. That lowest id
+    /// is state **4011**, confirmed as this block's first (lowest) id by the
+    /// committed JVM dump `tests/support/snow_support_jvm.txt` ("`B 4011
+    /// minecraft:redstone_wire`" — the dump's own header defines `B` as "the
+    /// first state id of a block"). Its `power` is `0`. So every dust update
+    /// used to resolve to the same id regardless of the power the server
+    /// actually wanted to send, and rendered as unpowered wire.
+    ///
+    /// `power=7` is chosen because it discriminates the two hypotheses: the
+    /// old code returns id 4011 (`power=0`) for *any* power value, so an
+    /// input that also produced 4011 would not tell the implementations
+    /// apart.
+    #[test]
+    fn state_id_resolves_redstone_dust_by_power_not_to_the_lowest_id() {
+        const WRONG_OLD_ANSWER: u32 = 4011;
+
+        assert_eq!(
+            properties(WRONG_OLD_ANSWER)
+                .and_then(|props| props.iter().find(|(k, _)| *k == "power"))
+                .map(|(_, v)| *v),
+            Some("0"),
+            "fixture sanity: the old broken fallback's wrong answer must actually carry power=0"
+        );
+
+        let power_seven = state_id("minecraft:redstone_wire[power=7]")
+            .expect("minecraft:redstone_wire[power=7] must resolve");
+
+        // The assertion that matters: not the old wrong answer.
+        assert_ne!(
+            power_seven, WRONG_OLD_ANSWER,
+            "state_id(\"minecraft:redstone_wire[power=7]\") returned the old lowest-id fallback \
+             ({WRONG_OLD_ANSWER}, power=0) instead of resolving power=7 to its own state — this \
+             is the exact defect issues #465/#511 describe"
+        );
+        assert_eq!(
+            properties(power_seven)
+                .and_then(|props| props.iter().find(|(k, _)| *k == "power"))
+                .map(|(_, v)| *v),
+            Some("7"),
+            "state_id must resolve the requested power value exactly, not merely to a different id"
+        );
+
+        // Tier 2's contract: every property the caller did *not* name keeps
+        // the block's jar-marked default value.
+        let default_id = state_id("minecraft:redstone_wire")
+            .expect("minecraft:redstone_wire must resolve to its jar-marked default");
+        let default_props = properties(default_id).expect("default state has properties");
+        let resolved_props = properties(power_seven).expect("resolved state has properties");
+        for &(key, default_value) in default_props {
+            if key == "power" {
+                continue;
+            }
+            let resolved_value = resolved_props
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| *v);
+            assert_eq!(
+                resolved_value,
+                Some(default_value),
+                "property `{key}` should keep its default value when the caller only named `power`"
+            );
+        }
+    }
+
+    /// A bare name with no properties at all resolves to the block's
+    /// jar-marked default (tier 3) — **not** the lowest id (4011). Cross-
+    /// checked against the committed JVM dump's own `D` (`state ==
+    /// defaultBlockState()`) bitstring for this block's id range in
+    /// `tests/support/snow_support_jvm.txt`, which marks id 5171 as the one
+    /// true bit — an id this test derives independently of `state_id` itself
+    /// by walking the dump's `P D` line, not by trusting the function under
+    /// test.
+    #[test]
+    fn state_id_resolves_a_bare_name_to_the_jar_marked_default() {
+        assert_eq!(state_id("minecraft:redstone_wire"), Some(5171));
+    }
+
+    /// An unknown block name resolves to nothing — `state_id` does not paper
+    /// over a name this version's census does not carry.
+    #[test]
+    fn state_id_returns_none_for_an_unknown_block() {
+        assert_eq!(state_id("minecraft:not_a_real_block"), None);
+    }
+}
+
 impl BlockStateRegistry for BlockStateTable {
     fn resolve(&self, id: u32) -> Option<ResolvedBlockState<'_>> {
         let &(block, set) = table::STATES.get(id as usize)?;

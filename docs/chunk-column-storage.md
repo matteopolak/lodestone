@@ -48,6 +48,35 @@ Measured on four real generated columns: **22,640 / 23,328 / 23,728 / 26,752 byt
 are counted. The paired `/usr/bin/time -l` arms are in
 [`chunk-store.md`](./chunk-store.md).
 
+### Loading a column no longer interns cell by cell
+
+Issue #510: `chunk_nbt::column_from_nbt` used to call `ChunkColumn::set_block`
+once per cell — 98,304 per column — and `set_block`'s `intern` step is a linear
+scan of the column-wide palette (`Vec<String>`, no reverse index) comparing
+full block-state strings. For a populated column that is on the order of
+10⁶ string comparisons per load, purely to rebuild a mapping the NBT already
+handed over as a per-section palette plus a packed index array — the load-path
+mirror of a defect `raw_palette`'s own doc comment already named on the save
+side.
+
+`ChunkColumn::set_section_from_local_palette(y_base, local, indices)` is the
+fix: it interns a section's own *local* palette (a handful of entries, what
+the NBT's `block_states.palette` already is) once per distinct state, builds a
+small remap, then writes all 4,096 cells from that remap via `write_block_id`
+— `set_block` minus the string resolution. `column_from_nbt` validates every
+packed index against the local palette length in one pass first (so
+`Error::PaletteIndexOutOfRange` still fires on a malformed file), then calls
+this once per section instead of looping `set_block` per cell.
+
+Measured against the real vanilla-written region file
+`.cache/mc/survival/world/dimensions/minecraft/overworld/region/r.0.0.mca`
+(1,024 columns, a `#[cfg(test)]` per-thread counter on `intern`, not a
+timing): **mean 107.5 `intern` calls per column, max 259**, against the old
+path's fixed 98,304 — enforced by the same test as a per-column bound of
+`distinct_states * sections`. Reverting to the cell-by-cell path and
+re-running is the gate's control: it fails immediately, 98,304 calls against
+a bound of a few hundred, for every populated column.
+
 ### The API this changed
 
 `ChunkColumn::raw_blocks() -> &[u16]` could not survive: there is no longer one
@@ -145,6 +174,7 @@ dependency graph is load-bearing for the browser bundle.
 | `from_flat_collapses_air_and_sizes_the_rest_to_its_ids` | `chunk_blocks.rs` | predicted uniform count *and* exact widths, so an over-wide packing fails too |
 | `append_section_cells_reproduces_the_flat_slice_exactly` | `chunk_blocks.rs` | the order `chunk_nbt` and the region file depend on |
 | `incremental_counters_match_an_independent_recount_through_a_mutation_storm` | `tests/random_tick_section_counters.rs` | a packing bug that dropped or shifted cells shows up as a random-tick counter disagreement, via a recount that reads the sections in its own separate loop |
+| `loading_a_real_column_interns_by_distinct_state_not_by_cell` | `chunk_nbt.rs`'s `intern_bound_tests` (`#[ignore]`d, needs `.cache/mc/survival/world`) | `intern` calls stay under `distinct_states * sections` and well below 98,304 for a real vanilla-written column |
 
 Both `chunk_memory.rs` arms assert a **variety precondition** first — distinct
 states, non-air cells, and *some* air — because a pure-air or single-state column

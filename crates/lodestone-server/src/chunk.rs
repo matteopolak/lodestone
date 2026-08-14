@@ -46,6 +46,32 @@ use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 use crate::block_entities::BlockEntity;
 use crate::chunk_blocks::SectionedBlocks;
 
+/// Counts calls to [`ChunkColumn::intern`], per test thread. A **counter**
+/// rather than a timing, per this repo's evidence standard — several agents
+/// build on this machine concurrently, so a wall-clock figure would be
+/// attributed to the wrong cause. `thread_local` rather than a shared atomic:
+/// `cargo test` gives each test its own OS thread, so a test that resets and
+/// reads within its own body is not racing any other test's calls.
+#[cfg(test)]
+thread_local! {
+    static INTERN_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Resets [`INTERN_CALLS`] to zero. Call before the operation under
+/// measurement.
+#[cfg(test)]
+pub(crate) fn reset_intern_calls() {
+    INTERN_CALLS.with(|c| c.set(0));
+}
+
+/// Reads [`INTERN_CALLS`]. Call immediately after the operation under
+/// measurement, before anything else on this thread can call
+/// [`ChunkColumn::intern`].
+#[cfg(test)]
+pub(crate) fn intern_calls() -> u64 {
+    INTERN_CALLS.with(std::cell::Cell::get)
+}
+
 pub(crate) const AIR: &str = "minecraft:air";
 pub(crate) const STONE: &str = "minecraft:stone";
 /// Rows per implicit section. [`ChunkColumn`] has no per-section struct — a
@@ -259,6 +285,21 @@ pub struct ChunkColumn {
     /// carries it, which is exactly the send a client has no other way to
     /// derive one for.
     motion_blocking: Option<Box<[u16; 256]>>,
+    /// Issue #518 part 2/4: the `SPAWN` stage's proposed creature placements —
+    /// see [`lodestone_worldgen::spawn_stage`]'s module doc for what a
+    /// candidate is (unconditioned on light/ground) and is not.
+    ///
+    /// Populated **only** by [`from_generated`](Self::from_generated), which
+    /// only ever runs on a genuine disk-miss (`crate::region_source`'s
+    /// `RegionChunkSource::column` calls the generator only when a saved
+    /// region has no chunk yet) — so this is non-empty at most once in a
+    /// chunk's whole lifetime, the same one-shot-at-generation semantics
+    /// vanilla's `ChunkStatus.SPAWN` has. A column loaded from disk, or
+    /// [`ChunkColumn::new`]'s placeholder, always starts with this empty.
+    /// [`take_generation_spawns`](Self::take_generation_spawns) drains it, so
+    /// even a cached `ChunkColumn` revisited later cannot hand out the same
+    /// candidates twice. See `docs/worldgen-mob-generation-spawn.md`.
+    generation_spawns: Vec<lodestone_worldgen::spawn_stage::GenerationSpawn>,
 }
 
 impl ChunkColumn {
@@ -294,6 +335,7 @@ impl ChunkColumn {
             structure_starts: Vec::new(),
             structure_references: std::collections::BTreeMap::new(),
             motion_blocking: None,
+            generation_spawns: Vec::new(),
         }
     }
 
@@ -336,6 +378,11 @@ impl ChunkColumn {
         // Issue #516. Copied before `into_raw` consumes the column, for the same
         // reason the two above are.
         let motion_blocking = column.motion_blocking_heightmap().map(|map| Box::new(*map));
+        // Issue #518 part 2/4. Copied before `into_raw` consumes the column, for
+        // the same reason as the two above — see this struct's own field doc for
+        // why "populated only here" is what makes generation-time spawning
+        // one-shot rather than a duplication hazard.
+        let generation_spawns = column.spawn_candidates().to_vec();
 
         let (min_y, height, palette, blocks, biome_quarts) = column.into_raw();
         debug_assert_eq!(
@@ -365,6 +412,7 @@ impl ChunkColumn {
             structure_starts: Vec::new(),
             structure_references: std::collections::BTreeMap::new(),
             motion_blocking,
+            generation_spawns,
         };
         column.recalc_ticking_counts();
         debug_assert_eq!(
@@ -575,6 +623,18 @@ impl ChunkColumn {
         self.block_entities = entities;
     }
 
+    /// Takes this column's pending `SPAWN`-stage creature candidates, leaving
+    /// it empty (issue #518 part 2/4).
+    ///
+    /// **Drain, not peek**, on purpose: a caller that observes a non-empty
+    /// result is the one and only consumer for this column's whole lifetime —
+    /// see [`generation_spawns`](Self::generation_spawns)'s field doc for why
+    /// that is what keeps a fresh world's animals from duplicating. Empty for
+    /// every column not fresh off [`from_generated`](Self::from_generated).
+    pub fn take_generation_spawns(&mut self) -> Vec<lodestone_worldgen::spawn_stage::GenerationSpawn> {
+        std::mem::take(&mut self.generation_spawns)
+    }
+
     /// This column's `MOTION_BLOCKING` heightmap in vanilla's stored form, or
     /// `None` if it did not come from the generator — see
     /// [`motion_blocking`](Self::motion_blocking) for the whole contract and
@@ -672,6 +732,8 @@ impl ChunkColumn {
 
     /// Interns a block-state string into the palette, returning its index.
     fn intern(&mut self, name: &str) -> u16 {
+        #[cfg(test)]
+        INTERN_CALLS.with(|c| c.set(c.get() + 1));
         if let Some(i) = self.palette.iter().position(|p| p == name) {
             return i as u16;
         }
@@ -702,6 +764,18 @@ impl ChunkColumn {
     /// Sets the block state at a local `(x, z)` in `0..16` and world `y`.
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, name: &str) {
         let id = self.intern(name);
+        self.write_block_id(x, y, z, id);
+    }
+
+    /// [`set_block`](Self::set_block) minus the string→id resolution: writes an
+    /// already-interned column-wide palette `id` at a local `(x, z)` in `0..16`
+    /// and world `y`.
+    ///
+    /// Exists so a caller resolving many cells against a *known* palette — a
+    /// section's worth, in [`set_section_from_local_palette`](Self::set_section_from_local_palette)
+    /// — pays [`intern`](Self::intern)'s linear scan once per distinct state
+    /// rather than once per cell.
+    fn write_block_id(&mut self, x: i32, y: i32, z: i32, id: u16) {
         let y_local = y - self.min_y;
         let old = self.blocks.get(x, y_local, z);
         self.blocks.set(x, y_local, z, id);
@@ -729,13 +803,41 @@ impl ChunkColumn {
                 // "harden" this.
                 debug_assert!(
                     self.section_ticking[section] > 0,
-                    "section_ticking[{section}] underflowed writing {name} at ({x}, {y}, {z}): \
-                     a randomly-ticking state left a cell the counter did not know held one, so \
+                    "section_ticking[{section}] underflowed writing {} at ({x}, {y}, {z}): a \
+                     randomly-ticking state left a cell the counter did not know held one, so \
                      some mutation path reached `blocks` without `set_block` or \
-                     `recalc_ticking_counts`"
+                     `recalc_ticking_counts`",
+                    self.palette[id as usize]
                 );
                 self.section_ticking[section] -= 1;
             }
+        }
+    }
+
+    /// Interns a whole section's *local* palette into the column-wide palette
+    /// — `local.len()` calls to [`intern`](Self::intern), not one per cell —
+    /// then writes every one of the section's cells from the resulting remap.
+    ///
+    /// The load-path mirror of what [`raw_palette`](Self::raw_palette)/
+    /// [`append_section_cells`](Self::append_section_cells) already do for the
+    /// save path (see that pair's doc comments): `crate::chunk_nbt`'s loader
+    /// used to call [`set_block`](Self::set_block) once per cell — 98,304 per
+    /// column — each a linear scan of the whole *column-wide* palette rather
+    /// than the handful of states a real section actually names.
+    ///
+    /// `indices` is one entry per cell in vanilla's own `(y_in_section << 8) |
+    /// (z << 4) | x` order (what `chunk_nbt::unpack_indices` already returns),
+    /// indexing into `local` — **not** into the column-wide palette. Every
+    /// entry must be `< local.len()`; callers validate that against the NBT
+    /// before calling, so this indexes unchecked.
+    pub fn set_section_from_local_palette(&mut self, y_base: i32, local: &[&str], indices: &[u16]) {
+        let remap: Vec<u16> = local.iter().map(|name| self.intern(name)).collect();
+        for (cell, &local_index) in indices.iter().enumerate() {
+            let id = remap[local_index as usize];
+            let ly = (cell >> 8) as i32;
+            let lz = ((cell >> 4) & 15) as i32;
+            let lx = (cell & 15) as i32;
+            self.write_block_id(lx, y_base + ly, lz, id);
         }
     }
 
