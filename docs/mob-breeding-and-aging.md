@@ -54,14 +54,67 @@ four defaults.
 
 ## What now drives it in production
 
-**Not yet fully wired** — the population-wide search and the "resolve a
-`take_bred()` into a child" step belong in `MobSim::tick`
-(`crates/lodestone-server/src/mobs.rs`), which is another agent's file. A
-full patch is included in this issue's broker request; see the PR/commit
-that lands it for the exact `crates/lodestone-server/src/mobs.rs` anchor.
-Until that patch lands, `MobSim::tick` never calls `set_love_partner_candidate`/
-`set_parent_candidate`, so `is_in_love()`/`is_baby()` stay reachable but
-unfed in the one place that runs in a real game.
+**Now fully wired.** The population-wide search and the "resolve a
+`take_bred()` into a child" step landed in `MobSim::tick`/`MobSim::resolve_breeding`
+(`crates/lodestone-server/src/mobs.rs`) in a prior session; `MobSim::feed_perception`
+performs the partner search and `resolve_breeding` performs the child spawn,
+the parent-age cooldown and the experience orb. See `docs/taming-and-breeding.md`
+for the interaction-arm side (what puts an animal in love in the first place).
+
+## The age-scaled hitbox and movement speed (issue #237's residue)
+
+Until this pass, `species_shape` and `combat_defaults` took only
+`entity_type`/static `attrs` — no `is_baby` parameter existed anywhere, so a
+spawned or bred baby kept its species' **adult** collision box and adult
+movement step forever. `pose.rs`'s `BABY_LIMB_SCALE` is a walk-cycle
+*animation* constant and never touched the hitbox or speed.
+
+**Fixed by threading `is_baby` through the shape fold, and re-deriving it on
+every baby/adult boundary crossing:**
+
+- [`species_shape`] now takes `is_baby: bool`. For a species with an entry in
+  [`baby_dimensions`] it uses that literal (mirroring vanilla's own
+  `BABY_DIMENSIONS` overrides — a baby zombie is `0.49×0.98`, **not**
+  `0.6×1.95` halved); for anything else it falls back to
+  [`DEFAULT_BABY_AGE_SCALE`] (`0.5`), vanilla `LivingEntity.getAgeScale()`'s
+  own default. The `SCALE` attribute is still applied once, uniformly, after
+  either selection — matching vanilla's separate
+  `getDefaultDimensions().scale(getScale())` fold.
+- [`SimMob::set_age`] detects a baby/adult boundary crossing (not every call —
+  a baby's 24,000-tick countdown would otherwise re-resolve the shape for no
+  observable change) and calls the new `NavigatingMob::set_shape`/
+  `set_step_per_tick` to update the live mob's hitbox and speed. Both the
+  spawn path (`spawn_species(...).set_age(BABY_START_AGE)`) and the breeding
+  path (`resolve_breeding`'s `child.set_age(BABY_START_AGE)`) go through this
+  one method, so a bred child gets the correct shape with no separate wiring.
+- [`baby_speed_multiplier`] carries the zombie family's `SPEED_MODIFIER_BABY`
+  (`ADD_MULTIPLIED_BASE` `0.5`, i.e. `base * 1.5`) — the only baby-only speed
+  modifier among the species this sim spawns babies for. Every breedable
+  `Animal` here (cow, sheep, pig, chicken, rabbit, wolf) has **no** baby speed
+  modifier in vanilla; only its hitbox shrinks.
+- **`combat_defaults` deliberately did not gain an `is_baby` parameter.**
+  Checked against `Zombie.createAttributes()` and every breedable species'
+  attribute builder: `max_health`/`attack_damage`/`armor` do not vary with
+  age for any species this sim models. Threading a parameter through that
+  changes nothing would be the "vacuous species" this repo's evidence
+  section warns about — the function's own doc comment now says so, so a
+  future reader does not "fix" a gap that was checked and closed as absent.
+- **Not covered**: the path navigator keeps the width it was constructed
+  with across a shape change (rebuilding it would drop an in-flight path —
+  disclosed in `NavigatingMob::set_shape`'s own doc), and no species outside
+  the table above has vanilla's `BABY_DIMENSIONS` ported — the generic `0.5`
+  fallback is real vanilla behaviour for those, not a placeholder, but a
+  species with its own literal (cat, ocelot, the horse family, chicken's
+  `#chicken_food` cousins not yet tameable here) will read slightly wrong
+  until someone adds a row.
+
+`crates/lodestone-server/src/mobs.rs`'s `baby_shape_tests` module predicts
+the exact baby zombie box against the halved-adult wrong hypothesis, the
+exact baby cow box, the generic fallback for a species with no table entry
+(a control against skeleton, which never breeds but exercises the same
+`is_baby()` boundary), the exact `0.23 * 1.5 = 0.345` baby zombie speed
+against a cow's unchanged speed, growing back up restoring the adult shape,
+and that a bred child's shape is already correct with no extra host wiring.
 
 **What is proven today**: a driver-level test,
 `crates/lodestone-entity/src/ai/navigating_mob.rs`'s
@@ -108,8 +161,8 @@ injected parent candidate.
   detection and a player-interaction path into `MobSim`; nothing here
   triggers it — a caller (or a test) must call `set_in_love()` directly for
   now.
-- **Taming (#235) and leashing (#236) are untouched.** Neither
-  `MobController` nor `goals.rs` has any surface for them yet — see the
+- **Taming landed** (see `docs/taming-and-breeding.md`) — `MobController` and
+  `goals.rs` both gained real surface for it. Leashing has not; see the
   parent issue's per-family table for the honest breakdown.
 
 ## Configuration

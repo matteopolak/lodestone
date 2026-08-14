@@ -696,6 +696,17 @@ fn attr_present(attrs: &AttributeMap, path: &str) -> Option<f64> {
 /// `Defenses` is exhaustively the damage pipeline's own fields (see
 /// `lodestone_entity::damage`'s module doc, "knockback impulse... `impl-physics`
 /// builds the knockback velocity from the other side").
+///
+/// **Deliberately takes no `is_baby`.** Checked against every species this
+/// sim spawns babies for: `Zombie.createAttributes()` and every breedable
+/// `Animal`'s attribute builder set `max_health`/`attack_damage`/`armor`
+/// identically regardless of age — only the hitbox
+/// ([`species_shape`]/[`baby_dimensions`]) and, for the zombie family, the
+/// movement speed ([`baby_speed_multiplier`]) actually differ. Threading a
+/// parameter through that would change nothing for any modeled species is
+/// the "vacuous species" this repo's own evidence section warns about;
+/// re-check this comment before adding one, rather than assuming it is
+/// missing.
 fn combat_defaults(entity_type: &ResourceKey) -> (f32, f32, Defenses, f64) {
     let attrs = default_attributes(entity_type).unwrap_or_else(AttributeMap::new);
     let max_health = attr(&attrs, "max_health") as f32;
@@ -709,6 +720,67 @@ fn combat_defaults(entity_type: &ResourceKey) -> (f32, f32, Defenses, f64) {
     (max_health, attack_damage, defenses, knockback_resistance)
 }
 
+/// Vanilla `LivingEntity.getAgeScale()`'s generic fallback: half size while a
+/// baby, full size otherwise
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/LivingEntity.java:555-557`,
+/// `getDefaultDimensions` folds it as `type.getDimensions().scale(getAgeScale())`
+/// at `LivingEntity.java:3733`). Used only for a species with no entry in
+/// [`baby_dimensions`] — vanilla itself does not treat this as "the" baby
+/// rule, most breedable animals and the whole zombie family override
+/// `getDefaultDimensions` with their own literal box instead of taking this
+/// default, which is why it is the fallback and not the primary path.
+const DEFAULT_BABY_AGE_SCALE: f32 = 0.5;
+
+/// A species' own `BABY_DIMENSIONS` constant (`width`, `height`), pre-`SCALE`-
+/// attribute — vanilla declares one per species rather than deriving it from
+/// [`DEFAULT_BABY_AGE_SCALE`], and the two disagree: a baby zombie is
+/// `0.49×0.98`
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/monster/zombie/Zombie.java:90`),
+/// not `0.6×1.95 * 0.5 = 0.3×0.975`. Scoped to the species this sim actually
+/// grows babies for — [`crate::ai::roster::passive`]'s breedable animals, the
+/// wolf ([`crate::ai::roster::neutral`]) and the zombie family, which spawns
+/// naturally as a baby without ever being bred; every other species falls
+/// back to [`DEFAULT_BABY_AGE_SCALE`], which is `LivingEntity`'s own real
+/// default rather than an approximation invented for the gap.
+fn baby_dimensions(entity_type: &ResourceKey) -> Option<(f32, f32)> {
+    Some(match entity_type.path() {
+        // `Zombie.java:90`; `Husk`, `ZombifiedPiglin`, `Drowned` and
+        // `ZombieVillager` each redeclare the identical literal for their own
+        // `BABY_DIMENSIONS`.
+        "zombie" | "husk" | "zombie_villager" | "drowned" | "zombified_piglin" => (0.49, 0.98),
+        // `animal/cow/AbstractCow.java:33` — shared by `Cow` and `MushroomCow`.
+        "cow" | "mooshroom" => (0.45, 0.7),
+        // `animal/sheep/Sheep.java:60`.
+        "sheep" => (0.45, 0.65),
+        // `animal/pig/Pig.java:70`.
+        "pig" => (0.45, 0.45),
+        // `animal/chicken/Chicken.java:59`.
+        "chicken" => (0.3, 0.4),
+        // `animal/rabbit/Rabbit.java:82`.
+        "rabbit" => (0.24, 0.4),
+        // `animal/wolf/Wolf.java:103`.
+        "wolf" => (0.3, 0.425),
+        _ => return None,
+    })
+}
+
+/// The baby-only movement-speed multiplier vanilla applies as a transient
+/// `MOVEMENT_SPEED` `AttributeModifier` with `ADD_MULTIPLIED_BASE`, so the
+/// final speed is `base * (1.0 + amount)`. Only the zombie family carries one
+/// (`Zombie.java:73-74`, amount `0.5`, applied in `ageUp`/`onSyncedDataUpdated`
+/// rather than at spawn, but the net effect for a mob whose age never crosses
+/// back is the same as always having it while a baby). Every breedable
+/// `AgeableMob` this sim spawns — cow, sheep, pig, chicken, rabbit, wolf — has
+/// **no** baby speed modifier at all, confirmed by reading each one's own
+/// `registerGoals`/attribute setup: only the hitbox shrinks for them. `1.0`
+/// (no change) for anything not listed.
+fn baby_speed_multiplier(entity_type: &ResourceKey) -> f64 {
+    match entity_type.path() {
+        "zombie" | "husk" | "zombie_villager" | "drowned" | "zombified_piglin" => 1.5,
+        _ => 1.0,
+    }
+}
+
 /// Resolves a species' body from the real 26.2 dimension census, folded with
 /// its `attrs`' `SCALE`/`STEP_HEIGHT` — see [`SimMob::spawn_species`]'s own doc
 /// comment for why this duplicates (rather than calls)
@@ -716,17 +788,226 @@ fn combat_defaults(entity_type: &ResourceKey) -> (f32, f32, Defenses, f64) {
 /// `&dyn VersionAdapter` for a version-aware caller, but `MobSim` already
 /// reads `lodestone_data` directly for its path/collision census, so there is
 /// no adapter to thread through here.
-fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap) -> MobShape {
+///
+/// `is_baby` selects [`baby_dimensions`]'s per-species literal, falling back
+/// to [`DEFAULT_BABY_AGE_SCALE`] against the census base — never against the
+/// `SCALE` attribute, which is applied once, uniformly, after either
+/// selection (matching vanilla's separate `getDefaultDimensions().scale(getScale())`
+/// fold at `LivingEntity.java:3729`).
+fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool) -> MobShape {
     let scale = attr(attrs, "scale") as f32;
     let step_height = attr(attrs, "step_height") as f32;
     let base = entity_types::entity_type_id_parts(entity_type.namespace(), entity_type.path())
         .and_then(entity_dimensions::base_dimensions);
-    let mut shape = base.map_or_else(
-        || MobShape::land(0.6, 1.95),
-        |d| MobShape::land(d.width * scale, d.height * scale),
-    );
+    let (width, height) = if is_baby {
+        baby_dimensions(entity_type).unwrap_or_else(|| {
+            let (w, h) = base.map_or((0.6, 1.95), |d| (d.width, d.height));
+            (w * DEFAULT_BABY_AGE_SCALE, h * DEFAULT_BABY_AGE_SCALE)
+        })
+    } else {
+        base.map_or((0.6, 1.95), |d| (d.width, d.height))
+    };
+    let mut shape = MobShape::land(width * scale, height * scale);
     shape.max_up_step = step_height;
     shape
+}
+
+/// One cell of a golem-construction block pattern, in the pattern's own
+/// local `(right, down, forward)` axes — vanilla `BlockPattern`'s frame
+/// (`level/block/state/pattern/BlockPattern.java`), where `(0, 0, 0)` is the
+/// anchor cell `find` requires to land exactly on the placed pumpkin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GolemCell {
+    Iron,
+    Snow,
+    Pumpkin,
+    Air,
+}
+
+impl GolemCell {
+    /// Vanilla's own block predicates: `BlockStatePredicate.forBlock` for
+    /// iron/snow, the carved-pumpkin-or-jack-o'-lantern `Predicate` literal
+    /// (`CarvedPumpkinBlock.PUMPKINS_PREDICATE`), and `BlockStateBase::isAir`
+    /// for the required-clear cells.
+    fn matches(self, block: &str) -> bool {
+        // Strip any `[prop=value]` state suffix so this compares block
+        // identity only, matching `BlockStatePredicate.forBlock`.
+        let path = block.split('[').next().unwrap_or(block);
+        match self {
+            GolemCell::Iron => path == "minecraft:iron_block",
+            GolemCell::Snow => path == "minecraft:snow_block",
+            GolemCell::Pumpkin => {
+                path == "minecraft:carved_pumpkin" || path == "minecraft:jack_o_lantern"
+            }
+            GolemCell::Air => path == "minecraft:air",
+        }
+    }
+}
+
+/// The snow golem's pattern (`CarvedPumpkinBlock.getOrCreateSnowGolemFull`):
+/// one column, a pumpkin over two snow blocks. Indexed `[down][right]`, a
+/// single `forward` layer (depth 1, `.aisle(...)` called once).
+const SNOW_GOLEM_PATTERN: &[&[GolemCell]] =
+    &[&[GolemCell::Pumpkin], &[GolemCell::Snow], &[GolemCell::Snow]];
+
+/// The iron golem's pattern (`getOrCreateIronGolemFull`): a T of iron blocks
+/// topped with a pumpkin, air filling the two corners of the top row and the
+/// two corners of the bottom row (`~^~` / `###` / `~#~` in the source's own
+/// aisle notation, `~` meaning "must be air").
+const IRON_GOLEM_PATTERN: &[&[GolemCell]] = &[
+    &[GolemCell::Air, GolemCell::Pumpkin, GolemCell::Air],
+    &[GolemCell::Iron, GolemCell::Iron, GolemCell::Iron],
+    &[GolemCell::Air, GolemCell::Iron, GolemCell::Air],
+];
+
+/// The six axis-aligned unit vectors `BlockPattern.find` rotates a pattern
+/// through (vanilla `Direction.values()`), as `(dx, dy, dz)`.
+const GOLEM_PATTERN_DIRECTIONS: [(i32, i32, i32); 6] = [
+    (0, -1, 0),
+    (0, 1, 0),
+    (0, 0, -1),
+    (0, 0, 1),
+    (-1, 0, 0),
+    (1, 0, 0),
+];
+
+fn vec3i_cross(a: (i32, i32, i32), b: (i32, i32, i32)) -> (i32, i32, i32) {
+    (
+        a.1 * b.2 - a.2 * b.1,
+        a.2 * b.0 - a.0 * b.2,
+        a.0 * b.1 - a.1 * b.0,
+    )
+}
+
+fn vec3i_neg(v: (i32, i32, i32)) -> (i32, i32, i32) {
+    (-v.0, -v.1, -v.2)
+}
+
+/// A matched golem pattern's orientation — vanilla `BlockPattern.
+/// BlockPatternMatch`'s `(frontTopLeft, forwards, up)` triple, sufficient to
+/// re-derive any cell's world position.
+#[derive(Debug, Clone, Copy)]
+struct GolemPatternMatch {
+    origin: (i32, i32, i32),
+    forwards: (i32, i32, i32),
+    up: (i32, i32, i32),
+}
+
+impl GolemPatternMatch {
+    /// Vanilla `BlockPattern.translateAndRotate`: the world cell at local
+    /// `(right, down, forward)`.
+    fn translate(&self, right: i32, down: i32, forward: i32) -> (i32, i32, i32) {
+        let r = vec3i_cross(self.forwards, self.up);
+        (
+            self.origin.0 + self.up.0 * -down + r.0 * right + self.forwards.0 * forward,
+            self.origin.1 + self.up.1 * -down + r.1 * right + self.forwards.1 * forward,
+            self.origin.2 + self.up.2 * -down + r.2 * right + self.forwards.2 * forward,
+        )
+    }
+
+    /// Every non-air cell's world position — what vanilla
+    /// `CarvedPumpkinBlock.clearPatternBlocks` iterates to clear (it walks
+    /// every cell including the air ones, but clearing air to air is a
+    /// no-op, so only the real blocks are worth reporting to a caller).
+    fn consumed(&self, pattern: &[&[GolemCell]]) -> Vec<BlockPos> {
+        let mut out = Vec::new();
+        for (down, row) in pattern.iter().enumerate() {
+            for (right, &cell) in row.iter().enumerate() {
+                if cell != GolemCell::Air {
+                    let (x, y, z) = self.translate(right as i32, down as i32, 0);
+                    out.push(BlockPos::new(x, y, z));
+                }
+            }
+        }
+        out
+    }
+}
+
+fn golem_pattern_matches(
+    block_at: &dyn Fn(i32, i32, i32) -> String,
+    pattern: &[&[GolemCell]],
+    candidate: &GolemPatternMatch,
+) -> bool {
+    for (down, row) in pattern.iter().enumerate() {
+        for (right, &cell) in row.iter().enumerate() {
+            let (x, y, z) = candidate.translate(right as i32, down as i32, 0);
+            if !cell.matches(&block_at(x, y, z)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Vanilla `BlockPattern.find`: brute-forces every position in the
+/// `dist × dist × dist` cube starting at `placed` (inclusive of `placed`
+/// itself), and every valid `(forwards, up)` axis pair (24 orientations —
+/// `up` excludes only parallel-to-`forwards`), until one fully matches.
+///
+/// **This is why a golem can be built lying on its side or upside down, not
+/// only standing upright** — real vanilla behaviour (the search tries all 24
+/// orientations, not "up"), not a generalisation invented for this port. A
+/// matcher that only tried `up = +Y` would silently reject a legally-built
+/// sideways golem.
+fn find_golem_pattern(
+    block_at: &dyn Fn(i32, i32, i32) -> String,
+    pattern: &[&[GolemCell]],
+    placed: (i32, i32, i32),
+) -> Option<GolemPatternMatch> {
+    let height = pattern.len() as i32;
+    let width = pattern.iter().map(|row| row.len()).max().unwrap_or(0) as i32;
+    // vanilla's `dist = max(width, height, depth)`; `depth` is always 1 for
+    // both patterns here (a single `.aisle(...)` call each).
+    let dist = height.max(width).max(1);
+    for dx in 0..dist {
+        for dy in 0..dist {
+            for dz in 0..dist {
+                let origin = (placed.0 + dx, placed.1 + dy, placed.2 + dz);
+                for &forwards in &GOLEM_PATTERN_DIRECTIONS {
+                    for &up in &GOLEM_PATTERN_DIRECTIONS {
+                        if up == forwards || up == vec3i_neg(forwards) {
+                            continue;
+                        }
+                        let candidate = GolemPatternMatch {
+                            origin,
+                            forwards,
+                            up,
+                        };
+                        if golem_pattern_matches(block_at, pattern, &candidate) {
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A pattern-block cell's world position → the golem's spawn position
+/// (vanilla `golem.snapTo(spawnPos.getX() + 0.5, spawnPos.getY() + 0.05,
+/// spawnPos.getZ() + 0.5, 0.0F, 0.0F)`).
+fn golem_feet_to_spawn_pos((x, y, z): (i32, i32, i32)) -> Vec3 {
+    Vec3::new(f64::from(x) + 0.5, f64::from(y) + 0.05, f64::from(z) + 0.5)
+}
+
+/// Which golem [`MobSim::try_construct_golem`] spawned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GolemSpecies {
+    Snow,
+    Iron,
+}
+
+/// The result of a successful golem-pattern match: which golem spawned, its
+/// entity id, and the world cells the caller must clear (vanilla
+/// `CarvedPumpkinBlock.clearPatternBlocks` — air them and fire the level
+/// event, both the block-placement owner's job, not this crate's).
+#[derive(Debug, Clone)]
+pub struct GolemConstruction {
+    pub species: GolemSpecies,
+    /// The spawned golem's entity id, as returned by [`SimMob::id`].
+    pub id: i32,
+    pub consumed: Vec<BlockPos>,
 }
 
 /// Whether `entity_type` is one of the hostile "monster" species, for the
@@ -809,6 +1090,41 @@ fn is_hostile_species(entity_type: &ResourceKey) -> bool {
             | "pillager"
     )
 }
+
+/// Whether `entity_type` can be leashed at all — vanilla `Mob.canBeLeashed()`'s
+/// real default, `!(this instanceof Enemy)`
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/Mob.java:1292-1294`):
+/// every species tagged `Enemy` (`Monster`'s whole hierarchy, plus `Ghast`,
+/// `Phantom` and `Shulker`, which implement it directly) refuses a lead, and
+/// every other `Mob` accepts one — **not a curated allowlist**, which is
+/// what an earlier draft of this issue assumed ("its own small vanilla
+/// table"). [`is_hostile_species`] already tracks exactly the `Enemy` set
+/// for every species this sim spawns today — checked per species against
+/// its own class hierarchy, not assumed from the name overlap — so this is
+/// a thin wrapper rather than a second table that could drift from it.
+///
+/// Vanilla layers per-species exceptions on both sides of that default:
+/// `TamableAnimal` forces it back to `true` (redundant here, since none of
+/// wolf/cat/parrot/the horse family are `Enemy` anyway), several water
+/// creatures force it to `false`, and a few `Enemy`-hierarchy species
+/// (hoglin, zoglin, the undead horse/camel variants) force it back to
+/// `true`. **None of those exceptions apply to any species this sim spawns
+/// today** — no water creature, hoglin, zoglin or undead mount is modelled
+/// yet. Add an exception table here, not a rewrite of this function, the
+/// day one is.
+fn is_leashable_species(entity_type: &ResourceKey) -> bool {
+    !is_hostile_species(entity_type)
+}
+
+/// Vanilla `Leashable.LEASH_TOO_FAR_DIST`: past this distance the lead snaps
+/// (`Leashable.java:30`).
+const LEASH_TOO_FAR_DIST: f64 = 12.0;
+
+/// Vanilla `Leashable.LEASH_ELASTIC_DIST`: past this distance (minus both
+/// entities' bounding-box widths, a nuance this port does not carry — see
+/// [`MobSim::tick_leashes`]'s own doc comment) a pull force applies
+/// (`Leashable.java:31`).
+const LEASH_ELASTIC_DIST: f64 = 6.0;
 
 /// Vanilla `Attributes.TEMPT_RANGE`'s default value
 /// (`.cache/mc/26.2/src/net/minecraft/world/entity/ai/attributes/Attributes.java:107`,
@@ -1316,6 +1632,47 @@ pub enum MobOwner {
     Player(Uuid),
 }
 
+/// What a lead is tied to — vanilla `Leashable.LeashData.leashHolder`, which
+/// is any `Entity` (a player, another leashable mob, or a
+/// `LeashFenceKnotEntity`). This sim has no non-living decoration-entity
+/// concept ([`SimMob`] assumes health, an `AttributeMap` and a goal
+/// selector, none of which a knot has), so a fence anchor is a bare
+/// [`BlockPos`] rather than a spawned entity — see [`MobSim::try_leash_to_fence`]'s
+/// own doc comment for what that costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeashHolder {
+    /// A player, by account uuid — resolved to a live position through
+    /// [`MobSim::players`]' `identity`.
+    Player(Uuid),
+    /// Another live [`SimMob`], by runtime entity id.
+    Mob(i32),
+    /// A fence post — vanilla's `LeashFenceKnotEntity`'s world position,
+    /// without the entity itself.
+    Fence(BlockPos),
+}
+
+/// The result of [`MobSim::try_leash`] — mirrors vanilla `Entity.interact`'s
+/// two leash-specific branches (`InteractionResult::SUCCESS`/`.withoutItem()`/
+/// `PASS`) closely enough that a caller can derive its own packet response
+/// from it without re-deriving the branching itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeashOutcome {
+    /// The mob is now leashed to the given holder. The caller must consume
+    /// one `minecraft:lead` from the placer's hand (vanilla `itemStack.shrink(1)`).
+    Attached,
+    /// The mob was leashed to the interacting player and is now free. `true`
+    /// means a `minecraft:lead` item was spawned at the mob's position
+    /// (vanilla `dropLeash`); `false` means none was (vanilla `removeLeash`,
+    /// the creative-mode/infinite-materials arm — the caller supplies which
+    /// via `try_leash`'s own `creative` parameter, this sim having no
+    /// game-mode state of its own).
+    Detached { dropped_lead: bool },
+    /// Neither arm applied — not leashable, out of range, or the holder
+    /// requested is not a fresh attach for an already-player-held mob
+    /// (vanilla's `!(leashable.getLeashHolder() instanceof Player)` guard).
+    Refused,
+}
+
 /// Vanilla `Creeper.DEFAULT_EXPLOSION_RADIUS`
 /// (`.cache/mc/26.2/src/net/minecraft/world/entity/monster/Creeper.java:52`,
 /// `private static final byte DEFAULT_EXPLOSION_RADIUS = 3;`), used flat by
@@ -1576,6 +1933,12 @@ pub struct SimMob<'w> {
     /// [`combat_defaults`]'s doc comment for why this is not folded into
     /// [`Defenses`].
     knockback_resistance: f64,
+    /// What a lead currently ties this mob to, if anything — vanilla
+    /// `Leashable.LeashData`. `None` is vanilla's `getLeashData() == null`;
+    /// there is no separate "has data but no holder" state modelled, since
+    /// nothing in this sim needs the delayed-load half `restoreLeashFromSave`
+    /// exists for (persistence is a different crate's concern).
+    leash_holder: Option<LeashHolder>,
 }
 
 impl<'w> SimMob<'w> {
@@ -1629,9 +1992,43 @@ impl<'w> SimMob<'w> {
     /// Sets the age timer — e.g.
     /// [`BABY_START_AGE`](lodestone_entity::ai::navigating_mob::BABY_START_AGE)
     /// to spawn this mob as a baby.
+    ///
+    /// **Also re-derives the hitbox and movement step when this crosses the
+    /// baby/adult boundary** — vanilla `AgeableMob.setAge` unconditionally
+    /// calls `this.refreshDimensions()`
+    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/AgeableMob.java:189`),
+    /// and until this only [`spawn_species`](Self) ever computed
+    /// [`species_shape`]: a mob bred into babyhood, or one growing up, kept
+    /// its spawn-time adult box and adult step speed forever. Gated on the
+    /// boundary rather than run on every call, since a baby's per-tick
+    /// countdown from [`BABY_START_AGE`](lodestone_entity::ai::navigating_mob::BABY_START_AGE)
+    /// to `0` would otherwise re-resolve both twenty-four thousand times for
+    /// no observable change.
     pub fn set_age(&mut self, age: i32) -> &mut Self {
+        let was_baby = self.mob.is_baby();
         self.mob.set_age(age);
+        let is_baby = self.mob.is_baby();
+        if is_baby != was_baby {
+            let attrs = default_attributes(&self.entity_type).unwrap_or_else(AttributeMap::new);
+            let shape = species_shape(&self.entity_type, &attrs, is_baby);
+            self.mob.set_shape(shape);
+            let base_speed = attr(&attrs, "movement_speed");
+            let multiplier = if is_baby {
+                baby_speed_multiplier(&self.entity_type)
+            } else {
+                1.0
+            };
+            self.mob.set_step_per_tick(base_speed * multiplier);
+        }
         self
+    }
+
+    /// This mob's current per-tick movement step — reflects
+    /// [`baby_speed_multiplier`] once [`set_age`](Self::set_age) has crossed
+    /// the baby/adult boundary.
+    #[must_use]
+    pub fn step_per_tick(&self) -> f64 {
+        self.mob.step_per_tick()
     }
 
     /// Whether this mob is a baby (`age < 0`), which is what gates
@@ -1746,6 +2143,30 @@ impl<'w> SimMob<'w> {
     /// does both, and is what a taming interaction should use.
     pub fn set_owner(&mut self, owner: Option<MobOwner>) -> &mut Self {
         self.owner = owner;
+        self
+    }
+
+    /// What a lead currently ties this mob to, if anything.
+    #[must_use]
+    pub fn leash_holder(&self) -> Option<LeashHolder> {
+        self.leash_holder
+    }
+
+    /// Whether a lead is currently attached — vanilla `Leashable.isLeashed()`,
+    /// which additionally requires `leashHolder != null`; this sim has no
+    /// "has leash data but no resolved holder" state (see the field's own
+    /// doc comment), so `Some` and "leashed" coincide exactly.
+    #[must_use]
+    pub fn is_leashed(&self) -> bool {
+        self.leash_holder.is_some()
+    }
+
+    /// Directly sets the leash holder, bypassing [`MobSim::try_leash`]'s
+    /// distance/species gating — for a host that has already decided (e.g.
+    /// restoring a save, or [`MobSim::try_leash_to_fence`]'s re-parent of an
+    /// already-leashed mob onto a fresh knot).
+    pub fn set_leash_holder(&mut self, holder: Option<LeashHolder>) -> &mut Self {
+        self.leash_holder = holder;
         self
     }
 
@@ -2842,6 +3263,7 @@ impl<'w> MobSim<'w> {
             ordered_to_sit: false,
             temper: 0,
             knockback_resistance,
+            leash_holder: None,
         });
         self.mobs.last_mut().expect("just pushed")
     }
@@ -2892,7 +3314,10 @@ impl<'w> MobSim<'w> {
     ///   (slowest is a zombie's `0.23`).
     pub fn spawn_species(&mut self, entity_type: ResourceKey, pos: Vec3) -> &mut SimMob<'w> {
         let attrs = default_attributes(&entity_type).unwrap_or_else(AttributeMap::new);
-        let shape = species_shape(&entity_type, &attrs);
+        // Always spawns adult-shaped; a caller wanting a baby applies
+        // `set_age(BABY_START_AGE)` afterward, which re-derives the shape
+        // through the same function (see `SimMob::set_age`'s own doc).
+        let shape = species_shape(&entity_type, &attrs, false);
         let step_per_tick = attr(&attrs, "movement_speed");
         // `minecraft:follow_range`, read **once** and fed to both consumers, so
         // target acquisition and the A* budget cannot drift apart (issue #455).
@@ -2947,6 +3372,72 @@ impl<'w> MobSim<'w> {
         // `visited_budget` above already derives from this exact read.
         mob.mob.set_follow_range(follow_range);
         mob
+    }
+
+    /// Given a just-placed carved pumpkin or jack o'lantern at `pumpkin_pos`,
+    /// checks whether it completes a valid snow- or iron-golem block pattern
+    /// and, if so, spawns the golem — vanilla
+    /// `CarvedPumpkinBlock.trySpawnGolem`
+    /// (`.cache/mc/26.2/src/net/minecraft/world/level/block/CarvedPumpkinBlock.java`).
+    ///
+    /// Tries the snow golem pattern first and returns on a match, exactly as
+    /// vanilla's early `return` does — a pumpkin that happens to complete
+    /// both (impossible for these two shapes, but the order is part of the
+    /// port) only ever produces the snow golem.
+    ///
+    /// **A pure detection query, not a world mutation.** `MobSim` holds only
+    /// a read-only [`PathWorld`] and has no block-*write* authority, so
+    /// `block_at` is the caller's own world oracle (the
+    /// [`tick_with_terrain`](Self::tick_with_terrain) idiom) and
+    /// [`GolemConstruction::consumed`] is a report, not an action — the
+    /// caller (the block-placement owner) is the one that actually clears
+    /// those cells, exactly as this issue's own scope says: "given this
+    /// placement, does a valid pattern exist, and if so spawn the golem".
+    pub fn try_construct_golem(
+        &mut self,
+        block_at: &dyn Fn(i32, i32, i32) -> String,
+        pumpkin_pos: (i32, i32, i32),
+    ) -> Option<GolemConstruction> {
+        if let Some(found) = find_golem_pattern(block_at, &SNOW_GOLEM_PATTERN, pumpkin_pos) {
+            // `getBlock(0, 2, 0)` — the bottom snow block's cell.
+            let feet = found.translate(0, 2, 0);
+            let consumed = found.consumed(&SNOW_GOLEM_PATTERN);
+            let id = self
+                .spawn_species(
+                    "minecraft:snow_golem".parse().expect("valid key"),
+                    golem_feet_to_spawn_pos(feet),
+                )
+                .id();
+            return Some(GolemConstruction {
+                species: GolemSpecies::Snow,
+                id,
+                consumed,
+            });
+        }
+        if let Some(found) = find_golem_pattern(block_at, &IRON_GOLEM_PATTERN, pumpkin_pos) {
+            // `getBlock(1, 2, 0)` — the bottom-centre iron block's cell.
+            let feet = found.translate(1, 2, 0);
+            let consumed = found.consumed(&IRON_GOLEM_PATTERN);
+            let id = self
+                .spawn_species(
+                    "minecraft:iron_golem".parse().expect("valid key"),
+                    golem_feet_to_spawn_pos(feet),
+                )
+                .id();
+            // vanilla additionally calls `setPlayerCreated(true)`
+            // (`IronGolem.java:79`), which suppresses this golem attacking
+            // the player who angered it and is checked on NBT save/load.
+            // This sim has no such per-golem flag and no player-directed
+            // hostility model for a neutral mob to suppress — a disclosed
+            // gap, not a silent omission: a player-built iron golem here
+            // behaves identically to a village-spawned one.
+            return Some(GolemConstruction {
+                species: GolemSpecies::Iron,
+                id,
+                consumed,
+            });
+        }
+        None
     }
 
     /// Advances every mob one tick: run its goals (which drive A\* and path
@@ -3304,8 +3795,111 @@ impl<'w> MobSim<'w> {
         // block they have mined. `tick_orbs` reads `tick_count` for its merge phase, so
         // it runs before the increment below.
         self.tick_orbs(&view);
+        self.tick_leashes();
 
         self.tick_count += 1;
+    }
+
+    /// Per-tick leash physics: pull leashed mobs toward their holder, and
+    /// snap (dropping a lead item) past [`LEASH_TOO_FAR_DIST`] — vanilla
+    /// `Leashable.tickLeash`.
+    ///
+    /// **Simplified, and disclosed rather than silent.** Real vanilla
+    /// computes a spring/torque interaction across up to four
+    /// attachment-point pairs and applies angular momentum to yaw
+    /// (`Leashable.checkElasticInteractions`/`computeElasticInteraction`).
+    /// This applies one straight-line impulse toward the holder's position
+    /// instead, through [`SimMob::apply_knockback`] — the same "hand
+    /// velocity application to the physics owner rather than growing a
+    /// second model here" seam `explosion.rs`/`damage.rs` already use for
+    /// combat knockback. Three things this does not carry:
+    ///
+    /// - No yaw torque (vanilla's `angularMomentum`/`entity.setYRot`).
+    /// - **No per-entity bounding-box subtraction from the elastic
+    ///   threshold** — vanilla's actual pull distance is
+    ///   `LEASH_ELASTIC_DIST - holder.getBbWidth() - entity.getBbWidth()`;
+    ///   this uses the flat [`LEASH_ELASTIC_DIST`] constant, so a very wide
+    ///   mob starts pulling slightly later than vanilla would.
+    /// - **A holder that cannot be resolved this tick silently drops the
+    ///   leash with no item spawned** — vanilla's `!canInteractWithLevel()`
+    ///   branch, narrowed to its `ENTITY_DROPS`-off arm (`removeLeash`)
+    ///   only. A disconnected player or a removed leash-holder mob loses the
+    ///   leashed mob's attachment rather than the mob dropping a lead for a
+    ///   holder that is not really gone (a reconnecting player, in
+    ///   particular) — the safer of the two wrong answers, but still a
+    ///   simplification worth naming.
+    fn tick_leashes(&mut self) {
+        let mut snapped: Vec<(i32, Vec3)> = Vec::new();
+        let mut pulled: Vec<(i32, Vec3)> = Vec::new();
+        let mut orphaned: Vec<i32> = Vec::new();
+
+        for i in 0..self.mobs.len() {
+            let Some(holder) = self.mobs[i].leash_holder else {
+                continue;
+            };
+            let mob_pos = self.mobs[i].position();
+            let holder_pos = match holder {
+                LeashHolder::Player(uuid) => self
+                    .players
+                    .iter()
+                    .find(|p| p.identity.as_ref().map(|i| i.uuid) == Some(uuid))
+                    .map(|p| p.perception.position),
+                LeashHolder::Mob(id) => self.mobs.iter().find(|m| m.id == id).map(SimMob::position),
+                LeashHolder::Fence(pos) => Some(Vec3::new(
+                    f64::from(pos.x) + 0.5,
+                    f64::from(pos.y) + 0.5,
+                    f64::from(pos.z) + 0.5,
+                )),
+            };
+            let Some(holder_pos) = holder_pos else {
+                orphaned.push(self.mobs[i].id);
+                continue;
+            };
+            let distance = dist_sqr(mob_pos, holder_pos).sqrt();
+            if distance > LEASH_TOO_FAR_DIST {
+                snapped.push((self.mobs[i].id, mob_pos));
+            } else if distance > LEASH_ELASTIC_DIST {
+                let excess = distance - LEASH_ELASTIC_DIST;
+                let dir = Vec3::new(
+                    (holder_pos.x - mob_pos.x) / distance,
+                    (holder_pos.y - mob_pos.y) / distance,
+                    (holder_pos.z - mob_pos.z) / distance,
+                );
+                // Capped, so a mob yanked from far away is pulled steadily
+                // rather than teleported in one tick — vanilla's own spring
+                // is likewise bounded (`SPRING_DAMPENING`).
+                let pull = excess.min(1.0) * 0.3;
+                pulled.push((
+                    self.mobs[i].id,
+                    Vec3::new(dir.x * pull, dir.y * pull, dir.z * pull),
+                ));
+            }
+        }
+
+        for id in orphaned {
+            if let Some(mob) = self.get_mut(id) {
+                mob.set_leash_holder(None);
+            }
+        }
+        for (id, impulse) in pulled {
+            if let Some(mob) = self.get_mut(id) {
+                mob.apply_knockback(impulse);
+            }
+        }
+        for (id, pos) in snapped {
+            if let Some(mob) = self.get_mut(id) {
+                mob.set_leash_holder(None);
+            }
+            self.spawn_item(
+                "minecraft:lead".parse().expect("valid key"),
+                pos,
+                Vec3::new(0.0, 0.0, 0.0),
+                lodestone_entity::item_entity::ItemLifecycle::newly_dropped(
+                    1,
+                    lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
+                ),
+            );
+        }
     }
 
     /// Populates every mob's [`MobController`] perception inputs from this
@@ -3522,6 +4116,117 @@ impl<'w> MobSim<'w> {
     /// Returns [`InteractOutcome::Pass`] when nothing responded, which is the
     /// caller's signal to fall through to whatever it does with an unconsumed
     /// right-click.
+    /// Attaches or detaches a lead between `mob_id` and the player `holder` —
+    /// vanilla `Entity.interact`'s two leash-specific branches (excluding
+    /// its sneak-multi-attach branch; see this method's own "not
+    /// implemented" note).
+    ///
+    /// - If `mob_id` is already leashed to `holder`, detaches it (vanilla's
+    ///   `leashable.getLeashHolder() == player` arm) and reports whether a
+    ///   `minecraft:lead` item should be spawned (`creative` mirrors
+    ///   `player.hasInfiniteMaterials()`, which this sim has no game-mode
+    ///   state of its own to answer).
+    /// - Else, if `holding_lead` and the mob is not already held by a
+    ///   *player* (vanilla's `!(leashable.getLeashHolder() instanceof Player)`
+    ///   guard — one player cannot steal another's leashed mob just by
+    ///   holding a lead), attaches it to `holder`, dropping any existing
+    ///   non-player leash first exactly as vanilla's `dropLeash()` does
+    ///   before `setLeashedTo`.
+    /// - Otherwise refuses: not leashable, no lead in hand, or out of
+    ///   [`LEASH_TOO_FAR_DIST`] (`canHaveALeashAttachedTo`'s own
+    ///   `leashSnapDistance` check).
+    ///
+    /// **Not implemented**: vanilla's sneak-right-click branch, which
+    /// re-parents *every* mob already leashed to `holder` onto whatever
+    /// entity was clicked, in one interaction. This only ever moves the one
+    /// `mob_id` named — a real gap for a player leashing several animals to
+    /// one another, not merely an unlikely input.
+    pub fn try_leash(
+        &mut self,
+        mob_id: i32,
+        holder: Uuid,
+        holding_lead: bool,
+        creative: bool,
+    ) -> LeashOutcome {
+        let Some(mob) = self.get(mob_id) else {
+            return LeashOutcome::Refused;
+        };
+        if mob.leash_holder() == Some(LeashHolder::Player(holder)) {
+            let pos = mob.position();
+            self.get_mut(mob_id)
+                .expect("just found")
+                .set_leash_holder(None);
+            let dropped_lead = !creative;
+            if dropped_lead {
+                // Spawned here, not left to the caller, for the same reason
+                // `tick_leashes`' snap branch spawns its own item: one place
+                // decides "a lead item now exists in the world", so a future
+                // second call site cannot forget it or double it.
+                self.spawn_item(
+                    "minecraft:lead".parse().expect("valid key"),
+                    pos,
+                    Vec3::new(0.0, 0.0, 0.0),
+                    lodestone_entity::item_entity::ItemLifecycle::newly_dropped(
+                        1,
+                        lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE,
+                    ),
+                );
+            }
+            return LeashOutcome::Detached { dropped_lead };
+        }
+        if !holding_lead || matches!(mob.leash_holder(), Some(LeashHolder::Player(_))) {
+            return LeashOutcome::Refused;
+        }
+        if !is_leashable_species(mob.entity_type()) {
+            return LeashOutcome::Refused;
+        }
+        let mob_pos = mob.position();
+        let Some(holder_pos) = self
+            .players
+            .iter()
+            .find(|p| p.identity.as_ref().map(|i| i.uuid) == Some(holder))
+            .map(|p| p.perception.position)
+        else {
+            return LeashOutcome::Refused;
+        };
+        if dist_sqr(mob_pos, holder_pos).sqrt() > LEASH_TOO_FAR_DIST {
+            return LeashOutcome::Refused;
+        }
+        self.get_mut(mob_id)
+            .expect("just found")
+            .set_leash_holder(Some(LeashHolder::Player(holder)));
+        LeashOutcome::Attached
+    }
+
+    /// Right-clicking a fence while holding a lead: re-parents every mob
+    /// currently leashed to `holder` (the player) onto a knot at `fence_pos`
+    /// — vanilla `LeadItem.bindPlayerMobs`. Unlike vanilla this never spawns
+    /// a `LeashFenceKnotEntity`; see [`LeashHolder::Fence`]'s own doc
+    /// comment for why, and for what that costs a real client (no visible
+    /// knot to render or right-click).
+    ///
+    /// **Simplified from vanilla's own scan**: `bindPlayerMobs` only
+    /// re-parents mobs within a 32-block radius of `fence_pos`; this moves
+    /// every mob leashed to `holder` regardless of distance from the fence.
+    /// The two coincide in practice — a leashed mob is already capped at
+    /// [`LEASH_TOO_FAR_DIST`] (12 blocks) from `holder`, and a player using
+    /// this interaction is, by construction, standing at the fence — but a
+    /// contrived setup (holder far from the fence, mob far from holder in
+    /// the other direction) could observe the difference.
+    ///
+    /// Returns the ids re-leashed; empty means no mob was leashed to
+    /// `holder` at all, matching vanilla's `InteractionResult.PASS`.
+    pub fn try_leash_to_fence(&mut self, holder: Uuid, fence_pos: BlockPos) -> Vec<i32> {
+        let mut moved = Vec::new();
+        for mob in &mut self.mobs {
+            if mob.leash_holder == Some(LeashHolder::Player(holder)) {
+                mob.leash_holder = Some(LeashHolder::Fence(fence_pos));
+                moved.push(mob.id);
+            }
+        }
+        moved
+    }
+
     pub fn interact(
         &mut self,
         mob_id: i32,
@@ -8770,6 +9475,623 @@ mod vehicle_tests {
             evicted.vehicle_rider(boat),
             None,
             "a rider absent from a non-empty roster has gone"
+        );
+    }
+}
+
+/// Issue #237's residue: the age-scaled hitbox and the baby-only movement
+/// modifier, which nothing exercised before `species_shape`/`SimMob::set_age`
+/// gained an `is_baby` fold.
+#[cfg(test)]
+mod baby_shape_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for z in 0..16 {
+            for x in 0..16 {
+                world.set_block(x, 0, z, "minecraft:stone");
+            }
+        }
+        world
+    }
+
+    fn above_floor() -> Vec3 {
+        Vec3::new(8.0, 1.0, 8.0)
+    }
+
+    /// **A baby zombie is the real `0.49×0.98` literal, not a halved adult.**
+    ///
+    /// `0.6×1.95` halved is `0.3×0.975` — close enough to the true value that
+    /// an assertion only checking "shrank" would pass under either
+    /// hypothesis. Predicting the exact literal is what separates a real
+    /// `BABY_DIMENSIONS` port from the generic `getAgeScale()` fallback.
+    #[test]
+    fn a_baby_zombie_is_the_exact_vanilla_literal_not_a_halved_adult() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:zombie".parse().expect("valid key"), above_floor())
+            .id();
+        {
+            let adult = sim.get(id).expect("spawned");
+            assert_eq!(adult.shape().width, 0.6, "adult zombie width");
+            assert_eq!(adult.shape().height, 1.95, "adult zombie height");
+        }
+
+        let mob = sim.get_mut(id).expect("spawned");
+        mob.set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE);
+        let baby = sim.get(id).expect("still spawned");
+        assert_eq!(
+            baby.shape().width,
+            0.49,
+            "baby zombie width is the literal BABY_DIMENSIONS, not 0.6 * 0.5 = 0.3"
+        );
+        assert_eq!(
+            baby.shape().height,
+            0.98,
+            "baby zombie height is the literal BABY_DIMENSIONS, not 1.95 * 0.5 = 0.975"
+        );
+    }
+
+    /// Growing back up re-derives the adult shape — the boundary crossing
+    /// runs in both directions, not just baby-ward.
+    #[test]
+    fn growing_up_restores_the_adult_shape() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), above_floor())
+            .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE)
+            .id();
+        assert_eq!(sim.get(id).expect("spawned").shape().width, 0.45, "baby cow width");
+
+        sim.get_mut(id).expect("spawned").set_age(0);
+        let grown = sim.get(id).expect("still spawned");
+        assert!(!grown.is_baby(), "age 0 is the cooldown-free adult reading");
+        assert_eq!(grown.shape().width, 0.9, "adult cow width restored");
+        assert_eq!(grown.shape().height, 1.4, "adult cow height restored");
+    }
+
+    /// **Control: a species with no `baby_dimensions` entry uses the real
+    /// `LivingEntity` fallback (half size), not a made-up constant.**
+    ///
+    /// Skeletons never naturally have babies, but `is_baby()` only reads the
+    /// age counter — nothing species-gates it — so this is the discriminating
+    /// input for the fallback arm specifically: a skeleton's adult box is
+    /// `0.6×1.99`, and the *wrong* hypothesis (no fallback at all, i.e. the
+    /// shape not changing) would leave it at `0.6×1.99` where the fallback
+    /// predicts `0.3×0.995`.
+    #[test]
+    fn control_a_species_with_no_baby_table_entry_uses_the_generic_age_scale() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species("minecraft:skeleton".parse().expect("valid key"), above_floor())
+            .id();
+        let adult_width = sim.get(id).expect("spawned").shape().width;
+        let adult_height = sim.get(id).expect("spawned").shape().height;
+        assert_eq!(adult_width, 0.6, "adult skeleton width");
+        assert_eq!(adult_height, 1.99, "adult skeleton height");
+
+        sim.get_mut(id)
+            .expect("spawned")
+            .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE);
+        let baby = sim.get(id).expect("still spawned");
+        assert_eq!(
+            baby.shape().width,
+            adult_width * 0.5,
+            "no BABY_DIMENSIONS entry falls back to LivingEntity's own 0.5 age scale"
+        );
+        assert_eq!(
+            baby.shape().height,
+            adult_height * 0.5,
+            "no BABY_DIMENSIONS entry falls back to LivingEntity's own 0.5 age scale"
+        );
+    }
+
+    /// **The zombie family's baby speed boost is `base * 1.5`, and a cow's
+    /// stays flat** — the discriminating pair the residue's "attribute
+    /// change" half asks for. Predicted exactly (`0.23 * 1.5 = 0.345`), not
+    /// merely asserted to have increased.
+    #[test]
+    fn baby_zombie_speeds_up_and_baby_cow_does_not() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+
+        let zombie_id = sim
+            .spawn_species("minecraft:zombie".parse().expect("valid key"), above_floor())
+            .id();
+        let zombie_adult_speed = sim.get(zombie_id).expect("spawned").step_per_tick();
+        assert!(
+            (zombie_adult_speed - 0.23).abs() < 1e-9,
+            "adult zombie movement_speed attribute is 0.23"
+        );
+        sim.get_mut(zombie_id)
+            .expect("spawned")
+            .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE);
+        let zombie_baby_speed = sim.get(zombie_id).expect("still spawned").step_per_tick();
+        assert!(
+            (zombie_baby_speed - 0.345).abs() < 1e-9,
+            "baby zombie speed must be exactly 0.23 * 1.5 = 0.345, got {zombie_baby_speed}"
+        );
+
+        let cow_id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), above_floor())
+            .id();
+        let cow_adult_speed = sim.get(cow_id).expect("spawned").step_per_tick();
+        sim.get_mut(cow_id)
+            .expect("spawned")
+            .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE);
+        let cow_baby_speed = sim.get(cow_id).expect("still spawned").step_per_tick();
+        assert!(
+            (cow_baby_speed - cow_adult_speed).abs() < 1e-9,
+            "a cow has no SPEED_MODIFIER_BABY — baby speed must equal adult speed exactly"
+        );
+    }
+
+    /// A bred child inherits the correct baby shape through
+    /// `resolve_breeding`'s existing `child.set_age(BABY_START_AGE)` call —
+    /// no separate wiring needed, because [`SimMob::set_age`] itself now
+    /// re-derives the shape. This is the island check: a shape fold that only
+    /// ran for a hand-called `set_age` in a test, and never for the
+    /// production breeding path, would still look finished from the unit
+    /// tests above alone.
+    #[test]
+    fn a_bred_child_spawns_with_the_baby_shape_already_applied() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let a = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(7.0, 1.0, 8.0))
+            .id();
+        let _b = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(9.0, 1.0, 8.0))
+            .id();
+
+        // Exercises `resolve_breeding`'s own partner search and
+        // `child.set_age(BABY_START_AGE)` call directly — the real
+        // production path a `BreedGoal` completing feeds through
+        // `MobSim::tick`, without re-driving sixty ticks of love-mode timing
+        // just to reach it.
+        sim.resolve_breeding(vec![(
+            a,
+            Vec3::new(8.0, 1.0, 8.0),
+            "minecraft:cow".parse().expect("valid key"),
+        )]);
+
+        let child = sim
+            .mobs
+            .iter()
+            .find(|m| m.is_baby())
+            .expect("a child was spawned and is a baby");
+        assert_eq!(
+            child.shape().width,
+            0.45,
+            "the bred calf's shape must already be the baby literal, not the adult default"
+        );
+    }
+}
+
+/// Issue #239: block-pattern detection and spawn for the snow and iron
+/// golem. Every world in this module is a bare `HashMap`-backed closure —
+/// `try_construct_golem` takes a pure block oracle, not a [`ChunkWorld`], so
+/// there is nothing else to build.
+#[cfg(test)]
+mod golem_tests {
+    use super::*;
+
+    fn world_from(blocks: &[((i32, i32, i32), &str)]) -> impl Fn(i32, i32, i32) -> String {
+        let map: std::collections::HashMap<(i32, i32, i32), String> = blocks
+            .iter()
+            .map(|(pos, name)| (*pos, (*name).to_owned()))
+            .collect();
+        move |x, y, z| {
+            map.get(&(x, y, z))
+                .cloned()
+                .unwrap_or_else(|| "minecraft:air".to_owned())
+        }
+    }
+
+    /// `try_construct_golem` reads only its own `block_at` closure — never
+    /// `self.world` — so an empty `ChunkWorld` is a fine stand-in; it exists
+    /// only because `MobSim::new` requires one.
+    fn empty_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    /// **The real iron golem shape, standing upright.** Four iron blocks in
+    /// a T (three across at `y=4`, one more below centre at `y=3`) topped
+    /// with a carved pumpkin — the exact geometry `CarvedPumpkinBlock`'s
+    /// `getOrCreateIronGolemFull` declares, worked out independently against
+    /// its `translateAndRotate` formula rather than assumed.
+    #[test]
+    fn an_upright_iron_golem_pattern_spawns_at_the_predicted_position() {
+        let world = world_from(&[
+            ((10, 5, 10), "minecraft:carved_pumpkin"),
+            ((9, 4, 10), "minecraft:iron_block"),
+            ((10, 4, 10), "minecraft:iron_block"),
+            ((11, 4, 10), "minecraft:iron_block"),
+            ((10, 3, 10), "minecraft:iron_block"),
+        ]);
+        let chunk_world = empty_world();
+        let mut mobs = MobSim::new(&chunk_world);
+        let result = mobs
+            .try_construct_golem(&world, (10, 5, 10))
+            .expect("a complete iron golem pattern must match");
+        assert_eq!(result.species, GolemSpecies::Iron);
+
+        let mut consumed: Vec<(i32, i32, i32)> =
+            result.consumed.iter().map(|p| (p.x, p.y, p.z)).collect();
+        consumed.sort_unstable();
+        let mut expected = vec![
+            (10, 5, 10),
+            (9, 4, 10),
+            (10, 4, 10),
+            (11, 4, 10),
+            (10, 3, 10),
+        ];
+        expected.sort_unstable();
+        assert_eq!(
+            consumed, expected,
+            "every pattern block (pumpkin included) must be reported, and nothing else"
+        );
+
+        let spawned = mobs.get(result.id).expect("the golem was spawned");
+        assert_eq!(
+            spawned.position(),
+            Vec3::new(10.5, 3.05, 10.5),
+            "spawn position is the bottom-centre iron block's cell, offset (0.5, 0.05, 0.5) \
+             per vanilla's own `snapTo` call — not the pumpkin's position"
+        );
+    }
+
+    /// **Control: the same four-iron-plus-pumpkin count is not enough on its
+    /// own** — remove the single load-bearing centre-bottom block and the
+    /// otherwise-identical structure must not match. Without this, a
+    /// permissive matcher (e.g. "at least 4 iron blocks nearby") would pass
+    /// the test above for the wrong reason.
+    #[test]
+    fn control_a_pattern_missing_its_bottom_iron_block_does_not_match() {
+        let world = world_from(&[
+            ((10, 5, 10), "minecraft:carved_pumpkin"),
+            ((9, 4, 10), "minecraft:iron_block"),
+            ((10, 4, 10), "minecraft:iron_block"),
+            ((11, 4, 10), "minecraft:iron_block"),
+            // (10, 3, 10) missing.
+        ]);
+        let chunk_world = empty_world();
+        let mut mobs = MobSim::new(&chunk_world);
+        assert!(
+            mobs.try_construct_golem(&world, (10, 5, 10)).is_none(),
+            "an incomplete pattern must never spawn a golem"
+        );
+    }
+
+    /// **The 24-orientation search actually engages** — the same T-shape
+    /// built lying on its side against an imaginary wall (`up = +X` instead
+    /// of `up = +Y`) must still match. A matcher that only tried
+    /// `up = (0, 1, 0)` would silently reject this, which is exactly the
+    /// "a pattern can be built in more than one orientation" trap this
+    /// issue's brief calls out by name.
+    #[test]
+    fn an_iron_golem_built_sideways_against_a_wall_still_matches() {
+        let world = world_from(&[
+            ((0, 4, 0), "minecraft:carved_pumpkin"),
+            ((-1, 3, 0), "minecraft:iron_block"),
+            ((-1, 4, 0), "minecraft:iron_block"),
+            ((-1, 5, 0), "minecraft:iron_block"),
+            ((-2, 4, 0), "minecraft:iron_block"),
+        ]);
+        let chunk_world = empty_world();
+        let mut mobs = MobSim::new(&chunk_world);
+        let result = mobs
+            .try_construct_golem(&world, (0, 4, 0))
+            .expect("a sideways-built iron golem pattern must still match");
+        assert_eq!(result.species, GolemSpecies::Iron);
+    }
+
+    /// The snow golem's pattern: pumpkin over two snow blocks, one column.
+    #[test]
+    fn a_snow_golem_pattern_spawns_at_the_predicted_position() {
+        let world = world_from(&[
+            ((2, 10, 2), "minecraft:carved_pumpkin"),
+            ((2, 9, 2), "minecraft:snow_block"),
+            ((2, 8, 2), "minecraft:snow_block"),
+        ]);
+        let chunk_world = empty_world();
+        let mut mobs = MobSim::new(&chunk_world);
+        let result = mobs
+            .try_construct_golem(&world, (2, 10, 2))
+            .expect("a complete snow golem pattern must match");
+        assert_eq!(result.species, GolemSpecies::Snow);
+        assert_eq!(result.consumed.len(), 3, "pumpkin plus two snow blocks");
+
+        let spawned = mobs.get(result.id).expect("the golem was spawned");
+        assert_eq!(
+            spawned.position(),
+            Vec3::new(2.5, 8.05, 2.5),
+            "spawn position is the bottom snow block's cell"
+        );
+    }
+
+    /// A jack o'lantern completes the pattern exactly as a plain carved
+    /// pumpkin does — `PUMPKINS_PREDICATE` accepts both, and a matcher keyed
+    /// on only one block name would miss half of vanilla's valid triggers.
+    #[test]
+    fn a_jack_o_lantern_completes_the_pattern_too() {
+        let world = world_from(&[
+            ((2, 10, 2), "minecraft:jack_o_lantern"),
+            ((2, 9, 2), "minecraft:snow_block"),
+            ((2, 8, 2), "minecraft:snow_block"),
+        ]);
+        let chunk_world = empty_world();
+        let mut mobs = MobSim::new(&chunk_world);
+        assert!(
+            mobs.try_construct_golem(&world, (2, 10, 2)).is_some(),
+            "a jack o'lantern must trigger the pattern exactly like a carved pumpkin"
+        );
+    }
+}
+
+/// Issue #236: lead attach/detach, the fence-knot re-parent, and the
+/// distance-based pull/snap physics.
+#[cfg(test)]
+mod leash_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        ChunkWorld::new(-64, 384)
+    }
+
+    fn player_at(uuid: Uuid, pos: Vec3) -> PerceivedPlayer {
+        PerceivedPlayer {
+            identity: Some(PlayerIdentity { uuid, entity_id: 99 }),
+            perception: PlayerPerception {
+                position: pos,
+                held_item: None,
+            },
+        }
+    }
+
+    #[test]
+    fn attaching_a_lead_to_a_leashable_mob_holds_it() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let holder = Uuid::new_v4();
+        sim.set_players(vec![player_at(holder, Vec3::new(0.0, 0.0, 0.0))]);
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(2.0, 0.0, 0.0))
+            .id();
+
+        let outcome = sim.try_leash(id, holder, true, false);
+        assert_eq!(outcome, LeashOutcome::Attached);
+        assert_eq!(
+            sim.get(id).expect("spawned").leash_holder(),
+            Some(LeashHolder::Player(holder))
+        );
+    }
+
+    /// **Control: a hostile species refuses a lead** — vanilla
+    /// `Mob.canBeLeashed()` is `!(this instanceof Enemy)`, so this is the
+    /// discriminating input against "every mob accepts a lead".
+    #[test]
+    fn control_a_hostile_mob_refuses_a_lead() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let holder = Uuid::new_v4();
+        sim.set_players(vec![player_at(holder, Vec3::new(0.0, 0.0, 0.0))]);
+        let id = sim
+            .spawn_species(
+                "minecraft:zombie".parse().expect("valid key"),
+                Vec3::new(2.0, 0.0, 0.0),
+            )
+            .id();
+
+        assert_eq!(sim.try_leash(id, holder, true, false), LeashOutcome::Refused);
+        assert_eq!(sim.get(id).expect("spawned").leash_holder(), None);
+    }
+
+    #[test]
+    fn detaching_returns_the_lead_unless_creative() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let holder = Uuid::new_v4();
+        sim.set_players(vec![player_at(holder, Vec3::new(0.0, 0.0, 0.0))]);
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(2.0, 0.0, 0.0))
+            .id();
+        assert_eq!(sim.try_leash(id, holder, true, false), LeashOutcome::Attached);
+
+        assert_eq!(
+            sim.try_leash(id, holder, false, false),
+            LeashOutcome::Detached { dropped_lead: true },
+            "survival mode must drop a lead item"
+        );
+        assert_eq!(sim.get(id).expect("still spawned").leash_holder(), None);
+        assert_eq!(sim.item_count(), 1, "the reported drop must be a real item, not just a flag");
+
+        assert_eq!(sim.try_leash(id, holder, true, false), LeashOutcome::Attached);
+        assert_eq!(
+            sim.try_leash(id, holder, false, true),
+            LeashOutcome::Detached {
+                dropped_lead: false
+            },
+            "creative mode (infinite materials) must not drop a lead item"
+        );
+        assert_eq!(
+            sim.item_count(),
+            1,
+            "creative detach must not spawn a second item on top of the survival one"
+        );
+    }
+
+    /// One player cannot steal another's already-leashed mob just by
+    /// holding a lead — vanilla's `!(leashable.getLeashHolder() instanceof
+    /// Player)` guard.
+    #[test]
+    fn a_different_players_lead_cannot_steal_an_already_leashed_mob() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let owner = Uuid::new_v4();
+        let thief = Uuid::new_v4();
+        sim.set_players(vec![
+            player_at(owner, Vec3::new(0.0, 0.0, 0.0)),
+            player_at(thief, Vec3::new(1.0, 0.0, 0.0)),
+        ]);
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(2.0, 0.0, 0.0))
+            .id();
+        assert_eq!(sim.try_leash(id, owner, true, false), LeashOutcome::Attached);
+
+        assert_eq!(sim.try_leash(id, thief, true, false), LeashOutcome::Refused);
+        assert_eq!(
+            sim.get(id).expect("spawned").leash_holder(),
+            Some(LeashHolder::Player(owner)),
+            "the mob must still belong to its original holder"
+        );
+    }
+
+    /// **The exact pull vector, predicted, at a discriminating distance**
+    /// (10 blocks: past `LEASH_ELASTIC_DIST` (6) and short of
+    /// `LEASH_TOO_FAR_DIST` (12), so both thresholds are exercised by the
+    /// same fixture in opposite directions). `excess = 10 - 6 = 4`, capped
+    /// to `1.0`, times the `0.3` scale this port uses — `0.3` exactly, along
+    /// `+x` since the holder is due east.
+    #[test]
+    fn a_leashed_mob_beyond_the_elastic_distance_is_pulled_toward_its_holder() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let holder = Uuid::new_v4();
+        sim.set_players(vec![player_at(holder, Vec3::new(10.0, 0.0, 0.0))]);
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        sim.get_mut(id)
+            .expect("spawned")
+            .set_leash_holder(Some(LeashHolder::Player(holder)));
+
+        sim.tick_leashes();
+
+        let mob = sim.get(id).expect("still spawned");
+        assert_eq!(
+            mob.position(),
+            Vec3::new(0.3, 0.0, 0.0),
+            "pulled 0.3 blocks toward the holder, not teleported"
+        );
+        assert!(mob.is_leashed(), "still leashed — this is a pull, not a snap");
+    }
+
+    /// **Control: within the elastic distance, nothing happens at all.**
+    /// Discriminates against a pull formula that fires unconditionally.
+    #[test]
+    fn control_a_leashed_mob_within_the_elastic_distance_is_not_pulled() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let holder = Uuid::new_v4();
+        sim.set_players(vec![player_at(holder, Vec3::new(3.0, 0.0, 0.0))]);
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        sim.get_mut(id)
+            .expect("spawned")
+            .set_leash_holder(Some(LeashHolder::Player(holder)));
+
+        sim.tick_leashes();
+
+        assert_eq!(
+            sim.get(id).expect("still spawned").position(),
+            Vec3::new(0.0, 0.0, 0.0),
+            "3 blocks is inside LEASH_ELASTIC_DIST (6) — no force at all"
+        );
+    }
+
+    /// Past `LEASH_TOO_FAR_DIST` (12), the lead snaps: the mob is freed and
+    /// a real `minecraft:lead` item appears at its position.
+    #[test]
+    fn a_leashed_mob_beyond_the_snap_distance_drops_its_lead() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let holder = Uuid::new_v4();
+        sim.set_players(vec![player_at(holder, Vec3::new(13.0, 0.0, 0.0))]);
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        sim.get_mut(id)
+            .expect("spawned")
+            .set_leash_holder(Some(LeashHolder::Player(holder)));
+        assert_eq!(sim.item_count(), 0, "control: nothing dropped yet");
+
+        sim.tick_leashes();
+
+        assert!(
+            !sim.get(id).expect("still spawned").is_leashed(),
+            "13 blocks is past LEASH_TOO_FAR_DIST (12) — the lead must snap"
+        );
+        assert_eq!(sim.item_count(), 1, "a lead item must be spawned on snap");
+    }
+
+    /// A leash holder that cannot be resolved (a disconnected player) drops
+    /// the leash silently, with no item — the disclosed simplification
+    /// `tick_leashes`'s own doc comment names.
+    #[test]
+    fn control_an_unresolvable_holder_drops_the_leash_without_an_item() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let holder = Uuid::new_v4();
+        // No `set_players` call — `holder` cannot be resolved to a position.
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        sim.get_mut(id)
+            .expect("spawned")
+            .set_leash_holder(Some(LeashHolder::Player(holder)));
+
+        sim.tick_leashes();
+
+        assert!(!sim.get(id).expect("still spawned").is_leashed());
+        assert_eq!(sim.item_count(), 0, "an unresolvable holder must not drop an item");
+    }
+
+    /// Right-clicking a fence with a lead re-parents every mob leashed to
+    /// the player onto that fence position — vanilla `LeadItem.bindPlayerMobs`.
+    #[test]
+    fn leashing_to_a_fence_reparents_every_mob_the_player_was_holding() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let holder = Uuid::new_v4();
+        sim.set_players(vec![player_at(holder, Vec3::new(0.0, 0.0, 0.0))]);
+        let a = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(1.0, 0.0, 0.0))
+            .id();
+        let b = sim
+            .spawn_species("minecraft:sheep".parse().expect("valid key"), Vec3::new(1.0, 0.0, 1.0))
+            .id();
+        // A third mob leashed to someone else must not be swept up.
+        let other_holder = Uuid::new_v4();
+        let c = sim
+            .spawn_species("minecraft:pig".parse().expect("valid key"), Vec3::new(1.0, 0.0, 2.0))
+            .id();
+        sim.get_mut(a).expect("spawned").set_leash_holder(Some(LeashHolder::Player(holder)));
+        sim.get_mut(b).expect("spawned").set_leash_holder(Some(LeashHolder::Player(holder)));
+        sim.get_mut(c)
+            .expect("spawned")
+            .set_leash_holder(Some(LeashHolder::Player(other_holder)));
+
+        let fence_pos = BlockPos::new(5, 0, 5);
+        let mut moved = sim.try_leash_to_fence(holder, fence_pos);
+        moved.sort_unstable();
+        let mut expected = vec![a, b];
+        expected.sort_unstable();
+        assert_eq!(moved, expected, "only the calling player's own leashed mobs move");
+
+        assert_eq!(
+            sim.get(a).expect("spawned").leash_holder(),
+            Some(LeashHolder::Fence(fence_pos))
+        );
+        assert_eq!(
+            sim.get(c).expect("spawned").leash_holder(),
+            Some(LeashHolder::Player(other_holder)),
+            "a mob leashed to a different player must be untouched"
         );
     }
 }

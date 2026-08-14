@@ -510,6 +510,38 @@ impl<'w> NavigatingMob<'w> {
         &self.shape
     }
 
+    /// Replaces the mob's collision body — the host's hook for
+    /// vanilla `LivingEntity.refreshDimensions()`, called when
+    /// [`set_age`](Self::set_age) crosses the baby/adult boundary and the
+    /// host recomputes its species' dimensions for the new state (vanilla
+    /// `AgeableMob.setAge` → `this.refreshDimensions()`,
+    /// `.cache/mc/26.2/src/net/minecraft/world/entity/AgeableMob.java:189`).
+    ///
+    /// Updates the hitbox only. [`PathNavigator`](super::super::pathfinding::navigation::PathNavigator)
+    /// keeps the width it was constructed with — rebuilding it here would
+    /// drop any path already in flight, a worse behavioural change than a
+    /// baby's slightly-too-wide navigator width. Disclosed rather than
+    /// silently traded off.
+    pub fn set_shape(&mut self, shape: MobShape) -> &mut Self {
+        self.shape = shape;
+        self
+    }
+
+    /// Replaces the mob's per-tick movement step — the host's hook for a
+    /// baby-only speed `AttributeModifier` (vanilla `Zombie::ageUp`'s
+    /// `SPEED_MODIFIER_BABY`, `ADD_MULTIPLIED_BASE` on `MOVEMENT_SPEED`),
+    /// which this crate has no attribute system to recompute on its own.
+    pub fn set_step_per_tick(&mut self, step_per_tick: f64) -> &mut Self {
+        self.step_per_tick = step_per_tick;
+        self
+    }
+
+    /// The mob's current per-tick movement step.
+    #[must_use]
+    pub fn step_per_tick(&self) -> f64 {
+        self.step_per_tick
+    }
+
     /// The targets the mob has struck, in order (for tests).
     #[must_use]
     pub fn attacks(&self) -> &[Vec3] {
