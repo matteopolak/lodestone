@@ -110,4 +110,40 @@ mod tests {
             None
         );
     }
+
+    /// Behavioural gate for issue #523: three per-frame call sites
+    /// (`gpu/nametag.rs::entity_base_height`, `gpu/entity_passes.rs`'s
+    /// `flame_hitbox_width` and `eye_probe_offset`) were switched from this
+    /// linear `strip_prefix` scan to
+    /// [`crate::entity_type::EntityType::from_name`]'s binary search. This
+    /// proves the swap is behaviour-preserving for every one of the 158
+    /// generated ids, not just the handful exercised by those call sites'
+    /// own tests — a wrong sort order in `EntityType`'s name index would
+    /// resolve some bare path to a *different* real id here, not to `None`,
+    /// which is exactly the failure mode a plain "does it still compile"
+    /// check cannot see.
+    #[test]
+    fn entity_type_from_name_agrees_with_entity_type_id_parts_for_every_id() {
+        use crate::entity_type::EntityType;
+
+        let mut mismatches = Vec::new();
+        for id in 0..i32::try_from(TYPE_COUNT).unwrap() {
+            let name = entity_type_name(id).expect("id within TYPE_COUNT");
+            let path = name
+                .strip_prefix("minecraft:")
+                .expect("every generated name is minecraft-namespaced");
+            let old = entity_type_id_parts("minecraft", path);
+            let new = EntityType::from_name(path).map(|t| i32::from(t.registry_id()));
+            if old != new {
+                mismatches.push(format!("{path}: old={old:?} new={new:?}"));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} of {TYPE_COUNT} ids disagree between entity_type_id_parts and \
+             EntityType::from_name:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
+    }
 }
