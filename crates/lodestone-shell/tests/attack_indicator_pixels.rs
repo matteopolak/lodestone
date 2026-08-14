@@ -18,7 +18,7 @@
 //!
 //! The indicator is a 16x4 native-pixel bar anchored at
 //! `(guiWidth/2 - 8, guiHeight/2 - 7 + 16)` — vanilla's own offset
-//! (`Hud.java:457-458`, `.cache/mc/26.2/client-src`) — which `hud.rs`'s
+//! (`Hud.java`, `.cache/mc/26.2/client-src`) — which `hud.rs`'s
 //! crosshair block computes as `(cx - 8, cy + 9)` against this canvas's own
 //! centre. [`indicator_rect`] below derives from that *same* expression
 //! rather than a hand-copied constant — `air_bubble_pixels.rs` in this same
@@ -42,7 +42,7 @@
 //! 1. **Partial cooldown, crosshair on** — the subject: `attack_cooldown =
 //!    Some(0.5)`, `crosshair = true`. Must paint inside the rect.
 //! 2. **Full cooldown (`1.0`), crosshair on** — vanilla's actual rule
-//!    (`Hud.java:461`, `else if (attackStrengthScale < 1.0F)`) hides the
+//!    (`Hud.java`, `else if (attackStrengthScale < 1.0F)`) hides the
 //!    indicator entirely once it reaches full strength, unless a slow
 //!    weapon's "ready" icon takes over — a variant this shell does not
 //!    implement (`docs/combat.md` names the cut). Getting this control wrong
@@ -277,7 +277,7 @@ fn the_attack_indicator_reaches_the_screen_through_the_real_hud_path() {
     assert_eq!(
         full_px, 0,
         "control failed to fail: the indicator drew {full_px} px at full charge (1.0), where \
-         vanilla's own rule (`Hud.java:461`) hides it entirely absent the unimplemented \
+         vanilla's own rule (`Hud.java`) hides it entirely absent the unimplemented \
          'ready' icon variant"
     );
     assert_eq!(

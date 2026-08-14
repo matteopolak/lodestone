@@ -29,7 +29,7 @@
 //! The first version of that diagram listed only the chunk packet and
 //! `block_entity_data`, which was accurate and read as exhaustive. It was not:
 //! in vanilla, **writing a block state is what creates a block entity** — no
-//! packet involved (26.2 `LevelChunk.java:341`,
+//! packet involved (26.2 `LevelChunk.java`,
 //! `((EntityBlock)newBlock).newBlockEntity(pos, state)`) — and
 //! `block_entity_data` is only ever data for an entity that already exists. Our
 //! `block_update` / `section_blocks_update` arms wrote the state and nothing

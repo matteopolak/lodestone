@@ -121,7 +121,7 @@ pub fn text_color_rgb(color: TextColor) -> [f32; 3] {
 /// One glyph run's active formatting, tracked across a `§`-coded string.
 ///
 /// A legacy colour code or `§r` resets every one of these to `false`
-/// (`apply_legacy_code` in `lodestone-model/src/text.rs:626-644`: "a legacy
+/// (`lodestone_model::text::apply_legacy_code`: "a legacy
 /// colour code resets all formatting to just that colour"); this type carries
 /// no colour of its own for that reason —
 /// [`resolve_legacy`](VanillaFont::resolve_legacy) tracks colour separately
@@ -242,7 +242,7 @@ pub struct VanillaFont {
     raster: RasterFont,
     /// `§k` obfuscated text's replacement pool: drawable codepoints grouped by
     /// `ceil(advance)`, mirroring `FontSet.glyphsByWidth`
-    /// (`FontSet.java:58,109,160-163`). Vanilla's own pool is built from *every*
+    /// (`FontSet.java`). Vanilla's own pool is built from *every*
     /// active provider (including `space`), but only bitmap glyphs are
     /// drawable here, so this is restricted to codepoints
     /// [`RasterFont::raster`] actually returns pixels for — a codepoint with no
@@ -251,7 +251,7 @@ pub struct VanillaFont {
     /// occasionally "obfuscate" a glyph into invisible whitespace).
     obfuscation_pool: HashMap<u32, Vec<char>>,
     /// Free-running state for the obfuscated-glyph picker. Vanilla never
-    /// reseeds `Font.random` (`Font.java:34`, `RandomSource.create()` at
+    /// reseeds `Font.random` (`Font.java`, `RandomSource.create()` at
     /// construction) — every glyph drawn advances the same stream, so the
     /// same text resamples differently **every frame** with no timer
     /// involved, which is what makes `§k` read as animated rather than a
@@ -484,7 +484,7 @@ impl VanillaFont {
     /// (source) order — the non-drawing half of what used to be `spans_run`'s
     /// body. `position` in the old single-pass version counted glyphs across
     /// the whole span list rather than resetting per span
-    /// (`Font.java:274`'s `position == 0` check is about the first glyph of
+    /// (`Font.java`'s `position == 0` check is about the first glyph of
     /// the *line*), and that is preserved here too: it is
     /// [`draw_resolved`](Self::draw_resolved) that now assigns `position`,
     /// over the final (bidi-reordered) glyph order.
@@ -508,7 +508,7 @@ impl VanillaFont {
     ///
     /// Vanilla's `graphics.text(font, component, x, y, colour, shadow)` takes the
     /// flag as an argument, and the two container labels
-    /// (`AbstractContainerScreen.java:190-191`) pass `false`. Every other text
+    /// (`AbstractContainerScreen.java`) pass `false`. Every other text
     /// surface in this crate passes it implicitly by calling
     /// [`draw`](Self::draw), so the shadowless case needs its own name rather
     /// than a bool parameter on the common path.
@@ -532,10 +532,10 @@ impl VanillaFont {
 
     /// Decodes a `§`-coded string into [`ResolvedGlyph`]s, in **logical**
     /// (source) order — the non-drawing half of what used to be `legacy_run`'s
-    /// body. Format codes carry real geometry (issue #117): `style` tracks the
+    /// body. Format codes carry real geometry: `style` tracks the
     /// five flags across the run exactly as `Font::legacy_width` already
     /// tracks bold for measurement, with the same reset rule
-    /// (`apply_legacy_code`, `lodestone-model/src/text.rs:626-644`) — a colour
+    /// (`lodestone_model::text::apply_legacy_code`) — a colour
     /// code or `§r` clears every flag, not just the one it names.
     ///
     /// `§` control pairs are consumed here and never become a
@@ -584,7 +584,7 @@ impl VanillaFont {
     /// `legacy_run`/`spans_run`'s bodies: both decoders now agree on
     /// [`ResolvedGlyph`], so there is exactly one place glyphs turn into
     /// quads, walked in **visual** order — `position == 0` is therefore the
-    /// first glyph drawn left-to-right on screen, matching `Font.java:274`
+    /// first glyph drawn left-to-right on screen, matching `Font.java`
     /// even for a right-to-left run.
     fn draw_resolved(
         &self,
@@ -627,14 +627,14 @@ impl VanillaFont {
     /// `(x, y)`. `first` is whether this is the very first glyph
     /// [`draw_resolved`](Self::draw_resolved) draws (`draw_resolved` restarts
     /// its own counter each pass, over the bidi-reordered — i.e. **visual**
-    /// — glyph order), matching `Font.java:274`'s `position == 0` check for
+    /// — glyph order), matching `Font.java`'s `position == 0` check for
     /// where the underline/strikethrough bar's left edge starts.
     ///
     /// Returns the advance in device pixels, computed from `ch`'s **own**
     /// glyph — even when `style.obfuscated` swaps in a different codepoint's
     /// pixels, see [`obfuscation_pool`](VanillaFont::obfuscation_pool)'s field
     /// docs for why. Effects (underline/strikethrough) and the background
-    /// advance vanilla marks per glyph (`Font.java:284`, `markBackground`) are
+    /// advance vanilla marks per glyph (`Font.java`, `markBackground`) are
     /// emitted here **unconditionally** — including for whitespace and the
     /// missing-glyph box — because vanilla's own `accept()` runs the same way
     /// for every character the string decomposes to, ink or not: an
@@ -692,7 +692,7 @@ impl VanillaFont {
             self.draw_ink(cs, &draw_r, x, y, scale, c, style.italic);
             if style.bold {
                 // The second, offset pass that actually makes bold read as
-                // bold (`BakedSheetGlyph.renderChar`, `BakedSheetGlyph.java:110-113`)
+                // bold (`BakedSheetGlyph.renderChar`, `BakedSheetGlyph.java`)
                 // — not a font-weight variant, the same glyph redrawn shifted.
                 self.draw_ink(
                     cs,
@@ -707,7 +707,7 @@ impl VanillaFont {
         }
 
         if style.has_effect() {
-            // `Font.java:274`: `effectX0 = position == 0 ? x - 1.0F : x`.
+            // `Font.java`: `effectX0 = position == 0 ? x - 1.0F : x`.
             let x0 = if first {
                 x - font_metrics::EFFECT_LEAD_IN * scale
             } else {
@@ -716,12 +716,12 @@ impl VanillaFont {
             let x1 = x + bold_advance * scale;
             let thickness = font_metrics::EFFECT_THICKNESS * scale;
             if style.strikethrough {
-                // `Font.java:285-291`: bar bottom at `y + 4.5F`.
+                // `Font.java`: bar bottom at `y + 4.5F`.
                 let bottom = y + font_metrics::STRIKETHROUGH_Y * scale;
                 cs.rect(x0, bottom - thickness, x1 - x0, thickness, c);
             }
             if style.underline {
-                // `Font.java:293-299`: bar bottom at `y + 9.0F`.
+                // `Font.java`: bar bottom at `y + 9.0F`.
                 let bottom = y + font_metrics::UNDERLINE_Y * scale;
                 cs.rect(x0, bottom - thickness, x1 - x0, thickness, c);
             }
@@ -740,7 +740,7 @@ impl VanillaFont {
     /// [`GlyphRaster::top`] returns for the glyph's top edge), and the row
     /// shifts in `x` by `ITALIC_SHEAR - ITALIC_SHEAR_SLOPE * v`
     /// (`BakedSheetGlyph.shearTop`/`shearBottom`,
-    /// `BakedSheetGlyph.java:144-150`, both `1.0F - 0.25F * v`). Vanilla shears
+    /// `BakedSheetGlyph.java`, both `1.0F - 0.25F * v`). Vanilla shears
     /// the whole glyph as one quad with two sheared edges (a continuous linear
     /// interpolation between the top and bottom edge's shear); this evaluates
     /// that same affine function per texel row instead, which is the run-based
@@ -793,7 +793,7 @@ impl VanillaFont {
 
     /// Picks a `§k` replacement raster from [`obfuscation_pool`](VanillaFont::obfuscation_pool),
     /// keyed by `ceil(original_advance)` — vanilla's own width class
-    /// (`FontSet.java:109`, `Mth.ceil(glyph.info().getAdvance(false))`), and
+    /// (`FontSet.java`, `Mth.ceil(glyph.info().getAdvance(false))`), and
     /// advances the free-running picker once. `None` only when this font has
     /// no drawable glyph at all of that exact rounded width.
     fn obfuscated_raster(&self, original_advance: f32) -> Option<GlyphRaster<'_>> {
@@ -822,7 +822,7 @@ impl VanillaFont {
 
 /// Groups every codepoint this font can actually draw pixels for by
 /// `ceil(advance)`, mirroring `FontSet.glyphsByWidth`
-/// (`FontSet.java:58,109,160-163`) restricted to codepoints
+/// (`FontSet.java`) restricted to codepoints
 /// [`RasterFont::raster`] returns coverage for. Built once at load time so
 /// `§k` never rebuilds it mid-draw.
 fn build_obfuscation_pool(raster: &RasterFont) -> HashMap<u32, Vec<char>> {
@@ -1186,7 +1186,7 @@ mod styling_tests {
         x1 - x0
     }
 
-    /// **Bold**: `BakedSheetGlyph.renderChar` (`BakedSheetGlyph.java:110-113`)
+    /// **Bold**: `BakedSheetGlyph.renderChar` (`BakedSheetGlyph.java`)
     /// redraws the same glyph a second time, offset `+boldOffset` in x. Ink's
     /// bounding box must therefore widen by *exactly* `BOLD_OFFSET` (at
     /// `scale = 1.0`, device px == logical px) — not "wider", the specific
@@ -1225,7 +1225,7 @@ mod styling_tests {
     /// **Italic**: each ink row shears in x by
     /// `ITALIC_SHEAR - ITALIC_SHEAR_SLOPE * v`, `v` being that row's own
     /// logical-pixel offset from the line's top
-    /// (`BakedSheetGlyph.shearTop`/`shearBottom`, `BakedSheetGlyph.java:144-150`).
+    /// (`BakedSheetGlyph.shearTop`/`shearBottom`, `BakedSheetGlyph.java`).
     /// This predicts the exact x offset between the topmost and bottommost ink
     /// row of an italic `'|'` (a single-column vertical stroke with **no**
     /// serif — verified directly against `RasterFont::raster('|')`'s ink
@@ -1326,7 +1326,7 @@ mod styling_tests {
         );
     }
 
-    /// **Underline / strikethrough**: `Font.java:274,285-299` draws a 1px bar
+    /// **Underline / strikethrough**: `Font.java` draws a 1px bar
     /// per glyph, spanning that glyph's advance (extended 1px left for the
     /// *first* glyph of the run) — unconditionally, including for a space,
     /// which has no ink of its own. Using two spaces isolates the bar
@@ -1369,7 +1369,7 @@ mod styling_tests {
     }
 
     /// As above, for strikethrough, which sits at a different fixed offset
-    /// (`Font.java:285-291`, `STRIKETHROUGH_Y` vs `UNDERLINE_Y`) — the two
+    /// (`Font.java`, `STRIKETHROUGH_Y` vs `UNDERLINE_Y`) — the two
     /// must land at *different* y, not share one "there is a line somewhere"
     /// implementation.
     #[test]
@@ -1400,8 +1400,8 @@ mod styling_tests {
         );
     }
 
-    /// A colour code (not just `§r`) resets bold — `apply_legacy_code`
-    /// (`lodestone-model/src/text.rs:626-644`): "a legacy colour code resets
+    /// A colour code (not just `§r`) resets bold —
+    /// `lodestone_model::text::apply_legacy_code`: "a legacy colour code resets
     /// all formatting to just that colour". `§r` is the easy half to get
     /// right; a colour code doing the same is the part a naive
     /// "only reset on `§r`" implementation misses.
@@ -1423,9 +1423,9 @@ mod styling_tests {
         );
     }
 
-    /// **Obfuscated**: `Font.getGlyph` (`Font.java:82-91`) swaps in a random
+    /// **Obfuscated**: `Font.getGlyph` (`Font.java`) swaps in a random
     /// same-width-class glyph every time it is asked, from a `RandomSource`
-    /// that is never reseeded (`Font.java:34`) — so two draws of the *same*
+    /// that is never reseeded (`Font.java`) — so two draws of the *same*
     /// `§k` string must produce **different** ink, which is what makes it read
     /// as animated rather than a one-shot scramble. A still frame cannot
     /// distinguish "animated" from "static but wrong", so this compares two
@@ -1465,7 +1465,7 @@ mod styling_tests {
         );
     }
 
-    /// Space is never obfuscated (`Font.java:85`, `codepoint != 32`) — an
+    /// Space is never obfuscated (`Font.java`, `codepoint != 32`) — an
     /// obfuscated string with spaces in it must keep them as gaps, not
     /// replace them with visible ink.
     #[test]
@@ -1524,7 +1524,7 @@ mod span_colour_tests {
     const W: f32 = 400.0;
     const H: f32 = 200.0;
 
-    /// Vanilla's sixteen, hand-transcribed from `TextColor.java:18-33` (26.2).
+    /// Vanilla's sixteen, hand-transcribed from `TextColor.java` (26.2).
     /// Deliberately **not** built from [`TextColor::rgb`] — that is the code under
     /// test, and an expectation derived from it would be satisfied by all sixteen
     /// being wrong together.

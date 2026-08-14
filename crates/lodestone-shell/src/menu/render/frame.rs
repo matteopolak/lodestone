@@ -15,7 +15,7 @@ pub enum Align {
     Centre,
     /// `x` is the text's right edge. The width is measured at draw time, which
     /// is why this is an alignment and not a pre-computed offset: vanilla's own
-    /// `copyrightX = width - font.width(text) - 2` (`TitleScreen.java:110-111`)
+    /// `copyrightX = width - font.width(text) - 2` (`TitleScreen.java`)
     /// depends on the font, and the font is not known until the draw.
     Right,
 }
@@ -40,7 +40,7 @@ pub struct MenuLabel {
     /// label before issue #103 used this implicitly — `build`'s `frame.vanilla`
     /// loop hardcoded it). The death screen's title needs `2.0`:
     /// `DeathScreen.visitText` sets `output.defaultParameters(normalParameters.
-    /// withScale(2.0F))` before drawing it (`DeathScreen.java:23,119`).
+    /// withScale(2.0F))` before drawing it (`DeathScreen.java`).
     pub scale: f32,
 }
 
@@ -79,7 +79,7 @@ pub struct MenuRow {
     /// instead of a `Button` (issue #55).
     ///
     /// A settings screen's numeric options are sliders and its enums and
-    /// booleans are `CycleButton`s (`OptionInstance.java:127-135`), and the two
+    /// booleans are `CycleButton`s (`OptionInstance.java`), and the two
     /// look nothing alike — a slider track has no bevel and no disabled variant.
     ///
     /// This used to say "no live option in this client is a slider", citing
@@ -91,7 +91,7 @@ pub struct MenuRow {
     /// `has_a_known_value`.
     pub slider: bool,
     /// The `[0, 1]` fraction along the track where the handle sits —
-    /// `AbstractSliderButton.value` (`AbstractSliderButton.java:28,69-77`) —
+    /// `AbstractSliderButton.value` (`AbstractSliderButton.java`) —
     /// or `None` when [`Self::slider`] is `true` but this client holds no
     /// value for the option at all yet.
     ///
@@ -121,7 +121,7 @@ pub struct MenuRow {
     pub slot: Option<Slot>,
     /// A GUI sprite id drawn centred in the widget **instead of** `label` —
     /// vanilla's `SpriteIconButton.CenteredIcon`
-    /// (`SpriteIconButton.java:236-244`). `label` is still carried (it is the
+    /// (`SpriteIconButton.java`). `label` is still carried (it is the
     /// tooltip/narration text in vanilla) but not drawn.
     pub icon: Option<&'static str>,
     /// Set on a [`super::Screen::ServerList`] row: everything an
@@ -287,7 +287,7 @@ pub enum Arrow {
 /// is already a [`MenuRow`] field. Both of these say what the **hover overlay**
 /// over the 32×32 icon is — vanilla's `transferable_list/select` /
 /// `unselect` sprites, drawn only when `PackEntry.showHoverOverlay()`
-/// (`TransferableSelectionList.java:272-274`) — and neither is derivable from the
+/// (`TransferableSelectionList.java`) — and neither is derivable from the
 /// row: which column a pack is in is the screen's fact, not the row's.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PackEntryView {
@@ -315,7 +315,7 @@ pub struct TabEntryView {
     /// own list".
     pub index: usize,
     /// Whether this is the tab currently showing — `TabManager.getCurrentTab()
-    /// == this.tab` (`TabButton.isSelected`, `TabButton.java:34-36`).
+    /// == this.tab` (`TabButton.isSelected`, `TabButton.java`).
     ///
     /// A different question from [`MenuFrame::selected`], which on every other
     /// screen carries the **keyboard-focused** row: this screen's tab bar has
@@ -339,7 +339,7 @@ pub struct WorldEntryView {
     pub index: usize,
     /// Whether this is `WorldSelectionList.getSelectedOpt()`'s entry, which gets
     /// `AbstractSelectionList.extractItem`'s 1 px outline plus black interior
-    /// (`AbstractSelectionList.java:354-370`).
+    /// (`AbstractSelectionList.java`).
     ///
     /// A different question from [`MenuFrame::selected`], which on this screen
     /// carries the **focused** row, and from [`MenuFrame::hovered`], which carries
@@ -635,7 +635,7 @@ pub struct MenuFrame<'a> {
     /// `None` on every screen with a row cursor, which is every screen except
     /// [`super::Screen::WorldSelect`] — so nothing about the existing screens'
     /// pixels changes. Vanilla's sprite argument is `isHoveredOrFocused()`
-    /// (`AbstractButton.java:43-53`), the `||` of the two, and
+    /// (`AbstractButton.java`), the `||` of the two, and
     /// [`Widget::is_hovered_or_focused`] is where that join lives; this field is
     /// only how the second operand reaches it. See
     /// [`super::world_select::WorldSelectNav::hovered`] for the bug that made the
@@ -696,7 +696,7 @@ pub struct MenuFrame<'a> {
     /// reaches a frame ([`super::nav::MenuNav::hover`]), which is all a button
     /// needs. The multiplayer list needs more: vanilla's row draws a different
     /// sprite depending on which **quadrant of the 32 px favicon** the cursor is
-    /// in (`ServerSelectionList.java:364-395`), and that cannot be decided before
+    /// in (`ServerSelectionList.java`), and that cannot be decided before
     /// the canvas is known, because the icon's rect depends on it. So the raw
     /// position rides along on the frame and [`draw_server_entry`] does the
     /// quadrant test against the rect it is about to draw into.

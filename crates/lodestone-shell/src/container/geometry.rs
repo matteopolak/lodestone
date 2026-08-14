@@ -62,7 +62,7 @@ pub struct ContainerGeometry {
     /// the slot items: the panel art, the hover highlight's *back* sprite, and
     /// the empty-slot placeholders. The remainder is the highlight's *front*
     /// sprite, which vanilla draws after every slot
-    /// (`extractSlotHighlightFront`, `AbstractContainerScreen.java:159-163`) and
+    /// (`extractSlotHighlightFront`, `AbstractContainerScreen.java`) and
     /// before `extractCarriedItem`'s `nextStratum()`.
     ///
     /// A caller drawing all of `bg_verts` in one pass loses the front sprite's
@@ -240,9 +240,9 @@ impl ContainerGeometry {
 
         // Vanilla's own dim behind an open container screen (that fix's
         // leftover). `AbstractContainerScreen::isInGameUi()` overrides `true`
-        // (`AbstractContainerScreen.java:535-538`), which routes
+        // (`AbstractContainerScreen.java`), which routes
         // `Screen::extractBackground` to `extractTransparentBackground`
-        // (`Screen.java:375-377`) — a full-canvas vertical **gradient**, not the
+        // (`Screen.java`) — a full-canvas vertical **gradient**, not the
         // pause menu's tiled dirt texture (that is the `else` branch, for
         // `isInGameUi() == false` screens). `-1072689136`/`-804253680` decoded:
         // ARGB (192,16,16,16) top to (208,16,16,16) bottom.
@@ -312,7 +312,7 @@ impl ContainerGeometry {
                 ) => {
                     // `AbstractFurnaceMenu`: data[0] litTime, data[1]
                     // litDuration, data[2] cookingProgress, data[3]
-                    // cookingTotalTime (`AbstractFurnaceMenu.java:143-156`).
+                    // cookingTotalTime (`AbstractFurnaceMenu.java`).
                     let (lit_sprite, burn_sprite) = match kind {
                         SpecialLayout::BlastFurnace => {
                             (BLAST_FURNACE_LIT_PROGRESS, BLAST_FURNACE_BURN_PROGRESS)
@@ -355,7 +355,7 @@ impl ContainerGeometry {
                 }
                 Some(SpecialLayout::Brewing) => {
                     // `BrewingStandMenu`: data[0] brewingTicks, data[1] fuel
-                    // (`BrewingStandMenu.java:117-123`).
+                    // (`BrewingStandMenu.java`).
                     let fuel = data(1);
                     let fuel_len = ((18 * fuel + 19) / 20).clamp(0, 18);
                     if fuel_len > 0
@@ -402,7 +402,7 @@ impl ContainerGeometry {
         }
         // Which slot the pointer is over — vanilla's `hoveredSlot`, set from
         // `getHoveredSlot(mouseX, mouseY)` every frame
-        // (`AbstractContainerScreen.java:102`). Derived from the **same**
+        // (`AbstractContainerScreen.java`). Derived from the **same**
         // `hit_test_with_book` the click path calls, with the same `gui_scale`
         // *and* the same `book_open`, so the highlight cannot land on a different
         // slot than a click would — the failure mode `hit_test_with_scale`'s own
@@ -506,7 +506,7 @@ impl ContainerGeometry {
         }
 
         // Both labels, exactly as `AbstractContainerScreen::extractLabels` draws
-        // them (`AbstractContainerScreen.java:189-191`):
+        // them (`AbstractContainerScreen.java`):
         //
         //     graphics.text(font, title,               titleLabelX, titleLabelY, -12566464, false);
         //     graphics.text(font, playerInventoryTitle, inventoryLabelX, inventoryLabelY, -12566464, false);
@@ -577,7 +577,7 @@ impl ContainerGeometry {
         // `docs/container-cost-screens.md`'s "What is not yet wired" gap,
         // closed. Both are drawn from `frame.cost_data` alongside the two
         // labels above, matching vanilla's own `extractLabels` pass
-        // (`AnvilScreen.java:93-118`, `EnchantmentScreen.java:96-135`).
+        // (`AnvilScreen.java`, `EnchantmentScreen.java`).
         draw_container_costs(&mut b, menu, &layout, frame, x, y);
 
         // Every well first, so the colour stream splits cleanly into "chrome"
@@ -605,7 +605,7 @@ impl ContainerGeometry {
         // would not produce.
         let drag = drag_preview(menu, frame.drag);
         // Vanilla's 50%-white wash behind each previewed stack
-        // (`AbstractContainerScreen.java:234`'s `fill(..., -2130706433)` —
+        // (`AbstractContainerScreen.java`'s `fill(..., -2130706433)` —
         // `0x80FFFFFF`). Emitted **before** `chrome_floats` so it lands under the
         // icon it backs; everything past that marker draws over the icon passes.
         if let Some(preview) = &drag {
@@ -693,7 +693,7 @@ impl ContainerGeometry {
         // carried stack, drawn in its own later stratum. This is vanilla's
         // `graphics.nextStratum()`, called immediately before it draws the
         // carried item and nowhere else on the screen
-        // (`AbstractContainerScreen.java:126`).
+        // (`AbstractContainerScreen.java`).
         //
         // It has to be a stratum and not merely "appended last".
         // Append order only settles two of the four cases, because the GUI item
@@ -824,15 +824,15 @@ impl ContainerGeometry {
 
 /// Vanilla's `-8323296` (`0x80FF20`) — green, the anvil cost's affordable
 /// colour and the enchanting row's affordable cost-number colour
-/// (`AnvilScreen.java:97`, and the `col = -8323296` reassignment at
-/// `EnchantmentScreen.java:129`).
+/// (`AnvilScreen.java`, and the `col = -8323296` reassignment at
+/// `EnchantmentScreen.java`).
 const COST_GREEN: [f32; 4] = [128.0 / 255.0, 1.0, 32.0 / 255.0, 1.0];
 /// Vanilla's `-40864` (`0xFFFF6060`) — red, the anvil's "too expensive" and
-/// "can't afford" colour (`AnvilScreen.java:101`, `:107`).
+/// "can't afford" colour (`AnvilScreen.java`, `:107`).
 const COST_RED: [f32; 4] = [1.0, 96.0 / 255.0, 96.0 / 255.0, 1.0];
 /// Vanilla's `-12550384` (`0x407F10`) — the enchanting row's *disabled*
 /// cost-number colour, exactly half [`COST_GREEN`]'s brightness
-/// (`EnchantmentScreen.java:115`'s `col = -12550384`, itself
+/// (`EnchantmentScreen.java`'s `col = -12550384`, itself
 /// `ARGB.opaque((col & 16711422) >> 1)` of the enabled green applied to the
 /// row's other text — the cost number reuses the same halved constant).
 const COST_DISABLED_GREEN: [f32; 4] = [64.0 / 255.0, 127.0 / 255.0, 16.0 / 255.0, 1.0];
@@ -840,7 +840,7 @@ const COST_DISABLED_GREEN: [f32; 4] = [64.0 / 255.0, 127.0 / 255.0, 16.0 / 255.0
 /// Draws the merchant screen's trade list: the second "Trades" label, and
 /// each visible offer's cost/result icons, discount strikethrough and trade
 /// arrow (that fix's UI half) — `MerchantScreen.extractLabels`/
-/// `extractContents` (`MerchantScreen.java:86-99,167-219`). A no-op for any
+/// `extractContents` (`MerchantScreen.java`). A no-op for any
 /// screen without [`SpecialLayout::Merchant`], or a merchant screen with no
 /// offers yet (`frame.trades` is `None`) — every existing caller.
 ///
@@ -866,7 +866,7 @@ fn draw_merchant_trades(
     }
     let Some(trades) = frame.trades else { return };
 
-    // `merchant.trades` — `MerchantScreen.java:98-99`:
+    // `merchant.trades` — `MerchantScreen.java`:
     // `5 - font.width(TRADES_LABEL) / 2 + 48`, i.e. centred on local x = 53.
     let trades_width = font.map_or(0.0, |f| f.width(frame.trades_label, 1.0));
     let trades_x = (53.0 - trades_width / 2.0).floor();
@@ -881,7 +881,7 @@ fn draw_merchant_trades(
         }
         // The discount strikethrough — vanilla draws two icons (base and
         // adjusted price) side by side when they differ
-        // (`extractAndDecorateCostA`, `MerchantScreen.java:229-240`); this
+        // (`extractAndDecorateCostA`, `MerchantScreen.java`); this
         // draws the adjusted price alone plus the strikethrough sprite,
         // which shows the same fact (a demand discount is active) without a
         // second overlapping icon.
@@ -925,7 +925,7 @@ fn draw_merchant_trades(
     }
 
     // The out-of-stock overlay is drawn once, for the **selected** row only
-    // (`extractBackground`, `MerchantScreen.java:107-119`) — a fixed panel
+    // (`extractBackground`, `MerchantScreen.java`) — a fixed panel
     // position, not one per row.
     if let Some(bg) = background
         && let Some(selected) = offers.get(frame.selected_trade)
@@ -962,9 +962,9 @@ fn draw_container_costs(
     }
 }
 
-/// `AnvilScreen.extractLabels` (`AnvilScreen.java:92-118`): the XP cost in
+/// `AnvilScreen.extractLabels` (`AnvilScreen.java`): the XP cost in
 /// the top-right of the panel, on a translucent backdrop, right-aligned.
-/// `container_data(0)` is `AnvilMenu`'s one `DataSlot` (`AnvilMenu.java:33`).
+/// `container_data(0)` is `AnvilMenu`'s one `DataSlot` (`AnvilMenu.java`).
 fn draw_anvil_cost(
     b: &mut Builder<'_>,
     menu: &Menu,
@@ -989,7 +989,7 @@ fn draw_anvil_cost(
     } else if menu.slot_item(RESULT_SLOT).is_none() {
         None
     } else {
-        // `AnvilMenu::mayPickup` (`AnvilMenu.java:70-71`): affordable iff
+        // `AnvilMenu::mayPickup` (`AnvilMenu.java`): affordable iff
         // infinite materials, or the player's level covers the cost.
         let may_pickup = frame.has_infinite_materials || frame.xp_level >= cost;
         let colour = if may_pickup { COST_GREEN } else { COST_RED };
@@ -1004,7 +1004,7 @@ fn draw_anvil_cost(
         return;
     };
     let text_width = b.font.map_or(0.0, |f| f.width(&text, 1.0));
-    // `AnvilScreen.java:112-115`: `tx = imageWidth - 8 - font.width(line) - 2`,
+    // `AnvilScreen.java`: `tx = imageWidth - 8 - font.width(line) - 2`,
     // `ty = 69`, backdrop `fill(tx - 2, 67, imageWidth - 8, 79, 0x4F000000)`.
     let tx = layout.width - 8.0 - text_width - 2.0;
     let ty = 69.0;
@@ -1018,10 +1018,10 @@ fn draw_anvil_cost(
     b.shadowed_label(&text, x + tx, y + ty, 1.0, colour);
 }
 
-/// `EnchantmentScreen.extractBackground` (`EnchantmentScreen.java:96-134`):
+/// `EnchantmentScreen.extractBackground` (`EnchantmentScreen.java`):
 /// the per-row level-cost number, bottom-right of each of the three offer
 /// buttons. `container_data(0..3)` are `EnchantmentMenu.costs[0..3]`
-/// (`EnchantmentMenu.java:73-75`).
+/// (`EnchantmentMenu.java`).
 ///
 /// **Deliberately does not draw the enchantment-name text.** That is
 /// `EnchantmentNames`' Standard Galactic Alphabet cipher font, a whole
@@ -1041,14 +1041,14 @@ fn draw_enchanting_costs(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFram
         if cost <= 0 {
             continue;
         }
-        // `EnchantmentScreen.java:111`: disabled unless infinite materials,
+        // `EnchantmentScreen.java`: disabled unless infinite materials,
         // or both enough lapis (`goldCount >= i + 1`) and enough levels.
         let afford = frame.has_infinite_materials
             || (gold_count >= i + 1 && frame.xp_level >= cost);
         let colour = if afford { COST_GREEN } else { COST_DISABLED_GREEN };
         let text = cost.to_string();
         let text_width = b.font.map_or(0.0, |f| f.width(&text, 1.0));
-        // `EnchantmentScreen.java:101-132`: `leftPos = xo + 60`,
+        // `EnchantmentScreen.java`: `leftPos = xo + 60`,
         // `leftPosText = leftPos + 20`, row `y = yo + 14 + 19*i`, cost drawn
         // at `(leftPosText + 86 - width, y + 16 + 7)`.
         let left_pos_text = x + 60.0 + 20.0;
@@ -1114,7 +1114,7 @@ impl DragPreview {
 /// Resolve [`ContainerFrame::drag`] against a menu, or `None` when no drag is
 /// armed, nothing is painted, or the cursor is empty — vanilla gates the whole
 /// preview on `isQuickCrafting && quickCraftSlots.contains(slot) &&
-/// !carried.isEmpty()` (`AbstractContainerScreen.java:202`).
+/// !carried.isEmpty()` (`AbstractContainerScreen.java`).
 ///
 /// Note the `single` case is still `Some`: it has to be, because it draws
 /// *nothing* in the painted cell rather than falling back to the real contents,

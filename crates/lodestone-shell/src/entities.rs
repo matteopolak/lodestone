@@ -697,7 +697,7 @@ pub struct EntityDraw {
     pub name_tag: Option<NameTag>,
     /// Whether the hurt/death **red overlay** applies to this entity's model
     /// this frame — vanilla's `state.hasRedOverlay = entity.hurtTime > 0 ||
-    /// entity.deathTime > 0` (`LivingEntityRenderer.java:281`), issue #98.
+    /// entity.deathTime > 0` (`LivingEntityRenderer.java`), issue #98.
     ///
     /// Boolean, not a fade: vanilla does not interpolate by how much of
     /// `hurtTime` remains, so neither does this (see
@@ -976,7 +976,7 @@ pub struct ItemPhysics {
     pub grounded: bool,
 }
 
-/// Vanilla's `Creeper.DEFAULT_MAX_SWELL` (`Creeper.java:51`): the tick count a
+/// Vanilla's `Creeper.DEFAULT_MAX_SWELL` (`Creeper.java`): the tick count a
 /// fuse counts up to before [`tick_creeper_fuse`] treats it as fully swollen.
 /// A creeper's real `maxSwell` can differ (the `Fuse` NBT tag), but that value
 /// is never synchronised to the client — see
@@ -986,7 +986,7 @@ const CREEPER_MAX_SWELL_TICKS: i32 = 30;
 
 /// A creeper's fuse, integrated **client-side** one tick at a time from the
 /// synced [`EntityFacts::creeper_swell_dir`] — exactly what vanilla's own
-/// client does (`Creeper.java:139`, `this.swell += swellDir`), because only
+/// client does (`Creeper.java`, `this.swell += swellDir`), because only
 /// the *direction* is ever on the wire, never the counter itself. See
 /// [`lodestone_render::entity_anim::pose_swelling`]'s doc for the full
 /// derivation of why this split exists.
@@ -1009,7 +1009,7 @@ pub struct CreeperFuse {
 }
 
 impl CreeperFuse {
-    /// Vanilla's own accessor default (`Creeper.java:100`,
+    /// Vanilla's own accessor default (`Creeper.java`,
     /// `entityData.define(DATA_SWELL_DIR, -1)`): idle, nothing swollen. Used
     /// to seed a freshly spawned creeper before its first metadata report —
     /// see [`spawn_track`].
@@ -1021,9 +1021,9 @@ impl CreeperFuse {
 }
 
 /// `GameTick` / `TickSet::Animate`: integrates every tracked creeper's fuse by
-/// exactly one tick, byte-for-byte `Creeper.java:139`'s
+/// exactly one tick, byte-for-byte `Creeper.java`'s
 /// `this.swell += swellDir` (clamped `0..=maxSwell` the same way `tick()`
-/// clamps it — `Creeper.java:140-145`). Run client-side because only
+/// clamps it — `Creeper.java`). Run client-side because only
 /// [`CreeperFuse::swell_dir`] is ever synced; the counter itself is not.
 pub fn tick_creeper_fuse(mut fuses: Query<&mut CreeperFuse>) {
     for mut fuse in &mut fuses {
@@ -1160,7 +1160,7 @@ const PICKUP_LIFE_TICKS: f32 = 3.0;
 ///
 /// `ItemPickupParticle.updatePosition()` targets
 /// `(target.getY() + target.getEyeY()) / 2.0`, and `Entity.getEyeY()` is
-/// `position.y + eyeHeight` (`Entity.java:3798`) — an **absolute** Y, not an
+/// `position.y + eyeHeight` (`Entity.java`) — an **absolute** Y, not an
 /// offset. So the midpoint is `y + eyeHeight / 2`, i.e. this constant times the
 /// eye height above the feet. Reading `getEyeY()` as a relative offset instead
 /// would target `y + (y + 1.62)/2`, which for a player at y = 64 is 32 blocks
@@ -1883,7 +1883,7 @@ pub fn extract_entity_draws(
     // nothing: this is the query that turns it into a sneaking player's crouch.
     //
     // **Deliberately not `EntityFlags & 0x02`.** Vanilla's `isCrouching()` is
-    // `hasPose(Pose.CROUCHING)` (`Entity.java:2711-2713`) and the shift-key bit is
+    // `hasPose(Pose.CROUCHING)` (`Entity.java`) and the shift-key bit is
     // `isShiftKeyDown()`/`isDiscrete()` (`:2691-2705`) — which is what the
     // *nametag* see-through gate below reads, correctly, because
     // `EntityRenderer.shouldShowName` really does ask `isDiscrete()`. Two
@@ -3345,7 +3345,7 @@ mod tests {
     ///
     /// The expected value comes from outside our code: vanilla's own default
     /// leather RGB is the literal `10511680` in
-    /// `ItemStackComponentizationFix.java:250`, which writes it as
+    /// `ItemStackComponentizationFix.java`, which writes it as
     /// `dyed_color`'s `rgb` when an old stack carries no explicit colour.
     /// That is `0x00A06540`.
     #[test]
@@ -3676,7 +3676,7 @@ mod tests {
 
         /// A player's tag is always its tab-list display name —
         /// `Player.shouldShowName()` returns `true` unconditionally
-        /// (`Player.java:1637`), never gated on any metadata flag.
+        /// (`Player.java`), never gated on any metadata flag.
         #[test]
         fn a_player_entitys_tag_is_its_tab_list_display_name() {
             let id = Uuid::from_u128(1);
@@ -3708,7 +3708,7 @@ mod tests {
 
         /// Every other entity's tag is its `CUSTOM_NAME`, gated on
         /// `CUSTOM_NAME_VISIBLE` — `LivingEntity.shouldShowName() =
-        /// isCustomNameVisible()` (`LivingEntity.java:2364`/`:2365`), unlike
+        /// isCustomNameVisible()` (`LivingEntity.java`/`:2365`), unlike
         /// a player.
         #[test]
         fn a_mob_with_a_visible_custom_name_shows_it() {
@@ -3767,7 +3767,7 @@ mod tests {
 
         /// `Entity.isDiscrete()` (`isShiftKeyDown()`, bit 1 of the shared
         /// flags byte) gates the see-through pass off while sneaking
-        /// (`SubmitNodeCollection.java:109`).
+        /// (`SubmitNodeCollection.java`).
         #[test]
         fn sneaking_suppresses_see_through_but_not_the_tag_itself() {
             let mut world = World::new();

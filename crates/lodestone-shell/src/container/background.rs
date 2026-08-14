@@ -39,9 +39,9 @@ fn sprite_location(id: &str) -> Option<ResourceLocation> {
 /// carry no sibling `.mcmeta` and vanilla does not scale them through any of
 /// [`lodestone_assets::gui::GuiScaling`]'s three modes. Instead it blits
 /// hand-placed sub-rectangles of each 256×256 sheet at native size —
-/// `ContainerScreen.java:21-27` draws the chest background as *two* blits (the
+/// `ContainerScreen.java` draws the chest background as *two* blits (the
 /// row-count-dependent top part, then a fixed 96 px bottom part immediately
-/// below it), `CraftingScreen.java:29-34` and `InventoryScreen.java:96-101` each
+/// below it), `CraftingScreen.java` and `InventoryScreen.java` each
 /// draw one whole-panel blit. `GuiScaling` has no variant for an arbitrary
 /// sub-rect, so this reads the sheets' atlas placement directly and computes
 /// the same UV windows vanilla's `blit` calls use, rather than forcing the
@@ -142,13 +142,13 @@ pub(super) enum BackgroundKind {
 /// Every `special_layout` sheet but one is a single whole-panel `176×166`
 /// blit at the sheet's origin, exactly like
 /// [`BackgroundKind::Inventory`]/[`BackgroundKind::Crafting`]
-/// (`AnvilScreen.java:30`-adjacent `blit` calls; every one of these screens'
+/// (`AnvilScreen.java`-adjacent `blit` calls; every one of these screens'
 /// `blit(texture, x, y, 0, 0, imageWidth, imageHeight)` uses the vanilla
 /// `176×166` default, none override `imageWidth`/`imageHeight` — re-verified
-/// against `AbstractContainerScreen.java:57-59`'s own default constructor for
+/// against `AbstractContainerScreen.java`'s own default constructor for
 /// the six added by #28, not merely assumed to match the first four). The one
 /// exception is [`BackgroundKind::Hopper`]: `HopperScreen`'s constructor
-/// explicitly passes `176, 133` (`HopperScreen.java:15`), so its blit is
+/// explicitly passes `176, 133` (`HopperScreen.java`), so its blit is
 /// `176×133`, not `166` — [`ContainerBackground::quads`] special-cases it
 /// rather than reusing the `whole_panel` closure's hardcoded size.
 pub(super) fn background_kind(menu: &Menu) -> BackgroundKind {
@@ -336,11 +336,11 @@ impl ContainerBackground {
 
     /// The Advancements screen's window blit (issue #167) —
     /// `graphics.blit(..., WINDOW_LOCATION, leftPos, topPos, 0, 0, 252, 140, 256,
-    /// 256)` (`AdvancementsScreen.java:205`).
+    /// 256)` (`AdvancementsScreen.java`).
     ///
     /// The `252 x 140` sample is scaled by the sprite's **real placed size**
     /// against vanilla's declared `256 x 256` sheet
-    /// (`BACKGROUND_TEXTURE_WIDTH`/`HEIGHT`, `AdvancementsScreen.java:34-35`) —
+    /// (`BACKGROUND_TEXTURE_WIDTH`/`HEIGHT`, `AdvancementsScreen.java`) —
     /// issue #565's first defect ("the bottom and right side don't have UI on
     /// the edges"). `window.png` has no sibling `.mcmeta` (see this struct's
     /// own doc), so a higher-resolution pack is the only way this sheet's real
@@ -427,7 +427,7 @@ impl ContainerBackground {
     /// The creative screen's own background blit (issue #158) —
     /// `graphics.blit(..., selectedTab.getBackgroundTexture(), leftPos, topPos,
     /// 0, 0, imageWidth, imageHeight, 256, 256)`
-    /// (`CreativeModeInventoryScreen.java:742-744`), i.e. the top-left
+    /// (`CreativeModeInventoryScreen.java`), i.e. the top-left
     /// `195 x 136` window of a `256 x 256` sheet.
     ///
     /// A separate entry point from [`Self::quads`] rather than a
@@ -501,7 +501,7 @@ impl ContainerBackground {
     /// but wrong for the furnace family's lit/burn bars and the brewing
     /// stand's fuel/brew/bubble bars (issue #28): vanilla grows every one of
     /// those from a partial `blitSprite` sub-rectangle of a larger sprite —
-    /// e.g. `AbstractFurnaceScreen.java:56-67`'s lit flame samples a `14×n`
+    /// e.g. `AbstractFurnaceScreen.java`'s lit flame samples a `14×n`
     /// window of a `14×14` sprite, offset from the *bottom*. Mirrors the
     /// `uv` closure [`quads`](Self::quads) already uses for the three/eleven
     /// whole-panel sheets, generalised to any sprite in the atlas rather than
@@ -558,7 +558,7 @@ impl ContainerBackground {
             }])
         };
         // As `whole_panel`, but at an explicit size — the hopper's `176×133`
-        // (`HopperScreen.java:15`), the one screen in this whole family that
+        // (`HopperScreen.java`), the one screen in this whole family that
         // is not vanilla's usual `166` tall.
         let whole_panel_sized = |loc: &ResourceLocation, w: f32, h: f32| -> Option<Vec<GuiSpriteQuad>> {
             let (uv_min, uv_max) = uv(loc, [0.0, 0.0, w, h])?;

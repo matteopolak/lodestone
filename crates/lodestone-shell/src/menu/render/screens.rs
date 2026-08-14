@@ -9,14 +9,14 @@ use super::*;
 
 /// Vanilla's `title.credits` string (`en_us.json`), drawn bottom-right on the
 /// title screen exactly as `TitleScreen.init` does
-/// (`TitleScreen.java:49,110-111,150-160`). It refers to the Mojang GUI assets
+/// (`TitleScreen.java`). It refers to the Mojang GUI assets
 /// this screen is drawn with, which are genuinely Mojang's, so it is reproduced
 /// verbatim.
 pub(super) const COPYRIGHT: &str = "Copyright Mojang AB. Do not distribute!";
 
 /// The bottom-left corner string, vanilla's
 /// `"Minecraft " + version.name()` (+ `menu.modded` for a modified client,
-/// `TitleScreen.java:314-323`).
+/// `TitleScreen.java`).
 ///
 /// A from-scratch reimplementation is about as "modified" as a client gets, so
 /// naming Lodestone and its version here is this line's honest equivalent —
@@ -56,8 +56,8 @@ pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
         backdrop: MenuBackdrop::Dim,
         vanilla: true,
         // `PauseScreen.init` adds a `StringWidget` with the screen title at
-        // y=40 when the pause menu is showing (`PauseScreen.java:87-88`); the
-        // title itself is `menu.game` == "Game Menu" (`PauseScreen.java:63,73`).
+        // y=40 when the pause menu is showing (`PauseScreen.java`); the
+        // title itself is `menu.game` == "Game Menu" (`PauseScreen.java`).
         labels: vec![MenuLabel {
             text: "Game Menu".to_string(),
             origin: Origin::ScreenTop,
@@ -72,7 +72,7 @@ pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
 }
 
 /// The score line's format, vanilla's `deathScreen.score.value` with the
-/// value substituted (`DeathScreen.java:38-39`).
+/// value substituted (`DeathScreen.java`).
 const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 
 /// Builds the death screen's overlay frame (issue #103): vanilla's
@@ -93,7 +93,7 @@ const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 /// `message` is the server's own death message
 /// (`net::NetUpdate::Death`/`Sim::death_message`, already flattened to plain
 /// text) — `None` draws no message line, matching vanilla's own `if
-/// (this.causeOfDeath != null)` guard (`DeathScreen.java:122-124`).
+/// (this.causeOfDeath != null)` guard (`DeathScreen.java`).
 ///
 /// Two simplifications named rather than silently taken:
 /// - **No hardcore variant.** This client has no hardcore mode (nothing
@@ -113,7 +113,7 @@ const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 ///
 /// The backdrop is [`OVERLAY_BG`] — the same flat dim [`pause_frame`] draws
 /// — rather than vanilla's own reddish `fillGradient`
-/// (`DeathScreen.java:134-136`): this pipeline's [`Quads::rect`] takes one
+/// (`DeathScreen.java`): this pipeline's [`Quads::rect`] takes one
 /// flat colour with no per-vertex gradient, and reproducing the gradient
 /// would mean extending it for one screen. Left for polish, like the
 /// panorama/splash-text gaps `docs/main-menu.md` names for the title screen.
@@ -123,7 +123,7 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
 
     let mut labels = vec![
         // `output.defaultParameters(normalParameters.withScale(2.0F))` then
-        // drawn at `(middleLine / 2, 30)` (`DeathScreen.java:119-120`) — see
+        // drawn at `(middleLine / 2, 30)` (`DeathScreen.java`) — see
         // `Origin::DeathTitle`'s doc for why that x is `width / 4`, not the
         // screen centre.
         MenuLabel {
@@ -140,7 +140,7 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
         && !text.is_empty()
     {
         // `output.accept(CENTER, middleLine, 85, this.causeOfDeath)`
-        // (`DeathScreen.java:123`) — `middleLine == width / 2`, i.e.
+        // (`DeathScreen.java`) — `middleLine == width / 2`, i.e.
         // `Origin::ScreenTop`, at normal (1.0) scale.
         labels.push(MenuLabel {
             text: text.to_string(),
@@ -153,7 +153,7 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
         });
     }
     // `output.accept(CENTER, middleLine, 100, this.deathScore)`
-    // (`DeathScreen.java:126`) — always drawn, message or not.
+    // (`DeathScreen.java`) — always drawn, message or not.
     labels.push(MenuLabel {
         text: DEATH_SCORE_UNTRACKED.to_string(),
         origin: Origin::ScreenTop,
@@ -191,7 +191,7 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
 /// Like [`pause_frame`]/[`death_frame`], not gated by [`owns_frame`]: the
 /// world keeps rendering (and, on a live server, ticking) behind it, matching
 /// vanilla's own `isInGameUi() == true`
-/// (`AbstractCommandBlockEditScreen.java:123-126`).
+/// (`AbstractCommandBlockEditScreen.java`).
 ///
 /// `tree` carries the real server's command tree. This used to read "threaded
 /// through purely so this function is testable — every production caller passes
@@ -231,7 +231,7 @@ pub fn command_block_frame(
         },
     ];
     // Vanilla's own guard is `!previousEdit.getValue().isEmpty()`
-    // (`AbstractCommandBlockEditScreen.java:159`), which a freshly
+    // (`AbstractCommandBlockEditScreen.java`), which a freshly
     // `setValue("-")`-ed box always passes — see
     // `CommandBlockState::previous_output_text`'s own doc.
     if !state.previous_output_text().is_empty() {
@@ -588,12 +588,12 @@ pub fn loading_frame_with_progress_and_grid(
 // -- vanilla's `DisconnectedScreen` metrics -----------------------------------
 
 /// `Button.builder(…).width(200)`, every call site
-/// (`DisconnectedScreen.java:52,57,61,63`) — not [`widget::DEFAULT_WIDTH`]'s
+/// (`DisconnectedScreen.java`) — not [`widget::DEFAULT_WIDTH`]'s
 /// 150.
 const ERROR_BUTTON_W: f32 = 200.0;
 /// Room reserved above the bottom edge for the one button this screen draws:
 /// [`WIDGET_H`] plus a margin roughly matching vanilla's `padding(2)` between
-/// stack children (`DisconnectedScreen.java:47`) plus some slack so the
+/// stack children (`DisconnectedScreen.java`) plus some slack so the
 /// button never crowds the edge on a small canvas.
 const ERROR_BUTTON_BOTTOM_MARGIN: f32 = WIDGET_H + 20.0;
 /// Where the title sits, from [`Origin::ScreenTop`].
@@ -608,7 +608,7 @@ const ERROR_TITLE_Y: f32 = 40.0;
 /// The wrap column the reason text is bounded to.
 ///
 /// Vanilla bounds its `MultiLineTextWidget` to `this.width - 50`
-/// (`DisconnectedScreen.java:46`), which is canvas-*dependent* and therefore
+/// (`DisconnectedScreen.java`), which is canvas-*dependent* and therefore
 /// not expressible as a fixed [`MenuNotice::w`] (the same reason
 /// [`ACCOUNTS_ROW_W`] is fixed rather than derived per-canvas). Sized off
 /// [`crate::config::MIN_SCALED_WIDTH`] so it is correct even at the smallest
@@ -621,7 +621,7 @@ const ERROR_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
 /// its row and no wrapped-text bound on its reason, until now):
 /// title, the disconnect reason wrapped and bounded exactly like
 /// [`accounts_failed_frame`]'s failure message, and one real button
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/DisconnectedScreen.java:42-70`).
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/DisconnectedScreen.java`).
 ///
 /// **Two vanilla widgets are never built here.** The `gui.report_to_server`
 /// and `gui.open_report_dir` buttons only appear when a `DisconnectionDetails`

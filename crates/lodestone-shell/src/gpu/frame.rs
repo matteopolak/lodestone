@@ -478,7 +478,7 @@ impl RenderState {
         // "the skybox ends too early and the bottom half is always black" — a
         // hard *pure black* band with a flat top edge at the horizon. Vanilla
         // clears the same target to the fog colour in a separate `"clear"` pass
-        // (`LevelRenderer.java:195-204`) and its `SkyRenderer` passes never
+        // (`LevelRenderer.java`) and its `SkyRenderer` passes never
         // clear at all. `SkyFrame::clear_color` is that colour, resolved for
         // this frame's clock and eye height so it is identical to the disc's own
         // rim.
@@ -1212,7 +1212,7 @@ impl RenderState {
         // The screen overlays, each from its own closed fix: their own `Load` passes (see
         // `ScreenEffectRenderer::draw_underwater`'s doc — they must not erase
         // the world/hand just drawn), run last, matching vanilla's own order
-        // (`GameRenderer.java:568-577`: the hand, then
+        // (`GameRenderer.java`: the hand, then
         // `screenEffectRenderer.submit`/`Hud.extractCameraOverlays`, then the
         // HUD/feature renderers — this shell's HUD draws in a later, separate
         // pass in `app.rs`).
@@ -1220,7 +1220,7 @@ impl RenderState {
         // Two independent gate groups, not one — see
         // `ScreenEffects::any_active`'s doc for why: underwater/fire/pumpkin/
         // spyglass are first-person-only in vanilla, freeze/confusion/portal
-        // are not (`Hud.java:293-308` are siblings of the `isFirstPerson`
+        // are not (`Hud.java` are siblings of the `isFirstPerson`
         // block, not nested in it), so each group re-checks its own
         // applicability here rather than relying on the outer `any_active`
         // short-circuit alone — that call only proves *something* should
@@ -1254,7 +1254,7 @@ impl RenderState {
                         stats.freeze_overlay_drawn = true;
                     }
                     // Portal takes priority over confusion when both are
-                    // positive — `Hud.java:300-302`'s own `if`/`else if`.
+                    // positive — `Hud.java`'s own `if`/`else if`.
                     if screen_effects.portal_intensity > 0.0 {
                         let frame = (screen_effects.tick % u64::from(fx.portal_frame_count())) as u32;
                         fx.draw_portal(queue, &mut encoder, view, frame, screen_effects.portal_intensity);

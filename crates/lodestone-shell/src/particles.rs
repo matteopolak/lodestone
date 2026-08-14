@@ -551,7 +551,7 @@ impl Particles {
             // pair in `lodestone_particle`, not a decoder.
             //
             // `explosion_emitter` (the seed vanilla's own `explode` packet
-            // actually names — `Level.java:593,619,645`) ignores every
+            // actually names — `Level.java`) ignores every
             // positional argument here: `HugeExplosionSeedParticle`'s
             // constructor reads none. `explosion` reuses `xa` as the
             // constructor's `size` parameter, the same repurposing
@@ -944,7 +944,7 @@ impl ParticleRenderer {
 
         // Two pipelines over one shader and one layout, differing **only** in
         // depth write. They are vanilla's `OPAQUE_PARTICLE` and
-        // `TRANSLUCENT_PARTICLE` (`RenderPipelines.java:625`), both built from
+        // `TRANSLUCENT_PARTICLE` (`RenderPipelines.java`), both built from
         // the same `PARTICLE_SNIPPET`.
         //
         // One deliberate deviation: vanilla's opaque pipeline has no blending at
@@ -1667,7 +1667,7 @@ mod tests {
 
         // Block light 0, sky light 0. `get_brightness(0)` is 0, but vanilla seeds
         // the accumulator with `AmbientColor` — `0x0A0A0A` in the overworld, per
-        // `DimensionTypes.java:36` — so an unlit particle is not black either: it
+        // `DimensionTypes.java` — so an unlit particle is not black either: it
         // reads 0.0935 once `notGamma` is mixed in. The retired ramp floored it at
         // 0.2, which is still the floor that fix named; the correct replacement
         // is a *smaller* floor, not none.

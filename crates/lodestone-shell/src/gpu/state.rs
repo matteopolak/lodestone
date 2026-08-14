@@ -402,7 +402,7 @@ impl RenderState {
     /// [`set_clear_color`](Self::set_clear_color) below.
     /// `render_distance_chunks` rides along for the same reason `sky_color` is in
     /// the struct: the sky disc's gradient end is `min(render_distance, the
-    /// attribute)` (`AtmosphericFogEnvironment.java:73`), so it is a *second*
+    /// attribute)` (`AtmosphericFogEnvironment.java`), so it is a *second*
     /// consumer of the same number the fog band already needs. #399 shipped the
     /// gradient clamp with `SkyFrame` defaulting to the old constant 512 and this
     /// call site still passing it — the mechanism landed and reached zero pixels.

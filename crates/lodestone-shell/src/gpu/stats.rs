@@ -285,7 +285,7 @@ pub struct RenderStats {
     /// Whether the confusion overlay drew this frame — not
     /// first-person-gated, keyed on `ScreenEffects::nausea_intensity > 0.0`
     /// **and** `ScreenEffects::portal_intensity <= 0.0` (portal takes
-    /// priority — `Hud.java:300-302`).
+    /// priority — `Hud.java`).
     pub confusion_overlay_drawn: bool,
     /// Whether the portal overlay drew this frame — not
     /// first-person-gated, keyed on `ScreenEffects::portal_intensity > 0.0`.

@@ -14,7 +14,7 @@
 //! `AbstractSignRenderer.submitSignText` submits with
 //! `Font.DisplayMode.POLYGON_OFFSET`, which resolves to
 //! `RenderPipelines.TEXT_POLYGON_OFFSET`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/RenderPipelines.java:484-491`):
+//! (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/RenderPipelines.java`):
 //! `new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true, 1.0F, 10.0F)`.
 //! `crack_pipeline.rs` already worked out this record's real field order from
 //! `VulkanRenderPipeline.java` — `(depthTest, writeDepth,

@@ -6,7 +6,7 @@
 //!
 //! # The eye height is a parameter, not a constant
 //!
-//! Vanilla's eye height is pose-dependent (`Avatar.java:22-36`: `0.4` swimming,
+//! Vanilla's eye height is pose-dependent (`Avatar.java`: `0.4` swimming,
 //! `1.27` crouching, `1.62` standing), so [`build_camera`] takes it explicitly.
 //! It used to hardcode
 //! [`PLAYER_EYE_HEIGHT`](lodestone_render::camera::PLAYER_EYE_HEIGHT), and the
@@ -20,7 +20,7 @@
 //!
 //! A pose change (standing `1.62` ↔ swimming `0.4`) is a **snap** in
 //! [`PlayerState::eye_height`] — it is set once, atomically, by
-//! `crate::pose::update_player_pose` (`Player.java:343-357`). Passing that
+//! `crate::pose::update_player_pose` (`Player.java`). Passing that
 //! straight into [`build_camera`] every frame is exactly what vanilla does
 //! *not* do, and is the source of the entering/leaving-swim camera jerk: real
 //! `Camera` (`.cache/mc/26.2/client-src/net/minecraft/client/Camera.java`)
@@ -43,7 +43,7 @@
 //! ```
 //!
 //! [`EyeHeightSmoother`] is that pair. **It is not `swimAmount`.** `swimAmount`
-//! (`LivingEntity.java:174,275-276,3478-3483`, modelled as
+//! (`LivingEntity.java`, modelled as
 //! [`PlayerState::swim_amount`]/`swim_amount_o`) is a linear `0..1` ramp at
 //! `0.09`/tick that blends the swimming **model**'s body-pitch animation —
 //! grepping every `.cache/mc/26.2/client-src` hit for `swimAmount` turns up
@@ -70,7 +70,7 @@
 //!
 //! The obvious place to put "the camera sits on the vehicle" is this module, and
 //! it would be wrong. 26.2's `Camera.alignWithEntity`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/Camera.java:246-264`) has
+//! (`.cache/mc/26.2/client-src/net/minecraft/client/Camera.java`) has
 //! **no `isPassenger()` branch** — it lerps `entity.xo/yo/zo` and adds the
 //! smoothed eye height, mounted or not. The single exception is a fix-up for
 //! *new-behaviour minecarts* (`:247-256`), which recomputes the attachment
@@ -79,9 +79,9 @@
 //! smoothing correction, not a different camera.
 //!
 //! Riding also does not change the eye height: `Player.updatePlayerPose`
-//! (`src/net/minecraft/world/entity/player/Player.java:343-357`) has no riding
+//! (`src/net/minecraft/world/entity/player/Player.java`) has no riding
 //! case and there is no `SITTING` pose, so a mounted player keeps
-//! `Avatar.DEFAULT_EYE_HEIGHT = 1.62` (`Avatar.java:16`).
+//! `Avatar.DEFAULT_EYE_HEIGHT = 1.62` (`Avatar.java`).
 //!
 //! So the whole of camera-on-the-vehicle is `lodestone_ecs::player::
 //! pin_passenger_to_vehicle` moving the player's **feet** onto the seat — which
@@ -96,7 +96,7 @@ use lodestone_physics::{Aabb, CollisionView, PlayerState};
 use lodestone_render::Camera;
 
 /// Vertical field of view in degrees — vanilla's **default**, "Normal" FOV
-/// (`Options.java:806,808`: `IntRange(30, 110)`, default `70`).
+/// (`Options.java`: `IntRange(30, 110)`, default `70`).
 ///
 /// **This is a default and no longer a pin.** [`build_camera`] used to write it
 /// into every camera unconditionally, which made vanilla's FOV option
@@ -195,7 +195,7 @@ impl CameraType {
 ///
 /// # The mirror is a field write, deliberately, and not a decomposition
 ///
-/// `Camera.alignWithEntity` (`Camera.java:266-271`) is:
+/// `Camera.alignWithEntity` (`Camera.java`) is:
 ///
 /// ```java
 /// this.detached = !this.minecraft.options.getCameraType().isFirstPerson();
@@ -401,7 +401,7 @@ fn sign(v: f32) -> i32 {
     }
 }
 
-/// `Camera`'s own `eyeHeight`/`eyeHeightOld` pair (`Camera.java:59-60,80-88`) —
+/// `Camera`'s own `eyeHeight`/`eyeHeightOld` pair (`Camera.java`) —
 /// the fix for that fix's entering/leaving-swim camera jerk.
 ///
 /// This is deliberately **not** [`PlayerState::swim_amount`]; see the module
@@ -438,7 +438,7 @@ impl EyeHeightSmoother {
         }
     }
 
-    /// `Camera.tick()` (`Camera.java:80-88`): ease halfway from the current
+    /// `Camera.tick()` (`Camera.java`): ease halfway from the current
     /// smoothed value toward `target_eye_height` (the entity's real, possibly
     /// just-snapped, pose eye height). Call this once per physics tick.
     pub fn tick(&mut self, target_eye_height: f32) {
@@ -461,7 +461,7 @@ impl EyeHeightSmoother {
 // ---------------------------------------------------------------------------
 
 /// Vanilla's `hurtDuration`, set alongside `hurtTime` by both
-/// `LivingEntity.animateHurt` (`LivingEntity.java:1873-1876`) and
+/// `LivingEntity.animateHurt` (`LivingEntity.java`) and
 /// `handleDamageEvent` (`:2044-2049`). Ten ticks — half a second.
 pub const HURT_DURATION_TICKS: f32 = 10.0;
 
@@ -477,7 +477,7 @@ pub const HURT_DURATION_TICKS: f32 = 10.0;
 ///
 /// * `walk_dist`/`walk_dist_o` — `ClientAvatarState.walkDist`/`walkDistO`. The
 ///   **phase** of the bob: total horizontal distance walked, scaled by `0.6`
-///   (`LocalPlayer.move`, `LocalPlayer.java:989`:
+///   (`LocalPlayer.move`, `LocalPlayer.java`:
 ///   `addWalkedDistance(Mth.length(deltaX, deltaZ) * 0.6F)` — note it is the
 ///   distance actually *moved*, post-collision, not the intended delta).
 /// * `bob`/`bob_o` — `ClientAvatarState.bob`/`bobO`. The **amplitude**, an
@@ -635,7 +635,7 @@ pub struct BobFrame {
 
 impl BobFrame {
     /// `GameRenderer.bobView`'s eye-space translation
-    /// (`GameRenderer.java:323-327`), as `(x, y, z)`:
+    /// (`GameRenderer.java`), as `(x, y, z)`:
     ///
     /// ```java
     /// poseStack.translate(
@@ -660,14 +660,14 @@ impl BobFrame {
         )
     }
 
-    /// `bobView`'s Z rotation in degrees (`GameRenderer.java:328`):
+    /// `bobView`'s Z rotation in degrees (`GameRenderer.java`):
     /// `sin(bd * PI) * bob * 3.0`. A **roll**, in phase with the sway.
     #[must_use]
     pub fn view_roll_degrees(&self) -> f32 {
         (self.walk_phase * std::f32::consts::PI).sin() * self.bob * 3.0
     }
 
-    /// `bobView`'s X rotation in degrees (`GameRenderer.java:329`):
+    /// `bobView`'s X rotation in degrees (`GameRenderer.java`):
     /// `abs(cos(bd * PI - 0.2) * bob) * 5.0`.
     ///
     /// **The `- 0.2` is inside the cosine and is in radians, not a multiple of
@@ -684,7 +684,7 @@ impl BobFrame {
     }
 
     /// `GameRenderer.bobHurt`'s tilt magnitude in degrees
-    /// (`GameRenderer.java:305-315`), before it is swung onto the damage
+    /// (`GameRenderer.java`), before it is swung onto the damage
     /// direction:
     ///
     /// ```java
@@ -701,7 +701,7 @@ impl BobFrame {
     /// smooth arc over the whole half-second and would read as nausea.
     ///
     /// `damage_tilt_strength` is vanilla's accessibility option
-    /// (`Options.java:876-883`, default `1.0`); pass `1.0` for the default.
+    /// (`Options.java`, default `1.0`); pass `1.0` for the default.
     #[must_use]
     pub fn hurt_roll_degrees(&self, damage_tilt_strength: f32) -> f32 {
         if self.hurt < 0.0 {
@@ -779,7 +779,7 @@ impl BobFrame {
     }
 
     /// The full eye-space bob transform: `bobHurt` then `bobView`, pushed onto
-    /// one pose stack in that order (`GameRenderer.java:534-536`), which is
+    /// one pose stack in that order (`GameRenderer.java`), which is
     /// `Hurt * View` as a matrix product.
     ///
     /// # Why this is a *projection* post-multiply in vanilla, and what that means here
@@ -1030,7 +1030,7 @@ pub fn build_camera(
 /// The bounds are named here rather than imported from
 /// `crate::config::{MIN_FOV, MAX_FOV}` deliberately: this module is the render
 /// rig and has no dependency on the persisted-settings layer in either
-/// direction, and the pair is a *vanilla record* (`Options.java:806`) that both
+/// direction, and the pair is a *vanilla record* (`Options.java`) that both
 /// places cite independently. `crate::config`'s own doc names this function as
 /// the second clamp.
 #[must_use]
@@ -1044,7 +1044,7 @@ fn clamp_fov(degrees: f32) -> f32 {
 
 /// Applies the spyglass FOV-zoom modifier to an already-built
 /// camera — `AbstractClientPlayer.getFieldOfViewModifier`
-/// (`AbstractClientPlayer.java:92-114`) returns `0.1F` outright (overriding
+/// (`AbstractClientPlayer.java`) returns `0.1F` outright (overriding
 /// every other FOV modifier) when `firstPerson && isScoping()`, and
 /// [`lodestone_render::spyglass_fov_modifier`] is the tested pure function
 /// for that.

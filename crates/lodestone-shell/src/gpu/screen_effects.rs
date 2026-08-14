@@ -42,7 +42,7 @@ pub struct ScreenEffects {
     /// That fix). Vanilla derives this generically from *any* equipped item's
     /// `minecraft:equippable.camera_overlay` component
     /// (`Hud.extractCameraOverlays`,
-    /// `.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java:269-291`)
+    /// `.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`)
     /// — carved pumpkin is simply the only item that currently ships with the
     /// field set, so this is named for the one concrete case rather than
     /// modelling the general per-item lookup table that has exactly one
@@ -58,10 +58,10 @@ pub struct ScreenEffects {
     /// Whether the local player is scoping with a held spyglass
     /// — vanilla's `Player.isScoping()`:
     /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
-    /// (`Player.java:1936-1938`). First-person-gated, like
+    /// (`Player.java`). First-person-gated, like
     /// [`Self::wearing_pumpkin`] (both live inside `Hud.
     /// extractCameraOverlays`'s `if (getCameraType().isFirstPerson())`
-    /// block, `Hud.java:277-291`) — unlike freeze/nausea/portal below.
+    /// block, `Hud.java`) — unlike freeze/nausea/portal below.
     pub scoping: bool,
     /// Vanilla's `LivingEntity.getEffectBlendFactor(MobEffects.NAUSEA,
     /// partialTicks)`, `0.0..=1.0` — drives the confusion
@@ -77,7 +77,7 @@ pub struct ScreenEffects {
     /// drives the portal overlay's alpha and (blended with
     /// [`Self::nausea_intensity`]) the same projection warp. Takes priority
     /// over nausea when both are positive
-    /// (`Hud.java:300-302`: `if (portalIntensity > 0.0F) { portal } else if
+    /// (`Hud.java`: `if (portalIntensity > 0.0F) { portal } else if
     /// (nauseaIntensity > 0.0F) { confusion }`) — `RenderState::render_inner`
     /// reproduces that `if`/`else if`, not an independent pair of checks.
     /// `0.0` (the default) is the honest value today: no nether-portal
@@ -99,11 +99,11 @@ impl ScreenEffects {
     ///   so that conjunct is omitted — never a false negative, since an
     ///   unmodelled state cannot suppress a draw it never influences);
     ///   pumpkin/scoping come from `Hud.extractCameraOverlays`'s own nested
-    ///   `if (getCameraType().isFirstPerson())` block (`Hud.java:277-291`).
+    ///   `if (getCameraType().isFirstPerson())` block (`Hud.java`).
     /// - [`Self::freeze_percent`]/[`Self::nausea_intensity`]/
     ///   [`Self::portal_intensity`] are **not** — vanilla draws
-    ///   `player.getTicksFrozen() > 0` (`Hud.java:293-295`) and the
-    ///   portal/confusion overlays (`Hud.java:297-308`) as *siblings* of the
+    ///   `player.getTicksFrozen() > 0` (`Hud.java`) and the
+    ///   portal/confusion overlays (`Hud.java`) as *siblings* of the
     ///   `if (isFirstPerson())` block, not nested inside it, so they paint in
     ///   third person too. Checked against the jar directly, not assumed —
     ///   see `docs/screen-overlays.md`.
@@ -251,7 +251,7 @@ mod tests {
             ..ScreenEffects::default()
         };
         assert!(fx.any_active(true), "freeze must activate in first person");
-        assert!(fx.any_active(false), "freeze must activate in third person too -- Hud.java:293-295 is a sibling of the isFirstPerson block, not nested in it");
+        assert!(fx.any_active(false), "freeze must activate in third person too -- Hud.java is a sibling of the isFirstPerson block, not nested in it");
     }
 
     #[test]

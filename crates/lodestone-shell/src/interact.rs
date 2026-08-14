@@ -142,8 +142,8 @@ pub struct RayTarget(pub Option<RayHit>);
 ///
 /// Recomputed alongside [`RayTarget`] by `Sim::update_target`, from the same
 /// camera and against a *shorter* range: vanilla's `DEFAULT_ENTITY_INTERACTION_RANGE`
-/// is `3.0` blocks (`Player.java:134`) versus `DEFAULT_BLOCK_INTERACTION_RANGE`'s
-/// `4.5` (`Player.java:133`), and further capped by the block hit distance when
+/// is `3.0` blocks (`Player.java`) versus `DEFAULT_BLOCK_INTERACTION_RANGE`'s
+/// `4.5` (`Player.java`), and further capped by the block hit distance when
 /// a block sits closer than that — an entity behind a wall cannot be targeted
 /// through it. Holds the target's [`lodestone_ecs::entity::MinecraftEntityId`]
 /// (the wire id `ClientAction::InteractEntity` needs), not a `bevy_ecs::Entity`,
@@ -167,7 +167,7 @@ pub struct Attacking(pub bool);
 
 /// Whether the use (right) button has been pressed and not yet released.
 ///
-/// The client-side mirror of vanilla's `Minecraft.java:1914`,
+/// The client-side mirror of vanilla's `Minecraft.java`,
 /// `this.player.isUsingItem()`, which gates whether releasing `key.use` sends
 /// `RELEASE_USE_ITEM` (`:1916`, `gameMode.releaseUsingItem`). Vanilla's own
 /// flag comes from a held item's `use()` running identically client- and
@@ -179,7 +179,7 @@ pub struct Attacking(pub bool);
 /// vanilla's real gate rather than an exact match.
 ///
 /// That gap is inert, not a wrong state transition: `LivingEntity
-/// .releaseUsingItem` (`.cache/mc/26.2/src/…/LivingEntity.java:3602-3613`)
+/// .releaseUsingItem` (`.cache/mc/26.2/src/…/LivingEntity.java`)
 /// already no-ops whenever the server itself has no `useItem` in progress, so
 /// a `RELEASE_USE_ITEM` sent while nothing was really being used is a
 /// harmless duplicate. Same shape as [`Attacking`] — a plain press/release
@@ -268,7 +268,7 @@ impl NetHandle {
     }
 }
 
-/// `LocalPlayer.sendIsSprintingIfNeeded` (`LocalPlayer.java:303-312`): put the
+/// `LocalPlayer.sendIsSprintingIfNeeded` (`LocalPlayer.java`): put the
 /// sprint **edge** on the wire as a `PlayerCommand`.
 ///
 /// The source of truth is [`PhysicsState`]'s `sprinting`, which the physics tick
@@ -744,7 +744,7 @@ pub fn drive_mining(
     // Keyed on **destruction**, not on the `StopDestroy` packet.
     //
     // This is the local **prediction** half of vanilla's
-    // `MultiPlayerGameMode.destroyBlock` (`MultiPlayerGameMode.java:113-145`):
+    // `MultiPlayerGameMode.destroyBlock` (`MultiPlayerGameMode.java`):
     // it clears the block and throws the destroy-effect debris synchronously
     // on the acting client, without waiting for a server round trip. The
     // effect hangs off that method, not off any packet — `destroyBlock` calls
@@ -771,12 +771,12 @@ pub fn drive_mining(
     // match, fed by `ClientboundLevelEventPacket` id `2001`) — which
     // structurally **never fires for our own break**, verified against
     // `.cache/mc/26.2/src` rather than assumed:
-    // `ServerPlayerGameMode.destroyBlock` (`ServerPlayerGameMode.java:262-298`,
+    // `ServerPlayerGameMode.destroyBlock` (`ServerPlayerGameMode.java`,
     // the server's handler for a player's own break) calls
     // `this.level.removeBlock(pos, false)` — a plain block-state write with no
     // `levelEvent` call anywhere in it. The `2001` particle event instead lives
     // in the *separate* `Level.destroyBlock(pos, drop, breaker, limit)` method
-    // (`Level.java:280-289`, `this.levelEvent(2001, pos, ...)`), which is what a
+    // (`Level.java`, `this.levelEvent(2001, pos, ...)`), which is what a
     // cascading break (a torch losing support, fire, an explosion) goes through
     // instead — and that call broadcasts to **every** nearby player
     // unconditionally, our own client included, which is exactly the

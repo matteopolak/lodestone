@@ -103,7 +103,7 @@ const SLOT: f32 = 18.0;
 const CELL: f32 = 16.0;
 
 /// The hover highlight's two sprite ids, from
-/// `AbstractContainerScreen.java:29-30`. Blitted at
+/// `AbstractContainerScreen.java`. Blitted at
 /// `(slot.x - 4, slot.y - 4, 24, 24)` (`:155`, `:161`) — one *behind* the slot's
 /// item and one *in front of* it, which is the whole reason there are two.
 pub const SLOT_HIGHLIGHT_BACK: &str = "container/slot_highlight_back";
@@ -121,7 +121,7 @@ const HIGHLIGHT: f32 = 24.0;
 const HIGHLIGHT_INSET: f32 = 4.0;
 
 /// The furnace family's two progress sprites, one pair per
-/// texture — `AbstractFurnaceScreen.java:17-18` takes them as constructor
+/// texture — `AbstractFurnaceScreen.java` takes them as constructor
 /// parameters, and `FurnaceScreen`/`BlastFurnaceScreen`/`SmokerScreen` each
 /// supply their own rather than sharing one id.
 const FURNACE_LIT_PROGRESS: &str = "container/furnace/lit_progress";
@@ -132,13 +132,13 @@ const SMOKER_LIT_PROGRESS: &str = "container/smoker/lit_progress";
 const SMOKER_BURN_PROGRESS: &str = "container/smoker/burn_progress";
 
 /// The brewing stand's three progress sprites,
-/// `BrewingStandScreen.java:12-14`.
+/// `BrewingStandScreen.java`.
 const BREWING_FUEL_LENGTH: &str = "container/brewing_stand/fuel_length";
 const BREWING_BREW_PROGRESS: &str = "container/brewing_stand/brew_progress";
 const BREWING_BUBBLES: &str = "container/brewing_stand/bubbles";
 
 /// The merchant screen's own sprites (that fix's UI half),
-/// `MerchantScreen.java:21-29`. The experience-bar trio and the scroller pair
+/// `MerchantScreen.java`. The experience-bar trio and the scroller pair
 /// are not drawn yet — see `container::merchant`'s module doc for what is
 /// modelled and what is a named gap.
 const MERCHANT_OUT_OF_STOCK: &str = "container/villager/out_of_stock";

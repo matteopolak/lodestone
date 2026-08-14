@@ -33,7 +33,7 @@
 //! itself reads the two separately:
 //!
 //! * **Mode** comes from the *block*, not the NBT —
-//!   `CommandBlockEntity.getMode()` (`CommandBlockEntity.java:144-153`) matches
+//!   `CommandBlockEntity.getMode()` (`CommandBlockEntity.java`) matches
 //!   on `Blocks.COMMAND_BLOCK` / `REPEATING_COMMAND_BLOCK` /
 //!   `CHAIN_COMMAND_BLOCK`. There is no mode field on the wire at all, which is
 //!   why a reader that only looked at NBT would show every chain block as
@@ -41,7 +41,7 @@
 //! * **Conditional** likewise — `CommandBlockEntity.isConditional()`
 //!   (`:155-158`) reads `blockState.getValue(CommandBlock.CONDITIONAL)`.
 //! * **Command / TrackOutput / LastOutput / auto** come from the NBT
-//!   (`BaseCommandBlock.save`, `BaseCommandBlock.java:47-52`, and
+//!   (`BaseCommandBlock.save`, `BaseCommandBlock.java`, and
 //!   `CommandBlockEntity.saveAdditional`, `:69-75`).
 //!
 //! # Fail open, never fail blank
@@ -112,7 +112,7 @@ pub fn mode_for_state(state_id: u32) -> Option<CommandBlockMode> {
 ///
 /// Absent property reads `false`, matching
 /// `CommandBlockEntity.isConditional()`'s own fallback for a block that is not
-/// a `CommandBlock` (`CommandBlockEntity.java:155-158`).
+/// a `CommandBlock` (`CommandBlockEntity.java`).
 #[must_use]
 fn conditional_for_state(state_id: u32) -> bool {
     lodestone_data::block_states::properties(state_id)
@@ -172,7 +172,7 @@ pub fn command_block_open(pos: BlockPos, state_id: u32, nbt: &Nbt) -> Option<Com
     };
 
     // `BaseCommandBlock.load` defaults: `Command` to `""`, `TrackOutput` to
-    // **`true`** (`BaseCommandBlock.java:62-65`) — note the asymmetry, it is
+    // **`true`** (`BaseCommandBlock.java`) — note the asymmetry, it is
     // the one field here whose default is not `false`/empty.
     let command = find(fields, "Command")
         .and_then(as_string)
@@ -182,7 +182,7 @@ pub fn command_block_open(pos: BlockPos, state_id: u32, nbt: &Nbt) -> Option<Com
     let automatic = find(fields, "auto").and_then(as_bool).unwrap_or(false);
 
     // `LastOutput` is a chat `Component`, and vanilla only shows it when
-    // tracking is on (`AbstractCommandBlockEditScreen.java:58` sets the
+    // tracking is on (`AbstractCommandBlockEditScreen.java` sets the
     // previous-output line to `"-"` otherwise). Drawn as `"-"` by the screen
     // when `None`, so an absent or untracked output needs no special case here.
     let previous_output = track_output

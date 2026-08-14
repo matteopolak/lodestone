@@ -17,40 +17,40 @@ use super::*;
 // pixels.
 
 /// The header band, spelled out as `8 + 9 + 8 + 20 + 4` in the constructor
-/// (`SelectWorldScreen.java:31`) and left unreduced here for the reason it is
+/// (`SelectWorldScreen.java`) and left unreduced here for the reason it is
 /// unreduced there: the parts *are* the layout — 8 px of slack above and below,
 /// the 9 px title `StringWidget`, the 20 px search box, and the 4 px
 /// `LinearLayout` spacing between the two.
 const WORLD_SELECT_HEADER_H: f32 = 8.0 + 9.0 + 8.0 + 20.0 + 4.0;
-/// The footer band (`SelectWorldScreen.java:31`). Two 20 px button rows 4 px
+/// The footer band (`SelectWorldScreen.java`). Two 20 px button rows 4 px
 /// apart measure 44, so the band carries 16 px of slack, which the footer
 /// `FrameLayout`'s inherited `align(0.5, 0.5)` splits 8/8.
 const WORLD_SELECT_FOOTER_H: f32 = 60.0;
 /// `LinearLayout.vertical().spacing(4)` in the header and `.rowSpacing(4)` in
-/// the footer grid (`SelectWorldScreen.java:46,82`) — the same 4 either way.
+/// the footer grid (`SelectWorldScreen.java`) — the same 4 either way.
 const WORLD_SELECT_SPACING: i32 = 4;
-/// `new GridLayout().columnSpacing(8)` (`SelectWorldScreen.java:82`).
+/// `new GridLayout().columnSpacing(8)` (`SelectWorldScreen.java`).
 const WORLD_SELECT_COLUMN_SPACING: i32 = 8;
-/// `footer.createRowHelper(4)` (`SelectWorldScreen.java:84`).
+/// `footer.createRowHelper(4)` (`SelectWorldScreen.java`).
 const WORLD_SELECT_FOOTER_COLUMNS: usize = 4;
 /// The search box's declared size — `new EditBox(font, this.width / 2 - 100, 22,
-/// 200, 20, …)` (`SelectWorldScreen.java:55`). **The `x` and `y` in that call
+/// 200, 20, …)` (`SelectWorldScreen.java`). **The `x` and `y` in that call
 /// are dead**: the header `LinearLayout` overwrites both when it arranges, which
 /// is why the box lands at y `21` rather than the 22 written there.
 const WORLD_SELECT_SEARCH_W: f32 = 200.0;
 /// `.width(71)` on Edit / Delete / Re-Create / Back
-/// (`SelectWorldScreen.java:91,96,103,106`). Play and Create take
+/// (`SelectWorldScreen.java`). Play and Create take
 /// `Button.DEFAULT_WIDTH` instead ([`widget::DEFAULT_WIDTH`]) and each spans two
 /// of the four columns.
 const WORLD_SELECT_SMALL_BTN_W: f32 = 71.0;
 /// A `StringWidget`'s height: `StringWidget(message, font)` delegates to
-/// `this(0, 0, font.width(...), 9, ...)` (`StringWidget.java:18-20`).
+/// `this(0, 0, font.width(...), 9, ...)` (`StringWidget.java`).
 const STRING_WIDGET_H: f32 = 9.0;
-/// `WorldSelectionList.getRowWidth()` (`WorldSelectionList.java:247-249`) — a
+/// `WorldSelectionList.getRowWidth()` (`WorldSelectionList.java`) — a
 /// 270 px override of `AbstractSelectionList`'s own 220 (`:389-391`).
 pub(super) const WORLD_LIST_ROW_W: f32 = 270.0;
 /// The list's `itemHeight`: the last argument of
-/// `super(minecraft, width, height, 0, 36)` (`WorldSelectionList.java:112`).
+/// `super(minecraft, width, height, 0, 36)` (`WorldSelectionList.java`).
 ///
 /// **Public since the list learned to scroll**, for
 /// [`SERVER_LIST_ITEM_H`](super::SERVER_LIST_ITEM_H)'s reason: the keyboard
@@ -64,7 +64,7 @@ pub const WORLD_LIST_ITEM_H: f32 = 36.0;
 /// box — which is exactly the world icon's 32×32 (`WorldListEntry.ICON_SIZE`,
 /// `:400`).
 const LIST_CONTENT_PADDING: f32 = 2.0;
-/// `getFirstEntryY() = getY() + 2` (`AbstractSelectionList.java:104-106`): the
+/// `getFirstEntryY() = getY() + 2` (`AbstractSelectionList.java`): the
 /// gap above the first row. Not [`LIST_CONTENT_PADDING`], even though it is also
 /// 2 — they are different expressions and only one of them scales with a row.
 const WORLD_LIST_FIRST_ENTRY_Y: f32 = 2.0;
@@ -85,7 +85,7 @@ const WORLD_LIST_FIRST_ENTRY_Y: f32 = 2.0;
 /// wrong everywhere else.
 const WORLD_SELECT_REF_CANVAS: (f32, f32) = (854.0, 480.0);
 
-/// Vanilla's `SelectWorldScreen.init` (`SelectWorldScreen.java:44-107`) as a
+/// Vanilla's `SelectWorldScreen.init` (`SelectWorldScreen.java`) as a
 /// real [`layout::HeaderAndFooterLayout`], arranged for a `width`×`height`
 /// canvas.
 ///
@@ -108,7 +108,7 @@ const WORLD_SELECT_REF_CANVAS: (f32, f32) = (854.0, 480.0);
 ///   measured and never drawn, which is also true of vanilla's list here: it is
 ///   an `AbstractWidget` but not one this shell has ported.
 /// - **`SharedConstants.DEBUG_WORLD_RECREATE` is a system-property debug flag**
-///   (`SharedConstants.java:119`), false in any shipped client, so the sub-header
+///   (`SharedConstants.java`), false in any shipped client, so the sub-header
 ///   holds the search box alone (`:50-53`).
 fn world_select_layout(width: f32, height: f32) -> layout::HeaderAndFooterLayout {
     let cell = |w: f32, h: f32| -> Box<dyn widget::LayoutElement> {
@@ -291,7 +291,7 @@ pub fn world_select_slot(button: super::world_select::WorldSelectButton) -> Slot
 /// `Align::Centre` because the cell is zero-width and therefore *is* the text's
 /// centre — see [`world_select_layout`]. `StringWidget.visitLines` draws at
 /// `y + (height - 9) / 2`, which is `y` for a 9 px widget
-/// (`StringWidget.java:64`), so the cell's `y` is the text's top.
+/// (`StringWidget.java`), so the cell's `y` is the text's top.
 #[must_use]
 pub fn world_select_title_label() -> MenuLabel {
     let slot = world_select_block().header_slot(0);
@@ -308,7 +308,7 @@ pub fn world_select_title_label() -> MenuLabel {
 
 /// The top of world-list row `index` at `scroll` **pixels** of offset —
 /// `getFirstEntryY() + index * itemHeight - scrollAmount`,
-/// `repositionEntries` (`AbstractSelectionList.java:993-996`).
+/// `repositionEntries` (`AbstractSelectionList.java`).
 ///
 /// **`scroll` is pixels, not rows**, for the reason that fix settled one
 /// screen over: one wheel notch is `scrollRate = defaultEntryHeight / 2` = 18 px,
@@ -346,7 +346,7 @@ pub fn world_list_visible_rows(height: f32) -> usize {
 /// Whether world-list row `index` overlaps the content band on a `height`-tall
 /// canvas at `scroll` **pixels** of offset — `extractListItems`' own visibility
 /// test, `child.getY() + child.getHeight() >= getY() && child.getY() <=
-/// getBottom()` (`AbstractSelectionList.java:346-352`).
+/// getBottom()` (`AbstractSelectionList.java`).
 ///
 /// `row_rect` calls this too (through [`MenuRow::world`]'s carried `scroll`), so a
 /// click can no longer land on a row that is not on screen — and, in the other
@@ -454,7 +454,7 @@ pub fn world_list_window_rows() -> usize {
 
 /// The left edge of every world-list row: `getRowLeft()`, which is
 /// `getX() + this.width / 2 - getRowWidth() / 2` with `getX() == 0`
-/// (`AbstractSelectionList.java:372-374`). The `floor` is Java's integer
+/// (`AbstractSelectionList.java`). The `floor` is Java's integer
 /// division of an odd canvas width, and it is the reason this takes a width
 /// rather than being folded into a slot.
 #[must_use]
@@ -475,9 +475,9 @@ pub fn world_list_row_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, 
 }
 
 /// A row's *content* rect — the entry rect inset by
-/// [`LIST_CONTENT_PADDING`]/twice it (`AbstractSelectionList.java:477-495`).
+/// [`LIST_CONTENT_PADDING`]/twice it (`AbstractSelectionList.java`).
 /// This is where a `WorldListEntry` puts its 32×32 icon and, at
-/// `x + 32 + 3`, its three text lines (`WorldSelectionList.java:494-502,569-571`).
+/// `x + 32 + 3`, its three text lines (`WorldSelectionList.java`).
 #[must_use]
 pub fn world_list_row_content_rect(
     index: usize,
@@ -516,7 +516,7 @@ pub(super) const WORLD_LIST_DIM: [f32; 4] =
     [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
 
 /// `AbstractSelectionList.extractItem`'s selection pass
-/// (`AbstractSelectionList.java:354-370`): a 1 px outline with the interior
+/// (`AbstractSelectionList.java`): a 1 px outline with the interior
 /// filled **black**, drawn under the row's content.
 pub(super) const WORLD_LIST_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
@@ -536,7 +536,7 @@ pub(super) const WORLD_LIST_ICON: f32 = 32.0;
 pub const WORLD_LIST_TEXT_DX: f32 = WORLD_LIST_ICON + 3.0;
 
 /// The three text lines' y offsets inside a row's content box —
-/// `WorldListEntry.extractContent` (`WorldSelectionList.java:557-563`):
+/// `WorldListEntry.extractContent` (`WorldSelectionList.java`):
 /// `contentY + 1`, `contentY + 9 + 3`, `contentY + 9 + 9 + 3`.
 ///
 /// Left unreduced for the reason `WORLD_SELECT_HEADER_H` is: the `9`s are
@@ -557,7 +557,7 @@ pub fn world_list_text_width() -> f32 {
 ///
 /// `NoWorldsEntry`'s geometry is now used for *only* that case: a populated list
 /// draws `WorldListEntry`'s icon column plus three text lines
-/// (`WorldSelectionList.java:490-502`) through
+/// (`WorldSelectionList.java`) through
 /// [`super::draw::draw_world_entry`], because there finally is a `LevelSummary`
 /// (`crate::saves::WorldSummary`) to supply them. See `world_select`'s module
 /// docs for why this shell shows an empty list at all where vanilla leaves the
@@ -565,7 +565,7 @@ pub fn world_list_text_width() -> f32 {
 ///
 /// `NoWorldsEntry.extractContent` centres a `StringWidget` in the entry's
 /// content box — `setPosition(getContentXMiddle() - width / 2, getContentYMiddle()
-/// - height / 2)` (`WorldSelectionList.java:392-396`) — and a `StringWidget`'s
+/// - height / 2)` (`WorldSelectionList.java`) — and a `StringWidget`'s
 /// own draw then adds `(height - 9) / 2`, which is 0 for its 9 px height. So the
 /// text's top is `contentYMiddle - 4`, and the `4` is Java's `9 / 2`, not 4.5.
 ///

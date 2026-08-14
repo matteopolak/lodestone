@@ -194,7 +194,7 @@ impl WindowApp {
             // `net::NetUpdate::Respawned` arrives; see `drive_ui_from_session`.
             MenuAction::Respawn => self.sim.respawn(),
             // The command-block screen's Done button (issue #47):
-            // `populateAndSendPacket` (`CommandBlockEditScreen.java:96-114`).
+            // `populateAndSendPacket` (`CommandBlockEditScreen.java`).
             //
             // `into_action` is the one step `MenuAction`'s `Eq` derive cannot
             // cross — `ClientAction` holds a float in a sibling variant, so

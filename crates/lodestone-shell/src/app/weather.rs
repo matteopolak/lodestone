@@ -115,7 +115,7 @@ impl WeatherTracker {
 /// # What each answer costs, and what this doc used to claim
 ///
 /// Vanilla samples a heightmap, a biome and a lightmap **per column** (441 of each
-/// at the default radius, `WeatherEffectRenderer.java:72-88`), reading a level it
+/// at the default radius, `WeatherEffectRenderer.java`), reading a level it
 /// owns directly. This client reaches the world through
 /// [`crate::net::entity_light_at`] and [`lodestone_client::ClientHandle`], each of
 /// which takes the client's world lock **per call**.
@@ -277,8 +277,8 @@ impl ProbeMemo {
 
     /// The whole per-column resolve: `(x, y, z)`'s standing biome translated to
     /// a [`lodestone_render::Precipitation`] via vanilla's own
-    /// `getPrecipitationAt` (`Biome.java:104-108`), height-adjusted the same way
-    /// `Biome.getHeightAdjustedTemperature` is (`Biome.java:110-121`), with all
+    /// `getPrecipitationAt` (`Biome.java`), height-adjusted the same way
+    /// `Biome.getHeightAdjustedTemperature` is (`Biome.java`), with all
     /// three world reads memoised.
     ///
     /// The three reads arrive as closures because that is what lets one type own
@@ -367,8 +367,8 @@ pub(super) fn section_key(
 impl ShellWeatherProbe {
     /// Resolve `(x, y, z)`'s standing biome and translate its declared
     /// climate to a [`lodestone_render::Precipitation`] via vanilla's own
-    /// `getPrecipitationAt` (`Biome.java:104-108`), height-adjusted the same
-    /// way `Biome.getHeightAdjustedTemperature` is (`Biome.java:110-121`).
+    /// `getPrecipitationAt` (`Biome.java`), height-adjusted the same
+    /// way `Biome.getHeightAdjustedTemperature` is (`Biome.java`).
     ///
     /// `None` at any hop — world not loaded, section elided (all-air), the
     /// climate table still empty, or the biome's own `temperature`/
@@ -503,7 +503,7 @@ mod tests {
     /// `biome_sky_colours_resolve_by_holder_id` fixture).
     const WARM_BIOME: u32 = 1;
     /// Biome holder id whose climate snows (temperature 0.0, below vanilla's
-    /// `warmEnoughToRain` 0.15 at `Biome.java:176`).
+    /// `warmEnoughToRain` 0.15 at `Biome.java`).
     const COLD_BIOME: u32 = 7;
 
     /// Drives the **production** resolve ([`ProbeMemo::precipitation_at`]) with

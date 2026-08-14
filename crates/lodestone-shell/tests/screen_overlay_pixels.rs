@@ -478,7 +478,7 @@ fn spectator_suppresses_both_overlays() {
 }
 
 /// Freeze/confusion/portal are **not** first-person-gated in vanilla
-/// (`Hud.java:293-308` are siblings of the `isFirstPerson` block) — unlike
+/// (`Hud.java` are siblings of the `isFirstPerson` block) — unlike
 /// every overlay above. This is the control that proves it: third person
 /// (`body_state` installed) must still draw them.
 #[test]
@@ -551,10 +551,10 @@ fn freeze_confusion_and_portal_survive_third_person_unlike_the_others() {
     assert!(!stats.spyglass_overlay_drawn, "spyglass is first-person-only");
     assert!(
         stats.freeze_overlay_drawn,
-        "freeze must draw in third person too -- Hud.java:293-295 is not nested in isFirstPerson"
+        "freeze must draw in third person too -- Hud.java is not nested in isFirstPerson"
     );
     // Portal takes priority over confusion when both are positive (both are
-    // 1.0 above), matching Hud.java:300-302's if/else if.
+    // 1.0 above), matching Hud.java's if/else if.
     assert!(
         stats.portal_overlay_drawn,
         "portal must draw in third person too, and win priority over confusion"

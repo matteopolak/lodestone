@@ -39,7 +39,7 @@
 //! # Where the expected values come from
 //!
 //! [`VANILLA`] is transcribed **by hand from the decompiled jar**, not read from
-//! the code under test: `TextColor.java:18-33` in `.cache/mc/26.2/src`, where
+//! the code under test: `TextColor.java` in `.cache/mc/26.2/src`, where
 //! vanilla writes them in decimal (`named("gold", 16755200)`). Calling
 //! `TextColor::rgb()` to build the expectation would make this
 //! `decode(encode(x))` — satisfied by any self-consistent misunderstanding,
@@ -53,7 +53,7 @@
 //! Vanilla is not colour-managed: a text colour is written to the framebuffer as
 //! the sRGB byte it is, and the drop shadow is `ARGB.scaleRGB(color, 0.25F)` — a
 //! quarter taken in **gamma** space (`Font.PreparedTextBuilder.getShadowColor`,
-//! `ARGB.java:104-115`). The plausible-but-wrong implementation converts to
+//! `ARGB.java`). The plausible-but-wrong implementation converts to
 //! linear first. Both hypotheses are computed below and the measurement is
 //! required to land on the right one; see [`gold_is_written_in_gamma_space`] and
 //! [`shadow_is_a_gamma_space_quarter`].
@@ -67,7 +67,7 @@ const H: u32 = 480;
 
 /// Vanilla's sixteen named colours, `(name, 0xrrggbb)`.
 ///
-/// Hand-transcribed from `TextColor.java:18-33` (26.2). The decimal vanilla
+/// Hand-transcribed from `TextColor.java` (26.2). The decimal vanilla
 /// actually writes is in the trailing comment, so a reviewer can check the
 /// conversion without opening the jar.
 const VANILLA: [(&str, u32); 16] = [

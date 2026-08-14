@@ -11,7 +11,7 @@ use super::*;
 /// Vanilla's cap on how many 20 Hz client ticks a single update may run.
 ///
 /// Read from the decompiled 26.2 client, not guessed:
-/// `.cache/mc/26.2/client-src/net/minecraft/client/Minecraft.java:262` declares
+/// `.cache/mc/26.2/client-src/net/minecraft/client/Minecraft.java` declares
 /// `private static final int MAX_TICKS_PER_UPDATE = 10;` and `:1176` applies it
 /// as `for (int i = 0; i < Math.min(10, ticksToDo); i++)`. Note *where* the cap
 /// lives: `DeltaTracker.Timer::advanceGameTime` returns the full uncapped tick
@@ -119,13 +119,13 @@ pub(crate) const AFK_THRESHOLD_SECS: f64 = 60.0;
 /// See [`AFK_THRESHOLD_SECS`].
 pub(crate) const LONG_AFK_THRESHOLD_SECS: f64 = 600.0;
 /// Vanilla's `FramerateLimitTracker.SHORT_AFK_LIMIT`/... — actually named
-/// `AFK_LIMIT`/`LONG_AFK_LIMIT` in `FramerateLimitTracker.java:11-12`.
+/// `AFK_LIMIT`/`LONG_AFK_LIMIT` in `FramerateLimitTracker.java`.
 pub(crate) const AFK_FPS: u32 = 30;
 /// See [`AFK_FPS`].
 pub(crate) const LONG_AFK_FPS: u32 = 10;
 
 /// Vanilla's `FramerateLimitTracker::getFramerateLimit`'s AFK half
-/// (`FramerateLimitTracker.java:26-34`), minus the `WINDOW_ICONIFIED`/
+/// (`FramerateLimitTracker.java`), minus the `WINDOW_ICONIFIED`/
 /// `OUT_OF_LEVEL_MENU` branches: this pacer already throttles an
 /// occluded/unfocused window unconditionally (the module doc's table
 /// predates `framerateLimit`), so those two vanilla branches are subsumed by
@@ -136,7 +136,7 @@ pub(crate) const LONG_AFK_FPS: u32 = 10;
 ///
 /// `raw_limit` is the persisted `framerate_limit` (`10..=260`, `260` = the
 /// `UNLIMITED_FRAMERATE_CUTOFF` sentinel `Options.java` never applies the
-/// limiter past — `Minecraft.java:1331`'s `if (framerateLimit < 260)`).
+/// limiter past — `Minecraft.java`'s `if (framerateLimit < 260)`).
 /// Returns `None` for "no cap at all", so a focused window with the row left
 /// at Unlimited and not AFK still lets vsync/the compositor pace it exactly
 /// as before this option existed.

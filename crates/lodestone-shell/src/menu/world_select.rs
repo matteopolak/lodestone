@@ -21,7 +21,7 @@
 //! Delete its confirmation screen, four before that fix enabled Create — and
 //! **`active = false` is the whole mechanism**, see [`super::widget`]. Vanilla
 //! disables them itself, for our exact reason:
-//! `SelectWorldScreen.updateButtonStatus(null)` (`SelectWorldScreen.java:159-166`)
+//! `SelectWorldScreen.updateButtonStatus(null)` (`SelectWorldScreen.java`)
 //! turns Edit, Delete and Re-Create off whenever nothing is selected, which is a
 //! state this screen really reaches (an empty `saves/`, or a filter matching
 //! nothing). What is left is the *client-level* ceiling: `Edit` and `Re-Create`
@@ -31,7 +31,7 @@
 //! with the feature unavailable.
 //!
 //! What vanilla does with a **tooltip** on such a button
-//! (`TitleScreen.java:196`, `OptionsScreen.java:88-92`) is still deferred, for
+//! (`TitleScreen.java`, `OptionsScreen.java`) is still deferred, for
 //! That fix's reason narrowed by that fix: nothing in this shell tracks hover *dwell
 //! time*, so a `tooltip` field would reach zero pixels. See
 //! `docs/menu-focus.md`'s deliberate-gaps list.
@@ -49,7 +49,7 @@
 //!
 //! - the content band holds **N** rows, one per [`crate::saves::WorldSummary`],
 //!   drawn with `WorldListEntry`'s geometry (a 32 px icon column and three text
-//!   lines — `WorldSelectionList.java:490-502`) rather than `NoWorldsEntry`'s
+//!   lines — `WorldSelectionList.java`) rather than `NoWorldsEntry`'s
 //!   single centred string. The icon square itself stays empty: this client
 //!   writes no `icon.png`, so there is nothing to blit into it, and the column
 //!   is reserved anyway because the three text lines' x is measured from it
@@ -63,7 +63,7 @@
 //! ## Three deliberate deviations, each with its reason
 //!
 //! - **The empty list does not leave the screen.** `handleNewLevels`
-//!   (`WorldSelectionList.java:167-183`) switches on the list type, and for
+//!   (`WorldSelectionList.java`) switches on the list type, and for
 //!   `SINGLEPLAYER` an empty result calls `CreateWorldScreen.openFresh` — real
 //!   vanilla *replaces* the world list with the creation screen when you have no
 //!   worlds. This shell instead draws `NoWorldsEntry` (`:379-397`, which vanilla
@@ -120,19 +120,19 @@ use crate::saves::WorldSummary;
 pub const WORLD_SELECT_TITLE: &str = "Select World";
 
 /// `gui.selectWorld.search` (`en_us.json`), the search box's hint
-/// (`SelectWorldScreen.java:62`). Vanilla styles it with
-/// `EditBox.SEARCH_HINT_STYLE` — grey **and italic** (`EditBox.java:37`); this
+/// (`SelectWorldScreen.java`). Vanilla styles it with
+/// `EditBox.SEARCH_HINT_STYLE` — grey **and italic** (`EditBox.java`); this
 /// shell's font has no italic variant, so only the grey survives, through
 /// [`EditBox::hint`]'s draw in [`super::render`].
 pub const SEARCH_HINT: &str = "Search...";
 
-/// The search box's narration `Component` (`SelectWorldScreen.java:55` passes
+/// The search box's narration `Component` (`SelectWorldScreen.java` passes
 /// the title through as the narration message). Never drawn.
 pub const SEARCH_NARRATION: &str = "Select World";
 
 /// `selectWorld.load_folder_access` is a *failure* string; the one this needs is
 /// `mco.upload.select.world.none`, which is what vanilla's `NoWorldsEntry`
-/// carries in the only branch that reaches it (`WorldSelectionList.java:176`).
+/// carries in the only branch that reaches it (`WorldSelectionList.java`).
 ///
 /// Reworded rather than transcribed, because vanilla's own string names the
 /// Realms upload flow this client does not have ("No worlds available to
@@ -244,13 +244,13 @@ pub const FIRST_BUTTON_ROW: usize = 1;
 /// - the *tab* order is registration order, not id order (see
 ///   [`super::focus`]), so [`WorldSelectNav::new`] can still register
 ///   header → contents → footer exactly as `layout.visitWidgets` walks them
-///   (`SelectWorldScreen.java:76`). `tab_visits_the_list_between_the_search_field_and_the_footer`
+///   (`SelectWorldScreen.java`). `tab_visits_the_list_between_the_search_field_and_the_footer`
 ///   is the gate on that, and it is the one that would fail if these two facts
 ///   were ever collapsed into one.
 pub const FIRST_WORLD_ROW: usize = FIRST_BUTTON_ROW + WORLD_SELECT_BUTTONS.len();
 
 /// The screen's six footer buttons, in vanilla's own `RowHelper` order —
-/// `SelectWorldScreen.createFooterButtons` (`SelectWorldScreen.java:81-107`).
+/// `SelectWorldScreen.createFooterButtons` (`SelectWorldScreen.java`).
 ///
 /// The order is load-bearing twice: it is the grid's cell order (so it decides
 /// where each button *is*, via `render::world_select_slot`) and it is the tab
@@ -258,7 +258,7 @@ pub const FIRST_WORLD_ROW: usize = FIRST_BUTTON_ROW + WORLD_SELECT_BUTTONS.len()
 /// vanilla registers them in that sequence (`:76`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldSelectButton {
-    /// `LevelSummary.PLAY_WORLD` = `selectWorld.select` (`LevelSummary.java:18`).
+    /// `LevelSummary.PLAY_WORLD` = `selectWorld.select` (`LevelSummary.java`).
     /// Two columns wide. **Enabled**: vanilla's
     /// `updateButtonStatus` turns this on for a selection whose
     /// `primaryActionActive()` holds (`:163`) — which since that fix is a real
@@ -280,7 +280,7 @@ pub enum WorldSelectButton {
     /// `selectWorld.delete`, 71 px. **Live** since that fix:
     /// `summary.canDelete()` (`:172`), and vanilla's own
     /// `LevelSummary.canDelete()` is unconditionally `true`
-    /// (`LevelSummary.java:209-211`) — so this is off only in the no-selection
+    /// (`LevelSummary.java`) — so this is off only in the no-selection
     /// branch, where there is nothing to delete. Its press opens
     /// [`super::Screen::Confirm`]; it does not delete anything itself.
     Delete,
@@ -400,7 +400,7 @@ const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
 ///
 /// The title `StringWidget` is **not** here. Vanilla registers it (`:76` visits
 /// every leaf) but `StringWidget`'s constructor sets `active = false`
-/// (`StringWidget.java:24`), so it can never take focus and never receives an
+/// (`StringWidget.java`), so it can never take focus and never receives an
 /// event; the only registry it observably belongs to is `narratables`, and
 /// nothing in this shell narrates. It is drawn as a [`super::render::MenuLabel`]
 /// instead.
@@ -475,7 +475,7 @@ pub enum WorldSelectOutcome {
     /// [`crate::saves::world_dir_in`], the containment check); the display name
     /// rides along because vanilla's `selectWorld.deleteWarning` interpolates
     /// `LevelSummary.getLevelName()` rather than the folder
-    /// (`WorldSelectionList.java:633`), and quoting the wrong one of the two is
+    /// (`WorldSelectionList.java`), and quoting the wrong one of the two is
     /// exactly how a player confirms the deletion of a different world.
     DeleteWorld {
         /// The folder under the saves root.
@@ -512,7 +512,7 @@ pub struct WorldSelectNav {
     /// The **unfiltered** set. [`Self::shown`] is the filtered view, and the two
     /// are kept apart so typing in the search box does not lose worlds — vanilla
     /// keeps `currentlyDisplayedLevels` for the same reason
-    /// (`WorldSelectionList.java:185-191`: `updateFilter` re-fills from the
+    /// (`WorldSelectionList.java`: `updateFilter` re-fills from the
     /// retained list rather than re-reading the disk).
     worlds: Vec<WorldSummary>,
     /// Indices into [`Self::worlds`] that pass the search filter, in list order.
@@ -564,7 +564,7 @@ impl WorldSelectNav {
         let (sx, sy, sw, sh) =
             super::render::world_select_search_slot().resolve(SEED_CANVAS.0, SEED_CANVAS.1);
         let mut search = EditBox::new(sx, sy, sw, sh, SEARCH_NARRATION);
-        // `this.searchBox.setHint(...)` (`SelectWorldScreen.java:62`).
+        // `this.searchBox.setHint(...)` (`SelectWorldScreen.java`).
         search.hint = Some(SEARCH_HINT.to_string());
         let buttons = WORLD_SELECT_BUTTONS.map(|b| {
             let (x, y, w, h) = super::render::world_select_slot(b).resolve(SEED_CANVAS.0, SEED_CANVAS.1);
@@ -769,7 +769,7 @@ impl WorldSelectNav {
     ///
     /// Vanilla's non-null branch reads four `LevelSummary` predicates —
     /// `primaryActionActive()`, `canEdit()`, `canRecreate()`, `canDelete()`
-    /// (`LevelSummary.java:189-211`) — plus a `requiresFileFixing()` tooltip. All
+    /// (`LevelSummary.java`) — plus a `requiresFileFixing()` tooltip. All
     /// four are asked here, against
     /// [`crate::saves::WorldSummary`]'s own ports of them, and then `&&`-ed with
     /// [`WorldSelectButton::enabled`]'s client-level ceiling: a world may be
@@ -848,7 +848,7 @@ impl WorldSelectNav {
     /// The mouse moved onto row `row`. Records hover only — **never** focus, see
     /// [`Self::hovered`]. A disabled row is still hovered, matching vanilla:
     /// `AbstractWidget.extractRenderState` sets `isHovered` from geometry alone
-    /// (`AbstractWidget.java:56-62`) and the disabled sprite wins anyway.
+    /// (`AbstractWidget.java`) and the disabled sprite wins anyway.
     pub fn hover(&mut self, row: usize) {
         if row == SEARCH_FIELD
             || WorldSelectButton::at_row(row).is_some()
@@ -876,7 +876,7 @@ impl WorldSelectNav {
     ///
     /// The ordering is what makes the search field behave: it consumes
     /// Backspace/Delete and the horizontal arrows, and *declines* Up/Down and Tab
-    /// (`EditBox.java:279-284`), which is how they reach focus traversal without
+    /// (`EditBox.java`), which is how they reach focus traversal without
     /// any rule saying so. See `docs/menu-focus.md`.
     pub fn handle_key(&mut self, key: MenuKey) -> WorldSelectOutcome {
         // Captured before anything can edit the box, because the search box's
@@ -905,7 +905,7 @@ impl WorldSelectNav {
                 WorldSelectOutcome::Handled
             }
             // `AbstractButton.keyPressed` presses a focused, *active* button on
-            // Enter or Space and returns `true` (`AbstractButton.java:61-71`).
+            // Enter or Space and returns `true` (`AbstractButton.java`).
             // Our `Widget` is data with no press callback, so the screen applies
             // that here instead; the observable behaviour is the same, and an
             // inactive button never gets here because it cannot hold focus.
@@ -920,7 +920,7 @@ impl WorldSelectNav {
             KeyOutcome::Declined => WorldSelectOutcome::Handled,
         };
         // `this.searchBox.setResponder(list::updateFilter)`
-        // (`SelectWorldScreen.java:63`). Gated on the value actually changing so a
+        // (`SelectWorldScreen.java`). Gated on the value actually changing so a
         // Backspace on an empty box does not rebuild the whole list — and, more
         // importantly, so a keystroke that only moved focus does not reset the
         // selection through `rebuild`.
@@ -948,7 +948,7 @@ impl WorldSelectNav {
     /// The scroll is not optional and not cosmetic: it is what stops focus landing
     /// on a row that is not drawn. Vanilla joins the two the same way
     /// — `setSelected` calls `scrollToEntry` whenever the last input was the
-    /// keyboard (`AbstractSelectionList.java:53-62`) — and it is called
+    /// keyboard (`AbstractSelectionList.java`) — and it is called
     /// unconditionally here rather than only when focus moved *onto* the list,
     /// because [`Self::scroll_to_focus`] is a no-op for a focus that is not on a
     /// row.
@@ -973,9 +973,9 @@ impl WorldSelectNav {
     /// Mirrors `ContainerEventHandler.mouseClicked` (`:44-52`) by row instead of
     /// by coordinate: the child answers whether it consumed the click
     /// (`AbstractWidget.mouseClicked` returns `false` when inactive,
-    /// `AbstractWidget.java:109-125`) and only then does it take focus, gated on
+    /// `AbstractWidget.java`) and only then does it take focus, gated on
     /// `shouldTakeFocusAfterInteraction()` — `true` for a plain `Button`
-    /// (`GuiEventListener.java:60-62`).
+    /// (`GuiEventListener.java`).
     pub fn click_row(&mut self, row: usize) -> WorldSelectOutcome {
         if row == SEARCH_FIELD {
             self.focus.set_focused(&mut self.widgets, Some(SEARCH_FIELD));
@@ -1011,7 +1011,7 @@ impl WorldSelectNav {
             if self.is_active(row) {
                 self.focus.set_focused(&mut self.widgets, Some(row));
                 // `setSelected`'s `topClipped || bottomClipped` branch
-                // (`AbstractSelectionList.java:55-61`): a click can land on a row
+                // (`AbstractSelectionList.java`): a click can land on a row
                 // that is only half inside the band, and that row then has to come
                 // fully in — it is the focused one.
                 self.scroll_to_focus();
@@ -1052,8 +1052,8 @@ impl WorldSelectNav {
             // Opens `Screen::CreateWorld`.
             WorldSelectButton::Create => WorldSelectOutcome::CreateWorld,
             // Vanilla's `list.getSelectedOpt().ifPresent(WorldListEntry::deleteWorld)`
-            // (`SelectWorldScreen.java:94-95`), whose `deleteWorld` opens a
-            // `ConfirmScreen` and deletes nothing (`WorldSelectionList.java:619-637`).
+            // (`SelectWorldScreen.java`), whose `deleteWorld` opens a
+            // `ConfirmScreen` and deletes nothing (`WorldSelectionList.java`).
             // That fix.
             WorldSelectButton::Delete => self.delete_selected(),
             // Edit and Re-Create have no screen to open, so both are inactive and
@@ -1080,7 +1080,7 @@ impl WorldSelectNav {
     /// could never see one — and making the corrupt row selectable so it could be
     /// deleted removed that implicit protection. The gate is vanilla's own:
     /// `WorldListEntry.joinWorld` opens with `if (this.summary.primaryActionActive())`
-    /// (`WorldSelectionList.java:610`), i.e. the check lives in the *action* and
+    /// (`WorldSelectionList.java`), i.e. the check lives in the *action* and
     /// not only in the button's `active` flag.
     /// `a_corrupt_worlds_row_is_selectable_and_deletable_but_never_playable` is
     /// what caught the gap, and it is the gate on it.
@@ -1138,7 +1138,7 @@ impl WorldSelectNav {
     /// One mouse-wheel notch at a `canvas_height`-tall canvas —
     /// `AbstractScrollArea::mouseScrolled`,
     /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())`
-    /// (`AbstractScrollArea.java:34`).
+    /// (`AbstractScrollArea.java`).
     ///
     /// **Delegates to [`super::widget::ScrollList`] rather than reimplementing the
     /// arithmetic**, which is what makes one notch 18 px rather than a whole 36 px
@@ -1195,7 +1195,7 @@ impl WorldSelectNav {
 
     /// Keep [`Self::scroll`] inside the range the **conservative** window can
     /// justify — vanilla's `refreshScrollAmount`, which `updateSizeAndPosition`
-    /// runs after every resize (`AbstractSelectionList.java:191-195`) and which
+    /// runs after every resize (`AbstractSelectionList.java`) and which
     /// `updateFilter` needs for the same reason: `clearEntries` does **not** reset
     /// the offset (`:84-87`), so a filter that shortens the list would otherwise
     /// leave it scrolled past the new end.
@@ -1734,7 +1734,7 @@ mod tests {
         assert_eq!(nav.search().value(), "cav", "the field kept its text");
 
         // Repeated Down must reach Back eventually and then stay there —
-        // arrows do not wrap (`Screen.java:139-143` gates the retry on Tab).
+        // arrows do not wrap (`Screen.java` gates the retry on Tab).
         let mut steps = 0;
         while nav.focused_row() != Some(WorldSelectButton::Back.row()) {
             nav.handle_key(MenuKey::Down);
@@ -1915,7 +1915,7 @@ mod tests {
         let nav = WorldSelectNav::new();
         assert_eq!(nav.search().hint.as_deref(), Some(SEARCH_HINT));
         assert_eq!(nav.search().value(), "", "it opens empty");
-        // 200x20 is vanilla's declared size (`SelectWorldScreen.java:55`), and it
+        // 200x20 is vanilla's declared size (`SelectWorldScreen.java`), and it
         // must survive the trip through the slot the draw uses.
         assert_eq!(nav.search().widget.width, 200.0);
         assert_eq!(nav.search().widget.height, 20.0);
@@ -1989,7 +1989,7 @@ mod tests {
         // than zero", and both hypotheses are computed from outside constants:
         // 25 rows of 36 is 900, `contentHeight()` adds vanilla's own `+ 4` — the
         // 2 px above the first entry and below the last
-        // (`AbstractSelectionList.java:197-205`) — and the band is
+        // (`AbstractSelectionList.java`) — and the band is
         // `480 - 60 - 49` = 371. So the answer is `904 - 371` = **533**, and the
         // wrong hypothesis (forgetting `contentHeight`'s `+ 4`) is 529. The first
         // draft of this assertion predicted 529 and the measurement said 533.

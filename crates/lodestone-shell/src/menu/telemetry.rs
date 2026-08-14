@@ -30,7 +30,7 @@
 //! ## Geometry, transcribed
 //!
 //! - [`HEADER_HEIGHT`] = 81: `new HeaderAndFooterLayout(this, 16 + 9 * 5 + 20,
-//!   …)` (`TelemetryInfoScreen.java:31-33`) — a **compile-time constant**,
+//!   …)` (`TelemetryInfoScreen.java`) — a **compile-time constant**,
 //!   not derived from measuring the description's real wrapped height (this
 //!   client has no font metrics at layout-build time either, so that is not
 //!   a gap introduced here).
@@ -110,7 +110,7 @@ pub const DESCRIPTION_LINES: [&str; 2] = [
 
 // -- geometry, transcribed (see the module docs) -----------------------------
 
-/// `TelemetryInfoScreen.java:32`'s literal `16 + 9 * 5 + 20`.
+/// `TelemetryInfoScreen.java`'s literal `16 + 9 * 5 + 20`.
 pub const HEADER_HEIGHT: f32 = 81.0;
 /// The same constructor's `EXTRA_TELEMETRY_AVAILABLE ? … : 33` — always the
 /// `33` branch here (see the module docs), which is also

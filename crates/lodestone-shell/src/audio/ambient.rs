@@ -57,7 +57,7 @@ const TICK: Duration = Duration::from_millis(50);
 /// accumulation in one frame.
 const MAX_CATCH_UP_TICKS: u32 = 10;
 
-/// Vanilla's `rainSoundTime` roll bound — `ClientLevel.java:385`
+/// Vanilla's `rainSoundTime` roll bound — `ClientLevel.java`
 /// (`random.nextInt(3)`).
 const RAIN_ROLL_BOUND: i32 = 3;
 
@@ -260,7 +260,7 @@ impl ShellAmbience {
             events.push(AmbienceEvent::OneShot {
                 name: Cow::Borrowed(sound.name),
                 // Vanilla plays this at the *listener*, relative, not at the
-                // landing block — `ClientLevel.java:388-392` passes the camera
+                // landing block — `ClientLevel.java` passes the camera
                 // position.
                 position: input.eye,
                 volume: sound.volume,
@@ -335,7 +335,7 @@ impl ShellAmbience {
 }
 
 /// Vanilla's step volume/pitch for a block's `SoundType` —
-/// `Entity.playStepSound` (`Entity.java:1473`): `volume * 0.15`, pitch as-is.
+/// `Entity.playStepSound` (`Entity.java`): `volume * 0.15`, pitch as-is.
 ///
 /// Split out here rather than inlined at the call site so the two multipliers
 /// live beside the rest of the ambience constants and are not retyped.

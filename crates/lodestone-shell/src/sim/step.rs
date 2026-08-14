@@ -200,7 +200,7 @@ impl Sim {
             let mut actions = std::mem::take(&mut w.resource_mut::<ActionQueue>().0);
             // Vanilla's tick tail. `Minecraft.tick` ends with
             // `connection.send(ServerboundClientTickEndPacket.INSTANCE)`
-            // (`client-src/net/minecraft/client/Minecraft.java:1832-1835`) — every
+            // (`client-src/net/minecraft/client/Minecraft.java`) — every
             // tick, after everything else the tick queued, whenever a connection
             // exists and the game is not paused.
             //
@@ -633,7 +633,7 @@ impl Sim {
     /// between `case ENTITY` and `case BLOCK`.
     ///
     /// The search radius is [`ENTITY_REACH`] (`3.0`, vanilla's
-    /// `DEFAULT_ENTITY_INTERACTION_RANGE`, `Player.java:134`), shortened to
+    /// `DEFAULT_ENTITY_INTERACTION_RANGE`, `Player.java`), shortened to
     /// `block_hit`'s own entry distance when a block sits closer than that —
     /// matching vanilla's `blockDistance` clamp, so a wall between the eye and
     /// an entity is never picked through.

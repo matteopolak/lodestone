@@ -142,7 +142,7 @@ impl WindowApp {
                 }
             }
             // Vanilla's All/Craftable cycle-button
-            // (`RecipeBookComponent.java:136`). Cycling it re-browses the
+            // (`RecipeBookComponent.java`). Cycling it re-browses the
             // corpus through `craftable_in` and swaps the button art, so this
             // arm is two visible changes, not a flag.
             Hit::FilterButton => {
@@ -164,7 +164,7 @@ impl WindowApp {
     /// Resolve a click at the current cursor against the merchant screen's
     /// trade-list buttons and act on it, returning whether it **consumed**
     /// the click — vanilla's `postButtonClick`
-    /// (`MerchantScreen.java:61-65,74-82`): select the row, remember it, and
+    /// (`MerchantScreen.java`): select the row, remember it, and
     /// tell the server (that fix's UI half).
     ///
     /// Given first refusal the same way
@@ -251,7 +251,7 @@ impl WindowApp {
     /// (part 3).
     ///
     /// Vanilla's `AbstractContainerScreen.checkHotbarKeyPressed`
-    /// (`AbstractContainerScreen.java:506-522`) guards on exactly two pieces of
+    /// (`AbstractContainerScreen.java`) guards on exactly two pieces of
     /// **state**: `menu.getCarried().isEmpty()` and `hoveredSlot != null`. Both
     /// are checked here rather than in `resolve_key`, which only knows about keys.
     /// Failing either does nothing — the same thing an open container did with
@@ -319,7 +319,7 @@ impl WindowApp {
     /// Goes through [`MenuInput::key_pressed`] rather than building the
     /// `Click` directly the way [`Self::send_container_swap`] does, because
     /// `key_pressed` already carries vanilla's `hoveredSlot.hasItem()` guard
-    /// (`AbstractContainerScreen.java:495`) and the `PickItem`/`Drop`
+    /// (`AbstractContainerScreen.java`) and the `PickItem`/`Drop`
     /// `else if` — duplicating either here would be a second copy that can
     /// drift from the one `container.rs` already tests. `Click::drop_one`/
     /// `drop_stack` and `do_throw` (`lodestone-game`) were built and tested
@@ -364,7 +364,7 @@ impl WindowApp {
     }
 
     /// `key.pickItem` pressed with a container screen open — `ClickType::CLONE`
-    /// against the hovered slot (`AbstractContainerScreen.java:495-501`).
+    /// against the hovered slot (`AbstractContainerScreen.java`).
     ///
     /// Identical in shape to [`Self::send_container_drop`] except that there is
     /// no modifier variant to carry: vanilla's clone click has no `ctrl` form.
@@ -422,7 +422,7 @@ impl WindowApp {
     /// consequence: *"throwing out items with Q doesn't update the count in my
     /// inventory or hotbar, but it does work properly otherwise."* `DROP_ITEM` /
     /// `DROP_ALL_ITEMS` are the one inventory change a vanilla server applies
-    /// **silently** — `ServerGamePacketListenerImpl.java:1303-1314` calls
+    /// **silently** — `ServerGamePacketListenerImpl.java` calls
     /// `player.drop(…)` and returns with no slot or content packet — so an
     /// unpredicted drop leaves the count wrong *forever*, not briefly.
     ///

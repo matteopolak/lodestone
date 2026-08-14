@@ -29,7 +29,7 @@
 //! place in the shell that reaches into `lodestone-data`'s generated
 //! protocol-776 item table rather than reading an already-resolved
 //! [`lodestone_model::ItemStack`] off an event. [`adjusted_cost_a_count`]
-//! ports `MerchantOffer.getModifiedCostCount` (`MerchantOffer.java:114-118`),
+//! ports `MerchantOffer.getModifiedCostCount` (`MerchantOffer.java`),
 //! the demand/reputation pricing arithmetic that makes cost A's *displayed*
 //! price differ from its base — the discount strikethrough vanilla draws when
 //! they differ.
@@ -38,11 +38,11 @@
 //!
 //! The seven pixel constants below (`BUTTON_*`, `ITEM_*_X`, `OFFER_Y0`,
 //! `ARROW_*`, `STRIKETHROUGH_*`) are transcribed from
-//! `MerchantScreen.java:36-53` and its `init`/`extractContents`; re-derive
+//! `MerchantScreen.java` and its `init`/`extractContents`; re-derive
 //! from `write`/the real screen, never from a summary, per this repo's own
 //! transposition trap. Rows past [`OFFER_ROWS`] (offer index `>= 7`) are a
 //! **named gap**: vanilla's scroller (`SCROLLER_SPRITE` et al.,
-//! `MerchantScreen.java:44-45,142-164`) is not drawn or interactive here, so
+//! `MerchantScreen.java`) is not drawn or interactive here, so
 //! a merchant with more than seven trades only shows and can only select the
 //! first seven. The experience-bar trio
 //! (`EXPERIENCE_BAR_*`, `extractProgressBar`) is a second named gap: it needs
@@ -64,7 +64,7 @@ use lodestone_model::event::MerchantOffer;
 
 use super::layout::Rect;
 
-/// `MerchantScreen`'s `imageWidth`/`imageHeight` (`MerchantScreen.java:57`).
+/// `MerchantScreen`'s `imageWidth`/`imageHeight` (`MerchantScreen.java`).
 pub const PANEL_W: f32 = 276.0;
 /// See [`PANEL_W`].
 pub const PANEL_H: f32 = 166.0;
@@ -75,31 +75,31 @@ pub const PANEL_H: f32 = 166.0;
 pub const OFFER_ROWS: usize = 7;
 
 /// `TRADE_BUTTON_X`/`TRADE_BUTTON_WIDTH`/`TRADE_BUTTON_HEIGHT`
-/// (`MerchantScreen.java:41-43`) and `init`'s own `buttonY = yo + 16 + 2`
-/// (`MerchantScreen.java:72`), in local widget pixels (panel top-left is
+/// (`MerchantScreen.java`) and `init`'s own `buttonY = yo + 16 + 2`
+/// (`MerchantScreen.java`), in local widget pixels (panel top-left is
 /// `(0, 0)`).
 const BUTTON_X: f32 = 5.0;
 const BUTTON_Y0: f32 = 18.0;
 const BUTTON_W: f32 = 88.0;
 const BUTTON_H: f32 = 20.0;
 /// Vertical step between rows — both the buttons' `buttonY += 20` and the
-/// items' `offerY += 20` (`MerchantScreen.java:81,194`) share this constant.
+/// items' `offerY += 20` (`MerchantScreen.java`) share this constant.
 const ROW_STEP: f32 = 20.0;
 
 /// `extractContents`'s `offerY = yo + 16 + 1` then `decorHeight = offerY + 2`
-/// (`MerchantScreen.java:173,184`) — the fake items' shared row-0 y. Distinct
+/// (`MerchantScreen.java`) — the fake items' shared row-0 y. Distinct
 /// from [`BUTTON_Y0`] by one pixel, matching vanilla's own two separate
 /// tracks.
 const OFFER_Y0: f32 = 19.0;
-/// `SELL_ITEM_1_X` plus `extractContents`'s own `+ 5` (`MerchantScreen.java:36,174`).
+/// `SELL_ITEM_1_X` plus `extractContents`'s own `+ 5` (`MerchantScreen.java`).
 const ITEM_A_X: f32 = 10.0;
-/// `SELL_ITEM_2_X` (`MerchantScreen.java:37`), relative to the panel (the `xo
+/// `SELL_ITEM_2_X` (`MerchantScreen.java`), relative to the panel (the `xo
 /// + 5 +` in `extractContents` folds to the same `35` offset from
 /// [`ITEM_A_X`]'s own `xo + 5 +`).
 const ITEM_B_X: f32 = 40.0;
-/// `BUY_ITEM_X` (`MerchantScreen.java:38`), same fold as [`ITEM_B_X`].
+/// `BUY_ITEM_X` (`MerchantScreen.java`), same fold as [`ITEM_B_X`].
 const ITEM_RESULT_X: f32 = 73.0;
-/// `extractButtonArrows`'s `xo + 5 + 35 + 20` (`MerchantScreen.java:223,225`).
+/// `extractButtonArrows`'s `xo + 5 + 35 + 20` (`MerchantScreen.java`).
 const ARROW_X: f32 = 60.0;
 /// `extractButtonArrows`'s `decorHeight + 3` — offset from a row's own
 /// [`OFFER_Y0`]-based y, not from the panel origin.
@@ -109,7 +109,7 @@ pub const ARROW_W: f32 = 10.0;
 /// See [`ARROW_W`].
 pub const ARROW_H: f32 = 9.0;
 /// `extractAndDecorateCostA`'s `sellItem1X + 7`/`decorHeight + 12`
-/// (`MerchantScreen.java:238`), offset from [`ITEM_A_X`]/a row's y.
+/// (`MerchantScreen.java`), offset from [`ITEM_A_X`]/a row's y.
 const STRIKETHROUGH_X_OFFSET: f32 = 7.0;
 const STRIKETHROUGH_Y_OFFSET: f32 = 12.0;
 /// The discount-strikethrough sprite's own size — see [`super::geometry`]'s
@@ -120,7 +120,7 @@ pub const STRIKETHROUGH_H: f32 = 2.0;
 
 /// `extractBackground`'s out-of-stock overlay,
 /// `this.leftPos + 83 + 99, this.topPos + 35, 28, 21`
-/// (`MerchantScreen.java:117`) — a single overlay for the **selected** row,
+/// (`MerchantScreen.java`) — a single overlay for the **selected** row,
 /// not one per row, so it is a fixed panel-relative position rather than a
 /// [`row_layout`] field.
 pub const OUT_OF_STOCK_X: f32 = 182.0;
@@ -215,7 +215,7 @@ pub fn button_hit_test(
     hit_test_local(offer_count, x / scale - px, y / scale - py)
 }
 
-/// `MerchantOffer.getModifiedCostCount` (`MerchantOffer.java:114-118`) — cost
+/// `MerchantOffer.getModifiedCostCount` (`MerchantOffer.java`) — cost
 /// A's demand/reputation-adjusted price:
 ///
 /// ```java

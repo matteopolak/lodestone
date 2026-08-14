@@ -321,7 +321,7 @@ pub fn accounts_list_spec(len: usize, scroll: f32) -> widget::ListSpec {
 }
 
 /// The top of account row `index` — `getFirstEntryY() + index * itemHeight -
-/// scrollAmount`, `repositionEntries` (`AbstractSelectionList.java:993-996`).
+/// scrollAmount`, `repositionEntries` (`AbstractSelectionList.java`).
 ///
 /// **`index` is the row's position in the full list and `scroll` is pixels.** Both
 /// changed together: `index` used to be the rendered-window position because
@@ -359,7 +359,7 @@ pub fn accounts_row_content_rect(index: usize, width: f32, scroll: f32) -> (f32,
 }
 
 /// Whether row `index` overlaps the content band at all on a `height`-tall canvas
-/// — `extractListItems`' own test (`AbstractSelectionList.java:346-352`).
+/// — `extractListItems`' own test (`AbstractSelectionList.java`).
 ///
 /// **This is a *partial*-overlap test now, and that is the point.** It used to be
 /// one degree stricter — a row that did not fit *entirely* was skipped whole —

@@ -739,7 +739,7 @@ impl UiState {
 
     /// Back to the title screen from the world list — vanilla's
     /// `SelectWorldScreen.onClose()`, which is `setScreen(this.lastScreen)`
-    /// (`SelectWorldScreen.java:154-157`), and also what its Back button does
+    /// (`SelectWorldScreen.java`), and also what its Back button does
     /// (`:106`).
     pub fn close_world_select(&mut self) {
         if self.screen == Screen::WorldSelect {
@@ -799,7 +799,7 @@ impl UiState {
     /// the pause menu rather than the title.
     ///
     /// This is vanilla's `inWorld` flag on `OptionsScreen`
-    /// (`OptionsScreen.java:41-47`), and it picks between two mutually exclusive
+    /// (`OptionsScreen.java`), and it picks between two mutually exclusive
     /// buttons in the root screen's header: `options.worldOptions.button` when a
     /// level is loaded, `options.online` when not (`:56-66`). It reads
     /// [`Self::settings_return`], which is already the exact fact — see
@@ -895,7 +895,7 @@ impl UiState {
     /// was pressed decides *whether a world was deleted*, not which screen comes
     /// next. Vanilla is the same shape — `WorldSelectionList.deleteWorld`'s
     /// callback calls `this.list.returnToScreen()` outside its `if (result)`
-    /// (`WorldSelectionList.java:624-631`).
+    /// (`WorldSelectionList.java`).
     pub fn close_confirm(&mut self) {
         if self.screen == Screen::Confirm {
             self.screen = Screen::WorldSelect;
@@ -1018,7 +1018,7 @@ impl UiState {
             Screen::Connecting => {}
             // Deliberately a no-op, not "unwind one level" like every screen
             // above: vanilla's `DeathScreen.shouldCloseOnEsc()` returns
-            // `false` (`DeathScreen.java:64-66`), so Escape does not dismiss
+            // `false` (`DeathScreen.java`), so Escape does not dismiss
             // it. `MenuNav::key_death` mirrors this — it does not call
             // `on_escape` for `MenuKey::Escape` the way every other screen's
             // key handler does — so this arm exists only so the match stays
@@ -1046,7 +1046,7 @@ impl UiState {
             Screen::CreateWorld => self.close_create_world(),
             // In practice `MenuNav::key_confirm` intercepts Escape before this is
             // reached, and it must: on the confirmation screen Escape is the
-            // *negative answer* (`ConfirmScreen.java:97-104` runs
+            // *negative answer* (`ConfirmScreen.java` runs
             // `callback.accept(false)` rather than `onClose`, which is why
             // `shouldCloseOnEsc()` is `false` there), so the callback has to run.
             // This arm keeps the match exhaustive and unwinds one level, which for

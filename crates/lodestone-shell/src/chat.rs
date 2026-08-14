@@ -470,7 +470,7 @@ pub fn compose_chat_action(line: &str) -> Option<ClientAction> {
 
 /// One highlighted run of a command line, mirroring vanilla's
 /// `CommandSuggestions.formatText`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/components/CommandSuggestions.java:402-438`).
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/components/CommandSuggestions.java`).
 /// Byte offsets into the input string; see this module's own doc for why no
 /// pixel width is computed here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -492,7 +492,7 @@ pub enum HighlightKind {
     /// A matched, valid argument value. The carried index cycles `0..5` once
     /// per argument regardless of nesting depth, selecting vanilla's
     /// `ARGUMENT_STYLES` in order — `AQUA, YELLOW, GREEN, LIGHT_PURPLE, GOLD`
-    /// (`CommandSuggestions.java:58-62`). Colour-to-`ChatFormatting` mapping
+    /// (`CommandSuggestions.java`). Colour-to-`ChatFormatting` mapping
     /// is a draw-call concern (`hud.rs`, brokered — not this crate), not
     /// modelled as an actual colour here.
     Argument(u8),
@@ -2369,7 +2369,7 @@ mod tests {
         /// token right after `/gamemode `, the only reachable child is the
         /// `GameMode` argument with no suggestions provider, so
         /// [`local_domain`] must supply all four vanilla game modes —
-        /// sourced from `GameType.java:17-20`'s declaration order
+        /// sourced from `GameType.java`'s declaration order
         /// (`survival, creative, adventure, spectator`), then resorted here
         /// alphabetically to match Brigadier's own `SuggestionsBuilder`.
         /// **Rejected ranking**: declaration order

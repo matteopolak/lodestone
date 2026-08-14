@@ -13,8 +13,8 @@
 //! ## Geometry
 //!
 //! Every rect below is transcribed from the two `init` methods, not
-//! invented — `AbstractCommandBlockEditScreen.java:44-80` for the shared
-//! widgets and `CommandBlockEditScreen.java:39-64` for the block-specific row.
+//! invented — `AbstractCommandBlockEditScreen.java` for the shared
+//! widgets and `CommandBlockEditScreen.java` for the block-specific row.
 //! All of it is anchored on `this.width / 2` (`render::Origin::ScreenTop`)
 //! except the Done/Cancel row, which is `this.height / 4 + 120 + 12`
 //! (`render::Origin::CommandBlockFooter`).
@@ -34,7 +34,7 @@
 //!   `crate::chat`'s walker only recognises a line that starts with `/`
 //!   (`chat.rs`'s `parse_line`), which every real command-block command does
 //!   **not** (`commandsOnly = true` in vanilla's own
-//!   `CommandSuggestions` constructor, `AbstractCommandBlockEditScreen.java:76`,
+//!   `CommandSuggestions` constructor, `AbstractCommandBlockEditScreen.java`,
 //!   means the whole line is a command with no leading slash). The adapter
 //!   prepends a synthetic `/`, calls the chat walker, then shifts every byte
 //!   offset back by one and drops the synthetic slash's own span — see
@@ -110,7 +110,7 @@ pub const OUTPUT_W: f32 = 20.0;
 /// See [`OUTPUT_DX`].
 pub const OUTPUT_H: f32 = 20.0;
 
-/// The mode/conditional/autoexec row's shared y (`CommandBlockEditScreen.java:50,55,62`).
+/// The mode/conditional/autoexec row's shared y (`CommandBlockEditScreen.java`).
 pub const EXTRA_ROW_Y: f32 = 165.0;
 /// Each of the three extra-row buttons is `100` wide, `20` tall.
 pub const EXTRA_ROW_W: f32 = 100.0;
@@ -149,7 +149,7 @@ pub const MODE_SEQUENCE_TEXT: &str = "Chain";
 pub const MODE_AUTO_TEXT: &str = "Repeat";
 /// `advMode.mode.redstone` — `CommandBlockMode::Redstone`'s label (the
 /// default, matching vanilla's `Mode mode = CommandBlockEntity.Mode.REDSTONE`
-/// field initialiser, `CommandBlockEditScreen.java:14`).
+/// field initialiser, `CommandBlockEditScreen.java`).
 pub const MODE_REDSTONE_TEXT: &str = "Impulse";
 
 /// The mode label for `mode`, matching `CommandBlockEditScreen.addExtraControls`'s
@@ -164,7 +164,7 @@ pub fn mode_label(mode: CommandBlockMode) -> &'static str {
 }
 
 /// `CommandBlockEntity.Mode.values()`'s declared order
-/// (`CommandBlockEntity.java:181-183`: `SEQUENCE, AUTO, REDSTONE`), which is
+/// (`CommandBlockEntity.java`: `SEQUENCE, AUTO, REDSTONE`), which is
 /// the order `CycleButton` cycles through.
 #[must_use]
 pub fn next_mode(mode: CommandBlockMode) -> CommandBlockMode {
@@ -177,23 +177,23 @@ pub fn next_mode(mode: CommandBlockMode) -> CommandBlockMode {
 
 /// `outputButton`'s label: `CycleButton.booleanBuilder(Component.literal("O"),
 /// Component.literal("X"), trackOutput).displayOnlyValue()`
-/// (`AbstractCommandBlockEditScreen.java:61-62`) — `true` shows the *first*
+/// (`AbstractCommandBlockEditScreen.java`) — `true` shows the *first*
 /// argument (`CycleButton.booleanBuilder`'s own `b == TRUE ? trueText :
-/// falseText`, `CycleButton.java:188`).
+/// falseText`, `CycleButton.java`).
 #[must_use]
 pub fn track_output_label(track_output: bool) -> &'static str {
     if track_output { "O" } else { "X" }
 }
 
 /// `conditionalButton`'s label (`advMode.mode.conditional`/`advMode.mode.unconditional`,
-/// `CommandBlockEditScreen.java:53`).
+/// `CommandBlockEditScreen.java`).
 #[must_use]
 pub fn conditional_label(conditional: bool) -> &'static str {
     if conditional { "Conditional" } else { "Unconditional" }
 }
 
 /// `autoexecButton`'s label (`advMode.mode.autoexec.bat`/`advMode.mode.redstoneTriggered`,
-/// `CommandBlockEditScreen.java:58-60`). `true` is vanilla's `automatic` flag —
+/// `CommandBlockEditScreen.java`). `true` is vanilla's `automatic` flag —
 /// "Always Active", no redstone required; `false` is "Needs Redstone".
 #[must_use]
 pub fn automatic_label(automatic: bool) -> &'static str {
@@ -255,7 +255,7 @@ pub struct CommandBlockOpen {
     /// The block's last recorded output line, if [`Self::track_output`] and
     /// the block has run at least once. `None` draws `"-"`, matching
     /// vanilla's own `previousEdit.setValue("-")` default
-    /// (`AbstractCommandBlockEditScreen.java:58`).
+    /// (`AbstractCommandBlockEditScreen.java`).
     pub previous_output: Option<String>,
     /// The block's current mode.
     pub mode: CommandBlockMode,
@@ -268,7 +268,7 @@ pub struct CommandBlockOpen {
 
 impl Default for CommandBlockOpen {
     /// A freshly placed command block: vanilla's own field initialisers
-    /// (`CommandBlockEditScreen.java:14-16`, `BaseCommandBlock`'s defaults).
+    /// (`CommandBlockEditScreen.java`, `BaseCommandBlock`'s defaults).
     fn default() -> Self {
         Self {
             pos: BlockPos::new(0, 0, 0),
@@ -369,7 +369,7 @@ impl CommandBlockState {
     #[must_use]
     pub fn new(open: CommandBlockOpen) -> Self {
         let mut command = EditBox::new(0.0, 0.0, COMMAND_W, COMMAND_H, "Console Command");
-        // `EditBox.setMaxLength(32500)` (`AbstractCommandBlockEditScreen.java:52`).
+        // `EditBox.setMaxLength(32500)` (`AbstractCommandBlockEditScreen.java`).
         command.set_max_length(32_500);
         command.set_value(&open.command);
         command.widget.focused = true;
@@ -404,7 +404,7 @@ impl CommandBlockState {
     }
 
     /// `modeButton`'s click handler (`(button, value) -> this.mode = value`,
-    /// `CommandBlockEditScreen.java:50`).
+    /// `CommandBlockEditScreen.java`).
     pub fn cycle_mode(&mut self) {
         self.mode = next_mode(self.mode);
     }
@@ -486,7 +486,7 @@ impl CommandBlockState {
         true
     }
 
-    /// `populateAndSendPacket` (`CommandBlockEditScreen.java:96-109`): the
+    /// `populateAndSendPacket` (`CommandBlockEditScreen.java`): the
     /// outbound packet this screen exists to produce.
     #[must_use]
     pub fn to_action(&self) -> ClientAction {
@@ -552,7 +552,7 @@ impl CommandBlockSubmit {
 
 /// Applies a chosen [`Candidate`] at `start`, the way vanilla's
 /// `Suggestion::apply` splices a replacement into `originalContents`
-/// (`CommandSuggestions.java:672`, transcribed rather than called — this
+/// (`CommandSuggestions.java`, transcribed rather than called — this
 /// module has no Brigadier `Suggestion` object, only the byte range and text
 /// [`complete`] already computed).
 #[must_use]

@@ -25,8 +25,8 @@
 //! pack on top overrides nothing. Both directions are attested from the record
 //! definitions in
 //! [`ResourceManager::from_priority_order`](lodestone_assets::ResourceManager::from_priority_order)'s
-//! own doc (`FallbackResourceManager.java:55,65` and
-//! `PackSelectionModel.java:36-37,52`) — that is the single place the reversal
+//! own doc (`FallbackResourceManager.java` and
+//! `PackSelectionModel.java`) — that is the single place the reversal
 //! happens, and [`crate::resources`] is its only caller.
 //!
 //! ## The built-in pack
@@ -34,7 +34,7 @@
 //! Always selected, always at the **bottom** of the Selected column, never
 //! removable — matched by construction rather than by a flag, exactly as
 //! vanilla's own fixed-position `Pack.Position.BOTTOM` built-in pack is
-//! (`Pack.java:145-157`): [`PackRow::builtin`] rows are appended by
+//! (`Pack.java`): [`PackRow::builtin`] rows are appended by
 //! [`PacksNav::rebuild`] after the user's, never enumerated as transfer
 //! targets, and [`crate::config::SelectedPacks`] does not persist it at all, so
 //! there is no state that could deselect it. Labelled the way vanilla labels
@@ -60,7 +60,7 @@
 //!
 //! - **Pack-format validation.** Vanilla checks `pack_format` against the host's
 //!   and shows an "incompatible" warning, a red content box and a confirmation
-//!   prompt (`TransferableSelectionList.java:137-144`, `pack.incompatible.*`).
+//!   prompt (`TransferableSelectionList.java`, `pack.incompatible.*`).
 //!   [`lodestone_assets::PackMeta::accepts`] already exists to answer it and
 //!   [`crate::resources::DiscoveredPack::pack_format`] already carries the
 //!   number, but **nothing in this client declares a host `pack_format`** to
@@ -87,10 +87,10 @@
 //!
 //! - Header: the generic 33 px band ([`options::SUB_HEADER_HEIGHT`]) — see
 //!   above. Footer: vanilla's own shape, `Open Pack Folder` + `Done`
-//!   (`LinearLayout.horizontal().spacing(8)`, `PackSelectionScreen.java:115-119`)
+//!   (`LinearLayout.horizontal().spacing(8)`, `PackSelectionScreen.java`)
 //!   through [`options::footer_rects`].
 //! - The two lists: `width/2 - 15 - 200` and `width/2 + 15`, each 200 px wide,
-//!   at the header's bottom (`PackSelectionScreen.java:164-170`). Row geometry:
+//!   at the header's bottom (`PackSelectionScreen.java`). Row geometry:
 //!   `TransferableSelectionList::getRowWidth() = width - 4` (`:44-46`), item
 //!   height 36, and the underlined header entry's `(int)(9.0F * 1.5F) = 13`
 //!   (`:59-60`, Java's truncating cast).
@@ -169,7 +169,7 @@ impl PackRow {
 
 // -- geometry, transcribed (see the module docs) -----------------------------
 
-/// `TransferableSelectionList`'s per-list width (`PackSelectionScreen.java:113-114`).
+/// `TransferableSelectionList`'s per-list width (`PackSelectionScreen.java`).
 pub const LIST_W: f32 = 200.0;
 /// The gap between each list's inner edge and the screen's centre —
 /// `this.width / 2 - 15 - 200` / `this.width / 2 + 15` (`:165,169`).

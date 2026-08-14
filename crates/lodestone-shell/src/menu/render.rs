@@ -148,7 +148,7 @@ const TEXT_SCALE: f32 = 2.0;
 /// widget still drawing at [`TEXT_SCALE`] while its row siblings (the
 /// Done/Cancel buttons on the same `ManageServerScreen`, via [`draw_widget`])
 /// draw at `1.0`. Measured against the jar: vanilla's `Font.lineHeight` is
-/// `9` (`Font.java:33`) inside `EditBox`'s 20 px box (`EditBox.java:61-63`),
+/// `9` (`Font.java`) inside `EditBox`'s 20 px box (`EditBox.java`),
 /// a `0.45` ratio; `GLYPH_H(7) * TEXT_SCALE(2.0) = 14` in the same 20 px box
 /// is `0.70` — exactly double. `GLYPH_H(7) * EDIT_TEXT_SCALE(1.0) = 7` is the
 /// same ratio `draw_widget`'s buttons already use.
@@ -186,46 +186,46 @@ pub const MOSAIC: usize = 16;
 // already divided the framebuffer by the effective GUI scale, so these are the
 // same units vanilla's `Screen.width`/`height` are in.
 
-/// A vanilla button's height — `Button.DEFAULT_HEIGHT` (`Button.java:15`).
+/// A vanilla button's height — `Button.DEFAULT_HEIGHT` (`Button.java`).
 ///
 /// Read from [`widget::DEFAULT_HEIGHT`] rather than restated: the widget layer
 /// and every slot below must not be able to drift apart.
 const WIDGET_H: f32 = widget::DEFAULT_HEIGHT;
-/// A vanilla wide button — `Button.BIG_WIDTH` (`Button.java:14`), used for the
-/// title screen's top three rows (`TitleScreen.java:178,196,199`). See
+/// A vanilla wide button — `Button.BIG_WIDTH` (`Button.java`), used for the
+/// title screen's top three rows (`TitleScreen.java`). See
 /// [`WIDGET_H`] on why this is an alias rather than a literal.
 const WIDE_W: f32 = widget::BIG_WIDTH;
-/// The title screen's half-width button (`TitleScreen.java:146,148`). Note the
+/// The title screen's half-width button (`TitleScreen.java`). Note the
 /// pair is `[W/2-100, 98]` and `[W/2+2, 98]` — a **4 px** gutter, unlike the
 /// pause screen's 8 px one below.
 const TITLE_HALF_W: f32 = 98.0;
 /// Vertical pitch between the title screen's rows — `init`'s `spacing`
-/// (`TitleScreen.java:112`, passed at `:117`).
+/// (`TitleScreen.java`, passed at `:117`).
 const TITLE_PITCH: f32 = 24.0;
-/// Side of an icon-only button on either screen (`TitleScreen.java:130`,
-/// `PauseScreen.java:105`).
+/// Side of an icon-only button on either screen (`TitleScreen.java`,
+/// `PauseScreen.java`).
 const ICON_BTN: f32 = 20.0;
 /// The sprite drawn inside an icon button — 15×15 in every vanilla call site
-/// (`CommonButtons.java:10,21`, `PauseScreen.java:104,115,134`).
+/// (`CommonButtons.java`, `PauseScreen.java`).
 const ICON_SPRITE: f32 = 15.0;
 
-/// Logo destination width — `LogoRenderer.LOGO_WIDTH` (`LogoRenderer.java:13`).
+/// Logo destination width — `LogoRenderer.LOGO_WIDTH` (`LogoRenderer.java`).
 const LOGO_W: f32 = 256.0;
 /// Logo destination height. Vanilla blits 44 rows out of a 256×**64** declared
-/// texture (`LogoRenderer.java:39`); the 20 rows below the cut are fully
+/// texture (`LogoRenderer.java`); the 20 rows below the cut are fully
 /// transparent (measured: max alpha 0), so drawing the whole sprite into a
 /// 256×64 rect is pixel-identical and needs no sub-rect blit. See
 /// [`crate::resources::TITLE_TEXTURES`].
 const LOGO_H: f32 = 64.0;
-/// `LogoRenderer.DEFAULT_HEIGHT_OFFSET` (`LogoRenderer.java:21`).
+/// `LogoRenderer.DEFAULT_HEIGHT_OFFSET` (`LogoRenderer.java`).
 const LOGO_Y: f32 = 30.0;
 /// Edition strip size — 128×14 of a declared 128×**16**
-/// (`LogoRenderer.java:17-20,43`); same all-transparent tail as the logo.
+/// (`LogoRenderer.java`); same all-transparent tail as the logo.
 const EDITION_W: f32 = 128.0;
 /// See [`EDITION_W`].
 const EDITION_H: f32 = 16.0;
 /// `heightOffset + LOGO_HEIGHT - EDITION_LOGO_OVERLAP` = `30 + 44 - 7`
-/// (`LogoRenderer.java:22,42`).
+/// (`LogoRenderer.java`).
 const EDITION_Y: f32 = LOGO_Y + 44.0 - 7.0;
 
 /// Width of vanilla's arranged pause-screen `GridLayout`: the widest cell is the
@@ -243,14 +243,14 @@ const EDITION_Y: f32 = LOGO_Y + 44.0 - 7.0;
 /// the code under test — so do not "simplify" this into a call to the layout.
 pub const PAUSE_GRID_W: f32 = 212.0;
 /// Height of the same grid: row 0 is `20 + paddingTop(50)` = 70
-/// (`PauseScreen.java:98`) and rows 1..4 are `20 + 4` = 24 each, for
+/// (`PauseScreen.java`) and rows 1..4 are `20 + 4` = 24 each, for
 /// `70 + 4 * 24`. See [`PAUSE_GRID_W`] on why this stays a hand-derived
 /// constant.
 pub const PAUSE_GRID_H: f32 = 166.0;
 
-// -- vanilla's `PauseScreen` cell metrics (`PauseScreen.java:50-54`) ----------
+// -- vanilla's `PauseScreen` cell metrics (`PauseScreen.java`) ----------
 
-/// `PauseScreen.COLUMNS` (`PauseScreen.java:50`).
+/// `PauseScreen.COLUMNS` (`PauseScreen.java`).
 const PAUSE_COLUMNS: usize = 2;
 /// `PauseScreen.MENU_PADDING_TOP` (`:51`) — the first cell's `paddingTop`, which
 /// is what pushes the whole menu below the "Game Menu" heading.
@@ -276,14 +276,14 @@ const PAUSE_ICON_SPACING: i32 = 4;
 /// the first such caller.
 pub(super) const LINE_H: f32 = 9.0;
 /// Vertical offset of the pause screen's title `StringWidget`
-/// (`PauseScreen.java:88`).
+/// (`PauseScreen.java`).
 const PAUSE_TITLE_Y: f32 = 40.0;
 /// Baseline of the title screen's two corner strings — vanilla draws both at
-/// `height - 10` (`TitleScreen.java:154,323`).
+/// `height - 10` (`TitleScreen.java`).
 const CORNER_TEXT_Y: f32 = -10.0;
 
 /// An active button's label colour: plain white, `ARGB.white(alpha)`
-/// (`AbstractButton.java:51` tints the sprite; the label itself is the
+/// (`AbstractButton.java` tints the sprite; the label itself is the
 /// component's own default).
 ///
 /// Also the tint every *sprite* on this pass is drawn with, which is why it
@@ -293,7 +293,7 @@ const CORNER_TEXT_Y: f32 = -10.0;
 const LABEL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// Tint applied to a disabled button's *icon sprite*. Vanilla passes
 /// `this.alpha` (1.0) and relies on the disabled background alone
-/// (`SpriteIconButton.java:81`), so this is white.
+/// (`SpriteIconButton.java`), so this is white.
 const ICON_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// Background colour of a menu screen (the vanilla dirt backdrop's dark tone).
@@ -306,7 +306,7 @@ const BG: [f32; 4] = [0.10, 0.10, 0.12, 1.0];
 ///
 /// This is now **vanilla's exact value**, not an eyeballed one. `Screen`'s
 /// in-world menu backdrop is `textures/gui/inworld_menu_background.png`
-/// tiled at 32 px (`Screen.java:405,418-419`), and that file was decoded
+/// tiled at 32 px (`Screen.java`), and that file was decoded
 /// straight out of `client.jar`: a 16×16 greyscale+alpha PNG in which **every
 /// pixel is grey 0, alpha 64** — i.e. flat black at 64/255. (`menu_background.png`,
 /// the out-of-world variant, is byte-for-byte the same.) So there is no dirt
@@ -361,7 +361,7 @@ const ROW_SEL: [f32; 4] = [0.36, 0.40, 0.48, 1.0];
 const ROW_OFF: [f32; 4] = [0.16, 0.16, 0.18, 1.0];
 /// Primary text.
 const FG: [f32; 4] = [0.94, 0.94, 0.94, 1.0];
-/// `AbstractSliderButton.HANDLE_WIDTH` (`AbstractSliderButton.java:26`): the
+/// `AbstractSliderButton.HANDLE_WIDTH` (`AbstractSliderButton.java`): the
 /// handle is always 8 px wide, whatever the track's own width is.
 ///
 /// `pub` because the mouse-drag hit-test needs it too — vanilla's

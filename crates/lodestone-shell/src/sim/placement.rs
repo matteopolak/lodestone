@@ -259,7 +259,7 @@ pub(crate) fn is_interactable_state(state: u32) -> bool {
 /// single-cell blocks whose remaining properties [`state_for_placement`] can also
 /// resolve. Namespace-stripped paths.
 const FACING_HORIZONTAL_OPPOSITE: &[&str] = &[
-    // `ChestBlock.java:213`, `EnderChestBlock.java:75`.
+    // `ChestBlock.java`, `EnderChestBlock.java`.
     "chest",
     "trapped_chest",
     "ender_chest",
@@ -271,25 +271,25 @@ const FACING_HORIZONTAL_OPPOSITE: &[&str] = &[
     "waxed_exposed_copper_chest",
     "waxed_weathered_copper_chest",
     "waxed_oxidized_copper_chest",
-    // `AbstractFurnaceBlock.java:53`.
+    // `AbstractFurnaceBlock.java`.
     "furnace",
     "blast_furnace",
     "smoker",
-    // `CarvedPumpkinBlock.java:140`.
+    // `CarvedPumpkinBlock.java`.
     "carved_pumpkin",
     "jack_o_lantern",
-    // `BeehiveBlock.java:271`.
+    // `BeehiveBlock.java`.
     "beehive",
     "bee_nest",
     // One-off `HorizontalDirectionalBlock`s.
-    "end_portal_frame",   // `EndPortalFrameBlock.java:56`
-    "chiseled_bookshelf", // `ChiseledBookShelfBlock.java:172`
-    "lectern",            // `LecternBlock.java:93`
-    "loom",               // `LoomBlock.java:54`
-    "stonecutter",        // `StonecutterBlock.java:45`
-    "vault",              // `VaultBlock.java:99`
-    "repeater",           // `DiodeBlock.java:158`
-    // `GlazedTerracottaBlock.java:28`.
+    "end_portal_frame",   // `EndPortalFrameBlock.java`
+    "chiseled_bookshelf", // `ChiseledBookShelfBlock.java`
+    "lectern",            // `LecternBlock.java`
+    "loom",               // `LoomBlock.java`
+    "stonecutter",        // `StonecutterBlock.java`
+    "vault",              // `VaultBlock.java`
+    "repeater",           // `DiodeBlock.java`
+    // `GlazedTerracottaBlock.java`.
     "white_glazed_terracotta",
     "orange_glazed_terracotta",
     "magenta_glazed_terracotta",

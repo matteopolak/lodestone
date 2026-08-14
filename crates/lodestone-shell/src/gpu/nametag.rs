@@ -12,7 +12,7 @@
 //!
 //! * **Normal pass** (`RenderPipelines.TEXT`, via `WORLD_TEXT_SNIPPET`):
 //!   `DepthStencilState.DEFAULT = new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true)`
-//!   (`DepthStencilState.java:6`) — depth-tested **and depth-written**.
+//!   (`DepthStencilState.java`) — depth-tested **and depth-written**.
 //!   Vanilla's reversed-Z convention makes "closer" `GREATER_THAN_OR_EQUAL`;
 //!   ours is `[0,1]` DirectX-style (`docs/`/`CLAUDE.md`'s rendering
 //!   constraints), so the *sign flips* to [`wgpu::CompareFunction::LessEqual`]
@@ -21,7 +21,7 @@
 //!   (a nearer tag's glyphs must win over a farther, overlapping one, exactly
 //!   as vanilla's write-enabled pass does).
 //! * **See-through pass** (`RenderPipelines.TEXT_SEE_THROUGH`):
-//!   `.withDepthStencilState(Optional.empty())` (`RenderPipelines.java:507`)
+//!   `.withDepthStencilState(Optional.empty())` (`RenderPipelines.java`)
 //!   — **no depth attachment use at all**, neither tested nor written. There
 //!   is no comparison operator to port here, so there is no sign to get
 //!   backwards — but `wgpu` itself has no "this pipeline ignores the pass's
@@ -35,7 +35,7 @@
 //!   `depth_write_enabled: false`. This is what makes a tag behind a wall
 //!   read as *dimmed* rather than fully hidden — it always draws, faded.
 //!
-//! Vanilla's color for each pass (`SubmitNodeCollection.java:113`/`:117`):
+//! Vanilla's color for each pass (`SubmitNodeCollection.java`/`:117`):
 //! normal is opaque white (`-1`), see-through is `-2130706433` =
 //! `0x81_FFFFFF` — white at alpha `129/255 ≈ 0.506`. Both are plain
 //! `BlendFunction.TRANSLUCENT` (`wgpu::BlendState::ALPHA_BLENDING` here);
@@ -47,13 +47,13 @@
 //!
 //! * **Distance cutoff**: `64.0` blocks, squared-distance compared against
 //!   camera-to-*feet* (`EntityRenderer.extractNameTags`'s default
-//!   `nameTagDistance` argument, `EntityRenderer.java:246`, tested at
-//!   `EntityRenderer.java:252`).
+//!   `nameTagDistance` argument, `EntityRenderer.java`, tested at
+//!   `EntityRenderer.java`).
 //! * **Anchor**: `feet.y + base_height * scale + 0.5`. The `+0.5` is
-//!   `SubmitNodeCollection.java:103`'s `nameTagAttachment.y + 0.5`; the
+//!   `SubmitNodeCollection.java`'s `nameTagAttachment.y + 0.5`; the
 //!   `base_height` term is `EntityAttachment.NAME_TAG`'s fallback point,
 //!   `AT_HEIGHT = (width, height) -> (0, height, 0)`
-//!   (`EntityAttachment.java:9`, `:25`) — the entity's own hitbox height,
+//!   (`EntityAttachment.java`, `:25`) — the entity's own hitbox height,
 //!   from the real jar-derived census (`lodestone_data::entity_dimensions`),
 //!   not a guess. Some vanilla types override this attachment point (a
 //!   sitting cat, a sleeping villager); that per-type override table is not
@@ -61,26 +61,26 @@
 //!   the overwhelming majority of named entities (players, standard mobs)
 //!   actually get.
 //! * **Sneaking suppression**: `Entity.isDiscrete()` gates the see-through
-//!   pass off (`SubmitNodeCollection.java:109`/`:118`) — resolved once, at
+//!   pass off (`SubmitNodeCollection.java`/`:118`) — resolved once, at
 //!   `net::entity_snapshot`'s boundary, as [`crate::entities::NameTag::see_through`].
 //!
 //! # What is deliberately not built
 //!
 //! * **The background plate.** Vanilla draws a `TEXT_BACKGROUND`/
 //!   `TEXT_BACKGROUND_SEE_THROUGH` quad behind the glyphs, coloured from the
-//!   `chatOpacity` game option (`SubmitNodeCollection.java:108`). Not in the
+//!   `chatOpacity` game option (`SubmitNodeCollection.java`). Not in the
 //!   issue's explicit scope checklist and not required for legibility (the
 //!   drop shadow already separates text from background); a genuine gap, not
 //!   an oversight.
 //! * **Per-frame packed-light modulation.** Vanilla forces near-full
 //!   brightness for the normal pass
 //!   (`LightCoordsUtil.lightCoordsWithEmission(lightCoords, 2)`,
-//!   `SubmitNodeCollection.java:113`) specifically so a nametag stays legible
+//!   `SubmitNodeCollection.java`) specifically so a nametag stays legible
 //!   in the dark — this renderer draws plain full-bright white unconditionally,
 //!   which is a close approximation of that emission override rather than a
 //!   divergence from it.
 //! * **`EntityAttachment` per-type overrides**, the crosshair-look-at
-//!   override to `shouldShowName` (`EntityRenderer.java:113`), scoreboard
+//!   override to `shouldShowName` (`EntityRenderer.java`), scoreboard
 //!   team colouring/prefixes and the `belowName` scoreboard line — all
 //!   explicitly out of scope per the issue.
 //!
@@ -122,15 +122,15 @@ struct NameTagVertex {
 }
 
 /// Vanilla's per-name-tag world scale
-/// (`SubmitNodeCollection.java:105`: `poseStack.scale(0.025F, -0.025F, 0.025F)`)
+/// (`SubmitNodeCollection.java`: `poseStack.scale(0.025F, -0.025F, 0.025F)`)
 /// — one logical text pixel is this many world blocks.
 const PX_SCALE: f32 = 0.025;
 
-/// The distance cutoff, in blocks (`EntityRenderer.java:246`).
+/// The distance cutoff, in blocks (`EntityRenderer.java`).
 const MAX_DISTANCE: f32 = 64.0;
 
 /// The padding above the `NAME_TAG` attachment point
-/// (`SubmitNodeCollection.java:103`).
+/// (`SubmitNodeCollection.java`).
 const ATTACHMENT_PADDING: f32 = 0.5;
 
 /// Fallback base hitbox height, in blocks, for a type path the jar-derived
@@ -139,7 +139,7 @@ const ATTACHMENT_PADDING: f32 = 0.5;
 /// The player's own height — a reasonable middle ground.
 const FALLBACK_HEIGHT: f32 = 1.8;
 
-/// Opaque white — the normal pass's colour (`-1` in `SubmitNodeCollection.java:113`).
+/// Opaque white — the normal pass's colour (`-1` in `SubmitNodeCollection.java`).
 const NORMAL_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// The drop shadow: the same 25%-brightness quarter
 /// `hud/vanilla_font.rs::shadow_of` applies, at the normal pass's full alpha.
@@ -150,7 +150,7 @@ const SHADOW_COLOR: [f32; 4] = [
     1.0,
 ];
 /// White at `129/255`, vanilla's `-2130706433` (`0x81_FFFFFF`) — the
-/// see-through pass's colour (`SubmitNodeCollection.java:117`).
+/// see-through pass's colour (`SubmitNodeCollection.java`).
 const SEE_THROUGH_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 129.0 / 255.0];
 
 /// Fixed vertex capacity per pass (six vertices per glyph-row ink run). Same
@@ -332,7 +332,7 @@ fn entity_base_height(type_path: &str) -> f32 {
 /// world space, billboarded with the frame's shared `right`/`up` basis —
 /// every nametag this frame shares the same basis, matching vanilla's single
 /// `camera.orientation` applied identically to each
-/// (`SubmitNodeCollection.java:104`: `poseStack.mulPose(camera.orientation)`,
+/// (`SubmitNodeCollection.java`: `poseStack.mulPose(camera.orientation)`,
 /// *before* any per-entity translation).
 ///
 /// No culling is configured on either pipeline (`cull_mode: None`, `wgpu`'s

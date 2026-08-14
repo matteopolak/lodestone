@@ -250,7 +250,7 @@ impl Sim {
     ///
     /// The pose's eye height is passed to [`build_camera`] explicitly, so the
     /// position handed to it is the player's real interpolated feet in every pose
-    /// (`Avatar.java:22-36`: `0.4` swimming, `1.27` crouching, `1.62` standing).
+    /// (`Avatar.java`: `0.4` swimming, `1.27` crouching, `1.62` standing).
     /// It used to be folded into the feet Y as a bias instead — arithmetically the
     /// same, but the argument was then not the feet whenever a non-standing pose
     /// was active. See `camera_rig.rs`'s module docs.
@@ -402,7 +402,7 @@ impl Sim {
     /// The option zeroes **only the walk terms**, never the hurt half of the
     /// frame: vanilla's `bobHurt` is unconditional — `GameRenderer.renderLevel`
     /// applies it outside the `optionsRenderState.bobView` check
-    /// (`GameRenderer.java:534-536`) — so the damage tilt must survive View
+    /// (`GameRenderer.java`) — so the damage tilt must survive View
     /// Bobbing being off. A player who has not been hit recently is unaffected
     /// either way (`frame.hurt` is negative when the countdown has lapsed, and
     /// `BobFrame::hurt_roll_degrees` already returns `0` for that), so this
@@ -452,7 +452,7 @@ impl Sim {
         //
         // Not gated on `third_person`: 26.2's `renderLevel` applies `bobView`
         // whenever `optionsRenderState.bobView` is set, with no camera-type check
-        // (`GameRenderer.java:534-536`), and `bobView` itself only tests
+        // (`GameRenderer.java`), and `bobView` itself only tests
         // `isPlayer`. Older versions did suppress it in third person and issue
         // That fix's body says so; re-read against `.cache/mc/26.2/client-src`, that is
         // no longer true.
@@ -477,14 +477,14 @@ impl Sim {
             0.0,
         );
         // `is_first_person`, not "is it the back view": vanilla's own predicate
-        // here is `!getCameraType().isFirstPerson()` (`Camera.java:266`, the
+        // here is `!getCameraType().isFirstPerson()` (`Camera.java`, the
         // `detached` assignment), so the front view takes the *same* pullback
         // path as the back view and differs only by the mirror inside
         // `third_person_camera`.
         if self.camera_type.is_first_person() {
             // Vanilla's FOV zoom is gated on `firstPerson &&
             // isScoping()` (`AbstractClientPlayer.getFieldOfViewModifier`,
-            // `AbstractClientPlayer.java:92-114`) — a third-person camera
+            // `AbstractClientPlayer.java`) — a third-person camera
             // never zooms, so this composition only runs on the early
             // first-person return, not the two third-person branches below.
             return apply_spyglass_fov(eye, self.spyglass_scoping());
@@ -505,7 +505,7 @@ impl Sim {
 
     /// Vanilla's `Player.isScoping()`:
     /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
-    /// (`Player.java:1936-1938`), computed entirely from `Sim`'s own state so
+    /// (`Player.java`), computed entirely from `Sim`'s own state so
     /// [`Self::render_camera`] needs no new parameter — `app.rs` computes the
     /// same condition independently for `ScreenEffects::scoping` (it already
     /// has the held item at hand for the first-person render source), and
@@ -690,7 +690,7 @@ impl Sim {
             arm_pose: lodestone_render::ArmPose::Empty,
             arm_pose_left_hand: false,
             // `Entity.isCrouching()` is `hasPose(Pose.CROUCHING)` — the
-            // *pose*, not the shift-key flag (`Entity.java:2711-2713`), and
+            // *pose*, not the shift-key flag (`Entity.java`), and
             // the two genuinely differ: holding shift in a one-block gap
             // leaves you shift-key-down and `SWIMMING`. For the local player
             // the pose is already authoritative and already fit-gated —
