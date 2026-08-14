@@ -33,6 +33,24 @@ use thiserror::Error;
 /// namespace and the sprite id: `assets/<ns>/textures/gui/sprites/<id>.png`.
 const SPRITES_INFIX: &str = "/textures/gui/sprites/";
 
+/// Gutter reserved around every sprite in the stitched GUI atlas.
+///
+/// The atlas carries no mip pyramid (see [`GuiAtlas::build`]'s doc), so this
+/// is not about mip bleed — it is the same hazard
+/// [`lodestone_assets::AtlasBuilder::with_padding`]'s doc names for a bare
+/// `Linear` minifying sample at a *single* level: `GpuAtlas::from_atlas`'s
+/// sampler is `min_filter: Linear` for every atlas it uploads, GUI included,
+/// and every real `gui/sprites/**` PNG is packed edge-to-edge with its
+/// neighbour by [`AtlasBuilder`]'s bin packer. A HUD element is drawn at a
+/// fixed *declared* pixel size (`hud.rs`'s slot/highlight constants, for
+/// example), while a sprite's *native* size is whatever the pack shipped —
+/// on any pack whose sprites exceed the 16x baseline (a 32x pack ships them
+/// at 2x), that declared draw size is **smaller** than the sprite's native
+/// pixels, i.e. minified, not magnified. One texel of gutter is enough: with
+/// no mip chain there is only ever one level to bilinear-sample, so the worst
+/// case is a single 2×2 tap straddling the sprite's own edge.
+const GUI_ATLAS_PADDING: u32 = 1;
+
 /// One textured quad produced by [`GuiAtlas::geometry`].
 ///
 /// `dst` is `[x, y, w, h]` in absolute target pixels (the draw position has
@@ -108,8 +126,13 @@ impl GuiAtlas {
     /// Enumerates every `assets/<ns>/textures/gui/sprites/**.png` across the
     /// pack stack, decodes it, parses its sibling `.png.mcmeta` (defaulting to
     /// [`GuiScaling::Stretch`] when absent, exactly like vanilla), and stitches
-    /// the lot with a mip-free [`AtlasBuilder`] (the HUD only ever magnifies, so
-    /// mips would never be sampled and only bloat the upload).
+    /// the lot with a mip-free [`AtlasBuilder`] (no HUD element is ever drawn
+    /// far enough away to need a mip pyramid, so requesting one would only
+    /// bloat the upload) but a real [`GUI_ATLAS_PADDING`] gutter — a HUD
+    /// element's *declared* draw size can still be smaller than a sprite's
+    /// *native* pixels on any pack denser than 16x, which is minification
+    /// even with no mips involved, and `GpuAtlas`'s `min_filter: Linear`
+    /// sampler bleeds a zero-gutter neighbour into that sample.
     ///
     /// Fails closed: an empty sprite set is a [`GuiAtlasError::NoSprites`] so the
     /// caller falls back loudly rather than binding a blank atlas.
@@ -156,7 +179,7 @@ impl GuiAtlas {
             return Err(GuiAtlasError::NoSprites);
         }
 
-        let mut builder = AtlasBuilder::new();
+        let mut builder = AtlasBuilder::new().with_padding(GUI_ATLAS_PADDING);
         let mut sprites: HashMap<String, SpriteEntry> = HashMap::with_capacity(png_paths.len());
 
         for path in &png_paths {
@@ -338,24 +361,23 @@ impl GuiAtlas {
     /// rescaled against nothing.** That is only correct when the caller's
     /// coordinates already agree with this sprite's *real* placed size, which
     /// is true exactly at a 1x-equivalent pack (declared == real) and false
-    /// otherwise. Prefer [`Self::subregion_quad_declared`], which takes the
-    /// size `src` was authored against and rescales — see its doc for why a
-    /// raw pass-through here reproduces issue #582 (a 32x pack samples a
-    /// quarter of the intended window and the result draws 2x too big). This
-    /// method is kept, unchanged, only because a caller still passes
-    /// declared-space literals through it; migrate that caller to
-    /// [`Self::subregion_quad_declared`] rather than adding a new user of
-    /// this one.
+    /// otherwise — on a denser pack this samples the wrong window and the
+    /// result draws too big. Prefer [`Self::subregion_quad_declared`], which
+    /// takes the size `src` was authored against and rescales. No production
+    /// caller of this exact signature remains (the last one, the recipe book
+    /// panel's draw site in `crate::hud` in `lodestone-shell`, was migrated
+    /// to [`Self::subregion_quad_declared`]); this method is kept only as the
+    /// primitive `subregion_quad_declared` is built on, and as the negative
+    /// control this module's own tests use to show the two diverge exactly
+    /// where a real/declared mismatch exists. Do not add a new caller of it.
     #[must_use]
     pub fn subregion_quad(&self, id: &str, src: [f32; 4], dst: [f32; 4]) -> Option<GuiSpriteQuad> {
         // `declared == native_size(id)` makes the rescale a no-op (ratio
-        // 1.0), so this is byte-identical to the pre-#582 implementation —
-        // deliberately: the one remaining caller of this exact signature
-        // (the recipe book panel, `crate::hud` in `lodestone-shell`) still
-        // passes vanilla's declared `256x256`-baseline literals uninformed of
-        // this fix, and changing this method's own arithmetic would silently
-        // change what that caller draws on any pack where real != declared,
-        // without that caller's own code having been touched to match.
+        // 1.0), so this stays byte-identical to the original, ratio-less
+        // implementation at a 1x-equivalent pack — deliberately, since this
+        // method's own contract promises real-pixel-space `src` and changing
+        // its arithmetic would break that promise for whatever still calls it
+        // directly (this module's own tests, today).
         let native = self.native_size(id)?;
         self.subregion_quad_declared(id, (native.0 as f32, native.1 as f32), src, dst)
     }
@@ -379,7 +401,7 @@ impl GuiAtlas {
     /// `512x512` and the ratio `2.0` widens the sampled window to match —
     /// without this, the same `147x166` request would cover only the
     /// sheet's top-left quadrant and the caller's destination rect would
-    /// show that quadrant magnified 2x, which is issue #582's report.
+    /// show that quadrant magnified 2x.
     ///
     /// A `declared` equal to `id`'s own [`Self::native_size`] makes this
     /// identical to [`Self::subregion_quad`] — the ratio is `1.0` either way.
@@ -673,8 +695,8 @@ mod tests {
         ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>])
     }
 
-    /// Issue #582's own worked example, reproduced as a gate: a `147×166`
-    /// window at `(1, 1)` of a sheet **declared** `256×256`
+    /// The recipe book panel's own worked example, reproduced as a gate: a
+    /// `147×166` window at `(1, 1)` of a sheet **declared** `256×256`
     /// (`RecipeBookComponent.java`'s `blit(RECIPE_BOOK_LOCATION, xo, yo, 1.0F,
     /// 1.0F, 147, 166, 256, 256)`), built once at 256×256 real pixels (a
     /// 16x-equivalent pack, where declared and real coincide) and once at
@@ -687,8 +709,8 @@ mod tests {
     /// (`SRC[i] / DECLARED`), which vanilla's own `textureX / spriteWidth`
     /// formula computes and which is resolution-independent by construction.
     /// Both packs must resolve to that same fraction of the sprite's real
-    /// placed atlas rect — the discriminating assertion the issue's
-    /// hypothesis predicts and the pre-fix code could not satisfy.
+    /// placed atlas rect — a ratio-less resolver could not satisfy this at
+    /// both resolutions simultaneously.
     #[test]
     fn subregion_quad_declared_is_pack_resolution_independent() {
         const DECLARED: (f32, f32) = (256.0, 256.0);
@@ -748,14 +770,14 @@ mod tests {
     }
 
     /// The negative control for the gate above: the legacy `subregion_quad`
-    /// (kept only for the not-yet-migrated recipe-panel caller — see its own
-    /// doc) treats `SRC` as real pixels with **no** declared/real rescale, so
-    /// it agrees with the declared-aware method only where the ratio is `1.0`
-    /// (16x-equivalent) and must disagree at 32x — proving this gate can
-    /// actually detect the bug the issue reports, not just that the code
-    /// runs.
+    /// (kept only as the primitive `subregion_quad_declared` is built on, and
+    /// as this control — see its own doc) treats `SRC` as real pixels with
+    /// **no** declared/real rescale, so it agrees with the declared-aware
+    /// method only where the ratio is `1.0` (16x-equivalent) and must
+    /// disagree at 32x — proving this gate can actually detect a
+    /// declared-vs-real mismatch, not just that the code runs.
     #[test]
-    fn legacy_subregion_quad_reproduces_the_582_bug_at_32x() {
+    fn legacy_subregion_quad_diverges_from_the_declared_fix_at_32x() {
         const DECLARED: (f32, f32) = (256.0, 256.0);
         const SRC: [f32; 4] = [1.0, 1.0, 147.0, 166.0];
         const DST: [f32; 4] = [10.0, 20.0, 147.0, 166.0];
@@ -792,8 +814,8 @@ mod tests {
             .expect("32x declared quad");
         assert_ne!(
             legacy_32.uv_min, declared_32.uv_min,
-            "at 32x the undeclared legacy method must diverge from the fix \
-             (this is issue #582's magnification, reproduced as a control)"
+            "at 32x the undeclared legacy method must diverge from the declared-aware fix, or \
+             this control proves nothing about what the rescale fixes"
         );
     }
 
