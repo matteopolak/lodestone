@@ -339,6 +339,106 @@ fn system_chat_preserves_component_colour() {
     }
 }
 
+/// `ClientAction::SendSignedChat` must land on the same `chat` packet id as
+/// unsigned `SendChat`, with the signature populated and the ack fields in
+/// `ChatMessage`'s own field order (`message, timestamp, salt, signature,
+/// last_seen_offset, acknowledged, checksum`).
+///
+/// `timestamp_millis` and `salt` are pairwise-distinct i64s so a transposition
+/// of the two would be visible; `last_seen_offset`/`checksum` are likewise
+/// distinct from both and from each other. This asserts the wire's own
+/// epoch-**millis** unit — the payload `lodestone-auth` signs over is a
+/// *different*, epoch-**seconds** value derived from this one and is not on
+/// this packet at all, so there is nothing here for it to transpose with; see
+/// `lodestone_auth::build_signature_payload`'s doc for that distinction.
+#[test]
+fn send_signed_chat_encodes_millis_timestamp_and_ack_fields_in_order() {
+    let adapter = V770Adapter::new();
+    let mut signature = [0u8; 256];
+    for (i, b) in signature.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    let out = adapter
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::SendSignedChat {
+                text: "hello".to_owned(),
+                timestamp_millis: 1_700_000_000_123,
+                salt: 42,
+                signature: signature.to_vec(),
+                last_seen_offset: 5,
+                acknowledged: [0b0000_0001, 0b0000_0010, 0b0000_0100],
+                checksum: -7,
+            },
+        )
+        .expect("encode signed chat");
+    let (id, payload) = out.expect("signed chat must produce a packet");
+    assert_eq!(id, play::serverbound::CHAT, "same packet id as unsigned chat");
+
+    let mut expected = mc_string("hello");
+    expected.extend_from_slice(&1_700_000_000_123i64.to_be_bytes());
+    expected.extend_from_slice(&42i64.to_be_bytes());
+    expected.push(0x01); // signature present
+    expected.extend_from_slice(&signature);
+    expected.extend_from_slice(&var_i32(5));
+    expected.extend_from_slice(&[0b0000_0001, 0b0000_0010, 0b0000_0100]);
+    expected.push((-7i8) as u8);
+    assert_eq!(payload, expected);
+}
+
+#[test]
+fn send_signed_chat_not_encoded_outside_play() {
+    let adapter = V770Adapter::new();
+    let out = adapter
+        .encode_action(
+            ConnectionState::Configuration,
+            &ClientAction::SendSignedChat {
+                text: "hi".to_owned(),
+                timestamp_millis: 1,
+                salt: 2,
+                signature: vec![0u8; 256],
+                last_seen_offset: 0,
+                acknowledged: [0; 3],
+                checksum: 0,
+            },
+        )
+        .expect("encode outside play");
+    assert!(out.is_none(), "signed chat only exists in play, got {out:?}");
+}
+
+/// `ClientAction::AnnounceChatSession` must encode `chat_session_update`'s
+/// field order exactly: session UUID, expiry (epoch millis), then the
+/// varint-length-prefixed public key and key signature — mirroring
+/// `RemoteChatSession.Data.write`. Public key and key signature are given
+/// different lengths and different bytes so a transposition of the two
+/// varint-prefixed blocks would be visible.
+#[test]
+fn announce_chat_session_encodes_uuid_millis_key_then_signature() {
+    let adapter = V770Adapter::new();
+    let session_id = uuid::Uuid::from_u128(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00);
+    let out = adapter
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::AnnounceChatSession {
+                session_id,
+                expires_at_millis: 1_700_000_000_123,
+                public_key: vec![0x30, 0x81, 0x9f],
+                key_signature: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            },
+        )
+        .expect("encode chat session announce");
+    let (id, payload) = out.expect("chat session announce must produce a packet");
+    assert_eq!(id, play::serverbound::CHAT_SESSION_UPDATE);
+
+    let mut expected = session_id.as_bytes().to_vec();
+    expected.extend_from_slice(&1_700_000_000_123i64.to_be_bytes());
+    expected.extend_from_slice(&var_i32(3));
+    expected.extend_from_slice(&[0x30, 0x81, 0x9f]);
+    expected.extend_from_slice(&var_i32(4));
+    expected.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+    assert_eq!(payload, expected);
+}
+
 #[test]
 fn disguised_chat_preserves_component_colour() {
     let adapter = V770Adapter::new();
