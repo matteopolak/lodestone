@@ -143,22 +143,29 @@ secret and token with `ServerKeyPair::decrypt`).
 
 ## How to change it
 
-- **Wiring this into a real dedicated/LAN host is not done by this change,
-  deliberately.** The one production caller of the mob-events-and-commands
-  wrapper (`serve_connection_with_mob_events_and_commands_shared`) is
-  `IntegratedServer` in `crate::integrated`, which this change's ownership
-  split does not cover (see this file's own comment on why that function's
-  signature could not simply grow a new parameter — the established pattern
-  every capability in `crate::server` already follows,
-  `serve_connection_with_resource_pack`/`serve_connection_with_plugin_channels`
-  among them). `serve_connection_with_online_mode` is the
-  `_and_commands_shared`-shaped sibling that passes `Some`; turning a real
-  host on needs `integrated.rs` (or whatever code path a future dedicated
-  server binary uses) to call it instead, with a real
-  `OnlineModeConfig::new(reqwest_client)` and — critically — a config flag an
-  operator can actually set (there is no `online-mode` knob read from
-  anywhere yet, matching `server-login-compression.md`'s own compression
-  threshold having no config knob either).
+- **Wiring into a real LAN/dedicated host is now done, via `LanConfig::online_mode`
+  (issue #273's other half).** `IntegratedServer::open_to_lan` — the one production
+  caller of the mob-events-and-commands wrapper
+  (`serve_connection_with_mob_events_and_commands_shared`) — reads
+  `LanConfig::online_mode: Option<OnlineModeConfig>` and, per accepted socket,
+  calls `serve_connection_with_online_mode` instead when it is `Some`. `None`
+  (`LanConfig::default()`, what `bind` and every pre-existing caller still
+  build) reproduces the offline behaviour above byte-for-byte. See
+  [`docs/open-to-lan.md`](./open-to-lan.md) for the field table and
+  `crates/lodestone-server/tests/open_to_lan_online_mode.rs` for a real-TCP-loopback
+  proof of both branches (a real RSA/AES-128-CFB8 round trip on the `Some`
+  side, no `EncryptionRequest` at all on the `None` side). Turning a *live*
+  host on from there needs a real `OnlineModeConfig::new(reqwest_client)` (not
+  `for_test`) passed into that field — nothing in this crate constructs one on
+  its own — plus whatever settings surface hands an operator the choice
+  (`crate::server`'s own precedent,
+  `serve_connection_with_resource_pack`/`serve_connection_with_plugin_channels`,
+  is the shape `serve_connection_with_online_mode` itself follows; `LanConfig`
+  is the shape the *host*-level knob follows, alongside `rcon`/`access`/`commands`).
+  Singleplayer (`IntegratedServer::open_in_memory*`) never reads this field at
+  all — those constructors call the plain `_shared` wrapper directly, which
+  always passes `None` internally, so singleplayer cannot authenticate no
+  matter how a LAN host is configured.
 - **New field on the verified identity (e.g. skin properties):**
   `lodestone_auth::HasJoinedProfile::properties` already carries them from
   the session server, but `ServerProtocol::login_success(&self, username,

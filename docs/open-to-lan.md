@@ -57,11 +57,46 @@ which is `bind`'s pre-#535 behaviour verbatim — no existing caller changes.
 | `commands` | every accepted connection's `/`-commands | hardcoded `CommandDispatch::none()` |
 | `resource_packs` | `ResourcePackPushFeed` per connection | hardcoded `::default()` |
 | `plugin_channels` | `PluginChannelRegistry` per connection | hardcoded `::default()` |
+| `online_mode` | picks `serve_connection_with_online_mode` vs the plain wrapper, per accepted socket | did not exist — every join was offline, unconditionally |
 
-The last three arrive because the accept loop now calls
+The `resource_packs`/`plugin_channels`/`commands` trio arrive because the accept loop calls
 `serve_connection_with_mob_events_and_commands_shared` (which grew the resource-pack and
 plugin-channel parameters and lost its `#[allow(dead_code)]`) instead of
 `serve_connection_with_mob_events_shared`, which hardcodes all three.
+
+### Online mode is a per-connection branch, not a parameter on that wrapper (issue #273)
+
+`serve_connection_with_mob_events_and_commands_shared`'s own doc comment explains why it never
+grew an `online_mode` parameter: its signature is depended on from outside this crate's ownership
+split (this file's caller, plus `crates/protocol/v770/tests/*`), so a new capability here always
+gets a **sibling** entry point instead — `serve_connection_with_online_mode`, the
+`_and_commands_shared`-shaped function that additionally takes `&OnlineModeConfig`. The accept
+loop's `async move` block picks between the two per accepted socket:
+
+```rust
+let _ = match &online_mode {
+    Some(online_mode) => serve_connection_with_online_mode(/* .., */ online_mode).await,
+    None => serve_connection_with_mob_events_and_commands_shared(/* .. */).await,
+};
+```
+
+`online_mode` itself is cloned out of `LanConfig` before the accept loop's `async move` (same
+`.clone()`-before-the-block trap this file's own "How to change it" section already names) and
+cloned again per accepted socket, exactly like `access` just above it — cheap either way:
+`None` costs nothing, and `Some` shares one `reqwest::Client` connection pool across every player,
+per `OnlineModeConfig::http`'s own doc comment. See
+[`docs/server-online-mode.md`](./server-online-mode.md) for the handshake itself, and
+`crates/lodestone-server/tests/open_to_lan_online_mode.rs` for a real-TCP-loopback proof of both
+branches — `default_lan_config_stays_offline_no_network_call` (the discriminating gate: a
+default-built `LanConfig` must never send an `EncryptionRequest`) and
+`lan_config_online_mode_demands_encryption_and_substitutes_identity` (a real RSA/AES-128-CFB8
+round trip through the real listener, ending with the session server's identity — not the
+client's claimed one — on the wire).
+
+Singleplayer never reaches this branch at all: `open_in_memory_with_mobs`/`open_persistent_with_mobs`
+call `serve_connection_with_mob_events_and_commands_shared` directly, with no `LanConfig` and no
+`online_mode` field anywhere in the call, so there is no way to make a singleplayer world
+authenticate short of editing those constructors themselves.
 
 ### Failure policy is deliberately not uniform
 
@@ -235,6 +270,14 @@ explicit flush described above.
   there is no config-literal fix the way `query`'s was — someone has to add the settings screen
   before this field can ever be `Some`. `IntegratedServer::publish` does not expose an RCON
   option at all yet; a host who wants one still needs `open_to_lan` at world-open time.
+* **`online_mode` is the same shape as the RCON gap: real and correctly wired, but nothing
+  turns it on yet.** `net.rs`'s `open_lan_world`/`publish_to_lan` callers build their `LanConfig`
+  with `..LanConfig::default()`, which leaves `online_mode: None` — there is no settings control
+  anywhere in the pause menu or world-creation flow that would ever construct
+  `Some(OnlineModeConfig::new(..))`. Closing this needs a real toggle (plus, per
+  [`docs/server-online-mode.md`](./server-online-mode.md), a `reqwest::Client` the shell already
+  owns one of for account sign-in) threaded into whichever caller builds the `LanConfig` — not a
+  change to this crate.
 * **The button is always present**, where vanilla hides the whole half-width row on a remote
   server. `PauseButton::enabled` is a pure function of the variant at every call site, so the
   "there is nothing of ours to publish" case is stated in chat instead.
@@ -245,13 +288,14 @@ explicit flush described above.
 
 ## Configuration
 
-`LanConfig` is the whole surface. `LanConfig::default()` is query-on, everything else off,
-`view_radius: 0`.
+`LanConfig` is the whole surface. `LanConfig::default()` is query-on, everything else off
+(including `online_mode: None`, i.e. offline), `view_radius: 0`.
 
 ## Dependencies
 
 * `crate::rcon` (`RconConfig`, `spawn_listener`), `crate::query` (`QueryConfig`,
   `QueryServer`), `crate::command::CommandDispatch`,
-  `crate::plugin_channels::PluginChannelRegistry`, `crate::server::ResourcePackPushFeed`.
+  `crate::plugin_channels::PluginChannelRegistry`, `crate::server::ResourcePackPushFeed`,
+  `crate::server::{OnlineModeConfig, serve_connection_with_online_mode}` (issue #273).
 * `tokio::net::{TcpListener, UdpSocket}`; native targets only (the whole module is
   `#[cfg(not(target_arch = "wasm32"))]`).
