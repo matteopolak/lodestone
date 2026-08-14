@@ -1,4 +1,4 @@
-//! The Advancements screen (issue #167) — vanilla's `AdvancementsScreen`,
+//! The Advancements screen — vanilla's `AdvancementsScreen`,
 //! reached from the pause menu's Advancements button.
 //!
 //! ## Where the progress comes from
@@ -28,15 +28,15 @@
 //! sprite-and-item-icon work at arbitrary positions, which is what the container
 //! path already does (item icons, a GUI sprite atlas, loose panel art, the dim
 //! gradient), and what the row/label `MenuFrame` system does not. The creative
-//! inventory screen (#158) uses the same seam for the same reason.
+//! inventory screen uses the same seam for the same reason.
 //!
 //! **Clipping is done on the CPU, not via a GPU scissor.**
 //! `render_geometry_scaled` has no scissor (unlike vanilla's own
 //! `enableScissor`/`disableScissor` bracket around `AdvancementTab.
 //! drawWidgets`), so [`advancements_geometry`] clamps every piece of tree
 //! content to the `234 x 113` viewport by hand instead: the connector lines
-//! (`clamp_to`, a plain `Rect` intersection) and, since issue #565, a
-//! widget's frame sprite too (`push_sprite_clipped`/`clip_sprite_quad`,
+//! (`clamp_to`, a plain `Rect` intersection) and a widget's frame sprite too
+//! (`push_sprite_clipped`/`clip_sprite_quad`,
 //! which shrinks the sprite's UV rect in lock-step with its destination rect
 //! rather than squishing the art to fit). Before that fix a widget crossing
 //! the boundary went from wholly undrawn to its full, unclamped `26 x 26`
@@ -44,14 +44,23 @@
 //! (`overlaps`, deliberately permissive so an edge click still lands) turned
 //! true — a visible **pop**, not a clip.
 //!
-//! **The item icon inside each frame is still not clipped** — [`Builder::
-//! draw_stack`] has no sub-rect clip primitive at all (it is closer to a
-//! small item-icon render than a sprite blit), so an icon whose frame is
-//! only partly visible still draws in full or not at all. This is a smaller
-//! divergence than the frame used to be: the icon is inset well inside the
-//! `26 x 26` frame ([`ICON_DX`]/[`ICON_DY`]), so by the time any of it would
-//! be visible the frame around it already reads as "arriving", rather than
-//! a fully-formed icon popping into empty space the way the *frame* used to.
+//! **The item icon inside each frame is now clipped too**
+//! ([`draw_stack_clipped`]) — [`Builder::draw_stack`] itself still has no
+//! sub-rect clip primitive (it composites up to four streams: a flat item
+//! sprite plus its glint copy, a 3-D block-item mesh, a special-renderer icon,
+//! and colour-stream chrome), so the clip lives at this module's own call
+//! site instead, applied *after* the fact to whichever vertices `draw_stack`
+//! just appended. The flat sprite and the colour-stream chrome (the
+//! atlas-less swatch/letter fallback, the durability bar, the stack count)
+//! are shrunk to their intersection with the viewport in the same
+//! [`clip_sprite_quad`] shape [`push_sprite_clipped`] already uses for a
+//! frame, so the two clipping paths agree rather than growing a second
+//! convention. The two 3-D paths (a block item's isometric mini-model, a
+//! chest-shaped special-renderer icon) have no axis-aligned destination rect
+//! to shrink the same way — the geometry is an already-posed mesh, not a
+//! quad — so those are dropped whole rather than clipped when the icon's own
+//! bounding square is not wholly inside the viewport, which can only ever
+//! draw *fewer* pixels than vanilla, never spill past the edge.
 
 use lodestone_assets::ItemAtlas;
 use lodestone_game::item::ItemStack;
@@ -998,8 +1007,8 @@ pub fn advancements_geometry(
         }
         push_sprite(&mut b, background, tab_sprite(i, false), *rect);
     }
-    // The tiled per-tab background, drawn **before** the window art — issue
-    // #565's fourth defect ("the inner shadow and border are missing").
+    // The tiled per-tab background, drawn **before** the window art, or the
+    // window's own baked-in inner shadow and border would be erased.
     //
     // `AdvancementTab.extractContents` (stratum 1, `AdvancementsScreen.
     // extractInside`) draws the tile grid; `AdvancementsScreen.extractWindow`
@@ -1065,20 +1074,17 @@ pub fn advancements_geometry(
         push_sprite_clipped(&mut b, background, sprite, *rect, layout.inside);
     }
     // `bg_slot_vertex_count`'s split, **before** the hover tooltip's own
-    // sprites — issue #565's second defect ("the hover popover draws under
-    // the entry"). See the big comment below the item-icon loops for why: in
-    // short, the renderer's four-pass order draws every background sprite
-    // pushed up to this marker *before* any item icon, so a tooltip panel
-    // pushed here (the pre-#565 shape) would sit under every widget's icon —
-    // not just the hovered one's, since the icon pass has no idea which
-    // sprite belongs to which widget. Everything from here on that belongs to
-    // the tooltip is pushed **after** this marker instead, landing in the
-    // "front" bg range the renderer draws once every icon already has.
+    // sprites: the renderer draws every background sprite pushed up to this
+    // marker before any item icon, so a tooltip panel pushed here would sit
+    // under every widget's icon rather than just the hovered one's. Everything
+    // from here on that belongs to the tooltip is pushed **after** this
+    // marker instead, landing in the "front" bg range the renderer draws once
+    // every icon already has.
     let bg_slot_floats = b.bg_verts.len();
 
     // The connector lines, shadows already ordered before foregrounds by
     // `draw_plan`. On the colour stream, which draws after the background
-    // sprites and before the item icons — exactly where vanilla puts them.
+    // sprites and before the item icons.
     let (shadow_ink, line_ink) = (LINE_BG, LINE_FG);
     for (rect, shadow) in &plan.lines {
         b.rect_px(
@@ -1099,14 +1105,17 @@ pub fn advancements_geometry(
         );
     }
     // `chrome_vertex_count`'s split: connector lines and the title above it,
-    // the hover dim below — see the dim's own comment for why it needs to sit
-    // in the *next* colour range rather than this one.
+    // the hover dim below.
     let chrome_floats = b.verts.len();
 
     // ---- the chrome/icon split ----
 
+    // Every widget's own icon, clipped to the viewport — [`draw_stack_clipped`]
+    // in the same shape as [`clip_sprite_quad`], which the frame loop above
+    // already uses, rather than growing a second clipping convention. See its
+    // own doc for what it clips and what it can only drop whole.
     for (_, _, stack, at) in &plan.frames {
-        b.draw_stack(&assets, stack, at.0, at.1);
+        draw_stack_clipped(&mut b, &assets, stack, at.0, at.1, layout.inside, (w, h));
     }
     let tab_roots = advancement_tabs();
     for (i, rect) in layout.tabs.iter().enumerate() {
@@ -1133,13 +1142,13 @@ pub fn advancements_geometry(
     let slot_glint_floats = b.glint_verts.len();
     let slot_special = b.special.len();
 
-    // ---- issue #565's second defect, the rest of the fix ------------------
+    // ---- the rest of the tooltip fix ---------------------------------------
     //
     // Everything from here down is the tooltip, and everything above is not —
     // that is now the *only* fact this split needs to encode, because
-    // [`push_sprite_clipped`]'s viewport clip (the third defect's fix) already
-    // keeps tree content from ever overlapping the window/tab chrome above.
-    // So two z-tiers is enough, and the renderer already has exactly two:
+    // [`push_sprite_clipped`]'s viewport clip already keeps tree content from
+    // ever overlapping the window/tab chrome above. So two z-tiers is enough,
+    // and the renderer already has exactly two:
     // `ContainerRenderer::render_geometry_scaled_between_strata`'s "slot" and
     // "carried" passes — built for an item held on the cursor, but structurally
     // the same shape as "content, then a tooltip that must sit above literally
@@ -1174,9 +1183,7 @@ pub fn advancements_geometry(
     // over it, then the icon frame redrawn on top — `extractHover`'s order,
     // and the reason the frame is drawn twice per hovered widget. Pushed
     // *after* `bg_slot_floats`, so the renderer's front-bg pass draws these
-    // once every widget's icon already has, rather than the pre-#565
-    // ordering, which pushed them before `bg_slot_floats` and so drew them
-    // before the icon pass ever ran.
+    // once every widget's icon already has.
     if let Some((_, hover)) = &hover {
         if let Some(panel) = hover.panel {
             push_sprite(&mut b, background, SPRITE_TITLE_BOX, panel);
@@ -1283,8 +1290,8 @@ fn push_sprite(
     }
 }
 
-/// [`push_sprite`], clamped to `clip` — issue #565's third defect: entries
-/// popped fully in and out at the viewport edge, because [`AdvancementsLayout
+/// [`push_sprite`], clamped to `clip` — without this, entries popped fully in
+/// and out at the viewport edge, because [`AdvancementsLayout
 /// ::widgets`]'s *inclusion* test (`overlaps`, in [`advancements_layout`]) is
 /// the only gate a widget's frame art passed through, and that test is
 /// deliberately permissive (any overlap at all counts, so a click at the very
@@ -1326,8 +1333,8 @@ fn push_sprite_clipped(
 ///
 /// Valid because a `GuiSpriteQuad` (unlike a nine-slice sprite) maps its
 /// whole `dst` rect to `[uv_min, uv_max]` **uniformly** — the same
-/// fraction-of-declared-size principle the nine-slice fix (#561) uses for a
-/// border quad, applied here to a plain one instead: the fraction of `dst`
+/// fraction-of-declared-size principle a nine-slice sprite's own border-quad
+/// fix uses, applied here to a plain quad instead: the fraction of `dst`
 /// kept on each axis is the same fraction of the UV span kept.
 #[must_use]
 fn clip_sprite_quad(q: GuiSpriteQuad, clip: Rect) -> Option<GuiSpriteQuad> {
@@ -1351,6 +1358,122 @@ fn clip_sprite_quad(q: GuiSpriteQuad, clip: Rect) -> Option<GuiSpriteQuad> {
         uv_min: [q.uv_min[0] + fx0 * u_span, q.uv_min[1] + fy0 * v_span],
         uv_max: [q.uv_min[0] + fx1 * u_span, q.uv_min[1] + fy1 * v_span],
     })
+}
+
+/// The GUI-pixel square [`Builder::draw_stack`] draws a slot icon into —
+/// `container`'s own private `CELL` restated here, the same way this module
+/// already restates [`COLOUR_FLOATS_PER_VERTEX`] because the original is
+/// module-private where it lives.
+const ICON_SIZE: f32 = 16.0;
+
+/// Whether `inner` lies wholly inside `outer` — the coarse containment test
+/// [`draw_stack_clipped`] uses for the two icon streams it cannot sub-clip.
+fn rect_wholly_inside(outer: Rect, inner: Rect) -> bool {
+    inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner.x + inner.w <= outer.x + outer.w
+        && inner.y + inner.h <= outer.y + outer.h
+}
+
+/// [`Builder::draw_stack`], clipped to `clip` — a sub-rect clip primitive in
+/// the same shape as [`clip_sprite_quad`] rather than a second convention:
+/// `draw_stack` has no clip seam of its own (it
+/// composites up to four streams — a flat item sprite plus its glint copy,
+/// a 3-D block-item mesh, a special-renderer block-entity icon, and
+/// colour-stream chrome), so this snapshots every stream's length, lets
+/// `draw_stack` run, and clips exactly the vertices it just appended.
+///
+/// The flat sprite and glint streams, and the colour-stream chrome, are
+/// `GuiSpriteQuad`-shaped (an axis-aligned destination rect, sampled
+/// uniformly) exactly like a frame sprite, so [`clip_quads_from`] reuses
+/// [`clip_sprite_quad`] itself for the first two and a plain [`clamp_to`]
+/// for the third (no UV to preserve there). The two 3-D streams are not:
+/// the geometry is an already-posed isometric mesh, with no destination
+/// rect to shrink, so an icon that straddles the edge on either of those
+/// paths is dropped whole instead — strictly *fewer* pixels than vanilla
+/// ever draws, never a spill past the edge, which is the containment
+/// property this exists to guarantee. Every advancement icon actually
+/// shipped is small (`ICON_SIZE`) and inset well inside its `26 x 26`
+/// frame, so this only ever triggers at the very edge of a scrolled tree.
+fn draw_stack_clipped(
+    b: &mut Builder<'_>,
+    assets: &IconAssets<'_>,
+    stack: &ItemStack,
+    x: f32,
+    y: f32,
+    clip: Rect,
+    canvas: (f32, f32),
+) {
+    let before = (
+        b.verts.len(),
+        b.item_verts.len(),
+        b.glint_verts.len(),
+        b.model_verts.len(),
+        b.special.len(),
+    );
+    b.draw_stack(assets, stack, x, y);
+
+    if (b.model_verts.len() > before.3 || b.special.len() > before.4)
+        && !rect_wholly_inside(clip, Rect { x, y, w: ICON_SIZE, h: ICON_SIZE })
+    {
+        b.model_verts.truncate(before.3);
+        b.special.truncate(before.4);
+    }
+
+    clip_quads_from(&mut b.item_verts, before.1, crate::hud::SPRITE_FLOATS_PER_VERTEX, true, canvas, clip);
+    clip_quads_from(&mut b.glint_verts, before.2, crate::hud::SPRITE_FLOATS_PER_VERTEX, true, canvas, clip);
+    clip_quads_from(&mut b.verts, before.0, COLOUR_FLOATS_PER_VERTEX, false, canvas, clip);
+}
+
+/// Clips every already-emitted flat quad on `verts[from..]` to `clip`, in
+/// place. Each quad is six vertices at `floats_per_vertex` floats each — the
+/// emission order [`crate::hud::item_icon::push_sprite_quad`] and
+/// `ColourStream::rect` both use (`v0=(x0,y0)`, `v1=(x1,y0)`, `v2=(x1,y1)`,
+/// duplicated at `v3`/`v4`, `v5=(x0,y1)`) — so the destination rect (and,
+/// when `has_uv`, the UV rect) can be read straight back out of the NDC
+/// vertices already written, the same trick
+/// `a_frame_straddling_the_viewport_edge_draws_only_its_visible_sliver`
+/// uses to decode a single rect's width, generalised here to a whole quad
+/// (and, for a UV-carrying stream, handed to [`clip_sprite_quad`] itself —
+/// the exact function a frame sprite clips through, so the two paths agree).
+/// A quad the clip drops entirely is not re-emitted, so `verts` may shrink.
+fn clip_quads_from(
+    verts: &mut Vec<f32>,
+    from: usize,
+    floats_per_vertex: usize,
+    has_uv: bool,
+    canvas: (f32, f32),
+    clip: Rect,
+) {
+    let stride = floats_per_vertex * 6;
+    let (vw, vh) = canvas;
+    let px = |ndc: f32| (ndc + 1.0) * vw / 2.0;
+    let py = |ndc: f32| (1.0 - ndc) * vh / 2.0;
+    let tail = verts.split_off(from);
+    for chunk in tail.chunks_exact(stride) {
+        let fpv = floats_per_vertex;
+        let (x0, y0) = (px(chunk[0]), py(chunk[1]));
+        let x1 = px(chunk[fpv]);
+        let y1 = py(chunk[fpv * 2 + 1]);
+        if has_uv {
+            let q = GuiSpriteQuad {
+                dst: [x0, y0, x1 - x0, y1 - y0],
+                uv_min: [chunk[2], chunk[3]],
+                uv_max: [chunk[fpv + 2], chunk[fpv * 2 + 3]],
+            };
+            let tint = [chunk[4], chunk[5], chunk[6], chunk[7]];
+            if let Some(clipped) = clip_sprite_quad(q, clip) {
+                crate::hud::item_icon::push_sprite_quad(verts, vw, vh, clipped, tint);
+            }
+        } else {
+            let mut r = Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+            let colour = [chunk[2], chunk[3], chunk[4], chunk[5]];
+            if clamp_to(&mut r, clip) {
+                let mut cs = crate::hud::item_icon::ColourStream { verts: &mut *verts, w: vw, h: vh };
+                cs.rect(r.x, r.y, r.w, r.h, colour);
+            }
+        }
+    }
 }
 
 /// The tab-button sprite for `index` — `AdvancementTabType.extractRenderState`
@@ -1550,7 +1673,7 @@ mod tests {
         assert!(resolved >= 5, "only {resolved} widgets were clickable");
     }
 
-    // -- clipping, not culling (issue #565) ----------------------------------
+    // -- clipping, not culling -----------------------------------------------
 
     #[test]
     fn clip_sprite_quad_shrinks_dst_and_uv_in_lock_step() {
@@ -1628,8 +1751,8 @@ mod tests {
             "expected a 1 px-wide sliver, got {clipped_px_w} px"
         );
 
-        // The control: the pre-#565 unclamped path draws the full 26 px width
-        // for the exact same input, so the assertion above is measuring the
+        // The control: the unclamped `push_sprite` path draws the full 26 px
+        // width for the exact same input, so the assertion above is measuring the
         // clip and not merely "some rect got drawn".
         let mut b_full = Builder::new(canvas_w, 300.0, None);
         push_sprite(&mut b_full, None, "advancements/frame_unobtained", straddling);
@@ -1641,7 +1764,124 @@ mod tests {
         assert!(clipped_px_w < full_px_w, "the clip must actually shrink the rect");
     }
 
-    // -- z-order: the tooltip must draw over every icon (issue #565) --------
+    // -- icon clipping: draw_stack_clipped must never spill past the edge ----
+
+    /// Decodes every vertex `(px, py)` a flat colour-stream buffer holds,
+    /// undoing `ColourStream`'s own `to_ndc` — the same read-back
+    /// `a_frame_straddling_the_viewport_edge_draws_only_its_visible_sliver`
+    /// already trusts for one rect's width, generalised to every vertex so a
+    /// whole icon draw (swatch, label, count) can be checked at once rather
+    /// than assuming which one call pushed it. Reads points, not vertex
+    /// *counts* or a probe rect sampling only vertices — the vertex-sampling
+    /// trap a coverage probe falls into when a quad *encloses* the probe
+    /// rather than sitting inside it does not apply here, because every
+    /// point this decodes is a real emitted vertex to begin with.
+    fn decode_colour_px(verts: &[f32], canvas_w: f32, canvas_h: f32) -> Vec<(f32, f32)> {
+        verts
+            .chunks_exact(COLOUR_FLOATS_PER_VERTEX)
+            .map(|v| {
+                let px = (v[0] + 1.0) * canvas_w / 2.0;
+                let py = (1.0 - v[1]) * canvas_h / 2.0;
+                (px, py)
+            })
+            .collect()
+    }
+
+    /// The discriminating gate for icon clipping: an icon whose
+    /// atlas-less swatch straddles the viewport's right edge must draw
+    /// **nothing** past it. Every point is checked, not just a sampled
+    /// bounding box, and every mismatch is collected rather than asserted
+    /// inside the loop — a single `assert!` per point would report only the
+    /// first escapee and hide how many there really were.
+    #[test]
+    fn an_icon_straddling_the_viewport_edge_draws_nothing_outside_it() {
+        let inside = Rect { x: 9.0, y: 18.0, w: INSIDE_W, h: INSIDE_H };
+        let (canvas_w, canvas_h) = (400.0, 300.0);
+        let assets = IconAssets { items: None, models: None };
+        let id: lodestone_model::Identifier = "minecraft:stick".parse().expect("a valid id");
+        let stack = ItemStack::new(id, 1);
+
+        // The fallback swatch is a 10x10 rect at (icon_x + 3, icon_y + 3)
+        // (`Builder::draw_stack_counted`'s `_` arm) — place the icon so that
+        // rect straddles the viewport's right edge by exactly one pixel,
+        // mirroring the frame test just above.
+        let icon_x = inside.x + inside.w - 1.0 - 3.0;
+        let icon_y = inside.y + 5.0;
+
+        let mut b = Builder::new(canvas_w, canvas_h, None);
+        draw_stack_clipped(&mut b, &assets, &stack, icon_x, icon_y, inside, (canvas_w, canvas_h));
+        let pts = decode_colour_px(&b.verts, canvas_w, canvas_h);
+        assert!(!pts.is_empty(), "the straddling icon drew nothing at all");
+        let escaped: Vec<(f32, f32)> = pts
+            .iter()
+            .copied()
+            .filter(|&(px, py)| {
+                px < inside.x - 0.01
+                    || py < inside.y - 0.01
+                    || px > inside.x + inside.w + 0.01
+                    || py > inside.y + inside.h + 0.01
+            })
+            .collect();
+        assert!(escaped.is_empty(), "vertices escaped the viewport: {escaped:?}");
+
+        // The control: the same stack at the same position through plain
+        // `Builder::draw_stack` (no clip) must spill past the edge, proving
+        // the assertion above is measuring the clip and not "nothing draws
+        // here" — [`Builder::draw_stack`] has no clip primitive of its own,
+        // which is [`draw_stack_clipped`]'s whole reason to exist.
+        let mut b_full = Builder::new(canvas_w, canvas_h, None);
+        b_full.draw_stack(&assets, &stack, icon_x, icon_y);
+        let full_pts = decode_colour_px(&b_full.verts, canvas_w, canvas_h);
+        let full_escaped = full_pts
+            .iter()
+            .filter(|&&(px, _)| px > inside.x + inside.w + 0.01)
+            .count();
+        assert!(
+            full_escaped > 0,
+            "control: the unclamped draw must spill past the right edge"
+        );
+    }
+
+    /// The completeness control the straddling gate above needs: an icon
+    /// placed **wholly inside** the viewport must still draw in full. A gate
+    /// that only ever checked containment would pass just as well if
+    /// [`draw_stack_clipped`] silently dropped every icon outright.
+    #[test]
+    fn an_icon_wholly_inside_the_viewport_draws_completely() {
+        let inside = Rect { x: 9.0, y: 18.0, w: INSIDE_W, h: INSIDE_H };
+        let (canvas_w, canvas_h) = (400.0, 300.0);
+        let assets = IconAssets { items: None, models: None };
+        let id: lodestone_model::Identifier = "minecraft:stick".parse().expect("a valid id");
+        let stack = ItemStack::new(id, 1);
+        let (icon_x, icon_y) = (inside.x + 20.0, inside.y + 20.0);
+
+        let mut b = Builder::new(canvas_w, canvas_h, None);
+        draw_stack_clipped(&mut b, &assets, &stack, icon_x, icon_y, inside, (canvas_w, canvas_h));
+
+        let mut b_full = Builder::new(canvas_w, canvas_h, None);
+        b_full.draw_stack(&assets, &stack, icon_x, icon_y);
+
+        assert_eq!(
+            b.verts.len(),
+            b_full.verts.len(),
+            "a fully-inside icon must draw exactly as much as the unclamped path"
+        );
+        let mismatches: Vec<(usize, f32, f32)> = b
+            .verts
+            .iter()
+            .zip(b_full.verts.iter())
+            .enumerate()
+            .filter(|(_, (a, c))| (**a - **c).abs() >= 0.01)
+            .map(|(i, (a, c))| (i, *a, *c))
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "a fully-inside icon must be pixel-identical to the unclamped draw, \
+             but (index, clipped, unclamped) differ at {mismatches:?}"
+        );
+    }
+
+    // -- z-order: the tooltip must draw over every icon ----------------------
 
     #[test]
     fn hovering_a_widget_pushes_its_tooltip_into_the_carried_pass() {
@@ -1664,7 +1904,7 @@ mod tests {
         // frame-redraw included — to `Builder::rect_px`, i.e. the plain
         // colour stream, never `bg_verts`. So `bg_slot_vertex_count` cannot
         // be exercised from this test; what *is* exercised, and is the part
-        // that was actually broken pre-#565, is that every one of the
+        // that used to be broken, is that every one of the
         // tooltip's own draws — the panel/bars/frame-redraw fallback rects
         // *and* the tooltip text *and* the icon-redraw fallback — lands
         // after `slot_vertex_count`, i.e. in the carried pass, alongside
