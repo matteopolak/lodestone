@@ -314,11 +314,13 @@ pub trait MobController {
     /// [`find_nearest_target`](MobController::find_nearest_target) names for
     /// its own `hasLineOfSight`, omitted rather than faked, erring permissive.
     ///
-    /// Defaults to `false` (nobody staring). The only consumers are the
-    /// enderman's stare-gated goals, and they are not registered yet, so a
-    /// host that never feeds this and a species that cannot read it must agree
-    /// on `false` — a default of `true` would make every enderman react to
-    /// every player on sight.
+    /// Defaults to `false` (nobody staring). The only consumer is the
+    /// enderman's [`EndermanFreezeWhenLookedAt`](crate::ai::goals::EndermanFreezeWhenLookedAt),
+    /// and a host that never feeds this must agree with that goal on `false`
+    /// — a default of `true` would make every enderman react to every player
+    /// on sight. That goal now exists, but the **feed** (a real per-tick view
+    /// vector crossing from `lodestone_server`) does not yet: see that
+    /// crate's `PlayerPerception` for the current state.
     fn is_being_stared_at(&self) -> bool {
         false
     }
@@ -644,9 +646,15 @@ pub fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
 ///
 /// with `dir` the unit vector from `viewer_eye` to `target` and `dist` its
 /// length. **The tolerance is divided by distance when `adjustForDistance` is
-/// true, so the acceptance cone *widens* with range** — the opposite of a
-/// fixed-angle cone, and the reason this is a faithful port rather than an
-/// approximation (the enderman passes `0.025, true`).
+/// true, so the required precision *increases* with range** — dividing a
+/// fixed `coneSize` by a growing `dist` pushes the threshold toward `1.0`,
+/// shrinking the angular cone the further away the viewer stands. Measured
+/// from this function's own test: `coneSize` `1.0` accepts a `dot` of `0.6`
+/// (about 53°) at 2 blocks but rejects the identical angle at 5 blocks
+/// (threshold rises from `0.5` to `0.8`). This is the opposite of a
+/// fixed-angle cone — that reads `coneSize` as the tolerance directly,
+/// independent of `dist` — and the reason this is a faithful port rather than
+/// an approximation (the enderman passes `0.025, true`).
 ///
 /// The full vanilla test is this cone *and* line of sight
 /// (`target.hasLineOfSight(viewer, …)`, a world raycast) — the same disclosed

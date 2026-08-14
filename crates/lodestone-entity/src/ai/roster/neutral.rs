@@ -29,7 +29,7 @@
 //! | absent primitive | blocks | landed as |
 //! |---|---|---|
 //! | the anger timer + anger target (a *grudge*) | all four | host-side `SimMob::anger` + `MobController::angry_target` (the deadline stays on the host) |
-//! | "is that player looking at me" (a gaze test) | enderman freeze + stare | `MobController::is_being_stared_at` + free `is_in_view_cone` geometry; the **feed is blocked** — `PlayerPerception` carries no view vector |
+//! | "is that player looking at me" (a gaze test) | enderman freeze + stare | `MobController::is_being_stared_at` + free `is_in_view_cone` geometry, now consumed by `EndermanFreezeWhenLookedAt` below (`Coverage::Modelled`). **The host feed is still blocked** — `lodestone_server::mobs::PlayerPerception` does not yet carry a view vector, so `is_being_stared_at` reads a permanent `false` in the running game until that lands; see this table's own doc on the enderman row. The teleport half (`EndermanLookForPlayerGoal`) stays `Missing` — it needs the anger-target primitive threaded through its own aggro/teleport state machine, not just the gaze boolean |
 //! | relocating a mob instantly (a teleport) | enderman teleport | `MobController::teleport_to`, host-commanded via `SimMob::teleport_to` |
 //! | a mob damaging **itself** | bee sting-then-die | `MobController::damage_self`, drained by `MobSim::tick` through the damage pipeline |
 //! | an owner relationship | wolf tame half | `MobController::owner_position`/`is_tame`/`is_ordered_to_sit` + host-side `SimMob::owner`. **No longer blocked**: `lodestone_server::mobs::PerceivedPlayer` puts a `PlayerIdentity` (account uuid + runtime entity id) at the perception seam, so a mob can be owned *by a player*, and the wolf's `SitWhenOrderedToGoal` and `FollowOwnerGoal` rows below are `Modelled` |
@@ -43,13 +43,29 @@
 //! So the honest state of #233 is: **the tables are complete and cited; the
 //! mechanisms are blocked on the seam, in five specific, named places — all of
 //! which now have a landed primitive (issue #458).** A primitive is not a
-//! mechanism: each of the four still needs its goal (the enderman's
-//! `EndermanFreezeWhenLookedAt`/`EndermanLookForPlayerGoal`, a bee sting hook,
-//! a tame interaction) and its census (`alertOthers`) before it can be a
+//! mechanism: each of the four still needs its goal (a bee sting hook, a tame
+//! interaction) and its census (`alertOthers`) before it can be a
 //! [`Coverage::Modelled`] row. Writing one of those *here* before its goal
 //! exists would produce a type with no possible consumer — the island this
 //! repo's dominant defect class is named after — so this module does not
-//! contain one.
+//! contain most of them.
+//!
+//! **The enderman's freeze half is the first exception**, and it is worth
+//! being precise about what "exception" means here. `EndermanFreezeWhenLookedAt`
+//! is a real [`Coverage::Modelled`] row below, driven off the real
+//! [`MobController::is_being_stared_at`](super::MobController::is_being_stared_at)
+//! seam, reachable through the real roster — not a stand-in that does
+//! something else. What is *not* landed yet
+//! is the host feed that computes the boolean from an actual player view
+//! vector (`lodestone_server::mobs::PlayerPerception` still carries no view
+//! direction), so in the running game today this goal's `can_use` reads a
+//! permanent `false` and an enderman never actually freezes. That is the same
+//! honest intermediate state `nearest_player`/`temptation` sat in before
+//! their own feed lines landed — a goal with no possible input yet,
+//! rather than a goal doing the wrong thing — and it is disclosed here rather
+//! than left to be rediscovered. `EndermanLookForPlayerGoal` (the teleport
+//! half) is unaffected by any of this: it stays [`Coverage::Missing`] because
+//! it needs its own aggro/teleport state machine, not just the gaze boolean.
 //!
 //! # The trap that decided the target rows
 //!
@@ -142,7 +158,9 @@
 //! [#233]: https://github.com/matteopolak/lodestone/issues/233
 
 use crate::ai::goal::Goal;
-use crate::ai::goals::{FollowOwnerGoal, FollowParentGoal, PanicGoal, TemptGoal};
+use crate::ai::goals::{
+    EndermanFreezeWhenLookedAt, FollowOwnerGoal, FollowParentGoal, PanicGoal, TemptGoal,
+};
 
 use super::{
     Registration, Selector, SpeciesContext, breed_1_0, float_goal, hurt_by_target,
@@ -174,11 +192,15 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// Attributes `:113-118` — `MAX_HEALTH 40.0`, `MOVEMENT_SPEED 0.3F`,
 /// `ATTACK_DAMAGE 7.0`, `FOLLOW_RANGE 64.0`.
 ///
-/// The stare is two goals, not one, and both are `Missing`:
-/// `EndermanFreezeWhenLookedAt` at goal priority 1 stops the navigation while a
-/// player within 16 blocks (`distanceToSqr <= 256.0`, `:414-415`) is staring, and
-/// `EndermanLookForPlayerGoal` at target priority 1 does the teleporting. Both
-/// route through `isBeingStaredBy` (`:209-211`), which is
+/// The stare is two goals, not one. `EndermanFreezeWhenLookedAt` at goal
+/// priority 1 stops the navigation while a player within 16 blocks
+/// (`distanceToSqr <= 256.0`, `:414-415`) is staring — that one is
+/// [`Coverage::Modelled`] below, though the host feed behind its gaze
+/// boolean is not landed yet; see this module's own doc.
+/// `EndermanLookForPlayerGoal` at target priority 1 does the teleporting and
+/// stays `Missing` — it needs its own aggro/teleport state machine on top of
+/// the gaze test, not just the boolean. Both route through `isBeingStaredBy`
+/// (`:209-211`), which is
 /// `PLAYER_NOT_WEARING_DISGUISE_ITEM` (`LivingEntity.java:212-215` — a carved
 /// pumpkin, via `ItemTags.GAZE_DISGUISE_EQUIPMENT`, defeats the stare) **and**
 /// `isLookingAtMe(player, 0.025, true, false, getEyeY())`.
@@ -188,15 +210,23 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// view vector `look` and the normalised offset `dir` from player eyes to the
 /// enderman, a stare is `look.dot(dir) > 1.0 - coneSize / dist` plus line of
 /// sight. `coneSize` is `0.025` and `adjustForDistance` is `true`, so the
-/// tolerance is **divided by distance** — the acceptance cone widens the further
-/// away the player is, which is the opposite of the fixed-angle cone an
-/// approximation reaches for first.
+/// tolerance is **divided by distance** — the required precision *increases*
+/// the further away the player stands (the same offset that reads as a stare
+/// up close reads as a near-miss at range), which is the opposite of the
+/// fixed-angle cone an approximation reaches for first. See
+/// [`is_in_view_cone`](crate::ai::mob::is_in_view_cone)'s own doc comment for
+/// the worked example.
 pub const ENDERMAN: &[Registration] = &[
     Registration::goal(0, "FloatGoal", float_goal),
     // `EnderMan.EndermanFreezeWhenLookedAt` (`:401-430`), flags `{JUMP, MOVE}`.
-    // Needs the gaze test above; no raycast or view-vector primitive exists on
-    // the seam.
-    Registration::missing(Selector::Goal, 1, "EnderMan.EndermanFreezeWhenLookedAt"),
+    // Built on `MobController::is_being_stared_at` — see
+    // `EndermanFreezeWhenLookedAt`'s own doc comment for the port. The
+    // host feed that computes the boolean from a real player view vector has
+    // not landed (`lodestone_server::mobs::PlayerPerception` carries none
+    // yet), so `can_use` reads a permanent `false` in the running game until
+    // it does; the goal itself is real and exercised against the seam by this
+    // module's own tests.
+    Registration::goal(1, "EnderMan.EndermanFreezeWhenLookedAt", freeze_when_looked_at),
     Registration::goal(2, "MeleeAttackGoal", melee_attack),
     // `WaterAvoidingRandomStrollGoal(this, 1.0, 0.0F)`. The third argument is
     // vanilla's probability of preferring a dry destination; ours has no such
@@ -453,6 +483,11 @@ pub const WOLF: &[Registration] = &[
 // The factors live here rather than in `super` because no other family
 // registers these three goals at these multipliers.
 
+/// `EnderMan.EndermanFreezeWhenLookedAt(this)` takes no constructor arguments.
+fn freeze_when_looked_at(_ctx: &SpeciesContext) -> Box<dyn Goal> {
+    Box::new(EndermanFreezeWhenLookedAt::new())
+}
+
 /// `TamableAnimal.TamableAnimalPanicGoal(1.5, …)` — the wolf's panic speed
 /// factor (`animal/wolf/Wolf.java:130`). Vanilla's own `PanicGoal` speed argument
 /// is a `MOVEMENT_SPEED` multiplier.
@@ -689,22 +724,20 @@ mod tests {
         assert_eq!(at(zombie, "ZombieAttackGoal"), Some(3));
     }
 
-    /// The four headline mechanisms of issue #233 must be present as
-    /// `Coverage::Missing` rows at their real vanilla priorities — not absent, and
+    /// The still-blocked headline mechanisms named in this module's own doc
+    /// comment must be present as `Coverage::Missing` rows at their real
+    /// vanilla priorities — not absent, and
     /// not silently `Modelled` by a goal that does something else.
     ///
-    /// This is the gate that fails if someone "implements" the enderman stare by
-    /// pointing the row at a plain melee goal, or drops a row because nothing
-    /// builds it.
+    /// This is the gate that fails if someone "implements" the enderman
+    /// teleport by pointing the row at a plain goal, or drops a row because
+    /// nothing builds it. The enderman *freeze* half is no longer in this
+    /// list — primitive 2 landed it as a real `Coverage::Modelled` row, and
+    /// [`the_enderman_freeze_row_is_modelled_and_built_from_the_seam`] is its
+    /// own positive gate.
     #[test]
     fn the_four_blocked_mechanisms_are_recorded_as_missing_not_omitted() {
         let blocked: &[(&str, i32, Selector, &str)] = &[
-            (
-                "enderman",
-                1,
-                Selector::Goal,
-                "EnderMan.EndermanFreezeWhenLookedAt",
-            ),
             (
                 "enderman",
                 1,
@@ -728,6 +761,133 @@ mod tests {
                  doing something else"
             );
         }
+    }
+
+    /// The enderman's freeze row is a real, working goal built from the seam —
+    /// not merely a row whose `coverage` field says `Modelled` while its build
+    /// function does something else. Drives the row's own `build()` against a
+    /// real [`NavigatingMob`], the production `MobController` (never
+    /// `ScriptMob` or [`super::probe`]'s double, which override perception
+    /// wholesale), with a discriminating pair: identical position and target,
+    /// only `is_being_stared_at` differs.
+    #[test]
+    fn the_enderman_freeze_row_is_modelled_and_built_from_the_seam() {
+        use crate::ai::mob::MobController;
+
+        let row = registrations_for("enderman")
+            .iter()
+            .find(|r| r.vanilla == "EnderMan.EndermanFreezeWhenLookedAt")
+            .expect("enderman has a freeze row");
+        assert_eq!(row.selector, Selector::Goal);
+        assert_eq!(row.priority, 1);
+        assert!(
+            matches!(row.coverage, Coverage::Modelled(_)),
+            "EndermanFreezeWhenLookedAt is a real goal now; this row must say so"
+        );
+        let build = row.build().expect("a Modelled row must build something");
+
+        let world = Flat::dry();
+        let ctx = SpeciesContext::new(ENDERMAN_SPEED);
+        let target = Vec3::new(6.0, 0.0, 0.0); // distSqr 36 <= 256
+
+        let mut watched = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            Vec3::new(0.0, 0.0, 0.0),
+            ENDERMAN_SPEED,
+            560,
+            1,
+        );
+        watched.set_attack_target(Some(target));
+        watched.set_stared_at(true);
+        assert!(
+            build(&ctx).can_use(&mut watched),
+            "the real row's goal must accept a stared-at target within range"
+        );
+
+        let mut unwatched = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            Vec3::new(0.0, 0.0, 0.0),
+            ENDERMAN_SPEED,
+            560,
+            1,
+        );
+        unwatched.set_attack_target(Some(target));
+        unwatched.set_stared_at(false);
+        assert!(
+            !build(&ctx).can_use(&mut unwatched),
+            "the identical position and target with is_being_stared_at() false \
+             must NOT make the real row's goal eligible — if this fires, the \
+             row's build function has degenerated into a distance check"
+        );
+    }
+
+    /// The freeze goal reaching *behaviour*, not just eligibility: the same
+    /// discriminating pair, driven through the whole real roster
+    /// (`goals_for("enderman", ..)`, exactly what `MobSim::spawn_species`
+    /// installs) and ticked, so this is the production wiring end to end —
+    /// `EndermanFreezeWhenLookedAt` (goal priority 1) must actually preempt
+    /// `MeleeAttackGoal` (priority 2) on their shared MOVE flag, the same
+    /// ordinary `GoalSelector` preemption the wolf panic-vs-melee test above
+    /// already relies on.
+    ///
+    /// If this test only varied the mobs' *position* it could not distinguish
+    /// a real gaze test from a plain distance check — the wrong
+    /// implementation someone could plausibly ship instead — so both mobs
+    /// start at the identical position and are given the identical target;
+    /// `is_being_stared_at` is the only input that differs.
+    #[test]
+    fn a_stared_at_enderman_freezes_while_an_unwatched_one_at_the_same_spot_closes_in() {
+        use crate::ai::mob::MobController;
+
+        let world = Flat::dry();
+        let ctx = SpeciesContext::new(ENDERMAN_SPEED);
+        let start = Vec3::new(0.5, 0.0, 0.5);
+        // 6 blocks: inside the freeze goal's 16-block range, well outside
+        // MeleeAttackGoal's reach, so 60 ticks of unobstructed closing is
+        // visible in the ending position.
+        let target = Vec3::new(6.5, 0.0, 0.5);
+
+        let run = |stared_at: bool| {
+            let mut mob = NavigatingMob::new(
+                &world,
+                MobShape::land(0.6, 1.95),
+                start,
+                ENDERMAN_SPEED,
+                560,
+                0xB4_2333,
+            );
+            let mut ai = GoalSelector::new();
+            for (priority, goal) in goals_for("enderman", &ctx) {
+                ai.add(priority, goal);
+            }
+            mob.set_attack_target(Some(target));
+            mob.set_stared_at(stared_at);
+            for _ in 0..60 {
+                mob.tick(&mut ai);
+            }
+            mob.position()
+        };
+
+        let frozen = run(true);
+        let closing = run(false);
+
+        assert_eq!(
+            frozen, start,
+            "a stared-at enderman must not move from its start position: \
+             EndermanFreezeWhenLookedAt (goal priority 1) should hold MOVE and \
+             call stop_navigation, preempting MeleeAttackGoal (priority 2). \
+             Ended at {frozen:?} instead of {start:?}"
+        );
+        let gap_closed = ((start.x - closing.x).powi(2) + (start.z - closing.z).powi(2)).sqrt();
+        assert!(
+            gap_closed > 1.0,
+            "with the identical start position and target but \
+             is_being_stared_at() false, MeleeAttackGoal should win MOVE and \
+             close the gap; the enderman only moved {gap_closed} blocks in 60 \
+             ticks (ended at {closing:?})"
+        );
     }
 
     /// Every player-targeting row on these species carries vanilla's anger

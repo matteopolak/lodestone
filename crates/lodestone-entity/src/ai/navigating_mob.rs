@@ -2298,12 +2298,12 @@ mod tests {
         assert!(!is_in_view_cone(eye, look, Vec3::new(-10.0, 0.0, 0.0), 0.025, true));
 
         // The load-bearing pair: the tolerance is **divided by distance**, so
-        // the cone widens with range. A 3-4-5 triangle gives dot 0.6 at both
-        // distances; cone 1.0 makes the thresholds 0.5 (dist 2) and 0.8
-        // (dist 5). The same angular offset is a stare close up and not far
-        // away — a fixed-angle cone would answer identically at both, so this
-        // pair is what distinguishes the distance-scaled model from an
-        // approximation.
+        // the *required precision increases* with range — the cone narrows,
+        // it does not widen. A 3-4-5 triangle gives dot 0.6 at both distances;
+        // cone 1.0 makes the thresholds 0.5 (dist 2) and 0.8 (dist 5). The
+        // same angular offset is a stare close up and not far away — a
+        // fixed-angle cone would answer identically at both, so this pair is
+        // what distinguishes the distance-scaled model from an approximation.
         assert!(is_in_view_cone(eye, look, Vec3::new(1.2, 0.0, 1.6), 1.0, true));
         assert!(!is_in_view_cone(eye, look, Vec3::new(3.0, 0.0, 4.0), 1.0, true));
 
@@ -2314,6 +2314,59 @@ mod tests {
         // Degenerate: a viewer standing exactly on the target is not a stare
         // (documented divergence from vanilla's divide-by-zero `true`).
         assert!(!is_in_view_cone(eye, look, eye, 1.0, true));
+    }
+
+    /// The boundary at the enderman's own parameters (`coneSize` `0.025`,
+    /// `adjustForDistance` `true` — `EnderMan.java:210`), re-derived from the
+    /// formula itself rather than guessed: at 10 blocks the threshold is
+    /// `1.0 - 0.025 / 10.0 = 0.9975` exactly, so a dot of `0.998` is just
+    /// inside the cone and `0.997` is just outside it.
+    ///
+    /// Both points sit on the same 10-length vector (`adjacent² + opposite² =
+    /// 100`), so this is the same closed-form-triangle construction as the
+    /// pair above, at the constant the enderman actually uses instead of a
+    /// round `1.0`.
+    #[test]
+    fn is_in_view_cone_boundary_at_the_endermans_own_cone_size() {
+        let eye = Vec3::new(0.0, 0.0, 0.0);
+        let look = Vec3::new(0.0, 0.0, 1.0);
+        const CONE_SIZE: f64 = 0.025; // EnderMan.java:210
+        const DIST: f64 = 10.0;
+        // threshold = 1.0 - CONE_SIZE / DIST = 0.9975
+
+        // adjacent 9.98 of a 10-length vector: dot = 0.998 > 0.9975.
+        let inside = Vec3::new((DIST * DIST - 9.98 * 9.98).sqrt(), 0.0, 9.98);
+        assert!(
+            is_in_view_cone(eye, look, inside, CONE_SIZE, true),
+            "dot 0.998 must clear the derived threshold 0.9975"
+        );
+
+        // adjacent 9.97: dot = 0.997 < 0.9975.
+        let outside = Vec3::new((DIST * DIST - 9.97 * 9.97).sqrt(), 0.0, 9.97);
+        assert!(
+            !is_in_view_cone(eye, look, outside, CONE_SIZE, true),
+            "dot 0.997 must fall short of the derived threshold 0.9975"
+        );
+
+        // A naive fixed-angle port — one that reads `coneSize` as the
+        // tolerance directly, never dividing by distance, which is exactly
+        // the approximation this function's own doc comment warns against —
+        // would use threshold `1.0 - 0.025 = 0.975` regardless of range. Both
+        // chosen points clear that: 0.998 and 0.997 both exceed 0.975, so a
+        // naive implementation cannot tell them apart and would call both a
+        // stare. Only the distance-divided threshold (0.9975 at 10 blocks)
+        // separates them, which is the discriminating property this pair
+        // exists to demonstrate.
+        let naive_threshold = 1.0 - CONE_SIZE;
+        let naive_dot = |target: Vec3| look.dot((target - eye).normalize());
+        assert!(naive_dot(inside) > naive_threshold);
+        assert!(
+            naive_dot(outside) > naive_threshold,
+            "a naive fixed-coneSize threshold accepts the 'outside' point too \
+             (dot {} > {naive_threshold}), which is exactly why it cannot \
+             reject what the real, distance-adjusted test rejects",
+            naive_dot(outside)
+        );
     }
 
     #[test]
