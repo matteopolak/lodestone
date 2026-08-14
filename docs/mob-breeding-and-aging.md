@@ -107,6 +107,21 @@ every baby/adult boundary crossing:**
   species with its own literal (cat, ocelot, the horse family, chicken's
   `#chicken_food` cousins not yet tameable here) will read slightly wrong
   until someone adds a row.
+- **The server authoritatively uses the corrected shape and speed today —
+  server-side pathfinding, collision and movement all read `SimMob::shape()`/
+  `step_per_tick()` directly — but the wire has no way to tell a client to
+  *render* a baby small.** Checked: `crate::protocol::MetadataField` has no
+  `Baby`/`Age` variant at all (unlike `TamableFlags`/`HorseFlags`, which
+  exist for taming), so `SimMob::snapshot` cannot populate one, and no
+  `v770` encoder arm exists either. Vanilla's own client derives the small
+  hitbox from a synced `AgeableMob.DATA_BABY_ID` boolean rather than the
+  server sending literal dimensions, so closing this needs a new metadata
+  field plus its encoder — real work, not a one-line hookup, and outside
+  `lodestone-server/src/protocol.rs`/`crates/protocol/v770`'s ownership this
+  pass. A baby zombie today has the *correct* small hitbox for every
+  server-side purpose (does it fit through a gap, does it path around an
+  obstacle, does it move at 1.5× speed) and still renders at adult size on a
+  connected client.
 
 `crates/lodestone-server/src/mobs.rs`'s `baby_shape_tests` module predicts
 the exact baby zombie box against the halved-adult wrong hypothesis, the
