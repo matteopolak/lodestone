@@ -138,6 +138,7 @@ pub mod mineshaft;
 pub mod placement;
 pub mod pool;
 pub mod processor;
+pub mod stronghold;
 pub mod template;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -940,6 +941,11 @@ pub enum StructureKind {
         /// setup's `ProtectedBlockProcessor` reads the same fixed tag.
         features_cannot_replace: Arc<HashSet<String>>,
     },
+    /// `minecraft:stronghold` — the recursive `StrongholdPieces` tree. No
+    /// fields: unlike every other kind here its start predicate reads no
+    /// biome and no column height, so the document holds nothing this
+    /// variant needs to carry. See [`stronghold`].
+    Stronghold,
     /// A structure `type` whose generator has not landed. Carries the type id so
     /// the ledger can name it.
     Unsupported(String),
@@ -1107,6 +1113,7 @@ impl StructureKind {
                     &Value::String("#minecraft:mineshaft_blocking".to_string()),
                 ),
             },
+            "minecraft:stronghold" => Self::Stronghold,
             "minecraft:buried_treasure" => Self::BuriedTreasure,
             "minecraft:ocean_monument" => Self::OceanMonument {
                 surrounding: resolve_biome_set(
@@ -1199,6 +1206,7 @@ impl StructureKind {
             | Self::DesertPyramid
             | Self::JunglePyramid
             | Self::Mineshaft { .. }
+            | Self::Stronghold
             | Self::Unsupported(_) => Vec::new(),
         }
     }
@@ -1420,6 +1428,14 @@ impl StructureKind {
                 let y = ctx.first_occupied_height(middle_x, middle_z, HeightmapKind::OceanFloorWg);
                 Some([middle_x, y, middle_z])
             }
+            // `context.chunkPos().getWorldPosition()` — the chunk's own
+            // north-west corner at Y=0, unmoved by any RNG.
+            // `StrongholdStructure.findGenerationPoint` does not sample a
+            // column or a biome the way every other kind here does; the real
+            // work (`generatePieces`) is entirely inside the lazy consumer,
+            // which is why [`Self::Stronghold`] needs no [`Stub`] arm of its
+            // own — `generate_pieces` below does the whole job.
+            Self::Stronghold => Some([cx * 16, 0, cz * 16]),
             // Handled by `find_stub` before this function is reached.
             Self::Jigsaw(_)
             | Self::Mineshaft { .. }
@@ -1578,6 +1594,7 @@ impl StructureKind {
                     refine: Some(PieceRefinement::BuriedTreasureChest),
                 }])
             }
+            Self::Stronghold => Some(stronghold::generate(cx, cz, seed, ctx)),
             // `OceanMonumentPieces` is ~1,400 lines of coded pieces, not
             // templates, so it is S5's and not S2's.
             Self::OceanMonument { .. } | Self::Unsupported(_) => None,
@@ -1639,6 +1656,15 @@ impl StructureKind {
             // build, which cannot happen, so `Unknown` (ledgered) is the honest
             // answer rather than `Invalid`.
             Self::Mineshaft { .. } => match pieces {
+                Some(p) if !p.is_empty() => Validity::Valid,
+                _ => Validity::Unknown,
+            },
+            // `stronghold::generate`'s retry loop never returns until a
+            // portal room has been placed, so — like a mineshaft — there is
+            // no invalid stronghold. `Unknown` rather than `Invalid` for the
+            // same reason: an empty list here would mean the generator
+            // itself never ran, which the ledger should name.
+            Self::Stronghold => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Unknown,
             },
@@ -2751,10 +2777,22 @@ impl StructureRegistry {
                 "`swamp_hut`'s witch and cat are not spawned, a mineshaft corridor's \
                  chest **minecart** is not spawned (its rail is placed and its loot \
                  table plus vanilla's `nextLong()` roll seed travel on \
-                 `StructurePiece::loot`, so only the entity is missing), and a spider \
-                 corridor's `spawner` block is placed with no `SpawnData` — nothing in \
-                 worldgen can spawn an entity or build a spawner's payload yet \
-                 (#221/#222)"
+                 `StructurePiece::loot`, so only the entity is missing), a spider \
+                 corridor's `spawner` block is placed with no `SpawnData`, and the \
+                 stronghold portal room's silverfish `spawner` is the same gap — \
+                 nothing in worldgen can spawn an entity or build a spawner's payload \
+                 yet"
+                    .into(),
+            );
+            unsupported.insert(
+                "stronghold:skip_air_shell".into(),
+                "every `StrongholdPieces` shell call passes `skipAir = true`, meaning \
+                 vanilla only overwrites a block that is not already air — read from \
+                 the real terrain a stronghold is dug into, since `postProcess` runs \
+                 after NOISE/SURFACE in vanilla's own pipeline. `stronghold::generate` \
+                 resolves every piece's blocks eagerly at start time, before any \
+                 terrain exists to read, so the predicate has nothing to consult and \
+                 every write is unconditional — the same shape as `coded:region_random`"
                     .into(),
             );
             unsupported.insert(
