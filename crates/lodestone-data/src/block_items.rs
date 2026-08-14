@@ -49,6 +49,7 @@
 //! `tests/block_items.rs` for the drift guard and the `LODESTONE_REGEN=1`
 //! refresh command.
 
+use crate::block::Block;
 use crate::generated_block_items as generated;
 
 pub use generated::ITEM_COUNT;
@@ -65,7 +66,7 @@ pub use generated::ITEM_COUNT;
 /// this exists for (placement) does the same thing with both, and an unknown
 /// id is exactly as unplaceable as a sword.
 #[must_use]
-pub fn block_for_item_id(id: i32) -> Option<&'static str> {
+pub fn block_for_item_id(id: i32) -> Option<Block> {
     usize::try_from(id)
         .ok()
         .and_then(|index| generated::BLOCK_FOR_ITEM.get(index))
@@ -82,8 +83,23 @@ pub fn block_for_item_id(id: i32) -> Option<&'static str> {
 /// [`crate::item_prototypes::prototype`] makes, and for the same reason:
 /// placement is a per-right-click query, not a per-tick one, and minting a
 /// second name index here could drift from the first.
+///
+/// # Prefer the typed forms
+///
+/// Both halves of this signature are the un-migrated string spelling, kept
+/// because it is what the placement path in `lodestone-server` still calls.
+/// New code should take the item as a typed id and use [`block_for_item_id`],
+/// which hands back a [`Block`]; the string here is produced by
+/// [`Block::name`], so the two can never disagree.
 #[must_use]
 pub fn block_for_item(item: &str) -> Option<&'static str> {
+    block_for_item_id(crate::items::item_id(item)?).map(Block::name)
+}
+
+/// The block that `item` places, as a [`Block`] — the typed sibling of
+/// [`block_for_item`].
+#[must_use]
+pub fn block_placed_by(item: &str) -> Option<Block> {
     block_for_item_id(crate::items::item_id(item)?)
 }
 

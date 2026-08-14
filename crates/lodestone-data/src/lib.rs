@@ -40,6 +40,8 @@ pub(crate) mod generated_attribute_types;
 pub(crate) mod generated_block_blast;
 #[path = "generated/block_entity_types.rs"]
 pub(crate) mod generated_block_entity_types;
+#[path = "generated/block_enum.rs"]
+pub(crate) mod generated_block_enum;
 #[path = "generated/block_items.rs"]
 pub(crate) mod generated_block_items;
 #[path = "generated/block_registry.rs"]
@@ -90,6 +92,7 @@ pub(crate) mod generated_sound_types;
 pub(crate) mod generated_tools;
 
 pub mod attribute_types;
+pub mod block;
 pub mod block_blast;
 pub mod block_entity_types;
 pub mod block_items;

@@ -66,6 +66,10 @@ fn tools_path() -> PathBuf {
     manifest_dir().join("src/generated/tools.rs")
 }
 
+fn block_enum_path() -> PathBuf {
+    manifest_dir().join("src/generated/block_enum.rs")
+}
+
 /// The committed JVM dump — an external anchor, not gitignored.
 const DUMP: &str = include_str!("support/tool_jvm.txt");
 
@@ -302,6 +306,223 @@ fn generate_block_registry(dump: &Dump) -> String {
         out.push_str("    ");
         for id in chunk {
             let _ = write!(out, "{id}, ");
+        }
+        out.pop();
+        out.push('\n');
+    }
+    out.push_str("];\n");
+    out
+}
+
+/// The Rust enum variant name for a registry path: `polished_granite` →
+/// `PolishedGranite`.
+///
+/// Callers must have already checked the path against
+/// [`assert_path_is_variant_safe`]; this function only transforms.
+fn variant_name(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for word in path.split('_') {
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    out
+}
+
+/// Fails the generator — loudly, naming the offender — if any block name cannot
+/// become a distinct, legal Rust variant.
+///
+/// Every one of these is silent-corruption-shaped rather than merely
+/// inconvenient. A path outside `[a-z0-9_]` or one starting with a digit yields
+/// a variant that does not compile, which is the harmless case. The dangerous
+/// one is a **collision**: two registry entries whose paths camel-case to the
+/// same identifier would produce a duplicate-variant compile error today, but a
+/// generator that "helpfully" de-duplicated them would silently alias two
+/// blocks. Measured against the committed 26.2 dump: 1,196 paths, 1,196
+/// distinct variants, all `minecraft:`, none digit-leading, none outside
+/// `[a-z0-9_]`. Asserting it here is what keeps that true after a version bump
+/// rather than a fact that happened to hold once.
+fn assert_path_is_variant_safe(names: &[String]) -> Vec<(String, String)> {
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    let mut pairs = Vec::with_capacity(names.len());
+    for name in names {
+        let (namespace, path) = name
+            .split_once(':')
+            .unwrap_or_else(|| panic!("registry name {name:?} has no namespace"));
+        assert_eq!(
+            namespace, "minecraft",
+            "the generated enum covers the built-in registry only; {name:?} is not `minecraft:`"
+        );
+        assert!(
+            !path.is_empty()
+                && path
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+            "block path {path:?} is outside [a-z0-9_] and has no obvious variant spelling"
+        );
+        assert!(
+            !path.as_bytes()[0].is_ascii_digit(),
+            "block path {path:?} starts with a digit, which is not a legal Rust variant"
+        );
+        let variant = variant_name(path);
+        assert_ne!(
+            variant, "Self",
+            "block path {path:?} camel-cases to the reserved identifier `Self`"
+        );
+        if let Some(previous) = seen.insert(variant.clone(), path.to_owned()) {
+            panic!(
+                "block paths {previous:?} and {path:?} both camel-case to `{variant}`; the \
+                 generator must be taught a disambiguation rather than silently aliasing them"
+            );
+        }
+        pairs.push((variant, name.clone()));
+    }
+    pairs
+}
+
+/// Renders `src/generated/block_enum.rs`: the `Block` enum whose discriminant
+/// **is** the `minecraft:block` registry id, plus the two index tables that make
+/// id → enum and name → enum branch-free lookups.
+fn generate_block_enum(dump: &Dump) -> String {
+    let block_count = dump.blocks.len();
+    let variants = assert_path_is_variant_safe(&dump.blocks);
+
+    // The default block state of each block, joined in from the committed
+    // snow-support census (`state == state.getBlock().defaultBlockState()`
+    // dumped from the real 26.2 server). Exactly one state per block carries the
+    // mark; the assertion below is what stops a silently-missing or duplicated
+    // default from becoming a wrong `Block::default_state`.
+    let mut default_state: Vec<Option<u32>> = vec![None; block_count];
+    for state in 0..block_states::STATE_COUNT {
+        if lodestone_data::snow_support::is_default_state(state) == Some(true) {
+            let name = block_states::block_name(state)
+                .unwrap_or_else(|| panic!("block-state {state} has no name"));
+            let block = block_id(dump, name) as usize;
+            assert!(
+                default_state[block].is_none(),
+                "block {name} has more than one state marked default ({:?} and {state})",
+                default_state[block]
+            );
+            default_state[block] = Some(state);
+        }
+    }
+    let default_state: Vec<u32> = default_state
+        .into_iter()
+        .enumerate()
+        .map(|(block, state)| {
+            state.unwrap_or_else(|| {
+                panic!(
+                    "block {} has no default state in the committed census",
+                    dump.blocks[block]
+                )
+            })
+        })
+        .collect();
+
+    let mut by_name: Vec<u16> = (0..block_count as u16).collect();
+    by_name.sort_unstable_by(|&a, &b| dump.blocks[a as usize].cmp(&dump.blocks[b as usize]));
+
+    let mut out = String::new();
+    out.push_str(
+        "// @generated by `cargo test -p lodestone-data --test tools -- --ignored`\n\
+         // from tests/support/tool_jvm.txt (a headless 26.2 server dump of\n\
+         // BuiltInRegistries.BLOCK's registration order, protocol 776 / Minecraft 26.2)\n\
+         // joined with the committed block-state and default-state censuses. DO NOT EDIT\n\
+         // BY HAND. Regenerate with LODESTONE_REGEN=1 (see the test module docs).\n",
+    );
+    out.push_str(
+        "//! The generated `minecraft:block` registry as a Rust enum.\n\
+         //!\n\
+         //! One variant per built-in block, in **registration** order, with the\n\
+         //! discriminant written out explicitly so that `block as u16` *is* the registry\n\
+         //! id a `Holder<Block>` carries on the wire — no lookup, no branch, no table.\n\
+         //! That identity is the whole point of the representation: every per-block\n\
+         //! census in this crate is a plain array indexed by it.\n\
+         //!\n\
+         //! A block **state** is a different and much larger space (32,366 in 26.2) and is\n\
+         //! deliberately *not* an enum — see [`crate::block_states::StateId`].\n\
+         //!\n\
+         //! The accessors live in [`crate::block`]; this file is data only.\n\n",
+    );
+
+    let _ = writeln!(
+        out,
+        "/// A built-in block of Minecraft 26.2, one variant per `minecraft:block`\n\
+         /// registry entry.\n\
+         ///\n\
+         /// `Block as u16` is the registry id. Ordering is **registration** order, not\n\
+         /// alphabetical.\n\
+         ///\n\
+         /// This enum is intentionally *not* `#[non_exhaustive]` and carries no `Custom`\n\
+         /// variant: a match over it is exhaustive, so a version bump that adds a block\n\
+         /// fails the compile of every incomplete match instead of falling into a\n\
+         /// wildcard. Blocks a plugin adds are represented by\n\
+         /// [`crate::block::BlockRef`], one level out.\n\
+         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]\n\
+         #[repr(u16)]\n\
+         pub enum Block {{"
+    );
+    for (id, (variant, name)) in variants.iter().enumerate() {
+        let _ = writeln!(out, "    /// `{name}`\n    {variant} = {id},");
+    }
+    out.push_str("}\n\n");
+
+    let _ = writeln!(
+        out,
+        "/// Every [`Block`], indexed by its registry id — the safe inverse of\n\
+         /// `block as u16`, and the iteration order of the registry.\n\
+         ///\n\
+         /// An array rather than a 1,196-arm `match` because this crate forbids `unsafe`\n\
+         /// (so the transmute is unavailable) and because a table index is one bounds\n\
+         /// check where the match is a jump table plus 1,196 lines for rustc to chew.\n\
+         pub static BLOCKS_BY_REGISTRY_ID: [Block; {block_count}] = ["
+    );
+    for chunk in variants.chunks(4) {
+        out.push_str("    ");
+        for (variant, _) in chunk {
+            let _ = write!(out, "Block::{variant}, ");
+        }
+        out.pop();
+        out.push('\n');
+    }
+    out.push_str("];\n\n");
+
+    let _ = writeln!(
+        out,
+        "/// Registry ids sorted by canonical name, for `O(log {block_count})` name lookup\n\
+         /// against [`crate::generated_block_registry::BLOCK_REGISTRY_NAMES`].\n\
+         ///\n\
+         /// A permutation of `u16` rather than a `[(&str, Block)]` pairs table on purpose:\n\
+         /// the pairs table would re-introduce {block_count} fat pointers and their\n\
+         /// relocations for names that already exist once in rodata.\n\
+         pub static REGISTRY_IDS_BY_NAME: [u16; {block_count}] = ["
+    );
+    for chunk in by_name.chunks(16) {
+        out.push_str("    ");
+        for id in chunk {
+            let _ = write!(out, "{id}, ");
+        }
+        out.pop();
+        out.push('\n');
+    }
+    out.push_str("];\n\n");
+
+    let _ = writeln!(
+        out,
+        "/// The global block-state id of each block's `defaultBlockState()`, indexed by\n\
+         /// registry id.\n\
+         ///\n\
+         /// The default is **not** the block's lowest state id — it differs for 661 of the\n\
+         /// 797 multi-state blocks — so this column is read from the server's own\n\
+         /// `state == state.getBlock().defaultBlockState()` mark, never inferred.\n\
+         pub static DEFAULT_STATE: [u32; {block_count}] = ["
+    );
+    for chunk in default_state.chunks(16) {
+        out.push_str("    ");
+        for state in chunk {
+            let _ = write!(out, "{state}, ");
         }
         out.pop();
         out.push('\n');
@@ -1205,12 +1426,15 @@ fn dump_agrees_with_mojangs_own_components_report() {
 fn committed_tables_match_dump() {
     let dump = parse_dump(DUMP);
     let block_registry = generate_block_registry(&dump);
+    let block_enum = generate_block_enum(&dump);
     let tools = generate_tools(&dump);
 
     if std::env::var_os("LODESTONE_REGEN").is_some() {
         std::fs::write(block_registry_path(), &block_registry).expect("write block registry");
+        std::fs::write(block_enum_path(), &block_enum).expect("write block enum");
         std::fs::write(tools_path(), &tools).expect("write tools");
         eprintln!("regenerated {}", block_registry_path().display());
+        eprintln!("regenerated {}", block_enum_path().display());
         eprintln!("regenerated {}", tools_path().display());
         return;
     }
@@ -1221,6 +1445,12 @@ fn committed_tables_match_dump() {
         block_registry, committed_registry,
         "src/generated/block_registry.rs is stale vs the JVM dump; \
          regenerate with LODESTONE_REGEN=1"
+    );
+    let committed_enum =
+        std::fs::read_to_string(block_enum_path()).expect("committed block enum present");
+    assert_eq!(
+        block_enum, committed_enum,
+        "src/generated/block_enum.rs is stale vs the JVM dump; regenerate with LODESTONE_REGEN=1"
     );
     let committed_tools = std::fs::read_to_string(tools_path()).expect("committed tools present");
     assert_eq!(

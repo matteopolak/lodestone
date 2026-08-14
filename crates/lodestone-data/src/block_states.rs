@@ -50,6 +50,70 @@ use crate::generated_block_states as table;
 pub use crate::generated_block_registry::BLOCK_COUNT;
 pub use table::STATE_COUNT;
 
+use crate::block::Block;
+
+/// A validated global block-state id — one of the 32,366 states of 26.2.
+///
+/// # Why a newtype and not an enum
+///
+/// [`Block`] is an enum because 1,196 hand-named block types is a set the
+/// compiler can usefully check exhaustively. A block *state* is not that set: it
+/// is the cross product of each block's property domains, 32,366 entries with no
+/// individual names, and nothing ever wants to `match` on one. So the type's job
+/// here is different — it is to make the *range* invariant true by construction
+/// so that every downstream lookup can be total.
+///
+/// That is the payoff. `StateId::new` is the single fallible step; after it,
+/// [`block`](Self::block), [`properties`](Self::properties) and
+/// [`is_default`](Self::is_default) return values rather than `Option`s. The
+/// free-function forms below ([`block_name`], [`properties`]) keep taking a raw
+/// `u32` and keep returning `Option`, because they are the un-migrated wire-side
+/// entry points; prefer the methods in new code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StateId(u32);
+
+impl StateId {
+    /// Validates a raw global block-state id, or `None` if it is not in
+    /// `0..`[`STATE_COUNT`].
+    #[must_use]
+    pub fn new(raw: u32) -> Option<Self> {
+        (raw < STATE_COUNT).then_some(Self(raw))
+    }
+
+    /// The raw global id, for the wire.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+
+    /// The block this state belongs to. Total, O(1), two array indexes.
+    ///
+    /// Goes through the generated registry-order join rather than treating a
+    /// state's block index as a registry id: the state table is name-sorted and
+    /// the registry is registration-ordered, so the two are unrelated
+    /// permutations.
+    #[must_use]
+    pub fn block(self) -> Block {
+        let registry_id = crate::generated_block_registry::STATE_BLOCK[self.0 as usize];
+        Block::from_registry_id(registry_id)
+            .expect("generated STATE_BLOCK column holds a valid registry id")
+    }
+
+    /// This state's property values as a sorted `(name, value)` slice; empty for
+    /// a block with no properties. Total, O(1), zero-heap.
+    #[must_use]
+    pub fn properties(self) -> &'static [(&'static str, &'static str)] {
+        let (_, set) = table::STATES[self.0 as usize];
+        table::PROPERTY_SETS[set as usize]
+    }
+
+    /// Whether this is its block's `defaultBlockState()`. Total, O(1).
+    #[must_use]
+    pub fn is_default(self) -> bool {
+        crate::snow_support::is_default_state(self.0) == Some(true)
+    }
+}
+
 /// The interned block identifier for `id` (for example `minecraft:oak_stairs`),
 /// or `None` if `id` is not in `0..`[`STATE_COUNT`].
 ///
