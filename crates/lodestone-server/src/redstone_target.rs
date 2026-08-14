@@ -12,11 +12,18 @@
 //! # What this needs of the execution model (for issue #548's incremental
 //! rework)
 //!
-//! * **Trigger**: an external event this crate does not produce yet — a
-//!   projectile hitting the block (`TargetBlock.onProjectileHit`). Nothing
-//!   here schedules anything on its own; [`apply_hit`] is a pure function
-//!   waiting for a caller. The seam is intentionally the same shape as every
-//!   other device in this family (`redstone_diode::run_scheduled_tick`,
+//! * **Trigger**: a projectile hitting the block (`TargetBlock.onProjectileHit`).
+//!   [`apply_hit`] itself stays a pure function, called from one named place —
+//!   `crate::mobs::MobSim::resolve_projectile_impacts` is the producer
+//!   (`mobs/projectiles.rs`'s `block_entry`, the exact per-axis slab test
+//!   `lodestone_entity::projectile::clip_aabb` already uses for an entity
+//!   hitbox, resolves which face was struck and at what fraction); the write
+//!   itself happens in `crate::tick::run_tick_loop_with_weather`, which is
+//!   the only thing holding both the live world and the `ScheduledTickQueue`
+//!   `has_pending_decay` needs — see `crate::mobs::ProjectileBlockHit`'s own
+//!   doc for why `MobSim` hands the hit off rather than resolving it itself.
+//!   The seam is intentionally the same shape as every other device in this
+//!   family (`redstone_diode::run_scheduled_tick`,
 //!   `redstone_torch::run_scheduled_tick`): a pure decision, called from one
 //!   named place, not spread across the dispatch.
 //! * **Propagation**: none beyond the ordinary neighbour fan-out an analog
