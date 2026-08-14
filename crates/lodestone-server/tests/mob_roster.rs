@@ -54,6 +54,7 @@ fn holding(at: Vec3, item: &str) -> PlayerPerception {
     PlayerPerception {
         position: at,
         held_item: Some(rk(&format!("minecraft:{item}"))),
+        view_direction: Vec3::new(0.0, 0.0, 1.0),
     }
 }
 
@@ -61,6 +62,7 @@ fn empty_handed(at: Vec3) -> PlayerPerception {
     PlayerPerception {
         position: at,
         held_item: None,
+        view_direction: Vec3::new(0.0, 0.0, 1.0),
     }
 }
 

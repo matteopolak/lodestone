@@ -1347,12 +1347,16 @@ fn no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record() {
 
 /// A player at `at` holding nothing.
 fn empty_handed(at: Vec3) -> PlayerPerception {
-    PlayerPerception { position: at, held_item: None }
+    PlayerPerception { position: at, held_item: None, view_direction: Vec3::new(0.0, 0.0, 1.0) }
 }
 
 /// A player at `at` holding `item` (a bare path, e.g. `"wheat"`).
 fn holding(at: Vec3, item: &str) -> PlayerPerception {
-    PlayerPerception { position: at, held_item: Some(rk(&format!("minecraft:{item}"))) }
+    PlayerPerception {
+        position: at,
+        held_item: Some(rk(&format!("minecraft:{item}"))),
+        view_direction: Vec3::new(0.0, 0.0, 1.0),
+    }
 }
 
 #[test]

@@ -32,6 +32,7 @@ fn watching(at: Vec3) -> PerceivedPlayer {
         perception: PlayerPerception {
             position: at,
             held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, 1.0),
         },
     }
 }

@@ -592,6 +592,7 @@ mod experience_orb_tests {
         followed.set_players(vec![PlayerPerception {
             position: player,
             held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, 1.0),
         }]);
         let followed_id = followed.spawn_orb(1, start, Vec3::new(0.0, 0.0, 0.0));
 
@@ -643,6 +644,7 @@ mod experience_orb_tests {
             // this orb and fail here.
             position: Vec3::new(start.x + 9.0, start.y, start.z),
             held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, 1.0),
         }]);
         let watched_id = watched.spawn_orb(1, start, Vec3::new(0.0, 0.0, 0.0));
 

@@ -182,6 +182,7 @@ fn player_at(pos: Vec3) -> Vec<PlayerPerception> {
     vec![PlayerPerception {
         position: pos,
         held_item: None,
+        view_direction: Vec3::new(0.0, 0.0, 1.0),
     }]
 }
 

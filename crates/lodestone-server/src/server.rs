@@ -72,6 +72,13 @@ use lodestone_model::{
 };
 use lodestone_data::block_items;
 use lodestone_net::{Connection, NetError, Transport};
+// Issue #273's encryption half: the server-side RSA keypair/decrypt and the
+// verify-token generator. Native-only for the same reason `crate::access` is
+// (see that field's own doc comment below) — online-mode auth needs the
+// native-only `lodestone-auth` session-server call too, so there is nothing
+// for a `wasm32` build to gain by linking these.
+#[cfg(not(target_arch = "wasm32"))]
+use lodestone_net::{ServerKeyPair, generate_verify_token};
 
 use crate::advancements::AdvancementManager;
 use crate::block_breaking::PendingBreak;
@@ -196,6 +203,24 @@ fn is_valid_player_name(name: &str) -> bool {
 /// have had to invent.
 fn invalid_username_reason() -> Text {
     Text::literal("Invalid username")
+}
+
+/// Vanilla's `multiplayer.disconnect.unverified_username` English text
+/// (`assets/minecraft/lang/en_us.json`), sent when the session server's
+/// `hasJoined` answers "this client never proved ownership of this
+/// username" (issue #273).
+#[cfg(not(target_arch = "wasm32"))]
+fn unverified_username_reason() -> Text {
+    Text::literal("Failed to verify username!")
+}
+
+/// Vanilla's `multiplayer.disconnect.authservers_down` English text, sent
+/// when the `hasJoined` call itself fails (network error, bad response) —
+/// distinct from [`unverified_username_reason`], which is the session
+/// server successfully saying "no".
+#[cfg(not(target_arch = "wasm32"))]
+fn auth_servers_down_reason() -> Text {
+    Text::literal("Authentication servers are down. Please try again later. Sorry!")
 }
 
 /// Cadence of the periodic time-of-day broadcast.
@@ -1411,6 +1436,150 @@ pub enum ServerError {
     /// refuse.
     #[error("login rejected: {0}")]
     AccessDenied(String),
+    /// The client's RSA-encrypted verify-token echo did not match the
+    /// challenge the server generated (issue #273) — either tampering, or a
+    /// client answering a stale `EncryptionRequest` after the server moved
+    /// on. Vanilla's equivalent is `ServerboundKeyPacket.isChallengeValid`
+    /// returning false, treated as a hard protocol error there too.
+    ///
+    /// Not `cfg`-gated, unlike its online-mode siblings below: it names no
+    /// native-only type, so a `wasm32` build keeps it available for the same
+    /// reason `ServerBound::EncryptionResponse` itself is not gated — the
+    /// variant can in principle be decoded on any target, only the request
+    /// that would provoke a legitimate reply cannot be sent there.
+    #[error("encryption handshake failed: verify token mismatch")]
+    VerifyTokenMismatch,
+    /// An `EncryptionResponse` (`key` packet) arrived with no matching
+    /// `EncryptionRequest` outstanding on this connection — either this
+    /// host is not in online mode (always true on `wasm32`, see
+    /// [`VerifyTokenMismatch`](Self::VerifyTokenMismatch)'s doc comment), or
+    /// the client already completed one handshake. Vanilla's
+    /// `Validate.validState(this.state == KEY, ...)` is the same guard.
+    #[error("encryption handshake failed: no encryption request was outstanding")]
+    UnexpectedEncryptionResponse,
+    /// The session server says this client never proved ownership of this
+    /// username's shared secret (`hasJoined` returned no profile) —
+    /// vanilla's `multiplayer.disconnect.unverified_username`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("login rejected: unverified username")]
+    UnverifiedUsername,
+    /// The session-server `hasJoined` call itself failed (network error, bad
+    /// JSON, unexpected status) — vanilla's
+    /// `multiplayer.disconnect.authservers_down`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("online-mode authentication service error: {0}")]
+    AuthServiceUnavailable(#[from] lodestone_auth::AuthError),
+}
+
+/// The session-server check a login performs once encryption is up: given the
+/// HTTP client, the username and the server-id hash, answer whether the
+/// client really holds the shared secret it claims to.
+///
+/// Boxed rather than a plain `fn` pointer so [`OnlineModeConfig::for_test`]
+/// can close over a fixture instead of a real client — see that
+/// constructor's own doc comment for why a substitutable seam exists here at
+/// all rather than only [`OnlineModeConfig::new`].
+#[cfg(not(target_arch = "wasm32"))]
+type SessionVerify = Arc<
+    dyn Fn(
+            reqwest::Client,
+            String,
+            String,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = lodestone_auth::Result<Option<lodestone_auth::HasJoinedProfile>>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+/// Configuration for the online-mode encryption + session-server handshake
+/// (issue #273's remaining half). Passed as `Some` to opt a connection into
+/// online mode; every pre-existing entry point in this file continues to
+/// pass `None` (offline, this crate's behaviour before this change) so no
+/// caller's wire behaviour changes underneath it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct OnlineModeConfig {
+    /// The HTTP client the session-server `hasJoined` call uses. Owned by the
+    /// caller (rather than constructed fresh per login) so a real host can
+    /// share one client's connection pool across every player who joins.
+    pub http: reqwest::Client,
+    verify: SessionVerify,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for OnlineModeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `SessionVerify` (a boxed `Fn`) has no `Debug` impl to derive; a
+        // one-line placeholder is more useful than a compile error over a
+        // lint.
+        f.debug_struct("OnlineModeConfig").finish_non_exhaustive()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OnlineModeConfig {
+    /// The real thing: `verify` calls [`lodestone_auth::has_joined`] against
+    /// `sessionserver.mojang.com`.
+    #[must_use]
+    pub fn new(http: reqwest::Client) -> Self {
+        Self {
+            http,
+            verify: Arc::new(|http, username, hash| {
+                Box::pin(async move { lodestone_auth::has_joined(&http, &username, &hash).await })
+            }),
+        }
+    }
+
+    /// Substitutes a fixture for the real session-server call — meant for
+    /// tests, though not `#[cfg(test)]`-gated (see below for why).
+    ///
+    /// This exists because of the exact hazard `CLAUDE.md` records for the
+    /// client-side half of this same handshake — a pre-existing unit test
+    /// that would otherwise reach a real external service the moment
+    /// online-mode auth got wired into a code path tests already call. There
+    /// is no way to hermetically test "a real vanilla client joins in online
+    /// mode" without either mocking HTTP or making the verification step
+    /// substitutable; this crate has no HTTP-mocking dependency, so this is
+    /// the injection seam instead.
+    ///
+    /// **Not `#[cfg(test)]`**, deliberately, even though every current caller
+    /// is a test: the login-sequence test that needs it
+    /// (`tests/online_mode.rs`) drives the real [`V770ServerProtocol`] from
+    /// `lodestone-v770`, which has a *normal* dependency on this crate for the
+    /// `ServerProtocol` trait. Adding `lodestone-v770` as a *dev*-dependency
+    /// here (so a `#[cfg(test)] mod tests` unit test could reach it) makes
+    /// this crate's own lib-test compilation and the copy `lodestone-v770`
+    /// links against two different instantiations of the same trait —
+    /// measured: `V770ServerProtocol: ServerProtocol is not implemented`
+    /// against the crate's own trait. An external `tests/*.rs` binary has no
+    /// such self-reference (it depends on this crate exactly once, normally),
+    /// so that is where the test using this constructor lives, and it needs
+    /// `pub`. Which constructor a *caller* chooses (`new` vs this one) is
+    /// still an assertable, compile-time-visible fact — the same property
+    /// `CLAUDE.md` asks a `#[cfg(test)]` fork for — it just isn't spelled with
+    /// that attribute here.
+    pub fn for_test(
+        verify: impl Fn(String, String) -> lodestone_auth::Result<Option<lodestone_auth::HasJoinedProfile>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        // `reqwest::Client::new()` panics without a crypto provider installed
+        // (see `lodestone_auth::install_crypto_provider`'s own doc); this
+        // `http` value is never actually used by the fixture `verify` below
+        // (it ignores its `_http` parameter), but the field still needs a
+        // real, valid `Client` to satisfy the type. Installing twice in one
+        // process is not an error.
+        lodestone_auth::install_crypto_provider();
+        let verify = Arc::new(verify);
+        Self {
+            http: reqwest::Client::new(),
+            verify: Arc::new(move |_http, username, hash| {
+                let result = verify(username, hash);
+                Box::pin(async move { result })
+            }),
+        }
+    }
 }
 
 async fn apply<T: Transport>(
@@ -1424,6 +1593,7 @@ async fn apply<T: Transport>(
         }
         ServerDirective::SetState(next) => *state = next,
         ServerDirective::SetCompression(threshold) => conn.set_compression(threshold),
+        ServerDirective::EnableEncryption(secret) => conn.enable_encryption(&secret)?,
         ServerDirective::None => {}
     }
     Ok(())
@@ -1718,6 +1888,11 @@ where
         &crate::access::AccessHandle::default(),
         #[cfg(not(target_arch = "wasm32"))]
         None,
+        // Issue #273: offline, this wrapper's behaviour before online mode
+        // existed. `serve_connection_with_online_mode` is the one entry point
+        // that passes `Some`.
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
     )
     .await
 }
@@ -1788,6 +1963,11 @@ where
         &crate::access::AccessHandle::default(),
         #[cfg(not(target_arch = "wasm32"))]
         None,
+        // Issue #273: offline, this wrapper's behaviour before online mode
+        // existed. `serve_connection_with_online_mode` is the one entry point
+        // that passes `Some`.
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
     )
     .await
 }
@@ -1846,6 +2026,9 @@ where
         world,
         access,
         peer_ip,
+        // Issue #273: this wrapper predates online mode; offline, same as
+        // every other pre-existing entry point.
+        None,
     )
     .await
 }
@@ -1939,6 +2122,88 @@ where
         access,
         #[cfg(not(target_arch = "wasm32"))]
         peer_ip,
+        // Issue #273: this function's signature is fixed for the same reason
+        // its own doc comment gives for not gaining a tenth parameter earlier
+        // — its one caller lives in `integrated.rs`. Offline, same as every
+        // pre-existing entry point; `serve_connection_with_online_mode` below
+        // is the `_and_commands_shared`-shaped sibling that passes `Some`.
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
+    )
+    .await
+}
+
+/// [`serve_connection_with_mob_events_and_commands_shared`], plus online-mode
+/// encryption and session-server verification (issue #273) — the
+/// `_and_commands_shared`-shaped sibling promised by that function's own
+/// `online_mode` argument comment.
+///
+/// A **new** entry point rather than a widened
+/// [`serve_connection_with_mob_events_and_commands_shared`], for the same
+/// reason every other capability in this file gets one: that function's one
+/// caller lives in `integrated.rs`, outside this change's reach, and a
+/// changed signature would break it from the outside. Wiring a real dedicated
+/// host up to online mode is therefore whoever owns `integrated.rs` calling
+/// this instead of that — a purely additive swap, not a signature change —
+/// once they choose to. Until then this is reachable for testing (see
+/// `crates/protocol/v770/tests/`, following the precedent
+/// `serve_connection_with_resource_pack`/`serve_connection_with_plugin_channels`
+/// already set for a capability with no production wiring yet) and for any
+/// other caller that wants online mode directly.
+///
+/// # Errors
+///
+/// As [`serve_connection`], plus [`ServerError::VerifyTokenMismatch`],
+/// [`ServerError::UnverifiedUsername`] and
+/// [`ServerError::AuthServiceUnavailable`] for the new handshake.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_connection_with_online_mode<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &Arc<S>,
+    entities: &E,
+    view_radius: i32,
+    block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
+    block_ticks: &BlockTickFeed,
+    explosions: &ExplosionFeed,
+    commands: &CommandDispatch,
+    resource_packs: &ResourcePackPushFeed,
+    plugin_channels: &PluginChannelRegistry,
+    world: &crate::world_state::WorldStateHandle,
+    access: &crate::access::AccessHandle,
+    peer_ip: Option<std::net::IpAddr>,
+    online_mode: &OnlineModeConfig,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+    E: EntitySource,
+{
+    serve_connection_inner(
+        conn,
+        proto,
+        SourceRef::Shared(source),
+        entities,
+        view_radius,
+        view_radius,
+        block_entities,
+        mobs,
+        block_ticks,
+        explosions,
+        &WeatherFeed::default(),
+        &SleepVote::default(),
+        &SleepFeed::default(),
+        commands,
+        &BorderFeed::default(),
+        resource_packs,
+        plugin_channels,
+        world,
+        access,
+        peer_ip,
+        Some(online_mode),
     )
     .await
 }
@@ -2002,6 +2267,11 @@ where
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
+        // Issue #273: offline, this wrapper's behaviour before online mode
+        // existed. `serve_connection_with_online_mode` is the one entry point
+        // that passes `Some`.
         #[cfg(not(target_arch = "wasm32"))]
         None,
     )
@@ -2086,6 +2356,11 @@ where
         &crate::access::AccessHandle::default(),
         #[cfg(not(target_arch = "wasm32"))]
         None,
+        // Issue #273: offline, this wrapper's behaviour before online mode
+        // existed. `serve_connection_with_online_mode` is the one entry point
+        // that passes `Some`.
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
     )
     .await
 }
@@ -2157,6 +2432,11 @@ where
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
+        // Issue #273: offline, this wrapper's behaviour before online mode
+        // existed. `serve_connection_with_online_mode` is the one entry point
+        // that passes `Some`.
         #[cfg(not(target_arch = "wasm32"))]
         None,
     )
@@ -2232,6 +2512,11 @@ where
         &crate::access::AccessHandle::default(),
         #[cfg(not(target_arch = "wasm32"))]
         None,
+        // Issue #273: offline, this wrapper's behaviour before online mode
+        // existed. `serve_connection_with_online_mode` is the one entry point
+        // that passes `Some`.
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
     )
     .await
 }
@@ -2303,6 +2588,11 @@ where
         // Issue #336: the inert default — admits everybody, ops nobody.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
+        #[cfg(not(target_arch = "wasm32"))]
+        None,
+        // Issue #273: offline, this wrapper's behaviour before online mode
+        // existed. `serve_connection_with_online_mode` is the one entry point
+        // that passes `Some`.
         #[cfg(not(target_arch = "wasm32"))]
         None,
     )
@@ -2409,6 +2699,13 @@ async fn serve_connection_inner<T, P, S, E>(
     // for an in-memory duplex, which has no address — and an IP ban therefore
     // cannot apply to singleplayer, which is correct rather than a gap.
     #[cfg(not(target_arch = "wasm32"))] peer_ip: Option<std::net::IpAddr>,
+    // Issue #273. `None` (every pre-existing entry point) means offline mode,
+    // this crate's behaviour before this parameter existed: `LoginStart` goes
+    // straight to `proto.login_success` exactly as it always did. `Some`
+    // sends an encryption request instead and only calls `login_success`
+    // once the session server confirms the client's identity — see the
+    // `LoginStart`/`EncryptionResponse` arms below.
+    #[cfg(not(target_arch = "wasm32"))] online_mode: Option<&OnlineModeConfig>,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -2424,6 +2721,17 @@ where
     // `PlayerInfo` map, so a second, independently derived uuid would produce a
     // spawn every client silently discards.
     let mut login_uuid: Option<uuid::Uuid> = None;
+    // Issue #273. `Some` between the moment `LoginStart` sends an
+    // `EncryptionRequest` and the moment the matching `EncryptionResponse`
+    // arrives — the RSA keypair the request's public key came from (needed
+    // again to decrypt the response) plus the verify-token challenge the
+    // response must echo back correctly. `take()`n by the `EncryptionResponse`
+    // arm, so a second response on the same connection (there is nothing
+    // outstanding for it to answer) is the `None` branch there, not a reused
+    // keypair.
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut pending_encryption: Option<(ServerKeyPair, [u8; lodestone_net::VERIFY_TOKEN_LEN])> =
+        None;
     let mut streamer = EntityStreamer::default();
     let mut player_list = PlayerListStreamer::default();
     // Vanilla's `ServerStatusPacketListenerImpl.hasRequestedStatus`
@@ -2517,9 +2825,104 @@ where
                 }
                 username = Some(name.clone());
                 login_uuid = Some(uuid);
-                for directive in proto.login_success(&name, uuid) {
-                    apply(conn, &mut state, directive).await?;
+
+                // Issue #273: online mode sends an encryption request instead
+                // of finishing login now — `login_success` is deferred to the
+                // `EncryptionResponse` arm below, once the session server has
+                // confirmed the client's identity. `encode_encryption_request`
+                // returning `ServerDirective::None` means this protocol has no
+                // wire support for it (the default every implementor but
+                // `V770ServerProtocol` gets), so that also falls back to an
+                // offline login rather than sending a request nothing would
+                // answer.
+                #[cfg(not(target_arch = "wasm32"))]
+                let sent_encryption_request = if let Some(cfg) = online_mode {
+                    let keypair = ServerKeyPair::generate()?;
+                    let verify_token = generate_verify_token();
+                    let directive =
+                        proto.encode_encryption_request(keypair.public_key_der(), &verify_token);
+                    if matches!(directive, ServerDirective::None) {
+                        false
+                    } else {
+                        apply(conn, &mut state, directive).await?;
+                        pending_encryption = Some((keypair, verify_token));
+                        true
+                    }
+                } else {
+                    false
+                };
+                #[cfg(target_arch = "wasm32")]
+                let sent_encryption_request = false;
+
+                if !sent_encryption_request {
+                    for directive in proto.login_success(&name, uuid) {
+                        apply(conn, &mut state, directive).await?;
+                    }
                 }
+            }
+            // Issue #273: the client's answer to the `EncryptionRequest` the
+            // `LoginStart` arm above sent. Everything up to and including this
+            // packet travels in the clear; `ServerDirective::EnableEncryption`
+            // below must be applied before anything is sent in reply, or the
+            // two sides disagree about which layer started where —
+            // `ServerDirective::EnableEncryption`'s own doc comment names the
+            // same ordering hazard `SetCompression` already documents for
+            // itself.
+            #[cfg(not(target_arch = "wasm32"))]
+            ServerBound::EncryptionResponse {
+                shared_secret,
+                verify_token,
+            } => {
+                let Some(cfg) = online_mode else {
+                    return Err(ServerError::UnexpectedEncryptionResponse);
+                };
+                let Some((keypair, expected_token)) = pending_encryption.take() else {
+                    return Err(ServerError::UnexpectedEncryptionResponse);
+                };
+                let decrypted_token = keypair.decrypt(&verify_token)?;
+                if decrypted_token != expected_token {
+                    return Err(ServerError::VerifyTokenMismatch);
+                }
+                let secret = keypair.decrypt(&shared_secret)?;
+                apply(conn, &mut state, ServerDirective::EnableEncryption(secret.clone())).await?;
+
+                // Vanilla's server-id is always the empty string
+                // (`ServerLoginPacketListenerImpl.serverId`); the hash is
+                // taken over it, the secret, and the exact public-key DER
+                // bytes the client encrypted against.
+                let hash = lodestone_auth::server_hash("", &secret, keypair.public_key_der());
+                let name = username.clone().unwrap_or_default();
+                match (cfg.verify)(cfg.http.clone(), name, hash).await {
+                    Ok(Some(profile)) => {
+                        login_uuid = Some(profile.id);
+                        username = Some(profile.name.clone());
+                        for directive in proto.login_success(&profile.name, profile.id) {
+                            apply(conn, &mut state, directive).await?;
+                        }
+                    }
+                    Ok(None) => {
+                        let directive =
+                            proto.encode_disconnect(state, &unverified_username_reason());
+                        apply(conn, &mut state, directive).await?;
+                        return Err(ServerError::UnverifiedUsername);
+                    }
+                    Err(error) => {
+                        let directive =
+                            proto.encode_disconnect(state, &auth_servers_down_reason());
+                        apply(conn, &mut state, directive).await?;
+                        return Err(ServerError::AuthServiceUnavailable(error));
+                    }
+                }
+            }
+            // Online-mode encryption is native-only (`lodestone-net::crypto`'s
+            // and `lodestone-auth`'s own doc comments): a `wasm32` build never
+            // sends an `EncryptionRequest` in the first place (`LoginStart`'s
+            // `sent_encryption_request` is unconditionally `false` there), so
+            // a real client answering one it was never sent is a protocol
+            // violation exactly like the native "nothing outstanding" case.
+            #[cfg(target_arch = "wasm32")]
+            ServerBound::EncryptionResponse { .. } => {
+                return Err(ServerError::UnexpectedEncryptionResponse);
             }
             ServerBound::LoginAcknowledged => {
                 state = State::Configuration;
@@ -8524,6 +8927,20 @@ where
             // `Into<PerceivedPlayer>`, so supplying the bare perception compiles fine
             // and silently makes every pet ownerless — the failure is invisible from
             // the call site, which is why this spells the identity out.
+            // Issue #458 primitive 2: the gaze feed needs a real view vector,
+            // not just a position. `player_rot` holds the latest known angles
+            // (just possibly refreshed above, or `Default` — yaw/pitch 0 — for
+            // a `MovePlayerPos` packet that carries no rotation at all before
+            // the first look). Same formula `block_placement.rs`'s
+            // `nearest_look` already uses for the block-placement raycast
+            // (`Entity.calculateViewVector`).
+            let facing = player_rot.unwrap_or_default();
+            let (yaw_rad, pitch_rad) = (f64::from(facing.yaw).to_radians(), f64::from(facing.pitch).to_radians());
+            let view_direction = Vec3::new(
+                -yaw_rad.sin() * pitch_rad.cos(),
+                -pitch_rad.sin(),
+                yaw_rad.cos() * pitch_rad.cos(),
+            );
             mobs.with(|sim| {
                 sim.set_players(vec![PerceivedPlayer {
                     identity: Some(PlayerIdentity {
@@ -8533,6 +8950,7 @@ where
                     perception: PlayerPerception {
                         position: Vec3::new(x, y, z),
                         held_item: inventory.selected_item().map(|stack| stack.item.clone()),
+                        view_direction,
                     },
                 }]);
             });
@@ -9684,6 +10102,9 @@ where
         // arm for those is gated on the state.
         ServerBound::Handshake { .. }
         | ServerBound::LoginStart { .. }
+        // Issue #273: `EncryptionResponse` is `State::Login`-only too, same
+        // as `LoginStart`/`LoginAcknowledged` beside it.
+        | ServerBound::EncryptionResponse { .. }
         | ServerBound::LoginAcknowledged
         | ServerBound::ConfigurationFinished
         | ServerBound::StatusRequest

@@ -588,6 +588,7 @@ mod vehicle_tests {
             perception: PlayerPerception {
                 position: Vec3::new(8.5, 64.0, 8.5),
                 held_item: None,
+                view_direction: Vec3::new(0.0, 0.0, 1.0),
             },
         }]);
         evicted.tick_vehicles(&lake());
