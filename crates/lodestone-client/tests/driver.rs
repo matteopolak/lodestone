@@ -276,6 +276,18 @@ fn signed_chat(signature: Vec<u8>, was_shown: bool) -> Directive {
     })
 }
 
+/// A `PLAYER_CHAT` that carried **no** signature — the wire's optional
+/// signature was absent, which the adapter reports as an empty byte string
+/// with `ack` still `Some` (the decoder reports the packet, not a judgement
+/// about it). A server produces these for any player without a chat session,
+/// including this client's own message echoed back while it sends unsigned.
+///
+/// Distinct from `signed_chat`'s argument only in that the signature is empty,
+/// which is exactly the distinction the last-seen window turns on.
+fn unsigned_chat() -> Directive {
+    signed_chat(Vec::new(), true)
+}
+
 /// The `Login` event that puts us in the world (entering Play). The driver arms
 /// its client-loaded latch on this.
 fn login_event() -> ClientEvent {
@@ -1490,4 +1502,88 @@ async fn a_mid_session_failure_reaches_the_event_stream_and_a_clean_close_does_n
     }
 
     assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// **Only a signed message advances the last-seen window** — the regression
+/// that got the repo owner disconnected once this client started transmitting
+/// a real acknowledgement offset.
+///
+/// Both peers must count the same messages. The server calls
+/// `LastSeenMessagesValidator.addPending` under `if (signature != null)`
+/// (`ServerGamePacketListenerImpl`), and vanilla's own client mirrors that null
+/// check around `ClientPacketListener.markMessageAsProcessed`
+/// (`ChatListener.handlePlayerChatMessage`). Counting an unsigned `PLAYER_CHAT`
+/// advances our offset past a server count that never moved.
+///
+/// **The expected value comes from outside this repo.** Measured against the
+/// live vanilla 26.2 oracle: sending one unsigned chat message and reading the
+/// echo back showed `signature present = False`, and acknowledging that single
+/// phantom message produced, in the server's own log,
+/// *"Failed to validate message acknowledgement offset … Advanced last seen
+/// window by 1 messages, but expected at most 0"* followed by
+/// *"lost connection: Chat message validation failure"* — vanilla's
+/// `multiplayer.disconnect.chat_validation_failed`.
+///
+/// The two hypotheses are made to differ by construction: `SIGNED` and
+/// `UNSIGNED` are **pairwise distinct and neither is zero**, so a gate with
+/// only signed messages — or only unsigned ones — could not tell them apart.
+/// Signed signatures are distinct because the tracker collapses consecutive
+/// duplicates.
+///
+/// **Measured under the neuter** (guard removed): this reports **6**, not
+/// `SIGNED + UNSIGNED = 8`, because every unsigned message carries the *same*
+/// empty signature and the tracker's consecutive-duplicate collapse
+/// (`LastSeenMessagesTracker.addPending`'s `lastTrackedMessage` check) folds
+/// the trailing run into one. 6 is the honest wrong-hypothesis value here; the
+/// assertion below does not name it, because it depends on the interleaving
+/// pattern rather than on the counts alone.
+#[tokio::test]
+async fn only_signed_chat_advances_the_last_seen_window() {
+    const SIGNED: i32 = 3;
+    const UNSIGNED: i32 = 5;
+    const BATCH: i32 = 0x7A;
+    const KA: i32 = 0x7B;
+
+    // Interleaved rather than grouped: a guard that bailed on the first
+    // unsigned message would still pass a signed-then-unsigned ordering.
+    let mut batch: Vec<Directive> = Vec::new();
+    for i in 0..UNSIGNED.max(SIGNED) {
+        if i < SIGNED {
+            batch.push(signed_chat((i as u16).to_be_bytes().to_vec(), true));
+        }
+        if i < UNSIGNED {
+            batch.push(unsigned_chat());
+        }
+    }
+
+    let adapter = FakeAdapter::new()
+        .on(ConnectionState::Handshaking, BATCH, batch)
+        .on(
+            ConnectionState::Handshaking,
+            KA,
+            vec![Directive::Emit(ClientEvent::KeepAlive { id: 3 })],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Manual);
+
+    peer.write_packet(BATCH, &[]).await.unwrap();
+    peer.write_packet(KA, &[]).await.unwrap();
+
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, CHAT_ACK_ID, "the tick flush must send a chat_ack");
+    let offset = i32::from_be_bytes(payload[1..5].try_into().unwrap());
+    assert_eq!(
+        offset, SIGNED,
+        "the window must advance by the {SIGNED} signed messages only and \
+         ignore the {UNSIGNED} unsigned ones; any larger offset is one a real \
+         server rejects with multiplayer.disconnect.chat_validation_failed"
+    );
+
+    // Drain so the driver's send side cannot wedge on a full channel.
+    let total = SIGNED + UNSIGNED + 1;
+    for _ in 0..total {
+        assert!(events.recv().await.is_some());
+    }
+
+    drop(handle);
 }
