@@ -780,6 +780,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   *lightmap*: a 16x16 texture indexed by `(block_level, sky_level)` that `block.vsh`
   folds into the vertex colour with `vertexColor = Color * sample_lightmap(Sampler2,
   UV2)`.
+- [Lightning](./lightning.md) — Vanilla's thunderstorm lightning: per-chunk
+  strike-target selection during a thunderstorm, the `LightningBolt` entity's
+  life-cycle, and its entity-facing effects (damage, ignition, and species
+  transformations). `crates/lodestone-server/src/lightning.rs` is a pure decision
+  module — it decides a strike should happen, where, and what an already-spawned
+  bolt should do on a given tick, but it cannot spawn anything: the live-entity
+  tracker (`MobSim`, in `crates/lodestone-server/src/mobs/`) is out of this change's
+  reach. Nothing server-side produces a lightning-bolt spawn yet, though the client is
+  already wired to receive one (`lodestone-shell`'s `net.rs` has a
+  `ClientEvent::EntitySpawned` arm for `lightning_bolt` calling into weather
+  rendering).
 - [Live mob simulation (issue #217)](./live-mob-sim.md) — The production wiring that
   turns `lodestone-server`'s `MobSim` (AI-driven mob motion, computed server-side)
   into mobs a real client actually watches move. Before this, `mobs.rs`'s own module
@@ -1211,6 +1222,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   String` closure — the same "pure decision, fake world via closure" shape
   [`docs/tick-scheduling.md`](./tick-scheduling.md) already established for gravity
   blocks:
+- [Regional Difficulty](./regional-difficulty.md) — Vanilla's `DifficultyInstance`:
+  a scalar (`effective_difficulty`, roughly `0.0`–`6.75`) grown from world
+  difficulty, elapsed world time, a chunk's inhabited time and the moon phase.
+  `crates/lodestone-server/src/regional_difficulty.rs` is the pure formula;
+  `WorldStateHandle::regional_difficulty_at`
+  (`crates/lodestone-server/src/world_state.rs`) is the one wired call site, feeding
+  `crates/lodestone-server/src/lightning.rs`'s skeleton-horse-trap chance.
 - [Registry data ingest (`registry_data`, dimension types, world clocks)](./registry-data-ingest.md) —
   The client's decode of the Configuration-phase `registry_data` packet, and the two
   registries it turns into typed values: `minecraft:dimension_type` and
