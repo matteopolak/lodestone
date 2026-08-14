@@ -124,6 +124,12 @@ mod golem;
 // staying true.
 pub use golem::{GolemConstruction, GolemSpecies};
 
+// Villager professions and workstation claiming (issues #243, #245). `pub`
+// (not re-exported at the top level) so `crate::server` can reach
+// `crate::mobs::villager::trades::offers_up_to` when it builds a
+// `MERCHANT_OFFERS` packet from an `InteractOutcome::OpenTrade`.
+pub mod villager;
+
 // No re-export: every item in `species` was already private in `mobs.rs`
 // before this split (nothing outside this module ever named them), so
 // `pub(super)` here — visible within `mobs` and its descendants — is a
@@ -524,17 +530,35 @@ pub enum InteractOutcome {
         /// `AbstractHorse.getTemper()` after the gain.
         temper: i32,
     },
+    /// A professioned villager's trade screen should open — vanilla
+    /// `Villager.mobInteract`, the full override that replaces the taming
+    /// chain entirely rather than falling through it (issue #245). Consumes
+    /// no item, the same as [`SitToggled`](Self::SitToggled): opening a menu
+    /// is not a `usePlayerItem` call in vanilla either.
+    OpenTrade {
+        /// The villager's current profession — never `None`/`Nitwit`, which
+        /// have no trades and never reach this arm (see
+        /// [`MobSim::interact`]'s villager short-circuit).
+        profession: villager::Profession,
+        /// `VillagerData.level`, `1..=5` — how many levels of trades to
+        /// accumulate (see `villager::trades::offers_up_to`).
+        level: i32,
+    },
 }
 
 impl InteractOutcome {
     /// Whether the interaction consumed one of the held item.
     ///
-    /// `SitToggled` is the exception, and it is vanilla's:
-    /// `InteractionResult.SUCCESS.withoutItem()`. A pet you sit down does not eat
-    /// whatever you happened to be holding.
+    /// `SitToggled`/`OpenTrade` are the exceptions, and `SitToggled`'s is
+    /// vanilla's: `InteractionResult.SUCCESS.withoutItem()`. A pet you sit
+    /// down does not eat whatever you happened to be holding, and opening a
+    /// trade screen is not a `usePlayerItem` call either.
     #[must_use]
     pub fn consumes_item(self) -> bool {
-        !matches!(self, Self::Pass | Self::SitToggled { .. })
+        !matches!(
+            self,
+            Self::Pass | Self::SitToggled { .. } | Self::OpenTrade { .. }
+        )
     }
 
     /// The particle type vanilla's matching `broadcastEntityEvent` would make the
@@ -547,7 +571,11 @@ impl InteractOutcome {
         match self {
             Self::Tamed | Self::InLove => Some("minecraft:heart"),
             Self::TameFailed => Some("minecraft:smoke"),
-            Self::Pass | Self::SitToggled { .. } | Self::Fed | Self::TemperRaised { .. } => None,
+            Self::Pass
+            | Self::SitToggled { .. }
+            | Self::Fed
+            | Self::TemperRaised { .. }
+            | Self::OpenTrade { .. } => None,
         }
     }
 }
@@ -848,6 +876,27 @@ pub struct SimMob<'w> {
     /// mooshroom guard itself — see that module's doc for why nothing yet
     /// consumes the toggle this guards.
     last_lightning_bolt: Option<i32>,
+    /// This villager's profession (issue #243) — `VillagerProfession.NONE`
+    /// for every non-villager species, and for a villager that has not
+    /// claimed a workstation yet. Only meaningful when
+    /// [`entity_type`](Self::entity_type) is `minecraft:villager`.
+    profession: villager::Profession,
+    /// The workstation block position [`profession`](Self::profession) was
+    /// claimed from, if any — `None` for an unemployed villager or a
+    /// non-villager. Cleared alongside `profession` reverting to `None` when
+    /// [`MobSim::tick_villager_professions`] finds the claim gone.
+    workstation: Option<BlockPos>,
+    /// `VillagerData.level`, `1..=5`. `1` for every non-villager and every
+    /// freshly spawned villager (`VillagerData`'s own field default).
+    villager_level: i32,
+    /// Accumulated trading xp toward [`villager::max_xp_for_level`]'s next
+    /// threshold. `Villager.villagerXp`.
+    villager_xp: i32,
+    /// Ticks until this mob's next job search, decremented in
+    /// [`MobSim::tick_villager_professions`]. Throttles the bounded terrain
+    /// scan [`villager::find_and_claim_workstation`] runs — see that
+    /// function's own doc for why the scan itself is not free.
+    job_search_cooldown: i32,
 }
 
 impl<'w> SimMob<'w> {
@@ -1531,6 +1580,44 @@ impl<'w> SimMob<'w> {
         self.mob.velocity()
     }
 
+    /// This villager's profession — `villager::Profession::None` for every
+    /// non-villager and every villager that has not claimed a workstation.
+    #[must_use]
+    pub fn profession(&self) -> villager::Profession {
+        self.profession
+    }
+
+    /// The workstation this villager claimed, if any.
+    #[must_use]
+    pub fn workstation(&self) -> Option<BlockPos> {
+        self.workstation
+    }
+
+    /// `VillagerData.level`, `1..=5`.
+    #[must_use]
+    pub fn villager_level(&self) -> i32 {
+        self.villager_level
+    }
+
+    /// Accumulated trading xp toward the next level.
+    #[must_use]
+    pub fn villager_xp(&self) -> i32 {
+        self.villager_xp
+    }
+
+    /// Assigns (or clears, with `villager::Profession::None`) this mob's
+    /// profession and workstation together — the two always change in
+    /// lockstep (see [`MobSim::tick_villager_professions`]'s doc for why a
+    /// claim and a profession are never set independently).
+    pub(crate) fn set_profession(
+        &mut self,
+        profession: villager::Profession,
+        workstation: Option<BlockPos>,
+    ) {
+        self.profession = profession;
+        self.workstation = workstation;
+    }
+
     /// Lowers the mob into a version-free [`EntitySnapshot`] for the encode seam.
     /// This is the whole identity/motion surface a [`ServerProtocol`] needs to
     /// build spawn/move/remove packets; the server holds the previous snapshot
@@ -1620,6 +1707,24 @@ impl<'w> SimMob<'w> {
                 metadata.push(MetadataField::Baby(self.is_baby()));
             }
             _ => {}
+        }
+        // `Villager.DATA_VILLAGER_DATA`, index 19 (issue #243) — the field a
+        // client's `VillagerRenderer`/`VillagerProfessionLayer` actually reads
+        // to pick a texture. Pushed unconditionally for every villager, at
+        // whatever `profession`/`villager_level` currently are (including
+        // `None`/`1`), for the same reason `Baby` above is pushed
+        // unconditionally: a profession transition needs to reach the client
+        // the same way the initial value did, not only while it is
+        // "interesting". `kind` is always `minecraft:plains` — see
+        // `crate::mobs::villager`'s module doc for why biome-derived type is
+        // out of scope.
+        if self.entity_type.path() == "villager" {
+            metadata.push(MetadataField::VillagerData {
+                kind: ResourceKey::from_str("minecraft:plains").expect("static key is valid"),
+                profession: ResourceKey::from_str(&format!("minecraft:{}", self.profession.path()))
+                    .expect("every Profession::path() is a valid identifier path"),
+                level: self.villager_level,
+            });
         }
         EntitySnapshot {
             id: self.id,
@@ -1948,6 +2053,12 @@ pub struct MobSim<'w> {
     /// sim cannot resolve a target block's power write itself. Drained by
     /// [`take_projectile_block_hits`](Self::take_projectile_block_hits).
     pending_projectile_block_hits: Vec<ProjectileBlockHit>,
+    /// The live workstation claim ledger [`tick_villager_professions`](Self::tick_villager_professions)
+    /// reads and writes (issue #243). See [`villager::WorkstationClaims`]'s
+    /// own doc for why this reuses `crate::poi_storage::PoiRecord` rather
+    /// than a parallel claim table, and for what is deliberately not built
+    /// (no on-disk persistence, no block-event hook).
+    workstation_claims: villager::WorkstationClaims,
 }
 
 /// One live `AbstractBoat` — wire identity, motion, and who is aboard.
@@ -2106,6 +2217,7 @@ impl<'w> MobSim<'w> {
             lightning_bolts: HashMap::new(),
             pending_lightning_fires: Vec::new(),
             pending_projectile_block_hits: Vec::new(),
+            workstation_claims: villager::WorkstationClaims::new(),
         }
     }
 
@@ -2173,6 +2285,20 @@ impl<'w> MobSim<'w> {
     #[must_use]
     pub fn items_settled_probe_count(&self) -> u64 {
         self.item_probe_count
+    }
+
+    /// This villager's accumulated trading xp — `crate::server`'s own
+    /// consumer for the `MERCHANT_OFFERS` packet's `villager_xp` field,
+    /// alongside the `profession`/`level` an [`InteractOutcome::OpenTrade`]
+    /// already carries. `0` for a non-villager or an unknown id — a
+    /// harmless default rather than a panic, the same convention every
+    /// other by-id accessor in this file uses.
+    #[must_use]
+    pub fn villager_xp(&self, mob_id: i32) -> i32 {
+        self.mobs
+            .iter()
+            .find(|m| m.id == mob_id)
+            .map_or(0, |m| m.villager_xp)
     }
 
     /// Replaces the set of players mob perception can see, for
@@ -2365,6 +2491,11 @@ impl<'w> MobSim<'w> {
             knockback_resistance,
             leash_holder: None,
             last_lightning_bolt: None,
+            profession: villager::Profession::None,
+            workstation: None,
+            villager_level: 1,
+            villager_xp: 0,
+            job_search_cooldown: 0,
         });
         self.mobs.last_mut().expect("just pushed")
     }
@@ -2573,6 +2704,65 @@ impl<'w> MobSim<'w> {
     pub fn tick(&mut self) {
         let world = self.world;
         self.tick_with_terrain(&|x, y, z| world.block_state(x, y, z).to_owned());
+    }
+
+    /// Ticks between one unemployed villager's job searches — throttles
+    /// [`villager::find_and_claim_workstation`]'s bounded terrain scan (see
+    /// that function's own doc for the cost it is bounding). 100 ticks is a
+    /// scope choice, not a transcribed vanilla constant: nothing in this
+    /// codebase ports `AssignProfessionFromJobSite`'s own interval.
+    const JOB_SEARCH_INTERVAL_TICKS: i32 = 100;
+
+    /// One villager-profession pass (issue #243): throttled job search for
+    /// unemployed villagers, and re-verification for employed ones.
+    ///
+    /// Re-verification, not an event hook, is how "losing the block loses
+    /// the job" is implemented — see [`villager`]'s own module doc for why,
+    /// and for the one-tick lag that trade-off buys. A villager whose
+    /// workstation position no longer resolves to the profession it was
+    /// claimed under (destroyed, or replaced with a different workstation
+    /// type) releases its ticket and goes back to unemployed on the very
+    /// next call.
+    fn tick_villager_professions(&mut self) {
+        let world = self.world;
+        let claims = &mut self.workstation_claims;
+        for mob in &mut self.mobs {
+            if mob.entity_type.path() != "villager" {
+                continue;
+            }
+            if let Some(pos) = mob.workstation {
+                let state = world.block_state(pos.x, pos.y, pos.z);
+                let still_valid = villager::poi_type_for_block(villager::bare_block_id(state))
+                    .and_then(villager::profession_for_poi_type)
+                    == Some(mob.profession);
+                if !still_valid {
+                    claims.remove(pos);
+                    mob.set_profession(villager::Profession::None, None);
+                }
+                continue;
+            }
+            // A profession with no job site (`Nitwit`) has nothing to search
+            // for; only `None` (truly unemployed) runs the search below.
+            if mob.profession != villager::Profession::None {
+                continue;
+            }
+            if mob.job_search_cooldown > 0 {
+                mob.job_search_cooldown -= 1;
+                continue;
+            }
+            mob.job_search_cooldown = Self::JOB_SEARCH_INTERVAL_TICKS;
+            let feet = mob.position();
+            let origin = BlockPos::new(
+                feet.x.floor() as i32,
+                feet.y.floor() as i32,
+                feet.z.floor() as i32,
+            );
+            if let Some((pos, profession)) =
+                villager::find_and_claim_workstation(origin, world, claims)
+            {
+                mob.set_profession(profession, Some(pos));
+            }
+        }
     }
 
     /// One tick, settling dropped items against a caller-supplied solidity
@@ -2897,6 +3087,7 @@ impl<'w> MobSim<'w> {
         // it runs before the increment below.
         self.tick_orbs(&view);
         self.tick_leashes();
+        self.tick_villager_professions();
 
         self.tick_count += 1;
     }
@@ -3437,6 +3628,29 @@ impl<'w> MobSim<'w> {
         let pos = mob.position();
         let item = held_item.map(|k| k.path().to_owned());
         let item = item.as_deref();
+
+        // `Villager.mobInteract` is a full override, not an `Animal.mobInteract`
+        // fall-through: a villager is never tameable, so this has to be a
+        // short-circuit ahead of the `tame_mechanism` dispatch below rather
+        // than another arm inside it (issue #245).
+        if species == "villager" {
+            let profession = mob.profession;
+            let level = mob.villager_level;
+            let has_offers = !villager::trades::offers_up_to(profession, level).is_empty();
+            let outcome = if matches!(
+                profession,
+                villager::Profession::None | villager::Profession::Nitwit
+            ) || !has_offers
+            {
+                // No job, or a job this crate has not ported real trades for
+                // yet (`villager::trades`' own doc names which professions
+                // those are) — an honest `Pass` rather than an empty screen.
+                InteractOutcome::Pass
+            } else {
+                InteractOutcome::OpenTrade { profession, level }
+            };
+            return outcome;
+        }
 
         let outcome = match species::tame_mechanism(&species) {
             Some(species::TameMechanism::Temper { max_temper }) => {
