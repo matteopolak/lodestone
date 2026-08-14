@@ -647,7 +647,7 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
 /// source so the table is not merely self-consistent.
 #[test]
 fn hand_checked_solidity_rows() {
-    // `Blocks.java:2926` registers SLIME_BLOCK with no forceSolid* call and a
+    // `Blocks.SLIME_BLOCK` registers with no forceSolid* call and a
     // full cube, so geometry and truth agree: solid.
     assert_eq!(
         block_solidity::blocks_motion(first_id_named("minecraft:slime_block")),

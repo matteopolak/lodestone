@@ -7,7 +7,7 @@
 //!
 //! # What is being anchored
 //!
-//! `SnowAndFreezeFeature.place` (`SnowAndFreezeFeature.java:20-49`) — vanilla's
+//! `SnowAndFreezeFeature.place` — vanilla's
 //! whole `TOP_LAYER_MODIFICATION` step — reads exactly four per-state facts, and
 //! the world generator cannot answer any of them from `blocks.json`:
 //! `Block.isFaceFull(collisionShape, UP)` (column `U`),
@@ -609,7 +609,7 @@ fn powder_snow_is_the_only_dynamic_shape_block_worldgen_exposes() {
 /// * **`snow[layers=8]` has `U == false`.** All eight snow states do. That is
 ///   why `SnowLayerBlock.canSurvive` carries an explicit
 ///   `|| belowState.is(this) && belowState.getValue(LAYERS) == 8` clause
-///   (`SnowLayerBlock.java:84`) — the geometry alone never satisfies it, because
+///   (in `SnowLayerBlock.canSurvive`) — the geometry alone never satisfies it, because
 ///   a full snow layer is 14/16 tall.
 /// * **`ice` and `packed_ice` have `U == true`** and are in
 ///   `cannot_support_snow_layer`. So the tag check must run **before** the

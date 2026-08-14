@@ -802,7 +802,7 @@ fn light_blocks_outline_to_nothing_because_the_census_holds_no_item() {
 }
 
 /// `getInteractionShape` defaults to `Shapes.empty()`
-/// (`BlockBehaviour.java:295-297`) and only four block families override it in
+/// (`BlockBehaviour.getInteractionShape`) and only four block families override it in
 /// 26.2. Pinned as a completeness statement: if a fifth appears, this fails and
 /// the docs' claim about which blocks refine their hit face gets updated.
 #[test]

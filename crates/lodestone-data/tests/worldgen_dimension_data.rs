@@ -333,7 +333,8 @@ fn dimension_settings_carry_the_engine_relevant_scalars() {
     );
 
     // Cell dimensions. Vanilla derives cell size as
-    // `QuartPos.toBlock(noiseSize*)` = `size * 4` (`NoiseSettings.java:46,50`),
+    // `QuartPos.toBlock(noiseSize*)` = `size * 4` (`NoiseSettings.getCellHeight`/
+    // `NoiseSettings.getCellWidth`),
     // so the Overworld's 4x8 cell is (size_horizontal 1, size_vertical 2) and
     // the End's is (2, 1) => an 8-wide, 4-tall cell. The engine's
     // `CELL_WIDTH`/`CELL_HEIGHT` are `const` 4/8, so the End needs these
@@ -427,7 +428,7 @@ fn end_islands_is_the_only_novel_density_function_type() {
 /// [`DIMENSION_FILES`]: the jar's
 /// `multi_noise_biome_source_parameter_list/nether.json` is 37 bytes of
 /// `{"preset": "minecraft:nether"}`, because the table lives in Java
-/// (`MultiNoiseBiomeSourceParameterList.java:51-67`) and its codec only ever
+/// (`MultiNoiseBiomeSourceParameterList.Preset.NETHER`) and its codec only ever
 /// serialises the preset id. The committed file is the oracle's output.
 const NETHER_PARAMETERS: &str = "biome_parameters/nether.json";
 
@@ -494,7 +495,8 @@ fn nether_biome_parameters_are_degenerate_points_discriminated_by_offset() {
 
     // Magnitude, not sign: the exact quantized table. `Climate.parameters`'
     // 7-float overload wraps each channel in `Parameter.point(v)` (= `span(v,v)`)
-    // and quantizes by 10000 (`Climate.java:27,77-83`), so every bound is an
+    // and quantizes by 10000 (`Climate.QUANTIZATION_FACTOR`, applied in
+    // `Climate.quantizeCoord`), so every bound is an
     // exact multiple of the source constant: crimson_forest's 0.4F -> 4000,
     // warped_forest's 0.375F offset -> 3750, basalt_deltas' 0.175F -> 1750.
     let expected: Vec<([i64; 13], &str)> = vec![
@@ -525,7 +527,7 @@ fn nether_biome_parameters_are_degenerate_points_discriminated_by_offset() {
         }
         // continentalness / erosion / depth / weirdness are all zero, because
         // the nether router sets those channels to `zero()`
-        // (`NoiseRouterData.java:390-411`). Only temperature, humidity and
+        // (`NoiseRouterData.nether`). Only temperature, humidity and
         // offset discriminate — which is why the two nether-specific noises
         // matter so much: they ARE the biome layout.
         for ch in 2..6 {
@@ -534,7 +536,7 @@ fn nether_biome_parameters_are_degenerate_points_discriminated_by_offset() {
     }
 
     // Exactly two rows carry a nonzero offset. Vanilla's `fitness` adds
-    // `Mth.square(this.offset)` as a flat penalty (`Climate.java:231-238`), so
+    // `Mth.square(this.offset)` as a flat penalty (`Climate.ParameterPoint.fitness`), so
     // these two are the deliberately-rarer biomes. Our engine reaches the same
     // number via `params[6].distance(0)^2`, which equals `offset^2` for either
     // sign — equivalent, not a gap.

@@ -5,15 +5,15 @@
 //!
 //! # Why this table has to exist
 //!
-//! `SnowAndFreezeFeature.place` (`SnowAndFreezeFeature.java:20-49`) asks four
+//! `SnowAndFreezeFeature.place` asks four
 //! questions of the block field, none of them answerable from `blocks.json`:
 //!
 //! | fn | vanilla expression | used for |
 //! |---|---|---|
-//! | [`face_full_up`] | `Block.isFaceFull(state.getCollisionShape(…), UP)` (`Block.java:345-348`) | `SnowLayerBlock.canSurvive` (`SnowLayerBlock.java:76-86`) |
-//! | [`has_fluid_state`] | `!state.getFluidState().isEmpty()` | the second half of the `MOTION_BLOCKING` heightmap predicate (`Heightmap.java:151`) |
-//! | [`is_water_source_liquid_block`] | `getFluidState().is(Fluids.WATER) && block instanceof LiquidBlock` (`Biome.java:153`) | which blocks turn to ice |
-//! | [`has_snowy_property`] | `state.hasProperty(BlockStateProperties.SNOWY)` | the `snowy` flip under a placed snow layer (`SnowAndFreezeFeature.java:41-43`) |
+//! | [`face_full_up`] | `Block.isFaceFull(state.getCollisionShape(…), UP)` | `SnowLayerBlock.canSurvive` |
+//! | [`has_fluid_state`] | `!state.getFluidState().isEmpty()` | the second half of the `MOTION_BLOCKING` heightmap predicate (`Heightmap.Types.MOTION_BLOCKING`) |
+//! | [`is_water_source_liquid_block`] | `getFluidState().is(Fluids.WATER) && block instanceof LiquidBlock` | which blocks turn to ice (`Biome.shouldFreeze`) |
+//! | [`has_snowy_property`] | `state.hasProperty(BlockStateProperties.SNOWY)` | the `snowy` flip under a placed snow layer, also in `SnowAndFreezeFeature.place` |
 //!
 //! [`crate::block_solidity::blocks_motion`] already carries the *first* half of
 //! the `MOTION_BLOCKING` predicate, and [`crate::collision_shapes`] carries the
@@ -28,7 +28,7 @@
 //!   `!Shapes.joinIsNotEmpty(Shapes.block(), shape.getFaceShape(UP),
 //!   NOT_SAME)` over the *discretised* `DiscreteVoxelShape` grid, after
 //!   `VoxelShape.calculateFace`'s three-way branch on `isCubeLikeAlong(Y)` /
-//!   empty slice / cube-like slice (`VoxelShape.java:197-245`). Re-deriving that
+//!   empty slice / cube-like slice. Re-deriving that
 //!   from the AABB list [`crate::collision_shapes`] holds means re-implementing
 //!   `SliceShape`, `CubePointRange` and their `1.0E-7` fuzzy comparisons. That
 //!   is a hand-rolled geometry pass, and this repo has already shipped a
@@ -100,7 +100,7 @@ pub fn face_full_up(id: u32) -> Option<bool> {
 /// if `id` is not in `0..`[`STATE_COUNT`].
 ///
 /// The second half of the `MOTION_BLOCKING` heightmap predicate
-/// (`Heightmap.java:151` — `input.blocksMotion() || !input.getFluidState()
+/// (`Heightmap.Types.MOTION_BLOCKING` — `input.blocksMotion() || !input.getFluidState()
 /// .isEmpty()`); combine with [`crate::block_solidity::blocks_motion`] for the
 /// whole thing. True for still and flowing water and lava **and** every
 /// waterlogged state, which is why it is broader than
@@ -114,7 +114,7 @@ pub fn has_fluid_state(id: u32) -> Option<bool> {
 /// instanceof LiquidBlock` for block-state `id`, or `None` if `id` is not in
 /// `0..`[`STATE_COUNT`].
 ///
-/// Exactly the condition `Biome.shouldFreeze` (`Biome.java:153`) puts on a
+/// Exactly the condition `Biome.shouldFreeze` puts on a
 /// block before it becomes ice. True for **one** state in 26.2,
 /// `minecraft:water[level=0]` — see the module doc for why that is not a bug in
 /// the dump.
@@ -127,7 +127,7 @@ pub fn is_water_source_liquid_block(id: u32) -> Option<bool> {
 /// `id`, or `None` if `id` is not in `0..`[`STATE_COUNT`].
 ///
 /// `SnowAndFreezeFeature` flips this property to `true` on the block it puts a
-/// snow layer on (`SnowAndFreezeFeature.java:41-43`); a port that skips the flip
+/// snow layer on (in `SnowAndFreezeFeature.place`); a port that skips the flip
 /// leaves visibly wrong terrain (a green grass top under snow) even when the
 /// snow itself is placed correctly.
 #[must_use]
