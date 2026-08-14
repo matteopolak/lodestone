@@ -4,8 +4,9 @@
 
 The render path for a block's own geometry drawn somewhere other than its own cell —
 vanilla's `SubmitNodeCollector.submitMovingBlock`. It is a **seam with more than one
-intended producer**, not a falling-block feature: falling sand and gravel use it, and so
-does `PistonHeadRenderer` — the piston head and the block it pushes.
+intended producer**, not a falling-block feature: falling sand and gravel use it, so does
+`PistonHeadRenderer` — the piston head and the block it pushes — and so does
+`TntRenderer`, primed TNT's block model.
 
 ## How it works
 
@@ -38,6 +39,7 @@ here (block models) or on the item path (item models — the campfire).
 | producer | input | source |
 |---|---|---|
 | `merge_falling_blocks` | the `&[EntityDraw]` slice `render` is already handed | a **network entity** |
+| `merge_primed_tnt` | the same `&[EntityDraw]` slice, filtered on `type_path == "tnt"` | a **network entity** |
 | `merge_piston_heads` | `MovingPistonSource` | a **block entity**, polled like every other in `sources.rs` |
 
 Neither touches a pipeline, a bind group or a draw call. Both end at
@@ -139,6 +141,46 @@ One thing to revisit if a producer draws a model with a random per-position offs
 not shimmer as it falls. Nothing here applies a random model offset at all, so there is
 no observable difference for the three states that fall today.
 
+### Primed TNT, and the state id it does not read off the wire
+
+`merge_primed_tnt` is the third producer, same shape as `merge_falling_blocks`:
+`TntRenderer` has no `bakeLayer` call either, so it poses an existing block model rather
+than a cuboid rig, and belongs here rather than in the entity pass — the entity pass's
+`resolve_animated` silently skips any `type_path` with no baked model, `"tnt"` included,
+so without this producer a primed TNT entity was correct on the wire and invisible on
+screen (issue: the client's entity render path keyed the falling-block-style render off
+the entity type string and had no `minecraft:tnt` arm).
+
+**The state id is a constant, not `EntityDraw::block_state`.** A falling block's state is
+genuinely variable and arrives in the spawn packet's Object Data field; `PrimedTnt`'s is
+always `Blocks.TNT.defaultBlockState()` and nothing on this wire carries it, so
+`merge_primed_tnt` looks it up directly with
+`lodestone_data::block_states::state_id("minecraft:tnt")` instead of routing through the
+field that exists for the falling block's *variable* case.
+
+**Two vanilla pieces are not ported**, both because the fuse tick count has no
+client-side home yet — `PrimedTnt.DATA_FUSE_ID` is decoded server-side
+(`lodestone_server::mobs::tnt`) and put on the wire as metadata index 8, but nothing
+folds it into an ingest component (`metadata_class` has no `Tnt` arm, so a TNT entity's
+index-8 `INT` matches no guarded arm and is dropped):
+
+* **No swell scale** — vanilla scales the block up in the last 10 ticks of the fuse
+  (`TntRenderer.getSwellAmount`). A static, unswelling block is the identity case of that
+  formula at an unknown fuse, not a fabricated value.
+* **No white "isLit" flash** — vanilla blinks the overlay every 5 ticks of the fuse.
+  `MovingBlock` carries no tint/overlay channel at all yet; adding one is a
+  `lodestone-render` change.
+
+Both are cosmetic. The block that draws is the *correct* one (`minecraft:tnt`'s real
+default state), at the *correct* pose, for the whole fuse — the gap is polish on top of a
+real TNT block, not the difference between a TNT block and nothing.
+
+`primed_tnt_pose` is `TntRenderer.submit`'s translate/rotate dance minus the swell scale,
+written out call-for-call rather than algebraically simplified (the two `Ry` calls do not
+cancel — there is a translation between them) — see its own doc comment and
+`the_primed_tnt_pose_rotates_about_its_own_centre_half_a_block_above_the_feet` for the
+two numeric properties that pin it down.
+
 ### Changing the falling-block pose
 
 `falling_block_pose` is its own function and gated, because it is the single most likely
@@ -197,4 +239,5 @@ crate has paid for nine times.
   moving_piston_spawns, moving_piston_seeds}` — the piston producer's input.
 * `lodestone_data::block_states::state_id` — how the piston gather resolves the
   *synthesised* head states `PistonHeadRenderer` builds (see
-  [`block-entity-renderers.md`](./block-entity-renderers.md)).
+  [`block-entity-renderers.md`](./block-entity-renderers.md)), and how
+  `merge_primed_tnt` resolves the constant `minecraft:tnt` default state.
