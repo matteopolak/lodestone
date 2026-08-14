@@ -468,6 +468,78 @@ impl Goal for PanicGoal {
     }
 }
 
+/// Stops an enderman dead and stares back while its current target watches it.
+///
+/// Vanilla `EnderMan.EndermanFreezeWhenLookedAt` (flags `{JUMP, MOVE}`,
+/// `monster/EnderMan.java:401-430`):
+///
+/// ```text
+/// canUse():  target = enderman.getTarget()
+///            target is Player && distanceToSqr(target) <= 256.0
+///              && enderman.isBeingStaredBy(target)
+/// start():   navigation.stop()
+/// tick():    lookControl.setLookAt(target.x, target.getEyeY(), target.z)
+/// ```
+///
+/// `canContinueToUse` is not overridden in vanilla, so it defaults to
+/// re-running `canUse` every tick — this port takes the same default rather
+/// than adding one.
+///
+/// # Two disclosed narrowings
+///
+/// * **The `Player` type check does not exist on this seam.** Every
+///   [`attack_target`](MobController::attack_target) this crate ever sets is a
+///   player position — nothing else can become one; see that method's own doc
+///   comment — so the port reads it directly rather than re-deriving a type
+///   test with nothing to check against.
+/// * **The gaze test itself is not computed here.** `enderman.isBeingStaredBy`
+///   is [`MobController::is_being_stared_at`], a host-fed boolean: the
+///   geometry is [`is_in_view_cone`](super::mob::is_in_view_cone), which
+///   mirrors `LivingEntity.isLookingAtMe`'s exact
+///   `dot > 1.0 - coneSize / dist` tolerance. Only the 16-block range check
+///   (`distanceToSqr <= 256.0`) belongs to *this* goal, exactly where vanilla
+///   puts it — folding it into the boolean would silently take the minimum of
+///   two ranges, the same trap this crate's `LookAtPlayerGoal`/`nearest_player`
+///   split already avoids.
+#[derive(Debug, Default)]
+pub struct EndermanFreezeWhenLookedAt {
+    target: Option<Vec3>,
+}
+
+impl EndermanFreezeWhenLookedAt {
+    /// Creates the goal with no remembered target.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Goal for EndermanFreezeWhenLookedAt {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Jump, Flag::Move])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        self.target = mob.attack_target();
+        match self.target {
+            Some(target) => {
+                distance_sqr(mob.position(), target) <= 256.0 && mob.is_being_stared_at()
+            }
+            None => false,
+        }
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        mob.stop_navigation();
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        if let Some(target) = self.target {
+            mob.look_at(target);
+        }
+    }
+}
+
 /// Acquires the nearest attackable entity as the mob's target.
 ///
 /// Vanilla `NearestAttackableTargetGoal` (flag TARGET). Runs in the mob's
@@ -1375,6 +1447,8 @@ mod tests {
         swell_dir: i32,
         ignited: bool,
         stopped_navigation: u32,
+        stared_at: bool,
+        looked_at: Option<Vec3>,
     }
     impl MobController for ScriptMob {
         fn next_f32(&mut self) -> f32 {
@@ -1410,8 +1484,13 @@ mod tests {
                 self.jumped += 1;
             }
         }
-        fn look_at(&mut self, _t: Vec3) {}
+        fn look_at(&mut self, t: Vec3) {
+            self.looked_at = Some(t);
+        }
         fn look_toward(&mut self, _dx: f64, _dz: f64) {}
+        fn is_being_stared_at(&self) -> bool {
+            self.stared_at
+        }
         fn nearest_player(&self) -> Option<Vec3> {
             self.player
         }
@@ -1618,6 +1697,80 @@ mod tests {
             ..Default::default()
         };
         assert!(goal.can_use(&mut mob));
+    }
+
+    // ---- EndermanFreezeWhenLookedAt --------------------------------------
+
+    /// The discriminating pair, at goal level: identical position and target,
+    /// only `is_being_stared_at` differs. A distance-only implementation (the
+    /// wrong one someone could plausibly ship instead of a real gaze test)
+    /// cannot produce this split, because both mobs stand at the same spot.
+    #[test]
+    fn freezes_only_while_its_target_stares_within_range() {
+        let mut goal = EndermanFreezeWhenLookedAt::new();
+        let mut watched = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            attack: Some(Vec3::new(6.0, 64.0, 0.0)), // distSqr 36 <= 256
+            stared_at: true,
+            ..Default::default()
+        };
+        assert!(
+            goal.can_use(&mut watched),
+            "a target within 16 blocks that is staring must make the goal eligible"
+        );
+
+        let mut unwatched = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            attack: Some(Vec3::new(6.0, 64.0, 0.0)), // identical position and target
+            stared_at: false,
+            ..Default::default()
+        };
+        assert!(
+            !goal.can_use(&mut unwatched),
+            "the identical target at the identical distance must NOT freeze the \
+             goal when is_being_stared_at() is false — if this fires, the goal \
+             degenerated into a distance check"
+        );
+    }
+
+    #[test]
+    fn freeze_ignores_a_staring_target_beyond_sixteen_blocks() {
+        // `EnderMan.EndermanFreezeWhenLookedAt.canUse` (`:414-415`): the
+        // `distanceToSqr(target) > 256.0` branch returns `false` before even
+        // consulting `isBeingStaredBy`, so a stare from far away never freezes
+        // the goal — a control on the 16-block gate, independent of the gaze
+        // boolean.
+        let mut goal = EndermanFreezeWhenLookedAt::new();
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            attack: Some(Vec3::new(17.0, 64.0, 0.0)), // distSqr 289 > 256
+            stared_at: true,
+            ..Default::default()
+        };
+        assert!(!goal.can_use(&mut mob));
+    }
+
+    #[test]
+    fn freeze_stops_navigation_and_looks_at_its_target() {
+        let mut goal = EndermanFreezeWhenLookedAt::new();
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            attack: Some(Vec3::new(6.0, 64.0, 0.0)),
+            stared_at: true,
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob));
+        goal.start(&mut mob);
+        assert_eq!(
+            mob.stopped_navigation, 1,
+            "vanilla's start() calls navigation.stop() unconditionally"
+        );
+        goal.tick(&mut mob);
+        assert_eq!(
+            mob.looked_at,
+            Some(Vec3::new(6.0, 64.0, 0.0)),
+            "tick() must aim the look control at the remembered target every tick"
+        );
     }
 
     #[test]

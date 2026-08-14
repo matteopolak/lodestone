@@ -79,14 +79,24 @@ not a `Registration` — modelling it means an arm in `MobSim::tick`, next to `f
    ```
 
    plus line of sight. `coneSize` is `0.025` and `adjustForDistance` is `true`, so **the tolerance is
-   divided by distance and the acceptance cone widens with range** — the opposite of the fixed-angle
-   cone an approximation reaches for.
+   divided by distance, and the required precision *increases* with range** — the cone narrows, not
+   widens. Hand-derived from the formula: at 2 blocks the threshold is `0.5` (up to ~60° off is still
+   a stare); at 5 blocks it is `0.8` (only ~37°). The same angular offset that reads as a stare up
+   close reads as a near-miss at range — the opposite of the fixed-angle cone an approximation reaches
+   for, which would answer identically at both distances.
 
 Two goals consume it. `EndermanFreezeWhenLookedAt` (`:401-430`, flags `{JUMP, MOVE}`) stops the
-navigation while a staring player is within `distanceToSqr <= 256.0` (16 blocks).
+navigation while a staring player is within `distanceToSqr <= 256.0` (16 blocks) — **now built**
+(`crates/lodestone-entity/src/ai/goals.rs`, `EndermanFreezeWhenLookedAt`), a real
+`Coverage::Modelled` row in the `ENDERMAN` table below. Its
+`can_use` reads `MobController::attack_target` for vanilla's `getTarget() instanceof Player` (every
+target this seam ever sets is a player position, so there is nothing else to type-check) and enforces
+the 16-block range itself, exactly where vanilla does — the range is **not** folded into
+`is_being_stared_at`, which would silently take the minimum of two ranges.
 `EndermanLookForPlayerGoal` (`:484-574`) does the teleporting: when stared at from
 `distanceToSqr < 16.0` (4 blocks) it calls `teleport()`; when the target is beyond
-`distanceToSqr > 256.0` it calls `teleportTowards` after a delay.
+`distanceToSqr > 256.0` it calls `teleportTowards` after a delay. It stays `Coverage::Missing` — it
+needs its own aggro/teleport state machine layered on the gaze test, not just the boolean.
 
 **`adjustedTickDelay` halves every literal.** `Goal.adjustedTickDelay` is
 `requiresUpdateEveryTick() ? ticks : reducedTickDelay(ticks)` (`ai/goal/Goal.java:49-51`) and
@@ -192,9 +202,17 @@ more, named below.
 - **Gaze.** `MobController::is_being_stared_at` (a fed boolean) plus the free function
   `is_in_view_cone`, which is vanilla's exact `dot > 1.0 - coneSize / (adjustForDistance ? dist : 1.0)`
   (`LivingEntity.java:1756-1775`) with the line-of-sight half left to the host (the same disclosed gap
-  `find_nearest_target` names). `NavigatingMob::set_stared_at` is the feed. **The feed is blocked**:
-  `PlayerPerception` carries no view vector, so nothing computes a stare in `feed_perception` yet and
-  every mob reads `false` in production — the correct neutral default rather than a wrong one.
+  `find_nearest_target` names). `NavigatingMob::set_stared_at` is the feed, and
+  `EndermanFreezeWhenLookedAt` (`ai/goals.rs`) is now a real consumer, registered in the `ENDERMAN`
+  table as `Coverage::Modelled` and driven through the real roster in
+  `roster::neutral::tests::a_stared_at_enderman_freezes_while_an_unwatched_one_at_the_same_spot_closes_in`.
+  **The host feed is still blocked**: `PlayerPerception` carries no view vector, so nothing computes a
+  stare in `feed_perception` yet and `is_being_stared_at` reads `false` in production — the correct
+  neutral default rather than a wrong one, and the same intermediate state `nearest_player`/
+  `temptation` sat in before their own feed line landed. The exact field
+  (`PlayerPerception::view_direction`, an `Entity.calculateViewVector`-shaped unit vector) and the
+  `feed_perception`/`server.rs` call sites that need it are written out, but not applied, in the
+  hand-off that closes this half of the gaze primitive — `mobs/**` belongs to another unit.
 - **Teleport.** `MobController::teleport_to` rewrites position instantly and abandons the active path;
   `SimMob::teleport_to` is the host command. No goal calls it yet (the enderman's `teleport()` /
   `teleportTowards` are `Missing`), so it is API, not behaviour.
