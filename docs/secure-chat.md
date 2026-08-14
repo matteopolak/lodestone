@@ -18,15 +18,19 @@ thrown away. A server with `enforce-secure-profile=true` silently drops every
 message this client sends.
 
 **What landed and what did not**, in the terms `CLAUDE.md`'s "nothing is done
-until something on screen changes" rule asks for:
+until something on screen changes" rule asks for. The chain is now traced
+end to end; every link up to the wire is verified locally, and the last one
+is explicitly not:
 
 | link in the chain | status |
 |---|---|
-| session key fetched from Mojang | done — [`lodestone_auth::fetch_key_pair`] |
-| message signed with the right byte layout | done — [`lodestone_auth::ChatSession::sign`], independently checked (see below) |
-| signature carried in the right wire field order | done for `chat_session_update`/`chat_command_signed`'s *shapes*; `ChatMessage`'s shape was already correct |
-| a live connection actually calling any of the above | **not done** — no `ClientAction` producer exists anywhere in the tree that supplies signing material, so `ChatSessionUpdate`/`ChatCommandSigned` currently have **zero encoders that ever run** and `ChatMessage` is still always sent via `ChatMessage::unsigned`. This is the island this doc's own future editor should close first — see "How to change it" |
-| a real server accepting a signed message | **unverifiable from this repo** — no test here reaches a real session server or a real game server |
+| account signed in | pre-existing — the shell already resolves an authenticated [`lodestone_auth::Session`] and threads it into [`lodestone_client::ClientBuilder::online_session`] before every join |
+| session key acquired | done — [`Driver`] calls [`lodestone_auth::fetch_key_pair`] on [`ClientEvent::Login`] when `auth_session` is `Some`, and builds a [`lodestone_auth::ChatSession`] from the result |
+| session announced to the server | done — the same `Login` handler emits [`ClientAction::AnnounceChatSession`], which v770's adapter encodes as `chat_session_update` |
+| message signed over the real last-seen chain | done — [`Driver::maybe_sign_chat`]/[`sign_chat_action`] turns an outgoing [`ClientAction::SendChat`] into [`ClientAction::SendSignedChat`], signing over [`lodestone_game::chat_ack::LastSeenTracker`]'s *current* window (`generate_and_apply_update`), not a stale or cached one |
+| signature on the wire in the right field order | done — v770's adapter encodes `SendSignedChat` into `ChatMessage` with a real signature and non-zero timestamp/salt/ack fields; `crates/protocol/v770/tests/chat_dispatch.rs`'s `send_signed_chat_encodes_millis_timestamp_and_ack_fields_in_order` asserts the exact byte layout, and `announce_chat_session_encodes_uuid_millis_key_then_signature` does the same for `chat_session_update` |
+| offline play still sends unsigned | done — `chat_session` stays `None` without an `auth_session` (or if the key fetch fails), and `maybe_sign_chat` passes `SendChat` through unchanged in that case; every pre-existing `SendChat` test in `lodestone-client`'s `tests/driver.rs` exercises exactly that path and stayed green |
+| a real server accepting a signed message | **unverifiable from this repo** — no test here reaches a real session server or a real game server, so this is traced, not tested |
 
 ## How it works
 
@@ -100,33 +104,83 @@ nothing calls it yet; see "What isn't built" below.
   messages would need to be verified against, once something calls
   [`verify_signature`] with it.
 
+### The producer — `lodestone_client::Driver`
+
+This is the piece that used to not exist, so it gets its own section rather
+than a bullet.
+
+- [`ClientAction`] (`crates/lodestone-model/src/action.rs`) gained two new
+  variants rather than extending `SendChat`'s existing fields: `SendChat`
+  itself is unchanged (so every existing caller and test — including ones in
+  files this work does not own — keeps compiling with no edits), and
+  [`ClientAction::SendSignedChat`]/[`ClientAction::AnnounceChatSession`] carry
+  the signed payload and the session announcement respectively.
+  `crates/lodestone-model/src/adapter.rs`'s `ClientActionKind`/`From` impl is
+  an *exhaustive* intra-crate match, so both variants needed an arm there too
+  — the compiler catches a missed one, but only inside `lodestone-model`.
+- v770's `adapter/serverbound.rs` gained matching encode arms:
+  `SendSignedChat` → `ChatMessage` with a real `signature`/`timestamp`/`salt`
+  and non-zero ack fields (same packet id as unsigned `SendChat`), and
+  `AnnounceChatSession` → `ChatSessionUpdate`. The legacy adapters (v47/v340/
+  v735) need no change — their `encode_action` matches end in a wildcard
+  `_ => Ok(None)`, so an unrecognised new variant just fails to encode there,
+  exactly like every other action they don't implement.
+- [`Driver`] (`lodestone-client/src/driver.rs`) owns the session lifecycle:
+  - On [`ClientEvent::Login`], if `auth_session` is `Some` (online-mode join)
+    and no `chat_session` exists yet, it calls [`fetch_key_pair`], builds a
+    [`ChatSession`] from the result, and pushes
+    `ClientAction::AnnounceChatSession` as an auto-action — the same
+    mechanism `emit` already uses for keep-alive/pong/cookie auto-responses.
+    A failed fetch is logged and degrades to unsigned chat for the rest of
+    the session; it does not end the connection.
+  - `handle_action` runs every outgoing action through
+    [`Driver::maybe_sign_chat`], which turns a plain `SendChat` into
+    `SendSignedChat` when `chat_session` is `Some`, and leaves every other
+    action (and `SendChat` with no session) untouched.
+  - The actual signing is [`sign_chat_action`], a **free function** (not a
+    `Driver` method) so it can be unit-tested without a live `Connection`:
+    it calls `chat_tracker.generate_and_apply_update()` — the *same* call
+    vanilla's `LocalPlayer.sendChat` makes — so the signature covers the
+    real, current last-seen window and the wire's ack fields are the same
+    update. A plain unsigned `SendChat` never calls this, so sending
+    unsigned cannot perturb a later signed message's chain.
+  - The salt is derived from `Uuid::new_v4()`'s random bytes rather than
+    pulling in a second RNG dependency; the wire timestamp is
+    `lodestone_time::epoch_duration()` (millis), and the signature payload's
+    seconds value is `timestamp_millis / 1000` — one clock read, one
+    division, so the two units cannot drift apart at the call site the way
+    two independent reads could.
+  - Nothing threads through `crates/lodestone-shell/src/net.rs`: the shell
+    already resolves an authenticated session and calls
+    `ClientBuilder::online_session` for every online-mode join (that wiring
+    predates this work), so `Driver.auth_session` is already populated
+    whenever it should be — the driver reacting to its own existing field is
+    what closes the loop, not a new shell call site.
+
 ## How to change it
 
-**The most important next step is wiring, not more crypto.** Everything above
-is a working, tested library with **no caller**:
+**What is still not built**, for whoever picks this up next:
 
-1. `ClientAction::SendChat`/`SendCommand` (`crates/lodestone-model/src/action.rs`)
-   carry only `text`/`command` today — no timestamp, salt, signature, or
-   last-seen data can reach the adapter through them. Extending these
-   variants (or adding new ones, e.g. `ClientAction::AnnounceChatSession`) is
-   the first change; it is in `lodestone-model`, a crate this work did not
-   touch.
-2. `crates/protocol/v770/src/adapter/serverbound.rs`'s
-   `ClientAction::SendChat` arm currently always builds
-   `ChatMessage::unsigned(text.clone())`. Once the action carries signing
-   material, this arm (and new arms for `ChatSessionUpdate`/
-   `ChatCommandSigned`) can encode it using the types this doc describes.
-3. Something needs to *own* a live [`ChatSession`] per connection, know when
-   to call [`fetch_key_pair`] (on join, and again whenever
-   [`ChatKeyPair::due_refresh`] says so), and feed [`ChatSession::sign`] the
-   last-seen acknowledgement state [`lodestone_game::chat_ack`]'s
-   `LastSeenTracker` already maintains. That is a `lodestone-client`/
-   `lodestone-shell`-side piece of state, not something this crate can hold —
-   `lodestone-auth` has no connection lifecycle to hook into.
-4. On the receive side: nothing today calls [`verify_signature`]. Building a
-   "verified" badge needs the rest of `SignedMessageChain.Decoder` (ordering,
-   expiry, a per-sender chain) — a distinct, later feature per this area's own
-   history.
+- `ClientAction::SendCommand` stays unsigned — there is no `ChatCommandSigned`
+  producer. That packet needs per-argument signing against a command tree the
+  server declares signable (`ArgumentSignatures.signCommand`), which is a
+  distinct and larger feature than message signing, not a small extension of
+  [`sign_chat_action`].
+- Key refresh (`ChatKeyPair::due_refresh`) is not polled anywhere. A session
+  that outlives the key's lifetime keeps signing with the stale key; whatever
+  a real server does with an expired-key signature is untested here. The
+  natural place to add this is next to the existing fetch in `Driver`'s
+  `ClientEvent::Login` handler — check `due_refresh` on some periodic event
+  (a keep-alive, the same one the last-seen tick-flush already piggybacks on)
+  and re-`fetch_key_pair` when due. Whether vanilla keeps the same session UUID
+  and chain position across a refresh or starts a fresh session is unread as
+  of this writing — check `AccountProfileKeyPairManager`/`LocalChatSession`
+  before assuming either.
+- On the receive side, nothing calls [`verify_signature`]. Building a
+  "verified" badge needs the rest of `SignedMessageChain.Decoder`
+  (link-ordering enforcement, expiry, a per-sender chain state machine) plus
+  something that reads [`PlayerInfoEntry::chat_session`] for the sender's
+  public key — a distinct, later feature per this area's own history.
 
 **Gotcha — the signature payload's timestamp is seconds, everything else on
 the wire is milliseconds.** If you touch [`build_signature_payload`], keep
@@ -149,6 +203,10 @@ native-only key fetch anyway. See `Cargo.toml`'s comment before changing this.
 No new environment variables or flags. Key acquisition reuses the same
 Minecraft-services access token online-mode join already resolves via
 [`lodestone_auth::login`]/[`lodestone_auth::flow`] — see `docs/accounts.md`.
+Whether a given join signs its chat is entirely a function of whether
+[`lodestone_client::ClientBuilder::online_session`] was called before
+`connect`/`connect_with` — there is no separate toggle, and none is planned:
+an online-mode account signs, offline play does not.
 
 ## Dependencies
 
@@ -160,6 +218,12 @@ Minecraft-services access token online-mode join already resolves via
 - `sha2` (native-only, `oid` feature) — the digest `Pkcs1v15Sign` signs over.
 - `base64`, `serde`/`serde_json` — already crate dependencies, reused for PEM
   body decoding and the `/player/certificates` response shape.
+- `lodestone-time` (`lodestone-client`, new) — the wire timestamp's portable
+  wall clock (`epoch_duration()`). Not `std::time::SystemTime::now()`
+  directly: that compiles for wasm32 and panics at runtime, and this crate's
+  own `wasm-check.sh` confinement rules already ban `Instant::now(`
+  crate-wide with an empty allowlist — see that crate's `Cargo.toml` comment
+  on the new dependency.
 
 ## What was and wasn't verified
 
@@ -179,13 +243,33 @@ byte layout against a genuinely independent implementation.
 to (Mojang's three published vectors); this is the closest equivalent that
 was achievable for a scheme with no published vectors of its own.
 
+**The wiring's own evidence, gathered this pass**: `crates/protocol/v770/tests/chat_dispatch.rs`'s
+`send_signed_chat_encodes_millis_timestamp_and_ack_fields_in_order` asserts
+`ClientAction::SendSignedChat`'s encoded bytes field-by-field against a
+hand-built expected buffer (message, millis timestamp, salt, signature
+presence + 256 bytes, offset, 3-byte ack, checksum — pairwise-distinct
+values throughout), and `announce_chat_session_encodes_uuid_millis_key_then_signature`
+does the same for `AnnounceChatSession` → `chat_session_update`.
+`lodestone-client/src/driver.rs`'s
+`sign_chat_action_signs_over_the_real_last_seen_chain_with_correct_units`
+builds a throwaway session (via the test-only
+[`ChatKeyPair::for_tests`]) and independently re-verifies the produced
+signature with [`verify_signature`] against the *real* last-seen entry the
+tracker held — and asserts the same signature does **not** verify against an
+empty window, the transposition control for "signs over the real chain, not
+`&[]`". A second test asserts two sends of identical text produce different
+signatures (the chain index advanced). None of this touches a real account,
+keychain, or network endpoint — `ChatKeyPair::for_tests` exists precisely so
+it doesn't have to.
+
 **Not verified, and not claimable from this repo**: whether a real vanilla
 server accepts a message signed this way. That needs a live join this repo's
 tests never make — the same limitation every other network-touching part of
 `lodestone-auth` already documents (see `docs/accounts.md`'s "What's verified
-and what isn't"). Nothing here has been checked against a live server, and as
-of this writing nothing in the tree even sends a signed message — see "How to
-change it" above.
+and what isn't"). Tracing the chain by hand: account signed in → session key
+acquired → session announced → message signed over the real last-seen chain →
+signature on the wire in the right field order are all verified above; server
+acceptance is the one link nothing here can reach.
 
 [`lodestone_auth::fetch_key_pair`]: ../crates/lodestone-auth/src/chat_session.rs
 [`fetch_key_pair`]: ../crates/lodestone-auth/src/chat_session.rs
@@ -194,10 +278,12 @@ change it" above.
 [`ChatSession::sign`]: ../crates/lodestone-auth/src/chat_session.rs
 [`ChatKeyPair`]: ../crates/lodestone-auth/src/chat_session.rs
 [`ChatKeyPair::due_refresh`]: ../crates/lodestone-auth/src/chat_session.rs
+[`ChatKeyPair::for_tests`]: ../crates/lodestone-auth/src/chat_session.rs
 [`build_signature_payload`]: ../crates/lodestone-auth/src/chat_session.rs
 [`verify_signature`]: ../crates/lodestone-auth/src/chat_session.rs
 [`flow::Session::access_token`]: ../crates/lodestone-auth/src/flow.rs
 [`flow::join_server`]: ../crates/lodestone-auth/src/flow.rs
+[`lodestone_auth::Session`]: ../crates/lodestone-auth/src/flow.rs
 [`lodestone_auth::login`]: ../crates/lodestone-auth/src/login.rs
 [`lodestone_auth::flow`]: ../crates/lodestone-auth/src/flow.rs
 [`lodestone_auth::server_hash`]: ../crates/lodestone-auth/src/hash.rs
@@ -207,3 +293,12 @@ change it" above.
 [`RemoteChatSessionData`]: ../crates/protocol/v770/src/packets/player_info.rs
 [`PlayerInfoEntry::chat_session`]: ../crates/protocol/v770/src/packets/player_info.rs
 [`lodestone_game::chat_ack`]: ../crates/lodestone-game/src/chat_ack.rs
+[`lodestone_game::chat_ack::LastSeenTracker`]: ../crates/lodestone-game/src/chat_ack.rs
+[`ClientAction`]: ../crates/lodestone-model/src/action.rs
+[`ClientAction::SendSignedChat`]: ../crates/lodestone-model/src/action.rs
+[`ClientAction::AnnounceChatSession`]: ../crates/lodestone-model/src/action.rs
+[`Driver`]: ../crates/lodestone-client/src/driver.rs
+[`Driver::maybe_sign_chat`]: ../crates/lodestone-client/src/driver.rs
+[`sign_chat_action`]: ../crates/lodestone-client/src/driver.rs
+[`ClientEvent::Login`]: ../crates/lodestone-model/src/event.rs
+[`lodestone_client::ClientBuilder::online_session`]: ../crates/lodestone-client/src/builder.rs
