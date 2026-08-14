@@ -36,6 +36,7 @@
 //! [`serve_connection`]: crate::serve_connection
 //! [`memory_pair`]: lodestone_net::memory_pair
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use lodestone_net::{Connection, memory_pair};
@@ -264,11 +265,20 @@ pub fn demo_mob_count(requested: usize) -> usize {
 /// capacity that does not cover the streamed view puts the columns under their feet
 /// permanently in eviction range at ~909 ms a column to regenerate — see
 /// `crate::chunk_store`'s module docs.
-fn with_nether<S>(overworld: S, view_radius: i32, uncapped: bool) -> DimensionalSource<S>
+/// `portals` is the index every dimension this call reaches will share —
+/// pass a fresh [`crate::portal::PortalIndex::new`] for a world with nothing
+/// to restore, or one already populated from disk (see
+/// [`IntegratedServer::open_persistent_with_mobs`]) so a portal lit in an
+/// earlier session is not rebuilt as a duplicate.
+fn with_nether<S>(
+    overworld: S,
+    view_radius: i32,
+    uncapped: bool,
+    portals: crate::portal::PortalIndex,
+) -> DimensionalSource<S>
 where
     S: ChunkSource + 'static,
 {
-    let portals = crate::portal::PortalIndex::new();
     let shared = portals.clone();
     let factory: crate::dimension::SiblingFactory = Arc::new(move |dimension| match dimension {
         Dimension::Nether => {
@@ -510,6 +520,26 @@ pub struct IntegratedServer {
     /// a channel, exactly as `save`/`level_dat` above reach persistence.
     #[cfg(not(target_arch = "wasm32"))]
     mobs: Option<MobHandle>,
+    /// The portal index every dimension's `ChunkSource` shares (issue #303's
+    /// second half) — the same handle `with_nether` hands to
+    /// [`crate::dimension::DimensionalSource::with_siblings`], read back here
+    /// so the autosave task and [`shutdown`](Self::shutdown) can write its
+    /// cells through `poi_storage` below without going through `host`.
+    /// `Some` for every constructor that calls `with_nether` (which is all of
+    /// them); `None` is unreachable in practice, exactly like `mobs` above
+    /// for a tick-loop constructor — see [`portals`](Self::portals).
+    #[cfg(not(target_arch = "wasm32"))]
+    portals: Option<crate::portal::PortalIndex>,
+    /// The `poi/` region set for each dimension this world hosts (issue
+    /// #303's second half), `Some` alongside `save`.
+    ///
+    /// A [`HashMap`] rather than two named fields, mirroring
+    /// [`crate::poi_storage`]'s own reasoning for deriving its subdirectory
+    /// name from [`Dimension::key`](crate::dimension::Dimension::key) instead
+    /// of hand-matching it: a third dimension needs no new field here, only
+    /// an entry in [`Dimension::ALL`](crate::dimension::Dimension::ALL).
+    #[cfg(not(target_arch = "wasm32"))]
+    poi_storage: Option<HashMap<Dimension, crate::poi_storage::PoiStorage>>,
     /// Issues #327/#328/#323: the world's shared game rules, difficulty and clock.
     /// The **same** handle the tick loop advances and every connection reads; kept
     /// here so the persistence path can load it at open and stamp it on save.
@@ -705,6 +735,10 @@ impl IntegratedServer {
             ChunkStore::for_integrated_view_radius(source, view_radius),
             view_radius,
             true,
+            // No world directory reaches this constructor, so there is
+            // nothing on disk to restore — a fresh index, same as before
+            // `with_nether` took one as a parameter.
+            crate::portal::PortalIndex::new(),
         ));
         // A fresh, empty registry for this one connection's lifetime. Nothing
         // ticks it here — only `open_in_memory_with_mobs` spawns the tick
@@ -759,6 +793,13 @@ impl IntegratedServer {
                 // Nothing persists here, so the save path has no population to read.
                 #[cfg(not(target_arch = "wasm32"))]
                 mobs: None,
+                // No world directory reaches this constructor (see the
+                // `with_nether` call above), so there is nothing to restore
+                // from and nothing to write back.
+                #[cfg(not(target_arch = "wasm32"))]
+                portals: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                poi_storage: None,
                 // No tick loop here, so there is nothing to share a store *with*.
                 world_state: crate::world_state::WorldStateHandle::default(),
                 // No RCON listener (issue #331) unless the caller starts one
@@ -850,6 +891,8 @@ impl IntegratedServer {
             crate::region_source::ScheduledTickHandle::default(),
             // No world directory, so no `entities/` set to restore from.
             None,
+            // Same reasoning: no `poi/` set either, so a fresh index.
+            crate::portal::PortalIndex::new(),
         )
     }
 
@@ -894,6 +937,17 @@ impl IntegratedServer {
         // `MobHandle::reseed` discards the whole sim, so a restore that ran
         // before it would be silently undone.
         entities_on_disk: Option<crate::entity_storage::EntityStorage>,
+        // Issue #303's second half. Unlike `entities_on_disk`, never `None` in
+        // practice by the time this function runs: both callers pass a real
+        // index, either fresh ([`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs))
+        // or restored from the `poi/` sets
+        // ([`open_persistent_with_mobs`](Self::open_persistent_with_mobs)) —
+        // see that constructor for where the restore happens. Threaded as a
+        // plain value, not an `Option`, because `with_nether` below always
+        // needs *some* index to hand every dimension's `ChunkSource`, and an
+        // empty one is exactly as cheap to construct as `None` would be to
+        // unwrap.
+        portals: crate::portal::PortalIndex,
     ) -> (Self, DuplexStream)
     where
         P: ServerProtocol + 'static,
@@ -1054,10 +1108,17 @@ impl IntegratedServer {
         // `for_integrated_view_radius`, i.e. **uncapped**: this is the real
         // singleplayer world, the one whose render-distance slider the player owns.
         // See `chunk_store::integrated_capacity_for_view_radius`.
+        // Cloned before the move into `with_nether` below, so the `Self`
+        // literal further down can still hand a caller the same handle the
+        // world's `ChunkSource`s actually share (issue #303's second half) —
+        // the same "clone before the move" shape every other `*_for_handle`
+        // binding in this constructor already follows.
+        let handle_portals = portals.clone();
         let source = Arc::new(with_nether(
             ChunkStore::for_integrated_view_radius(source, view_radius),
             view_radius,
             true,
+            portals,
         ));
 
         // Issue #454: **mob seeding is off the critical path.**
@@ -1381,6 +1442,15 @@ impl IntegratedServer {
                 entity_storage: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 mobs: Some(handle_mobs),
+                // Always `Some` here — every dimension's `ChunkSource` shares
+                // this exact handle (see `handle_portals`'s own comment
+                // above). Set by `open_persistent_with_mobs` after this
+                // returns; an in-memory world builds a `poi_storage` of its
+                // own `None`, matching `entity_storage` just above.
+                #[cfg(not(target_arch = "wasm32"))]
+                portals: Some(handle_portals),
+                #[cfg(not(target_arch = "wasm32"))]
+                poi_storage: None,
                 world_state: world_state_for_handle,
                 #[cfg(not(target_arch = "wasm32"))]
                 rcon_task: None,
@@ -1447,10 +1517,14 @@ impl IntegratedServer {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::region_source::Error`] if `world_dir`'s region
-    /// directory cannot be created. Reading is deliberately *not* fallible —
-    /// a missing region file is a world that has never been saved, which is
-    /// every world's first open.
+    /// Returns [`crate::region_source::Error`] if `world_dir`'s region,
+    /// `entities/` or `poi/` directories cannot be created. Reading is
+    /// deliberately *not* fallible for any of the three — a missing region
+    /// file is a world that has never been saved, which is every world's
+    /// first open; a `poi/` set that exists but will not parse is logged and
+    /// treated as empty (see the restore loop below) rather than failing the
+    /// whole open, on the same "a world with a read problem is still a world
+    /// worth playing" argument the entity restore already makes.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::too_many_arguments)]
     pub fn open_persistent_with_mobs<P, S>(
@@ -1515,6 +1589,35 @@ impl IntegratedServer {
         // `region/` so a later entity save cannot fail for a reason the caller
         // could have been told about here.
         let entity_storage = crate::entity_storage::EntityStorage::new(world_dir)?;
+        // Issue #303's second half: the `poi/` region set — one store per
+        // dimension, unlike `entity_storage`/`region/`, because a lit portal
+        // is a POI in both the overworld and the Nether (`crate::poi_storage`'s
+        // own doc). Created eagerly for the same reason `entity_storage` is
+        // above, and restored from immediately after: `PoiStorage::load_all`,
+        // not `load_area`, because a portal may be anywhere the player has
+        // walked and no bounded range is guaranteed to contain it (see that
+        // method's own doc). A read failure is logged rather than propagated,
+        // matching the seed task's own entity-restore arm below — a world
+        // whose POI cannot be read is still a world worth playing, and a
+        // silent blank read here would look exactly like a fresh world with
+        // no portals, which is the failure this whole change exists to stop.
+        let portals = crate::portal::PortalIndex::new();
+        let mut poi_storage: HashMap<Dimension, crate::poi_storage::PoiStorage> = HashMap::new();
+        for dimension in Dimension::ALL {
+            let storage = crate::poi_storage::PoiStorage::new(world_dir, dimension)?;
+            match storage.load_all() {
+                Ok(sections) => {
+                    let restored = crate::portal::restore_index_from_poi(dimension, sections.iter());
+                    portals.extend(dimension, restored.cells(dimension));
+                }
+                Err(err) => {
+                    tracing::error!(
+                        "poi load failed for {dimension:?}, portals not restored: {err}"
+                    );
+                }
+            }
+            poi_storage.insert(dimension, storage);
+        }
         let (mut server, client_end) = Self::open_in_memory_with_mobs_using(
             protocol,
             persistent,
@@ -1530,6 +1633,11 @@ impl IntegratedServer {
             // restored cow is one the next save recognises as its own (see
             // `EntityStorage::save`'s uuid-identity clearing).
             Some(entity_storage.clone()),
+            // Issue #303's second half: the index just restored above, so
+            // every dimension's `ChunkSource` shares it from the moment the
+            // first connection is served — not a fresh one that gets restored
+            // into only after some later point.
+            portals,
         );
 
         let autosave_handle = save.clone();
@@ -1566,6 +1674,13 @@ impl IntegratedServer {
         // is: a clone made inside the `async move` would move the binding.
         let autosave_entities = entity_storage.clone();
         let autosave_mobs = server.mobs.clone();
+        // Issue #303's second half: the same "clone before the move" shape as
+        // `autosave_entities` above. `server.portals` is always `Some` by this
+        // point (`open_in_memory_with_mobs_using`'s `Self` literal sets it
+        // unconditionally); `poi_storage` (the local `HashMap` built above,
+        // not yet moved anywhere) is what the write side reads per dimension.
+        let autosave_portals = server.portals.clone();
+        let autosave_poi_storage = poi_storage.clone();
         let autosave_task = spawn_tick_task(&server.shutdown, async move {
             let mut ticker = tokio::time::interval(autosave);
             // The first tick of a tokio interval completes immediately; a save
@@ -1615,11 +1730,33 @@ impl IntegratedServer {
                         tracing::warn!("autosave could not write entities: {err}");
                     }
                 }
+                // Issue #303's second half: the portal index, on the same
+                // interval and the same blocking pool as everything above —
+                // one dimension at a time, since each has its own
+                // `PoiStorage`. `poi_chunks_for_index` snapshots this
+                // dimension's cells (`PortalIndex` holds its own short-lived
+                // lock for that, released before the blocking write) and
+                // groups them into the chunk/section map `PoiStorage::save`
+                // wants.
+                if let Some(portals) = &autosave_portals {
+                    for dimension in Dimension::ALL {
+                        let Some(storage) = autosave_poi_storage.get(&dimension) else {
+                            continue;
+                        };
+                        let chunks = crate::portal::poi_chunks_for_index(portals, dimension);
+                        let storage = storage.clone();
+                        let result = tokio::task::spawn_blocking(move || storage.save(&chunks)).await;
+                        if let Ok(Err(err)) = result {
+                            tracing::warn!("autosave could not write {dimension:?} poi: {err}");
+                        }
+                    }
+                }
             }
         });
         server.save = Some(save);
         server.level_dat = Some(level_dat);
         server.entity_storage = Some(entity_storage);
+        server.poi_storage = Some(poi_storage);
         // Replaces the mob-seeding task slot only if it is free; seeding owns
         // it for `open_in_memory_with_mobs`, so the autosave task is kept
         // alive by racing the same `shutdown` notify and is dropped with the
@@ -1658,6 +1795,20 @@ impl IntegratedServer {
     #[must_use]
     pub fn mobs(&self) -> Option<&MobHandle> {
         self.mobs.as_ref()
+    }
+
+    /// The world's shared portal index (issue #303's second half) — the same
+    /// handle every dimension's `ChunkSource` shares, so a caller (a gate, a
+    /// command) can inspect or extend the exact index a return trip consults
+    /// rather than a copy. Restored from the `poi/` sets at open by
+    /// [`open_persistent_with_mobs`](Self::open_persistent_with_mobs); flushed
+    /// back to them on the same autosave interval and at
+    /// [`shutdown`](Self::shutdown). Every constructor calls `with_nether`, so
+    /// this is `Some` in practice for every handle this type hands out.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn portals(&self) -> Option<&crate::portal::PortalIndex> {
+        self.portals.as_ref()
     }
 
     /// Writes every dirty chunk now, on the calling thread, returning how many
@@ -1818,6 +1969,9 @@ impl IntegratedServer {
             ChunkStore::for_view_radius(source, view_radius),
             view_radius,
             false,
+            // LAN worlds are not persistent yet (see `save: None` in the
+            // `Self` literal below), so there is nothing on disk to restore.
+            crate::portal::PortalIndex::new(),
         ));
         let shutdown = ShutdownSignal::new();
         let signal = shutdown.clone();
@@ -2202,6 +2356,11 @@ impl IntegratedServer {
             // there is nothing for an entity save to write to.
             #[cfg(not(target_arch = "wasm32"))]
             mobs: None,
+            // Same reasoning as `entity_storage`/`mobs` just above.
+            #[cfg(not(target_arch = "wasm32"))]
+            portals: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            poi_storage: None,
             world_state: handle_world_state,
             // Set by the `start_rcon` call just below when the caller asked for
             // one (issue #331). It needs a password, so it stays opt-in.
@@ -2602,6 +2761,35 @@ impl IntegratedServer {
                 }
                 Ok(Err(err)) => tracing::warn!("entity save on shutdown failed: {err}"),
                 Err(err) => tracing::warn!("entity save on shutdown panicked: {err}"),
+            }
+        }
+        // Issue #303's second half: the portal index, last, for the same
+        // ordering reason as the mobs above — nothing can light or break a
+        // portal once both the tick and connection tasks have stopped.
+        // Without this a clean quit loses every portal lit since the last
+        // autosave tick, and the next return trip beyond the fallback scan's
+        // radius builds a duplicate — the exact bug this whole change exists
+        // to close.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(portals), Some(poi_storage)) = (self.portals.take(), self.poi_storage.take())
+        {
+            for dimension in Dimension::ALL {
+                let Some(storage) = poi_storage.get(&dimension) else {
+                    continue;
+                };
+                let chunks = crate::portal::poi_chunks_for_index(&portals, dimension);
+                let storage = storage.clone();
+                match tokio::task::spawn_blocking(move || storage.save(&chunks)).await {
+                    Ok(Ok(written)) => {
+                        tracing::debug!("poi saved on shutdown ({dimension:?}): {written} records");
+                    }
+                    Ok(Err(err)) => {
+                        tracing::warn!("poi save on shutdown failed ({dimension:?}): {err}");
+                    }
+                    Err(err) => {
+                        tracing::warn!("poi save on shutdown panicked ({dimension:?}): {err}");
+                    }
+                }
             }
         }
     }
