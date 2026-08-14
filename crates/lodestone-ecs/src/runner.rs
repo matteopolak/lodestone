@@ -22,7 +22,7 @@ pub enum Runner {
     Winit,
     /// A hand-rolled fixed-tick loop for embeddings with no window: bots,
     /// tests, the eventual headless integrated-server arm. Modeled on
-    /// azalea's `run_schedule_loop` (`azalea-client/src/client.rs:163-223`):
+    /// azalea's `run_schedule_loop` (`azalea-client/src/client.rs`):
     /// `GameTick` at `tick_hz`, catch-up capped at `max_catch_up_ticks`
     /// (matching `docs/frame-pacing.md`'s ten-tick rule), `Update`/`Extract`
     /// once per iteration via [`Runner::run_headless`].

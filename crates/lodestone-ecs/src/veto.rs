@@ -1,4 +1,4 @@
-//! Issue #109 — the cancelable action wrapper for the core interaction verbs.
+//! The cancelable action wrapper for the core interaction verbs.
 //!
 //! # What it is
 //!
@@ -14,7 +14,7 @@
 //!
 //! # Why a synchronous predicate and not an event
 //!
-//! Issue #109 names the hard constraint itself: *"a plugin system that cancels
+//! The hard constraint itself: *"a plugin system that cancels
 //! must not need to re-enter the World to do so"*. Both obvious designs fail it:
 //!
 //! - **A `Message` a plugin reads and answers.** The commitment happens inside
