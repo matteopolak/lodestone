@@ -679,6 +679,15 @@ rather than restating a constant. (§12.41)
 uniform-but-wrong frame from a localised blob. Ask *where*, not *what*, and **make failure output print a
 bounding box** — that diagnosed two premise-false controls in one step.
 
+**But a bounding box is an instrument too, and this one was broken for as long as it existed.**
+`text_colour.rs`'s `opaque_ink` cast raw NDC floats — clip space, `[-1, 1]` — straight to `i32`, so every
+on-screen vertex truncated to `0` and **every failure in that file printed `(0, 0, 0, 0)`** regardless of
+where the ink actually was. The presence/absence assertions were unaffected, since they read only `rgb`,
+which is exactly why nobody noticed: the gate's *verdict* was right and only its *diagnosis* was empty. So
+a box that is degenerate, constant, or suspiciously round across unrelated failures is a broken transform,
+not a measurement — **check the box localises before reasoning from a gate that prints one**, the same way
+you check a guard's detector actually ran.
+
 **And a probe that samples *vertices* is blind to any quad larger than the probe.** `band_coverage` in the menu
 render tests counts vertices falling inside a rect, so a quad that **encloses** the rect contributes none and
 reads as zero coverage. Measured, not hypothesised: a canvas-wide tint painted straight through one gate's
