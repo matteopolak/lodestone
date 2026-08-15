@@ -2760,6 +2760,7 @@ dependencies = [
 name = "lodestone-client"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.0",
  "lodestone-auth",
  "lodestone-core",
  "lodestone-ecs",
@@ -2768,6 +2769,7 @@ dependencies = [
  "lodestone-net",
  "lodestone-registry",
  "lodestone-testsupport",
+ "lodestone-time",
  "lodestone-world",
  "rand 0.8.7",
  "reqwest",
@@ -3051,6 +3053,7 @@ dependencies = [
  "bevy_app",
  "bevy_ecs",
  "flate2",
+ "js-sys",
  "lodestone-anvil",
  "lodestone-auth",
  "lodestone-client",
@@ -3075,6 +3078,7 @@ dependencies = [
  "tracing",
  "uuid",
  "wasm-bindgen-futures",
+ "web-sys",
  "web-time",
 ]
 
