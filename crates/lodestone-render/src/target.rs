@@ -47,6 +47,14 @@ pub struct AcquiredFrame {
     /// `true` if the surface reported the frame as suboptimal (e.g. mid-resize).
     pub suboptimal: bool,
     surface_texture: Option<wgpu::SurfaceTexture>,
+    /// The texture backing [`Self::view`], for **every** target kind — unlike
+    /// [`Self::texture`], which is deliberately `None` for a [`HeadlessTarget`]
+    /// (see that method's own doc). This exists for a consumer that needs
+    /// *some* texture to `copy_texture_to_texture` the already-rendered frame
+    /// out of regardless of which target produced it — the menu background
+    /// blur, whose GPU-gated tests run against a [`HeadlessTarget`] and would
+    /// otherwise have no source texture to blur at all.
+    colour_texture: wgpu::Texture,
 }
 
 impl AcquiredFrame {
@@ -75,6 +83,13 @@ impl AcquiredFrame {
     #[must_use]
     pub fn texture(&self) -> Option<&wgpu::Texture> {
         self.surface_texture.as_ref().map(|t| &t.texture)
+    }
+
+    /// The texture backing [`Self::view`] — see [`Self::colour_texture`]
+    /// field doc for why this differs from [`Self::texture`].
+    #[must_use]
+    pub fn colour_texture(&self) -> &wgpu::Texture {
+        &self.colour_texture
     }
 
     /// Present the frame. A no-op for headless targets; schedules presentation
@@ -116,10 +131,16 @@ pub struct HeadlessTarget {
 }
 
 impl HeadlessTarget {
-    /// Usage flags on the backing texture: renderable and copyable (for
-    /// read-back verification).
-    pub const USAGE: wgpu::TextureUsages =
-        wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::COPY_SRC);
+    /// Usage flags on the backing texture: renderable, copyable out (for
+    /// read-back verification) and copyable in — `COPY_DST` lets a test seed
+    /// this target with known content (`queue.write_texture`, or a
+    /// `copy_texture_to_texture` from another texture) before exercising a
+    /// pass that reads "whatever was already drawn", such as the menu
+    /// background blur (`menu::render::blur`), which otherwise has no
+    /// headless-target-compatible way to set up its own precondition.
+    pub const USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
+        .union(wgpu::TextureUsages::COPY_SRC)
+        .union(wgpu::TextureUsages::COPY_DST);
 
     /// Create an offscreen target of the given size and format.
     #[must_use]
@@ -256,6 +277,7 @@ impl RenderTarget for HeadlessTarget {
                 .create_view(&wgpu::TextureViewDescriptor::default()),
             suboptimal: false,
             surface_texture: None,
+            colour_texture: self.texture.clone(),
         })
     }
 }
@@ -447,9 +469,11 @@ impl SurfaceTarget<'_> {
             format: Some(view_format),
             ..Default::default()
         });
+        let colour_texture = texture.texture.clone();
         AcquiredFrame {
             view,
             suboptimal,
+            colour_texture,
             surface_texture: Some(texture),
         }
     }

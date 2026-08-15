@@ -5113,6 +5113,37 @@ pub fn sign_edit_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super:
 /// the sixth overlay screen, [`sign_edit_overlay_frame`]'s exact shape and
 /// for the same reason: a second construction in `app/redraw.rs`'s draw
 /// block would be free to disagree with what this hit-tests against.
+///
+/// **Two bugs this used to carry, found auditing it alongside the Social fix
+/// above.** [`crate::menu::confirm::resource_pack_prompt_frame`] builds its
+/// `MenuFrame` with `..Default::default()`, so — unlike every other overlay
+/// builder in this file — nothing here called [`super::render::stamp_canvas_facts`]
+/// or touched `backdrop`, which left `backdrop` at `MenuFrame::default()`'s
+/// `MenuBackdrop::Panorama`. `Panorama.wants_panorama()` is `true`, so
+/// `MenuRenderer::draw` drew vanilla's cubemap over whatever `render_overlay`'s
+/// `Load` op had already put in `view` — the paused world, when the prompt
+/// opened from [`Screen::Playing`]/[`Screen::Chat`]/[`Screen::Container`]/
+/// [`Screen::Paused`] — the exact defect class `stats_overlay_frame`'s own
+/// doc records, and the general sweep in `render/tests.rs` could not catch
+/// it: this screen is reached only through `ui.begin(SessionKind::Multiplayer)`
+/// (the *no*-world case, where `Panorama` happens to be correct), never
+/// through a live world, so `owns_frame_agrees_with_frame_for_on_every_screen`
+/// walked straight past the broken case.
+///
+/// The record settles which is right: `Screen.extractBackground` forks on
+/// `this.minecraft.level == null` — panorama with no level, the in-world
+/// wash otherwise — exactly [`UiState::settings_in_world`]'s own fork, so
+/// this now mirrors [`settings_overlay_frame`] instead of
+/// [`sign_edit_overlay_frame`]: `Dim` (plus the blur — `PackConfirmScreen`
+/// does not override `isInGameUi()`) when
+/// [`UiState::resource_pack_prompt_in_world`], the untouched `Panorama`
+/// default otherwise (`Screen::Connecting` has no level, matching vanilla's
+/// `level == null` arm). Vanilla actually blurs there too — the `blur`
+/// call in `extractBackground` is unconditional once `isInGameUi()` is
+/// ruled out, panorama or not — but this port scopes the blur pass to
+/// [`MenuRenderer::render_overlay`] frames only (see `render::blur`'s module
+/// doc), so the Connecting-screen panorama stays unblurred, a stated cut
+/// rather than an oversight.
 #[must_use]
 pub fn resource_pack_prompt_overlay_frame<'a>(
     ui: &UiState,
@@ -5122,7 +5153,13 @@ pub fn resource_pack_prompt_overlay_frame<'a>(
         return None;
     }
     let prompt = nav.resource_pack_prompt()?;
-    Some(crate::menu::confirm::resource_pack_prompt_frame(prompt))
+    let mut frame = crate::menu::confirm::resource_pack_prompt_frame(prompt);
+    super::render::stamp_canvas_facts(&mut frame, ui, nav);
+    if ui.resource_pack_prompt_in_world() {
+        frame.backdrop = super::render::MenuBackdrop::Dim;
+        frame.blur = true;
+    }
+    Some(frame)
 }
 
 /// The **in-world** settings screen's overlay frame, or `None` when settings is not
@@ -5180,6 +5217,9 @@ pub fn settings_overlay_frame<'a>(
     );
     super::render::stamp_canvas_facts(&mut frame, ui, nav);
     frame.backdrop = super::render::MenuBackdrop::Dim;
+    // `OptionsScreen` does not override `isInGameUi()` either, so vanilla
+    // blurs behind in-world Options — see `MenuFrame::blur`'s own doc.
+    frame.blur = true;
     Some(frame)
 }
 
@@ -5205,6 +5245,37 @@ pub fn stats_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::ren
     let mut frame = crate::menu::stats::frame(nav.stats(), nav.stats_snapshot());
     super::render::stamp_canvas_facts(&mut frame, ui, nav);
     frame.backdrop = super::render::MenuBackdrop::Dim;
+    // `StatsScreen` does not override `isInGameUi()` — see `MenuFrame::blur`'s
+    // own doc.
+    frame.blur = true;
+    Some(frame)
+}
+
+/// The Social Interactions screen's overlay frame, or `None` when it is not
+/// up — [`stats_overlay_frame`]'s exact shape and for the identical reason:
+/// [`UiState::open_social_from_pause`] only opens [`Screen::Social`] from
+/// [`Screen::Paused`] and there is no title-screen entry point (see that
+/// variant's own doc), so this is unconditional too.
+///
+/// A player report (2026-08-15) caught this for Statistics; Social has the
+/// same defect for the same underlying reason — [`super::render::dispatch::frame_for`]'s
+/// old `Screen::Social` arm built `super::social::frame(..)` unconditionally,
+/// which routes through `draw_menu`'s `Clear` pass and by construction never
+/// renders the world that frame, so no backdrop value that arm's frame ever
+/// carried could have shown the paused world behind it. `Dim`, not the
+/// default `Panorama`, and stamped with the same canvas facts
+/// [`stats_overlay_frame`] carries — a frame built outside `frame_for`'s own
+/// `Some` arm gets neither for free.
+#[must_use]
+pub fn social_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::render::MenuFrame<'a>> {
+    if ui.screen() != Screen::Social {
+        return None;
+    }
+    let mut frame = crate::menu::social::frame(nav.social(), ui.kind());
+    super::render::stamp_canvas_facts(&mut frame, ui, nav);
+    frame.backdrop = super::render::MenuBackdrop::Dim;
+    // `SocialInteractionsScreen` does not override `isInGameUi()` either.
+    frame.blur = true;
     Some(frame)
 }
 
@@ -5233,6 +5304,11 @@ pub fn server_links_overlay_frame<'a>(
     let mut frame = crate::menu::server_links::frame(&nav.server_links);
     super::render::stamp_canvas_facts(&mut frame, ui, nav);
     frame.backdrop = super::render::MenuBackdrop::Dim;
+    // This client has no dedicated `ServerLinksScreen` in vanilla to check —
+    // it stands in for `Dialogs.SERVER_LINKS`, a dialog over the pause
+    // screen, which inherits `PauseScreen`'s own non-`isInGameUi` fork. See
+    // `MenuFrame::blur`'s own doc.
+    frame.blur = true;
     Some(frame)
 }
 

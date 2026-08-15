@@ -65,6 +65,16 @@ pub struct MenuRenderer {
     /// [`Self::gui_attempted`]: without it a jar-less run re-decodes six PNGs
     /// every frame.
     panorama_attempted: bool,
+    /// The background-blur pass — see [`blur::MenuBlur`]'s own doc. Built
+    /// eagerly in [`Self::new`], unlike [`Self::sprites`]/[`Self::panorama`]:
+    /// it needs no atlas, no font and no jar, so there is nothing to lazily
+    /// wait for.
+    blur: blur::MenuBlur,
+    /// The texture backing this frame's target, captured once via
+    /// [`Self::begin_frame`] before anything draws into it — see that
+    /// method's own doc for why the capture happens there rather than inside
+    /// [`Self::draw`] itself.
+    frame_texture: Option<wgpu::Texture>,
 }
 
 impl MenuRenderer {
@@ -142,7 +152,30 @@ impl MenuRenderer {
             font: VanillaFont::shared(),
             panorama: None,
             panorama_attempted: false,
+            blur: blur::MenuBlur::new(device, color_format),
+            frame_texture: None,
         }
+    }
+
+    /// Capture the texture backing this frame's target — call once per
+    /// frame, right after acquiring it and before any `render`/`render_overlay`
+    /// call, so that a later overlay with [`MenuFrame::blur`] set can sample
+    /// "whatever has been drawn so far" ([`Self::draw`]'s own blur step).
+    ///
+    /// A single per-frame capture rather than a parameter on
+    /// [`Self::render_overlay`] itself: threading a new texture argument
+    /// through every overlay call site would touch a file this crate does
+    /// not own (`app/redraw.rs`) at every one of them, where this needs only
+    /// one insertion, immediately after the frame is acquired.
+    ///
+    /// The texture handle is cheap to clone (`wgpu`'s resource types are
+    /// `Arc`-backed) and its *contents* are read fresh at blur time — the
+    /// handle identifies the same GPU allocation the world/HUD/container
+    /// passes write into later this same frame, in submission order, so the
+    /// copy [`blur::MenuBlur::run`] performs at overlay-draw time already
+    /// sees everything drawn before it.
+    pub fn begin_frame(&mut self, texture: wgpu::Texture) {
+        self.frame_texture = Some(texture);
     }
 
     /// Whether the real GUI sprite atlas is bound, i.e. whether the buttons draw
@@ -367,6 +400,29 @@ impl MenuRenderer {
         load: wgpu::LoadOp<wgpu::Color>,
     ) {
         self.ensure_gui(device, queue);
+        // The background blur behind an open in-game menu — see `blur`'s own
+        // module doc for the vanilla mechanism this reproduces. Two guards:
+        // `frame.blur` is the per-screen decision (see its own doc on why
+        // that is not implied by `backdrop`), and `load == Load` rules out
+        // ever blurring a screen that owns the whole (`Clear`) frame — there
+        // is nothing behind it yet to blur, and every screen that sets
+        // `frame.blur` is an overlay anyway, but a frame built by hand
+        // (rather than through `frame_for`'s own dispatch) could set both
+        // inconsistently, and this is the one place that would notice.
+        //
+        // Runs before the widget draw below and before `ensure_panorama`'s
+        // block, matching vanilla's own ordering
+        // (`extractBlurredBackground` before `extractMenuBackground`, both
+        // before the screen's own widgets): the world/HUD/container passes
+        // already wrote into `frame_texture` earlier this frame (see
+        // `Self::begin_frame`'s doc), so this blurs *that*, and the sharp
+        // widgets go on top of the blurred result afterwards, never blurred
+        // themselves.
+        if frame.blur && matches!(load, wgpu::LoadOp::Load) {
+            if let Some(source) = self.frame_texture.as_ref() {
+                self.blur.run(device, queue, source, view, width, height);
+            }
+        }
         // The panorama is vanilla's out-of-world background, and which screens get
         // it is now the frame's own declaration (`MenuBackdrop`) rather than a
         // reading of `!frame.overlay`. That inference was wrong for two screens:

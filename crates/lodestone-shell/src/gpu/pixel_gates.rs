@@ -1709,3 +1709,103 @@ fn orbs_in_different_buckets_draw_different_sprites_and_same_bucket_orbs_do_not(
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// **The end-to-end wiring half of the menu-blur fix** — `checkerboard_loses_edge_contrast_but_keeps_its_mean`
+/// in `menu/render/blur.rs` proves the `MenuBlur` pipeline itself blurs; this
+/// proves `MenuFrame::blur` actually reaches it through the real
+/// `MenuRenderer::begin_frame` → `render_overlay` path, not just a unit
+/// calling `MenuBlur::run` directly. Without this, `MenuBlur` could be
+/// correct, tested, and still be the "built, tested, reaches no pixels"
+/// island shape this repo has shipped nine times before.
+///
+/// Two draws of the *same* seeded checkerboard through the *same*
+/// `MenuRenderer`, differing only in `MenuFrame::blur` — a paired
+/// comparison, so the `Dim` wash quad both frames also draw (translucent,
+/// so it shifts every pixel toward black by a constant factor) cancels out
+/// of the *contrast* measurement instead of needing its own tolerance.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn menu_frame_blur_flag_reaches_the_real_render_overlay_path() {
+    use crate::menu::render::{MenuBackdrop, MenuFrame, MenuRenderer};
+
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU (or a software adapter), don't 'skip' — a silent pass \
+         here would assert nothing",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (w, h): (u32, u32) = (64, 64);
+    const CELL: u32 = 8;
+
+    let mut checkerboard = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let v = if ((x / CELL) + (y / CELL)) % 2 == 0 { 255 } else { 0 };
+            let i = ((y * w + x) * 4) as usize;
+            checkerboard[i] = v;
+            checkerboard[i + 1] = v;
+            checkerboard[i + 2] = v;
+            checkerboard[i + 3] = 255;
+        }
+    }
+
+    let draw = |blur: bool| -> Vec<u8> {
+        let mut target = HeadlessTarget::new(device, w, h, format);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: target.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &checkerboard,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        let frame = RenderTarget::acquire(&mut target).expect("headless acquire");
+        let mut menu = MenuRenderer::new(device, format);
+        menu.begin_frame(frame.colour_texture().clone());
+        let menu_frame = MenuFrame {
+            backdrop: MenuBackdrop::Dim,
+            blur,
+            ..Default::default()
+        };
+        menu.render_overlay(device, queue, frame.view(), &menu_frame, w, h);
+        target.read_texels(device, queue)
+    };
+
+    let unblurred = draw(false);
+    let blurred = draw(true);
+
+    let px = |buf: &[u8], x: u32, y: u32| -> i32 { i32::from(buf[((y * w + x) * 4) as usize]) };
+    let mut worse: Vec<(u32, u32, i32, i32)> = Vec::new();
+    for x in (CELL..w).step_by(CELL as usize) {
+        for y in [CELL / 2, CELL * 5 / 2, CELL * 9 / 2, CELL * 13 / 2] {
+            let plain = (px(&unblurred, x - 1, y) - px(&unblurred, x, y)).abs();
+            let with_blur = (px(&blurred, x - 1, y) - px(&blurred, x, y)).abs();
+            // Each location must lose contrast once the flag is set — a
+            // per-location comparison, collected rather than asserted
+            // inside the loop, so a failure names every offending edge.
+            if with_blur >= plain {
+                worse.push((x, y, plain, with_blur));
+            }
+        }
+    }
+    assert!(
+        worse.is_empty(),
+        "{} of 28 edges did not lose contrast when MenuFrame::blur was set, through \
+         the real render_overlay path -- offending (x, y, unblurred_contrast, \
+         blurred_contrast): {worse:?}",
+        worse.len()
+    );
+}

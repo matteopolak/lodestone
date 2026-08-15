@@ -1037,6 +1037,24 @@ impl UiState {
         self.screen == Screen::ResourcePackPrompt
     }
 
+    /// Whether the resource-pack prompt is currently open **over a live
+    /// world** — i.e. [`Self::resource_pack_prompt_return`] is anything but
+    /// [`Screen::Connecting`], the one entry point with no level loaded yet
+    /// (a push can arrive during Configuration, before Play).
+    ///
+    /// [`Self::settings_in_world`]'s exact shape and for the same reason:
+    /// vanilla's `Screen::extractBackground` forks on `this.minecraft.level
+    /// == null`, not on which screen is asking, so this prompt needs the
+    /// same in-world query every other overlay screen with an out-of-world
+    /// case already has. Unlike `settings_in_world` this has more than one
+    /// "in world" return screen (`Playing`/`Chat`/`Container`/`Paused`), so
+    /// it is a `!=` against the one out-of-world case rather than a `==`
+    /// against one in-world case.
+    #[must_use]
+    pub fn resource_pack_prompt_in_world(&self) -> bool {
+        self.resource_pack_prompt_return != Screen::Connecting
+    }
+
     /// Open the resource-pack prompt over whichever live screen the player
     /// is on — see [`Screen::ResourcePackPrompt`]'s doc for the five it can
     /// open from. A stray call from anywhere else (the main menu, an

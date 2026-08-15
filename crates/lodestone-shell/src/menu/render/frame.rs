@@ -702,6 +702,24 @@ pub struct MenuFrame<'a> {
     /// What sits behind this screen's widgets. See [`MenuBackdrop`] — the three
     /// states this used to try to express with one `overlay: bool`.
     pub backdrop: MenuBackdrop,
+    /// Whether [`MenuRenderer::render_overlay`](super::MenuRenderer::render_overlay)
+    /// must run the background blur ([`super::blur::MenuBlur`]) before drawing
+    /// this frame's widgets.
+    ///
+    /// **Not implied by `backdrop == MenuBackdrop::Dim`.** Vanilla's own fork
+    /// (`Screen::isInGameUi`) is a *third* axis, orthogonal to translucency:
+    /// `Screen::extractBackground` blurs for every screen where
+    /// `isInGameUi()` is `false` (Pause, in-world Options, Statistics, Social,
+    /// Server Links, the in-world resource-pack prompt — vanilla's
+    /// `INWORLD_MENU_BACKGROUND` wash, which this client already approximates
+    /// with the `Dim` quad) and does **not** for the screens that override it
+    /// to `true` (`AbstractContainerScreen` and its sign-edit/command-block-edit
+    /// siblings — `extractTransparentBackground`'s flat gradient only, no
+    /// blur), even though those also use `Dim` here. So each overlay-frame
+    /// builder sets this by hand, the same way each already sets `backdrop`
+    /// by hand — see [`super::pause_frame`]/`super::nav::stats_overlay_frame`
+    /// and this field's own call sites.
+    pub blur: bool,
     /// This frame reproduces one of **vanilla's own** screens: its rows carry
     /// [`MenuRow::slot`]s, its buttons draw as `widget/button*` nine-slice
     /// sprites, and the row-stack's centred title/subtitle/footer block is
