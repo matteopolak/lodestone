@@ -239,7 +239,16 @@ impl SectionOriginArena {
         let zero_slot = arena
             .allocate(stride)
             .expect("a freshly created arena has room for its one reserved slot");
-        write_section_origin(queue, arena.buffer(), zero_slot.offset(), [0.0, 0.0, 0.0]);
+        // Never fades: the dropped-item and held-item passes share this slot,
+        // and their geometry is not a terrain section — see
+        // `lodestone_render::SECTION_FADE_ALREADY_VISIBLE`'s doc.
+        write_section_origin(
+            queue,
+            arena.buffer(),
+            zero_slot.offset(),
+            [0.0, 0.0, 0.0],
+            lodestone_render::SECTION_FADE_ALREADY_VISIBLE,
+        );
         Self {
             arena,
             stride,
@@ -261,13 +270,21 @@ impl SectionOriginArena {
     /// Allocate and write a fresh slot for a newly uploaded section, returning
     /// both the allocation (to free later) and the dynamic offset to draw
     /// with. `None` if the arena is exhausted — see the type's doc.
+    ///
+    /// `build_time_secs` is this section's fade start time (see
+    /// `lodestone_render::section_visibility`) — pass
+    /// [`lodestone_render::SECTION_FADE_ALREADY_VISIBLE`] for a section that
+    /// must never fade (the packed/demo path, which draws through
+    /// `block.wgsl` and never reads this lane at all, but is kept honest here
+    /// rather than relying on that).
     pub(super) fn alloc(
         &mut self,
         queue: &wgpu::Queue,
         origin: [f32; 3],
+        build_time_secs: f32,
     ) -> Option<(ArenaAllocation, u32)> {
         let slot = self.arena.allocate(self.stride).ok()?;
-        write_section_origin(queue, self.arena.buffer(), slot.offset(), origin);
+        write_section_origin(queue, self.arena.buffer(), slot.offset(), origin, build_time_secs);
         let offset = slot.offset() as u32;
         Some((slot, offset))
     }
@@ -413,6 +430,28 @@ pub(super) struct ModelRenderer {
     pub(super) hand_cam_buffer: wgpu::Buffer,
     pub(super) hand_cam_bind_group: wgpu::BindGroup,
     pub(super) sections: HashMap<SectionKey, ModelSectionGpu>,
+    /// Every coord that has ever carried a real (non-empty) mesh since it was
+    /// last explicitly unloaded ([`RenderState::remove_section`]) — including
+    /// one currently meshed empty and absent from [`Self::sections`].
+    ///
+    /// This is what stops the fade from re-triggering on an ordinary block
+    /// edit that turns a *previously all-air* section non-empty for the first
+    /// time (building the first block onto an open-sky column, or hollowing a
+    /// section out and refilling it): [`upload_section`](super::RenderState::
+    /// upload_section) only allocates a fresh `origin_alloc` — and so only a
+    /// fresh fade `build_time` — when the coord has no entry in
+    /// [`Self::sections`], which is equally true of "never seen before" and
+    /// "seen before, currently empty". Consulting this set is what tells the
+    /// two apart, mirroring vanilla's `RenderSection.wasPreviouslyEmpty`
+    /// (`SectionOcclusionGraph.updateEmptySections`): a section is a fresh
+    /// arrival only the *first* time this coord is ever populated, not every
+    /// time it goes empty and comes back.
+    ///
+    /// Cleared for a coord only by [`RenderState::remove_section`] (a genuine
+    /// unload — the chunk left view distance), so walking away and back does
+    /// still fade, exactly like a real vanilla `RenderSection` slot recycled
+    /// by a different chunk address.
+    pub(super) seen: std::collections::HashSet<SectionKey>,
 }
 
 /// Build the per-slot animation uniform array for game `tick` from the snapshot

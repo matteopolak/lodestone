@@ -265,6 +265,16 @@ pub struct RenderState {
     /// animation — see `prepare_flame`'s doc for why this counts
     /// render frames rather than the real 20 Hz game tick.
     flame_frame_counter: std::cell::Cell<u64>,
+    /// The live game tick, as of the last [`Self::update_animation`] call —
+    /// the section fade-in's clock (`lodestone_render::section_visibility`).
+    /// `update_animation` is documented to run once per frame *before*
+    /// `render`, so a section uploaded mid-frame (`upload_section`) reads a
+    /// same-frame-or-one-frame-stale tick, never a future one — close enough
+    /// for a 0.75 s fade. A `Cell`, not a new per-frame argument threaded
+    /// through `upload_section`'s several call sites, for the same reason
+    /// `flame_frame_counter` is one: `render_inner` and `upload_section` both
+    /// take `&self`/`&mut self` without a fresh tick in hand.
+    section_fade_tick: std::cell::Cell<u64>,
     /// Block-break debris **and** sheet particles (flame, smoke, crits,
     /// splashes). Bound to *both* stitches: whichever atlas the terrain draws
     /// from, so a debris fragment is textured from the same pixels as the block

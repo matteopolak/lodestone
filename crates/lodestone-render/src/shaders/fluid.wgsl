@@ -13,10 +13,24 @@ struct Camera {
 };
 
 // A section's world-space origin (see the model shader's `Origin`); bound at
-// group 0 binding 1 with a dynamic offset.
+// group 0 binding 1 with a dynamic offset. `section_origin.w` is this
+// section's fade `build_time` -- see the model shader's `Origin` doc and
+// `section_visibility` below. Water shares its section's own origin slot (one
+// `ModelSectionGpu::origin_alloc` for opaque, water and translucent alike), so
+// a section's water surface fades in on exactly the same clock as its blocks
+// rather than drifting from them.
 struct Origin {
     section_origin: vec4<f32>,
 };
+
+// Byte-for-byte the model shader's own constant and function -- see that
+// shader's comments for the vanilla derivation and the cross-check that keeps
+// the two from drifting.
+const SECTION_FADE_DURATION_SECS: f32 = 0.75;
+
+fn section_visibility(now: f32, build_time: f32) -> f32 {
+    return clamp((now - build_time) / SECTION_FADE_DURATION_SECS, 0.0, 1.0);
+}
 
 // The factor the *sky* half of the lightmap is scaled by, so terrain darkens at
 // night. Rides `fog_end_enabled.z`, the same spare lane the entity pass uses, so
@@ -211,6 +225,8 @@ struct VsOut {
     // below; this is additive to it, not a replacement, and a mesh that never
     // sets it (`.a == 0`) still gets that exact constant.
     @location(5) @interpolate(flat) tint_rgb_override: vec4<u32>,
+    // This section's fade-in factor -- see the model shader's matching field.
+    @location(6) @interpolate(flat) visibility: f32,
 };
 
 @vertex
@@ -240,6 +256,7 @@ fn vs_main(
     out.anim_idx = packed.z;
     out.world = world;
     out.tint_rgb_override = tint_rgb_override;
+    out.visibility = section_visibility(camera.fog_ambient_light.w, origin.section_origin.w);
     return out;
 }
 
@@ -266,11 +283,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         tint_col = vec3<f32>(in.tint_rgb_override.rgb) / 255.0;
     }
     let lit_srgb = linear_to_srgb(tex.rgb) * tint_col * in.shade;
+    // The section fade-in, same mix as the model shader's — see that shader's
+    // comment. Not an alpha fade: `tex.a` reaches the return untouched, so this
+    // has no effect on the fluid pipeline's own alpha blend/depth state.
+    let materialised_srgb = mix(linear_to_srgb(camera.fog_color_start.rgb), lit_srgb, in.visibility);
     // Fog mixes in gamma space, inside the same round-trip — see the model
     // shader for the derivation from `fog.glsl` and for the measured size of the
     // linear-space error this replaced. All three fogged shaders must agree, or
     // water and the terrain it sits in dissolve at visibly different rates.
     let amount = fog_amount(in.world - camera.fog_eye.xyz);
-    let fogged_srgb = mix(lit_srgb, linear_to_srgb(camera.fog_color_start.rgb), amount);
+    let fogged_srgb = mix(materialised_srgb, linear_to_srgb(camera.fog_color_start.rgb), amount);
     return vec4<f32>(srgb_to_linear(fogged_srgb), tex.a);
 }

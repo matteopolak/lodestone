@@ -68,16 +68,18 @@ fn fog_with_clock_carries_the_night_track_gate_a() {
     // survive untouched. This is the discriminating row that a fix which
     // darkens fog at *every* tick (not just night) would fail.
     let overworld_ambient = lodestone_render::light::OVERWORLD_AMBIENT_LIGHT;
-    let noon = RenderState::fog_uniform_for(&fog, 6000, 1.0, overworld_ambient, [0.0, 0.0, 0.0]);
+    let noon =
+        RenderState::fog_uniform_for(&fog, 6000, 1.0, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
     assert_close("noon", byte_of(&noon), [135, 181, 235]);
 
     // Midnight: the "too extreme" complaint's root cause.
     let midnight =
-        RenderState::fog_uniform_for(&fog, 18000, 0.24, overworld_ambient, [0.0, 0.0, 0.0]);
+        RenderState::fog_uniform_for(&fog, 18000, 0.24, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
     assert_close("midnight", byte_of(&midnight), [9, 12, 20]);
 
     // Dusk, exactly on the first night keyframe.
-    let dusk = RenderState::fog_uniform_for(&fog, 13670, 0.5, overworld_ambient, [0.0, 0.0, 0.0]);
+    let dusk =
+        RenderState::fog_uniform_for(&fog, 13670, 0.5, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
     assert_close("dusk", byte_of(&dusk), [6, 8, 20]);
 
     // The sky-darken lane is untouched by this change and must still ride
@@ -98,6 +100,20 @@ fn fog_with_clock_carries_the_night_track_gate_a() {
     );
 }
 
+/// [`RenderState::fog_uniform_for`]'s new `now_secs` parameter must land in
+/// `ambient_light`'s `w` lane and nowhere else — a transposition here would
+/// silently feed the section fade-in the wrong number while leaving every
+/// other fog byte correct, so this checks the lane directly rather than
+/// inferring it from a rendered colour. Also checks `rgb` is untouched by the
+/// new argument, since the two ride the same `vec4`.
+#[test]
+fn fog_uniform_for_carries_now_secs_in_the_ambient_light_w_lane() {
+    let fog = FogSettings::for_render_distance([0.5, 0.6, 0.7], 8);
+    let ambient = [0.1, 0.2, 0.3];
+    let u = RenderState::fog_uniform_for(&fog, 6000, 1.0, ambient, [0.0, 0.0, 0.0], 41.0);
+    assert_eq!(u.ambient_light, [0.1, 0.2, 0.3, 41.0]);
+}
+
 /// [`RenderState::set_clear_color_tracked`]'s pure core must land on the
 /// same tracked value [`fog_with_clock_carries_the_night_track_gate_a`]
 /// pins for terrain fog — the clear colour and the fog colour derive from
@@ -116,6 +132,7 @@ fn clear_color_tracked_matches_the_fog_colour_at_the_same_tick() {
             1.0,
             lodestone_render::light::OVERWORLD_AMBIENT_LIGHT,
             [0.0, 0.0, 0.0],
+            0.0,
         );
         let fog_rgb = [fog.color_start[0], fog.color_start[1], fog.color_start[2]];
         assert_eq!(
@@ -453,6 +470,9 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         death_time: 0.0,
         // No flame overlay from this construction site.
         on_fire: false,
+        // Not invisible and not an armour stand.
+        invisible: false,
+        armor_stand: None,
         // Not a player, so no skin can apply.
         player_skin: None,
         variant_sheet: None,

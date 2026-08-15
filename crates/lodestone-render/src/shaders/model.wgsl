@@ -24,19 +24,48 @@ struct Camera {
     fog_end_enabled: vec4<f32>,
     // `rgb` = this frame's dimension `AMBIENT_LIGHT_COLOR` (`crate::light::
     // OVERWORLD_AMBIENT_LIGHT` when unset) — the floor `lightmap_color` seeds
-    // its accumulator with before either light half is added. `w` unused.
-    // Mirrors `lodestone_render::fog::FogUniform::ambient_light` exactly;
-    // see that field's doc for why grey-everywhere was wrong (the Nether's
-    // and End's real floors are markedly *brighter* than the overworld's).
+    // its accumulator with before either light half is added. `w` = this
+    // frame's clock, in the same seconds `Origin.section_origin.w` (below)
+    // measures a section's fade `build_time` in -- see `section_visibility`
+    // and `SECTION_FADE_DURATION_SECS`. Mirrors
+    // `lodestone_render::fog::FogUniform::ambient_light` exactly; see that
+    // field's doc for why grey-everywhere was wrong (the Nether's and End's
+    // real floors are markedly *brighter* than the overworld's).
     fog_ambient_light: vec4<f32>,
 };
 
 // A section's world-space origin, bound at group 0 binding 1 with a dynamic
 // offset: one physically resident buffer of these serves every section, so
 // re-aiming the camera (binding 0, above) never needs to touch this one.
+//
+// `section_origin.w` is this section's fade `build_time`, in
+// `camera.fog_ambient_light.w`'s clock -- see `section_visibility`. Written
+// once, at the section's first upload, never touched again for its lifetime
+// (a block-edit remesh of an already-resident section reuses the same slot
+// and so the same `build_time`, which is what stops an ordinary block break
+// from re-triggering the fade -- see `lodestone_render::SECTION_FADE_ALREADY_VISIBLE`
+// for the sentinel that opts a section out entirely).
 struct Origin {
     section_origin: vec4<f32>,
 };
+
+// Vanilla's `Options.chunkSectionFadeInTime` shipped default (`Options.java`,
+// range 0.0..=2.0 seconds). This client has no video-settings UI to expose
+// the option yet, so it is hardcoded exactly like `BRIGHTNESS_FACTOR` below --
+// and must move with `lodestone_render::SECTION_FADE_DURATION_SECS`, the same
+// constant on the Rust side (`section_fade_duration_matches_the_shader`
+// checks the two do not drift).
+const SECTION_FADE_DURATION_SECS: f32 = 0.75;
+
+// Vanilla's `SectionRenderDispatcher.RenderSection.getVisibility`: 0 the
+// instant a section is built, ramping linearly to 1 over
+// `SECTION_FADE_DURATION_SECS`. `build_time` in the past by more than the
+// duration (the `SECTION_FADE_ALREADY_VISIBLE` sentinel, or simply an old
+// section) saturates to 1 immediately -- `clamp` subsumes vanilla's
+// `elapsed >= fadeDuration` branch.
+fn section_visibility(now: f32, build_time: f32) -> f32 {
+    return clamp((now - build_time) / SECTION_FADE_DURATION_SECS, 0.0, 1.0);
+}
 
 // The factor the *sky* half of the lightmap is scaled by, so terrain darkens at
 // night. Rides `fog_end_enabled.z`, the same spare lane the entity pass uses, so
@@ -245,6 +274,11 @@ struct VsOut {
     // per-material "opaque leaves" state. A new vertex attribute costs
     // nothing against the four-bind-group floor -- it is not a bind group.
     @location(6) @interpolate(flat) cutout_bypass: u32,
+    // This section's fade-in factor (`section_visibility`), resolved once per
+    // vertex from a per-section constant and a per-frame clock -- both
+    // uniform across the draw, so `flat` costs nothing and avoids any
+    // per-fragment drift.
+    @location(7) @interpolate(flat) visibility: f32,
 };
 
 @vertex
@@ -270,6 +304,7 @@ fn vs_main(
     out.world = world;
     out.tint_rgb_override = tint_rgb_override;
     out.cutout_bypass = packed.w;
+    out.visibility = section_visibility(camera.fog_ambient_light.w, origin.section_origin.w);
     return out;
 }
 
@@ -318,6 +353,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // single round-trip (rather than one per multiply) means fewer transfer
     // applications and less rounding.
     let lit_srgb = linear_to_srgb(tex.rgb) * tint_col * in.shade;
+    // The section fade-in: mix the lit fragment toward the fog colour by
+    // `in.visibility`, so a freshly built section materialises out of the fog
+    // instead of popping in solid. Byte-for-byte `terrain.fsh`'s own
+    // `color = mix(FogColor * vec4(1,1,1,color.a), color, ChunkVisibility)` --
+    // note it is **not** an alpha fade: only `rgb` moves, alpha (and every
+    // pipeline's blend/depth state) is untouched, so this costs nothing beyond
+    // the mix itself and cannot interact with translucent draw order. This
+    // happens *before* the distance fog below, exactly like vanilla layers the
+    // two: a section can be both mid-materialising and distance-fogged at once.
+    let materialised_srgb = mix(linear_to_srgb(camera.fog_color_start.rgb), lit_srgb, in.visibility);
     // Fade the lit fragment toward the fog colour by its view distance, so the
     // outermost loaded chunks dissolve into the sky rather than ending in a wall.
     //
@@ -342,6 +387,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // `FogUniform::color_start` *means* for every reader, so it is deliberately
     // not done here. See `docs/fog.md`.
     let amount = fog_amount(in.world - camera.fog_eye.xyz);
-    let fogged_srgb = mix(lit_srgb, linear_to_srgb(camera.fog_color_start.rgb), amount);
+    let fogged_srgb = mix(materialised_srgb, linear_to_srgb(camera.fog_color_start.rgb), amount);
     return vec4<f32>(srgb_to_linear(fogged_srgb), tex.a);
 }
