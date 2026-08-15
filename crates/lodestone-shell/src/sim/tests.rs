@@ -6350,3 +6350,183 @@ fn body_yaw_interpolates_between_ticks_rather_than_snapping() {
          endpoint; got {mid}"
     );
 }
+
+/// Issue #649's real gate: a hex chat colour reaching a **drawn vertex**
+/// through the actual per-frame wiring, not through hand-authored spans.
+///
+/// `hud.rs`'s own `chat_spans_carry_hex_named_and_inline_legacy_colour_to_distinct_vertices`
+/// proves `HudGeometry::build` draws a hex colour when handed a
+/// `Vec<TextSpan>` directly — it never touches `ChatLog`/`Sim` at all, so it
+/// could not have caught this issue: the bug was entirely upstream, in
+/// `Session::recent_chat`/`app/redraw.rs` calling the *legacy*
+/// `String`-flattening accessor instead of the span-carrying one. This test
+/// drives the real production entry point instead: a `NetUpdate::Chat`
+/// folded by the real `Sim::poll_net` (exactly like
+/// `end_session_tears_down_and_a_fresh_connect_afterward_starts_clean` above
+/// feeds one), read back through `Sim::recent_chat_spans` — the exact
+/// accessor `app/redraw.rs` calls every frame — windowed with the same
+/// slicing arithmetic `app/redraw.rs` applies, and drawn through the same
+/// `HudGeometry::build` the live `HudRenderer` calls.
+#[test]
+fn hex_chat_colour_reaches_a_vertex_through_the_real_session_and_redraw_wiring() {
+    use crate::hud::{DebugStats, HudFrame, HudGeometry};
+    use lodestone_model::text::{Text, TextColor, TextContent, TextSpan, TextStyle};
+
+    // The discriminating fixture from issue #649: a hex `TextColor::Rgb`
+    // component style, a named component style, and a literal carrying an
+    // *inline* `§c` code — the owner's own report was entirely the third
+    // convention. A fixture using only named colours cannot tell "hex is
+    // dropped" from "everything works", because a named colour survives
+    // legacy flattening intact.
+    let hex = Text {
+        content: TextContent::Literal("Hex".to_string()),
+        style: TextStyle {
+            color: Some(TextColor::Rgb(0x1a_2b3c)),
+            ..TextStyle::default()
+        },
+        ..Text::default()
+    };
+    let inline_legacy = Text::literal("\u{00a7}cRed");
+    let named = Text {
+        content: TextContent::Literal("Gray".to_string()),
+        style: TextStyle {
+            color: Some(TextColor::Gray),
+            ..TextStyle::default()
+        },
+        ..Text::default()
+    };
+    let root = Text {
+        extra: vec![hex, inline_legacy, named],
+        ..Text::default()
+    };
+
+    // The real production entry point: a server chat line arriving on the
+    // net thread's `NetUpdate` channel, folded by the real `Sim::poll_net`
+    // (`NetUpdate::Chat`'s handler in `sim/net_apply.rs` stores the full
+    // `Text`, spans and all, in `ChatLog` — nothing flattens it at this
+    // point).
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::Chat {
+        text: root,
+        player: false,
+        sender: None,
+    })
+    .unwrap();
+    sim.poll_net();
+
+    // The real accessor `app/redraw.rs` calls every frame.
+    let chat_spans_owned = sim.recent_chat_spans(10);
+    assert_eq!(
+        chat_spans_owned.len(),
+        1,
+        "setup: exactly one chat line must have arrived"
+    );
+
+    // The same windowing/slicing `app/redraw.rs` applies before filling
+    // `HudFrame::chat_spans` — closed-chat window is the whole vec, i.e.
+    // `(0, chat_spans_owned.len())`, reproduced verbatim here.
+    let chat_spans_lines: Vec<(&[TextSpan], f32)> = chat_spans_owned
+        .iter()
+        .map(|(spans, age)| (spans.as_slice(), *age))
+        .collect();
+
+    let stats = DebugStats::default();
+    let geo = HudGeometry::build(
+        &HudFrame {
+            crosshair: false,
+            show_debug: false,
+            chat_spans: &chat_spans_lines,
+            ..HudFrame::new(&stats)
+        },
+        640,
+        480,
+    );
+    assert!(
+        geo.vertex_count() > 0,
+        "sanity: the line must draw something at all"
+    );
+
+    let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    let has_colour = |rgb: (u8, u8, u8)| {
+        geo.verts
+            .chunks_exact(6)
+            .any(|v| (byte(v[2]), byte(v[3]), byte(v[4])) == rgb)
+    };
+    let expected = [
+        ("hex", (0x1a_u8, 0x2b_u8, 0x3c_u8)),
+        ("inline §c", (0xff_u8, 0x55_u8, 0x55_u8)),
+        ("named gray", (0xaa_u8, 0xaa_u8, 0xaa_u8)),
+    ];
+    let missing: Vec<&str> = expected
+        .iter()
+        .filter(|(_, rgb)| !has_colour(*rgb))
+        .map(|(name, _)| *name)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these colours never reached a vertex through the real Sim/redraw \
+         wiring: {missing:?} (full expected set: {expected:?})"
+    );
+
+    // Control: the sibling *legacy* accessor on the exact same stored line,
+    // fed into `HudFrame::chat` instead of `chat_spans` — proves the
+    // detector can actually fail, and localises the loss to the accessor
+    // seam this issue names rather than to `HudGeometry::build` itself
+    // (which is shared by both branches).
+    let chat_owned = sim.recent_chat(10);
+    assert_eq!(chat_owned.len(), 1, "setup: same one line, legacy accessor");
+    let chat_legacy: Vec<(&str, f32)> =
+        chat_owned.iter().map(|(l, a)| (l.as_str(), *a)).collect();
+    let legacy_geo = HudGeometry::build(
+        &HudFrame {
+            crosshair: false,
+            show_debug: false,
+            chat: &chat_legacy,
+            ..HudFrame::new(&stats)
+        },
+        640,
+        480,
+    );
+    let legacy_has_colour = |rgb: (u8, u8, u8)| {
+        legacy_geo
+            .verts
+            .chunks_exact(6)
+            .any(|v| (byte(v[2]), byte(v[3]), byte(v[4])) == rgb)
+    };
+    assert!(
+        !legacy_has_colour((0x1a, 0x2b, 0x3c)),
+        "control failed: the legacy accessor was expected to lose the hex \
+         colour (that is the bug issue #649 names) but drew it anyway — this \
+         test's premise is wrong"
+    );
+}
+
+/// The anti-island companion to the gate above: a grep control on
+/// `app/redraw.rs`'s own source, in the same spirit as
+/// `menu::nav::tests::app_rs_still_threads_every_chat_option_into_the_hud_frame`.
+/// The gate above proves the wiring works when it is exercised *this* way,
+/// but a unit test cannot run `App::redraw` itself (it is the frame loop, and
+/// needs a live GPU context) — so if the real call site quietly reverted to
+/// filling the legacy `HudFrame::chat` field instead, this test would keep
+/// passing while the screen went back to hex-blind. This is one grep wide,
+/// which is why it is checked by reading the source rather than by driving
+/// the widget.
+#[test]
+fn app_rs_fills_hud_frame_chat_spans_not_the_legacy_chat_field() {
+    let src = include_str!("../app/redraw.rs");
+    assert!(
+        src.contains("hud_frame.chat_spans = &chat_spans_lines"),
+        "app/redraw.rs must fill `HudFrame::chat_spans` from the real \
+         `Sim::recent_chat_spans` wiring — see issue #649"
+    );
+    // The control: the detector must be able to report an absence. The old,
+    // hex-blind line this issue's fix replaced.
+    assert!(
+        !src.contains("hud_frame.chat = &chat_lines"),
+        "app/redraw.rs must not go back to filling the legacy, hex-blind \
+         `HudFrame::chat` field from the per-frame chat wiring — that is \
+         exactly the regression this test exists to catch"
+    );
+}

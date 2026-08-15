@@ -246,7 +246,11 @@ impl Sim {
                     // stored scrollback and the log line both read as prose, not
                     // raw keys like `entity.minecraft.spider`.
                     let text = self.resolve_text(&text);
-                    tracing::info!(target: "chat", "{}", text.to_legacy_string());
+                    // `to_plain_string`, not `to_legacy_string`: a terminal does not
+                    // render `§` codes, so logging the legacy-flattened string prints
+                    // mojibake for any coloured line — the code points survive, just
+                    // uninterpreted, into the log file.
+                    tracing::info!(target: "chat", "{}", text.to_plain_string());
                     // Stamped with the driver's own clock, which is why the log and
                     // the clock had to move to the ECS together (Stage 3 deferred
                     // both for exactly this reason). `local` is the session entity,
