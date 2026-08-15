@@ -63,7 +63,44 @@
 //! into everything `sim.rs` re-exports that `sim::tests` has always had, with
 //! no need to enumerate any of it.
 
+use lodestone_ecs::entity::EntityUuid;
+use lodestone_ecs::{SessionScoreboard, SessionTabList};
+use lodestone_physics::CollisionRule;
+
 use super::*;
+
+/// `Team.CollisionRule` (`lodestone_game::scoreboard::CollisionRule`) has no
+/// dependency relationship with [`lodestone_physics::push::CollisionRule`] —
+/// `lodestone-game` and `lodestone-physics` are siblings, neither depending on
+/// the other — so the shell, which depends on both, is the one seam that can
+/// convert between the two identical enums.
+fn convert_collision_rule(rule: lodestone_game::scoreboard::CollisionRule) -> CollisionRule {
+    match rule {
+        lodestone_game::scoreboard::CollisionRule::Always => CollisionRule::Always,
+        lodestone_game::scoreboard::CollisionRule::Never => CollisionRule::Never,
+        lodestone_game::scoreboard::CollisionRule::PushOtherTeams => CollisionRule::PushOtherTeams,
+        lodestone_game::scoreboard::CollisionRule::PushOwnTeam => CollisionRule::PushOwnTeam,
+    }
+}
+
+/// `Entity.getScoreboardName()` — the string a scoreboard team's member list
+/// actually carries. `Player.getScoreboardName()` overrides the base
+/// `Entity` behaviour to the account name (`Player.java`); every other entity
+/// keeps the base `Entity.java` behaviour, its own UUID rendered as a string.
+/// Getting this backwards (e.g. keying a player by UUID) would silently miss
+/// every real server's `/team join <team> <player-name>`.
+fn scoreboard_holder(
+    is_player: bool,
+    uuid: Option<&EntityUuid>,
+    tab_list: Option<&lodestone_game::tablist::TabList>,
+) -> Option<String> {
+    let uuid = uuid?.0;
+    if is_player {
+        Some(tab_list?.get(&uuid)?.profile.name.clone())
+    } else {
+        Some(uuid.to_string())
+    }
+}
 
 impl Sim {
     /// What this tick's physics collides against.
@@ -151,16 +188,51 @@ impl Sim {
     /// [`lodestone_model::EntityFacts::pushes_players`].
     pub(crate) fn tick_nearby_entities(&mut self) -> NearbyEntities {
         let center = self.player().position;
-        let nearby = self.write(|w| {
-            let mut state = w.query::<(&Position, &EntityKind)>();
+        let local = self.local;
+        let local_uuid = self.local_uuid();
+        let (list, self_collision_rule) = self.write(|w| {
+            // `w.query()` needs `&mut w`, if only transiently — build the
+            // `QueryState` before taking any of the immutable borrows below,
+            // exactly as the pre-existing `version` handle already had to
+            // (see its own comment): a borrow taken first would have to
+            // outlive `query()`'s `&mut`, which the borrow checker refuses.
+            let mut state = w.query::<(&Position, &EntityKind, Option<&EntityUuid>)>();
+
+            // Both are on `self.local` in the shell's own mirrored world —
+            // the same component `Sim::sidebar` reads `SessionScoreboard`
+            // off of — so this is one more immutable reborrow of `w`
+            // alongside the query iteration below, not a second world.
+            let scoreboard = w
+                .get::<SessionScoreboard>(local)
+                .map(|board| &board.0);
+            let tab_list = w.get::<SessionTabList>(local).map(|list| &list.0);
+
+            // `Entity.getTeam()` for the local player itself — the other half
+            // of the team gate that a neighbour's own `CollisionRule` below
+            // only supplies one side of. `Player.getScoreboardName()` is the
+            // account name, resolved the same way a remote player's is: by
+            // uuid through the tab list, not through any component the local
+            // player entity carries (it carries none — see
+            // `spawn_local_player`).
+            let local_name = local_uuid
+                .and_then(|uuid| tab_list.and_then(|list| list.get(&uuid)))
+                .map(|entry| entry.profile.name.clone());
+            let local_team = local_name
+                .as_deref()
+                .and_then(|name| scoreboard.and_then(|board| board.team_of(name)));
+            let self_collision_rule = local_team
+                .map(|team| convert_collision_rule(team.collision_rule))
+                .unwrap_or_default();
+            let local_team_name = local_team.map(|team| team.name.as_str());
+
             // Read once, before the loop. Building the `QueryState` ends the
             // mutable borrow, so the resource handle and the iteration coexist
             // as two immutable reborrows — which is what lets this stay a single
             // `write` pass instead of a resource lookup per candidate.
             let version = w.resource::<VersionData>();
-            state
+            let list = state
                 .iter(w)
-                .filter_map(|(pos, kind)| {
+                .filter_map(|(pos, kind, uuid)| {
                     let feet = Vec3d::new(pos.0.x, pos.0.y, pos.0.z);
                     if (feet.x - center.x).abs() > NEARBY_ENTITY_RADIUS
                         || (feet.y - center.y).abs() > NEARBY_ENTITY_RADIUS
@@ -179,11 +251,36 @@ impl Sim {
                     // reads as a real step height resolved from an attribute map.
                     let dims =
                         EntityDimensions::new(facts.dimensions.width, facts.dimensions.height, 0.6);
-                    Some(NearbyEntity::living(feet, dims.bounding_box(feet)))
+                    let mut neighbour = NearbyEntity::living(feet, dims.bounding_box(feet));
+
+                    // `EntitySelector.pushableBy`'s team gate — see
+                    // `lodestone_physics::push::team_allows_push`. A neighbour
+                    // outside the scoreboard census (no team, or a team we
+                    // failed to resolve a holder key for) keeps
+                    // `NearbyEntity::living`'s `Always`/`not allied` default,
+                    // which is exactly vanilla's `ownTeam == null` resolution.
+                    let is_player = kind.0.path() == "player";
+                    if let Some(team) = scoreboard_holder(is_player, uuid, tab_list)
+                        .as_deref()
+                        .and_then(|holder| scoreboard.and_then(|board| board.team_of(holder)))
+                    {
+                        neighbour.collision_rule = convert_collision_rule(team.collision_rule);
+                        // `Team.isAlliedTo` is reference equality
+                        // (`Team.java`) — vanilla has no cross-team alliance,
+                        // so "allied" collapses to "same named team", and the
+                        // comparison is symmetric regardless of which side
+                        // is read as `ownTeam` and which as `theirTeam`.
+                        neighbour.allied = local_team_name == Some(team.name.as_str());
+                    }
+                    Some(neighbour)
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (list, self_collision_rule)
         });
-        NearbyEntities(nearby)
+        NearbyEntities {
+            list,
+            self_collision_rule,
+        }
     }
 
     /// What **dropped items** are simulated against this tick.

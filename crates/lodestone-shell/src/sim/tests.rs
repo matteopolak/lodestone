@@ -3016,6 +3016,145 @@ fn sidebar_rows_read_the_clients_one_folded_scoreboard() {
     );
 }
 
+/// `Sim::tick_nearby_entities` must resolve a neighbour's real scoreboard team
+/// into its `NearbyEntity::collision_rule`/`allied`, not leave every neighbour
+/// at [`lodestone_physics::push::NearbyEntity::living`]'s `Always`/`false`
+/// default forever — the defect the owner reported (a vanilla client refusing
+/// to be pushed while ours accepted it) traces to exactly this: production had
+/// zero readers of a non-default `CollisionRule` before this test, because the
+/// only constructor `tick_nearby_entities` ever called was `::living`.
+///
+/// Two neighbours, not one, so the gate can be told from "every neighbour
+/// reads as `Never`" — a team-name holder that never resolves would default
+/// every neighbour to `Always` (see `tick_nearby_entities`'s own comment on
+/// why an unresolved holder keeps the safe default), and a broken resolver
+/// that always returns `Never` would be caught by Carol having no team and
+/// still reading `Always`.
+///
+/// This does not exercise [`NearbyEntities::self_collision_rule`] (the local
+/// player's *own* team) — that resolution goes through `NetClient::local_uuid`,
+/// which `NetClient::loopback_with_feed` never publishes (it is a private
+/// field this test cannot reach without touching `net.rs`), so
+/// `self_collision_rule` reads its safe `Always` default here. The neighbour
+/// half is the half the owner's report is actually about: a real remote
+/// player pushing *us*.
+#[test]
+fn tick_nearby_entities_resolves_a_neighbours_scoreboard_team() {
+    use lodestone_model::event::{TeamAction, TeamParameters, Visibility};
+    use lodestone_model::{ClientEvent, GameMode, PlayerListEntry, Text};
+    use uuid::Uuid;
+
+    let mut sim = Sim::new(test_config());
+    let feet = sim.player().position;
+
+    let bob = Uuid::from_u128(101);
+    let carol = Uuid::from_u128(102);
+
+    // The tab list carries the account name a scoreboard team's member list
+    // actually keys on (`Player.getScoreboardName()`) — see
+    // `crate::sim::collide::scoreboard_holder`.
+    ingest(
+        &mut sim,
+        ClientEvent::PlayerListUpdate {
+            entries: vec![
+                PlayerListEntry {
+                    uuid: bob,
+                    name: Some("Bob".into()),
+                    game_mode: Some(GameMode::Survival),
+                    latency: Some(20),
+                    display_name: None,
+                    listed: Some(true),
+                    properties: None,
+                    chat_session: None,
+                },
+                PlayerListEntry {
+                    uuid: carol,
+                    name: Some("Carol".into()),
+                    game_mode: Some(GameMode::Survival),
+                    latency: Some(20),
+                    display_name: None,
+                    listed: Some(true),
+                    properties: None,
+                    chat_session: None,
+                },
+            ],
+        },
+    );
+
+    // A real server's `/team add red` + `/scoreboard teams option red
+    // collisionRule never` + `/team join red Bob` — Bob is on a team whose
+    // rule forbids the push outright; Carol has no team at all, exactly the
+    // discriminating pair the task needs: one forbidden, one allowed, so a
+    // resolver that ignores the team entirely (leaving everyone `Always`)
+    // fails on Bob, and a resolver that is simply broken in the other
+    // direction (everyone reads `Never`) fails on Carol.
+    ingest(
+        &mut sim,
+        ClientEvent::TeamUpdate {
+            name: "red".into(),
+            action: TeamAction::Create {
+                params: Box::new(TeamParameters {
+                    display_name: Text::literal("Red"),
+                    prefix: Text::literal(""),
+                    suffix: Text::literal(""),
+                    name_tag_visibility: Visibility::Always,
+                    collision_rule: lodestone_model::CollisionRule::Never,
+                    color: None,
+                    friendly_fire: true,
+                    see_friendly_invisibles: true,
+                }),
+                members: vec!["Bob".into()],
+            },
+        },
+    );
+
+    for (entity_id, uuid) in [(9001, bob), (9002, carol)] {
+        ingest(
+            &mut sim,
+            ClientEvent::EntitySpawned {
+                entity_id,
+                uuid: Some(uuid),
+                entity_type: "minecraft:player".parse().expect("valid entity type key"),
+                pos: lodestone_model::Vec3::new(feet.x + 1.0, feet.y, feet.z),
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            },
+        );
+    }
+
+    let nearby = sim.tick_nearby_entities();
+    assert_eq!(
+        nearby.list.len(),
+        2,
+        "both Bob and Carol must be in range and pass the push census"
+    );
+
+    let never_count = nearby
+        .list
+        .iter()
+        .filter(|n| n.collision_rule == lodestone_physics::push::CollisionRule::Never)
+        .count();
+    let always_count = nearby
+        .list
+        .iter()
+        .filter(|n| n.collision_rule == lodestone_physics::push::CollisionRule::Always)
+        .count();
+    assert_eq!(
+        never_count, 1,
+        "exactly Bob's NearbyEntity must carry his team's Never rule"
+    );
+    assert_eq!(
+        always_count, 1,
+        "Carol has no team, so hers must keep the Always default — proving \
+         the resolver is not just returning Never unconditionally"
+    );
+    assert!(
+        nearby.list.iter().all(|n| !n.allied),
+        "the local player has no team in this harness, so `ownTeam != null` \
+         must veto `allied` for every neighbour regardless of their own team"
+    );
+}
+
 // -----------------------------------------------------------------------
 // Local placement prediction (issue #381)
 // -----------------------------------------------------------------------
