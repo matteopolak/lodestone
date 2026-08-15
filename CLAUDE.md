@@ -1178,10 +1178,19 @@ comment and let the tracker keep its own history. **Commit messages and issue co
 
 Two things this does **not** cover:
 
-- **Vanilla record definitions still get cited, by symbol.** `FireBlock.tick`,
-  `LivingEntityRenderer`'s `yRot`, `Mth.clampedLerp` — the decompile under `.cache/mc/26.2/` is a pinned
-  external source and citing it is how the next reader re-verifies a port. **Drop the `:NNN` there too**;
-  a class-and-method name is just as findable and does not rot when the cache is re-extracted.
+- **Vanilla record definitions get cited in `docs/` only — never in a `.rs` file.** The owner's
+  decision, on legal advice grounds: prose under `docs/` may name `FireBlock.tick`,
+  `LivingEntityRenderer`'s `yRot`, `Mth.clampedLerp` and the rest, because the decompile under
+  `.cache/mc/26.2/` is a pinned external source and citing it is how the next reader re-verifies a
+  port. **Source comments must not.** Drop the `:NNN` in docs too; a class-and-method name is just as
+  findable and does not rot when the cache is re-extracted.
+
+  This costs something real and the cost is worth naming, because the mitigation is what keeps the
+  rule survivable: the in-code citation is what let a mislabelled knockback derivation be caught by
+  reading the method it named. So when you remove one, **do not just delete it** — say in the comment
+  *what rule the code implements*, in terms a reader of that file can check, and point at the `docs/`
+  page that carries the citation. "Two knockback impulses, the flat one unconditional and the sprint
+  bonus gated — see `docs/combat.md`" is as verifiable as a symbol and names nothing.
 - **Measurements keep their numbers.** §12 exists for figures — allocation counts, instruction counts,
   hit rates, byte totals, md5s. Those are evidence, not citations, and they are the point of the record.
 
