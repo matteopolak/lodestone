@@ -41,7 +41,7 @@
 //! whether or not the dead half currently misbehaves. Grep for a second folder
 //! whenever one is touched.
 
-use lodestone_game::bossbar::{BossBarColor, BossBarSet};
+use lodestone_game::bossbar::{BossBarColor, BossBarOverlay, BossBarSet};
 use lodestone_model::text::TextSpan;
 
 /// A ready-to-draw scoreboard sidebar: a title plus up to 15 rows, each a label
@@ -152,8 +152,18 @@ pub fn spans_lines(spans: &[TextSpan]) -> Vec<Vec<TextSpan>> {
     lines
 }
 
-/// A ready-to-draw boss bar: a styled title, a clamped progress fraction, and an
-/// RGB tint derived from the bar colour.
+/// A ready-to-draw boss bar: a styled title, a clamped progress fraction, and
+/// the colour/overlay enums that select vanilla's real per-colour sprite art.
+///
+/// Earlier this carried a `color: [f32; 3]` RGB tint instead, on the
+/// (unchecked) assumption that vanilla paints one greyscale bar and tints it.
+/// `BossHealthOverlay.BAR_BACKGROUND_SPRITES`/`BAR_PROGRESS_SPRITES`
+/// (`.cache/mc/26.2/client-src`) say otherwise: seven **distinct** sprite
+/// files per colour, blitted with `color = -1` (opaque white, no tint at
+/// all). A tint field could not have driven that draw no matter what the HUD
+/// did with it — the fold had already thrown away the one piece of
+/// information (*which* colour) a sprite-based draw needs, and manufactured a
+/// value (an approximate RGB) that vanilla's own draw call never uses.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BossBarView {
     /// The title as **styled spans**, for the same reason [`Sidebar`]'s fields
@@ -167,8 +177,35 @@ pub struct BossBarView {
     pub title: Vec<TextSpan>,
     /// Progress in `0.0..=1.0`.
     pub progress: f32,
-    /// Bar tint (RGB in `0..1`).
-    pub color: [f32; 3],
+    /// Bar colour — selects the background/progress sprite pair via
+    /// [`BossBarColor::background_sprite_id`]/[`BossBarColor::progress_sprite_id`].
+    pub color: BossBarColor,
+    /// Division/overlay style — selects the notch sprite pair (or none, for
+    /// [`BossBarOverlay::Progress`]) via
+    /// [`BossBarOverlay::background_sprite_id`]/[`BossBarOverlay::progress_sprite_id`].
+    pub overlay: BossBarOverlay,
+}
+
+/// Vanilla's `Mth.lerpDiscrete(alpha, p0, p1)` (`.cache/mc/26.2/client-src`):
+/// an integer interpolation between `p0` and `p1` that is `0` only at
+/// `alpha == 0.0` and `p1` only at `alpha >= 1.0`, otherwise
+/// `p0 + floor(alpha * (p1 - p0 - 1)) + 1`. `BossHealthOverlay.extractBar`
+/// feeds this `(progress, 0, 182)` to get the progress sprite's pixel width —
+/// **not** `progress * 182` rounded or truncated, which disagrees with this
+/// formula at most fractions (they coincide at `0.0`, `1.0`, and `0.5`, which
+/// is exactly why a fixture corpus that only ever tries a half-full bar can't
+/// tell the two apart).
+#[must_use]
+pub fn lerp_discrete_width(alpha: f32, native_width: i32) -> i32 {
+    if alpha <= 0.0 {
+        return 0;
+    }
+    let delta = native_width;
+    let mut w = (alpha * (delta - 1) as f32).floor() as i32 + 1;
+    if w > native_width {
+        w = native_width;
+    }
+    w
 }
 
 /// Fold the active boss bars into drawable views, preserving server (render)
@@ -199,22 +236,10 @@ pub fn boss_bars_from(
             // colour of its own arrives carrying its parent's.
             title: lodestone_game::text::resolve(&b.title, translate).to_spans(),
             progress: b.progress.clamp(0.0, 1.0),
-            color: boss_color_rgb(b.color),
+            color: b.color,
+            overlay: b.overlay,
         })
         .collect()
-}
-
-/// Map a vanilla boss-bar colour to an approximate RGB tint.
-fn boss_color_rgb(color: BossBarColor) -> [f32; 3] {
-    match color {
-        BossBarColor::Pink => [0.96, 0.40, 0.71],
-        BossBarColor::Blue => [0.30, 0.55, 0.95],
-        BossBarColor::Red => [0.90, 0.20, 0.20],
-        BossBarColor::Green => [0.35, 0.80, 0.30],
-        BossBarColor::Yellow => [0.95, 0.85, 0.25],
-        BossBarColor::Purple => [0.65, 0.35, 0.90],
-        BossBarColor::White => [0.92, 0.92, 0.92],
-    }
 }
 
 #[cfg(test)]
@@ -411,9 +436,55 @@ mod tests {
             "progress must clamp to 1.0, got {}",
             views[1].progress
         );
+        assert_eq!(views[0].color, BossBarColor::Purple, "colour must fold through");
+        assert_eq!(views[1].color, BossBarColor::Red, "colour must fold through");
         assert_ne!(
-            views[0].color, views[1].color,
-            "purple and red must tint differently"
+            views[0].color.background_sprite_id(),
+            views[1].color.background_sprite_id(),
+            "purple and red must resolve to distinct sprite ids"
+        );
+    }
+
+    /// [`lerp_discrete_width`] against vanilla's own `Mth.lerpDiscrete`
+    /// formula, hand-expanded — the exact source of the boss bar's clipped
+    /// progress-fill width, not a naive `progress * native_width` round or
+    /// truncation. `0.0`/`1.0`/`0.5` are where the naive version happens to
+    /// agree (this module's own doc comment names why that makes them
+    /// non-discriminating); `0.3`/`0.61`/`0.99` do not.
+    #[test]
+    fn lerp_discrete_width_matches_vanillas_formula_not_a_naive_scale() {
+        let cases: [(f32, i32); 8] = [
+            (0.0, 0),
+            (1.0, 182),
+            (0.5, 91),
+            (0.1, 19),  // floor(0.1 * 181) + 1 = floor(18.1) + 1 = 19; naive round(0.1 * 182) = 18
+            (0.2, 37),  // floor(0.2 * 181) + 1 = floor(36.2) + 1 = 37; naive round(0.2 * 182) = 36
+            (0.8, 145), // floor(0.8 * 181) + 1 = floor(144.8) + 1 = 145; naive round(0.8 * 182) = 146
+            (0.9, 163), // floor(0.9 * 181) + 1 = floor(162.9) + 1 = 163; naive round(0.9 * 182) = 164
+            (2.0, 182), // out-of-range progress must still clamp to the bar
+        ];
+        let mut wrong = Vec::new();
+        for (alpha, want) in cases {
+            let got = lerp_discrete_width(alpha, 182);
+            if got != want {
+                wrong.push(format!("alpha {alpha}: want {want}, got {got}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+
+        // Negative control: the naive `round(alpha * 182)` hypothesis must
+        // disagree at the discriminating inputs above, or this test would not
+        // be able to tell the two implementations apart.
+        let mut naive_agrees_everywhere = true;
+        for (alpha, want) in cases {
+            let naive = (alpha.clamp(0.0, 1.0) * 182.0).round() as i32;
+            if naive != want {
+                naive_agrees_everywhere = false;
+            }
+        }
+        assert!(
+            !naive_agrees_everywhere,
+            "fixture is not discriminating: the naive scale matches every case"
         );
     }
 }

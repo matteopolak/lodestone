@@ -1735,6 +1735,39 @@ pub fn chat_input_top(canvas_h: f32, pose_scale: f32) -> f32 {
     canvas_h - HUD_MARGIN - font::GLYPH_H as f32 * pose_scale
 }
 
+/// The scrollback's own anchor — vanilla's `ChatComponent.extractRenderState`
+/// (`ChatComponent.java`): `final int chatBottom = Mth.floor((screenHeight -
+/// 40) / scale);`, computed in the pose's *local* (unscaled-by-chat-scale)
+/// coordinates and then carried back to screen/canvas pixels by the very
+/// `pose.scale(scale, scale)` that local value is drawn under — so the real
+/// canvas-pixel anchor is `floor((canvas_h - 40) / scale) * scale`. Every
+/// message row's bottom edge is `chatBottom - lineIndex * entryHeight`
+/// (`lineIndex == 0` for the newest), so this is where the newest row's
+/// bottom edge lands.
+///
+/// **Independent of the input box.** `extractRenderState` computes this one
+/// expression before it ever branches on `displayMode.foreground`, and the
+/// `EditBox` (`this.height - 12`, `ChatScreen.init`) is a wholly separate
+/// literal in a different class — vanilla never derives one from the other.
+/// So this takes `canvas_h` and the chat scale only, not [`chat_input_top`]:
+/// coupling the two (as this HUD used to, computing `chat_bottom` from
+/// `input_y` while the box was open) is what silently made the vanilla gap
+/// disappear, since that coupling forces the newest row flush against the
+/// input strip's own top edge regardless of what `40` says. Used unconditionally,
+/// open or closed, for the same reason — vanilla's `chatBottom` does not
+/// change with `displayMode` either.
+///
+/// At the vanilla-default `chatScale` of `1.0` this is simply `canvas_h -
+/// 40.0`: a fixed, real 40 logical-canvas-pixel headroom above wherever the
+/// input box happens to sit, not a restated `0`.
+#[must_use]
+pub fn chat_bottom(canvas_h: f32, pose_scale: f32) -> f32 {
+    if pose_scale <= 0.0 {
+        return canvas_h - 40.0;
+    }
+    ((canvas_h - 40.0) / pose_scale).floor() * pose_scale
+}
+
 /// Vanilla's `CommandSuggestions.LINE_HEIGHT` is `12`, decomposed: the 9px font
 /// draws at `rect.getY() + 2 + 12 * i`, so the row is 2px of lead, the glyph,
 /// and 1px of trail. Ours keeps the padding and substitutes this HUD's own glyph
@@ -2332,15 +2365,16 @@ impl HudGeometry {
                 b.text("_", cursor_x, input_y, chat_pose_scale, [1.0, 1.0, 1.0, 1.0]);
             }
         }
-        // The scrollback stacks upward from here, so while the input is open this
-        // must be the **top of the input strip**, not the text's own top. Using
-        // `input_y` let the strip's padding overlap the last scrollback row, and
-        // two translucent blacks over one another read as a brighter seam.
-        let chat_bottom = if chat_open {
-            input_y - INPUT_STRIP_PAD * chat_pose_scale
-        } else {
-            b.h - margin
-        };
+        // The scrollback stacks upward from here — vanilla's own `chatBottom`
+        // (see [`chat_bottom`]'s doc), unconditional on whether the box is
+        // open. This used to be `input_y - INPUT_STRIP_PAD * chat_pose_scale`
+        // while open, which coupled the scrollback's anchor to the input
+        // strip's own top edge; vanilla never does that (`chatBottom` and the
+        // `EditBox`'s `height - 12` are two independent literals in two
+        // different classes), and the coupling is what erased vanilla's real
+        // ~26px headroom between the newest message and the input box,
+        // leaving them flush.
+        let chat_bottom = chat_bottom(b.h, chat_pose_scale);
         // How many visual rows fit the configured box height — vanilla's
         // `ChatComponent.getLinesPerPage` (`ChatComponent.java`,
         // `height / lineHeight`), derived from the same `chat_box_h`/
@@ -2769,16 +2803,29 @@ impl HudGeometry {
         // `BossHealthOverlay.extractRenderState`/`extractBar`, ported at
         // vanilla's own fixed 182×5 native size and `BOSS_BAR_TEXT_SCALE`
         // (`1.0`) rather than this function's ambient `scale`/`line_h`, the
-        // same exemption as [`SIDEBAR_LINE_H`]. The fill is tinted by the
-        // bar's colour and clamped progress; an empty slice draws nothing, so
-        // this costs zero verts off a server that sends none. Not ported:
-        // vanilla's per-colour/overlay sprite art (`BAR_BACKGROUND_SPRITES`
-        // etc.) — this still draws a flat tinted rect, which is a separate,
-        // pre-existing simplification from the sizing bug this fixes.
+        // same exemption as [`SIDEBAR_LINE_H`]. An empty slice draws nothing,
+        // so this costs zero verts off a server that sends none.
+        //
+        // Four clauses, each a real vanilla `blitSprite`, all untinted
+        // (`color = -1` in `extractBar`'s private overload) since every
+        // colour is its own pre-baked sprite rather than a tinted greyscale
+        // one:
+        //   1. the background plate, full 182px, `bb.color.background_sprite_id()`
+        //   2. the background notch overlay, also full 182px, only when the
+        //      bar's overlay style is not `Progress`
+        //   3. the progress fill, `bb.color.progress_sprite_id()`, **cropped**
+        //      (not scaled) to `lerp_discrete_width(progress, 182)` px — see
+        //      that function's doc for why this differs from a plain
+        //      `progress * 182`
+        //   4. the progress notch overlay, cropped to the same width as (3),
+        //      again only when the overlay style is not `Progress`
+        // (2) and (4) draw on top of (1) and (3) respectively, exactly
+        // `extractBar`'s draw order.
         if !frame.boss_bars.is_empty() {
             let bscale = BOSS_BAR_TEXT_SCALE;
             let bar_x = b.w * 0.5 - BOSS_BAR_WIDTH * 0.5;
             let mut y_offset = BOSS_BAR_TOP;
+            let white = [1.0, 1.0, 1.0, 1.0];
             for bb in frame.boss_bars {
                 let yo = y_offset;
                 let tw = b.spans_width(&bb.title, bscale);
@@ -2790,11 +2837,49 @@ impl HudGeometry {
                     [1.0, 1.0, 1.0],
                     1.0,
                 );
-                b.rect_px(bar_x, yo, BOSS_BAR_WIDTH, BOSS_BAR_HEIGHT, [0.08, 0.08, 0.10, 0.75]);
-                let fill = BOSS_BAR_WIDTH * bb.progress.clamp(0.0, 1.0);
-                if fill > 0.0 {
-                    let c = bb.color;
-                    b.rect_px(bar_x, yo, fill, BOSS_BAR_HEIGHT, [c[0], c[1], c[2], 0.95]);
+
+                // (1) background plate, full width.
+                b.sprite(
+                    bb.color.background_sprite_id(),
+                    bar_x,
+                    yo,
+                    BOSS_BAR_WIDTH,
+                    BOSS_BAR_HEIGHT,
+                    white,
+                );
+                // (2) background notch overlay, full width, on top of (1).
+                if let Some(id) = bb.overlay.background_sprite_id() {
+                    b.sprite(id, bar_x, yo, BOSS_BAR_WIDTH, BOSS_BAR_HEIGHT, white);
+                }
+
+                let width_px = crate::overlay::lerp_discrete_width(
+                    bb.progress.clamp(0.0, 1.0),
+                    BOSS_BAR_WIDTH as i32,
+                );
+                if width_px > 0 {
+                    let frac = width_px as f32 / BOSS_BAR_WIDTH;
+                    // (3) progress fill, cropped to `frac` — shrink both the
+                    // destination width and the sampled UV span (as the XP
+                    // bar's fill does above), so the bar reveals its own
+                    // pattern instead of squashing it into a narrower box.
+                    for mut q in
+                        b.gui_geometry(bb.color.progress_sprite_id(), bar_x, yo, BOSS_BAR_WIDTH, BOSS_BAR_HEIGHT)
+                    {
+                        let span = q.uv_max[0] - q.uv_min[0];
+                        q.dst[2] *= frac;
+                        q.uv_max[0] = q.uv_min[0] + span * frac;
+                        b.push_sprite_quad(q, white);
+                    }
+                    // (4) progress notch overlay, cropped the same way, on
+                    // top of (3).
+                    if let Some(id) = bb.overlay.progress_sprite_id() {
+                        for mut q in b.gui_geometry(id, bar_x, yo, BOSS_BAR_WIDTH, BOSS_BAR_HEIGHT) {
+                            let span = q.uv_max[0] - q.uv_min[0];
+                            q.dst[2] *= frac;
+                            q.uv_max[0] = q.uv_min[0] + span * frac;
+                            b.push_sprite_quad(q, white);
+                        }
+                    }
                 }
                 y_offset += BOSS_BAR_STEP;
                 if y_offset >= b.h / 3.0 {
@@ -7540,57 +7625,189 @@ mod tests {
         );
     }
 
+    /// Encode a solid-colour RGBA PNG so a `MemorySource` can stand in for a
+    /// real jar in a hermetic test — the same trick
+    /// `lodestone_render::gui_atlas`'s own tests use (no GPU, no disk).
+    fn solid_png(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
+        let mut data = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut data, w, h);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            let pixels: Vec<u8> = (0..(w * h)).flat_map(|_| rgba).collect();
+            writer.write_image_data(&pixels).expect("png data");
+        }
+        data
+    }
+
+    /// A minimal synthetic pack covering the boss-bar sprite ids exercised
+    /// below: two colours' background/progress plates plus one notch-overlay
+    /// pair, at vanilla's real 182×5 native size
+    /// (`.cache/mc/26.2/client-src/assets/.../gui/sprites/boss_bar/*.png`).
+    /// Content is an arbitrary flat colour per id — this is a **geometry**
+    /// gate (does the draw reach the atlas and land the right rect?), not a
+    /// pixel-colour gate, so what matters is that each id is *present* and
+    /// distinct, not what it looks like.
+    fn boss_bar_synthetic_atlas() -> GuiAtlas {
+        let mut src = lodestone_assets::MemorySource::new("boss-bar-test");
+        for (id, rgba) in [
+            ("boss_bar/purple_background", [60, 20, 90, 255]),
+            ("boss_bar/purple_progress", [170, 60, 220, 255]),
+            ("boss_bar/red_background", [90, 20, 20, 255]),
+            ("boss_bar/red_progress", [220, 40, 40, 255]),
+            ("boss_bar/notched_6_background", [10, 10, 10, 255]),
+            ("boss_bar/notched_6_progress", [250, 250, 250, 255]),
+        ] {
+            src.insert(
+                format!("assets/minecraft/textures/gui/sprites/{id}.png"),
+                solid_png(182, 5, rgba),
+            );
+        }
+        let manager = lodestone_assets::ResourceManager::new(vec![
+            Box::new(src) as Box<dyn lodestone_assets::ResourceSource>
+        ]);
+        GuiAtlas::build(&manager).expect("synthetic boss-bar atlas must build")
+    }
+
+    /// The bounding box (logical pixels) of each 6-vertex (two-triangle)
+    /// quad in `verts`, in emission order. `push_sprite_quad` always emits
+    /// exactly one quad per call, so grouping by six vertices recovers the
+    /// draw's own call order — one entry per `b.sprite`/`b.push_sprite_quad`
+    /// invocation.
+    fn quad_boxes(verts: &[f32], cw: f32, ch: f32) -> Vec<(f32, f32, f32, f32)> {
+        let px = |x: f32| (x + 1.0) * 0.5 * cw;
+        let py = |y: f32| (1.0 - y) * 0.5 * ch;
+        verts
+            .chunks(SPRITE_FLOATS_PER_VERTEX * 6)
+            .map(|quad| {
+                let mut x0 = f32::MAX;
+                let mut y0 = f32::MAX;
+                let mut x1 = f32::MIN;
+                let mut y1 = f32::MIN;
+                for v in quad.chunks(SPRITE_FLOATS_PER_VERTEX) {
+                    let (x, y) = (px(v[0]), py(v[1]));
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+                (x0, y0, x1, y1)
+            })
+            .collect()
+    }
+
+    /// The boss bar's four vanilla clauses (`BossHealthOverlay.extractBar`,
+    /// `.cache/mc/26.2/client-src`), each pinned to the layer that actually
+    /// emits geometry (`HudGeometry::sprite_verts`, via a real
+    /// [`GuiAtlas`]) rather than to [`crate::overlay::BossBarView`]'s model —
+    /// the gap this whole fix closes was that every existing gate stopped one
+    /// layer above this and a flat `rect_px` reached the screen instead.
+    ///
+    /// 1. background plate, full 182px, drawn even at zero progress
+    /// 2. background notch overlay, full 182px, only when the overlay style
+    ///    is not `Progress`
+    /// 3. progress fill, **cropped** (not scaled) to
+    ///    [`crate::overlay::lerp_discrete_width`] — checked at a half-full
+    ///    bar (the brief's own discriminating case) and at `0.2`, which the
+    ///    naive `round(progress * 182)` hypothesis gets wrong (36px, not 37)
+    /// 4. progress notch overlay, cropped the same way, only when the
+    ///    overlay style is not `Progress`
     #[test]
-    fn boss_bar_fill_tracks_progress_and_colour() {
-        use crate::overlay::BossBarView;
+    fn boss_bar_reaches_the_sprite_geometry_layer_not_just_the_model() {
+        use crate::overlay::{BossBarView, lerp_discrete_width};
+        use lodestone_game::bossbar::{BossBarColor, BossBarOverlay};
+
+        let atlas = boss_bar_synthetic_atlas();
         let stats = DebugStats::default();
-        let base = HudFrame {
-            crosshair: false,
-            show_debug: false,
-            ..HudFrame::new(&stats)
-        };
-        let base_verts = HudGeometry::build(&base, 640, 480).vertex_count();
+        let (w, h) = (640u32, 480u32);
+        let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
+        let bar_x = cw * 0.5 - BOSS_BAR_WIDTH * 0.5;
+        let yo = BOSS_BAR_TOP;
 
-        let full = [BossBarView {
-            title: crate::overlay::plain_spans("Ender Dragon"),
-            progress: 1.0,
-            color: [0.6, 0.2, 0.8],
-        }];
-        let frame_full = HudFrame {
-            boss_bars: &full,
-            ..HudFrame {
+        let render = |progress: f32, overlay: BossBarOverlay| -> Vec<(f32, f32, f32, f32)> {
+            let bars = [BossBarView {
+                title: crate::overlay::plain_spans("Ender Dragon"),
+                progress,
+                color: BossBarColor::Purple,
+                overlay,
+            }];
+            let frame = HudFrame {
+                boss_bars: &bars,
                 crosshair: false,
                 show_debug: false,
                 ..HudFrame::new(&stats)
+            };
+            let geo = HudGeometry::build_with_gui(&frame, w, h, &atlas);
+            quad_boxes(&geo.sprite_verts, cw, ch)
+        };
+
+        let mut wrong = Vec::new();
+        let mut check = |name: String, got: f32, want: f32| {
+            if (got - want).abs() > 0.5 {
+                wrong.push(format!("{name}: got {got:.2}, want {want:.2}"));
             }
         };
-        let with_full = HudGeometry::build(&frame_full, 640, 480);
-        assert!(
-            with_full.vertex_count() > base_verts,
-            "a boss bar must add its title and bar geometry"
+
+        // -- clause 1: background, full width, drawn even at zero progress,
+        // and clauses 3/4 correctly absent (no fill, overlay is Progress).
+        let empty = render(0.0, BossBarOverlay::Progress);
+        assert_eq!(
+            empty.len(),
+            1,
+            "progress 0.0 with the Progress overlay must draw only the \
+             background plate: got {empty:?}"
+        );
+        check("empty bg x0".into(), empty[0].0, bar_x);
+        check("empty bg x1".into(), empty[0].2, bar_x + BOSS_BAR_WIDTH);
+        check("empty bg y0".into(), empty[0].1, yo);
+        check("empty bg y1".into(), empty[0].3, yo + BOSS_BAR_HEIGHT);
+
+        // -- clause 3 at full progress: the fill spans the whole 182px too.
+        let full = render(1.0, BossBarOverlay::Progress);
+        assert_eq!(full.len(), 2, "full progress must draw background + fill: got {full:?}");
+        check("full bg x0".into(), full[0].0, bar_x);
+        check("full bg x1".into(), full[0].2, bar_x + BOSS_BAR_WIDTH);
+        check("full fill x0".into(), full[1].0, bar_x);
+        check("full fill x1".into(), full[1].2, bar_x + BOSS_BAR_WIDTH);
+
+        // -- clause 3, the discriminating cases: a half-full bar's fill must
+        // cover the *predicted partial* width — not zero, not full, and (at
+        // 0.2) not the naive `progress * 182` scale either.
+        for (progress, want_px) in [(0.5_f32, 91_i32), (0.2_f32, 37_i32)] {
+            let quads = render(progress, BossBarOverlay::Progress);
+            assert_eq!(
+                quads.len(),
+                2,
+                "progress {progress} must draw background + fill: got {quads:?}"
+            );
+            let predicted = lerp_discrete_width(progress, BOSS_BAR_WIDTH as i32);
+            assert_eq!(predicted, want_px, "lerp_discrete_width regressed for {progress}");
+            let fill = quads[1];
+            check(format!("progress {progress} fill x0"), fill.0, bar_x);
+            check(format!("progress {progress} fill x1"), fill.2, bar_x + want_px as f32);
+            check(format!("progress {progress} fill y0"), fill.1, yo);
+            check(format!("progress {progress} fill y1"), fill.3, yo + BOSS_BAR_HEIGHT);
+        }
+
+        // -- clauses 2 + 4: the notch overlay draws only when the overlay
+        // style is not `Progress`, doubling the quad count at both ends.
+        let notched_empty = render(0.0, BossBarOverlay::Notched6);
+        assert_eq!(
+            notched_empty.len(),
+            2,
+            "zero progress with a notch overlay must draw background + \
+             background-notch, no fill: got {notched_empty:?}"
+        );
+        let notched_full = render(1.0, BossBarOverlay::Notched6);
+        assert_eq!(
+            notched_full.len(),
+            4,
+            "full progress with a notch overlay must draw all four clauses: \
+             got {notched_full:?}"
         );
 
-        // A zero-progress bar still draws the background track (same vert count),
-        // but the fill colour disappears — so the verts must differ. This guards
-        // that the fill actually tracks progress rather than being cosmetic.
-        let empty = [BossBarView {
-            title: crate::overlay::plain_spans("Ender Dragon"),
-            progress: 0.0,
-            color: [0.6, 0.2, 0.8],
-        }];
-        let frame_empty = HudFrame {
-            boss_bars: &empty,
-            ..HudFrame {
-                crosshair: false,
-                show_debug: false,
-                ..HudFrame::new(&stats)
-            }
-        };
-        let with_empty = HudGeometry::build(&frame_empty, 640, 480);
-        assert_ne!(
-            with_full.verts, with_empty.verts,
-            "full vs empty progress must change the drawn fill"
-        );
+        assert!(wrong.is_empty(), "{wrong:?}");
     }
 
     #[test]
@@ -7837,6 +8054,175 @@ mod tests {
             with_xp > 150,
             "the XP bar's green fill must reach pixels once experience arrives, got {with_xp}"
         );
+    }
+
+    /// GPU gate for the player report this fix addresses: "the boss bar ...
+    /// is just a solid rectangle and doesn't use the texture pack for it at
+    /// all." Runs through the **real vanilla `client.jar`** atlas
+    /// (`GuiAtlas::build`), not a synthetic one, because the bug's own
+    /// symptom — a flat fill instead of `BossHealthOverlay`'s real
+    /// per-colour sprite art — can only be told apart from a correct draw by
+    /// looking at the *actual shipped pixels*, which
+    /// [`boss_bar_reaches_the_sprite_geometry_layer_not_just_the_model`]
+    /// (synthetic solid-colour sprites, no GPU) structurally cannot see.
+    ///
+    /// Deliberately colour-agnostic per CLAUDE.md's "you cannot predict an
+    /// exact composited byte through `ALPHA_BLENDING` on this backend":
+    /// every threshold below is **measured from this gate's own renders**
+    /// (a background-only frame vs a full-fill frame), not a hand-picked RGB
+    /// value, and every assertion is a magnitude/direction claim with
+    /// tolerance, never an exact byte.
+    #[test]
+    #[ignore = "requires a GPU adapter and the vanilla client.jar"]
+    fn boss_bar_paints_real_sprite_art_not_a_flat_rectangle() {
+        use lodestone_game::bossbar::{BossBarColor, BossBarOverlay};
+        use lodestone_render::{HeadlessTarget, RenderTarget};
+
+        use crate::overlay::{BossBarView, lerp_discrete_width, plain_spans};
+
+        let manager = crate::resources::vanilla_manager().expect(
+            "GPU gate opted in via --ignored but no vanilla client.jar was found; set \
+             LODESTONE_ASSETS to a pack root containing client.jar, or populate \
+             .cache/mc/<ver>/client.jar — do NOT skip, a silent pass here asserts nothing",
+        );
+        let atlas =
+            Arc::new(GuiAtlas::build(&manager).expect("build the GUI atlas from client.jar"));
+
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU, don't 'skip' — a silent pass here asserts nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        // Same (480, 320) the XP gates above use, for the same reason: it is
+        // where `calculate_gui_scale(AUTO, w, h) == 1`, so the logical canvas
+        // this module lays `BOSS_BAR_WIDTH`/`BOSS_BAR_TOP` into is the
+        // physical target 1:1 and the pixel math below needs no scale term.
+        let (w, h) = (480u32, 320u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+        let stats = DebugStats::default();
+
+        let mut hud = HudRenderer::new(device, format);
+        hud.attach_gui(device, queue, format, atlas);
+
+        const BG: u8 = 128;
+        let mut render = |progress: Option<f32>| -> Vec<u8> {
+            let bars = [BossBarView {
+                title: plain_spans(""),
+                progress: progress.unwrap_or(0.0),
+                color: BossBarColor::Purple,
+                overlay: BossBarOverlay::Progress,
+            }];
+            let frame = target.acquire().expect("headless acquire");
+            clear_view(device, queue, frame.view(), [BG, BG, BG]);
+            let hud_frame = HudFrame {
+                show_debug: false,
+                crosshair: false,
+                hotbar: None,
+                health: None,
+                food: None,
+                xp: None,
+                boss_bars: if progress.is_some() { &bars } else { &[] },
+                ..HudFrame::new(&stats)
+            };
+            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            target.read_texels(device, queue)
+        };
+
+        let bar_x = (w as f32 * 0.5 - BOSS_BAR_WIDTH * 0.5).round() as u32;
+        let yo = BOSS_BAR_TOP as u32;
+        // Row 2 of the 5-row bar: constant along X in the raw sprite (a
+        // horizontal bevel varies by row, not by column — measured directly
+        // off `.cache/mc/26.2/client-src`'s `purple_progress.png`), so it is
+        // the row to use for the fill/background boundary scan below.
+        let mid_row = yo + 2;
+        let x_probe = bar_x + 90; // interior column, well clear of the sprite's rounded corners
+
+        let sample = |pixels: &[u8], x: u32, y: u32| -> (i32, i32, i32) {
+            let i = ((y * w + x) * 4) as usize;
+            (i32::from(pixels[i]), i32::from(pixels[i + 1]), i32::from(pixels[i + 2]))
+        };
+        let painted = |pixels: &[u8], x: u32, y: u32| -> bool {
+            let (r, g, b) = sample(pixels, x, y);
+            (r - i32::from(BG)).abs() + (g - i32::from(BG)).abs() + (b - i32::from(BG)).abs() > 30
+        };
+
+        let none = render(None);
+        let bg_only = render(Some(0.0));
+        let full = render(Some(1.0));
+        let half = render(Some(0.5));
+
+        // -- negative control: no active boss bar paints nothing at the rect.
+        let mut wrong = Vec::new();
+        for dy in 0..5 {
+            if painted(&none, x_probe, yo + dy) {
+                wrong.push(format!(
+                    "row {dy}: with no boss bar the rect must stay background, \
+                     got {:?}",
+                    sample(&none, x_probe, yo + dy)
+                ));
+            }
+        }
+
+        // -- the bug this fixes: a flat rect is one solid colour top to
+        // bottom; vanilla's real sprite has a highlight/shadow bevel across
+        // its 5 rows. This is the assertion that falls straight out under
+        // the pre-fix `rect_px` draw and is the direct pixel-level check of
+        // the player's own report.
+        let rows: Vec<(i32, i32, i32)> = (0..5).map(|dy| sample(&bg_only, x_probe, yo + dy)).collect();
+        let all_identical = rows.windows(2).all(|w| w[0] == w[1]);
+        if all_identical {
+            wrong.push(format!(
+                "the boss bar's 5 rows are all one solid colour — this is the \
+                 reported bug (a flat rectangle, no sprite art): rows={rows:?}"
+            ));
+        }
+
+        // -- clause 3 reaches real pixels, and its width is *measured*, not
+        // guessed: the fill must be visibly brighter (blue channel) than the
+        // bare background at the same column, or nothing below is
+        // meaningful.
+        let bg_b = sample(&bg_only, x_probe, mid_row).2;
+        let full_b = sample(&full, x_probe, mid_row).2;
+        if full_b <= bg_b + 20 {
+            wrong.push(format!(
+                "the progress fill must be visibly brighter than the bare background \
+                 at a filled column (blue channel): background={bg_b}, full={full_b}"
+            ));
+        }
+
+        // -- the half-full bar's fill edge lands at the *predicted* partial
+        // column, not at the background's own full-182px edge and not at
+        // zero — the threshold is this gate's own measured midpoint between
+        // background and full fill, not a hand-picked byte value.
+        let threshold = (bg_b + full_b) / 2;
+        let mut half_edge = None;
+        for dx in 0..BOSS_BAR_WIDTH as u32 {
+            if sample(&half, bar_x + dx, mid_row).2 > threshold {
+                half_edge = Some(dx);
+            }
+        }
+        let predicted_edge = lerp_discrete_width(0.5, BOSS_BAR_WIDTH as i32) as u32;
+        match half_edge {
+            Some(edge) => {
+                let diff = (edge as i32 - predicted_edge as i32).abs();
+                if diff > 4 {
+                    wrong.push(format!(
+                        "half-full bar's fill edge should land near the predicted \
+                         {predicted_edge}px column, got {edge}px (diff {diff})"
+                    ));
+                }
+            }
+            None => wrong.push("a half-full bar must still show some fill".to_string()),
+        }
+
+        eprintln!("=== boss bar sprite-art gate (headless) ===");
+        eprintln!("bg_only rows @ x={x_probe}: {rows:?}");
+        eprintln!("bg_b={bg_b} full_b={full_b} threshold={threshold}");
+        eprintln!("half_edge={half_edge:?} predicted_edge={predicted_edge}");
+
+        assert!(wrong.is_empty(), "{wrong:?}");
     }
 
     /// GPU gate for a live player report: "the xp bar number is too big and too
@@ -8401,13 +8787,19 @@ mod tests {
     /// text pitch.
     #[test]
     fn boss_bar_lands_on_vanillas_fixed_182x5_rect_not_a_canvas_fraction() {
+        use lodestone_game::bossbar::{BossBarColor, BossBarOverlay};
+
+        // Zero progress so the background plate is the *only* sprite quad —
+        // this test's job is placement, not the fill's width (covered by
+        // `boss_bar_reaches_the_sprite_geometry_layer_not_just_the_model`).
         let bars = vec![BossBarView {
             title: vec![TextSpan {
                 text: "Boss".to_string(),
                 style: lodestone_model::text::TextStyle::default(),
             }],
-            progress: 0.5,
-            color: [1.0, 0.0, 0.0],
+            progress: 0.0,
+            color: BossBarColor::Red,
+            overlay: BossBarOverlay::Progress,
         }];
         let stats = DebugStats::default();
         let frame = HudFrame {
@@ -8417,24 +8809,21 @@ mod tests {
             ..HudFrame::new(&stats)
         };
         let (w, h) = (640u32, 480u32);
-        let geo = HudGeometry::build(&frame, w, h);
+        let atlas = boss_bar_synthetic_atlas();
+        let geo = HudGeometry::build_with_gui(&frame, w, h, &atlas);
         let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, w, h);
 
         let bar_x = cw * 0.5 - BOSS_BAR_WIDTH * 0.5;
         let yo = BOSS_BAR_TOP;
 
-        let px = |x: f32| (x + 1.0) * 0.5 * cw;
-        let py = |y: f32| (1.0 - y) * 0.5 * ch;
-        let mut bg_bounds: Option<(f32, f32, f32, f32)> = None;
-        for chunk in geo.verts.chunks(FLOATS_PER_VERTEX) {
-            let (x, y) = (px(chunk[0]), py(chunk[1]));
-            let (r, g, b) = (chunk[2], chunk[3], chunk[4]);
-            if (r - 0.08).abs() < 1e-3 && (g - 0.08).abs() < 1e-3 && (b - 0.10).abs() < 1e-3 {
-                let e = bg_bounds.get_or_insert((x, y, x, y));
-                *e = (e.0.min(x), e.1.min(y), e.2.max(x), e.3.max(y));
-            }
-        }
-        let bg = bg_bounds.expect("the boss bar background plate must draw");
+        let quads = quad_boxes(&geo.sprite_verts, cw, ch);
+        assert_eq!(
+            quads.len(),
+            1,
+            "zero progress with the Progress overlay must draw exactly the \
+             background plate: got {quads:?}"
+        );
+        let bg = quads[0];
         let mut mismatches = Vec::new();
         let mut check = |name: &str, got: f32, want: f32| {
             if (got - want).abs() > 0.5 {

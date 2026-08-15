@@ -171,7 +171,8 @@ fn a_coded_boss_bar_title_draws_exactly_the_visible_text() {
         let bars = [BossBarView {
             title,
             progress: 0.5,
-            color: [1.0, 0.0, 1.0],
+            color: lodestone_game::bossbar::BossBarColor::Purple,
+            overlay: lodestone_game::bossbar::BossBarOverlay::Progress,
         }];
         HudGeometry::build(
             &HudFrame {

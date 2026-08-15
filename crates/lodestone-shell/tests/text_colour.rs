@@ -511,7 +511,8 @@ fn hex_surfaces_with(coloured: bool) -> Vec<(&'static str, u32, HudGeometry)> {
     let bars = [BossBarView {
         title: hex(3),
         progress: 0.5,
-        color: [1.0, 0.0, 1.0],
+        color: lodestone_game::bossbar::BossBarColor::Purple,
+        overlay: lodestone_game::bossbar::BossBarOverlay::Progress,
     }];
     let frame = Frame {
         boss_bars: &bars,
