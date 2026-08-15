@@ -48,10 +48,11 @@ use lodestone_model::{AnimationAction, ClientEvent, EntityMovement, Reported};
 use lodestone_physics::Vec3d;
 
 use crate::entity::{
-    Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName, CustomNameVisible, DeathTime,
-    DisplayItem, EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
-    FallingBlockState, HeadYaw, Health, HurtTime, Leashed, MinecraftEntityId, MobState, OnGround,
-    Passengers, Pose, Position, Rotation, Tamed, Variant, Vehicle, Velocity,
+    ArmorStandFlags, Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName,
+    CustomNameVisible, DeathTime, DisplayItem, EntityFlags, EntityIndex, EntityKind, EntityUuid,
+    Equipment, ExperienceOrbValue, FallingBlockState, HeadYaw, Health, HurtTime, Leashed,
+    MinecraftEntityId, MobState, OnGround, Passengers, Pose, Position, Rotation, Tamed, Variant,
+    Vehicle, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -899,6 +900,23 @@ pub fn apply_entity_metadata(
         if let Some(bits) = metadata.mob_flags {
             entity.insert(MobState {
                 aggressive: lodestone_entity::metadata::MobFlags::from_bits(bits).aggressive(),
+            });
+        }
+        // The *armour stand* client-flags byte — the other claimant of the same
+        // wire index `MobState` folds above, present only for entities the
+        // adapter established are `ArmorStand`s (never both on the same
+        // entity). This is the last hop the "hologram" chain needs before the
+        // shell's own draw call site can read it: a decorative stand's
+        // marker/no-base-plate/show-arms cosmetics were decoded end to end and
+        // dropped on the floor here until this arm existed, exactly as `Tamed`
+        // was before its own arm was added.
+        if let Some(bits) = metadata.armor_stand_flags {
+            let decoded = lodestone_entity::metadata::ArmorStandFlags::from_bits(bits);
+            entity.insert(ArmorStandFlags {
+                small: decoded.small(),
+                show_arms: decoded.show_arms(),
+                no_base_plate: decoded.no_base_plate(),
+                marker: decoded.marker(),
             });
         }
         if let Some(variant) = &metadata.variant {
@@ -1750,6 +1768,100 @@ mod tests {
             Some(&MobState { aggressive: true }),
             "a health-only update cleared the aggressive latch — a skeleton would drop its \
              draw every time it took damage"
+        );
+    }
+
+    /// The same routing check as
+    /// [`the_metadata_event_carrying_mob_flags_is_claimed_by_this_module`], for
+    /// the armour-stand client-flags byte — the *other* claimant of the same
+    /// wire index. Rides the same `EntityMetadataUpdated` event, so no new
+    /// `handles_event` arm was needed.
+    #[test]
+    fn the_metadata_event_carrying_armor_stand_flags_is_claimed_by_this_module() {
+        let event = metadata(
+            EntityMetadataUpdate {
+                armor_stand_flags: Some(0x18),
+                ..EntityMetadataUpdate::default()
+            },
+            7,
+        );
+        assert!(
+            handles_event(&event),
+            "armour-stand flags ride `EntityMetadataUpdated`; if this module stops \
+             claiming it, `apply_entity_metadata` never folds `ArmorStandFlags` in \
+             production and a 'hologram' stand keeps its base plate forever"
+        );
+    }
+
+    /// End-to-end through the real schedule, mirroring [`mob_flags_fold_into_mob_state`]:
+    /// a spawn, then a metadata packet carrying the armour-stand flags byte,
+    /// produces a [`crate::entity::ArmorStandFlags`] — the last hop before the
+    /// shell's own draw call site (out of this crate's scope) can read it.
+    ///
+    /// The value used is 0x18 (`marker | no_base_plate`), the typical
+    /// "hologram" configuration: pairwise-distinct in the sense CLAUDE.md
+    /// requires — only two of the four bits are set, not all-or-nothing — so a
+    /// transposition with any neighbouring bit or with `MobState`'s own
+    /// `aggressive` bit (0x04, deliberately absent here) cannot survive
+    /// unnoticed.
+    #[test]
+    fn armor_stand_flags_fold_into_armor_stand_flags_component() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(22, "minecraft:armor_stand"));
+        assert!(
+            entity_for(&world, 22).get::<ArmorStandFlags>().is_none(),
+            "absent until the first byte mentions it, like MobState and Baby"
+        );
+
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    armor_stand_flags: Some(0x18),
+                    ..EntityMetadataUpdate::default()
+                },
+                22,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 22).get::<ArmorStandFlags>(),
+            Some(&ArmorStandFlags {
+                small: false,
+                show_arms: false,
+                no_base_plate: true,
+                marker: true,
+            })
+        );
+        // And it must not have landed in `MobState` — the two share a wire byte
+        // and nothing else.
+        assert!(
+            entity_for(&world, 22).get::<MobState>().is_none(),
+            "an armour stand's own flags byte must never surface as MobState"
+        );
+
+        // A metadata packet that does not mention the byte must leave the
+        // component completely alone — the same incremental-update rule
+        // `mob_flags_fold_into_mob_state`'s health-only case checks.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    health: Some(20.0),
+                    ..EntityMetadataUpdate::default()
+                },
+                22,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 22).get::<ArmorStandFlags>(),
+            Some(&ArmorStandFlags {
+                small: false,
+                show_arms: false,
+                no_base_plate: true,
+                marker: true,
+            }),
+            "a health-only update cleared the flags — an unrelated field must not \
+             touch this component"
         );
     }
 

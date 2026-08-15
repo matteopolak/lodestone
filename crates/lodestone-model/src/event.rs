@@ -416,6 +416,42 @@ pub struct EntityMetadataUpdate {
     /// therefore means "not known to be mob flags", which a consumer must read as
     /// "not aggressive", never as a cleared bitfield.
     pub mob_flags: Option<u8>,
+    /// The **armour stand client-flags** byte (small / show-arms / no-base-plate
+    /// / marker), when present and when the entity is known to be an
+    /// `ArmorStand`. Decode through
+    /// `lodestone_entity::metadata::ArmorStandFlags` rather than by masking
+    /// inline.
+    ///
+    /// # Why this is separate from [`mob_flags`](Self::mob_flags)
+    ///
+    /// It is the *other* claimant of the same metadata index (15) with the same
+    /// serializer (`BYTE`) — `ArmorStand.DATA_CLIENT_FLAGS` rather than
+    /// `Mob.DATA_MOB_FLAGS_ID` — and `0x04` means `showArms` here where it means
+    /// `aggressive` in [`mob_flags`](Self::mob_flags). Folding them into one
+    /// field would make "is this stand's arm visible" and "is this mob
+    /// attacking" read off whichever byte the adapter happened to establish
+    /// last.
+    ///
+    /// # Why a client needs this: the "hologram" case
+    ///
+    /// A server-side "hologram" is an armour stand with
+    /// [`flags`](Self::flags)'s invisible bit set, a custom name, and
+    /// `custom_name_visible` — but that trio alone still shows the stand's base
+    /// plate and, if it were ever built without this byte, a `showArms` toggle
+    /// would have no field to read. `marker` (no hitbox, ignores piston pushes)
+    /// and `no_base_plate` are what a decorative stand actually turns off; see
+    /// `lodestone_entity::metadata::ArmorStandFlags`'s own doc for the full
+    /// conjunction.
+    ///
+    /// # Why this can be absent on a packet that carried the byte
+    ///
+    /// Same shape as [`mob_flags`](Self::mob_flags), the complementary half: a
+    /// version adapter that cannot establish the entity is an `ArmorStand`
+    /// leaves this `None` rather than surfacing a byte that may mean a mob's
+    /// aggressive bit. `None` therefore means "not known to be armour-stand
+    /// flags", which a consumer must read as "no armour-stand-specific
+    /// cosmetics known", never as a cleared bitfield.
+    pub armor_stand_flags: Option<u8>,
     /// The custom name. [`Reported::Unreported`] when this packet did not
     /// mention it; [`Reported::Reported(None)`](Reported::Reported) is an
     /// explicit clear; [`Reported::Reported(Some(name))`](Reported::Reported)
@@ -571,6 +607,7 @@ impl EntityMetadataUpdate {
         self.flags.is_none()
             && self.living_flags.is_none()
             && self.mob_flags.is_none()
+            && self.armor_stand_flags.is_none()
             && !self.custom_name.is_reported()
             && self.custom_name_visible.is_none()
             && self.pose.is_none()
