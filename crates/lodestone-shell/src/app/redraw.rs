@@ -1593,6 +1593,30 @@ impl WindowApp {
             menu.render_overlay(device, queue, frame.view(), &settings_frame, w, h);
         }
 
+        // Statistics and Server Links are the same shape as the block above, and
+        // the paragraph above applies to them word for word: `frame_for` returns
+        // `None` for both, so without these two blocks each screen draws
+        // *nothing*. Statistics differs from Settings in one way worth knowing —
+        // it has no out-of-world route at all (it is only ever opened from the
+        // pause menu), so its `frame_for` arm is unconditionally `None` rather
+        // than conditional on being in a world.
+        //
+        // Neither builds its frame raw here, for the reason the Settings comment
+        // records: the overlay helper stamps the shared canvas facts, and one
+        // expression feeds both this draw and `on_screen_frame`'s hit test.
+        if let Some(stats_frame) = crate::menu::nav::stats_overlay_frame(&self.ui, &self.nav)
+            && let Some(menu) = self.menu.as_mut()
+        {
+            menu.render_overlay(device, queue, frame.view(), &stats_frame, w, h);
+        }
+
+        if let Some(links_frame) =
+            crate::menu::nav::server_links_overlay_frame(&self.ui, &self.nav)
+            && let Some(menu) = self.menu.as_mut()
+        {
+            menu.render_overlay(device, queue, frame.view(), &links_frame, w, h);
+        }
+
         // Issue #474: the command block edit screen was drawn **nowhere**.
         // `menu::render::frame_for` correctly has no arm — it is an overlay, not
         // a full screen — but neither did `on_screen_frame`, and neither did
