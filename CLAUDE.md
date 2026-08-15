@@ -611,6 +611,23 @@ throughout, then a live gate produced 49 × "unexpected end of input". Use captu
 oracle, or a hand-decoded spec example. Note that a self-authored JVM oracle validates *the behaviour
 you chose to model*, so agreement across ports sharing an author is weak evidence.
 
+**And when a fix and a gate disagree, the gate is as likely to hold the bug — a derivation written in a
+doc comment is not evidence the derivation is right.** Measured: fixing mob knockback turned
+`combat_live.rs` red, expecting a mob to fly *toward* its attacker. The gate looked rigorous — its doc
+carried a full derivation, term by term — and the derivation's own first line said `dx = target.x -
+attacker.x`, **labelled "attacker→target"**. Vanilla's `dealDefaultKnockback` uses
+`source.getSourcePosition().x() - this.getX()`, the other way round. So the *test's expected value*
+reproduced the exact sign error the code fix had just removed, and the label made it read as checked.
+The reciprocal claim was wrong too: the gate's premise that a non-sprinting hit's knockback power is zero
+contradicts `hurtServer`, which applies the flat `0.4` unconditionally and sprint-gates only the *bonus*.
+
+Two habits. **Check a derivation's convention labels against the source, not its arithmetic against
+itself** — the arithmetic was internally consistent and that is exactly why it survived. And **when a
+change turns a gate red, derive the expectation afresh from the outside source before touching either
+side**; "the newer code is right" and "the test is right" are both assumptions, and here the tell that
+settled it was a *third* gate (`mob_attack.rs`) that had been correct all along and disagreed with the
+first.
+
 The cheapest instance of that symmetry, and it recurs in every packet: **two adjacent same-typed fields
 transpose without a trace.** `TAKE_ITEM_ENTITY` is three VarInts, the first two being the item entity and its
 collector — swap them and the round-trip through our own encode/decode is *byte-perfect*, while the client
