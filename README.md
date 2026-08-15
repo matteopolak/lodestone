@@ -1,9 +1,15 @@
 # Lodestone
 
-A Minecraft client written from scratch in Rust — renderer, physics, networking, world
-generation — plus an integrated server it can host from. No Mojang code is used or
+A Minecraft-compatible client written from scratch in Rust — renderer, physics, networking,
+world generation — plus an integrated server it can host from. No Mojang code is used or
 redistributed; everything is ported from the published protocol, the decompiled reference
-under `.cache/`, and Mojang's own data generators.
+under `.cache/` (never checked in — see [`docs/legal-notices.md`](./docs/legal-notices.md)),
+and Mojang's own data generators.
+
+**Lodestone is not affiliated with, endorsed by, or associated with Mojang Studios, Microsoft,
+or Minecraft in any way.** "Minecraft" is a trademark of Mojang Synergies AB. This is an
+independent, unofficial project; see [`docs/legal-notices.md`](./docs/legal-notices.md) for
+what that means for licensing, third-party design references, and data sources.
 
 ## Goals
 
