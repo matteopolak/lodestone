@@ -317,6 +317,19 @@ const SPRINT_ATTACK_KNOCKBACK_POWER: f64 = 0.5;
 #[cfg(not(target_arch = "wasm32"))]
 const VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 
+/// [`VITALS_TICK_INTERVAL`]'s wasm32 counterpart — same value (vanilla's 20
+/// TPS, same as every other timer in this file), kept as its own literal
+/// rather than sharing the native constant. Independent literals that happen
+/// to agree are this crate's own established shape for a per-target cadence
+/// (see `tick.rs`'s module doc on why `MILLIS_PER_TICK` is not shared either),
+/// and here it is load-bearing: [`VITALS_TICK_INTERVAL`] is only compiled for
+/// `not(wasm32)`, so a single shared constant would have to drop its `cfg`
+/// entirely, which reintroduces exactly the "second file the
+/// `tokio::time::Instant` ban allows" shape `tick.rs` warns against for the
+/// neighbouring clock type.
+#[cfg(target_arch = "wasm32")]
+const WASM_VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
+
 /// How many [`VITALS_TICK_INTERVAL`] ticks between periodic player saves
 /// (issue #302) — 600, i.e. 30 s at this crate's 20 TPS stand-in.
 ///
@@ -12939,24 +12952,364 @@ where
     }
 }
 
+/// The player-`vitals` slice of the native loop's `vitals_tick` `select!` arm
+/// above — air supply/drowning, world-border damage, burning, status
+/// effects, hunger, and finishing an in-progress eat/drink — ported to run
+/// off [`crate::browser_timer::BrowserInterval`] instead of `tokio::time::
+/// interval_at`, so the wasm32 [`serve_play`] loop below can drive it too
+/// (issue #636).
+///
+/// # Why this is a new function rather than a shared extraction
+///
+/// The native arm is left untouched rather than refactored to call this
+/// function: it is a single ~600-line block threading roughly two dozen
+/// mutable locals through one `tokio::select!` arm inside this crate's
+/// largest and most delicate file, and this crate's own root `CLAUDE.md`
+/// names `server.rs` a "known choke point" where a wholesale rewrite has
+/// silently dropped another agent's work before. Duplicating the call
+/// sequence into a smaller, purpose-built function for one target is the
+/// lower-risk trade against a 1387+1732-test native suite this change must
+/// not regress. Every call this function makes is to the same production
+/// types/methods the native arm calls (`PlayerVitals::tick`,
+/// `BurnState::tick`, `ActiveEffects::tick`, `finish_consuming`,
+/// `publish_health`, …), not a reimplementation of any of them.
+///
+/// # What is deliberately excluded, and why
+///
+/// - **The periodic player save.** There is no `PlayerDataStore` on `wasm32`
+///   at all (no filesystem) — see the native `serve_play`'s own comment on
+///   `player_store` for this target's reality, and this function's own lack
+///   of a `player_store` parameter.
+/// - **The deferred-break continuation**
+///   (`PendingBreak::deferred_break_ready`). `PendingBreak::defer` already
+///   returns `None` unconditionally when `start_tick` is `None`, and
+///   `dispatch_play_packet`'s `wasm32` call site passes `None` for that tick
+///   counter (see its own comment, "Issue #531") — so a dig can never even
+///   enter the deferred state on this target today, timer or not. Wiring the
+///   finish side alone would be exactly the "connected but nothing produces
+///   the input" island shape this repo's own `CLAUDE.md` warns about; making
+///   it reachable needs a second change (feeding a real tick count into
+///   `dispatch_play_packet` on this target), left for a follow-up.
+/// - **Hostile-mob melee damage against the player**
+///   (`MobHandle::take_player_hits`). Its only producer is `MobSim::tick`,
+///   which runs inside `crate::tick::run_tick_loop` — itself entirely
+///   `#[cfg(not(target_arch = "wasm32"))]` (see `integrated.rs`'s own module
+///   doc). No mob AI ticks on this target at all yet, so this queue is always
+///   empty here; wiring the drain would be the same island shape as above.
+/// - **Portal travel** (`PortalTracker::tick` firing a trip). A real trip
+///   mutates `join_stream`/`view`/the connection's own dimension mid-loop —
+///   genuine complexity this change does not take on for a mechanic none of
+///   the four originally reported symptoms (drops, fall damage, air supply,
+///   worldgen-past-spawn) name. A player standing in a portal on `wasm32`
+///   today simply never travels — a real, now-documented gap, not a silent
+///   one.
+///
+/// World-border damage, burning, status effects and hunger *are* included
+/// even though this target still has no world-tick loop either, because each
+/// has a real, independent, packet-reachable producer already: `BorderFeed::
+/// with` is a command/config surface, not the tick loop; standing in
+/// fire/lava is a block read, not tick-loop state; and a potion/food item
+/// finishing its use is this same function's own `item_in_use` arm.
+#[allow(clippy::too_many_arguments)]
+#[cfg(target_arch = "wasm32")]
+async fn wasm_vitals_tick<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: SourceRef<'_, S>,
+    state: &mut State,
+    world: &crate::world_state::WorldStateHandle,
+    border: &BorderFeed,
+    game_mode: GameMode,
+    player_uuid: uuid::Uuid,
+    username: &str,
+    player_pos: Option<(f64, f64, f64)>,
+    vitals: &mut PlayerVitals,
+    inventory: &mut PlayerInventory,
+    advancements: &mut AdvancementManager,
+    drops_rng: &mut SpawnRng,
+    burn: &mut crate::burning::BurnState,
+    burn_rng: &mut SpawnRng,
+    effects: &mut crate::mob_effects::ActiveEffects,
+    item_in_use: &mut Option<ItemInUse>,
+    mobs: &MobHandle,
+    block_ticks: &BlockTickFeed,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+{
+    let invulnerable = Abilities::for_mode(game_mode).invulnerable;
+
+    // `LivingEntity.updateUsingItem` — see the native arm's identical block
+    // (`server::serve_play`'s `vitals_tick`) for the full reasoning: the
+    // periodic eat/drink sound, then the finish once `finish_tick` is
+    // reached.
+    if let Some(started) = item_in_use.clone() {
+        let now = mobs.with(|sim| sim.tick_count());
+        if now < started.finish_tick
+            && let Some(pos) = player_pos
+            && let Some(consumable) =
+                lodestone_game::consumable::consumable_for_item(&started.item)
+        {
+            let remaining = u32::try_from(started.finish_tick - now).unwrap_or(u32::MAX);
+            let already = started.last_effect_remaining == Some(remaining);
+            if !already
+                && lodestone_game::consumable::should_emit_consume_effects(
+                    consumable.consume_ticks,
+                    remaining,
+                )
+            {
+                let seed = i64::from(drops_rng.next_int(i32::MAX));
+                let roll = drops_rng.next_f32();
+                if let Some(effect) = crate::effects::item_consumed_tick(
+                    &started.item,
+                    Vec3::new(pos.0, pos.1, pos.2),
+                    roll,
+                    seed,
+                ) {
+                    block_ticks.publish_effect(effect);
+                }
+            }
+            if let Some(live) = item_in_use.as_mut() {
+                live.last_effect_remaining = Some(remaining);
+            }
+        }
+        if now >= started.finish_tick {
+            *item_in_use = None;
+            if let Some((native, remainder)) =
+                finish_consuming(inventory, vitals, &started, game_mode)
+            {
+                if let Some(pos) = player_pos {
+                    let at = Vec3::new(pos.0, pos.1, pos.2);
+                    let seed = i64::from(drops_rng.next_int(i32::MAX));
+                    if let Some(effect) = crate::effects::item_consume_finished(
+                        &started.item,
+                        at,
+                        drops_rng.next_f32(),
+                        seed,
+                    ) {
+                        block_ticks.publish_effect(effect);
+                    }
+                    block_ticks.publish_effect(crate::effects::player_burped(
+                        at,
+                        drops_rng.next_f32(),
+                        i64::from(drops_rng.next_int(i32::MAX)),
+                    ));
+                }
+                if let Some(menu_slot) = window_zero_menu_slot(native) {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
+                    )
+                    .await?;
+                }
+                apply(
+                    conn,
+                    state,
+                    proto.encode_set_health(
+                        vitals.health(),
+                        vitals.food().food_level(),
+                        vitals.food().saturation(),
+                    ),
+                )
+                .await?;
+            }
+        }
+    }
+
+    // Border damage, then drowning — vanilla's own order, same as the native
+    // arm.
+    if let Some((x, y, z)) = player_pos {
+        let border_state = border.get();
+        if let Some(damage) = border_state.damage_for_position(x, z).filter(|_| !invulnerable) {
+            if vitals.apply_border_damage(damage).is_some() {
+                publish_health(
+                    conn,
+                    state,
+                    proto,
+                    vitals,
+                    LOCAL_PLAYER_ENTITY_ID,
+                    username,
+                    crate::vitals::DeathCause::OutsideBorder,
+                    advancements,
+                    player_uuid,
+                    Some(crate::vitals::HurtDirection::PURE_ROLL),
+                )
+                .await?;
+            }
+        }
+
+        let eye_state = source.get().block_state(
+            x.floor() as i32,
+            (y + EYE_HEIGHT).floor() as i32,
+            z.floor() as i32,
+        );
+        // Issue #636's named gap: air supply/drowning had no timer at all on
+        // this target. `!invulnerable &&`: a creative player's air bar does
+        // not deplete and they never drown, matching the native arm.
+        let outcome = vitals.tick(!invulnerable && is_water(&eye_state));
+        if let Some(air) = outcome.air_changed {
+            apply(conn, state, proto.encode_air_supply_update(air)).await?;
+        }
+        if outcome.damage.is_some() {
+            publish_health(
+                conn,
+                state,
+                proto,
+                vitals,
+                LOCAL_PLAYER_ENTITY_ID,
+                username,
+                crate::vitals::DeathCause::Drown,
+                advancements,
+                player_uuid,
+                Some(crate::vitals::HurtDirection::PURE_ROLL),
+            )
+            .await?;
+        }
+    }
+
+    // Burning — the ignition producer and the burn consumer in one place,
+    // same as the native arm's identical block and for the same reason (see
+    // its own comment).
+    if let Some((x, y, z)) = player_pos {
+        let feet = source.get().block_state(x.floor() as i32, y.floor() as i32, z.floor() as i32);
+        let standing_in = crate::burning::BurnSource::for_block(&feet);
+        let creative = Abilities::for_mode(game_mode).invulnerable;
+        let resistant = effects.amplifier_of("minecraft:fire_resistance").is_some();
+        if let Some(source_kind) = standing_in
+            && !creative
+        {
+            match source_kind {
+                crate::burning::BurnSource::Fire | crate::burning::BurnSource::SoulFire => {
+                    let ramp = 1 + i32::from(burn_rng.next_f32() < 0.5);
+                    burn.fire_ignite(true, ramp);
+                }
+                crate::burning::BurnSource::Lava => {
+                    burn.ignite_for_ticks(crate::burning::LAVA_IGNITE_TICKS);
+                }
+            }
+        }
+        let out = burn.tick(standing_in, creative, resistant);
+        if out.damage > 0.0 {
+            vitals.apply_effect_damage(out.damage);
+            publish_health(
+                conn,
+                state,
+                proto,
+                vitals,
+                LOCAL_PLAYER_ENTITY_ID,
+                username,
+                crate::vitals::DeathCause::OnFire,
+                advancements,
+                player_uuid,
+                Some(crate::vitals::HurtDirection::PURE_ROLL),
+            )
+            .await?;
+        }
+    }
+
+    // Status effects, ahead of hunger — same order as the native arm, and
+    // for the same reason (see its own comment: `hunger` charges exhaustion,
+    // so it must land before the exhaustion is spent).
+    if !effects.is_empty() {
+        let out = effects.tick(
+            i32::try_from(world.time().game_time.max(0)).unwrap_or(i32::MAX),
+            vitals.health(),
+            crate::vitals::MAX_HEALTH,
+        );
+        if out.exhaustion > 0.0 {
+            vitals.add_exhaustion(out.exhaustion);
+        }
+        let mut moved = false;
+        let mut hurt_landed = false;
+        if out.heal > 0.0 {
+            vitals.heal(out.heal);
+            moved = true;
+        }
+        if out.poison_damage > 0.0 {
+            vitals.apply_effect_damage(out.poison_damage);
+            moved = true;
+            hurt_landed = true;
+        }
+        if out.wither_damage > 0.0 {
+            vitals.apply_effect_damage(out.wither_damage);
+            moved = true;
+            hurt_landed = true;
+        }
+        if moved {
+            publish_health(
+                conn,
+                state,
+                proto,
+                vitals,
+                LOCAL_PLAYER_ENTITY_ID,
+                username,
+                crate::vitals::DeathCause::Wither,
+                advancements,
+                player_uuid,
+                hurt_landed.then_some(crate::vitals::HurtDirection::PURE_ROLL),
+            )
+            .await?;
+        }
+    }
+
+    // Hunger, after the air block — vanilla's own order, same as the native
+    // arm. Runs whether or not a position has been reported, unlike
+    // drowning/burning above.
+    if !Abilities::for_mode(game_mode).invulnerable {
+        let (difficulty, _) = world.difficulty();
+        let food_out = vitals.tick_food(difficulty, world.natural_health_regeneration());
+        if !food_out.is_empty() {
+            publish_health(
+                conn,
+                state,
+                proto,
+                vitals,
+                LOCAL_PLAYER_ENTITY_ID,
+                username,
+                crate::vitals::DeathCause::Starve,
+                advancements,
+                player_uuid,
+                food_out.starve.map(|_| crate::vitals::HurtDirection::PURE_ROLL),
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// `wasm32` counterpart of the native [`serve_play`] above — same signature,
-/// same [`dispatch_play_packet`] dispatch, but degraded to the old
-/// packet-driven-only loop (no `tokio::select!`, no timers). See the native
-/// definition's doc comment for why the two forked instead of sharing one
-/// body with an internal `cfg`.
+/// same [`dispatch_play_packet`] dispatch. Used to be degraded to a bare
+/// packet-driven-only loop with no timer at all (`tokio::time` is compiled in
+/// for this crate's wasm32 target but **hangs on its first poll** rather than
+/// firing — see `crate::browser_timer`'s module doc). Issue #636 gave it one
+/// real `tokio::select!` arm, racing the socket read against a single
+/// `crate::browser_timer::BrowserInterval` at the vitals cadence — see
+/// [`wasm_vitals_tick`] for exactly what that arm does and does not cover.
+/// See the native definition's doc comment for why the two forked instead of
+/// sharing one body with an internal `cfg`; that reasoning (no real
+/// `tokio::time` on this target) is why this loop still has only one timer
+/// where native has four, not zero.
 ///
 /// Issue #619's world-spawn-ticket refresh (`PlayerTicketGuard::
 /// refresh_world_spawn`) is threaded through this target too, but nothing on
-/// this loop ever calls it — the native definition's own `keep_alive_tick`
-/// timer arm is the one caller, and this target has no timer arm at all (see
-/// the native doc comment above). Real, not a bug this issue introduces: this
-/// target's `open_in_memory` join path is the one production `IntegratedServer`
-/// entry point where `PLAYER_SPAWN`'s 20-"tick" countdown (a `TicketStore::tick`
-/// unit, driven by `ChunkStore::maybe_tick_tickets`'s own read-cadence check-in
-/// — see that method's doc) can lapse with nobody refreshing it. The
-/// `PLAYER_LOADING`/`PLAYER_SIMULATION` pair this same guard grants is
-/// unaffected (`timeout: 0`, i.e. does not expire), so this only ever costs the
-/// world-spawn ring specifically, on this one target.
+/// this loop calls it — the native definition's own `keep_alive_tick` timer
+/// arm is the one caller, and this target's own timer (`vitals_interval`
+/// below) is not it, deliberately: a real socket on this target is an
+/// in-process `DuplexStream` between this same tab's client and server code,
+/// not a remote peer that can go quiet independently, so the failure mode
+/// `keep_alive_tick` exists to catch cannot occur here — see the loop body's
+/// own comment on `vitals_interval`. Real, not a bug this issue introduces:
+/// this target's `open_in_memory` join path is the one production
+/// `IntegratedServer` entry point where `PLAYER_SPAWN`'s 20-"tick" countdown (a
+/// `TicketStore::tick` unit, driven by `ChunkStore::maybe_tick_tickets`'s own
+/// read-cadence check-in — see that method's doc) can lapse with nobody
+/// refreshing it. The `PLAYER_LOADING`/`PLAYER_SIMULATION` pair this same
+/// guard grants is unaffected (`timeout: 0`, i.e. does not expire), so this
+/// only ever costs the world-spawn ring specifically, on this one target.
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
 async fn serve_play<T, P, S, E>(
@@ -13047,12 +13400,14 @@ async fn serve_play<T, P, S, E>(
     // one. Same signature and same position as the native definition's pair.
     mut advancements: AdvancementManager,
     player_uuid: uuid::Uuid,
-    // Issue #326 B1: same gap as `_weather`/`_explosions`, same reason —
-    // border damage is applied on the native loop's `vitals_tick` timer, which
-    // this target owns none of, so a browser singleplayer world never deals
-    // border damage. Accepted for signature parity with the native definition
-    // (and with `serve_connection_inner`'s call, which is target-agnostic).
-    _border: &BorderFeed,
+    // Issue #636: **wired**, unlike this parameter's neighbours below. Border
+    // damage needs no world-tick-loop producer — `BorderFeed::with` is a
+    // command/config surface, independent of `crate::tick::run_tick_loop` —
+    // so once this loop has any timer at all (`wasm_vitals_tick`, driven by
+    // `crate::browser_timer::BrowserInterval` below), there is nothing left
+    // stopping it. See that function's own doc for what else this loop's new
+    // timer does and does not cover.
+    border: &BorderFeed,
     // Issue #334: same gap as `_weather`/`_explosions`, same reason — a
     // resource pack push has no packet driving it either, and the drain point
     // is the native loop's `container_sync_tick`, which this target owns none
@@ -13098,21 +13453,21 @@ where
     let mut pending_break: Option<PendingBreak> = None;
     let mut sprinting = false;
     let mut bow_draw: Option<BowDraw> = None;
-    // Tracked for parity with the native loop's shared `dispatch_play_packet`
-    // signature. Never *finished* here: the completion lives on the per-tick timer
-    // the `wasm32` loop does not have, exactly like `vitals`' drowning countdown
-    // above — so a browser session starts a bite and never lands it.
+    // Issue #636: **finished here now**, unlike the doc below used to say —
+    // `wasm_vitals_tick`'s item-in-use arm (driven by the new
+    // `vitals_interval` below) is exactly the native loop's own finish logic,
+    // ported. A bite started on this target now lands.
     let mut item_in_use: Option<ItemInUse> = None;
-    // `player_pos`/`vitals` are tracked for parity with the native loop's
-    // `dispatch_play_packet` calls (shared function, shared signature), but
-    // `vitals` is only ever *ticked* by the native loop's timer, which
-    // `tokio::time` has none of on `wasm32`. Drowning simply does not happen
-    // in a `wasm32`-served session today — a real, documented gap, not a
-    // silent one (see this function's own doc comment). Fall damage
-    // (`FallTracker`) is different: it is driven purely by inbound
-    // `PlayerMoved` packets, not a timer, so it works identically here —
-    // `vitals` still needs to exist as somewhere for `apply_fall_damage` to
-    // carry health, even though nothing else fills it in on this target.
+    // `player_pos`/`vitals` were tracked for parity only, before issue #636:
+    // `vitals` used to be ticked exclusively by the native loop's timer,
+    // which `tokio::time` has none of on `wasm32`. **That gap is now closed**
+    // for drowning/air supply, border damage, burning, status effects and
+    // hunger — see `wasm_vitals_tick`'s own doc for the mechanism and for
+    // what is *still* excluded (the periodic save, the deferred-break
+    // continuation, mob melee damage, portal travel) and why. Fall damage
+    // (`FallTracker`) never needed this: it is driven purely by inbound
+    // `PlayerMoved` packets, not a timer, so it already worked identically on
+    // both targets.
     let mut player_pos: Option<(f64, f64, f64)> = None;
     // Issue #262, alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
@@ -13201,7 +13556,57 @@ where
         apply(conn, &mut state, proto.end_chunk_batch(batch_size)).await?;
     }
 
-    while let Some((packet_id, payload)) = conn.read_packet().await? {
+    // Issue #636: this loop's one timer — see `crate::browser_timer`'s module
+    // doc for the mechanism (a real browser macrotask via `window.
+    // setTimeout`, never `tokio::time`, which hangs on this target rather
+    // than merely failing) and `wasm_vitals_tick`'s own doc for exactly what
+    // rides it and what does not. Anchored one period out, matching every
+    // native `interval_at` call in `serve_play` above (`BrowserInterval::
+    // new`'s own doc).
+    let mut vitals_interval =
+        crate::browser_timer::BrowserInterval::new(WASM_VITALS_TICK_INTERVAL);
+    loop {
+        let (packet_id, payload) = tokio::select! {
+            packet = conn.read_packet() => {
+                match packet? {
+                    Some(p) => p,
+                    // Clean disconnect — same exit as the native loop's
+                    // `read_packet` arm, minus that arm's player-save call:
+                    // this target has no `PlayerDataStore` to save into (see
+                    // `inventory`'s own comment above).
+                    None => return Ok(ServeSummary { username, chunks_sent, inventory }),
+                }
+            }
+            // Cancel-safe: `BrowserInterval::tick`'s own doc comment — losing
+            // this race to a ready packet leaves the interval's deadline
+            // untouched, so nothing is lost by not firing this iteration.
+            _ = vitals_interval.tick() => {
+                wasm_vitals_tick(
+                    conn,
+                    proto,
+                    source,
+                    &mut state,
+                    world,
+                    border,
+                    game_mode,
+                    player_uuid,
+                    &username,
+                    player_pos,
+                    &mut vitals,
+                    &mut inventory,
+                    &mut advancements,
+                    &mut drops_rng,
+                    &mut burn,
+                    &mut burn_rng,
+                    &mut effects,
+                    &mut item_in_use,
+                    mobs,
+                    block_ticks,
+                )
+                .await?;
+                continue;
+            }
+        };
         dispatch_play_packet(
             conn,
             proto,
@@ -13381,7 +13786,6 @@ where
             apply(conn, &mut state, directive).await?;
         }
     }
-    Ok(ServeSummary { username, chunks_sent, inventory })
 }
 
 #[cfg(test)]

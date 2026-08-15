@@ -39,13 +39,45 @@ join chunks: 9 columns inline, 352 deferred to the play loop, 10 rings, window 4
 Configuration -> Play: 0ms total
 ```
 
-Not yet **playable**: the page sits on "Joining world…". The blocker is precise and is
-the next unit — the server's play and tick loops are built on `tokio::time`
-(`Instant`/`sleep`/`interval`, 40 sites across `server.rs` and `tick.rs`). Our wasm
-`tokio` enables the `time` feature, which **compiles and then traps**: tokio has no
-`wasm32-unknown-unknown` clock. So the 352 deferred columns never arrive and the loading
-screen never dismisses. That needs a timer seam — the old `web/` spike used
-`gloo-timers` for exactly this — which is a port rather than a swap.
+**Update (issue #636): the join no longer stalls, and the play loop now has one real
+timer.** Two things were wrong, not one, and they were fixed separately:
+
+1. `35f4800b` stopped the join/streaming burst itself from blocking the tab
+   (`generate_columns_offloaded`/`generate_and_encode_columns_offloaded` had zero
+   `.await` points on wasm32 and `map_columns_parallel`'s multi-column branch
+   **traps** there via `std::thread::scope`). Verified live in this session: a fresh
+   world's 352 deferred join columns stream and mesh to completion, and `Configuration
+   -> Play` reaches the world.
+2. `crate::server::serve_play`'s wasm32 arm was, until #636, a bare
+   `while let Some(packet) = conn.read_packet().await? { .. }` with **no timer arm at
+   all** — not because the join stalled, but because `tokio::time` (`Instant`/`sleep`/
+   `interval`) **compiles for `wasm32-unknown-unknown` and then hangs on its first
+   poll** rather than merely tolling early, so it was simply never reachable. Every
+   timed system riding one of the native loop's four `tokio::time::interval_at` timers
+   (`keep_alive_tick`/`time_sync_tick`/`vitals_tick`/`container_sync_tick`) had
+   therefore never run in the browser: no air-supply/drowning tick, no border damage,
+   no burning, no status-effect tick, no hunger, no finishing an in-progress eat/drink.
+   `crates/lodestone-server/src/browser_timer.rs`'s `BrowserInterval` is the fix — a
+   `tokio::time::interval_at`-alike built on a real browser macrotask
+   (`window.setTimeout`, the same primitive `crate::chunk::yield_to_browser` already
+   used for the join yield, never a microtask), with `Delay` missed-tick semantics
+   (never `Burst` — see that module's doc for why `Burst` is actively dangerous for a
+   timer racing a socket read). `server::wasm_vitals_tick` is what now rides it:
+   air-supply/drowning, world-border damage, burning, status effects, hunger, and
+   finishing an eat/drink. **Still not wired**, and named rather than silent: the
+   periodic player save (no filesystem on this target regardless), the
+   deferred-past-`StopDestroy` block-break continuation (its own precondition,
+   `PendingBreak::start_tick`, is unconditionally `None` on this target for an
+   unrelated reason and needs a second change), hostile-mob melee damage against the
+   player and portal travel (both need `crate::tick::run_tick_loop`'s mob AI or
+   dimension-switch plumbing, neither of which exists on this target yet — see
+   [Open work](#open-work) item 1, revised below).
+
+Two of the four originally-reported symptoms (item drops, worldgen-stalls-past-spawn)
+were separate islands with their own root causes and are covered by earlier fixes,
+not this one — see issue #636's own history. This update's scope was specifically the
+missing periodic driver and the systems that were `#[cfg(not(target_arch =
+"wasm32"))]`-gated for want of one.
 
 ## Where the port started
 
@@ -376,11 +408,20 @@ that guard is one typo away from being decorative.
 
 In rough dependency order.
 
-1. **The server's tokio timers.** The one thing between Play and a playable world; see
-   [Status](#status). `tokio::time` compiles on wasm and traps, so `server.rs` and
-   `tick.rs` need a sleep/interval/Instant seam. Note `lodestone-client` already
-   discovered this independently — it logs *"read_timeout is unsupported on wasm32 (no
-   runtime timer); ignoring"*.
+1. ~~The server's tokio timers.~~ **Partially done (issue #636).** `server.rs`'s own
+   per-connection periodic driver now has a wasm32 seam
+   (`crate::browser_timer::BrowserInterval`) and rides it for air-supply/drowning,
+   border damage, burning, status effects and hunger — see [Status](#status). What is
+   NOT done: `tick.rs`'s `run_tick_loop` (mob AI, scheduled/random block ticks,
+   weather cycle, the periodic block-entity tick) is still entirely
+   `#[cfg(not(target_arch = "wasm32"))]` and has no browser counterpart at all, so a
+   browser singleplayer world still has no mob AI, no crop growth, no fluid flow tick,
+   no scheduled redstone, and no weather cycle. That is the "genuinely large piece of
+   work" issue #636 named as out of scope for the timer fix itself — it needs the
+   world-tick loop ported to the same `BrowserInterval` primitive (or an equivalent),
+   not just the per-connection one this update wired. Note `lodestone-client` already
+   discovered the underlying hazard independently — it logs *"read_timeout is
+   unsupported on wasm32 (no runtime timer); ignoring"*.
 2. **Bundle size.** Measured and attributed; see [Bundle size](#bundle-size). Its cause
    is generated static tables, which is a whole-project question rather than a wasm one,
    so it is deliberately not being acted on here.
