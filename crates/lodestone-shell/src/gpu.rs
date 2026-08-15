@@ -331,6 +331,23 @@ pub struct RenderState {
     /// 8-block camera-cell crossing or a graph change — never on rotation, which
     /// is what keeps mouse movement off the walk.
     occlusion: std::cell::RefCell<occlusion::OcclusionCache>,
+    /// The camera's block position as of the most recent [`RenderState::render`]
+    /// call — vanilla's `LevelRenderer.compileSections`'s `BlockPos
+    /// cameraPosition = camera.blockPos`, cached here so `upload_section` can
+    /// read it without a signature change threading a camera argument through
+    /// every one of its several call sites (issue tracked in `docs/`: the
+    /// near-distance fade skip).
+    ///
+    /// `Cell`, not a plain field, for the same reason [`Self::occlusion`] is a
+    /// `RefCell`: `render`/`render_inner` take `&self`. One frame stale by
+    /// construction — a section upload that lands between two `render` calls
+    /// reads the *previous* frame's camera position, which is harmless here:
+    /// the 768-squared-block threshold this feeds is coarse (≈27.7 blocks),
+    /// and the camera cannot cross it in one frame. `None` only before the
+    /// first frame has ever rendered, in which case `upload_section` falls
+    /// back to "unknown, so always fade" — the pre-fix behaviour, for a
+    /// vanishingly small startup window rather than a wrong guess.
+    last_camera_block_pos: std::cell::Cell<Option<[i32; 3]>>,
     /// Whether the reachable set culls, only counts, or is not walked at all.
     /// See [`RenderState::set_terrain_occlusion`].
     occlusion_mode: TerrainOcclusion,

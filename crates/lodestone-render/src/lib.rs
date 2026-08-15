@@ -218,8 +218,8 @@ pub use model_pipeline::{
     SECTION_FADE_ALREADY_VISIBLE, SECTION_FADE_DURATION_SECS, SectionOriginUniform,
     model_anim_buffer, model_camera_buffer, model_camera_buffer_with_fog, model_palette_buffer,
     model_shared_camera_buffer, model_shared_camera_buffer_with_fog, section_origin_buffer,
-    section_visibility, update_model_anim_buffer, update_model_shared_camera_buffer,
-    write_section_origin,
+    section_is_nearby, section_visibility, update_model_anim_buffer,
+    update_model_shared_camera_buffer, write_section_origin,
 };
 pub use fluid_grid::{FluidGrid, FluidNeighborCell, PackedCell};
 pub use models::{
