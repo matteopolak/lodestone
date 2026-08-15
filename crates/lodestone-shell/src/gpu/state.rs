@@ -220,6 +220,7 @@ impl RenderState {
                 hand_cam_buffer,
                 hand_cam_bind_group,
                 sections: HashMap::new(),
+                seen: std::collections::HashSet::new(),
             }
         });
 
@@ -263,6 +264,7 @@ impl RenderState {
             debug_lines_source: DebugLinesSource::default(),
             entities,
             flame_frame_counter: std::cell::Cell::new(0),
+            section_fade_tick: std::cell::Cell::new(0),
             particles,
             particle_atlas_bind_group,
             particle_sheet_atlas: None,
@@ -522,6 +524,14 @@ impl RenderState {
             self.sky_darken.value(),
             self.ambient_light.value(),
             [eye.x, eye.y, eye.z],
+            // The section fade-in's clock (`lodestone_render::
+            // section_visibility`), in the same seconds a section's
+            // `build_time` uses — see `Self::section_fade_tick`'s doc.
+            // `TICK_PERIOD` (1/20 s) rather than a wall clock: this crate's
+            // render path must never call `std::time::Instant`/`SystemTime`
+            // (they trap on wasm32 — see `DESIGN.md`), and the live game tick
+            // is already a portable clock threaded in via `update_animation`.
+            self.section_fade_tick.get() as f32 / 20.0,
         )
     }
 
@@ -536,12 +546,13 @@ impl RenderState {
         sky_darken: f32,
         ambient_light: [f32; 3],
         eye: [f32; 3],
+        now_secs: f32,
     ) -> FogUniform {
         let mut settings = *fog;
         settings.color = lodestone_render::fog_color_for_time_of_day(time_of_day, fog.color);
         let mut u = FogUniform::new(&settings, eye);
         u.end_enabled[2] = sky_darken;
-        u.ambient_light = [ambient_light[0], ambient_light[1], ambient_light[2], 0.0];
+        u.ambient_light = [ambient_light[0], ambient_light[1], ambient_light[2], now_secs];
         u
     }
 

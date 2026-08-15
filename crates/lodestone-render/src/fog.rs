@@ -606,10 +606,14 @@ pub struct FogUniform {
     /// `lightmap.fsh` seeds its accumulator with before either light half is
     /// added (`crate::light::light_color_from_levels`'s `ambient` parameter).
     /// Grey in the overworld, warm brown in the Nether, sage in the End; see
-    /// `crate::light::OVERWORLD_AMBIENT_LIGHT` and `rgb24_to_channels`. `w`
-    /// unused. Set by callers after [`new`](Self::new), exactly like
-    /// `end_enabled`'s sky-darken lane — `new` has no dimension to ask, so it
-    /// defaults this to the overworld's own value (see that function's doc).
+    /// `crate::light::OVERWORLD_AMBIENT_LIGHT` and `rgb24_to_channels`. `w` =
+    /// this frame's clock, in the same seconds a section's `build_time` uses
+    /// (see `model_pipeline::section_visibility`) — the only consumer of this
+    /// lane is the per-section fade-in mix in `model.wgsl`/`fluid.wgsl`, which
+    /// never reads `rgb` from it. Set by callers after [`new`](Self::new),
+    /// exactly like `end_enabled`'s sky-darken lane — `new` has no dimension
+    /// or clock to ask, so it defaults `rgb` to the overworld's own value (see
+    /// that function's doc) and `w` to `0.0`.
     ///
     /// This is a **fourth** `vec4`, not a reused spare lane: every lane of the
     /// first three was already spoken for (`docs/fog.md`'s "previously-free

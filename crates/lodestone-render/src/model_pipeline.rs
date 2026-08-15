@@ -613,8 +613,38 @@ pub struct ModelSharedCameraUniform {
     pub fog: crate::fog::FogUniform,
 }
 
-/// A section's world-space origin (group 0 binding 1): `vec4(origin.xyz, 0)`,
-/// added to the section-local vertex position in the vertex shader.
+/// Vanilla's `chunkSectionFadeInTime` default (`Options.java`'s
+/// `OptionInstance<Double>` of that name: range `0.0..=2.0` seconds, shipped
+/// default `0.75`). This client has no video-settings UI to expose the option
+/// yet, so it is hardcoded exactly like `model.wgsl`'s own `BRIGHTNESS_FACTOR`
+/// — see that shader's matching constant, which must move with this one.
+pub const SECTION_FADE_DURATION_SECS: f32 = 0.75;
+
+/// Sentinel `build_time` for a section that must never fade: far enough in the
+/// past that `now - sentinel` clears [`SECTION_FADE_DURATION_SECS`] for any
+/// clock value a real session reaches, including `now == 0.0` at startup —
+/// unlike `f32::NEG_INFINITY`, arithmetic on it cannot produce `inf`/`NaN`
+/// further down the shader. [`SectionOriginUniform::new`] defaults to this, so
+/// every one-off caller (dropped items, the first-person held item, the
+/// arena's reserved zero slot, tests) renders at full visibility exactly as it
+/// did before the fade existed.
+pub const SECTION_FADE_ALREADY_VISIBLE: f32 = -1.0e6;
+
+/// Byte-for-byte the mix `model.wgsl`/`fluid.wgsl` compute per section:
+/// vanilla's `SectionRenderDispatcher.RenderSection.getVisibility` —
+/// `elapsed >= duration ? 1.0 : elapsed / duration`, written here as an
+/// equivalent clamp so the CPU-side prediction in this crate's tests and the
+/// shader's own arithmetic can be checked against the same formula.
+#[must_use]
+pub fn section_visibility(now_secs: f32, build_time_secs: f32) -> f32 {
+    let elapsed = now_secs - build_time_secs;
+    (elapsed / SECTION_FADE_DURATION_SECS).clamp(0.0, 1.0)
+}
+
+/// A section's world-space origin (group 0 binding 1): `vec4(origin.xyz,
+/// build_time)`, added to the section-local vertex position in the vertex
+/// shader; `build_time` feeds the per-section fade-in (see
+/// [`section_visibility`]).
 ///
 /// Bound with a **dynamic offset**, so one physically resident buffer (an
 /// arena of these, or a single slot for a one-off draw) serves every section:
@@ -624,16 +654,30 @@ pub struct ModelSharedCameraUniform {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SectionOriginUniform {
-    /// `xyz` = the section's world-space origin; `w` unused.
+    /// `xyz` = the section's world-space origin; `w` = this section's fade
+    /// `build_time`, in the same clock units as `Camera.fog_ambient_light.w`
+    /// (seconds). [`SECTION_FADE_ALREADY_VISIBLE`] for a section that must
+    /// never fade.
     pub origin: [f32; 4],
 }
 
 impl SectionOriginUniform {
-    /// Build from a plain `[x, y, z]` world origin.
+    /// Build from a plain `[x, y, z]` world origin, defaulted to
+    /// [`SECTION_FADE_ALREADY_VISIBLE`] — the safe choice for every caller
+    /// that does not know or care about the fade (see that constant's doc).
     #[must_use]
     pub const fn new(origin: [f32; 3]) -> Self {
         Self {
-            origin: [origin[0], origin[1], origin[2], 0.0],
+            origin: [origin[0], origin[1], origin[2], SECTION_FADE_ALREADY_VISIBLE],
+        }
+    }
+
+    /// Build with an explicit fade `build_time`, for a genuinely new section
+    /// that should fade in from the fog colour. See [`section_visibility`].
+    #[must_use]
+    pub const fn with_build_time(origin: [f32; 3], build_time_secs: f32) -> Self {
+        Self {
+            origin: [origin[0], origin[1], origin[2], build_time_secs],
         }
     }
 }
@@ -694,13 +738,22 @@ pub fn section_origin_buffer(device: &wgpu::Device, origin: [f32; 3]) -> wgpu::B
 /// [`SectionOriginUniform`]s, at `offset`). Real sections call this exactly
 /// once, at upload — the origin is constant for the section's lifetime — never
 /// per frame.
+///
+/// `build_time_secs` is this section's fade start time (see
+/// [`section_visibility`]); pass [`SECTION_FADE_ALREADY_VISIBLE`] for a
+/// section that must never fade (the reserved zero slot, a one-off draw).
 pub fn write_section_origin(
     queue: &wgpu::Queue,
     buffer: &wgpu::Buffer,
     offset: u64,
     origin: [f32; 3],
+    build_time_secs: f32,
 ) {
-    queue.write_buffer(buffer, offset, bytemuck::bytes_of(&SectionOriginUniform::new(origin)));
+    queue.write_buffer(
+        buffer,
+        offset,
+        bytemuck::bytes_of(&SectionOriginUniform::with_build_time(origin, build_time_secs)),
+    );
 }
 
 const MODEL_WGSL: &str = include_str!("shaders/model.wgsl");
@@ -775,6 +828,103 @@ mod tests {
     fn fluid_depth_nudge_pushes_away_from_the_camera() {
         assert!(FLUID_DEPTH_NUDGE > 0.0);
         assert!(FLUID_WGSL.contains("out.clip.z = out.clip.z + FLUID_DEPTH_NUDGE * out.clip.w;"));
+    }
+
+    /// The Rust constant and both WGSL copies must be the same number, or the
+    /// CPU-side prediction below describes a fade the GPU does not actually
+    /// run. `cargo check` never compiles a shader (see `DESIGN.md`'s note on
+    /// `no_wgsl_is_inlined_in_rust_sources`), so this string match is what
+    /// ties the measured constant to what ships.
+    #[test]
+    fn section_fade_duration_matches_the_shader() {
+        let decl = format!("const SECTION_FADE_DURATION_SECS: f32 = {SECTION_FADE_DURATION_SECS};");
+        assert!(
+            MODEL_WGSL.contains(&decl),
+            "model.wgsl does not declare `{decl}` — the shader and \
+             SECTION_FADE_DURATION_SECS have drifted apart"
+        );
+        assert!(
+            FLUID_WGSL.contains(&decl),
+            "fluid.wgsl does not declare `{decl}` — the shader and \
+             SECTION_FADE_DURATION_SECS have drifted apart"
+        );
+        // Vanilla's real default (`Options.java`'s `chunkSectionFadeInTime`,
+        // 0.75 of its 0.0..=2.0 range) — not a plausible round number typed
+        // from memory.
+        assert_eq!(SECTION_FADE_DURATION_SECS, 0.75);
+    }
+
+    /// `section_visibility` at three points: the instant a section is built
+    /// (must read as the fog colour, not a snap-in), the middle of the fade
+    /// (the discriminating instant — a gate that only samples the two ends
+    /// cannot tell a real fade from a delayed pop), and past the duration
+    /// (fully materialised). Exact equalities throughout: this is a plain
+    /// linear mix with no alpha blending involved (see `model.wgsl`'s
+    /// comment on the fade being an RGB mix, not an alpha fade), so unlike
+    /// this codebase's `ALPHA_BLENDING` gates there is no backend-dependent
+    /// compositing to bracket — the predicted value is the only value.
+    #[test]
+    fn section_visibility_at_start_middle_and_end() {
+        let build_time = 100.0_f32;
+        assert_eq!(section_visibility(build_time, build_time), 0.0, "t=0: pure fog colour");
+        assert_eq!(
+            section_visibility(build_time + SECTION_FADE_DURATION_SECS * 0.5, build_time),
+            0.5,
+            "t=duration/2: the mid-fade discriminator"
+        );
+        assert_eq!(
+            section_visibility(build_time + SECTION_FADE_DURATION_SECS, build_time),
+            1.0,
+            "t=duration: fully materialised"
+        );
+        // Past the duration, visibility saturates rather than overshooting —
+        // vanilla's `elapsed >= fadeDuration ? 1.0 : ...` branch, reproduced
+        // here by `clamp` rather than by the branch itself.
+        assert_eq!(
+            section_visibility(build_time + SECTION_FADE_DURATION_SECS * 10.0, build_time),
+            1.0
+        );
+        // A negative delta (clock skew, or a section reused before its build
+        // time is written) must not go negative and invert the mix.
+        assert_eq!(section_visibility(build_time - 1.0, build_time), 0.0);
+    }
+
+    /// [`SECTION_FADE_ALREADY_VISIBLE`] must clear the fade for *any* `now`
+    /// a real session reaches — this is the sentinel every one-off caller
+    /// ([`SectionOriginUniform::new`]) relies on to render at full visibility
+    /// unconditionally, including `now == 0.0` at startup, which is exactly
+    /// when a naive `build_time = 0.0` default would have read as "just
+    /// built" and flashed a fade on the dropped-item/held-item pass.
+    #[test]
+    fn already_visible_sentinel_clears_at_any_plausible_clock_value() {
+        for now in [0.0_f32, 1.0, 60.0, 3600.0, 1_000_000.0] {
+            assert_eq!(
+                section_visibility(now, SECTION_FADE_ALREADY_VISIBLE),
+                1.0,
+                "now={now} did not read as fully visible"
+            );
+        }
+    }
+
+    /// [`SectionOriginUniform::new`] (every one-off caller: dropped items,
+    /// the held item, the arena's reserved zero slot, tests) must default to
+    /// the always-visible sentinel, not `0.0` — this is the regression the
+    /// test above's doc names directly.
+    #[test]
+    fn section_origin_uniform_new_defaults_to_already_visible() {
+        let u = SectionOriginUniform::new([1.0, 2.0, 3.0]);
+        assert_eq!(u.origin, [1.0, 2.0, 3.0, SECTION_FADE_ALREADY_VISIBLE]);
+    }
+
+    /// [`SectionOriginUniform::with_build_time`] must place the build time in
+    /// the `w` lane the shader actually reads (`origin.section_origin.w`),
+    /// not silently drop it — a transposition here is invisible to
+    /// `decode(encode(x)) == x` against our own constructor, so the fixture
+    /// uses pairwise-distinct values.
+    #[test]
+    fn section_origin_uniform_with_build_time_places_it_in_w() {
+        let u = SectionOriginUniform::with_build_time([11.0, 1.0, 4.0], 42.0);
+        assert_eq!(u.origin, [11.0, 1.0, 4.0, 42.0]);
     }
 
     #[test]

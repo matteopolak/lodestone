@@ -170,21 +170,35 @@ impl RenderState {
                 }
                 let origin_alloc = match existing {
                     Some(old) => old.origin_alloc,
-                    None => match model.origin_arena.alloc(queue, origin_f) {
-                        Some((alloc, _offset)) => alloc,
-                        None => {
-                            // Should not happen — see `SectionOriginArena`'s
-                            // doc for the capacity margin — but degrade to a
-                            // dropped (missing) section rather than a panic if
-                            // it ever does.
-                            tracing::warn!(
-                                "section-origin arena exhausted at {key:?}; \
-                                 dropping this section's geometry"
-                            );
-                            return;
+                    None => {
+                        // A fresh arrival: fade in, unless this coord has
+                        // already carried real geometry earlier in its
+                        // current loaded lifetime (an all-air section that
+                        // just got its first block, or one hollowed out and
+                        // refilled) — see `ModelRenderer::seen`'s doc for why
+                        // that must not re-trigger the fade.
+                        let build_time = if model.seen.contains(&key) {
+                            lodestone_render::SECTION_FADE_ALREADY_VISIBLE
+                        } else {
+                            self.section_fade_tick.get() as f32 / 20.0
+                        };
+                        match model.origin_arena.alloc(queue, origin_f, build_time) {
+                            Some((alloc, _offset)) => alloc,
+                            None => {
+                                // Should not happen — see `SectionOriginArena`'s
+                                // doc for the capacity margin — but degrade to a
+                                // dropped (missing) section rather than a panic if
+                                // it ever does.
+                                tracing::warn!(
+                                    "section-origin arena exhausted at {key:?}; \
+                                     dropping this section's geometry"
+                                );
+                                return;
+                            }
                         }
-                    },
+                    }
                 };
+                model.seen.insert(key);
                 model.sections.insert(
                     key,
                     ModelSectionGpu {
@@ -228,7 +242,16 @@ impl RenderState {
                 let origin_f = [origin[0] as f32, origin[1] as f32, origin[2] as f32];
                 let origin_alloc = match existing {
                     Some(old) => old.origin_alloc,
-                    None => match self.packed_origin_arena.alloc(queue, origin_f) {
+                    // The packed/demo path draws through `block.wgsl`, which
+                    // never reads the origin's `w` lane at all — the sentinel
+                    // is passed for honesty, not because it changes anything
+                    // this path draws. The fade is model-path-only; see
+                    // `upload_section`'s `SectionGeometry::Model` arm.
+                    None => match self.packed_origin_arena.alloc(
+                        queue,
+                        origin_f,
+                        lodestone_render::SECTION_FADE_ALREADY_VISIBLE,
+                    ) {
                         Some((alloc, _offset)) => alloc,
                         None => {
                             // Should not happen — `PACKED_ORIGIN_ARENA_SLOTS` is
@@ -266,13 +289,18 @@ impl RenderState {
         if let Some(old) = self.sections.remove(key) {
             self.packed_origin_arena.free(old.origin_alloc);
         }
-        if let Some(model) = self.model.as_mut()
-            && let Some(old) = model.sections.remove(key)
-        {
-            free_resident(&mut model.mesh_arena, old.mesh.as_ref());
-            free_resident(&mut model.mesh_arena, old.water.as_ref());
-            free_resident(&mut model.mesh_arena, old.translucent.as_ref());
-            model.origin_arena.free(old.origin_alloc);
+        if let Some(model) = self.model.as_mut() {
+            // A genuine unload: forget this coord was ever seen, so a later
+            // re-arrival (walking back into range) fades in again exactly
+            // like a real vanilla `RenderSection` slot recycled onto a
+            // different chunk address — see `ModelRenderer::seen`'s doc.
+            model.seen.remove(key);
+            if let Some(old) = model.sections.remove(key) {
+                free_resident(&mut model.mesh_arena, old.mesh.as_ref());
+                free_resident(&mut model.mesh_arena, old.water.as_ref());
+                free_resident(&mut model.mesh_arena, old.translucent.as_ref());
+                model.origin_arena.free(old.origin_alloc);
+            }
         }
     }
 
@@ -432,7 +460,13 @@ impl RenderState {
     /// the model/fluid shaders draw the correct frame. A no-op when there is no
     /// live-vanilla model pass (the offline demo path). Skipping it leaves every
     /// sprite on frame 0 — the pre-wiring behaviour — rather than erroring.
+    ///
+    /// Also stashes `tick` as [`Self::section_fade_tick`] — the one other
+    /// per-frame clock this call already receives, and the section fade-in's
+    /// source of "now" (see that field's doc for why a `Cell` here rather
+    /// than a new argument to [`upload_section`](Self::upload_section)).
     pub fn update_animation(&self, queue: &wgpu::Queue, tick: u64) {
+        self.section_fade_tick.set(tick);
         if let Some(model) = &self.model {
             let slots = anim_slots_at(&model.animations, tick);
             update_model_anim_buffer(queue, &model.anim_buffer, &slots);
