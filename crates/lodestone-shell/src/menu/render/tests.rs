@@ -7955,3 +7955,106 @@ fn create_worlds_tab_bar_gets_the_flanking_separators_but_never_the_merge_fill()
 
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// The owner's report on the just-landed tab widget (issues #564/#567): "the
+/// tabs for Create New World etc look almost perfect! the text like 'Game',
+/// 'World' etc. (the tab labels) are too high up". `draw_tab` blitted the
+/// label at vanilla's `top` local directly (`getY() + (isSelected() ? 0 :
+/// 3)`, `MenuTabBar.java`) instead of centring it between `top` and `bottom`
+/// the way `MenuTabButton.renderLabel` → `acceptScrollingWithDefaultCenter`
+/// → `ActiveTextCollector.defaultScrollingHelper` actually does — see
+/// `widget::tab_label_top`'s own doc for the formula and the incident.
+///
+/// Two arms, selected and unselected, on the **same label** ("More",
+/// `create_world::MORE_TAB`) so a fixture-width or x-position difference
+/// cannot be mistaken for the fix: clicking the More tab flips it from
+/// unselected to selected without moving it, which is what makes this a
+/// discriminating input rather than the *magnitude* species `CLAUDE.md`
+/// warns about ("the label moved down" alone would pass on either wrong
+/// hypothesis moving it *some* amount).
+///
+/// "More" is also not an incidental choice of label: the jar-less debug
+/// font's `M` glyph (`font::glyph_rows`) lights up both edge columns in
+/// *every* row, including row 0, so the emitted glyph quads' own
+/// bounding-box top is exactly the `y` `Quads::text` was called with, with
+/// no per-glyph offset to subtract first — the same trick
+/// `the_search_box_draws_as_a_field_inside_its_own_slot` uses for the same
+/// reason.
+///
+/// Predicted from `widget::tab_label_top`'s own formula at `y = 0`,
+/// `height = layout::TAB_BAR_HEIGHT` (24), `line_height = LINE_H` (9):
+/// unselected `(3 + 24 - 9) / 2 + 1 = 10`, selected `(0 + 24 - 9) / 2 + 1 =
+/// 8`. The pre-fix code drew at `3`/`0` — both wrong, and wrong in the
+/// direction the owner reported ("too high").
+#[test]
+fn the_tab_label_is_vertically_centred_not_flush_against_the_tabs_own_top() {
+    let nav = test_nav("tab-label-y");
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut fav = FaviconCache::new();
+    let mut ui = UiState::new();
+    ui.open_world_select();
+    ui.open_create_world();
+    assert_eq!(ui.screen(), Screen::CreateWorld, "premise");
+
+    let (w, h) = (854.0_f32, 480.0_f32);
+    let (start_x, tab_width) = layout::tab_bar_geometry(w, create_world::TAB_LABELS.len());
+    let more_x0 = start_x + tab_width * create_world::MORE_TAB as f32;
+    let more_x1 = more_x0 + tab_width;
+
+    // Restricted to both the More tab's own x-span and its own row's y-band
+    // (`0..layout::TAB_BAR_HEIGHT`) — narrow enough that Game's and World's
+    // own labels, sitting at a different x in the same y-band, cannot leak
+    // into this bounding box.
+    let more_label_top = |v: &[f32]| -> Option<f32> {
+        let mut y0 = f32::MAX;
+        let mut seen = false;
+        for vert in v.chunks_exact(STRIDE) {
+            if (2..6).any(|c| (vert[c] - widget::ACTIVE_LABEL[c - 2]).abs() > 1e-4) {
+                continue;
+            }
+            let px = (vert[0] + 1.0) * 0.5 * w;
+            let py = (1.0 - vert[1]) * 0.5 * h;
+            if px < more_x0 || px > more_x1 || py < 0.0 || py > layout::TAB_BAR_HEIGHT {
+                continue;
+            }
+            seen = true;
+            y0 = y0.min(py);
+        }
+        seen.then_some(y0)
+    };
+
+    // Arm 1: unselected. Game (index 0) is selected by default (see the
+    // control above), so More starts out unselected.
+    let f = frame_for(&ui, &nav, &statuses, &mut fav).expect("Create New World draws a frame");
+    let unselected_y = more_label_top(&geometry(&f, w, h))
+        .expect("the More label must draw inside its own tab rect");
+    assert!(
+        (unselected_y - 10.0).abs() < 0.01,
+        "unselected More's label top is {unselected_y}, want widget::tab_label_top(0, 24, \
+         false, 9) == 10 — not vanilla's raw `top` local (3). The label must be vertically \
+         centred, not flush against the tab's own top"
+    );
+
+    // Arm 2: selected, same label, same x — only the tab's selection state
+    // changed.
+    let mut nav = nav;
+    assert_eq!(
+        nav.click(&mut ui, create_world::MORE_TAB),
+        crate::menu::nav::MenuAction::None,
+        "clicking a tab switches content in place, it does not navigate"
+    );
+    let f = frame_for(&ui, &nav, &statuses, &mut fav).expect("Create New World draws a frame");
+    let selected_y = more_label_top(&geometry(&f, w, h))
+        .expect("the More label must draw inside its own tab rect");
+    assert!(
+        (selected_y - 8.0).abs() < 0.01,
+        "selected More's label top is {selected_y}, want widget::tab_label_top(0, 24, true, 9) \
+         == 8 — not vanilla's raw `top` local (0)"
+    );
+
+    assert_ne!(
+        unselected_y, selected_y,
+        "the selected/unselected offset must survive centring, or this gate could not tell a \
+         centred-but-offset-collapsed regression from a correct draw"
+    );
+}
