@@ -865,7 +865,13 @@ rolled its loot, spawned a real item, and **never sent `ADD_ENTITY`**. Nothing w
 
 So when a fixture's own docs explain that some path is not exercised, **read it as scope, not as
 reassurance** — and grep the corpus for that phrasing (`never called`, `inert`, `unused in these tests`) as
-its own audit. The habit that catches this class: for any packet you believe production sends, ask **which
+its own audit. **The same holds for production comments admitting an unported feature**: the boss bar drew
+a flat tinted rect for as long as it existed, above a comment reading *"Not ported: vanilla's
+per-colour/overlay sprite art"* — accurate, deliberate, and tracked by nothing. Add `not ported`,
+`approximation`, `placeholder` and `for now` to that grep. Note the gap there began a layer *up*: the model
+had already folded the bar's colour into an approximate RGB tint and dropped the overlay style, so no
+amount of care at the draw site could have recovered them — **when a draw looks unfixable, check whether
+the model threw the information away first.** The habit that catches this class: for any packet you believe production sends, ask **which
 gate asserts it reached the wire**, not which gate asserts the state that should have produced it.
 
 **The worst instance so far shipped a totally silent hang, and every gate in the corpus used a fresh world.**
