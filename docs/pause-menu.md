@@ -11,8 +11,13 @@ way to leave a session on purpose").
 
 `Screen::Paused` reproduces `PauseScreen.createPauseMenu`
 (`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/PauseScreen.java:91-183`)
-whole: **nine** widgets, of which three are live. The rects live in
-`render::pause_slot`.
+whole: **ten** widgets while the hosted world is unpublished (`PAUSE_BUTTONS`),
+**nine** once it is published (`PAUSE_BUTTONS_PUBLISHED` drops Open to LAN —
+see "Which Options row, and why" below). Seven are live in the unpublished
+list (six once published, since Open to LAN is the one that disappears); the
+rest are present-and-disabled. The rects live in `render::pause_slot`. A
+sixth, *conditional* row — Server Links — is drawn outside this grid
+entirely; see "A row outside the grid: Server Links" below.
 
 Vanilla builds it with a `GridLayout`, so the rects are not obvious. Working
 through `GridLayout.arrangeElements` (`GridLayout.java:25-89`) and
@@ -30,19 +35,38 @@ through `GridLayout.arrangeElements` (`GridLayout.java:25-89`) and
   `(floor((W-212)/2), floor((H-166)/4))` — the alignment is a truncating
   `(int)` cast (`FrameLayout.java:113-116`), hence the floors.
 
-Grid-relative, therefore:
+Grid-relative, therefore. Row 3 (Options) is the one row that forks — see
+"Which Options row, and why" below — but the fork changes only that row's
+children, not any other row's offset: the grid keeps its five rows and its
+212×166 size in both states (`the_pause_grid_size_matches_whether_or_not_lan_
+is_published` pins that), so Disconnect sits at the same `+4, +146` either
+way.
 
-| # | widget | offset from grid origin | size | state |
-|---|---|---|---|---|
-| 0 | Back to Game | `+4, +50` | 204×20 | live |
-| 1 | Advancements | `+4, +74` | 98×20 | **disabled** |
-| 2 | Statistics | `+110, +74` | 98×20 | **disabled** |
-| 3 | Report Bugs (icon) | `+60, +98` | 20×20 | **disabled** |
-| 4 | Give Feedback (icon) | `+84, +98` | 20×20 | **disabled** |
-| 5 | Friends (icon) | `+108, +98` | 20×20 | **disabled** |
-| 6 | Player Reporting (icon) | `+132, +98` | 20×20 | **disabled** |
-| 7 | Options… | `+4, +122` | 204×20 | live |
-| 8 | Disconnect | `+4, +146` | 204×20 | live |
+Index columns below are `pause_slot`'s own two match arms — unpublished
+(`PAUSE_BUTTONS`, 10 rows) and published (`PAUSE_BUTTONS_PUBLISHED`, 9 rows) —
+so they diverge from Options onward:
+
+| unpub. # | pub. # | widget | offset from grid origin | size | state |
+|---|---|---|---|---|---|
+| 0 | 0 | Back to Game | `+4, +50` | 204×20 | live |
+| 1 | 1 | Advancements | `+4, +74` | 98×20 | live (issue #167) |
+| 2 | 2 | Statistics | `+110, +74` | 98×20 | live (issue #188) |
+| 3 | 3 | Report Bugs (icon) | `+60, +98` | 20×20 | **disabled** |
+| 4 | 4 | Give Feedback (icon) | `+84, +98` | 20×20 | **disabled** |
+| 5 | 5 | Friends (icon) | `+108, +98` | 20×20 | **disabled** |
+| 6 | 6 | Player Reporting (icon) | `+132, +98` | 20×20 | live (issue #189) |
+| 7 | 7 | Options… | `+4, +122` | 98×20 unpub. / 204×20 pub. | live |
+| 8 | — | Open to LAN (unpublished only) | `+110, +122` | 98×20 | live |
+| 9 | 8 | Disconnect | `+4, +146` | 204×20 | live |
+
+Unpublished, row 3 is a half-width pair — same 106 px columns and 8 px gutter
+as row 1's Advancements/Statistics — and the grid holds all ten widgets
+above. Published, Open to LAN's cell is simply absent and Options reclaims
+the full 204 px row, same shape as row 0/row 8. Only three widgets remain
+genuinely disabled — Report Bugs and Give Feedback open an external Mojang
+link this client does not implement, and Friends needs a Microsoft-account
+social graph — see "Advancements, Statistics and Player Reporting: no longer
+disabled" below for the other three.
 
 The "Game Menu" heading is a `StringWidget` at `W/2 - textWidth/2, 40`
 (`PauseScreen.java:87-88`), the title being `menu.game`.
@@ -83,17 +107,28 @@ vanilla — "Save and Quit to Title" locally, "Disconnect" remotely
 is the local dev world with no persistence, so "Save and Quit" would promise a
 save that does not happen.
 
-### Advancements and Statistics: present, disabled — a reversal
+### Advancements, Statistics and Player Reporting: no longer disabled
 
-An earlier version of `nav.rs` **omitted** both, on the grounds that neither has
-a client-side subsystem to open onto, so either button would reach zero pixels —
-this repo's dominant defect class. That reasoning was right about the *action*
-and wrong about the *position*. They are now present and
-`PauseButton::enabled() == false`: nothing decodes `update_advancements` or
-`award_stats`, so there is nothing to open, but a greyed-out button where vanilla
-puts one is faithful UI rather than an island, and vanilla itself greys buttons
-out on this very screen (`playerReportingButton` with no players to report,
-`PauseScreen.java:148-151`).
+An earlier version of `nav.rs` **omitted** Advancements and Statistics
+entirely, on the grounds that neither has a client-side subsystem to open
+onto, so either button would reach zero pixels — this repo's dominant defect
+class. That reasoning was right about the *action* and wrong about the
+*position*: a greyed-out button where vanilla puts one is faithful UI rather
+than an island, and vanilla itself greys buttons out on this very screen
+(`playerReportingButton` with no players to report, `PauseScreen.java:148-151`).
+So both landed present-and-`PauseButton::enabled() == false`, matching that
+reasoning — but that was an interim state, not the current one.
+
+**All three of Advancements, Statistics and Player Reporting are now live**,
+each once its own screen landed: Advancements (issue #167, `update_advancements`
+decoded, real progress — see `advancements.md`), Statistics (issue #188 — the
+screen is real and honestly shows zero everywhere, since nothing decodes
+`award_stats` yet; see `statistics-screen.md`), Player Reporting (issue #189,
+opens the Social screen — see `social-interactions.md`). `PauseButton::enabled`
+lists all three. **Only Report Bugs, Give Feedback and Friends remain
+genuinely disabled** — the first two open an external Mojang link this client
+does not implement, and Friends needs a Microsoft-account social graph this
+client does not have.
 
 The greyed look is vanilla's own — `widget/button_disabled` plus a
 `0xFF_A0_A0_A0` label — not an invented one. See
@@ -111,10 +146,27 @@ one quad instead of tiling: `render::OVERLAY_BG` is `[0, 0, 0, 64/255]`, and
 `the_pause_overlays_backdrop_is_vanillas_measured_black_at_alpha_64` pins the
 exact floats.
 
-What is missing is the **blur** vanilla applies behind it when the pause screen is
-topmost (`Screen.java:389-394`), gated on the `menuBackgroundBlurriness` option —
-which vanilla lets the player set to 0, in which case this is exactly vanilla.
-Above 0, vanilla's menu reads calmer over a busy world than ours does.
+**The blur vanilla applies behind the pause screen is implemented now** — see
+[`menu-blur.md`](./menu-blur.md) for the six-pass box blur itself. `pause_frame`
+sets `MenuFrame::blur = true` (vanilla's `PauseScreen` never overrides
+`isInGameUi()`, so the default fork applies). It runs at vanilla's default
+radius (`Options.BLURRINESS_DEFAULT_VALUE = 5`) as a hardcoded constant, not a
+live `menuBackgroundBlurriness`-equivalent setting — that doc's "How to
+change it" is where wiring a real option would go.
+
+### A row outside the grid: Server Links
+
+Vanilla's Server Links button (`menu.server_links`, opens a dialog listing
+links a server announced) is **not** one of `PAUSE_BUTTONS`/
+`PAUSE_BUTTONS_PUBLISHED` — `pause_slot`'s `ServerLinks` arm places it just
+below the whole grid (`dy: grid_h + padding`) rather than as a sixth grid row,
+the same "outside the arranged tree" shape `MainButton::Accounts` already uses
+on the title screen. `MenuNav::pause_buttons` appends it dynamically, and only
+when the server actually announced a link — vanilla's own
+`!serverLinks.isEmpty()` gate, reproduced as an *omission* rather than a
+disabled row, matching `PauseButton::OpenToLan`'s own precedent. It opens
+`Screen::ServerLinks`; see `crate::menu::server_links`'s own module doc for
+the screen behind it.
 
 ## How it works
 
@@ -128,7 +180,12 @@ is a local UI state, not a world stop." That's a deliberate divergence from
 single-player vanilla (which halts world ticking while paused) — this client
 never owns the world simulation, so it can't stop it, and doesn't pretend to.
 
-`UiState::on_escape` is the full state machine:
+`UiState::on_escape` is a single exhaustive match, now well past twenty arms
+as more screens landed (`CommandBlockEdit`, `SignEdit`, `WorldSelect`,
+`Accounts`, `Death`, `Credits`, `Social`, `Statistics`, `ServerLinks`,
+`Advancements`, `CreateWorld`, `Confirm`, …) — this is **not** that full
+match, only the transitions this doc's own reader needs, the ones that
+actually touch pause:
 
 ```
 Playing → Paused          Paused → Playing
@@ -140,6 +197,12 @@ MainMenu → request_quit
 Connecting → no-op
 ```
 
+Read `menu.rs`'s `on_escape` itself for every other screen's arm — most of
+them are a documented no-op or single-level unwind that some screen-specific
+key handler (`MenuNav::key_*`) intercepts before `on_escape` is ever reached
+in practice, kept here only so the match stays exhaustive for a caller that
+reaches this fallback some other way.
+
 The one genuinely stateful part is Options-from-pause. `settings_return:
 Screen` records whether `Screen::Settings` was entered via
 `open_settings` (title screen only) or `open_settings_from_pause`
@@ -150,14 +213,13 @@ menu, not on the main menu and not back in gameplay.
 
 ### Why `Screen::Paused` must stay out of `owns_frame`
 
-`owns_frame` (`crates/lodestone-shell/src/menu/render.rs`) is the set of
-screens the menu renderer treats as owning the entire frame:
-
-```rust
-pub fn owns_frame(screen: super::Screen) -> bool {
-    matches!(screen, Screen::MainMenu | Screen::ServerList | Screen::ServerEdit | Screen::Settings | Screen::Error)
-}
-```
+`owns_frame` (`crates/lodestone-shell/src/menu/render/frame.rs`) is the set of
+screens the menu renderer treats as owning the entire frame. It has grown well
+past its original five as more full-screen menus landed — `MainMenu`,
+`ServerList`, `ServerEdit`, `WorldSelect`, `Settings`, `Accounts`,
+`Connecting`, `Error`, `Credits`, `Social`, `Statistics`, `CreateWorld` and
+`Confirm` as of this writing — but the one fact this section exists for has
+not changed: `Screen::Paused` is not, and cannot safely be added to, that set.
 
 That set drives a **`Clear` render pass** — appropriate for the main menu,
 which has no world behind it to preserve. `Screen::Paused` is deliberately
@@ -171,9 +233,9 @@ pass already put in the target, don't erase it first. `App`'s draw loop
 calls this after the world/HUD/container passes, gated on
 `self.ui.is_paused()`. The negative-control test
 `owns_frame_excludes_paused_so_the_pause_menu_never_replaces_the_world`
-(`render.rs`) pins this the way `CLAUDE.md`'s evidence standard asks: not
-just "pause renders correctly" but "pause is provably absent from the set
-that would break it."
+(`crates/lodestone-shell/src/menu/render/tests.rs`) pins this the way
+`CLAUDE.md`'s evidence standard asks: not just "pause renders correctly" but
+"pause is provably absent from the set that would break it."
 
 ### The HUD keeps drawing behind it (issue #61)
 
@@ -204,8 +266,9 @@ So the dim you see over an open inventory is not the HUD switching off; it is th
 screen's own translucent background drawn over a HUD that is still there.
 
 `app::hud_follows_world(Screen)` is now that predicate — true for `Playing`,
-`Chat`, `Container`, `Paused`; false for `Connecting` (no world yet) and every
-menu screen. `HudFrame::crosshair` keeps `is_playing()`.
+`Chat`, `Container`, `Paused`, and (issue #103) `Death`; false for
+`Connecting` (no world yet) and every menu screen. `HudFrame::crosshair` keeps
+`is_playing()`.
 
 Exactly two vanilla HUD elements *do* consult `screen()`, and neither is a vital:
 the potion-effect icons (`Hud.java:486-488` — suppressed only when the screen
@@ -255,6 +318,14 @@ lifecycle moved there in seam 10 of the `sim.rs` decomposition; see
 - The connection: `net` is dropped (`NetClient::drop` joins its background
   thread first, so nothing races a reset against an in-flight poll), `phase`
   returns to `LocalOnly`.
+- Screen-adjacent session flags added since this list was first written:
+  `death_message` (issue #103's death screen must not survive a
+  quit-to-title), `won` (issue #192's credits screen, same reason),
+  `lan_published` (the pause menu must offer Open to LAN again next session —
+  see [`open-to-lan.md`](./open-to-lan.md)), and the dimension-edge/portal
+  state `reset_dimension_state` clears (a stale `applied_dimension` would make
+  the next session's login look like a dimension change and drop freshly
+  streamed terrain).
 - Every read-model `poll_net` feeds: chat log, tab list, scoreboard, status
   effects, title/action-bar, health/food/dead/respawn-count/experience,
   entity interpolation state, the local entity id, the teleport-count
@@ -293,7 +364,7 @@ inert rather than a visible bug.
 Clearing fields is necessary but not sufficient — the actual claim
 `end_session` makes is that a **second** connection afterward behaves
 exactly like the first. `end_session_tears_down_and_a_fresh_connect_
-afterward_starts_clean` (`sim.rs`) is written to prove that, not just that
+afterward_starts_clean` (`sim/tests.rs`) is written to prove that, not just that
 fields end up empty: it populates chat/health/entity-id from a first
 session, calls `end_session()`, asserts the reset, then attaches a
 **second** `NetClient`, drives it to `Connected` with a different entity
@@ -310,17 +381,26 @@ actually took.
 - **Pause menu input and the widget list** —
   `crates/lodestone-shell/src/menu/nav.rs` (`key_paused`, `PauseButton`,
   `PauseButton::{enabled, icon}`, `step_enabled`).
-- **Pause menu layout** — `crates/lodestone-shell/src/menu/render.rs`
-  (`pause_slot`, `Origin::PauseGrid`, `PAUSE_GRID_W`/`PAUSE_GRID_H`). Change a
-  rect here and nowhere else: `row_rect` resolves the slot and `app.rs`'s
-  `menu_row_at` calls `row_rect`, so the draw and the hit-test cannot disagree.
-- **Rendering** — `crates/lodestone-shell/src/menu/render.rs` (`owns_frame`,
-  `pause_frame`, `render_overlay` vs `render`, `build` vs `geometry`). If you add a new screen that
-  should overlay the world instead of replacing it, follow `Paused`'s
-  pattern — a second render entry point with `LoadOp::Load`, kept out of
-  `owns_frame` — rather than adding a special case inside the `Clear` path.
-  [`Screen::Death`](./death-screen.md) (issue #103) is the first screen that
-  actually did this, end to end.
+- **Pause menu layout** — `crates/lodestone-shell/src/menu/render/title_pause.rs`
+  (`pause_menu_grid_with`, `pause_block`, `pause_slot`, `pause_grid_size`); the
+  hand-derived `PAUSE_GRID_W`/`PAUSE_GRID_H` constants still live in
+  `crates/lodestone-shell/src/menu/render.rs`, and `Origin::PauseGrid` is in
+  `crates/lodestone-shell/src/menu/render/origin.rs`. Change a rect here and
+  nowhere else: `row_rect` resolves the slot and `app.rs`'s `menu_row_at` calls
+  `row_rect`, so the draw and the hit-test cannot disagree.
+- **Rendering** — `owns_frame` is
+  `crates/lodestone-shell/src/menu/render/frame.rs`; `pause_frame` is
+  `crates/lodestone-shell/src/menu/render/screens.rs`; `render_overlay` vs
+  `render`, `build` vs `geometry` are in
+  `crates/lodestone-shell/src/menu/render/renderer.rs`/`draw.rs`. If you add a
+  new screen that should overlay the world instead of replacing it, follow
+  `Paused`'s pattern — a second render entry point with `LoadOp::Load`, kept
+  out of `owns_frame` — rather than adding a special case inside the `Clear`
+  path. [`Screen::Death`](./death-screen.md) (issue #103) is the first screen
+  that actually did this, end to end.
+- **The blur behind the overlay** — see [`menu-blur.md`](./menu-blur.md)'s own
+  "How to change it"; setting `MenuFrame::blur` is the pause frame builder's
+  job, the pass itself is shared with every other blurred overlay.
 - **Teardown** — `Sim::end_session` in
   `crates/lodestone-shell/src/sim/session.rs`.
   Adding new per-session state anywhere in `Sim`? Check whether it needs a
@@ -336,11 +416,15 @@ actually took.
 ## Configuration
 
 None of its own — no flags gate whether the pause menu exists or how it
-renders.
+renders. The blur behind it is a hardcoded radius, not a setting; see
+[`menu-blur.md`](./menu-blur.md)'s own Configuration section.
 
 ## Dependencies
 
 - `crate::menu::{nav, render}` — the pause screen's own state and layout.
+- `crate::menu::server_links` — the screen the conditional Server Links row
+  opens.
+- [`menu-blur.md`](./menu-blur.md) — the backdrop blur behind the overlay.
 - `crate::net::NetClient` — what `end_session` drops.
 - `lodestone-game::{mining::Mining, placement::Placement}` — the prediction
   state `end_session` replaces wholesale rather than resetting in place.
@@ -351,7 +435,7 @@ renders.
 
 ## Tests
 
-Hermetic, `crates/lodestone-shell/src/sim.rs`:
+Hermetic, `crates/lodestone-shell/src/sim/tests.rs`:
 `end_session_tears_down_and_a_fresh_connect_afterward_starts_clean` (the
 acceptance test above). `crates/lodestone-shell/src/menu.rs`:
 `quit_to_title_only_leaves_from_pause_and_clears_session_state`.
@@ -359,12 +443,19 @@ acceptance test above). `crates/lodestone-shell/src/menu.rs`:
 `quit_to_title_from_the_pause_menu_leaves_for_the_main_menu`,
 `a_disabled_button_is_hoverable_but_cannot_be_activated`,
 `keyboard_navigation_steps_over_every_disabled_button`.
-`crates/lodestone-shell/src/menu/render.rs`:
+`crates/lodestone-shell/src/menu/render/tests.rs`:
 `owns_frame_excludes_paused_so_the_pause_menu_never_replaces_the_world`,
-`pause_frame_builds_vanillas_nine_widgets_in_order_and_tracks_the_highlight`,
+`pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight`,
 `the_pause_screen_rects_are_vanillas_own` (the hand-derived grid above, asserted
 against `pause_slot` rather than read out of it),
+`the_published_pause_frame_drops_open_to_lan_and_reflows_options`,
+`the_pause_grid_size_matches_whether_or_not_lan_is_published`,
+`a_changed_cell_padding_moves_every_pause_rect` (issue #394's negative control:
+change one `LayoutSettings` padding value on the real builder and watch every
+rect assertion go red),
 `every_vanilla_widget_is_on_screen_and_none_overlap`,
 `the_button_sprite_matches_vanillas_enabled_hovered_rule`,
 `nine_slice_borders_come_from_the_mcmeta_not_a_constant`,
-`the_pause_overlays_backdrop_is_vanillas_measured_black_at_alpha_64`.
+`the_pause_overlays_backdrop_is_vanillas_measured_black_at_alpha_64`,
+`frame_for_defers_to_an_overlay_for_server_links` (the Server Links screen
+reached from the pause row's conditional button).
