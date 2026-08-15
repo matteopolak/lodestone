@@ -3,63 +3,66 @@
 //! Generated potion->effects table for protocol 776 (Minecraft 26.2).
 //!
 //! Each entry is one `Potions.java` `new Potion(name, MobEffectInstance...)` call's
-//! effect list, as `(mob_effect_index, amplifier)` pairs — `mob_effect_index` is an
-//! index into [`crate::generated_mob_effects::MOB_EFFECT_NAMES`] (**not** a network mob
-//! effect id, though today the two coincide because that table is itself indexed by
-//! network id), and `amplifier` is `MobEffectInstance`'s own constructor argument
-//! (`new MobEffectInstance(effect, duration)` implies amplifier `0`).
+//! effect list, as `(mob_effect_index, amplifier, duration_ticks)` triples —
+//! `mob_effect_index` is an index into [`crate::generated_mob_effects::MOB_EFFECT_NAMES`]
+//! (**not** a network mob effect id, though today the two coincide because that table is
+//! itself indexed by network id), `amplifier` is `MobEffectInstance`'s own constructor
+//! argument (`new MobEffectInstance(effect, duration)` implies amplifier `0`), and
+//! `duration_ticks` is that same constructor's `duration` argument verbatim — the raw,
+//! unscaled tick count `PotionContents.addPotionTooltip`/`MobEffectUtil.formatDuration`
+//! read before any `POTION_DURATION_SCALE` component is applied.
 //!
 //! Indexed exactly as [`crate::generated_potions::POTION_NAMES`]. `water`/`mundane`/
 //! `thick`/`awkward` carry no effect (`new Potion(name)`, no `MobEffectInstance` args)
 //! and are empty slices, matching `PotionContents.getAllEffects()`'s empty-list case.
 
-/// One potion's built-in effect list, `(mob_effect_index, amplifier)` pairs in
-/// `Potions.java`'s own declaration order.
-pub static POTION_EFFECTS: [&[(usize, u8)]; crate::generated_potions::POTION_COUNT as usize] = [
-    &[],             // water
-    &[],             // mundane
-    &[],             // thick
-    &[],             // awkward
-    &[(15, 0)],      // night_vision
-    &[(15, 0)],      // long_night_vision
-    &[(13, 0)],      // invisibility
-    &[(13, 0)],      // long_invisibility
-    &[(7, 0)],       // leaping
-    &[(7, 0)],       // long_leaping
-    &[(7, 1)],       // strong_leaping
-    &[(11, 0)],      // fire_resistance
-    &[(11, 0)],      // long_fire_resistance
-    &[(0, 0)],       // swiftness
-    &[(0, 0)],       // long_swiftness
-    &[(0, 1)],       // strong_swiftness
-    &[(1, 0)],       // slowness
-    &[(1, 0)],       // long_slowness
-    &[(1, 3)],       // strong_slowness
-    &[(1, 3), (10, 2)], // turtle_master
-    &[(1, 3), (10, 2)], // long_turtle_master
-    &[(1, 5), (10, 3)], // strong_turtle_master
-    &[(12, 0)],      // water_breathing
-    &[(12, 0)],      // long_water_breathing
-    &[(5, 0)],       // healing
-    &[(5, 1)],       // strong_healing
-    &[(6, 0)],       // harming
-    &[(6, 1)],       // strong_harming
-    &[(18, 0)],      // poison
-    &[(18, 0)],      // long_poison
-    &[(18, 1)],      // strong_poison
-    &[(9, 0)],       // regeneration
-    &[(9, 0)],       // long_regeneration
-    &[(9, 1)],       // strong_regeneration
-    &[(4, 0)],       // strength
-    &[(4, 0)],       // long_strength
-    &[(4, 1)],       // strong_strength
-    &[(17, 0)],      // weakness
-    &[(17, 0)],      // long_weakness
-    &[(25, 0)],      // luck
-    &[(27, 0)],      // slow_falling
-    &[(27, 0)],      // long_slow_falling
-    &[(35, 0)],      // wind_charged
-    &[(36, 0)],      // weaving
-    &[(37, 0)],      // oozing
-    &[(38, 0)],      // infested
+/// One potion's built-in effect list, `(mob_effect_index, amplifier, duration_ticks)`
+/// triples in `Potions.java`'s own declaration order.
+pub static POTION_EFFECTS: [&[(usize, u8, u32)]; crate::generated_potions::POTION_COUNT as usize] = [
+    &[],                          // water
+    &[],                          // mundane
+    &[],                          // thick
+    &[],                          // awkward
+    &[(15, 0, 3600)],             // night_vision
+    &[(15, 0, 9600)],             // long_night_vision
+    &[(13, 0, 3600)],             // invisibility
+    &[(13, 0, 9600)],             // long_invisibility
+    &[(7, 0, 3600)],              // leaping
+    &[(7, 0, 9600)],              // long_leaping
+    &[(7, 1, 1800)],              // strong_leaping
+    &[(11, 0, 3600)],             // fire_resistance
+    &[(11, 0, 9600)],             // long_fire_resistance
+    &[(0, 0, 3600)],              // swiftness
+    &[(0, 0, 9600)],              // long_swiftness
+    &[(0, 1, 1800)],              // strong_swiftness
+    &[(1, 0, 1800)],              // slowness
+    &[(1, 0, 4800)],              // long_slowness
+    &[(1, 3, 400)],               // strong_slowness
+    &[(1, 3, 400), (10, 2, 400)], // turtle_master
+    &[(1, 3, 800), (10, 2, 800)], // long_turtle_master
+    &[(1, 5, 400), (10, 3, 400)], // strong_turtle_master
+    &[(12, 0, 3600)],             // water_breathing
+    &[(12, 0, 9600)],             // long_water_breathing
+    &[(5, 0, 1)],                 // healing
+    &[(5, 1, 1)],                 // strong_healing
+    &[(6, 0, 1)],                 // harming
+    &[(6, 1, 1)],                 // strong_harming
+    &[(18, 0, 900)],              // poison
+    &[(18, 0, 1800)],             // long_poison
+    &[(18, 1, 432)],              // strong_poison
+    &[(9, 0, 900)],               // regeneration
+    &[(9, 0, 1800)],              // long_regeneration
+    &[(9, 1, 450)],               // strong_regeneration
+    &[(4, 0, 3600)],              // strength
+    &[(4, 0, 9600)],              // long_strength
+    &[(4, 1, 1800)],              // strong_strength
+    &[(17, 0, 1800)],             // weakness
+    &[(17, 0, 4800)],             // long_weakness
+    &[(25, 0, 6000)],             // luck
+    &[(27, 0, 1800)],             // slow_falling
+    &[(27, 0, 4800)],             // long_slow_falling
+    &[(35, 0, 3600)],             // wind_charged
+    &[(36, 0, 3600)],             // weaving
+    &[(37, 0, 3600)],             // oozing
+    &[(38, 0, 3600)],             // infested
 ];
