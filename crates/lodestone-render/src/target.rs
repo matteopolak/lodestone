@@ -266,6 +266,27 @@ impl RenderTarget for HeadlessTarget {
 pub struct SurfaceTarget<'window> {
     surface: wgpu::Surface<'window>,
     config: wgpu::SurfaceConfiguration,
+    /// The format every acquired [`AcquiredFrame::view`] is created with, and
+    /// the format [`RenderTarget::format`] reports for pipeline construction.
+    ///
+    /// Equal to `config.format` on native (Metal/Vulkan/DX12): wgpu-core's
+    /// `surface_get_capabilities` sorts sRGB formats first
+    /// (`sort_by_key(|fc| !fc.format.is_srgb())`), so `get_default_config`'s
+    /// `formats[0]` is already an `*UnormSrgb` variant there.
+    ///
+    /// On the WebGPU backend this **must** differ from `config.format`: the
+    /// browser canvas API only ever accepts `Rgba8Unorm`/`Bgra8Unorm`/
+    /// `Rgba16Float` as a canvas format (see `wgpu`'s `WebSurface::get_capabilities`,
+    /// which never lists an `*UnormSrgb` entry at all — there is structurally no
+    /// sRGB canvas format to pick), so `config.format` is always non-sRGB there.
+    /// [`SurfaceTarget::new`] compensates by reinterpreting the swapchain
+    /// texture through an sRGB *view* (via `config.view_formats`), which is the
+    /// mechanism the WebGPU spec provides for exactly this. Without it, the
+    /// terrain/GUI shaders' linear output reaches the browser's compositor with
+    /// no EOTF applied, and the whole presentation — world and every menu quad
+    /// alike, since both go through this one swapchain — comes out uniformly
+    /// darker than native.
+    view_format: wgpu::TextureFormat,
     /// The present mode `get_default_config` chose for this adapter/surface,
     /// kept so [`Self::set_present_mode`] can restore *exactly* what we started
     /// with rather than a mode that merely sounds equivalent.
@@ -276,6 +297,28 @@ pub struct SurfaceTarget<'window> {
     /// name instead of by remembered value would quietly change the default
     /// presentation of every platform that has `FifoRelaxed`.
     default_present_mode: wgpu::PresentMode,
+}
+
+/// Decide the view format an acquired swapchain frame should be created with,
+/// given the format `get_default_config` chose for `configure`.
+///
+/// Returns `None` when `configured` is already sRGB (the native case — no
+/// override needed, `config.view_formats` stays empty and the view is created
+/// with `configured` directly). Returns `Some(srgb)` when `configured` has a
+/// distinct sRGB counterpart (the WebGPU case — `configured` is always
+/// `Rgba8Unorm`/`Bgra8Unorm`, since the browser canvas API has no sRGB format
+/// to offer `get_default_config` in the first place).
+///
+/// Pure and wgpu-device-free on purpose: this is the seam a test can drive
+/// with a capability list shaped like each backend's, without standing up a
+/// real surface.
+#[must_use]
+fn choose_view_format(configured: wgpu::TextureFormat) -> Option<wgpu::TextureFormat> {
+    if configured.is_srgb() {
+        return None;
+    }
+    let srgb = configured.add_srgb_suffix();
+    (srgb != configured).then_some(srgb)
 }
 
 impl<'window> SurfaceTarget<'window> {
@@ -301,10 +344,19 @@ impl<'window> SurfaceTarget<'window> {
         // `resize`) re-applies *this* `config`, so the flag survives a resize and
         // a surface-lost recovery without a second edit.
         config.usage |= wgpu::TextureUsages::COPY_SRC;
+        // See `Self::view_format`'s doc: on the WebGPU backend `config.format`
+        // is always non-sRGB, so ask the browser to let us reinterpret the
+        // swapchain texture through an sRGB view. `view_formats` must be
+        // declared up front for `configure` to permit it at `create_view` time.
+        let view_format = choose_view_format(config.format);
+        if let Some(srgb) = view_format {
+            config.view_formats = vec![srgb];
+        }
         surface.configure(device, &config);
         let default_present_mode = config.present_mode;
         Some(Self {
             surface,
+            view_format: view_format.unwrap_or(config.format),
             config,
             default_present_mode,
         })
@@ -352,7 +404,7 @@ impl<'window> SurfaceTarget<'window> {
 
 impl RenderTarget for SurfaceTarget<'_> {
     fn format(&self) -> wgpu::TextureFormat {
-        self.config.format
+        self.view_format
     }
 
     fn size(&self) -> (u32, u32) {
@@ -374,8 +426,8 @@ impl RenderTarget for SurfaceTarget<'_> {
 
     fn acquire(&mut self) -> Result<AcquiredFrame, TargetError> {
         match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) => Ok(Self::frame(t, false)),
-            wgpu::CurrentSurfaceTexture::Suboptimal(t) => Ok(Self::frame(t, true)),
+            wgpu::CurrentSurfaceTexture::Success(t) => Ok(Self::frame(t, false, self.view_format)),
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => Ok(Self::frame(t, true, self.view_format)),
             wgpu::CurrentSurfaceTexture::Timeout => Err(TargetError::Timeout),
             wgpu::CurrentSurfaceTexture::Occluded => Err(TargetError::Occluded),
             wgpu::CurrentSurfaceTexture::Outdated => Err(TargetError::Outdated),
@@ -386,10 +438,15 @@ impl RenderTarget for SurfaceTarget<'_> {
 }
 
 impl SurfaceTarget<'_> {
-    fn frame(texture: wgpu::SurfaceTexture, suboptimal: bool) -> AcquiredFrame {
-        let view = texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+    fn frame(
+        texture: wgpu::SurfaceTexture,
+        suboptimal: bool,
+        view_format: wgpu::TextureFormat,
+    ) -> AcquiredFrame {
+        let view = texture.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(view_format),
+            ..Default::default()
+        });
         AcquiredFrame {
             view,
             suboptimal,
@@ -401,6 +458,54 @@ impl SurfaceTarget<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Format-decision gate for the "everything is darker on wasm" defect.
+    ///
+    /// `wgpu`'s `WebSurface::get_capabilities` (the WebGPU backend, used on
+    /// wasm32) never lists an `*UnormSrgb` format at all -- the browser canvas
+    /// API only accepts `Rgba8Unorm`/`Bgra8Unorm`/`Rgba16Float`, so
+    /// `get_default_config`'s `formats[0]` is unconditionally non-sRGB there.
+    /// This asserts the decision `SurfaceTarget::new` makes given that input:
+    /// it must select an sRGB *view* format rather than silently presenting
+    /// linear colour, which is what made the terrain/GUI shaders' linear
+    /// output reach the compositor with no EOTF applied and the whole frame
+    /// -- menus included, since every menu quad goes through this same
+    /// swapchain -- come out darker than native.
+    #[test]
+    fn web_backend_non_srgb_swapchain_gets_an_srgb_view_format() {
+        for configured in [wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureFormat::Bgra8Unorm] {
+            let got = choose_view_format(configured);
+            let want = Some(configured.add_srgb_suffix());
+            assert_eq!(
+                got, want,
+                "web-shaped input {configured:?}: expected view format override {want:?}, got {got:?}"
+            );
+            assert!(
+                got.is_some_and(|f| f.is_srgb()),
+                "view format override for {configured:?} must actually be sRGB, got {got:?}"
+            );
+        }
+    }
+
+    /// Companion arm: on native (Metal/Vulkan/DX12), wgpu-core's
+    /// `surface_get_capabilities` sorts sRGB formats first
+    /// (`sort_by_key(|fc| !fc.format.is_srgb())`), so `get_default_config`
+    /// already hands `SurfaceTarget::new` an sRGB format. No view override is
+    /// needed or should be applied -- confirming the fix is a wasm-only
+    /// correction, not a blanket behaviour change that could regress native.
+    #[test]
+    fn native_srgb_swapchain_needs_no_view_format_override() {
+        for configured in [
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ] {
+            assert_eq!(
+                choose_view_format(configured),
+                None,
+                "native-shaped input {configured:?} must not get a view format override"
+            );
+        }
+    }
 
     #[test]
     fn target_error_classification() {

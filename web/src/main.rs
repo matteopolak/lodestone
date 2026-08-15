@@ -46,8 +46,13 @@ use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{Response, window};
 
 /// The renderable corpus: blockstates, models, textures, lang, fonts, GUI sprites,
-/// panorama, sounds index. Copied into `dist/` by trunk from the local
-/// `.cache/mc/26.2` — see `index.html`, and `web/README.md` for how to populate it.
+/// sounds index. Copied into `dist/` by trunk from the local `.cache/mc/26.2` —
+/// see `index.html`, and `web/README.md` for how to populate it.
+///
+/// **Does not carry the real title-screen panorama.** `client.jar` ships only a
+/// 1×1 grey stub for each of the six panorama faces — the real 1024×1024 art is a
+/// separate, content-addressed asset-object, fetched (best-effort) by
+/// [`fetch_panorama_faces`] instead.
 const CLIENT_JAR_URL: &str = "client.jar";
 
 /// The block-state id table the atlas and the model baker are built against. Mojang's
@@ -103,7 +108,55 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(js_sys::Uint8Array::new(&buf).to_vec())
 }
 
-/// Fetch both blobs and install them as the session's asset bundle.
+/// Best-effort fetch of the real (non-stub) title-screen panorama faces.
+///
+/// `client.jar` ships only a 69-byte 1×1 grey stub for each of the six panorama
+/// faces — the real 1024×1024 art is a *separate* asset-object, content-addressed
+/// and not part of the jar at all (see
+/// `crates/lodestone-shell/src/asset_objects.rs`'s module doc for the measurement
+/// and the eight-name scope this applies to). `web/Trunk.toml`'s `post_build` hook
+/// resolves those six objects out of a local `.cache/mc/<version>` asset-object
+/// store, when one is populated, and stages them beside the page as flat
+/// `panorama_0.png`..`panorama_5.png` — plain filenames, since a browser has no
+/// use for the store's hash-addressed path scheme.
+///
+/// **Unlike `client.jar`/`blocks.json`, a missing face here is not fatal.** Those
+/// two have no fallback and `install_assets` still bails hard on either; the
+/// panorama already has one per face (the jar's own stub), wired through
+/// `crate::resources::load_panorama`'s `WasmObjectBytes` path, so this simply
+/// fetches whichever of the six respond with 200 and leaves the rest for that
+/// fallback to cover. A checkout with no populated `.cache/mc` therefore still
+/// boots to a title screen — just a flat-grey one, exactly as a native run
+/// outside a populated store already does.
+async fn fetch_panorama_faces() -> Vec<(String, Vec<u8>)> {
+    let mut faces = Vec::with_capacity(6);
+    for n in 0..6 {
+        match fetch_bytes(&format!("panorama_{n}.png")).await {
+            Ok(bytes) => {
+                log::info!("[boot] panorama face {n}: {} B", bytes.len());
+                // The asset-index name `panorama::face_index_key` produces for
+                // whichever layer this suffix maps to — see `FACE_SUFFIXES`. The
+                // *number* here is vanilla's file suffix, not the cubemap layer
+                // index, so this must build the same string the index uses
+                // rather than re-deriving a layer order.
+                faces.push((
+                    format!("minecraft/textures/gui/title/background/panorama_{n}.png"),
+                    bytes,
+                ));
+            }
+            Err(e) => {
+                log::info!(
+                    "[boot] panorama face {n} not staged ({e}); falling back to \
+                     client.jar's 1x1 stub for it"
+                );
+            }
+        }
+    }
+    faces
+}
+
+/// Fetch the required blobs and the optional panorama faces, and install them
+/// all as the session's asset bundle.
 async fn install_assets() -> Result<(), String> {
     status("fetching client.jar …");
     let client_jar = fetch_bytes(CLIENT_JAR_URL).await?;
@@ -112,14 +165,22 @@ async fn install_assets() -> Result<(), String> {
         client_jar.len() as f64 / (1024.0 * 1024.0)
     ));
     let blocks_report = fetch_bytes(BLOCKS_REPORT_URL).await?;
-    let sizes = format!(
-        "assets ready: client.jar {:.1} MiB, blocks.json {:.1} MiB",
+    status(&format!(
+        "client.jar {:.1} MiB, blocks.json {:.1} MiB — fetching panorama …",
         client_jar.len() as f64 / (1024.0 * 1024.0),
         blocks_report.len() as f64 / (1024.0 * 1024.0),
+    ));
+    let panorama = fetch_panorama_faces().await;
+    let sizes = format!(
+        "assets ready: client.jar {:.1} MiB, blocks.json {:.1} MiB, panorama {}/6 faces",
+        client_jar.len() as f64 / (1024.0 * 1024.0),
+        blocks_report.len() as f64 / (1024.0 * 1024.0),
+        panorama.len(),
     );
     lodestone::platform::assets::install(lodestone::platform::assets::Bundle {
         client_jar,
         blocks_report,
+        panorama,
     })?;
     status(&sizes);
     Ok(())

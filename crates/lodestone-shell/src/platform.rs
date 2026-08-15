@@ -194,13 +194,32 @@ pub mod assets {
     /// disk, in the same roles: the jar is the `ResourceSource` (textures, models,
     /// blockstates, lang), and the report is the block-state id table the atlas and
     /// the model baker are built against.
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub struct Bundle {
         /// `client.jar` — the renderable corpus, consumed by `ZipSource::from_bytes`.
         pub client_jar: Vec<u8>,
         /// `generated/reports/blocks.json`, consumed by
         /// `BlocksJsonRegistry::from_slice`.
         pub blocks_report: Vec<u8>,
+        /// The handful of `client.jar`-shadowed asset-object bytes `web/` could
+        /// fetch and stage — today just whichever of the six real title-screen
+        /// panorama faces `web/Trunk.toml`'s `post_build` hook resolved out of a
+        /// local `.cache/mc/<version>` asset-object store, if any.
+        ///
+        /// Keyed by the same asset-index name
+        /// `crate::menu::panorama::face_index_key` produces (no `assets/`
+        /// prefix), so `crate::resources`'s wasm32 `load_panorama` arm can hand
+        /// this straight to `crate::menu::panorama::load` as an
+        /// [`crate::asset_objects::ObjectBytesSource`] with no translation.
+        ///
+        /// **Empty, not missing, is the expected default.** Native has a real
+        /// `AssetObjectStore` to fall back to; a browser has neither that nor a
+        /// filesystem, so an empty vec here is not an error — `panorama::load`
+        /// already falls back to `client.jar`'s 1×1 grey stub per face, exactly
+        /// as a native run with no populated store does. Any subset (not just
+        /// all-six-or-nothing) is honoured: `web/Trunk.toml`'s hook stages
+        /// per-face and reports which resolved.
+        pub panorama: Vec<(String, Vec<u8>)>,
     }
 
     static BUNDLE: OnceLock<Bundle> = OnceLock::new();
@@ -311,5 +330,136 @@ pub mod clipboard {
         wasm_bindgen_futures::spawn_local(async move {
             let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
         });
+    }
+}
+
+/// The relay's WebSocket URL, and a wasm32 sleep with no timer driver behind it.
+///
+/// # What it is
+///
+/// Two small primitives a browser-only relay ping needs and a native build does
+/// not: where to dial the relay, and how to bound a wait for its answer.
+///
+/// # How it works
+///
+/// [`relay_ws_url`] used to be a second thing entirely — `web/src/main.rs`
+/// hardcoded `ws://127.0.0.1:25580`, a literal a contributor had to remember to
+/// change in lockstep with the justfile's `relay_defaults` `--listen` flag. That
+/// constant is gone; `web/Trunk.toml` now proxies the fixed path `/relay` on the
+/// page's own origin through to the relay's real listener (`[[proxies]]`, `ws =
+/// true`), so the browser never needs a second port at all. [`relay_ws_url_from`]
+/// is the pure half — scheme-and-host in, URL out — kept separate from
+/// [`relay_ws_url`] specifically so it has a real native unit test; reading
+/// `window.location` is not a unit worth testing, string formatting is.
+///
+/// **This only resolves to something with `trunk serve` running.** A deployed,
+/// pre-built `dist/` has no trunk process behind it, so `/relay` 404s or refuses
+/// the WebSocket upgrade outright — see `web/README.md`'s "Deployed builds" note.
+/// The URL this returns is still well-formed there; there is simply nothing
+/// listening on the far end unless the deployment's own reverse proxy adds an
+/// equivalent forward.
+///
+/// [`sleep`] exists because `tokio::time::timeout` does not merely fail to fire
+/// on `wasm32`, it hangs on its *first poll* — there is no entered runtime and so
+/// no timer driver behind its deadline computation (measured while diagnosing an
+/// unrelated wasm32 join stall; see `net.rs`'s `run_async` for the full writeup).
+/// A relay ping still needs a real deadline — an unreachable relay must fail
+/// visibly rather than leave a server-list row `Pending` forever — so this builds
+/// one out of a JS `setTimeout`, which *is* backed by a real timer (the
+/// browser's), and resolves the returned future from that callback. Race it
+/// against the real work with `tokio::select!`, which needs no driver of its own
+/// beyond polling whichever future's waker fires first.
+///
+/// # How to change it
+///
+/// If a second wasm-only caller needs a deadline, reuse [`sleep`] rather than a
+/// second `set_timeout` callsite — `wasm_bindgen::closure::Closure` construction
+/// is easy to get subtly wrong (see `ws_web.rs`'s comment on the `WebSocket`
+/// `error` event for one way it already has).
+pub mod relay {
+    /// Builds a relay WebSocket URL from an origin's scheme and host, appending
+    /// the fixed `/relay` path `web/Trunk.toml`'s proxy listens on.
+    ///
+    /// **Deliberately not `cfg`-gated to `wasm32`, unlike the rest of this
+    /// module** — it touches no `web_sys`, so it compiles and runs on every
+    /// target, which is what gives it a real native `cargo test` (see the
+    /// module doc: reading `window.location` is not a unit worth testing,
+    /// string formatting is).
+    #[must_use]
+    pub fn relay_ws_url_from(https: bool, host: &str) -> String {
+        let scheme = if https { "wss:" } else { "ws:" };
+        format!("{scheme}//{host}/relay")
+    }
+
+    /// [`relay_ws_url_from`], reading the page's own scheme and host off
+    /// `window.location`. Falls back to `127.0.0.1:8080` — `just run-wasm`'s
+    /// default — if there is somehow no `Window` (there always is one in the
+    /// browser build this compiles for).
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub fn relay_ws_url() -> String {
+        let Some(window) = web_sys::window() else {
+            return relay_ws_url_from(false, "127.0.0.1:8080");
+        };
+        let location = window.location();
+        let https = location.protocol().is_ok_and(|p| p == "https:");
+        let host = location.host().unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+        relay_ws_url_from(https, &host)
+    }
+
+    /// Resolves after `duration`, via a JS `setTimeout` rather than
+    /// `tokio::time::timeout` — see the module doc for why the latter cannot be
+    /// used here at all (it hangs, it does not merely fail to fire).
+    #[cfg(target_arch = "wasm32")]
+    pub async fn sleep(duration: std::time::Duration) {
+        let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+            // A missed `set_timeout` call (the only failure mode here — an
+            // exhausted timer-id space or similar) leaves `resolve` uncalled,
+            // which means this future never completes rather than completing
+            // early. That is the safe direction: a ping that never times out
+            // degrades to "still pending", not to "reported success it never
+            // had".
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis);
+        });
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::relay_ws_url_from;
+
+        // Predicted values, not a round-trip through the function under test —
+        // `decode(encode(x)) == x` would prove nothing about the scheme mapping.
+        #[test]
+        fn http_origin_maps_to_plain_ws() {
+            assert_eq!(
+                relay_ws_url_from(false, "127.0.0.1:8080"),
+                "ws://127.0.0.1:8080/relay"
+            );
+        }
+
+        #[test]
+        fn https_origin_maps_to_wss() {
+            assert_eq!(
+                relay_ws_url_from(true, "example.com"),
+                "wss://example.com/relay"
+            );
+        }
+
+        #[test]
+        fn host_carries_a_nonstandard_port_verbatim() {
+            // The discriminating case: a fixture where scheme and host are both
+            // pairwise-distinct from the other tests', so a transposed
+            // scheme/host argument order would fail rather than coincidentally
+            // pass.
+            assert_eq!(
+                relay_ws_url_from(false, "lodestone.example:9001"),
+                "ws://lodestone.example:9001/relay"
+            );
+        }
     }
 }

@@ -383,7 +383,22 @@ In rough dependency order.
 2. **Bundle size.** Measured and attributed; see [Bundle size](#bundle-size). Its cause
    is generated static tables, which is a whole-project question rather than a wasm one,
    so it is deliberately not being acted on here.
-3. **The panorama** does not draw. Cosmetic next to a playable world.
+3. ~~The panorama does not draw.~~ **Fixed.** `client.jar` only ever carried its
+   1×1 grey stub for each face — the real 1024×1024 art is a separate,
+   content-addressed asset-object the jar routing fix above did not reach, since
+   `crate::asset_objects::AssetObjectStore` is plain `std::fs` with no wasm32
+   arm. `web/Trunk.toml`'s `post_build` hook now resolves those six objects out
+   of a local `.cache/mc/<version>` store at build time (via
+   `web/scripts/stage_panorama.py`) and stages them as flat `panorama_0.png`..
+   `panorama_5.png`; `web/src/main.rs`'s `fetch_panorama_faces` fetches whichever
+   exist (best-effort — a missing face is not fatal, it just falls back to the
+   jar stub as it always did) and `resources::load_panorama`'s wasm32 arm feeds
+   them to `menu::panorama::load` through a new `ObjectBytesSource` trait
+   (`crate::asset_objects::ObjectBytesSource`), the seam that lets a
+   filesystem-free build hand in pre-fetched bytes where native hands in a real
+   `AssetObjectStore`. Verified live: `loaded the title-screen panorama cubemap
+   from the asset-object store face=1024` in the browser console, and the
+   rotating night-sky panorama on screen instead of a flat backdrop.
 4. **Silent refusals.** `saves::create_world`'s browser refusal is now unreachable from
    the menu (the in-memory path replaced it), but the world-list screen still swallows a
    `set_error` without showing it on the path that produced one.
@@ -463,6 +478,29 @@ that is not the problem.
 * **`just check-seam`** (`cargo check -p lodestone-shell --no-default-features`) is
   the only thing proving the shell compiles with *no* protocol family, and a large
   `cfg` refactor is exactly what breaks it. Run it often.
+* **A green title screen is not evidence the *colour* is right.** The whole browser
+  presentation — world and every menu alike, since they share one swapchain — came
+  out uniformly darker than native. Root cause: `SurfaceTarget::new`
+  (`crates/lodestone-render/src/target.rs`) configures the swapchain from
+  `wgpu::Surface::get_default_config`, which just takes `get_capabilities().formats
+  [0]`. On native, wgpu-core's own `surface_get_capabilities` sorts sRGB formats
+  first, so `formats[0]` is already `Bgra8UnormSrgb` there. **The WebGPU backend's
+  `get_capabilities` never lists an sRGB format at all** — `wgpu`'s own
+  `WebSurface::get_capabilities` hardcodes `[Rgba8Unorm, Bgra8Unorm, (Rgba16Float)]`,
+  because a browser canvas structurally cannot be configured with an
+  `*UnormSrgb` format (verified live: `navigator.gpu.getPreferredCanvasFormat()`
+  reports `"bgra8unorm"` in this exact build). So the terrain/GUI shaders' linear
+  output reached the compositor with no EOTF applied, everywhere. Fixed by
+  reinterpreting the swapchain texture through an sRGB *view* — `config
+  .view_formats` plus an explicit format on every acquired frame's
+  `TextureViewDescriptor` — which is the mechanism the WebGPU spec provides for
+  exactly this; `SurfaceTarget::format()` now reports that view format rather than
+  the physical (always non-sRGB, on web) swapchain format, since that is what every
+  pipeline is built against. See `target.rs`'s `choose_view_format` and its two
+  format-decision tests (one shaped like each backend's capability ordering) —
+  pinning an exact composited byte is not reliable on this backend (see this
+  repo's rendering-constraints notes on `ALPHA_BLENDING`), so the gate asserts the
+  *decision*, not a pixel.
 
 ## What the record got wrong
 

@@ -230,6 +230,31 @@ impl AssetObjectStore {
     }
 }
 
+/// Anything that can resolve a jar-shadowed asset-object's bytes by its
+/// asset-index name (no `assets/` prefix) — the same key
+/// [`AssetObjectStore::object_bytes`] takes.
+///
+/// [`AssetObjectStore`] is the native implementor, over a real
+/// `std::fs`-backed store. It exists as a trait, rather than every caller
+/// taking `&AssetObjectStore` directly, because wasm32 has no filesystem to
+/// open a store over at all — `AssetObjectStore::open` needs a real root
+/// directory, and there is none in a browser. `crate::resources`' wasm32 arm
+/// implements this over a flat, pre-fetched `HashMap` instead (see
+/// `resources::WasmObjectBytes`), built from the handful of jar-shadowed
+/// files (currently just the six panorama faces) `web/` fetches and stages
+/// alongside `client.jar`. Every other caller is unaffected: this only
+/// widens what [`crate::menu::panorama::load`] accepts.
+pub trait ObjectBytesSource {
+    /// As [`AssetObjectStore::object_bytes`].
+    fn object_bytes(&self, key: &str) -> Option<Vec<u8>>;
+}
+
+impl ObjectBytesSource for AssetObjectStore {
+    fn object_bytes(&self, key: &str) -> Option<Vec<u8>> {
+        Self::object_bytes(self, key)
+    }
+}
+
 /// Environment variable naming the asset-object root directly (one holding
 /// `asset-index-*.json` and `objects/`, e.g. `.cache/mc/26.2`). Highest priority
 /// in [`discover_store_root`].

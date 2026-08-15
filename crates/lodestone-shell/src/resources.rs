@@ -1071,18 +1071,45 @@ pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
     }
 }
 
+/// An in-memory [`ObjectBytesSource`](crate::asset_objects::ObjectBytesSource)
+/// over whatever jar-shadowed asset-object bytes `web/` managed to fetch and
+/// install — see [`crate::platform::assets::Bundle::panorama`].
+///
+/// The wasm32 counterpart to [`crate::asset_objects::AssetObjectStore`]: there is
+/// no filesystem to open a real store over in a browser, so this wraps a flat
+/// `HashMap` built from whatever `(key, bytes)` pairs the bundle carries instead.
+/// An absent key (bundle empty, or that particular face didn't stage) reads as
+/// `None`, exactly as an unresolved store entry does — the caller,
+/// `crate::menu::panorama::load`, already treats that as "fall back to the jar
+/// stub for this face" with no wasm-specific branch of its own.
+#[cfg(target_arch = "wasm32")]
+struct WasmObjectBytes(std::collections::HashMap<String, Vec<u8>>);
+
+#[cfg(target_arch = "wasm32")]
+impl crate::asset_objects::ObjectBytesSource for WasmObjectBytes {
+    fn object_bytes(&self, key: &str) -> Option<Vec<u8>> {
+        self.0.get(key).cloned()
+    }
+}
+
 /// Load the title screen's panorama cubemap —
 /// `textures/gui/title/background/panorama_{0..5}.png`, decoded and stacked into
 /// cubemap layer order by [`crate::menu::panorama::load`].
 ///
 /// **This is the one loader here that must not read `client.jar` first.** The jar
 /// ships 69-byte 1×1 grey stubs for all six faces and the real 1024×1024 art
-/// comes from the launcher's asset-object store, so this opens an
-/// [`AssetObjectStore`](crate::asset_objects::AssetObjectStore) over the *same*
-/// root and hands it to `panorama::load`, which prefers it per face. A root with
-/// no populated store still loads — from the stubs, with a warning that says so —
-/// because a flat title screen beats a failed startup. `cargo run -p xtask --
-/// fetch-assets --version <v>` is what populates it.
+/// comes from the launcher's asset-object store. Native opens an
+/// [`AssetObjectStore`](crate::asset_objects::AssetObjectStore) over the on-disk
+/// root and hands it to `panorama::load`, which prefers it per face; wasm32 has
+/// no filesystem to open one over, so it hands in a [`WasmObjectBytes`] built
+/// from whatever `web/` fetched instead (see
+/// [`crate::platform::assets::Bundle::panorama`]) — `web/Trunk.toml`'s
+/// `post_build` hook is what populates *that*, resolved from the very same
+/// `.cache/mc/<version>` store a native run reads directly. Either way, a root
+/// (or bundle) with no populated store still loads — from the stubs, with a
+/// warning that says so — because a flat title screen beats a failed startup.
+/// `cargo run -p xtask -- fetch-assets --version <v>` is what populates the
+/// on-disk store both routes ultimately read from.
 ///
 /// Same fail-open contract as every other loader here otherwise: `None` on a
 /// jar-less run, a missing face, or faces that disagree in size, which leaves the
@@ -1095,15 +1122,12 @@ pub fn load_panorama() -> Option<Arc<crate::menu::panorama::PanoramaFaces>> {
     let manager = open_vanilla_pack_stack()?;
     // Absent or unreadable is not fatal: `panorama::load` falls back to the jar
     // per face and reports how many faces it actually got from the store.
-    // `asset_root` is plain `std::fs` and always `None` in a browser (there is
-    // no on-disk store there), which is exactly the "no store" case a native
-    // run outside a populated `.cache/mc` already falls back from — so this
-    // must not bail the whole function the way it used to when it re-derived
-    // `root` from `asset_root()?` up front instead of through
-    // `open_vanilla_pack_stack`.
-    let objects = asset_root().and_then(|root| {
-        match crate::asset_objects::AssetObjectStore::open(&root) {
-            Ok(store) => Some(store),
+    #[cfg(not(target_arch = "wasm32"))]
+    let objects: Option<Box<dyn crate::asset_objects::ObjectBytesSource>> = asset_root()
+        .and_then(|root| match crate::asset_objects::AssetObjectStore::open(&root) {
+            Ok(store) => {
+                Some(Box::new(store) as Box<dyn crate::asset_objects::ObjectBytesSource>)
+            }
             Err(e) => {
                 tracing::warn!(
                     target: "assets",
@@ -1113,9 +1137,29 @@ pub fn load_panorama() -> Option<Arc<crate::menu::panorama::PanoramaFaces>> {
                 );
                 None
             }
-        }
-    });
-    match crate::menu::panorama::load(&manager, objects.as_ref()) {
+        });
+    // `asset_root` is plain `std::fs` and always `None` in a browser (there is
+    // no on-disk store there) — `WasmObjectBytes` is the wasm32 substitute,
+    // built from whatever `web/`'s fetch actually landed.
+    #[cfg(target_arch = "wasm32")]
+    let objects: Option<Box<dyn crate::asset_objects::ObjectBytesSource>> =
+        crate::platform::assets::bundle().and_then(|bundle| {
+            if bundle.panorama.is_empty() {
+                tracing::warn!(
+                    target: "assets",
+                    "no panorama faces staged for the browser build — the panorama will \
+                     fall back to client.jar's 1x1 stub faces, which render a flat grey \
+                     sky. Run: cargo run -p xtask -- fetch-assets --version <version>, \
+                     then rebuild with `just run-wasm` so web/Trunk.toml's post_build \
+                     hook can stage them"
+                );
+                None
+            } else {
+                Some(Box::new(WasmObjectBytes(bundle.panorama.iter().cloned().collect()))
+                    as Box<dyn crate::asset_objects::ObjectBytesSource>)
+            }
+        });
+    match crate::menu::panorama::load(&manager, objects.as_deref()) {
         Ok(faces) => {
             if faces.is_real_art() {
                 tracing::info!(

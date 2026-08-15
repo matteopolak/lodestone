@@ -420,13 +420,18 @@ pub fn face_jar_path(layer: usize) -> String {
 /// that cares must read it, because the two are visually indistinguishable from
 /// "it drew something".
 ///
+/// `objects` is a trait object rather than a concrete
+/// [`AssetObjectStore`](crate::asset_objects::AssetObjectStore) so a caller with
+/// no filesystem (wasm32) can hand in a pre-fetched, in-memory source instead —
+/// see [`crate::asset_objects::ObjectBytesSource`].
+///
 /// # Errors
 ///
 /// Returns a message naming the face that is in neither source or fails to
 /// decode, or [`assemble`]'s error.
 pub fn load(
     manager: &lodestone_assets::ResourceManager,
-    objects: Option<&crate::asset_objects::AssetObjectStore>,
+    objects: Option<&dyn crate::asset_objects::ObjectBytesSource>,
 ) -> Result<PanoramaFaces, String> {
     let mut decoded = Vec::with_capacity(6);
     let mut from_store = 0usize;

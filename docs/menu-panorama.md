@@ -212,12 +212,28 @@ z here. The x/y rows are identical.
 
 ### Where the bytes come from
 
-`resources::load_panorama` opens **two** sources over one root: the jar (for the
-fallback) and an
-[`AssetObjectStore`](../crates/lodestone-shell/src/asset_objects.rs) (for the real
-faces). `panorama::load` prefers the store per face and counts how many it got,
-which lands in `PanoramaFaces::from_object_store` and is surfaced as
+`resources::load_panorama` opens **two** sources: the jar (for the fallback) and,
+for the real faces, whatever implements
+[`ObjectBytesSource`](../crates/lodestone-shell/src/asset_objects.rs). Native's
+implementor is a real
+[`AssetObjectStore`](../crates/lodestone-shell/src/asset_objects.rs) opened over
+the on-disk root. `panorama::load` prefers it per face and counts how many it
+got, which lands in `PanoramaFaces::from_object_store` and is surfaced as
 `MenuRenderer::panorama_faces_from_object_store()`.
+
+**wasm32 has no filesystem to open a store over, so it is a different
+implementor, not a different code path in `panorama::load` itself.**
+`resources.rs`'s wasm32 arm wraps a `HashMap<String, Vec<u8>>` (`WasmObjectBytes`)
+built from `platform::assets::Bundle::panorama` — `(key, bytes)` pairs `web/`
+fetched at boot. Those bytes exist on the page only because `web/Trunk.toml`'s
+`post_build` hook runs `web/scripts/stage_panorama.py`, which resolves the same
+six asset-index names out of a local `.cache/mc/<version>` store at *build* time
+and stages them as flat `panorama_0.png`..`panorama_5.png` beside the page;
+`web/src/main.rs`'s `fetch_panorama_faces` then fetches whichever exist,
+best-effort, one face missing or all six. Before this, the object-store half of
+this section simply had no wasm32 arm at all, so the browser always drew the
+jar's flat grey stub regardless of what was in `.cache/mc` — `panorama_attached()`
+was `true` but `panorama_faces_from_object_store()` was always `0`.
 
 **6 means the real art; 0 means six jar stubs and a flat sky.** A gate that means
 to measure the real panorama must assert that count — `panorama_attached()` is not
