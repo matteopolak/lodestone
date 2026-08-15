@@ -71,38 +71,71 @@ fn attack_runs_the_full_armour_reduction_pipeline_with_the_live_verified_number(
     assert!(!outcome.killed);
 }
 
-/// **Control**: `knockback_power <= 0.0` (the real production value for a
-/// non-sprinting bare-handed attacker — see `crate::server::apply_attack`'s
-/// own doc comment) must leave velocity completely untouched, not merely
-/// "small". Proves the knockback branch is actually gated on `power`, not
-/// firing unconditionally with a near-zero result.
+/// **Control**: no damage landing (the i-frame case — a weaker follow-up hit
+/// inside the invulnerability window) must leave velocity completely
+/// untouched. Proves the knockback branch is gated on the hit actually
+/// dealing damage, not firing unconditionally.
+///
+/// A bare `knockback_power <= 0.0` is deliberately **not** this control any
+/// more: vanilla's `LivingEntity.dealDefaultKnockback` applies a flat `0.4`
+/// knockback to every damaging hit regardless of the attacker's own
+/// `attack_knockback` attribute, so a non-sprinting punch —
+/// `knockback_power == 0.0` in
+/// `crate::server::apply_attack`'s own vocabulary — still knocks the target
+/// back. See `MobSim::attack`'s own doc comment for the two-call model this
+/// pins.
 #[test]
-fn zero_knockback_power_leaves_velocity_exactly_unchanged() {
+fn no_damage_dealt_leaves_velocity_exactly_unchanged() {
     let world = empty_world();
     let mut sim = MobSim::new(&world);
-    let id = spawn_plain_mob(&mut sim, Vec3::new(2.0, 0.0, 0.0));
-    let before = sim.get(id).expect("present").velocity();
+    let id = spawn_plain_mob(&mut sim, Vec3::new(0.0, 0.0, 0.0));
+    sim.get_mut(id).expect("just spawned").set_defenses(Defenses::default());
 
-    let outcome = sim
-        .attack(id, Vec3::new(0.0, 0.0, 0.0), 1.0, DamageFlags::default(), 0.0)
+    // First hit lands and knocks back, establishing a non-zero velocity so
+    // the control below is "unchanged from something", not "unchanged from
+    // zero" (which a knockback bug that merely no-ops could satisfy by
+    // accident).
+    sim.attack(id, Vec3::new(-1.0, 0.0, 0.0), 8.0, DamageFlags::default(), 0.0)
         .expect("id is live");
+    let before = sim.get(id).expect("present").velocity();
+    assert_ne!(before, Vec3::new(0.0, 0.0, 0.0), "precondition: the first hit must have knocked back");
+
+    // Second, weaker hit inside the 20-tick i-frame window: `damage_dealt`
+    // must be `0.0` (pinned separately by
+    // `a_weaker_followup_hit_inside_the_iframe_window_is_ignored`), so no
+    // knockback of either kind should apply.
+    let outcome = sim
+        .attack(id, Vec3::new(-1.0, 0.0, 0.0), 5.0, DamageFlags::default(), 0.0)
+        .expect("id is live");
+    assert_eq!(outcome.damage_dealt, 0.0, "precondition: the follow-up must be swallowed by i-frames");
 
     assert_eq!(outcome.velocity, before);
     assert_eq!(sim.get(id).expect("present").velocity(), before);
 }
 
-/// A positive knockback power (the sprint-attack case,
-/// `SPRINT_ATTACK_KNOCKBACK_POWER = 0.5`) produces the **exact** predicted
-/// velocity — hand-derived from `knockback_impulse`'s own formula
-/// (`LivingEntity.java:1641-1658`), the identical arithmetic
-/// `lodestone-physics/src/knockback.rs`'s own known-answer tests use, not
-/// re-derived intuition:
+/// A landed hit produces the **exact** predicted velocity — hand-derived from
+/// `knockback_impulse`'s own formula (`LivingEntity.knockback`), applied
+/// **twice** and chained (vanilla's own `dealDefaultKnockback` then
+/// `causeExtraKnockback`, two independent `LivingEntity.knockback` calls —
+/// see `MobSim::attack`'s own doc comment), not re-derived intuition:
 ///
-/// attacker at (0,0,0), target at (1,0,0) so `(dx, dz) = (1, 0)`; velocity
-/// starts at zero; `knockback_resistance = 0.0` (generic default); grounded.
-/// `dir = normalize(1,0,0) = (1,0,0)`, `deltaVector = dir * 0.5 = (0.5,0,0)`.
-/// `y' = min(0/2 + 0.5, 0.4) = 0.4` (the grounded cap). `x' = 0/2 - 0.5 =
-/// -0.5`. `z' = 0/2 - 0 = 0.0`.
+/// attacker at (0,0,0), target at (1,0,0), so the target-to-attacker vector
+/// is `(dx, dz) = (-1, 0)`; velocity starts at zero; `knockback_resistance =
+/// 0.0` (generic default); grounded; `knockback_power = 0.5` (the
+/// sprint-attack bonus).
+///
+/// Stage 1 (`MELEE_DEFAULT_KNOCKBACK_POWER = 0.4`, vanilla's mandatory
+/// per-hit knockback): `dir = normalize(-1,0) = (-1,0)`, `deltaVector = dir *
+/// 0.4 = (-0.4,0,0)`. `x' = 0/2 - (-0.4) = 0.4`. `y' = min(0/2 + 0.4, 0.4) =
+/// 0.4` (the grounded cap). `z' = 0/2 - 0 = 0.0`. `v1 = (0.4, 0.4, 0.0)`.
+///
+/// Stage 2 (the `0.5` sprint bonus, chained onto `v1`): `deltaVector = dir *
+/// 0.5 = (-0.5,0,0)`. `x' = 0.4/2 - (-0.5) = 0.7`. `y' = min(0.4/2 + 0.5,
+/// 0.4) = 0.4` (capped again). `z' = 0.0/2 - 0 = 0.0`. `v2 = (0.7, 0.4,
+/// 0.0)`.
+///
+/// The target (at `+x`, relative to an attacker at the origin) is pushed
+/// further in `+x` — away from the attacker, not toward it.
 #[test]
 fn positive_knockback_power_produces_the_exact_predicted_velocity() {
     let world = empty_world();
@@ -113,7 +146,7 @@ fn positive_knockback_power_produces_the_exact_predicted_velocity() {
         .attack(id, Vec3::new(0.0, 0.0, 0.0), 1.0, DamageFlags::default(), 0.5)
         .expect("id is live");
 
-    let expected = Vec3::new(-0.5, 0.4, 0.0);
+    let expected = Vec3::new(0.7, 0.4, 0.0);
     assert!(
         (outcome.velocity.x - expected.x).abs() < 1e-9
             && (outcome.velocity.y - expected.y).abs() < 1e-9
@@ -122,21 +155,50 @@ fn positive_knockback_power_produces_the_exact_predicted_velocity() {
         outcome.velocity
     );
 
-    // Cross-check against calling `knockback_impulse` directly with the same
-    // inputs — proves `MobSim::attack` is not silently diverging from the
-    // primitive it claims to call.
-    let direct = knockback_impulse(
+    // Cross-check against calling `knockback_impulse` directly, twice and
+    // chained, with the same inputs — proves `MobSim::attack` is not
+    // silently diverging from the primitive it claims to call.
+    let after_default = knockback_impulse(
         Vec3d { x: 0.0, y: 0.0, z: 0.0 },
         true,
-        0.5,
-        1.0,
+        0.4,
+        -1.0,
         0.0,
         0.0,
         || (1.0, 0.0),
     );
+    let direct = knockback_impulse(after_default, true, 0.5, -1.0, 0.0, 0.0, || (1.0, 0.0));
     assert!((outcome.velocity.x - direct.x).abs() < 1e-9);
     assert!((outcome.velocity.y - direct.y).abs() < 1e-9);
     assert!((outcome.velocity.z - direct.z).abs() < 1e-9);
+}
+
+/// A non-sprinting (`knockback_power == 0.0`) melee hit still knocks the
+/// target back — the exact regression #607 reported ("mobs dont take
+/// knockback if i punch them"). Only the mandatory `0.4` default fires;
+/// hand-derived the same way as the sprint case above, minus stage 2.
+///
+/// attacker at (0,0,0), target at (1,0,0): `(dx, dz) = (-1, 0)`. `dir =
+/// (-1,0)`. `deltaVector = dir * 0.4 = (-0.4,0,0)`. `x' = 0/2 - (-0.4) =
+/// 0.4`. `y' = min(0/2 + 0.4, 0.4) = 0.4`. `z' = 0.0`.
+#[test]
+fn a_non_sprinting_hit_still_applies_the_default_knockback() {
+    let world = empty_world();
+    let mut sim = MobSim::new(&world);
+    let id = spawn_plain_mob(&mut sim, Vec3::new(1.0, 0.0, 0.0));
+
+    let outcome = sim
+        .attack(id, Vec3::new(0.0, 0.0, 0.0), 1.0, DamageFlags::default(), 0.0)
+        .expect("id is live");
+
+    let expected = Vec3::new(0.4, 0.4, 0.0);
+    assert!(
+        (outcome.velocity.x - expected.x).abs() < 1e-9
+            && (outcome.velocity.y - expected.y).abs() < 1e-9
+            && (outcome.velocity.z - expected.z).abs() < 1e-9,
+        "expected {expected:?}, got {:?}",
+        outcome.velocity
+    );
 }
 
 /// A target's own `knockback_resistance` attribute fully cancels the
