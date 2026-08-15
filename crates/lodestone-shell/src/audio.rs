@@ -57,49 +57,83 @@
 //! [`ClientEvent::EntitySound`]: lodestone_client::ClientEvent::EntitySound
 //! [`NetUpdate`]: crate::net::NetUpdate
 
-//! ## Browser (`wasm32`) arm — and why it is an *uninhabited* type
+//! ## Browser (`wasm32`) arm — a real `ShellAudio`, not a stub
 //!
 //! This module used to be `#![cfg(not(target_arch = "wasm32"))]` in its entirety,
 //! which made `crate::audio` vanish on wasm and took thirteen call sites in
 //! `hud.rs`, `sim.rs`, `sim/audio.rs`, `sim/build.rs`, `app/menus.rs` and
-//! `app/redraw.rs` down with it — most of them naming nothing device-backed at all,
-//! just [`subtitles::SubtitleCaption`] and the pure `music`/`ambient` selection
-//! logic. Those three submodules are ordinary arithmetic and compile fine for a
-//! browser, so they now stay.
+//! `app/redraw.rs` down with it. Then [`ShellAudio`] became a `cfg` fork whose
+//! browser arm was an **uninhabited enum** — a deliberate compile-time "this
+//! cannot even appear to work" while nobody had built the device sink yet.
 //!
-//! What genuinely cannot exist there is the device: [`lodestone_sound::AudioEngine`]
-//! wraps a `cpal` sink and is `cfg`-gated out of the wasm build at its own crate.
-//! So [`ShellAudio`] is a **cfg fork**, and its browser arm is an *empty enum*:
+//! That device sink now exists. [`lodestone_sound::AudioEngine`] (native) wraps
+//! `cpal`, which is `cfg`-gated out of the wasm build at its own crate — so the
+//! two targets could never share that type — but everything `AudioEngine`
+//! wraps *around* `cpal` is device-free and already wasm-clean:
+//! [`lodestone_sound::SoundResolver`] (event → weighted pick → decode) and
+//! [`lodestone_audio::Mixer`] (spatialise → sum → interleaved stereo `f32`)
+//! carry no `cfg` gate at all. The browser arm below is exactly what this
+//! module's previous revision predicted: "an `AudioWorklet` feeding
+//! `lodestone-audio`'s mixer directly" — except the sink is a `ScriptProcessorNode`
+//! rather than an `AudioWorklet`. That substitution is deliberate, not a
+//! shortcut: an `AudioWorklet` processor runs its own wasm module instance on a
+//! **separate** audio-rendering thread, which needs a JS loader shim living
+//! beside the page (`web/`, off limits to this file) plus a
+//! `SharedArrayBuffer`/`Atomics` handoff across it — a second build artifact and
+//! a cross-origin-isolation header this crate cannot add on its own.
+//! `ScriptProcessorNode` runs its callback on the **main** thread instead, so it
+//! needs none of that: `web_sys::AudioContext` and a `Closure` are enough, both
+//! already ordinary dependencies of this crate's wasm32 target. The cost is
+//! real (main-thread audio callbacks can glitch under load, and the API is
+//! formally deprecated though universally implemented) and is exactly the "one
+//! turn, real but partial" trade this module's doc explicitly allows; migrating
+//! the callback to a genuine `AudioWorklet` later changes nothing about
+//! [`SoundResolver`](lodestone_sound::SoundResolver) or [`Mixer`] — only the
+//! sink.
 //!
-//! ```ignore
-//! pub enum ShellAudio {}   // no variants — no value of this type can exist
-//! ```
+//! ### What still has to come from outside this file
 //!
-//! Every method is still present so the shared call sites type-check, and every
-//! body is `match *self {}` — a total match over zero variants, which compiles to
-//! nothing and is *statically* unreachable. That is deliberately **not** a stub
-//! that silently does nothing: a stub can be reached and then quietly swallow every
-//! sound in the game, which is the invisible-island failure this repo keeps paying
-//! for. Here the type system guarantees the browser cannot even *appear* to have
-//! audio — `ShellAudio::from_env()` returns `None`, the exact path native already
-//! takes when there is no asset store or no output device, and every consumer
-//! already reads `Option<ShellAudio>`.
+//! The mixer and the resolver both need bytes: `sounds.json` and the `.ogg`
+//! corpus it indexes. A browser has no filesystem, so those bytes have to be
+//! fetched and staged by `web/` and handed in through
+//! [`crate::platform::assets::Bundle`]'s `sounds_json`/`sound_objects` fields —
+//! the same seam [`crate::menu::panorama`] already uses for the title-screen
+//! faces, extended here rather than duplicated. **Empty is the honest default**,
+//! exactly as an empty `panorama` bundle falls back to `client.jar`'s grey
+//! stub: `ShellAudio::from_env` degrades to `None` with a logged reason, never a
+//! stub that silently swallows sound. See that struct's field docs for the
+//! staging shape a `web/`-side change needs to provide, and this module's own
+//! `from_env` for the exact log lines a missing bundle, an empty `sounds.json`,
+//! or a zero-object corpus each produce.
 //!
-//! Browser audio, when someone builds it, wants an `AudioWorklet` feeding
-//! `lodestone-audio`'s mixer directly (that crate is already wasm-clean). It
-//! replaces the empty enum with a real one; nothing outside this file changes.
+//! ### The autoplay gate
+//!
+//! A browser refuses to start an `AudioContext` outside a real user gesture — an
+//! eagerly-created one begins `suspended` and stays that way with **no error**,
+//! the same failure shape this repo already measured for a gesture-less
+//! `request_pointer_lock()`. So [`ShellAudio::from_env`] never calls `resume()`;
+//! [`ShellAudio::resume_on_gesture`] is a separate, explicit call a real input
+//! handler makes, and [`ShellAudio::is_suspended`] makes the state observable
+//! rather than a silent skip. Wiring `resume_on_gesture` to the shell's actual
+//! click/keydown handling is outside this file's owned paths (`app/**`); see
+//! the brokered hunk this change reports.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+#[cfg(target_arch = "wasm32")]
+use std::{cell::RefCell, rc::Rc};
 
 use glam::Vec3;
-#[cfg(not(target_arch = "wasm32"))]
+// Both targets parse `sounds.json` the same way now: native reads it off the
+// asset-object store, wasm32 reads it out of `platform::assets::Bundle`.
 use lodestone_assets::sound::SoundRegistry;
 use lodestone_model::event::SoundCategory;
 use lodestone_render::Camera;
 #[cfg(not(target_arch = "wasm32"))]
 use lodestone_sound::AudioEngine;
 use lodestone_sound::music::{Music, MusicStart};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, closure::Closure};
 
 pub(crate) mod ambient;
 pub(crate) mod music;
@@ -108,7 +142,12 @@ pub(crate) mod subtitles;
 /// Wall-clock milliseconds for the caption clock — vanilla's `Util.getMillis()`,
 /// the same origin `gpu/glint.rs` and `app::recipe_toast_now_ms` use, so a caption
 /// ages against the same clock every other timed overlay does.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// Shared between both targets: `crate::platform::epoch_duration` is
+/// `lodestone_time::epoch_duration`, already portable (it is what closed the
+/// last of the five wasm32 clock traps), so this needs no `cfg` fork of its
+/// own — only the code that used to call `std::time::SystemTime::now()`
+/// directly did.
 fn caption_now_ms() -> u64 {
     crate::platform::epoch_duration().as_millis() as u64
 }
@@ -440,100 +479,500 @@ impl ShellAudio {
 
 
 // ---------------------------------------------------------------------------
-// Browser (`wasm32`) arm — see this module's docs for why it is uninhabited.
+// Browser (`wasm32`) arm — see this module's docs for the architecture.
 // ---------------------------------------------------------------------------
 
-/// The browser's `ShellAudio`: an **empty enum**, so no value of this type can
-/// ever exist.
-///
-/// [`Self::from_env`] returns `None`, which is the same path native takes when
-/// there is no asset store or no output device, so every `if let Some(audio)` in
-/// the shell simply never enters. The methods below exist only so those shared
-/// call sites type-check; each body is `match *self {}`, a total match over zero
-/// variants that the compiler proves unreachable and emits nothing for.
-///
-/// This is not a stub. A stub is a reachable value whose methods do nothing,
-/// which is how a subsystem comes to look wired while producing nothing — the
-/// island failure. An uninhabited type makes "browser audio silently pretends to
-/// work" a compile-time impossibility instead of a thing to remember.
+/// `ScriptProcessorNode` frames per `onaudioprocess` callback. A power of two
+/// in the WHATWG-mandated `[256, 16384]` range; `2048` at a typical `44100`/
+/// `48000` Hz context is ~43-46 ms of buffering — small enough that the
+/// listener/category-volume writes each frame (`Sim::set_audio_listener`,
+/// `Sim::set_sound_volumes`) reach the mixer promptly, large enough that the
+/// main-thread callback (JS event-loop cadence, not a realtime audio thread)
+/// is not woken absurdly often.
 #[cfg(target_arch = "wasm32")]
-#[derive(Debug)]
-pub enum ShellAudio {}
+const SCRIPT_PROCESSOR_BUFFER_FRAMES: u32 = 2048;
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// The browser session's live audio, or `None` before
+    /// [`ShellAudio::from_env`] installs one.
+    ///
+    /// A `thread_local`, not a field on [`ShellAudio`] — see that type's doc
+    /// for why: `bevy_ecs::Resource` (via `Component`) requires `Send + Sync`
+    /// unconditionally in this workspace's `bevy_ecs` build, `web_sys`/
+    /// `wasm_bindgen::closure::Closure` types are `!Send`/`!Sync` by design,
+    /// and this crate `deny`s `unsafe_code`, which rules out asserting
+    /// `Send`/`Sync` on a wrapper by hand. `wasm32-unknown-unknown` without
+    /// the `atomics` target feature is genuinely single-threaded, so a
+    /// `thread_local!` holding the real state, reached through a zero-sized,
+    /// trivially-`Send`-`Sync` `ShellAudio` handle, is sound without any
+    /// `unsafe` and needs no change to how `sim.rs` stores the `AudioEngine`
+    /// resource.
+    static AUDIO_STATE: RefCell<Option<AudioState>> = const { RefCell::new(None) };
+}
+
+/// The real state behind the browser's audio: [`SoundResolver`] (resolve +
+/// decode) plus a device-free [`Mixer`] a `ScriptProcessorNode` pulls from
+/// every callback. See this module's docs for why a `ScriptProcessorNode`
+/// rather than an `AudioWorklet`, and for what `web/` still has to stage
+/// before this produces anything but silence.
+///
+/// [`SoundResolver`]: lodestone_sound::SoundResolver
+/// [`Mixer`]: lodestone_audio::Mixer
+#[cfg(target_arch = "wasm32")]
+struct AudioState {
+    ctx: web_sys::AudioContext,
+    // `Rc<RefCell<_>>`, not a plain field: the `onaudioprocess` closure below
+    // needs its own handle to the *same* mixer the game-thread methods write
+    // into. Wasm is single-threaded (the closure runs on the same main thread
+    // as everything else, just at a different point in the event loop), so a
+    // `RefCell` — not a `Mutex` — is the honest tool; there is no second thread
+    // to race with.
+    mixer: Rc<RefCell<lodestone_audio::Mixer>>,
+    resolver: lodestone_sound::SoundResolver,
+    subtitles: subtitles::SubtitleQueue,
+    reported_failure: bool,
+    // Kept alive for the state's lifetime (config-scoped, effectively the
+    // whole session): dropping either would disconnect the callback, and a
+    // `ScriptProcessorNode` whose JS side still holds the closure reference
+    // but whose Rust closure has been freed is a wasm-bindgen use-after-free,
+    // not a graceful no-op.
+    _node: web_sys::ScriptProcessorNode,
+    _on_audio_process: Closure<dyn FnMut(web_sys::AudioProcessingEvent)>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AudioState {
+    /// Log one play failure: loud and actionable the first time, `debug`
+    /// after. Mirrors native's [`ShellAudio::report_failure`] — same method
+    /// name, same reasoning, different `cfg`.
+    fn report_failure(&mut self, name: &str, error: &impl std::fmt::Display) {
+        if self.reported_failure {
+            tracing::debug!(target: "audio", "sound '{name}' not played: {error}");
+            return;
+        }
+        self.reported_failure = true;
+        tracing::warn!(
+            target: "audio",
+            "sound '{name}' not played: {error}. If sounds are silent, the staged .ogg \
+             subset probably does not cover this event — see \
+             platform::assets::Bundle::sound_objects. Further failures log at debug."
+        );
+    }
+
+    fn record_caption(&mut self, name: &str, pos: Vec3) {
+        if let Some(key) = self.resolver.subtitle(name) {
+            let key = key.to_string();
+            self.subtitles.push(&key, pos, caption_now_ms());
+        }
+    }
+
+    fn play(
+        &mut self,
+        name: &str,
+        category: SoundCategory,
+        pos: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) {
+        self.record_caption(name, pos);
+        match self
+            .resolver
+            .resolve_instance(name, category, pos, volume, pitch, seed)
+        {
+            Ok(Some(instance)) => {
+                self.mixer.borrow_mut().play(instance);
+            }
+            // Vanilla's silent "empty sound" (unknown event / zero weight) —
+            // not an error, matching `SoundResolver`'s own contract.
+            Ok(None) => {}
+            Err(e) => self.report_failure(name, &e),
+        }
+    }
+}
+
+/// The shell's handle to the browser's audio — see [`AUDIO_STATE`] for why
+/// this carries no fields of its own. Constructed once via
+/// [`ShellAudio::from_env`]; `None` means audio is disabled (no staged bundle,
+/// no `sounds.json`, or `AudioContext` creation failed) and every call site is
+/// a simple `if let Some(audio)` — the same contract native's arm makes.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone, Copy)]
+pub struct ShellAudio;
 
 #[cfg(target_arch = "wasm32")]
 impl ShellAudio {
-    /// Always `None`: a browser has no `cpal` device and no asset store on disk.
+    /// Brings audio up from `web/`'s staged [`platform::assets::Bundle`], or
+    /// returns `None` with a logged reason — the same three-tier degrade
+    /// native's `from_env` makes (no bytes / bad bytes / device failure), just
+    /// with "bytes" meaning "staged in the process-wide bundle" instead of
+    /// "found on disk".
     ///
-    /// Logged once at `info`, at the same level and target native uses for "no
-    /// store found", so the reason appears in the console rather than nowhere.
+    /// [`platform::assets::Bundle`]: crate::platform::assets::Bundle
     #[must_use]
     pub fn from_env() -> Option<Self> {
+        let Some(bundle) = crate::platform::assets::bundle() else {
+            tracing::info!(
+                target: "audio",
+                "audio disabled: no asset bundle installed yet (web/ has not called \
+                 platform::assets::install)"
+            );
+            return None;
+        };
+        if bundle.sounds_json.is_empty() {
+            tracing::info!(
+                target: "audio",
+                "audio disabled: no sounds.json staged for this session (web/'s build did \
+                 not fetch minecraft/sounds.json into the bundle)"
+            );
+            return None;
+        }
+        let registry = match SoundRegistry::parse(&bundle.sounds_json) {
+            Ok(registry) => registry,
+            Err(e) => {
+                tracing::warn!(target: "audio", "audio disabled: parsing sounds.json: {e}");
+                return None;
+            }
+        };
+
+        // Same "silence describes itself" census native's `load_from_root`
+        // does — a registry with no samples resolves every event and plays
+        // nothing, and nothing else in the pipeline can tell you that.
+        let mut source = lodestone_assets::MemorySource::new("wasm-sound-bundle");
+        for (key, bytes) in &bundle.sound_objects {
+            // `ResolvedSound::file_path` already produces the
+            // `assets/<ns>/sounds/<path>.ogg` form `MemorySource` keys on; the
+            // staged bundle carries the bare asset-index name (no `assets/`
+            // prefix, matching `panorama`'s convention), so this is the one
+            // translation point.
+            source.insert(format!("assets/{key}"), bytes.clone());
+        }
+        let present = bundle.sound_objects.len();
+        if present == 0 {
+            tracing::warn!(
+                target: "audio",
+                events = registry.len(),
+                "audio is enabled but the browser build staged NO sound samples, so every \
+                 sound is silent until web/ stages a curated .ogg subset into \
+                 platform::assets::Bundle::sound_objects"
+            );
+        } else {
+            tracing::info!(
+                target: "audio",
+                present,
+                events = registry.len(),
+                "sound samples staged for the browser build"
+            );
+        }
+
+        let ctx = match web_sys::AudioContext::new() {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                tracing::warn!(target: "audio", "audio disabled: AudioContext::new() failed: {e:?}");
+                return None;
+            }
+        };
+        // Rounds rather than truncates: `sample_rate()` is a real device rate
+        // (44100/48000 typically) reported as `f32`, and a mixer built one Hz
+        // low is an audible, permanent pitch error for the whole session.
+        let sample_rate = ctx.sample_rate().round().max(1.0) as u32;
+        let mixer = Rc::new(RefCell::new(lodestone_audio::Mixer::new(sample_rate)));
+
+        let node = match ctx
+            .create_script_processor_with_buffer_size_and_number_of_input_channels_and_number_of_output_channels(
+                SCRIPT_PROCESSOR_BUFFER_FRAMES,
+                0,
+                lodestone_audio::OUTPUT_CHANNELS as u32,
+            ) {
+            Ok(node) => node,
+            Err(e) => {
+                tracing::warn!(target: "audio", "audio disabled: createScriptProcessor failed: {e:?}");
+                return None;
+            }
+        };
+
+        let on_audio_process = {
+            let mixer = Rc::clone(&mixer);
+            // Reused across every callback rather than allocated per call:
+            // `onaudioprocess` fires at real-time cadence (~20-40 Hz at this
+            // buffer size), and a fresh `Vec` on every one of those is
+            // needless per-callback churn on the same thread driving the rest
+            // of the game.
+            let mut interleaved: Vec<f32> = Vec::new();
+            let mut left: Vec<f32> = Vec::new();
+            let mut right: Vec<f32> = Vec::new();
+            Closure::<dyn FnMut(web_sys::AudioProcessingEvent)>::new(
+                move |event: web_sys::AudioProcessingEvent| {
+                    let Ok(output) = event.output_buffer() else {
+                        return;
+                    };
+                    let frames = output.length() as usize;
+                    let needed = frames * lodestone_audio::OUTPUT_CHANNELS;
+                    if interleaved.len() != needed {
+                        interleaved.resize(needed, 0.0);
+                        left.resize(frames, 0.0);
+                        right.resize(frames, 0.0);
+                    }
+                    mixer.borrow_mut().render(&mut interleaved);
+                    // `Mixer::render` always produces interleaved stereo
+                    // (`OUTPUT_CHANNELS == 2`) regardless of how many output
+                    // channels this node was created with; `AudioBuffer`
+                    // channels are planar, so split it into the two per-channel
+                    // arrays WebAudio wants. A mono `ScriptProcessorNode` is not
+                    // requested above for exactly this reason — de-interleaving
+                    // down to one channel would need to *mix* L+R, which the
+                    // mixer already decided not to do.
+                    for i in 0..frames {
+                        left[i] = interleaved[i * lodestone_audio::OUTPUT_CHANNELS];
+                        right[i] = interleaved[i * lodestone_audio::OUTPUT_CHANNELS + 1];
+                    }
+                    // A failed `copyToChannel` (e.g. the buffer shrank between
+                    // the two calls) leaves that block silent rather than
+                    // panicking the callback — one glitched block must not be
+                    // worse than a decode failure elsewhere in this file.
+                    let _ = output.copy_to_channel(&left, 0);
+                    let _ = output.copy_to_channel(&right, 1);
+                },
+            )
+        };
+        node.set_onaudioprocess(Some(on_audio_process.as_ref().unchecked_ref()));
+
+        if let Err(e) = node.connect_with_audio_node(&ctx.destination()) {
+            tracing::warn!(
+                target: "audio",
+                "audio disabled: connecting the mixer node to the audio destination failed: {e:?}"
+            );
+            return None;
+        }
+
         tracing::info!(
             target: "audio",
-            "audio disabled: no browser backend yet (lodestone-audio's mixer is wasm-clean; \
-             what is missing is an AudioWorklet sink to drive it)"
+            "audio enabled (browser WebAudio, device @ {sample_rate} Hz, AudioContext {:?} \
+             — call ShellAudio::resume_on_gesture() from a real input event to start it)",
+            ctx.state(),
         );
-        None
+
+        // Replaces whatever was here, matching native: a fresh `Sim` (a new
+        // singleplayer/multiplayer session in the same tab) calls `from_env`
+        // again, and the old device — like the old `cpal` stream native
+        // drops — must not linger and keep rendering into a destination
+        // nothing references any more.
+        AUDIO_STATE.with(|cell| {
+            *cell.borrow_mut() = Some(AudioState {
+                ctx,
+                mixer,
+                resolver: lodestone_sound::SoundResolver::new(registry, Box::new(source)),
+                subtitles: subtitles::SubtitleQueue::default(),
+                reported_failure: false,
+                _node: node,
+                _on_audio_process: on_audio_process,
+            });
+        });
+        Some(Self)
     }
 
-    pub fn set_listener(&self, _camera: &Camera) {
-        match *self {}
-    }
-
-    pub fn set_category_volumes(&self, _volumes: &[(SoundCategory, f32)]) {
-        match *self {}
-    }
-
+    /// Whether the underlying `AudioContext` is still `suspended` — the
+    /// ordinary state until [`Self::resume_on_gesture`] runs from a real user
+    /// input event. See this module's docs for why an eager `resume()` at
+    /// construction is wrong rather than merely unnecessary.
+    ///
+    /// `false` if [`Self::from_env`] never installed a state at all — an
+    /// audio-disabled session has nothing to be suspended.
     #[must_use]
-    pub fn category_volume(&self, _category: SoundCategory) -> f32 {
-        match *self {}
+    pub fn is_suspended(&self) -> bool {
+        AUDIO_STATE.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|state| state.ctx.state() == web_sys::AudioContextState::Suspended)
+        })
     }
 
+    /// Resumes the audio context. Call this from an input-event handler
+    /// (click/keydown) — never eagerly — so the browser's autoplay gate
+    /// actually lifts. `resume()` returns a `Promise`; there is nothing this
+    /// call needs to await (there is no "started" callback anyone here is
+    /// waiting on), so this is fire-and-forget and [`Self::is_suspended`] is
+    /// the way to observe whether it actually took.
+    pub fn resume_on_gesture(&self) {
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow().as_ref()
+                && let Err(e) = state.ctx.resume()
+            {
+                tracing::warn!(target: "audio", "AudioContext::resume() failed: {e:?}");
+            }
+        });
+    }
+
+    /// Updates the listener from the render camera. Call once per frame — see
+    /// native's [`set_listener`](Self::set_listener) doc for the basis
+    /// convention, identical here.
+    pub fn set_listener(&self, camera: &Camera) {
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow().as_ref() {
+                state.mixer.borrow_mut().set_listener(lodestone_audio::Listener {
+                    position: camera.position,
+                    forward: camera.forward(),
+                    up: Vec3::Y,
+                });
+            }
+        });
+    }
+
+    /// Pushes the eleven `soundSource.*` slider values onto their mixer buses.
+    /// Identical contract to native's
+    /// [`set_category_volumes`](Self::set_category_volumes): a thin forward,
+    /// through the same [`lodestone_sound::map_category`] ordinal bridge
+    /// native's `AudioEngine` uses, so the two targets cannot drift onto
+    /// different buses for the same slider.
+    pub fn set_category_volumes(&self, volumes: &[(SoundCategory, f32)]) {
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow().as_ref() {
+                let mut mixer = state.mixer.borrow_mut();
+                let buses = mixer.volumes_mut();
+                for (category, volume) in volumes {
+                    buses.set_user(lodestone_sound::map_category(*category), *volume);
+                }
+            }
+        });
+    }
+
+    /// The slider value currently on `category`'s bus. `1.0` (full volume,
+    /// the mixer's own default) when audio is disabled — the read-back must
+    /// never itself be the thing that reveals a silenced session.
+    #[must_use]
+    pub fn category_volume(&self, category: SoundCategory) -> f32 {
+        AUDIO_STATE.with(|cell| {
+            cell.borrow().as_ref().map_or(1.0, |state| {
+                state
+                    .mixer
+                    .borrow()
+                    .volumes()
+                    .user(lodestone_sound::map_category(category))
+            })
+        })
+    }
+
+    /// Plays a positioned sound (the `SOUND` packet path). Resolution/decode
+    /// failures are logged and swallowed, matching native.
     pub fn play_sound(
         &mut self,
-        _name: &str,
-        _category: SoundCategory,
-        _pos: Vec3,
-        _volume: f32,
-        _pitch: f32,
-        _seed: i64,
+        name: &str,
+        category: SoundCategory,
+        pos: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
     ) {
-        match *self {}
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.play(name, category, pos, volume, pitch, seed);
+            }
+        });
     }
 
-    pub fn subtitle_captions(&mut self, _camera: &Camera) -> Vec<subtitles::SubtitleCaption> {
-        match *self {}
+    /// This frame's drawable caption rows — identical to native's
+    /// [`subtitle_captions`](Self::subtitle_captions).
+    pub fn subtitle_captions(&mut self, camera: &Camera) -> Vec<subtitles::SubtitleCaption> {
+        AUDIO_STATE.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let Some(state) = guard.as_mut() else {
+                return Vec::new();
+            };
+            if state.subtitles.is_empty() {
+                return Vec::new();
+            }
+            let forward = camera.forward();
+            let right = forward.cross(Vec3::Y).normalize_or_zero();
+            state
+                .subtitles
+                .views(camera.position, forward, right, caption_now_ms())
+        })
     }
 
-    pub fn start_music(&mut self, _music: &Music) -> MusicStart {
-        match *self {}
+    /// Ask the resolver for a music track, reporting whether it produced
+    /// anything. Same "resolved but not yet audible" gap native's
+    /// [`start_music`](Self::start_music) documents — `Mixer` has no
+    /// streaming-voice API on either target, so this closes the
+    /// selection/request path and the last mile stays open on both.
+    pub fn start_music(&mut self, music: &Music) -> MusicStart {
+        AUDIO_STATE.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let Some(state) = guard.as_mut() else {
+                return MusicStart::Silent;
+            };
+            match state.resolver.resolve_streaming(music.sound(), 0) {
+                Ok(Some(_stream)) => MusicStart::Started,
+                Ok(None) => MusicStart::Silent,
+                Err(e) => {
+                    state.report_failure(music.sound(), &e);
+                    MusicStart::Silent
+                }
+            }
+        })
     }
 
-    pub fn start_loop(
-        &mut self,
-        _name: &str,
-        _volume: f32,
-    ) -> Option<lodestone_sound::PlayHandle> {
-        match *self {}
+    /// Start an ambient **loop** voice at `volume`, returning its handle —
+    /// identical contract to native's [`start_loop`](Self::start_loop):
+    /// forces `looping`/`relative`, same as vanilla's
+    /// `BiomeAmbientSoundsHandler.LoopSoundInstance`.
+    pub fn start_loop(&mut self, name: &str, volume: f32) -> Option<lodestone_sound::PlayHandle> {
+        AUDIO_STATE.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let state = guard.as_mut()?;
+            match state
+                .resolver
+                .resolve_instance(name, SoundCategory::Ambient, Vec3::ZERO, volume, 1.0, 0)
+            {
+                Ok(Some(mut instance)) => {
+                    instance.looping = true;
+                    instance.relative = true;
+                    Some(state.mixer.borrow_mut().play(instance))
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    state.report_failure(name, &e);
+                    None
+                }
+            }
+        })
     }
 
-    pub fn set_loop_volume(&self, _handle: lodestone_sound::PlayHandle, _volume: f32) {
-        match *self {}
+    /// Push a live loop's crossfade volume.
+    pub fn set_loop_volume(&self, handle: lodestone_sound::PlayHandle, volume: f32) {
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow().as_ref() {
+                state.mixer.borrow_mut().set_voice_volume(handle, volume);
+            }
+        });
     }
 
-    pub fn stop_loop(&self, _handle: lodestone_sound::PlayHandle) {
-        match *self {}
+    /// Stop a live loop.
+    pub fn stop_loop(&self, handle: lodestone_sound::PlayHandle) {
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow().as_ref() {
+                state.mixer.borrow_mut().stop(handle);
+            }
+        });
     }
 
+    /// Plays an entity-attached sound (the `SOUND_ENTITY` packet path).
+    /// Identical to [`Self::play_sound`]; see native's
+    /// [`play_entity_sound`](Self::play_entity_sound) doc for the
+    /// snapshot-not-follow caveat, which applies here too.
     pub fn play_entity_sound(
         &mut self,
-        _name: &str,
-        _category: SoundCategory,
-        _pos: Vec3,
-        _volume: f32,
-        _pitch: f32,
-        _seed: i64,
+        name: &str,
+        category: SoundCategory,
+        pos: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
     ) {
-        match *self {}
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.play(name, category, pos, volume, pitch, seed);
+            }
+        });
     }
 }
