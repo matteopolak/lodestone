@@ -71,6 +71,19 @@ All four *checks* are required, and each catches a class the others structurally
   choreography test asserting an exact `vec![Directive…]` is a silent caller. **No `cargo check` can see
   this** — the break is a runtime `assert_eq!`. When you add an event or change what an adapter emits,
   grep for the **packet id**, not for the event, and run the crate with `--no-fail-fast`.
+- **A second instance of that class, with a different trigger: widening a *system's* signature breaks
+  every hand-rolled schedule, at runtime, and `--lib` cannot see it either.** Adding
+  `ResMut<AudioEngine>`/`Res<FrameClock>` to `drive_mining` compiled clean and passed
+  `cargo test -p lodestone-shell --lib` at the documented 1729/0 — while **three integration binaries**
+  panicked with *"Resource does not exist"*, because each builds its own `GameTick` schedule rather than
+  the production one and therefore inserts only the resources the system needed *before*. So the
+  requirement is data, checked when the schedule runs, and **three separate instruments miss it**:
+  `cargo check` (not a type error), `--lib` (a different binary), and `-p` fail-fast (aborts before
+  reaching them alphabetically). Only `cargo test -p <crate> --no-fail-fast` across **every** target
+  found it. The habit: when you add a resource to a system, **grep for every harness that constructs a
+  schedule containing it** — a hermetic harness is a second, silent implementation of production's
+  wiring, and it is exactly the shared-construction-path blindness this file already records for
+  `render::frame_for`, one layer down.
 - **`cargo check -p lodestone-shell --no-default-features` is now a required health check.** With `live`
   on by default nothing else proves the shell compiles with **no** version family — the entire point of
   the version seam, and the only thing stopping a hardcoded `v770` dependency creeping into shell code.
