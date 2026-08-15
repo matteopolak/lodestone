@@ -3109,6 +3109,7 @@ dependencies = [
  "lodestone-anvil",
  "lodestone-app",
  "lodestone-assets",
+ "lodestone-audio",
  "lodestone-auth",
  "lodestone-client",
  "lodestone-command",
