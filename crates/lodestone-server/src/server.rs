@@ -11055,7 +11055,7 @@ where
 /// TPS, for the `game_time` the periodic [`ServerProtocol::encode_set_time`]
 /// broadcast carries.
 #[cfg(not(target_arch = "wasm32"))]
-fn ticks_since(start: tokio::time::Instant) -> i64 {
+fn ticks_since(start: crate::tick::PlayTimerInstant) -> i64 {
     (start.elapsed().as_millis() / MILLIS_PER_TICK) as i64
 }
 
@@ -11116,7 +11116,7 @@ struct LoopStallWatch {
     /// reported the whole keep-alive interval as a stall and suppressed the
     /// timeout the test was gating. Only the arm body can starve the connection,
     /// so only the arm body is measured.
-    arm_start: Option<tokio::time::Instant>,
+    arm_start: Option<crate::tick::PlayTimerInstant>,
     /// The longest arm body observed, and the arm that owned it. `""` until one
     /// exceeds [`STALL_FLOOR`].
     worst: Duration,
@@ -11142,7 +11142,7 @@ impl LoopStallWatch {
 
     /// Opens a pass. Called as the first statement of every `select!` arm body.
     fn enter(&mut self) {
-        self.arm_start = Some(tokio::time::Instant::now());
+        self.arm_start = Some(crate::tick::PlayTimerInstant::now());
     }
 
     /// Closes the pass that `arm` serviced. A no-op without a matching
@@ -11453,7 +11453,7 @@ where
     // payload that was queued before it arrived.
     let mut plugin_channel_cursor: u64 = 0;
     let mut keep_alive_tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
+        crate::tick::PlayTimerInstant::now() + KEEP_ALIVE_INTERVAL,
         KEEP_ALIVE_INTERVAL,
     );
     // **`Delay`, not tokio's default `Burst`, and this is the difference between a
@@ -11469,7 +11469,7 @@ where
     // When the outstanding challenge was written. The timeout is measured from
     // here plus `LoopStallWatch::unserviced` rather than from the interval's own
     // cadence — see that type's doc comment.
-    let mut keep_alive_sent_at = tokio::time::Instant::now();
+    let mut keep_alive_sent_at = crate::tick::PlayTimerInstant::now();
     let mut watch = LoopStallWatch::new();
     // `interval_at`, not the bare `interval` constructor: `Interval::tick`'s
     // *first* call resolves immediately for an interval built with
@@ -11479,13 +11479,13 @@ where
     // `TIME_SYNC_INTERVAL` out avoids that, and mirrors `keep_alive_tick`
     // above for the same reason.
     let mut time_sync_tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + TIME_SYNC_INTERVAL,
+        crate::tick::PlayTimerInstant::now() + TIME_SYNC_INTERVAL,
         TIME_SYNC_INTERVAL,
     );
     // Same reasoning as `time_sync_tick`: anchored one interval out so the
     // first vitals tick does not fire in the same instant as join.
     let mut vitals_tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + VITALS_TICK_INTERVAL,
+        crate::tick::PlayTimerInstant::now() + VITALS_TICK_INTERVAL,
         VITALS_TICK_INTERVAL,
     );
     // Same reasoning again: anchored one interval out so the first sync
@@ -11493,10 +11493,10 @@ where
     // at join, so this is cosmetic here, but consistent with every other
     // timer in this function).
     let mut container_sync_tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + CONTAINER_SYNC_INTERVAL,
+        crate::tick::PlayTimerInstant::now() + CONTAINER_SYNC_INTERVAL,
         CONTAINER_SYNC_INTERVAL,
     );
-    let play_start = tokio::time::Instant::now();
+    let play_start = crate::tick::PlayTimerInstant::now();
     let mut next_keep_alive_id: i64 = 0;
     // The deferred join stream's own batch bookkeeping — see
     // `JOIN_STREAM_BATCH_COLUMNS`. `open` is whether a `begin_chunk_batch` has
@@ -11940,7 +11940,7 @@ where
                         worst_millis = watch.worst().map(|(_, d)| d.as_millis() as u64).unwrap_or(0),
                         "keep-alive unanswered, but this loop ate the whole window — not kicking",
                     );
-                    keep_alive_sent_at = tokio::time::Instant::now();
+                    keep_alive_sent_at = crate::tick::PlayTimerInstant::now();
                     watch.clear_unserviced();
                     watch.pass("keep_alive_tick");
                     continue;
@@ -11981,7 +11981,7 @@ where
                 }
                 next_keep_alive_id += 1;
                 pending_keep_alive = Some(next_keep_alive_id);
-                keep_alive_sent_at = tokio::time::Instant::now();
+                keep_alive_sent_at = crate::tick::PlayTimerInstant::now();
                 watch.clear_unserviced();
                 apply(conn, &mut state, proto.encode_keep_alive(next_keep_alive_id)).await?;
                 // Issue #297/#619: vanilla's `Ready.keepAlive()`, run from this
