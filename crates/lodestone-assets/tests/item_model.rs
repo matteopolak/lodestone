@@ -153,6 +153,7 @@ fn special_node_surfaces_renderer_kind_and_base() {
         ItemModelNode::Special {
             base: loc("minecraft:item/template_skull"),
             kind: "minecraft:player_head".into(),
+            transformation: None,
         }
     );
     // The data-vs-code seam: the special renderer is enumerable as (base, kind).
@@ -172,8 +173,61 @@ fn special_node_surfaces_renderer_kind_and_base() {
         vec![ItemModelOutput::Special {
             base: &loc("minecraft:item/template_skull"),
             kind: "minecraft:player_head",
+            transformation: None,
         }]
     );
+}
+
+/// The skull family's real gap: a `special` node's own `"transformation"`
+/// field (issue's own JSON, `assets/minecraft/items/skeleton_skull.json`) is
+/// parsed rather than silently dropped.
+#[test]
+fn special_node_carries_its_own_transformation() {
+    let json = br#"{"model":{"type":"minecraft:special",
+        "base":"minecraft:item/template_skull",
+        "model":{"type":"minecraft:head","kind":"skeleton"},
+        "transformation":{
+            "left_rotation":[1.0,0.0,0.0,-0.0],
+            "right_rotation":[0.0,0.0,0.0,1.0],
+            "scale":[1.0,1.0,1.0],
+            "translation":[0.5,0.0,0.5]
+        }}}"#;
+    let m = ItemModel::parse(json).unwrap();
+    let ItemModelNode::Special { transformation, .. } = &m.root else {
+        panic!("expected a special node");
+    };
+    let t = transformation.expect("the skull family carries a node transformation");
+    assert_eq!(t.translation, [0.5, 0.0, 0.5]);
+    assert_eq!(t.left_rotation, [1.0, 0.0, 0.0, -0.0]);
+    assert_eq!(t.scale, [1.0, 1.0, 1.0]);
+    assert_eq!(t.right_rotation, [0.0, 0.0, 0.0, 1.0]);
+
+    // Resolving still surfaces it on the output, not just the parsed node —
+    // this is what a caller actually reads.
+    let ctx = Ctx::default();
+    let resolved = m.resolve(&ctx);
+    let [ItemModelOutput::Special { transformation, .. }] = resolved.as_slice() else {
+        panic!("expected one special output");
+    };
+    assert_eq!(transformation.unwrap().translation, [0.5, 0.0, 0.5]);
+}
+
+/// A `special` node whose JSON omits `"transformation"` entirely (every
+/// non-skull kind today, e.g. `chest.json`) parses to `None`, not to
+/// `Transformation::default()` — the caller must be able to tell "compose
+/// nothing" from "compose the identity", even though the two matrices are
+/// equal, because only the `None` case matches vanilla's `Optional::isEmpty`
+/// short-circuit in `Transformation.compose`.
+#[test]
+fn special_node_with_no_transformation_field_parses_to_none() {
+    let json = br#"{"model":{"type":"minecraft:special",
+        "base":"minecraft:item/template_chest",
+        "model":{"type":"minecraft:chest","texture":"minecraft:normal"}}}"#;
+    let m = ItemModel::parse(json).unwrap();
+    let ItemModelNode::Special { transformation, .. } = &m.root else {
+        panic!("expected a special node");
+    };
+    assert_eq!(*transformation, None);
 }
 
 #[test]

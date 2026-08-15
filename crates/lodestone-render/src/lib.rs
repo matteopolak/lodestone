@@ -193,7 +193,8 @@ pub use gui_entity::{
 };
 pub use item_render::{
     CROSSBOW_CHARGE_TICKS, GUI_DEPTH_HALF_RANGE, ItemStateContext, SCALE_LIMIT, TRANSLATION_LIMIT,
-    UNITS_PER_BLOCK, display_matrix, gui_item_pose, gui_ortho,
+    UNITS_PER_BLOCK, compose_special_node_transform, display_matrix, gui_item_pose, gui_ortho,
+    node_transform_matrix,
 };
 pub use light::{
     BLOCK_FACTOR, BLOCK_LIGHT_TINT, BRIGHTNESS_FACTOR, apply_brightness_option, brightness,

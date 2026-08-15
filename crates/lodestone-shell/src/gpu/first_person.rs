@@ -776,6 +776,12 @@ impl RenderState {
             inverse_arm_height,
             &transform,
         );
+        // The `special` node's own `"transformation"` (skull family only) composes
+        // *underneath* the display-context pose just built, exactly as
+        // `SpecialModelWrapper.Unbaked.bake` does — see
+        // `compose_special_node_transform`'s doc for the derivation.
+        let placement =
+            lodestone_render::compose_special_node_transform(placement, form.transformation);
         // `upload_instances` takes the packed byte widened to `u32`, the same shape
         // the arm branch passes `hand_light` through.
         let light = self.hand_light(camera);

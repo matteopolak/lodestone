@@ -85,6 +85,10 @@ pub enum ItemModelNode {
         base: ResourceLocation,
         /// The special renderer id.
         kind: String,
+        /// The node's own `"transformation"` field, `None` when the JSON carries
+        /// none (every non-skull `special` kind today). See
+        /// [`ItemNodeTransform`]'s doc for how a caller must compose it.
+        transformation: Option<ItemNodeTransform>,
     },
     /// `minecraft:empty` — renders nothing.
     Empty,
@@ -93,6 +97,68 @@ pub enum ItemModelNode {
         /// The unrecognised `type` id.
         kind: String,
     },
+}
+
+/// A `minecraft:special` node's own `"transformation"` field — vanilla's
+/// `Transformation` record (`com.mojang.math.Transformation`): a TRS composed
+/// as `translation * left_rotation * scale * right_rotation`, with a
+/// *quaternion pair* rather than the Euler-angle rotation
+/// [`DisplayTransform`] uses. Only the skull family carries this today
+/// (`assets/minecraft/items/*_skull.json`, `player_head.json`); every other
+/// `special` kind's JSON omits `"transformation"` entirely.
+///
+/// Stored as raw JSON numbers, same convention as [`DisplayTransform`]:
+/// units are already blocks (no vanilla `/16` here — that division is
+/// specific to `ItemTransform`'s deserializer, not `Transformation`'s), and
+/// no clamp is applied, because `Transformation`'s own codec has none.
+///
+/// # How a caller must compose this
+///
+/// `SpecialModelWrapper.Unbaked.bake` computes
+/// `Transformation.compose(transformation, this.transformation)`, which is
+/// `Transformation.compose(final Matrix4fc parent, Optional<Transformation>
+/// transform)` → `parent.mul(transform.getMatrix())` when present. JOML's
+/// `Matrix4f.mul` multiplies as `this * other`, and applying a column-vector
+/// matrix product right-to-left means `other` (this node's own transform) is
+/// applied to the model *first*, and `parent` (the display-context transform
+/// already in effect — vanilla's `display.gui`/`display.firstperson_*`/etc.,
+/// or the equivalent world placement chain) applied *second*. In this
+/// crate's own matrix convention (`glam`, also column-vector, also
+/// right-to-left composition) that is:
+///
+/// ```text
+/// final_placement = existing_outer_placement * node_transform_matrix
+/// ```
+///
+/// where `node_transform_matrix = T(translation) * Q(left_rotation) *
+/// S(scale) * Q(right_rotation)` and `existing_outer_placement` is whatever
+/// the caller already builds for an *ordinary* special-renderer item (the
+/// GUI icon's `gui_item_pose`, the held-item hand chain, or a dropped/other-
+/// entity-hand/item-frame world placement) — none of which change; this
+/// value is composed on top, not substituted for them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ItemNodeTransform {
+    /// Translation, in blocks (already the JSON's raw units — no `/16`).
+    pub translation: [f32; 3],
+    /// The left (pre-scale) rotation quaternion, `[x, y, z, w]`.
+    pub left_rotation: [f32; 4],
+    /// Per-axis scale.
+    pub scale: [f32; 3],
+    /// The right (post-scale) rotation quaternion, `[x, y, z, w]`.
+    pub right_rotation: [f32; 4],
+}
+
+impl Default for ItemNodeTransform {
+    /// `Transformation.IDENTITY`: zero translation, identity rotations, unit
+    /// scale.
+    fn default() -> Self {
+        Self {
+            translation: [0.0; 3],
+            left_rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+            right_rotation: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
 }
 
 /// One `select` case.
@@ -179,6 +245,9 @@ pub enum ItemModelOutput<'a> {
         base: &'a ResourceLocation,
         /// The special renderer id.
         kind: &'a str,
+        /// The node's own `"transformation"` field — see
+        /// [`ItemNodeTransform`]'s doc for how a caller must compose it.
+        transformation: Option<ItemNodeTransform>,
     },
 }
 
@@ -358,7 +427,12 @@ fn parse_node(value: &Value) -> Result<ItemModelNode, ItemModelError> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| ItemModelError::BadField("special missing model.type".into()))?
                 .to_string();
-            Ok(ItemModelNode::Special { base, kind })
+            let transformation = obj.get("transformation").map(parse_node_transform);
+            Ok(ItemModelNode::Special {
+                base,
+                kind,
+                transformation,
+            })
         }
         "empty" => Ok(ItemModelNode::Empty),
         other => Ok(ItemModelNode::Other {
@@ -460,6 +534,42 @@ fn parse_grass_climate(value: &Value) -> Option<[f32; 2]> {
     Some([temperature, downfall])
 }
 
+/// A `minecraft:special` node's `"transformation"` object —
+/// `com.mojang.math.Transformation`'s codec (`translation`, `left_rotation`,
+/// `scale`, `right_rotation`, all required fields on the real record). A
+/// component whose field is absent or malformed falls back to
+/// [`ItemNodeTransform::default`]'s value for that component rather than
+/// failing the whole item's parse — consistent with this parser's general
+/// leniency (unrecognised node types are preserved, not rejected).
+fn parse_node_transform(value: &Value) -> ItemNodeTransform {
+    let default = ItemNodeTransform::default();
+    ItemNodeTransform {
+        translation: parse_vec3(value.get("translation")).unwrap_or(default.translation),
+        left_rotation: parse_vec4(value.get("left_rotation")).unwrap_or(default.left_rotation),
+        scale: parse_vec3(value.get("scale")).unwrap_or(default.scale),
+        right_rotation: parse_vec4(value.get("right_rotation")).unwrap_or(default.right_rotation),
+    }
+}
+
+fn parse_vec3(value: Option<&Value>) -> Option<[f32; 3]> {
+    let [x, y, z] = value?.as_array()?.as_slice() else {
+        return None;
+    };
+    Some([x.as_f64()? as f32, y.as_f64()? as f32, z.as_f64()? as f32])
+}
+
+fn parse_vec4(value: Option<&Value>) -> Option<[f32; 4]> {
+    let [x, y, z, w] = value?.as_array()?.as_slice() else {
+        return None;
+    };
+    Some([
+        x.as_f64()? as f32,
+        y.as_f64()? as f32,
+        z.as_f64()? as f32,
+        w.as_f64()? as f32,
+    ])
+}
+
 fn strip_ns(kind: &str) -> &str {
     kind.strip_prefix("minecraft:").unwrap_or(kind)
 }
@@ -525,7 +635,7 @@ fn collect_refs<'a>(node: &'a ItemModelNode, out: &mut Vec<&'a ResourceLocation>
 
 fn collect_specials<'a>(node: &'a ItemModelNode, out: &mut Vec<(&'a ResourceLocation, &'a str)>) {
     match node {
-        ItemModelNode::Special { base, kind } => out.push((base, kind)),
+        ItemModelNode::Special { base, kind, .. } => out.push((base, kind)),
         ItemModelNode::Composite { models } => models.iter().for_each(|m| collect_specials(m, out)),
         ItemModelNode::Condition {
             on_true, on_false, ..
@@ -562,7 +672,15 @@ fn collect_specials<'a>(node: &'a ItemModelNode, out: &mut Vec<(&'a ResourceLoca
 fn collect_outputs<'a>(node: &'a ItemModelNode, out: &mut Vec<ItemModelOutput<'a>>) {
     match node {
         ItemModelNode::Model { model, tints } => out.push(ItemModelOutput::Model { model, tints }),
-        ItemModelNode::Special { base, kind } => out.push(ItemModelOutput::Special { base, kind }),
+        ItemModelNode::Special {
+            base,
+            kind,
+            transformation,
+        } => out.push(ItemModelOutput::Special {
+            base,
+            kind,
+            transformation: *transformation,
+        }),
         ItemModelNode::Composite { models } => {
             models.iter().for_each(|m| collect_outputs(m, out));
         }
@@ -599,7 +717,15 @@ fn resolve_node<'a>(
 ) {
     match node {
         ItemModelNode::Model { model, tints } => out.push(ItemModelOutput::Model { model, tints }),
-        ItemModelNode::Special { base, kind } => out.push(ItemModelOutput::Special { base, kind }),
+        ItemModelNode::Special {
+            base,
+            kind,
+            transformation,
+        } => out.push(ItemModelOutput::Special {
+            base,
+            kind,
+            transformation: *transformation,
+        }),
         ItemModelNode::Composite { models } => {
             models.iter().for_each(|m| resolve_node(m, ctx, out))
         }

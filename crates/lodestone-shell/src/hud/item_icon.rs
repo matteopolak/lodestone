@@ -364,11 +364,16 @@ pub(crate) fn draw_item_icon_counted(
                 // read it). `DisplaySlot::Gui` on a chest is `[30, 45, 0]` at
                 // `0.625` — note **45**, where a block item is 225, so a chest
                 // faces the viewer rather than showing a corner.
-                IconPart::Special { kind, .. } => {
+                IconPart::Special {
+                    kind,
+                    transformation,
+                    ..
+                } => {
                     push_special_icon(
                         sink.special,
                         &slot.item,
                         kind,
+                        *transformation,
                         &icon.display.get(DisplaySlot::Gui),
                         x,
                         y,
@@ -526,11 +531,16 @@ pub(crate) fn draw_item_icon_popped(
                 IconPart::Model { .. } => {
                     push_item_model(sink.model, assets.models, &slot.item, x, y, size);
                 }
-                IconPart::Special { kind, .. } => {
+                IconPart::Special {
+                    kind,
+                    transformation,
+                    ..
+                } => {
                     push_special_icon(
                         sink.special,
                         &slot.item,
                         kind,
+                        *transformation,
                         &icon.display.get(DisplaySlot::Gui),
                         x,
                         y,
@@ -663,10 +673,18 @@ fn push_item_model(
 /// `specialRenderer != null` branch and the ordinary quad branch from the *same*
 /// line — read from the record definition rather than from a summary of the call
 /// site. Vanilla centres a chest icon about the block centre too.
+///
+/// `node_transform` is the `special` node's own `"transformation"` field
+/// (only the skull family has one today) and is composed *underneath*
+/// `transform`'s `display.gui` pose via
+/// [`lodestone_render::compose_special_node_transform`] — see that
+/// function's doc for why it is a right-, not left-, multiply.
+#[allow(clippy::too_many_arguments)]
 fn push_special_icon(
     out: &mut Vec<SpecialIconDraw>,
     item: &ResourceLocation,
     kind: &str,
+    node_transform: Option<lodestone_assets::ItemNodeTransform>,
     transform: &DisplayTransform,
     x: f32,
     y: f32,
@@ -675,10 +693,11 @@ fn push_special_icon(
     let Some((model, texture)) = special_icon_geometry(kind, item) else {
         return;
     };
+    let outer = gui_item_pose([x, y, size, size], transform);
     out.push(SpecialIconDraw {
         model,
         texture,
-        placement: gui_item_pose([x, y, size, size], transform),
+        placement: lodestone_render::compose_special_node_transform(outer, node_transform),
     });
 }
 

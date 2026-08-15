@@ -364,6 +364,38 @@ fn hexagon_is_distinguishable_from_a_flat_quad() {
     );
 }
 
+/// The same premise check as [`hexagon_is_distinguishable_from_a_flat_quad`],
+/// for the player head: the composed pose (`display.gui` plus the node's own
+/// `"transformation"`) must still leave the silhouette materially smaller than
+/// its bounding box, or [`a_player_head_item_in_the_hotbar_reaches_pixels`]'s
+/// area band cannot distinguish real geometry from a flat quad.
+#[test]
+#[ignore = "requires the vanilla client.jar"]
+fn player_head_silhouette_is_distinguishable_from_a_flat_quad() {
+    let (pose, lo, hi) = special_pose_and_extent("minecraft:player_head", SKULL_HUMANOID);
+    let area = silhouette_area(pose, lo, hi);
+    let (x0, y0, x1, y1) = projected_bbox(pose, lo, hi);
+    let bbox_area = (x1 - x0) * (y1 - y0);
+
+    eprintln!("silhouette   = {area:.1} px^2");
+    eprintln!("bbox         = {:.2} x {:.2} = {bbox_area:.1} px^2", x1 - x0, y1 - y0);
+    eprintln!("ratio        = {:.3}", area / bbox_area);
+
+    assert!(
+        area < bbox_area * 0.95,
+        "the player head's silhouette ({area:.1}) must be materially smaller than its \
+         bounding box ({bbox_area:.1}) for the pixel count to tell geometry from a flat \
+         quad. At ratio {:.3} the two predictions are too close and the count assertion \
+         in the GPU gate would pass on either.",
+        area / bbox_area
+    );
+    assert!(
+        area > 1.0 && bbox_area > 1.0,
+        "a degenerate pose ({area:.1} px^2 in a {bbox_area:.1} px^2 box) would make every \
+         downstream assertion vacuously satisfiable"
+    );
+}
+
 /// An item's GUI pose and baked extent, resolved through the **production**
 /// path: the item atlas's own `display.gui` and the baked
 /// [`BlockEntityModelSet`]'s own AABB, not numbers copied out of either.
@@ -376,6 +408,14 @@ fn special_pose_and_extent(item: &str, model_name: &'static str) -> (Mat4, Vec3,
     let item: ResourceLocation = item.parse().expect("valid item id");
     let icon = atlas.icon(&item).expect("item must resolve to an icon");
     let transform = icon.display.get(DisplaySlot::Gui);
+    // The node's own `"transformation"` (only the skull family carries one) —
+    // read from the same `IconPart::Special` `push_special_icon` reads, so this
+    // prediction and the production draw cannot disagree about which node field
+    // fed it.
+    let node_transformation = icon.parts.iter().find_map(|p| match p {
+        IconPart::Special { transformation, .. } => *transformation,
+        _ => None,
+    });
 
     let models = BlockEntityModelSet::load();
     let mesh = models.get(model_name).unwrap_or_else(|| {
@@ -387,8 +427,9 @@ fn special_pose_and_extent(item: &str, model_name: &'static str) -> (Mat4, Vec3,
 
     let [rx, ry, rw, rh] = cell_rect(0);
     let rect = [rx as f32, ry as f32, rw as f32, rh as f32];
+    let outer = gui_item_pose(rect, &transform);
     (
-        gui_item_pose(rect, &transform),
+        lodestone_render::compose_special_node_transform(outer, node_transformation),
         mesh.local_min,
         mesh.local_max,
     )
@@ -695,24 +736,28 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
 /// [`special_pose_and_extent`] rather than a second hand-derivation is the point —
 /// a copied constant is exactly how a gate ends up measuring the wrong cell.
 ///
-/// # This measures our pipeline's real output, not vanilla's exact placement
+/// # The node's own `"transformation"` is now part of the prediction
 ///
-/// The bounding-box prediction below is `gui_item_pose` over the baked mesh AABB
-/// alone, which is exactly what `push_special_icon` composes today — so subject
-/// and prediction agree, and a real regression in either still fails this gate.
-/// It is **not** a claim that the result matches a real vanilla screenshot pixel
-/// for pixel: `assets/minecraft/items/player_head.json` puts a *second*
-/// transformation (`translation: [0.5, 0, 0.5]` plus a 180°-about-X rotation) on
-/// the `minecraft:special` model node itself
-/// (`SpecialModelWrapper.Unbaked.bake`, `.cache/mc/26.2/client-src/net/minecraft/
-/// client/renderer/item/SpecialModelWrapper.java`), and `ItemModelNode::Special`
-/// in `lodestone-assets` has no field for it — so a real player head sits
-/// noticeably more centred in its cell than this pipeline draws it today. See
-/// `special_item_rig`'s neighbouring comment in `block_entity.rs` for the full
-/// citation trail, including the flip this file **used to** apply here, which a
-/// closer read of `SkullSpecialRenderer.submit`/`PlayerHeadSpecialRenderer.submit`
-/// showed was wrong (the world-only ground/wall flip never reaches the item path
-/// at all) and which this gate's own bounding-box mismatch caught before it
+/// `assets/minecraft/items/player_head.json` puts a *second* transformation
+/// (`translation: [0.5, 0, 0.5]` plus a 180°-about-X rotation) on the
+/// `minecraft:special` model node itself (`SpecialModelWrapper.Unbaked.bake`,
+/// `.cache/mc/26.2/client-src/net/minecraft/client/renderer/item/
+/// SpecialModelWrapper.java`) — carried today by `ItemModelNode::Special`'s
+/// `transformation` field and composed by [`special_pose_and_extent`] via
+/// `lodestone_render::compose_special_node_transform`, the same call
+/// `push_special_icon` makes. Before that field existed this gate's own doc
+/// documented the mispositioning it measured rather than vanilla's placement
+/// (the prediction sat mostly clipped outside the 16 px cell); now the
+/// unclipped `gui_item_pose ∘ node_transform` prediction lands **entirely**
+/// inside the cell — measured `(146.3, 303.2)..(157.7, 315.8)` inside a
+/// `(143, 300, 16, 16)` cell — so this gate uses the same tight per-edge
+/// check [`a_chest_item_in_the_hotbar_reaches_pixels`] does, no clip-to-cell
+/// fallback. See `special_item_rig`'s neighbouring comment in
+/// `block_entity.rs` for the full citation trail, including the flip this
+/// file **used to** apply here, which a closer read of
+/// `SkullSpecialRenderer.submit`/`PlayerHeadSpecialRenderer.submit` showed
+/// was wrong (the world-only ground/wall flip never reaches the item path at
+/// all) and which this gate's own bounding-box mismatch caught before it
 /// shipped.
 #[test]
 #[ignore = "requires a GPU adapter and the vanilla client.jar"]
@@ -872,6 +917,7 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
     eprintln!("lit bbox, slot 0      = {bbox:?}");
     eprintln!("lit, slot 8 (empty)   = {subject_empty}");
     eprintln!("lit, slot 0 (no item-model pass attached) = {control_filled}");
+    eprintln!("predicted (gui_item_pose ∘ node_transform) = ({px0:.1}, {py0:.1})..({px1:.1}, {py1:.1})");
 
     assert!(
         sheets_in_pass > 0,
@@ -890,69 +936,66 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
              its texture map."
         );
     };
-    // The unclipped prediction sits mostly **outside** the 16 px cell for this
-    // item — see this test's own doc for why (the unported per-node
-    // `translation`/`rotation` `assets/minecraft/items/player_head.json` layers
-    // on top of `display.gui`) — so a chest-style "observed edge within `tol` of
-    // the unclipped prediction" check is the wrong instrument here: it would
-    // fail even for a byte-perfect render of *this pipeline's own* (incomplete)
-    // pose. The right instrument is the same prediction **clipped to the cell**,
-    // which is exactly what a correctly-posed, correctly-culled draw can
-    // actually contribute to `lit_in`'s count.
-    let clip_x0 = px0.max(filled[0] as f32);
-    let clip_y0 = py0.max(filled[1] as f32);
-    let clip_x1 = px1.min((filled[0] + filled[2]) as f32);
-    let clip_y1 = py1.min((filled[1] + filled[3]) as f32);
-    eprintln!(
-        "predicted, clipped to cell = ({clip_x0:.1}, {clip_y0:.1})..({clip_x1:.1}, {clip_y1:.1})"
+    // Now that the node's own `"transformation"` is carried and composed (see
+    // this test's own doc), the unclipped prediction lands **entirely** inside
+    // the 16 px cell — measured, not assumed: this fails loudly (a value
+    // outside `filled`'s bounds) if a future change reverts to only the
+    // display-context pose. So this gate now uses the same tight per-edge
+    // check [`a_chest_item_in_the_hotbar_reaches_pixels`] does, no clip-to-cell
+    // fallback: a whole-box offset means the pose composition differs from the
+    // one the prediction used (right- vs left-multiplying the node transform,
+    // e.g.), and a resize means the scale, the `-0.5` centring, or the node's
+    // own scale does.
+    assert!(
+        px0 >= filled[0] as f32 && py0 >= filled[1] as f32,
+        "the predicted top-left ({px0:.1}, {py0:.1}) falls outside the cell \
+         {filled:?} — the node transform is not landing this item back in its \
+         cell the way the fix requires"
     );
-    // **Containment, not touching every edge.** A hexagonal silhouette's true
-    // bounding box touches all four of its *own* edges by construction, but a
-    // rectangular clip's edges are not necessarily edges of that hexagon at all
-    // — cutting through its interior can leave the lit pixels short of the clip
-    // line on that side. So only the two axes the clip left **unaltered** (where
-    // `clip_* == unclipped prediction`) get the tight per-edge check the chest
-    // gate uses; every edge gets the looser containment check regardless.
+    assert!(
+        px1 <= (filled[0] + filled[2]) as f32 && py1 <= (filled[1] + filled[3]) as f32,
+        "the predicted bottom-right ({px1:.1}, {py1:.1}) falls outside the cell \
+         {filled:?} — the node transform is not landing this item back in its \
+         cell the way the fix requires"
+    );
     let tol = 1.5f32;
-    assert!(
-        bx0 as f32 >= clip_x0 - tol - 1.0 && bx1 as f32 <= clip_x1 + tol + 1.0,
-        "the player head's lit x range ({bx0}..{bx1}) is not contained in the predicted, \
-         cell-clipped x range ({clip_x0:.1}..{clip_x1:.1})"
-    );
-    assert!(
-        by0 as f32 >= clip_y0 - tol - 1.0 && by1 as f32 <= clip_y1 + tol + 1.0,
-        "the player head's lit y range ({by0}..{by1}) is not contained in the predicted, \
-         cell-clipped y range ({clip_y0:.1}..{clip_y1:.1})"
-    );
-    for (label, observed, clipped, unclipped) in [
-        ("x0", bx0 as f32, clip_x0, px0),
-        ("y0", by0 as f32, clip_y0, py0),
-        ("x1", bx1 as f32, clip_x1, px1),
-        ("y1", by1 as f32, clip_y1, py1),
+    for (label, observed, expected) in [
+        ("x0", bx0 as f32, px0),
+        ("y0", by0 as f32, py0),
+        ("x1", bx1 as f32, px1),
+        ("y1", by1 as f32, py1),
     ] {
-        if (clipped - unclipped).abs() > 0.5 {
-            // The cell boundary, not the silhouette's own extent, decided this
-            // edge — containment above is the only claim this test makes for it.
-            continue;
-        }
         assert!(
-            (observed - clipped).abs() <= tol + 1.0,
-            "the player head's lit {label} is {observed:.1} but `gui_item_pose` over the \
-             baked mesh AABB puts this (cell-untouched) edge at {clipped:.1}. Lit box ({bx0}, \
-             {by0})..({bx1}, {by1}); predicted ({px0:.1}, {py0:.1})..({px1:.1}, {py1:.1})."
+            (observed - expected).abs() <= tol + 1.0,
+            "the player head's lit {label} is {observed:.1} but `gui_item_pose` composed \
+             with the node's own transformation puts it at {expected:.1}. Lit box \
+             ({bx0}, {by0})..({bx1}, {by1}); predicted ({px0:.1}, {py0:.1})..({px1:.1}, \
+             {py1:.1})."
         );
     }
-    // A generous ceiling rather than a tight band: the visible sliver is small
-    // enough (a handful of px, by construction of the clip above) that the
-    // hexagon-vs-flat-quad area/shading checks the chest gate runs would have no
-    // signal to measure against. What this **can** still catch is the wrong-
-    // pipeline failure mode that matters most here: the flat-sprite fallback
-    // filling the *whole* clipped region solid, or spilling past it.
-    let clip_area = ((clip_x1 - clip_x0).max(0.0) * (clip_y1 - clip_y0).max(0.0)) as usize;
+
+    // --- how much: geometry, not a flat quad ---------------------------------
+    //
+    // Same shape as the chest gate: predict both the correct hypothesis
+    // (silhouette area) and the plausible wrong one (a flat quad filling the
+    // whole bbox), and require the measurement to land on the former.
+    let low = (expected_area * 0.80) as usize;
+    let high = (expected_area * 1.20) as usize;
+    let bbox_area = (px1 - px0) * (py1 - py0);
     assert!(
-        subject_filled <= clip_area + 4,
-        "{subject_filled} lit px is more than the ~{clip_area} px the clipped prediction \
-         allows for — the draw is spilling past where the posed geometry says it should be."
+        (low..=high).contains(&subject_filled),
+        "a player head icon must cover ~{expected_area:.0} px of the 256 px cell — the \
+         projected silhouette of the baked `SKULL_HUMANOID` AABB under the composed pose \
+         — got {subject_filled} in box ({bx0}, {by0})..({bx1}, {by1}). Far below means \
+         faces are missing or the draw never ran; near {bbox_area:.0} means something is \
+         filling the bounding box, i.e. a flat quad rather than geometry."
+    );
+    assert!(
+        (subject_filled as f32) < bbox_area * 0.95,
+        "{subject_filled} lit px fills essentially the whole {bbox_area:.0} px bounding \
+         box. A rotated box projects to a hexagon and leaves its bbox corners empty; only \
+         a screen-aligned quad fills it. This reads as the flat-sprite fallback, not the \
+         block-entity geometry."
     );
 
     assert_eq!(

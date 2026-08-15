@@ -134,8 +134,8 @@ pub use icon::{
 pub use item_atlas::{ItemAtlas, ItemAtlasReport};
 pub use lang::Language;
 pub use item_model::{
-    ItemModel, ItemModelNode, ItemModelOutput, ItemPropertyContext, RangeEntry, SelectCase,
-    TintSource,
+    ItemModel, ItemModelNode, ItemModelOutput, ItemNodeTransform, ItemPropertyContext, RangeEntry,
+    SelectCase, TintSource,
 };
 pub use item_tint::{ItemTintContext, ResolvedTint, TintProvenance};
 pub use location::ResourceLocation;
