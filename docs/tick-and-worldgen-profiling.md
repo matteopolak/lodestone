@@ -185,7 +185,16 @@ go red, then the build was restored from an md5-checked backup (never
   blind spot: the shift was verified by hand not to flip any of their
   boundary values). Restored; all six pass again, sha unaffected (this pass
   made no commit with the neuter in it).
-
+- `profile.rs`: `percentile` was changed to always return the smallest
+  sample regardless of `p` (simulating a rank computation that never
+  advances past the first element). Of the five `profile.rs` unit tests,
+  two went red as predicted — the hand-derived percentile test and the
+  aggregate-batch test, both of which assert a specific non-minimum
+  percentile value — while the three structural tests (empty-slice, empty
+  batch, stage-name coverage) correctly stayed green, since none of them
+  assert a percentile value the neuter could touch. Restored; all five pass
+  again, plus the real-generator report test and the `gen-counters`
+  cross-check test, both re-verified green afterward.
 ## How to change it
 
 - **Add a tick phase**: widen `TickPhase`, `TICK_PHASE_COUNT`, and
