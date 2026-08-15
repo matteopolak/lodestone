@@ -2611,6 +2611,34 @@ pub fn special_item_rig(kind: &str, item_path: &str) -> Option<(&'static str, &'
     }
 }
 
+// A skull item's own placement, deliberately, is **not** the world skull
+// functions' `scale(-1, -1, 1)`. An earlier version of this file added exactly
+// that flip here, reasoning from `skull_ground_placement_matrix`'s own doc
+// (`SkullModel`'s head box is authored Y-down) without first checking the real
+// *item*-context renderer. It was wrong, caught before landing by reading
+// `SkullSpecialRenderer.submit`/`PlayerHeadSpecialRenderer.submit`
+// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/special/`): both
+// call `SkullBlockRenderer.submitSkull` directly, with **no** placement
+// transformation at all — the ground/wall flip is applied only by
+// `SkullBlockRenderer.submit`, the *block-entity* path, via
+// `poseStack.mulPose(state.transformation)` before it ever reaches
+// `submitSkull`. So the item path really does draw the raw Y-down
+// `SkullModel` cube (`addBox(-4, -8, -4, 8, 8, 8)`, matching this crate's own
+// baked `SKULL_HUMANOID`/`SKULL_MOB` AABB exactly) through nothing but the
+// ordinary `ItemTransform.apply` chain every other special rig uses.
+//
+// The GUI icon and held player head *do* still measure off-centre against a
+// naive full-cell prediction, and that has a real cause, just not this one:
+// `assets/minecraft/items/player_head.json` puts a **second** transformation —
+// `translation: [0.5, 0.0, 0.5]` plus a 180°-about-X `left_rotation` — on the
+// `minecraft:special` model *node itself*
+// (`SpecialModelWrapper.Unbaked.bake`: `Transformation.compose(displayTransform,
+// this.transformation)`), and `ItemModelNode::Special` in `lodestone-assets`
+// carries no field for it at all today. That is a real, separate, unfixed gap
+// — filed rather than patched here under time pressure, because porting a
+// quaternion-based `Transformation` compose into this schema is its own piece
+// of work, not a one-line correction like the flip this note replaces.
+
 /// One resolved block entity, ready to batch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockEntityInstance {

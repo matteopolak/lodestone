@@ -90,11 +90,11 @@ use lodestone_assets::{
     SpriteLayer,
 };
 use lodestone_render::{
-    BlockEntityModelSet, BlockModels, CHEST_SINGLE, CameraUniform, ChestHalf, ChestMaterial,
-    EntityCameraUniform, EntityPipeline, GpuAtlas, GpuEntityModel, GuiSpriteQuad, ModelPipeline,
-    ModelVertex, RenderLayer, chest_texture_stem, chest_texture_stems, entity_camera_buffer,
-    fog::FogUniform, gui_item_pose, gui_ortho, mesh_item_quads, model_shared_camera_buffer,
-    section_origin_buffer, update_model_shared_camera_buffer, upload_instances,
+    BlockEntityModelSet, BlockModels, CameraUniform, EntityCameraUniform, EntityPipeline, GpuAtlas,
+    GpuEntityModel, GuiSpriteQuad, ModelPipeline, ModelVertex, RenderLayer, block_entity_texture_stems,
+    entity_camera_buffer, fog::FogUniform, gui_item_pose, gui_ortho, mesh_item_quads,
+    model_shared_camera_buffer, section_origin_buffer, update_model_shared_camera_buffer,
+    upload_instances,
 };
 
 use super::font;
@@ -240,7 +240,7 @@ pub(crate) struct IconSink<'o> {
 /// seam between the world's chest and the one in your hand.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SpecialIconDraw {
-    /// The [`BlockEntityModelSet`] model name, e.g. [`CHEST_SINGLE`].
+    /// The [`BlockEntityModelSet`] model name, e.g. [`lodestone_render::CHEST_SINGLE`].
     pub model: &'static str,
     /// The jar texture stem, e.g. `entity/chest/normal`.
     pub texture: &'static str,
@@ -1104,12 +1104,26 @@ impl SpecialIcons {
             }
         }
 
+        // `crate::resources::load_block_entity_textures()` already decodes every
+        // stem `block_entity_texture_stems()` names (skulls, bells, banners,
+        // shulker boxes, books, decorated pots — not just chests), but this pass
+        // used to build a bind group for only the `chest_texture_stems()` subset
+        // of what it had just loaded. `special_item_rig` resolves a player head
+        // to `skull_texture_stem(SkullType::Player)` fine — the geometry and the
+        // `IconPart::Special` slot both land — and `build_special_batches` then
+        // silently dropped the draw at its `!s.textures.contains_key(draw.texture)`
+        // guard, because no skull sheet had ever reached this map. That is the
+        // whole bug: a player head (and every other non-chest special icon) was
+        // resolved, matched a real rig and sheet, and still drew zero pixels in
+        // an inventory slot, while the exact same rig drew correctly in the hand
+        // (`RenderState::prepare_special_hand` binds through the world's
+        // `BlockEntityRenderer`, which has always loaded the full stem list).
         let real = crate::resources::load_block_entity_textures();
         let mut textures = HashMap::new();
-        for stem in chest_texture_stems() {
+        for stem in block_entity_texture_stems() {
             let Some(img) = real.get(stem) else {
-                // The loader already warned. A chest with no sheet draws nothing
-                // rather than a magenta box, matching the world pass.
+                // The loader already warned. A special icon with no sheet draws
+                // nothing rather than a magenta box, matching the world pass.
                 continue;
             };
             let view = entity_sheet_texture(device, queue, img);

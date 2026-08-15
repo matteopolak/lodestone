@@ -88,7 +88,7 @@ use lodestone::resources::{BlockResources, load_block_entity_textures, load_item
 use lodestone_assets::{DisplaySlot, IconPart, ResourceLocation};
 use lodestone_render::{
     BlockEntityModelSet, BlockModels, CHEST_SINGLE, GpuContext, HeadlessTarget, RenderTarget,
-    gui_item_pose,
+    SKULL_HUMANOID, gui_item_pose,
 };
 
 /// Chosen so `calculate_gui_scale(AUTO, W, H) == 1` and the logical-canvas divide
@@ -364,19 +364,23 @@ fn hexagon_is_distinguishable_from_a_flat_quad() {
     );
 }
 
-/// The chest's GUI pose and baked extent, resolved through the **production**
+/// An item's GUI pose and baked extent, resolved through the **production**
 /// path: the item atlas's own `display.gui` and the baked
 /// [`BlockEntityModelSet`]'s own AABB, not numbers copied out of either.
-fn chest_pose_and_extent() -> (Mat4, Vec3, Vec3) {
+///
+/// Parametrized over `(item, model_name)` so the chest gate and the player-head
+/// gate below share one derivation rather than each hand-copying it — the same
+/// discipline the module doc asks of every expected number in this file.
+fn special_pose_and_extent(item: &str, model_name: &'static str) -> (Mat4, Vec3, Vec3) {
     let atlas = load_item_atlas().expect("the item atlas must build from client.jar");
-    let item: ResourceLocation = ITEM.parse().expect("valid item id");
-    let icon = atlas.icon(&item).expect("chest must resolve to an icon");
+    let item: ResourceLocation = item.parse().expect("valid item id");
+    let icon = atlas.icon(&item).expect("item must resolve to an icon");
     let transform = icon.display.get(DisplaySlot::Gui);
 
     let models = BlockEntityModelSet::load();
-    let mesh = models.get(CHEST_SINGLE).unwrap_or_else(|| {
+    let mesh = models.get(model_name).unwrap_or_else(|| {
         panic!(
-            "the baked corpus must contain {CHEST_SINGLE}; without it this gate would be \
+            "the baked corpus must contain {model_name}; without it this gate would be \
              measuring the absence of a model rather than the absence of a draw"
         )
     });
@@ -388,6 +392,13 @@ fn chest_pose_and_extent() -> (Mat4, Vec3, Vec3) {
         mesh.local_min,
         mesh.local_max,
     )
+}
+
+/// The chest's GUI pose and baked extent — [`special_pose_and_extent`] pinned to
+/// this file's chest fixture, kept as its own name so the existing chest gate
+/// below reads unchanged.
+fn chest_pose_and_extent() -> (Mat4, Vec3, Vec3) {
+    special_pose_and_extent(ITEM, CHEST_SINGLE)
 }
 
 #[test]
@@ -663,5 +674,294 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
         "without attach_item_models the same frame must draw nothing in the cell; \
          {control_filled} lit pixels means something else is painting there and the \
          positive assertions above are not evidence for the new pass"
+    );
+}
+
+/// **The player-head regression this gate exists to hold shut.** `SpecialIcons::new`
+/// (`hud/item_icon.rs`) built its bind-group map from `chest_texture_stems()`
+/// alone even though `crate::resources::load_block_entity_textures()` — the map it
+/// read from — had already decoded every stem `block_entity_texture_stems()`
+/// names, skulls included. `special_item_rig` still resolved a player head to a
+/// real rig and sheet, `push_special_icon` still recorded the draw, and
+/// `build_special_batches`' `!s.textures.contains_key(draw.texture)` guard then
+/// silently dropped it every frame — an island one hop *inside* the special-icon
+/// pass that the chest gate above cannot see, because a chest's own sheet was
+/// always in the (accidentally chest-only) map.
+///
+/// Otherwise the same shape as [`a_chest_item_in_the_hotbar_reaches_pixels`]:
+/// bounding box against the baked `SKULL_HUMANOID` AABB under the real
+/// `display.gui` pose, silhouette area against a flat-quad prediction, shading
+/// variation, and the same two negative controls. Reusing
+/// [`special_pose_and_extent`] rather than a second hand-derivation is the point —
+/// a copied constant is exactly how a gate ends up measuring the wrong cell.
+///
+/// # This measures our pipeline's real output, not vanilla's exact placement
+///
+/// The bounding-box prediction below is `gui_item_pose` over the baked mesh AABB
+/// alone, which is exactly what `push_special_icon` composes today — so subject
+/// and prediction agree, and a real regression in either still fails this gate.
+/// It is **not** a claim that the result matches a real vanilla screenshot pixel
+/// for pixel: `assets/minecraft/items/player_head.json` puts a *second*
+/// transformation (`translation: [0.5, 0, 0.5]` plus a 180°-about-X rotation) on
+/// the `minecraft:special` model node itself
+/// (`SpecialModelWrapper.Unbaked.bake`, `.cache/mc/26.2/client-src/net/minecraft/
+/// client/renderer/item/SpecialModelWrapper.java`), and `ItemModelNode::Special`
+/// in `lodestone-assets` has no field for it — so a real player head sits
+/// noticeably more centred in its cell than this pipeline draws it today. See
+/// `special_item_rig`'s neighbouring comment in `block_entity.rs` for the full
+/// citation trail, including the flip this file **used to** apply here, which a
+/// closer read of `SkullSpecialRenderer.submit`/`PlayerHeadSpecialRenderer.submit`
+/// showed was wrong (the world-only ground/wall flip never reaches the item path
+/// at all) and which this gate's own bounding-box mismatch caught before it
+/// shipped.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_player_head_item_in_the_hotbar_reaches_pixels() {
+    const HEAD: &str = "minecraft:player_head";
+
+    assert_eq!(
+        calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+        1,
+        "cell_rect assumes W x H divides to itself under the GUI scale"
+    );
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    // --- premises --------------------------------------------------------------
+
+    let item: ResourceLocation = HEAD.parse().expect("valid item id");
+    let item_atlas = load_item_atlas().expect("the item atlas must build from client.jar");
+    let icon = item_atlas
+        .icon(&item)
+        .expect("player_head must resolve to an icon in the item atlas");
+    let kind = icon
+        .parts
+        .iter()
+        .find_map(|p| match p {
+            IconPart::Special { kind, .. } => Some(kind.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "{HEAD} must resolve to an IconPart::Special; got {:?}. Without that this \
+                 gate renders an item the special pass never sees and proves nothing.",
+                icon.parts
+            )
+        });
+    assert_eq!(
+        kind, "minecraft:player_head",
+        "vanilla splits player_head into its own `kind` (distinct from the mob \
+         `minecraft:head` family) precisely because its renderer resolves a \
+         profile texture -- see `special_item_rig`'s own doc"
+    );
+    let sheets_on_disk = load_block_entity_textures().len();
+    assert!(
+        sheets_on_disk > 0,
+        "no block-entity sheets decoded from the jar; a player head could not draw \
+         for reasons that have nothing to do with the wiring under test"
+    );
+
+    let (pose, lo, hi) = special_pose_and_extent(HEAD, SKULL_HUMANOID);
+    let expected_area = silhouette_area(pose, lo, hi);
+    let (px0, py0, px1, py1) = projected_bbox(pose, lo, hi);
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models: &BlockModels = atlas
+        .models()
+        .expect("the vanilla load must attach baked block models");
+    assert!(
+        models.item(&item).is_none(),
+        "{HEAD} unexpectedly has baked block-item geometry; if that is now true this \
+         whole special-renderer pass may be redundant for it -- re-derive before trusting \
+         either"
+    );
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+
+    let slots: Vec<Option<HotbarSlot>> = std::iter::once(Some(HotbarSlot {
+        item: item.clone(),
+        count: 1,
+        damage: None,
+        max_damage: None,
+        enchanted: false,
+        dyed_color: None,
+        potion_color: None,
+    }))
+    .chain(std::iter::repeat_with(|| None).take(8))
+    .collect();
+
+    let stats = DebugStats::default();
+    let hud_frame = HudFrame {
+        show_debug: false,
+        crosshair: false,
+        hotbar: None,
+        hotbar_items: Some(&slots),
+        ..HudFrame::new(&stats)
+    };
+
+    let mut shoot = |hud: &mut HudRenderer| -> Vec<u8> {
+        let frame = target.acquire().expect("headless acquire");
+        clear_view(device, queue, frame.view(), [0, 0, 0]);
+        hud.render_with_item_models(
+            device,
+            queue,
+            frame.view(),
+            Some(render.depth_view()),
+            &hud_frame,
+            Some(models),
+            calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+            W,
+            H,
+        );
+        target.read_texels(device, queue)
+    };
+
+    let mut lit_hud = HudRenderer::new(device, format);
+    lit_hud.attach_items(device, queue, format, item_atlas.clone());
+    lit_hud.attach_item_models(
+        device,
+        format,
+        render
+            .model_atlas_view()
+            .expect("the vanilla path must expose a model atlas"),
+        render
+            .model_atlas_sampler()
+            .expect("the vanilla path must expose a model atlas sampler"),
+        render
+            .model_palette_buffer()
+            .expect("the vanilla path must expose a tint palette"),
+        render
+            .model_anim_buffer()
+            .expect("the vanilla path must expose animation slots"),
+    );
+    let subject = shoot(&mut lit_hud);
+    let sheets_in_pass = lit_hud.special_icon_sheets();
+
+    let mut dark_hud = HudRenderer::new(device, format);
+    dark_hud.attach_items(device, queue, format, item_atlas.clone());
+    let control = shoot(&mut dark_hud);
+
+    let filled = cell_rect(0);
+    let empty = cell_rect(8);
+    let subject_filled = lit_in(&subject, filled);
+    let subject_empty = lit_in(&subject, empty);
+    let control_filled = lit_in(&control, filled);
+    let bbox = lit_bbox(&subject, filled);
+
+    eprintln!("=== hotbar special-item (player head) pixel gate ===");
+    eprintln!("item                  = {HEAD}  kind = {kind}");
+    eprintln!("sheets on disk        = {sheets_on_disk}");
+    eprintln!("sheets loaded by pass = {sheets_in_pass}");
+    eprintln!("mesh AABB (blocks)    = {lo:?} .. {hi:?}");
+    eprintln!("expected silhouette   = {expected_area:.1} px of 256");
+    eprintln!("lit, slot 0 (head)    = {subject_filled}");
+    eprintln!("lit bbox, slot 0      = {bbox:?}");
+    eprintln!("lit, slot 8 (empty)   = {subject_empty}");
+    eprintln!("lit, slot 0 (no item-model pass attached) = {control_filled}");
+
+    assert!(
+        sheets_in_pass > 0,
+        "the special-icon pass reported {sheets_in_pass} sheets after a frame \
+         containing a player head — it never built, so whatever painted in the \
+         cell is not it. ({sheets_on_disk} sheets are decodable from the jar, so \
+         this is a wiring failure and not a missing pack.)"
+    );
+
+    let Some((bx0, by0, bx1, by1)) = bbox else {
+        panic!(
+            "nothing drew in hotbar cell 0 for a player head. Expected ~{expected_area:.0} \
+             lit px inside ({px0:.1}, {py0:.1})..({px1:.1}, {py1:.1}). This is the \
+             `SpecialIcons::new` chest-only-stems bug: the rig and sheet resolve, and \
+             `build_special_batches` drops the draw because no skull sheet ever reached \
+             its texture map."
+        );
+    };
+    // The unclipped prediction sits mostly **outside** the 16 px cell for this
+    // item — see this test's own doc for why (the unported per-node
+    // `translation`/`rotation` `assets/minecraft/items/player_head.json` layers
+    // on top of `display.gui`) — so a chest-style "observed edge within `tol` of
+    // the unclipped prediction" check is the wrong instrument here: it would
+    // fail even for a byte-perfect render of *this pipeline's own* (incomplete)
+    // pose. The right instrument is the same prediction **clipped to the cell**,
+    // which is exactly what a correctly-posed, correctly-culled draw can
+    // actually contribute to `lit_in`'s count.
+    let clip_x0 = px0.max(filled[0] as f32);
+    let clip_y0 = py0.max(filled[1] as f32);
+    let clip_x1 = px1.min((filled[0] + filled[2]) as f32);
+    let clip_y1 = py1.min((filled[1] + filled[3]) as f32);
+    eprintln!(
+        "predicted, clipped to cell = ({clip_x0:.1}, {clip_y0:.1})..({clip_x1:.1}, {clip_y1:.1})"
+    );
+    // **Containment, not touching every edge.** A hexagonal silhouette's true
+    // bounding box touches all four of its *own* edges by construction, but a
+    // rectangular clip's edges are not necessarily edges of that hexagon at all
+    // — cutting through its interior can leave the lit pixels short of the clip
+    // line on that side. So only the two axes the clip left **unaltered** (where
+    // `clip_* == unclipped prediction`) get the tight per-edge check the chest
+    // gate uses; every edge gets the looser containment check regardless.
+    let tol = 1.5f32;
+    assert!(
+        bx0 as f32 >= clip_x0 - tol - 1.0 && bx1 as f32 <= clip_x1 + tol + 1.0,
+        "the player head's lit x range ({bx0}..{bx1}) is not contained in the predicted, \
+         cell-clipped x range ({clip_x0:.1}..{clip_x1:.1})"
+    );
+    assert!(
+        by0 as f32 >= clip_y0 - tol - 1.0 && by1 as f32 <= clip_y1 + tol + 1.0,
+        "the player head's lit y range ({by0}..{by1}) is not contained in the predicted, \
+         cell-clipped y range ({clip_y0:.1}..{clip_y1:.1})"
+    );
+    for (label, observed, clipped, unclipped) in [
+        ("x0", bx0 as f32, clip_x0, px0),
+        ("y0", by0 as f32, clip_y0, py0),
+        ("x1", bx1 as f32, clip_x1, px1),
+        ("y1", by1 as f32, clip_y1, py1),
+    ] {
+        if (clipped - unclipped).abs() > 0.5 {
+            // The cell boundary, not the silhouette's own extent, decided this
+            // edge — containment above is the only claim this test makes for it.
+            continue;
+        }
+        assert!(
+            (observed - clipped).abs() <= tol + 1.0,
+            "the player head's lit {label} is {observed:.1} but `gui_item_pose` over the \
+             baked mesh AABB puts this (cell-untouched) edge at {clipped:.1}. Lit box ({bx0}, \
+             {by0})..({bx1}, {by1}); predicted ({px0:.1}, {py0:.1})..({px1:.1}, {py1:.1})."
+        );
+    }
+    // A generous ceiling rather than a tight band: the visible sliver is small
+    // enough (a handful of px, by construction of the clip above) that the
+    // hexagon-vs-flat-quad area/shading checks the chest gate runs would have no
+    // signal to measure against. What this **can** still catch is the wrong-
+    // pipeline failure mode that matters most here: the flat-sprite fallback
+    // filling the *whole* clipped region solid, or spilling past it.
+    let clip_area = ((clip_x1 - clip_x0).max(0.0) * (clip_y1 - clip_y0).max(0.0)) as usize;
+    assert!(
+        subject_filled <= clip_area + 4,
+        "{subject_filled} lit px is more than the ~{clip_area} px the clipped prediction \
+         allows for — the draw is spilling past where the posed geometry says it should be."
+    );
+
+    assert_eq!(
+        subject_empty, 0,
+        "an empty hotbar cell must stay black; {subject_empty} lit pixels there means the \
+         draw is not localised to its slot"
+    );
+    assert_eq!(
+        control_filled, 0,
+        "without attach_item_models the same frame must draw nothing in the cell"
     );
 }
