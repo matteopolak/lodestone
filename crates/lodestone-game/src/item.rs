@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use lodestone_model::{ArmorTrim, AuthoredEnchantment, Identifier, ItemEnchantment, Text, ToolPatch};
+use lodestone_model::{ArmorTrim, AuthoredEnchantment, Identifier, ItemEnchantment, Text, TextSpan, ToolPatch};
 
 /// The default maximum stack size when an item carries no
 /// `minecraft:max_stack_size` component. Matches vanilla's `Item.Properties`
@@ -966,6 +966,31 @@ pub fn normalize(stack: ItemStack) -> Option<ItemStack> {
 ///   than a raw snake_case key.
 #[must_use]
 pub fn styled_hover_name(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<String>) -> String {
+    styled_hover_text(stack, translate).to_legacy_string()
+}
+
+/// The span-carrying sibling of [`styled_hover_name`]: identical construction
+/// (custom name or best-effort base name, forced italic when custom), but
+/// returned as [`TextSpan`]s via [`Text::to_spans`] instead of flattened
+/// through [`Text::to_legacy_string`].
+///
+/// `to_legacy_string` cannot represent a `TextColor::Rgb` custom name
+/// (`TextColor::legacy_code` returns `None` for it), so a hex-coloured custom
+/// item name silently lost its colour at every `styled_hover_name` draw site
+/// — the same bug `Text::to_legacy_string`'s own doc and the chat draw path
+/// already carry a fix for. A draw site that wants the colour to survive
+/// should call this and draw the spans, not `styled_hover_name`.
+#[must_use]
+pub fn styled_hover_name_spans(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<String>) -> Vec<TextSpan> {
+    styled_hover_text(stack, translate).to_spans()
+}
+
+/// The shared construction behind [`styled_hover_name`] and
+/// [`styled_hover_name_spans`]: the custom name (or best-effort base name),
+/// wrapped in an empty root forced italic when a custom name is present. See
+/// [`styled_hover_name`]'s own doc for the vanilla mirror and its two
+/// documented gaps.
+fn styled_hover_text(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<String>) -> Text {
     let custom = match stack.components().get_str(CUSTOM_NAME_COMPONENT) {
         Some(ComponentValue::Text(text)) => Some(text.clone()),
         _ => None,
@@ -978,7 +1003,7 @@ pub fn styled_hover_name(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<S
         root.style.italic = Some(true);
     }
     root.extra.push(hover);
-    root.to_legacy_string()
+    root
 }
 
 /// The best-effort plain display name for `item` with no custom-name
