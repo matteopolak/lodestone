@@ -77,27 +77,42 @@ its net HUD line); joining any real server does not. Its `*args` carries the
 `web/README.md` defaults so the bare recipe is useful, which is why it is the
 only recipe here with a default argument.
 
-**`run-wasm` starts the relay itself**, so the browser you get can actually join
-something rather than only render; `LODESTONE_NO_RELAY=1` serves the page alone.
-That is why its body lives in `scripts/run-wasm.sh` rather than inline: two
-long-lived servers in one command need a trap, so the relay cannot outlive the
-run and hold its port for the next one. `LODESTONE_RELAY_ARGS` carries
-`relay_defaults` into the script, keeping one definition of the endpoints shared
-with `run-relay`; the script also reads `LODESTONE_TARGET_DIR`/`LODESTONE_JOBS`
-itself and converts them to **flags**, so the one cargo command it runs honours a
-private target dir instead of silently bypassing it.
+**`run-wasm` no longer spawns the relay as a second process at all.** It links
+`lodestone-relay` in as a library dependency of a small native binary,
+`lodestone-web-server` (`web/server/`, crate `lodestone-web-server`), which
+serves the built page **and** answers `/relay` from the same listener — one
+port, one process. `web/Trunk.toml`'s `[[proxies]]` entry that used to forward
+`/relay` to a separately-run relay, and the `LODESTONE_NO_RELAY`/
+`LODESTONE_RELAY_ARGS` env vars that controlled it, are gone; see
+`web/README.md` → "Serving the page and the relay from one process" for the
+current shape. The script's body still lives in `scripts/run-wasm.sh` rather
+than inline, for the same reason as before: two long-lived processes in one
+command — now `trunk watch` (rebuilds `dist/`, never serves) and
+`lodestone-web-server` — need a trap so neither can outlive the run and keep
+its port bound (or keep watching) for the next one.
+`LODESTONE_WEB_LISTEN`/`LODESTONE_RELAY_TARGET` are the current env knobs
+(the latter's own default, `127.0.0.1:8080`, is baked into the script rather
+than shared with `run-relay`'s `relay_defaults`, since the two no longer share
+a listener). `LODESTONE_JOBS` still reaches the one cargo command the script
+runs (`lodestone-web-server`'s own build) as a **flag**; `LODESTONE_TARGET_DIR`
+does not apply to it any more — `web/server` is a member of `web/`'s own
+workspace, so it already builds into `web/target/` without contending for the
+shared `target/` lock, the same reasoning the table above gives for why
+`run-wasm` takes neither `{{tdir}}` nor `{{jflag}}` for the wasm half.
 
 **Measured gotcha, and the reason that script is shaped the way it is:** a
 `trap … EXIT INT TERM` does **not** fire while bash is blocked on a foreground
 child, because a caught signal is deferred until the current foreground command
-finishes — and `trunk serve` never finishes. The first version ran trunk in the
-foreground and a `SIGTERM` to the script left **both** trunk and the relay alive,
-still holding the port. Ctrl-C in a terminal happened to work, because `SIGINT`
-goes to the whole foreground process *group* and reached the children directly —
-which is precisely why this survives casual testing and why the port-already-bound
-pre-flight check exists at all. Trunk therefore runs in the **background** with
-the script blocking in `wait`, which bash interrupts to run the handler. Do not
-simplify that back into a foreground call.
+finishes — and neither `trunk watch` nor `lodestone-web-server` ever finishes on
+their own. An earlier version ran the dev server in the foreground and a
+`SIGTERM` to the script left both children alive, still holding the port.
+Ctrl-C in a terminal happened to work, because `SIGINT` goes to the whole
+foreground process *group* and reached the children directly — which is
+precisely why this survives casual testing and why the port-already-bound
+pre-flight check exists at all. The foreground child (`lodestone-web-server`,
+whose stdout carries the request/relay log) therefore also runs in the
+**background**, with the script blocking in `wait` on it, which bash interrupts
+to run the handler. Do not simplify that back into a bare foreground call.
 
 Both new recipes carry a `[doc("…")]` attribute. Without one, `just --list`
 shows the **last comment line** before a recipe, which for anything carrying real

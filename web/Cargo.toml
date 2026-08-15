@@ -15,9 +15,17 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# Empty workspace table => this crate is its own workspace root and is NOT
-# attached to the parent Lodestone workspace.
+# This crate is its own workspace root, NOT attached to the parent Lodestone
+# workspace — `server` (a plain native binary, see web/server/src/main.rs) is
+# the only other member, added so it shares this workspace's own
+# web/Cargo.lock rather than the root one. Neither member is swept into the
+# parent's `cargo build --workspace`: `cargo` run from a directory whose
+# manifest has BOTH `[package]` and `[workspace]` builds only that package by
+# default (no --workspace), which is also why `trunk build`/`trunk watch`,
+# invoked from this directory, never touches `server` even though it is now a
+# workspace member.
 [workspace]
+members = ["server"]
 
 [dependencies]
 # **The whole game.** The same crate the native `lodestone` binary is built from:

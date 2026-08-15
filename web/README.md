@@ -10,7 +10,7 @@ build --workspace`.
 join" section especially) still describes an earlier version of this crate
 that had its own `src/multiplayer.rs`/`src/singleplayer.rs`/`src/input.rs`/
 `src/terrain.rs` — none of which exist any more; `src/main.rs` is now the
-entire crate. That is a larger, separate cleanup than the relay-ping/proxy
+entire crate. That is a larger, separate cleanup than the serving-architecture
 change this pass made; treat any claim below that names a `web/src/*.rs` file
 other than `main.rs` as unverified until it is swept.
 
@@ -27,7 +27,8 @@ other than `main.rs` as unverified until it is swept.
   `lodestone-worldgen` stack, connected in-process over an in-memory duplex
   under `spawn_local` — no relay, no socket, no Docker.
 - **Server-list ping, over the relay:** `lodestone-shell`'s multiplayer server
-  list now really pings a server from the browser — see "Live multiplayer
+  list now really pings a server from the browser, through `lodestone-relay`
+  linked into `lodestone-web-server` (`web/server/`) — see "Live multiplayer
   transport" below for what that needs and what it does not (yet) cover.
 
 ## Toolchain (verified versions)
@@ -51,15 +52,31 @@ trunk --version   # => trunk 0.21.14
 ## Run it
 
 ```sh
-cd web
-trunk serve --release --address 127.0.0.1 --port 8080
+just run-wasm
 # open http://127.0.0.1:8080/
 ```
 
-**Use `--release`.** A debug build makes single-threaded worldgen ~10× slower;
-in release, one column is ~1 s (see below), which the singleplayer probe's 30 s
-deadline tolerates. A debug build can blow that deadline and *look* like a
-failure.
+This is `scripts/run-wasm.sh`: `trunk watch --release` keeps rebuilding
+`web/dist/` on every source change, paired with `lodestone-web-server`
+(`web/server/`, a plain native binary) which serves that directory **and**
+the `/relay` WebSocket→TCP bridge from the same listener — one port, one
+process for the browser to talk to, and Ctrl-C stops both. See "Live
+multiplayer transport" below for what `/relay` needs, and "Serving the page
+and the relay from one process" for why this replaced two separate ones.
+
+Prefer bare `trunk` for quick, page-only visual iteration with no relay or
+multiplayer ping (same restriction it always had before the relay existed):
+
+```sh
+cd web && trunk serve --release --address 127.0.0.1 --port 8080
+# open http://127.0.0.1:8080/
+```
+
+**Use `--release`** for both the wasm bundle and `lodestone-web-server`
+itself. For the wasm bundle specifically: a debug build makes single-threaded
+worldgen ~10× slower; in release, one column is ~1 s (see below), which the
+singleplayer probe's 30 s deadline tolerates. A debug build can blow that
+deadline and *look* like a failure.
 
 ### Assets: the build succeeds without them, the page does not
 
@@ -92,34 +109,33 @@ real cause buried (see `docs/ci.md`).
 
 A browser page has no raw TCP socket, so both the multiplayer server-list
 **ping** and (once wired — see the warning below) a real **join** go through
-`lodestone-relay`, a protocol-blind WebSocket→TCP bridge. Start it pointing at
-a real server, then reload:
+`lodestone-relay`, a protocol-blind WebSocket→TCP bridge. `just run-wasm`
+already runs it — see "Serving the page and the relay from one process" below
+— so nothing extra needs starting; this section explains what dialing it
+actually does.
 
-```sh
-cargo run -p lodestone-relay -- --listen 127.0.0.1:25580 --target 127.0.0.1:25565
-```
-
-**The browser no longer needs to know the relay's port.** `web/Trunk.toml`'s
-`[[proxies]]` entry forwards the fixed path `/relay` on the page's own origin
-(`ws://127.0.0.1:8080/relay` under `trunk serve`) through to the relay's real
-listener, so a page served on one port reaches everything through that one
-port — see `Trunk.toml`'s own comment for the schema and for the one literal
-that still has to be kept in sync by hand (its `backend`, against the
-justfile's `relay_defaults`). `just run-wasm` starts both; `LODESTONE_NO_RELAY=1
-just run-wasm` serves the page alone.
+**The browser only ever needs to know its own origin.**
+`crate::platform::relay::relay_ws_url()` (`lodestone-shell`) derives the
+WebSocket URL from `window.location` plus the fixed path `/relay` — no port
+baked in anywhere in Rust. Under `just run-wasm` that resolves to
+`ws://127.0.0.1:8080/relay`, answered by `lodestone-web-server`'s own `/relay`
+route on the same listener that served the page.
 
 **Server-list ping:** `lodestone-shell`'s multiplayer screen (`menu/status.rs`)
 pings a saved server entry by dialing the relay and running the ordinary
-status exchange over it, asynchronously, with a 5 s deadline. With the relay
-down (or `/relay` not proxied — see "Deployed builds" below), a row resolves
+status exchange over it, asynchronously, with a 5 s deadline. With no server
+reachable at the relay's `--target` (or with `/relay` unanswered entirely —
+see "Serving the page and the relay from one process" below), a row resolves
 to `Failed` with a reason naming the obstacle rather than hanging on
-`Pending` forever. With the relay up and pointed at a real server, a row shows
-that server's real MOTD/ping/player count. **One relay forwards to exactly one
-fixed backend** (`lodestone-relay`'s own `--target`), so every row in the list
-reaches the *same* server when pinged through a relay, regardless of which
-row's host/port triggered the probe — those fields still travel in the
-handshake, a real server may virtual-host on them, but the relay itself does
-not route on them.
+`Pending` forever. With a real server behind `--target`, a row shows that
+server's real MOTD/ping/player count — verified live against
+`scripts/live-oracles/creative.sh`, byte-matching its `server.properties`
+(`motd=lodestone creative oracle`, `max-players=8`). **One relay forwards to
+exactly one fixed backend** (`--target`), so every row in the list reaches the
+*same* server when pinged through a relay, regardless of which row's
+host/port triggered the probe — those fields still travel in the handshake, a
+real server may virtual-host on them, but the relay itself does not route on
+them.
 
 **A real browser** ***join*** **is not currently wired to the relay at all.**
 `lodestone-shell/src/net.rs`'s `run_async`, on `target_arch = "wasm32"` with a
@@ -135,9 +151,55 @@ predates the shell-launcher port and does not describe what `net.rs` does
 today. Wiring a real join is a separate, larger change than this pass made —
 see that function's `Origin::Remote` match arm for the exact seam.
 
-## ⚠ COOP/COEP: why the dev server matters
+## Serving the page and the relay from one process
 
-`Trunk.toml` sets two headers on every response:
+`lodestone-web-server` (`web/server/`, a plain native binary, crate
+`lodestone-web-server`) links `lodestone-relay` in as a **library dependency**
+rather than running it as a spawned child. It serves the built page out of
+`--dist` (default `./dist`, what `trunk build`/`trunk watch` write) **and**
+answers `/relay` as a WebSocket upgrade bridged to `--target` — one listener,
+one process, so there is no second port and nothing to keep in sync by hand.
+
+```sh
+web/target/release/lodestone-web-server \
+  --listen 127.0.0.1:8080 --dist web/dist --target 127.0.0.1:25565
+```
+
+`--listen 127.0.0.1:0` asks the OS for a free port instead of the fixed
+default — the conflict case a hardcoded port risks. Pass `--port-file <path>`
+to have the actually-bound port written there as a bare decimal, for a script
+to read without a pipeline; `scripts/run-wasm.sh` does exactly this.
+
+**This is also the deployable artifact `trunk serve`'s dev-only proxy could
+never be.** `trunk build` produces a plain static `dist/` and `trunk serve`'s
+proxy is a dev-server feature with nothing behind a `dist/` served any other
+way — that used to mean a deployed build had **no relay path at all**, an
+accepted, documented gap. Running `lodestone-web-server` in front of `dist/`
+closes it: point `--target` at a reachable Minecraft server and `/relay`
+works from any deployment that can run this binary, not only `trunk serve`.
+
+**What is still unsolved:** TLS. `lodestone-web-server` speaks plain HTTP/WS
+only, so an `https://` deployment (required the moment the page is served
+over anything but `localhost`, since an `https` page cannot open `ws://`)
+needs a reverse proxy in front of it (nginx, Caddy, a CDN edge function, a
+load balancer doing TLS termination) forwarding to this binary's `--listen`
+address — ordinary practice for any plain-HTTP origin server, and nothing
+here builds or runs that reverse proxy. Nothing about the relay path itself
+is loopback-specific (`--target`/`--listen` take any address), but going from
+"binds `127.0.0.1:8080`" to "reachable over `wss://` from the public
+internet" is genuinely separate work that has not been attempted.
+
+`web/Trunk.toml`'s `[[proxies]]` entry that used to forward `/relay` to a
+separately-run `lodestone-relay` process is **gone** — it would just be a
+second, redundant way to reach a relay that this binary already serves on the
+one port `trunk serve` itself is not used for by `just run-wasm` any more.
+`trunk serve` used standalone (page-only iteration, no relay) still works;
+see "Run it" above.
+
+## ⚠ COOP/COEP: why both servers set the same two headers
+
+Both `web/Trunk.toml`'s `[serve]` block and `lodestone-web-server` set two
+headers on every response:
 
 ```
 Cross-Origin-Opener-Policy:   same-origin
@@ -153,28 +215,10 @@ substrate is already isolated when threading lands.
 **The trap:** a plain static file server (`python -m http.server`, most CDNs by
 default, etc.) does **not** send these headers. The build renders fine without
 them today, so serving `dist/` statically *appears* to work — but anything that
-later depends on cross-origin isolation will work under `trunk serve` and
-**silently fail** under a plain server, with `crossOriginIsolated === false` and
-no error. If you serve `dist/` yourself, replicate both headers, or you are
-building on a foundation the dev server has and production may not.
-
-### Deployed builds have no relay proxy either — say so, don't discover it
-
-The `[[proxies]]` entry that makes `/relay` reach the relay (see "Live
-multiplayer transport" above) is a **`trunk serve`-only** feature: it is
-`Trunk.toml` config for the dev server's own built-in proxy, and `trunk build`
-produces a plain static `dist/` with nothing behind it. Serve that directory
-with anything other than `trunk serve` — a CDN, `nginx`, GitHub Pages — and a
-request to `/relay` has nothing to answer it; the browser's WebSocket upgrade
-fails immediately (refused), which the ping path already treats as an ordinary
-`Failed` row rather than a hang, but there is still no way to reach a real
-server from that deployment. This is an **accepted, currently unsolved gap**,
-not an oversight nobody noticed: a real deployment needs its own reverse proxy
-(nginx, Caddy, a CDN edge function, or a copy of trunk's own proxy behaviour)
-in front of a reachable `lodestone-relay`, forwarding `/relay` as a WebSocket
-the same way `Trunk.toml` does today. Nothing here builds or runs that; it is
-recorded so the gap has a name rather than surfacing as "multiplayer silently
-does not work" on whatever the first real deployment turns out to be.
+later depends on cross-origin isolation will **silently fail** with
+`crossOriginIsolated === false` and no error under a server that omits them.
+`lodestone-web-server` sets both unconditionally (`tower_http::set_header`);
+if you serve `dist/` with something else entirely, replicate both headers.
 
 ## Worldgen is the singleplayer gate, not the transport
 
@@ -343,9 +387,15 @@ neither has been tried.
 
 ### Running it
 
+**Note:** these commands predate this pass's serving-architecture change (see
+"Serving the page and the relay from one process" above) and are unverified
+against the current `src/main.rs` per this file's own top-of-file disclaimer
+— kept here only so a reader attempting to reproduce the join measurement
+above starts from the current run command, not a doubly-stale one naming a
+separately-run `lodestone-relay` process.
+
 ```sh
-cargo run -p lodestone-relay -- --listen 127.0.0.1:25580 --target 127.0.0.1:25565
-cd web && trunk serve --release
+just run-wasm
 # then: fill in the relay/host/port/name boxes and press Join,
 # or load http://127.0.0.1:8080/?join=1 to join on page load.
 ```
@@ -438,11 +488,18 @@ error into a runtime crash, which is strictly worse and invisible to `cargo chec
 web/
   index.html          data-trunk links: rust app; client.jar/blocks.json are
                        fetched at runtime, not linked here — see "Assets" above
-  Trunk.toml           dev-server config (COOP/COEP headers, the /relay proxy)
+  Trunk.toml           dev-server config for standalone `trunk serve` (page-only,
+                       no relay) — COOP/COEP headers, post_build asset hooks
   scripts/
     stage_panorama.py post_build hook: stages real panorama faces if present
   assets/               post_build-hook staging target; empty in the repo
   src/
-    main.rs             the entire crate: boot, asset fetch, hands off to
+    main.rs             the entire wasm crate: boot, asset fetch, hands off to
                          lodestone-shell's `app::run` — see its own module doc
+  server/               NATIVE crate `lodestone-web-server` — links
+                         lodestone-relay as a library, serves dist/ and /relay
+                         from one listener; see "Serving the page and the
+                         relay from one process" above. A workspace member of
+                         web/'s own Cargo.toml (own web/Cargo.lock), never
+                         built by trunk (which builds only the root package).
 ```

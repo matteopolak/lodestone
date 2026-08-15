@@ -30,10 +30,14 @@ tdir := env("LODESTONE_TARGET_DIR", "target")
 jobs := env("LODESTONE_JOBS", "")
 jflag := if jobs != "" { "-j " + jobs } else { "" }
 
-# Default relay endpoints for `run-relay`, matching web/README.md. Held in a
-# variable rather than inline in the signature purely so `just --list` can still
-# fit the recipe's doc comment on the same line as its name — an inline default
-# this long pushes the description onto a line of its own.
+# Default endpoints for the STANDALONE `lodestone-relay` binary via `run-relay`
+# only — `run-wasm` below no longer uses this at all (its own binary,
+# `lodestone-web-server`, has its own baked-in defaults matching this file's
+# host/port, since there is no longer a second literal anywhere to keep in
+# sync with). Held in a variable rather than inline in the signature purely so
+# `just --list` can still fit the recipe's doc comment on the same line as its
+# name — an inline default this long pushes the description onto a line of
+# its own.
 relay_defaults := "--listen 127.0.0.1:25580 --target 127.0.0.1:25565"
 
 # --- Health checks (CLAUDE.md "Build and test") ---------------------------
@@ -78,9 +82,12 @@ health: check check-all check-seam test
 run *args:
     cargo run --release -p lodestone-shell --bin lodestone {{jflag}} --target-dir {{tdir}} -- {{args}}
 
-# cd web && trunk serve --release — launch the BROWSER build and serve it on
-# http://127.0.0.1:8080/ (address, port and the COOP/COEP headers all come from
-# web/Trunk.toml, so they are deliberately not repeated here).
+# scripts/run-wasm.sh — keep the browser build rebuilding on change (`trunk
+# watch`) AND serve it, page plus the /relay WebSocket->TCP bridge, from ONE
+# port (`lodestone-web-server`, web/server/src/main.rs) on http://127.0.0.1:8080/
+# by default. Address, port and the two COOP/COEP headers are baked into that
+# binary's own defaults (LODESTONE_WEB_LISTEN overrides), not read from
+# web/Trunk.toml — trunk itself no longer serves anything for this recipe.
 #
 # Named `run-wasm` rather than `run:wasm` or `run --surface wasm` for two
 # reasons. `:` is just's module-path separator, so it is not available in a
@@ -94,25 +101,23 @@ run *args:
 # --release is NOT a preference here, the same way it is not for `run`, but for a
 # different reason: a debug build makes single-threaded worldgen ~10x slower,
 # which blows the singleplayer probe's own 30 s deadline and therefore *presents
-# as a failure* rather than as slowness. See web/README.md → "Run it".
+# as a failure* rather than as slowness. See web/README.md → "Run it". Applies to
+# BOTH halves now — `trunk watch --release` for the wasm bundle, and a --release
+# build of `lodestone-web-server` itself.
 #
 # No {{jflag}} and no --target-dir {{tdir}}, and their absence is deliberate
-# rather than an oversight: trunk drives cargo itself and exposes neither flag
-# (its output knob is --dist), and `web/` is its own workspace root with its own
-# Cargo.lock and its own web/target/, so it never contends for the shared
-# target/ lock that {{tdir}} exists to avoid.
+# rather than an oversight, for BOTH the wasm build and lodestone-web-server's own
+# build: trunk drives cargo itself and exposes neither flag (its output knob is
+# --dist), and both `web/` and `web/server` are members of web/'s own workspace
+# root, with its own Cargo.lock and its own web/target/, so neither ever contends
+# for the shared target/ lock that {{tdir}} exists to avoid.
 #
-# It starts `run-relay` too, and that is the default rather than an extra,
-# because a browser cannot open a raw TCP socket: without the relay the page
-# renders and in-memory singleplayer work, and the multiplayer server-list ping
-# fails visibly instead of reaching a server (a row reads `Failed` with a
-# reason naming the relay, not a silent blank). A "run" command that silently
-# produces a client which cannot reach anything looks broken rather than
-# incomplete. `LODESTONE_NO_RELAY=1 just run-wasm` serves the page alone.
-#
-# The browser reaches the relay through THIS port, at `/relay` — see
-# web/Trunk.toml's `[[proxies]]` entry — not through a second port, so nothing
-# about the relay is visible to a player beyond "the server list works".
+# It links the relay in rather than starting a separate one, which is why there
+# is no LODESTONE_NO_RELAY any more: `/relay` is just a route on the one listener,
+# idle until something dials it, so there is no second process whose absence needs
+# a flag. Without a real server behind --target, the multiplayer server-list ping
+# still fails *visibly* (a row reads `Failed`, naming the reason) rather than
+# hanging or looking broken — same guarantee the old two-process shape gave.
 #
 # **A real multiplayer join is not wired to the relay yet.** Only the
 # server-list ping is, as of this recipe's current doc. `net.rs`'s browser join
@@ -122,14 +127,18 @@ run *args:
 # this comment to claim joining works; check `net.rs`'s `run_async` before
 # trusting any future version of this line that does.
 #
-# Two long-lived servers in one command is why the body is a script and not
-# inline here: it needs a trap, so the relay cannot outlive the run and keep its
-# port bound for the *next* one. Per this file's header that body belongs in
-# scripts/, exactly as `wasm-size` delegates. LODESTONE_RELAY_ARGS is how
-# {{relay_defaults}} reaches it, so the endpoints keep one definition shared with
-# `run-relay` below rather than drifting in two places. (It is a LODESTONE_*
-# name, not a CARGO_* one, for the sccache reason at the top of this file, and it
-# is set inline on the command rather than via `set export`.)
+# Two long-lived processes in one command is why the body is a script and not
+# inline here: it needs a trap, so neither process can outlive the run and keep
+# its port bound (or its watch running) for the *next* one. Per this file's
+# header that body belongs in scripts/, exactly as `wasm-size` delegates.
+# LODESTONE_WEB_LISTEN / LODESTONE_RELAY_TARGET are LODESTONE_* names, not
+# CARGO_* ones, for the sccache reason at the top of this file, and are meant to
+# be set inline on the command rather than via `set export`.
+#
+# Port 0 (`LODESTONE_WEB_LISTEN=127.0.0.1:0`) asks the OS for a free port
+# instead of the fixed default, for exactly the conflict case a fixed port
+# risks; the script reads the port lodestone-web-server actually bound back
+# from a file it writes (--port-file), never from a pipeline.
 #
 # Prerequisites are trunk 0.21.x and the wasm32-unknown-unknown target; the
 # script verifies both up front and fails with the install command, rather than
@@ -139,22 +148,20 @@ run *args:
 # comment line before a recipe, which for any recipe carrying real rationale is a
 # mid-sentence fragment. Prefer it over reordering the prose so the summary lands
 # last — the rationale should read top-to-bottom for someone in the file.
-[doc("relay + browser (wasm) build on :8080; LODESTONE_NO_RELAY=1 for the page alone")]
+[doc("watch + serve (page + /relay, one port) the browser build; :8080 by default")]
 run-wasm *args:
-    LODESTONE_RELAY_ARGS="{{relay_defaults}}" ./scripts/run-wasm.sh {{args}}
+    ./scripts/run-wasm.sh {{args}}
 
-# cargo run -p lodestone-relay — the WebSocket→TCP bridge the browser build needs
-# to reach a real server at all, because a browser cannot open a raw TCP
-# socket. Render and in-memory singleplayer work with this down; the
-# multiplayer server-list ping (`menu/status.rs`'s `relay_probe`) does not — a
-# row resolves to `Failed` with a reason naming the relay instead. Defaults
-# match web/README.md **and** web/Trunk.toml's `[[proxies]]` backend, which is
-# a second, hand-kept literal for the same `--listen` port (trunk cannot read
-# this file's shell variable) — `scripts/run-wasm.sh` warns if the two drift.
-# Override by passing your own flags, e.g.
-# `just run-relay --listen 127.0.0.1:25580 --target 127.0.0.1:25570` — and if
-# you change the port, update web/Trunk.toml's `backend` to match.
-[doc("cargo run -p lodestone-relay — the WebSocket→TCP bridge run-wasm needs to join a server")]
+# cargo run -p lodestone-relay — the STANDALONE WebSocket→TCP bridge, its own
+# process on its own port (25580 by default). **`run-wasm` above does NOT use
+# this any more** — it links `lodestone-relay` in as a library inside
+# `lodestone-web-server` instead, so there is no second port or process to keep
+# in sync with. This recipe is for pairing a bare `trunk serve` (page-only dev
+# loop, see web/Trunk.toml's own comment) with a relay by hand, or for anything
+# else that wants a standalone protocol-blind WS↔TCP bridge. Override by
+# passing your own flags, e.g.
+# `just run-relay --listen 127.0.0.1:25580 --target 127.0.0.1:25570`.
+[doc("cargo run -p lodestone-relay — the STANDALONE relay (run-wasm no longer needs this)")]
 run-relay *args=relay_defaults:
     cargo run --release -p lodestone-relay {{jflag}} --target-dir {{tdir}} -- {{args}}
 

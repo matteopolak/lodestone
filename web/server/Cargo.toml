@@ -1,0 +1,29 @@
+[package]
+name = "lodestone-web-server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A member of web/'s OWN workspace (see web/Cargo.toml's `[workspace]` table),
+# never the parent Lodestone workspace — this binary is native-only and has no
+# reason to be swept into `crates/lodestone-*`'s glob. It shares web/Cargo.lock
+# with the `lodestone-web` (browser) package, not the root Cargo.lock.
+[[bin]]
+name = "lodestone-web-server"
+path = "src/main.rs"
+
+[dependencies]
+# The whole reason this crate exists: link the relay in as a library instead of
+# spawning it as a second process. `bridge`/`serve` are not called directly (see
+# main.rs's module doc for why), but the dependency is real — this binary and
+# the standalone `lodestone-relay` binary share the same protocol-blind bridge
+# design, just wired into two different listeners.
+lodestone-relay = { path = "../../crates/lodestone-relay" }
+
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util", "fs"] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["fs", "set-header"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
