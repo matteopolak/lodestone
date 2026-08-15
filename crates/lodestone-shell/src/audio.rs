@@ -395,41 +395,54 @@ impl ShellAudio {
             .views(camera.position, forward, right, caption_now_ms())
     }
 
-    /// Ask the engine for a music track, reporting whether it produced anything.
+    /// Ask the engine to start a music track playing for real, reporting
+    /// whether it produced anything.
     ///
-    /// Returns [`MusicStart::Started`] only when the track genuinely resolved to a
-    /// stream. In an ordinary checkout it returns [`MusicStart::Silent`], and that
-    /// is **correct rather than a failure**: `cargo xtask fetch-sounds` excludes
-    /// music by default, so 0 of 70 music objects are on disk and
-    /// [`AudioEngine::resolve_music`] reports a plain absence. `--all` adds 92
-    /// objects / 293 MB. One real 26.2 quirk to expect even with the full corpus:
-    /// `music.nether.warped_forest` ships an **empty `sounds` array**, so that
-    /// biome is silent by data.
+    /// Returns [`MusicStart::Started`] only when the track genuinely resolved
+    /// and a streaming voice is now live. In an ordinary checkout it returns
+    /// [`MusicStart::Silent`], and that is **correct rather than a failure**:
+    /// `cargo xtask fetch-sounds` excludes music by default, so 0 of 70 music
+    /// objects are on disk and
+    /// [`AudioEngine::start_music`](lodestone_sound::AudioEngine::start_music)
+    /// reports a plain absence. `--all` adds 92 objects / 293 MB. One real
+    /// 26.2 quirk to expect even with the full corpus:
+    /// `music.nether.warped_forest` ships an **empty `sounds` array**, so
+    /// that biome is silent by data.
     ///
-    /// # Nothing is audible yet, and the reason is downstream of here
-    ///
-    /// A resolved [`StreamingSound`](lodestone_sound::StreamingSound) is returned
-    /// by the engine and dropped by this function, because `lodestone_audio`'s
-    /// `Mixer` has **no streaming-voice API** — its `SoundInstance` takes fully
-    /// decoded PCM, and decoding music is exactly what must not happen here
-    /// (`the_end.ogg` is 304 MiB decoded). So this closes the *selection and
-    /// request* path and leaves the last mile open; `VorbisStream` exists and is
-    /// unwired. Reporting `Started` here would be a lie, so a resolved-but-
-    /// unplayable track deliberately still reports `Started` **only** in the sense
-    /// that the track exists — see the discussion in `docs/music-selection.md`
-    /// before changing this, because `MusicManager`'s delay bookkeeping keys off
-    /// the answer.
+    /// See [`AudioEngine::start_music`](lodestone_sound::AudioEngine::start_music)
+    /// for the producer-thread/ring/mixer wiring that makes this audible —
+    /// the "resolved but dropped" gap this call site used to have is closed
+    /// there, not here.
     pub fn start_music(&mut self, music: &Music) -> MusicStart {
         // Seed 0: vanilla's own music path uses `SimpleSoundInstance.forMusic`,
         // which takes no seed and so leaves the weighted pick on its default.
-        match self.engine.resolve_music(music.sound(), 0) {
-            Ok(Some(_stream)) => MusicStart::Started,
-            Ok(None) => MusicStart::Silent,
+        match self.engine.start_music(music.sound(), 0) {
+            Ok(start) => start,
             Err(e) => {
                 self.report_failure(music.sound(), &e);
                 MusicStart::Silent
             }
         }
+    }
+
+    /// Stops the current music voice, if any. The `MusicSink::stop` half of
+    /// [`MusicManager`](lodestone_sound::music::MusicManager)'s contract — see
+    /// [`AudioEngine::stop_music`](lodestone_sound::AudioEngine::stop_music).
+    pub fn stop_music(&self) {
+        self.engine.stop_music();
+    }
+
+    /// Whether the track [`Self::start_music`] most recently started is still
+    /// sounding — the `MusicSink::is_active` half.
+    #[must_use]
+    pub fn is_music_active(&self) -> bool {
+        self.engine.is_music_active()
+    }
+
+    /// Sets the `Music` bus's runtime gain — the `MusicSink::set_music_gain`
+    /// half, driving `MusicManager.fadePlaying`'s crossfade.
+    pub fn set_music_gain(&self, gain: f32) {
+        self.engine.set_music_gain(gain);
     }
 
     /// Start an ambient **loop** voice at `volume`, returning its handle.
@@ -534,6 +547,98 @@ thread_local! {
     static AUDIO_STATE: RefCell<Option<AudioState>> = const { RefCell::new(None) };
 }
 
+/// Ring capacity for one streaming voice, in samples (interleaved across
+/// `channels`): about half a second of the source's own audio. Same
+/// reasoning and same figure as native's `lodestone_sound::engine`-private
+/// `stream_ring_capacity` — kept as a small independent copy here rather than
+/// a shared export, since the two targets' producers (a thread vs. a
+/// per-callback pump) are different enough that sharing the constant alone
+/// would not remove any real duplication.
+#[cfg(target_arch = "wasm32")]
+fn stream_ring_capacity(source_rate: u32, channels: u16) -> usize {
+    let half_second = (source_rate as usize / 2) * usize::from(channels.max(1));
+    half_second.max(2)
+}
+
+/// The browser's music producer: a lazily-decoding [`VorbisStream`] plus the
+/// ring it feeds, pumped from the **main thread** rather than a spawned one.
+///
+/// # Why not a thread, the way native does it
+///
+/// `lodestone_sound::AudioEngine::start_music` (native) spawns a real OS
+/// thread to decode ahead of the ring. `std::thread::spawn` **traps** on
+/// wasm32 (see `CLAUDE.md`'s rendering-constraints/browser-shell section),
+/// and wasm32-unknown-unknown without the `atomics` target feature has no
+/// second thread to put one on regardless. So instead of a producer thread,
+/// [`pump_music_producer`] is called from inside the very same
+/// `onaudioprocess` closure that already runs [`Mixer::render`] — a
+/// `ScriptProcessorNode`'s callback runs on the **main** thread (this
+/// module's own doc explains why that is the sink used here rather than an
+/// `AudioWorklet`), so "decode a little, then render" in one callback is
+/// exactly as safe as "render" alone was: no second thread is created or
+/// needed. Vorbis packet decode is cheap enough (a few thousand samples) that
+/// pumping a bounded handful of packets per callback keeps the ring topped up
+/// without making any one callback noticeably slower.
+///
+/// [`VorbisStream`]: lodestone_audio::VorbisStream
+#[cfg(target_arch = "wasm32")]
+struct MusicProducer {
+    stream: lodestone_audio::VorbisStream,
+    ring: std::sync::Arc<lodestone_audio::SampleRing>,
+    ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Decodes up to a handful of packets into `producer.ring`, stopping early
+/// once the ring has no more free space (so a callback with a well-fed ring
+/// does negligible extra work) or once the stream ends or errors (in which
+/// case [`MusicProducer::ended`] is set, exactly like native's producer
+/// thread does on its own end/error path).
+///
+/// Called from two places: once synchronously when
+/// [`ShellAudio::start_music`] first resolves a track (so the very first
+/// render block already has something to play instead of guaranteed silence
+/// for one callback), and once per `onaudioprocess` callback thereafter.
+#[cfg(target_arch = "wasm32")]
+fn pump_music_producer(producer: &mut MusicProducer) {
+    /// Bounds the decode work done inside one audio callback. A real vanilla
+    /// music packet decodes to a few thousand samples; even a generous
+    /// multiple of that per callback is a small fraction of a
+    /// `SCRIPT_PROCESSOR_BUFFER_FRAMES`-sized callback's own budget.
+    const MAX_PACKETS_PER_PUMP: u32 = 8;
+    for _ in 0..MAX_PACKETS_PER_PUMP {
+        if producer.ring.free() == 0 {
+            return;
+        }
+        match producer.stream.next_packet() {
+            Ok(Some(packet)) => {
+                let mut offset = 0;
+                while offset < packet.len() {
+                    let written = producer.ring.write(&packet[offset..]);
+                    if written == 0 {
+                        // Ring is full; resume from here next callback rather
+                        // than looping — there is no second thread to back
+                        // off on here, and the caller (the render callback
+                        // itself) must return promptly either way.
+                        return;
+                    }
+                    offset += written;
+                }
+            }
+            Ok(None) => {
+                producer.ended.store(true, std::sync::atomic::Ordering::Release);
+                return;
+            }
+            Err(_) => {
+                // A mid-stream decode error: stop producing and mark ended so
+                // the voice finishes cleanly once the ring drains, rather
+                // than waiting forever for samples that will never arrive.
+                producer.ended.store(true, std::sync::atomic::Ordering::Release);
+                return;
+            }
+        }
+    }
+}
+
 /// The real state behind the browser's audio: [`SoundResolver`] (resolve +
 /// decode) plus a device-free [`Mixer`] a `ScriptProcessorNode` pulls from
 /// every callback. See this module's docs for why a `ScriptProcessorNode`
@@ -555,6 +660,15 @@ struct AudioState {
     resolver: lodestone_sound::SoundResolver,
     subtitles: subtitles::SubtitleQueue,
     reported_failure: bool,
+    /// The one music voice's producer, if a track is currently playing —
+    /// shared with the `onaudioprocess` closure exactly like `mixer` is, so
+    /// both the game-thread `start_music` call and the per-callback pump can
+    /// reach it. `None` means no music voice is live.
+    music_producer: Rc<RefCell<Option<MusicProducer>>>,
+    /// The mixer handle for the current music voice, if any — this struct's
+    /// own half of the same single-slot contract native's `AudioEngine`
+    /// keeps in its `current_music` field.
+    current_music: Option<lodestone_audio::PlayHandle>,
     // Kept alive for the state's lifetime (config-scoped, effectively the
     // whole session): dropping either would disconnect the callback, and a
     // `ScriptProcessorNode` whose JS side still holds the closure reference
@@ -588,6 +702,18 @@ impl AudioState {
             let key = key.to_string();
             self.subtitles.push(&key, pos, caption_now_ms());
         }
+    }
+
+    /// Stops the current music voice, if any, and drops its producer so the
+    /// `onaudioprocess` closure stops pumping it. Mirrors native's
+    /// `AudioEngine::stop_music` — the mixer half here (`Mixer::stop`) plus
+    /// the "who feeds it" half (dropping `music_producer`, this target's
+    /// equivalent of signalling a producer thread to exit).
+    fn stop_music(&mut self) {
+        if let Some(handle) = self.current_music.take() {
+            self.mixer.borrow_mut().stop(handle);
+        }
+        *self.music_producer.borrow_mut() = None;
     }
 
     fn play(
@@ -727,6 +853,7 @@ impl ShellAudio {
         // low is an audible, permanent pitch error for the whole session.
         let sample_rate = ctx.sample_rate().round().max(1.0) as u32;
         let mixer = Rc::new(RefCell::new(lodestone_audio::Mixer::new(sample_rate)));
+        let music_producer: Rc<RefCell<Option<MusicProducer>>> = Rc::new(RefCell::new(None));
 
         let node = match ctx
             .create_script_processor_with_buffer_size_and_number_of_input_channels_and_number_of_output_channels(
@@ -743,6 +870,7 @@ impl ShellAudio {
 
         let on_audio_process = {
             let mixer = Rc::clone(&mixer);
+            let music_producer = Rc::clone(&music_producer);
             // Reused across every callback rather than allocated per call:
             // `onaudioprocess` fires at real-time cadence (~20-40 Hz at this
             // buffer size), and a fresh `Vec` on every one of those is
@@ -756,6 +884,14 @@ impl ShellAudio {
                     let Ok(output) = event.output_buffer() else {
                         return;
                     };
+                    // Decode-ahead happens HERE, on the main thread, before
+                    // rendering this block — see `MusicProducer`'s doc for why
+                    // this replaces a producer thread on wasm32. Bounded (at
+                    // most `MAX_PACKETS_PER_PUMP` packets), so a well-fed ring
+                    // costs one `free() == 0` check and returns immediately.
+                    if let Some(producer) = music_producer.borrow_mut().as_mut() {
+                        pump_music_producer(producer);
+                    }
                     let frames = output.length() as usize;
                     let needed = frames * lodestone_audio::OUTPUT_CHANNELS;
                     if interleaved.len() != needed {
@@ -814,6 +950,8 @@ impl ShellAudio {
                 resolver: lodestone_sound::SoundResolver::new(registry, Box::new(source)),
                 subtitles: subtitles::SubtitleQueue::default(),
                 reported_failure: false,
+                music_producer,
+                current_music: None,
                 _node: node,
                 _on_audio_process: on_audio_process,
             });
@@ -975,19 +1113,56 @@ impl ShellAudio {
         })
     }
 
-    /// Ask the resolver for a music track, reporting whether it produced
-    /// anything. Same "resolved but not yet audible" gap native's
-    /// [`start_music`](Self::start_music) documents — `Mixer` has no
-    /// streaming-voice API on either target, so this closes the
-    /// selection/request path and the last mile stays open on both.
+    /// Starts a music track playing for real: resolves it exactly like
+    /// native's `resolve_music` used to, then builds a [`MusicProducer`] and
+    /// a fresh [`SampleRing`](lodestone_audio::SampleRing), pumps it once
+    /// synchronously (so the very first render block already has something
+    /// to play), and hands the ring to the mixer as a new streaming voice.
+    /// See [`MusicProducer`]'s doc for why decode happens on the main thread
+    /// here instead of a spawned one, and this module's header for the
+    /// realtime discipline the `onaudioprocess` closure keeps either way.
+    ///
+    /// Only one music voice may be live at a time (matching vanilla's single
+    /// `currentMusic`); starting a new one first stops whatever this state
+    /// was previously tracking, exactly like native's `start_music`.
     pub fn start_music(&mut self, music: &Music) -> MusicStart {
         AUDIO_STATE.with(|cell| {
             let mut guard = cell.borrow_mut();
             let Some(state) = guard.as_mut() else {
                 return MusicStart::Silent;
             };
+            state.stop_music();
             match state.resolver.resolve_streaming(music.sound(), 0) {
-                Ok(Some(_stream)) => MusicStart::Started,
+                Ok(Some(streaming)) => {
+                    let source_rate = streaming.stream.sample_rate();
+                    let channels = streaming.stream.channels();
+                    let ring = std::sync::Arc::new(lodestone_audio::SampleRing::with_min_capacity(
+                        stream_ring_capacity(source_rate, channels),
+                    ));
+                    let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let mut producer = MusicProducer {
+                        stream: streaming.stream,
+                        ring: std::sync::Arc::clone(&ring),
+                        ended: std::sync::Arc::clone(&ended),
+                    };
+                    pump_music_producer(&mut producer);
+
+                    let source = lodestone_audio::StreamSource {
+                        ring,
+                        source_channels: channels,
+                        source_rate,
+                        category: lodestone_sound::map_category(
+                            lodestone_model::event::SoundCategory::Music,
+                        ),
+                        volume: streaming.volume,
+                        pitch: streaming.pitch,
+                        ended,
+                    };
+                    let handle = state.mixer.borrow_mut().play_stream(source);
+                    state.current_music = Some(handle);
+                    *state.music_producer.borrow_mut() = Some(producer);
+                    MusicStart::Started
+                }
                 Ok(None) => MusicStart::Silent,
                 Err(e) => {
                     state.report_failure(music.sound(), &e);
@@ -995,6 +1170,54 @@ impl ShellAudio {
                 }
             }
         })
+    }
+
+    /// Stops the current music voice, if any. The `MusicSink::stop` half of
+    /// [`MusicManager`](lodestone_sound::music::MusicManager)'s contract.
+    pub fn stop_music(&self) {
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.stop_music();
+            }
+        });
+    }
+
+    /// Whether the track [`Self::start_music`] most recently started is
+    /// still sounding — the `MusicSink::is_active` half. Also the cleanup
+    /// point for a track that finished on its own: a `false` answer here
+    /// also drops the stale producer, mirroring native's
+    /// `AudioEngine::is_music_active`.
+    #[must_use]
+    pub fn is_music_active(&self) -> bool {
+        AUDIO_STATE.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let Some(state) = guard.as_mut() else {
+                return false;
+            };
+            let Some(handle) = state.current_music else {
+                return false;
+            };
+            let active = state.mixer.borrow().is_active(handle);
+            if !active {
+                state.current_music = None;
+                *state.music_producer.borrow_mut() = None;
+            }
+            active
+        })
+    }
+
+    /// Sets the `Music` bus's runtime gain — the `MusicSink::set_music_gain`
+    /// half, driving `MusicManager.fadePlaying`'s crossfade.
+    pub fn set_music_gain(&self, gain: f32) {
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow().as_ref() {
+                state
+                    .mixer
+                    .borrow_mut()
+                    .volumes_mut()
+                    .set_runtime_gain(lodestone_audio::SoundCategory::Music, gain);
+            }
+        });
     }
 
     /// Start an ambient **loop** voice at `volume`, returning its handle —

@@ -28,12 +28,17 @@
 //! compiled*. Delete the test arm and that gate fails rather than quietly
 //! reaching for a device.
 //!
-//! # Nothing is audible yet, and that is downstream of this module
+//! # Playback is real; this module still owns none of it
 //!
-//! [`ShellAudio::start_music`] resolves a stream and drops it, because
-//! `lodestone_audio`'s `Mixer` has no streaming-voice API. This module closes the
-//! *selection and request* path — which is what `that fix` specifies and gates — and
-//! the last mile stays open. See `docs/music-selection.md`.
+//! [`ShellAudio::start_music`] now resolves a stream and hands it to a real
+//! streaming voice (`lodestone_sound::AudioEngine::start_music` natively, the
+//! main-thread pump in `ShellAudio`'s wasm arm in the browser) — see
+//! `docs/music-selection.md` for the ring/producer wiring. This module still
+//! holds none of that: it is the same device-free `MusicManager` driver it
+//! always was, and [`ShellMusicSink::is_active`]/[`ShellMusicSink::stop`] now
+//! poll/drive the real voice through [`ShellAudio`] rather than a sticky flag
+//! this module invented — see those methods' own docs for why the flag is
+//! still kept as the test-build fallback.
 
 use std::time::Duration;
 
@@ -224,6 +229,15 @@ pub(crate) fn world_situation<'a>(
 }
 
 /// A [`MusicSink`] over the shell's optional audio, recording every request.
+///
+/// `active`/`gain` are the **test-build and audio-disabled fallback** — see
+/// [`ShellMusicSink::is_active`]/[`ShellMusicSink::set_music_gain`]. When a
+/// real [`ShellAudio`] is present these two fields still get written (kept
+/// harmlessly in sync by [`start`](MusicSink::start)), but the *authoritative*
+/// answer comes from the engine, not from them: a sticky "I was told
+/// `Started` once" bool can never notice a track finishing on its own, which
+/// is exactly the bug `MusicManager::tick`'s `!isActive` branch exists to
+/// react to.
 struct ShellMusicSink<'a> {
     audio: Option<&'a mut ShellAudio>,
     requests: &'a mut Vec<String>,
@@ -268,15 +282,34 @@ impl MusicSink for ShellMusicSink<'_> {
     }
 
     fn stop(&mut self) {
+        // Real audio owns the actual stop (and, natively, signals the
+        // producer thread to exit — see `AudioEngine::stop_music`'s doc); the
+        // sticky flag is the fallback for a test build or a disabled-audio
+        // session, where there is no engine to ask.
+        if let Some(audio) = self.audio.as_deref_mut() {
+            audio.stop_music();
+        }
         self.active = false;
     }
 
     fn is_active(&self) -> bool {
-        self.active
+        // Poll the real engine when one exists, so a track that finished on
+        // its own is noticed on the very next tick — a sticky bool set once
+        // at `start` time can never see that on its own. Falls back to the
+        // sticky flag only when there is no engine to ask (test builds always
+        // take this branch, by `begin`'s own assertion that `audio` is `None`
+        // in `#[cfg(test)]`).
+        match self.audio.as_deref() {
+            Some(audio) => audio.is_music_active(),
+            None => self.active,
+        }
     }
 
     fn set_music_gain(&mut self, gain: f32) {
         self.gain = gain;
+        if let Some(audio) = self.audio.as_deref_mut() {
+            audio.set_music_gain(gain);
+        }
     }
 }
 
