@@ -255,7 +255,21 @@ web-sys = { version = "0.3", features = [
     # inputs never receive keyboard modifiers).
     "Clipboard",
     "Navigator",
+    # `platform::relay::relay_ws_url`'s `window.location().host()/.protocol()`,
+    # so the browser server-list ping can dial the relay without a hardcoded
+    # port — see that function's doc.
+    "Location",
 ] }
+# The status ping behind the multiplayer server list needs a real network round
+# trip on this target too (`menu/status.rs`'s `relay_probe`), and a browser has
+# no raw TCP socket — only `lodestone-net`'s `ws-web` feature (a `web-sys`
+# `WebSocket` transport riding the same protocol-blind relay `lodestone-relay`
+# is) gets one. Declared here rather than on the unconditional `lodestone-net`
+# edge above so a native build never sees it: the feature's own module is
+# already `cfg(all(feature = "ws-web", target_arch = "wasm32"))`-gated in
+# `lodestone-net`, so this line is a no-op off wasm32, but keeping it out of the
+# native dependency set is one fewer thing for `check-seam` to reason about.
+lodestone-net = { workspace = true, features = ["ws-web"] }
 
 
 [dev-dependencies]

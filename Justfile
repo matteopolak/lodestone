@@ -104,10 +104,23 @@ run *args:
 #
 # It starts `run-relay` too, and that is the default rather than an extra,
 # because a browser cannot open a raw TCP socket: without the relay the page
-# renders and in-memory singleplayer works, but joining anything reports `relay
-# UNREACHABLE`. A "run" command that silently produces a client which cannot
-# connect looks broken rather than incomplete. `LODESTONE_NO_RELAY=1 just
-# run-wasm` serves the page alone.
+# renders and in-memory singleplayer work, and the multiplayer server-list ping
+# fails visibly instead of reaching a server (a row reads `Failed` with a
+# reason naming the relay, not a silent blank). A "run" command that silently
+# produces a client which cannot reach anything looks broken rather than
+# incomplete. `LODESTONE_NO_RELAY=1 just run-wasm` serves the page alone.
+#
+# The browser reaches the relay through THIS port, at `/relay` — see
+# web/Trunk.toml's `[[proxies]]` entry — not through a second port, so nothing
+# about the relay is visible to a player beyond "the server list works".
+#
+# **A real multiplayer join is not wired to the relay yet.** Only the
+# server-list ping is, as of this recipe's current doc. `net.rs`'s browser join
+# path still refuses outright ("a browser cannot open a TCP socket … must go
+# through the WebSocket relay") rather than actually dialling one — that
+# refusal names the right fix but nothing currently performs it. Do not extend
+# this comment to claim joining works; check `net.rs`'s `run_async` before
+# trusting any future version of this line that does.
 #
 # Two long-lived servers in one command is why the body is a script and not
 # inline here: it needs a trap, so the relay cannot outlive the run and keep its
@@ -131,11 +144,16 @@ run-wasm *args:
     LODESTONE_RELAY_ARGS="{{relay_defaults}}" ./scripts/run-wasm.sh {{args}}
 
 # cargo run -p lodestone-relay — the WebSocket→TCP bridge the browser build needs
-# to join a real server, because a browser cannot open a raw TCP socket. Render
-# and in-memory singleplayer work with this down (the page shows `relay
-# UNREACHABLE` on its net HUD line); joining anything does not. Defaults match
-# web/README.md; override by passing your own flags, e.g.
-# `just run-relay --listen 127.0.0.1:25580 --target 127.0.0.1:25570`.
+# to reach a real server at all, because a browser cannot open a raw TCP
+# socket. Render and in-memory singleplayer work with this down; the
+# multiplayer server-list ping (`menu/status.rs`'s `relay_probe`) does not — a
+# row resolves to `Failed` with a reason naming the relay instead. Defaults
+# match web/README.md **and** web/Trunk.toml's `[[proxies]]` backend, which is
+# a second, hand-kept literal for the same `--listen` port (trunk cannot read
+# this file's shell variable) — `scripts/run-wasm.sh` warns if the two drift.
+# Override by passing your own flags, e.g.
+# `just run-relay --listen 127.0.0.1:25580 --target 127.0.0.1:25570` — and if
+# you change the port, update web/Trunk.toml's `backend` to match.
 [doc("cargo run -p lodestone-relay — the WebSocket→TCP bridge run-wasm needs to join a server")]
 run-relay *args=relay_defaults:
     cargo run --release -p lodestone-relay {{jflag}} --target-dir {{tdir}} -- {{args}}

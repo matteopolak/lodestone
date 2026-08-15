@@ -22,12 +22,18 @@
 #   to serve the page alone.
 #
 # THE PORT IS NOT FREELY CHOOSABLE
-#   `web/src/main.rs` hardcodes RELAY_URL as ws://127.0.0.1:25580, so changing
-#   --listen here without editing that constant produces a page that cannot
-#   reach its own relay. Note also that 25580 is the port
-#   scripts/live-oracles/terrain.sh binds for the light-gate oracle: if that
-#   oracle is up, the relay cannot bind, and the pre-flight check below reports
-#   that instead of letting you wait out a 90 s wasm build first.
+#   The browser no longer hardcodes a relay port in Rust at all — it asks its
+#   own page origin for `/relay`, and web/Trunk.toml's `[[proxies]]` entry
+#   forwards that to the relay's real listener. But Trunk.toml's `backend` is
+#   still a literal `127.0.0.1:25580`, because trunk reads only its own static
+#   TOML and cannot see this file's `--listen`. So changing --listen here
+#   without editing web/Trunk.toml's `backend` still produces a page that
+#   cannot reach its own relay — the drift check below (search
+#   "relay/proxy port drift") catches exactly that mismatch and warns before
+#   you spend a 90 s wasm build finding out some other way. Note also that
+#   25580 is the port scripts/live-oracles/terrain.sh binds for the light-gate
+#   oracle: if that oracle is up, the relay cannot bind, and the pre-flight
+#   check below reports that too.
 #
 # WHY THE RELAY IS BUILT BEFORE TRUNK STARTS
 #   Two reasons, both about failing fast. A relay that does not compile should
@@ -134,6 +140,27 @@ if [[ -z "${LODESTONE_NO_RELAY:-}" ]]; then
       break
     fi
   done
+
+  # relay/proxy port drift check. web/Trunk.toml's `[[proxies]]` entry has to
+  # carry the relay's --listen port as a second, hand-kept literal (trunk reads
+  # only its own static TOML — see that file's own comment for why this can't
+  # be one shared definition). If someone changes RELAY_PORT here without
+  # updating Trunk.toml's `backend`, the browser's `/relay` proxy silently
+  # points at a port nothing is listening on and every ping/join just reads
+  # "relay unreachable" with no clue why. A warning, not a hard failure: the
+  # relay itself still starts correctly on the requested port either way, and
+  # someone intentionally running a bespoke Trunk.toml should not be blocked.
+  if [[ -n "$RELAY_PORT" && -f "$ROOT/web/Trunk.toml" ]]; then
+    TRUNK_BACKEND_PORT="$(grep -A3 '^\[\[proxies\]\]' "$ROOT/web/Trunk.toml" \
+      | grep '^backend' | head -1 | grep -oE ':[0-9]+' | head -1 | tr -d ':')"
+    if [[ -n "$TRUNK_BACKEND_PORT" && "$TRUNK_BACKEND_PORT" != "$RELAY_PORT" ]]; then
+      echo "warning: relay --listen port is $RELAY_PORT but web/Trunk.toml's" >&2
+      echo "         [[proxies]] backend still names port $TRUNK_BACKEND_PORT." >&2
+      echo "         The browser's /relay proxy will reach nothing. Update" >&2
+      echo "         web/Trunk.toml's backend to match, or pass a matching" >&2
+      echo "         --listen." >&2
+    fi
+  fi
 
   if [[ -n "$RELAY_PORT" ]] && command -v lsof >/dev/null 2>&1; then
     HOLDER="$(lsof -nP -iTCP:"$RELAY_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
